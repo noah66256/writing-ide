@@ -1,8 +1,17 @@
 const { app, BrowserWindow, Menu, shell, ipcMain, dialog } = require("electron");
 const path = require("path");
-const fs = require("node:fs/promises");
+const fs = require("node:fs");
+const fsp = require("node:fs/promises");
 
 const IGNORE_DIRS = new Set(["node_modules", ".git", "dist", "out", "build", ".next"]);
+const TEXT_EXT = new Set([".md", ".mdx", ".txt"]);
+
+let mainWindow = null;
+let recentProjects = [];
+let watcher = null;
+let watchedRoot = null;
+let watchTimer = null;
+let watchChanged = new Set();
 
 function normalizeRelPath(p) {
   const raw = String(p ?? "");
@@ -24,7 +33,7 @@ function toFsPath(rootDir, relPath) {
 async function walkTextFiles(dir, rootDir, out) {
   let entries = [];
   try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
+    entries = await fsp.readdir(dir, { withFileTypes: true });
   } catch {
     return;
   }
@@ -43,75 +52,120 @@ async function walkTextFiles(dir, rootDir, out) {
   }
 }
 
-function registerIpc() {
-  ipcMain.handle("project.pickDirectory", async () => {
-    const win = BrowserWindow.getFocusedWindow();
-    const result = await dialog.showOpenDialog(win ?? undefined, {
-      title: "打开项目文件夹",
-      properties: ["openDirectory", "createDirectory"],
-    });
-    if (result.canceled) return { ok: false, canceled: true };
-    const dir = result.filePaths?.[0];
-    if (!dir) return { ok: false, canceled: true };
-    return { ok: true, dir };
-  });
-
-  ipcMain.handle("project.listFiles", async (_event, rootDir) => {
-    const root = String(rootDir ?? "");
-    if (!root) return { ok: false, error: "MISSING_ROOT" };
-    const out = [];
-    await walkTextFiles(root, root, out);
-    out.sort((a, b) => a.localeCompare(b));
-    return { ok: true, files: out };
-  });
-
-  ipcMain.handle("doc.readFile", async (_event, rootDir, relPath) => {
-    const root = String(rootDir ?? "");
-    if (!root) return { ok: false, error: "MISSING_ROOT" };
-    const file = toFsPath(root, relPath);
-    const content = await fs.readFile(file, "utf-8");
-    return { ok: true, content };
-  });
-
-  ipcMain.handle("doc.writeFile", async (_event, rootDir, relPath, content) => {
-    const root = String(rootDir ?? "");
-    if (!root) return { ok: false, error: "MISSING_ROOT" };
-    const file = toFsPath(root, relPath);
-    await fs.mkdir(path.dirname(file), { recursive: true });
-    await fs.writeFile(file, String(content ?? ""), "utf-8");
-    return { ok: true };
-  });
-
-  ipcMain.handle("doc.deleteFile", async (_event, rootDir, relPath) => {
-    const root = String(rootDir ?? "");
-    if (!root) return { ok: false, error: "MISSING_ROOT" };
-    const file = toFsPath(root, relPath);
-    await fs.unlink(file);
-    return { ok: true };
-  });
+async function walkEntries(dir, rootDir, outFiles, outDirs) {
+  let entries = [];
+  try {
+    entries = await fsp.readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const ent of entries) {
+    if (!ent?.name) continue;
+    const full = path.join(dir, ent.name);
+    if (ent.isDirectory()) {
+      if (IGNORE_DIRS.has(ent.name)) continue;
+      const relDir = path.relative(rootDir, full).split(path.sep).join("/");
+      outDirs.push(relDir);
+      await walkEntries(full, rootDir, outFiles, outDirs);
+      continue;
+    }
+    if (!ent.isFile()) continue;
+    const rel = path.relative(rootDir, full).split(path.sep).join("/");
+    const ext = path.extname(rel).toLowerCase();
+    if (TEXT_EXT.has(ext)) outFiles.push(rel);
+  }
 }
 
-function createWindow() {
-  const win = new BrowserWindow({
-    width: 1280,
-    height: 840,
-    title: "写作 IDE",
-    webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
+function send(payload) {
+  try {
+    mainWindow?.webContents?.send("menu.action", payload);
+  } catch {
+    // ignore
+  }
+}
 
-  const send = (payload) => {
-    try {
-      win.webContents.send("menu.action", payload);
-    } catch {
-      // ignore
+function shouldIgnoreRel(relPath) {
+  const p = String(relPath ?? "").replaceAll("\\", "/");
+  const parts = p.split("/").filter(Boolean);
+  if (!parts.length) return true;
+  return IGNORE_DIRS.has(parts[0]);
+}
+
+function flushFsEvents() {
+  const root = watchedRoot;
+  if (!root) return;
+  const paths = Array.from(watchChanged);
+  watchChanged.clear();
+  try {
+    mainWindow?.webContents?.send("project.fsEvent", { rootDir: root, paths, ts: Date.now() });
+  } catch {
+    // ignore
+  }
+}
+
+function stopWatch() {
+  try {
+    watcher?.close?.();
+  } catch {
+    // ignore
+  }
+  watcher = null;
+  watchedRoot = null;
+  watchChanged.clear();
+  if (watchTimer) {
+    clearTimeout(watchTimer);
+    watchTimer = null;
+  }
+}
+
+function startWatch(rootDir) {
+  const root = String(rootDir ?? "");
+  if (!root) return { ok: false, error: "MISSING_ROOT" };
+  if (watchedRoot === root && watcher) return { ok: true };
+  stopWatch();
+  watchedRoot = root;
+  try {
+    watcher = fs.watch(root, { recursive: true }, (_eventType, filename) => {
+      const rel = String(filename ?? "").replaceAll("\\", "/");
+      if (!rel) {
+        // 无 filename：退化为“刷新一次”
+        watchChanged.add("__all__");
+      } else if (!shouldIgnoreRel(rel)) {
+        watchChanged.add(rel);
+      }
+      if (watchTimer) return;
+      watchTimer = setTimeout(() => {
+        watchTimer = null;
+        flushFsEvents();
+      }, 200);
+    });
+    return { ok: true };
+  } catch (e) {
+    stopWatch();
+    return { ok: false, error: "WATCH_FAILED", detail: String(e?.message ?? e) };
+  }
+}
+
+function buildMenuTemplate() {
+  const recentSubmenu = [];
+  const items = Array.isArray(recentProjects) ? recentProjects.slice(0, 10) : [];
+  if (items.length) {
+    for (const dir of items) {
+      const d = String(dir ?? "");
+      if (!d) continue;
+      recentSubmenu.push({
+        label: path.basename(d) || d,
+        sublabel: d,
+        click: () => send({ type: "file.openRecent", dir: d }),
+      });
     }
-  };
+  } else {
+    recentSubmenu.push({ label: "（无）", enabled: false });
+  }
+  recentSubmenu.push({ type: "separator" });
+  recentSubmenu.push({ label: "清除最近项目", click: () => send({ type: "workspace.clearRecent" }) });
 
-  const template = [
+  return [
     {
       label: "文件",
       submenu: [
@@ -122,6 +176,7 @@ function createWindow() {
         },
         { type: "separator" },
         { label: "打开项目…", accelerator: "Ctrl+O", click: () => send({ type: "file.openProject" }) },
+        { label: "最近项目", submenu: recentSubmenu },
         { type: "separator" },
         { label: "保存", accelerator: "Ctrl+S", click: () => send({ type: "file.save" }) },
         { label: "另存为（占位）", accelerator: "Ctrl+Shift+S", click: () => send({ type: "file.saveAs" }) },
@@ -202,8 +257,125 @@ function createWindow() {
       ],
     },
   ];
+}
 
-  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+function updateMenu() {
+  try {
+    Menu.setApplicationMenu(Menu.buildFromTemplate(buildMenuTemplate()));
+  } catch {
+    // ignore
+  }
+}
+
+function registerIpc() {
+  ipcMain.handle("project.pickDirectory", async () => {
+    const win = BrowserWindow.getFocusedWindow();
+    const result = await dialog.showOpenDialog(win ?? undefined, {
+      title: "打开项目文件夹",
+      properties: ["openDirectory", "createDirectory"],
+    });
+    if (result.canceled) return { ok: false, canceled: true };
+    const dir = result.filePaths?.[0];
+    if (!dir) return { ok: false, canceled: true };
+    return { ok: true, dir };
+  });
+
+  ipcMain.handle("project.listFiles", async (_event, rootDir) => {
+    const root = String(rootDir ?? "");
+    if (!root) return { ok: false, error: "MISSING_ROOT" };
+    const out = [];
+    await walkTextFiles(root, root, out);
+    out.sort((a, b) => a.localeCompare(b));
+    return { ok: true, files: out };
+  });
+
+  ipcMain.handle("project.listEntries", async (_event, rootDir) => {
+    const root = String(rootDir ?? "");
+    if (!root) return { ok: false, error: "MISSING_ROOT" };
+    const files = [];
+    const dirs = [];
+    await walkEntries(root, root, files, dirs);
+    files.sort((a, b) => a.localeCompare(b));
+    dirs.sort((a, b) => a.localeCompare(b));
+    return { ok: true, files, dirs };
+  });
+
+  ipcMain.handle("doc.readFile", async (_event, rootDir, relPath) => {
+    const root = String(rootDir ?? "");
+    if (!root) return { ok: false, error: "MISSING_ROOT" };
+    const file = toFsPath(root, relPath);
+    const content = await fsp.readFile(file, "utf-8");
+    return { ok: true, content };
+  });
+
+  ipcMain.handle("doc.writeFile", async (_event, rootDir, relPath, content) => {
+    const root = String(rootDir ?? "");
+    if (!root) return { ok: false, error: "MISSING_ROOT" };
+    const file = toFsPath(root, relPath);
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.writeFile(file, String(content ?? ""), "utf-8");
+    return { ok: true };
+  });
+
+  ipcMain.handle("doc.deleteFile", async (_event, rootDir, relPath) => {
+    const root = String(rootDir ?? "");
+    if (!root) return { ok: false, error: "MISSING_ROOT" };
+    const file = toFsPath(root, relPath);
+    await fsp.unlink(file);
+    return { ok: true };
+  });
+
+  ipcMain.handle("doc.mkdir", async (_event, rootDir, relDir) => {
+    const root = String(rootDir ?? "");
+    if (!root) return { ok: false, error: "MISSING_ROOT" };
+    const dir = toFsPath(root, relDir);
+    await fsp.mkdir(dir, { recursive: true });
+    return { ok: true };
+  });
+
+  ipcMain.handle("doc.renamePath", async (_event, rootDir, fromRel, toRel) => {
+    const root = String(rootDir ?? "");
+    if (!root) return { ok: false, error: "MISSING_ROOT" };
+    const from = toFsPath(root, fromRel);
+    const to = toFsPath(root, toRel);
+    await fsp.mkdir(path.dirname(to), { recursive: true });
+    await fsp.rename(from, to);
+    return { ok: true };
+  });
+
+  ipcMain.handle("project.watchStart", async (_event, rootDir) => startWatch(rootDir));
+  ipcMain.handle("project.watchStop", async () => {
+    stopWatch();
+    return { ok: true };
+  });
+
+  ipcMain.handle("workspace.setRecentProjects", async (_event, dirs) => {
+    const list = Array.isArray(dirs) ? dirs : [];
+    recentProjects = list.map((x) => String(x ?? "").trim()).filter(Boolean).slice(0, 10);
+    updateMenu();
+    return { ok: true };
+  });
+  ipcMain.handle("workspace.clearRecentProjects", async () => {
+    recentProjects = [];
+    updateMenu();
+    return { ok: true };
+  });
+}
+
+function createWindow() {
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 840,
+    title: "写作 IDE",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  mainWindow = win;
+  updateMenu();
 
   const devServerUrl = process.env.VITE_DEV_SERVER_URL;
   if (devServerUrl) {
@@ -223,6 +395,7 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => {
+  stopWatch();
   if (process.platform !== "darwin") app.quit();
 });
 

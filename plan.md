@@ -379,6 +379,7 @@
 - ✅ Gateway：邮箱登录（devCode）、OpenAI-compatible SSE 代理（`/api/llm/chat/stream`）、模型列表（`/api/llm/models`）、KB 最小检索演示
 - ✅ 编辑器：Tab 预览/固定/关闭（单击=预览替换；双击=固定新 Tab；× 关闭不影响左侧）
 - ✅ 本地项目落盘（MVP）：打开真实目录、读写磁盘文件、最近项目（自动恢复上次项目）
+- ✅ Explorer（增强）：树形目录；右键新建文件/文件夹、重命名、移动、删除；外部文件变更自动刷新（dirty 不覆盖）
 - ✅ ReAct（开发期）：Gateway 负责 `/api/agent/run/stream` 编排（SSE：`tool.call/tool.result`），Desktop 执行工具并回传 `tool_result`
 - ✅ proposal-first 写入：`doc.applyEdits` 与覆盖写入类工具先出提案，点 Keep 才 apply；Undo 可回滚
 - ✅ Diff 预览（增强）：Tool Block 以“文件级头部”展示（NEW/MOD + +X/-Y），并对 +/- 行做红绿高亮；支持复制 diff
@@ -387,7 +388,8 @@
 #### TODO（按优先级，滚动更新）
 - **P0（写作 IDE 日用闭环）**
   - [x] 本地项目落盘（MVP）：打开真实目录、读写磁盘文件、最近项目（自动恢复上次项目）
-  - [ ] 本地项目落盘（增强）：最近项目菜单、文件监听（外部修改刷新）、重命名/移动/新建文件夹
+  - [x] 本地项目落盘（增强）：最近项目菜单、文件监听（外部修改刷新）、重命名/移动/新建文件夹（树形目录）
+  - [ ] Explorer（增强）：文件夹空目录展示、拖拽移动、批量操作、搜索/过滤
   - [x] Diff 预览（文件级）：NEW/MOD + +X/-Y + 红绿高亮（右侧 Tool Blocks）
   - [ ] Diff 预览升级（分栏）：unified diff → 更直观的左右分栏/更像 VSCode/Git 的对照视图
   - [ ] 快照面板：在 Dock Panel 提供快照列表/恢复/删除（与 Tool Block Keep/Undo 一致）

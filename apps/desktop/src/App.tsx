@@ -47,6 +47,30 @@ export default function App() {
     void useProjectStore.getState().loadProjectFromDisk(last);
   }, []);
 
+  // 最近项目：同步到主进程（用于动态菜单）
+  const recentProjectDirs = useWorkspaceStore((s) => s.recentProjectDirs);
+  useEffect(() => {
+    void window.desktop?.workspace?.setRecentProjects?.(recentProjectDirs);
+  }, [recentProjectDirs]);
+
+  // 文件监听：主进程 fs watch -> renderer 刷新
+  useEffect(() => {
+    const off = window.desktop?.fs?.onFsEvent?.((payload: any) => {
+      const rootDir = String(payload?.rootDir ?? "");
+      const cur = useProjectStore.getState().rootDir;
+      if (!rootDir || !cur || rootDir !== cur) return;
+      // 批量事件：统一走一次 refresh（内部会做 dirty 冲突保护）
+      void useProjectStore.getState().refreshFromDisk("fs.watch");
+    });
+    return () => {
+      try {
+        off?.();
+      } catch {
+        // ignore
+      }
+    };
+  }, []);
+
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
       const d = dragRef.current;
@@ -119,6 +143,20 @@ export default function App() {
           useWorkspaceStore.getState().addRecentProjectDir(res.dir);
           await useProjectStore.getState().loadProjectFromDisk(res.dir);
         })();
+        return;
+      }
+      if (payload.type === "file.openRecent") {
+        const dir = String(payload.dir ?? "");
+        if (!dir) return;
+        void (async () => {
+          useWorkspaceStore.getState().addRecentProjectDir(dir);
+          await useProjectStore.getState().loadProjectFromDisk(dir);
+        })();
+        return;
+      }
+      if (payload.type === "workspace.clearRecent") {
+        useWorkspaceStore.getState().clearRecent();
+        void window.desktop?.workspace?.clearRecentProjects?.();
         return;
       }
       if (payload.type === "file.save") {

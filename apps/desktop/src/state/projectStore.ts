@@ -1,5 +1,6 @@
 import type { editor } from "monaco-editor";
 import { create } from "zustand";
+import { useRunStore } from "./runStore";
 
 export type ProjectFile = {
   path: string;
@@ -9,6 +10,7 @@ export type ProjectFile = {
 };
 
 export type ProjectSnapshot = {
+  dirs?: string[];
   files: ProjectFile[];
   openPaths: string[];
   activePath: string;
@@ -27,6 +29,7 @@ type ProjectState = {
   isLoading: boolean;
   error: string | null;
 
+  dirs: string[]; // 目录列表（相对 rootDir，可包含空目录）
   files: ProjectFile[];
   openPaths: string[];
   activePath: string;
@@ -48,6 +51,9 @@ type ProjectState = {
   getFileByPath: (path: string) => ProjectFile | undefined;
 
   loadProjectFromDisk: (rootDir: string) => Promise<void>;
+  refreshFromDisk: (reason?: string) => Promise<void>;
+  mkdir: (dirPath: string) => Promise<void>;
+  renamePath: (fromPath: string, toPath: string) => Promise<void>;
 
   commitSnapshot: (label?: string) => SavedSnapshot;
   deleteSnapshot: (snapshotId: string) => void;
@@ -76,12 +82,19 @@ const DEFAULT_DOC_RULES =
   `- 涉及文件改动必须给可应用 diff；写入前需要用户确认。\n`;
 
 const saveTimers = new Map<string, number>();
+let refreshInFlight: Promise<void> | null = null;
+let refreshQueuedReason: string | null = null;
+
+function normalizeRel(p: string) {
+  return String(p ?? "").trim().replaceAll("\\", "/").replaceAll("//", "/");
+}
 
 export const useProjectStore = create<ProjectState>((set, get) => ({
   rootDir: null,
   isLoading: false,
   error: null,
 
+  dirs: [],
   files: [
     {
       path: "drafts/draft.md",
@@ -155,6 +168,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       return { openPaths: nextOpen, activePath: nextActive, previewPath: nextPreview };
     }),
   updateFile: (path, content) => {
+    const prev = get().getFileByPath(path)?.content ?? "";
+    if (prev === content) return;
     set((s) => ({
       files: s.files.map((f) => (f.path === path ? { ...f, content, loaded: true, dirty: true } : f)),
     }));
@@ -225,7 +240,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       activePath: path,
       previewPath: st.previewPath ?? path,
     }));
-    void get().writeFileNow(path, content);
+    void (async () => {
+      await get().writeFileNow(path, content);
+      await get().refreshFromDisk("createFile");
+    })();
   },
   deleteFile: (path) => {
     const s = get();
@@ -238,7 +256,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       const previewPath = st.previewPath === path ? null : st.previewPath;
       return { files, openPaths, activePath, previewPath };
     });
-    if (rootDir && api) void api.deleteFile(rootDir, path).catch(() => ({ ok: false }));
+    if (rootDir && api) {
+      void api
+        .deleteFile(rootDir, path)
+        .then(() => get().refreshFromDisk("deleteFile"))
+        .catch(() => ({ ok: false }));
+    }
   },
   getFileByPath: (path) => get().files.find((f) => f.path === path),
 
@@ -250,13 +273,16 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
 
     set({ rootDir, isLoading: true, error: null });
-    const list = await api.listFiles(rootDir);
-    if (!list.ok || !Array.isArray(list.files)) {
-      set({ error: list.error ?? "LIST_FILES_FAILED", isLoading: false });
+    const list = await (api.listEntries ? api.listEntries(rootDir) : api.listFiles(rootDir));
+    const filesList = (list as any).files;
+    const dirsList = (list as any).dirs;
+    if (!list.ok || !Array.isArray(filesList)) {
+      set({ error: (list as any).error ?? "LIST_FILES_FAILED", isLoading: false });
       return;
     }
 
-    let files = list.files.slice();
+    let files = filesList.slice();
+    let dirs = Array.isArray(dirsList) ? dirsList.slice() : [];
     if (!files.includes("doc.rules.md")) {
       await api.writeFile(rootDir, "doc.rules.md", DEFAULT_DOC_RULES);
       files.unshift("doc.rules.md");
@@ -273,6 +299,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
     const active = files.includes("README.md") ? "README.md" : files[0] ?? "";
     set({
+      dirs,
       files: projFiles,
       openPaths: active ? [active] : [],
       activePath: active,
@@ -281,6 +308,104 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       isLoading: false,
       error: null,
     });
+
+    // 启动文件监听
+    try {
+      await api.watchStart?.(rootDir);
+    } catch {
+      // ignore
+    }
+  },
+
+  refreshFromDisk: async (reason) => {
+    if (refreshInFlight) {
+      refreshQueuedReason = reason ?? "queued";
+      return;
+    }
+    refreshQueuedReason = null;
+    refreshInFlight = (async () => {
+    const api = window.desktop?.fs;
+    const rootDir = get().rootDir;
+    if (!api || !rootDir) return;
+
+    const list = await (api.listEntries ? api.listEntries(rootDir) : api.listFiles(rootDir));
+    const diskFiles: string[] = Array.isArray((list as any).files) ? (list as any).files.slice() : [];
+    const diskDirs: string[] = Array.isArray((list as any).dirs) ? (list as any).dirs.slice() : [];
+    diskFiles.sort((a, b) => a.localeCompare(b));
+    diskDirs.sort((a, b) => a.localeCompare(b));
+
+    const prevFiles = get().files;
+    const prevMap = new Map(prevFiles.map((f) => [f.path, f]));
+    const diskSet = new Set(diskFiles);
+
+    const nextFiles: ProjectFile[] = [];
+    for (const p of diskFiles) {
+      const prev = prevMap.get(p);
+      if (prev?.dirty) {
+        // 本地未保存：不覆盖
+        nextFiles.push({ ...prev, loaded: true });
+        continue;
+      }
+      try {
+        const r = await api.readFile(rootDir, p);
+        nextFiles.push({ path: p, content: r.ok ? (r.content ?? "") : "", loaded: true, dirty: false });
+      } catch {
+        nextFiles.push({ path: p, content: prev?.content ?? "", loaded: true, dirty: false });
+      }
+    }
+
+    // 处理被外部删除的文件：dirty 的先保留（避免丢内容），否则移除并关闭 tab
+    const removed = prevFiles.filter((f) => !diskSet.has(f.path));
+    const removedDirty = removed.filter((f) => f.dirty);
+    for (const f of removedDirty) nextFiles.push({ ...f, loaded: true });
+
+    set((s) => {
+      const removedSet = new Set(removed.filter((x) => !x.dirty).map((x) => x.path));
+      const openPaths = s.openPaths.filter((p) => !removedSet.has(p));
+      const activePath = removedSet.has(s.activePath) ? (openPaths[0] ?? nextFiles[0]?.path ?? "") : s.activePath;
+      const previewPath = s.previewPath && removedSet.has(s.previewPath) ? null : s.previewPath;
+      return { dirs: diskDirs, files: nextFiles, openPaths, activePath, previewPath };
+    });
+
+    if (removedDirty.length) {
+      useRunStore.getState().log("warn", "检测到外部删除，但本地有未保存内容：已保留内存版本（请手动另存）", {
+        reason: reason ?? "unknown",
+        paths: removedDirty.map((x) => x.path),
+      });
+    }
+    // dirty 文件如被外部修改，这里无法精准判断是否变化；保持“本地优先”，避免覆盖
+    })();
+    try {
+      await refreshInFlight;
+    } finally {
+      refreshInFlight = null;
+    }
+    if (refreshQueuedReason) {
+      const nextReason = refreshQueuedReason;
+      refreshQueuedReason = null;
+      void get().refreshFromDisk(nextReason);
+    }
+  },
+
+  mkdir: async (dirPath) => {
+    const api = window.desktop?.fs;
+    const rootDir = get().rootDir;
+    if (!api || !rootDir) return;
+    const rel = normalizeRel(dirPath);
+    if (!rel) return;
+    await api.mkdir(rootDir, rel);
+    await get().refreshFromDisk("mkdir");
+  },
+
+  renamePath: async (fromPath, toPath) => {
+    const api = window.desktop?.fs;
+    const rootDir = get().rootDir;
+    if (!api || !rootDir) return;
+    const fromRel = normalizeRel(fromPath);
+    const toRel = normalizeRel(toPath);
+    if (!fromRel || !toRel) return;
+    await api.renamePath(rootDir, fromRel, toRel);
+    await get().refreshFromDisk("rename");
   },
 
   commitSnapshot: (label) => {
@@ -306,6 +431,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   snapshot: () => {
     const s = get();
     return {
+      dirs: [...s.dirs],
       files: s.files.map((f) => ({ ...f })),
       openPaths: [...s.openPaths],
       activePath: s.activePath,
@@ -315,6 +441,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   restore: (snap) => {
     const prev = get();
     set({
+      dirs: Array.isArray((snap as any).dirs) ? ([...(snap as any).dirs] as any) : prev.dirs,
       files: snap.files.map((f) => ({ ...f })),
       openPaths: [...snap.openPaths],
       activePath: snap.activePath,

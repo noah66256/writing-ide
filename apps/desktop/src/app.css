@@ -224,6 +224,115 @@ body {
   padding: 0 2px 8px;
 }
 
+.tree {
+  display: grid;
+  gap: 2px;
+  padding: 0 2px 8px;
+}
+
+.treeRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  min-width: 0;
+}
+
+.treeRow:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.treeActive {
+  background: rgba(37, 99, 235, 0.10);
+  outline: 1px solid rgba(37, 99, 235, 0.28);
+}
+
+.treeCaret {
+  width: 12px;
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+
+.treeKind {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  width: 22px;
+  flex: 0 0 auto;
+}
+
+.treeLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.treeDirty {
+  color: rgba(220, 38, 38, 0.9);
+  font-size: 10px;
+  flex: 0 0 auto;
+}
+
+.ctxMenu {
+  position: fixed;
+  z-index: 99999;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 6px;
+  display: grid;
+  gap: 4px;
+  min-width: 190px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.22);
+}
+
+.ctxItem {
+  appearance: none;
+  border: none;
+  background: transparent;
+  text-align: left;
+  color: var(--text);
+  padding: 7px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.ctxItem:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.ctxDanger {
+  color: rgba(220, 38, 38, 0.95);
+}
+
+.ctxSep {
+  height: 1px;
+  background: var(--border);
+  margin: 2px 4px;
+}
+
+.modalInput {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.02);
+  color: var(--text);
+  padding: 10px 12px;
+  outline: none;
+  font-size: 13px;
+}
+
+.modalInput:focus {
+  border-color: rgba(37, 99, 235, 0.45);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
 .recentBox {
   border: 1px solid var(--border);
   border-radius: 10px;
