@@ -11,6 +11,22 @@
 - Dock Panel：KB 管理/检索与引用、文章结构图（思维导图实时刷新）、Linter、Search、Runs/Logs
 
 ### 开发说明
-该目录目前仅做骨架占位；后续会补齐 Electron+React+Vite 工程化配置与启动脚本。
+已补齐最小可运行骨架（Electron + Vite + React + TypeScript），用于快速打通：
+- 三栏布局 + Dock Panel（中下方）
+- Monaco Editor（Markdown）
+- 右侧 Agent：流式输出 + Tool Blocks（Keep/Undo）
+- Topic Lab 最小版：生成选题/标题/角度，选中后写入 Main Doc 并新建草稿文件（可 Undo）
+
+### 运行（本地）
+在项目根目录：
+
+```bash
+npm install
+npm run dev:desktop
+```
+
+说明：
+- 会启动 Vite（`5173`）并拉起 Electron。
+- 当前 Agent 为本地 mock（未接模型）；后续接入 Gateway 模型后会替换为真实流式与工具执行。
 
 

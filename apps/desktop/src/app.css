@@ -1,0 +1,306 @@
+:root {
+  --bg: #0e0f13;
+  --panel: #11131a;
+  --panel2: #0f1117;
+  --border: #2a2d34;
+  --text: #e7e9ee;
+  --muted: #9aa3b2;
+  --accent: #6aa6ff;
+  --danger: #ff5a5f;
+  --ok: #22c55e;
+  --warn: #fbbf24;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    Segoe UI,
+    Roboto,
+    Helvetica,
+    Arial,
+    "Apple Color Emoji",
+    "Segoe UI Emoji";
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.app {
+  height: 100vh;
+  display: grid;
+  grid-template-columns: 240px 1fr 380px;
+}
+
+.sidebar {
+  background: var(--panel2);
+  border-right: 1px solid var(--border);
+  overflow: auto;
+}
+
+.center {
+  display: grid;
+  grid-template-rows: 1fr 240px;
+  min-width: 0;
+}
+
+.editorPane {
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+  min-width: 0;
+}
+
+.dock {
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.agent {
+  background: var(--panel2);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.sectionTitle {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  padding: 10px 10px 6px;
+}
+
+.list {
+  padding: 0 6px 10px;
+}
+
+.fileItem {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.fileItem:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.fileItemActive {
+  background: rgba(106, 166, 255, 0.12);
+  outline: 1px solid rgba(106, 166, 255, 0.3);
+}
+
+.tabBar {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  overflow-x: auto;
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tabActive {
+  color: var(--text);
+  border-color: rgba(106, 166, 255, 0.35);
+  background: rgba(106, 166, 255, 0.08);
+}
+
+.agentHeader {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.select {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.mainDoc {
+  border-bottom: 1px solid var(--border);
+  padding: 10px;
+}
+
+.mainDoc pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.messages {
+  flex: 1;
+  overflow: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.msgAssistant {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  white-space: pre-wrap;
+}
+
+.toolBlock {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.toolHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.toolName {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.badge {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.badgeOk {
+  color: var(--ok);
+  border-color: rgba(34, 197, 94, 0.35);
+}
+
+.badgeWarn {
+  color: var(--warn);
+  border-color: rgba(251, 191, 36, 0.35);
+}
+
+.badgeDanger {
+  color: var(--danger);
+  border-color: rgba(255, 90, 95, 0.35);
+}
+
+.toolBody {
+  padding: 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.btnRow {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.btn {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+
+.btnPrimary {
+  border-color: rgba(106, 166, 255, 0.35);
+  background: rgba(106, 166, 255, 0.16);
+}
+
+.btnDanger {
+  border-color: rgba(255, 90, 95, 0.35);
+  background: rgba(255, 90, 95, 0.12);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.composer {
+  border-top: 1px solid var(--border);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.input {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.dockTabs {
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.dockTab {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  user-select: none;
+}
+
+.dockTabActive {
+  color: var(--text);
+  border-color: rgba(106, 166, 255, 0.35);
+  background: rgba(106, 166, 255, 0.08);
+}
+
+.dockContent {
+  padding: 10px;
+  color: var(--muted);
+  font-size: 13px;
+  height: calc(240px - 45px);
+  overflow: auto;
+}
+
+

@@ -3,9 +3,32 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "main": "electron/main.cjs",
   "scripts": {
-    "dev": "echo \"TODO: scaffold desktop (Electron+React+Vite)\" && exit 1",
-    "build": "echo \"TODO: scaffold desktop (Electron+React+Vite)\" && exit 1"
+    "dev": "concurrently -n renderer,electron -c auto \"npm:dev:renderer\" \"npm:dev:electron\"",
+    "dev:renderer": "vite --port 5173",
+    "dev:electron": "wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron electron/main.cjs",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "monaco-editor": "^0.52.2",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "zustand": "^5.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.5",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^34.1.1",
+    "typescript": "~5.9.3",
+    "vite": "^7.2.4",
+    "wait-on": "^8.0.3"
   }
 }
 
