@@ -38,11 +38,20 @@ export type ToolBlockStep = {
 
 export type Step = AssistantStep | ToolBlockStep;
 
+export type LogEntry = {
+  id: string;
+  ts: number;
+  level: "info" | "warn" | "error";
+  message: string;
+  data?: unknown;
+};
+
 type RunState = {
   mode: Mode;
   model: string;
   mainDoc: MainDoc;
   steps: Step[];
+  logs: LogEntry[];
   isRunning: boolean;
 
   setMode: (mode: Mode) => void;
@@ -66,6 +75,8 @@ type RunState = {
   undoStep: (stepId: string) => void;
 
   updateMainDoc: (patch: Partial<MainDoc>) => { undo: () => void };
+  log: (level: LogEntry["level"], message: string, data?: unknown) => void;
+  clearLogs: () => void;
   setRunning: (running: boolean) => void;
 };
 
@@ -78,12 +89,13 @@ export const useRunStore = create<RunState>((set, get) => ({
   model: "mock",
   mainDoc: { goal: "" },
   steps: [],
+  logs: [],
   isRunning: false,
 
   setMode: (mode) => set({ mode }),
   setModel: (model) => set({ model }),
   setRunning: (running) => set({ isRunning: running }),
-  resetRun: () => set({ steps: [], isRunning: false, mainDoc: { goal: "" } }),
+  resetRun: () => set({ steps: [], logs: [], isRunning: false, mainDoc: { goal: "" } }),
 
   addAssistant: (initialText = "", streaming = false) => {
     const id = makeId("a");
@@ -159,6 +171,23 @@ export const useRunStore = create<RunState>((set, get) => ({
     set({ mainDoc: { ...prev, ...patch } });
     return { undo: () => set({ mainDoc: prev }) };
   },
+
+  log: (level, message, data) => {
+    const entry: LogEntry = {
+      id: makeId("log"),
+      ts: Date.now(),
+      level,
+      message,
+      data
+    };
+    set((s) => {
+      const next = [...s.logs, entry];
+      // cap，避免长时间测试占用内存
+      const capped = next.length > 500 ? next.slice(next.length - 500) : next;
+      return { logs: capped };
+    });
+  },
+  clearLogs: () => set({ logs: [] })
 }));
 
 

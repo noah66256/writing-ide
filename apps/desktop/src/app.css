@@ -570,7 +570,7 @@ body {
   padding: 10px;
   color: var(--muted);
   font-size: 13px;
-  height: calc(240px - 45px);
+  min-height: 0;
   overflow: auto;
 }
 

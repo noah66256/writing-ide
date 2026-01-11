@@ -128,7 +128,9 @@ fastify.post("/api/llm/chat/stream", async (request, reply) => {
   });
 
   const abort = new AbortController();
-  request.raw.on("close", () => abort.abort());
+  // 仅在“客户端中断”时取消上游请求；不要监听 request.close（它在正常完成请求体后也会触发）
+  request.raw.on("aborted", () => abort.abort());
+  reply.raw.on("close", () => abort.abort());
 
   const writeEvent = (event: string, data: unknown) => {
     reply.raw.write(`event: ${event}\n`);
