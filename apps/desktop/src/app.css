@@ -403,6 +403,45 @@ body {
   background: rgba(220, 38, 38, 0.08);
 }
 
+.diffBox {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.02);
+  padding: 8px;
+  overflow: auto;
+  max-height: 340px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+.diffLine {
+  white-space: pre;
+}
+
+.diffHeader {
+  color: var(--muted);
+}
+
+.diffHunk {
+  color: #2563eb;
+}
+
+.diffAdd {
+  color: #15803d;
+  background: rgba(22, 163, 74, 0.08);
+}
+
+.diffDel {
+  color: #b91c1c;
+  background: rgba(220, 38, 38, 0.08);
+}
+
+.diffCtx {
+  color: var(--text);
+}
+
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;

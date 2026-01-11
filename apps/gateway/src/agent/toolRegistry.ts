@@ -33,6 +33,21 @@ export const TOOL_LIST: ToolMeta[] = [
     args: [{ name: "path", required: true, desc: "文件路径（如 drafts/draft.md）" }],
   },
   {
+    name: "doc.commitSnapshot",
+    description: "创建一个项目快照（用于回滚/Undo）。",
+    args: [{ name: "label", required: false, desc: "快照备注（可选）" }],
+  },
+  {
+    name: "doc.listSnapshots",
+    description: "列出当前项目的快照列表（只读）。",
+    args: [],
+  },
+  {
+    name: "doc.restoreSnapshot",
+    description: "恢复到指定快照（proposal-first：Keep 才会真正恢复；Undo 可回滚）。",
+    args: [{ name: "snapshotId", required: true, desc: "快照 ID（doc.commitSnapshot 的返回）" }],
+  },
+  {
     name: "doc.previewDiff",
     description: "生成 diff 预览（无副作用）。可传 newContent 或 edits。",
     args: [

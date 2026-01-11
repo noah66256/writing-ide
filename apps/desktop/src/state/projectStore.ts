@@ -13,11 +13,19 @@ export type ProjectSnapshot = {
   previewPath: string | null;
 };
 
+export type SavedSnapshot = {
+  id: string;
+  label: string;
+  createdAt: string;
+  snap: ProjectSnapshot;
+};
+
 type ProjectState = {
   files: ProjectFile[];
   openPaths: string[];
   activePath: string;
   previewPath: string | null; // 单击预览：复用同一个“预览 tab”
+  snapshots: SavedSnapshot[];
   editorRef: editor.IStandaloneCodeEditor | null;
 
   setEditorRef: (ref: editor.IStandaloneCodeEditor | null) => void;
@@ -29,6 +37,10 @@ type ProjectState = {
   createFile: (path: string, content: string) => void;
   deleteFile: (path: string) => void;
   getFileByPath: (path: string) => ProjectFile | undefined;
+
+  commitSnapshot: (label?: string) => SavedSnapshot;
+  deleteSnapshot: (snapshotId: string) => void;
+  getSnapshot: (snapshotId: string) => SavedSnapshot | undefined;
 
   snapshot: () => ProjectSnapshot;
   restore: (snap: ProjectSnapshot) => void;
@@ -64,6 +76,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   openPaths: ["drafts/draft.md"],
   activePath: "drafts/draft.md",
   previewPath: "drafts/draft.md",
+  snapshots: [],
   editorRef: null,
 
   setEditorRef: (ref) => set({ editorRef: ref }),
@@ -133,6 +146,26 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       return { files, openPaths, activePath };
     }),
   getFileByPath: (path) => get().files.find((f) => f.path === path),
+
+  commitSnapshot: (label) => {
+    const makeId = () => `snap_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const snap = get().snapshot();
+    const rec: SavedSnapshot = {
+      id: makeId(),
+      label: String(label ?? "").trim() || `快照 ${new Date().toLocaleString()}`,
+      createdAt: new Date().toISOString(),
+      snap,
+    };
+    set((s) => {
+      const next = [rec, ...s.snapshots];
+      const capped = next.length > 30 ? next.slice(0, 30) : next;
+      return { snapshots: capped };
+    });
+    return rec;
+  },
+  deleteSnapshot: (snapshotId) =>
+    set((s) => ({ snapshots: s.snapshots.filter((x) => x.id !== snapshotId) })),
+  getSnapshot: (snapshotId) => get().snapshots.find((x) => x.id === snapshotId),
 
   snapshot: () => {
     const s = get();

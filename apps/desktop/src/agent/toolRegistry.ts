@@ -354,6 +354,105 @@ const tools: ToolDefinition[] = [
     },
   },
   {
+    name: "doc.commitSnapshot",
+    description: "创建一个项目快照（用于回滚/Undo）。",
+    args: [{ name: "label", required: false, desc: "快照备注（可选）" }],
+    riskLevel: "low",
+    applyPolicy: "auto_apply",
+    reversible: true,
+    run: async (args) => {
+      const label = typeof args.label === "string" ? String(args.label) : undefined;
+      const rec = useProjectStore.getState().commitSnapshot(label);
+      const undo = () => useProjectStore.getState().deleteSnapshot(rec.id);
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          snapshotId: rec.id,
+          label: rec.label,
+          createdAt: rec.createdAt,
+          filesCount: rec.snap.files.length,
+        },
+        undoable: true,
+        undo,
+      };
+    },
+  },
+  {
+    name: "doc.listSnapshots",
+    description: "列出当前项目的快照列表（只读）。",
+    args: [],
+    riskLevel: "low",
+    applyPolicy: "proposal",
+    reversible: false,
+    run: async () => {
+      const snaps = useProjectStore.getState().snapshots.map((s) => ({
+        id: s.id,
+        label: s.label,
+        createdAt: s.createdAt,
+        filesCount: s.snap.files.length,
+      }));
+      return { ok: true, output: { ok: true, snapshots: snaps }, undoable: false };
+    },
+  },
+  {
+    name: "doc.restoreSnapshot",
+    description: "恢复到指定快照（proposal-first：Keep 才会真正恢复；Undo 可回滚）。",
+    args: [{ name: "snapshotId", required: true, desc: "快照 ID（doc.commitSnapshot 的返回）" }],
+    riskLevel: "high",
+    applyPolicy: "proposal",
+    reversible: true,
+    run: async (args) => {
+      const snapshotId = String(args.snapshotId ?? "");
+      if (!snapshotId) return { ok: false, error: "MISSING_SNAPSHOT_ID" };
+      const rec = useProjectStore.getState().getSnapshot(snapshotId);
+      if (!rec) return { ok: false, error: "SNAPSHOT_NOT_FOUND" };
+
+      const cur = useProjectStore.getState().snapshot();
+      const curMap = new Map(cur.files.map((f) => [f.path, f.content]));
+      const snapMap = new Map(rec.snap.files.map((f) => [f.path, f.content]));
+      const allPaths = Array.from(new Set([...curMap.keys(), ...snapMap.keys()])).sort();
+      const changedFiles = allPaths.filter((p) => (curMap.get(p) ?? "") !== (snapMap.get(p) ?? ""));
+
+      const previewPath =
+        changedFiles.includes(useProjectStore.getState().activePath)
+          ? useProjectStore.getState().activePath
+          : changedFiles[0] ?? useProjectStore.getState().activePath;
+      const before = curMap.get(previewPath) ?? "";
+      const after = snapMap.get(previewPath) ?? before;
+      const d = unifiedDiff({ path: previewPath, before, after, maxCells: 300_000 });
+
+      const apply = () => {
+        const snapBefore = useProjectStore.getState().snapshot();
+        useProjectStore.getState().restore(rec.snap);
+        return { undo: () => useProjectStore.getState().restore(snapBefore) };
+      };
+
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          snapshotId: rec.id,
+          label: rec.label,
+          createdAt: rec.createdAt,
+          filesCount: rec.snap.files.length,
+          note: "这是恢复提案。点击 Keep 才会恢复到该快照；Undo 可回滚。",
+          changedFiles,
+          preview: {
+            path: previewPath,
+            diffUnified: d.diff,
+            truncated: d.truncated,
+            stats: d.stats ?? null,
+          },
+        },
+        riskLevel: "high",
+        applyPolicy: "proposal",
+        apply,
+        undoable: false,
+      };
+    },
+  },
+  {
     name: "doc.write",
     description:
       "写入文件（path, content）。新建可自动落盘；覆盖已有文件会走 proposal-first（Keep 才覆盖，Undo 可回滚）。",

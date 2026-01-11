@@ -377,8 +377,23 @@
 #### 当前进度（开发期已落地）
 - ✅ Desktop：三栏 + Dock Panel；Monaco Markdown（Tab）；右侧 Agent（Plan/Agent/Chat）+ 流式输出 + Tool Blocks（Keep/Undo）
 - ✅ Gateway：邮箱登录（devCode）、OpenAI-compatible SSE 代理（`/api/llm/chat/stream`）、模型列表（`/api/llm/models`）、KB 最小检索演示
-- ✅ ReAct（开发期）：Plan/Agent 支持 **XML `<tool_calls>`**，最小工具集先在 Desktop 本地执行（`run.mainDoc.* / project.* / doc.*`），并把编辑器选区注入 Context Pack
-- ⏭️ 下一步：把 Tool Registry（Schema + XML）与工具执行迁回 Gateway，并实现 medium/high 风险的 proposal-first（Keep 才 apply）与 Run 审计
+- ✅ 编辑器：Tab 预览/固定/关闭（单击=预览替换；双击=固定新 Tab；× 关闭不影响左侧）
+- ✅ ReAct（开发期）：Gateway 负责 `/api/agent/run/stream` 编排（SSE：`tool.call/tool.result`），Desktop 执行工具并回传 `tool_result`
+- ✅ proposal-first 写入：`doc.applyEdits` 与覆盖写入类工具先出提案，点 Keep 才 apply；Undo 可回滚
+- ✅ Diff 预览：`doc.previewDiff` / `doc.applyEdits` / 覆盖写入输出 unified diff；Tool Block 支持 diff 预览与复制
+- ✅ 快照：`doc.commitSnapshot` / `doc.listSnapshots` / `doc.restoreSnapshot`（restore 为 proposal-first）
+
+#### TODO（按优先级，滚动更新）
+- **P0（写作 IDE 日用闭环）**
+  - [ ] 本地项目落盘：打开真实目录、读写磁盘文件、最近项目（替换内存 projectStore）
+  - [ ] Diff 预览升级：unified diff → 更直观的分栏/高亮 diff（类似 VSCode/Git）
+  - [ ] 快照面板：在 Dock Panel 提供快照列表/恢复/删除（与 Tool Block Keep/Undo 一致）
+- **P1（写作增强）**
+  - [ ] Outline：从 Markdown 标题树生成大纲，并与编辑器联动（点击定位）
+  - [ ] Lint（style/platform/facts）Problems 面板展示与一键修复提案
+- **P2（治理与审计）**
+  - [ ] Gateway Tool Registry（Schema+XML）完善 + 工具执行迁回 Gateway（鉴权/审计/计费）
+  - [ ] Run 审计：Run 列表、工具调用记录、费用 usage 归因
 
 ### 9. 仍待确认的问题（决定实现细节）
 - **邮箱登录形态**：验证码（推荐）还是邮箱+密码？（会影响后端表结构与安全策略）

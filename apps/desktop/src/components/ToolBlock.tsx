@@ -3,6 +3,32 @@ import { useProjectStore } from "../state/projectStore";
 import { useRunStore, type ToolBlockStep } from "../state/runStore";
 import type { TopicCandidate, TopicLabOutput } from "../agent/topicLab";
 
+function findDiffInfo(output: any): { path?: string; diff: string; truncated?: boolean; stats?: any; note?: string } | null {
+  if (!output || typeof output !== "object") return null;
+  if (typeof output.diffUnified === "string") {
+    return { diff: output.diffUnified, truncated: output.truncated, stats: output.stats, path: output.path };
+  }
+  const preview = (output as any).preview;
+  if (preview && typeof preview === "object" && typeof preview.diffUnified === "string") {
+    return {
+      diff: preview.diffUnified,
+      truncated: preview.truncated,
+      stats: preview.stats,
+      path: preview.path ?? output.path,
+      note: typeof preview.note === "string" ? preview.note : typeof output.note === "string" ? output.note : undefined,
+    };
+  }
+  return null;
+}
+
+function diffLineClass(line: string) {
+  if (line.startsWith("@@")) return "diffLine diffHunk";
+  if (line.startsWith("+++ ") || line.startsWith("--- ")) return "diffLine diffHeader";
+  if (line.startsWith("+")) return "diffLine diffAdd";
+  if (line.startsWith("-")) return "diffLine diffDel";
+  return "diffLine diffCtx";
+}
+
 function badgeClass(status: ToolBlockStep["status"]) {
   if (status === "success") return "badge badgeOk";
   if (status === "running") return "badge badgeWarn";
@@ -50,6 +76,8 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
     if (!out?.topics?.length) return null;
     return out;
   }, [step.output, step.toolName]);
+
+  const diffInfo = useMemo(() => findDiffInfo(step.output as any), [step.output]);
 
   const canApplyPick = mode !== "chat" && step.status === "success" && !!topicOutput;
 
@@ -164,6 +192,43 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
               <div style={{ color: "var(--muted)", fontSize: 12 }}>input</div>
               <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(step.input)}</pre>
             </div>
+            {diffInfo && (
+              <div style={{ display: "grid", gap: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                  <div style={{ color: "var(--muted)", fontSize: 12 }}>
+                    diff{diffInfo.path ? ` · ${diffInfo.path}` : ""}
+                    {diffInfo.stats ? ` · +${diffInfo.stats.added ?? 0}/-${diffInfo.stats.removed ?? 0}` : ""}
+                    {diffInfo.truncated ? " · truncated" : ""}
+                  </div>
+                  <button
+                    className="btn"
+                    type="button"
+                    onClick={() => {
+                      const text = diffInfo.diff;
+                      navigator.clipboard?.writeText(text).catch(() => {
+                        // ignore
+                      });
+                    }}
+                    title="复制 unified diff"
+                  >
+                    复制 diff
+                  </button>
+                </div>
+                {diffInfo.note && <div style={{ color: "var(--muted)", fontSize: 12 }}>{diffInfo.note}</div>}
+                <div className="diffBox" aria-label="diff 预览">
+                  {(expanded ? diffInfo.diff : diffInfo.diff.split("\n").slice(0, 40).join("\n"))
+                    .split("\n")
+                    .map((line, i) => (
+                      <div key={i} className={diffLineClass(line)}>
+                        {line}
+                      </div>
+                    ))}
+                  {!expanded && diffInfo.diff.split("\n").length > 40 && (
+                    <div className="diffLine diffCtx">…（展开可看全部）</div>
+                  )}
+                </div>
+              </div>
+            )}
             {expanded && (
               <div>
                 <div style={{ color: "var(--muted)", fontSize: 12 }}>output</div>
