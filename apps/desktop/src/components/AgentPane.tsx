@@ -9,6 +9,9 @@ import { RichText } from "./RichText";
 
 type RunController = { cancel: () => void };
 
+type RefItem = { kind: "file" | "dir"; path: string };
+const DND_MIME = "application/x-writing-ide-item";
+
 export function AgentPane() {
   const mode = useRunStore((s) => s.mode);
   const model = useRunStore((s) => s.model);
@@ -23,12 +26,18 @@ export function AgentPane() {
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const historyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const controllerRef = useRef<RunController | null>(null);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   const [submitFromHistory, setSubmitFromHistory] = useState<null | { stepId: string; text: string }>(null);
   const historyEditRef = useRef<HTMLDivElement | null>(null);
+
+  const [refPickerOpen, setRefPickerOpen] = useState(false);
+  const [refPickerQuery, setRefPickerQuery] = useState("");
+  const [refPickerTarget, setRefPickerTarget] = useState<"main" | "history">("main");
+  const refPickerInputRef = useRef<HTMLInputElement | null>(null);
 
   // 默认走相对路径（/api），由 Vite dev server 代理到本地 Gateway，避免跨域问题
   const gatewayUrl = (import.meta as any).env?.VITE_GATEWAY_URL ?? "";
@@ -95,6 +104,88 @@ export function AgentPane() {
   const onStop = () => {
     controllerRef.current?.cancel();
     controllerRef.current = null;
+  };
+
+  const buildRefToken = (item: RefItem) => {
+    const p = String(item.path ?? "").replaceAll("\\", "/");
+    const path = item.kind === "dir" && p && !p.endsWith("/") ? `${p}/` : p;
+    return `@{${path}}`;
+  };
+
+  const insertAtCursor = (opts: { target: "main" | "history"; token: string }) => {
+    const token = opts.token;
+    if (!token) return;
+    if (opts.target === "main") {
+      const el = textareaRef.current;
+      const cur = input;
+      const start = el?.selectionStart ?? cur.length;
+      const end = el?.selectionEnd ?? cur.length;
+      const prefix = cur.slice(0, start);
+      const suffix = cur.slice(end);
+      const needsSpace = prefix.length && !/\s$/.test(prefix);
+      const insert = (needsSpace ? " " : "") + token + " ";
+      const next = prefix + insert + suffix;
+      setInput(next);
+      requestAnimationFrame(() => {
+        if (!el) return;
+        const pos = start + insert.length;
+        el.selectionStart = pos;
+        el.selectionEnd = pos;
+        el.focus();
+      });
+      return;
+    }
+    const el = historyTextareaRef.current;
+    const cur = editingText;
+    const start = el?.selectionStart ?? cur.length;
+    const end = el?.selectionEnd ?? cur.length;
+    const prefix = cur.slice(0, start);
+    const suffix = cur.slice(end);
+    const needsSpace = prefix.length && !/\s$/.test(prefix);
+    const insert = (needsSpace ? " " : "") + token + " ";
+    const next = prefix + insert + suffix;
+    setEditingText(next);
+    requestAnimationFrame(() => {
+      if (!el) return;
+      const pos = start + insert.length;
+      el.selectionStart = pos;
+      el.selectionEnd = pos;
+      el.focus();
+    });
+  };
+
+  const openRefPicker = (target: "main" | "history") => {
+    setRefPickerTarget(target);
+    setRefPickerQuery("");
+    setRefPickerOpen(true);
+    requestAnimationFrame(() => refPickerInputRef.current?.focus());
+  };
+
+  const projectFiles = useProjectStore((s) => s.files);
+  const projectDirs = useProjectStore((s) => s.dirs);
+  const refOptions = useMemo(() => {
+    const q = refPickerQuery.trim().toLowerCase();
+    const hit = (p: string) => (q ? String(p).toLowerCase().includes(q) : true);
+    const out: RefItem[] = [];
+    for (const d of projectDirs ?? []) if (hit(d)) out.push({ kind: "dir", path: d });
+    for (const f of projectFiles ?? []) if (hit(f.path)) out.push({ kind: "file", path: f.path });
+    return out.slice(0, 80);
+  }, [projectDirs, projectFiles, refPickerQuery]);
+
+  const onDropRef = (e: React.DragEvent, target: "main" | "history") => {
+    const raw = e.dataTransfer.getData(DND_MIME);
+    if (!raw) return;
+    try {
+      const obj = JSON.parse(raw);
+      const kind = obj?.kind === "dir" ? "dir" : obj?.kind === "file" ? "file" : null;
+      const path = String(obj?.path ?? "").replaceAll("\\", "/");
+      if (!kind || !path) return;
+      e.preventDefault();
+      e.stopPropagation();
+      insertAtCursor({ target, token: buildRefToken({ kind, path }) });
+    } catch {
+      // ignore
+    }
   };
 
   const mainDocRows = useMemo(() => {
@@ -230,6 +321,14 @@ export function AgentPane() {
                         onChange={(e) => setEditingText(e.target.value)}
                         rows={3}
                         placeholder="输入写作任务（例如：帮我写一条小红书爆款选题）…"
+                        ref={historyTextareaRef}
+                        onDragOver={(e) => {
+                          if (e.dataTransfer.types?.includes?.(DND_MIME)) {
+                            e.preventDefault();
+                            e.dataTransfer.dropEffect = "copy";
+                          }
+                        }}
+                        onDrop={(e) => onDropRef(e, "history")}
                         onKeyDown={(e) => {
                           if (e.isComposing) return;
                           if (e.key === "Escape") {
@@ -296,10 +395,10 @@ export function AgentPane() {
                             className="iconBtn"
                             type="button"
                             aria-label="@ 引用"
-                            title="@ 引用选择器（占位：先插入 @）"
+                            title="@ 引用选择器"
                             onClick={(e) => {
                               e.stopPropagation();
-                              setEditingText((v) => (v.endsWith("@") ? v : v + "@"));
+                              openRefPicker("history");
                             }}
                           >
                             <IconAt />
@@ -428,6 +527,13 @@ export function AgentPane() {
             rows={3}
             placeholder="输入写作任务（例如：帮我写一条小红书爆款选题）…"
             ref={textareaRef}
+            onDragOver={(e) => {
+              if (e.dataTransfer.types?.includes?.(DND_MIME)) {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "copy";
+              }
+            }}
+            onDrop={(e) => onDropRef(e, "main")}
             onKeyDown={(e) => {
               if (e.isComposing) return; // 中文输入法合成中，不触发快捷键
               if (e.key !== "Enter") return;
@@ -487,8 +593,8 @@ export function AgentPane() {
                 className="iconBtn"
                 type="button"
                 aria-label="@ 引用"
-                title="@ 引用选择器（占位：先插入 @）"
-                onClick={() => setInput((v) => (v.endsWith("@") ? v : v + "@"))}
+                title="@ 引用选择器"
+                onClick={() => openRefPicker("main")}
               >
                 <IconAt />
               </button>
@@ -575,6 +681,60 @@ export function AgentPane() {
           快捷键：Enter 发送；Ctrl/⌘ + Enter 换行（Chat 模式不会调用写入类工具）。
         </div>
       </div>
+
+      {refPickerOpen && (
+        <div className="modalMask" role="dialog" aria-modal="true" onMouseDown={() => setRefPickerOpen(false)}>
+          <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="modalTitle">引用文件/文件夹</div>
+            <div className="modalDesc">
+              选择后会插入 <span className="rtCode">@{"{path}"}</span>，发送时会自动把引用内容注入上下文（文件夹会展开为其下文件）。
+            </div>
+            <input
+              ref={refPickerInputRef}
+              className="modalInput"
+              placeholder="搜索路径…（支持文件与文件夹）"
+              value={refPickerQuery}
+              onChange={(e) => setRefPickerQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setRefPickerOpen(false);
+                }
+              }}
+            />
+            <div className="refList" role="list">
+              {refOptions.length ? (
+                refOptions.map((it) => (
+                  <button
+                    key={`${it.kind}:${it.path}`}
+                    className="refItem"
+                    type="button"
+                    onClick={() => {
+                      insertAtCursor({ target: refPickerTarget, token: buildRefToken(it) });
+                      setRefPickerOpen(false);
+                    }}
+                    title={it.path}
+                  >
+                    <span className={`refKind ${it.kind === "dir" ? "refKindDir" : "refKindFile"}`}>
+                      {it.kind === "dir" ? "DIR" : "FILE"}
+                    </span>
+                    <span className="refPath">{it.path}</span>
+                  </button>
+                ))
+              ) : (
+                <div className="explorerHint" style={{ padding: "8px 2px 0" }}>
+                  无匹配结果
+                </div>
+              )}
+            </div>
+            <div className="modalBtns" style={{ marginTop: 12 }}>
+              <button className="btn" type="button" onClick={() => setRefPickerOpen(false)}>
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

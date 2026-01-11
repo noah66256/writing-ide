@@ -224,6 +224,30 @@ body {
   padding: 0 2px 8px;
 }
 
+.treeSearchRow {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 0 2px 10px;
+}
+
+.treeSearch {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.02);
+  color: var(--text);
+  padding: 8px 10px;
+  outline: none;
+  font-size: 12px;
+}
+
+.treeSearch:focus {
+  border-color: rgba(37, 99, 235, 0.45);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
 .tree {
   display: grid;
   gap: 2px;
@@ -331,6 +355,63 @@ body {
 .modalInput:focus {
   border-color: rgba(37, 99, 235, 0.45);
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.refList {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  max-height: 320px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.refItem {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.02);
+  color: var(--text);
+  padding: 8px 10px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.refItem:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.refKind {
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.refKindDir {
+  color: #2563eb;
+  border-color: rgba(37, 99, 235, 0.30);
+  background: rgba(37, 99, 235, 0.08);
+}
+
+.refKindFile {
+  color: #15803d;
+  border-color: rgba(22, 163, 74, 0.35);
+  background: rgba(22, 163, 74, 0.10);
+}
+
+.refPath {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
 }
 
 .recentBox {

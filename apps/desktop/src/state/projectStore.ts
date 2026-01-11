@@ -86,7 +86,11 @@ let refreshInFlight: Promise<void> | null = null;
 let refreshQueuedReason: string | null = null;
 
 function normalizeRel(p: string) {
-  return String(p ?? "").trim().replaceAll("\\", "/").replaceAll("//", "/");
+  let s = String(p ?? "").trim().replaceAll("\\", "/");
+  s = s.replace(/\/+/g, "/");
+  s = s.replace(/^\.\//, "");
+  s = s.replace(/\/+$/g, "");
+  return s;
 }
 
 export const useProjectStore = create<ProjectState>((set, get) => ({
@@ -404,8 +408,88 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const fromRel = normalizeRel(fromPath);
     const toRel = normalizeRel(toPath);
     if (!fromRel || !toRel) return;
-    await api.renamePath(rootDir, fromRel, toRel);
-    await get().refreshFromDisk("rename");
+    const snap = get().snapshot();
+
+    const st0 = get();
+    const isFile = !!st0.files.find((f) => f.path === fromRel);
+    const prefix = `${fromRel}/`;
+
+    // 禁止把目录移动到自身或子目录
+    if (!isFile) {
+      if (toRel === fromRel || toRel.startsWith(prefix)) {
+        useRunStore.getState().log("warn", "rename.blocked", { from: fromRel, to: toRel, reason: "into_self" });
+        return;
+      }
+    }
+
+    // 简单冲突检测（避免覆盖/合并导致不可控）
+    const hasFileAt = (p: string) => !!get().files.find((f) => f.path === p);
+    const hasDirAt = (p: string) => (p ? get().dirs.includes(p) : false);
+    if (isFile) {
+      if (hasFileAt(toRel)) {
+        useRunStore.getState().log("warn", "rename.blocked", { from: fromRel, to: toRel, reason: "dest_exists" });
+        return;
+      }
+    } else {
+      const destPrefix = `${toRel}/`;
+      const collides =
+        hasDirAt(toRel) ||
+        get().files.some((f) => f.path === toRel || f.path.startsWith(destPrefix));
+      if (collides) {
+        useRunStore.getState().log("warn", "rename.blocked", { from: fromRel, to: toRel, reason: "dest_exists" });
+        return;
+      }
+    }
+
+    const mapPath = (p: string) => {
+      if (isFile) return p === fromRel ? toRel : p;
+      if (p === fromRel) return toRel;
+      if (p.startsWith(prefix)) return toRel + p.slice(fromRel.length);
+      return p;
+    };
+
+    // 移动前：把影响范围内 dirty 文件先写盘（避免 rename/move 后丢内容）
+    const affectedFiles = isFile
+      ? get().files.filter((f) => f.path === fromRel)
+      : get().files.filter((f) => f.path.startsWith(prefix));
+
+    for (const f of affectedFiles) {
+      if (!f.dirty) continue;
+      const t = saveTimers.get(f.path);
+      if (t) window.clearTimeout(t);
+      saveTimers.delete(f.path);
+      try {
+        await api.writeFile(rootDir, f.path, f.content);
+      } catch {
+        // ignore
+      }
+    }
+
+    // 先在内存里完成路径映射（保证 tab/active 不丢）
+    set((s) => ({
+      dirs: s.dirs.map((d) => mapPath(d)),
+      files: s.files.map((f) =>
+        isFile
+          ? f.path === fromRel
+            ? { ...f, path: toRel, dirty: false }
+            : f
+          : f.path.startsWith(prefix)
+            ? { ...f, path: toRel + f.path.slice(fromRel.length), dirty: false }
+            : f,
+      ),
+      openPaths: s.openPaths.map(mapPath),
+      activePath: mapPath(s.activePath),
+      previewPath: s.previewPath ? mapPath(s.previewPath) : s.previewPath,
+    }));
+
+    try {
+      await api.renamePath(rootDir, fromRel, toRel);
+      await get().refreshFromDisk("rename");
+    } catch (e: any) {
+      // 失败：回滚
+      get().restore(snap as any);
+      useRunStore.getState().log("error", "rename.failed", { from: fromRel, to: toRel, message: String(e?.message ?? e) });
+    }
   },
 
   commitSnapshot: (label) => {

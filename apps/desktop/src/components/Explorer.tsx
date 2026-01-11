@@ -6,6 +6,9 @@ type TreeNode =
   | { kind: "dir"; name: string; path: string; children: TreeNode[] }
   | { kind: "file"; name: string; path: string; file: ProjectFile };
 
+const DND_MIME = "application/x-writing-ide-item";
+type DndItem = { kind: "file" | "dir"; path: string };
+
 function basename(p: string) {
   const parts = String(p ?? "").split("/");
   return parts[parts.length - 1] ?? p;
@@ -72,6 +75,44 @@ function buildTree(dirs: string[], files: ProjectFile[]) {
   return root as Extract<TreeNode, { kind: "dir" }>;
 }
 
+function filterTree(root: Extract<TreeNode, { kind: "dir" }>, termRaw: string) {
+  const term = String(termRaw ?? "").trim().toLowerCase();
+  if (!term) return root;
+  const match = (s: string) => String(s ?? "").toLowerCase().includes(term);
+
+  const walk = (node: TreeNode): TreeNode | null => {
+    if (node.kind === "file") {
+      return match(node.name) || match(node.path) ? node : null;
+    }
+    const children = node.children.map(walk).filter(Boolean) as TreeNode[];
+    const selfMatch = node.path ? match(node.name) || match(node.path) : false;
+    if (selfMatch || children.length) return { ...node, children };
+    return null;
+  };
+
+  return (walk(root) as Extract<TreeNode, { kind: "dir" }> | null) ?? null;
+}
+
+function buildRefToken(item: DndItem) {
+  const p = String(item.path ?? "").replaceAll("\\", "/");
+  const path = item.kind === "dir" && p && !p.endsWith("/") ? `${p}/` : p;
+  return `@{${path}}`;
+}
+
+function getDndItem(e: React.DragEvent): DndItem | null {
+  const raw = e.dataTransfer.getData(DND_MIME);
+  if (!raw) return null;
+  try {
+    const obj = JSON.parse(raw);
+    const kind = obj?.kind === "dir" ? "dir" : obj?.kind === "file" ? "file" : null;
+    const path = String(obj?.path ?? "").replaceAll("\\", "/");
+    if (!kind || !path) return null;
+    return { kind, path };
+  } catch {
+    return null;
+  }
+}
+
 type CtxMenu = { x: number; y: number; kind: "root" | "dir" | "file"; path: string };
 type PromptState = {
   title: string;
@@ -94,11 +135,13 @@ export function Explorer() {
   const recentProjectDirs = useWorkspaceStore((s) => s.recentProjectDirs);
 
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [filter, setFilter] = useState("");
   const [ctx, setCtx] = useState<CtxMenu | null>(null);
   const [prompt, setPrompt] = useState<PromptState | null>(null);
   const promptInputRef = useRef<HTMLInputElement | null>(null);
 
   const tree = useMemo(() => buildTree(dirs ?? [], files ?? []), [dirs, files]);
+  const filtered = useMemo(() => filterTree(tree, filter), [tree, filter]);
 
   useEffect(() => {
     if (!rootDir || !activePath) return;
@@ -222,7 +265,7 @@ export function Explorer() {
   const renderNode = (node: TreeNode, depth: number) => {
     const pad = 8 + depth * 14;
     if (node.kind === "dir") {
-      const open = isDirOpen(node.path);
+      const open = filter.trim() ? true : isDirOpen(node.path);
       return (
         <div key={`dir:${node.path}`}>
           {node.path ? (
@@ -231,6 +274,42 @@ export function Explorer() {
               style={{ paddingLeft: pad }}
               title={node.path}
               onClick={() => setExpanded((p) => ({ ...p, [node.path]: !open }))}
+              draggable
+              onDragStart={(e) => {
+                const payload: DndItem = { kind: "dir", path: node.path };
+                e.dataTransfer.effectAllowed = "copyMove";
+                e.dataTransfer.setData(DND_MIME, JSON.stringify(payload));
+                e.dataTransfer.setData("text/plain", node.path);
+              }}
+              onDragOver={(e) => {
+                const item = getDndItem(e);
+                if (!item) return;
+                // 允许将任意文件/目录拖到目录上进行移动
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+              }}
+              onDrop={(e) => {
+                const item = getDndItem(e);
+                if (!item) return;
+                e.preventDefault();
+                e.stopPropagation();
+                const targetDir = node.path;
+                if (!targetDir) return;
+
+                const src = item.path;
+                // 禁止把目录拖进自己或子目录
+                if (item.kind === "dir") {
+                  if (targetDir === src || targetDir.startsWith(`${src}/`)) return;
+                }
+                const dest = joinPath(targetDir, basename(src));
+                if (!dest || dest === src) return;
+                // 冲突检测：目标已存在则不做（避免不可控 merge）
+                const s = useProjectStore.getState();
+                const existsFile = !!s.files.find((f) => f.path === dest);
+                const existsDir = dest && s.dirs.includes(dest);
+                if (existsFile || existsDir) return;
+                void s.renamePath(src, dest);
+              }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setCtx({ x: e.clientX, y: e.clientY, kind: "dir", path: node.path });
@@ -254,6 +333,13 @@ export function Explorer() {
         title={node.path}
         onClick={() => openFilePreview(node.path)}
         onDoubleClick={() => openFilePinned(node.path)}
+        draggable
+        onDragStart={(e) => {
+          const payload: DndItem = { kind: "file", path: node.path };
+          e.dataTransfer.effectAllowed = "copyMove";
+          e.dataTransfer.setData(DND_MIME, JSON.stringify(payload));
+          e.dataTransfer.setData("text/plain", node.path);
+        }}
         onContextMenu={(e) => {
           e.preventDefault();
           setCtx({ x: e.clientX, y: e.clientY, kind: "file", path: node.path });
@@ -265,8 +351,6 @@ export function Explorer() {
       </div>
     );
   };
-
-  const rootChildren = tree.children;
 
   return (
     <div className="list">
@@ -317,7 +401,52 @@ export function Explorer() {
       {error ? <div className="explorerError">打开失败：{error}</div> : null}
       {isLoading ? <div className="explorerHint">正在加载文件…</div> : null}
 
-      {rootDir ? <div className="tree">{rootChildren.map((c) => renderNode(c, 0))}</div> : null}
+      {rootDir ? (
+        <div
+          className="tree"
+          onDragOver={(e) => {
+            const item = getDndItem(e);
+            if (!item) return;
+            // 拖到空白处：移动到根目录
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "move";
+          }}
+          onDrop={(e) => {
+            const item = getDndItem(e);
+            if (!item) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const src = item.path;
+            const dest = basename(src);
+            if (!dest || dest === src) return;
+            const s = useProjectStore.getState();
+            const existsFile = !!s.files.find((f) => f.path === dest);
+            const existsDir = dest && s.dirs.includes(dest);
+            if (existsFile || existsDir) return;
+            void s.renamePath(src, dest);
+          }}
+        >
+          <div className="treeSearchRow">
+            <input
+              className="treeSearch"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="搜索文件/目录…"
+            />
+            {filter.trim() ? (
+              <button className="btn btnIcon" type="button" onClick={() => setFilter("")}>
+                清除
+              </button>
+            ) : null}
+          </div>
+
+          {filtered ? (
+            (filtered.children.length ? filtered.children : []).map((c) => renderNode(c, 0))
+          ) : (
+            <div className="explorerHint">无匹配结果</div>
+          )}
+        </div>
+      ) : null}
 
       {ctx ? (
         <div className="ctxMenu" style={{ left: ctx.x, top: ctx.y }}>

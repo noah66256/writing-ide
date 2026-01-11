@@ -51,7 +51,113 @@ function buildAgentProtocolPrompt() {
   );
 }
 
-function buildContextPack() {
+type Ref = { kind: "file" | "dir"; path: string };
+
+function parseRefsFromPrompt(prompt: string): Ref[] {
+  const out: Ref[] = [];
+  const re = /@\{([^}]+)\}/g;
+  let m: RegExpExecArray | null = null;
+  while ((m = re.exec(prompt)) !== null) {
+    const raw = String(m[1] ?? "").trim();
+    if (!raw) continue;
+    let p = raw.replaceAll("\\", "/").replace(/^\.\//, "").trim();
+    if (!p) continue;
+    let kind: Ref["kind"] = p.endsWith("/") ? "dir" : "file";
+    if (kind === "dir") p = p.replace(/\/+$/g, "");
+    out.push({ kind, path: p });
+  }
+  const seen = new Set<string>();
+  return out.filter((r) => {
+    const key = `${r.kind}:${r.path}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function buildReferencesText(prompt: string) {
+  const refs = parseRefsFromPrompt(prompt);
+  if (!refs.length) return "";
+  const proj = useProjectStore.getState();
+
+  const maxTotal = 60_000;
+  const maxPerFile = 8_000;
+  const maxFilesInDir = 12;
+  let used = 0;
+
+  const pushLimited = (s: string, parts: string[]) => {
+    if (!s) return;
+    if (used >= maxTotal) return;
+    const left = maxTotal - used;
+    const chunk = s.length > left ? s.slice(0, left) + "\n…(references truncated)\n" : s;
+    parts.push(chunk);
+    used += chunk.length;
+  };
+
+  const parts: string[] = [];
+  pushLimited(
+    `REFERENCES（来自用户输入中的 @{} 引用；已提供正文，无需再调用 doc.read）：\n`,
+    parts,
+  );
+
+  for (const ref of refs) {
+    if (used >= maxTotal) break;
+    const path = ref.path;
+    if (!path) continue;
+
+    const looksDir =
+      ref.kind === "dir" ||
+      (Array.isArray((proj as any).dirs) && (proj as any).dirs.includes(path)) ||
+      proj.files.some((f) => f.path.startsWith(`${path}/`));
+
+    if (looksDir) {
+      const children = proj.files
+        .map((f) => f.path)
+        .filter((p) => p.startsWith(`${path}/`))
+        .sort((a, b) => a.localeCompare(b));
+      const listed = children.slice(0, maxFilesInDir);
+      pushLimited(`\n- DIR: ${path}/ (files=${children.length}${children.length > maxFilesInDir ? `, showing=${maxFilesInDir}` : ""})\n`, parts);
+      if (!listed.length) {
+        pushLimited(`  (no text files)\n`, parts);
+        continue;
+      }
+      for (const fp of listed) {
+        if (used >= maxTotal) break;
+        let content = "";
+        try {
+          content = await proj.ensureLoaded(fp);
+        } catch {
+          content = proj.getFileByPath(fp)?.content ?? "";
+        }
+        const truncated = content.length > maxPerFile;
+        const body = truncated ? content.slice(0, maxPerFile) + "\n…(file truncated)\n" : content;
+        pushLimited(`  - FILE: ${fp} (chars=${content.length}${truncated ? ", truncated" : ""})\n`, parts);
+        pushLimited(`-----BEGIN ${fp}-----\n${body}\n-----END ${fp}-----\n`, parts);
+      }
+      continue;
+    }
+
+    const file = proj.getFileByPath(path);
+    if (!file) {
+      pushLimited(`\n- FILE: ${path} (not found)\n`, parts);
+      continue;
+    }
+    let content = "";
+    try {
+      content = await proj.ensureLoaded(path);
+    } catch {
+      content = file.content ?? "";
+    }
+    const truncated = content.length > maxPerFile;
+    const body = truncated ? content.slice(0, maxPerFile) + "\n…(file truncated)\n" : content;
+    pushLimited(`\n- FILE: ${path} (chars=${content.length}${truncated ? ", truncated" : ""})\n`, parts);
+    pushLimited(`-----BEGIN ${path}-----\n${body}\n-----END ${path}-----\n`, parts);
+  }
+
+  return parts.join("");
+}
+
+function buildContextPack(extra?: { referencesText?: string }) {
   const mainDoc = useRunStore.getState().mainDoc;
   const proj = useProjectStore.getState();
   const docRules = proj.getFileByPath("doc.rules.md")?.content ?? "";
@@ -102,9 +208,11 @@ function buildContextPack() {
     };
   })();
 
+  const refs = extra?.referencesText ? `${extra.referencesText}\n\n` : "";
   return (
     `MAIN_DOC(JSON):\n${JSON.stringify(mainDoc, null, 2)}\n\n` +
     `DOC_RULES(Markdown):\n${docRules}\n\n` +
+    refs +
     `EDITOR_SELECTION(JSON):\n${JSON.stringify(selection, null, 2)}\n\n` +
     `RECENT_DIALOGUE:\n${recentDialogue}\n\n` +
     `PROJECT_STATE(JSON):\n${JSON.stringify(state, null, 2)}\n\n` +
@@ -112,6 +220,39 @@ function buildContextPack() {
     `- 已提供当前编辑器选区（EDITOR_SELECTION）。若用户说“改写我选中的这段”，优先用该选区。\n` +
     `- 如需文件正文请调用 doc.read；如需刷新选区也可调用 doc.getSelection。`
   );
+}
+
+function buildChatContextPack(extra?: { referencesText?: string }) {
+  const proj = useProjectStore.getState();
+  const docRules = proj.getFileByPath("doc.rules.md")?.content ?? "";
+  const selection = (() => {
+    const ed = proj.editorRef;
+    const model = ed?.getModel();
+    const sel = ed?.getSelection();
+    if (!ed || !model || !sel) {
+      return { ok: false, hasSelection: false, reason: "NO_EDITOR" as const };
+    }
+    const fullText = model.getValueInRange(sel);
+    const maxChars = 4000;
+    const truncated = fullText.length > maxChars;
+    const selectedText = truncated ? fullText.slice(0, maxChars) : fullText;
+    return {
+      ok: true,
+      hasSelection: fullText.length > 0,
+      path: proj.activePath,
+      selectedChars: fullText.length,
+      truncated,
+      range: {
+        startLineNumber: sel.startLineNumber,
+        startColumn: sel.startColumn,
+        endLineNumber: sel.endLineNumber,
+        endColumn: sel.endColumn,
+      },
+      selectedText,
+    };
+  })();
+  const refs = extra?.referencesText ? `${extra.referencesText}\n\n` : "";
+  return `DOC_RULES(Markdown):\n${docRules}\n\n${refs}EDITOR_SELECTION(JSON):\n${JSON.stringify(selection, null, 2)}\n`;
 }
 
 async function fetchChatStream(args: {
@@ -239,6 +380,8 @@ export function startGatewayRun(args: {
   (async () => {
     log("info", "gateway.run.start", { gatewayUrl: args.gatewayUrl, model: args.model, mode: args.mode });
     try {
+      const referencesText = await buildReferencesText(args.prompt).catch(() => "");
+
       // Chat：纯对话，不启用工具循环
       if (args.mode === "chat") {
         const assistantId = addAssistant("", true, false);
@@ -246,7 +389,10 @@ export function startGatewayRun(args: {
         const ret = await fetchChatStream({
           gatewayUrl: args.gatewayUrl,
           model: args.model,
-          messages: [{ role: "user", content: args.prompt }],
+          messages: [
+            { role: "system", content: buildChatContextPack({ referencesText }) },
+            { role: "user", content: args.prompt },
+          ],
           abort,
           onDelta: (d) => appendAssistantDelta(assistantId, d),
           log,
@@ -267,7 +413,7 @@ export function startGatewayRun(args: {
           model: args.model,
           mode: args.mode,
           prompt: args.prompt,
-          contextPack: buildContextPack(),
+          contextPack: buildContextPack({ referencesText }),
         }),
         signal: abort.signal,
       });
