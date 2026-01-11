@@ -199,6 +199,9 @@ const tools: ToolDefinition[] = [
 
       const snap = s.snapshot();
       ed.executeEdits("agent", [{ range: sel, text, forceMoveMarkers: true }]);
+      // 确保项目 store 与 Monaco 模型一致（避免 onChange 没触发导致回弹）
+      const next = ed.getModel()?.getValue() ?? "";
+      useProjectStore.getState().updateFile(s.activePath, next);
       const undo = () => useProjectStore.getState().restore(snap);
 
       return {

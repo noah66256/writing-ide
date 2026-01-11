@@ -42,6 +42,10 @@ function buildAgentProtocolPrompt() {
     `- 如果你输出 tool_call/tool_calls，则消息里禁止夹杂任何其它自然语言。\n` +
     `- <arg> 内可以放 JSON（不要代码块，不要反引号）。\n` +
     `- 工具结果会由系统用 XML 回传（system message）：<tool_result name="xxx"><![CDATA[{...json}]]></tool_result>\n\n` +
+    `编辑器选区约定：\n` +
+    `- Context Pack 会提供 EDITOR_SELECTION。\n` +
+    `- 如果用户要求“改写/润色我选中的这段”，请优先使用 EDITOR_SELECTION.selectedText；如 hasSelection=false，再提示用户先选中，或用 doc.read 获取全文后让用户指定范围。\n` +
+    `- 写回选区请用 doc.replaceSelection。\n\n` +
     `你可用的工具如下（只能调用这里列出的）：\n\n` +
     toolsPrompt()
   );
@@ -57,11 +61,42 @@ function buildContextPack() {
     openPaths: proj.openPaths,
     files,
   };
+
+  const selection = (() => {
+    const ed = proj.editorRef;
+    const model = ed?.getModel();
+    const sel = ed?.getSelection();
+    if (!ed || !model || !sel) {
+      return { ok: false, hasSelection: false, reason: "NO_EDITOR" as const };
+    }
+    const fullText = model.getValueInRange(sel);
+    const maxChars = 4000;
+    const truncated = fullText.length > maxChars;
+    const selectedText = truncated ? fullText.slice(0, maxChars) : fullText;
+    return {
+      ok: true,
+      hasSelection: fullText.length > 0,
+      path: proj.activePath,
+      selectedChars: fullText.length,
+      truncated,
+      range: {
+        startLineNumber: sel.startLineNumber,
+        startColumn: sel.startColumn,
+        endLineNumber: sel.endLineNumber,
+        endColumn: sel.endColumn,
+      },
+      selectedText,
+    };
+  })();
+
   return (
     `MAIN_DOC(JSON):\n${JSON.stringify(mainDoc, null, 2)}\n\n` +
     `DOC_RULES(Markdown):\n${docRules}\n\n` +
+    `EDITOR_SELECTION(JSON):\n${JSON.stringify(selection, null, 2)}\n\n` +
     `PROJECT_STATE(JSON):\n${JSON.stringify(state, null, 2)}\n\n` +
-    `注意：如需文件正文请调用 doc.read；如需选段请调用 doc.getSelection。`
+    `注意：\n` +
+    `- 已提供当前编辑器选区（EDITOR_SELECTION）。若用户说“改写我选中的这段”，优先用该选区。\n` +
+    `- 如需文件正文请调用 doc.read；如需刷新选区也可调用 doc.getSelection。`
   );
 }
 
