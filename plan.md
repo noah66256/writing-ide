@@ -493,6 +493,11 @@
   - 工具调用消息中不允许夹杂其它自然语言文本（避免解析歧义）
   - 所有 `<arg>` 必须能通过 `inputSchema` 校验，否则系统返回结构化错误并要求模型修复参数
 
+#### 14.4 开发期实现（现状）
+- **Gateway 编排**：`POST /api/agent/run/stream` 以 SSE 输出 `assistant.delta` / `tool.call` / `tool.result` 等事件
+- **Desktop 执行工具**：收到 `tool.call` 后本地执行（读写内存项目/编辑器选区），并通过 `POST /api/agent/run/:runId/tool_result` 回传
+- **proposal-first 写入**：`doc.applyEdits` / 覆盖写入类工具会先生成提案 Tool Block，用户点 Keep 才真正 apply
+
 ### 15. 我们需要哪些工具？（MVP → 增长/视频 → 知识库）
 #### 15.1 IDE/编辑器核心（必须）
 - **文档/项目**

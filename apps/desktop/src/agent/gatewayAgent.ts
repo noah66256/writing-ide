@@ -243,160 +243,181 @@ export function startGatewayRun(args: {
         return;
       }
 
-      // Plan/Agent：ReAct（LLM 产出 tool_calls XML → 本地执行工具 → tool_result 回注 → 继续）
-      const baseSystem: ChatMessage[] = [{ role: "system", content: buildAgentProtocolPrompt() }];
-      const history: ChatMessage[] = [{ role: "user", content: args.prompt }];
-      const maxTurns = 12;
+      // Plan/Agent：改为走 Gateway 的 /api/agent/run/stream（Gateway 负责 ReAct 循环；Desktop 负责执行工具并回传 tool_result）
+      const url = args.gatewayUrl ? `${args.gatewayUrl}/api/agent/run/stream` : "/api/agent/run/stream";
 
-      for (let turn = 0; turn < maxTurns; turn += 1) {
-        if (abort.signal.aborted) break;
-        log("info", "agent.turn.start", { turn });
-
-        const messages: ChatMessage[] = [...baseSystem, { role: "system", content: buildContextPack() }, ...history];
-
-        // 先隐藏 assistant（如果最终是 tool_calls，就不把 XML 展示给用户）
-        const assistantId = addAssistant("", true, true);
-        currentAssistantId = assistantId;
-
-        let assistantText = "";
-        let flushed = 0;
-        let decided: "unknown" | "tool" | "text" = "unknown";
-
-        const ret = await fetchChatStream({
-          gatewayUrl: args.gatewayUrl,
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
           model: args.model,
-          messages,
-          abort,
-          onDelta: (d) => {
-            assistantText += d;
+          mode: args.mode,
+          prompt: args.prompt,
+          contextPack: buildContextPack(),
+        }),
+        signal: abort.signal,
+      });
 
-            if (decided === "unknown") {
-              const t = assistantText.trimStart();
-              if (t.startsWith("<tool_calls") || t.startsWith("<tool_call")) {
-                decided = "tool";
-              } else if (t.length > 0 && !t.startsWith("<")) {
-                decided = "text";
-                patchAssistant(assistantId, { hidden: false });
-              } else if (t.length > 96 && t.startsWith("<") && !t.startsWith("<tool_calls") && !t.startsWith("<tool_call")) {
-                // 防止模型把正常文本包成奇怪 XML，这里兜底当作文本展示
-                decided = "text";
-                patchAssistant(assistantId, { hidden: false });
-              }
-            }
-
-            if (decided === "text") {
-              const next = assistantText.slice(flushed);
-              flushed = assistantText.length;
-              if (next) appendAssistantDelta(assistantId, next);
-            }
-          },
-          log,
-        });
-
-        if (!ret.ok) {
-          patchAssistant(assistantId, { hidden: false });
-          appendAssistantDelta(assistantId, `\n\n[模型错误] ${ret.error}`);
-          finishAssistant(assistantId);
-          setRunning(false);
-          return;
-        }
-
-        // flush 尾巴
-        if (decided === "text") {
-          const next = assistantText.slice(flushed);
-          if (next) appendAssistantDelta(assistantId, next);
-        }
-
-        finishAssistant(assistantId);
-        history.push({ role: "assistant", content: assistantText });
-
-        const toolCalls = parseToolCalls(assistantText);
-        if (!toolCalls) {
-          // 如果看起来像 tool_calls 但解析失败，直接把原文展示出来并结束，方便调试
-          if (isToolCallMessage(assistantText)) {
-            patchAssistant(assistantId, { hidden: false, text: assistantText });
-            appendAssistantDelta(
-              assistantId,
-              "\n\n[解析提示] 该条看起来像工具调用，但 XML 解析失败；请让模型严格输出 <tool_calls>...</tool_calls>。",
-            );
-          } else {
-            patchAssistant(assistantId, { hidden: false, text: assistantText });
-          }
-          setRunning(false);
-          return;
-        }
-
-        // tool_calls：隐藏这条 assistant
-        patchAssistant(assistantId, { hidden: true });
-        log("info", "agent.tool_calls", { count: toolCalls.length });
-
-        for (const call of toolCalls) {
-          if (abort.signal.aborted) break;
-
-          const exec = await executeToolCall({ toolName: call.name, rawArgs: call.args, mode: args.mode });
-          const def = exec.def;
-          const initialKept = def?.applyPolicy === "auto_apply";
-          const toolStepId = addTool({
-            toolName: call.name,
-            status: "running",
-            input: exec.parsedArgs,
-            output: undefined,
-            riskLevel: def?.riskLevel ?? "high",
-            applyPolicy: def?.applyPolicy ?? "proposal",
-            undoable: false,
-            kept: initialKept,
-            applied: def?.applyPolicy === "auto_apply",
-          });
-
-          if (exec.result.ok) {
-            patchTool(toolStepId, {
-              status: "success",
-              output: exec.result.output,
-              undoable: exec.result.undoable,
-              undo: exec.result.undo,
-              apply: exec.result.apply,
-              kept: initialKept,
-              applied: def?.applyPolicy === "auto_apply",
-            });
-            history.push({ role: "system", content: renderToolResultXml(call.name, exec.result.output) });
-
-            // proposal-first：遇到需要用户确认的写入提案，暂停本次 Run，等待用户点击 Keep/Undo
-            if (def?.applyPolicy === "proposal" && typeof exec.result.apply === "function") {
-              const tipId = addAssistant("", false, false);
-              patchAssistant(tipId, {
-                text:
-                  "我已经生成一份“修改提案”（见上方 Tool Block）。\n\n" +
-                  "- 点击 **Keep**：应用到编辑器\n" +
-                  "- 点击 **Undo**：丢弃该提案\n\n" +
-                  "确认后你可以继续发下一条指令（例如：继续改写下一段/生成整篇）。",
-              });
-              setRunning(false);
-              return;
-            }
-          } else {
-            patchTool(toolStepId, {
-              status: "failed",
-              output: { ok: false, error: exec.result.error },
-              undoable: false,
-              kept: false,
-              applied: false,
-            });
-            history.push({ role: "system", content: renderToolErrorXml(call.name, exec.result.error) });
-          }
-        }
-      }
-
-      // 被 Stop/Cancel 打断：不额外提示（避免误报“死循环”）
-      if (abort.signal.aborted) {
+      log("info", "gateway.agent.response", { status: res.status });
+      if (!res.ok || !res.body) {
+        const text = await res.text().catch(() => "");
+        const a = addAssistant("", false, false);
+        patchAssistant(a, { hidden: false });
+        appendAssistantDelta(a, `\n\n[Gateway 错误] ${text || `HTTP_${res.status}`}`);
+        finishAssistant(a);
         setRunning(false);
         return;
       }
 
-      // 超出最大轮数（防止死循环）
-      const warnId = addAssistant("", false, false);
-      patchAssistant(warnId, {
-        text: "\n\n[提示] 已达到本次 Run 的最大工具循环轮数（maxTurns），为避免死循环已自动停止。你可以补充指令或更具体的目标再试一次。",
-      });
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let runId: string | null = null;
+      let assistantId: string | null = null;
+
+      const ensureAssistant = () => {
+        if (assistantId) return assistantId;
+        assistantId = addAssistant("", true, false);
+        currentAssistantId = assistantId;
+        return assistantId;
+      };
+
+      const postToolResult = async (payload: any) => {
+        if (!runId) return;
+        const postUrl = args.gatewayUrl
+          ? `${args.gatewayUrl}/api/agent/run/${runId}/tool_result`
+          : `/api/agent/run/${runId}/tool_result`;
+        await fetch(postUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: abort.signal,
+        });
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let idx = buffer.indexOf("\n\n");
+        while (idx >= 0) {
+          const block = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+
+          const evt = parseSseBlock(block);
+          if (!evt) {
+            idx = buffer.indexOf("\n\n");
+            continue;
+          }
+
+          if (evt.event === "run.start") {
+            try {
+              const payload = JSON.parse(evt.data);
+              runId = payload?.runId ? String(payload.runId) : runId;
+              log("info", "agent.run.start", payload);
+            } catch {
+              log("info", "agent.run.start", evt.data);
+            }
+          }
+
+          if (evt.event === "assistant.delta") {
+            try {
+              const payload = JSON.parse(evt.data);
+              const delta = payload?.delta;
+              if (typeof delta === "string" && delta.length) {
+                const id = ensureAssistant();
+                appendAssistantDelta(id, delta);
+              }
+            } catch {
+              // ignore
+            }
+          }
+
+          if (evt.event === "assistant.done") {
+            if (assistantId) finishAssistant(assistantId);
+            assistantId = null;
+          }
+
+          if (evt.event === "tool.call") {
+            let payload: any = null;
+            try {
+              payload = JSON.parse(evt.data);
+            } catch {
+              payload = null;
+            }
+            const toolCallId = String(payload?.toolCallId ?? "");
+            const name = String(payload?.name ?? "");
+            const rawArgs = (payload?.args ?? {}) as Record<string, string>;
+
+            log("info", "tool.call", { toolCallId, name });
+
+            const exec = await executeToolCall({ toolName: name, rawArgs, mode: args.mode });
+            const def = exec.def;
+            const stepApplyPolicy =
+              exec.result.ok ? exec.result.applyPolicy ?? def?.applyPolicy ?? "proposal" : def?.applyPolicy ?? "proposal";
+            const stepRiskLevel =
+              exec.result.ok ? exec.result.riskLevel ?? def?.riskLevel ?? "high" : def?.riskLevel ?? "high";
+            const initialKept = stepApplyPolicy === "auto_apply";
+
+            // 用 toolCallId 作为 stepId，便于后续 tool.result 对齐（即使未来有 server-side tool）
+            const stepId = addTool({
+              id: toolCallId || undefined,
+              toolName: name,
+              status: exec.result.ok ? "success" : "failed",
+              input: exec.parsedArgs,
+              output: exec.result.ok ? exec.result.output : { ok: false, error: exec.result.error },
+              riskLevel: stepRiskLevel,
+              applyPolicy: stepApplyPolicy,
+              undoable: exec.result.ok ? exec.result.undoable : false,
+              undo: exec.result.ok ? exec.result.undo : undefined,
+              apply: exec.result.ok ? exec.result.apply : undefined,
+              kept: initialKept,
+              applied: stepApplyPolicy === "auto_apply",
+            });
+            void stepId;
+
+            await postToolResult({
+              toolCallId,
+              name,
+              ok: exec.result.ok,
+              output: exec.result.ok ? exec.result.output : { ok: false, error: exec.result.error },
+              meta: {
+                applyPolicy: stepApplyPolicy,
+                riskLevel: stepRiskLevel,
+                hasApply: exec.result.ok ? typeof exec.result.apply === "function" : false,
+              },
+            });
+          }
+
+          if (evt.event === "tool.result") {
+            // 预留：未来支持 server-side tool 时，可在这里 patchTool(toolCallId,...)
+            // 当前 client-side 工具已经本地更新 ToolBlock，这里只打日志即可。
+            log("info", "tool.result", evt.data);
+          }
+
+          if (evt.event === "error") {
+            try {
+              const payload = JSON.parse(evt.data);
+              const msg = payload?.error ? String(payload.error) : "unknown";
+              const id = ensureAssistant();
+              patchAssistant(id, { hidden: false });
+              appendAssistantDelta(id, `\n\n[模型错误] ${msg}`);
+              finishAssistant(id);
+            } catch {
+              const id = ensureAssistant();
+              patchAssistant(id, { hidden: false });
+              appendAssistantDelta(id, `\n\n[模型错误] ${evt.data}`);
+              finishAssistant(id);
+            }
+            setRunning(false);
+            return;
+          }
+
+          idx = buffer.indexOf("\n\n");
+        }
+      }
+
       setRunning(false);
     } catch (e: any) {
       const msg = e?.message ? String(e.message) : String(e);

@@ -11,6 +11,8 @@ import { kbSearch, type KbCard } from "@writing-ide/kb-core";
 import { MemoryKbStore } from "./kb/memoryStore.js";
 import { adjustUserPoints, listUserTransactions } from "./billing.js";
 import { streamChatCompletions, type OpenAiChatMessage } from "./llm/openaiCompat.js";
+import { isToolCallMessage, parseToolCalls, renderToolResultXml } from "./agent/xmlProtocol.js";
+import { TOOL_NAMES, toolsPrompt } from "./agent/toolRegistry.js";
 
 // 允许使用项目根目录的 .env（你可以用 env.example 复制出来），也支持 apps/gateway/.env 覆盖
 const __filename = fileURLToPath(import.meta.url);
@@ -168,6 +170,240 @@ fastify.post("/api/llm/chat/stream", async (request, reply) => {
   }
 });
 
+// ======== Agent（ReAct：Gateway 负责模型对话与 tool.call 事件；工具由 Desktop 执行并回传 tool_result） ========
+
+type ToolResultPayload = {
+  toolCallId: string;
+  name: string;
+  ok: boolean;
+  output: unknown;
+  meta?: {
+    applyPolicy?: "proposal" | "auto_apply";
+    riskLevel?: "low" | "medium" | "high";
+    hasApply?: boolean;
+  };
+};
+
+const agentRunWaiters = new Map<string, Map<string, (payload: ToolResultPayload) => void>>();
+
+function buildAgentProtocolPrompt() {
+  return (
+    `你是写作 IDE 的内置 Agent（偏写作产出与编辑体验，不要跑偏成通用工作流平台）。\n\n` +
+    `你可以在需要时“调用工具”。当你要调用工具时，你必须输出 **且只能输出** 下面 XML 之一：\n` +
+    `- 单次：<tool_call name="..."><arg name="...">...</arg></tool_call>\n` +
+    `- 多次：<tool_calls>...多个 tool_call...</tool_calls>\n\n` +
+    `规则：\n` +
+    `- 如果你输出 tool_call/tool_calls，则消息里禁止夹杂任何其它自然语言。\n` +
+    `- <arg> 内可以放 JSON（不要代码块，不要反引号）。\n` +
+    `- 工具结果会由系统用 XML 回传（system message）：<tool_result name="xxx"><![CDATA[{...json}]]></tool_result>\n\n` +
+    `你可用的工具如下（只能调用这里列出的）：\n\n` +
+    toolsPrompt()
+  );
+}
+
+fastify.post("/api/agent/run/stream", async (request, reply) => {
+  if (!IS_DEV) return reply.code(404).send({ error: "NOT_AVAILABLE" });
+
+  const bodySchema = z.object({
+    model: z.string().optional(),
+    mode: z.enum(["plan", "agent", "chat"]).optional(),
+    prompt: z.string().min(1),
+    contextPack: z.string().optional()
+  });
+  const body = bodySchema.parse((request as any).body);
+
+  const env = getLlmEnv();
+  if (!env.ok) return reply.code(500).send({ error: "LLM_NOT_CONFIGURED" });
+
+  const model = body.model ?? env.defaultModel;
+  const mode = body.mode ?? "agent";
+  const runId = randomUUID();
+
+  const origin = String((request as any).headers?.origin ?? "").trim();
+  if (origin) {
+    reply.raw.setHeader("access-control-allow-origin", origin);
+    reply.raw.setHeader("access-control-allow-credentials", "true");
+    reply.raw.setHeader("vary", "Origin");
+  }
+  reply.raw.statusCode = 200;
+  reply.raw.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  reply.raw.setHeader("Cache-Control", "no-cache, no-transform");
+  reply.raw.setHeader("Connection", "keep-alive");
+  reply.raw.setHeader("X-Accel-Buffering", "no");
+  (reply as any).hijack?.();
+  (reply.raw as any).flushHeaders?.();
+
+  const abort = new AbortController();
+  request.raw.on("aborted", () => abort.abort());
+  reply.raw.on("close", () => abort.abort());
+
+  const writeEvent = (event: string, data: unknown) => {
+    reply.raw.write(`event: ${event}\n`);
+    reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  const waiters = new Map<string, (payload: ToolResultPayload) => void>();
+  agentRunWaiters.set(runId, waiters);
+
+  writeEvent("run.start", { runId, model, mode });
+
+  const messages: OpenAiChatMessage[] = [
+    { role: "system", content: buildAgentProtocolPrompt() },
+    ...(body.contextPack ? [{ role: "system", content: body.contextPack } as OpenAiChatMessage] : []),
+    { role: "user", content: body.prompt }
+  ];
+
+  const maxTurns = 12;
+
+  try {
+    for (let turn = 0; turn < maxTurns; turn += 1) {
+      if (abort.signal.aborted) break;
+
+      let assistantText = "";
+      let decided: "unknown" | "tool" | "text" = "unknown";
+
+      for await (const ev of streamChatCompletions({
+        config: { baseUrl: env.baseUrl, apiKey: env.apiKey },
+        model,
+        messages,
+        signal: abort.signal
+      })) {
+        if (ev.type === "delta") {
+          assistantText += ev.delta;
+          if (decided === "unknown") {
+            const t = assistantText.trimStart();
+            if (t.startsWith("<tool_calls") || t.startsWith("<tool_call")) decided = "tool";
+            else if (t.length > 0 && !t.startsWith("<")) decided = "text";
+            else if (t.length > 96 && t.startsWith("<") && !t.startsWith("<tool_calls") && !t.startsWith("<tool_call"))
+              decided = "text";
+          }
+          if (decided === "text") writeEvent("assistant.delta", { delta: ev.delta });
+        }
+        if (ev.type === "error") {
+          writeEvent("error", { error: ev.error });
+          reply.raw.end();
+          agentRunWaiters.delete(runId);
+          return;
+        }
+        if (ev.type === "done") break;
+      }
+
+      messages.push({ role: "assistant", content: assistantText });
+
+      const toolCalls = parseToolCalls(assistantText);
+      if (!toolCalls) {
+        // 如果看起来像 tool_calls 但解析失败，给出提示并结束
+        if (isToolCallMessage(assistantText)) {
+          writeEvent("assistant.delta", {
+            delta:
+              "\n\n[解析提示] 该条看起来像工具调用，但 XML 解析失败；请严格输出 <tool_calls>...</tool_calls>。"
+          });
+        }
+        writeEvent("assistant.done", {});
+        reply.raw.end();
+        agentRunWaiters.delete(runId);
+        return;
+      }
+
+      // tool_calls：逐个 emit tool.call，等待 Desktop 回传 tool_result
+      for (const call of toolCalls) {
+        if (!call?.name || !TOOL_NAMES.has(call.name)) {
+          writeEvent("error", { error: `UNKNOWN_TOOL:${call?.name ?? ""}` });
+          reply.raw.end();
+          agentRunWaiters.delete(runId);
+          return;
+        }
+
+        const toolCallId = randomUUID();
+        writeEvent("tool.call", { toolCallId, name: call.name, args: call.args });
+
+        const payload: ToolResultPayload = await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error("TOOL_RESULT_TIMEOUT")), 60_000);
+          waiters.set(toolCallId, (p) => {
+            clearTimeout(timeout);
+            resolve(p);
+          });
+          abort.signal.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timeout);
+              reject(new Error("ABORTED"));
+            },
+            { once: true }
+          );
+        });
+
+        waiters.delete(toolCallId);
+        writeEvent("tool.result", {
+          toolCallId,
+          name: payload.name,
+          ok: payload.ok,
+          output: payload.output,
+          meta: payload.meta ?? null
+        });
+
+        messages.push({ role: "system", content: renderToolResultXml(call.name, payload.output) });
+
+        // proposal-first：工具返回需要用户确认的提案，终止本次 run，等待用户 Keep/Undo 后再继续对话
+        if (payload.meta?.applyPolicy === "proposal" && payload.meta?.hasApply) {
+          writeEvent("assistant.delta", {
+            delta:
+              "\n\n我已经生成一份“修改提案”（见上方 Tool Block）。\n\n" +
+              "- 点击 **Keep**：应用到编辑器\n" +
+              "- 点击 **Undo**：丢弃该提案\n\n" +
+              "确认后你可以继续发下一条指令（例如：继续改写下一段/生成整篇）。"
+          });
+          writeEvent("assistant.done", {});
+          reply.raw.end();
+          agentRunWaiters.delete(runId);
+          return;
+        }
+      }
+    }
+
+    writeEvent("assistant.delta", {
+      delta: "\n\n[提示] 已达到本次 Run 的最大工具循环轮数（maxTurns），为避免死循环已自动停止。"
+    });
+    writeEvent("assistant.done", {});
+  } catch (e: any) {
+    const msg = e?.message ? String(e.message) : String(e);
+    writeEvent("error", { error: msg });
+  } finally {
+    agentRunWaiters.delete(runId);
+    reply.raw.end();
+  }
+});
+
+fastify.post("/api/agent/run/:runId/tool_result", async (request, reply) => {
+  if (!IS_DEV) return reply.code(404).send({ error: "NOT_AVAILABLE" });
+
+  const paramsSchema = z.object({ runId: z.string().min(1) });
+  const bodySchema = z.object({
+    toolCallId: z.string().min(1),
+    name: z.string().min(1),
+    ok: z.boolean(),
+    output: z.any(),
+    meta: z
+      .object({
+        applyPolicy: z.enum(["proposal", "auto_apply"]).optional(),
+        riskLevel: z.enum(["low", "medium", "high"]).optional(),
+        hasApply: z.boolean().optional()
+      })
+      .optional()
+  });
+  const { runId } = paramsSchema.parse((request as any).params);
+  const payload = bodySchema.parse((request as any).body) as ToolResultPayload;
+
+  const waiters = agentRunWaiters.get(runId);
+  if (!waiters) return reply.code(404).send({ error: "RUN_NOT_FOUND" });
+
+  const resolve = waiters.get(payload.toolCallId);
+  if (!resolve) return reply.code(404).send({ error: "TOOL_CALL_NOT_FOUND" });
+
+  resolve(payload);
+  return reply.send({ ok: true });
+});
+
 fastify.post("/api/auth/email/request-code", async (request, reply) => {
   const bodySchema = z.object({
     email: z.string().email()
@@ -218,8 +454,8 @@ fastify.post("/api/auth/email/verify", async (request, reply) => {
 
   let user = db.users.find((u) => u.email === lowerEmail);
   if (!user) {
-    const role: User["role"] =
-      ADMIN_EMAILS.includes(lowerEmail) || (IS_DEV && db.users.length === 0 ? "admin" : "user");
+    const isAdmin = ADMIN_EMAILS.includes(lowerEmail) || (IS_DEV && db.users.length === 0);
+    const role: User["role"] = isAdmin ? "admin" : "user";
     user = {
       id: randomUUID(),
       email: lowerEmail,

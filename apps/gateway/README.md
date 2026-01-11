@@ -17,6 +17,13 @@
   - run/step 事件流（SSE/WebSocket）、toolRun 记录、undoToken/撤销策略、Run 审计查询接口
   - Postgres+pgvector KB 存储层、webSearch/导入/抽取、LLM 配置热生效（B 端配置）
 
+### Agent Run（开发期：SSE）
+已实现（开发期最小闭环）：
+- `POST /api/agent/run/stream`：启动一次 Plan/Agent 运行（SSE），Gateway 负责 ReAct 编排
+  - SSE 事件：`run.start` / `assistant.delta` / `assistant.done` / `tool.call` / `tool.result` / `error`
+  - 工具执行：Gateway 发 `tool.call` 给 Desktop；Desktop 执行后调用 `POST /api/agent/run/:runId/tool_result` 回传
+- `POST /api/agent/run/:runId/tool_result`：回传工具执行结果（供下一回合继续）
+
 ### 运行（本地）
 在项目根目录：
 

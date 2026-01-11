@@ -8,7 +8,7 @@
 
 ### 当前状态（已打通的最小闭环）
 - **Desktop**：三栏布局 + Dock Panel；Monaco Markdown 编辑器（Tab）；右侧 Agent（Plan/Agent/Chat）+ 流式输出 + Tool Blocks（Keep/Undo）。
-- **ReAct（开发期）**：Plan/Agent 模式支持 **XML `<tool_calls>` 工具调用**，工具在 Desktop 本地执行（最小集：`run.mainDoc.* / project.* / doc.*`），并以 Tool Blocks 展示，可 Undo。
+- **ReAct（开发期）**：Plan/Agent 模式支持 **XML `<tool_calls>` 工具调用**，由 **Gateway 编排运行**（`/api/agent/run/stream`），工具在 Desktop 本地执行并回传 `tool_result`，右侧以 Tool Blocks 展示，可 Keep/Undo。
 - **Gateway**：邮箱验证码登录（devCode）、OpenAI-compatible SSE 流式代理（`/api/llm/chat/stream`）、模型列表（`/api/llm/models`）、积分与流水接口、KB 最小搜索演示（对接 `packages/kb-core`）。
 
 ### 右侧 Agent 输出（约定）
@@ -20,6 +20,12 @@
 
 补充（开发期已实现）：
 - **proposal-first 写入**：例如 `doc.applyEdits` 会先生成“修改提案”Tool Block，用户点 **Keep** 才真正应用到编辑器；点 **Undo** 丢弃提案/回滚。
+
+### Agent Run（开发期：SSE 事件）
+- `POST /api/agent/run/stream`：启动一次 Plan/Agent 运行（SSE）
+  - 输入包含 `prompt` 与 `contextPack`（Main Doc / Doc Rules / 编辑器选区 / 项目状态摘要等）
+  - SSE 事件：`run.start` / `assistant.delta` / `assistant.done` / `tool.call` / `tool.result` / `error`
+- `POST /api/agent/run/:runId/tool_result`：Desktop 执行工具后把结果回传给 Gateway（供后续回合继续）
 
 ### 计费模型（当前约定）
 - C 端以**充值积分**为主；Gateway 负责余额/流水与扣费审计（后续模型调用按 usage 扣费）。

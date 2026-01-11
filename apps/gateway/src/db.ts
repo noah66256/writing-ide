@@ -62,9 +62,10 @@ export async function loadDb(): Promise<Db> {
         const createdAt = typeof t?.createdAt === "string" ? t.createdAt : new Date().toISOString();
         const reason = typeof t?.reason === "string" ? t.reason : undefined;
         if (!id || !userId) return null;
-        return { id, userId, type, delta, reason, createdAt };
+        const base: PointsTransaction = { id, userId, type, delta, createdAt };
+        return reason ? { ...base, reason } : base;
       })
-      .filter((t): t is PointsTransaction => Boolean(t));
+      .filter((t): t is PointsTransaction => t !== null);
 
     return { users, pointsTransactions };
   } catch {
