@@ -10,6 +10,7 @@ export type RefComposerHandle = {
 };
 
 const REF_CLASS = "refChip";
+const DND_MIME = "application/x-writing-ide-item";
 
 function normalizePath(p: string) {
   let s = String(p ?? "").trim().replaceAll("\\", "/");
@@ -51,11 +52,6 @@ function buildChip(item: RefItem) {
   close.className = "refChipClose";
   close.textContent = "×";
   close.title = "移除引用";
-  close.addEventListener("mousedown", (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    el.remove();
-  });
 
   el.appendChild(label);
   el.appendChild(close);
@@ -124,6 +120,45 @@ function isSelectionInside(root: HTMLElement, sel: Selection | null) {
   const r = sel.getRangeAt(0);
   const sc = r.startContainer;
   return root === sc || root.contains(sc);
+}
+
+function getRefItemFromDataTransfer(dt: DataTransfer | null): RefItem | null {
+  if (!dt) return null;
+  const raw = dt.getData(DND_MIME);
+  if (!raw) return null;
+  try {
+    const obj = JSON.parse(raw);
+    const kind = obj?.kind === "dir" ? "dir" : obj?.kind === "file" ? "file" : null;
+    const path = normalizePath(String(obj?.path ?? ""));
+    if (!kind || !path) return null;
+    return { kind, path };
+  } catch {
+    return null;
+  }
+}
+
+function rangeFromPoint(x: number, y: number): Range | null {
+  const doc: any = document as any;
+  if (typeof doc.caretRangeFromPoint === "function") {
+    try {
+      return doc.caretRangeFromPoint(x, y) as Range;
+    } catch {
+      // ignore
+    }
+  }
+  if (typeof doc.caretPositionFromPoint === "function") {
+    try {
+      const pos = doc.caretPositionFromPoint(x, y);
+      if (!pos) return null;
+      const r = document.createRange();
+      r.setStart(pos.offsetNode, pos.offset);
+      r.collapse(true);
+      return r;
+    } catch {
+      // ignore
+    }
+  }
+  return null;
 }
 
 export const RefComposer = forwardRef<
@@ -249,10 +284,58 @@ export const RefComposer = forwardRef<
       suppressContentEditableWarning
       data-placeholder={placeholder}
       aria-label={props["aria-label"] ?? "输入"}
+      onMouseDown={(e) => {
+        const t = e.target as HTMLElement | null;
+        if (!t) return;
+        if (t.classList?.contains?.("refChipClose")) {
+          e.preventDefault();
+          e.stopPropagation();
+          const chip = t.closest?.(`.${REF_CLASS}`) as HTMLElement | null;
+          chip?.remove();
+          syncToState();
+        }
+      }}
+      onDragOver={(e) => {
+        const item = getRefItemFromDataTransfer(e.dataTransfer);
+        if (!item) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+      }}
+      onDrop={(e) => {
+        const item = getRefItemFromDataTransfer(e.dataTransfer);
+        if (!item) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const el = rootRef.current;
+        if (!el) return;
+        const r = rangeFromPoint(e.clientX, e.clientY);
+        if (r) {
+          try {
+            const sel = document.getSelection();
+            if (sel) {
+              sel.removeAllRanges();
+              sel.addRange(r);
+            }
+            lastRangeRef.current = r.cloneRange();
+          } catch {
+            // ignore
+          }
+        }
+        insertRef(item);
+      }}
       onInput={() => syncToState()}
       onKeyUp={() => saveSelection()}
       onMouseUp={() => saveSelection()}
       onFocus={() => saveSelection()}
+      onBlur={() => {
+        // 把用户手输/粘贴的 @{} token 转成 chip（失焦时做一次，不影响打字体验）
+        const el = rootRef.current;
+        if (!el) return;
+        const v = serialize(el);
+        lastValueRef.current = v;
+        props.onChange(v);
+        setFromValue(el, v);
+      }}
       onKeyDown={(e) => {
         if ((e as any).isComposing) return;
         if (e.key === "Enter" && props.onEnterSend) {
