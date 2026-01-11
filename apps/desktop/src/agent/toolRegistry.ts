@@ -261,9 +261,11 @@ const tools: ToolDefinition[] = [
     applyPolicy: "proposal",
     reversible: false,
     run: async () => {
-      const file = useProjectStore.getState().getFileByPath("doc.rules.md");
+      const s = useProjectStore.getState();
+      const file = s.getFileByPath("doc.rules.md");
       if (!file) return { ok: false, error: "DOC_RULES_NOT_FOUND" };
-      return { ok: true, output: { ok: true, path: file.path, content: file.content }, undoable: false };
+      const content = await s.ensureLoaded(file.path);
+      return { ok: true, output: { ok: true, path: file.path, content }, undoable: false };
     },
   },
   {
@@ -303,9 +305,11 @@ const tools: ToolDefinition[] = [
     run: async (args) => {
       const path = String(args.path ?? "");
       if (!path) return { ok: false, error: "MISSING_PATH" };
-      const file = useProjectStore.getState().getFileByPath(path);
+      const s = useProjectStore.getState();
+      const file = s.getFileByPath(path);
       if (!file) return { ok: false, error: "FILE_NOT_FOUND" };
-      return { ok: true, output: { ok: true, path: file.path, content: file.content }, undoable: false };
+      const content = await s.ensureLoaded(file.path);
+      return { ok: true, output: { ok: true, path: file.path, content }, undoable: false };
     },
   },
   {
@@ -323,9 +327,10 @@ const tools: ToolDefinition[] = [
     run: async (args) => {
       const path = String(args.path ?? "");
       if (!path) return { ok: false, error: "MISSING_PATH" };
-      const file = useProjectStore.getState().getFileByPath(path);
+      const s = useProjectStore.getState();
+      const file = s.getFileByPath(path);
       if (!file) return { ok: false, error: "FILE_NOT_FOUND" };
-      const before = file.content ?? "";
+      const before = await s.ensureLoaded(file.path);
       const newContent = typeof args.newContent === "string" ? String(args.newContent) : undefined;
       const edits = args.edits as any;
       let after = newContent ?? before;
@@ -629,7 +634,7 @@ const tools: ToolDefinition[] = [
         normalized.push({ startLineNumber: sl, startColumn: sc, endLineNumber: el, endColumn: ec, text });
       }
 
-      const before = file.content ?? "";
+      const before = await s.ensureLoaded(file.path);
       const { after } = applyTextEdits({ before, edits: normalized });
       const d = unifiedDiff({ path, before, after });
 

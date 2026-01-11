@@ -10,6 +10,23 @@ contextBridge.exposeInMainWorld("desktop", {
     ipcRenderer.on("menu.action", listener);
     return () => ipcRenderer.removeListener("menu.action", listener);
   },
+  fs: {
+    pickDirectory() {
+      return ipcRenderer.invoke("project.pickDirectory");
+    },
+    listFiles(rootDir) {
+      return ipcRenderer.invoke("project.listFiles", rootDir);
+    },
+    readFile(rootDir, relPath) {
+      return ipcRenderer.invoke("doc.readFile", rootDir, relPath);
+    },
+    writeFile(rootDir, relPath, content) {
+      return ipcRenderer.invoke("doc.writeFile", rootDir, relPath, content);
+    },
+    deleteFile(rootDir, relPath) {
+      return ipcRenderer.invoke("doc.deleteFile", rootDir, relPath);
+    },
+  },
 });
 
 

@@ -6,6 +6,8 @@ import { AccountFooter } from "./components/AccountFooter";
 import { useEffect, useRef } from "react";
 import { useLayoutStore } from "./state/layoutStore";
 import { useUiStore, type DockTabKey } from "./state/uiStore";
+import { useProjectStore } from "./state/projectStore";
+import { useWorkspaceStore } from "./state/workspaceStore";
 
 export default function App() {
   const appRef = useRef<HTMLDivElement | null>(null);
@@ -37,6 +39,13 @@ export default function App() {
   const editorMin = 220;
 
   const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
+
+  // 启动时：尝试恢复上次打开的项目
+  useEffect(() => {
+    const last = useWorkspaceStore.getState().lastProjectDir;
+    if (!last) return;
+    void useProjectStore.getState().loadProjectFromDisk(last);
+  }, []);
 
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
@@ -99,8 +108,23 @@ export default function App() {
       if (payload.type === "dock.tab") {
         const tab = String(payload.tab ?? "") as DockTabKey;
         if (tab) setDockTab(tab);
+        return;
       }
-      // 其它菜单动作暂时占位（后续接入本地项目落盘后再实现）
+      if (payload.type === "file.openProject") {
+        const api = window.desktop?.fs;
+        if (!api) return;
+        void (async () => {
+          const res = await api.pickDirectory();
+          if (!res.ok || !res.dir) return;
+          useWorkspaceStore.getState().addRecentProjectDir(res.dir);
+          await useProjectStore.getState().loadProjectFromDisk(res.dir);
+        })();
+        return;
+      }
+      if (payload.type === "file.save") {
+        void useProjectStore.getState().saveActiveNow();
+        return;
+      }
     });
     return () => {
       try {

@@ -196,6 +196,34 @@ body {
   padding: 0 6px 10px;
 }
 
+.explorerHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px 10px;
+}
+
+.explorerRoot {
+  flex: 1;
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.explorerError {
+  color: var(--danger);
+  font-size: 12px;
+  padding: 0 2px 8px;
+}
+
+.explorerHint {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 2px 8px;
+}
+
 .fileItem {
   display: flex;
   gap: 8px;

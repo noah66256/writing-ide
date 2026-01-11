@@ -1,5 +1,95 @@
-const { app, BrowserWindow, Menu, shell } = require("electron");
+const { app, BrowserWindow, Menu, shell, ipcMain, dialog } = require("electron");
 const path = require("path");
+const fs = require("node:fs/promises");
+
+const IGNORE_DIRS = new Set(["node_modules", ".git", "dist", "out", "build", ".next"]);
+
+function normalizeRelPath(p) {
+  const raw = String(p ?? "");
+  const replaced = raw.replaceAll("\\", "/");
+  const normalized = path.posix.normalize(replaced);
+  if (!normalized || normalized === "." || normalized.startsWith("/") || normalized.includes("\0")) {
+    throw new Error("INVALID_REL_PATH");
+  }
+  const parts = normalized.split("/").filter(Boolean);
+  if (parts.some((x) => x === "..")) throw new Error("INVALID_REL_PATH");
+  return parts.join("/");
+}
+
+function toFsPath(rootDir, relPath) {
+  const rel = normalizeRelPath(relPath);
+  return path.join(rootDir, ...rel.split("/"));
+}
+
+async function walkTextFiles(dir, rootDir, out) {
+  let entries = [];
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const ent of entries) {
+    if (!ent?.name) continue;
+    const full = path.join(dir, ent.name);
+    if (ent.isDirectory()) {
+      if (IGNORE_DIRS.has(ent.name)) continue;
+      await walkTextFiles(full, rootDir, out);
+      continue;
+    }
+    if (!ent.isFile()) continue;
+    const rel = path.relative(rootDir, full).split(path.sep).join("/");
+    const lower = rel.toLowerCase();
+    if (lower.endsWith(".md") || lower.endsWith(".mdx") || lower.endsWith(".txt")) out.push(rel);
+  }
+}
+
+function registerIpc() {
+  ipcMain.handle("project.pickDirectory", async () => {
+    const win = BrowserWindow.getFocusedWindow();
+    const result = await dialog.showOpenDialog(win ?? undefined, {
+      title: "打开项目文件夹",
+      properties: ["openDirectory", "createDirectory"],
+    });
+    if (result.canceled) return { ok: false, canceled: true };
+    const dir = result.filePaths?.[0];
+    if (!dir) return { ok: false, canceled: true };
+    return { ok: true, dir };
+  });
+
+  ipcMain.handle("project.listFiles", async (_event, rootDir) => {
+    const root = String(rootDir ?? "");
+    if (!root) return { ok: false, error: "MISSING_ROOT" };
+    const out = [];
+    await walkTextFiles(root, root, out);
+    out.sort((a, b) => a.localeCompare(b));
+    return { ok: true, files: out };
+  });
+
+  ipcMain.handle("doc.readFile", async (_event, rootDir, relPath) => {
+    const root = String(rootDir ?? "");
+    if (!root) return { ok: false, error: "MISSING_ROOT" };
+    const file = toFsPath(root, relPath);
+    const content = await fs.readFile(file, "utf-8");
+    return { ok: true, content };
+  });
+
+  ipcMain.handle("doc.writeFile", async (_event, rootDir, relPath, content) => {
+    const root = String(rootDir ?? "");
+    if (!root) return { ok: false, error: "MISSING_ROOT" };
+    const file = toFsPath(root, relPath);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, String(content ?? ""), "utf-8");
+    return { ok: true };
+  });
+
+  ipcMain.handle("doc.deleteFile", async (_event, rootDir, relPath) => {
+    const root = String(rootDir ?? "");
+    if (!root) return { ok: false, error: "MISSING_ROOT" };
+    const file = toFsPath(root, relPath);
+    await fs.unlink(file);
+    return { ok: true };
+  });
+}
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -31,9 +121,9 @@ function createWindow() {
           click: () => send({ type: "file.newDraft" }),
         },
         { type: "separator" },
-        { label: "打开项目（占位）", accelerator: "Ctrl+O", click: () => send({ type: "file.openProject" }) },
+        { label: "打开项目…", accelerator: "Ctrl+O", click: () => send({ type: "file.openProject" }) },
         { type: "separator" },
-        { label: "保存（占位）", accelerator: "Ctrl+S", click: () => send({ type: "file.save" }) },
+        { label: "保存", accelerator: "Ctrl+S", click: () => send({ type: "file.save" }) },
         { label: "另存为（占位）", accelerator: "Ctrl+Shift+S", click: () => send({ type: "file.saveAs" }) },
         { type: "separator" },
         { role: "close", label: "关闭窗口" },
@@ -124,6 +214,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  registerIpc();
   createWindow();
 
   app.on("activate", () => {

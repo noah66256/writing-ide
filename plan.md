@@ -378,6 +378,7 @@
 - ✅ Desktop：三栏 + Dock Panel；Monaco Markdown（Tab）；右侧 Agent（Plan/Agent/Chat）+ 流式输出 + Tool Blocks（Keep/Undo）
 - ✅ Gateway：邮箱登录（devCode）、OpenAI-compatible SSE 代理（`/api/llm/chat/stream`）、模型列表（`/api/llm/models`）、KB 最小检索演示
 - ✅ 编辑器：Tab 预览/固定/关闭（单击=预览替换；双击=固定新 Tab；× 关闭不影响左侧）
+- ✅ 本地项目落盘（MVP）：打开真实目录、读写磁盘文件、最近项目（自动恢复上次项目）
 - ✅ ReAct（开发期）：Gateway 负责 `/api/agent/run/stream` 编排（SSE：`tool.call/tool.result`），Desktop 执行工具并回传 `tool_result`
 - ✅ proposal-first 写入：`doc.applyEdits` 与覆盖写入类工具先出提案，点 Keep 才 apply；Undo 可回滚
 - ✅ Diff 预览：`doc.previewDiff` / `doc.applyEdits` / 覆盖写入输出 unified diff；Tool Block 支持 diff 预览与复制
@@ -385,7 +386,8 @@
 
 #### TODO（按优先级，滚动更新）
 - **P0（写作 IDE 日用闭环）**
-  - [ ] 本地项目落盘：打开真实目录、读写磁盘文件、最近项目（替换内存 projectStore）
+  - [x] 本地项目落盘（MVP）：打开真实目录、读写磁盘文件、最近项目（自动恢复上次项目）
+  - [ ] 本地项目落盘（增强）：最近项目菜单、文件监听（外部修改刷新）、重命名/移动/新建文件夹
   - [ ] Diff 预览升级：unified diff → 更直观的分栏/高亮 diff（类似 VSCode/Git）
   - [ ] 快照面板：在 Dock Panel 提供快照列表/恢复/删除（与 Tool Block Keep/Undo 一致）
 - **P1（写作增强）**
