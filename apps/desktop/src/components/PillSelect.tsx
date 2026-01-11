@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { IconChevronDown } from "./Icons";
 
 export type PillOption = {
@@ -17,6 +18,11 @@ export function PillSelect(props: {
   const { value, options, onChange } = props;
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const [menuPos, setMenuPos] = useState<null | { left: number; bottom: number; width: number }>(
+    null,
+  );
 
   const selected = useMemo(
     () => options.find((o) => o.value === value) ?? options[0],
@@ -26,8 +32,11 @@ export function PillSelect(props: {
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
       const root = rootRef.current;
+      const menu = menuRef.current;
       if (!root) return;
-      if (root.contains(e.target as Node)) return;
+      const target = e.target as Node;
+      if (root.contains(target)) return;
+      if (menu && menu.contains(target)) return;
       setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
@@ -40,6 +49,26 @@ export function PillSelect(props: {
       document.removeEventListener("keydown", onKey);
     };
   }, []);
+
+  const computeMenuPos = () => {
+    const btn = btnRef.current;
+    if (!btn) return;
+    const rect = btn.getBoundingClientRect();
+    const width = Math.max(rect.width, 180);
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+    // 默认向上弹出：bottom = 视口底部到按钮顶部的距离 + gap
+    const bottom = Math.max(8, window.innerHeight - rect.top + 8);
+    setMenuPos({ left, bottom, width });
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    computeMenuPos();
+    const onResize = () => computeMenuPos();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   return (
     <div
@@ -56,7 +85,14 @@ export function PillSelect(props: {
         type="button"
         aria-haspopup="listbox"
         aria-expanded={open}
-        onClick={() => setOpen((x) => !x)}
+        ref={btnRef}
+        onClick={() =>
+          setOpen((x) => {
+            const next = !x;
+            if (next) computeMenuPos();
+            return next;
+          })
+        }
       >
         <span className="pillLabel">{selected?.label ?? value}</span>
         <span className={`pillChevron ${open ? "pillChevronOpen" : ""}`}>
@@ -64,29 +100,44 @@ export function PillSelect(props: {
         </span>
       </button>
 
-      {open && (
-        <div className="pillMenu" role="listbox" aria-label="选择">
-          {options.map((o) => {
-            const active = o.value === value;
-            return (
-              <button
-                key={o.value}
-                className={`pillOption ${active ? "pillOptionActive" : ""}`}
-                role="option"
-                aria-selected={active}
-                type="button"
-                onClick={() => {
-                  onChange(o.value);
-                  setOpen(false);
-                }}
-                title={o.label}
-              >
-                {o.label}
-              </button>
-            );
-          })}
-        </div>
-      )}
+      {open &&
+        menuPos &&
+        createPortal(
+          <div
+            ref={menuRef}
+            className="pillMenu"
+            role="listbox"
+            aria-label="选择"
+            style={{
+              position: "fixed",
+              left: menuPos.left,
+              bottom: menuPos.bottom,
+              width: menuPos.width,
+              zIndex: 9999,
+            }}
+          >
+            {options.map((o) => {
+              const active = o.value === value;
+              return (
+                <button
+                  key={o.value}
+                  className={`pillOption ${active ? "pillOptionActive" : ""}`}
+                  role="option"
+                  aria-selected={active}
+                  type="button"
+                  onClick={() => {
+                    onChange(o.value);
+                    setOpen(false);
+                  }}
+                  title={o.label}
+                >
+                  {o.label}
+                </button>
+              );
+            })}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

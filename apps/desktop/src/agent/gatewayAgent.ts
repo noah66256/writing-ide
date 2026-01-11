@@ -53,15 +53,31 @@ export function startGatewayRun(args: {
   (async () => {
     log("info", "gateway.run.start", { gatewayUrl: args.gatewayUrl, model: args.model, mode: args.mode });
     try {
-      const res = await fetch(`${args.gatewayUrl}/api/llm/chat/stream`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: args.model,
-          messages: [{ role: "user", content: args.prompt }]
-        }),
-        signal: abort.signal
-      });
+      const doFetch = async (baseUrl: string) =>
+        fetch(`${baseUrl}/api/llm/chat/stream`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: args.model,
+            messages: [{ role: "user", content: args.prompt }]
+          }),
+          signal: abort.signal
+        });
+
+      let res: Response | null = null;
+      try {
+        res = await doFetch(args.gatewayUrl);
+      } catch (e: any) {
+        const msg = e?.message ? String(e.message) : String(e);
+        // Windows 下 localhost 可能走 IPv6/系统代理导致 Failed to fetch；自动回退到 127.0.0.1
+        if (msg.includes("Failed to fetch") && args.gatewayUrl.includes("localhost")) {
+          const fallback = args.gatewayUrl.replace("localhost", "127.0.0.1");
+          log("warn", "gateway.fetch_retry", { from: args.gatewayUrl, to: fallback });
+          res = await doFetch(fallback);
+        } else {
+          throw e;
+        }
+      }
 
       log("info", "gateway.response", { status: res.status });
       if (!res.ok || !res.body) {

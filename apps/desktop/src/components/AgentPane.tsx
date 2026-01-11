@@ -23,7 +23,8 @@ export function AgentPane() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const controllerRef = useRef<RunController | null>(null);
 
-  const gatewayUrl = (import.meta as any).env?.VITE_GATEWAY_URL ?? "http://localhost:8000";
+  // 默认用 127.0.0.1 避免 localhost IPv6/代理导致的 Failed to fetch
+  const gatewayUrl = (import.meta as any).env?.VITE_GATEWAY_URL ?? "http://127.0.0.1:8000";
 
   useEffect(() => {
     // 尽量从 Gateway 拉取模型列表；失败则保留 mock

@@ -18,6 +18,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
+  overflow: hidden; /* IDE 形态：禁止整页滚动，改为各面板内部滚动 */
   font-family:
     ui-sans-serif,
     system-ui,
@@ -30,6 +31,10 @@ body {
     "Segoe UI Emoji";
 }
 
+#root {
+  height: 100%;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -38,6 +43,7 @@ body {
   height: 100vh;
   display: grid;
   /* 列宽由 App.tsx 动态计算（可拖拽分割条） */
+  overflow: hidden;
 }
 
 .sidebar {
