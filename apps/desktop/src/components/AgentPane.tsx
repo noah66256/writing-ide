@@ -6,11 +6,9 @@ import { IconAt, IconGlobe, IconImage, IconMic, IconRewind, IconSend, IconStop }
 import { PillSelect } from "./PillSelect";
 import { ToolBlock } from "./ToolBlock";
 import { RichText } from "./RichText";
+import { RefComposer, type RefComposerHandle, type RefItem } from "./RefComposer";
 
 type RunController = { cancel: () => void };
-
-type RefItem = { kind: "file" | "dir"; path: string };
-const DND_MIME = "application/x-writing-ide-item";
 
 export function AgentPane() {
   const mode = useRunStore((s) => s.mode);
@@ -25,7 +23,7 @@ export function AgentPane() {
   const [input, setInput] = useState("");
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerRef = useRef<RefComposerHandle | null>(null);
   const historyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const controllerRef = useRef<RunController | null>(null);
 
@@ -96,62 +94,15 @@ export function AgentPane() {
   };
 
   const onSend = () => {
-    const text = input.trim();
+    const text = (composerRef.current?.getValue() ?? input).trim();
     startTurn(text);
     setInput("");
+    composerRef.current?.setValue("");
   };
 
   const onStop = () => {
     controllerRef.current?.cancel();
     controllerRef.current = null;
-  };
-
-  const buildRefToken = (item: RefItem) => {
-    const p = String(item.path ?? "").replaceAll("\\", "/");
-    const path = item.kind === "dir" && p && !p.endsWith("/") ? `${p}/` : p;
-    return `@{${path}}`;
-  };
-
-  const insertAtCursor = (opts: { target: "main" | "history"; token: string }) => {
-    const token = opts.token;
-    if (!token) return;
-    if (opts.target === "main") {
-      const el = textareaRef.current;
-      const cur = input;
-      const start = el?.selectionStart ?? cur.length;
-      const end = el?.selectionEnd ?? cur.length;
-      const prefix = cur.slice(0, start);
-      const suffix = cur.slice(end);
-      const needsSpace = prefix.length && !/\s$/.test(prefix);
-      const insert = (needsSpace ? " " : "") + token + " ";
-      const next = prefix + insert + suffix;
-      setInput(next);
-      requestAnimationFrame(() => {
-        if (!el) return;
-        const pos = start + insert.length;
-        el.selectionStart = pos;
-        el.selectionEnd = pos;
-        el.focus();
-      });
-      return;
-    }
-    const el = historyTextareaRef.current;
-    const cur = editingText;
-    const start = el?.selectionStart ?? cur.length;
-    const end = el?.selectionEnd ?? cur.length;
-    const prefix = cur.slice(0, start);
-    const suffix = cur.slice(end);
-    const needsSpace = prefix.length && !/\s$/.test(prefix);
-    const insert = (needsSpace ? " " : "") + token + " ";
-    const next = prefix + insert + suffix;
-    setEditingText(next);
-    requestAnimationFrame(() => {
-      if (!el) return;
-      const pos = start + insert.length;
-      el.selectionStart = pos;
-      el.selectionEnd = pos;
-      el.focus();
-    });
   };
 
   const openRefPicker = (target: "main" | "history") => {
@@ -172,20 +123,16 @@ export function AgentPane() {
     return out.slice(0, 80);
   }, [projectDirs, projectFiles, refPickerQuery]);
 
-  const onDropRef = (e: React.DragEvent, target: "main" | "history") => {
-    const raw = e.dataTransfer.getData(DND_MIME);
-    if (!raw) return;
-    try {
-      const obj = JSON.parse(raw);
-      const kind = obj?.kind === "dir" ? "dir" : obj?.kind === "file" ? "file" : null;
-      const path = String(obj?.path ?? "").replaceAll("\\", "/");
-      if (!kind || !path) return;
-      e.preventDefault();
-      e.stopPropagation();
-      insertAtCursor({ target, token: buildRefToken({ kind, path }) });
-    } catch {
-      // ignore
+  const applyRef = (item: RefItem) => {
+    if (refPickerTarget === "main") {
+      composerRef.current?.insertRef(item);
+      // 同步 state（用于 CTX 估算）
+      setInput(composerRef.current?.getValue() ?? input);
+      return;
     }
+    // history：暂时仍用 textarea（后续再升级为同款 RefComposer）
+    const token = `@{${item.kind === "dir" ? `${item.path.replace(/\/+$/g, "")}/` : item.path}}`;
+    setEditingText((v) => (v ? v + " " + token + " " : token + " "));
   };
 
   const mainDocRows = useMemo(() => {
@@ -322,13 +269,6 @@ export function AgentPane() {
                         rows={3}
                         placeholder="输入写作任务（例如：帮我写一条小红书爆款选题）…"
                         ref={historyTextareaRef}
-                        onDragOver={(e) => {
-                          if (e.dataTransfer.types?.includes?.(DND_MIME)) {
-                            e.preventDefault();
-                            e.dataTransfer.dropEffect = "copy";
-                          }
-                        }}
-                        onDrop={(e) => onDropRef(e, "history")}
                         onKeyDown={(e) => {
                           if (e.isComposing) return;
                           if (e.key === "Escape") {
@@ -520,45 +460,13 @@ export function AgentPane() {
 
       <div className="composer">
         <div className="composerBox">
-          <textarea
-            className="composerTextarea"
+          <RefComposer
+            ref={composerRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
-            rows={3}
+            onChange={setInput}
             placeholder="输入写作任务（例如：帮我写一条小红书爆款选题）…"
-            ref={textareaRef}
-            onDragOver={(e) => {
-              if (e.dataTransfer.types?.includes?.(DND_MIME)) {
-                e.preventDefault();
-                e.dataTransfer.dropEffect = "copy";
-              }
-            }}
-            onDrop={(e) => onDropRef(e, "main")}
-            onKeyDown={(e) => {
-              if (e.isComposing) return; // 中文输入法合成中，不触发快捷键
-              if (e.key !== "Enter") return;
-
-              // Ctrl/⌘ + Enter：换行（不发送）
-              if (e.ctrlKey || e.metaKey) {
-                e.preventDefault();
-                const el = textareaRef.current;
-                const start = el?.selectionStart ?? input.length;
-                const end = el?.selectionEnd ?? input.length;
-                const next = input.slice(0, start) + "\n" + input.slice(end);
-                setInput(next);
-                requestAnimationFrame(() => {
-                  if (!el) return;
-                  const pos = start + 1;
-                  el.selectionStart = pos;
-                  el.selectionEnd = pos;
-                });
-                return;
-              }
-
-              // Enter：发送
-              e.preventDefault();
-              onSend();
-            }}
+            onEnterSend={onSend}
+            aria-label="输入写作任务"
           />
 
           <div className="composerBar">
@@ -710,7 +618,7 @@ export function AgentPane() {
                     className="refItem"
                     type="button"
                     onClick={() => {
-                      insertAtCursor({ target: refPickerTarget, token: buildRefToken(it) });
+                      applyRef(it);
                       setRefPickerOpen(false);
                     }}
                     title={it.path}

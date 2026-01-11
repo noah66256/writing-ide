@@ -1064,6 +1064,49 @@ body {
   font-size: 14px;
 }
 
+.composerEditable {
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-height: 72px;
+}
+
+.composerEditable:empty:before {
+  content: attr(data-placeholder);
+  color: rgba(0, 0, 0, 0.35);
+}
+
+.refChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(37, 99, 235, 0.30);
+  background: rgba(37, 99, 235, 0.10);
+  color: rgba(37, 99, 235, 0.95);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.refChipLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 280px;
+}
+
+.refChipClose {
+  color: rgba(37, 99, 235, 0.85);
+  cursor: pointer;
+  user-select: none;
+}
+
+.refChipClose:hover {
+  color: rgba(220, 38, 38, 0.95);
+}
+
 .composerBar {
   display: flex;
   align-items: center;
