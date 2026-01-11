@@ -43,7 +43,59 @@ body {
 .sidebar {
   background: var(--panel2);
   border-right: 1px solid var(--border);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebarMain {
+  flex: 1;
   overflow: auto;
+}
+
+.accountFooter {
+  display: grid;
+  grid-template-columns: 34px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+  border-top: 1px solid var(--border);
+  background: var(--panel2);
+}
+
+.accountAvatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.12);
+  border: 1px solid rgba(37, 99, 235, 0.25);
+  display: grid;
+  place-items: center;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.accountMeta {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.accountName {
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.accountEmail {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .center {
