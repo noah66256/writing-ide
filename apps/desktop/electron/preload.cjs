@@ -29,6 +29,9 @@ contextBridge.exposeInMainWorld("desktop", {
     deleteFile(rootDir, relPath) {
       return ipcRenderer.invoke("doc.deleteFile", rootDir, relPath);
     },
+    deletePath(rootDir, relPath) {
+      return ipcRenderer.invoke("doc.deletePath", rootDir, relPath);
+    },
     mkdir(rootDir, relDir) {
       return ipcRenderer.invoke("doc.mkdir", rootDir, relDir);
     },

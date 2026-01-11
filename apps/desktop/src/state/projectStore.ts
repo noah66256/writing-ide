@@ -48,6 +48,7 @@ type ProjectState = {
   saveActiveNow: () => Promise<void>;
   createFile: (path: string, content: string) => void;
   deleteFile: (path: string) => void;
+  deletePath: (path: string) => Promise<void>;
   getFileByPath: (path: string) => ProjectFile | undefined;
 
   loadProjectFromDisk: (rootDir: string) => Promise<void>;
@@ -265,6 +266,55 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         .deleteFile(rootDir, path)
         .then(() => get().refreshFromDisk("deleteFile"))
         .catch(() => ({ ok: false }));
+    }
+  },
+  deletePath: async (path) => {
+    const rel = normalizeRel(path);
+    if (!rel) return;
+    const api = window.desktop?.fs;
+    const rootDir = get().rootDir;
+    if (!api || !rootDir) return;
+
+    const snap = get().snapshot();
+    const st0 = get();
+    const isDir = st0.dirs.includes(rel);
+    const isFile = !!st0.files.find((f) => f.path === rel);
+    const prefix = `${rel}/`;
+    if (!isDir && !isFile) return;
+
+    // 先更新内存（避免 UI 卡住），失败再回滚
+    set((s) => {
+      const removedPaths = new Set<string>();
+      const nextFiles = isDir
+        ? s.files.filter((f) => {
+            const drop = f.path === rel || f.path.startsWith(prefix);
+            if (drop) removedPaths.add(f.path);
+            return !drop;
+          })
+        : s.files.filter((f) => {
+            const drop = f.path === rel;
+            if (drop) removedPaths.add(f.path);
+            return !drop;
+          });
+
+      const nextDirs = isDir ? s.dirs.filter((d) => d !== rel && !d.startsWith(prefix)) : s.dirs;
+      const openPaths = s.openPaths.filter((p) => !removedPaths.has(p));
+      const activePath = removedPaths.has(s.activePath) ? (openPaths[0] ?? nextFiles[0]?.path ?? "") : s.activePath;
+      const previewPath = s.previewPath && removedPaths.has(s.previewPath) ? null : s.previewPath;
+      return { dirs: nextDirs, files: nextFiles, openPaths, activePath, previewPath };
+    });
+
+    try {
+      if (api.deletePath) {
+        await api.deletePath(rootDir, rel);
+      } else {
+        // 兼容旧实现：只能删文件
+        if (!isDir) await api.deleteFile(rootDir, rel);
+      }
+      await get().refreshFromDisk("deletePath");
+    } catch (e: any) {
+      get().restore(snap as any);
+      useRunStore.getState().log("error", "delete.failed", { path: rel, message: String(e?.message ?? e) });
     }
   },
   getFileByPath: (path) => get().files.find((f) => f.path === path),

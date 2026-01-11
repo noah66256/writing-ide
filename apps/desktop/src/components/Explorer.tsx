@@ -136,12 +136,82 @@ export function Explorer() {
 
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [filter, setFilter] = useState("");
+  const [selected, setSelected] = useState<string[]>([]);
+  const [anchor, setAnchor] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState<null | { kind: "root" | "dir"; path: string; valid: boolean }>(null);
   const [ctx, setCtx] = useState<CtxMenu | null>(null);
   const [prompt, setPrompt] = useState<PromptState | null>(null);
   const promptInputRef = useRef<HTMLInputElement | null>(null);
 
+  const isDirOpen = (p: string) => (p ? !!expanded[p] : true);
+
   const tree = useMemo(() => buildTree(dirs ?? [], files ?? []), [dirs, files]);
   const filtered = useMemo(() => filterTree(tree, filter), [tree, filter]);
+
+  const visibleOrder = useMemo(() => {
+    const out: string[] = [];
+    const walk = (node: TreeNode) => {
+      if (node.kind === "dir") {
+        if (node.path) out.push(node.path);
+        const open = filter.trim() ? true : isDirOpen(node.path);
+        if (open) node.children.forEach(walk);
+        return;
+      }
+      out.push(node.path);
+    };
+    if (filtered) filtered.children.forEach(walk);
+    return out;
+  }, [filtered, expanded, filter]);
+
+  const selectedSet = useMemo(() => new Set(selected), [selected]);
+  const isSelected = (p: string) => selectedSet.has(p);
+
+  const selectOnly = (p: string) => {
+    setSelected([p]);
+    setAnchor(p);
+  };
+  const toggleSelect = (p: string) => {
+    setSelected((prev) => (prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]));
+    setAnchor(p);
+  };
+  const selectRange = (p: string) => {
+    const a = anchor ?? p;
+    const i1 = visibleOrder.indexOf(a);
+    const i2 = visibleOrder.indexOf(p);
+    if (i1 < 0 || i2 < 0) {
+      selectOnly(p);
+      return;
+    }
+    const [s, e] = i1 <= i2 ? [i1, i2] : [i2, i1];
+    setSelected(visibleOrder.slice(s, e + 1));
+  };
+
+  const clearSelection = () => setSelected([]);
+
+  const highlight = (text: string) => {
+    const term = filter.trim();
+    if (!term) return text;
+    const t = text;
+    const lower = t.toLowerCase();
+    const q = term.toLowerCase();
+    const parts: any[] = [];
+    let i = 0;
+    while (true) {
+      const idx = lower.indexOf(q, i);
+      if (idx < 0) break;
+      if (idx > i) parts.push(t.slice(i, idx));
+      parts.push(
+        <span key={`${idx}-${q}`} className="hl">
+          {t.slice(idx, idx + q.length)}
+        </span>,
+      );
+      i = idx + q.length;
+      if (parts.length > 30) break;
+    }
+    if (!parts.length) return t;
+    if (i < t.length) parts.push(t.slice(i));
+    return <>{parts}</>;
+  };
 
   useEffect(() => {
     if (!rootDir || !activePath) return;
@@ -257,36 +327,122 @@ export function Explorer() {
   const actionDeleteFile = (targetPath: string) => {
     const ok = window.confirm(`确认删除文件？\n\n${targetPath}\n\n（此操作会删除磁盘文件）`);
     if (!ok) return;
-    useProjectStore.getState().deleteFile(targetPath);
+    void useProjectStore.getState().deletePath(targetPath);
   };
 
-  const isDirOpen = (p: string) => (p ? !!expanded[p] : true);
+  const actionDeleteDir = (dirPath: string) => {
+    const ok = window.confirm(`确认删除文件夹？\n\n${dirPath}/\n\n（此操作会递归删除磁盘目录及其文件）`);
+    if (!ok) return;
+    void useProjectStore.getState().deletePath(dirPath);
+  };
+
+  const normalizeSelection = (paths: string[]) => {
+    const s = useProjectStore.getState();
+    const dirsSel = paths.filter((p) => s.dirs.includes(p)).sort((a, b) => a.length - b.length);
+    const filesSel = paths.filter((p) => !s.dirs.includes(p));
+    // 如果某个目录已选，则其子项不再重复选择
+    const isCovered = (p: string) => dirsSel.some((d) => p === d || p.startsWith(`${d}/`));
+    const dirsOut: string[] = [];
+    for (const d of dirsSel) {
+      if (dirsOut.some((x) => d === x || d.startsWith(`${x}/`))) continue;
+      dirsOut.push(d);
+    }
+    const filesOut = filesSel.filter((f) => !isCovered(f));
+    return [...dirsOut, ...filesOut];
+  };
+
+  const actionMoveSelected = () => {
+    const items = normalizeSelection(selected);
+    if (!items.length) return;
+    ask({
+      title: "批量移动",
+      desc: `将 ${items.length} 项移动到目标目录（留空=根目录）`,
+      placeholder: "例如：drafts/2026（必须存在；不存在可先新建文件夹）",
+      confirmText: "移动",
+      onConfirm: async (v) => {
+        const targetDir = String(v ?? "").trim().replaceAll("\\", "/").replace(/\/+$/g, "");
+        const s = useProjectStore.getState();
+        if (targetDir && !s.dirs.includes(targetDir)) {
+          window.alert("目标目录不存在：请先创建该文件夹。");
+          return;
+        }
+        for (const p of items) {
+          const dest = targetDir ? joinPath(targetDir, basename(p)) : basename(p);
+          if (!dest || dest === p) continue;
+          await s.renamePath(p, dest);
+        }
+        clearSelection();
+      },
+    });
+  };
+
+  const actionDeleteSelected = () => {
+    const items = normalizeSelection(selected);
+    if (!items.length) return;
+    const shown = items.slice(0, 8);
+    const more = items.length > shown.length ? `\n…以及另外 ${items.length - shown.length} 项` : "";
+    const ok = window.confirm(`确认删除所选 ${items.length} 项？\n\n${shown.join("\n")}${more}\n\n（此操作会删除磁盘文件/目录）`);
+    if (!ok) return;
+    void (async () => {
+      const s = useProjectStore.getState();
+      for (const p of items) await s.deletePath(p);
+      clearSelection();
+    })();
+  };
 
   const renderNode = (node: TreeNode, depth: number) => {
     const pad = 8 + depth * 14;
     if (node.kind === "dir") {
       const open = filter.trim() ? true : isDirOpen(node.path);
+      const sel = node.path && isSelected(node.path);
+      const isDropOver = dragOver?.kind === "dir" && dragOver.path === node.path;
+      const dropCls = isDropOver ? (dragOver?.valid ? "treeDropOver" : "treeDropOver treeDropInvalid") : "";
       return (
         <div key={`dir:${node.path}`}>
           {node.path ? (
             <div
-              className="treeRow treeDir"
+              className={`treeRow treeDir ${sel ? "treeSelected" : ""} ${dropCls}`}
               style={{ paddingLeft: pad }}
               title={node.path}
-              onClick={() => setExpanded((p) => ({ ...p, [node.path]: !open }))}
+              onClick={(e) => {
+                if (e.shiftKey) {
+                  selectRange(node.path);
+                  return;
+                }
+                if (e.ctrlKey || e.metaKey) {
+                  toggleSelect(node.path);
+                  return;
+                }
+                selectOnly(node.path);
+                setExpanded((p) => ({ ...p, [node.path]: !open }));
+              }}
               draggable
               onDragStart={(e) => {
                 const payload: DndItem = { kind: "dir", path: node.path };
                 e.dataTransfer.effectAllowed = "copyMove";
                 e.dataTransfer.setData(DND_MIME, JSON.stringify(payload));
                 e.dataTransfer.setData("text/plain", node.path);
+                setDragOver(null);
               }}
+              onDragEnd={() => setDragOver(null)}
               onDragOver={(e) => {
                 const item = getDndItem(e);
                 if (!item) return;
                 // 允许将任意文件/目录拖到目录上进行移动
+                const targetDir = node.path;
+                const src = item.path;
+                const dest = joinPath(targetDir, basename(src));
+                const s = useProjectStore.getState();
+                const existsFile = !!s.files.find((f) => f.path === dest);
+                const existsDir = dest && s.dirs.includes(dest);
+                const invalidSelf = item.kind === "dir" && (targetDir === src || targetDir.startsWith(`${src}/`));
+                const valid = !!dest && dest !== src && !existsFile && !existsDir && !invalidSelf;
                 e.preventDefault();
                 e.dataTransfer.dropEffect = "move";
+                setDragOver({ kind: "dir", path: node.path, valid });
+              }}
+              onDragLeave={() => {
+                if (dragOver?.kind === "dir" && dragOver.path === node.path) setDragOver(null);
               }}
               onDrop={(e) => {
                 const item = getDndItem(e);
@@ -309,14 +465,16 @@ export function Explorer() {
                 const existsDir = dest && s.dirs.includes(dest);
                 if (existsFile || existsDir) return;
                 void s.renamePath(src, dest);
+                setDragOver(null);
               }}
               onContextMenu={(e) => {
                 e.preventDefault();
+                if (!sel) selectOnly(node.path);
                 setCtx({ x: e.clientX, y: e.clientY, kind: "dir", path: node.path });
               }}
             >
               <span className="treeCaret">{open ? "▾" : "▸"}</span>
-              <span className="treeLabel">{node.name}</span>
+              <span className="treeLabel">{highlight(node.name)}</span>
             </div>
           ) : null}
           {open ? node.children.map((c) => renderNode(c, node.path ? depth + 1 : depth)) : null}
@@ -325,13 +483,25 @@ export function Explorer() {
     }
     const dirty = node.file?.dirty;
     const active = activePath === node.path;
+    const sel = isSelected(node.path);
     return (
       <div
         key={`file:${node.path}`}
-        className={`treeRow treeFile ${active ? "treeActive" : ""}`}
+        className={`treeRow treeFile ${active ? "treeActive" : ""} ${sel ? "treeSelected" : ""}`}
         style={{ paddingLeft: pad }}
         title={node.path}
-        onClick={() => openFilePreview(node.path)}
+        onClick={(e) => {
+          if (e.shiftKey) {
+            selectRange(node.path);
+            return;
+          }
+          if (e.ctrlKey || e.metaKey) {
+            toggleSelect(node.path);
+            return;
+          }
+          selectOnly(node.path);
+          openFilePreview(node.path);
+        }}
         onDoubleClick={() => openFilePinned(node.path)}
         draggable
         onDragStart={(e) => {
@@ -339,14 +509,17 @@ export function Explorer() {
           e.dataTransfer.effectAllowed = "copyMove";
           e.dataTransfer.setData(DND_MIME, JSON.stringify(payload));
           e.dataTransfer.setData("text/plain", node.path);
+          setDragOver(null);
         }}
+        onDragEnd={() => setDragOver(null)}
         onContextMenu={(e) => {
           e.preventDefault();
+          if (!sel) selectOnly(node.path);
           setCtx({ x: e.clientX, y: e.clientY, kind: "file", path: node.path });
         }}
       >
         <span className="treeKind">MD</span>
-        <span className="treeLabel">{node.name}</span>
+        <span className="treeLabel">{highlight(node.name)}</span>
         {dirty ? <span className="treeDirty" title="未保存">●</span> : null}
       </div>
     );
@@ -403,13 +576,23 @@ export function Explorer() {
 
       {rootDir ? (
         <div
-          className="tree"
+          className={`tree ${dragOver?.kind === "root" ? (dragOver.valid ? "treeDropRoot" : "treeDropRoot treeDropInvalid") : ""}`}
           onDragOver={(e) => {
             const item = getDndItem(e);
             if (!item) return;
             // 拖到空白处：移动到根目录
+            const src = item.path;
+            const dest = basename(src);
+            const s = useProjectStore.getState();
+            const existsFile = !!s.files.find((f) => f.path === dest);
+            const existsDir = dest && s.dirs.includes(dest);
+            const valid = !!dest && dest !== src && !existsFile && !existsDir;
             e.preventDefault();
             e.dataTransfer.dropEffect = "move";
+            setDragOver({ kind: "root", path: "", valid });
+          }}
+          onDragLeave={() => {
+            if (dragOver?.kind === "root") setDragOver(null);
           }}
           onDrop={(e) => {
             const item = getDndItem(e);
@@ -424,6 +607,7 @@ export function Explorer() {
             const existsDir = dest && s.dirs.includes(dest);
             if (existsFile || existsDir) return;
             void s.renamePath(src, dest);
+            setDragOver(null);
           }}
         >
           <div className="treeSearchRow">
@@ -440,6 +624,21 @@ export function Explorer() {
             ) : null}
           </div>
 
+          {selected.length ? (
+            <div className="selBar">
+              <div className="selCount">已选 {selected.length} 项</div>
+              <button className="btn btnIcon" type="button" onClick={actionMoveSelected}>
+                批量移动
+              </button>
+              <button className="btn btnDanger btnIcon" type="button" onClick={actionDeleteSelected}>
+                批量删除
+              </button>
+              <button className="btn btnIcon" type="button" onClick={clearSelection}>
+                清空
+              </button>
+            </div>
+          ) : null}
+
           {filtered ? (
             (filtered.children.length ? filtered.children : []).map((c) => renderNode(c, 0))
           ) : (
@@ -451,6 +650,17 @@ export function Explorer() {
       {ctx ? (
         <div className="ctxMenu" style={{ left: ctx.x, top: ctx.y }}>
           {ctx.kind === "root" ? null : null}
+          {selected.length > 1 ? (
+            <>
+              <button className="ctxItem" type="button" onClick={() => (setCtx(null), actionMoveSelected())}>
+                移动所选…
+              </button>
+              <button className="ctxItem ctxDanger" type="button" onClick={() => (setCtx(null), actionDeleteSelected())}>
+                删除所选
+              </button>
+              <div className="ctxSep" />
+            </>
+          ) : null}
           {ctx.kind === "dir" ? (
             <>
               <button className="ctxItem" type="button" onClick={() => (setCtx(null), actionNewFile(ctx.path))}>
@@ -465,6 +675,9 @@ export function Explorer() {
               </button>
               <button className="ctxItem" type="button" onClick={() => (setCtx(null), actionMove(ctx.path))}>
                 移动/改路径…
+              </button>
+              <button className="ctxItem ctxDanger" type="button" onClick={() => (setCtx(null), actionDeleteDir(ctx.path))}>
+                删除
               </button>
               <div className="ctxSep" />
               <button className="ctxItem" type="button" onClick={() => (setCtx(null), void doRefresh())}>

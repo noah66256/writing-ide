@@ -325,6 +325,26 @@ function registerIpc() {
     return { ok: true };
   });
 
+  ipcMain.handle("doc.deletePath", async (_event, rootDir, relPath) => {
+    const root = String(rootDir ?? "");
+    if (!root) return { ok: false, error: "MISSING_ROOT" };
+    const target = toFsPath(root, relPath);
+    try {
+      const st = await fsp.lstat(target);
+      if (st.isDirectory()) {
+        await fsp.rm(target, { recursive: true, force: true });
+      } else {
+        await fsp.unlink(target);
+      }
+      return { ok: true };
+    } catch (e) {
+      // 如果不存在也视为 ok（防止不同步导致报错）
+      const msg = String(e?.code ?? e?.message ?? e);
+      if (msg.includes("ENOENT")) return { ok: true };
+      return { ok: false, error: "DELETE_FAILED", detail: String(e?.message ?? e) };
+    }
+  });
+
   ipcMain.handle("doc.mkdir", async (_event, rootDir, relDir) => {
     const root = String(rootDir ?? "");
     if (!root) return { ok: false, error: "MISSING_ROOT" };
