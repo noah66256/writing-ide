@@ -374,6 +374,12 @@
   - Windows 安装包
   - macOS x64（Intel）与 arm64（Apple Silicon）分别构建与签名/公证（若上架/分发需要）
 
+#### 当前进度（开发期已落地）
+- ✅ Desktop：三栏 + Dock Panel；Monaco Markdown（Tab）；右侧 Agent（Plan/Agent/Chat）+ 流式输出 + Tool Blocks（Keep/Undo）
+- ✅ Gateway：邮箱登录（devCode）、OpenAI-compatible SSE 代理（`/api/llm/chat/stream`）、模型列表（`/api/llm/models`）、KB 最小检索演示
+- ✅ ReAct（开发期）：Plan/Agent 支持 **XML `<tool_calls>`**，最小工具集先在 Desktop 本地执行（`run.mainDoc.* / project.* / doc.*`），并把编辑器选区注入 Context Pack
+- ⏭️ 下一步：把 Tool Registry（Schema + XML）与工具执行迁回 Gateway，并实现 medium/high 风险的 proposal-first（Keep 才 apply）与 Run 审计
+
 ### 9. 仍待确认的问题（决定实现细节）
 - **邮箱登录形态**：验证码（推荐）还是邮箱+密码？（会影响后端表结构与安全策略）
 - **爆款数据来源**：素材的默认导入策略（用户粘贴/上传为主 vs 自动抓取为主）与平台优先级（先做两类分发机制画像后，平台只是映射配置）。

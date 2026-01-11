@@ -335,6 +335,7 @@ export function startGatewayRun(args: {
 
           const exec = await executeToolCall({ toolName: call.name, rawArgs: call.args, mode: args.mode });
           const def = exec.def;
+          const initialKept = def?.applyPolicy === "auto_apply";
           const toolStepId = addTool({
             toolName: call.name,
             status: "running",
@@ -343,7 +344,7 @@ export function startGatewayRun(args: {
             riskLevel: def?.riskLevel ?? "high",
             applyPolicy: def?.applyPolicy ?? "proposal",
             undoable: false,
-            kept: true,
+            kept: initialKept,
             applied: def?.applyPolicy === "auto_apply",
           });
 
@@ -353,7 +354,7 @@ export function startGatewayRun(args: {
               output: exec.result.output,
               undoable: exec.result.undoable,
               undo: exec.result.undo,
-              kept: true,
+              kept: initialKept,
               applied: def?.applyPolicy === "auto_apply",
             });
             history.push({ role: "system", content: renderToolResultXml(call.name, exec.result.output) });

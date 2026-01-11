@@ -15,7 +15,26 @@
 - 三栏布局 + Dock Panel（中下方）
 - Monaco Editor（Markdown）
 - 右侧 Agent：流式输出 + Tool Blocks（Keep/Undo）
+- Plan/Agent：支持 **ReAct（XML `<tool_calls>`）** 的工具调用（开发期先在 Desktop 本地执行最小工具集）
 - Topic Lab 最小版：生成选题/标题/角度，选中后写入 Main Doc 并新建草稿文件（可 Undo）
+
+### ReAct（开发期：本地工具执行）
+Plan/Agent 模式会按回合注入 Context Pack：
+- Main Doc（本次 Run 主线）
+- Doc Rules（项目级：`doc.rules.md`）
+- 编辑器选区（`EDITOR_SELECTION`：路径/范围/选中文本，带截断）
+- 项目状态（打开文件、activePath、文件列表摘要）
+
+工具调用协议：
+- 模型要调用工具时输出 **且只能输出** XML：`<tool_call/>` 或 `<tool_calls/>`
+- 系统执行工具后用 `<tool_result/>` 回传（system message）
+
+当前最小工具集：
+- `run.mainDoc.get` / `run.mainDoc.update`（low / auto_apply / 可 Undo）
+- `project.listFiles` / `project.docRules.get`（只读）
+- `doc.read`（只读）
+- `doc.write`（仅新建文件；low / auto_apply / 可 Undo）
+- `doc.getSelection` / `doc.replaceSelection`（选段改写；low / auto_apply / 可 Undo）
 
 ### 运行（本地）
 在项目根目录：
@@ -27,6 +46,7 @@ npm run dev:desktop
 
 说明：
 - 会启动 Vite（`5173`）并拉起 Electron。
-- 当前 Agent 为本地 mock（未接模型）；后续接入 Gateway 模型后会替换为真实流式与工具执行。
+- 如需真实模型流式输出，请先启动 Gateway（默认 `8000`），并在根目录 `.env` 配好 `LLM_BASE_URL / LLM_MODEL / LLM_API_KEY`。
+- Desktop dev 通过 Vite proxy 把 `/api/*` 转发到 Gateway，避免 Electron renderer 跨域问题。
 
 
