@@ -7,6 +7,7 @@
 - Electron 壳（多窗口、托盘、快捷键、自动更新等）
 - Monaco Editor（Markdown）
 - 右侧 Agent Composer：模式/模型选择 + 多模态输入（@引用/图片/语音接口）
+- 右侧输出：流式输出 + 工具卡片（每个工具独立模块展示，支持 Keep/Undo）
 - Dock Panel：KB 管理/检索与引用、文章结构图（思维导图实时刷新）、Linter、Search、Runs/Logs
 
 ### 开发说明
