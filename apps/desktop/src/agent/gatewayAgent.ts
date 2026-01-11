@@ -53,8 +53,9 @@ export function startGatewayRun(args: {
   (async () => {
     log("info", "gateway.run.start", { gatewayUrl: args.gatewayUrl, model: args.model, mode: args.mode });
     try {
-      const doFetch = async (baseUrl: string) =>
-        fetch(`${baseUrl}/api/llm/chat/stream`, {
+      const doFetch = async (baseUrl: string) => {
+        const url = baseUrl ? `${baseUrl}/api/llm/chat/stream` : "/api/llm/chat/stream";
+        return fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -63,6 +64,7 @@ export function startGatewayRun(args: {
           }),
           signal: abort.signal
         });
+      };
 
       let res: Response | null = null;
       try {
