@@ -21,6 +21,7 @@ export function AgentPane() {
   const [input, setInput] = useState("");
   const [modelOptions, setModelOptions] = useState<string[]>(["mock"]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const controllerRef = useRef<RunController | null>(null);
 
   // 默认用 127.0.0.1 避免 localhost IPv6/代理导致的 Failed to fetch
@@ -61,6 +62,7 @@ export function AgentPane() {
     `（提示：后续接入真实 usage 后会用真实 token 计数替代）`;
 
   const onSend = () => {
+    if (isRunning) return;
     const text = input.trim();
     if (!text) return;
     controllerRef.current?.cancel();
@@ -68,6 +70,7 @@ export function AgentPane() {
       model === "mock"
         ? startMockRun(text)
         : startGatewayRun({ gatewayUrl, mode, model, prompt: text });
+    setInput("");
   };
 
   const onStop = () => {
@@ -105,8 +108,31 @@ export function AgentPane() {
             onChange={(e) => setInput(e.target.value)}
             rows={3}
             placeholder="输入写作任务（例如：帮我写一条小红书爆款选题）…"
+            ref={textareaRef}
             onKeyDown={(e) => {
-              if ((e.ctrlKey || e.metaKey) && e.key === "Enter") onSend();
+              if (e.isComposing) return; // 中文输入法合成中，不触发快捷键
+              if (e.key !== "Enter") return;
+
+              // Ctrl/⌘ + Enter：换行（不发送）
+              if (e.ctrlKey || e.metaKey) {
+                e.preventDefault();
+                const el = textareaRef.current;
+                const start = el?.selectionStart ?? input.length;
+                const end = el?.selectionEnd ?? input.length;
+                const next = input.slice(0, start) + "\n" + input.slice(end);
+                setInput(next);
+                requestAnimationFrame(() => {
+                  if (!el) return;
+                  const pos = start + 1;
+                  el.selectionStart = pos;
+                  el.selectionEnd = pos;
+                });
+                return;
+              }
+
+              // Enter：发送
+              e.preventDefault();
+              onSend();
             }}
           />
 
@@ -227,7 +253,7 @@ export function AgentPane() {
         </div>
 
         <div style={{ color: "var(--muted)", fontSize: 12 }}>
-          快捷键：Ctrl/⌘ + Enter 发送（Chat 模式不会调用写入类工具）。
+          快捷键：Enter 发送；Ctrl/⌘ + Enter 换行（Chat 模式不会调用写入类工具）。
         </div>
       </div>
     </>
