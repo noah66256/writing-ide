@@ -5,6 +5,7 @@ import { Explorer } from "./components/Explorer";
 import { AccountFooter } from "./components/AccountFooter";
 import { useEffect, useRef } from "react";
 import { useLayoutStore } from "./state/layoutStore";
+import { useUiStore, type DockTabKey } from "./state/uiStore";
 
 export default function App() {
   const appRef = useRef<HTMLDivElement | null>(null);
@@ -26,6 +27,7 @@ export default function App() {
   const setLeftWidth = useLayoutStore((s) => s.setLeftWidth);
   const setRightWidth = useLayoutStore((s) => s.setRightWidth);
   const setDockHeight = useLayoutStore((s) => s.setDockHeight);
+  const setDockTab = useUiStore((s) => s.setDockTab);
 
   const gutter = 6;
   const leftMin = 200;
@@ -89,6 +91,25 @@ export default function App() {
     setLeftWidth,
     setRightWidth,
   ]);
+
+  // 菜单动作（Electron → renderer）
+  useEffect(() => {
+    const off = window.desktop?.onMenuAction?.((payload: any) => {
+      if (!payload || typeof payload !== "object") return;
+      if (payload.type === "dock.tab") {
+        const tab = String(payload.tab ?? "") as DockTabKey;
+        if (tab) setDockTab(tab);
+      }
+      // 其它菜单动作暂时占位（后续接入本地项目落盘后再实现）
+    });
+    return () => {
+      try {
+        off?.();
+      } catch {
+        // ignore
+      }
+    };
+  }, [setDockTab]);
 
   const startDrag = (kind: "left" | "right" | "dock") => (e: React.PointerEvent) => {
     e.preventDefault();

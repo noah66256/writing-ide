@@ -1,10 +1,10 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useRunStore } from "../state/runStore";
-
-type TabKey = "outline" | "graph" | "problems" | "runs" | "logs";
+import { useUiStore, type DockTabKey } from "../state/uiStore";
 
 export function DockPanel() {
-  const [tab, setTab] = useState<TabKey>("runs");
+  const tab = useUiStore((s) => s.dockTab);
+  const setTab = useUiStore((s) => s.setDockTab);
   const steps = useRunStore((s) => s.steps);
   const mainDoc = useRunStore((s) => s.mainDoc);
   const logs = useRunStore((s) => s.logs);
@@ -19,38 +19,45 @@ export function DockPanel() {
     <div style={{ height: "100%", display: "grid", gridTemplateRows: "auto 1fr" }}>
       <div className="dockTabs">
         <div
+          className={`dockTab ${tab === "kb" ? "dockTabActive" : ""}`}
+          onClick={() => setTab("kb" as DockTabKey)}
+        >
+          KB
+        </div>
+        <div
           className={`dockTab ${tab === "outline" ? "dockTabActive" : ""}`}
-          onClick={() => setTab("outline")}
+          onClick={() => setTab("outline" as DockTabKey)}
         >
           Outline
         </div>
         <div
           className={`dockTab ${tab === "graph" ? "dockTabActive" : ""}`}
-          onClick={() => setTab("graph")}
+          onClick={() => setTab("graph" as DockTabKey)}
         >
           Graph
         </div>
         <div
           className={`dockTab ${tab === "problems" ? "dockTabActive" : ""}`}
-          onClick={() => setTab("problems")}
+          onClick={() => setTab("problems" as DockTabKey)}
         >
           Problems
         </div>
         <div
           className={`dockTab ${tab === "runs" ? "dockTabActive" : ""}`}
-          onClick={() => setTab("runs")}
+          onClick={() => setTab("runs" as DockTabKey)}
         >
           Runs
         </div>
         <div
           className={`dockTab ${tab === "logs" ? "dockTabActive" : ""}`}
-          onClick={() => setTab("logs")}
+          onClick={() => setTab("logs" as DockTabKey)}
         >
           Logs
         </div>
       </div>
 
       <div className="dockContent">
+        {tab === "kb" && <div>（占位）本地知识库：后续接入 Postgres+pgvector 与引用回链。</div>}
         {tab === "outline" && <div>（占位）后续从 Markdown 标题树生成 Outline。</div>}
         {tab === "graph" && <div>（占位）后续显示文章结构图（思维导图）。</div>}
         {tab === "problems" && <div>（占位）后续接入 lint.style / lint.platform / lint.facts。</div>}

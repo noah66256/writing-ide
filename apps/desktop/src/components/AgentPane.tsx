@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { startGatewayRun } from "../agent/gatewayAgent";
-import { startMockRun } from "../agent/mockAgent";
 import { useRunStore } from "../state/runStore";
+import { useProjectStore } from "../state/projectStore";
 import { IconAt, IconGlobe, IconImage, IconMic, IconSend, IconStop } from "./Icons";
 import { PillSelect } from "./PillSelect";
 import { ToolBlock } from "./ToolBlock";
+import { RichText } from "./RichText";
 
 type RunController = { cancel: () => void };
 
@@ -19,24 +20,28 @@ export function AgentPane() {
   const setModel = useRunStore((s) => s.setModel);
 
   const [input, setInput] = useState("");
-  const [modelOptions, setModelOptions] = useState<string[]>(["mock"]);
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const controllerRef = useRef<RunController | null>(null);
+
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState("");
+  const [submitFromHistory, setSubmitFromHistory] = useState<null | { stepId: string; text: string }>(null);
 
   // 默认走相对路径（/api），由 Vite dev server 代理到本地 Gateway，避免跨域问题
   const gatewayUrl = (import.meta as any).env?.VITE_GATEWAY_URL ?? "";
 
   useEffect(() => {
-    // 尽量从 Gateway 拉取模型列表；失败则保留 mock
+    // 尽量从 Gateway 拉取模型列表
     fetch(`${gatewayUrl}/api/llm/models`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
       .then((data) => {
         const ids = Array.isArray(data?.models) ? data.models.map((m: any) => String(m.id)) : [];
-        const next = ["mock", ...ids.filter(Boolean)];
+        const next = ids.filter(Boolean);
         setModelOptions(Array.from(new Set(next)));
-        if (model === "mock") return;
-        if (!next.includes(model)) setModel(next[1] ?? "mock");
+        if (!next.length) return;
+        if (!model || !next.includes(model)) setModel(next[0]);
       })
       .catch(() => {
         // ignore
@@ -48,8 +53,8 @@ export function AgentPane() {
   const mainDocChars = JSON.stringify(mainDoc).length;
   const recentTextChars = steps
     .slice(-6)
-    .filter((s) => s.type === "assistant")
-    .reduce((sum, s) => sum + (s.type === "assistant" ? s.text.length : 0), 0);
+    .filter((s) => s.type === "assistant" || s.type === "user")
+    .reduce((sum, s) => sum + ("text" in s ? String((s as any).text ?? "").length : 0), 0);
   const inputChars = input.length;
   const approxTokens = Math.ceil((mainDocChars + recentTextChars + inputChars) / 4);
   const approxLimit = 32000;
@@ -61,15 +66,28 @@ export function AgentPane() {
     `- Input: ~${Math.ceil(inputChars / 4)}\n` +
     `（提示：后续接入真实 usage 后会用真实 token 计数替代）`;
 
-  const onSend = () => {
+  const startTurn = (text: string) => {
     if (isRunning) return;
-    const text = input.trim();
     if (!text) return;
     controllerRef.current?.cancel();
-    controllerRef.current =
-      model === "mock"
-        ? startMockRun(text)
-        : startGatewayRun({ gatewayUrl, mode, model, prompt: text });
+    if (!model) {
+      useRunStore.getState().addAssistant("（未选择模型：请先启动 Gateway 并选择一个模型）");
+      return;
+    }
+
+    // 记录用户消息 + baseline（用于“从历史消息提交/回滚”）
+    const baseline = {
+      project: useProjectStore.getState().snapshot(),
+      mainDoc: JSON.parse(JSON.stringify(useRunStore.getState().mainDoc ?? {})),
+    };
+    useRunStore.getState().addUser(text, baseline as any);
+
+    controllerRef.current = startGatewayRun({ gatewayUrl, mode, model, prompt: text });
+  };
+
+  const onSend = () => {
+    const text = input.trim();
+    startTurn(text);
     setInput("");
   };
 
@@ -78,28 +96,180 @@ export function AgentPane() {
     controllerRef.current = null;
   };
 
+  const mainDocRows = useMemo(() => {
+    const platformLabel =
+      mainDoc.platformType === "feed_preview"
+        ? "Feed 试看型"
+        : mainDoc.platformType === "search_click"
+          ? "点选/搜索型"
+          : mainDoc.platformType === "long_subscription"
+            ? "长内容订阅型"
+            : "";
+    const rows: Array<{ k: string; v: string }> = [];
+    if (mainDoc.goal) rows.push({ k: "目标", v: String(mainDoc.goal) });
+    if (platformLabel) rows.push({ k: "平台画像", v: platformLabel });
+    if (mainDoc.topic) rows.push({ k: "选题", v: String(mainDoc.topic) });
+    if (mainDoc.angle) rows.push({ k: "角度", v: String(mainDoc.angle) });
+    if (mainDoc.title) rows.push({ k: "标题", v: String(mainDoc.title) });
+    return rows;
+  }, [mainDoc]);
+
+  const submitHistory = (opts: { revert: boolean }) => {
+    const payload = submitFromHistory;
+    if (!payload) return;
+    const { stepId, text } = payload;
+    setSubmitFromHistory(null);
+    setEditingId(null);
+    setEditingText("");
+
+    controllerRef.current?.cancel();
+    controllerRef.current = null;
+
+    const all = useRunStore.getState().steps;
+    const step = all.find((s) => s.id === stepId);
+    if (!step || step.type !== "user") return;
+
+    if (opts.revert && step.baseline) {
+      // 回滚文件与主文档到该消息提交前，并清除其后消息
+      useProjectStore.getState().restore(step.baseline.project);
+      useRunStore.getState().setMainDoc(step.baseline.mainDoc);
+      useRunStore.getState().truncateFrom(stepId);
+
+      // 重新添加“编辑后的用户消息”（新 baseline）
+      const baseline = {
+        project: useProjectStore.getState().snapshot(),
+        mainDoc: JSON.parse(JSON.stringify(useRunStore.getState().mainDoc ?? {})),
+      };
+      useRunStore.getState().addUser(text, baseline as any);
+    } else {
+      // 不回滚文件：仅清除该消息之后的对话，然后从这里继续
+      useRunStore.getState().patchUser(stepId, { text, edited: true });
+      useRunStore.getState().truncateAfter(stepId);
+    }
+
+    // 继续运行（从该条消息的内容开始）
+    controllerRef.current = startGatewayRun({ gatewayUrl, mode, model, prompt: text });
+  };
+
   return (
     <>
       <div className="mainDoc">
         <div className="sectionTitle" style={{ padding: 0, marginBottom: 6 }}>
           MAIN DOC
         </div>
-        <pre>{JSON.stringify(mainDoc, null, 2)}</pre>
+        {mainDocRows.length === 0 ? (
+          <div style={{ color: "var(--muted)", fontSize: 12 }}>（暂无主线内容）</div>
+        ) : (
+          <div className="mainDocRich">
+            {mainDocRows.map((r) => (
+              <div key={r.k} className="mainDocRow">
+                <div className="mainDocKey">{r.k}</div>
+                <div className="mainDocVal">{r.v}</div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="messages">
         {steps.map((step) => {
+          if (step.type === "user") {
+            const isEditing = editingId === step.id;
+            return (
+              <div key={step.id} className="msgUser">
+                <div className="msgUserHeader">
+                  <div className="msgUserMeta">
+                    你 · {new Date(step.ts).toLocaleTimeString()}
+                    {step.edited ? "（已编辑）" : ""}
+                  </div>
+                  <button
+                    className="msgEditBtn"
+                    type="button"
+                    onClick={() => {
+                      setEditingId(step.id);
+                      setEditingText(step.text);
+                    }}
+                    title="编辑并从该条继续（可回滚）"
+                  >
+                    编辑
+                  </button>
+                </div>
+                {isEditing ? (
+                  <div style={{ display: "grid", gap: 8 }}>
+                    <textarea
+                      className="msgEditArea"
+                      value={editingText}
+                      onChange={(e) => setEditingText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.isComposing) return;
+                        if (e.key !== "Enter") return;
+                        if (e.ctrlKey || e.metaKey) return; // 允许换行（默认行为）
+                        e.preventDefault();
+                        setSubmitFromHistory({ stepId: step.id, text: editingText.trim() });
+                      }}
+                    />
+                    <div className="btnRow">
+                      <button
+                        className="btn"
+                        type="button"
+                        onClick={() => {
+                          setEditingId(null);
+                          setEditingText("");
+                        }}
+                      >
+                        取消
+                      </button>
+                      <button
+                        className="btn btnPrimary"
+                        type="button"
+                        onClick={() => setSubmitFromHistory({ stepId: step.id, text: editingText.trim() })}
+                        disabled={!editingText.trim()}
+                      >
+                        提交
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <RichText text={step.text} />
+                )}
+              </div>
+            );
+          }
           if (step.type === "assistant") {
             if (step.hidden) return null;
             return (
               <div key={step.id} className="msgAssistant">
-                {step.text}
+                <RichText text={step.text} />
               </div>
             );
           }
           return <ToolBlock key={step.id} step={step} />;
         })}
       </div>
+
+      {submitFromHistory && (
+        <div className="modalMask" role="dialog" aria-modal="true">
+          <div className="modal">
+            <div className="modalTitle">从历史消息提交？</div>
+            <div className="modalDesc">
+              从历史消息继续会<strong>清除该消息之后的对话</strong>并重新运行。
+              <br />
+              你希望同时回滚到该消息提交前的文件与主文档状态吗？
+            </div>
+            <div className="modalBtns">
+              <button className="btn" type="button" onClick={() => setSubmitFromHistory(null)}>
+                取消
+              </button>
+              <button className="btn" type="button" onClick={() => submitHistory({ revert: false })}>
+                继续（不回滚）
+              </button>
+              <button className="btn btnPrimary" type="button" onClick={() => submitHistory({ revert: true })}>
+                继续并回滚
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="composer">
         <div className="composerBox">
@@ -155,7 +325,7 @@ export function AgentPane() {
                 value={model}
                 options={modelOptions.map((m) => ({ value: m, label: m }))}
                 onChange={(v) => setModel(v)}
-                title={model}
+                title={model || "未选择模型"}
                 minWidth={120}
                 maxWidth={220}
               />

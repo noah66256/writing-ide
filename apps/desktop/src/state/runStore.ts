@@ -1,4 +1,6 @@
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
+import type { ProjectSnapshot } from "./projectStore";
 
 export type Mode = "plan" | "agent" | "chat";
 export type ToolApplyPolicy = "proposal" | "auto_apply";
@@ -10,6 +12,19 @@ export type MainDoc = {
   topic?: string;
   angle?: string;
   title?: string;
+};
+
+export type UserStep = {
+  id: string;
+  type: "user";
+  text: string;
+  ts: number;
+  edited?: boolean;
+  // 用于“从历史消息提交”时回滚（文件 + 主文档）
+  baseline?: {
+    project: ProjectSnapshot;
+    mainDoc: MainDoc;
+  };
 };
 
 export type AssistantStep = {
@@ -40,7 +55,7 @@ export type ToolBlockStep = {
   undo?: () => void;
 };
 
-export type Step = AssistantStep | ToolBlockStep;
+export type Step = UserStep | AssistantStep | ToolBlockStep;
 
 export type LogEntry = {
   id: string;
@@ -60,7 +75,13 @@ type RunState = {
 
   setMode: (mode: Mode) => void;
   setModel: (model: string) => void;
+  setMainDoc: (mainDoc: MainDoc) => void;
   resetRun: () => void;
+
+  addUser: (text: string, baseline?: UserStep["baseline"]) => string;
+  patchUser: (stepId: string, patch: Partial<UserStep>) => void;
+  truncateAfter: (stepId: string) => void; // 保留 stepId（包含它），清除其后
+  truncateFrom: (stepId: string) => void; // 清除 stepId（包含它）及其后
 
   addAssistant: (initialText?: string, streaming?: boolean, hidden?: boolean) => string;
   appendAssistantDelta: (stepId: string, delta: string) => void;
@@ -89,9 +110,11 @@ function makeId(prefix: string) {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
-export const useRunStore = create<RunState>((set, get) => ({
+export const useRunStore = create<RunState>()(
+  persist(
+    (set, get) => ({
   mode: "plan",
-  model: "mock",
+  model: "",
   mainDoc: { goal: "" },
   steps: [],
   logs: [],
@@ -99,8 +122,34 @@ export const useRunStore = create<RunState>((set, get) => ({
 
   setMode: (mode) => set({ mode }),
   setModel: (model) => set({ model }),
+  setMainDoc: (mainDoc) => set({ mainDoc }),
   setRunning: (running) => set({ isRunning: running }),
   resetRun: () => set({ steps: [], logs: [], isRunning: false, mainDoc: { goal: "" } }),
+
+  addUser: (text, baseline) => {
+    const id = makeId("u");
+    const step: UserStep = { id, type: "user", text, ts: Date.now(), baseline };
+    set((s) => ({ steps: [...s.steps, step] }));
+    return id;
+  },
+  patchUser: (stepId, patch) =>
+    set((s) => ({
+      steps: s.steps.map((step) =>
+        step.id === stepId && step.type === "user" ? { ...step, ...patch } : step,
+      ),
+    })),
+  truncateAfter: (stepId) =>
+    set((s) => {
+      const idx = s.steps.findIndex((x) => x.id === stepId);
+      if (idx < 0) return {};
+      return { steps: s.steps.slice(0, idx + 1) };
+    }),
+  truncateFrom: (stepId) =>
+    set((s) => {
+      const idx = s.steps.findIndex((x) => x.id === stepId);
+      if (idx < 0) return {};
+      return { steps: s.steps.slice(0, idx) };
+    }),
 
   addAssistant: (initialText = "", streaming = false, hidden = false) => {
     const id = makeId("a");
@@ -235,6 +284,12 @@ export const useRunStore = create<RunState>((set, get) => ({
     });
   },
   clearLogs: () => set({ logs: [] })
-}));
+}),
+    {
+      name: "writing-ide.runprefs.v1",
+      partialize: (s) => ({ mode: s.mode, model: s.model }),
+    },
+  ),
+);
 
 

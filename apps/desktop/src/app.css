@@ -306,6 +306,169 @@ body {
   color: var(--muted);
 }
 
+.mainDocRich {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.mainDocRow {
+  display: grid;
+  grid-template-columns: 88px 1fr;
+  gap: 10px;
+  align-items: start;
+}
+
+.mainDocKey {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.mainDocVal {
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.msgUser {
+  background: rgba(37, 99, 235, 0.10);
+  border: 1px solid rgba(37, 99, 235, 0.25);
+  border-radius: 10px;
+  padding: 10px;
+  align-self: flex-end;
+  max-width: 92%;
+}
+
+.msgUserHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.msgUserMeta {
+  color: rgba(37, 99, 235, 0.9);
+  font-size: 12px;
+}
+
+.msgEditBtn {
+  background: transparent;
+  border: 1px solid rgba(37, 99, 235, 0.25);
+  color: rgba(37, 99, 235, 0.9);
+  border-radius: 8px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.msgEditBtn:hover {
+  background: rgba(37, 99, 235, 0.08);
+}
+
+.msgEditArea {
+  width: 100%;
+  border: 1px solid rgba(37, 99, 235, 0.25);
+  border-radius: 10px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--text);
+  resize: vertical;
+  min-height: 80px;
+}
+
+.richText {
+  color: var(--text);
+}
+
+.rtP {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.rtH {
+  margin: 8px 0 4px;
+}
+
+.rtH1 {
+  font-size: 18px;
+}
+
+.rtH2 {
+  font-size: 16px;
+}
+
+.rtH3 {
+  font-size: 14px;
+}
+
+.rtUl,
+.rtOl {
+  margin: 6px 0 6px 18px;
+}
+
+.rtQuote {
+  margin: 6px 0;
+  padding-left: 10px;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+
+.rtPre {
+  margin: 6px 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.03);
+  padding: 10px;
+  overflow: auto;
+}
+
+.rtCode {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+
+.modalMask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: grid;
+  place-items: center;
+  z-index: 99999;
+}
+
+.modal {
+  width: min(520px, calc(100vw - 24px));
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
+  padding: 14px;
+}
+
+.modalTitle {
+  font-size: 14px;
+  color: var(--text);
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.modalDesc {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.5;
+  margin-bottom: 12px;
+}
+
+.modalBtns {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .messages {
   flex: 1;
   overflow: auto;

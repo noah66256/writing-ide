@@ -261,6 +261,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
       let assistantText = "";
       let decided: "unknown" | "tool" | "text" = "unknown";
+      let flushed = 0;
 
       for await (const ev of streamChatCompletions({
         config: { baseUrl: env.baseUrl, apiKey: env.apiKey },
@@ -270,6 +271,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       })) {
         if (ev.type === "delta") {
           assistantText += ev.delta;
+          const prevDecided = decided;
           if (decided === "unknown") {
             const t = assistantText.trimStart();
             if (t.startsWith("<tool_calls") || t.startsWith("<tool_call")) decided = "tool";
@@ -277,7 +279,16 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             else if (t.length > 96 && t.startsWith("<") && !t.startsWith("<tool_calls") && !t.startsWith("<tool_call"))
               decided = "text";
           }
-          if (decided === "text") writeEvent("assistant.delta", { delta: ev.delta });
+          // 一旦判断为 text，需要把此前积累但未发出的内容补发，否则会出现“输出中断/缺头”
+          if (decided === "text") {
+            if (prevDecided !== "text") {
+              writeEvent("assistant.delta", { delta: assistantText.slice(flushed) });
+              flushed = assistantText.length;
+            } else {
+              writeEvent("assistant.delta", { delta: ev.delta });
+              flushed = assistantText.length;
+            }
+          }
         }
         if (ev.type === "error") {
           writeEvent("error", { error: ev.error });

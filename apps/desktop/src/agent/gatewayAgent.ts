@@ -62,6 +62,19 @@ function buildContextPack() {
     files,
   };
 
+  const recentDialogue = (() => {
+    const steps = useRunStore.getState().steps;
+    const msgs = steps
+      .filter((s) => s.type === "user" || (s.type === "assistant" && !s.hidden))
+      .slice(-10)
+      .map((s) => {
+        const text = s.type === "user" ? s.text : s.type === "assistant" ? s.text : "";
+        const trimmed = text.length > 2000 ? text.slice(0, 2000) + "…(truncated)" : text;
+        return `${s.type === "user" ? "USER" : "ASSISTANT"}: ${trimmed}`;
+      });
+    return msgs.join("\n\n");
+  })();
+
   const selection = (() => {
     const ed = proj.editorRef;
     const model = ed?.getModel();
@@ -93,6 +106,7 @@ function buildContextPack() {
     `MAIN_DOC(JSON):\n${JSON.stringify(mainDoc, null, 2)}\n\n` +
     `DOC_RULES(Markdown):\n${docRules}\n\n` +
     `EDITOR_SELECTION(JSON):\n${JSON.stringify(selection, null, 2)}\n\n` +
+    `RECENT_DIALOGUE:\n${recentDialogue}\n\n` +
     `PROJECT_STATE(JSON):\n${JSON.stringify(state, null, 2)}\n\n` +
     `注意：\n` +
     `- 已提供当前编辑器选区（EDITOR_SELECTION）。若用户说“改写我选中的这段”，优先用该选区。\n` +
@@ -203,7 +217,6 @@ export function startGatewayRun(args: {
   prompt: string;
 }): GatewayRunController {
   const {
-    resetRun,
     setRunning,
     addAssistant,
     appendAssistantDelta,
@@ -215,9 +228,10 @@ export function startGatewayRun(args: {
     log
   } = useRunStore.getState();
 
-  resetRun();
   setRunning(true);
-  updateMainDoc({ goal: args.prompt });
+  // 不要每轮覆盖 goal：只在为空时初始化（后续由 run.mainDoc.update 维护主线）
+  const cur = useRunStore.getState().mainDoc;
+  if (!cur.goal) updateMainDoc({ goal: args.prompt });
 
   const abort = new AbortController();
   let currentAssistantId: string | null = null;
