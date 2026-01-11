@@ -294,6 +294,10 @@ body {
   cursor: pointer;
 }
 
+.btnIcon {
+  padding: 7px 10px;
+}
+
 .btnPrimary {
   border-color: rgba(37, 99, 235, 0.35);
   background: rgba(37, 99, 235, 0.10);
@@ -316,41 +320,99 @@ body {
   gap: 8px;
 }
 
-.composerTop {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
+.composerBox {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel);
+  overflow: hidden;
 }
 
-.composerTools {
+.composerTextarea {
+  width: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  padding: 12px 12px 6px;
+  resize: none;
+  line-height: 1.5;
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    Segoe UI,
+    Roboto,
+    Helvetica,
+    Arial;
+  font-size: 14px;
+}
+
+.composerBar {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid var(--border);
+  padding: 8px 10px;
+}
+
+.composerBarLeft {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.composerBarRight {
+  display: flex;
+  align-items: center;
   gap: 8px;
 }
 
-.composerLeft {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+.selectCompact {
+  width: auto;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: rgba(0, 0, 0, 0.02);
 }
 
-.btnIcon {
-  padding: 7px 10px;
-}
-
-.input {
-  width: 100%;
-  background: var(--panel);
-  color: var(--text);
+.iconBtn {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
   border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.02);
   border-radius: 10px;
-  padding: 10px 12px;
+  color: var(--muted);
+  cursor: pointer;
 }
 
-.textarea {
-  resize: none;
-  line-height: 1.5;
+.iconBtn:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text);
+}
+
+.sendBtn {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  border: 1px solid rgba(37, 99, 235, 0.25);
+  background: rgba(37, 99, 235, 0.12);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.sendBtn:hover {
+  background: rgba(37, 99, 235, 0.18);
+}
+
+.sendBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .dockTabs {

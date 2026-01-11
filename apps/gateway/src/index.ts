@@ -10,6 +10,7 @@ import { loadDb, saveDb, type User } from "./db.js";
 import { kbSearch, type KbCard } from "@writing-ide/kb-core";
 import { MemoryKbStore } from "./kb/memoryStore.js";
 import { adjustUserPoints, listUserTransactions } from "./billing.js";
+import { streamChatCompletions, type OpenAiChatMessage } from "./llm/openaiCompat.js";
 
 // 允许使用项目根目录的 .env（你可以用 env.example 复制出来），也支持 apps/gateway/.env 覆盖
 const __filename = fileURLToPath(import.meta.url);
@@ -69,6 +70,91 @@ function requireAdmin(request: any, reply: any) {
 
 fastify.get("/api/health", async () => {
   return { ok: true };
+});
+
+function getLlmEnv() {
+  const baseUrl = String(process.env.LLM_BASE_URL ?? "").trim();
+  const apiKey = String(process.env.LLM_API_KEY ?? "").trim();
+  const defaultModel = String(process.env.LLM_MODEL ?? "").trim();
+  return {
+    baseUrl,
+    apiKey,
+    defaultModel,
+    ok: Boolean(baseUrl && apiKey && defaultModel)
+  };
+}
+
+// ======== LLM（OpenAI-compatible，开发期最小闭环） ========
+
+fastify.get("/api/llm/models", async () => {
+  const env = getLlmEnv();
+  if (!env.defaultModel) return { models: [] };
+  return { models: [{ id: env.defaultModel }] };
+});
+
+fastify.post("/api/llm/chat/stream", async (request, reply) => {
+  if (!IS_DEV) return reply.code(404).send({ error: "NOT_AVAILABLE" });
+
+  const msgSchema = z.object({
+    role: z.enum(["system", "user", "assistant"]),
+    content: z.string()
+  });
+  const bodySchema = z.object({
+    model: z.string().optional(),
+    prompt: z.string().optional(),
+    messages: z.array(msgSchema).optional(),
+    temperature: z.number().min(0).max(2).optional()
+  });
+  const body = bodySchema.parse((request as any).body);
+
+  const env = getLlmEnv();
+  if (!env.ok) return reply.code(500).send({ error: "LLM_NOT_CONFIGURED" });
+
+  const model = body.model ?? env.defaultModel;
+  const messages: OpenAiChatMessage[] =
+    body.messages?.length
+      ? (body.messages as any)
+      : body.prompt
+        ? [{ role: "user", content: body.prompt }]
+        : [];
+
+  if (!messages.length) return reply.code(400).send({ error: "EMPTY_MESSAGES" });
+
+  reply.raw.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no"
+  });
+
+  const abort = new AbortController();
+  request.raw.on("close", () => abort.abort());
+
+  const writeEvent = (event: string, data: unknown) => {
+    reply.raw.write(`event: ${event}\n`);
+    reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  writeEvent("run.start", { model });
+
+  try {
+    for await (const ev of streamChatCompletions({
+      config: { baseUrl: env.baseUrl, apiKey: env.apiKey },
+      model,
+      messages,
+      temperature: body.temperature,
+      signal: abort.signal
+    })) {
+      if (ev.type === "delta") writeEvent("assistant.delta", { delta: ev.delta });
+      else if (ev.type === "done") writeEvent("assistant.done", {});
+      else if (ev.type === "error") writeEvent("error", { error: ev.error });
+    }
+  } catch (e: any) {
+    const msg = e?.message ? String(e.message) : String(e);
+    writeEvent("error", { error: msg });
+  } finally {
+    reply.raw.end();
+  }
 });
 
 fastify.post("/api/auth/email/request-code", async (request, reply) => {
