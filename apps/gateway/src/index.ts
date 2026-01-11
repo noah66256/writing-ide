@@ -2,11 +2,20 @@ import cors from "@fastify/cors";
 import jwt from "@fastify/jwt";
 import Fastify from "fastify";
 import { randomUUID } from "node:crypto";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
+import dotenv from "dotenv";
 import { loadDb, saveDb, type User } from "./db.js";
 import { kbSearch, type KbCard } from "@writing-ide/kb-core";
 import { MemoryKbStore } from "./kb/memoryStore.js";
 import { adjustUserPoints, listUserTransactions } from "./billing.js";
+
+// 允许使用项目根目录的 .env（你可以用 env.example 复制出来），也支持 apps/gateway/.env 覆盖
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
+dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
 const PORT = Number(process.env.PORT ?? 8000);
 const JWT_SECRET = process.env.JWT_SECRET ?? "dev-secret-change-me";
