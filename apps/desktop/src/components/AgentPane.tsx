@@ -191,47 +191,45 @@ export function AgentPane() {
         {steps.map((step) => {
           if (step.type === "user") {
             const isEditing = editingId === step.id;
-            const hasRevert = !isEditing;
             return (
-              <div
-                key={step.id}
-                className="msgUser"
-                onClick={() => {
-                  if (isEditing) return;
-                  setEditingId(step.id);
-                  setEditingText(step.text);
-                }}
-              >
-                {hasRevert && (
-                  <div className="msgUserHeader">
-                    <div className="msgUserMeta">
-                      你 · {new Date(step.ts).toLocaleTimeString()}
-                      {step.edited ? "（已编辑）" : ""}
+              <div key={step.id} className="msgUser">
+                <div
+                  className={`composerBox historyBox ${isEditing ? "historyBoxActive" : "historyBoxIdle"}`}
+                  onClick={() => {
+                    if (isEditing) return;
+                    setEditingId(step.id);
+                    setEditingText(step.text);
+                  }}
+                >
+                  {!isEditing && (
+                    <div className="historyHeader">
+                      <div className="msgUserMeta">
+                        你 · {new Date(step.ts).toLocaleTimeString()}
+                        {step.edited ? "（已编辑）" : ""}
+                      </div>
+                      <button
+                        className="iconBtn"
+                        type="button"
+                        aria-label="从此处继续（可回滚）"
+                        title="从此处继续（可回滚）"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSubmitFromHistory({ stepId: step.id, text: step.text });
+                        }}
+                      >
+                        <IconRewind />
+                      </button>
                     </div>
-                    <button
-                      className="iconBtn"
-                      type="button"
-                      aria-label="从此处继续（可回滚）"
-                      title="从此处继续（可回滚）"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSubmitFromHistory({ stepId: step.id, text: step.text });
-                      }}
-                    >
-                      <IconRewind />
-                    </button>
-                  </div>
-                )}
+                  )}
 
-                {isEditing ? (
-                  <div ref={historyEditRef}>
-                    <div className="composerBox">
+                  {isEditing ? (
+                    <div ref={historyEditRef}>
                       <textarea
                         className="composerTextarea"
                         value={editingText}
                         onChange={(e) => setEditingText(e.target.value)}
                         rows={3}
-                        placeholder="编辑这条历史消息，然后提交继续…"
+                        placeholder="输入写作任务（例如：帮我写一条小红书爆款选题）…"
                         onKeyDown={(e) => {
                           if (e.isComposing) return;
                           if (e.key === "Escape") {
@@ -376,10 +374,12 @@ export function AgentPane() {
                         </div>
                       </div>
                     </div>
-                  </div>
-                ) : (
-                  <RichText text={step.text} />
-                )}
+                  ) : (
+                    <div className="historyText">
+                      <RichText text={step.text} />
+                    </div>
+                  )}
+                </div>
               </div>
             );
           }
