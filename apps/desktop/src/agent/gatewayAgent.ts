@@ -335,7 +335,13 @@ export function startGatewayRun(args: {
         }
       }
 
-      // 超出最大轮数
+      // 被 Stop/Cancel 打断：不额外提示（避免误报“死循环”）
+      if (abort.signal.aborted) {
+        setRunning(false);
+        return;
+      }
+
+      // 超出最大轮数（防止死循环）
       const warnId = addAssistant("", false, false);
       patchAssistant(warnId, {
         text: "\n\n[提示] 已达到本次 Run 的最大工具循环轮数（maxTurns），为避免死循环已自动停止。你可以补充指令或更具体的目标再试一次。",
