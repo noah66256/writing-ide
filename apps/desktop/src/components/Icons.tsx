@@ -142,4 +142,19 @@ export function IconStop(props: SvgProps) {
   );
 }
 
+export function IconChevronDown(props: SvgProps) {
+  const s = props.size ?? 16;
+  return (
+    <svg {...baseProps(s)}>
+      <path
+        d="M7 10l5 5 5-5"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 

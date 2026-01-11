@@ -3,6 +3,7 @@ import { startGatewayRun } from "../agent/gatewayAgent";
 import { startMockRun } from "../agent/mockAgent";
 import { useRunStore } from "../state/runStore";
 import { IconAt, IconGlobe, IconImage, IconMic, IconSend, IconStop } from "./Icons";
+import { PillSelect } from "./PillSelect";
 import { ToolBlock } from "./ToolBlock";
 
 type RunController = { cancel: () => void };
@@ -40,12 +41,6 @@ export function AgentPane() {
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const shortModelLabel = (id: string) => {
-    const trimmed = id.trim();
-    if (trimmed.length <= 18) return trimmed;
-    return `${trimmed.slice(0, 16)}…`;
-  };
 
   // Context 使用量（估算）：Main Doc + 最近消息 + 当前输入
   const mainDocChars = JSON.stringify(mainDoc).length;
@@ -116,28 +111,26 @@ export function AgentPane() {
 
           <div className="composerBar">
             <div className="composerBarLeft">
-              <select
-                className="select selectCompact selectMode"
+              <PillSelect
                 value={mode}
-                onChange={(e) => setMode(e.target.value as typeof mode)}
+                options={[
+                  { value: "plan", label: "Plan" },
+                  { value: "agent", label: "Agent" },
+                  { value: "chat", label: "Chat" },
+                ]}
+                onChange={(v) => setMode(v as typeof mode)}
                 title="模式"
-              >
-                <option value="plan">Plan</option>
-                <option value="agent">Agent</option>
-                <option value="chat">Chat</option>
-              </select>
-              <select
-                className="select selectCompact selectModel"
+                minWidth={86}
+                maxWidth={120}
+              />
+              <PillSelect
                 value={model}
-                onChange={(e) => setModel(e.target.value)}
+                options={modelOptions.map((m) => ({ value: m, label: m }))}
+                onChange={(v) => setModel(v)}
                 title={model}
-              >
-                {modelOptions.map((m) => (
-                  <option key={m} value={m}>
-                    {shortModelLabel(m)}
-                  </option>
-                ))}
-              </select>
+                minWidth={120}
+                maxWidth={220}
+              />
               <div className="ctxPill" title={ctxTitle} aria-label="Context 使用量">
                 CTX {ctxPct}%
               </div>

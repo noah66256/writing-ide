@@ -37,8 +37,7 @@ body {
 .app {
   height: 100vh;
   display: grid;
-  /* 右侧给更宽默认值 + 最小宽度，避免挤炸；后续再做可拖拽分割条 */
-  grid-template-columns: 240px 1fr minmax(420px, 520px);
+  /* 列宽由 App.tsx 动态计算（可拖拽分割条） */
 }
 
 .sidebar {
@@ -101,12 +100,11 @@ body {
 
 .center {
   display: grid;
-  grid-template-rows: 1fr 240px;
+  /* 行高由 App.tsx 动态计算（Dock 可拖拽） */
   min-width: 0;
 }
 
 .editorPane {
-  border-right: 1px solid var(--border);
   overflow: hidden;
   min-width: 0;
 }
@@ -114,7 +112,6 @@ body {
 .dock {
   background: var(--panel);
   border-top: 1px solid var(--border);
-  border-right: 1px solid var(--border);
   overflow: hidden;
 }
 
@@ -124,6 +121,46 @@ body {
   display: flex;
   flex-direction: column;
   min-width: 0;
+}
+
+.splitter {
+  background: transparent;
+  position: relative;
+  touch-action: none;
+}
+
+.splitterCol {
+  cursor: col-resize;
+}
+
+.splitterRow {
+  cursor: row-resize;
+}
+
+.splitterCol::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-0.5px);
+  background: var(--border);
+}
+
+.splitterRow::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  transform: translateY(-0.5px);
+  background: var(--border);
+}
+
+.splitter:hover {
+  background: rgba(0, 0, 0, 0.04);
 }
 
 .sectionTitle {
@@ -371,21 +408,87 @@ body {
   flex-wrap: nowrap;
 }
 
-.selectCompact {
-  width: auto;
-  padding: 5px 10px;
+.pillSelect {
+  position: relative;
+  min-width: 96px;
+  max-width: 220px;
+}
+
+.pillBtn {
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
   border-radius: 999px;
-  font-size: 12px;
+  border: 1px solid var(--border);
   background: rgba(0, 0, 0, 0.02);
-  max-width: 150px;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
 }
 
-.selectMode {
-  max-width: 110px;
+.pillBtn:hover {
+  background: rgba(0, 0, 0, 0.05);
 }
 
-.selectModel {
-  max-width: 160px;
+.pillLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.pillChevron {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  transition: transform 120ms ease;
+}
+
+.pillChevronOpen {
+  transform: rotate(180deg);
+}
+
+.pillMenu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  min-width: 180px;
+  max-width: 320px;
+  max-height: 260px;
+  overflow: auto;
+  z-index: 50;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.12);
+  padding: 6px;
+  display: grid;
+  gap: 2px;
+}
+
+.pillOption {
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.pillOption:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.pillOptionActive {
+  background: rgba(37, 99, 235, 0.10);
+  outline: 1px solid rgba(37, 99, 235, 0.25);
 }
 
 .ctxPill {
