@@ -18,7 +18,7 @@ export function EditorPane() {
   const activeFile = getFileByPath(activePath);
 
   return (
-    <div style={{ height: "100%", display: "grid", gridTemplateRows: "auto 1fr" }}>
+    <div className="editorRoot">
       <div className="tabBar">
         {openPaths.map((p) => (
           <div
@@ -32,21 +32,23 @@ export function EditorPane() {
         ))}
       </div>
 
-      <Editor
-        height="100%"
-        language="markdown"
-        theme="vs"
-        value={activeFile?.content ?? ""}
-        onMount={(ed: editor.IStandaloneCodeEditor) => setEditorRef(ed)}
-        onChange={(value) => updateFile(activePath, value ?? "")}
-        options={{
-          minimap: { enabled: false },
-          wordWrap: "on",
-          fontSize: 14,
-          padding: { top: 12, bottom: 12 },
-          scrollBeyondLastLine: false,
-        }}
-      />
+      <div className="editorContainer">
+        <Editor
+          height="100%"
+          language="markdown"
+          theme="vs"
+          value={activeFile?.content ?? ""}
+          onMount={(ed: editor.IStandaloneCodeEditor) => setEditorRef(ed)}
+          onChange={(value) => updateFile(activePath, value ?? "")}
+          options={{
+            minimap: { enabled: false },
+            wordWrap: "on",
+            fontSize: 14,
+            padding: { top: 12, bottom: 12 },
+            scrollBeyondLastLine: false,
+          }}
+        />
+      </div>
     </div>
   );
 }
