@@ -120,12 +120,21 @@ fastify.post("/api/llm/chat/stream", async (request, reply) => {
 
   if (!messages.length) return reply.code(400).send({ error: "EMPTY_MESSAGES" });
 
-  reply.raw.writeHead(200, {
-    "Content-Type": "text/event-stream; charset=utf-8",
-    "Cache-Control": "no-cache, no-transform",
-    Connection: "keep-alive",
-    "X-Accel-Buffering": "no"
-  });
+  // 注意：不要用 writeHead 覆盖 fastify-cors 已设置的响应头，否则浏览器会 CORS 失败（Failed to fetch）
+  // 这里用 setHeader 追加 SSE 相关头，并显式补齐 allow-origin（保险起见）。
+  const origin = String((request as any).headers?.origin ?? "").trim();
+  if (origin) {
+    reply.raw.setHeader("access-control-allow-origin", origin);
+    reply.raw.setHeader("access-control-allow-credentials", "true");
+    reply.raw.setHeader("vary", "Origin");
+  }
+  reply.raw.statusCode = 200;
+  reply.raw.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  reply.raw.setHeader("Cache-Control", "no-cache, no-transform");
+  reply.raw.setHeader("Connection", "keep-alive");
+  reply.raw.setHeader("X-Accel-Buffering", "no");
+  (reply as any).hijack?.();
+  (reply.raw as any).flushHeaders?.();
 
   const abort = new AbortController();
   // 仅在“客户端中断”时取消上游请求；不要监听 request.close（它在正常完成请求体后也会触发）
