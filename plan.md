@@ -381,14 +381,15 @@
 - ✅ 本地项目落盘（MVP）：打开真实目录、读写磁盘文件、最近项目（自动恢复上次项目）
 - ✅ ReAct（开发期）：Gateway 负责 `/api/agent/run/stream` 编排（SSE：`tool.call/tool.result`），Desktop 执行工具并回传 `tool_result`
 - ✅ proposal-first 写入：`doc.applyEdits` 与覆盖写入类工具先出提案，点 Keep 才 apply；Undo 可回滚
-- ✅ Diff 预览：`doc.previewDiff` / `doc.applyEdits` / 覆盖写入输出 unified diff；Tool Block 支持 diff 预览与复制
+- ✅ Diff 预览（增强）：Tool Block 以“文件级头部”展示（NEW/MOD + +X/-Y），并对 +/- 行做红绿高亮；支持复制 diff
 - ✅ 快照：`doc.commitSnapshot` / `doc.listSnapshots` / `doc.restoreSnapshot`（restore 为 proposal-first）
 
 #### TODO（按优先级，滚动更新）
 - **P0（写作 IDE 日用闭环）**
   - [x] 本地项目落盘（MVP）：打开真实目录、读写磁盘文件、最近项目（自动恢复上次项目）
   - [ ] 本地项目落盘（增强）：最近项目菜单、文件监听（外部修改刷新）、重命名/移动/新建文件夹
-  - [ ] Diff 预览升级：unified diff → 更直观的分栏/高亮 diff（类似 VSCode/Git）
+  - [x] Diff 预览（文件级）：NEW/MOD + +X/-Y + 红绿高亮（右侧 Tool Blocks）
+  - [ ] Diff 预览升级（分栏）：unified diff → 更直观的左右分栏/更像 VSCode/Git 的对照视图
   - [ ] 快照面板：在 Dock Panel 提供快照列表/恢复/删除（与 Tool Block Keep/Undo 一致）
 - **P1（写作增强）**
   - [ ] Outline：从 Markdown 标题树生成大纲，并与编辑器联动（点击定位）

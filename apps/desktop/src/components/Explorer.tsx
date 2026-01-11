@@ -14,6 +14,7 @@ export function Explorer() {
   const rootDir = useProjectStore((s) => s.rootDir);
   const isLoading = useProjectStore((s) => s.isLoading);
   const error = useProjectStore((s) => s.error);
+  const recentProjectDirs = useWorkspaceStore((s) => s.recentProjectDirs);
 
   const openProject = async () => {
     const api = window.desktop?.fs;
@@ -22,6 +23,12 @@ export function Explorer() {
     if (!res.ok || !res.dir) return;
     useWorkspaceStore.getState().addRecentProjectDir(res.dir);
     await useProjectStore.getState().loadProjectFromDisk(res.dir);
+  };
+
+  const openRecent = async (dir: string) => {
+    if (!dir) return;
+    useWorkspaceStore.getState().addRecentProjectDir(dir);
+    await useProjectStore.getState().loadProjectFromDisk(dir);
   };
 
   return (
@@ -34,6 +41,26 @@ export function Explorer() {
           打开
         </button>
       </div>
+
+      {!rootDir && recentProjectDirs.length > 0 ? (
+        <div className="recentBox">
+          <div className="recentTitle">最近项目</div>
+          <div className="recentList">
+            {recentProjectDirs.slice(0, 6).map((d) => (
+              <button
+                key={d}
+                className="recentItem"
+                type="button"
+                onClick={() => void openRecent(d)}
+                title={d}
+                disabled={isLoading}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       {error ? <div className="explorerError">打开失败：{error}</div> : null}
       {isLoading ? <div className="explorerHint">正在加载文件…</div> : null}

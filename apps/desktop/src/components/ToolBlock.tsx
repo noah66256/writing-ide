@@ -21,6 +21,41 @@ function findDiffInfo(output: any): { path?: string; diff: string; truncated?: b
   return null;
 }
 
+function fileKindLabel(p?: string) {
+  const path = String(p ?? "");
+  const base = path.split("/").pop() ?? path;
+  const ext = base.includes(".") ? (base.split(".").pop() ?? "").toLowerCase() : "";
+  const map: Record<string, string> = {
+    ts: "TS",
+    tsx: "TSX",
+    js: "JS",
+    jsx: "JSX",
+    json: "JSON",
+    md: "MD",
+    mdx: "MDX",
+    txt: "TXT",
+    yml: "YAML",
+    yaml: "YAML",
+  };
+  return map[ext] ?? (ext ? ext.toUpperCase().slice(0, 4) : "FILE");
+}
+
+function diffStatus(step: ToolBlockStep): "new" | "modified" {
+  if (step.toolName === "doc.write") {
+    const out = step.output as any;
+    if (out && typeof out.created === "boolean") return out.created ? "new" : "modified";
+  }
+  return "modified";
+}
+
+function statusBadgeText(s: "new" | "modified") {
+  return s === "new" ? "NEW" : "MOD";
+}
+
+function statusBadgeClass(s: "new" | "modified") {
+  return s === "new" ? "diffFileBadge diffBadgeNew" : "diffFileBadge diffBadgeMod";
+}
+
 function diffLineClass(line: string) {
   if (line.startsWith("@@")) return "diffLine diffHunk";
   if (line.startsWith("+++ ") || line.startsWith("--- ")) return "diffLine diffHeader";
@@ -194,25 +229,34 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
             </div>
             {diffInfo && (
               <div style={{ display: "grid", gap: 8 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-                  <div style={{ color: "var(--muted)", fontSize: 12 }}>
-                    diff{diffInfo.path ? ` · ${diffInfo.path}` : ""}
-                    {diffInfo.stats ? ` · +${diffInfo.stats.added ?? 0}/-${diffInfo.stats.removed ?? 0}` : ""}
-                    {diffInfo.truncated ? " · truncated" : ""}
+                <div className="diffFileHeader">
+                  <div className="diffFileLeft" title={diffInfo.path ?? ""}>
+                    <span className="diffFileKind">{fileKindLabel(diffInfo.path)}</span>
+                    <span className="diffFilePath">{diffInfo.path ?? "（未知文件）"}</span>
+                    <span className={statusBadgeClass(diffStatus(step))}>{statusBadgeText(diffStatus(step))}</span>
+                    {diffInfo.truncated ? <span className="diffFileBadge diffBadgeTruncated">TRUNCATED</span> : null}
                   </div>
-                  <button
-                    className="btn"
-                    type="button"
-                    onClick={() => {
-                      const text = diffInfo.diff;
-                      navigator.clipboard?.writeText(text).catch(() => {
-                        // ignore
-                      });
-                    }}
-                    title="复制 unified diff"
-                  >
-                    复制 diff
-                  </button>
+                  <div className="diffFileRight">
+                    {diffInfo.stats ? (
+                      <div className="diffStats" aria-label="diff 统计">
+                        <span className="diffStat diffStatAdd">+{diffInfo.stats.added ?? 0}</span>
+                        <span className="diffStat diffStatDel">-{diffInfo.stats.removed ?? 0}</span>
+                      </div>
+                    ) : null}
+                    <button
+                      className="btn"
+                      type="button"
+                      onClick={() => {
+                        const text = diffInfo.diff;
+                        navigator.clipboard?.writeText(text).catch(() => {
+                          // ignore
+                        });
+                      }}
+                      title="复制 unified diff"
+                    >
+                      复制 diff
+                    </button>
+                  </div>
                 </div>
                 {diffInfo.note && <div style={{ color: "var(--muted)", fontSize: 12 }}>{diffInfo.note}</div>}
                 <div className="diffBox" aria-label="diff 预览">

@@ -224,6 +224,49 @@ body {
   padding: 0 2px 8px;
 }
 
+.recentBox {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px;
+  margin: 0 2px 10px;
+  background: var(--panel);
+}
+
+.recentTitle {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.recentList {
+  display: grid;
+  gap: 6px;
+}
+
+.recentItem {
+  text-align: left;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.02);
+  color: var(--text);
+  padding: 6px 8px;
+  cursor: pointer;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recentItem:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.recentItem:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .fileItem {
   display: flex;
   gap: 8px;
@@ -626,8 +669,108 @@ body {
   white-space: pre;
 }
 
+.diffFileHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 8px 10px;
+}
+
+.diffFileLeft {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.diffFileKind {
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.diffFilePath {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+}
+
+.diffFileBadge {
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.diffBadgeNew {
+  color: #15803d;
+  border-color: rgba(22, 163, 74, 0.35);
+  background: rgba(22, 163, 74, 0.10);
+}
+
+.diffBadgeMod {
+  color: #2563eb;
+  border-color: rgba(37, 99, 235, 0.30);
+  background: rgba(37, 99, 235, 0.08);
+}
+
+.diffBadgeTruncated {
+  color: var(--warn);
+  border-color: rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.10);
+}
+
+.diffFileRight {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.diffStats {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.diffStat {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.diffStatAdd {
+  color: #15803d;
+  border-color: rgba(22, 163, 74, 0.35);
+  background: rgba(22, 163, 74, 0.10);
+}
+
+.diffStatDel {
+  color: #b91c1c;
+  border-color: rgba(220, 38, 38, 0.35);
+  background: rgba(220, 38, 38, 0.10);
+}
+
 .diffLine {
   white-space: pre;
+  padding: 0 8px;
+  border-radius: 8px;
 }
 
 .diffHeader {
@@ -640,12 +783,12 @@ body {
 
 .diffAdd {
   color: #15803d;
-  background: rgba(22, 163, 74, 0.08);
+  background: rgba(22, 163, 74, 0.12);
 }
 
 .diffDel {
   color: #b91c1c;
-  background: rgba(220, 38, 38, 0.08);
+  background: rgba(220, 38, 38, 0.12);
 }
 
 .diffCtx {
