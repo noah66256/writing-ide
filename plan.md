@@ -101,9 +101,14 @@
   - 每张工具卡都有 `Keep` / `Undo`：
     - **Keep**：将该步骤标记为“保留”，并把其“有效产物”纳入 Run 复盘与后续上下文（Context Pack）
     - **Undo**：撤销该步骤的副作用（若有），并从后续上下文中移除该步骤产物（避免注意力被错误步骤带跑）
-  - **写入类工具的默认策略（更安全）**
-    - 写入类工具默认不直接写文件，而是先产出 `diff/edits` 作为工具卡内容
-    - 用户点 `Keep` 才真正 `apply`；点 `Undo` 则丢弃提案（不落盘）
+  - **写入类工具的执行策略（按风险分级）**
+    - **Low：允许自动落盘（auto-apply）但必须可 Undo 回滚**
+      - 覆盖：`doc.replaceSelection`、小范围 `doc.applyEdits`、`doc.write` 写入**新文件**（不覆盖已有文件）
+      - 要求：执行成功必须返回 `undoToken`（或自动创建 `snapshotId`），保证点击 `Undo` 能回到执行前状态
+      - 语义：若是新建文件，则 `Undo=删除该文件`（并从上下文移除该步产物）
+    - **Medium/High：默认提案优先（proposal-first）**
+      - 覆盖：整篇重写、覆盖已有文件、重命名/移动/删除、KB ingest、批量修改等
+      - 先产出 `diff/edits`；用户点 `Keep` 才真正 apply；点 `Undo` 则丢弃提案（不落盘）
   - **只读工具**
     - `Undo` 语义为“从上下文移除/不采纳此结果”（不需要物理回滚）
 
@@ -444,6 +449,8 @@
   - `inputSchema`：JSON Schema（或 Zod→JSONSchema），要求字段语义明确、可校验
   - `outputSchema`：同上（让后续步骤可依赖结构化输出）
   - `permission`：`read` / `write` / `network` / `dangerous`（写入必须二次确认）
+  - `riskLevel`：`low` / `medium` / `high`（用于决定默认执行策略与 UI 提示）
+  - `applyPolicy`：`proposal` / `auto_apply`（`auto_apply` 必须 `reversible=true` 且返回 `undoToken`/`snapshotId`）
   - `idempotent`：是否幂等；是否有副作用（影响调度与重试策略）
   - `reversible`：是否可撤销（支持 Undo）；若有副作用，必须给出 `undo` 策略
   - `undoSchema`：撤销所需的输入结构（或返回 `undoToken` 供系统调用）
@@ -455,8 +462,9 @@
 - **输出要“结构化可复用”**：工具返回尽量是 JSON 结构而不是大段文本
 - **失败要“可修复”**：工具返回明确错误码 + 修复建议（例如缺字段/权限不足/找不到文件）
 - **默认先计划再行动**：对复杂写作任务，要求模型先产出 Todo List（结构化），再开始调用工具；这样既符合你的预期，也能显著降低乱调用/漏步骤
-- **写入动作必须“提案→确认→执行”**
-  - 先生成 `edits/diff` 给用户预览，用户确认后才调用 `doc.applyEdits` 或 `doc.applyPatch`
+- **写入动作默认“提案→确认→执行”，允许低风险自动落盘（必须可 Undo）**
+  - `riskLevel=medium/high`：先生成 `edits/diff` 预览，用户确认后才 apply
+  - `riskLevel=low`：可 `auto_apply`，但必须返回 `undoToken`（或 `snapshotId`）支持卡片级回滚
 - **用“分层工具”减少模型犯错**
   - 例如不要让模型自己拼复杂 diff：提供 `doc.applyEdits(edits: TextEdit[])` 这种更安全的 API
  - **UI 与工具契约联动（Keep/Undo）**
@@ -489,7 +497,8 @@
   - `project.search`（全文/标题/Frontmatter）
   - `doc.parseOutline`（标题树）、`doc.wordCount`
 - **变更管理**
-  - `doc.previewDiff`（生成可视化 diff）、`doc.commitSnapshot`（快照/回滚点）
+  - `doc.previewDiff`（生成可视化 diff）
+  - `doc.commitSnapshot`（创建快照/回滚点）、`doc.restoreSnapshot`（按快照回滚；用于 Tool Block Undo）
 - **任务/计划（让模型“先做 todo”落到产品里）**
   - `run.setTodoList`（写入/更新本次任务的 todo 列表，用于 UI 勾选与复盘）
   - `run.updateTodo`（更新 todo 状态/备注/产出物链接）
@@ -508,6 +517,14 @@
   - `content.extractHooks`, `content.extractAudiencePainPoints`
 - **选题/标题池**
   - `topic.generate`, `title.generate`, `angle.generate`（角度/冲突/人设）
+  - **定位**：Topic Lab（选题/定标题）是“增量生成 + 结构化评估”，补足 KB 的“存量检索”
+  - **可独立调用**：用户在 UI 里点一下生成候选；也可被主 Agent 在 Plan/Agent 模式按需调用（不写死流程）
+  - **最小版（进 MVP）**
+    - 输入：赛道/人设/平台画像/受众/目标/禁用项（来自用户 + Main Doc + Doc Rules），可选 `useKb=true`
+    - 输出：`topics[]`（每项包含：选题、角度、标题池、开头 hook 建议、结构模板建议、风险点/注意事项）
+    - 用户选中候选后：写入 `Main Doc`（topic/title/angle），作为后续大纲与写作锚点
+  - **趋势/联网（可选开关）**
+    - 可加 `useWebSearch=true`：用于补充趋势与案例；要求输出携带来源引用（可审计）
 - **平台画像驱动适配**
   - `platform.getProfile`（feed试看型/点选搜索型/长内容订阅型）
   - `platform.adapt`（基于画像把同一内容改写成平台体裁）
