@@ -35,7 +35,7 @@ export function EditorPane() {
       <Editor
         height="100%"
         language="markdown"
-        theme="vs-dark"
+        theme="vs"
         value={activeFile?.content ?? ""}
         onMount={(ed: editor.IStandaloneCodeEditor) => setEditorRef(ed)}
         onChange={(value) => updateFile(activePath, value ?? "")}

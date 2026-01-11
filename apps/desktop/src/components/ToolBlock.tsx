@@ -124,23 +124,25 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
       <div className="toolBody">
         {topicOutput ? (
           <div style={{ display: "grid", gap: 10 }}>
-            <div style={{ color: "#e7e9ee" }}>候选选题（点击“采用”会写入 Main Doc 并新建草稿，可 Undo）</div>
+            <div style={{ color: "var(--text)" }}>
+              候选选题（点击“采用”会写入 Main Doc 并新建草稿，可 Undo）
+            </div>
             <div style={{ display: "grid", gap: 8 }}>
               {topicOutput.topics.slice(0, 6).map((t, idx) => (
                 <div
                   key={`${t.topic}-${idx}`}
                   style={{
-                    border: "1px solid rgba(42,45,52,1)",
+                    border: "1px solid var(--border)",
                     borderRadius: 10,
                     padding: 10,
-                    background: "rgba(255,255,255,0.02)",
+                    background: "var(--panel)",
                   }}
                 >
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
                     <div style={{ display: "grid", gap: 4 }}>
-                      <div style={{ color: "#e7e9ee" }}>{t.topic}</div>
-                      <div style={{ color: "#9aa3b2", fontSize: 12 }}>角度：{t.angle}</div>
-                      <div style={{ color: "#9aa3b2", fontSize: 12 }}>
+                      <div style={{ color: "var(--text)" }}>{t.topic}</div>
+                      <div style={{ color: "var(--muted)", fontSize: 12 }}>角度：{t.angle}</div>
+                      <div style={{ color: "var(--muted)", fontSize: 12 }}>
                         标题：{t.titles[0] ?? "（无）"}
                       </div>
                     </div>
@@ -159,12 +161,12 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
         ) : (
           <div style={{ display: "grid", gap: 10 }}>
             <div>
-              <div style={{ color: "#9aa3b2", fontSize: 12 }}>input</div>
+              <div style={{ color: "var(--muted)", fontSize: 12 }}>input</div>
               <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(step.input)}</pre>
             </div>
             {expanded && (
               <div>
-                <div style={{ color: "#9aa3b2", fontSize: 12 }}>output</div>
+                <div style={{ color: "var(--muted)", fontSize: 12 }}>output</div>
                 <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(step.output)}</pre>
               </div>
             )}

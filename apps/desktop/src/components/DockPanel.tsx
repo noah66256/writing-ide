@@ -48,11 +48,11 @@ export function DockPanel() {
         {tab === "problems" && <div>（占位）后续接入 lint.style / lint.platform / lint.facts。</div>}
         {tab === "runs" && (
           <div style={{ display: "grid", gap: 10 }}>
-            <div style={{ color: "#e7e9ee" }}>Main Doc（当前 Run）</div>
+            <div style={{ color: "var(--text)" }}>Main Doc（当前 Run）</div>
             <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
               {JSON.stringify(mainDoc, null, 2)}
             </pre>
-            <div style={{ color: "#e7e9ee" }}>Tool Blocks</div>
+            <div style={{ color: "var(--text)" }}>Tool Blocks</div>
             {toolSteps.length === 0 ? (
               <div>暂无工具步骤。你可以在右侧发起一次 Plan/Agent。</div>
             ) : (
@@ -63,12 +63,12 @@ export function DockPanel() {
                       style={{
                         fontFamily:
                           "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-                        color: "#e7e9ee",
+                        color: "var(--text)",
                       }}
                     >
                       {t.toolName}
                     </span>{" "}
-                    <span style={{ color: "#9aa3b2" }}>· {t.status}</span>
+                    <span style={{ color: "var(--muted)" }}>· {t.status}</span>
                   </div>
                 ))}
               </div>

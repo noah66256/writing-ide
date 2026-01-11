@@ -21,7 +21,7 @@ export function Explorer() {
         >
           <span
             style={{
-              color: "#9aa3b2",
+              color: "var(--muted)",
               fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
               fontSize: 12,
               width: 22,

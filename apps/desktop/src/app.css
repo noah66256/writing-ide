@@ -1,14 +1,15 @@
 :root {
-  --bg: #0e0f13;
-  --panel: #11131a;
-  --panel2: #0f1117;
-  --border: #2a2d34;
-  --text: #e7e9ee;
-  --muted: #9aa3b2;
-  --accent: #6aa6ff;
-  --danger: #ff5a5f;
-  --ok: #22c55e;
-  --warn: #fbbf24;
+  /* Light theme（默认白色主题） */
+  --bg: #f7f7fb;
+  --panel: #ffffff;
+  --panel2: #f2f4f8;
+  --border: #e5e7eb;
+  --text: #111827;
+  --muted: #6b7280;
+  --accent: #2563eb;
+  --danger: #dc2626;
+  --ok: #16a34a;
+  --warn: #d97706;
 }
 
 html,
@@ -94,12 +95,12 @@ body {
 }
 
 .fileItem:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(0, 0, 0, 0.04);
 }
 
 .fileItemActive {
-  background: rgba(106, 166, 255, 0.12);
-  outline: 1px solid rgba(106, 166, 255, 0.3);
+  background: rgba(37, 99, 235, 0.10);
+  outline: 1px solid rgba(37, 99, 235, 0.28);
 }
 
 .tabBar {
@@ -107,7 +108,7 @@ body {
   gap: 6px;
   padding: 8px;
   border-bottom: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(0, 0, 0, 0.02);
   overflow-x: auto;
 }
 
@@ -125,8 +126,8 @@ body {
 
 .tabActive {
   color: var(--text);
-  border-color: rgba(106, 166, 255, 0.35);
-  background: rgba(106, 166, 255, 0.08);
+  border-color: rgba(37, 99, 235, 0.35);
+  background: rgba(37, 99, 235, 0.08);
 }
 
 .agentHeader {
@@ -139,7 +140,7 @@ body {
 
 .select {
   width: 100%;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--panel);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -169,7 +170,7 @@ body {
 }
 
 .msgAssistant {
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 10px;
@@ -179,7 +180,7 @@ body {
 .toolBlock {
   border: 1px solid var(--border);
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--panel);
 }
 
 .toolHeader {
@@ -233,7 +234,7 @@ body {
 }
 
 .btn {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--panel);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -242,13 +243,13 @@ body {
 }
 
 .btnPrimary {
-  border-color: rgba(106, 166, 255, 0.35);
-  background: rgba(106, 166, 255, 0.16);
+  border-color: rgba(37, 99, 235, 0.35);
+  background: rgba(37, 99, 235, 0.10);
 }
 
 .btnDanger {
-  border-color: rgba(255, 90, 95, 0.35);
-  background: rgba(255, 90, 95, 0.12);
+  border-color: rgba(220, 38, 38, 0.35);
+  background: rgba(220, 38, 38, 0.08);
 }
 
 .btn:disabled {
@@ -263,13 +264,41 @@ body {
   gap: 8px;
 }
 
+.composerTop {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.composerTools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.composerLeft {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btnIcon {
+  padding: 7px 10px;
+}
+
 .input {
   width: 100%;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--panel);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 10px 12px;
+}
+
+.textarea {
+  resize: none;
+  line-height: 1.5;
 }
 
 .dockTabs {
@@ -291,8 +320,8 @@ body {
 
 .dockTabActive {
   color: var(--text);
-  border-color: rgba(106, 166, 255, 0.35);
-  background: rgba(106, 166, 255, 0.08);
+  border-color: rgba(37, 99, 235, 0.35);
+  background: rgba(37, 99, 235, 0.08);
 }
 
 .dockContent {
