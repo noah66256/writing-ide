@@ -1,0 +1,12 @@
+{
+  "name": "@writing-ide/desktop",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "echo \"TODO: scaffold desktop (Electron+React+Vite)\" && exit 1",
+    "build": "echo \"TODO: scaffold desktop (Electron+React+Vite)\" && exit 1"
+  }
+}
+
+
