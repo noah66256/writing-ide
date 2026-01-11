@@ -37,7 +37,8 @@ body {
 .app {
   height: 100vh;
   display: grid;
-  grid-template-columns: 240px 1fr 380px;
+  /* 右侧给更宽默认值 + 最小宽度，避免挤炸；后续再做可拖拽分割条 */
+  grid-template-columns: 240px 1fr minmax(420px, 520px);
 }
 
 .sidebar {
@@ -351,40 +352,64 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
   border-top: 1px solid var(--border);
-  padding: 8px 10px;
+  padding: 6px 8px;
 }
 
 .composerBarLeft {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
 }
 
 .composerBarRight {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  flex-wrap: nowrap;
 }
 
 .selectCompact {
   width: auto;
-  padding: 6px 10px;
+  padding: 5px 10px;
   border-radius: 999px;
   font-size: 12px;
   background: rgba(0, 0, 0, 0.02);
+  max-width: 150px;
+}
+
+.selectMode {
+  max-width: 110px;
+}
+
+.selectModel {
+  max-width: 160px;
+}
+
+.ctxPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.02);
+  color: var(--muted);
+  font-size: 12px;
+  user-select: none;
+  white-space: nowrap;
 }
 
 .iconBtn {
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   display: grid;
   place-items: center;
   border: 1px solid var(--border);
   background: rgba(0, 0, 0, 0.02);
-  border-radius: 10px;
+  border-radius: 9px;
   color: var(--muted);
   cursor: pointer;
 }
@@ -395,8 +420,8 @@ body {
 }
 
 .sendBtn {
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   display: grid;
   place-items: center;
   border-radius: 999px;

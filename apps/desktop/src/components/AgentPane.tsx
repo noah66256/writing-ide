@@ -41,6 +41,29 @@ export function AgentPane() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const shortModelLabel = (id: string) => {
+    const trimmed = id.trim();
+    if (trimmed.length <= 18) return trimmed;
+    return `${trimmed.slice(0, 16)}…`;
+  };
+
+  // Context 使用量（估算）：Main Doc + 最近消息 + 当前输入
+  const mainDocChars = JSON.stringify(mainDoc).length;
+  const recentTextChars = steps
+    .slice(-6)
+    .filter((s) => s.type === "assistant")
+    .reduce((sum, s) => sum + (s.type === "assistant" ? s.text.length : 0), 0);
+  const inputChars = input.length;
+  const approxTokens = Math.ceil((mainDocChars + recentTextChars + inputChars) / 4);
+  const approxLimit = 32000;
+  const ctxPct = Math.min(100, Math.round((approxTokens / approxLimit) * 100));
+  const ctxTitle =
+    `Context 估算：${approxTokens}/${approxLimit} tokens（${ctxPct}%）\n` +
+    `- Main Doc: ~${Math.ceil(mainDocChars / 4)}\n` +
+    `- Recent: ~${Math.ceil(recentTextChars / 4)}\n` +
+    `- Input: ~${Math.ceil(inputChars / 4)}\n` +
+    `（提示：后续接入真实 usage 后会用真实 token 计数替代）`;
+
   const onSend = () => {
     const text = input.trim();
     if (!text) return;
@@ -94,7 +117,7 @@ export function AgentPane() {
           <div className="composerBar">
             <div className="composerBarLeft">
               <select
-                className="select selectCompact"
+                className="select selectCompact selectMode"
                 value={mode}
                 onChange={(e) => setMode(e.target.value as typeof mode)}
                 title="模式"
@@ -104,17 +127,20 @@ export function AgentPane() {
                 <option value="chat">Chat</option>
               </select>
               <select
-                className="select selectCompact"
+                className="select selectCompact selectModel"
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
-                title="模型"
+                title={model}
               >
                 {modelOptions.map((m) => (
                   <option key={m} value={m}>
-                    {m}
+                    {shortModelLabel(m)}
                   </option>
                 ))}
               </select>
+              <div className="ctxPill" title={ctxTitle} aria-label="Context 使用量">
+                CTX {ctxPct}%
+              </div>
             </div>
 
             <div className="composerBarRight">
