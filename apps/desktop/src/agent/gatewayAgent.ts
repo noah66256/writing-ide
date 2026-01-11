@@ -354,10 +354,25 @@ export function startGatewayRun(args: {
               output: exec.result.output,
               undoable: exec.result.undoable,
               undo: exec.result.undo,
+              apply: exec.result.apply,
               kept: initialKept,
               applied: def?.applyPolicy === "auto_apply",
             });
             history.push({ role: "system", content: renderToolResultXml(call.name, exec.result.output) });
+
+            // proposal-first：遇到需要用户确认的写入提案，暂停本次 Run，等待用户点击 Keep/Undo
+            if (def?.applyPolicy === "proposal" && typeof exec.result.apply === "function") {
+              const tipId = addAssistant("", false, false);
+              patchAssistant(tipId, {
+                text:
+                  "我已经生成一份“修改提案”（见上方 Tool Block）。\n\n" +
+                  "- 点击 **Keep**：应用到编辑器\n" +
+                  "- 点击 **Undo**：丢弃该提案\n\n" +
+                  "确认后你可以继续发下一条指令（例如：继续改写下一段/生成整篇）。",
+              });
+              setRunning(false);
+              return;
+            }
           } else {
             patchTool(toolStepId, {
               status: "failed",

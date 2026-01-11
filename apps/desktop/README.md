@@ -35,6 +35,12 @@ Plan/Agent 模式会按回合注入 Context Pack：
 - `doc.read`（只读）
 - `doc.write`（仅新建文件；low / auto_apply / 可 Undo）
 - `doc.getSelection` / `doc.replaceSelection`（选段改写；low / auto_apply / 可 Undo）
+- `doc.applyEdits`（**proposal-first**：先出预览，点击 Keep 才应用；Undo 可回滚）
+
+### 编辑器标签页（Tab）规则（仿 VSCode 预览模式）
+- **单击左侧文件**：预览打开（复用同一个预览 Tab，会替换/关闭上一个预览文件）
+- **双击左侧文件**：固定打开（新增一个 Tab，不会被单击替换）
+- **Tab 可关闭（×）**：关闭不会影响左侧文件树（仅关闭编辑区视图）
 
 ### 运行（本地）
 在项目根目录：

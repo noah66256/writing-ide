@@ -10,17 +10,21 @@ export type ProjectSnapshot = {
   files: ProjectFile[];
   openPaths: string[];
   activePath: string;
+  previewPath: string | null;
 };
 
 type ProjectState = {
   files: ProjectFile[];
   openPaths: string[];
   activePath: string;
+  previewPath: string | null; // 单击预览：复用同一个“预览 tab”
   editorRef: editor.IStandaloneCodeEditor | null;
 
   setEditorRef: (ref: editor.IStandaloneCodeEditor | null) => void;
   setActivePath: (path: string) => void;
-  openFile: (path: string) => void;
+  openFilePreview: (path: string) => void; // 单击：预览（替换上一个预览 tab）
+  openFilePinned: (path: string) => void; // 双击：固定（新增 tab，不影响预览 tab）
+  closeTab: (path: string) => void; // 关闭标签页（不删除文件）
   updateFile: (path: string, content: string) => void;
   createFile: (path: string, content: string) => void;
   deleteFile: (path: string) => void;
@@ -59,15 +63,54 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   ],
   openPaths: ["drafts/draft.md"],
   activePath: "drafts/draft.md",
+  previewPath: "drafts/draft.md",
   editorRef: null,
 
   setEditorRef: (ref) => set({ editorRef: ref }),
   setActivePath: (path) => set({ activePath: path }),
-  openFile: (path) =>
-    set((s) => ({
-      openPaths: s.openPaths.includes(path) ? s.openPaths : [...s.openPaths, path],
-      activePath: path,
-    })),
+  openFilePreview: (path) =>
+    set((s) => {
+      if (!s.files.some((f) => f.path === path)) return {};
+      if (s.openPaths.includes(path)) return { activePath: path };
+
+      if (s.previewPath && s.openPaths.includes(s.previewPath)) {
+        const idx = s.openPaths.indexOf(s.previewPath);
+        const next = s.openPaths.slice();
+        next[idx] = path;
+        return { openPaths: next, activePath: path, previewPath: path };
+      }
+
+      return { openPaths: [...s.openPaths, path], activePath: path, previewPath: path };
+    }),
+  openFilePinned: (path) =>
+    set((s) => {
+      if (!s.files.some((f) => f.path === path)) return {};
+      if (s.openPaths.includes(path)) {
+        return { activePath: path, previewPath: s.previewPath === path ? null : s.previewPath };
+      }
+      return { openPaths: [...s.openPaths, path], activePath: path };
+    }),
+  closeTab: (path) =>
+    set((s) => {
+      const idx = s.openPaths.indexOf(path);
+      if (idx < 0) return {};
+      const nextOpen = s.openPaths.filter((p) => p !== path);
+      const nextPreview = s.previewPath === path ? null : s.previewPath;
+      let nextActive = s.activePath;
+
+      if (s.activePath === path) {
+        nextActive = nextOpen[idx - 1] ?? nextOpen[idx] ?? nextOpen[0] ?? "";
+      }
+
+      if (!nextOpen.length) {
+        const fallback = s.files[0]?.path ?? "";
+        if (fallback) {
+          return { openPaths: [fallback], activePath: fallback, previewPath: fallback };
+        }
+      }
+
+      return { openPaths: nextOpen, activePath: nextActive, previewPath: nextPreview };
+    }),
   updateFile: (path, content) =>
     set((s) => ({
       files: s.files.map((f) => (f.path === path ? { ...f, content } : f)),
@@ -97,6 +140,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       files: s.files.map((f) => ({ ...f })),
       openPaths: [...s.openPaths],
       activePath: s.activePath,
+      previewPath: s.previewPath,
     };
   },
   restore: (snap) =>
@@ -104,6 +148,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       files: snap.files.map((f) => ({ ...f })),
       openPaths: [...snap.openPaths],
       activePath: snap.activePath,
+      previewPath: snap.previewPath,
     }),
 }));
 

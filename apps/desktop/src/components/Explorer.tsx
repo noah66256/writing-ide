@@ -8,7 +8,8 @@ function basename(p: string) {
 export function Explorer() {
   const files = useProjectStore((s) => s.files);
   const activePath = useProjectStore((s) => s.activePath);
-  const openFile = useProjectStore((s) => s.openFile);
+  const openFilePreview = useProjectStore((s) => s.openFilePreview);
+  const openFilePinned = useProjectStore((s) => s.openFilePinned);
 
   return (
     <div className="list">
@@ -16,7 +17,8 @@ export function Explorer() {
         <div
           key={f.path}
           className={`fileItem ${activePath === f.path ? "fileItemActive" : ""}`}
-          onClick={() => openFile(f.path)}
+          onClick={() => openFilePreview(f.path)}
+          onDoubleClick={() => openFilePinned(f.path)}
           title={f.path}
         >
           <span

@@ -10,7 +10,9 @@ function basename(p: string) {
 export function EditorPane() {
   const openPaths = useProjectStore((s) => s.openPaths);
   const activePath = useProjectStore((s) => s.activePath);
+  const previewPath = useProjectStore((s) => s.previewPath);
   const setActivePath = useProjectStore((s) => s.setActivePath);
+  const closeTab = useProjectStore((s) => s.closeTab);
   const updateFile = useProjectStore((s) => s.updateFile);
   const getFileByPath = useProjectStore((s) => s.getFileByPath);
   const setEditorRef = useProjectStore((s) => s.setEditorRef);
@@ -23,11 +25,23 @@ export function EditorPane() {
         {openPaths.map((p) => (
           <div
             key={p}
-            className={`tab ${p === activePath ? "tabActive" : ""}`}
+            className={`tab ${p === activePath ? "tabActive" : ""} ${p === previewPath ? "tabPreview" : ""}`}
             onClick={() => setActivePath(p)}
             title={p}
           >
-            {basename(p)}
+            <span className="tabLabel">{basename(p)}</span>
+            <button
+              className="tabClose"
+              type="button"
+              aria-label={`关闭 ${basename(p)}`}
+              title="关闭"
+              onClick={(e) => {
+                e.stopPropagation();
+                closeTab(p);
+              }}
+            >
+              ×
+            </button>
           </div>
         ))}
       </div>

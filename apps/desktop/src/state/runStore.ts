@@ -33,6 +33,9 @@ export type ToolBlockStep = {
   kept: boolean;
   applied: boolean;
 
+  // proposal-first：Keep 时执行 apply（如存在），再标记 applied/undoable
+  apply?: () => void | { undo?: () => void };
+
   undoable: boolean;
   undo?: () => void;
 };
@@ -142,6 +145,7 @@ export const useRunStore = create<RunState>((set, get) => ({
       applyPolicy: tool.applyPolicy,
       kept: tool.kept ?? false,
       applied: tool.applied ?? tool.applyPolicy === "auto_apply",
+      apply: tool.apply,
       undoable: tool.undoable,
       undo: tool.undo,
     };
@@ -155,12 +159,47 @@ export const useRunStore = create<RunState>((set, get) => ({
       ),
     })),
 
-  keepStep: (stepId) =>
+  keepStep: (stepId) => {
+    const step = get().steps.find((s) => s.id === stepId);
+    if (!step || step.type !== "tool") return;
+    if (step.status === "running" || step.status === "undone" || step.kept) return;
+
+    // proposal-first：Keep 时执行 apply（并补齐 undo）
+    if (step.applyPolicy === "proposal" && !step.applied && step.apply) {
+      try {
+        const ret = step.apply();
+        const undo = (ret as any)?.undo as (() => void) | undefined;
+        set((s) => ({
+          steps: s.steps.map((x) =>
+            x.id === stepId && x.type === "tool"
+              ? {
+                  ...x,
+                  kept: true,
+                  applied: true,
+                  undoable: Boolean(undo) || x.undoable,
+                  undo: undo ?? x.undo,
+                }
+              : x,
+          ),
+        }));
+      } catch (e: any) {
+        const msg = e?.message ? String(e.message) : String(e);
+        set((s) => ({
+          steps: s.steps.map((x) =>
+            x.id === stepId && x.type === "tool"
+              ? { ...x, status: "failed", output: { ok: false, error: msg } }
+              : x,
+          ),
+        }));
+      }
+      return;
+    }
+
+    // 默认：仅采纳进入上下文
     set((s) => ({
-      steps: s.steps.map((step) =>
-        step.id === stepId && step.type === "tool" ? { ...step, kept: true } : step,
-      ),
-    })),
+      steps: s.steps.map((x) => (x.id === stepId && x.type === "tool" ? { ...x, kept: true } : x)),
+    }));
+  },
   undoStep: (stepId) => {
     const step = get().steps.find((s) => s.id === stepId);
     if (!step || step.type !== "tool") return;
@@ -168,7 +207,7 @@ export const useRunStore = create<RunState>((set, get) => ({
     set((s) => ({
       steps: s.steps.map((x) =>
         x.id === stepId && x.type === "tool"
-          ? { ...x, status: "undone", kept: false }
+          ? { ...x, status: "undone", kept: false, applied: false }
           : x,
       ),
     }));

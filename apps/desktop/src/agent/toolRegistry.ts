@@ -10,6 +10,8 @@ export type ToolArgSpec = {
 export type ToolExecOk = {
   ok: true;
   output: unknown;
+  // proposal-first：返回 apply 供 Keep 执行（apply 返回 undo 供 Undo 回滚）
+  apply?: () => void | { undo?: () => void };
   undoable: boolean;
   undo?: () => void;
 };
@@ -209,6 +211,115 @@ const tools: ToolDefinition[] = [
         output: { ok: true, replacedChars: before.length, newChars: text.length },
         undoable: true,
         undo,
+      };
+    },
+  },
+  {
+    name: "doc.applyEdits",
+    description:
+      "对当前活动文件应用一组文本编辑（edits）。默认先生成预览（proposal-first），点击 Keep 才真正写入；Undo 可回滚。",
+    args: [
+      { name: "path", required: false, desc: "文件路径（默认 activePath；MVP 仅支持 activePath）" },
+      {
+        name: "edits",
+        required: true,
+        desc:
+          'JSON 数组：[{ startLineNumber, startColumn, endLineNumber, endColumn, text }...]（基于 Monaco range）',
+      },
+    ],
+    riskLevel: "medium",
+    applyPolicy: "proposal",
+    reversible: true,
+    run: async (args) => {
+      const s = useProjectStore.getState();
+      const ed = s.editorRef;
+      if (!ed) return { ok: false, error: "NO_EDITOR" };
+      const model = ed.getModel();
+      if (!model) return { ok: false, error: "NO_MODEL" };
+
+      const path = String(args.path ?? s.activePath ?? "");
+      if (!path) return { ok: false, error: "MISSING_PATH" };
+      if (path !== s.activePath) return { ok: false, error: "ONLY_ACTIVE_FILE_SUPPORTED" };
+
+      const edits = args.edits as any;
+      if (!Array.isArray(edits) || edits.length === 0) return { ok: false, error: "EMPTY_EDITS" };
+
+      type One = {
+        startLineNumber: number;
+        startColumn: number;
+        endLineNumber: number;
+        endColumn: number;
+        text: string;
+      };
+      const normalized: One[] = [];
+      for (const e of edits) {
+        const sl = Number(e?.startLineNumber);
+        const sc = Number(e?.startColumn);
+        const el = Number(e?.endLineNumber);
+        const ec = Number(e?.endColumn);
+        const text = String(e?.text ?? "");
+        if (![sl, sc, el, ec].every((n) => Number.isFinite(n) && n > 0)) {
+          return { ok: false, error: "INVALID_RANGE" };
+        }
+        normalized.push({ startLineNumber: sl, startColumn: sc, endLineNumber: el, endColumn: ec, text });
+      }
+
+      // 预览：用 offset 在纯字符串上应用（倒序，避免偏移）
+      const before = model.getValue();
+      const ranges = normalized
+        .map((e) => {
+          const startOffset = model.getOffsetAt({ lineNumber: e.startLineNumber, column: e.startColumn });
+          const endOffset = model.getOffsetAt({ lineNumber: e.endLineNumber, column: e.endColumn });
+          return { ...e, startOffset, endOffset };
+        })
+        .sort((a, b) => b.startOffset - a.startOffset);
+
+      let after = before;
+      for (const r of ranges) {
+        after = after.slice(0, r.startOffset) + r.text + after.slice(r.endOffset);
+      }
+
+      const first = ranges[ranges.length - 1];
+      const ctx = 400;
+      const start = Math.max(0, first.startOffset - ctx);
+      const end = Math.min(before.length, first.endOffset + ctx);
+      const beforeExcerpt = before.slice(start, end);
+      const afterExcerpt = after.slice(start, Math.min(after.length, start + (end - start)));
+
+      const apply = () => {
+        const snap = useProjectStore.getState().snapshot();
+        ed.executeEdits(
+          "agent",
+          normalized.map((e) => ({
+            range: {
+              startLineNumber: e.startLineNumber,
+              startColumn: e.startColumn,
+              endLineNumber: e.endLineNumber,
+              endColumn: e.endColumn,
+            },
+            text: e.text,
+            forceMoveMarkers: true,
+          })),
+        );
+        const next = ed.getModel()?.getValue() ?? "";
+        useProjectStore.getState().updateFile(path, next);
+        return { undo: () => useProjectStore.getState().restore(snap) };
+      };
+
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          path,
+          editsCount: normalized.length,
+          preview: {
+            note: "这是修改提案。点击 Keep 才会应用到编辑器；Undo 可回滚。",
+            beforeExcerpt,
+            afterExcerpt,
+          },
+        },
+        apply,
+        undoable: false,
       };
     },
   },
