@@ -90,6 +90,7 @@ export function AgentPane() {
       <div className="messages">
         {steps.map((step) => {
           if (step.type === "assistant") {
+            if (step.hidden) return null;
             return (
               <div key={step.id} className="msgAssistant">
                 {step.text}

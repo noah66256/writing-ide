@@ -17,6 +17,7 @@ export type AssistantStep = {
   type: "assistant";
   text: string;
   streaming?: boolean;
+  hidden?: boolean;
 };
 
 export type ToolBlockStep = {
@@ -58,9 +59,10 @@ type RunState = {
   setModel: (model: string) => void;
   resetRun: () => void;
 
-  addAssistant: (initialText?: string, streaming?: boolean) => string;
+  addAssistant: (initialText?: string, streaming?: boolean, hidden?: boolean) => string;
   appendAssistantDelta: (stepId: string, delta: string) => void;
   finishAssistant: (stepId: string) => void;
+  patchAssistant: (stepId: string, patch: Partial<AssistantStep>) => void;
 
   addTool: (
     tool: Omit<ToolBlockStep, "id" | "type" | "kept" | "applied"> & {
@@ -97,10 +99,10 @@ export const useRunStore = create<RunState>((set, get) => ({
   setRunning: (running) => set({ isRunning: running }),
   resetRun: () => set({ steps: [], logs: [], isRunning: false, mainDoc: { goal: "" } }),
 
-  addAssistant: (initialText = "", streaming = false) => {
+  addAssistant: (initialText = "", streaming = false, hidden = false) => {
     const id = makeId("a");
     set((s) => ({
-      steps: [...s.steps, { id, type: "assistant", text: initialText, streaming }],
+      steps: [...s.steps, { id, type: "assistant", text: initialText, streaming, hidden }],
     }));
     return id;
   },
@@ -118,6 +120,12 @@ export const useRunStore = create<RunState>((set, get) => ({
         step.id === stepId && step.type === "assistant"
           ? { ...step, streaming: false }
           : step,
+      ),
+    })),
+  patchAssistant: (stepId, patch) =>
+    set((s) => ({
+      steps: s.steps.map((step) =>
+        step.id === stepId && step.type === "assistant" ? { ...step, ...patch } : step,
       ),
     })),
 
