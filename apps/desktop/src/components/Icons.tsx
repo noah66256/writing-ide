@@ -142,6 +142,28 @@ export function IconStop(props: SvgProps) {
   );
 }
 
+export function IconRewind(props: SvgProps) {
+  const s = props.size ?? 18;
+  return (
+    <svg {...baseProps(s)}>
+      <path
+        d="M8.5 7.5 5 11l3.5 3.5"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M6 11h7.2a4.8 4.8 0 0 1 0 9.6H10"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 export function IconChevronDown(props: SvgProps) {
   const s = props.size ?? 16;
   return (

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { startGatewayRun } from "../agent/gatewayAgent";
 import { useRunStore } from "../state/runStore";
 import { useProjectStore } from "../state/projectStore";
-import { IconAt, IconGlobe, IconImage, IconMic, IconSend, IconStop } from "./Icons";
+import { IconAt, IconGlobe, IconImage, IconMic, IconRewind, IconSend, IconStop } from "./Icons";
 import { PillSelect } from "./PillSelect";
 import { ToolBlock } from "./ToolBlock";
 import { RichText } from "./RichText";
@@ -28,6 +28,7 @@ export function AgentPane() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   const [submitFromHistory, setSubmitFromHistory] = useState<null | { stepId: string; text: string }>(null);
+  const historyEditRef = useRef<HTMLDivElement | null>(null);
 
   // 默认走相对路径（/api），由 Vite dev server 代理到本地 Gateway，避免跨域问题
   const gatewayUrl = (import.meta as any).env?.VITE_GATEWAY_URL ?? "";
@@ -151,6 +152,21 @@ export function AgentPane() {
     controllerRef.current = startGatewayRun({ gatewayUrl, mode, model, prompt: text });
   };
 
+  // 点击空白处取消“选定历史框”（回到显示态）
+  useEffect(() => {
+    if (!editingId) return;
+    const onDown = (e: MouseEvent) => {
+      const root = historyEditRef.current;
+      const target = e.target as Node;
+      if (!root) return;
+      if (root.contains(target)) return;
+      setEditingId(null);
+      setEditingText("");
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [editingId]);
+
   return (
     <>
       <div className="mainDoc">
@@ -175,58 +191,190 @@ export function AgentPane() {
         {steps.map((step) => {
           if (step.type === "user") {
             const isEditing = editingId === step.id;
+            const hasRevert = !isEditing;
             return (
-              <div key={step.id} className="msgUser">
-                <div className="msgUserHeader">
-                  <div className="msgUserMeta">
-                    你 · {new Date(step.ts).toLocaleTimeString()}
-                    {step.edited ? "（已编辑）" : ""}
-                  </div>
-                  <button
-                    className="msgEditBtn"
-                    type="button"
-                    onClick={() => {
-                      setEditingId(step.id);
-                      setEditingText(step.text);
-                    }}
-                    title="编辑并从该条继续（可回滚）"
-                  >
-                    编辑
-                  </button>
-                </div>
-                {isEditing ? (
-                  <div style={{ display: "grid", gap: 8 }}>
-                    <textarea
-                      className="msgEditArea"
-                      value={editingText}
-                      onChange={(e) => setEditingText(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.isComposing) return;
-                        if (e.key !== "Enter") return;
-                        if (e.ctrlKey || e.metaKey) return; // 允许换行（默认行为）
-                        e.preventDefault();
-                        setSubmitFromHistory({ stepId: step.id, text: editingText.trim() });
+              <div
+                key={step.id}
+                className="msgUser"
+                onClick={() => {
+                  if (isEditing) return;
+                  setEditingId(step.id);
+                  setEditingText(step.text);
+                }}
+              >
+                {hasRevert && (
+                  <div className="msgUserHeader">
+                    <div className="msgUserMeta">
+                      你 · {new Date(step.ts).toLocaleTimeString()}
+                      {step.edited ? "（已编辑）" : ""}
+                    </div>
+                    <button
+                      className="iconBtn"
+                      type="button"
+                      aria-label="从此处继续（可回滚）"
+                      title="从此处继续（可回滚）"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSubmitFromHistory({ stepId: step.id, text: step.text });
                       }}
-                    />
-                    <div className="btnRow">
-                      <button
-                        className="btn"
-                        type="button"
-                        onClick={() => {
-                          setEditingId(null);
-                          setEditingText("");
+                    >
+                      <IconRewind />
+                    </button>
+                  </div>
+                )}
+
+                {isEditing ? (
+                  <div ref={historyEditRef}>
+                    <div className="composerBox">
+                      <textarea
+                        className="composerTextarea"
+                        value={editingText}
+                        onChange={(e) => setEditingText(e.target.value)}
+                        rows={3}
+                        placeholder="编辑这条历史消息，然后提交继续…"
+                        onKeyDown={(e) => {
+                          if (e.isComposing) return;
+                          if (e.key === "Escape") {
+                            e.preventDefault();
+                            setEditingId(null);
+                            setEditingText("");
+                            return;
+                          }
+                          if (e.key !== "Enter") return;
+
+                          // Ctrl/⌘ + Enter：换行（不提交）
+                          if (e.ctrlKey || e.metaKey) {
+                            e.preventDefault();
+                            const el = e.currentTarget;
+                            const start = el.selectionStart ?? editingText.length;
+                            const end = el.selectionEnd ?? editingText.length;
+                            const next = editingText.slice(0, start) + "\n" + editingText.slice(end);
+                            setEditingText(next);
+                            requestAnimationFrame(() => {
+                              const pos = start + 1;
+                              el.selectionStart = pos;
+                              el.selectionEnd = pos;
+                            });
+                            return;
+                          }
+
+                          // Enter：提交（触发确认弹窗）
+                          e.preventDefault();
+                          const t = editingText.trim();
+                          if (!t) return;
+                          setSubmitFromHistory({ stepId: step.id, text: t });
                         }}
-                      >
-                        取消
-                      </button>
-                      <button
-                        className="btn btnPrimary"
-                        type="button"
-                        onClick={() => setSubmitFromHistory({ stepId: step.id, text: editingText.trim() })}
-                        disabled={!editingText.trim()}
-                      >
-                        提交
-                      </button>
+                      />
+
+                      <div className="composerBar">
+                        <div className="composerBarLeft">
+                          <PillSelect
+                            value={mode}
+                            options={[
+                              { value: "plan", label: "Plan" },
+                              { value: "agent", label: "Agent" },
+                              { value: "chat", label: "Chat" },
+                            ]}
+                            onChange={(v) => setMode(v as typeof mode)}
+                            title="模式"
+                            minWidth={86}
+                            maxWidth={120}
+                          />
+                          <PillSelect
+                            value={model}
+                            options={modelOptions.map((m) => ({ value: m, label: m }))}
+                            onChange={(v) => setModel(v)}
+                            title={model || "未选择模型"}
+                            minWidth={120}
+                            maxWidth={220}
+                          />
+                          <div className="ctxPill" title={ctxTitle} aria-label="Context 使用量">
+                            CTX {ctxPct}%
+                          </div>
+                        </div>
+
+                        <div className="composerBarRight">
+                          <button
+                            className="iconBtn"
+                            type="button"
+                            aria-label="@ 引用"
+                            title="@ 引用选择器（占位：先插入 @）"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditingText((v) => (v.endsWith("@") ? v : v + "@"));
+                            }}
+                          >
+                            <IconAt />
+                          </button>
+                          <button
+                            className="iconBtn"
+                            type="button"
+                            aria-label="联网/网页引用"
+                            title="联网/网页引用（占位：后续接 webSearch）"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              useRunStore.getState().addAssistant("（webSearch 按钮占位：后续接入）");
+                            }}
+                          >
+                            <IconGlobe />
+                          </button>
+                          <button
+                            className="iconBtn"
+                            type="button"
+                            aria-label="图片"
+                            title="图片输入（占位：后续接入上传/解析/OCR）"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              fileInputRef.current?.click();
+                            }}
+                          >
+                            <IconImage />
+                          </button>
+                          <button
+                            className="iconBtn"
+                            type="button"
+                            aria-label="语音"
+                            title="语音输入（占位：后续接入 start/stop）"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              useRunStore.getState().addAssistant("（语音输入接口已预留，后续接入）");
+                            }}
+                          >
+                            <IconMic />
+                          </button>
+
+                          {isRunning ? (
+                            <button
+                              className="sendBtn"
+                              type="button"
+                              aria-label="停止"
+                              title="停止"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onStop();
+                              }}
+                            >
+                              <IconStop />
+                            </button>
+                          ) : (
+                            <button
+                              className="sendBtn"
+                              type="button"
+                              aria-label="提交"
+                              title="提交"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const t = editingText.trim();
+                                if (!t) return;
+                                setSubmitFromHistory({ stepId: step.id, text: t });
+                              }}
+                              disabled={!editingText.trim() || !model}
+                            >
+                              <IconSend />
+                            </button>
+                          )}
+                        </div>
+                      </div>
                     </div>
                   </div>
                 ) : (
