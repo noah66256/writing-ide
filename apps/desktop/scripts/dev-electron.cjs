@@ -13,17 +13,19 @@ function resolvePort(defaultPort = 5173) {
 function resolveDevServerUrl(port) {
   const raw = String(process.env.VITE_DEV_SERVER_URL ?? "").trim();
   if (raw) return raw;
-  return `http://127.0.0.1:${port}`;
+  // Windows 上 Vite 可能只监听在 IPv6 回环（::1），此时 127.0.0.1 会连接失败；
+  // 用 localhost 能自动匹配系统的回环解析（::1 或 127.0.0.1）。
+  return `http://localhost:${port}`;
 }
 
 function parseHostPort(urlStr, fallbackPort) {
   try {
     const u = new URL(urlStr);
-    const host = u.hostname || "127.0.0.1";
+    const host = u.hostname || "localhost";
     const port = u.port ? Number(u.port) : fallbackPort;
     return { host, port };
   } catch {
-    return { host: "127.0.0.1", port: fallbackPort };
+    return { host: "localhost", port: fallbackPort };
   }
 }
 
