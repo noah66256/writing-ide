@@ -50,7 +50,7 @@ npm install
 npm run dev:gateway
 ```
 
-4) 启动 Desktop（新终端，Vite 默认 `5173`）
+4) 启动 Desktop（新终端，Vite 默认 `5173`；如冲突可用环境变量 `DESKTOP_DEV_PORT` 修改）
 
 ```bash
 npm run dev:desktop

@@ -51,7 +51,7 @@ npm run dev:desktop
 ```
 
 说明：
-- 会启动 Vite（`5173`）并拉起 Electron。
+- 会启动 Vite（默认 `5173`，可通过环境变量 `DESKTOP_DEV_PORT` 修改）并拉起 Electron。
 - 如需真实模型流式输出，请先启动 Gateway（默认 `8000`），并在根目录 `.env` 配好 `LLM_BASE_URL / LLM_MODEL / LLM_API_KEY`。
 - Desktop dev 通过 Vite proxy 把 `/api/*` 转发到 Gateway，避免 Electron renderer 跨域问题。
 
