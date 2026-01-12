@@ -159,6 +159,7 @@ async function buildReferencesText(prompt: string) {
 
 function buildContextPack(extra?: { referencesText?: string }) {
   const mainDoc = useRunStore.getState().mainDoc;
+  const todoList = useRunStore.getState().todoList;
   const proj = useProjectStore.getState();
   const docRules = proj.getFileByPath("doc.rules.md")?.content ?? "";
   const files = proj.files.map((f) => ({ path: f.path, chars: f.content.length }));
@@ -167,19 +168,6 @@ function buildContextPack(extra?: { referencesText?: string }) {
     openPaths: proj.openPaths,
     files,
   };
-
-  const recentDialogue = (() => {
-    const steps = useRunStore.getState().steps;
-    const msgs = steps
-      .filter((s) => s.type === "user" || (s.type === "assistant" && !s.hidden))
-      .slice(-10)
-      .map((s) => {
-        const text = s.type === "user" ? s.text : s.type === "assistant" ? s.text : "";
-        const trimmed = text.length > 2000 ? text.slice(0, 2000) + "…(truncated)" : text;
-        return `${s.type === "user" ? "USER" : "ASSISTANT"}: ${trimmed}`;
-      });
-    return msgs.join("\n\n");
-  })();
 
   const selection = (() => {
     const ed = proj.editorRef;
@@ -211,14 +199,15 @@ function buildContextPack(extra?: { referencesText?: string }) {
   const refs = extra?.referencesText ? `${extra.referencesText}\n\n` : "";
   return (
     `MAIN_DOC(JSON):\n${JSON.stringify(mainDoc, null, 2)}\n\n` +
+    `RUN_TODO(JSON):\n${JSON.stringify(todoList, null, 2)}\n\n` +
     `DOC_RULES(Markdown):\n${docRules}\n\n` +
     refs +
     `EDITOR_SELECTION(JSON):\n${JSON.stringify(selection, null, 2)}\n\n` +
-    `RECENT_DIALOGUE:\n${recentDialogue}\n\n` +
     `PROJECT_STATE(JSON):\n${JSON.stringify(state, null, 2)}\n\n` +
     `注意：\n` +
     `- 已提供当前编辑器选区（EDITOR_SELECTION）。若用户说“改写我选中的这段”，优先用该选区。\n` +
-    `- 如需文件正文请调用 doc.read；如需刷新选区也可调用 doc.getSelection。`
+    `- 如需文件正文请调用 doc.read；如需刷新选区也可调用 doc.getSelection。\n` +
+    `- 本次 Context Pack 不包含完整历史对话；关键决策请写入 Main Doc（run.mainDoc.update），历史素材请用 @{} 显式引用。`
   );
 }
 

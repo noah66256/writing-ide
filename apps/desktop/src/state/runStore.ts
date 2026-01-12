@@ -9,9 +9,23 @@ export type ToolRiskLevel = "low" | "medium" | "high";
 export type MainDoc = {
   goal?: string;
   platformType?: "feed_preview" | "search_click" | "long_subscription";
+  audience?: string;
+  persona?: string;
+  tone?: string;
+  sourcesPolicy?: "user_only" | "kb" | "web" | "kb_and_web";
   topic?: string;
   angle?: string;
   title?: string;
+  outline?: string;
+};
+
+export type TodoStatus = "todo" | "in_progress" | "done" | "blocked" | "skipped";
+
+export type TodoItem = {
+  id: string;
+  text: string;
+  status: TodoStatus;
+  note?: string;
 };
 
 export type UserStep = {
@@ -24,6 +38,7 @@ export type UserStep = {
   baseline?: {
     project: ProjectSnapshot;
     mainDoc: MainDoc;
+    todoList: TodoItem[];
   };
 };
 
@@ -69,6 +84,7 @@ type RunState = {
   mode: Mode;
   model: string;
   mainDoc: MainDoc;
+  todoList: TodoItem[];
   steps: Step[];
   logs: LogEntry[];
   isRunning: boolean;
@@ -101,6 +117,8 @@ type RunState = {
   undoStep: (stepId: string) => void;
 
   updateMainDoc: (patch: Partial<MainDoc>) => { undo: () => void };
+  setTodoList: (items: TodoItem[]) => { undo: () => void };
+  updateTodo: (id: string, patch: Partial<TodoItem>) => { undo: () => void };
   log: (level: LogEntry["level"], message: string, data?: unknown) => void;
   clearLogs: () => void;
   setRunning: (running: boolean) => void;
@@ -116,6 +134,7 @@ export const useRunStore = create<RunState>()(
   mode: "plan",
   model: "",
   mainDoc: { goal: "" },
+  todoList: [],
   steps: [],
   logs: [],
   isRunning: false,
@@ -124,7 +143,7 @@ export const useRunStore = create<RunState>()(
   setModel: (model) => set({ model }),
   setMainDoc: (mainDoc) => set({ mainDoc }),
   setRunning: (running) => set({ isRunning: running }),
-  resetRun: () => set({ steps: [], logs: [], isRunning: false, mainDoc: { goal: "" } }),
+  resetRun: () => set({ steps: [], logs: [], isRunning: false, mainDoc: { goal: "" }, todoList: [] }),
 
   addUser: (text, baseline) => {
     const id = makeId("u");
@@ -266,6 +285,21 @@ export const useRunStore = create<RunState>()(
     const prev = get().mainDoc;
     set({ mainDoc: { ...prev, ...patch } });
     return { undo: () => set({ mainDoc: prev }) };
+  },
+
+  setTodoList: (items) => {
+    const prev = get().todoList;
+    set({ todoList: Array.isArray(items) ? items : [] });
+    return { undo: () => set({ todoList: prev }) };
+  },
+
+  updateTodo: (id, patch) => {
+    const prev = get().todoList;
+    const idx = prev.findIndex((t) => t.id === id);
+    if (idx < 0) return { undo: () => void 0 };
+    const next = prev.map((t) => (t.id === id ? { ...t, ...patch, id: t.id } : t));
+    set({ todoList: next });
+    return { undo: () => set({ todoList: prev }) };
   },
 
   log: (level, message, data) => {

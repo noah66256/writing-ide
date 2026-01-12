@@ -381,6 +381,8 @@
 - ✅ 本地项目落盘（MVP）：打开真实目录、读写磁盘文件、最近项目（自动恢复上次项目）
 - ✅ Explorer（增强）：树形目录；右键新建文件/文件夹、重命名、移动、删除；外部文件变更自动刷新（dirty 不覆盖）
 - ✅ ReAct（开发期）：Gateway 负责 `/api/agent/run/stream` 编排（SSE：`tool.call/tool.result`），Desktop 执行工具并回传 `tool_result`
+- ✅ Todo/进度（写作闭环锚点）：`run.setTodoList` / `run.updateTodo`（工具）+ Context Pack 注入 + Dock/Runs 富文本展示
+- ✅ 对话稳定性（防“自言自语/臆造继续/顺序错乱”）：Plan/Agent Context Pack 移除 RECENT_DIALOGUE；Gateway 提示词强约束“工具 XML 独占消息”；前端过滤漏出的 `<tool_call>` 并支持自动滚动
 - ✅ proposal-first 写入：`doc.applyEdits` 与覆盖写入类工具先出提案，点 Keep 才 apply；Undo 可回滚
 - ✅ Diff 预览（增强）：Tool Block 以“文件级头部”展示（NEW/MOD + +X/-Y），并对 +/- 行做红绿高亮；支持复制 diff
 - ✅ 快照：`doc.commitSnapshot` / `doc.listSnapshots` / `doc.restoreSnapshot`（restore 为 proposal-first）
@@ -393,6 +395,7 @@
   - [x] 引用（@）：右侧引用选择器 + 左侧拖拽到输入框插入引用 token；发送时把引用内容注入上下文（含文件夹展开与截断保护）
   - [x] Explorer（增强）：批量操作（多选/批量移动/删除）、拖拽视觉反馈、搜索高亮
   - [x] Diff 预览（文件级）：NEW/MOD + +X/-Y + 红绿高亮（右侧 Tool Blocks）
+  - [x] Todo List：Agent 生成/更新 todo（`run.setTodoList` / `run.updateTodo`），UI 可查看进度（Dock/Runs）
   - [ ] Diff 预览升级（分栏）：unified diff → 更直观的左右分栏/更像 VSCode/Git 的对照视图
   - [ ] 快照面板：在 Dock Panel 提供快照列表/恢复/删除（与 Tool Block Keep/Undo 一致）
 - **P1（写作增强）**

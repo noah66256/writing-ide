@@ -145,20 +145,28 @@
 - @ 引用选择器 + 拖拽引用 + 引用注入 contextPack（含截断与文件夹展开）
 - Tool Blocks（Keep/Undo）+ 文件级 diff 预览（NEW/MOD + +X/-Y）
 - proposal-first 写入（覆盖写入/批量/回滚等）
+- Todo/进度：`run.setTodoList` / `run.updateTodo`（工具）+ Context Pack 注入 + Dock/Runs 展示（可追踪闭环）
 
 建议下一步补齐（写作正事会强依赖）：
 - `Outline`：从 Markdown 标题树生成大纲，并与编辑器联动（点击定位）
 - `Problems/Lint`：把 style/platform/facts 的问题做成可点击列表与“一键生成修复提案”
-- `run.setTodoList / run.updateTodo`：把 todo 变成“可勾选、可重规划”的一等公民（UI + 状态）
 
 ---
 
-### 9. 外部参考：planning-with-files（待补链接）
-你提到的 **`planning-with-files` skill** 我这边用当前检索没定位到准确仓库/链接。  
-你方便把 GitHub 链接或完整 repo 名称贴一下，我会把它的关键协议/范式抽成：
-- 我们的“技能提示（playbook）”如何写
-- 需要哪些工具接口（例如列文件/读文件/写文件/提交 diff）
-- 如何把“文件计划（File Plan）”纳入 Main Doc 与 Tool Blocks
+### 9. 外部参考：planning-with-files（Manus 风格的“文件即记忆”）
+参考仓库：[OthmanAdi/planning-with-files](https://github.com/OthmanAdi/planning-with-files)
+
+我们从里面吸收的关键点（对齐写作 Agent）：
+- **Filesystem as memory**：重要信息写进文件/持久化结构，不全塞上下文
+- **3-file pattern**：`task_plan.md`（计划/状态）+ `findings.md`（发现/素材）+ `progress.md`（日志/测试）
+- **Attention manipulation**：关键决策前强制“重读计划”，避免 goal drift
+- **错误持久化**：失败/踩坑要记录，避免重复失败
+
+对齐到我们当前实现：
+- `Main Doc` ≈ `task_plan.md`（run 主线锚点）
+- `RUN_TODO` + Dock/Runs ≈ 计划/进度（更适合 UI 化）
+- 后续可补一个 `findings.md`（或 Dock/KB 面板）承载“素材与发现”
+- 稳定性补丁：Plan/Agent Context Pack 不注入完整历史对话（避免臆造“你说继续”）；若模型违规把工具 XML 混入正文，前端会过滤 `<tool_call>` 片段并保持输出顺序清晰；消息区支持自动跟随滚动（上滑浏览历史时不抢滚动）
 
 ---
 

@@ -217,6 +217,24 @@ function unifiedDiff(args: { path: string; before: string; after: string; contex
   return { truncated: false, diff: outLines.join("\n") + "\n", stats: { added, removed } };
 }
 
+type TodoStatus = "todo" | "in_progress" | "done" | "blocked" | "skipped";
+
+function makeTodoId() {
+  const anyCrypto = globalThis as any;
+  const uuid = typeof anyCrypto?.crypto?.randomUUID === "function" ? anyCrypto.crypto.randomUUID() : null;
+  return `todo_${uuid ?? `${Date.now()}_${Math.random().toString(16).slice(2)}`}`;
+}
+
+function normalizeTodoStatus(input: unknown): TodoStatus {
+  const s = String(input ?? "").trim().toLowerCase();
+  if (s === "todo") return "todo";
+  if (s === "in_progress" || s === "inprogress" || s === "doing") return "in_progress";
+  if (s === "done" || s === "completed") return "done";
+  if (s === "blocked") return "blocked";
+  if (s === "skipped") return "skipped";
+  return "todo";
+}
+
 function coerceValue(v: string): unknown {
   const raw = v;
   const s = v.trim();
@@ -293,6 +311,58 @@ const tools: ToolDefinition[] = [
       const { undo } = useRunStore.getState().updateMainDoc(patch as any);
       const mainDoc = useRunStore.getState().mainDoc;
       return { ok: true, output: { ok: true, mainDoc }, undoable: true, undo };
+    },
+  },
+  {
+    name: "run.setTodoList",
+    description:
+      "设置本次 Run 的 Todo List（用于进度追踪与防跑偏）。建议在澄清后立刻调用一次，并在执行过程中用 run.updateTodo 更新状态。",
+    args: [{ name: "items", required: true, desc: 'JSON 数组：TodoItem[]（{ id?, text, status?, note? }）' }],
+    riskLevel: "low",
+    applyPolicy: "auto_apply",
+    reversible: true,
+    run: async (args) => {
+      const items = args.items as any;
+      if (!Array.isArray(items)) return { ok: false, error: "INVALID_ITEMS" };
+
+      const norm = items
+        .map((x: any) => ({
+          id: String(x?.id ?? "").trim() || makeTodoId(),
+          text: String(x?.text ?? "").trim(),
+          status: normalizeTodoStatus(x?.status),
+          note: x?.note === undefined ? undefined : String(x.note ?? ""),
+        }))
+        .filter((t: any) => Boolean(t.text));
+
+      const { undo } = useRunStore.getState().setTodoList(norm as any);
+      const todoList = useRunStore.getState().todoList;
+      return { ok: true, output: { ok: true, todoList }, undoable: true, undo };
+    },
+  },
+  {
+    name: "run.updateTodo",
+    description: "更新某一条 Todo 的状态/备注（用于记录进度）。",
+    args: [
+      { name: "id", required: true, desc: "Todo ID（来自 run.setTodoList 的返回）" },
+      { name: "patch", required: true, desc: "JSON 对象：{ status?, note?, text? }" },
+    ],
+    riskLevel: "low",
+    applyPolicy: "auto_apply",
+    reversible: true,
+    run: async (args) => {
+      const id = String(args.id ?? "").trim();
+      if (!id) return { ok: false, error: "MISSING_ID" };
+      const patch = args.patch as any;
+      if (!patch || typeof patch !== "object") return { ok: false, error: "INVALID_PATCH" };
+
+      const nextPatch: any = {};
+      if (patch.text !== undefined) nextPatch.text = String(patch.text ?? "");
+      if (patch.status !== undefined) nextPatch.status = normalizeTodoStatus(patch.status);
+      if (patch.note !== undefined) nextPatch.note = String(patch.note ?? "");
+
+      const { undo } = useRunStore.getState().updateTodo(id, nextPatch);
+      const todoList = useRunStore.getState().todoList;
+      return { ok: true, output: { ok: true, todoList }, undoable: true, undo };
     },
   },
   {
@@ -712,8 +782,13 @@ export async function executeToolCall(args: {
   parsedArgs: Record<string, unknown>;
   result: ToolExecResult;
 }> {
-  const def = getTool(args.toolName);
   const parsedArgs = parseArgs(args.rawArgs);
+  const def = getTool(args.toolName);
+
+  // Chat 模式：纯对话，不允许调用任何工具（双保险；Gateway 侧也会做 allowlist）。
+  if (args.mode === "chat") {
+    return { def, parsedArgs, result: { ok: false, error: "TOOL_NOT_ALLOWED_IN_CHAT_MODE" } };
+  }
   if (!def) {
     return { parsedArgs, result: { ok: false, error: "UNKNOWN_TOOL" } };
   }

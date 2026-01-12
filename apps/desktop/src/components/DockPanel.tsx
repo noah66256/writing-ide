@@ -1,12 +1,14 @@
 import { useMemo } from "react";
 import { useRunStore } from "../state/runStore";
 import { useUiStore, type DockTabKey } from "../state/uiStore";
+import { RichText } from "./RichText";
 
 export function DockPanel() {
   const tab = useUiStore((s) => s.dockTab);
   const setTab = useUiStore((s) => s.setDockTab);
   const steps = useRunStore((s) => s.steps);
   const mainDoc = useRunStore((s) => s.mainDoc);
+  const todoList = useRunStore((s) => s.todoList);
   const logs = useRunStore((s) => s.logs);
   const clearLogs = useRunStore((s) => s.clearLogs);
 
@@ -14,6 +16,43 @@ export function DockPanel() {
     () => steps.filter((s) => s.type === "tool").map((s) => s),
     [steps],
   );
+
+  const mainDocMd = useMemo(() => {
+    const lines: string[] = [];
+    const platformLabel =
+      mainDoc.platformType === "feed_preview"
+        ? "Feed 试看型"
+        : mainDoc.platformType === "search_click"
+          ? "点选/搜索型"
+          : mainDoc.platformType === "long_subscription"
+            ? "长内容订阅型"
+            : "";
+    if (mainDoc.goal) lines.push(`- **目标**：${String(mainDoc.goal)}`);
+    if (platformLabel) lines.push(`- **平台画像**：${platformLabel}`);
+    if (mainDoc.audience) lines.push(`- **受众**：${String(mainDoc.audience)}`);
+    if (mainDoc.persona) lines.push(`- **人设**：${String(mainDoc.persona)}`);
+    if (mainDoc.tone) lines.push(`- **口吻**：${String(mainDoc.tone)}`);
+    if (mainDoc.sourcesPolicy) lines.push(`- **素材来源**：${String(mainDoc.sourcesPolicy)}`);
+    if (mainDoc.topic) lines.push(`- **选题**：${String(mainDoc.topic)}`);
+    if (mainDoc.angle) lines.push(`- **角度**：${String(mainDoc.angle)}`);
+    if (mainDoc.title) lines.push(`- **标题**：${String(mainDoc.title)}`);
+    if (mainDoc.outline) lines.push(`\n---\n\n### 当前大纲（摘要）\n\n${String(mainDoc.outline)}`);
+    return lines.join("\n");
+  }, [mainDoc]);
+
+  const todoMd = useMemo(() => {
+    if (!todoList.length) return "";
+    const done = todoList.filter((t) => t.status === "done").length;
+    const total = todoList.length;
+    const lines: string[] = [];
+    lines.push(`### Todo（${done}/${total}）`);
+    for (const t of todoList) {
+      const mark = t.status === "done" ? "x" : " ";
+      const note = t.note ? ` — ${t.note}` : "";
+      lines.push(`- [${mark}] ${t.text}${note}`);
+    }
+    return lines.join("\n");
+  }, [todoList]);
 
   return (
     <div style={{ height: "100%", display: "grid", gridTemplateRows: "auto 1fr" }}>
@@ -64,9 +103,8 @@ export function DockPanel() {
         {tab === "runs" && (
           <div style={{ display: "grid", gap: 10 }}>
             <div style={{ color: "var(--text)" }}>Main Doc（当前 Run）</div>
-            <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
-              {JSON.stringify(mainDoc, null, 2)}
-            </pre>
+            {mainDocMd ? <RichText text={mainDocMd} /> : <div>暂无 Main Doc。你可以在右侧开始一次 Plan/Agent。</div>}
+            {todoMd ? <RichText text={todoMd} /> : <div style={{ color: "var(--muted)" }}>暂无 Todo（建议让 Agent 先生成 Todo List）。</div>}
             <div style={{ color: "var(--text)" }}>Tool Blocks</div>
             {toolSteps.length === 0 ? (
               <div>暂无工具步骤。你可以在右侧发起一次 Plan/Agent。</div>

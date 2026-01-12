@@ -10,10 +10,19 @@ import { RefComposer, type RefComposerHandle, type RefItem } from "./RefComposer
 
 type RunController = { cancel: () => void };
 
+function stripToolXml(text: string) {
+  if (!text) return "";
+  const out = text
+    .replace(/<tool_calls[\s\S]*?<\/tool_calls>/g, "")
+    .replace(/<tool_call[\s\S]*?<\/tool_call>/g, "");
+  return out.replace(/\n{3,}/g, "\n\n");
+}
+
 export function AgentPane() {
   const mode = useRunStore((s) => s.mode);
   const model = useRunStore((s) => s.model);
   const mainDoc = useRunStore((s) => s.mainDoc);
+  const todoList = useRunStore((s) => s.todoList);
   const steps = useRunStore((s) => s.steps);
   const isRunning = useRunStore((s) => s.isRunning);
 
@@ -36,6 +45,10 @@ export function AgentPane() {
   const [refPickerQuery, setRefPickerQuery] = useState("");
   const [refPickerTarget, setRefPickerTarget] = useState<"main" | "history">("main");
   const refPickerInputRef = useRef<HTMLInputElement | null>(null);
+
+  const messagesRef = useRef<HTMLDivElement | null>(null);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const stickToBottomRef = useRef(true);
 
   // 默认走相对路径（/api），由 Vite dev server 代理到本地 Gateway，避免跨域问题
   const gatewayUrl = (import.meta as any).env?.VITE_GATEWAY_URL ?? "";
@@ -87,6 +100,7 @@ export function AgentPane() {
     const baseline = {
       project: useProjectStore.getState().snapshot(),
       mainDoc: JSON.parse(JSON.stringify(useRunStore.getState().mainDoc ?? {})),
+      todoList: JSON.parse(JSON.stringify(useRunStore.getState().todoList ?? [])),
     };
     useRunStore.getState().addUser(text, baseline as any);
 
@@ -172,12 +186,14 @@ export function AgentPane() {
       // 回滚文件与主文档到该消息提交前，并清除其后消息
       useProjectStore.getState().restore(step.baseline.project);
       useRunStore.getState().setMainDoc(step.baseline.mainDoc);
+      useRunStore.getState().setTodoList(step.baseline.todoList ?? []);
       useRunStore.getState().truncateFrom(stepId);
 
       // 重新添加“编辑后的用户消息”（新 baseline）
       const baseline = {
         project: useProjectStore.getState().snapshot(),
         mainDoc: JSON.parse(JSON.stringify(useRunStore.getState().mainDoc ?? {})),
+        todoList: JSON.parse(JSON.stringify(useRunStore.getState().todoList ?? [])),
       };
       useRunStore.getState().addUser(text, baseline as any);
     } else {
@@ -205,6 +221,20 @@ export function AgentPane() {
     return () => document.removeEventListener("mousedown", onDown);
   }, [editingId]);
 
+  const onMessagesScroll = () => {
+    const el = messagesRef.current;
+    if (!el) return;
+    const threshold = 80;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+    stickToBottomRef.current = atBottom;
+  };
+
+  // 自动滚动：仅在用户没有上滑浏览历史时跟随到底部
+  useEffect(() => {
+    if (!stickToBottomRef.current) return;
+    requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ block: "end" }));
+  }, [steps, isRunning]);
+
   return (
     <>
       <div className="mainDoc">
@@ -223,9 +253,14 @@ export function AgentPane() {
             ))}
           </div>
         )}
+        {todoList.length > 0 && (
+          <div style={{ marginTop: 8, color: "var(--muted)", fontSize: 12 }}>
+            进度：{todoList.filter((t) => t.status === "done").length}/{todoList.length}（TODO）
+          </div>
+        )}
       </div>
 
-      <div className="messages">
+      <div className="messages" ref={messagesRef} onScroll={onMessagesScroll}>
         {steps.map((step) => {
           if (step.type === "user") {
             const isEditing = editingId === step.id;
@@ -426,12 +461,13 @@ export function AgentPane() {
             if (step.hidden) return null;
             return (
               <div key={step.id} className="msgAssistant">
-                <RichText text={step.text} />
+                <RichText text={stripToolXml(step.text)} />
               </div>
             );
           }
           return <ToolBlock key={step.id} step={step} />;
         })}
+        <div ref={bottomRef} />
       </div>
 
       {submitFromHistory && (

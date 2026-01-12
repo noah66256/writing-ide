@@ -12,7 +12,7 @@ import { MemoryKbStore } from "./kb/memoryStore.js";
 import { adjustUserPoints, listUserTransactions } from "./billing.js";
 import { streamChatCompletions, type OpenAiChatMessage } from "./llm/openaiCompat.js";
 import { isToolCallMessage, parseToolCalls, renderToolResultXml } from "./agent/xmlProtocol.js";
-import { TOOL_NAMES, toolsPrompt } from "./agent/toolRegistry.js";
+import { toolNamesForMode, toolsPrompt, type AgentMode } from "./agent/toolRegistry.js";
 
 // 允许使用项目根目录的 .env（你可以用 env.example 复制出来），也支持 apps/gateway/.env 覆盖
 const __filename = fileURLToPath(import.meta.url);
@@ -186,9 +186,28 @@ type ToolResultPayload = {
 
 const agentRunWaiters = new Map<string, Map<string, (payload: ToolResultPayload) => void>>();
 
-function buildAgentProtocolPrompt() {
+function buildAgentProtocolPrompt(mode: AgentMode) {
+  const modePolicy =
+    mode === "chat"
+      ? `当前模式：Chat（纯对话）。\n- 你**不允许调用任何工具**（包括读写文件）。\n- 你只需用 Markdown 输出可读内容即可。\n\n`
+      : `当前模式：${mode === "plan" ? "Plan（逐步）" : "Agent（一次成型+迭代）"}。\n` +
+        `你需要按“写作闭环”工作，并把进度写入 Main Doc / Todo：\n` +
+        `1) 澄清（最多 5 个问题）：平台画像 / 受众 / 目标 / 口吻人设 / 素材来源。\n` +
+        `   - 若信息不足以开写：先输出澄清问题（自然语言），此时不要调用工具。\n` +
+        `2) 产 Todo List（可追踪）：澄清后立刻调用 run.setTodoList。\n` +
+        `3) 执行（由你自主决定是否调用工具）：素材收集（@引用/读文件）→ 结构（先 outline）→ 初稿 → 改写润色 → 自检。\n` +
+        `4) 进度记录：完成/推进每个关键步骤时，调用 run.updateTodo；关键决策与约束调用 run.mainDoc.update。\n` +
+        `输出约束：\n` +
+        `- 给用户看的文字输出必须是 Markdown（富文本），不要输出 JSON。\n` +
+        `- 不要输出思维链/自言自语（例如“我将…”“下一步我会…”）；只输出对用户有用的内容（澄清问题 / 结果 / 简短步骤摘要）。\n` +
+        `- 绝对不要臆造“用户刚刚说了什么/回复了继续”。历史仅以 Main Doc / RUN_TODO 为准。\n` +
+        `- 若需要调用工具：请直接输出 <tool_call>/<tool_calls>（整条消息只含 XML）；不要在同一条消息里夹带任何 Markdown 文本。\n` +
+        `- 如需更新多个 Todo/Main Doc：请在一次 <tool_calls> 中批量调用多个 tool_call，减少回合，避免触发 maxTurns。\n` +
+        `- 写入类操作遵守系统的 proposal-first / Keep/Undo 机制。\n\n`;
+
   return (
     `你是写作 IDE 的内置 Agent（偏写作产出与编辑体验，不要跑偏成通用工作流平台）。\n\n` +
+    modePolicy +
     `你可以在需要时“调用工具”。当你要调用工具时，你必须输出 **且只能输出** 下面 XML 之一：\n` +
     `- 单次：<tool_call name="..."><arg name="...">...</arg></tool_call>\n` +
     `- 多次：<tool_calls>...多个 tool_call...</tool_calls>\n\n` +
@@ -197,7 +216,7 @@ function buildAgentProtocolPrompt() {
     `- <arg> 内可以放 JSON（不要代码块，不要反引号）。\n` +
     `- 工具结果会由系统用 XML 回传（system message）：<tool_result name="xxx"><![CDATA[{...json}]]></tool_result>\n\n` +
     `你可用的工具如下（只能调用这里列出的）：\n\n` +
-    toolsPrompt()
+    toolsPrompt(mode)
   );
 }
 
@@ -216,8 +235,9 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   if (!env.ok) return reply.code(500).send({ error: "LLM_NOT_CONFIGURED" });
 
   const model = body.model ?? env.defaultModel;
-  const mode = body.mode ?? "agent";
+  const mode = (body.mode ?? "agent") as AgentMode;
   const runId = randomUUID();
+  const allowedToolNames = toolNamesForMode(mode);
 
   const origin = String((request as any).headers?.origin ?? "").trim();
   if (origin) {
@@ -248,12 +268,12 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   writeEvent("run.start", { runId, model, mode });
 
   const messages: OpenAiChatMessage[] = [
-    { role: "system", content: buildAgentProtocolPrompt() },
+    { role: "system", content: buildAgentProtocolPrompt(mode) },
     ...(body.contextPack ? [{ role: "system", content: body.contextPack } as OpenAiChatMessage] : []),
     { role: "user", content: body.prompt }
   ];
 
-  const maxTurns = 12;
+  const maxTurns = 24;
 
   try {
     for (let turn = 0; turn < maxTurns; turn += 1) {
@@ -318,8 +338,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
       // tool_calls：逐个 emit tool.call，等待 Desktop 回传 tool_result
       for (const call of toolCalls) {
-        if (!call?.name || !TOOL_NAMES.has(call.name)) {
-          writeEvent("error", { error: `UNKNOWN_TOOL:${call?.name ?? ""}` });
+        if (!call?.name || !allowedToolNames.has(call.name)) {
+          writeEvent("error", { error: `TOOL_NOT_ALLOWED:${call?.name ?? ""}` });
           reply.raw.end();
           agentRunWaiters.delete(runId);
           return;
