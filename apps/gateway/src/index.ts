@@ -201,6 +201,7 @@ function buildAgentProtocolPrompt(mode: AgentMode) {
         `- 给用户看的文字输出必须是 Markdown（富文本），不要输出 JSON。\n` +
         `- 不要输出思维链/自言自语（例如“我将…”“下一步我会…”）；只输出对用户有用的内容（澄清问题 / 结果 / 简短步骤摘要）。\n` +
         `- 绝对不要臆造“用户刚刚说了什么/回复了继续”。历史仅以 Main Doc / RUN_TODO 为准。\n` +
+        `- 如果用户要求把结果写入项目（例如：分割到文件夹、生成多个文件、覆盖某文件、移动/删除/重命名），你必须调用相关工具真正写入；不要只在文本里声称“已完成”。\n` +
         `- 若需要调用工具：请直接输出 <tool_call>/<tool_calls>（整条消息只含 XML）；不要在同一条消息里夹带任何 Markdown 文本。\n` +
         `- 如需更新多个 Todo/Main Doc：请在一次 <tool_calls> 中批量调用多个 tool_call，减少回合，避免触发 maxTurns。\n` +
         `- 写入类操作遵守系统的 proposal-first / Keep/Undo 机制。\n\n`;
@@ -273,6 +274,38 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     { role: "user", content: body.prompt }
   ];
 
+  const userPrompt = String(body.prompt ?? "");
+  const wantsWrite =
+    mode !== "chat" &&
+    (/@\{[^}]+\/\}/.test(userPrompt) ||
+      /(分割|拆分|切分|写入|保存|生成|放到|移动到|导出|新建|删除|重命名)/.test(userPrompt));
+
+  let hasTodoList = false;
+  let hasWriteOps = false;
+  let hasAnyToolCall = false;
+  let autoRetryBudget = 2;
+
+  function looksLikeClarifyQuestions(text: string) {
+    const t = String(text ?? "").trim();
+    if (!t) return false;
+    if (t.length > 2000) return false;
+    // 简单启发式：包含问号/疑问词，且不像是在输出最终结果
+    return /[?？]/.test(t) || /(请问|是否|能否|方便|要不要|需要你)/.test(t);
+  }
+
+  function isWriteLikeTool(name: string) {
+    return (
+      name === "doc.write" ||
+      name === "doc.applyEdits" ||
+      name === "doc.replaceSelection" ||
+      name === "doc.mkdir" ||
+      name === "doc.renamePath" ||
+      name === "doc.deletePath" ||
+      name === "doc.restoreSnapshot" ||
+      name === "doc.splitToDir"
+    );
+  }
+
   const maxTurns = mode === "agent" ? 48 : mode === "plan" ? 32 : 12;
 
   try {
@@ -337,6 +370,39 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           continue;
         }
 
+        // Plan/Agent：避免“只读完 doc 就停 / 没有 todo 就结束 / 明明要写入却没写入”
+        if (mode !== "chat" && autoRetryBudget > 0) {
+          const t = assistantText.trim();
+          const isEmpty = t.length === 0;
+          const isClarify = looksLikeClarifyQuestions(t);
+
+          const needTodo = !hasTodoList && !isClarify;
+          const needWrite = wantsWrite && !hasWriteOps && !isClarify;
+
+          if (isEmpty || needTodo || needWrite) {
+            autoRetryBudget -= 1;
+            writeEvent("assistant.delta", {
+              delta:
+                "\n\n[系统提示] 检测到本次任务尚未进入可追踪执行（Todo 未设置 / 或尚未完成写入目标），我会让模型自动继续一次（无需你输入）。\n" +
+                "请它：若不需澄清，先 run.setTodoList；若用户要求写入项目/分割到文件夹，请务必用工具执行（例如 doc.write / doc.splitToDir）。"
+            });
+            writeEvent("assistant.done", { reason: "auto_retry_incomplete" });
+
+            // 记录本轮输出（即使为空），并要求下一轮按协议继续
+            messages.push({ role: "assistant", content: assistantText });
+            messages.push({
+              role: "system",
+              content:
+                "你刚才输出了纯文本，但任务尚未完成。\n" +
+                "- 如果需要澄清：请直接输出最多 5 个问题（纯文本），此时不要调用工具。\n" +
+                "- 否则：请立刻输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
+                "  - 至少包含 run.setTodoList\n" +
+                "  - 若用户要求写入/分割到文件夹：请调用 doc.splitToDir（或 doc.write 等）完成写入。"
+            });
+            continue;
+          }
+        }
+
         // 纯文本：认为本次 run 已给出用户可读输出，结束
         messages.push({ role: "assistant", content: assistantText });
         writeEvent("run.end", { runId, reason: "text", turn });
@@ -350,6 +416,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
       // tool_calls：逐个 emit tool.call，等待 Desktop 回传 tool_result
       for (const call of toolCalls) {
+        hasAnyToolCall = true;
         if (!call?.name || !allowedToolNames.has(call.name)) {
           writeEvent("error", { error: `TOOL_NOT_ALLOWED:${call?.name ?? ""}` });
           writeEvent("run.end", { runId, reason: "tool_not_allowed", turn, tool: call?.name ?? "" });
@@ -385,6 +452,9 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           output: payload.output,
           meta: payload.meta ?? null
         });
+
+        if (payload.ok && payload.name === "run.setTodoList") hasTodoList = true;
+        if (payload.ok && isWriteLikeTool(payload.name)) hasWriteOps = true;
 
         messages.push({ role: "system", content: renderToolResultXml(call.name, payload.output) });
 

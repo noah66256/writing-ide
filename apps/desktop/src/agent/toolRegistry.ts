@@ -37,6 +37,93 @@ export type ToolDefinition = {
   run: (args: Record<string, unknown>, ctx: { mode: Mode }) => Promise<ToolExecResult> | ToolExecResult;
 };
 
+function sanitizeFileName(input: string) {
+  let s = String(input ?? "").trim();
+  s = s.replace(/\s+/g, " ");
+  // Windows 文件名非法字符：<>:"/\|?* 以及控制字符
+  s = s.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "");
+  // 避免结尾是点/空格（Windows 不友好）
+  s = s.replace(/[ .]+$/g, "");
+  if (!s) return "untitled";
+
+  const upper = s.toUpperCase();
+  const reserved = new Set([
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "COM1",
+    "COM2",
+    "COM3",
+    "COM4",
+    "COM5",
+    "COM6",
+    "COM7",
+    "COM8",
+    "COM9",
+    "LPT1",
+    "LPT2",
+    "LPT3",
+    "LPT4",
+    "LPT5",
+    "LPT6",
+    "LPT7",
+    "LPT8",
+    "LPT9",
+  ]);
+  if (reserved.has(upper)) s = `${s}_`;
+
+  // 控制长度（避免路径过长）
+  const max = 80;
+  if (s.length > max) s = s.slice(0, max).trim();
+  return s || "untitled";
+}
+
+function normalizeRelPath(p: string) {
+  let s = String(p ?? "").trim().replaceAll("\\", "/");
+  s = s.replace(/^\.\//, "");
+  s = s.replace(/\/+/g, "/");
+  s = s.replace(/^\/+/, "");
+  return s;
+}
+
+function splitTitleBlocks(content: string) {
+  const text = String(content ?? "")
+    .replace(/^\uFEFF/, "")
+    .replaceAll("\r\n", "\n")
+    .replaceAll("\r", "\n");
+
+  const parts = text
+    .split(/(?=^标题\s*[：:])/m)
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .filter((x) => /^标题\s*[：:]/m.test(x));
+  return parts;
+}
+
+function extractTitleFromBlock(block: string) {
+  const lines = String(block ?? "")
+    .replaceAll("\r\n", "\n")
+    .replaceAll("\r", "\n")
+    .split("\n")
+    .map((l) => l.trim());
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? "";
+    const m = line.match(/^标题\s*[：:]\s*(.*)$/);
+    if (!m) continue;
+    const rest = String(m[1] ?? "").trim();
+    if (rest) return rest;
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const t = (lines[j] ?? "").trim();
+      if (!t) continue;
+      // 跳过“文案/正文”标签行
+      if (/^(文案|正文|内容)\s*[：:]\s*$/.test(t)) continue;
+      return t;
+    }
+  }
+  return "";
+}
+
 function computeLineStarts(text: string) {
   const starts = [0];
   for (let i = 0; i < text.length; i += 1) {
@@ -654,6 +741,106 @@ const tools: ToolDefinition[] = [
           created: false,
           preview: { note: "覆盖写入为提案：点击 Keep 才会覆盖文件；Undo 可回滚。", diffUnified: d.diff, truncated: d.truncated, stats: d.stats ?? null },
         },
+        applyPolicy: "proposal",
+        riskLevel: "medium",
+        apply,
+        undoable: false,
+      };
+    },
+  },
+  {
+    name: "doc.splitToDir",
+    description:
+      "将一个大文档按“标题/文案(正文)”块分割成多篇，并写入目标文件夹（proposal-first：Keep 才会真正写入；Undo 可回滚）。",
+    args: [
+      { name: "path", required: true, desc: "源文件路径（如 直男财经.md）" },
+      { name: "targetDir", required: true, desc: "目标目录（如 直男财经/）" },
+    ],
+    riskLevel: "medium",
+    applyPolicy: "proposal",
+    reversible: true,
+    run: async (args) => {
+      const srcPath = normalizeRelPath(String(args.path ?? ""));
+      const dirRaw = normalizeRelPath(String(args.targetDir ?? ""));
+      const targetDir = dirRaw.replace(/\/+$/g, "");
+      if (!srcPath) return { ok: false, error: "MISSING_PATH" };
+      if (!targetDir) return { ok: false, error: "MISSING_TARGET_DIR" };
+
+      const proj = useProjectStore.getState();
+      const file = proj.getFileByPath(srcPath);
+      if (!file) return { ok: false, error: "FILE_NOT_FOUND" };
+
+      const content = await proj.ensureLoaded(file.path);
+      const blocks = splitTitleBlocks(content);
+      if (!blocks.length) return { ok: false, error: "NO_TITLE_BLOCKS" };
+      if (blocks.length > 300) return { ok: false, error: "TOO_MANY_BLOCKS" };
+
+      const existing = new Set(proj.files.map((f) => f.path));
+      const used = new Set<string>();
+
+      const out = blocks.map((b, idx) => {
+        const title = extractTitleFromBlock(b) || `片段_${idx + 1}`;
+        let base = sanitizeFileName(title);
+        if (!base) base = `片段_${idx + 1}`;
+        const base0 = base;
+        let n = 2;
+        let rel = `${targetDir}/${base}.md`;
+        while (existing.has(rel) || used.has(rel)) {
+          base = sanitizeFileName(`${base0}_${n++}`);
+          rel = `${targetDir}/${base}.md`;
+        }
+        used.add(rel);
+        return { path: rel, title, content: b.trimEnd() + "\n" };
+      });
+
+      const preview = {
+        ok: true,
+        sourcePath: srcPath,
+        targetDir: `${targetDir}/`,
+        count: out.length,
+        note: `这是分割提案：点击 Keep 才会写入 ${out.length} 个新文件到 ${targetDir}/；Undo 可回滚。`,
+        files: out.map((f) => ({
+          path: f.path,
+          title: f.title,
+          chars: f.content.length,
+          head: f.content.slice(0, 120),
+        })),
+      };
+
+      const apply = () => {
+        const snap = useProjectStore.getState().snapshot();
+        const s = useProjectStore.getState();
+        const rootDir = s.rootDir;
+        const api = window.desktop?.fs;
+
+        void (async () => {
+          try {
+            if (rootDir && api) {
+              await api.mkdir(rootDir, targetDir).catch(() => ({ ok: false }));
+              for (const f of out) {
+                await api.writeFile(rootDir, f.path, f.content);
+              }
+              await s.refreshFromDisk("splitToDir");
+            } else {
+              // 无落盘能力时：退化为内存写入（可能会打开多个 tab，开发期可接受）
+              for (const f of out) {
+                const exists = !!s.getFileByPath(f.path);
+                if (!exists) s.createFile(f.path, f.content);
+                else s.updateFile(f.path, f.content);
+              }
+            }
+          } catch (e: any) {
+            useRunStore.getState().log("error", "splitToDir.failed", { message: String(e?.message ?? e) });
+            s.restore(snap as any);
+          }
+        })();
+
+        return { undo: () => useProjectStore.getState().restore(snap) };
+      };
+
+      return {
+        ok: true,
+        output: preview,
         applyPolicy: "proposal",
         riskLevel: "medium",
         apply,

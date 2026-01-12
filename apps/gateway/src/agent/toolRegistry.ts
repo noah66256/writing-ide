@@ -93,6 +93,16 @@ export const TOOL_LIST: ToolMeta[] = [
     modes: ["plan", "agent"],
   },
   {
+    name: "doc.splitToDir",
+    description:
+      "将一个大文档按“标题/文案(正文)”块分割成多篇，并写入目标文件夹（proposal-first：Keep 才会真正写入；Undo 可回滚）。",
+    args: [
+      { name: "path", required: true, desc: "源文件路径（如 直男财经.md）" },
+      { name: "targetDir", required: true, desc: "目标目录（如 直男财经/）" },
+    ],
+    modes: ["plan", "agent"],
+  },
+  {
     name: "doc.getSelection",
     description: "获取编辑器当前选区内容。",
     args: [],
