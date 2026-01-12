@@ -146,6 +146,8 @@
 - Tool Blocks（Keep/Undo）+ 文件级 diff 预览（NEW/MOD + +X/-Y）
 - proposal-first 写入（覆盖写入/批量/回滚等）
 - Todo/进度：`run.setTodoList` / `run.updateTodo`（工具）+ Context Pack 注入 + Dock/Runs 展示（可追踪闭环）
+- Agent 写入任务闭环：Plan/Agent 下若 Todo 未设置或用户要求写入但尚未发生写入工具调用，Gateway 不会直接 `reason=text` 结束，会自动要求模型继续
+- 文稿拆分工具：`doc.splitToDir`（proposal-first）把“标题/文案(正文)”大篇切成多文件写入目录（Keep/Undo）
 
 建议下一步补齐（写作正事会强依赖）：
 - `Outline`：从 Markdown 标题树生成大纲，并与编辑器联动（点击定位）

@@ -36,4 +36,9 @@
 - 始终使用简体中文回复。
 - 结论先行，避免长篇赘述；给出明确的下一步与需用户确认点。
 
+## 开发约定：终端默认 Git Bash（Windows）
+- 默认终端：Git Bash（`bash.exe`）。
+- 不要切换 PowerShell/CMD 来执行命令（避免行为与语法不一致）。
+- 必须调用 Windows 原生命令时：在 Git Bash 里用 `cmd.exe /c <command>` 调用，避免 Git Bash 的路径转换（例如把 `/PID` 误当路径）。
+
 

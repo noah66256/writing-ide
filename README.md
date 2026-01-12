@@ -56,6 +56,12 @@ npm run dev:gateway
 npm run dev:desktop
 ```
 
+例如（Git Bash）把端口改到 5174：
+
+```bash
+DESKTOP_DEV_PORT=5174 npm run dev:desktop
+```
+
 5) 启动 Admin Web（新终端，后续实现）
 
 ```bash
