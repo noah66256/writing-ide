@@ -501,6 +501,14 @@ export function startGatewayRun(args: {
 
             log("info", "tool.call", { toolCallId, name });
 
+            // 关键：Gateway 侧不会在每次模型调用结束都发 assistant.done。
+            // 如果此时不手动结束当前 assistant 气泡，后续新的 assistant.delta 会继续追加到“上面那条气泡”，
+            // 造成视觉上“工具卡片插入后，内容在中间继续生成/自动滚动失效”。
+            if (assistantId) {
+              finishAssistant(assistantId);
+              assistantId = null;
+            }
+
             const exec = await executeToolCall({ toolName: name, rawArgs, mode: args.mode });
             const def = exec.def;
             const stepApplyPolicy =
