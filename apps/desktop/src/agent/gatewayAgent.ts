@@ -370,6 +370,43 @@ export function startGatewayRun(args: {
     log("info", "gateway.run.start", { gatewayUrl: args.gatewayUrl, model: args.model, mode: args.mode });
     try {
       const referencesText = await buildReferencesText(args.prompt).catch(() => "");
+      // 尽量确保 doc.rules 与 activePath 已加载，避免“上下文不对”（空规则/空正文）
+      const proj = useProjectStore.getState();
+      const docRulesPath = proj.getFileByPath("doc.rules.md")?.path;
+      if (docRulesPath) {
+        await proj.ensureLoaded(docRulesPath).catch(() => void 0);
+      }
+      if (proj.activePath) {
+        await proj.ensureLoaded(proj.activePath).catch(() => void 0);
+      }
+
+      // 记录 Context Pack 摘要（便于排查“上下文不对/自动终止”）
+      try {
+        const todo = useRunStore.getState().todoList ?? [];
+        const done = todo.filter((t) => t.status === "done").length;
+        const refs = parseRefsFromPrompt(args.prompt);
+        const ed = proj.editorRef;
+        const hasSelection = (() => {
+          const model = ed?.getModel();
+          const sel = ed?.getSelection();
+          if (!ed || !model || !sel) return false;
+          return model.getValueInRange(sel).length > 0;
+        })();
+        const docRulesChars = proj.getFileByPath("doc.rules.md")?.content?.length ?? 0;
+        log("info", "context.pack.summary", {
+          mode: args.mode,
+          model: args.model,
+          activePath: proj.activePath,
+          openPaths: proj.openPaths?.length ?? 0,
+          fileCount: proj.files?.length ?? 0,
+          docRulesChars,
+          refs: refs.map((r) => ({ kind: r.kind, path: r.path })),
+          todo: { done, total: todo.length },
+          hasSelection,
+        });
+      } catch {
+        // ignore
+      }
 
       // Chat：纯对话，不启用工具循环
       if (args.mode === "chat") {
@@ -468,6 +505,10 @@ export function startGatewayRun(args: {
             } catch {
               log("info", "agent.run.start", evt.data);
             }
+          }
+
+          if (evt.event === "run.end") {
+            log("info", "agent.run.end", evt.data);
           }
 
           if (evt.event === "assistant.delta") {

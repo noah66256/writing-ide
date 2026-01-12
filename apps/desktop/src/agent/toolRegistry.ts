@@ -225,13 +225,45 @@ function makeTodoId() {
   return `todo_${uuid ?? `${Date.now()}_${Math.random().toString(16).slice(2)}`}`;
 }
 
+function slugifyTodoId(text: string) {
+  const s = String(text ?? "").trim().toLowerCase();
+  const slug = s
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+/, "")
+    .replace(/_+$/, "")
+    .slice(0, 40);
+  return slug;
+}
+
 function normalizeTodoStatus(input: unknown): TodoStatus {
   const s = String(input ?? "").trim().toLowerCase();
   if (s === "todo") return "todo";
-  if (s === "in_progress" || s === "inprogress" || s === "doing") return "in_progress";
-  if (s === "done" || s === "completed") return "done";
-  if (s === "blocked") return "blocked";
-  if (s === "skipped") return "skipped";
+  if (
+    s === "in_progress" ||
+    s === "inprogress" ||
+    s === "in-progress" ||
+    s === "in progress" ||
+    s === "doing" ||
+    s === "working" ||
+    s === "wip" ||
+    s.includes("进行中") ||
+    s.includes("在做") ||
+    s.includes("处理中")
+  )
+    return "in_progress";
+  if (
+    s === "done" ||
+    s === "completed" ||
+    s === "complete" ||
+    s === "finish" ||
+    s === "finished" ||
+    s === "ok" ||
+    s.includes("已完成") ||
+    s.includes("完成")
+  )
+    return "done";
+  if (s === "blocked" || s === "block" || s === "stuck" || s.includes("阻塞") || s.includes("卡住")) return "blocked";
+  if (s === "skipped" || s === "skip" || s === "ignored" || s.includes("跳过")) return "skipped";
   return "todo";
 }
 
@@ -325,14 +357,28 @@ const tools: ToolDefinition[] = [
       const items = args.items as any;
       if (!Array.isArray(items)) return { ok: false, error: "INVALID_ITEMS" };
 
+      const used = new Set<string>();
       const norm = items
-        .map((x: any) => ({
-          id: String(x?.id ?? "").trim() || makeTodoId(),
-          text: String(x?.text ?? "").trim(),
-          status: normalizeTodoStatus(x?.status),
-          note: x?.note === undefined ? undefined : String(x.note ?? ""),
-        }))
-        .filter((t: any) => Boolean(t.text));
+        .map((x: any, idx: number) => {
+          const text = String(x?.text ?? "").trim();
+          if (!text) return null;
+
+          let id = String(x?.id ?? "").trim();
+          if (!id) id = slugifyTodoId(text) || `t${idx + 1}`;
+          id = id.replaceAll(" ", "_");
+          const base = id;
+          let n = 2;
+          while (used.has(id)) id = `${base}_${n++}`;
+          used.add(id);
+
+          return {
+            id,
+            text,
+            status: normalizeTodoStatus(x?.status),
+            note: x?.note === undefined ? undefined : String(x.note ?? ""),
+          };
+        })
+        .filter(Boolean);
 
       const { undo } = useRunStore.getState().setTodoList(norm as any);
       const todoList = useRunStore.getState().todoList;
@@ -355,13 +401,37 @@ const tools: ToolDefinition[] = [
       const patch = args.patch as any;
       if (!patch || typeof patch !== "object") return { ok: false, error: "INVALID_PATCH" };
 
+      const s = useRunStore.getState();
+      const cur = s.todoList ?? [];
+      const findIdx = (needle: string) =>
+        cur.findIndex((t: any) => String(t?.id ?? "") === needle);
+      let foundId = id;
+      let idx = findIdx(foundId);
+      if (idx < 0) {
+        const alt = id.replaceAll("-", "_");
+        idx = findIdx(alt);
+        if (idx >= 0) foundId = alt;
+      }
+      if (idx < 0) {
+        return {
+          ok: false,
+          error: "TODO_NOT_FOUND",
+          output: {
+            ok: false,
+            error: "TODO_NOT_FOUND",
+            hint: "请使用 run.setTodoList 返回的 todo.id；或先重新 setTodoList。",
+            available: cur.map((t: any) => ({ id: t.id, text: t.text, status: t.status })),
+          },
+        };
+      }
+
       const nextPatch: any = {};
       if (patch.text !== undefined) nextPatch.text = String(patch.text ?? "");
       if (patch.status !== undefined) nextPatch.status = normalizeTodoStatus(patch.status);
       if (patch.note !== undefined) nextPatch.note = String(patch.note ?? "");
 
-      const { undo } = useRunStore.getState().updateTodo(id, nextPatch);
-      const todoList = useRunStore.getState().todoList;
+      const { undo } = s.updateTodo(foundId, nextPatch);
+      const todoList = s.todoList;
       return { ok: true, output: { ok: true, todoList }, undoable: true, undo };
     },
   },

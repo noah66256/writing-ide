@@ -273,7 +273,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     { role: "user", content: body.prompt }
   ];
 
-  const maxTurns = 24;
+  const maxTurns = mode === "agent" ? 48 : mode === "plan" ? 32 : 12;
 
   try {
     for (let turn = 0; turn < maxTurns; turn += 1) {
@@ -319,27 +319,40 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         if (ev.type === "done") break;
       }
 
-      messages.push({ role: "assistant", content: assistantText });
-
       const toolCalls = parseToolCalls(assistantText);
       if (!toolCalls) {
-        // 如果看起来像 tool_calls 但解析失败，给出提示并结束
+        // 如果看起来像 tool_calls 但解析失败：不要直接终止 run，要求模型立刻重试一次（避免用户手动“继续”）
         if (isToolCallMessage(assistantText)) {
           writeEvent("assistant.delta", {
             delta:
-              "\n\n[解析提示] 该条看起来像工具调用，但 XML 解析失败；请严格输出 <tool_calls>...</tool_calls>。"
+              "\n\n[解析提示] 该条看起来像工具调用，但 XML 解析失败；我会让模型自动重试一次（无需你输入）。\n" +
+              "请它严格输出 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。"
           });
+          writeEvent("assistant.done", { reason: "tool_xml_parse_failed_retry" });
+          messages.push({
+            role: "system",
+            content:
+              "你上一条输出看起来像工具调用，但 XML 解析失败。请立刻重新输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。"
+          });
+          continue;
         }
-        writeEvent("assistant.done", {});
+
+        // 纯文本：认为本次 run 已给出用户可读输出，结束
+        messages.push({ role: "assistant", content: assistantText });
+        writeEvent("run.end", { runId, reason: "text", turn });
+        writeEvent("assistant.done", { reason: "text" });
         reply.raw.end();
         agentRunWaiters.delete(runId);
         return;
       }
 
+      messages.push({ role: "assistant", content: assistantText });
+
       // tool_calls：逐个 emit tool.call，等待 Desktop 回传 tool_result
       for (const call of toolCalls) {
         if (!call?.name || !allowedToolNames.has(call.name)) {
           writeEvent("error", { error: `TOOL_NOT_ALLOWED:${call?.name ?? ""}` });
+          writeEvent("run.end", { runId, reason: "tool_not_allowed", turn, tool: call?.name ?? "" });
           reply.raw.end();
           agentRunWaiters.delete(runId);
           return;
@@ -349,7 +362,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         writeEvent("tool.call", { toolCallId, name: call.name, args: call.args });
 
         const payload: ToolResultPayload = await new Promise((resolve, reject) => {
-          const timeout = setTimeout(() => reject(new Error("TOOL_RESULT_TIMEOUT")), 60_000);
+          const timeout = setTimeout(() => reject(new Error("TOOL_RESULT_TIMEOUT")), 180_000);
           waiters.set(toolCallId, (p) => {
             clearTimeout(timeout);
             resolve(p);
@@ -384,7 +397,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               "- 点击 **Undo**：丢弃该提案\n\n" +
               "确认后你可以继续发下一条指令（例如：继续改写下一段/生成整篇）。"
           });
-          writeEvent("assistant.done", {});
+          writeEvent("run.end", { runId, reason: "proposal_waiting", turn, tool: call.name });
+          writeEvent("assistant.done", { reason: "proposal_waiting" });
           reply.raw.end();
           agentRunWaiters.delete(runId);
           return;
@@ -395,7 +409,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     writeEvent("assistant.delta", {
       delta: "\n\n[提示] 已达到本次 Run 的最大工具循环轮数（maxTurns），为避免死循环已自动停止。"
     });
-    writeEvent("assistant.done", {});
+    writeEvent("run.end", { runId, reason: "maxTurns", maxTurns });
+    writeEvent("assistant.done", { reason: "maxTurns" });
   } catch (e: any) {
     const msg = e?.message ? String(e.message) : String(e);
     writeEvent("error", { error: msg });

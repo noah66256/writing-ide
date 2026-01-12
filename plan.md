@@ -382,7 +382,7 @@
 - ✅ Explorer（增强）：树形目录；右键新建文件/文件夹、重命名、移动、删除；外部文件变更自动刷新（dirty 不覆盖）
 - ✅ ReAct（开发期）：Gateway 负责 `/api/agent/run/stream` 编排（SSE：`tool.call/tool.result`），Desktop 执行工具并回传 `tool_result`
 - ✅ Todo/进度（写作闭环锚点）：`run.setTodoList` / `run.updateTodo`（工具）+ Context Pack 注入 + Dock/Runs 富文本展示
-- ✅ 对话稳定性（防“自言自语/臆造继续/顺序错乱”）：Plan/Agent Context Pack 移除 RECENT_DIALOGUE；Gateway 提示词强约束“工具 XML 独占消息”；前端过滤漏出的 `<tool_call>` 并支持自动滚动
+- ✅ 对话稳定性（防“自言自语/臆造继续/顺序错乱/自动终止”）：Plan/Agent Context Pack 移除 RECENT_DIALOGUE；Gateway 提示词强约束“工具 XML 独占消息”；前端过滤漏出的 `<tool_call>` 并支持自动滚动；工具 XML 解析失败会自动重试；SSE 增加 `run.end`（原因）便于排查；Todo 状态兼容 `in-progress` 等别名
 - ✅ proposal-first 写入：`doc.applyEdits` 与覆盖写入类工具先出提案，点 Keep 才 apply；Undo 可回滚
 - ✅ Diff 预览（增强）：Tool Block 以“文件级头部”展示（NEW/MOD + +X/-Y），并对 +/- 行做红绿高亮；支持复制 diff
 - ✅ 快照：`doc.commitSnapshot` / `doc.listSnapshots` / `doc.restoreSnapshot`（restore 为 proposal-first）
