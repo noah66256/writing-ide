@@ -2,12 +2,43 @@ import { AgentPane } from "./components/AgentPane";
 import { DockPanel } from "./components/DockPanel";
 import { EditorPane } from "./components/EditorPane";
 import { Explorer } from "./components/Explorer";
+import { KbPane } from "./components/KbPane";
+import { MaterialsPane } from "./components/MaterialsPane";
 import { AccountFooter } from "./components/AccountFooter";
-import { useEffect, useRef } from "react";
+import { CardJobsModal } from "./components/CardJobsModal";
+import { useEffect, useRef, type ReactNode } from "react";
 import { useLayoutStore } from "./state/layoutStore";
 import { useUiStore, type DockTabKey } from "./state/uiStore";
 import { useProjectStore } from "./state/projectStore";
 import { useWorkspaceStore } from "./state/workspaceStore";
+
+function isDockTabKey(t: string): t is DockTabKey {
+  return t === "outline" || t === "graph" || t === "problems" || t === "runs" || t === "logs";
+}
+
+function SidebarSection(props: { title: string; collapsed: boolean; onToggle: () => void; children: ReactNode }) {
+  return (
+    <section className="sidebarSection">
+      <div
+        className="sidebarSectionHeader"
+        role="button"
+        tabIndex={0}
+        aria-expanded={!props.collapsed}
+        onClick={props.onToggle}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            props.onToggle();
+          }
+        }}
+      >
+        <span className="sidebarSectionCaret">{props.collapsed ? "▸" : "▾"}</span>
+        <span className="sidebarSectionTitle">{props.title}</span>
+      </div>
+      <div className={`sidebarSectionBody ${props.collapsed ? "sidebarSectionBodyCollapsed" : ""}`}>{props.children}</div>
+    </section>
+  );
+}
 
 export default function App() {
   const appRef = useRef<HTMLDivElement | null>(null);
@@ -29,6 +60,11 @@ export default function App() {
   const setLeftWidth = useLayoutStore((s) => s.setLeftWidth);
   const setRightWidth = useLayoutStore((s) => s.setRightWidth);
   const setDockHeight = useLayoutStore((s) => s.setDockHeight);
+  const explorerCollapsed = useLayoutStore((s) => s.explorerCollapsed);
+  const kbCollapsed = useLayoutStore((s) => s.kbCollapsed);
+  const materialsCollapsed = useLayoutStore((s) => s.materialsCollapsed);
+  const toggleSectionCollapsed = useLayoutStore((s) => s.toggleSectionCollapsed);
+  const openSection = useLayoutStore((s) => s.openSection);
   const setDockTab = useUiStore((s) => s.setDockTab);
 
   const gutter = 6;
@@ -130,8 +166,15 @@ export default function App() {
     const off = window.desktop?.onMenuAction?.((payload: any) => {
       if (!payload || typeof payload !== "object") return;
       if (payload.type === "dock.tab") {
-        const tab = String(payload.tab ?? "") as DockTabKey;
-        if (tab) setDockTab(tab);
+        const tab = String(payload.tab ?? "");
+        if (isDockTabKey(tab)) setDockTab(tab);
+        return;
+      }
+      if (payload.type === "sidebar.openSection") {
+        const section = String(payload.section ?? "").trim();
+        if (section === "explorer") openSection("explorer");
+        if (section === "kb") openSection("kb");
+        if (section === "materials") openSection("materials");
         return;
       }
       if (payload.type === "file.openProject") {
@@ -193,33 +236,51 @@ export default function App() {
   const centerRows = `1fr ${gutter}px ${dockHeight}px`;
 
   return (
-    <div className="app" ref={appRef} style={{ gridTemplateColumns: appCols }}>
-      <aside className="sidebar" style={{ gridColumn: 1 }}>
-        <div className="sidebarMain">
-          <div className="sectionTitle">EXPLORER</div>
-          <Explorer />
-        </div>
-        <AccountFooter />
-      </aside>
+    <>
+      <div className="app" ref={appRef} style={{ gridTemplateColumns: appCols }}>
+        <aside className="sidebar" style={{ gridColumn: 1 }}>
+          <div className="sidebarMain">
+            <SidebarSection
+              title="EXPLORER"
+              collapsed={explorerCollapsed}
+              onToggle={() => toggleSectionCollapsed("explorer")}
+            >
+              <Explorer />
+            </SidebarSection>
+            <SidebarSection title="KB" collapsed={kbCollapsed} onToggle={() => toggleSectionCollapsed("kb")}>
+              <KbPane />
+            </SidebarSection>
+            <SidebarSection
+              title="MATERIALS"
+              collapsed={materialsCollapsed}
+              onToggle={() => toggleSectionCollapsed("materials")}
+            >
+              <MaterialsPane />
+            </SidebarSection>
+          </div>
+          <AccountFooter />
+        </aside>
 
-      <div className="splitter splitterCol" style={{ gridColumn: 2 }} onPointerDown={startDrag("left")} />
+        <div className="splitter splitterCol" style={{ gridColumn: 2 }} onPointerDown={startDrag("left")} />
 
-      <div className="center" style={{ gridColumn: 3, gridTemplateRows: centerRows }}>
-        <div className="editorPane" style={{ gridRow: 1 }}>
-          <EditorPane />
+        <div className="center" style={{ gridColumn: 3, gridTemplateRows: centerRows }}>
+          <div className="editorPane" style={{ gridRow: 1 }}>
+            <EditorPane />
+          </div>
+          <div className="splitter splitterRow" style={{ gridRow: 2 }} onPointerDown={startDrag("dock")} />
+          <div className="dock" style={{ gridRow: 3 }}>
+            <DockPanel />
+          </div>
         </div>
-        <div className="splitter splitterRow" style={{ gridRow: 2 }} onPointerDown={startDrag("dock")} />
-        <div className="dock" style={{ gridRow: 3 }}>
-          <DockPanel />
-        </div>
+
+        <div className="splitter splitterCol" style={{ gridColumn: 4 }} onPointerDown={startDrag("right")} />
+
+        <aside className="agent" style={{ gridColumn: 5 }}>
+          <AgentPane />
+        </aside>
       </div>
-
-      <div className="splitter splitterCol" style={{ gridColumn: 4 }} onPointerDown={startDrag("right")} />
-
-      <aside className="agent" style={{ gridColumn: 5 }}>
-        <AgentPane />
-      </aside>
-    </div>
+      <CardJobsModal />
+    </>
   );
 }
 

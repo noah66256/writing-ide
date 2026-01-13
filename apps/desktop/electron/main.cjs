@@ -211,7 +211,7 @@ function buildMenuTemplate() {
         {
           label: "面板",
           submenu: [
-            { label: "本地知识库", click: () => send({ type: "dock.tab", tab: "kb" }) },
+            { label: "本地知识库", click: () => send({ type: "sidebar.openSection", section: "kb" }) },
             { label: "大纲", click: () => send({ type: "dock.tab", tab: "outline" }) },
             { label: "结构图", click: () => send({ type: "dock.tab", tab: "graph" }) },
             { label: "问题（Linter）", click: () => send({ type: "dock.tab", tab: "problems" }) },
@@ -278,6 +278,92 @@ function registerIpc() {
     const dir = result.filePaths?.[0];
     if (!dir) return { ok: false, canceled: true };
     return { ok: true, dir };
+  });
+
+  ipcMain.handle("kb.pickFiles", async (_event, options) => {
+    const win = BrowserWindow.getFocusedWindow();
+    const opt = options && typeof options === "object" ? options : {};
+    const multi = opt.multi !== false; // default true
+    const title = typeof opt.title === "string" ? opt.title : "导入到知识库";
+    const filters = Array.isArray(opt.filters)
+      ? opt.filters
+          .map((f) => ({
+            name: typeof f?.name === "string" ? f.name : "Files",
+            extensions: Array.isArray(f?.extensions) ? f.extensions.map((x) => String(x ?? "")).filter(Boolean) : [],
+          }))
+          .filter((f) => f.extensions.length > 0)
+      : [
+          { name: "Markdown / 文本", extensions: ["md", "mdx", "txt"] },
+          { name: "Word", extensions: ["docx"] },
+          { name: "PDF", extensions: ["pdf"] },
+        ];
+    const result = await dialog.showOpenDialog(win ?? undefined, {
+      title,
+      properties: multi ? ["openFile", "multiSelections"] : ["openFile"],
+      filters,
+    });
+    if (result.canceled) return { ok: false, canceled: true };
+    const files = Array.isArray(result.filePaths) ? result.filePaths : [];
+    return { ok: true, files };
+  });
+
+  ipcMain.handle("kb.extractTextFromFile", async (_event, filePath) => {
+    const p = String(filePath ?? "").trim();
+    if (!p) return { ok: false, error: "MISSING_PATH" };
+    const ext = path.extname(p).toLowerCase();
+    const format =
+      ext === ".md"
+        ? "md"
+        : ext === ".mdx"
+          ? "mdx"
+          : ext === ".txt"
+            ? "txt"
+            : ext === ".docx"
+              ? "docx"
+              : ext === ".pdf"
+                ? "pdf"
+                : "unknown";
+
+    try {
+      if (format === "md" || format === "mdx" || format === "txt") {
+        const text = await fsp.readFile(p, "utf-8");
+        return { ok: true, format, text };
+      }
+
+      if (format === "docx") {
+        let mammoth = null;
+        try {
+          mammoth = require("mammoth");
+        } catch (e) {
+          return { ok: false, format, error: "DEPENDENCY_NOT_AVAILABLE:mammoth" };
+        }
+        const result = await mammoth.extractRawText({ path: p });
+        const text = String(result?.value ?? "");
+        return { ok: true, format, text, meta: { warnings: result?.messages ?? [] } };
+      }
+
+      if (format === "pdf") {
+        let pdfParse = null;
+        try {
+          pdfParse = require("pdf-parse");
+        } catch (e) {
+          return { ok: false, format, error: "DEPENDENCY_NOT_AVAILABLE:pdf-parse" };
+        }
+        const buf = await fsp.readFile(p);
+        const data = await pdfParse(buf);
+        const text = String(data?.text ?? "");
+        const meta = {
+          pages: typeof data?.numpages === "number" ? data.numpages : undefined,
+          info: data?.info ?? undefined,
+        };
+        return { ok: true, format, text, meta };
+      }
+
+      return { ok: false, format, error: "UNSUPPORTED_FORMAT" };
+    } catch (e) {
+      const msg = String(e?.message ?? e);
+      return { ok: false, format, error: msg };
+    }
   });
 
   ipcMain.handle("project.listFiles", async (_event, rootDir) => {

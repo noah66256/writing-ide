@@ -192,6 +192,42 @@ body {
   padding: 10px 10px 6px;
 }
 
+.sidebarSectionHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 10px 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.sidebarSectionHeader:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.sidebarSectionHeader:focus-visible {
+  outline: 2px solid rgba(37, 99, 235, 0.22);
+  outline-offset: -2px;
+  border-radius: 8px;
+}
+
+.sidebarSectionCaret {
+  width: 12px;
+  color: var(--muted);
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+
+.sidebarSectionTitle {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.sidebarSectionBodyCollapsed {
+  display: none;
+}
+
 .list {
   padding: 0 6px 10px;
 }

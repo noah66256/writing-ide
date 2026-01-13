@@ -4,9 +4,11 @@ import { persist } from "zustand/middleware";
 type WorkspaceState = {
   lastProjectDir: string | null;
   recentProjectDirs: string[];
+  kbBaseDir: string | null;
   setLastProjectDir: (dir: string | null) => void;
   addRecentProjectDir: (dir: string) => void;
   clearRecent: () => void;
+  setKbBaseDir: (dir: string | null) => void;
 };
 
 export const useWorkspaceStore = create<WorkspaceState>()(
@@ -14,6 +16,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
     (set, get) => ({
       lastProjectDir: null,
       recentProjectDirs: [],
+      kbBaseDir: null,
       setLastProjectDir: (lastProjectDir) => set({ lastProjectDir }),
       addRecentProjectDir: (dir) =>
         set(() => {
@@ -25,6 +28,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           return { recentProjectDirs: capped, lastProjectDir: clean };
         }),
       clearRecent: () => set({ recentProjectDirs: [] }),
+      setKbBaseDir: (kbBaseDir) => set({ kbBaseDir }),
     }),
     { name: "writing-ide.workspace.v1" },
   ),

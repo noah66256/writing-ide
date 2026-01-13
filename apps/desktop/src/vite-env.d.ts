@@ -23,6 +23,20 @@ declare global {
         watchStop: () => Promise<{ ok: boolean; error?: string }>;
         onFsEvent?: (handler: (payload: any) => void) => () => void;
       };
+      kb?: {
+        pickFiles: (options?: {
+          title?: string;
+          filters?: Array<{ name: string; extensions: string[] }>;
+          multi?: boolean;
+        }) => Promise<{ ok: boolean; canceled?: boolean; files?: string[]; error?: string }>;
+        extractTextFromFile: (filePath: string) => Promise<{
+          ok: boolean;
+          error?: string;
+          format?: "md" | "mdx" | "txt" | "docx" | "pdf" | "unknown";
+          text?: string;
+          meta?: any;
+        }>;
+      };
       workspace?: {
         setRecentProjects: (dirs: string[]) => Promise<{ ok: boolean; error?: string }>;
         clearRecentProjects: () => Promise<{ ok: boolean; error?: string }>;

@@ -24,6 +24,9 @@ Thumbs.db
 .env.*
 !.env.example
 
+# deploy credentials (server info, keys)
+deploy/
+
 # reference material (do not commit)
 _ref/
 

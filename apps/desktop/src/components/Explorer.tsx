@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useProjectStore, type ProjectFile } from "../state/projectStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
+import { useKbStore } from "../state/kbStore";
+import { useLayoutStore } from "../state/layoutStore";
 
 type TreeNode =
   | { kind: "dir"; name: string; path: string; children: TreeNode[] }
@@ -260,6 +262,40 @@ export function Explorer() {
 
   const ask = (p: Omit<PromptState, "value"> & { value?: string }) =>
     setPrompt({ ...p, value: p.value ?? "" });
+
+  const actionImportToKb = (paths: string[]) => {
+    const kb = useKbStore.getState();
+    if (!kb.baseDir) {
+      // 引导用户先选择 KB 目录
+      useLayoutStore.getState().openSection("kb");
+      window.alert("请先在左侧 KB 面板选择 KB 目录，然后再导入。");
+      return;
+    }
+    const s = useProjectStore.getState();
+    const norm = normalizeSelection(paths);
+    const out = new Set<string>();
+    for (const p of norm) {
+      const isDir = s.dirs.includes(p) || s.files.some((f) => f.path.startsWith(`${p}/`));
+      if (isDir) {
+        for (const f of s.files) if (f.path.startsWith(`${p}/`)) out.add(f.path);
+      } else {
+        out.add(p);
+      }
+    }
+    const list = Array.from(out).filter((p) => {
+      const ext = p.toLowerCase();
+      return ext.endsWith(".md") || ext.endsWith(".mdx") || ext.endsWith(".txt");
+    });
+    if (!list.length) {
+      window.alert("未找到可导入的文本文件（仅支持 .md/.mdx/.txt）。");
+      return;
+    }
+    void (async () => {
+      const ret = await kb.importProjectPaths(list);
+      // 导入完成后：加入抽卡队列并弹窗执行（支持暂停/继续/取消）
+      await kb.enqueueCardJobs(ret.docIds, { open: true, autoStart: true });
+    })();
+  };
 
   const actionNewFile = (baseDir: string) => {
     ask({
@@ -627,6 +663,9 @@ export function Explorer() {
           {selected.length ? (
             <div className="selBar">
               <div className="selCount">已选 {selected.length} 项</div>
+              <button className="btn btnIcon" type="button" onClick={() => actionImportToKb(selected)}>
+                导入并抽卡
+              </button>
               <button className="btn btnIcon" type="button" onClick={actionMoveSelected}>
                 批量移动
               </button>
@@ -663,6 +702,10 @@ export function Explorer() {
           ) : null}
           {ctx.kind === "dir" ? (
             <>
+              <button className="ctxItem" type="button" onClick={() => (setCtx(null), actionImportToKb([ctx.path]))}>
+                导入到知识库（并抽卡）
+              </button>
+              <div className="ctxSep" />
               <button className="ctxItem" type="button" onClick={() => (setCtx(null), actionNewFile(ctx.path))}>
                 新建文件…
               </button>
@@ -687,6 +730,10 @@ export function Explorer() {
           ) : null}
           {ctx.kind === "file" ? (
             <>
+              <button className="ctxItem" type="button" onClick={() => (setCtx(null), actionImportToKb([ctx.path]))}>
+                导入到知识库（并抽卡）
+              </button>
+              <div className="ctxSep" />
               <button className="ctxItem" type="button" onClick={() => (setCtx(null), actionRename("file", ctx.path))}>
                 重命名…
               </button>

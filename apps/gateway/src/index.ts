@@ -10,7 +10,7 @@ import { loadDb, saveDb, type User } from "./db.js";
 import { kbSearch, type KbCard } from "@writing-ide/kb-core";
 import { MemoryKbStore } from "./kb/memoryStore.js";
 import { adjustUserPoints, listUserTransactions } from "./billing.js";
-import { streamChatCompletions, type OpenAiChatMessage } from "./llm/openaiCompat.js";
+import { chatCompletionOnce, streamChatCompletions, type OpenAiChatMessage } from "./llm/openaiCompat.js";
 import { isToolCallMessage, parseToolCalls, renderToolResultXml } from "./agent/xmlProtocol.js";
 import { toolNamesForMode, toolsPrompt, type AgentMode } from "./agent/toolRegistry.js";
 
@@ -773,6 +773,213 @@ fastify.post(
     };
   }
 );
+
+/**
+ * KB 抽卡（开发期）：输入段落列表，输出结构化卡片（JSON）。
+ * - 不落库：由 Desktop 本地 KB 接口负责写入/断点续传。
+ * - 不要求登录：因为 Desktop 目前还没接入真实登录态（后续可切到 authenticate）。
+ */
+fastify.post("/api/kb/dev/extract_cards", async (request, reply) => {
+  if (!IS_DEV) return reply.code(404).send({ error: "NOT_AVAILABLE" });
+
+  const bodySchema = z.object({
+    model: z.string().optional(),
+    maxCards: z.number().int().min(1).max(80).optional(),
+    paragraphs: z
+      .array(
+        z.object({
+          index: z.number().int().min(0),
+          text: z.string().min(1),
+          headingPath: z.array(z.string()).optional()
+        })
+      )
+      .min(1)
+      .max(300)
+  });
+  const body = bodySchema.parse((request as any).body);
+
+  const baseUrlDefault = String(process.env.LLM_BASE_URL ?? "").trim();
+  const apiKeyDefault = String(process.env.LLM_API_KEY ?? "").trim();
+  const modelDefault = String(process.env.LLM_MODEL ?? "").trim();
+
+  const cardBaseUrl = String(process.env.LLM_CARD_BASE_URL ?? "").trim() || baseUrlDefault;
+  const cardApiKey = String(process.env.LLM_CARD_API_KEY ?? "").trim() || apiKeyDefault;
+  const cardModelDefault = String(process.env.LLM_CARD_MODEL ?? "").trim() || modelDefault;
+
+  if (!cardBaseUrl || !cardApiKey || !cardModelDefault) {
+    return reply.code(500).send({
+      error: "LLM_NOT_CONFIGURED",
+      hint: "请配置 LLM_BASE_URL/LLM_MODEL/LLM_API_KEY；若抽卡需不同 key/model，请配置 LLM_CARD_MODEL/LLM_CARD_API_KEY（可选 LLM_CARD_BASE_URL）。"
+    });
+  }
+
+  const model = body.model ?? cardModelDefault;
+  const maxCards = body.maxCards ?? 18;
+  const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 3);
+  const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
+
+  // facet 列表：先用 plan.md 里的顶层枚举（后续接入更细的 taxonomy 文件）
+  const facetIds = [
+    "intro",
+    "opening_design",
+    "narrative_structure",
+    "language_style",
+    "one_liner_crafting",
+    "topic_selection",
+    "resonance",
+    "logic_framework",
+    "reader_interaction",
+    "emotion_mobilization",
+    "question_design",
+    "scene_building",
+    "rhetoric",
+    "voice_rhythm",
+    "persuasion",
+    "values_embedding",
+    "structure_patterns",
+    "psychology_principles",
+    "special_markers",
+    "viral_patterns",
+    "ai_clone_strategy"
+  ];
+
+  const sys = [
+    "你是写作 IDE 的「知识库抽卡器」。",
+    "任务：把输入的段落列表抽取成可复用的写作知识卡（卡片越少越精）。",
+    "",
+    "输出要求：你必须且只能输出一个 JSON 数组（不要代码块，不要多余文字）。",
+    "数组元素为 Card 对象，字段：",
+    '- title: string（卡片标题，短且可复用）',
+    '- type: "concept"|"principle"|"strategy"|"tactic"|"case"|"warning"|"faq"（可选，尽量填）',
+    "- content: string（Markdown，建议用要点列表；要能直接拿来写作）",
+    "- tags?: string[]",
+    "- oneLiners?: string[]（可选）",
+    "- steps?: string[]（可选）",
+    "- pitfalls?: string[]（可选）",
+    "- examples?: string[]（可选）",
+    "- paragraphIndices: number[]（引用来源段落索引，用于回链；至少 1 个）",
+    `- facetIds: string[]（必填：从以下枚举里选 1-3 个，允许多选；不要编造新的；如果确实无法判断，填 ["logic_framework"]）：${facetIds.join(", ")}`,
+    "",
+    `数量约束：最多 ${maxCards} 张卡。避免重复、避免空泛。`
+  ].join("\n");
+
+  const user = [
+    "段落列表如下（格式：[#index] (headingPath 可选) 内容）：",
+    ...body.paragraphs.map((p) => {
+      const hp = Array.isArray(p.headingPath) && p.headingPath.length ? ` (${p.headingPath.join(" > ")})` : "";
+      const text = String(p.text ?? "").replace(/\s+/g, " ").trim();
+      return `[#${p.index}]${hp} ${text}`;
+    })
+  ].join("\n");
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const parseUpstream = (text: string) => {
+    let message = String(text ?? "");
+    try {
+      const j = JSON.parse(message);
+      if (typeof j?.error?.message === "string") message = j.error.message;
+      else if (typeof j?.message === "string") message = j.message;
+    } catch {
+      // ignore
+    }
+    const m = message.match(/request id:\s*([^)]+)\)/i);
+    const requestId = m?.[1] ? String(m[1]) : undefined;
+    return { message, requestId };
+  };
+
+  let lastErr: any = null;
+  let lastStatus: number | undefined = undefined;
+  let lastDetail: string | undefined = undefined;
+
+  let ret: any = null;
+  for (let attempt = 0; attempt <= retryMax; attempt += 1) {
+    ret = await chatCompletionOnce({
+      config: { baseUrl: cardBaseUrl, apiKey: cardApiKey },
+      model,
+      messages: [
+        { role: "system", content: sys },
+        { role: "user", content: user }
+      ],
+      temperature: 0.2
+    });
+
+    if (ret.ok) break;
+
+    lastStatus = ret.status;
+    lastDetail = ret.error;
+    const is429 = ret.status === 429 || String(ret.error ?? "").includes("Too Many Requests") || String(ret.error ?? "").includes("负载已饱和");
+    lastErr = { is429, detail: ret.error, status: ret.status };
+    if (!is429 || attempt >= retryMax) break;
+
+    const jitter = Math.floor(Math.random() * 200);
+    const wait = retryBaseMs * Math.pow(2, attempt) + jitter;
+    await sleep(wait);
+  }
+
+  if (!ret?.ok) {
+    const is429 = Boolean(lastErr?.is429);
+    const parsed = parseUpstream(String(lastDetail ?? ""));
+    const payload = {
+      error: is429 ? "UPSTREAM_BUSY" : "UPSTREAM_ERROR",
+      message: parsed.message || "upstream error",
+      requestId: parsed.requestId,
+      status: lastStatus ?? null,
+      retry: { attempts: retryMax + 1, retryMax, retryBaseMs }
+    };
+    return reply.code(is429 ? 503 : 502).send(payload);
+  }
+
+  const raw = String(ret.content ?? "").trim();
+
+  const tryParse = (s: string) => {
+    try {
+      const x = JSON.parse(s);
+      return x;
+    } catch {
+      return null;
+    }
+  };
+
+  let parsed: any = tryParse(raw);
+  if (!parsed) {
+    // 宽松兜底：截取第一个 JSON 数组
+    const m = raw.match(/\[[\s\S]*\]/);
+    if (m?.[0]) parsed = tryParse(m[0]);
+  }
+
+  if (!Array.isArray(parsed)) {
+    return reply.code(500).send({ error: "INVALID_MODEL_OUTPUT", hint: "模型未返回合法 JSON 数组" });
+  }
+
+  // 轻量清洗
+  const cards = parsed
+    .map((c: any) => ({
+      title: typeof c?.title === "string" ? c.title.trim().slice(0, 120) : "",
+      type: typeof c?.type === "string" ? c.type.trim() : undefined,
+      content: typeof c?.content === "string" ? c.content.trim() : "",
+      tags: Array.isArray(c?.tags) ? c.tags.map((x: any) => String(x ?? "").trim()).filter(Boolean).slice(0, 12) : undefined,
+      oneLiners: Array.isArray(c?.oneLiners)
+        ? c.oneLiners.map((x: any) => String(x ?? "").trim()).filter(Boolean).slice(0, 12)
+        : undefined,
+      steps: Array.isArray(c?.steps) ? c.steps.map((x: any) => String(x ?? "").trim()).filter(Boolean).slice(0, 24) : undefined,
+      pitfalls: Array.isArray(c?.pitfalls)
+        ? c.pitfalls.map((x: any) => String(x ?? "").trim()).filter(Boolean).slice(0, 24)
+        : undefined,
+      examples: Array.isArray(c?.examples)
+        ? c.examples.map((x: any) => String(x ?? "").trim()).filter(Boolean).slice(0, 12)
+        : undefined,
+      paragraphIndices: Array.isArray(c?.paragraphIndices)
+        ? c.paragraphIndices.map((n: any) => Number(n)).filter((n: any) => Number.isFinite(n) && n >= 0).slice(0, 24)
+        : [],
+      facetIds: Array.isArray(c?.facetIds)
+        ? c.facetIds.map((x: any) => String(x ?? "").trim()).filter((x: string) => facetIds.includes(x)).slice(0, 6)
+        : undefined
+    }))
+    .filter((c: any) => c.title && c.content && c.paragraphIndices.length > 0)
+    .slice(0, maxCards);
+
+  return reply.send({ ok: true, cards });
+});
 
 await fastify.listen({ port: PORT, host: "0.0.0.0" });
 

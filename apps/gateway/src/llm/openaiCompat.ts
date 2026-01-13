@@ -29,6 +29,10 @@ export type StreamDeltaEvent =
   | { type: "done" }
   | { type: "error"; error: string };
 
+export type ChatCompletionOnceResult =
+  | { ok: true; content: string; raw: any }
+  | { ok: false; error: string; status?: number; rawText?: string };
+
 async function* readLines(stream: ReadableStream<Uint8Array>) {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
@@ -117,6 +121,50 @@ export async function* streamChatCompletions(args: {
       return;
     }
   }
+}
+
+export async function chatCompletionOnce(args: {
+  config: OpenAiCompatConfig;
+  model: string;
+  messages: OpenAiChatMessage[];
+  temperature?: number;
+  signal?: AbortSignal;
+}): Promise<ChatCompletionOnceResult> {
+  const url = openAiCompatUrl(args.config.baseUrl, "/chat/completions");
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${args.config.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: args.model,
+      messages: args.messages,
+      temperature: args.temperature,
+      stream: false,
+    }),
+    signal: args.signal,
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    return { ok: false, error: text || `UPSTREAM_${res.status}`, status: res.status, rawText: text };
+  }
+
+  let json: any = null;
+  try {
+    json = await res.json();
+  } catch {
+    const text = await res.text().catch(() => "");
+    return { ok: false, error: "UPSTREAM_INVALID_JSON", status: res.status, rawText: text };
+  }
+
+  const content = json?.choices?.[0]?.message?.content;
+  if (typeof content !== "string") {
+    return { ok: false, error: "UPSTREAM_EMPTY_CONTENT", status: res.status, rawText: JSON.stringify(json) };
+  }
+  return { ok: true, content, raw: json };
 }
 
 

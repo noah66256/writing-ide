@@ -51,6 +51,14 @@ contextBridge.exposeInMainWorld("desktop", {
       return () => ipcRenderer.removeListener("project.fsEvent", listener);
     },
   },
+  kb: {
+    pickFiles(options) {
+      return ipcRenderer.invoke("kb.pickFiles", options);
+    },
+    extractTextFromFile(filePath) {
+      return ipcRenderer.invoke("kb.extractTextFromFile", filePath);
+    },
+  },
   workspace: {
     setRecentProjects(dirs) {
       return ipcRenderer.invoke("workspace.setRecentProjects", dirs);

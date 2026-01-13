@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useRunStore } from "../state/runStore";
-import { useUiStore, type DockTabKey } from "../state/uiStore";
+import { useUiStore } from "../state/uiStore";
 import { RichText } from "./RichText";
 
 export function DockPanel() {
@@ -58,45 +58,38 @@ export function DockPanel() {
     <div style={{ height: "100%", display: "grid", gridTemplateRows: "auto 1fr" }}>
       <div className="dockTabs">
         <div
-          className={`dockTab ${tab === "kb" ? "dockTabActive" : ""}`}
-          onClick={() => setTab("kb" as DockTabKey)}
-        >
-          KB
-        </div>
-        <div
           className={`dockTab ${tab === "outline" ? "dockTabActive" : ""}`}
-          onClick={() => setTab("outline" as DockTabKey)}
+          onClick={() => setTab("outline")}
         >
           Outline
         </div>
         <div
           className={`dockTab ${tab === "graph" ? "dockTabActive" : ""}`}
-          onClick={() => setTab("graph" as DockTabKey)}
+          onClick={() => setTab("graph")}
         >
           Graph
         </div>
         <div
           className={`dockTab ${tab === "problems" ? "dockTabActive" : ""}`}
-          onClick={() => setTab("problems" as DockTabKey)}
+          onClick={() => setTab("problems")}
         >
           Problems
         </div>
         <div
           className={`dockTab ${tab === "runs" ? "dockTabActive" : ""}`}
-          onClick={() => setTab("runs" as DockTabKey)}
+          onClick={() => setTab("runs")}
         >
           Runs
         </div>
         <div
           className={`dockTab ${tab === "logs" ? "dockTabActive" : ""}`}
-          onClick={() => setTab("logs" as DockTabKey)}
+          onClick={() => setTab("logs")}
         >
           Logs
         </div>
       </div>
 
       <div className="dockContent">
-        {tab === "kb" && <div>（占位）本地知识库：后续接入 Postgres+pgvector 与引用回链。</div>}
         {tab === "outline" && <div>（占位）后续从 Markdown 标题树生成 Outline。</div>}
         {tab === "graph" && <div>（占位）后续显示文章结构图（思维导图）。</div>}
         {tab === "problems" && <div>（占位）后续接入 lint.style / lint.platform / lint.facts。</div>}
