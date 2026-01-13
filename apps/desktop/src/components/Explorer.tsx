@@ -3,6 +3,8 @@ import { useProjectStore, type ProjectFile } from "../state/projectStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
 import { useKbStore } from "../state/kbStore";
 import { useLayoutStore } from "../state/layoutStore";
+import { useRunStore } from "../state/runStore";
+import { useUiStore } from "../state/uiStore";
 
 type TreeNode =
   | { kind: "dir"; name: string; path: string; children: TreeNode[] }
@@ -144,6 +146,7 @@ export function Explorer() {
   const [ctx, setCtx] = useState<CtxMenu | null>(null);
   const [prompt, setPrompt] = useState<PromptState | null>(null);
   const promptInputRef = useRef<HTMLInputElement | null>(null);
+  const ctxMenuRef = useRef<HTMLDivElement | null>(null);
 
   const isDirOpen = (p: string) => (p ? !!expanded[p] : true);
 
@@ -230,7 +233,12 @@ export function Explorer() {
 
   useEffect(() => {
     if (!ctx) return;
-    const onDown = () => setCtx(null);
+    const onDown = (e: MouseEvent) => {
+      const el = ctxMenuRef.current;
+      const target = e.target as Node | null;
+      if (el && target && el.contains(target)) return;
+      setCtx(null);
+    };
     window.addEventListener("mousedown", onDown);
     return () => window.removeEventListener("mousedown", onDown);
   }, [ctx]);
@@ -264,37 +272,93 @@ export function Explorer() {
     setPrompt({ ...p, value: p.value ?? "" });
 
   const actionImportToKb = (paths: string[]) => {
+    const run = useRunStore.getState();
     const kb = useKbStore.getState();
-    if (!kb.baseDir) {
-      // 引导用户先选择 KB 目录
-      useLayoutStore.getState().openSection("kb");
-      window.alert("请先在左侧 KB 面板选择 KB 目录，然后再导入。");
-      return;
-    }
-    const s = useProjectStore.getState();
-    const norm = normalizeSelection(paths);
-    const out = new Set<string>();
-    for (const p of norm) {
-      const isDir = s.dirs.includes(p) || s.files.some((f) => f.path.startsWith(`${p}/`));
-      if (isDir) {
-        for (const f of s.files) if (f.path.startsWith(`${p}/`)) out.add(f.path);
-      } else {
-        out.add(p);
+    try {
+      // dev 下自动切到 Logs，方便用户立刻看到“点了之后发生了什么”
+      const isDev = Boolean((import.meta as any).env?.DEV);
+      if (isDev) useUiStore.getState().setDockTab("logs");
+
+      run.log("info", "kb.import.click", {
+        rawPaths: Array.isArray(paths) ? paths : [],
+        baseDir: kb.baseDir,
+        currentLibraryId: kb.currentLibraryId,
+      });
+
+      const s = useProjectStore.getState();
+      const norm = normalizeSelection(paths);
+      const out = new Set<string>();
+      for (const p of norm) {
+        const isDir = s.dirs.includes(p) || s.files.some((f) => f.path.startsWith(`${p}/`));
+        if (isDir) {
+          for (const f of s.files) if (f.path.startsWith(`${p}/`)) out.add(f.path);
+        } else {
+          out.add(p);
+        }
       }
+
+      const list = Array.from(out).filter((p) => {
+        const ext = p.toLowerCase();
+        return ext.endsWith(".md") || ext.endsWith(".mdx") || ext.endsWith(".txt");
+      });
+
+      run.log("info", "kb.import.filter", {
+        norm,
+        expandedCount: out.size,
+        listCount: list.length,
+        sample: list.slice(0, 20),
+      });
+
+      if (!list.length) {
+        run.log("warn", "kb.import.no_text_files", { expandedCount: out.size, norm });
+        window.alert("未找到可导入的文本文件（仅支持 .md/.mdx/.txt）。");
+        return;
+      }
+      if (!kb.baseDir) {
+        run.log("warn", "kb.import.no_base_dir", { listCount: list.length });
+        // 引导用户先选择 KB 目录
+        useLayoutStore.getState().openSection("kb");
+        window.alert("请先在左侧 KB 面板选择 KB 目录，然后再导入。");
+        return;
+      }
+      if (!kb.currentLibraryId) {
+        run.log("warn", "kb.import.no_library_selected", { listCount: list.length });
+        useLayoutStore.getState().openSection("kb");
+        // 兼容 HMR/旧 state：动作不存在时不阻塞
+        const setPending = (kb as any).setPendingImport;
+        if (typeof setPending === "function") setPending({ kind: "project", paths: list });
+        else run.log("error", "kb.import.missing_setPendingImport", {});
+        kb.openKbManager(
+          "libraries",
+          `请先选择一个库（强制）。已暂存待导入 ${list.length} 个文件，选库后会自动继续导入并加入抽卡队列（不会自动开始，需在“抽卡任务”里点 ▶）。`,
+        );
+        window.alert("请先在“库管理”里选择一个库；选择后会自动继续导入并入队，需手动点 ▶ 开始抽卡。");
+        return;
+      }
+
+      void (async () => {
+        run.log("info", "kb.import.start", { listCount: list.length, libraryId: kb.currentLibraryId });
+        const ret = await kb.importProjectPaths(list);
+        run.log("info", "kb.import.done", { ...ret, docIdCount: ret.docIds.length, sample: ret.docIds.slice(0, 6) });
+
+        if (!ret.docIds.length) {
+          run.log("warn", "kb.import.no_docs_created", ret);
+          kb.openKbManager("libraries", "导入完成，但没有生成任何文档（可能是文件为空/读取失败/被判定为重复）。请打开底部 Logs 查看 kb.import.* 详情。");
+          window.alert("导入完成，但没有生成任何文档。请打开底部 DockPanel → Logs 查看详情。");
+          return;
+        }
+
+        // 导入完成后：加入抽卡队列并打开弹窗（不自动开始，避免误触）
+        await kb.enqueueCardJobs(ret.docIds, { open: true, autoStart: false });
+        run.log("info", "kb.import.enqueue_jobs", { docIdCount: ret.docIds.length });
+      })().catch((e: any) => {
+        run.log("error", "kb.import.async_failed", { error: String(e?.message ?? e) });
+        window.alert(`导入失败：${String(e?.message ?? e)}`);
+      });
+    } catch (e: any) {
+      run.log("error", "kb.import.click_failed", { error: String(e?.message ?? e) });
+      window.alert(`导入触发异常：${String(e?.message ?? e)}`);
     }
-    const list = Array.from(out).filter((p) => {
-      const ext = p.toLowerCase();
-      return ext.endsWith(".md") || ext.endsWith(".mdx") || ext.endsWith(".txt");
-    });
-    if (!list.length) {
-      window.alert("未找到可导入的文本文件（仅支持 .md/.mdx/.txt）。");
-      return;
-    }
-    void (async () => {
-      const ret = await kb.importProjectPaths(list);
-      // 导入完成后：加入抽卡队列并弹窗执行（支持暂停/继续/取消）
-      await kb.enqueueCardJobs(ret.docIds, { open: true, autoStart: true });
-    })();
   };
 
   const actionNewFile = (baseDir: string) => {
@@ -687,7 +751,7 @@ export function Explorer() {
       ) : null}
 
       {ctx ? (
-        <div className="ctxMenu" style={{ left: ctx.x, top: ctx.y }}>
+        <div ref={ctxMenuRef} className="ctxMenu" style={{ left: ctx.x, top: ctx.y }}>
           {ctx.kind === "root" ? null : null}
           {selected.length > 1 ? (
             <>

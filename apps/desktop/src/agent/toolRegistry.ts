@@ -1,5 +1,6 @@
 import { useProjectStore } from "../state/projectStore";
 import { useRunStore, type Mode, type ToolApplyPolicy, type ToolRiskLevel } from "../state/runStore";
+import { useKbStore } from "../state/kbStore";
 
 export type ToolArgSpec = {
   name: string;
@@ -378,6 +379,59 @@ function parseArgs(rawArgs: Record<string, string>) {
 }
 
 const tools: ToolDefinition[] = [
+  {
+    name: "kb.search",
+    description:
+      "在本地知识库中检索（按库过滤、按 source_doc 分组）。默认只在右侧已关联的库里搜索。用于写作引用素材（结构/卡片/段落）。",
+    args: [
+      { name: "query", required: true, desc: "搜索关键词/问题" },
+      { name: "kind", desc: '可选：artifact kind（"card"|"outline"|"paragraph"），默认 card' },
+      { name: "libraryIds", desc: "可选：库 ID 数组；不传则用右侧已关联库" },
+      { name: "facetIds", desc: "可选：outlineFacet id 数组（多选）" },
+      { name: "perDocTopN", desc: "每篇文档最多返回多少条命中（默认 3）" },
+      { name: "topDocs", desc: "最多返回多少篇文档（默认 12）" },
+    ],
+    riskLevel: "low",
+    applyPolicy: "proposal",
+    reversible: false,
+    run: async (args) => {
+      const query = String(args.query ?? "").trim();
+      if (!query) return { ok: false, error: "EMPTY_QUERY" };
+      const kindRaw = String(args.kind ?? "card").trim();
+      const kind = (kindRaw === "outline" || kindRaw === "paragraph" || kindRaw === "card" ? kindRaw : "card") as any;
+      const facetIds = Array.isArray(args.facetIds) ? (args.facetIds as any[]).map((x) => String(x ?? "").trim()).filter(Boolean) : [];
+      const perDocTopN = typeof args.perDocTopN === "number" ? Math.max(1, Math.floor(args.perDocTopN)) : 3;
+      const topDocs = typeof args.topDocs === "number" ? Math.max(1, Math.floor(args.topDocs)) : 12;
+      const explicitLibs = Array.isArray(args.libraryIds) ? (args.libraryIds as any[]).map((x) => String(x ?? "").trim()).filter(Boolean) : [];
+      const attached = useRunStore.getState().kbAttachedLibraryIds ?? [];
+      const libraryIds = explicitLibs.length ? explicitLibs : attached;
+      if (!libraryIds.length) return { ok: false, error: "NO_LIBRARY_SELECTED" };
+
+      const ret = await useKbStore.getState().searchForAgent({ query, kind, facetIds, libraryIds, perDocTopN, topDocs });
+      if (!ret.ok) return { ok: false, error: ret.error ?? "SEARCH_FAILED" };
+
+      // 输出精简：按文档分组
+      const groups = (ret.groups ?? []).map((g) => ({
+        sourceDoc: g.sourceDoc,
+        bestScore: g.bestScore,
+        hits: g.hits.map((h) => ({
+          score: h.score,
+          snippet: h.snippet,
+          artifact: {
+            id: h.artifact.id,
+            kind: h.artifact.kind,
+            title: h.artifact.title,
+            cardType: (h.artifact as any).cardType,
+            facetIds: h.artifact.facetIds ?? [],
+            anchor: h.artifact.anchor,
+            // 注意：不返回全文 content，避免 token 爆炸；需要全文由 doc.read / kb 引用机制后续完善
+          },
+        })),
+      }));
+
+      return { ok: true, output: { ok: true, query, kind, libraryIds, groups }, undoable: false };
+    },
+  },
   {
     name: "project.listFiles",
     description: "列出当前项目内存文件列表（path）。需要知道可用文件时使用。",

@@ -7,6 +7,7 @@ import { PillSelect } from "./PillSelect";
 import { ToolBlock } from "./ToolBlock";
 import { RichText } from "./RichText";
 import { RefComposer, type RefComposerHandle, type RefItem } from "./RefComposer";
+import { useKbStore } from "../state/kbStore";
 
 type RunController = { cancel: () => void };
 
@@ -52,6 +53,8 @@ export function AgentPane() {
 
   // 默认走相对路径（/api），由 Vite dev server 代理到本地 Gateway，避免跨域问题
   const gatewayUrl = (import.meta as any).env?.VITE_GATEWAY_URL ?? "";
+  const kbAttached = useRunStore((s) => s.kbAttachedLibraryIds);
+  const openKbManager = useKbStore((s) => s.openKbManager);
 
   useEffect(() => {
     // 尽量从 Gateway 拉取模型列表
@@ -530,6 +533,15 @@ export function AgentPane() {
               <div className="ctxPill" title={ctxTitle} aria-label="Context 使用量">
                 CTX {ctxPct}%
               </div>
+              <button
+                className="ctxPill"
+                type="button"
+                title={(kbAttached ?? []).length ? `已关联库：${(kbAttached ?? []).length}` : "未关联任何库"}
+                onClick={() => openKbManager("libraries")}
+                style={{ cursor: "pointer", border: "none" }}
+              >
+                KB {(kbAttached ?? []).length || 0}库
+              </button>
             </div>
 
             <div className="composerBarRight">
@@ -627,7 +639,15 @@ export function AgentPane() {
       </div>
 
       {refPickerOpen && (
-        <div className="modalMask" role="dialog" aria-modal="true" onMouseDown={() => setRefPickerOpen(false)}>
+        <div
+          className="modalMask"
+          role="dialog"
+          aria-modal="true"
+          onMouseDown={(e) => {
+            // 仅点击遮罩空白处关闭，避免误关（与 KB 管理弹窗一致）
+            if (e.target === e.currentTarget) setRefPickerOpen(false);
+          }}
+        >
           <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
             <div className="modalTitle">引用文件/文件夹</div>
             <div className="modalDesc">

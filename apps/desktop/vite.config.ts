@@ -11,6 +11,9 @@ function resolveDevPort(defaultPort = 5173) {
 
 const devPort = resolveDevPort();
 
+// Gateway 地址：优先环境变量，否则用服务器（本地调试 Gateway 时可改回 127.0.0.1:8000）
+const gatewayTarget = process.env.VITE_GATEWAY_URL || "http://120.26.6.147:8000";
+
 export default defineConfig({
   // Electron file:// 加载时需要相对路径
   base: "./",
@@ -18,10 +21,10 @@ export default defineConfig({
   server: {
     port: devPort,
     strictPort: true,
-    // 开发期：通过 Vite proxy 把 /api 转发到本地 Gateway，避免 Electron renderer 的跨域/CORS/localhost问题
+    // 开发期：通过 Vite proxy 把 /api 转发到 Gateway，避免 Electron renderer 的跨域/CORS/localhost问题
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:8000",
+        target: gatewayTarget,
         changeOrigin: true,
       },
     },

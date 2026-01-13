@@ -89,6 +89,12 @@ type RunState = {
   logs: LogEntry[];
   isRunning: boolean;
 
+  // KB：右侧 Agent 关联的库（多选；持久化，便于常用库默认保持关联）
+  kbAttachedLibraryIds: string[];
+  setKbAttachedLibraries: (ids: string[]) => void;
+  toggleKbAttachedLibrary: (id: string) => void;
+  clearKbAttachedLibraries: () => void;
+
   setMode: (mode: Mode) => void;
   setModel: (model: string) => void;
   setMainDoc: (mainDoc: MainDoc) => void;
@@ -138,12 +144,26 @@ export const useRunStore = create<RunState>()(
   steps: [],
   logs: [],
   isRunning: false,
+  kbAttachedLibraryIds: [],
 
   setMode: (mode) => set({ mode }),
   setModel: (model) => set({ model }),
   setMainDoc: (mainDoc) => set({ mainDoc }),
   setRunning: (running) => set({ isRunning: running }),
   resetRun: () => set({ steps: [], logs: [], isRunning: false, mainDoc: { goal: "" }, todoList: [] }),
+
+  setKbAttachedLibraries: (ids) => {
+    const unique = Array.from(new Set((ids ?? []).map((x) => String(x ?? "").trim()).filter(Boolean)));
+    set({ kbAttachedLibraryIds: unique });
+  },
+  toggleKbAttachedLibrary: (id) => {
+    const v = String(id ?? "").trim();
+    if (!v) return;
+    const cur = get().kbAttachedLibraryIds ?? [];
+    const next = cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v];
+    set({ kbAttachedLibraryIds: next });
+  },
+  clearKbAttachedLibraries: () => set({ kbAttachedLibraryIds: [] }),
 
   addUser: (text, baseline) => {
     const id = makeId("u");
@@ -321,7 +341,7 @@ export const useRunStore = create<RunState>()(
 }),
     {
       name: "writing-ide.runprefs.v1",
-      partialize: (s) => ({ mode: s.mode, model: s.model }),
+      partialize: (s) => ({ mode: s.mode, model: s.model, kbAttachedLibraryIds: s.kbAttachedLibraryIds }),
     },
   ),
 );

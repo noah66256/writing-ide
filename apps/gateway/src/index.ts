@@ -785,6 +785,9 @@ fastify.post("/api/kb/dev/extract_cards", async (request, reply) => {
   const bodySchema = z.object({
     model: z.string().optional(),
     maxCards: z.number().int().min(1).max(80).optional(),
+    facetIds: z.array(z.string().min(1)).min(1).max(80).optional(),
+    // doc_v2: 让模型直接输出最终写作要素类型（hook/thesis/ending/one_liner/outline/other）
+    mode: z.enum(["generic", "doc_v2"]).optional(),
     paragraphs: z
       .array(
         z.object({
@@ -819,7 +822,7 @@ fastify.post("/api/kb/dev/extract_cards", async (request, reply) => {
   const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
 
   // facet 列表：先用 plan.md 里的顶层枚举（后续接入更细的 taxonomy 文件）
-  const facetIds = [
+  const defaultFacetIds = [
     "intro",
     "opening_design",
     "narrative_structure",
@@ -842,26 +845,49 @@ fastify.post("/api/kb/dev/extract_cards", async (request, reply) => {
     "viral_patterns",
     "ai_clone_strategy"
   ];
+  const facetIds =
+    Array.isArray((body as any).facetIds) && (body as any).facetIds.length
+      ? (body as any).facetIds.map((x: any) => String(x ?? "").trim()).filter(Boolean).slice(0, 80)
+      : defaultFacetIds;
 
-  const sys = [
-    "你是写作 IDE 的「知识库抽卡器」。",
-    "任务：把输入的段落列表抽取成可复用的写作知识卡（卡片越少越精）。",
-    "",
-    "输出要求：你必须且只能输出一个 JSON 数组（不要代码块，不要多余文字）。",
-    "数组元素为 Card 对象，字段：",
-    '- title: string（卡片标题，短且可复用）',
-    '- type: "concept"|"principle"|"strategy"|"tactic"|"case"|"warning"|"faq"（可选，尽量填）',
-    "- content: string（Markdown，建议用要点列表；要能直接拿来写作）",
-    "- tags?: string[]",
-    "- oneLiners?: string[]（可选）",
-    "- steps?: string[]（可选）",
-    "- pitfalls?: string[]（可选）",
-    "- examples?: string[]（可选）",
-    "- paragraphIndices: number[]（引用来源段落索引，用于回链；至少 1 个）",
-    `- facetIds: string[]（必填：从以下枚举里选 1-3 个，允许多选；不要编造新的；如果确实无法判断，填 ["logic_framework"]）：${facetIds.join(", ")}`,
-    "",
-    `数量约束：最多 ${maxCards} 张卡。避免重复、避免空泛。`
-  ].join("\n");
+  const mode = (body as any).mode ?? "generic";
+
+  const sys =
+    mode === "doc_v2"
+      ? [
+          "你是写作 IDE 的「知识库抽卡器」。",
+          "任务：从输入段落中抽取“最终写作要素卡”，用于仿写与结构复用（人类不看中间产物）。",
+          "",
+          "输出要求：你必须且只能输出一个 JSON 数组（不要代码块，不要多余文字）。",
+          "数组元素为 Card 对象，字段：",
+          '- title: string（短标题）',
+          '- cardType: "hook"|"thesis"|"ending"|"one_liner"|"outline"|"other"（必填）',
+          "- content: string（Markdown，要能直接拿来写作/仿写）",
+          "- paragraphIndices: number[]（引用来源段落索引；至少 1 个）",
+          `- facetIds: string[]（必填：从以下枚举里选 1-3 个；不要编造新的；若无法判断用 ["${facetIds[0] ?? "logic_framework"}"]）：${facetIds.join(", ")}`,
+          "",
+          "数量建议：hook<=3，thesis<=3，ending<=3，one_liner<=12（可合并成少量卡），outline<=1。",
+          `数量硬约束：最多 ${maxCards} 张卡。避免重复、避免空泛。`
+        ].join("\n")
+      : [
+          "你是写作 IDE 的「知识库抽卡器」。",
+          "任务：把输入的段落列表抽取成可复用的写作知识卡（卡片越少越精）。",
+          "",
+          "输出要求：你必须且只能输出一个 JSON 数组（不要代码块，不要多余文字）。",
+          "数组元素为 Card 对象，字段：",
+          '- title: string（卡片标题，短且可复用）',
+          '- type: "concept"|"principle"|"strategy"|"tactic"|"case"|"warning"|"faq"（可选，尽量填）',
+          "- content: string（Markdown，建议用要点列表；要能直接拿来写作）",
+          "- tags?: string[]",
+          "- oneLiners?: string[]（可选）",
+          "- steps?: string[]（可选）",
+          "- pitfalls?: string[]（可选）",
+          "- examples?: string[]（可选）",
+          "- paragraphIndices: number[]（引用来源段落索引，用于回链；至少 1 个）",
+          `- facetIds: string[]（必填：从以下枚举里选 1-3 个，允许多选；不要编造新的；如果确实无法判断，填 ["logic_framework"]）：${facetIds.join(", ")}`,
+          "",
+          `数量约束：最多 ${maxCards} 张卡。避免重复、避免空泛。`
+        ].join("\n");
 
   const user = [
     "段落列表如下（格式：[#index] (headingPath 可选) 内容）：",
@@ -956,6 +982,7 @@ fastify.post("/api/kb/dev/extract_cards", async (request, reply) => {
     .map((c: any) => ({
       title: typeof c?.title === "string" ? c.title.trim().slice(0, 120) : "",
       type: typeof c?.type === "string" ? c.type.trim() : undefined,
+      cardType: typeof c?.cardType === "string" ? c.cardType.trim() : undefined,
       content: typeof c?.content === "string" ? c.content.trim() : "",
       tags: Array.isArray(c?.tags) ? c.tags.map((x: any) => String(x ?? "").trim()).filter(Boolean).slice(0, 12) : undefined,
       oneLiners: Array.isArray(c?.oneLiners)
@@ -979,6 +1006,241 @@ fastify.post("/api/kb/dev/extract_cards", async (request, reply) => {
     .slice(0, maxCards);
 
   return reply.send({ ok: true, cards });
+});
+
+/**
+ * KB 生成库级“仿写手册”（开发期）：输入单篇已抽出的结构化要素卡，输出库级 StyleProfile + Facet Playbook。
+ * - 产物由 Desktop 负责落库（会落到一个“仿写手册”虚拟 SourceDoc 下）
+ */
+fastify.post("/api/kb/dev/build_library_playbook", async (request, reply) => {
+  if (!IS_DEV) return reply.code(404).send({ error: "NOT_AVAILABLE" });
+
+  const bodySchema = z.object({
+    model: z.string().optional(),
+    facetIds: z.array(z.string().min(1)).min(1).max(80),
+    docs: z
+      .array(
+        z.object({
+          id: z.string().min(1),
+          title: z.string().min(1),
+          items: z
+            .array(
+              z.object({
+                cardType: z.enum(["hook", "thesis", "ending", "one_liner", "outline", "other"]),
+                title: z.string().optional(),
+                content: z.string().min(1),
+                paragraphIndices: z.array(z.number().int().min(0)).min(1).max(24),
+                facetIds: z.array(z.string().min(1)).min(1).max(6).optional()
+              })
+            )
+            .min(1)
+            .max(120)
+        })
+      )
+      .min(1)
+      .max(200)
+  });
+  const body = bodySchema.parse((request as any).body);
+
+  const baseUrlDefault = String(process.env.LLM_BASE_URL ?? "").trim();
+  const apiKeyDefault = String(process.env.LLM_API_KEY ?? "").trim();
+  const modelDefault = String(process.env.LLM_MODEL ?? "").trim();
+
+  const cardBaseUrl = String(process.env.LLM_CARD_BASE_URL ?? "").trim() || baseUrlDefault;
+  const cardApiKey = String(process.env.LLM_CARD_API_KEY ?? "").trim() || apiKeyDefault;
+  const cardModelDefault = String(process.env.LLM_CARD_MODEL ?? "").trim() || modelDefault;
+
+  if (!cardBaseUrl || !cardApiKey || !cardModelDefault) {
+    return reply.code(500).send({
+      error: "LLM_NOT_CONFIGURED",
+      hint: "请配置 LLM_BASE_URL/LLM_MODEL/LLM_API_KEY；若抽卡需不同 key/model，请配置 LLM_CARD_MODEL/LLM_CARD_API_KEY（可选 LLM_CARD_BASE_URL）。"
+    });
+  }
+
+  const model = body.model ?? cardModelDefault;
+  const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 3);
+  const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
+
+  const facetIds = body.facetIds.slice(0, 80);
+  const docs = body.docs.slice(0, 200);
+
+  const sys = [
+    "你是写作 IDE 的「库级仿写手册生成器」。",
+    "你会收到一批文档的“结构化要素卡”（hook/thesis/ending/one_liner/outline 等），每条都带来源段落索引。",
+    "",
+    "任务：输出两个东西：",
+    "1) styleProfile：该库作者/素材的整体写法画像（可用于仿写），要具体、可操作（别空泛）。",
+    "2) playbookFacets：对每个 facetId 生成一张“写法手册卡”（21 个一级维度），每张卡包含：信号/套路/模板/禁忌/检查清单，并给 2-4 个带引用的例子。",
+    "",
+    "引用格式要求：每条例子必须包含 evidence 数组元素：{docId, docTitle, paragraphIndex, quote}；quote 尽量短（<=60字）且来自对应段落。",
+    "",
+    "输出要求：你必须且只能输出一个 JSON 对象（不要代码块，不要多余文字）。",
+    "JSON 结构：",
+    "{",
+    '  "styleProfile": { "title": string, "content": string(Markdown), "evidence": Evidence[] },',
+    '  "playbookFacets": [ { "facetId": string, "title": string, "content": string(Markdown), "evidence": Evidence[] } ]',
+    "}",
+    `facetId 枚举如下（不要新增）：${facetIds.join(", ")}。`,
+    "约束：playbookFacets 必须覆盖所有 facetId（顺序不限）。content 要短、硬、可执行。"
+  ].join("\n");
+
+  const user = [
+    "输入文档要素卡如下（已做过摘要；不要要求全文）：",
+    JSON.stringify(
+      {
+        facetIds,
+        docs: docs.map((d) => ({
+          id: d.id,
+          title: d.title,
+          items: d.items.map((it) => ({
+            cardType: it.cardType,
+            title: it.title ?? "",
+            // 传入的 content 可能较长：这里截一下，避免 prompt 爆
+            content: String(it.content ?? "").slice(0, 1600),
+            paragraphIndices: it.paragraphIndices,
+            facetIds: it.facetIds ?? []
+          }))
+        }))
+      },
+      null,
+      2
+    )
+  ].join("\n");
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const parseUpstream = (text: string) => {
+    let message = String(text ?? "");
+    try {
+      const j = JSON.parse(message);
+      if (typeof j?.error?.message === "string") message = j.error.message;
+      else if (typeof j?.message === "string") message = j.message;
+    } catch {
+      // ignore
+    }
+    const m = message.match(/request id:\s*([^)]+)\)/i);
+    const requestId = m?.[1] ? String(m[1]) : undefined;
+    return { message, requestId };
+  };
+
+  let lastErr: any = null;
+  let lastStatus: number | undefined = undefined;
+  let lastDetail: string | undefined = undefined;
+
+  let ret: any = null;
+  for (let attempt = 0; attempt <= retryMax; attempt += 1) {
+    ret = await chatCompletionOnce({
+      config: { baseUrl: cardBaseUrl, apiKey: cardApiKey },
+      model,
+      messages: [
+        { role: "system", content: sys },
+        { role: "user", content: user }
+      ],
+      temperature: 0.2
+    });
+
+    if (ret.ok) break;
+
+    lastStatus = ret.status;
+    lastDetail = ret.error;
+    const is429 = ret.status === 429 || String(ret.error ?? "").includes("Too Many Requests") || String(ret.error ?? "").includes("负载已饱和");
+    lastErr = { is429, detail: ret.error, status: ret.status };
+    if (!is429 || attempt >= retryMax) break;
+
+    const jitter = Math.floor(Math.random() * 200);
+    const wait = retryBaseMs * Math.pow(2, attempt) + jitter;
+    await sleep(wait);
+  }
+
+  if (!ret?.ok) {
+    const is429 = Boolean(lastErr?.is429);
+    const parsed = parseUpstream(String(lastDetail ?? ""));
+    const payload = {
+      error: is429 ? "UPSTREAM_BUSY" : "UPSTREAM_ERROR",
+      message: parsed.message || "upstream error",
+      requestId: parsed.requestId,
+      status: lastStatus ?? null,
+      retry: { attempts: retryMax + 1, retryMax, retryBaseMs }
+    };
+    return reply.code(is429 ? 503 : 502).send(payload);
+  }
+
+  const raw = String(ret.content ?? "").trim();
+  const tryParse = (s: string) => {
+    try {
+      const x = JSON.parse(s);
+      return x;
+    } catch {
+      return null;
+    }
+  };
+
+  let parsed: any = tryParse(raw);
+  if (!parsed) {
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (m?.[0]) parsed = tryParse(m[0]);
+  }
+  if (!parsed || typeof parsed !== "object") {
+    return reply.code(500).send({ error: "INVALID_MODEL_OUTPUT", hint: "模型未返回合法 JSON 对象" });
+  }
+
+  const evSchema = z.object({
+    docId: z.string().min(1),
+    docTitle: z.string().min(1),
+    paragraphIndex: z.number().int().min(0),
+    quote: z.string().min(1).max(120)
+  });
+  const outSchema = z.object({
+    styleProfile: z.object({
+      title: z.string().min(1).max(120),
+      content: z.string().min(1),
+      evidence: z.array(evSchema).min(1).max(24)
+    }),
+    playbookFacets: z
+      .array(
+        z.object({
+          facetId: z.string().min(1),
+          title: z.string().min(1).max(160),
+          content: z.string().min(1),
+          evidence: z.array(evSchema).min(1).max(24)
+        })
+      )
+      .min(1)
+      .max(120)
+  });
+
+  let out: any = null;
+  try {
+    out = outSchema.parse(parsed);
+  } catch (e) {
+    return reply.code(500).send({ error: "INVALID_MODEL_OUTPUT", hint: "输出 schema 不符合预期", detail: String((e as any)?.message ?? e) });
+  }
+
+  // 只保留 facetIds 内的 facet；并补齐缺失（缺的用空壳兜底）
+  const seen = new Set<string>();
+  const filtered = (out.playbookFacets as any[])
+    .map((x) => ({ ...x, facetId: String(x.facetId ?? "").trim() }))
+    .filter((x) => facetIds.includes(x.facetId))
+    .filter((x) => {
+      if (seen.has(x.facetId)) return false;
+      seen.add(x.facetId);
+      return true;
+    });
+  const missing = facetIds.filter((id) => !seen.has(id));
+  const filled = [
+    ...filtered,
+    ...missing.map((id) => ({
+      facetId: id,
+      title: `（待补齐）${id}`,
+      content: `- （待补齐：该维度暂无足够样本，请后续补充语料或重新抽卡）`,
+      evidence: out.styleProfile.evidence.slice(0, 1)
+    }))
+  ];
+
+  return reply.send({
+    ok: true,
+    styleProfile: out.styleProfile,
+    playbookFacets: filled
+  });
 });
 
 await fastify.listen({ port: PORT, host: "0.0.0.0" });

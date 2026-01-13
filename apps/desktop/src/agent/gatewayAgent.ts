@@ -1,5 +1,6 @@
 import { useProjectStore } from "../state/projectStore";
 import { useRunStore, type Mode } from "../state/runStore";
+import { useKbStore } from "../state/kbStore";
 import { executeToolCall, toolsPrompt } from "./toolRegistry";
 import { isToolCallMessage, parseToolCalls, renderToolErrorXml, renderToolResultXml } from "./xmlProtocol";
 
@@ -157,11 +158,13 @@ async function buildReferencesText(prompt: string) {
   return parts.join("");
 }
 
-function buildContextPack(extra?: { referencesText?: string }) {
+async function buildContextPack(extra?: { referencesText?: string }) {
   const mainDoc = useRunStore.getState().mainDoc;
   const todoList = useRunStore.getState().todoList;
   const proj = useProjectStore.getState();
   const docRules = proj.getFileByPath("doc.rules.md")?.content ?? "";
+  const kbAttached = useRunStore.getState().kbAttachedLibraryIds ?? [];
+  const kbLibraries = useKbStore.getState().libraries ?? [];
   const files = proj.files.map((f) => ({ path: f.path, chars: f.content.length }));
   const state = {
     activePath: proj.activePath,
@@ -197,11 +200,28 @@ function buildContextPack(extra?: { referencesText?: string }) {
   })();
 
   const refs = extra?.referencesText ? `${extra.referencesText}\n\n` : "";
+  const kbText = (() => {
+    const ids = Array.isArray(kbAttached) ? kbAttached.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
+    const map = new Map(kbLibraries.map((l: any) => [l.id, { id: l.id, name: l.name, docCount: l.docCount, updatedAt: l.updatedAt }]));
+    const selected = ids.map((id: string) => map.get(id) ?? { id, name: id });
+    return `KB_SELECTED_LIBRARIES(JSON):\n${JSON.stringify(selected, null, 2)}\n\n` +
+      `提示：如需引用知识库内容，请调用工具 kb.search（默认只在已关联库中检索）。\n\n`;
+  })();
+
+  const playbookText = await useKbStore.getState().getPlaybookTextForLibraries(
+    Array.isArray(kbAttached) ? kbAttached.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [],
+  );
+  const playbookSection = playbookText
+    ? `KB_LIBRARY_PLAYBOOK(Markdown):\n${playbookText}\n\n` +
+      `提示：上面已注入库级“仿写手册”（Style Profile + 维度写法）。如需更多原文证据/更多样例，再调用 kb.search。\n\n`
+    : "";
   return (
     `MAIN_DOC(JSON):\n${JSON.stringify(mainDoc, null, 2)}\n\n` +
     `RUN_TODO(JSON):\n${JSON.stringify(todoList, null, 2)}\n\n` +
     `DOC_RULES(Markdown):\n${docRules}\n\n` +
     refs +
+    kbText +
+    playbookSection +
     `EDITOR_SELECTION(JSON):\n${JSON.stringify(selection, null, 2)}\n\n` +
     `PROJECT_STATE(JSON):\n${JSON.stringify(state, null, 2)}\n\n` +
     `注意：\n` +
@@ -439,7 +459,7 @@ export function startGatewayRun(args: {
           model: args.model,
           mode: args.mode,
           prompt: args.prompt,
-          contextPack: buildContextPack({ referencesText }),
+          contextPack: await buildContextPack({ referencesText }),
         }),
         signal: abort.signal,
       });

@@ -1,69 +1,33 @@
 import { useMemo, useState } from "react";
 import { useKbStore } from "../state/kbStore";
-import { facetLabel } from "../kb/facets";
-
-type KbTabKey = "card" | "paragraph" | "outline";
+import { useRunStore } from "../state/runStore";
 
 export function KbPane() {
   const baseDir = useKbStore((s) => s.baseDir);
   const isLoading = useKbStore((s) => s.isLoading);
   const error = useKbStore((s) => s.error);
   const lastImportAt = useKbStore((s) => s.lastImportAt);
-  const query = useKbStore((s) => s.query);
-  const setQuery = useKbStore((s) => s.setQuery);
-  const groups = useKbStore((s) => s.groups);
   const pickBaseDir = useKbStore((s) => s.pickBaseDir);
-  const search = useKbStore((s) => s.search);
-  const importExternalFiles = useKbStore((s) => s.importExternalFiles);
-  const openCardJobsModal = useKbStore((s) => s.openCardJobsModal);
-  const enqueueCardJobs = useKbStore((s) => s.enqueueCardJobs);
+  const openKbManager = useKbStore((s) => s.openKbManager);
+  const refreshLibraries = useKbStore((s) => s.refreshLibraries);
+  const libraries = useKbStore((s) => s.libraries);
+  const currentLibraryId = useKbStore((s) => s.currentLibraryId);
+  const setCurrentLibrary = useKbStore((s) => s.setCurrentLibrary);
 
-  const [importMsg, setImportMsg] = useState<string>("");
-  const [tab, setTab] = useState<KbTabKey>("card");
+  const attached = useRunStore((s) => s.kbAttachedLibraryIds ?? []);
+  const toggleAttached = (id: string) => useRunStore.getState().toggleKbAttachedLibrary(id);
 
-  const canPickFiles = Boolean(window.desktop?.kb?.pickFiles);
-  const tabLabel = tab === "card" ? "卡片" : tab === "paragraph" ? "段落" : "大纲";
-  const tabPlaceholder = tab === "card" ? "搜索卡片…" : tab === "paragraph" ? "搜索段落…" : "搜索大纲…";
-
-  const runSearch = async (nextTab?: KbTabKey) => {
-    const kind = (nextTab ?? tab) as any;
-    await search(query, { kind });
-  };
-
-  const onPickFiles = async () => {
-    setImportMsg("");
-    const kb = window.desktop?.kb;
-    if (!kb) return;
-    if (!baseDir) {
-      await pickBaseDir();
-      if (!useKbStore.getState().baseDir) return;
-    }
-    const ret = await kb.pickFiles({
-      title: "导入到知识库（MD / DOCX / PDF）",
-      multi: true,
-      filters: [
-        { name: "Markdown / 文本", extensions: ["md", "mdx", "txt"] },
-        { name: "Word", extensions: ["docx"] },
-        { name: "PDF", extensions: ["pdf"] },
-      ],
-    });
-    if (!ret?.ok || !ret.files?.length) return;
-    const r = await importExternalFiles(ret.files);
-    await enqueueCardJobs(r.docIds, { open: true, autoStart: true });
-    setImportMsg(`导入完成：新增 ${r.imported}，跳过 ${r.skipped}；已加入抽卡队列 ${r.docIds.length} 篇。`);
-    await runSearch();
-  };
-
-  const summary = useMemo(() => {
-    const docs = groups.length;
-    const hits = groups.reduce((acc, g) => acc + g.hits.length, 0);
-    return { docs, hits };
-  }, [groups]);
+  const [msg, setMsg] = useState<string>("");
+  const currentName = useMemo(() => libraries.find((l) => l.id === currentLibraryId)?.name ?? "", [libraries, currentLibraryId]);
+  const attachedNames = useMemo(() => {
+    const map = new Map(libraries.map((l) => [l.id, l.name]));
+    return (attached ?? []).map((id: string) => map.get(id) ?? id).filter(Boolean);
+  }, [attached, libraries]);
 
   return (
     <div className="list">
       <div className="explorerHint" style={{ padding: "0 2px 8px" }}>
-        本地知识库（MVP）：离线可浏览/检索；抽卡需要联网并配置 LLM。
+        本地知识库：左侧只管理“库”，写作时把库关联到右侧 Agent（需要引用时再检索）。
       </div>
 
       <div style={{ display: "grid", gap: 8, padding: "0 2px 10px" }}>
@@ -71,14 +35,11 @@ export function KbPane() {
           <button className="btn btnIcon" type="button" onClick={() => void pickBaseDir()} disabled={isLoading}>
             {baseDir ? "更换 KB 目录" : "选择 KB 目录"}
           </button>
-          <button className="btn btnIcon" type="button" onClick={() => void onPickFiles()} disabled={isLoading || !canPickFiles}>
-            导入语料（MD / DOCX / PDF）
+          <button className="btn btnIcon" type="button" onClick={() => openKbManager("libraries")} disabled={!baseDir}>
+            库管理…
           </button>
-          <button className="btn btnIcon" type="button" onClick={openCardJobsModal} disabled={!baseDir}>
-            抽卡任务…
-          </button>
-          <button className="btn btnIcon" type="button" onClick={() => void runSearch()} disabled={isLoading || !baseDir}>
-            刷新
+          <button className="btn btnIcon" type="button" onClick={() => void refreshLibraries()} disabled={isLoading || !baseDir}>
+            刷新库
           </button>
         </div>
 
@@ -86,101 +47,70 @@ export function KbPane() {
           {baseDir ? `KB 目录：${baseDir}` : "未设置 KB 目录（请先选择）"}
         </div>
 
-        <div className="dockTabs" style={{ padding: 0, borderBottom: "none" }}>
-          <div
-            className={`dockTab ${tab === "card" ? "dockTabActive" : ""}`}
-            onClick={() => {
-              const next: KbTabKey = "card";
-              setTab(next);
-              void runSearch(next);
-            }}
-          >
-            卡片
-          </div>
-          <div
-            className={`dockTab ${tab === "paragraph" ? "dockTabActive" : ""}`}
-            onClick={() => {
-              const next: KbTabKey = "paragraph";
-              setTab(next);
-              void runSearch(next);
-            }}
-          >
-            段落
-          </div>
-          <div
-            className={`dockTab ${tab === "outline" ? "dockTabActive" : ""}`}
-            onClick={() => {
-              const next: KbTabKey = "outline";
-              setTab(next);
-              void runSearch(next);
-            }}
-          >
-            大纲
-          </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <span className="ctxPill">
+            当前库：{currentLibraryId ? currentName || currentLibraryId : "（未选择）"}
+          </span>
+          <span className="ctxPill" title={attachedNames.join("、") || ""}>
+            右侧已关联：{(attached ?? []).length || 0} 个库
+          </span>
         </div>
 
-        <input
-          className="treeSearch"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder={tabPlaceholder}
-          disabled={isLoading || !baseDir}
-        />
-
-        {importMsg ? <div className="explorerHint">{importMsg}</div> : null}
+        {msg ? <div className="explorerHint">{msg}</div> : null}
         {lastImportAt ? <div className="explorerHint">最近导入：{new Date(lastImportAt).toLocaleString()}</div> : null}
         {error ? <div className="explorerError">KB 错误：{error}</div> : null}
         {isLoading ? <div className="explorerHint">处理中…</div> : null}
       </div>
 
-      {groups.length ? (
-        <div className="explorerHint" style={{ padding: "0 2px 8px" }}>
-          命中：文档 {summary.docs} 篇，{tabLabel} {summary.hits} 条（按文档分组）
-        </div>
-      ) : null}
-
-      {groups.length ? (
+      {baseDir ? (
         <div style={{ display: "grid", gap: 10, padding: "0 2px 10px" }}>
-          {groups.map((g) => (
-            <div key={g.sourceDoc.id} style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel)" }}>
-              <div style={{ padding: "8px 10px", borderBottom: "1px solid var(--border)" }}>
-                <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {g.sourceDoc.title}
-                </div>
-                <div style={{ fontSize: 12, color: "var(--muted)" }}>
-                  {g.sourceDoc.format} · best {Math.round(g.bestScore)}
-                </div>
-              </div>
-              <div style={{ padding: "10px", display: "grid", gap: 8 }}>
-                {g.hits.map((h) => (
-                  <div key={h.artifact.id} style={{ display: "grid", gap: 4 }}>
-                    <div style={{ fontSize: 12, color: "var(--muted)" }}>
-                      {h.artifact.kind}
-                      {h.artifact.kind === "card" && (h.artifact as any).title ? ` · ${(h.artifact as any).title}` : ""}
-                      {h.artifact.kind === "card" && (h.artifact as any).cardType ? ` · ${(h.artifact as any).cardType}` : ""}
-                      {Array.isArray(h.artifact.anchor?.headingPath) && h.artifact.anchor.headingPath.length
-                        ? ` · ${h.artifact.anchor.headingPath.join(" > ")}`
-                        : ""}
-                      {typeof h.artifact.anchor?.paragraphIndex === "number" ? ` · 段落 ${h.artifact.anchor.paragraphIndex}` : ""}
-                    </div>
-                    <div style={{ fontSize: 13, color: "var(--text)", whiteSpace: "pre-wrap" }}>{h.snippet}</div>
-                    {h.artifact.kind === "card" && Array.isArray(h.artifact.facetIds) && h.artifact.facetIds.length ? (
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 2 }}>
-                        {h.artifact.facetIds.slice(0, 8).map((id) => (
-                          <span key={id} className="ctxPill" title={id}>
-                            {facetLabel(id)}
-                          </span>
-                        ))}
+          {libraries.length ? (
+            libraries.map((l) => {
+              const isCur = l.id === currentLibraryId;
+              const isAttached = (attached ?? []).includes(l.id);
+              return (
+                <div key={l.id} style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel)", padding: 10 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {l.name}
                       </div>
-                    ) : null}
+                      <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                        文档 {l.docCount} 篇 · 更新 {l.updatedAt ? new Date(l.updatedAt).toLocaleString() : "-"}
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                      <button
+                        className={`btn btnIcon ${isCur ? "btnPrimary" : ""}`}
+                        type="button"
+                        onClick={() => {
+                          setCurrentLibrary(isCur ? null : l.id);
+                          setMsg(isCur ? "已取消当前库选择：导入/抽卡前需要重新选择库。" : "");
+                        }}
+                        disabled={isLoading}
+                      >
+                        {isCur ? "当前库" : "设为当前"}
+                      </button>
+                      <button
+                        className={`btn btnIcon ${isAttached ? "btnPrimary" : ""}`}
+                        type="button"
+                        onClick={() => toggleAttached(l.id)}
+                        disabled={isLoading}
+                        title="关联到右侧 Agent（多选）"
+                      >
+                        {isAttached ? "已关联" : "关联到右侧"}
+                      </button>
+                    </div>
                   </div>
-                ))}
-              </div>
+                </div>
+              );
+            })
+          ) : (
+            <div className="explorerHint">
+              还没有任何库。点击上方「库管理…」新建库，并选择为当前库后才能导入语料/抽卡。
             </div>
-          ))}
+          )}
         </div>
-      ) : query.trim() && !isLoading ? (
-        <div className="explorerHint">无匹配结果。</div>
       ) : null}
     </div>
   );

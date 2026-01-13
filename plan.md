@@ -163,7 +163,10 @@
       - `one_liner`（金句库）
       - `ending`（结尾/CTA）
       - `style_profile`（人设/语言习惯：通常是“聚合卡”，一位博主 1 张即可）
-    - **细分类（你截图那套“写作分析维度”非常适合做 `outlineFacet`）**
+    - **细分类（Facet Pack：维度集，可选/可扩展）**
+      - 说明：不同写作类型（口播/营销、小说、技术写作…）使用不同的 Facet Pack。
+      - 每个「库」绑定一个 Facet Pack；抽卡/仿写手册按该库的 Facet Pack 执行（避免维度打架）。
+      - 原则：Facet Pack 只负责“一级维度”（稳定、少而不打架）；“尽量多而细”放在每个维度卡内部，用子套路/子信号呈现（不要无限新增一级 `facetId`）。
       - `intro`（引言）
       - `opening_design`（开场设计）
       - `narrative_structure`（叙事结构）
