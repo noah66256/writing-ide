@@ -255,12 +255,20 @@ export function AgentPane() {
       };
 
       const text = JSON.stringify(diag, null, 2);
-      await navigator.clipboard.writeText(text);
+      // Electron/浏览器剪贴板在窗口未聚焦时可能失败：优先尝试浏览器剪贴板，失败则走原生 clipboard IPC
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        const api = window.desktop?.clipboard;
+        if (!api?.writeText) throw new Error("CLIPBOARD_NOT_AVAILABLE");
+        const r = await api.writeText(text);
+        if (!r?.ok) throw new Error(r?.error ?? "CLIPBOARD_WRITE_FAILED");
+      }
       setCopiedHint(`已复制诊断信息（${text.length} chars）`);
       setTimeout(() => setCopiedHint(null), 1600);
     } catch (e: any) {
       const msg = e?.message ? String(e.message) : String(e);
-      window.alert(`复制失败：${msg}`);
+      window.alert(`复制失败：${msg}\n\n提示：请确保窗口处于前台（聚焦），或稍后重试。`);
     }
   };
 

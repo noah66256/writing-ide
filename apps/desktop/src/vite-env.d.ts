@@ -41,6 +41,9 @@ declare global {
         setRecentProjects: (dirs: string[]) => Promise<{ ok: boolean; error?: string }>;
         clearRecentProjects: () => Promise<{ ok: boolean; error?: string }>;
       };
+      clipboard?: {
+        writeText: (text: string) => Promise<{ ok: boolean; error?: string }>;
+      };
     };
   }
 }

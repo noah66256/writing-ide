@@ -67,6 +67,11 @@ contextBridge.exposeInMainWorld("desktop", {
       return ipcRenderer.invoke("workspace.clearRecentProjects");
     },
   },
+  clipboard: {
+    writeText(text) {
+      return ipcRenderer.invoke("clipboard.writeText", text);
+    },
+  },
 });
 
 

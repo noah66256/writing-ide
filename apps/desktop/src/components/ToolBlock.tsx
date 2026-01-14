@@ -248,9 +248,17 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
                       type="button"
                       onClick={() => {
                         const text = diffInfo.diff;
-                        navigator.clipboard?.writeText(text).catch(() => {
-                          // ignore
-                        });
+                        const tryCopy = async () => {
+                          try {
+                            await navigator.clipboard.writeText(text);
+                            return;
+                          } catch {
+                            const api = window.desktop?.clipboard;
+                            if (!api?.writeText) return;
+                            await api.writeText(text).catch(() => void 0);
+                          }
+                        };
+                        void tryCopy();
                       }}
                       title="复制 unified diff"
                     >

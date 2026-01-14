@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, shell, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, Menu, shell, ipcMain, dialog, clipboard } = require("electron");
 const path = require("path");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
@@ -268,6 +268,15 @@ function updateMenu() {
 }
 
 function registerIpc() {
+  ipcMain.handle("clipboard.writeText", async (_event, text) => {
+    try {
+      clipboard.writeText(String(text ?? ""));
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
   ipcMain.handle("project.pickDirectory", async () => {
     const win = BrowserWindow.getFocusedWindow();
     const result = await dialog.showOpenDialog(win ?? undefined, {
