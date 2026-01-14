@@ -343,8 +343,32 @@ export function Explorer() {
 
         if (!ret.docIds.length) {
           run.log("warn", "kb.import.no_docs_created", ret);
-          kb.openKbManager("libraries", "导入完成，但没有生成任何文档（可能是文件为空/读取失败/被判定为重复）。请打开底部 Logs 查看 kb.import.* 详情。");
-          window.alert("导入完成，但没有生成任何文档。请打开底部 DockPanel → Logs 查看详情。");
+          const reasonText = (() => {
+            const by = (ret as any)?.skippedByReason;
+            if (!by || typeof by !== "object") return "";
+            const label = (k: string) => {
+              if (k === "duplicate_same_hash") return "被判定为重复（同库）";
+              if (k === "empty_file") return "文件为空";
+              if (k === "unsupported_format") return "格式不支持";
+              if (k === "no_entries") return "无法分割条目";
+              if (k === "empty_entry") return "条目为空";
+              if (k === "extract_failed") return "抽取失败";
+              return k;
+            };
+            const items = Object.entries(by as Record<string, any>)
+              .map(([k, v]) => [String(k), Number(v)] as const)
+              .filter((x) => Number.isFinite(x[1]) && x[1] > 0)
+              .sort((a, b) => b[1] - a[1])
+              .slice(0, 4)
+              .map(([k, v]) => `${label(k)}×${v}`);
+            return items.length ? items.join("，") : "";
+          })();
+          const msg =
+            `导入完成，但没有生成任何文档` +
+            (reasonText ? `（${reasonText}）` : "（可能是文件为空/读取失败/被判定为重复）") +
+            "。请打开底部 DockPanel → Logs 查看详情。";
+          kb.openKbManager("libraries", msg);
+          window.alert(msg);
           return;
         }
 

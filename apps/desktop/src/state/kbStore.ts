@@ -214,8 +214,21 @@ type KbState = {
   emptyTrash: () => Promise<{ ok: boolean; removedLibraries: number; removedDocs: number; removedArtifacts: number; error?: string }>;
   resetLocalKb: () => Promise<{ ok: boolean; error?: string }>;
 
-  importProjectPaths: (paths: string[]) => Promise<{ imported: number; skipped: number; docIds: string[] }>;
-  importExternalFiles: (absPaths: string[]) => Promise<{ imported: number; skipped: number; docIds: string[] }>;
+  importProjectPaths: (paths: string[]) => Promise<{
+    imported: number;
+    skipped: number;
+    docIds: string[];
+    skippedByReason?: Record<string, number>;
+    skippedSample?: Array<{ path: string; reason: string }>;
+  }>;
+  importExternalFiles: (absPaths: string[]) => Promise<{
+    imported: number;
+    skipped: number;
+    docIds: string[];
+    skippedByReason?: Record<string, number>;
+    skippedSample?: Array<{ path: string; reason: string }>;
+    errors?: Array<{ path: string; error: string }>;
+  }>;
   extractCardsForDocs: (docIds: string[], opts?: { signal?: AbortSignal }) => Promise<{
     ok: boolean;
     extracted: number;
@@ -1927,6 +1940,13 @@ export const useKbStore = create<KbState>()(
         let imported = 0;
         let skipped = 0;
         const importedDocIds: string[] = [];
+        const skippedByReason: Record<string, number> = {};
+        const skippedSample: Array<{ path: string; reason: string }> = [];
+        const bumpSkip = (reason: string, path: string) => {
+          skipped += 1;
+          skippedByReason[reason] = (skippedByReason[reason] ?? 0) + 1;
+          if (skippedSample.length < 8) skippedSample.push({ path, reason });
+        };
         set({ isLoading: true, error: null });
         kbLog("info", "kb.import.project.start", { libId, pathsCount: Array.isArray(paths) ? paths.length : 0 });
 
@@ -1944,7 +1964,7 @@ export const useKbStore = create<KbState>()(
           for (const relPath of unique) {
             const format = extToFormat(relPath);
             if (format !== "md" && format !== "mdx" && format !== "txt") {
-              skipped += 1;
+              bumpSkip("unsupported_format", relPath);
               continue;
             }
             let text = "";
@@ -1956,12 +1976,12 @@ export const useKbStore = create<KbState>()(
             }
             const clean = normalizeText(text);
             if (!clean) {
-              skipped += 1;
+              bumpSkip("empty_file", relPath);
               continue;
             }
             const entries = splitIntoEntries({ text: clean });
             if (!entries.length) {
-              skipped += 1;
+              bumpSkip("no_entries", relPath);
               continue;
             }
 
@@ -1969,19 +1989,20 @@ export const useKbStore = create<KbState>()(
               const entryIndex = Number.isFinite(entry.entryIndex) ? entry.entryIndex : 0;
               const entryText = normalizeText(entry.text);
               if (!entryText) {
-                skipped += 1;
+                bumpSkip("empty_entry", `${relPath}#${entryIndex}`);
                 continue;
               }
               const contentHash = fnv1a32Hex(entryText);
 
               const existing = db.sourceDocs.find(
                 (d) =>
+                  d.libraryId === libId &&
                   d.importedFrom?.kind === "project" &&
                   d.importedFrom.relPath === relPath &&
                   (typeof (d.importedFrom as any).entryIndex === "number" ? (d.importedFrom as any).entryIndex : 0) === entryIndex,
               );
               if (existing && existing.contentHash === contentHash) {
-                skipped += 1;
+                bumpSkip("duplicate_same_hash", `${relPath}#${entryIndex}`);
                 continue;
               }
 
@@ -2014,7 +2035,14 @@ export const useKbStore = create<KbState>()(
 
           set({ lastImportAt: nowIso() });
           await get().refreshLibraries().catch(() => void 0);
-          kbLog("info", "kb.import.project.done", { imported, skipped, docIdCount: importedDocIds.length, sample: importedDocIds.slice(0, 6) });
+          kbLog("info", "kb.import.project.done", {
+            imported,
+            skipped,
+            skippedByReason,
+            skippedSample,
+            docIdCount: importedDocIds.length,
+            sample: importedDocIds.slice(0, 6),
+          });
         } catch (e: any) {
           set({ error: String(e?.message ?? e) });
           kbLog("error", "kb.import.project.failed", { error: String(e?.message ?? e) });
@@ -2022,7 +2050,7 @@ export const useKbStore = create<KbState>()(
           set({ isLoading: false });
         }
 
-        return { imported, skipped, docIds: importedDocIds };
+        return { imported, skipped, docIds: importedDocIds, skippedByReason, skippedSample };
       },
 
       importExternalFiles: async (absPaths) => {
@@ -2040,6 +2068,13 @@ export const useKbStore = create<KbState>()(
         let imported = 0;
         let skipped = 0;
         const importedDocIds: string[] = [];
+        const skippedByReason: Record<string, number> = {};
+        const skippedSample: Array<{ path: string; reason: string }> = [];
+        const bumpSkip = (reason: string, path: string) => {
+          skipped += 1;
+          skippedByReason[reason] = (skippedByReason[reason] ?? 0) + 1;
+          if (skippedSample.length < 8) skippedSample.push({ path, reason });
+        };
         set({ isLoading: true, error: null });
 
         try {
@@ -2061,17 +2096,17 @@ export const useKbStore = create<KbState>()(
             if (!ret?.ok || !ret.text) {
               const err = String(ret?.error ?? "EXTRACT_FAILED");
               errors.push({ path: absPath, error: err });
-              skipped += 1;
+              bumpSkip("extract_failed", absPath);
               continue;
             }
             const clean = normalizeText(String(ret.text));
             if (!clean) {
-              skipped += 1;
+              bumpSkip("empty_file", absPath);
               continue;
             }
             const entries = splitIntoEntries({ text: clean });
             if (!entries.length) {
-              skipped += 1;
+              bumpSkip("no_entries", absPath);
               continue;
             }
 
@@ -2079,19 +2114,20 @@ export const useKbStore = create<KbState>()(
               const entryIndex = Number.isFinite(entry.entryIndex) ? entry.entryIndex : 0;
               const entryText = normalizeText(entry.text);
               if (!entryText) {
-                skipped += 1;
+                bumpSkip("empty_entry", `${absPath}#${entryIndex}`);
                 continue;
               }
               const contentHash = fnv1a32Hex(entryText);
 
               const existing = db.sourceDocs.find(
                 (d) =>
+                  d.libraryId === libId &&
                   d.importedFrom?.kind === "file" &&
                   d.importedFrom.absPath === absPath &&
                   (typeof (d.importedFrom as any).entryIndex === "number" ? (d.importedFrom as any).entryIndex : 0) === entryIndex,
               );
               if (existing && existing.contentHash === contentHash) {
-                skipped += 1;
+                bumpSkip("duplicate_same_hash", `${absPath}#${entryIndex}`);
                 continue;
               }
 
@@ -2138,7 +2174,7 @@ export const useKbStore = create<KbState>()(
           set({ isLoading: false });
         }
 
-        return { imported, skipped, docIds: importedDocIds };
+        return { imported, skipped, docIds: importedDocIds, skippedByReason, skippedSample, errors };
       },
 
       extractCardsForDocs: async (docIds, opts) => {
