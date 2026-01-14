@@ -588,7 +588,7 @@
   - `kb.search`（FTS/可选向量）、`kb.cite`（返回可插入的引用片段与来源定位）
   - 说明（当前 Desktop 本地 KB 实现细节）：`kb.search` 默认两段式
     - 先词法召回（快速、便宜）
-    - 若词法 0 命中且 `useVector=true`：启用**向量兜底召回**（从目标库候选集中算 embedding，相似度重排后按 `source_doc` 分组返回）；embedding 会缓存到本地 `KbArtifact.embeddings[embeddingModel]`
+    - 若词法 0 命中且 `useVector=true`：启用**向量兜底召回**（从目标库候选集中算 embedding，相似度重排后按 `source_doc` 分组返回）；为避免超时，向量阶段采用**批量 embeddings + 时间预算/候选上限**；embedding 会缓存到本地 `KbArtifact.embeddings[embeddingModel]`
     - `embeddingModel` 支持 A/B（例如 `text-embedding-3-large` / `Embedding-V1`）
 
 #### 15.4 视频（可选增强；先“字幕/抽帧”兜底）

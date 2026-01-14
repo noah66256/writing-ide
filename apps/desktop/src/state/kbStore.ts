@@ -719,6 +719,39 @@ async function fetchEmbedding(args: { model?: string; input: string }): Promise<
   }
 }
 
+async function fetchEmbeddingsBatch(args: {
+  model?: string;
+  inputs: string[];
+}): Promise<{ ok: true; embeddings: number[][]; modelUsed?: string } | { ok: false; error: string }> {
+  const gatewayUrl = getGatewayUrl();
+  const url = gatewayUrl ? `${gatewayUrl}/api/llm/embeddings` : "/api/llm/embeddings";
+  const inputs = Array.isArray(args.inputs) ? args.inputs.map((s) => String(s ?? "")) : [];
+  if (!inputs.length) return { ok: false, error: "EMBEDDINGS_EMPTY_INPUTS" };
+  try {
+    const body: any = { input: inputs };
+    if (args.model) body.model = args.model;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok) {
+      const detail = json?.detail ? JSON.stringify(json.detail).slice(0, 300) : JSON.stringify(json).slice(0, 300);
+      return { ok: false, error: `EMBEDDINGS_HTTP_${res.status}:${detail}` };
+    }
+    const data = Array.isArray(json?.data) ? json.data : null;
+    if (!data) return { ok: false, error: "EMBEDDINGS_INVALID_RESPONSE" };
+    const embeddings = data
+      .map((row: any) => (Array.isArray(row?.embedding) ? row.embedding : null))
+      .map((emb: any) => (Array.isArray(emb) ? emb.map((x: any) => Number(x)).filter((x: any) => Number.isFinite(x)) : []));
+    if (!embeddings.length) return { ok: false, error: "EMBEDDINGS_INVALID_RESPONSE" };
+    return { ok: true, embeddings, modelUsed: json?.modelUsed };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+}
+
 function makeSnippet(args: { text: string; matchIndex: number; queryLen: number }) {
   const raw = args.text.replaceAll("\n", " ").replace(/\s+/g, " ").trim();
   if (!raw) return "";
@@ -1454,6 +1487,7 @@ export const useKbStore = create<KbState>()(
           // 简单排序：先 playbook/style_profile 再 doc_v2，再按标题
           const pri = (t: string) => {
             if (t === "style_profile") return 0;
+            if (t === "final_polish_checklist") return 1;
             if (t === "playbook_facet") return 1;
             if (t === "outline") return 2;
             if (t === "hook") return 3;
@@ -1935,6 +1969,59 @@ export const useKbStore = create<KbState>()(
             });
           }
 
+          // 终稿润色清单（独立卡）：用于“最后一遍把文章改得更像本人写的”
+          // 说明：这里先做可执行 checklist（不额外发 LLM 请求），后续可在 Gateway 侧增强为模型生成的更细清单。
+          const styleTitle = String(sp?.title ?? "写法画像").trim();
+          const styleBody = String(sp?.content ?? "").trim();
+          const polish = [
+            `### 终稿润色清单（final polish）`,
+            ``,
+            `> 目标：把稿子从“写得像”推进到“像本人写的”。先按顺序过一遍，再做第二遍小修。`,
+            ``,
+            `#### 0. 先锁定“本人声音”（从 Style Profile 抄规则，不要自作主张）`,
+            `- 口吻/人设：按「${styleTitle}」执行（硬核、结论先行、战场感、少废话）`,
+            `- 禁用：避免空泛解释/教学口吻（如“总的来说/我们可以看到/简单来说”）`,
+            `- 句式：多短句+硬转折；少长解释段`,
+            ``,
+            `#### 1. 开头 3 段：必须“钩子→结论→战场坐标”`,
+            `- 第 1 段就给冲突/博弈点（别铺垫）`,
+            `- 第 2 段直接给结论/判断（别卖关子）`,
+            `- 第 3 段给坐标：谁在反制、代价是什么、读者该怎么理解`,
+            ``,
+            `#### 2. 结构收束：用“要点编号/五环”把逻辑拎起来`,
+            `- 每个小节开头先抛一句“结论句”（再解释证据）`,
+            `- 结尾必须回扣：这盘棋下一步可能怎么走 + 对普通人/产业的影响`,
+            ``,
+            `#### 3. 语言层：把 AI 腔擦干净（逐段扫）`,
+            `- 删除解释型过渡句：例如“因此/此外/同时”改成“关键是/问题在于/说白了”`,
+            `- 把“中性陈述”改成“带判断的硬句”`,
+            `- 一段一重点：每段只留一个主句，其余是证据/推演`,
+            ``,
+            `#### 4. 金句与节奏（可选加分）`,
+            `- 每 3–5 段至少有 1 句“硬金句”（不必押韵，但要有判断和力量）`,
+            `- 节奏：长段拆短；关键句单独成段`,
+            ``,
+            `#### 5. 自检（最后 2 分钟）`,
+            `- 读一遍：像不像“本人”？如果像“新闻通稿/百科”，立刻重写开头与转折`,
+            `- 读一遍：有没有“空结论”？每个判断都要有证据或推演链`,
+            ``,
+            `---`,
+            ``,
+            `#### Style Profile 摘要（供对照）`,
+            styleBody ? styleBody.slice(0, 1200) + (styleBody.length > 1200 ? "\n…(truncated)\n" : "") : "（空）",
+          ].join("\n");
+
+          newArts.push({
+            id: makeId("kb_card"),
+            sourceDocId: playbookDocId,
+            kind: "card",
+            title: "终稿润色清单",
+            cardType: "final_polish_checklist",
+            content: polish,
+            facetIds: undefined,
+            anchor: { paragraphIndex: 0 },
+          });
+
           // 写回：upsert playbook doc + 替换其卡片
           db.sourceDocs = [...db.sourceDocs.filter((d) => d.id !== playbookDocId), playbookDoc];
           db.artifacts = db.artifacts.filter((a) => a.sourceDocId !== playbookDocId);
@@ -2098,48 +2185,71 @@ export const useKbStore = create<KbState>()(
             .sort((a, b) => b.bestScore - a.bestScore)
             .slice(0, topDocs);
 
+          const vectorBudgetMs = 90_000;
+          const vectorBudgetStart = Date.now();
+          const budgetExceeded = () => Date.now() - vectorBudgetStart > vectorBudgetMs;
+
           // 可选：向量重排（先词法召回，再对候选集做 embedding cosine similarity）
           if (useVector && groups.length > 0) {
             const q = query.slice(0, 800); // 控制 query 长度
             const qEmb = await fetchEmbedding({ model: embeddingModel, input: q });
-            if (qEmb.ok && qEmb.embedding.length > 0) {
+            if (qEmb.ok && qEmb.embedding.length > 0 && !budgetExceeded()) {
               const modelUsed = embeddingModel ?? qEmb.modelUsed ?? "";
+              const key = modelUsed || "default";
               const maxCandidates = Math.min(120, groups.reduce((sum, g) => sum + g.hits.length, 0));
-              let usedCandidates = 0;
-              let mutated = false;
 
+              // 先收集候选（稳定顺序：按当前 groups/hits 顺序）
+              const candidates: Array<{ hit: { artifact: KbArtifact; score: number; snippet: string } }> = [];
               for (const g of groups) {
                 for (const h of g.hits) {
-                  if (usedCandidates >= maxCandidates) break;
-                  usedCandidates += 1;
-                  const a = h.artifact;
-                  const key = modelUsed || "default";
-                  let vec = a.embeddings?.[key];
-                  if (!vec) {
-                    const text = String(a.content ?? "").slice(0, 1200);
-                    const emb = await fetchEmbedding({ model: embeddingModel, input: text });
-                    if (emb.ok && emb.embedding.length > 0) {
-                      vec = emb.embedding;
-                      a.embeddings = { ...(a.embeddings ?? {}), [key]: vec };
-                      mutated = true;
-                    }
+                  if (candidates.length >= maxCandidates) break;
+                  candidates.push({ hit: h });
+                }
+                if (candidates.length >= maxCandidates) break;
+              }
+
+              // 批量补齐缺失向量（分片，避免一次 body 过大）
+              const missing: Array<{ art: KbArtifact; text: string }> = [];
+              for (const c of candidates) {
+                const a = c.hit.artifact;
+                if (a.embeddings?.[key]?.length) continue;
+                missing.push({ art: a, text: String(a.content ?? "").slice(0, 1200) });
+              }
+
+              let mutated = false;
+              const chunkSize = 32;
+              for (let i = 0; i < missing.length; i += chunkSize) {
+                if (budgetExceeded()) break;
+                const chunk = missing.slice(i, i + chunkSize);
+                const ret = await fetchEmbeddingsBatch({ model: embeddingModel, inputs: chunk.map((x) => x.text) });
+                if (!ret.ok) break;
+                for (let j = 0; j < chunk.length; j += 1) {
+                  const vec = ret.embeddings[j] ?? [];
+                  if (vec.length) {
+                    const a = chunk[j]!.art;
+                    a.embeddings = { ...(a.embeddings ?? {}), [key]: vec };
+                    mutated = true;
                   }
+                }
+              }
+
+              // 计算相似度并重排
+              for (const g of groups) {
+                for (const h of g.hits) {
+                  if (budgetExceeded()) break;
+                  const a = h.artifact;
+                  const vec = a.embeddings?.[key];
                   if (vec && vec.length > 0) {
                     const sim = cosineSim(qEmb.embedding, vec);
-                    // 组合：向量为主，词法为辅（避免纯向量把“同词同义但不相关”顶上来）
                     const lex = Number(h.score) || 0;
                     h.score = sim * 1000 + Math.min(100, lex);
                   }
                 }
-                // 先在 doc 内重排
                 g.hits = g.hits.sort((a, b) => b.score - a.score).slice(0, perDocTopN);
                 g.bestScore = g.hits.length ? g.hits[0]!.score : 0;
               }
-
-              // doc 间重排
               groups = groups.sort((a, b) => b.bestScore - a.bestScore).slice(0, topDocs);
 
-              // 将新写入的 embedding 缓存落盘（避免下次重复算）
               if (mutated) {
                 try {
                   await saveDb({ baseDir, ownerKey, db });
@@ -2158,55 +2268,72 @@ export const useKbStore = create<KbState>()(
             // 向量兜底召回：当词法召回为 0 时，仍可通过 embedding 从库内候选集中找相似内容
             const q = query.slice(0, 800);
             const qEmb = await fetchEmbedding({ model: embeddingModel, input: q });
-            if (qEmb.ok && qEmb.embedding.length > 0) {
+            if (qEmb.ok && qEmb.embedding.length > 0 && !budgetExceeded()) {
               const modelUsed = embeddingModel ?? qEmb.modelUsed ?? "";
               const key = modelUsed || "default";
 
-              // 候选集：按库 + kind + facet 过滤，优先取“最近更新的文档”的内容（更符合当前库）
+              // 候选集：按库 + kind + facet 过滤，按“最近文档优先”收集（稳定且更贴近当前库）
               const docsInLib = db.sourceDocs
                 .filter((d) => allowLibs.has(String(d.libraryId ?? "")))
                 .slice()
                 .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
-              const docRank = new Map<string, number>();
-              docsInLib.forEach((d, idx) => docRank.set(d.id, idx));
-
-              const candidates: Array<{ artifact: KbArtifact; doc: KbSourceDoc }> = [];
-              const maxCandidates = 260; // 控制成本：A/B 测试时也不会太贵
+              const docIdSet = new Set(docsInLib.map((d) => d.id));
+              const artsByDoc = new Map<string, KbArtifact[]>();
               for (const a of db.artifacts) {
                 if (kind && a.kind !== kind) continue;
+                if (!docIdSet.has(a.sourceDocId)) continue;
                 if (facetIds.length > 0) {
                   const setIds = new Set(a.facetIds ?? []);
                   const any = facetIds.some((f) => setIds.has(f));
                   if (!any) continue;
                 }
-                const doc = docsById.get(a.sourceDocId);
-                if (!doc) continue;
-                if (!allowLibs.has(String(doc.libraryId ?? ""))) continue;
-                candidates.push({ artifact: a, doc });
+                const list = artsByDoc.get(a.sourceDocId) ?? [];
+                list.push(a);
+                artsByDoc.set(a.sourceDocId, list);
+              }
+
+              const maxCandidates = 220; // 控制成本/时间：兜底召回只要够覆盖 topDocs 即可
+              const candidates: Array<{ art: KbArtifact; doc: KbSourceDoc }> = [];
+              for (const d of docsInLib) {
+                const list = artsByDoc.get(d.id) ?? [];
+                for (const a of list) {
+                  candidates.push({ art: a, doc: d });
+                  if (candidates.length >= maxCandidates) break;
+                }
                 if (candidates.length >= maxCandidates) break;
               }
 
-              // 如果按 artifact 遍历顺序拿到的不是“最近”，按 docRank 稍微偏向最近文档
-              candidates.sort((x, y) => (docRank.get(x.doc.id) ?? 999999) - (docRank.get(y.doc.id) ?? 999999));
-
-              let mutated = false;
-              const scored: Array<{ artifact: KbArtifact; doc: KbSourceDoc; score: number; snippet: string }> = [];
+              // 批量补齐缺失向量
+              const missing: Array<{ art: KbArtifact; text: string }> = [];
               for (const c of candidates) {
-                const a = c.artifact;
-                let vec = a.embeddings?.[key];
-                if (!vec) {
-                  const text = String(a.content ?? "").slice(0, 1200);
-                  const emb = await fetchEmbedding({ model: embeddingModel, input: text });
-                  if (emb.ok && emb.embedding.length > 0) {
-                    vec = emb.embedding;
+                if (c.art.embeddings?.[key]?.length) continue;
+                missing.push({ art: c.art, text: String(c.art.content ?? "").slice(0, 1200) });
+              }
+              let mutated = false;
+              const chunkSize = 32;
+              for (let i = 0; i < missing.length; i += chunkSize) {
+                if (budgetExceeded()) break;
+                const chunk = missing.slice(i, i + chunkSize);
+                const ret = await fetchEmbeddingsBatch({ model: embeddingModel, inputs: chunk.map((x) => x.text) });
+                if (!ret.ok) break;
+                for (let j = 0; j < chunk.length; j += 1) {
+                  const vec = ret.embeddings[j] ?? [];
+                  if (vec.length) {
+                    const a = chunk[j]!.art;
                     a.embeddings = { ...(a.embeddings ?? {}), [key]: vec };
                     mutated = true;
                   }
                 }
+              }
+
+              const scored: Array<{ artifact: KbArtifact; doc: KbSourceDoc; score: number; snippet: string }> = [];
+              for (const c of candidates) {
+                if (budgetExceeded()) break;
+                const vec = c.art.embeddings?.[key];
                 if (!vec || !vec.length) continue;
                 const sim = cosineSim(qEmb.embedding, vec);
-                const snippet = makeSnippet({ text: a.content, matchIndex: -1, queryLen: 0 });
-                scored.push({ artifact: a, doc: c.doc, score: sim, snippet });
+                const snippet = makeSnippet({ text: c.art.content, matchIndex: -1, queryLen: 0 });
+                scored.push({ artifact: c.art, doc: c.doc, score: sim, snippet });
               }
 
               // 分组：按 doc 聚合，每篇取 topN
@@ -2285,6 +2412,7 @@ export const useKbStore = create<KbState>()(
             const facets = a
               .filter((x) => x.cardType === "playbook_facet")
               .sort((x, y) => (facetOrder.get(String(x.facetIds?.[0] ?? "")) ?? 999) - (facetOrder.get(String(y.facetIds?.[0] ?? "")) ?? 999));
+            const polish = a.find((x) => x.cardType === "final_polish_checklist");
 
             push(`【库级仿写手册】${lib.name}\n`);
             if (style?.content) {
@@ -2296,6 +2424,10 @@ export const useKbStore = create<KbState>()(
                 if (used >= maxTotal) break;
                 push(`\n${f.content}\n`);
               }
+            }
+            if (polish?.content) {
+              push(`\n---\n\n【终稿润色清单】\n`);
+              push(`\n${polish.content}\n`);
             }
             push(`\n\n====\n\n`);
           }
