@@ -27,6 +27,7 @@ export function AgentPane() {
   const todoList = useRunStore((s) => s.todoList);
   const steps = useRunStore((s) => s.steps);
   const isRunning = useRunStore((s) => s.isRunning);
+  const activity = useRunStore((s) => s.activity);
 
   const setMode = useRunStore((s) => s.setMode);
   const setModel = useRunStore((s) => s.setModel);
@@ -62,6 +63,23 @@ export function AgentPane() {
   const deleteConversation = useConversationStore((s) => s.deleteConversation);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [copiedHint, setCopiedHint] = useState<string | null>(null);
+
+  // 运行状态耗时刷新（0.5s）
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (!isRunning || !activity) return;
+    const id = window.setInterval(() => setNowTick(Date.now()), 500);
+    return () => window.clearInterval(id);
+  }, [isRunning, activity?.text, activity?.startedAt]);
+
+  const formatElapsed = (ms: number) => {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    const mm = String(m).padStart(2, "0");
+    const ss = String(r).padStart(2, "0");
+    return `${mm}:${ss}`;
+  };
 
   // 默认走相对路径（/api），由 Vite dev server 代理到本地 Gateway，避免跨域问题
   const gatewayUrl = (import.meta as any).env?.VITE_GATEWAY_URL ?? "";
@@ -867,6 +885,13 @@ export function AgentPane() {
             </div>
           </div>
         </div>
+
+        {isRunning && activity?.text ? (
+          <div className="activityBar" title={activity.text}>
+            <div className="activityText">{activity.text}</div>
+            <div className="activityTime">已耗时 {formatElapsed(nowTick - activity.startedAt)}</div>
+          </div>
+        ) : null}
 
         <div style={{ color: "var(--muted)", fontSize: 12 }}>
           快捷键：Enter 发送；Ctrl/⌘ + Enter 换行（Chat 模式不会调用写入类工具）。

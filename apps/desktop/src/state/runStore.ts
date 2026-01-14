@@ -80,6 +80,11 @@ export type LogEntry = {
   data?: unknown;
 };
 
+export type RunActivity = {
+  text: string;
+  startedAt: number; // 用于 UI 显示耗时
+};
+
 type RunState = {
   mode: Mode;
   model: string;
@@ -88,6 +93,7 @@ type RunState = {
   steps: Step[];
   logs: LogEntry[];
   isRunning: boolean;
+  activity: RunActivity | null;
 
   // KB：右侧 Agent 关联的库（多选；持久化，便于常用库默认保持关联）
   kbAttachedLibraryIds: string[];
@@ -138,6 +144,7 @@ type RunState = {
   log: (level: LogEntry["level"], message: string, data?: unknown) => void;
   clearLogs: () => void;
   setRunning: (running: boolean) => void;
+  setActivity: (text: string | null, opts?: { resetTimer?: boolean }) => void;
 };
 
 function makeId(prefix: string) {
@@ -154,13 +161,33 @@ export const useRunStore = create<RunState>()(
   steps: [],
   logs: [],
   isRunning: false,
+  activity: null,
   kbAttachedLibraryIds: [],
 
   setMode: (mode) => set({ mode }),
   setModel: (model) => set({ model }),
   setMainDoc: (mainDoc) => set({ mainDoc }),
-  setRunning: (running) => set({ isRunning: running }),
-  resetRun: () => set({ steps: [], logs: [], isRunning: false, mainDoc: { goal: "" }, todoList: [] }),
+  setRunning: (running) =>
+    set((s) => ({
+      isRunning: running,
+      // run 结束/停止时，清空 activity，避免残留“像卡死”
+      activity: running ? s.activity : null,
+    })),
+  setActivity: (text, opts) =>
+    set((s) => {
+      const t = text ? String(text).trim() : "";
+      if (!t) return { activity: null };
+      const prev = s.activity;
+      const same = prev && prev.text === t;
+      const resetTimer = Boolean(opts?.resetTimer);
+      return {
+        activity: {
+          text: t,
+          startedAt: same && !resetTimer ? prev!.startedAt : Date.now(),
+        },
+      };
+    }),
+  resetRun: () => set({ steps: [], logs: [], isRunning: false, activity: null, mainDoc: { goal: "" }, todoList: [] }),
   loadSnapshot: (snap) => {
     const s = snap && typeof snap === "object" ? snap : ({} as any);
     const cleanSteps = Array.isArray(s.steps) ? s.steps : [];
@@ -189,6 +216,7 @@ export const useRunStore = create<RunState>()(
         ? (s.kbAttachedLibraryIds as string[]).map((x) => String(x ?? "").trim()).filter(Boolean)
         : get().kbAttachedLibraryIds,
       isRunning: false,
+      activity: null,
     });
   },
 

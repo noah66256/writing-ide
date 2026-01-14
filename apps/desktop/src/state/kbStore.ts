@@ -2150,6 +2150,25 @@ export const useKbStore = create<KbState>()(
         const embeddingModel = String(args.embeddingModel ?? "").trim() || undefined;
 
         try {
+          // 运行态提示：避免用户以为“卡死”（仅在 Run 进行时提示）
+          const run = useRunStore.getState();
+          const setActivity = (text: string, opts?: { resetTimer?: boolean }) => {
+            try {
+              if (run.isRunning) run.setActivity(text, opts);
+            } catch {
+              // ignore
+            }
+          };
+
+          let lastStageAt = 0;
+          const stage = (text: string, opts?: { resetTimer?: boolean }) => {
+            const now = Date.now();
+            // 节流，避免高频更新导致 UI 抖动
+            if (!opts?.resetTimer && now - lastStageAt < 180) return;
+            lastStageAt = now;
+            setActivity(text, opts);
+          };
+
           const db = await loadDb({ baseDir, ownerKey });
           const activeLibIds = new Set(db.libraries.map((l) => l.id));
           const allowLibs = new Set(libraryIds.filter((id) => activeLibIds.has(id)));
@@ -2158,6 +2177,7 @@ export const useKbStore = create<KbState>()(
           const docsById = new Map(db.sourceDocs.map((d) => [d.id, d]));
           const hitsByDoc = new Map<string, KbSearchGroup>();
 
+          stage("正在知识库检索：词法召回…", { resetTimer: true });
           for (const a of db.artifacts) {
             if (kind && a.kind !== kind) continue;
             if (facetIds.length > 0) {
@@ -2191,6 +2211,7 @@ export const useKbStore = create<KbState>()(
 
           // 可选：向量重排（先词法召回，再对候选集做 embedding cosine similarity）
           if (useVector && groups.length > 0) {
+            stage("正在知识库检索：向量检索（重排）…", { resetTimer: true });
             const q = query.slice(0, 800); // 控制 query 长度
             const qEmb = await fetchEmbedding({ model: embeddingModel, input: q });
             if (qEmb.ok && qEmb.embedding.length > 0 && !budgetExceeded()) {
@@ -2221,6 +2242,9 @@ export const useKbStore = create<KbState>()(
               for (let i = 0; i < missing.length; i += chunkSize) {
                 if (budgetExceeded()) break;
                 const chunk = missing.slice(i, i + chunkSize);
+                const totalChunks = Math.max(1, Math.ceil(missing.length / chunkSize));
+                const chunkNo = Math.floor(i / chunkSize) + 1;
+                stage(`正在知识库检索：向量检索（重排 ${chunkNo}/${totalChunks}）…`);
                 const ret = await fetchEmbeddingsBatch({ model: embeddingModel, inputs: chunk.map((x) => x.text) });
                 if (!ret.ok) break;
                 for (let j = 0; j < chunk.length; j += 1) {
@@ -2266,6 +2290,7 @@ export const useKbStore = create<KbState>()(
               .slice(0, topDocs);
           } else if (useVector && groups.length === 0) {
             // 向量兜底召回：当词法召回为 0 时，仍可通过 embedding 从库内候选集中找相似内容
+            stage("正在知识库检索：向量检索（兜底召回）…", { resetTimer: true });
             const q = query.slice(0, 800);
             const qEmb = await fetchEmbedding({ model: embeddingModel, input: q });
             if (qEmb.ok && qEmb.embedding.length > 0 && !budgetExceeded()) {
@@ -2314,6 +2339,9 @@ export const useKbStore = create<KbState>()(
               for (let i = 0; i < missing.length; i += chunkSize) {
                 if (budgetExceeded()) break;
                 const chunk = missing.slice(i, i + chunkSize);
+                const totalChunks = Math.max(1, Math.ceil(missing.length / chunkSize));
+                const chunkNo = Math.floor(i / chunkSize) + 1;
+                stage(`正在知识库检索：向量检索（兜底 ${chunkNo}/${totalChunks}）…`);
                 const ret = await fetchEmbeddingsBatch({ model: embeddingModel, inputs: chunk.map((x) => x.text) });
                 if (!ret.ok) break;
                 for (let j = 0; j < chunk.length; j += 1) {
@@ -2364,6 +2392,7 @@ export const useKbStore = create<KbState>()(
             }
           }
 
+          // kb.search 完成：把状态留给上层（gatewayAgent 会设置“等待模型继续/生成…”）
           return { ok: true, groups };
         } catch (e: any) {
           return { ok: false, error: String(e?.message ?? e) };

@@ -368,6 +368,7 @@ export function startGatewayRun(args: {
 }): GatewayRunController {
   const {
     setRunning,
+    setActivity,
     addAssistant,
     appendAssistantDelta,
     finishAssistant,
@@ -379,6 +380,7 @@ export function startGatewayRun(args: {
   } = useRunStore.getState();
 
   setRunning(true);
+  setActivity("正在构建上下文…", { resetTimer: true });
   // 不要每轮覆盖 goal：只在为空时初始化（后续由 run.mainDoc.update 维护主线）
   // 关键：不要把整段长原文/长 prompt 塞进 Main Doc（会每轮注入 Context Pack，导致仿写手册/约束被淹没，输出变差）
   const cur = useRunStore.getState().mainDoc;
@@ -397,6 +399,7 @@ export function startGatewayRun(args: {
     log("info", "gateway.run.start", { gatewayUrl: args.gatewayUrl, model: args.model, mode: args.mode });
     try {
       const referencesText = await buildReferencesText(args.prompt).catch(() => "");
+      setActivity("正在构建上下文…");
       // 尽量确保 doc.rules 与 activePath 已加载，避免“上下文不对”（空规则/空正文）
       const proj = useProjectStore.getState();
       const docRulesPath = proj.getFileByPath("doc.rules.md")?.path;
@@ -437,6 +440,7 @@ export function startGatewayRun(args: {
 
       // Chat：纯对话，不启用工具循环
       if (args.mode === "chat") {
+        setActivity("正在请求模型…", { resetTimer: true });
         const assistantId = addAssistant("", true, false);
         currentAssistantId = assistantId;
         const ret = await fetchChatStream({
@@ -453,12 +457,14 @@ export function startGatewayRun(args: {
         if (!ret.ok) appendAssistantDelta(assistantId, `\n\n[模型错误] ${ret.error}`);
         finishAssistant(assistantId);
         setRunning(false);
+        setActivity(null);
         return;
       }
 
       // Plan/Agent：改为走 Gateway 的 /api/agent/run/stream（Gateway 负责 ReAct 循环；Desktop 负责执行工具并回传 tool_result）
       const url = args.gatewayUrl ? `${args.gatewayUrl}/api/agent/run/stream` : "/api/agent/run/stream";
 
+      setActivity("正在请求模型…", { resetTimer: true });
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -479,6 +485,7 @@ export function startGatewayRun(args: {
         appendAssistantDelta(a, `\n\n[Gateway 错误] ${text || `HTTP_${res.status}`}`);
         finishAssistant(a);
         setRunning(false);
+        setActivity(null);
         return;
       }
 
@@ -543,6 +550,8 @@ export function startGatewayRun(args: {
               const payload = JSON.parse(evt.data);
               const delta = payload?.delta;
               if (typeof delta === "string" && delta.length) {
+                // 一旦开始输出正文，更新状态（避免用户以为卡住）
+                setActivity("正在生成…");
                 const id = ensureAssistant();
                 appendAssistantDelta(id, delta);
               }
@@ -554,6 +563,8 @@ export function startGatewayRun(args: {
           if (evt.event === "assistant.done") {
             if (assistantId) finishAssistant(assistantId);
             assistantId = null;
+            // 一个 assistant 气泡结束后，先标记“继续运行中”，直到 run.end 或下一个 tool.call
+            if (useRunStore.getState().isRunning) setActivity("正在继续…");
           }
 
           if (evt.event === "tool.call") {
@@ -568,6 +579,7 @@ export function startGatewayRun(args: {
             const rawArgs = (payload?.args ?? {}) as Record<string, string>;
 
             log("info", "tool.call", { toolCallId, name });
+            setActivity(`正在执行工具：${name}…`, { resetTimer: true });
 
             // 关键：Gateway 侧不会在每次模型调用结束都发 assistant.done。
             // 如果此时不手动结束当前 assistant 气泡，后续新的 assistant.delta 会继续追加到“上面那条气泡”，
@@ -613,6 +625,7 @@ export function startGatewayRun(args: {
                 hasApply: exec.result.ok ? typeof exec.result.apply === "function" : false,
               },
             });
+            if (useRunStore.getState().isRunning) setActivity("正在等待模型继续…", { resetTimer: true });
           }
 
           if (evt.event === "tool.result") {
@@ -636,6 +649,7 @@ export function startGatewayRun(args: {
               finishAssistant(id);
             }
             setRunning(false);
+            setActivity(null);
             return;
           }
 
@@ -644,6 +658,7 @@ export function startGatewayRun(args: {
       }
 
       setRunning(false);
+      setActivity(null);
     } catch (e: any) {
       const msg = e?.message ? String(e.message) : String(e);
       log("error", "gateway.network_error", { message: msg });
@@ -652,6 +667,7 @@ export function startGatewayRun(args: {
       appendAssistantDelta(a, `\n\n[网络错误] ${msg}`);
       finishAssistant(a);
       setRunning(false);
+      setActivity(null);
     }
   })();
 
@@ -660,6 +676,7 @@ export function startGatewayRun(args: {
       log("warn", "gateway.run.cancel");
       abort.abort();
       setRunning(false);
+      setActivity(null);
       if (currentAssistantId) finishAssistant(currentAssistantId);
     }
   };
