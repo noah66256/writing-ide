@@ -37,6 +37,15 @@ npm install
 npm run dev:gateway
 ```
 
+### 生产部署（注意 nvm）
+服务器若使用 nvm（例如宝塔的 `/www/server/nvm`），**非交互 ssh 默认不会加载 `.bashrc`**，会导致 `node/npm/pm2` 找不到。
+
+推荐命令形态（示例）：
+
+```bash
+ssh writing 'bash -lc "export NVM_DIR=/www/server/nvm; [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\"; nvm use 22 >/dev/null; cd /www/wwwroot/writing-ide && npm run build -w @writing-ide/gateway && pm2 restart writing-gateway"'
+```
+
 ### 环境变量（根目录 `.env`）
 从 `env.example` 复制为 `.env` 并填写：
 - `LLM_BASE_URL`：OpenAI-compatible base url（不要带 `/v1`，Gateway 会自动补）
