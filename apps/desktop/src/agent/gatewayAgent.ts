@@ -380,8 +380,15 @@ export function startGatewayRun(args: {
 
   setRunning(true);
   // 不要每轮覆盖 goal：只在为空时初始化（后续由 run.mainDoc.update 维护主线）
+  // 关键：不要把整段长原文/长 prompt 塞进 Main Doc（会每轮注入 Context Pack，导致仿写手册/约束被淹没，输出变差）
   const cur = useRunStore.getState().mainDoc;
-  if (!cur.goal) updateMainDoc({ goal: args.prompt });
+  if (!cur.goal) {
+    const raw = String(args.prompt ?? "").trim();
+    const oneLine = raw.replace(/\s+/g, " ");
+    const max = 180;
+    const short = oneLine.length > max ? oneLine.slice(0, max) + "…（已截断；原始输入见置顶回合/历史）" : oneLine;
+    updateMainDoc({ goal: short });
+  }
 
   const abort = new AbortController();
   let currentAssistantId: string | null = null;

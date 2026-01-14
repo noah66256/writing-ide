@@ -99,6 +99,16 @@ type RunState = {
   setModel: (model: string) => void;
   setMainDoc: (mainDoc: MainDoc) => void;
   resetRun: () => void;
+  // 会话/历史：加载一段历史快照到当前 Run（用于“对话历史/切换”）
+  loadSnapshot: (snap: {
+    mode: Mode;
+    model: string;
+    mainDoc: MainDoc;
+    todoList: TodoItem[];
+    steps: Array<Step | Omit<ToolBlockStep, "apply" | "undo">>;
+    logs: LogEntry[];
+    kbAttachedLibraryIds: string[];
+  }) => void;
 
   addUser: (text: string, baseline?: UserStep["baseline"]) => string;
   patchUser: (stepId: string, patch: Partial<UserStep>) => void;
@@ -151,6 +161,36 @@ export const useRunStore = create<RunState>()(
   setMainDoc: (mainDoc) => set({ mainDoc }),
   setRunning: (running) => set({ isRunning: running }),
   resetRun: () => set({ steps: [], logs: [], isRunning: false, mainDoc: { goal: "" }, todoList: [] }),
+  loadSnapshot: (snap) => {
+    const s = snap && typeof snap === "object" ? snap : ({} as any);
+    const cleanSteps = Array.isArray(s.steps) ? s.steps : [];
+    // 历史快照不携带可执行函数，统一清掉 apply/undo，并标记 undoable=false
+    const normalized: Step[] = cleanSteps.map((step: any) => {
+      if (!step || typeof step !== "object") return step as any;
+      if (step.type === "tool") {
+        const t = step as any;
+        return {
+          ...t,
+          apply: undefined,
+          undo: undefined,
+          undoable: false,
+        } as ToolBlockStep;
+      }
+      return step as Step;
+    });
+    set({
+      mode: s.mode === "plan" || s.mode === "agent" || s.mode === "chat" ? s.mode : get().mode,
+      model: typeof s.model === "string" ? s.model : get().model,
+      mainDoc: (s.mainDoc && typeof s.mainDoc === "object" ? s.mainDoc : get().mainDoc) as MainDoc,
+      todoList: Array.isArray(s.todoList) ? (s.todoList as TodoItem[]) : [],
+      steps: normalized,
+      logs: Array.isArray(s.logs) ? (s.logs as LogEntry[]) : [],
+      kbAttachedLibraryIds: Array.isArray(s.kbAttachedLibraryIds)
+        ? (s.kbAttachedLibraryIds as string[]).map((x) => String(x ?? "").trim()).filter(Boolean)
+        : get().kbAttachedLibraryIds,
+      isRunning: false,
+    });
+  },
 
   setKbAttachedLibraries: (ids) => {
     const unique = Array.from(new Set((ids ?? []).map((x) => String(x ?? "").trim()).filter(Boolean)));

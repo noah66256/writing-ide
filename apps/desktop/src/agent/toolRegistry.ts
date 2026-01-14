@@ -390,6 +390,8 @@ const tools: ToolDefinition[] = [
       { name: "facetIds", desc: "可选：outlineFacet id 数组（多选）" },
       { name: "perDocTopN", desc: "每篇文档最多返回多少条命中（默认 3）" },
       { name: "topDocs", desc: "最多返回多少篇文档（默认 12）" },
+      { name: "useVector", desc: "可选：是否用向量做重排（默认 true；需要 Gateway 配置 embeddings 代理）" },
+      { name: "embeddingModel", desc: '可选：向量模型 ID（例如 "text-embedding-3-large" 或 "Embedding-V1"）；不传则用服务器默认' },
     ],
     riskLevel: "low",
     applyPolicy: "proposal",
@@ -402,12 +404,14 @@ const tools: ToolDefinition[] = [
       const facetIds = Array.isArray(args.facetIds) ? (args.facetIds as any[]).map((x) => String(x ?? "").trim()).filter(Boolean) : [];
       const perDocTopN = typeof args.perDocTopN === "number" ? Math.max(1, Math.floor(args.perDocTopN)) : 3;
       const topDocs = typeof args.topDocs === "number" ? Math.max(1, Math.floor(args.topDocs)) : 12;
+      const useVector = args.useVector === undefined ? true : Boolean(args.useVector);
+      const embeddingModel = String(args.embeddingModel ?? "").trim() || undefined;
       const explicitLibs = Array.isArray(args.libraryIds) ? (args.libraryIds as any[]).map((x) => String(x ?? "").trim()).filter(Boolean) : [];
       const attached = useRunStore.getState().kbAttachedLibraryIds ?? [];
       const libraryIds = explicitLibs.length ? explicitLibs : attached;
       if (!libraryIds.length) return { ok: false, error: "NO_LIBRARY_SELECTED" };
 
-      const ret = await useKbStore.getState().searchForAgent({ query, kind, facetIds, libraryIds, perDocTopN, topDocs });
+      const ret = await useKbStore.getState().searchForAgent({ query, kind, facetIds, libraryIds, perDocTopN, topDocs, useVector, embeddingModel });
       if (!ret.ok) return { ok: false, error: ret.error ?? "SEARCH_FAILED" };
 
       // 输出精简：按文档分组
@@ -429,7 +433,7 @@ const tools: ToolDefinition[] = [
         })),
       }));
 
-      return { ok: true, output: { ok: true, query, kind, libraryIds, groups }, undoable: false };
+      return { ok: true, output: { ok: true, query, kind, libraryIds, useVector, embeddingModel: embeddingModel ?? null, groups }, undoable: false };
     },
   },
   {

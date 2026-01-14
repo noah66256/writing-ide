@@ -11,6 +11,26 @@ export type ToolMeta = {
 // 执行仍由 Desktop 客户端完成，并通过 tool_result 回传。
 export const TOOL_LIST: ToolMeta[] = [
   {
+    name: "kb.search",
+    description:
+      "在本地知识库中检索（按库过滤、按 source_doc 分组返回）。\n" +
+      "【仿写检索 skill（强烈建议）】当用户要求“按某库风格仿写/改写”时：先用 kb.search 拉 3–8 条可抄的原文样例（优先 kind=paragraph / outline），再写稿；写作中遇到具体段落（开头/转折/结尾/金句）再补一次 kb.search。\n" +
+      "【查询建议】\n" +
+      "- 结构：kind=outline，query=“这篇文章的结构/分段/节奏/五环结构/结论先行”\n" +
+      "- 口吻/句式：kind=paragraph，query=“直男财经 口吻/金句/反差破题/转折句式/收尾 CTA”\n" +
+      "- 维度：传 facetIds（来自 FacetPack，例如 opening_design/logic_framework/ending 等）缩小检索范围。\n" +
+      "【提示】如未关联库，会报错 NO_LIBRARY_SELECTED；请先在右侧把库关联上。",
+    args: [
+      { name: "query", required: true, desc: "搜索关键词/问题" },
+      { name: "kind", required: false, desc: '可选：artifact kind（"card"|"outline"|"paragraph"），默认 "card"' },
+      { name: "libraryIds", required: false, desc: "可选：库 ID 数组；不传则默认使用右侧已关联库" },
+      { name: "facetIds", required: false, desc: "可选：outlineFacet id 数组（多选）" },
+      { name: "perDocTopN", required: false, desc: "每篇文档最多返回多少条命中（默认 3）" },
+      { name: "topDocs", required: false, desc: "最多返回多少篇文档（默认 12）" },
+    ],
+    modes: ["plan", "agent"],
+  },
+  {
     name: "run.mainDoc.get",
     description: "读取本次 Run 的 Main Doc（主文档/主线）。",
     args: [],

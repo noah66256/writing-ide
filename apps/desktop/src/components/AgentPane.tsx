@@ -8,6 +8,7 @@ import { ToolBlock } from "./ToolBlock";
 import { RichText } from "./RichText";
 import { RefComposer, type RefComposerHandle, type RefItem } from "./RefComposer";
 import { useKbStore } from "../state/kbStore";
+import { useConversationStore, type RunSnapshot, type SerializableStep } from "../state/conversationStore";
 
 type RunController = { cancel: () => void };
 
@@ -50,6 +51,17 @@ export function AgentPane() {
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
+
+  // Cursor-like：按“用户消息起点”作为回合锚点，滚动时动态置顶
+  const userNodeByIdRef = useRef<Record<string, HTMLDivElement | null>>({});
+  const [pinnedUserId, setPinnedUserId] = useState<string | null>(null);
+
+  // 会话历史（最小版）：新建/历史/删除
+  const conversations = useConversationStore((s) => s.conversations);
+  const addConversation = useConversationStore((s) => s.addConversation);
+  const deleteConversation = useConversationStore((s) => s.deleteConversation);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [copiedHint, setCopiedHint] = useState<string | null>(null);
 
   // 默认走相对路径（/api），由 Vite dev server 代理到本地 Gateway，避免跨域问题
   const gatewayUrl = (import.meta as any).env?.VITE_GATEWAY_URL ?? "";
@@ -122,6 +134,118 @@ export function AgentPane() {
     controllerRef.current = null;
   };
 
+  function truncateStr(s: string, max = 8000) {
+    const t = String(s ?? "");
+    if (t.length <= max) return t;
+    return t.slice(0, max) + "\n…（已截断）";
+  }
+
+  function buildSnapshot(): RunSnapshot {
+    const state = useRunStore.getState();
+    const safeMainDoc = { ...(state.mainDoc ?? {}) } as any;
+    for (const k of Object.keys(safeMainDoc)) {
+      const v = safeMainDoc[k];
+      if (typeof v === "string") safeMainDoc[k] = truncateStr(v, 8000);
+    }
+
+    const rawSteps = (state.steps ?? []).slice(-260);
+    const serial: SerializableStep[] = rawSteps.map((st: any) => {
+      if (!st || typeof st !== "object") return st as any;
+      if (st.type === "assistant") return { ...st, text: truncateStr(String(st.text ?? ""), 12000) };
+      if (st.type === "user") return { ...st, text: truncateStr(String(st.text ?? ""), 12000) };
+      if (st.type === "tool") {
+        const t = st as any;
+        return { ...t, apply: undefined, undo: undefined, undoable: false } as any;
+      }
+      return st as any;
+    });
+
+    return {
+      mode: state.mode,
+      model: state.model,
+      mainDoc: safeMainDoc,
+      todoList: JSON.parse(JSON.stringify(state.todoList ?? [])),
+      steps: serial,
+      logs: JSON.parse(JSON.stringify(state.logs ?? [])),
+      kbAttachedLibraryIds: JSON.parse(JSON.stringify(state.kbAttachedLibraryIds ?? [])),
+    };
+  }
+
+  function currentConversationTitle(): string {
+    const all = useRunStore.getState().steps ?? [];
+    const lastUser = [...all].reverse().find((s) => s.type === "user") as any;
+    const t = String(lastUser?.text ?? "").trim();
+    return t ? t.split("\n")[0] : "未命名对话";
+  }
+
+  const onNewConversation = () => {
+    if (isRunning) return;
+    // 归档当前对话到历史（若为空则直接清空）
+    const hasAny =
+      (useRunStore.getState().steps ?? []).length > 0 ||
+      Object.values(useRunStore.getState().mainDoc ?? {}).some((v) => String(v ?? "").trim());
+    if (hasAny) {
+      addConversation({ title: currentConversationTitle(), snapshot: buildSnapshot() });
+    }
+    useRunStore.getState().resetRun();
+  };
+
+  const onDeleteCurrent = () => {
+    if (isRunning) return;
+    const hasAny = (useRunStore.getState().steps ?? []).length > 0;
+    if (!hasAny) return;
+    const ok = window.confirm("删除当前对话？（仅清空右侧对话记录，不影响项目文件）");
+    if (!ok) return;
+    useRunStore.getState().resetRun();
+  };
+
+  const onCopyDiagnostics = async () => {
+    try {
+      const run = useRunStore.getState();
+      const kb = useKbStore.getState();
+      const libs = run.kbAttachedLibraryIds ?? [];
+      const playbook = await kb.getPlaybookTextForLibraries(libs).catch(() => "");
+      const toolCalls = (run.steps ?? [])
+        .filter((s: any) => s && typeof s === "object" && s.type === "tool")
+        .map((t: any) => ({ toolName: t.toolName, status: t.status }));
+
+      const mainDocLens: Record<string, number> = {};
+      for (const [k, v] of Object.entries(run.mainDoc ?? {})) {
+        if (typeof v === "string") mainDocLens[k] = v.length;
+      }
+
+      const diag = {
+        ts: new Date().toISOString(),
+        mode: run.mode,
+        model: run.model,
+        kbAttachedLibraryIds: libs,
+        kbAttachedLibraries: (kb.libraries ?? []).filter((l: any) => libs.includes(l.id)),
+        playbookChars: playbook.length,
+        mainDocLens,
+        todo: {
+          total: (run.todoList ?? []).length,
+          done: (run.todoList ?? []).filter((t: any) => t.status === "done").length,
+        },
+        steps: {
+          total: (run.steps ?? []).length,
+          user: (run.steps ?? []).filter((s: any) => s.type === "user").length,
+          assistant: (run.steps ?? []).filter((s: any) => s.type === "assistant").length,
+          tool: toolCalls.length,
+        },
+        toolCalls,
+        logsTail: (run.logs ?? []).slice(-80),
+      };
+
+      const text = JSON.stringify(diag, null, 2);
+      await navigator.clipboard.writeText(text);
+      setCopiedHint(`已复制诊断信息（${text.length} chars）`);
+      setTimeout(() => setCopiedHint(null), 1600);
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : String(e);
+      window.alert(`复制失败：${msg}`);
+    }
+  };
+
   const openRefPicker = (target: "main" | "history") => {
     setRefPickerTarget(target);
     setRefPickerQuery("");
@@ -152,23 +276,22 @@ export function AgentPane() {
     setEditingText((v) => (v ? v + " " + token + " " : token + " "));
   };
 
-  const mainDocRows = useMemo(() => {
-    const platformLabel =
-      mainDoc.platformType === "feed_preview"
-        ? "Feed 试看型"
-        : mainDoc.platformType === "search_click"
-          ? "点选/搜索型"
-          : mainDoc.platformType === "long_subscription"
-            ? "长内容订阅型"
-            : "";
-    const rows: Array<{ k: string; v: string }> = [];
-    if (mainDoc.goal) rows.push({ k: "目标", v: String(mainDoc.goal) });
-    if (platformLabel) rows.push({ k: "平台画像", v: platformLabel });
-    if (mainDoc.topic) rows.push({ k: "选题", v: String(mainDoc.topic) });
-    if (mainDoc.angle) rows.push({ k: "角度", v: String(mainDoc.angle) });
-    if (mainDoc.title) rows.push({ k: "标题", v: String(mainDoc.title) });
-    return rows;
-  }, [mainDoc]);
+  const mainDocSummary = useMemo(() => {
+    const parts: string[] = [];
+    if (mainDoc.title) parts.push(`标题：${String(mainDoc.title)}`);
+    if (mainDoc.topic) parts.push(`选题：${String(mainDoc.topic)}`);
+    if (mainDoc.goal) parts.push(`目标：${String(mainDoc.goal).trim().replace(/\s+/g, " ").slice(0, 80)}`);
+    if (!parts.length) return "MAIN DOC：暂无（建议仅保留摘要/约束，不要把整篇原文塞进 Main Doc）";
+    return "MAIN DOC：" + parts.join(" · ");
+  }, [mainDoc.goal, mainDoc.title, mainDoc.topic]);
+
+  const userSteps = useMemo(() => steps.filter((s) => s.type === "user") as any[], [steps]);
+
+  // 默认置顶：最后一条 user（最近一回合）
+  useEffect(() => {
+    const last = userSteps.length ? String(userSteps[userSteps.length - 1].id) : null;
+    setPinnedUserId((prev) => prev ?? last);
+  }, [userSteps]);
 
   const submitHistory = (opts: { revert: boolean }) => {
     const payload = submitFromHistory;
@@ -230,6 +353,18 @@ export function AgentPane() {
     const threshold = 80;
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
     stickToBottomRef.current = atBottom;
+
+    // 动态置顶：根据当前滚动位置选中“最靠上的回合锚点”（用户消息）
+    const top = el.scrollTop + 12;
+    let best: string | null = null;
+    for (const u of userSteps) {
+      const id = String(u.id);
+      const node = userNodeByIdRef.current[id];
+      if (!node) continue;
+      if (node.offsetTop <= top) best = id;
+      else break;
+    }
+    if (best && best !== pinnedUserId) setPinnedUserId(best);
   };
 
   // 自动滚动：仅在用户没有上滑浏览历史时跟随到底部
@@ -241,26 +376,55 @@ export function AgentPane() {
   return (
     <>
       <div className="mainDoc">
-        <div className="sectionTitle" style={{ padding: 0, marginBottom: 6 }}>
-          MAIN DOC
+        <div className="agentTopBar">
+          <div className="mainDocSummary" title={mainDocSummary}>
+            {mainDocSummary}
+          </div>
+          <div className="agentTopActions">
+            <button className="btn" type="button" onClick={onNewConversation} disabled={isRunning}>
+              新对话
+            </button>
+            <button className="btn" type="button" onClick={() => setHistoryOpen(true)} disabled={isRunning}>
+              历史 {conversations.length ? `(${conversations.length})` : ""}
+            </button>
+            <button className="btn" type="button" onClick={onCopyDiagnostics} disabled={isRunning}>
+              复制诊断
+            </button>
+            <button className="btn btnDanger" type="button" onClick={onDeleteCurrent} disabled={isRunning}>
+              删除
+            </button>
+          </div>
         </div>
-        {mainDocRows.length === 0 ? (
-          <div style={{ color: "var(--muted)", fontSize: 12 }}>（暂无主线内容）</div>
-        ) : (
-          <div className="mainDocRich">
-            {mainDocRows.map((r) => (
-              <div key={r.k} className="mainDocRow">
-                <div className="mainDocKey">{r.k}</div>
-                <div className="mainDocVal">{r.v}</div>
-              </div>
-            ))}
+        {copiedHint && <div style={{ marginTop: 6, color: "var(--muted)", fontSize: 12 }}>{copiedHint}</div>}
+
+        <div className="pinnedTurnBar">
+          <div className="pinnedTurnHeader">
+            <div className="pinnedTurnTitle">PINNED TURN</div>
+            <div className="pinnedTurnActions">
+              <button
+                className="btn btnIcon"
+                type="button"
+                title="从该回合继续（可选择是否回滚）"
+                onClick={() => {
+                  const id = pinnedUserId ?? userSteps[userSteps.length - 1]?.id;
+                  const u = userSteps.find((x) => x.id === id);
+                  if (!id || !u) return;
+                  setSubmitFromHistory({ stepId: String(id), text: String(u.text ?? "") });
+                }}
+                disabled={!pinnedUserId}
+              >
+                <IconRewind />
+              </button>
+            </div>
           </div>
-        )}
-        {todoList.length > 0 && (
-          <div style={{ marginTop: 8, color: "var(--muted)", fontSize: 12 }}>
-            进度：{todoList.filter((t) => t.status === "done").length}/{todoList.length}（TODO）
+          <div className="pinnedTurnText clamp4">
+            {(() => {
+              const id = pinnedUserId ?? userSteps[userSteps.length - 1]?.id;
+              const u = userSteps.find((x) => x.id === id);
+              return u ? String(u.text ?? "") : "（暂无对话）";
+            })()}
           </div>
-        )}
+        </div>
       </div>
 
       <div className="messages" ref={messagesRef} onScroll={onMessagesScroll}>
@@ -268,7 +432,13 @@ export function AgentPane() {
           if (step.type === "user") {
             const isEditing = editingId === step.id;
             return (
-              <div key={step.id} className="msgUser">
+              <div
+                key={step.id}
+                className="msgUser"
+                ref={(el) => {
+                  userNodeByIdRef.current[step.id] = el;
+                }}
+              >
                 <div
                   className={`composerBox historyBox ${isEditing ? "historyBoxActive" : "historyBoxIdle"}`}
                   onClick={() => {
@@ -472,6 +642,71 @@ export function AgentPane() {
         })}
         <div ref={bottomRef} />
       </div>
+
+      {historyOpen && (
+        <div
+          className="modalMask"
+          role="dialog"
+          aria-modal="true"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setHistoryOpen(false);
+          }}
+        >
+          <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="modalTitle">对话历史</div>
+            <div className="modalDesc">点击一条历史对话即可载入到右侧（工具步会变成只读展示）。</div>
+            <div style={{ display: "grid", gap: 8, maxHeight: 380, overflow: "auto" }}>
+              {conversations.length ? (
+                conversations.map((c) => (
+                  <div
+                    key={c.id}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "1fr auto",
+                      gap: 10,
+                      alignItems: "center",
+                      border: "1px solid var(--border)",
+                      borderRadius: 10,
+                      padding: 10,
+                      background: "var(--panel)",
+                    }}
+                  >
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ textAlign: "left", width: "100%" }}
+                      onClick={() => {
+                        useRunStore.getState().loadSnapshot(c.snapshot as any);
+                        setHistoryOpen(false);
+                      }}
+                    >
+                      <div style={{ color: "var(--text)" }}>{c.title}</div>
+                      <div style={{ color: "var(--muted)", fontSize: 12 }}>
+                        {new Date(c.createdAt).toLocaleString()}
+                      </div>
+                    </button>
+                    <button
+                      className="btn btnDanger"
+                      type="button"
+                      title="从历史中删除"
+                      onClick={() => deleteConversation(c.id)}
+                    >
+                      删除
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <div style={{ color: "var(--muted)", fontSize: 12 }}>（暂无历史）</div>
+              )}
+            </div>
+            <div className="modalBtns" style={{ marginTop: 12 }}>
+              <button className="btn" type="button" onClick={() => setHistoryOpen(false)}>
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {submitFromHistory && (
         <div className="modalMask" role="dialog" aria-modal="true">

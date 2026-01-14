@@ -86,12 +86,86 @@ function getLlmEnv() {
   };
 }
 
+function getEmbedEnv() {
+  const baseUrl = String(process.env.LLM_EMBED_BASE_URL ?? process.env.LLM_BASE_URL ?? "").trim();
+  const apiKeyDefault =
+    String(process.env.LLM_EMBED_API_KEY ?? "").trim() ||
+    String(process.env.LLM_CARD_API_KEY ?? "").trim() ||
+    String(process.env.LLM_API_KEY ?? "").trim();
+  const models = String(process.env.LLM_EMBED_MODELS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const defaultModel = models[0] ?? "";
+  return {
+    baseUrl,
+    apiKey: apiKeyDefault,
+    models,
+    defaultModel,
+    ok: Boolean(baseUrl && apiKeyDefault && models.length > 0)
+  };
+}
+
 // ======== LLM（OpenAI-compatible，开发期最小闭环） ========
 
 fastify.get("/api/llm/models", async () => {
   const env = getLlmEnv();
   if (!env.defaultModel) return { models: [] };
   return { models: [{ id: env.defaultModel }] };
+});
+
+fastify.get("/api/llm/embedding_models", async () => {
+  const env = getEmbedEnv();
+  return { models: (env.models ?? []).map((id) => ({ id })) };
+});
+
+fastify.post("/api/llm/embeddings", async (request, reply) => {
+  const bodySchema = z.object({
+    model: z.string().optional(),
+    input: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)])
+  });
+  const body = bodySchema.parse((request as any).body);
+
+  const env = getEmbedEnv();
+  if (!env.ok) {
+    return reply.code(500).send({
+      error: "EMBEDDINGS_NOT_CONFIGURED",
+      hint: "请配置 LLM_EMBED_MODELS；并确保 LLM_BASE_URL 与 LLM_CARD_API_KEY（或 LLM_EMBED_API_KEY）可用。"
+    });
+  }
+
+  const model = (body.model && env.models.includes(body.model) ? body.model : env.defaultModel) || env.defaultModel;
+  const base = env.baseUrl.replace(/\/+$/g, "");
+
+  try {
+    const resp = await fetch(`${base}/v1/embeddings`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${env.apiKey}`
+      },
+      body: JSON.stringify({ model, input: body.input })
+    });
+    const text = await resp.text();
+    let json: any = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = null;
+    }
+    if (!resp.ok) {
+      return reply.code(resp.status).send({
+        error: "UPSTREAM_ERROR",
+        status: resp.status,
+        detail: json ?? text
+      });
+    }
+    // 尽量保持 OpenAI 兼容输出结构（data[0].embedding）
+    return { ...(json ?? {}), modelUsed: model };
+  } catch (e: any) {
+    const msg = e?.message ? String(e.message) : String(e);
+    return reply.code(500).send({ error: "EMBEDDINGS_FAILED", detail: msg });
+  }
 });
 
 fastify.post("/api/llm/chat/stream", async (request, reply) => {
@@ -191,13 +265,13 @@ function buildAgentProtocolPrompt(mode: AgentMode) {
     mode === "chat"
       ? `当前模式：Chat（纯对话）。\n- 你**不允许调用任何工具**（包括读写文件）。\n- 你只需用 Markdown 输出可读内容即可。\n\n`
       : `当前模式：${mode === "plan" ? "Plan（逐步）" : "Agent（一次成型+迭代）"}。\n` +
-        `你需要按“写作闭环”工作，并把进度写入 Main Doc / Todo：\n` +
-        `1) 澄清（最多 5 个问题，可选）：平台画像 / 受众 / 目标 / 口吻人设 / 素材来源。\n` +
-        `   - 若用户明确说“先直接开始/先仿写看看/先给版本/不要再问”：你必须跳过澄清，基于合理默认假设直接开写。\n` +
-        `   - 若信息不足以开写且用户未要求直接开始：先输出澄清问题（自然语言），此时不要调用工具。\n` +
-        `2) 产 Todo List（可追踪）：只要进入执行阶段，你必须立刻调用 run.setTodoList（不要等用户再次确认）。\n` +
-        `3) 执行（由你自主决定是否调用工具）：素材收集（@引用/读文件）→ 结构（先 outline）→ 初稿 → 改写润色 → 自检。\n` +
-        `4) 进度记录：完成/推进每个关键步骤时，调用 run.updateTodo；关键决策与约束调用 run.mainDoc.update。\n` +
+        `你需要按“写作闭环”工作，并把进度写入 Main Doc / Todo。**硬约束：第一步永远先产 Todo List**。\n` +
+        `1) 产 Todo List（可追踪，必须）：你必须立刻调用 run.setTodoList。\n` +
+        `   - 即使你需要澄清，也必须先把“澄清问题/默认假设/下一步动作”写进 todo（澄清最多 5 个高价值问题：平台画像/受众/目标/口吻人设/素材来源）。\n` +
+        `   - 若用户明确说“先直接开始/先仿写看看/先给版本/不要再问”：你必须把澄清项标为可跳过，并基于合理默认假设直接推进写作。\n` +
+        `   - 若右侧已关联知识库且任务是“仿写/按某库风格改写”：todo 中必须包含“先 kb.search 拉样例（优先 paragraph/outline）再写”的步骤。\n` +
+        `2) 执行（由你自主决定是否调用工具）：素材收集（@引用/读文件/KB 检索）→ 结构（先 outline）→ 初稿 → 改写润色 → 自检。\n` +
+        `3) 进度记录：完成/推进每个关键步骤时，调用 run.updateTodo；关键决策与约束调用 run.mainDoc.update。\n` +
         `输出约束：\n` +
         `- 给用户看的文字输出必须是 Markdown（富文本），不要输出 JSON。\n` +
         `- 不要输出思维链/自言自语（例如“我将…”“下一步我会…”）；只输出对用户有用的内容（澄清问题 / 结果 / 简短步骤摘要）。\n` +
@@ -209,6 +283,10 @@ function buildAgentProtocolPrompt(mode: AgentMode) {
 
   return (
     `你是写作 IDE 的内置 Agent（偏写作产出与编辑体验，不要跑偏成通用工作流平台）。\n\n` +
+    `能力边界（非常重要）：\n` +
+    `- 你**只能**使用“下方列出的工具”。工具=能力边界；如果工具列表里没有某项能力，你就不具备该能力。\n` +
+    `- 如果工具列表里没有联网检索工具（例如 web.search/webSearch），你**不得**声称你能上网/你查到了网络信息，也不得输出“来自网络”的引用。\n` +
+    `- 知识库（KB）只能通过 kb.search/kb.cite 等工具结果来引用；不得凭空说“KB 里有/KB 显示”。引用必须能回链到来源定位。\n\n` +
     modePolicy +
     `你可以在需要时“调用工具”。当你要调用工具时，你必须输出 **且只能输出** 下面 XML 之一：\n` +
     `- 单次：<tool_call name="..."><arg name="...">...</arg></tool_call>\n` +
@@ -380,7 +458,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           const isEmpty = t.length === 0;
           const isClarify = looksLikeClarifyQuestions(t) && !forceProceed;
 
-          const needTodo = !hasTodoList && !isClarify;
+          // 关键：在 Plan/Agent 模式，todo 是“可追踪执行”的入口。即使需要澄清，也必须先设置 todo。
+          const needTodo = !hasTodoList;
           const needWrite = wantsWrite && !hasWriteOps && !isClarify;
 
           if (isEmpty || needTodo || needWrite) {
@@ -388,7 +467,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             writeEvent("assistant.delta", {
               delta:
                 "\n\n[系统提示] 检测到本次任务尚未进入可追踪执行（Todo 未设置 / 或尚未完成写入目标），我会让模型自动继续一次（无需你输入）。\n" +
-                "请它：若不需澄清，先 run.setTodoList；若用户要求写入项目/分割到文件夹，请务必用工具执行（例如 doc.write / doc.splitToDir）。"
+                "请它：先 run.setTodoList（永远第一步）；todo 中可包含澄清步骤与默认假设；若用户要求写入项目/分割到文件夹，请务必用工具执行（例如 doc.write / doc.splitToDir）。"
             });
             writeEvent("assistant.done", { reason: "auto_retry_incomplete" });
 
@@ -398,10 +477,10 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               role: "system",
               content:
                 "你刚才输出了纯文本，但任务尚未完成。\n" +
-                "- 如果需要澄清：请直接输出最多 5 个问题（纯文本），此时不要调用工具。\n" +
-                "- 否则：请立刻输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
-                "  - 至少包含 run.setTodoList\n" +
-                "  - 若用户要求写入/分割到文件夹：请调用 doc.splitToDir（或 doc.write 等）完成写入。"
+                "- 你必须先输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
+                "  - 至少包含 run.setTodoList（永远第一步）\n" +
+                "  - 若用户要求写入/分割到文件夹：请调用 doc.splitToDir（或 doc.write 等）完成写入。\n" +
+                "- 在你成功设置 todo 之后，如果仍需要澄清：下一条消息再输出最多 5 个问题（纯文本 Markdown），并在 todo 中标记为 blocked/等待用户输入；用户不答时写明默认假设继续推进。"
             });
             continue;
           }

@@ -58,6 +58,8 @@ export type KbArtifact = {
   cardType?: string;
   content: string;
   facetIds?: string[];
+  // 向量缓存：key=embeddingModel，value=embedding vector
+  embeddings?: Record<string, number[]>;
   // doc_v2：保留模型返回的完整引用段落索引（用于库级手册聚合时做证据）
   evidenceParagraphIndices?: number[];
   anchor: KbAnchor;
@@ -93,7 +95,7 @@ type KbPendingImport = {
 };
 
 type KbDb = {
-  version: 2;
+  version: 3;
   ownerKey: string;
   createdAt: string;
   updatedAt: string;
@@ -410,14 +412,19 @@ async function loadDb(args: { baseDir: string; ownerKey: string }): Promise<KbDb
     });
 
     const db: KbDb = {
-      version: 2,
+      version: 3,
       ownerKey: String(parsed?.ownerKey ?? args.ownerKey),
       createdAt: String(parsed?.createdAt ?? t),
       updatedAt: String(parsed?.updatedAt ?? t),
       libraries: ensuredLibs,
       trash,
       sourceDocs,
-      artifacts: rawArtifacts as any,
+      artifacts: (rawArtifacts as any[]).map((a: any) => {
+        const embeddingsRaw = a?.embeddings;
+        const embeddings =
+          embeddingsRaw && typeof embeddingsRaw === "object" && !Array.isArray(embeddingsRaw) ? (embeddingsRaw as any) : undefined;
+        return { ...a, embeddings } as KbArtifact;
+      }) as any,
     };
     return db;
   } catch (e: any) {
@@ -425,11 +432,11 @@ async function loadDb(args: { baseDir: string; ownerKey: string }): Promise<KbDb
     // File not exists -> new db
     if (msg.includes("ENOENT") || msg.includes("not found")) {
       const t = nowIso();
-      return { version: 2, ownerKey: args.ownerKey, createdAt: t, updatedAt: t, libraries: [], trash: [], sourceDocs: [], artifacts: [] };
+      return { version: 3, ownerKey: args.ownerKey, createdAt: t, updatedAt: t, libraries: [], trash: [], sourceDocs: [], artifacts: [] };
     }
     // Bad JSON -> start new db (avoid bricking)
     const t = nowIso();
-    return { version: 2, ownerKey: args.ownerKey, createdAt: t, updatedAt: t, libraries: [], trash: [], sourceDocs: [], artifacts: [] };
+    return { version: 3, ownerKey: args.ownerKey, createdAt: t, updatedAt: t, libraries: [], trash: [], sourceDocs: [], artifacts: [] };
   }
 }
 
@@ -657,6 +664,56 @@ function scoreArtifactText(args: { haystack: string; query: string }) {
   // simple: early hit + length
   const score = Math.max(1, 1000 - idx) + Math.min(120, q.length) * 3;
   return { score, idx };
+}
+
+function cosineSim(a: number[], b: number[]) {
+  const n = Math.min(a.length, b.length);
+  if (!n) return 0;
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < n; i += 1) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    dot += x * y;
+    na += x * x;
+    nb += y * y;
+  }
+  const den = Math.sqrt(na) * Math.sqrt(nb);
+  if (!den) return 0;
+  return dot / den;
+}
+
+function getGatewayUrl() {
+  try {
+    return String((import.meta as any).env?.VITE_GATEWAY_URL ?? "").trim();
+  } catch {
+    return "";
+  }
+}
+
+async function fetchEmbedding(args: { model?: string; input: string }): Promise<{ ok: true; embedding: number[]; modelUsed?: string } | { ok: false; error: string }> {
+  const gatewayUrl = getGatewayUrl();
+  const url = gatewayUrl ? `${gatewayUrl}/api/llm/embeddings` : "/api/llm/embeddings";
+  try {
+    const body: any = { input: args.input };
+    if (args.model) body.model = args.model;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok) {
+      const detail = json?.detail ? JSON.stringify(json.detail).slice(0, 300) : JSON.stringify(json).slice(0, 300);
+      return { ok: false, error: `EMBEDDINGS_HTTP_${res.status}:${detail}` };
+    }
+    const emb = json?.data?.[0]?.embedding;
+    if (!Array.isArray(emb)) return { ok: false, error: "EMBEDDINGS_INVALID_RESPONSE" };
+    return { ok: true, embedding: emb.map((x: any) => Number(x)).filter((x: any) => Number.isFinite(x)), modelUsed: json?.modelUsed };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
 }
 
 function makeSnippet(args: { text: string; matchIndex: number; queryLen: number }) {
@@ -1999,6 +2056,8 @@ export const useKbStore = create<KbState>()(
         const topDocs = args.topDocs ?? 12;
         const libraryIds = Array.from(new Set((args.libraryIds ?? []).map((x) => String(x ?? "").trim()).filter(Boolean)));
         if (!libraryIds.length) return { ok: false, error: "NO_LIBRARY_SELECTED" };
+        const useVector = args.useVector === undefined ? true : Boolean(args.useVector);
+        const embeddingModel = String(args.embeddingModel ?? "").trim() || undefined;
 
         try {
           const db = await loadDb({ baseDir, ownerKey });
@@ -2028,13 +2087,71 @@ export const useKbStore = create<KbState>()(
             hitsByDoc.set(doc.id, g);
           }
 
-          const groups = Array.from(hitsByDoc.values())
+          let groups = Array.from(hitsByDoc.values())
             .map((g) => ({
               ...g,
-              hits: g.hits.sort((a, b) => b.score - a.score).slice(0, perDocTopN),
+              hits: g.hits.sort((a, b) => b.score - a.score).slice(0, perDocTopN * 3),
             }))
             .sort((a, b) => b.bestScore - a.bestScore)
             .slice(0, topDocs);
+
+          // 可选：向量重排（先词法召回，再对候选集做 embedding cosine similarity）
+          if (useVector && groups.length > 0) {
+            const q = query.slice(0, 800); // 控制 query 长度
+            const qEmb = await fetchEmbedding({ model: embeddingModel, input: q });
+            if (qEmb.ok && qEmb.embedding.length > 0) {
+              const modelUsed = embeddingModel ?? qEmb.modelUsed ?? "";
+              const maxCandidates = Math.min(120, groups.reduce((sum, g) => sum + g.hits.length, 0));
+              let usedCandidates = 0;
+              let mutated = false;
+
+              for (const g of groups) {
+                for (const h of g.hits) {
+                  if (usedCandidates >= maxCandidates) break;
+                  usedCandidates += 1;
+                  const a = h.artifact;
+                  const key = modelUsed || "default";
+                  let vec = a.embeddings?.[key];
+                  if (!vec) {
+                    const text = String(a.content ?? "").slice(0, 1200);
+                    const emb = await fetchEmbedding({ model: embeddingModel, input: text });
+                    if (emb.ok && emb.embedding.length > 0) {
+                      vec = emb.embedding;
+                      a.embeddings = { ...(a.embeddings ?? {}), [key]: vec };
+                      mutated = true;
+                    }
+                  }
+                  if (vec && vec.length > 0) {
+                    const sim = cosineSim(qEmb.embedding, vec);
+                    // 组合：向量为主，词法为辅（避免纯向量把“同词同义但不相关”顶上来）
+                    const lex = Number(h.score) || 0;
+                    h.score = sim * 1000 + Math.min(100, lex);
+                  }
+                }
+                // 先在 doc 内重排
+                g.hits = g.hits.sort((a, b) => b.score - a.score).slice(0, perDocTopN);
+                g.bestScore = g.hits.length ? g.hits[0]!.score : 0;
+              }
+
+              // doc 间重排
+              groups = groups.sort((a, b) => b.bestScore - a.bestScore).slice(0, topDocs);
+
+              // 将新写入的 embedding 缓存落盘（避免下次重复算）
+              if (mutated) {
+                try {
+                  await saveDb({ baseDir, ownerKey, db });
+                } catch {
+                  // ignore cache write failures
+                }
+              }
+            }
+          } else {
+            // no vector：回到每篇 topN
+            groups = groups
+              .map((g) => ({ ...g, hits: g.hits.slice(0, perDocTopN) }))
+              .sort((a, b) => b.bestScore - a.bestScore)
+              .slice(0, topDocs);
+          }
 
           return { ok: true, groups };
         } catch (e: any) {
