@@ -1175,7 +1175,10 @@ fastify.post("/api/kb/dev/build_library_playbook", async (request, reply) => {
 
   const bodySchema = z.object({
     model: z.string().optional(),
+    // lite：骨架版（样本少/更快）；full：更完整（更慢）
     mode: z.enum(["lite", "full"]).optional(),
+    // full：生成 styleProfile + facets；facets：只生成 facets（styleProfile 输出极短占位，避免重复浪费）
+    part: z.enum(["full", "facets"]).optional(),
     facetIds: z.array(z.string().min(1)).min(1).max(80),
     docs: z
       .array(
@@ -1226,6 +1229,7 @@ fastify.post("/api/kb/dev/build_library_playbook", async (request, reply) => {
   const itemsTotal = docs.reduce((s, d) => s + (d.items?.length ?? 0), 0);
   const corpusSmall = docs.length <= 2 && itemsTotal <= 40;
   const effectiveMode: "lite" | "full" = body.mode ?? (corpusSmall ? "lite" : "full");
+  const part: "full" | "facets" = body.part ?? "full";
 
   const stripForQuote = (s: string) =>
     String(s ?? "")
@@ -1246,78 +1250,87 @@ fastify.post("/api/kb/dev/build_library_playbook", async (request, reply) => {
     if (fallbackEvidence.length >= 3) break;
   }
 
-  const sys =
-    effectiveMode === "lite"
-      ? [
-          "你是写作 IDE 的「库级仿写手册生成器」。",
-          "你会收到一批文档的“结构化要素卡”（hook/thesis/ending/one_liner/outline 等），每条都带来源段落索引。",
-          "",
-          `当前样本较少（docs=${docs.length}, itemsTotal=${itemsTotal}），请优先生成“骨架版仿写手册”（快、短、可执行）。`,
-          "",
-          "任务：输出两个东西：",
-          "1) styleProfile：整体写法画像，必须具体可操作。建议 8–12 条 bullet，总长度尽量 < 900 字。",
-          "2) playbookFacets：对每个 facetId 生成一张“写法手册卡”（覆盖全部 facetId）。每张卡 content 用统一短模板：",
-          "   - 信号：<=3 条",
-          "   - 模板：<=2 条（可用句式/结构）",
-          "   - 自检：<=2 条",
-          "   - 若证据不足：在 content 第一行写“（证据不足：样本太少）”",
-          "",
-          "证据（evidence）要求：",
-          "- 每张卡尽量给 1 条 evidence：{docId, docTitle, paragraphIndex, quote}，quote <=60字。",
-          "- 如果某个 facet 没有足够证据，允许复用同一条 evidence（例如直接复用 styleProfile 的第 1 条 evidence）。不要臆造不存在的 docId/段落索引。",
-          "",
-          "输出要求：你必须且只能输出一个 JSON 对象（不要代码块，不要多余文字）。",
-          "JSON 结构：",
-          "{",
-          '  "styleProfile": { "title": string, "content": string(Markdown), "evidence": Evidence[] },',
-          '  "playbookFacets": [ { "facetId": string, "title": string, "content": string(Markdown), "evidence": Evidence[] } ]',
-          "}",
-          `facetId 枚举如下（不要新增）：${facetIds.join(", ")}。`,
-          "约束：playbookFacets 必须覆盖所有 facetId（顺序不限）。content 必须短、硬、可执行。"
-        ].join("\n")
-      : [
-          "你是写作 IDE 的「库级仿写手册生成器」。",
-          "你会收到一批文档的“结构化要素卡”（hook/thesis/ending/one_liner/outline 等），每条都带来源段落索引。",
-          "",
-          "任务：输出两个东西：",
-          "1) styleProfile：该库作者/素材的整体写法画像（可用于仿写），要具体、可操作（别空泛）。",
-          "2) playbookFacets：对每个 facetId 生成一张“写法手册卡”（21 个一级维度），每张卡包含：信号/套路/模板/禁忌/检查清单，并给 1-2 个带引用的例子。",
-          "",
-          "引用格式要求：每条例子必须包含 evidence 数组元素：{docId, docTitle, paragraphIndex, quote}；quote 尽量短（<=60字）且来自对应段落。",
-          "证据不足时：允许复用同一条 evidence（例如直接复用 styleProfile 的第 1 条 evidence），不要臆造不存在的 docId/段落索引。",
-          "",
-          "输出要求：你必须且只能输出一个 JSON 对象（不要代码块，不要多余文字）。",
-          "JSON 结构：",
-          "{",
-          '  "styleProfile": { "title": string, "content": string(Markdown), "evidence": Evidence[] },',
-          '  "playbookFacets": [ { "facetId": string, "title": string, "content": string(Markdown), "evidence": Evidence[] } ]',
-          "}",
-          `facetId 枚举如下（不要新增）：${facetIds.join(", ")}。`,
-          "约束：playbookFacets 必须覆盖所有 facetId（顺序不限）。content 要短、硬、可执行。"
-        ].join("\n");
-
-  const user = [
-    "输入文档要素卡如下（已做过摘要；不要要求全文）：",
-    JSON.stringify(
-      {
-        facetIds,
-        docs: docs.map((d) => ({
-          id: d.id,
-          title: d.title,
-          items: d.items.map((it) => ({
-            cardType: it.cardType,
-            title: it.title ?? "",
-            // 传入的 content 可能较长：这里截一下，避免 prompt 爆
-            content: String(it.content ?? "").slice(0, effectiveMode === "lite" ? 800 : 1600),
-            paragraphIndices: it.paragraphIndices,
-            facetIds: it.facetIds ?? []
-          }))
-        }))
-      },
-      null,
-      2
-    )
+  const sysLite = [
+    "你是写作 IDE 的「库级仿写手册生成器」。",
+    "你会收到一批文档的“结构化要素卡”（hook/thesis/ending/one_liner/outline 等），每条都带来源段落索引。",
+    "",
+    `当前样本较少（docs=${docs.length}, itemsTotal=${itemsTotal}），请优先生成“骨架版仿写手册”（快、短、可执行）。`,
+    part === "facets" ? "本次请求仅用于生成 playbookFacets；styleProfile 请输出非常短的占位（<=120字），不要展开。" : "",
+    "",
+    "任务：输出两个东西：",
+    part === "facets"
+      ? "1) styleProfile：输出占位即可（<=120字，不要展开）。"
+      : "1) styleProfile：整体写法画像，必须具体可操作。建议 8–12 条 bullet，总长度尽量 < 900 字。",
+    "2) playbookFacets：对每个 facetId 生成一张“写法手册卡”（覆盖全部 facetId）。每张卡 content 用统一短模板：",
+    "   - 信号：<=3 条",
+    "   - 模板：<=2 条（可用句式/结构）",
+    "   - 自检：<=2 条",
+    "   - 若证据不足：在 content 第一行写“（证据不足：样本太少）”",
+    "",
+    "证据（evidence）要求：",
+    "- 每张卡尽量给 1 条 evidence：{docId, docTitle, paragraphIndex, quote}，quote <=60字。",
+    "- 如果某个 facet 没有足够证据，允许复用同一条 evidence（例如直接复用 styleProfile 的第 1 条 evidence）。不要臆造不存在的 docId/段落索引。",
+    "",
+    "输出要求：你必须且只能输出一个 JSON 对象（不要代码块，不要多余文字）。",
+    "JSON 结构：",
+    "{",
+    '  "styleProfile": { "title": string, "content": string(Markdown), "evidence": Evidence[] },',
+    '  "playbookFacets": [ { "facetId": string, "title": string, "content": string(Markdown), "evidence": Evidence[] } ]',
+    "}",
+    `facetId 枚举如下（不要新增）：${facetIds.join(", ")}。`,
+    "约束：playbookFacets 必须覆盖所有 facetId（顺序不限）。content 必须短、硬、可执行。"
   ].join("\n");
+
+  const sysFull = [
+    "你是写作 IDE 的「库级仿写手册生成器」。",
+    "你会收到一批文档的“结构化要素卡”（hook/thesis/ending/one_liner/outline 等），每条都带来源段落索引。",
+    "",
+    part === "facets" ? "本次请求仅用于生成 playbookFacets；styleProfile 请输出非常短的占位（<=120字），不要展开。" : "",
+    "",
+    "任务：输出两个东西：",
+    part === "facets"
+      ? "1) styleProfile：输出占位即可（<=120字，不要展开）。"
+      : "1) styleProfile：该库作者/素材的整体写法画像（可用于仿写），要具体、可操作（别空泛）。",
+    "2) playbookFacets：对每个 facetId 生成一张“写法手册卡”（21 个一级维度），每张卡包含：信号/套路/模板/禁忌/检查清单，并给 1-2 个带引用的例子。",
+    "",
+    "引用格式要求：每条例子必须包含 evidence 数组元素：{docId, docTitle, paragraphIndex, quote}；quote 尽量短（<=60字）且来自对应段落。",
+    "证据不足时：允许复用同一条 evidence（例如直接复用 styleProfile 的第 1 条 evidence），不要臆造不存在的 docId/段落索引。",
+    "",
+    "输出要求：你必须且只能输出一个 JSON 对象（不要代码块，不要多余文字）。",
+    "JSON 结构：",
+    "{",
+    '  "styleProfile": { "title": string, "content": string(Markdown), "evidence": Evidence[] },',
+    '  "playbookFacets": [ { "facetId": string, "title": string, "content": string(Markdown), "evidence": Evidence[] } ]',
+    "}",
+    `facetId 枚举如下（不要新增）：${facetIds.join(", ")}。`,
+    "约束：playbookFacets 必须覆盖所有 facetId（顺序不限）。content 要短、硬、可执行。"
+  ].join("\n");
+
+  const buildUser = (maxChars: number) =>
+    [
+      "输入文档要素卡如下（已做过摘要；不要要求全文）：",
+      JSON.stringify(
+        {
+          facetIds,
+          docs: docs.map((d) => ({
+            id: d.id,
+            title: d.title,
+            items: d.items.map((it) => ({
+              cardType: it.cardType,
+              title: it.title ?? "",
+              // 传入的 content 可能较长：这里截一下，避免 prompt 爆
+              content: String(it.content ?? "").slice(0, maxChars),
+              paragraphIndices: it.paragraphIndices,
+              facetIds: it.facetIds ?? []
+            }))
+          }))
+        },
+        null,
+        2
+      )
+    ].join("\n");
+  const userLite = buildUser(800);
+  const userFull = buildUser(1600);
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const parseUpstream = (text: string) => {
@@ -1341,6 +1354,8 @@ fastify.post("/api/kb/dev/build_library_playbook", async (request, reply) => {
   let ret: any = null;
   let usedMode: "lite" | "full" = effectiveMode;
   for (let attempt = 0; attempt <= retryMax; attempt += 1) {
+    const sys = usedMode === "lite" ? sysLite : sysFull;
+    const user = usedMode === "lite" ? userLite : userFull;
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), timeoutMs);
     ret = await chatCompletionOnce({
@@ -1363,13 +1378,15 @@ fastify.post("/api/kb/dev/build_library_playbook", async (request, reply) => {
     const isTimeout = /aborted|AbortError|timeout/i.test(errText);
     const is429 = ret.status === 429 || errText.includes("Too Many Requests") || errText.includes("负载已饱和");
     lastErr = { is429, isTimeout, detail: ret.error, status: ret.status };
-    // timeout 时：如果不是 lite，则降级到 lite 再试一次（优先拿到可用结果）
-    if (isTimeout && usedMode !== "lite") {
-      usedMode = "lite";
-      // 直接下一轮重试（不额外等待）
-      continue;
+    // timeout：优先“full→lite”降级一次；如果已经是 lite 仍超时，则不继续内层重试（交给上层做拆分/重试）
+    if (isTimeout) {
+      if (usedMode !== "lite") {
+        usedMode = "lite";
+        continue;
+      }
+      break;
     }
-    if ((!is429 && !isTimeout) || attempt >= retryMax) break;
+    if (!is429 || attempt >= retryMax) break;
 
     const jitter = Math.floor(Math.random() * 200);
     const wait = retryBaseMs * Math.pow(2, attempt) + jitter;

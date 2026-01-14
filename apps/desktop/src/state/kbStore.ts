@@ -1091,6 +1091,8 @@ async function postExtractCards(args: {
 
 async function postBuildLibraryPlaybook(args: {
   model?: string;
+  mode?: "lite" | "full";
+  part?: "full" | "facets";
   facetIds: string[];
   docs: Array<{
     id: string;
@@ -1111,6 +1113,8 @@ async function postBuildLibraryPlaybook(args: {
       signal: args.signal,
       body: JSON.stringify({
         model: args.model,
+        mode: args.mode,
+        part: args.part,
         facetIds: args.facetIds,
         docs: args.docs,
       }),
@@ -1869,11 +1873,26 @@ export const useKbStore = create<KbState>()(
                 }
 
                 cardJobsAbort = new AbortController();
-                const ret = await get().extractCardsForDocs([next.docId], { signal: cardJobsAbort.signal });
+                const signal = cardJobsAbort.signal;
+                const ret = await get().extractCardsForDocs([next.docId], { signal });
+                const aborted = Boolean(signal.aborted);
+                const reason = cardJobsAbortReason;
                 cardJobsAbort = null;
                 cardJobsAbortReason = null;
 
                 if (!ret.ok) {
+                  if (aborted && reason === "pause") {
+                    // 暂停：把当前 job 退回 pending，等待继续
+                    endedByControl = true;
+                    markCardJob(next.id, { status: "pending" });
+                    break;
+                  }
+
+                  if (aborted && reason === "cancel") {
+                    endedByControl = true;
+                    markCardJob(next.id, { status: "cancelled" });
+                    break;
+                  }
                   markCardJob(next.id, { status: "failed", error: ret.error ?? "EXTRACT_FAILED" });
                   continue;
                 }
@@ -1926,11 +1945,25 @@ export const useKbStore = create<KbState>()(
               }
 
               cardJobsAbort = new AbortController();
-              const ret = await get().generateLibraryPlaybook(libId, { signal: cardJobsAbort.signal });
+              const signal = cardJobsAbort.signal;
+              const ret = await get().generateLibraryPlaybook(libId, { signal });
+              const aborted = Boolean(signal.aborted);
+              const reason = cardJobsAbortReason;
               cardJobsAbort = null;
               cardJobsAbortReason = null;
 
               if (!ret.ok) {
+                if (aborted && reason === "pause") {
+                  endedByControl = true;
+                  markPlaybookJob(next.id, { status: "pending" });
+                  break;
+                }
+
+                if (aborted && reason === "cancel") {
+                  endedByControl = true;
+                  markPlaybookJob(next.id, { status: "cancelled" });
+                  break;
+                }
                 markPlaybookJob(next.id, { status: "failed", error: ret.error ?? "PLAYBOOK_FAILED" });
                 continue;
               }
@@ -2628,41 +2661,73 @@ export const useKbStore = create<KbState>()(
             docs: docsPayload.length,
             itemsTotal: docsPayload.reduce((s, d) => s + (d.items?.length ?? 0), 0),
           });
-          // 分批生成（避免 1 次生成 21 个 facet + 证据导致上游超时）
-          const facetBatches = chunkArray(packFacetIds, 7);
+          // 分批生成（稳定性优先）：
+          // - 第一次用 part=full 生成 styleProfile（只带 1 个 facet，避免重复生成 styleProfile 浪费 token/时间）
+          // - 其余 facets 用 part=facets 分批生成；若超时则对该批次二分递归（避免“7→4→2 全量重跑”造成 20min 等待）
           const facetById = new Map<string, any>();
           let styleProfile: any = null;
 
           const isTimeoutErr = (msg: string) => /UPSTREAM_TIMEOUT|timeout|504/.test(String(msg ?? ""));
+          const isAbortErr = (msg: string) => /aborted|AbortError|signal is aborted/i.test(String(msg ?? ""));
 
-          // 批量调用：若超时，自动缩小 batch size 重试（最多 2 轮缩小）
-          const runBatches = async (batchSize: number) => {
-            const batches = chunkArray(packFacetIds, batchSize);
-            for (let bi = 0; bi < batches.length; bi += 1) {
-              const facetIds = batches[bi]!;
-              kbLog("info", "kb.playbook.request.batch", { libId, batchNo: bi + 1, batchCount: batches.length, facetCount: facetIds.length });
-              const ret = await postBuildLibraryPlaybook({ facetIds, docs: docsPayload, signal: opts?.signal });
-              if (!ret.ok) {
-                kbLog("error", "kb.playbook.failed.batch", { libId, batchNo: bi + 1, error: ret.error });
-                return { ok: false as const, error: ret.error };
-              }
-              if (!styleProfile && ret.styleProfile) styleProfile = ret.styleProfile;
-              for (const f of ret.playbookFacets ?? []) {
-                const facetId = String(f?.facetId ?? "").trim();
-                if (!facetId) continue;
-                facetById.set(facetId, f);
-              }
+          const mode: "lite" | "full" = docsPayload.length <= 2 && docsPayload.reduce((s, d) => s + (d.items?.length ?? 0), 0) <= 40 ? "lite" : "full";
+
+          const merge = (ret: { styleProfile: any; playbookFacets: any[] }) => {
+            const sp = ret?.styleProfile;
+            if (!styleProfile && sp && String(sp?.content ?? "").trim()) styleProfile = sp;
+            for (const f of ret.playbookFacets ?? []) {
+              const fid = String(f?.facetId ?? "").trim();
+              if (!fid) continue;
+              facetById.set(fid, f);
             }
-            return { ok: true as const };
           };
 
-          // 先按 7 一批跑；如超时则 4 一批；还超时则 2 一批
-          let batchRet = await runBatches(7);
-          if (!batchRet.ok && isTimeoutErr(batchRet.error)) batchRet = await runBatches(4);
-          if (!batchRet.ok && isTimeoutErr(batchRet.error)) batchRet = await runBatches(2);
-          if (!batchRet.ok) {
-            kbLog("error", "kb.playbook.failed", { libId, error: batchRet.error });
-            return { ok: false, error: batchRet.error };
+          const requestBatch = async (facetIds: string[], part: "full" | "facets", meta?: Record<string, any>) => {
+            kbLog("info", "kb.playbook.request.batch", { libId, part, facetCount: facetIds.length, ...(meta ?? {}) });
+            return await postBuildLibraryPlaybook({ facetIds, docs: docsPayload, mode, part, signal: opts?.signal });
+          };
+
+          const ensureFacetsChunk = async (facetIds: string[]): Promise<{ ok: true } | { ok: false; error: string }> => {
+            if (!facetIds.length) return { ok: true };
+            const ret = await requestBatch(facetIds, "facets");
+            if (ret.ok) {
+              merge(ret);
+              return { ok: true };
+            }
+            const err = String(ret.error ?? "");
+            // 用户点了停止：上层 runner 会按 AbortReason 把 job 置为 cancelled / pending
+            if (opts?.signal?.aborted) return { ok: false, error: err || "ABORTED" };
+            if (isTimeoutErr(err) && facetIds.length > 1) {
+              const mid = Math.ceil(facetIds.length / 2);
+              const left = await ensureFacetsChunk(facetIds.slice(0, mid));
+              if (!left.ok) return left;
+              return await ensureFacetsChunk(facetIds.slice(mid));
+            }
+            if (!isAbortErr(err)) kbLog("error", "kb.playbook.failed.batch", { libId, part: "facets", facetCount: facetIds.length, error: err });
+            return { ok: false, error: err || "PLAYBOOK_FAILED" };
+          };
+
+          // 1) 先生成一次 styleProfile（full，但 facetIds 只带 1 个维度）
+          const firstFacetIds = packFacetIds.slice(0, 1);
+          const first = await requestBatch(firstFacetIds, "full", { batchNo: 1, batchCount: 1, note: "styleProfile" });
+          if (!first.ok) {
+            const err = String(first.error ?? "");
+            if (!isAbortErr(err)) kbLog("error", "kb.playbook.failed.batch", { libId, part: "full", facetCount: firstFacetIds.length, error: err });
+            kbLog("error", "kb.playbook.failed", { libId, error: err });
+            return { ok: false, error: err || "PLAYBOOK_FAILED" };
+          }
+          merge(first);
+
+          // 2) 其余 facets：初始每批 4 个；该批超时则二分递归
+          const remaining = packFacetIds.filter((id) => !facetById.has(id));
+          const batches = chunkArray(remaining, 4);
+          for (let bi = 0; bi < batches.length; bi += 1) {
+            const ids = batches[bi]!;
+            const r = await ensureFacetsChunk(ids);
+            if (!r.ok) {
+              kbLog("error", "kb.playbook.failed", { libId, error: r.error });
+              return { ok: false, error: r.error };
+            }
           }
 
           // 校验：必须覆盖全部 facetId（否则提示缺失）
