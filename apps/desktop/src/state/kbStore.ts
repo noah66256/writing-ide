@@ -644,6 +644,12 @@ async function postBuildLibraryPlaybook(args: {
         const j = JSON.parse(text);
         if (typeof j?.message === "string") msg = j.message;
         else if (typeof j?.error?.message === "string") msg = j.error.message;
+        else if (typeof j?.error === "string") {
+          const hint = typeof j?.hint === "string" ? String(j.hint) : "";
+          const detail = typeof j?.detail === "string" ? String(j.detail) : "";
+          msg = hint ? `${j.error}: ${hint}` : String(j.error);
+          if (detail && detail !== hint) msg += `\n${detail}`;
+        }
       } catch {
         // ignore
       }
@@ -1915,10 +1921,30 @@ export const useKbStore = create<KbState>()(
             .filter((d) => d.items.length > 0)
             .slice(0, 200);
 
-          if (!docsPayload.length) return { ok: false, error: "NO_DOC_CARDS_YET（请先对该库文档跑完“抽卡任务”）" };
+          if (!docsPayload.length) {
+            const docCount = docs.length;
+            const docWithCards = grouped.size;
+            kbLog("warn", "kb.playbook.no_doc_cards_yet", { libId, docCount, docWithCards });
+            return {
+              ok: false,
+              error:
+                "NO_DOC_CARDS_YET（请先对该库文档跑完“抽卡任务”）\n" +
+                `- 库内文档：${docCount} 篇\n` +
+                `- 已有要素卡的文档：${docWithCards} 篇`,
+            };
+          }
 
+          kbLog("info", "kb.playbook.request", {
+            libId,
+            facetCount: packFacetIds.length,
+            docs: docsPayload.length,
+            itemsTotal: docsPayload.reduce((s, d) => s + (d.items?.length ?? 0), 0),
+          });
           const ret = await postBuildLibraryPlaybook({ facetIds: packFacetIds, docs: docsPayload, signal: opts?.signal });
-          if (!ret.ok) return { ok: false, error: ret.error };
+          if (!ret.ok) {
+            kbLog("error", "kb.playbook.failed", { libId, error: ret.error });
+            return { ok: false, error: ret.error };
+          }
 
           const facetLabel = (id: string) => pack.facets.find((f) => f.id === id)?.label ?? id;
 
