@@ -1337,7 +1337,7 @@ fastify.post("/api/kb/dev/classify_genre", async (request, reply) => {
 
   const bodySchema = z.object({
     model: z.string().optional(),
-    stats: z.record(z.any()).optional(),
+    stats: z.record(z.string(), z.any()).optional(),
     samples: z
       .array(
         z.object({
