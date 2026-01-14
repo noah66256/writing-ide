@@ -950,6 +950,13 @@ function scoreDocV2CardForPick(c: any) {
   return base + Math.min(200, title.length) + Math.min(800, content.length) + Math.min(200, pi * 20);
 }
 
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  const s = Math.max(1, Math.floor(size));
+  for (let i = 0; i < arr.length; i += s) out.push(arr.slice(i, i + s));
+  return out;
+}
+
 function parseMarkdownToArtifacts(args: { sourceDocId: string; text: string }): KbArtifact[] {
   const text = args.text.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
   const lines = text.split("\n");
@@ -2621,10 +2628,52 @@ export const useKbStore = create<KbState>()(
             docs: docsPayload.length,
             itemsTotal: docsPayload.reduce((s, d) => s + (d.items?.length ?? 0), 0),
           });
-          const ret = await postBuildLibraryPlaybook({ facetIds: packFacetIds, docs: docsPayload, signal: opts?.signal });
-          if (!ret.ok) {
-            kbLog("error", "kb.playbook.failed", { libId, error: ret.error });
-            return { ok: false, error: ret.error };
+          // 分批生成（避免 1 次生成 21 个 facet + 证据导致上游超时）
+          const facetBatches = chunkArray(packFacetIds, 7);
+          const facetById = new Map<string, any>();
+          let styleProfile: any = null;
+
+          const isTimeoutErr = (msg: string) => /UPSTREAM_TIMEOUT|timeout|504/.test(String(msg ?? ""));
+
+          // 批量调用：若超时，自动缩小 batch size 重试（最多 2 轮缩小）
+          const runBatches = async (batchSize: number) => {
+            const batches = chunkArray(packFacetIds, batchSize);
+            for (let bi = 0; bi < batches.length; bi += 1) {
+              const facetIds = batches[bi]!;
+              kbLog("info", "kb.playbook.request.batch", { libId, batchNo: bi + 1, batchCount: batches.length, facetCount: facetIds.length });
+              const ret = await postBuildLibraryPlaybook({ facetIds, docs: docsPayload, signal: opts?.signal });
+              if (!ret.ok) {
+                kbLog("error", "kb.playbook.failed.batch", { libId, batchNo: bi + 1, error: ret.error });
+                return { ok: false as const, error: ret.error };
+              }
+              if (!styleProfile && ret.styleProfile) styleProfile = ret.styleProfile;
+              for (const f of ret.playbookFacets ?? []) {
+                const facetId = String(f?.facetId ?? "").trim();
+                if (!facetId) continue;
+                facetById.set(facetId, f);
+              }
+            }
+            return { ok: true as const };
+          };
+
+          // 先按 7 一批跑；如超时则 4 一批；还超时则 2 一批
+          let batchRet = await runBatches(7);
+          if (!batchRet.ok && isTimeoutErr(batchRet.error)) batchRet = await runBatches(4);
+          if (!batchRet.ok && isTimeoutErr(batchRet.error)) batchRet = await runBatches(2);
+          if (!batchRet.ok) {
+            kbLog("error", "kb.playbook.failed", { libId, error: batchRet.error });
+            return { ok: false, error: batchRet.error };
+          }
+
+          // 校验：必须覆盖全部 facetId（否则提示缺失）
+          const missing = packFacetIds.filter((id) => !facetById.has(id));
+          if (!styleProfile || missing.length) {
+            const msg =
+              `PLAYBOOK_INCOMPLETE\n` +
+              `- styleProfile: ${styleProfile ? "ok" : "missing"}\n` +
+              `- missingFacets(${missing.length}): ${missing.slice(0, 8).join(", ")}${missing.length > 8 ? "..." : ""}`;
+            kbLog("error", "kb.playbook.failed", { libId, error: msg });
+            return { ok: false, error: msg };
           }
 
           const facetLabel = (id: string) => pack.facets.find((f) => f.id === id)?.label ?? id;
@@ -2647,7 +2696,7 @@ export const useKbStore = create<KbState>()(
           };
 
           const newArts: KbArtifact[] = [];
-          const sp = ret.styleProfile;
+          const sp = styleProfile;
           newArts.push({
             id: makeId("kb_card"),
             sourceDocId: playbookDocId,
@@ -2659,8 +2708,9 @@ export const useKbStore = create<KbState>()(
             anchor: { paragraphIndex: 0 },
           });
 
-          for (const f of ret.playbookFacets) {
-            const facetId = String(f?.facetId ?? "").trim();
+          for (const facetId of packFacetIds) {
+            const f = facetById.get(facetId);
+            if (!f) continue;
             if (!facetId) continue;
             const title = String(f?.title ?? "").trim() || `${facetLabel(facetId)}（${facetId}）`;
             const body = String(f?.content ?? "").trim();
