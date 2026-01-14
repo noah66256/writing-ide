@@ -64,20 +64,26 @@ export async function* streamChatCompletions(args: {
 }): AsyncGenerator<StreamDeltaEvent> {
   const url = openAiCompatUrl(args.config.baseUrl, "/chat/completions");
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${args.config.apiKey}`
-    },
-    body: JSON.stringify({
-      model: args.model,
-      messages: args.messages,
-      temperature: args.temperature,
-      stream: true
-    }),
-    signal: args.signal
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${args.config.apiKey}`
+      },
+      body: JSON.stringify({
+        model: args.model,
+        messages: args.messages,
+        temperature: args.temperature,
+        stream: true
+      }),
+      signal: args.signal
+    });
+  } catch (e: any) {
+    yield { type: "error", error: String(e?.message ?? e) };
+    return;
+  }
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -132,20 +138,25 @@ export async function chatCompletionOnce(args: {
 }): Promise<ChatCompletionOnceResult> {
   const url = openAiCompatUrl(args.config.baseUrl, "/chat/completions");
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${args.config.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: args.model,
-      messages: args.messages,
-      temperature: args.temperature,
-      stream: false,
-    }),
-    signal: args.signal,
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${args.config.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: args.model,
+        messages: args.messages,
+        temperature: args.temperature,
+        stream: false,
+      }),
+      signal: args.signal,
+    });
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");

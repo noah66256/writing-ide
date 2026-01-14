@@ -1007,14 +1007,41 @@ fastify.post("/api/kb/dev/extract_cards", async (request, reply) => {
           `数量约束：最多 ${maxCards} 张卡。避免重复、避免空泛。`
         ].join("\n");
 
-  const user = [
-    "段落列表如下（格式：[#index] (headingPath 可选) 内容）：",
-    ...body.paragraphs.map((p) => {
-      const hp = Array.isArray(p.headingPath) && p.headingPath.length ? ` (${p.headingPath.join(" > ")})` : "";
-      const text = String(p.text ?? "").replace(/\s+/g, " ").trim();
-      return `[#${p.index}]${hp} ${text}`;
-    })
-  ].join("\n");
+  const sampleParagraphs = (paras: Array<{ index: number; text: string; headingPath?: string[] }>, maxCount: number) => {
+    const list = Array.isArray(paras) ? paras.slice(0) : [];
+    if (list.length <= maxCount) return list;
+    const pick = new Set<number>();
+    pick.add(0);
+    pick.add(list.length - 1);
+    const slots = Math.max(2, maxCount);
+    for (let i = 1; i < slots - 1; i += 1) {
+      const idx = Math.round((i * (list.length - 1)) / (slots - 1));
+      pick.add(Math.max(0, Math.min(list.length - 1, idx)));
+    }
+    const idxs = Array.from(pick)
+      .sort((a, b) => a - b)
+      .slice(0, maxCount);
+    return idxs.map((i) => list[i]!).filter(Boolean);
+  };
+
+  const normalizeParaText = (text: string, maxChars: number) => {
+    const t = String(text ?? "").replace(/\s+/g, " ").trim();
+    if (!t) return "";
+    if (maxChars > 0 && t.length > maxChars) return t.slice(0, maxChars) + "…";
+    return t;
+  };
+
+  const buildUser = (paras: Array<{ index: number; text: string; headingPath?: string[] }>, maxCount: number, maxCharsPerPara: number) => {
+    const picked = sampleParagraphs(paras, maxCount);
+    return [
+      `段落列表如下（格式：[#index] (headingPath 可选) 内容）。说明：为避免超时，已对输入做了控量与截断（最多 ${maxCount} 段，每段最多 ${maxCharsPerPara} 字符）。`,
+      ...picked.map((p) => {
+        const hp = Array.isArray(p.headingPath) && p.headingPath.length ? ` (${p.headingPath.join(" > ")})` : "";
+        const text = normalizeParaText(String(p.text ?? ""), maxCharsPerPara);
+        return `[#${p.index}]${hp} ${text}`;
+      })
+    ].join("\n");
+  };
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const parseUpstream = (text: string) => {
@@ -1037,6 +1064,11 @@ fastify.post("/api/kb/dev/extract_cards", async (request, reply) => {
 
   let ret: any = null;
   for (let attempt = 0; attempt <= retryMax; attempt += 1) {
+    // 超时兜底：逐次降级输入规模，优先保证“能抽出卡”而不是卡死等待
+    const maxCount = attempt <= 0 ? 160 : attempt === 1 ? 80 : attempt === 2 ? 48 : 32;
+    const maxCharsPerPara = attempt <= 0 ? 520 : attempt === 1 ? 360 : attempt === 2 ? 260 : 220;
+    const user = buildUser(body.paragraphs as any, maxCount, maxCharsPerPara);
+
     ret = await chatCompletionOnce({
       config: { baseUrl: cardBaseUrl, apiKey: cardApiKey },
       model,
@@ -1051,9 +1083,12 @@ fastify.post("/api/kb/dev/extract_cards", async (request, reply) => {
 
     lastStatus = ret.status;
     lastDetail = ret.error;
-    const is429 = ret.status === 429 || String(ret.error ?? "").includes("Too Many Requests") || String(ret.error ?? "").includes("负载已饱和");
-    lastErr = { is429, detail: ret.error, status: ret.status };
-    if (!is429 || attempt >= retryMax) break;
+    const errText = String(ret.error ?? "");
+    const is429 = ret.status === 429 || errText.includes("Too Many Requests") || errText.includes("负载已饱和");
+    const isTimeout = /Headers Timeout Error|timeout|超时/i.test(errText) || /fetch failed/i.test(errText);
+    const isRetryable = is429 || isTimeout || ret.status === 502 || ret.status === 503 || errText.includes("UPSTREAM_502") || errText.includes("UPSTREAM_503");
+    lastErr = { is429, isTimeout, detail: ret.error, status: ret.status };
+    if (!isRetryable || attempt >= retryMax) break;
 
     const jitter = Math.floor(Math.random() * 200);
     const wait = retryBaseMs * Math.pow(2, attempt) + jitter;
@@ -1062,10 +1097,15 @@ fastify.post("/api/kb/dev/extract_cards", async (request, reply) => {
 
   if (!ret?.ok) {
     const is429 = Boolean(lastErr?.is429);
+    const isTimeout = Boolean(lastErr?.isTimeout);
     const parsed = parseUpstream(String(lastDetail ?? ""));
     const payload = {
-      error: is429 ? "UPSTREAM_BUSY" : "UPSTREAM_ERROR",
-      message: parsed.message || "upstream error",
+      error: is429 ? "UPSTREAM_BUSY" : isTimeout ? "UPSTREAM_TIMEOUT" : "UPSTREAM_ERROR",
+      message:
+        (parsed.message || "upstream error") +
+        (isTimeout
+          ? "\n\n提示：上游模型响应超时（可能负载过高或输入过长）。可稍后重试，或减少语料长度/拆分文件，或切换更快的抽卡模型（LLM_CARD_MODEL）。"
+          : ""),
       requestId: parsed.requestId,
       status: lastStatus ?? null,
       retry: { attempts: retryMax + 1, retryMax, retryBaseMs }
