@@ -130,7 +130,11 @@ export type KbPlaybookJob = {
   libraryId: string;
   libraryName?: string;
   status: KbCardJobStatus;
-  generatedFacets?: number;
+  // 进度（估算用）：Style Profile 1 + facets N
+  totalFacets?: number;
+  generatedFacets?: number; // 运行中会实时增长；成功时通常等于 totalFacets
+  generatedStyleProfile?: boolean;
+  phase?: "style_profile" | "facets";
   error?: string;
   updatedAt: string;
 };
@@ -192,6 +196,8 @@ type KbState = {
   cardJobError: string | null;
   cardJobs: KbCardJob[];
   playbookJobs: KbPlaybookJob[];
+  cardJobRunStartedAtMs: number | null;
+  cardJobRunElapsedMs: number;
 
   // 导入：未选库时先暂存，待用户选择库后自动继续
   pendingImport: KbPendingImport | null;
@@ -235,7 +241,10 @@ type KbState = {
     skipped: number;
     error?: string;
   }>;
-  generateLibraryPlaybook: (libraryId: string, opts?: { signal?: AbortSignal }) => Promise<{ ok: boolean; facets?: number; error?: string }>;
+  generateLibraryPlaybook: (
+    libraryId: string,
+    opts?: { signal?: AbortSignal; jobId?: string },
+  ) => Promise<{ ok: boolean; facets?: number; error?: string }>;
   // 库体检（Fingerprint）：统计“声音指纹”（率/分布）+ 开集体裁识别（可用 LLM）
   getLatestLibraryFingerprint: (libraryId: string) => Promise<{ ok: boolean; snapshot?: KbLibraryFingerprintSnapshot; error?: string }>;
   computeLibraryFingerprint: (args: {
@@ -1345,6 +1354,8 @@ export const useKbStore = create<KbState>()(
       cardJobError: null,
       cardJobs: [],
       playbookJobs: [],
+      cardJobRunStartedAtMs: null,
+      cardJobRunElapsedMs: 0,
       pendingImport: null,
 
       setQuery: (query) => set({ query }),
@@ -1734,12 +1745,14 @@ export const useKbStore = create<KbState>()(
         if (!libId) return { ok: false, error: "LIBRARY_ID_REQUIRED" };
 
         let libName = libId;
+        let totalFacets: number | undefined = undefined;
         let alreadyGenerated = false;
         try {
           const db = await loadDb({ baseDir, ownerKey });
           const lib = db.libraries.find((l) => l.id === libId);
           if (!lib) return { ok: false, error: "LIBRARY_NOT_FOUND" };
           libName = lib.name;
+          totalFacets = getFacetPack(lib.facetPackId ?? "speech_marketing_v1").facets.length;
 
           const playbookRel = `__kb_playbook__/library/${libId}.md`;
           const existingPlaybookDoc = db.sourceDocs.find(
@@ -1791,7 +1804,10 @@ export const useKbStore = create<KbState>()(
               libraryName: libName,
               status: "pending",
               error: undefined,
-              generatedFacets: undefined,
+              totalFacets: totalFacets ?? next[idx]?.totalFacets,
+              generatedFacets: 0,
+              generatedStyleProfile: false,
+              phase: "style_profile",
               updatedAt: now,
             };
           } else {
@@ -1800,6 +1816,10 @@ export const useKbStore = create<KbState>()(
               libraryId: libId,
               libraryName: libName,
               status: "pending",
+              totalFacets: totalFacets,
+              generatedFacets: 0,
+              generatedStyleProfile: false,
+              phase: "style_profile",
               updatedAt: now,
             });
           }
@@ -1817,7 +1837,16 @@ export const useKbStore = create<KbState>()(
       startCardJobs: async () => {
         const ok = await get().ensureReady();
         if (!ok) return;
-        set({ kbManagerOpen: true, kbManagerTab: "jobs", cardJobStatus: "running", cardJobError: null });
+        const prevStatus = get().cardJobStatus;
+        const nowMs = Date.now();
+        set((s) => ({
+          kbManagerOpen: true,
+          kbManagerTab: "jobs",
+          cardJobStatus: "running",
+          cardJobError: null,
+          cardJobRunStartedAtMs: prevStatus === "running" && s.cardJobRunStartedAtMs != null ? s.cardJobRunStartedAtMs : nowMs,
+          cardJobRunElapsedMs: prevStatus === "idle" ? 0 : s.cardJobRunElapsedMs,
+        }));
 
         if (cardJobsRunner) {
           // 可能存在：用户“暂停”后很快点击“继续”，旧 runner 还没退出。
@@ -1935,7 +1964,7 @@ export const useKbStore = create<KbState>()(
 
             // 风格手册任务：复用同一套 ▶/⏸/■ 控制（AbortSignal 可中断）
             const next = nextPlaybook!;
-            markPlaybookJob(next.id, { status: "running", error: undefined });
+            markPlaybookJob(next.id, { status: "running", error: undefined, generatedFacets: 0, generatedStyleProfile: false, phase: "style_profile" });
 
             try {
               const libId = String(next.libraryId ?? "").trim();
@@ -1946,7 +1975,7 @@ export const useKbStore = create<KbState>()(
 
               cardJobsAbort = new AbortController();
               const signal = cardJobsAbort.signal;
-              const ret = await get().generateLibraryPlaybook(libId, { signal });
+              const ret = await get().generateLibraryPlaybook(libId, { signal, jobId: next.id });
               const aborted = Boolean(signal.aborted);
               const reason = cardJobsAbortReason;
               cardJobsAbort = null;
@@ -1992,7 +2021,14 @@ export const useKbStore = create<KbState>()(
           }
 
           // 正常跑完：自动回到 idle（暂停时保持 paused）
-          if (!endedByControl && get().cardJobStatus === "running") set({ cardJobStatus: "idle" });
+          if (!endedByControl && get().cardJobStatus === "running") {
+            const nowMs = Date.now();
+            set((s) => {
+              const startedAt = s.cardJobRunStartedAtMs;
+              const add = typeof startedAt === "number" ? Math.max(0, nowMs - startedAt) : 0;
+              return { cardJobStatus: "idle", cardJobRunStartedAtMs: null, cardJobRunElapsedMs: s.cardJobRunElapsedMs + add };
+            });
+          }
         };
 
         cardJobsRunner = run().finally(() => {
@@ -2005,7 +2041,12 @@ export const useKbStore = create<KbState>()(
 
       pauseCardJobs: () => {
         if (get().cardJobStatus !== "running") return;
-        set({ cardJobStatus: "paused" });
+        const nowMs = Date.now();
+        set((s) => {
+          const startedAt = s.cardJobRunStartedAtMs;
+          const add = typeof startedAt === "number" ? Math.max(0, nowMs - startedAt) : 0;
+          return { cardJobStatus: "paused", cardJobRunStartedAtMs: null, cardJobRunElapsedMs: s.cardJobRunElapsedMs + add };
+        });
         cardJobsAbortReason = "pause";
         try {
           cardJobsAbort?.abort();
@@ -2021,10 +2062,15 @@ export const useKbStore = create<KbState>()(
       },
 
       cancelCardJobs: () => {
+        const nowMs = Date.now();
         set((s) => {
           const now = nowIso();
+          const startedAt = s.cardJobRunStartedAtMs;
+          const add = typeof startedAt === "number" ? Math.max(0, nowMs - startedAt) : 0;
           return {
             cardJobStatus: "idle",
+            cardJobRunStartedAtMs: null,
+            cardJobRunElapsedMs: s.cardJobRunElapsedMs + add,
             cardJobs: s.cardJobs.map((j) => {
               if (j.status !== "pending" && j.status !== "running") return j;
               return { ...j, status: "cancelled", updatedAt: now };
@@ -2582,6 +2628,15 @@ export const useKbStore = create<KbState>()(
 
           const pack = getFacetPack(lib.facetPackId ?? "speech_marketing_v1");
           const packFacetIds = pack.facets.map((f) => f.id);
+          const jobId = String((opts as any)?.jobId ?? "").trim();
+          const report = (patch: Partial<KbPlaybookJob>) => {
+            if (!jobId) return;
+            const now = nowIso();
+            set((s) => ({
+              playbookJobs: s.playbookJobs.map((j) => (j.id === jobId ? { ...j, ...patch, updatedAt: now } : j)),
+            }));
+          };
+          report({ totalFacets: packFacetIds.length, generatedFacets: 0, generatedStyleProfile: false, phase: "style_profile" });
 
           const playbookRel = `__kb_playbook__/library/${libId}.md`;
           const existingPlaybookDoc = db.sourceDocs.find((d) => d.libraryId === libId && d.importedFrom?.kind === "project" && d.importedFrom.relPath === playbookRel);
@@ -2692,6 +2747,7 @@ export const useKbStore = create<KbState>()(
             const ret = await requestBatch(facetIds, "facets");
             if (ret.ok) {
               merge(ret);
+              report({ generatedFacets: facetById.size, phase: "facets" });
               return { ok: true };
             }
             const err = String(ret.error ?? "");
@@ -2717,6 +2773,7 @@ export const useKbStore = create<KbState>()(
             return { ok: false, error: err || "PLAYBOOK_FAILED" };
           }
           merge(first);
+          report({ generatedStyleProfile: true, generatedFacets: facetById.size, phase: "facets" });
 
           // 2) 其余 facets：初始每批 4 个；该批超时则二分递归
           const remaining = packFacetIds.filter((id) => !facetById.has(id));

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useKbStore, type KbCardJob, type KbLibraryFingerprintSnapshot } from "../state/kbStore";
 import { useRunStore } from "../state/runStore";
-import { FACET_PACKS, facetPackLabel } from "../kb/facets";
+import { FACET_PACKS, facetPackLabel, getFacetPack } from "../kb/facets";
 import { RichText } from "./RichText";
 
 function statusLabel(s: KbCardJob["status"]) {
@@ -23,6 +23,17 @@ function statusColor(s: KbCardJob["status"]) {
   return "var(--muted)";
 }
 
+function formatDuration(ms: number) {
+  const x = Math.max(0, Math.floor(ms));
+  const sec = Math.floor(x / 1000);
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  const pad2 = (n: number) => String(n).padStart(2, "0");
+  if (h > 0) return `${h}:${pad2(m)}:${pad2(s)}`;
+  return `${m}:${pad2(s)}`;
+}
+
 export function CardJobsModal() {
   const open = useKbStore((s) => s.kbManagerOpen);
   const tab = useKbStore((s) => s.kbManagerTab);
@@ -30,6 +41,8 @@ export function CardJobsModal() {
   const status = useKbStore((s) => s.cardJobStatus);
   const jobs = useKbStore((s) => s.cardJobs);
   const playbookJobs = useKbStore((s) => s.playbookJobs);
+  const runStartedAtMs = useKbStore((s) => s.cardJobRunStartedAtMs);
+  const runElapsedMs = useKbStore((s) => s.cardJobRunElapsedMs);
   const close = useKbStore((s) => s.closeKbManager);
   const start = useKbStore((s) => s.startCardJobs);
   const pause = useKbStore((s) => s.pauseCardJobs);
@@ -74,6 +87,14 @@ export function CardJobsModal() {
   const promptInputRef = useRef<HTMLInputElement | null>(null);
   const ask = (p: Omit<PromptState, "value"> & { value?: string }) => setPrompt({ ...p, value: p.value ?? "" });
 
+  // 进度/耗时估算：每秒刷新一次
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (!open) return;
+    const t = window.setInterval(() => setTick((x) => x + 1), 1000);
+    return () => window.clearInterval(t);
+  }, [open]);
+
   // 窗口拖动（不限制边界；可双击标题栏回到居中）
   const [pos, setPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const dragRef = useRef<null | { startX: number; startY: number; baseX: number; baseY: number; pointerId: number }>(null);
@@ -102,6 +123,45 @@ export function CardJobsModal() {
     const runningLabel = runningCard?.docTitle ?? (runningPlaybook ? `【风格手册】${runningPlaybook.libraryName ?? runningPlaybook.libraryId}` : null);
     return { total, done, failed, cancelled, runningLabel };
   }, [jobs, playbookJobs]);
+
+  const progress = useMemo(() => {
+    // 总体进度条：把“抽卡=按文档计数” + “风格手册=StyleProfile(1)+facet(N)”统一成“单元”计数
+    const libById = new Map(libraries.map((l) => [l.id, l]));
+
+    const cardTotal = jobs.length;
+    const cardDone = jobs.filter((j) => j.status !== "pending" && j.status !== "running").length;
+
+    const playbookTotal = playbookJobs.reduce((sum, j) => {
+      const lib = libById.get(j.libraryId);
+      const facets = typeof j.totalFacets === "number" ? j.totalFacets : getFacetPack(lib?.facetPackId).facets.length;
+      return sum + 1 + Math.max(0, facets);
+    }, 0);
+
+    const playbookDone = playbookJobs.reduce((sum, j) => {
+      const lib = libById.get(j.libraryId);
+      const facets = typeof j.totalFacets === "number" ? j.totalFacets : getFacetPack(lib?.facetPackId).facets.length;
+      const facetsDone = Math.max(0, Math.min(Math.max(0, facets), Number(j.generatedFacets ?? 0)));
+      const styleDone = j.generatedStyleProfile ? 1 : 0;
+      if (j.status === "success") return sum + 1 + Math.max(0, facets);
+      if (j.status === "pending") return sum;
+      return sum + styleDone + facetsDone;
+    }, 0);
+
+    const totalUnits = cardTotal + playbookTotal;
+    const doneUnits = cardDone + playbookDone;
+
+    const nowMs = Date.now();
+    const elapsedMs =
+      (typeof runElapsedMs === "number" ? runElapsedMs : 0) +
+      (status === "running" && typeof runStartedAtMs === "number" ? Math.max(0, nowMs - runStartedAtMs) : 0);
+
+    const done = Math.max(0, Math.min(totalUnits, doneUnits));
+    const remaining = Math.max(0, totalUnits - done);
+    const pct = totalUnits > 0 ? Math.max(0, Math.min(1, done / totalUnits)) : 0;
+    const etaMs = done >= 1 && remaining > 0 && elapsedMs >= 3000 ? Math.round((elapsedMs / done) * remaining) : null;
+
+    return { totalUnits, doneUnits: done, pct, elapsedMs, etaMs };
+  }, [tick, status, runStartedAtMs, runElapsedMs, jobs, playbookJobs, libraries]);
 
   const currentLibrary = useMemo(() => {
     const id = String(currentLibraryId ?? "").trim();
@@ -908,6 +968,38 @@ export function CardJobsModal() {
               {summary.runningLabel ? <span className="ctxPill">当前：{summary.runningLabel}</span> : null}
             </div>
 
+            {progress.totalUnits ? (
+              <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div
+                    style={{
+                      flex: 1,
+                      height: 8,
+                      borderRadius: 999,
+                      background: "var(--border)",
+                      overflow: "hidden",
+                    }}
+                  >
+                    <div
+                      style={{
+                        height: "100%",
+                        width: `${Math.round(progress.pct * 100)}%`,
+                        background: progress.pct >= 1 ? "rgba(22, 163, 74, 0.95)" : "rgba(37, 99, 235, 0.95)",
+                        transition: "width 200ms linear",
+                      }}
+                    />
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>
+                    {Math.round(progress.pct * 100)}%
+                  </div>
+                </div>
+                <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                  估算：{progress.doneUnits}/{progress.totalUnits} · 已用 {formatDuration(progress.elapsedMs)}
+                  {progress.etaMs ? ` · 预计剩余 ~${formatDuration(progress.etaMs)}` : ""}
+                </div>
+              </div>
+            ) : null}
+
             <div
               style={{
                 border: "1px solid var(--border)",
@@ -959,7 +1051,14 @@ export function CardJobsModal() {
                               <span style={{ color: "var(--text)" }}>{`【风格手册】${j.libraryName ?? j.libraryId}`}</span>
                             </div>
                             <div style={{ fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>
-                              {typeof j.generatedFacets === "number" ? `维度卡 +${j.generatedFacets}` : ""}
+                              {typeof j.totalFacets === "number"
+                                ? `画像 ${j.generatedStyleProfile ? "✔" : "…"} · 维度 ${Math.max(
+                                    0,
+                                    Math.min(j.totalFacets, Number(j.generatedFacets ?? 0)),
+                                  )}/${j.totalFacets}`
+                                : typeof j.generatedFacets === "number"
+                                  ? `维度卡 +${j.generatedFacets}`
+                                  : ""}
                             </div>
                           </div>
                           {j.error ? (
