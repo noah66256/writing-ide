@@ -1940,6 +1940,14 @@ export const useKbStore = create<KbState>()(
         let imported = 0;
         let skipped = 0;
         const importedDocIds: string[] = [];
+        const docIdSet = new Set<string>();
+        const addDocId = (id: string) => {
+          const clean = String(id ?? "").trim();
+          if (!clean) return;
+          if (docIdSet.has(clean)) return;
+          docIdSet.add(clean);
+          importedDocIds.push(clean);
+        };
         const skippedByReason: Record<string, number> = {};
         const skippedSample: Array<{ path: string; reason: string }> = [];
         const bumpSkip = (reason: string, path: string) => {
@@ -2003,6 +2011,8 @@ export const useKbStore = create<KbState>()(
               );
               if (existing && existing.contentHash === contentHash) {
                 bumpSkip("duplicate_same_hash", `${relPath}#${entryIndex}`);
+                // 关键：重复也返回 docId，便于后续“入队抽卡/重新生成手册”等动作继续执行
+                addDocId(existing.id);
                 continue;
               }
 
@@ -2027,7 +2037,7 @@ export const useKbStore = create<KbState>()(
               db.artifacts.push(...buildArtifacts({ format, sourceDocId: id, text: entryText }));
 
               imported += 1;
-              importedDocIds.push(id);
+              addDocId(id);
               // 断点续传：每条 entry 都落盘一次
               await saveDb({ baseDir, ownerKey, db });
             }
@@ -2068,6 +2078,14 @@ export const useKbStore = create<KbState>()(
         let imported = 0;
         let skipped = 0;
         const importedDocIds: string[] = [];
+        const docIdSet = new Set<string>();
+        const addDocId = (id: string) => {
+          const clean = String(id ?? "").trim();
+          if (!clean) return;
+          if (docIdSet.has(clean)) return;
+          docIdSet.add(clean);
+          importedDocIds.push(clean);
+        };
         const skippedByReason: Record<string, number> = {};
         const skippedSample: Array<{ path: string; reason: string }> = [];
         const bumpSkip = (reason: string, path: string) => {
@@ -2128,6 +2146,7 @@ export const useKbStore = create<KbState>()(
               );
               if (existing && existing.contentHash === contentHash) {
                 bumpSkip("duplicate_same_hash", `${absPath}#${entryIndex}`);
+                addDocId(existing.id);
                 continue;
               }
 
@@ -2150,7 +2169,7 @@ export const useKbStore = create<KbState>()(
               db.artifacts.push(...buildArtifacts({ format, sourceDocId: id, text: entryText }));
 
               imported += 1;
-              importedDocIds.push(id);
+              addDocId(id);
               await saveDb({ baseDir, ownerKey, db });
             }
           }
