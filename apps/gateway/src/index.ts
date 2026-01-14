@@ -269,7 +269,7 @@ function buildAgentProtocolPrompt(mode: AgentMode) {
         `1) 产 Todo List（可追踪，必须）：你必须立刻调用 run.setTodoList。\n` +
         `   - 即使你需要澄清，也必须先把“澄清问题/默认假设/下一步动作”写进 todo（澄清最多 5 个高价值问题：平台画像/受众/目标/口吻人设/素材来源）。\n` +
         `   - 若用户明确说“先直接开始/先仿写看看/先给版本/不要再问”：你必须把澄清项标为可跳过，并基于合理默认假设直接推进写作。\n` +
-        `   - 若右侧已关联知识库且任务是“仿写/按某库风格改写”：todo 中必须包含“先 kb.search 拉样例（优先 paragraph/outline）再写”的步骤。\n` +
+        `   - 若右侧已关联知识库，且 KB_SELECTED_LIBRARIES 中存在 purpose=style（风格库），并且任务是“写作/仿写/改写/润色”：todo 中必须包含“先 kb.search 拉样例（优先 kind=paragraph/outline）再写”的步骤。\n` +
         `2) 执行（由你自主决定是否调用工具）：素材收集（@引用/读文件/KB 检索）→ 结构（先 outline）→ 初稿 → 改写润色 → 自检。\n` +
         `3) 进度记录：完成/推进每个关键步骤时，调用 run.updateTodo；关键决策与约束调用 run.mainDoc.update。\n` +
         `输出约束：\n` +
@@ -362,9 +362,34 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     (/@\{[^}]+\/\}/.test(userPrompt) ||
       /(分割|拆分|切分|写入|保存|生成|放到|移动到|导出|新建|删除|重命名)/.test(userPrompt));
 
+  function parseKbSelectedLibrariesFromContextPack(ctx?: string): any[] {
+    const text = String(ctx ?? "");
+    if (!text) return [];
+    const m = text.match(/KB_SELECTED_LIBRARIES\(JSON\):\n([\s\S]*?)\n\n/);
+    const raw = m?.[1] ? String(m[1]).trim() : "";
+    if (!raw) return [];
+    try {
+      const j = JSON.parse(raw);
+      return Array.isArray(j) ? j : [];
+    } catch {
+      return [];
+    }
+  }
+
+  const kbSelected = parseKbSelectedLibrariesFromContextPack(body.contextPack);
+  const hasStyleLibrary =
+    mode !== "chat" &&
+    Array.isArray(kbSelected) &&
+    kbSelected.some((l: any) => String(l?.purpose ?? "").trim() === "style");
+
+  const isWritingTask =
+    mode !== "chat" &&
+    /(仿写|改写|润色|续写|扩写|写(一篇|一段|一条|稿|文|文章|脚本|文案)|生成(文章|稿|文案)|按.+风格)/.test(userPrompt);
+
   let hasTodoList = false;
   let hasWriteOps = false;
   let hasAnyToolCall = false;
+  let hasKbSearch = false;
   let autoRetryBudget = 2;
 
   function looksLikeClarifyQuestions(text: string) {
@@ -461,13 +486,18 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           // 关键：在 Plan/Agent 模式，todo 是“可追踪执行”的入口。即使需要澄清，也必须先设置 todo。
           const needTodo = !hasTodoList;
           const needWrite = wantsWrite && !hasWriteOps && !isClarify;
+          const needKb = hasStyleLibrary && isWritingTask && !hasKbSearch && !isClarify;
 
-          if (isEmpty || needTodo || needWrite) {
+          if (isEmpty || needTodo || needWrite || needKb) {
             autoRetryBudget -= 1;
             writeEvent("assistant.delta", {
               delta:
                 "\n\n[系统提示] 检测到本次任务尚未进入可追踪执行（Todo 未设置 / 或尚未完成写入目标），我会让模型自动继续一次（无需你输入）。\n" +
-                "请它：先 run.setTodoList（永远第一步）；todo 中可包含澄清步骤与默认假设；若用户要求写入项目/分割到文件夹，请务必用工具执行（例如 doc.write / doc.splitToDir）。"
+                "请它：先 run.setTodoList（永远第一步）；todo 中可包含澄清步骤与默认假设；" +
+                (needKb
+                  ? "若已绑定风格库且任务是写作类：先 kb.search 拉 paragraph/outline 样例再写；"
+                  : "") +
+                "若用户要求写入项目/分割到文件夹，请务必用工具执行（例如 doc.write / doc.splitToDir）。"
             });
             writeEvent("assistant.done", { reason: "auto_retry_incomplete" });
 
@@ -479,6 +509,9 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
                 "你刚才输出了纯文本，但任务尚未完成。\n" +
                 "- 你必须先输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
                 "  - 至少包含 run.setTodoList（永远第一步）\n" +
+                (needKb
+                  ? "  - 若 KB_SELECTED_LIBRARIES 中存在 purpose=style（风格库）且任务为写作类：必须先调用 kb.search（优先 kind=paragraph/outline）拉样例，再开始写稿。\n"
+                  : "") +
                 "  - 若用户要求写入/分割到文件夹：请调用 doc.splitToDir（或 doc.write 等）完成写入。\n" +
                 "- 在你成功设置 todo 之后，如果仍需要澄清：下一条消息再输出最多 5 个问题（纯文本 Markdown），并在 todo 中标记为 blocked/等待用户输入；用户不答时写明默认假设继续推进。"
             });
@@ -538,6 +571,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
         if (payload.ok && payload.name === "run.setTodoList") hasTodoList = true;
         if (payload.ok && isWriteLikeTool(payload.name)) hasWriteOps = true;
+        if (payload.ok && payload.name === "kb.search") hasKbSearch = true;
 
         messages.push({ role: "system", content: renderToolResultXml(call.name, payload.output) });
 

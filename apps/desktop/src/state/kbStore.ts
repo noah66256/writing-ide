@@ -24,6 +24,13 @@ type ImportedFrom =
 export type KbLibrary = {
   id: string;
   name: string;
+  /**
+   * 库用途（决定默认策略/界面引导）：
+   * - material: 素材库（默认）
+   * - style: 风格库（绑定后写作类任务默认先 kb.search 拉样例）
+   * - product: 产品库（偏产品/需求/PRD/规范等资料）
+   */
+  purpose?: "material" | "style" | "product";
   facetPackId: string; // FacetPackId；序列化时用 string，读取时兜底到 speech_marketing_v1
   createdAt: string;
   updatedAt: string;
@@ -167,6 +174,7 @@ type KbState = {
   libraries: Array<{
     id: string;
     name: string;
+    purpose: "material" | "style" | "product";
     facetPackId: string;
     docCount: number;
     updatedAt: string;
@@ -198,6 +206,7 @@ type KbState = {
   setCurrentLibrary: (libraryId: string | null) => void;
   createLibrary: (name: string) => Promise<{ ok: boolean; id?: string; error?: string }>;
   renameLibrary: (id: string, name: string) => Promise<{ ok: boolean; error?: string }>;
+  setLibraryPurpose: (id: string, purpose: "material" | "style" | "product") => Promise<{ ok: boolean; error?: string }>;
   setLibraryFacetPack: (id: string, facetPackId: string) => Promise<{ ok: boolean; error?: string }>;
   deleteLibraryToTrash: (id: string) => Promise<{ ok: boolean; error?: string }>;
   restoreLibraryFromTrash: (id: string) => Promise<{ ok: boolean; error?: string }>;
@@ -402,6 +411,13 @@ function sanitizeOwnerKey(ownerKey: string) {
   return s.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_").slice(0, 80) || "local_anonymous";
 }
 
+function normalizeLibraryPurpose(purpose: any): "material" | "style" | "product" {
+  const s = String(purpose ?? "").trim();
+  if (s === "style") return "style";
+  if (s === "product") return "product";
+  return "material";
+}
+
 function dbRelPath(ownerKey: string) {
   const key = sanitizeOwnerKey(ownerKey);
   return `writing-ide-kb/owners/${key}/kb.v1.json`;
@@ -428,6 +444,7 @@ async function loadDb(args: { baseDir: string; ownerKey: string }): Promise<KbDb
       .map((x) => ({
         id: String(x?.id ?? "").trim(),
         name: String(x?.name ?? "").trim(),
+        purpose: normalizeLibraryPurpose(x?.purpose),
         facetPackId: normalizeFacetPackId(x?.facetPackId),
         createdAt: String(x?.createdAt ?? t),
         updatedAt: String(x?.updatedAt ?? t),
@@ -440,6 +457,7 @@ async function loadDb(args: { baseDir: string; ownerKey: string }): Promise<KbDb
         const library: KbLibrary = {
           id: String(lib?.id ?? "").trim(),
           name: String(lib?.name ?? "").trim(),
+          purpose: normalizeLibraryPurpose(lib?.purpose),
           facetPackId: normalizeFacetPackId(lib?.facetPackId),
           createdAt: String(lib?.createdAt ?? t),
           updatedAt: String(lib?.updatedAt ?? t),
@@ -456,7 +474,7 @@ async function loadDb(args: { baseDir: string; ownerKey: string }): Promise<KbDb
       libs.length > 0
         ? libs
         : rawSourceDocs.length > 0
-          ? [{ id: migratedLibId, name: "历史导入", facetPackId: "speech_marketing_v1", createdAt: t, updatedAt: t }]
+          ? [{ id: migratedLibId, name: "历史导入", purpose: "material", facetPackId: "speech_marketing_v1", createdAt: t, updatedAt: t }]
           : [];
 
     const sourceDocs: KbSourceDoc[] = rawSourceDocs.map((d) => {
@@ -1192,6 +1210,7 @@ export const useKbStore = create<KbState>()(
           .map((l) => ({
             id: l.id,
             name: l.name,
+            purpose: normalizeLibraryPurpose((l as any).purpose),
             facetPackId: normalizeFacetPackId((l as any).facetPackId),
             docCount: stats.docCountByLib.get(l.id) ?? 0,
             updatedAt: stats.updatedAtByLib.get(l.id) ?? l.updatedAt ?? l.createdAt,
@@ -1267,7 +1286,7 @@ export const useKbStore = create<KbState>()(
         const db = await loadDb({ baseDir, ownerKey });
         const id = makeId("kb_lib");
         const t = nowIso();
-        db.libraries.push({ id, name: nm, facetPackId: "speech_marketing_v1", createdAt: t, updatedAt: t });
+        db.libraries.push({ id, name: nm, purpose: "material", facetPackId: "speech_marketing_v1", createdAt: t, updatedAt: t });
         await saveDb({ baseDir, ownerKey, db });
         set({ currentLibraryId: id });
         await get().refreshLibraries().catch(() => void 0);
@@ -1290,6 +1309,27 @@ export const useKbStore = create<KbState>()(
         await saveDb({ baseDir, ownerKey, db });
         await get().refreshLibraries().catch(() => void 0);
         return { ok: true };
+      },
+
+      setLibraryPurpose: async (id, purpose) => {
+        const ok = await get().ensureReady();
+        if (!ok) return { ok: false, error: "KB_DIR_NOT_SET" };
+        const baseDir = get().baseDir!;
+        const ownerKey = get().ownerKey;
+        const libId = String(id ?? "").trim();
+        const pur = normalizeLibraryPurpose(purpose);
+        if (!libId) return { ok: false, error: "INVALID_ID" };
+        try {
+          const db = await loadDb({ baseDir, ownerKey });
+          const idx = db.libraries.findIndex((l) => l.id === libId);
+          if (idx < 0) return { ok: false, error: "NOT_FOUND" };
+          db.libraries[idx] = { ...db.libraries[idx], purpose: pur, updatedAt: nowIso() };
+          await saveDb({ baseDir, ownerKey, db });
+          await get().refreshLibraries().catch(() => void 0);
+          return { ok: true };
+        } catch (e: any) {
+          return { ok: false, error: String(e?.message ?? e) };
+        }
       },
 
       setLibraryFacetPack: async (id, facetPackId) => {

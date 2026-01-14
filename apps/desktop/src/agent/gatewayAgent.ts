@@ -202,7 +202,19 @@ async function buildContextPack(extra?: { referencesText?: string }) {
   const refs = extra?.referencesText ? `${extra.referencesText}\n\n` : "";
   const kbText = (() => {
     const ids = Array.isArray(kbAttached) ? kbAttached.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
-    const map = new Map(kbLibraries.map((l: any) => [l.id, { id: l.id, name: l.name, docCount: l.docCount, updatedAt: l.updatedAt }]));
+    const map = new Map(
+      kbLibraries.map((l: any) => [
+        l.id,
+        {
+          id: l.id,
+          name: l.name,
+          purpose: l.purpose ?? "material",
+          facetPackId: l.facetPackId,
+          docCount: l.docCount,
+          updatedAt: l.updatedAt,
+        },
+      ]),
+    );
     const selected = ids.map((id: string) => map.get(id) ?? { id, name: id });
     return `KB_SELECTED_LIBRARIES(JSON):\n${JSON.stringify(selected, null, 2)}\n\n` +
       `提示：如需引用知识库内容，请调用工具 kb.search（默认只在已关联库中检索）。\n\n`;

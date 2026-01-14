@@ -45,6 +45,7 @@ export function CardJobsModal() {
   const refreshLibraries = useKbStore((s) => s.refreshLibraries);
   const createLibrary = useKbStore((s) => s.createLibrary);
   const renameLibrary = useKbStore((s) => s.renameLibrary);
+  const setLibraryPurpose = useKbStore((s) => s.setLibraryPurpose);
   const setLibraryFacetPack = useKbStore((s) => s.setLibraryFacetPack);
   const enqueuePlaybookJob = useKbStore((s) => s.enqueuePlaybookJob);
   const deleteLibraryToTrash = useKbStore((s) => s.deleteLibraryToTrash);
@@ -341,7 +342,8 @@ export function CardJobsModal() {
                             {l.name}
                           </button>
                           <div style={{ fontSize: 12, color: "var(--muted)" }}>
-                            文档 {l.docCount} 篇 · 更新 {new Date(l.updatedAt).toLocaleString()} · 标签 {facetPackLabel(l.facetPackId)}
+                            文档 {l.docCount} 篇 · 更新 {new Date(l.updatedAt).toLocaleString()} · 标签 {facetPackLabel(l.facetPackId)} · 用途{" "}
+                            {l.purpose === "style" ? "风格库" : l.purpose === "product" ? "产品库" : "素材库"}
                           </div>
                           {l.fingerprint ? (
                             <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -362,6 +364,23 @@ export function CardJobsModal() {
                           <div style={{ fontSize: 12, color: "var(--muted)" }}>id: {l.id}</div>
                         </div>
                         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                          <select
+                            className="btn"
+                            value={l.purpose ?? "material"}
+                            title="库用途：只有“风格库”会触发“绑定后写作默认先 kb.search 拉样例”的策略"
+                            onChange={(e) => {
+                              const next = String(e.target.value ?? "material") as any;
+                              void (async () => {
+                                const r = await setLibraryPurpose(l.id, next);
+                                if (!r.ok) window.alert(`设置失败：${r.error ?? "unknown"}`);
+                                await refreshLibraries().catch(() => void 0);
+                              })();
+                            }}
+                          >
+                            <option value="material">素材库</option>
+                            <option value="style">风格库</option>
+                            <option value="product">产品库</option>
+                          </select>
                           <button
                             className="btn btnIcon"
                             type="button"

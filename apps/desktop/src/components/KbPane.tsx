@@ -76,7 +76,8 @@ export function KbPane() {
                         {l.name}
                       </div>
                       <div style={{ fontSize: 12, color: "var(--muted)" }}>
-                        文档 {l.docCount} 篇 · 更新 {l.updatedAt ? new Date(l.updatedAt).toLocaleString() : "-"}
+                        文档 {l.docCount} 篇 · 更新 {l.updatedAt ? new Date(l.updatedAt).toLocaleString() : "-"} · 用途{" "}
+                        {l.purpose === "style" ? "风格库" : l.purpose === "product" ? "产品库" : "素材库"}
                       </div>
                       {l.fingerprint ? (
                         <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
