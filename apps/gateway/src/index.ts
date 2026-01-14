@@ -192,9 +192,10 @@ function buildAgentProtocolPrompt(mode: AgentMode) {
       ? `当前模式：Chat（纯对话）。\n- 你**不允许调用任何工具**（包括读写文件）。\n- 你只需用 Markdown 输出可读内容即可。\n\n`
       : `当前模式：${mode === "plan" ? "Plan（逐步）" : "Agent（一次成型+迭代）"}。\n` +
         `你需要按“写作闭环”工作，并把进度写入 Main Doc / Todo：\n` +
-        `1) 澄清（最多 5 个问题）：平台画像 / 受众 / 目标 / 口吻人设 / 素材来源。\n` +
-        `   - 若信息不足以开写：先输出澄清问题（自然语言），此时不要调用工具。\n` +
-        `2) 产 Todo List（可追踪）：澄清后立刻调用 run.setTodoList。\n` +
+        `1) 澄清（最多 5 个问题，可选）：平台画像 / 受众 / 目标 / 口吻人设 / 素材来源。\n` +
+        `   - 若用户明确说“先直接开始/先仿写看看/先给版本/不要再问”：你必须跳过澄清，基于合理默认假设直接开写。\n` +
+        `   - 若信息不足以开写且用户未要求直接开始：先输出澄清问题（自然语言），此时不要调用工具。\n` +
+        `2) 产 Todo List（可追踪）：只要进入执行阶段，你必须立刻调用 run.setTodoList（不要等用户再次确认）。\n` +
         `3) 执行（由你自主决定是否调用工具）：素材收集（@引用/读文件）→ 结构（先 outline）→ 初稿 → 改写润色 → 自检。\n` +
         `4) 进度记录：完成/推进每个关键步骤时，调用 run.updateTodo；关键决策与约束调用 run.mainDoc.update。\n` +
         `输出约束：\n` +
@@ -275,6 +276,9 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   ];
 
   const userPrompt = String(body.prompt ?? "");
+  const forceProceed =
+    mode !== "chat" &&
+    /(先(直接)?(开始|写|仿写|给一版|给版本|产出|干活)|不要(再)?问|别问了|先做|直接写)/.test(userPrompt);
   const wantsWrite =
     mode !== "chat" &&
     (/@\{[^}]+\/\}/.test(userPrompt) ||
@@ -374,7 +378,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         if (mode !== "chat" && autoRetryBudget > 0) {
           const t = assistantText.trim();
           const isEmpty = t.length === 0;
-          const isClarify = looksLikeClarifyQuestions(t);
+          const isClarify = looksLikeClarifyQuestions(t) && !forceProceed;
 
           const needTodo = !hasTodoList && !isClarify;
           const needWrite = wantsWrite && !hasWriteOps && !isClarify;
