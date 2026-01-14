@@ -548,7 +548,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               "\n\n我已经生成一份“修改提案”（见上方 Tool Block）。\n\n" +
               "- 点击 **Keep**：应用到编辑器\n" +
               "- 点击 **Undo**：丢弃该提案\n\n" +
-              "确认后你可以继续发下一条指令（例如：继续改写下一段/生成整篇）。"
+              "你也可以直接继续发下一条指令（例如：开始润色/继续改写下一段）。\n" +
+              "提示：若后续需要读取该文件内容，请调用 doc.read；系统会优先返回“提案态最新内容”（不要求先 Keep）。"
           });
           writeEvent("run.end", { runId, reason: "proposal_waiting", turn, tool: call.name });
           writeEvent("assistant.done", { reason: "proposal_waiting" });

@@ -215,6 +215,57 @@ async function buildContextPack(extra?: { referencesText?: string }) {
     ? `KB_LIBRARY_PLAYBOOK(Markdown):\n${playbookText}\n\n` +
       `提示：上面已注入库级“仿写手册”（Style Profile + 维度写法）。如需更多原文证据/更多样例，再调用 kb.search。\n\n`
     : "";
+
+  // Pending proposals：用于“proposal-first 不落盘”但仍可继续下一步（避免下一轮说‘没有初稿’）
+  const pendingProposals = (() => {
+    const steps = useRunStore.getState().steps ?? [];
+    const out: Array<{ toolName: string; path?: string; note?: string }> = [];
+    for (const st of steps as any[]) {
+      if (!st || typeof st !== "object") continue;
+      if (st.type !== "tool") continue;
+      if (st.status !== "success") continue;
+      if (st.applyPolicy !== "proposal") continue;
+      if (st.applied === true) continue;
+      if (st.status === "undone") continue;
+      if (st.toolName === "doc.write") {
+        out.push({
+          toolName: "doc.write",
+          path: typeof st.input?.path === "string" ? st.input.path : typeof st.output?.path === "string" ? st.output.path : undefined,
+          note: typeof st.output?.preview?.note === "string" ? st.output.preview.note : undefined,
+        });
+        continue;
+      }
+      if (st.toolName === "doc.applyEdits") {
+        out.push({
+          toolName: "doc.applyEdits",
+          path: typeof st.output?.path === "string" ? st.output.path : typeof st.input?.path === "string" ? st.input.path : undefined,
+          note: typeof st.output?.preview?.note === "string" ? st.output.preview.note : undefined,
+        });
+        continue;
+      }
+      if (st.toolName === "doc.splitToDir") {
+        out.push({
+          toolName: "doc.splitToDir",
+          path: typeof st.output?.targetDir === "string" ? st.output.targetDir : undefined,
+          note: typeof st.output?.note === "string" ? st.output.note : undefined,
+        });
+        continue;
+      }
+      if (st.toolName === "doc.restoreSnapshot") {
+        out.push({
+          toolName: "doc.restoreSnapshot",
+          path: typeof st.output?.preview?.path === "string" ? st.output.preview.path : undefined,
+          note: typeof st.output?.note === "string" ? st.output.note : undefined,
+        });
+        continue;
+      }
+    }
+    return out.slice(-20);
+  })();
+  const pendingSection = pendingProposals.length
+    ? `PENDING_FILE_PROPOSALS(JSON):\n${JSON.stringify(pendingProposals, null, 2)}\n\n` +
+      `提示：存在未 Keep 的“文件提案”。后续若调用 doc.read 读取对应文件，系统会优先返回“提案态最新内容”（不要求先 Keep）。\n\n`
+    : "";
   return (
     `MAIN_DOC(JSON):\n${JSON.stringify(mainDoc, null, 2)}\n\n` +
     `RUN_TODO(JSON):\n${JSON.stringify(todoList, null, 2)}\n\n` +
@@ -222,6 +273,7 @@ async function buildContextPack(extra?: { referencesText?: string }) {
     refs +
     kbText +
     playbookSection +
+    pendingSection +
     `EDITOR_SELECTION(JSON):\n${JSON.stringify(selection, null, 2)}\n\n` +
     `PROJECT_STATE(JSON):\n${JSON.stringify(state, null, 2)}\n\n` +
     `注意：\n` +

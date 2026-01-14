@@ -172,6 +172,65 @@ function applyTextEdits(args: {
   return { after };
 }
 
+function getVirtualFileContentFromPendingProposals(path: string): { content: string; sources: string[] } | null {
+  const p = normalizeRelPath(path);
+  if (!p) return null;
+  const proj = useProjectStore.getState();
+  const file = proj.getFileByPath(p);
+  if (!file) return null;
+
+  // 基线：当前文件内容（磁盘/内存）
+  let content = file.content ?? "";
+  const sources: string[] = [];
+
+  const steps = useRunStore.getState().steps ?? [];
+  const pending = steps.filter(
+    (s: any) =>
+      s &&
+      typeof s === "object" &&
+      s.type === "tool" &&
+      s.status === "success" &&
+      s.applyPolicy === "proposal" &&
+      s.applied !== true &&
+      s.status !== "undone" &&
+      (s.toolName === "doc.write" || s.toolName === "doc.applyEdits"),
+  ) as any[];
+
+  // 按出现顺序顺推，叠加提案
+  for (const st of pending) {
+    if (st.toolName === "doc.write") {
+      const inPath = normalizeRelPath(String(st.input?.path ?? ""));
+      if (inPath !== p) continue;
+      const next = String(st.input?.content ?? "");
+      content = next;
+      sources.push(`doc.write(proposal):${st.id}`);
+      continue;
+    }
+    if (st.toolName === "doc.applyEdits") {
+      const inPath = normalizeRelPath(String(st.input?.path ?? proj.activePath ?? ""));
+      if (inPath !== p) continue;
+      const edits = Array.isArray(st.input?.edits) ? st.input.edits : null;
+      if (!edits) continue;
+      const norm = edits
+        .map((e: any) => ({
+          startLineNumber: Number(e?.startLineNumber),
+          startColumn: Number(e?.startColumn),
+          endLineNumber: Number(e?.endLineNumber),
+          endColumn: Number(e?.endColumn),
+          text: String(e?.text ?? ""),
+        }))
+        .filter((e: any) => [e.startLineNumber, e.startColumn, e.endLineNumber, e.endColumn].every((n: any) => Number.isFinite(n) && n > 0));
+      if (!norm.length) continue;
+      content = applyTextEdits({ before: content, edits: norm }).after;
+      sources.push(`doc.applyEdits(proposal):${st.id}`);
+      continue;
+    }
+  }
+
+  if (!sources.length) return null;
+  return { content, sources };
+}
+
 function unifiedDiff(args: { path: string; before: string; after: string; context?: number; maxCells?: number; maxHunkLines?: number }) {
   const beforeLines = args.before.split("\n");
   const afterLines = args.after.split("\n");
@@ -593,8 +652,20 @@ const tools: ToolDefinition[] = [
       const s = useProjectStore.getState();
       const file = s.getFileByPath(path);
       if (!file) return { ok: false, error: "FILE_NOT_FOUND" };
-      const content = await s.ensureLoaded(file.path);
-      return { ok: true, output: { ok: true, path: file.path, content }, undoable: false };
+      const diskContent = await s.ensureLoaded(file.path);
+      const virt = getVirtualFileContentFromPendingProposals(file.path);
+      const content = virt?.content ?? diskContent;
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          path: file.path,
+          content,
+          virtualFromProposal: Boolean(virt),
+          proposalSources: virt?.sources ?? [],
+        },
+        undoable: false,
+      };
     },
   },
   {
