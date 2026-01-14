@@ -27,6 +27,8 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "facetIds", required: false, desc: "可选：outlineFacet id 数组（多选）" },
       { name: "perDocTopN", required: false, desc: "每篇文档最多返回多少条命中（默认 3）" },
       { name: "topDocs", required: false, desc: "最多返回多少篇文档（默认 12）" },
+      { name: "useVector", required: false, desc: "可选：是否使用向量做重排（true/false；默认 true）" },
+      { name: "embeddingModel", required: false, desc: '可选：向量模型 id（例如 "text-embedding-3-large" 或 "Embedding-V1"）' },
     ],
     modes: ["plan", "agent"],
   },
