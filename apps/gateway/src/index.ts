@@ -1218,6 +1218,7 @@ fastify.post("/api/kb/dev/build_library_playbook", async (request, reply) => {
   const model = body.model ?? cardModelDefault;
   const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 3);
   const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
+  const timeoutMs = Number(process.env.LLM_CARD_TIMEOUT_MS ?? 120_000);
 
   const facetIds = body.facetIds.slice(0, 80);
   const docs = body.docs.slice(0, 200);
@@ -1286,6 +1287,8 @@ fastify.post("/api/kb/dev/build_library_playbook", async (request, reply) => {
 
   let ret: any = null;
   for (let attempt = 0; attempt <= retryMax; attempt += 1) {
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), timeoutMs);
     ret = await chatCompletionOnce({
       config: { baseUrl: cardBaseUrl, apiKey: cardApiKey },
       model,
@@ -1293,15 +1296,19 @@ fastify.post("/api/kb/dev/build_library_playbook", async (request, reply) => {
         { role: "system", content: sys },
         { role: "user", content: user }
       ],
-      temperature: 0.2
+      temperature: 0.2,
+      signal: abort.signal
     });
+    clearTimeout(timer);
 
     if (ret.ok) break;
 
     lastStatus = ret.status;
     lastDetail = ret.error;
-    const is429 = ret.status === 429 || String(ret.error ?? "").includes("Too Many Requests") || String(ret.error ?? "").includes("负载已饱和");
-    lastErr = { is429, detail: ret.error, status: ret.status };
+    const errText = String(ret.error ?? "");
+    const isTimeout = /aborted|AbortError|timeout/i.test(errText);
+    const is429 = ret.status === 429 || errText.includes("Too Many Requests") || errText.includes("负载已饱和");
+    lastErr = { is429, isTimeout, detail: ret.error, status: ret.status };
     if (!is429 || attempt >= retryMax) break;
 
     const jitter = Math.floor(Math.random() * 200);
@@ -1311,15 +1318,18 @@ fastify.post("/api/kb/dev/build_library_playbook", async (request, reply) => {
 
   if (!ret?.ok) {
     const is429 = Boolean(lastErr?.is429);
+    const isTimeout = Boolean(lastErr?.isTimeout);
     const parsed = parseUpstream(String(lastDetail ?? ""));
     const payload = {
-      error: is429 ? "UPSTREAM_BUSY" : "UPSTREAM_ERROR",
-      message: parsed.message || "upstream error",
+      error: is429 ? "UPSTREAM_BUSY" : isTimeout ? "UPSTREAM_TIMEOUT" : "UPSTREAM_ERROR",
+      message:
+        (isTimeout ? `upstream timeout after ${timeoutMs}ms` : parsed.message) || "upstream error",
+      hint: isTimeout ? "生成风格手册超时：请稍后重试，或换更快/更稳定的模型（LLM_CARD_MODEL）。" : undefined,
       requestId: parsed.requestId,
       status: lastStatus ?? null,
       retry: { attempts: retryMax + 1, retryMax, retryBaseMs }
     };
-    return reply.code(is429 ? 503 : 502).send(payload);
+    return reply.code(is429 ? 503 : isTimeout ? 504 : 502).send(payload);
   }
 
   const raw = String(ret.content ?? "").trim();

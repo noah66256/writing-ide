@@ -1124,14 +1124,22 @@ async function postBuildLibraryPlaybook(args: {
       } catch {
         // ignore
       }
-      return { ok: false, error: msg };
+      const baseHint = base ? `gateway=${base}` : "gateway=同源(/api)";
+      return { ok: false, error: `${msg}\n(${baseHint}, url=${url}, status=${res.status})` };
     }
     const json = await res.json().catch(() => null);
     if (!json?.ok) return { ok: false, error: "INVALID_RESPONSE" };
     if (!json?.styleProfile || !Array.isArray(json?.playbookFacets)) return { ok: false, error: "INVALID_RESPONSE" };
     return { ok: true, styleProfile: json.styleProfile, playbookFacets: json.playbookFacets };
   } catch (e: any) {
-    return { ok: false, error: String(e?.message ?? e) };
+    const baseHint = base ? `gateway=${base}` : "gateway=同源(/api)";
+    const msg = String(e?.message ?? e);
+    const cause = e?.cause ? String(e.cause?.message ?? e.cause) : "";
+    const hint =
+      msg === "fetch failed"
+        ? "提示：这通常是网路/代理/证书/服务不可达导致。请确认 Gateway 可访问；若你在 dev 模式，确认本地 gateway 正在运行；若你连接远端，确认 VITE_GATEWAY_URL 正确。"
+        : "";
+    return { ok: false, error: `${msg}${cause ? `\nCAUSE: ${cause}` : ""}\n(${baseHint}, url=${url})${hint ? `\n${hint}` : ""}` };
   }
 }
 
