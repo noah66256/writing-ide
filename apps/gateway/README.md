@@ -12,6 +12,10 @@
   - Embeddings 代理（用于 Desktop 侧 `kb.search` 的向量重排/兜底召回与 A/B）：`GET /api/llm/embedding_models`、`POST /api/llm/embeddings`
   - `/api/health`
   - KB 最小搜索演示：`POST /api/kb/search`（对接 `packages/kb-core`）
+  - KB dev（开发期 Desktop 本地 KB 的上游能力）：
+    - 抽卡：`POST /api/kb/dev/extract_cards`
+    - 生成库级仿写手册：`POST /api/kb/dev/build_library_playbook`
+    - 库体检（体裁/声音开集标签）：`POST /api/kb/dev/classify_genre`
   - 积分余额/流水与管理员充值接口（演示用）
 - 待实现：
   - Tool Registry（Schema + XML）与执行器（把 Desktop 本地工具逐步迁回 Gateway）

@@ -78,6 +78,17 @@ export function KbPane() {
                       <div style={{ fontSize: 12, color: "var(--muted)" }}>
                         文档 {l.docCount} 篇 · 更新 {l.updatedAt ? new Date(l.updatedAt).toLocaleString() : "-"}
                       </div>
+                      {l.fingerprint ? (
+                        <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          <span className="ctxPill" title={`体裁/声音识别置信度：${Math.round((l.fingerprint.confidence ?? 0) * 100)}%`}>
+                            像：{l.fingerprint.primaryLabel}
+                          </span>
+                          <span className="ctxPill" title={`体检时间：${new Date(l.fingerprint.computedAt).toLocaleString()}`}>
+                            稳定：
+                            {l.fingerprint.stability === "high" ? "高" : l.fingerprint.stability === "medium" ? "中" : "低"}
+                          </span>
+                        </div>
+                      ) : null}
                     </div>
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
                       <button

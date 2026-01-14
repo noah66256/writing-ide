@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useKbStore, type KbCardJob } from "../state/kbStore";
+import { useKbStore, type KbCardJob, type KbLibraryFingerprintSnapshot } from "../state/kbStore";
 import { useRunStore } from "../state/runStore";
 import { FACET_PACKS, facetPackLabel } from "../kb/facets";
 import { RichText } from "./RichText";
@@ -57,6 +57,9 @@ export function CardJobsModal() {
   const toggleAttach = useRunStore((s) => s.toggleKbAttachedLibrary);
 
   const listCardsForLibrary = useKbStore((s) => s.listCardsForLibrary);
+  const getLatestLibraryFingerprint = useKbStore((s) => s.getLatestLibraryFingerprint);
+  const computeLibraryFingerprint = useKbStore((s) => s.computeLibraryFingerprint);
+  const compareLatestLibraryFingerprints = useKbStore((s) => s.compareLatestLibraryFingerprints);
 
   type PromptState = {
     title: string;
@@ -107,6 +110,7 @@ export function CardJobsModal() {
 
   // 库内卡片浏览（轻量）
   const [viewLibId, setViewLibId] = useState<string | null>(null);
+  const [viewTab, setViewTab] = useState<"health" | "cards">("health");
   const [cardsQuery, setCardsQuery] = useState("");
   const [cardsType, setCardsType] = useState<string>("__all__");
   const [cardsLoading, setCardsLoading] = useState(false);
@@ -114,10 +118,18 @@ export function CardJobsModal() {
   const [cardsTotal, setCardsTotal] = useState(0);
   const [cards, setCards] = useState<Array<{ artifact: any; sourceDoc: any }>>([]);
 
+  // 库体检（Fingerprint）
+  const [fpLoading, setFpLoading] = useState(false);
+  const [fpErr, setFpErr] = useState<string | null>(null);
+  const [fp, setFp] = useState<KbLibraryFingerprintSnapshot | null>(null);
+  const [fpAdvanced, setFpAdvanced] = useState(false);
+  const [fpCompare, setFpCompare] = useState<null | { diff: any; olderAt: string; newerAt: string }>(null);
+
   useEffect(() => {
     if (!open) return;
     if (tab !== "libraries") return;
     if (!viewLibId) return;
+    if (viewTab !== "cards") return;
     void (async () => {
       setCardsLoading(true);
       setCardsErr(null);
@@ -137,7 +149,27 @@ export function CardJobsModal() {
       }
       setCardsLoading(false);
     })();
-  }, [open, tab, viewLibId, cardsQuery, cardsType, listCardsForLibrary]);
+  }, [open, tab, viewLibId, viewTab, cardsQuery, cardsType, listCardsForLibrary]);
+
+  useEffect(() => {
+    if (!open) return;
+    if (tab !== "libraries") return;
+    if (!viewLibId) return;
+    if (viewTab !== "health") return;
+    void (async () => {
+      setFpLoading(true);
+      setFpErr(null);
+      setFpCompare(null);
+      const r = await getLatestLibraryFingerprint(viewLibId);
+      if (!r.ok) {
+        setFpErr(r.error ?? "LOAD_FAILED");
+        setFp(null);
+      } else {
+        setFp(r.snapshot ?? null);
+      }
+      setFpLoading(false);
+    })();
+  }, [open, tab, viewLibId, viewTab, getLatestLibraryFingerprint]);
 
   if (!open) return null;
 
@@ -294,17 +326,65 @@ export function CardJobsModal() {
                               textOverflow: "ellipsis",
                               whiteSpace: "nowrap",
                             }}
-                            title="查看该库卡片（在下方展示）"
-                            onClick={() => setViewLibId((prev) => (prev === l.id ? null : l.id))}
+                            title="展开该库（库体检/卡片预览）"
+                            onClick={() => {
+                              setViewLibId((prev) => {
+                                const next = prev === l.id ? null : l.id;
+                                if (next) {
+                                  setViewTab("health");
+                                  setFpAdvanced(false);
+                                }
+                                return next;
+                              });
+                            }}
                           >
                             {l.name}
                           </button>
                           <div style={{ fontSize: 12, color: "var(--muted)" }}>
                             文档 {l.docCount} 篇 · 更新 {new Date(l.updatedAt).toLocaleString()} · 标签 {facetPackLabel(l.facetPackId)}
                           </div>
+                          {l.fingerprint ? (
+                            <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                              <span
+                                className="ctxPill"
+                                title={`体裁/声音识别置信度：${Math.round((l.fingerprint.confidence ?? 0) * 100)}% · 体检时间：${new Date(
+                                  l.fingerprint.computedAt,
+                                ).toLocaleString()}`}
+                              >
+                                像：{l.fingerprint.primaryLabel}
+                              </span>
+                              <span className="ctxPill">
+                                稳定：
+                                {l.fingerprint.stability === "high" ? "高" : l.fingerprint.stability === "medium" ? "中" : "低"}
+                              </span>
+                            </div>
+                          ) : null}
                           <div style={{ fontSize: 12, color: "var(--muted)" }}>id: {l.id}</div>
                         </div>
                         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                          <button
+                            className="btn btnIcon"
+                            type="button"
+                            title="打开库体检（像什么/稳不稳/怎么修）"
+                            onClick={() => {
+                              setViewLibId(l.id);
+                              setViewTab("health");
+                              setFpAdvanced(false);
+                            }}
+                          >
+                            库体检
+                          </button>
+                          <button
+                            className="btn btnIcon"
+                            type="button"
+                            title="打开卡片预览（库内 card 浏览/筛选）"
+                            onClick={() => {
+                              setViewLibId(l.id);
+                              setViewTab("cards");
+                            }}
+                          >
+                            看卡片
+                          </button>
                           <button
                             className={`btn btnIcon ${isCur ? "btnPrimary" : ""}`}
                             type="button"
@@ -369,86 +449,294 @@ export function CardJobsModal() {
                   background: "var(--panel)",
                   padding: 10,
                   display: "grid",
-                  gap: 8,
+                  gap: 10,
                 }}
               >
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", justifyContent: "space-between" }}>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                    <div className="sectionTitle" style={{ padding: 0 }}>
-                      卡片（库内预览）
-                    </div>
-                    <span className="ctxPill">共 {cardsTotal} 条</span>
-                    {cardsLoading ? <span className="ctxPill">加载中…</span> : null}
-                    {cardsErr ? <span className="ctxPill" style={{ color: "rgba(220, 38, 38, 0.95)" }}>{cardsErr}</span> : null}
+                    <button
+                      className={`btn btnIcon ${viewTab === "health" ? "btnPrimary" : ""}`}
+                      type="button"
+                      onClick={() => setViewTab("health")}
+                      title="像什么 / 稳不稳 / 怎么修"
+                    >
+                      库体检
+                    </button>
+                    <button
+                      className={`btn btnIcon ${viewTab === "cards" ? "btnPrimary" : ""}`}
+                      type="button"
+                      onClick={() => setViewTab("cards")}
+                      title="浏览该库抽出的卡片"
+                    >
+                      卡片预览
+                    </button>
+                    {viewTab === "health" ? (
+                      <>
+                        {fpLoading ? <span className="ctxPill">加载中…</span> : null}
+                        {fpErr ? <span className="ctxPill" style={{ color: "rgba(220, 38, 38, 0.95)" }}>{fpErr}</span> : null}
+                        {fp?.computedAt ? <span className="ctxPill">体检：{new Date(fp.computedAt).toLocaleString()}</span> : null}
+                      </>
+                    ) : (
+                      <>
+                        <span className="ctxPill">共 {cardsTotal} 条</span>
+                        {cardsLoading ? <span className="ctxPill">加载中…</span> : null}
+                        {cardsErr ? <span className="ctxPill" style={{ color: "rgba(220, 38, 38, 0.95)" }}>{cardsErr}</span> : null}
+                      </>
+                    )}
                   </div>
                   <button className="btn btnIcon" type="button" onClick={() => setViewLibId(null)}>
                     收起
                   </button>
                 </div>
 
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                  <input
-                    className="modalInput"
-                    style={{ maxWidth: 360 }}
-                    value={cardsQuery}
-                    placeholder="搜索卡片（标题/内容/类型/文档名）…"
-                    onChange={(e) => setCardsQuery(e.target.value)}
-                  />
-                  <select className="btn" value={cardsType} onChange={(e) => setCardsType(String(e.target.value ?? "__all__"))} title="按卡片类型过滤">
-                    <option value="__all__">全部类型</option>
-                    <option value="hook">hook</option>
-                    <option value="thesis">thesis</option>
-                    <option value="ending">ending</option>
-                    <option value="one_liner">one_liner</option>
-                    <option value="outline">outline</option>
-                    <option value="other">other</option>
-                    <option value="style_profile">style_profile</option>
-                    <option value="playbook_facet">playbook_facet</option>
-                  </select>
-                </div>
+                {viewTab === "health" ? (
+                  <>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", justifyContent: "space-between" }}>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                        <button
+                          className="btn btnIcon"
+                          type="button"
+                          disabled={fpLoading}
+                          onClick={() => {
+                            const ok = window.confirm("生成/更新该库的「声音指纹（数字版）」？\n\n- 会统计“率/分布/n-gram”，并尝试用 Gateway 做开集体裁识别\n- 产物只写入本地 KB，不会改动原文\n");
+                            if (!ok) return;
+                            void (async () => {
+                              setFpLoading(true);
+                              setFpErr(null);
+                              setFpCompare(null);
+                              const r = await computeLibraryFingerprint({ libraryId: viewLibId, useLlm: true });
+                              if (!r.ok) {
+                                setFpErr(r.error ?? "COMPUTE_FAILED");
+                              } else {
+                                setFp(r.snapshot ?? null);
+                              }
+                              setFpLoading(false);
+                            })();
+                          }}
+                        >
+                          生成：声音指纹（数字版）
+                        </button>
+                        <button
+                          className="btn btnIcon"
+                          type="button"
+                          onClick={() => {
+                            const lib = libraries.find((x) => x.id === viewLibId);
+                            if (!lib) return;
+                            const ok = window.confirm(
+                              `为库「${lib.name}」入队生成风格手册（21+1）？\n\n` +
+                                "- 会读取该库已抽出的单篇要素卡（hook/thesis/ending/one_liner/outline）\n" +
+                                "- 并生成 1 张 Style Profile + 每个维度 1 张写法手册卡\n" +
+                                "- 产物会落到一个“【仿写手册】”虚拟文档下，可被右侧 Agent 直接使用\n\n" +
+                                "提示：生成手册是异步队列任务，需到「抽卡任务」Tab 点击 ▶ 执行。"
+                            );
+                            if (!ok) return;
+                            void (async () => {
+                              const r = await enqueuePlaybookJob(viewLibId, { open: true });
+                              if (!r.ok) window.alert(`入队失败：${r.error ?? "unknown"}`);
+                              else openKbManager("jobs", "已入队：风格手册。请点击 ▶ 开始执行。");
+                            })();
+                          }}
+                        >
+                          生成/更新：风格手册（推荐）
+                        </button>
+                        <button
+                          className="btn btnIcon"
+                          type="button"
+                          disabled={fpLoading}
+                          onClick={() => {
+                            void (async () => {
+                              setFpLoading(true);
+                              setFpErr(null);
+                              const r = await compareLatestLibraryFingerprints(viewLibId);
+                              if (!r.ok) {
+                                setFpCompare(null);
+                                setFpErr(r.error === "NOT_ENOUGH_HISTORY" ? "不足两次体检历史：先点两次「生成：声音指纹」" : r.error ?? "COMPARE_FAILED");
+                              } else {
+                                setFpCompare({
+                                  diff: r.diff,
+                                  olderAt: r.older.computedAt,
+                                  newerAt: r.newer.computedAt,
+                                });
+                              }
+                              setFpLoading(false);
+                            })();
+                          }}
+                        >
+                          对比：上次 vs 这次
+                        </button>
+                      </div>
+                      <button className="btn btnIcon" type="button" onClick={() => setFpAdvanced((v) => !v)}>
+                        {fpAdvanced ? "收起细节" : "我懂点，展开细节"}
+                      </button>
+                    </div>
 
-                <div
-                  style={{
-                    border: "1px solid var(--border)",
-                    borderRadius: 12,
-                    background: "var(--panel2)",
-                    padding: 10,
-                    maxHeight: "min(44vh, 420px)",
-                    overflow: "auto",
-                    display: "grid",
-                    gap: 10,
-                  }}
-                >
-                  {!cardsLoading && !cards.length ? (
-                    <div className="explorerHint">暂无卡片（可能还没抽卡/没生成风格手册，或筛选条件无结果）。</div>
-                  ) : null}
-                  {cards.map((it) => {
-                    const t = String(it?.artifact?.cardType ?? "");
-                    const title = String(it?.artifact?.title ?? "").trim() || "（无标题）";
-                    const content = String(it?.artifact?.content ?? "").trim();
-                    const docTitle = String(it?.sourceDoc?.title ?? "");
-                    return (
-                      <div key={String(it?.artifact?.id ?? Math.random())} style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel)", padding: 10 }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-                          <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            <span className="ctxPill" style={{ marginRight: 8 }}>
-                              {t || "card"}
-                            </span>
-                            <span style={{ fontWeight: 700 }}>{title}</span>
-                            {docTitle ? <span style={{ color: "var(--muted)" }}>{` · 文档：${docTitle}`}</span> : null}
+                    {!fpLoading && !fp ? (
+                      <div className="explorerHint">还没有体检数据。点「生成：声音指纹（数字版）」开始。</div>
+                    ) : null}
+
+                    {fp ? (
+                      <div style={{ display: "grid", gap: 10 }}>
+                        <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))" }}>
+                          <div style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel2)", padding: 10 }}>
+                            <div style={{ fontWeight: 800 }}>像什么（最重要）</div>
+                            <div style={{ marginTop: 6, fontSize: 16, fontWeight: 900 }}>
+                              {fp.genres?.primary?.label ?? "unknown"}（{Math.round((fp.genres?.primary?.confidence ?? 0) * 100)}%）
+                            </div>
+                            <div style={{ marginTop: 6, color: "var(--muted)", fontSize: 12, whiteSpace: "pre-wrap" }}>
+                              {fp.genres?.primary?.why ?? ""}
+                            </div>
+                            {Array.isArray(fp.genres?.candidates) && fp.genres.candidates.length > 1 ? (
+                              <div style={{ marginTop: 8, color: "var(--muted)", fontSize: 12 }}>
+                                也可能像：
+                                {fp.genres.candidates
+                                  .slice(1, 4)
+                                  .map((c) => `${c.label}（${Math.round((c.confidence ?? 0) * 100)}%）`)
+                                  .join(" / ")}
+                              </div>
+                            ) : null}
+                          </div>
+
+                          <div style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel2)", padding: 10 }}>
+                            <div style={{ fontWeight: 800 }}>稳不稳（风格一致性）</div>
+                            <div style={{ marginTop: 6, fontSize: 16, fontWeight: 900 }}>
+                              {fp.stability?.level === "high" ? "稳定：高" : fp.stability?.level === "medium" ? "稳定：中" : "稳定：低"}
+                            </div>
+                            <div style={{ marginTop: 6, color: "var(--muted)", fontSize: 12, whiteSpace: "pre-wrap" }}>{fp.stability?.note ?? ""}</div>
+                            {Array.isArray(fp.stability?.outlierDocIds) && fp.stability.outlierDocIds.length ? (
+                              <div style={{ marginTop: 8, color: "var(--muted)", fontSize: 12 }}>
+                                离群文档（建议先修/分库）：{fp.stability.outlierDocIds.join(", ")}
+                              </div>
+                            ) : null}
+                          </div>
+
+                          <div style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel2)", padding: 10 }}>
+                            <div style={{ fontWeight: 800 }}>怎么修（只给按钮）</div>
+                            <div style={{ marginTop: 8, color: "var(--muted)", fontSize: 12, whiteSpace: "pre-wrap" }}>
+                              - 想让右侧 Agent “像本人写的”：优先生成风格手册 + 终稿润色清单\n- 想先确认这库到底偏哪：先生成声音指纹（数字版）\n- 如果稳定性低：建议分库或先补同体裁语料
+                            </div>
                           </div>
                         </div>
-                        {content ? (
-                          <div style={{ marginTop: 8 }}>
-                            <RichText text={content} />
+
+                        {fpCompare ? (
+                          <div style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel2)", padding: 10 }}>
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                              <div style={{ fontWeight: 800 }}>对比结果</div>
+                              <div className="ctxPill">
+                                {new Date(fpCompare.olderAt).toLocaleString()} → {new Date(fpCompare.newerAt).toLocaleString()}
+                              </div>
+                            </div>
+                            <pre style={{ margin: "8px 0 0", whiteSpace: "pre-wrap" }}>{JSON.stringify(fpCompare.diff, null, 2)}</pre>
                           </div>
-                        ) : (
-                          <div style={{ marginTop: 8, color: "var(--muted)", fontSize: 12 }}>（无内容）</div>
-                        )}
+                        ) : null}
+
+                        {fpAdvanced ? (
+                          <div style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel2)", padding: 10, display: "grid", gap: 10 }}>
+                            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                              <span className="ctxPill">样本：{fp.corpus?.docs ?? 0} 篇</span>
+                              <span className="ctxPill">字数：{fp.corpus?.chars ?? 0}</span>
+                              <span className="ctxPill">句子：{fp.corpus?.sentences ?? 0}</span>
+                              <span className="ctxPill">证据覆盖（卡片）：{Math.round((fp.evidence?.cardsWithEvidenceRate ?? 0) * 100)}%</span>
+                              <span className="ctxPill">证据覆盖（手册）：{Math.round((fp.evidence?.playbookCardsWithEvidenceRate ?? 0) * 100)}%</span>
+                            </div>
+
+                            <div style={{ display: "grid", gap: 8 }}>
+                              <div style={{ fontWeight: 800 }}>核心指标（可解释、可量化）</div>
+                              <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(fp.stats ?? {}, null, 2)}</pre>
+                            </div>
+
+                            <div style={{ display: "grid", gap: 8 }}>
+                              <div style={{ fontWeight: 800 }}>高频短语（n‑gram Top）</div>
+                              <div style={{ display: "grid", gap: 6 }}>
+                                {(fp.topNgrams ?? []).map((ng) => (
+                                  <div key={`${ng.n}:${ng.text}`} style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                                    <span className="ctxPill">{ng.n}-gram</span>
+                                    <span style={{ fontWeight: 800 }}>{ng.text}</span>
+                                    <span className="ctxPill">每千字 {ng.per1kChars}</span>
+                                    <span className="ctxPill">覆盖 {ng.docCoverage} 篇</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+
+                            <div style={{ display: "grid", gap: 8 }}>
+                              <div style={{ fontWeight: 800 }}>文档级（找离群/混合体裁）</div>
+                              <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(fp.perDoc ?? [], null, 2)}</pre>
+                            </div>
+                          </div>
+                        ) : null}
                       </div>
-                    );
-                  })}
-                </div>
+                    ) : null}
+                  </>
+                ) : (
+                  <>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                      <input
+                        className="modalInput"
+                        style={{ maxWidth: 360 }}
+                        value={cardsQuery}
+                        placeholder="搜索卡片（标题/内容/类型/文档名）…"
+                        onChange={(e) => setCardsQuery(e.target.value)}
+                      />
+                      <select className="btn" value={cardsType} onChange={(e) => setCardsType(String(e.target.value ?? "__all__"))} title="按卡片类型过滤">
+                        <option value="__all__">全部类型</option>
+                        <option value="hook">hook</option>
+                        <option value="thesis">thesis</option>
+                        <option value="ending">ending</option>
+                        <option value="one_liner">one_liner</option>
+                        <option value="outline">outline</option>
+                        <option value="other">other</option>
+                        <option value="style_profile">style_profile</option>
+                        <option value="playbook_facet">playbook_facet</option>
+                      </select>
+                    </div>
+
+                    <div
+                      style={{
+                        border: "1px solid var(--border)",
+                        borderRadius: 12,
+                        background: "var(--panel2)",
+                        padding: 10,
+                        maxHeight: "min(44vh, 420px)",
+                        overflow: "auto",
+                        display: "grid",
+                        gap: 10,
+                      }}
+                    >
+                      {!cardsLoading && !cards.length ? (
+                        <div className="explorerHint">暂无卡片（可能还没抽卡/没生成风格手册，或筛选条件无结果）。</div>
+                      ) : null}
+                      {cards.map((it) => {
+                        const t = String(it?.artifact?.cardType ?? "");
+                        const title = String(it?.artifact?.title ?? "").trim() || "（无标题）";
+                        const content = String(it?.artifact?.content ?? "").trim();
+                        const docTitle = String(it?.sourceDoc?.title ?? "");
+                        return (
+                          <div
+                            key={String(it?.artifact?.id ?? Math.random())}
+                            style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel)", padding: 10 }}
+                          >
+                            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
+                              <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                <span className="ctxPill" style={{ marginRight: 8 }}>
+                                  {t || "card"}
+                                </span>
+                                <span style={{ fontWeight: 700 }}>{title}</span>
+                                {docTitle ? <span style={{ color: "var(--muted)" }}>{` · 文档：${docTitle}`}</span> : null}
+                              </div>
+                            </div>
+                            {content ? (
+                              <div style={{ marginTop: 8 }}>
+                                <RichText text={content} />
+                              </div>
+                            ) : (
+                              <div style={{ marginTop: 8, color: "var(--muted)", fontSize: 12 }}>（无内容）</div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
               </div>
             ) : null}
           </div>

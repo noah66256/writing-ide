@@ -65,6 +65,45 @@ export type KbArtifact = {
   anchor: KbAnchor;
 };
 
+export type KbFingerprintStabilityLevel = "high" | "medium" | "low";
+
+export type KbFingerprintGenre = {
+  label: string; // 开集：允许 unknown_*
+  confidence: number; // 0~1
+  why: string;
+  evidence?: Array<{ docId: string; paragraphIndex: number | null; quote: string }>;
+};
+
+export type KbLibraryFingerprintSnapshot = {
+  id: string;
+  libraryId: string;
+  computedAt: string;
+  version: 1;
+  // 用于 UI 的“傻瓜徽章”
+  badge?: { primaryLabel: string; confidence: number; stability: KbFingerprintStabilityLevel };
+  // 样本概况（用于“稳不稳”）
+  corpus: { docs: number; chars: number; sentences: number };
+  // 确定性统计（核心：每100句/每1000字）
+  stats: Record<string, any>;
+  // 开集体裁/声音标签（LLM 生成或兜底 unknown）
+  genres: { primary: KbFingerprintGenre; candidates: KbFingerprintGenre[] };
+  // 稳定性（库内一致性）
+  stability: { level: KbFingerprintStabilityLevel; note?: string; outlierDocIds?: string[] };
+  // 高频短语（n-gram）
+  topNgrams: Array<{ n: number; text: string; per1kChars: number; docCoverage: number }>;
+  // 文档级（用于找离群）
+  perDoc: Array<{
+    docId: string;
+    docTitle: string;
+    chars: number;
+    sentences: number;
+    badge?: { primaryLabel: string; confidence: number };
+    stats: Record<string, any>;
+  }>;
+  // 证据覆盖率：帮助判断“手册会不会胡”
+  evidence: { cardsWithEvidenceRate: number; playbookCardsWithEvidenceRate: number };
+};
+
 export type KbCardJobStatus = "pending" | "running" | "success" | "skipped" | "failed" | "cancelled";
 
 export type KbCardJob = {
@@ -103,6 +142,7 @@ type KbDb = {
   trash: KbLibraryTrashItem[];
   sourceDocs: KbSourceDoc[];
   artifacts: KbArtifact[];
+  fingerprints?: KbLibraryFingerprintSnapshot[];
 };
 
 export type KbSearchGroup = {
@@ -124,7 +164,14 @@ type KbState = {
 
   // 库（Library）
   currentLibraryId: string | null; // 强制用户选择库；不默认选中
-  libraries: Array<{ id: string; name: string; facetPackId: string; docCount: number; updatedAt: string }>;
+  libraries: Array<{
+    id: string;
+    name: string;
+    facetPackId: string;
+    docCount: number;
+    updatedAt: string;
+    fingerprint?: { primaryLabel: string; confidence: number; stability: KbFingerprintStabilityLevel; computedAt: string };
+  }>;
   trashLibraries: Array<{ id: string; name: string; docCount: number; deletedAt: string }>;
 
   // 库管理弹窗（包含抽卡队列）
@@ -167,6 +214,18 @@ type KbState = {
     error?: string;
   }>;
   generateLibraryPlaybook: (libraryId: string, opts?: { signal?: AbortSignal }) => Promise<{ ok: boolean; facets?: number; error?: string }>;
+  // 库体检（Fingerprint）：统计“声音指纹”（率/分布）+ 开集体裁识别（可用 LLM）
+  getLatestLibraryFingerprint: (libraryId: string) => Promise<{ ok: boolean; snapshot?: KbLibraryFingerprintSnapshot; error?: string }>;
+  computeLibraryFingerprint: (args: {
+    libraryId: string;
+    useLlm?: boolean;
+    model?: string;
+  }) => Promise<{ ok: boolean; snapshot?: KbLibraryFingerprintSnapshot; error?: string }>;
+  getLibraryFingerprintHistory: (libraryId: string, limit?: number) => Promise<{ ok: boolean; items: KbLibraryFingerprintSnapshot[]; error?: string }>;
+  compareLatestLibraryFingerprints: (libraryId: string) => Promise<
+    | { ok: true; newer: KbLibraryFingerprintSnapshot; older: KbLibraryFingerprintSnapshot; diff: Record<string, any> }
+    | { ok: false; error: string }
+  >;
   // 供 Agent 的 Context Pack 注入：读取库级“仿写手册”（StyleProfile + 维度手册）
   getPlaybookTextForLibraries: (libraryIds: string[]) => Promise<string>;
 
@@ -363,6 +422,7 @@ async function loadDb(args: { baseDir: string; ownerKey: string }): Promise<KbDb
     const rawArtifacts: any[] = Array.isArray(parsed?.artifacts) ? parsed.artifacts : [];
     const rawLibs: any[] = Array.isArray(parsed?.libraries) ? parsed.libraries : [];
     const rawTrash: any[] = Array.isArray(parsed?.trash) ? parsed.trash : [];
+    const rawFingerprints: any[] = Array.isArray(parsed?.fingerprints) ? parsed.fingerprints : [];
 
     const libs: KbLibrary[] = rawLibs
       .map((x) => ({
@@ -428,6 +488,14 @@ async function loadDb(args: { baseDir: string; ownerKey: string }): Promise<KbDb
           embeddingsRaw && typeof embeddingsRaw === "object" && !Array.isArray(embeddingsRaw) ? (embeddingsRaw as any) : undefined;
         return { ...a, embeddings } as KbArtifact;
       }) as any,
+      fingerprints: rawFingerprints
+        .map((x: any) => {
+          const id = String(x?.id ?? "").trim();
+          const libraryId = String(x?.libraryId ?? "").trim();
+          if (!id || !libraryId) return null;
+          return x as KbLibraryFingerprintSnapshot;
+        })
+        .filter(Boolean) as any,
     };
     return db;
   } catch (e: any) {
@@ -435,11 +503,31 @@ async function loadDb(args: { baseDir: string; ownerKey: string }): Promise<KbDb
     // File not exists -> new db
     if (msg.includes("ENOENT") || msg.includes("not found")) {
       const t = nowIso();
-      return { version: 3, ownerKey: args.ownerKey, createdAt: t, updatedAt: t, libraries: [], trash: [], sourceDocs: [], artifacts: [] };
+      return {
+        version: 3,
+        ownerKey: args.ownerKey,
+        createdAt: t,
+        updatedAt: t,
+        libraries: [],
+        trash: [],
+        sourceDocs: [],
+        artifacts: [],
+        fingerprints: [],
+      };
     }
     // Bad JSON -> start new db (avoid bricking)
     const t = nowIso();
-    return { version: 3, ownerKey: args.ownerKey, createdAt: t, updatedAt: t, libraries: [], trash: [], sourceDocs: [], artifacts: [] };
+    return {
+      version: 3,
+      ownerKey: args.ownerKey,
+      createdAt: t,
+      updatedAt: t,
+      libraries: [],
+      trash: [],
+      sourceDocs: [],
+      artifacts: [],
+      fingerprints: [],
+    };
   }
 }
 
@@ -477,6 +565,202 @@ function computeLibraryStats(db: KbDb) {
   }
 
   return { docCountByLib, updatedAtByLib, docCountByTrash };
+}
+
+function latestFingerprintByLib(db: KbDb) {
+  const map = new Map<string, KbLibraryFingerprintSnapshot>();
+  for (const fp of db.fingerprints ?? []) {
+    const libId = String((fp as any)?.libraryId ?? "").trim();
+    if (!libId) continue;
+    const prev = map.get(libId);
+    if (!prev || String((fp as any)?.computedAt ?? "") > String((prev as any)?.computedAt ?? "")) {
+      map.set(libId, fp as any);
+    }
+  }
+  return map;
+}
+
+function clamp01(x: number) {
+  if (!Number.isFinite(x)) return 0;
+  return Math.max(0, Math.min(1, x));
+}
+
+function isPlaybookDoc(d: KbSourceDoc) {
+  const rel = String(d.importedFrom?.kind === "project" ? (d.importedFrom as any).relPath ?? "" : "").trim();
+  return rel.startsWith("__kb_playbook__/library/");
+}
+
+function normalizeTextForStats(text: string) {
+  return String(text ?? "").replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+}
+
+function splitSentences(text: string) {
+  const t = normalizeTextForStats(text);
+  const parts = t
+    .split(/[\n。！？!?]+/g)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return parts.length ? parts : t.trim() ? [t.trim()] : [];
+}
+
+function countCharsBySet(text: string, set: Set<string>) {
+  let n = 0;
+  for (const ch of text) if (set.has(ch)) n += 1;
+  return n;
+}
+
+function countRegex(text: string, re: RegExp) {
+  const m = text.match(re);
+  return m ? m.length : 0;
+}
+
+function computeTextFingerprintStats(text: string) {
+  const t = normalizeTextForStats(text);
+  const chars = t.length;
+  const sentences = splitSentences(t);
+  const sentenceCount = sentences.length;
+
+  const avgSentenceLen = sentenceCount ? sentences.reduce((a, s) => a + s.length, 0) / sentenceCount : 0;
+  const shortSentenceRate = sentenceCount ? sentences.filter((s) => s.length <= 12).length / sentenceCount : 0;
+
+  const questionSentences = sentenceCount
+    ? sentences.filter((s) => /[？?]/.test(s) || /(吗|呢|为什么|怎么|何以|问题来了)/.test(s)).length
+    : 0;
+  const questionRatePer100Sentences = sentenceCount ? (questionSentences / sentenceCount) * 100 : 0;
+
+  const exclaimSentences = sentenceCount ? sentences.filter((s) => /[！!]/.test(s)).length : 0;
+  const exclaimRatePer100Sentences = sentenceCount ? (exclaimSentences / sentenceCount) * 100 : 0;
+
+  const per1k = (n: number) => (chars ? (n / chars) * 1000 : 0);
+  const firstPersonPer1kChars = per1k(countRegex(t, /我|咱|咱们|我们/g));
+  const secondPersonPer1kChars = per1k(countRegex(t, /你|你们/g));
+  const particlePer1kChars = per1k(countRegex(t, /啊|呢|吧|呀|哎|诶|呐/g));
+  const digitPer1kChars = per1k(countRegex(t, /\d/g));
+
+  return {
+    chars,
+    sentences: sentenceCount,
+    stats: {
+      // “每100句”
+      questionRatePer100Sentences: Number(questionRatePer100Sentences.toFixed(2)),
+      exclaimRatePer100Sentences: Number(exclaimRatePer100Sentences.toFixed(2)),
+      avgSentenceLen: Number(avgSentenceLen.toFixed(2)),
+      shortSentenceRate: Number(clamp01(shortSentenceRate).toFixed(4)),
+      // “每1000字”
+      firstPersonPer1kChars: Number(firstPersonPer1kChars.toFixed(2)),
+      secondPersonPer1kChars: Number(secondPersonPer1kChars.toFixed(2)),
+      particlePer1kChars: Number(particlePer1kChars.toFixed(2)),
+      digitPer1kChars: Number(digitPer1kChars.toFixed(2)),
+    },
+  };
+}
+
+function buildDocTextFromParagraphArtifacts(args: { docId: string; artifacts: KbArtifact[] }) {
+  const paras = args.artifacts
+    .filter((a) => a.sourceDocId === args.docId && a.kind === "paragraph")
+    .sort((a, b) => (Number(a.anchor?.paragraphIndex ?? 0) || 0) - (Number(b.anchor?.paragraphIndex ?? 0) || 0))
+    .map((a) => String(a.content ?? "").trim())
+    .filter(Boolean);
+  return paras.join("\n");
+}
+
+function computeTopNgrams(args: { docs: Array<{ docId: string; text: string }>; maxItems?: number }) {
+  const maxItems = Math.max(6, Math.min(32, Number(args.maxItems ?? 12)));
+  const totalChars = args.docs.reduce((a, d) => a + (d.text?.length ?? 0), 0) || 0;
+
+  const totalCounts = new Map<string, { n: number; count: number; docs: Set<string> }>();
+  const segRe = /[0-9A-Za-z\u4e00-\u9fff]+/g;
+
+  for (const d of args.docs) {
+    const text = normalizeTextForStats(d.text);
+    const seenInDoc = new Set<string>();
+    const segs = text.match(segRe) ?? [];
+    for (const seg of segs) {
+      const s = seg.trim();
+      if (s.length < 2) continue;
+      const L = s.length;
+      for (let n = 2; n <= 6; n += 1) {
+        if (L < n) continue;
+        for (let i = 0; i <= L - n; i += 1) {
+          const g = s.slice(i, i + n);
+          // 过滤纯数字 ngram，噪声太大
+          if (/^\d+$/.test(g)) continue;
+          const key = `${n}:${g}`;
+          const rec = totalCounts.get(key) ?? { n, count: 0, docs: new Set<string>() };
+          rec.count += 1;
+          totalCounts.set(key, rec);
+          seenInDoc.add(key);
+        }
+      }
+    }
+    for (const key of seenInDoc) {
+      const rec = totalCounts.get(key);
+      if (rec) rec.docs.add(d.docId);
+    }
+  }
+
+  const items = Array.from(totalCounts.entries())
+    .map(([key, v]) => {
+      const text = key.split(":").slice(1).join(":");
+      const per1kChars = totalChars ? (v.count / totalChars) * 1000 : 0;
+      return { n: v.n, text, per1kChars, docCoverage: v.docs.size };
+    })
+    .sort((a, b) => b.per1kChars - a.per1kChars)
+    .slice(0, maxItems)
+    .map((x) => ({ ...x, per1kChars: Number(x.per1kChars.toFixed(3)) }));
+
+  return items;
+}
+
+function computeStability(args: { perDoc: Array<{ docId: string; stats: any; chars: number; sentences: number }> }): {
+  level: KbFingerprintStabilityLevel;
+  note?: string;
+  outlierDocIds?: string[];
+} {
+  const docs = args.perDoc;
+  if (docs.length <= 1) return { level: "high", note: "样本较少：默认视为稳定" };
+
+  const keys = ["questionRatePer100Sentences", "avgSentenceLen", "particlePer1kChars"];
+  const valuesByKey = new Map<string, number[]>();
+  for (const k of keys) valuesByKey.set(k, []);
+  for (const d of docs) {
+    for (const k of keys) valuesByKey.get(k)!.push(Number(d.stats?.[k] ?? 0));
+  }
+  const cv = (arr: number[]) => {
+    const n = arr.length || 1;
+    const mean = arr.reduce((a, x) => a + x, 0) / n;
+    const var0 = arr.reduce((a, x) => a + (x - mean) * (x - mean), 0) / n;
+    const sd = Math.sqrt(var0);
+    if (!mean) return sd;
+    return sd / Math.abs(mean);
+  };
+  const cvs = keys.map((k) => cv(valuesByKey.get(k) ?? []));
+  const score = cvs.reduce((a, x) => a + Math.min(2, x), 0) / cvs.length;
+
+  const level: KbFingerprintStabilityLevel = score < 0.25 ? "high" : score < 0.55 ? "medium" : "low";
+  const note =
+    level === "high"
+      ? "库内写法较一致（节奏/问句/口头语波动小）"
+      : level === "medium"
+        ? "有一定混合体裁/写法波动（建议关注离群文档或分库）"
+        : "明显混合体裁/写法（建议分库或先修离群文档）";
+
+  // outliers（粗略）：任意关键指标偏离均值 2σ
+  const outliers = new Set<string>();
+  for (const k of keys) {
+    const arr = valuesByKey.get(k) ?? [];
+    const n = arr.length || 1;
+    const mean = arr.reduce((a, x) => a + x, 0) / n;
+    const var0 = arr.reduce((a, x) => a + (x - mean) * (x - mean), 0) / n;
+    const sd = Math.sqrt(var0);
+    if (!sd) continue;
+    docs.forEach((d, i) => {
+      const v = Number(d.stats?.[k] ?? 0);
+      if (Math.abs(v - mean) >= 2 * sd) outliers.add(d.docId);
+    });
+  }
+
+  return { level, note, outlierDocIds: Array.from(outliers) };
 }
 
 function parseMarkdownToArtifacts(args: { sourceDocId: string; text: string }): KbArtifact[] {
@@ -664,6 +948,68 @@ async function postBuildLibraryPlaybook(args: {
   }
 }
 
+async function postClassifyGenre(args: {
+  model?: string;
+  stats?: Record<string, any>;
+  samples: Array<{ docId: string; docTitle?: string; paragraphIndex?: number | null; text: string }>;
+  signal?: AbortSignal;
+}): Promise<
+  | { ok: true; primary: KbFingerprintGenre; candidates: KbFingerprintGenre[] }
+  | { ok: false; error: string }
+> {
+  const base = gatewayBaseUrl();
+  const url = base ? `${base}/api/kb/dev/classify_genre` : "/api/kb/dev/classify_genre";
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: args.signal,
+      body: JSON.stringify({
+        model: args.model,
+        stats: args.stats ?? null,
+        samples: (args.samples ?? []).slice(0, 24),
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      let msg = text || `HTTP_${res.status}`;
+      try {
+        const j = JSON.parse(text);
+        if (typeof j?.message === "string") msg = j.message;
+        else if (typeof j?.error?.message === "string") msg = j.error.message;
+        else if (typeof j?.error === "string") {
+          const hint = typeof j?.hint === "string" ? String(j.hint) : "";
+          const detail = typeof j?.detail === "string" ? String(j.detail) : "";
+          msg = hint ? `${j.error}: ${hint}` : String(j.error);
+          if (detail && detail !== hint) msg += `\n${detail}`;
+        }
+      } catch {
+        // ignore
+      }
+      return { ok: false, error: msg };
+    }
+    const json = await res.json().catch(() => null);
+    if (!json?.ok || !json?.primary || !Array.isArray(json?.candidates)) return { ok: false, error: "INVALID_RESPONSE" };
+    const primary: KbFingerprintGenre = {
+      label: String(json.primary.label ?? "unknown"),
+      confidence: Number(json.primary.confidence ?? 0),
+      why: String(json.primary.why ?? ""),
+      evidence: Array.isArray(json.primary.evidence) ? json.primary.evidence : undefined,
+    };
+    const candidates: KbFingerprintGenre[] = (json.candidates as any[])
+      .map((c) => ({
+        label: String(c?.label ?? "unknown"),
+        confidence: Number(c?.confidence ?? 0),
+        why: String(c?.why ?? ""),
+        evidence: Array.isArray(c?.evidence) ? c.evidence : undefined,
+      }))
+      .filter((x) => x.label && Number.isFinite(x.confidence) && x.why);
+    return { ok: true, primary, candidates: candidates.slice(0, 8) };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+}
+
 function scoreArtifactText(args: { haystack: string; query: string }) {
   const q = args.query.trim().toLowerCase();
   if (!q) return { score: 0, idx: -1 };
@@ -841,6 +1187,7 @@ export const useKbStore = create<KbState>()(
         const ownerKey = get().ownerKey;
         const db = await loadDb({ baseDir, ownerKey });
         const stats = computeLibraryStats(db);
+        const fpMap = latestFingerprintByLib(db);
         const libs = db.libraries
           .map((l) => ({
             id: l.id,
@@ -848,6 +1195,12 @@ export const useKbStore = create<KbState>()(
             facetPackId: normalizeFacetPackId((l as any).facetPackId),
             docCount: stats.docCountByLib.get(l.id) ?? 0,
             updatedAt: stats.updatedAtByLib.get(l.id) ?? l.updatedAt ?? l.createdAt,
+            fingerprint: (() => {
+              const fp = fpMap.get(l.id);
+              const b = fp?.badge;
+              if (!fp || !b) return undefined;
+              return { primaryLabel: b.primaryLabel, confidence: b.confidence, stability: b.stability, computedAt: fp.computedAt };
+            })(),
           }))
           .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
         const trash = db.trash
@@ -2056,6 +2409,201 @@ export const useKbStore = create<KbState>()(
 
           await get().refreshLibraries().catch(() => void 0);
           return { ok: true, facets: newArts.filter((a) => a.cardType === "playbook_facet").length };
+        } catch (e: any) {
+          return { ok: false, error: String(e?.message ?? e) };
+        }
+      },
+
+      getLatestLibraryFingerprint: async (libraryId) => {
+        const ok = await get().ensureReady();
+        if (!ok) return { ok: false, error: "KB_DIR_NOT_SET" };
+        const baseDir = get().baseDir!;
+        const ownerKey = get().ownerKey;
+        const libId = String(libraryId ?? "").trim();
+        if (!libId) return { ok: false, error: "LIBRARY_ID_REQUIRED" };
+        try {
+          const db = await loadDb({ baseDir, ownerKey });
+          const list = (db.fingerprints ?? []).filter((x) => String((x as any)?.libraryId ?? "") === libId);
+          const sorted = list.sort((a, b) => String((b as any)?.computedAt ?? "").localeCompare(String((a as any)?.computedAt ?? "")));
+          const snapshot = sorted[0];
+          return { ok: true, snapshot };
+        } catch (e: any) {
+          return { ok: false, error: String(e?.message ?? e) };
+        }
+      },
+
+      getLibraryFingerprintHistory: async (libraryId, limit) => {
+        const ok = await get().ensureReady();
+        if (!ok) return { ok: false, items: [], error: "KB_DIR_NOT_SET" };
+        const baseDir = get().baseDir!;
+        const ownerKey = get().ownerKey;
+        const libId = String(libraryId ?? "").trim();
+        if (!libId) return { ok: false, items: [], error: "LIBRARY_ID_REQUIRED" };
+        const lim = Math.max(1, Math.min(20, Number(limit ?? 5)));
+        try {
+          const db = await loadDb({ baseDir, ownerKey });
+          const list = (db.fingerprints ?? []).filter((x) => String((x as any)?.libraryId ?? "") === libId);
+          const sorted = list
+            .sort((a, b) => String((b as any)?.computedAt ?? "").localeCompare(String((a as any)?.computedAt ?? "")))
+            .slice(0, lim);
+          return { ok: true, items: sorted as any };
+        } catch (e: any) {
+          return { ok: false, items: [], error: String(e?.message ?? e) };
+        }
+      },
+
+      compareLatestLibraryFingerprints: async (libraryId) => {
+        const ok = await get().ensureReady();
+        if (!ok) return { ok: false, error: "KB_DIR_NOT_SET" };
+        const baseDir = get().baseDir!;
+        const ownerKey = get().ownerKey;
+        const libId = String(libraryId ?? "").trim();
+        if (!libId) return { ok: false, error: "LIBRARY_ID_REQUIRED" };
+        try {
+          const db = await loadDb({ baseDir, ownerKey });
+          const list = (db.fingerprints ?? [])
+            .filter((x) => String((x as any)?.libraryId ?? "") === libId)
+            .sort((a, b) => String((b as any)?.computedAt ?? "").localeCompare(String((a as any)?.computedAt ?? "")));
+          if (list.length < 2) return { ok: false, error: "NOT_ENOUGH_HISTORY" };
+          const newer = list[0] as any as KbLibraryFingerprintSnapshot;
+          const older = list[1] as any as KbLibraryFingerprintSnapshot;
+          const pick = (s: KbLibraryFingerprintSnapshot, k: string) => Number((s.stats as any)?.[k] ?? 0);
+          const keys = [
+            "questionRatePer100Sentences",
+            "exclaimRatePer100Sentences",
+            "avgSentenceLen",
+            "shortSentenceRate",
+            "firstPersonPer1kChars",
+            "secondPersonPer1kChars",
+            "particlePer1kChars",
+            "digitPer1kChars",
+          ];
+          const diff: Record<string, any> = {};
+          for (const k of keys) diff[k] = { older: pick(older, k), newer: pick(newer, k), delta: Number((pick(newer, k) - pick(older, k)).toFixed(3)) };
+          diff.primaryLabel = { older: older.genres?.primary?.label ?? "", newer: newer.genres?.primary?.label ?? "" };
+          diff.stability = { older: older.stability?.level ?? "", newer: newer.stability?.level ?? "" };
+          return { ok: true, newer, older, diff };
+        } catch (e: any) {
+          return { ok: false, error: String(e?.message ?? e) };
+        }
+      },
+
+      computeLibraryFingerprint: async (args) => {
+        const ok = await get().ensureReady();
+        if (!ok) return { ok: false, error: "KB_DIR_NOT_SET" };
+        const baseDir = get().baseDir!;
+        const ownerKey = get().ownerKey;
+        const libId = String(args?.libraryId ?? "").trim();
+        if (!libId) return { ok: false, error: "LIBRARY_ID_REQUIRED" };
+
+        try {
+          const db = await loadDb({ baseDir, ownerKey });
+          const lib = db.libraries.find((l) => l.id === libId);
+          if (!lib) return { ok: false, error: "LIBRARY_NOT_FOUND" };
+
+          const docs = db.sourceDocs.filter((d) => d.libraryId === libId && !isPlaybookDoc(d));
+          if (!docs.length) return { ok: false, error: "NO_DOCS_IN_LIBRARY" };
+
+          // 文档级：从 paragraph artifacts 还原文本并做统计（这一步确定性，不依赖 LLM）
+          const perDoc = docs.map((d) => {
+            const text = buildDocTextFromParagraphArtifacts({ docId: d.id, artifacts: db.artifacts });
+            const fp = computeTextFingerprintStats(text);
+            return { docId: d.id, docTitle: d.title, text, chars: fp.chars, sentences: fp.sentences, stats: fp.stats };
+          });
+
+          const corpus = {
+            docs: perDoc.length,
+            chars: perDoc.reduce((a, d) => a + d.chars, 0),
+            sentences: perDoc.reduce((a, d) => a + d.sentences, 0),
+          };
+
+          // 库级 stats：按“全文拼接”口径统计（避免均值误导）
+          const allText = perDoc.map((d) => d.text).join("\n\n");
+          const libFp = computeTextFingerprintStats(allText);
+
+          const topNgrams = computeTopNgrams({ docs: perDoc.map((d) => ({ docId: d.docId, text: d.text })), maxItems: 12 });
+          const stability = computeStability({ perDoc: perDoc.map((d) => ({ docId: d.docId, stats: d.stats, chars: d.chars, sentences: d.sentences })) });
+
+          // 证据覆盖率：doc_v2 卡（有 evidenceParagraphIndices）与 playbook 卡（有证据段落索引列表）
+          const docIdSet = new Set(docs.map((d) => d.id));
+          const docCards = db.artifacts.filter((a) => a.kind === "card" && docIdSet.has(a.sourceDocId));
+          const docCardsWithEvidence = docCards.filter((a) => Array.isArray(a.evidenceParagraphIndices) && a.evidenceParagraphIndices.length > 0);
+
+          const playbookDoc = db.sourceDocs.find((d) => d.libraryId === libId && isPlaybookDoc(d));
+          const playbookCards = playbookDoc ? db.artifacts.filter((a) => a.kind === "card" && a.sourceDocId === playbookDoc.id) : [];
+          const playbookCardsWithEvidence = playbookCards.filter((a) => {
+            const content = String(a.content ?? "");
+            // playbook content 里有“证据（可追溯）”块时认为可回溯
+            return content.includes("#### 证据（可追溯）") || content.includes("段落 #");
+          });
+
+          const evidence = {
+            cardsWithEvidenceRate: docCards.length ? docCardsWithEvidence.length / docCards.length : 0,
+            playbookCardsWithEvidenceRate: playbookCards.length ? playbookCardsWithEvidence.length / playbookCards.length : 0,
+          };
+
+          // 开集体裁识别：优先让 Gateway LLM 做归纳（带置信度与证据）；失败则退化为 unknown
+          const samples = db.artifacts
+            .filter((a) => docIdSet.has(a.sourceDocId) && a.kind === "paragraph")
+            .slice(0, 18)
+            .map((p) => ({
+              docId: p.sourceDocId,
+              docTitle: docs.find((d) => d.id === p.sourceDocId)?.title ?? "",
+              paragraphIndex: typeof p.anchor?.paragraphIndex === "number" ? p.anchor.paragraphIndex : null,
+              text: String(p.content ?? "").trim().slice(0, 360),
+            }))
+            .filter((x) => x.text);
+
+          let genres: { primary: KbFingerprintGenre; candidates: KbFingerprintGenre[] } = {
+            primary: { label: "unknown", confidence: 0, why: "（未识别：未启用或不可用）" },
+            candidates: [{ label: "unknown", confidence: 0, why: "（未识别：未启用或不可用）" }],
+          };
+
+          const useLlm = args?.useLlm === undefined ? true : Boolean(args.useLlm);
+          if (useLlm && samples.length) {
+            const ret = await postClassifyGenre({ model: args?.model, stats: { ...libFp.stats, corpus }, samples });
+            if (ret.ok) genres = { primary: ret.primary, candidates: ret.candidates };
+            else genres = { ...genres, primary: { ...genres.primary, why: `（未识别：${ret.error}）` } };
+          }
+
+          const snapshot: KbLibraryFingerprintSnapshot = {
+            id: makeId("kb_fp"),
+            libraryId: libId,
+            computedAt: nowIso(),
+            version: 1,
+            badge: {
+              primaryLabel: String(genres.primary.label ?? "unknown") || "unknown",
+              confidence: clamp01(Number(genres.primary.confidence ?? 0)),
+              stability: stability.level,
+            },
+            corpus,
+            stats: libFp.stats,
+            genres,
+            stability,
+            topNgrams,
+            perDoc: perDoc.map((d) => ({
+              docId: d.docId,
+              docTitle: d.docTitle,
+              chars: d.chars,
+              sentences: d.sentences,
+              stats: d.stats,
+            })),
+            evidence: {
+              cardsWithEvidenceRate: clamp01(evidence.cardsWithEvidenceRate),
+              playbookCardsWithEvidenceRate: clamp01(evidence.playbookCardsWithEvidenceRate),
+            },
+          };
+
+          // 写回：每库保留最近 5 份快照
+          const all = Array.isArray(db.fingerprints) ? db.fingerprints.slice(0) : [];
+          const keptOther = all.filter((x) => String((x as any)?.libraryId ?? "") !== libId);
+          const inLib = all.filter((x) => String((x as any)?.libraryId ?? "") === libId);
+          const nextInLib = [snapshot, ...inLib].sort((a, b) => String((b as any)?.computedAt ?? "").localeCompare(String((a as any)?.computedAt ?? ""))).slice(0, 5);
+          db.fingerprints = [...keptOther, ...nextInLib];
+          await saveDb({ baseDir, ownerKey, db });
+
+          await get().refreshLibraries().catch(() => void 0);
+          return { ok: true, snapshot };
         } catch (e: any) {
           return { ok: false, error: String(e?.message ?? e) };
         }

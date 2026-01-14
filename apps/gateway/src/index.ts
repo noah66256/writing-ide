@@ -1327,6 +1327,161 @@ fastify.post("/api/kb/dev/build_library_playbook", async (request, reply) => {
   });
 });
 
+/**
+ * KB 库体检：体裁/声音开集分类（开发期）。
+ * - 输入：统计摘要 + 少量样例片段
+ * - 输出：开集标签（可为 unknown_*），附置信度与证据解释
+ */
+fastify.post("/api/kb/dev/classify_genre", async (request, reply) => {
+  if (!IS_DEV) return reply.code(404).send({ error: "NOT_AVAILABLE" });
+
+  const bodySchema = z.object({
+    model: z.string().optional(),
+    stats: z.record(z.any()).optional(),
+    samples: z
+      .array(
+        z.object({
+          docId: z.string().min(1),
+          docTitle: z.string().optional(),
+          paragraphIndex: z.number().int().min(0).optional(),
+          text: z.string().min(1)
+        })
+      )
+      .min(1)
+      .max(24)
+  });
+  const body = bodySchema.parse((request as any).body);
+
+  const baseUrlDefault = String(process.env.LLM_BASE_URL ?? "").trim();
+  const apiKeyDefault = String(process.env.LLM_API_KEY ?? "").trim();
+  const modelDefault = String(process.env.LLM_MODEL ?? "").trim();
+  if (!baseUrlDefault || !apiKeyDefault || !modelDefault) {
+    return reply.code(500).send({ error: "LLM_NOT_CONFIGURED", hint: "请配置 LLM_BASE_URL/LLM_MODEL/LLM_API_KEY" });
+  }
+
+  const model = body.model ?? modelDefault;
+  const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 3);
+  const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  const sys = [
+    "你是写作 IDE 的「体裁/声音识别器」（开集分类，不要穷举）。",
+    "",
+    "你会收到两类信息：",
+    "1) stats：一些确定性的统计摘要（比如句长、问句率、口头语率、数字密度等）。这些数字是确定的，你不得编造或篡改。",
+    "2) samples：少量样例片段（每条带 docId 与 paragraphIndex）。",
+    "",
+    "任务：给出该语料库最像的“媒介/体裁/声音”标签（开集），并给出置信度和证据解释。",
+    "",
+    "输出要求：你必须且只能输出一个 JSON 对象（不要代码块，不要多余文字）。",
+    "JSON 结构：",
+    "{",
+    '  "primary": { "label": string, "confidence": number(0~1), "why": string },',
+    '  "candidates": [ { "label": string, "confidence": number(0~1), "why": string, "evidence": [ { "docId": string, "paragraphIndex": number|null, "quote": string } ] } ]',
+    "}",
+    "",
+    "规则：",
+    "- label 允许开集：例如「口播-财经评论」「小红书-图文清单」「小说-悬疑」「朋友圈-短句情绪」；如果不确定，可输出「unknown_*」。",
+    "- confidence 是你的主观置信度；primary 必须等于 candidates 中置信度最高的一条。",
+    "- evidence 里 quote 必须来自 samples 的原文，尽量短（<=60字）。",
+    "- 不要给写作建议，只做识别与解释。"
+  ].join("\n");
+
+  const user = JSON.stringify(
+    {
+      stats: body.stats ?? null,
+      samples: body.samples.map((s) => ({
+        docId: s.docId,
+        docTitle: s.docTitle ?? "",
+        paragraphIndex: typeof s.paragraphIndex === "number" ? s.paragraphIndex : null,
+        text: String(s.text ?? "").replace(/\s+/g, " ").trim()
+      }))
+    },
+    null,
+    2
+  );
+
+  let ret: any = null;
+  for (let attempt = 0; attempt <= retryMax; attempt += 1) {
+    ret = await chatCompletionOnce({
+      config: { baseUrl: baseUrlDefault, apiKey: apiKeyDefault },
+      model,
+      messages: [
+        { role: "system", content: sys },
+        { role: "user", content: user }
+      ],
+      temperature: 0.2
+    });
+    if (ret.ok) break;
+
+    const is429 =
+      ret.status === 429 || String(ret.error ?? "").includes("Too Many Requests") || String(ret.error ?? "").includes("负载已饱和");
+    if (!is429 || attempt >= retryMax) break;
+    const jitter = Math.floor(Math.random() * 200);
+    const wait = retryBaseMs * Math.pow(2, attempt) + jitter;
+    await sleep(wait);
+  }
+
+  if (!ret?.ok) {
+    return reply.code(ret?.status === 429 ? 503 : 502).send({
+      error: "UPSTREAM_ERROR",
+      message: String(ret?.error ?? "upstream error"),
+      status: ret?.status ?? null
+    });
+  }
+
+  const raw = String(ret.content ?? "").trim();
+  const tryParse = (s: string) => {
+    try {
+      return JSON.parse(s);
+    } catch {
+      return null;
+    }
+  };
+  let parsed: any = tryParse(raw);
+  if (!parsed) {
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (m?.[0]) parsed = tryParse(m[0]);
+  }
+
+  const outSchema = z.object({
+    primary: z.object({
+      label: z.string().min(1),
+      confidence: z.number().min(0).max(1),
+      why: z.string().min(1)
+    }),
+    candidates: z
+      .array(
+        z.object({
+          label: z.string().min(1),
+          confidence: z.number().min(0).max(1),
+          why: z.string().min(1),
+          evidence: z
+            .array(
+              z.object({
+                docId: z.string().min(1),
+                paragraphIndex: z.number().int().min(0).nullable(),
+                quote: z.string().min(1)
+              })
+            )
+            .max(8)
+            .optional()
+        })
+      )
+      .min(1)
+      .max(8)
+  });
+
+  try {
+    const out = outSchema.parse(parsed);
+    const sorted = [...out.candidates].sort((a, b) => b.confidence - a.confidence).slice(0, 8);
+    const primary = sorted[0]!;
+    return reply.send({ ok: true, primary, candidates: sorted });
+  } catch (e: any) {
+    return reply.code(500).send({ error: "INVALID_MODEL_OUTPUT", hint: "模型未返回合法 JSON", detail: String(e?.message ?? e) });
+  }
+});
+
 await fastify.listen({ port: PORT, host: "0.0.0.0" });
 
 
