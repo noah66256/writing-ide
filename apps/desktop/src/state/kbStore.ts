@@ -794,6 +794,162 @@ function computeStability(args: { perDoc: Array<{ docId: string; stats: any; cha
   return { level, note, outlierDocIds: Array.from(outliers) };
 }
 
+function stableJson(x: any) {
+  try {
+    return JSON.stringify(x);
+  } catch {
+    return String(x ?? "");
+  }
+}
+
+function chunkParagraphsForExtraction(args: {
+  paragraphs: Array<{ index: number; text: string; headingPath?: string[] }>;
+  // 质量模式：尽量覆盖全文但控制请求规模
+  maxChunks: number;
+  maxParasPerChunk: number;
+  maxCharsPerChunk: number;
+  overlapParas: number;
+}): Array<Array<{ index: number; text: string; headingPath?: string[] }>> {
+  const paras = Array.isArray(args.paragraphs) ? args.paragraphs.slice(0) : [];
+  if (!paras.length) return [];
+
+  const normText = (s: string) => String(s ?? "").trim();
+  const cleaned = paras
+    .map((p) => ({ ...p, text: normText(p.text) }))
+    .filter((p) => p.text);
+  if (!cleaned.length) return [];
+
+  // 先按 headingPath（章节）聚合连续段落
+  type Section = { key: string; items: Array<{ index: number; text: string; headingPath?: string[] }>; chars: number };
+  const sections: Section[] = [];
+  for (const p of cleaned) {
+    const key = Array.isArray(p.headingPath) && p.headingPath.length ? p.headingPath.join(" > ") : "";
+    const chars = p.text.length;
+    const last = sections[sections.length - 1];
+    if (last && last.key === key) {
+      last.items.push(p);
+      last.chars += chars;
+    } else {
+      sections.push({ key, items: [p], chars });
+    }
+  }
+
+  const chunks: Array<Array<{ index: number; text: string; headingPath?: string[] }>> = [];
+  const pushChunk = (items: Array<{ index: number; text: string; headingPath?: string[] }>) => {
+    const uniq: Array<{ index: number; text: string; headingPath?: string[] }> = [];
+    const seen = new Set<number>();
+    for (const it of items) {
+      const idx = Number(it.index);
+      if (!Number.isFinite(idx)) continue;
+      if (seen.has(idx)) continue;
+      seen.add(idx);
+      uniq.push(it);
+    }
+    if (uniq.length) chunks.push(uniq);
+  };
+
+  // 顺序装箱：尽量保持章节完整；超限则拆分章节
+  let buf: Array<{ index: number; text: string; headingPath?: string[] }> = [];
+  let bufChars = 0;
+  const flush = () => {
+    if (!buf.length) return;
+    pushChunk(buf);
+    buf = [];
+    bufChars = 0;
+  };
+
+  for (const sec of sections) {
+    if (!sec.items.length) continue;
+    // 如果单个 section 就过大：按段落拆
+    const secTooBig = sec.items.length > args.maxParasPerChunk || sec.chars > args.maxCharsPerChunk;
+    if (!secTooBig) {
+      const wouldParas = buf.length + sec.items.length;
+      const wouldChars = bufChars + sec.chars;
+      if (buf.length && (wouldParas > args.maxParasPerChunk || wouldChars > args.maxCharsPerChunk)) flush();
+      buf.push(...sec.items);
+      bufChars += sec.chars;
+      continue;
+    }
+
+    // flush existing buffer first
+    if (buf.length) flush();
+
+    let sub: Array<{ index: number; text: string; headingPath?: string[] }> = [];
+    let subChars = 0;
+    for (const p of sec.items) {
+      const wouldParas = sub.length + 1;
+      const wouldChars = subChars + p.text.length;
+      if (sub.length && (wouldParas > args.maxParasPerChunk || wouldChars > args.maxCharsPerChunk)) {
+        pushChunk(sub);
+        sub = [];
+        subChars = 0;
+      }
+      sub.push(p);
+      subChars += p.text.length;
+    }
+    if (sub.length) pushChunk(sub);
+  }
+  if (buf.length) flush();
+
+  if (!chunks.length) return [];
+
+  // 加 overlap：每块前面附带前一块末尾若干段（保持语境连续）
+  const overlapped = chunks.map((c, i) => {
+    if (i === 0 || args.overlapParas <= 0) return c;
+    const prev = chunks[i - 1]!;
+    const tail = prev.slice(Math.max(0, prev.length - args.overlapParas));
+    return [...tail, ...c];
+  });
+
+  // 太多块时：保留首尾覆盖 + 采样中间
+  if (overlapped.length <= args.maxChunks) return overlapped;
+  const max = Math.max(2, args.maxChunks);
+  const keep = new Set<number>();
+  keep.add(0);
+  keep.add(overlapped.length - 1);
+  if (max >= 4) {
+    keep.add(1);
+    keep.add(overlapped.length - 2);
+  }
+  while (keep.size < max) {
+    const need = max - keep.size;
+    const candidates: number[] = [];
+    for (let i = 2; i <= overlapped.length - 3; i += 1) if (!keep.has(i)) candidates.push(i);
+    if (!candidates.length) break;
+    // 均匀取样
+    for (let k = 0; k < need; k += 1) {
+      const idx = Math.floor((k * candidates.length) / Math.max(1, need));
+      keep.add(candidates[Math.min(candidates.length - 1, idx)]!);
+      if (keep.size >= max) break;
+    }
+    break;
+  }
+  return Array.from(keep)
+    .sort((a, b) => a - b)
+    .map((i) => overlapped[i]!)
+    .filter(Boolean);
+}
+
+function scoreDocV2CardForPick(c: any) {
+  const t = String(c?.cardType ?? "").trim();
+  const title = String(c?.title ?? "").trim();
+  const content = String(c?.content ?? "").trim();
+  const pi = Array.isArray(c?.paragraphIndices) ? c.paragraphIndices.length : 0;
+  const base =
+    t === "outline"
+      ? 5000
+      : t === "hook"
+        ? 4200
+        : t === "thesis"
+          ? 3800
+          : t === "ending"
+            ? 3600
+            : t === "one_liner"
+              ? 2000
+              : 1000;
+  return base + Math.min(200, title.length) + Math.min(800, content.length) + Math.min(200, pi * 20);
+}
+
 function parseMarkdownToArtifacts(args: { sourceDocId: string; text: string }): KbArtifact[] {
   const text = args.text.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
   const lines = text.split("\n");
@@ -2233,25 +2389,94 @@ export const useKbStore = create<KbState>()(
             const packFacetIdSet = new Set(packFacetIds);
             const fallbackFacetId = packFacetIds[0] ?? "logic_framework";
 
-            const paras = db.artifacts
+            const isStyleLib = normalizeLibraryPurpose((lib as any)?.purpose) === "style";
+
+            const allParas = db.artifacts
               .filter((a) => a.sourceDocId === id && a.kind === "paragraph")
-              .slice(0, 180) // 控制 prompt 大小（MVP）
+              .slice(0, 1200) // 防止极端文档导致内存/耗时爆炸；质量模式会分块覆盖首尾
               .map((p) => ({
                 index: typeof p.anchor?.paragraphIndex === "number" ? p.anchor.paragraphIndex : 0,
                 text: p.content,
                 headingPath: Array.isArray(p.anchor?.headingPath) ? p.anchor.headingPath : [],
               }));
 
-            if (!paras.length) {
+            if (!allParas.length) {
               skipped += 1;
               continue;
             }
 
-            const ret = await postExtractCards({ paragraphs: paras, maxCards: 24, facetIds: packFacetIds, mode: "doc_v2", signal: opts?.signal });
-            if (!ret.ok) return { ok: false, extracted, skipped, error: ret.error };
+            // 质量模式（风格库）：智能切割 → 分段抽卡 → 全局合并（保证覆盖，不靠截断）
+            const chunks = isStyleLib
+              ? chunkParagraphsForExtraction({
+                  paragraphs: allParas,
+                  maxChunks: 6,
+                  maxParasPerChunk: 60,
+                  maxCharsPerChunk: 12000,
+                  overlapParas: 2,
+                })
+              : [allParas.slice(0, 180)]; // 非风格库：保持原策略（速度优先）
+
+            const merged: any[] = [];
+            const seen = new Set<string>();
+            const addCard = (c: any) => {
+              const t = String(c?.cardType ?? "").trim();
+              const title = String(c?.title ?? "").trim();
+              const content = String(c?.content ?? "").trim();
+              if (!t || !title || !content) return;
+              const key = `${t}::${title}::${fnv1a32Hex(content)}`;
+              if (seen.has(key)) return;
+              seen.add(key);
+              merged.push(c);
+            };
+
+            for (let ci = 0; ci < chunks.length; ci += 1) {
+              const chunk = chunks[ci]!;
+              const maxCards = isStyleLib ? (ci === 0 ? 16 : 12) : 24;
+              const ret = await postExtractCards({ paragraphs: chunk, maxCards, facetIds: packFacetIds, mode: "doc_v2", signal: opts?.signal });
+              if (!ret.ok) return { ok: false, extracted, skipped, error: ret.error };
+              for (const c of ret.cards) addCard(c);
+            }
+
+            if (!merged.length) {
+              skipped += 1;
+              continue;
+            }
+
+            // 配额收敛：保证“每类都有”，避免被 one_liner 淹没
+            const normalizeType = (raw: any) => {
+              const s = String(raw ?? "").trim();
+              return ["hook", "thesis", "ending", "one_liner", "outline", "other"].includes(s) ? s : "other";
+            };
+            const picked: any[] = [];
+            const take = (type: string, limit: number) => {
+              const list = merged
+                .filter((c) => normalizeType(c?.cardType) === type)
+                .slice()
+                .sort((a, b) => scoreDocV2CardForPick(b) - scoreDocV2CardForPick(a));
+              for (const c of list.slice(0, limit)) picked.push(c);
+            };
+            take("outline", 1);
+            take("hook", 3);
+            take("thesis", 3);
+            take("ending", 3);
+            take("one_liner", 12);
+            take("other", 6);
+
+            // 去重（合并时已去重，这里再保守一遍）
+            const finalCards: any[] = [];
+            const seen2 = new Set<string>();
+            for (const c of picked) {
+              const t = normalizeType(c?.cardType);
+              const title = String(c?.title ?? "").trim();
+              const content = String(c?.content ?? "").trim();
+              const key = `${t}::${title}::${fnv1a32Hex(content)}`;
+              if (seen2.has(key)) continue;
+              seen2.add(key);
+              finalCards.push({ ...c, cardType: t });
+            }
 
             const newArts: KbArtifact[] = [];
-            for (const c of ret.cards) {
+            for (const c of finalCards) {
               const title = String(c?.title ?? "").trim();
               const content = String(c?.content ?? "").trim();
               const paragraphIndices = Array.isArray(c?.paragraphIndices) ? c.paragraphIndices : [];
