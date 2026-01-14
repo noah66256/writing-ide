@@ -202,6 +202,9 @@ type KbState = {
     libraryIds: string[];
     perDocTopN?: number;
     topDocs?: number;
+    // 向量检索：默认开启；embeddingModel 可用于 A/B（例如 text-embedding-3-large / Embedding-V1）
+    useVector?: boolean;
+    embeddingModel?: string;
   }) => Promise<{ ok: boolean; groups?: KbSearchGroup[]; error?: string }>;
 };
 
@@ -2145,12 +2148,93 @@ export const useKbStore = create<KbState>()(
                 }
               }
             }
-          } else {
+          } else if (!useVector) {
             // no vector：回到每篇 topN
             groups = groups
               .map((g) => ({ ...g, hits: g.hits.slice(0, perDocTopN) }))
               .sort((a, b) => b.bestScore - a.bestScore)
               .slice(0, topDocs);
+          } else if (useVector && groups.length === 0) {
+            // 向量兜底召回：当词法召回为 0 时，仍可通过 embedding 从库内候选集中找相似内容
+            const q = query.slice(0, 800);
+            const qEmb = await fetchEmbedding({ model: embeddingModel, input: q });
+            if (qEmb.ok && qEmb.embedding.length > 0) {
+              const modelUsed = embeddingModel ?? qEmb.modelUsed ?? "";
+              const key = modelUsed || "default";
+
+              // 候选集：按库 + kind + facet 过滤，优先取“最近更新的文档”的内容（更符合当前库）
+              const docsInLib = db.sourceDocs
+                .filter((d) => allowLibs.has(String(d.libraryId ?? "")))
+                .slice()
+                .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
+              const docRank = new Map<string, number>();
+              docsInLib.forEach((d, idx) => docRank.set(d.id, idx));
+
+              const candidates: Array<{ artifact: KbArtifact; doc: KbSourceDoc }> = [];
+              const maxCandidates = 260; // 控制成本：A/B 测试时也不会太贵
+              for (const a of db.artifacts) {
+                if (kind && a.kind !== kind) continue;
+                if (facetIds.length > 0) {
+                  const setIds = new Set(a.facetIds ?? []);
+                  const any = facetIds.some((f) => setIds.has(f));
+                  if (!any) continue;
+                }
+                const doc = docsById.get(a.sourceDocId);
+                if (!doc) continue;
+                if (!allowLibs.has(String(doc.libraryId ?? ""))) continue;
+                candidates.push({ artifact: a, doc });
+                if (candidates.length >= maxCandidates) break;
+              }
+
+              // 如果按 artifact 遍历顺序拿到的不是“最近”，按 docRank 稍微偏向最近文档
+              candidates.sort((x, y) => (docRank.get(x.doc.id) ?? 999999) - (docRank.get(y.doc.id) ?? 999999));
+
+              let mutated = false;
+              const scored: Array<{ artifact: KbArtifact; doc: KbSourceDoc; score: number; snippet: string }> = [];
+              for (const c of candidates) {
+                const a = c.artifact;
+                let vec = a.embeddings?.[key];
+                if (!vec) {
+                  const text = String(a.content ?? "").slice(0, 1200);
+                  const emb = await fetchEmbedding({ model: embeddingModel, input: text });
+                  if (emb.ok && emb.embedding.length > 0) {
+                    vec = emb.embedding;
+                    a.embeddings = { ...(a.embeddings ?? {}), [key]: vec };
+                    mutated = true;
+                  }
+                }
+                if (!vec || !vec.length) continue;
+                const sim = cosineSim(qEmb.embedding, vec);
+                const snippet = makeSnippet({ text: a.content, matchIndex: -1, queryLen: 0 });
+                scored.push({ artifact: a, doc: c.doc, score: sim, snippet });
+              }
+
+              // 分组：按 doc 聚合，每篇取 topN
+              const byDoc = new Map<string, KbSearchGroup>();
+              for (const s of scored.sort((a, b) => b.score - a.score)) {
+                const g = byDoc.get(s.doc.id) ?? { sourceDoc: s.doc, bestScore: 0, hits: [] };
+                if (g.hits.length < perDocTopN) {
+                  g.hits.push({ artifact: s.artifact, score: s.score, snippet: s.snippet });
+                  if (s.score > g.bestScore) g.bestScore = s.score;
+                  byDoc.set(s.doc.id, g);
+                }
+                if (byDoc.size >= topDocs && g.hits.length >= perDocTopN) {
+                  // 轻量提前结束：已覆盖足够多文档时可不再扩
+                }
+              }
+
+              groups = Array.from(byDoc.values())
+                .sort((a, b) => b.bestScore - a.bestScore)
+                .slice(0, topDocs);
+
+              if (mutated) {
+                try {
+                  await saveDb({ baseDir, ownerKey, db });
+                } catch {
+                  // ignore cache write failures
+                }
+              }
+            }
           }
 
           return { ok: true, groups };

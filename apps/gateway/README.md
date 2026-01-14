@@ -9,6 +9,7 @@
 - 已实现：
   - 邮箱验证码登录（开发期可返回 `devCode`）+ JWT
   - OpenAI-compatible 模型代理（SSE）：`GET /api/llm/models`、`POST /api/llm/chat/stream`
+  - Embeddings 代理（用于 Desktop 侧 `kb.search` 的向量重排/兜底召回与 A/B）：`GET /api/llm/embedding_models`、`POST /api/llm/embeddings`
   - `/api/health`
   - KB 最小搜索演示：`POST /api/kb/search`（对接 `packages/kb-core`）
   - 积分余额/流水与管理员充值接口（演示用）
@@ -37,5 +38,13 @@ npm run dev:gateway
 - `LLM_BASE_URL`：OpenAI-compatible base url（不要带 `/v1`，Gateway 会自动补）
 - `LLM_MODEL`：默认模型 id
 - `LLM_API_KEY`：密钥
+
+如需启用 Embeddings 代理（推荐，用于 KB 检索向量重排/A-B）：
+- `LLM_EMBED_MODELS`：逗号分隔的 embedding 模型列表（第一项为默认）
+- `LLM_EMBED_API_KEY`：可选（默认回退到 `LLM_CARD_API_KEY` 再回退 `LLM_API_KEY`）
+
+说明（与 Desktop 的本地 KB 联动）：
+- Desktop 的 `kb.search` 默认 `useVector=true`；当词法召回结果为空时，会走“向量兜底召回”（通过 `POST /api/llm/embeddings` 获取向量并重排候选）。
+- 你可以在工具参数里传 `embeddingModel` 来做 A/B（例如 `text-embedding-3-large` vs `Embedding-V1`）。
 
 

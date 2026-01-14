@@ -9,7 +9,7 @@
 ### 当前状态（已打通的最小闭环）
 - **Desktop**：三栏布局 + Dock Panel；Monaco Markdown 编辑器（Tab）；右侧 Agent（Plan/Agent/Chat）+ 流式输出 + Tool Blocks（Keep/Undo）。
 - **ReAct（开发期）**：Plan/Agent 模式支持 **XML `<tool_calls>` 工具调用**，由 **Gateway 编排运行**（`/api/agent/run/stream`），工具在 Desktop 本地执行并回传 `tool_result`，右侧以 Tool Blocks 展示，可 Keep/Undo。
-- **Gateway**：邮箱验证码登录（devCode）、OpenAI-compatible SSE 流式代理（`/api/llm/chat/stream`）、模型列表（`/api/llm/models`）、积分与流水接口、KB 最小搜索演示（对接 `packages/kb-core`）。
+- **Gateway**：邮箱验证码登录（devCode）、OpenAI-compatible SSE 流式代理（`/api/llm/chat/stream`）、模型列表（`/api/llm/models`）、Embeddings 代理（`/api/llm/embeddings`）、积分与流水接口、KB 最小搜索演示（对接 `packages/kb-core`）。
 
 ### 右侧 Agent 输出（约定）
 - **流式输出**：像 Cursor 一样边生成边显示，可随时停止/取消 Run
@@ -78,5 +78,8 @@ npm run dev:admin
 - **第一步（抽卡任务）**：在“抽卡任务”页点 **▶** 开始；支持 **⏸** 暂停、**■** 停止。会为每篇文档生成要素卡（hook/thesis/ending/one_liner/outline）。
 - **第二步（生成风格手册）**：在“抽卡任务”页点“生成风格手册”入队，再点 **▶** 执行；结果会生成 `Style Profile + 21+1` 维度写法手册卡，并落到一个“【仿写手册】”虚拟文档下。
 - **关联右侧 Agent**：在“库”页点“关联到右侧”，右侧输入区会显示 `KB N库`；Agent 运行时会自动注入已关联库的“仿写手册”，并可调用工具 `kb.search` 检索更多素材。
+- **仿写检索（强烈建议）**：仿写/按库风格改写时，优先让 Agent 先调用 `kb.search` 拉样例（优先 `kind=paragraph/outline`），再开始写稿；必要时可指定 `embeddingModel` 做 A/B 测试（见 `env.example` 的 `LLM_EMBED_MODELS`）。
+  - **两段式检索（关键）**：`kb.search` 默认“先词法召回”；若词法 0 命中且 `useVector=true`，会启用**向量兜底召回**（从目标库内候选集中计算 embedding，相似度重排后按 `source_doc` 分组返回），确保像“反差破题/五环结构”这类概念型 query 也能命中。
+  - **缓存策略**：embedding 会按 `KbArtifact.embeddings[embeddingModel]` 缓存在本地 KB 数据中，减少重复调用与费用。
 
 
