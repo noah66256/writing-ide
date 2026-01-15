@@ -15,6 +15,11 @@ import {
 type ModelDraft = AiModelDto & { apiKeyInput?: string; clearApiKey?: boolean };
 type StageDraft = Pick<AiStageDto, "stage" | "name" | "description" | "modelId" | "temperature" | "maxTokens" | "isEnabled">;
 
+type ModelDraftUi = ModelDraft & {
+  priceInInput?: string;
+  priceOutInput?: string;
+};
+
 function endpointLabel(endpoint: string) {
   const e = String(endpoint || "");
   if (/\/embeddings/i.test(e)) return "Embeddings";
@@ -59,7 +64,15 @@ export function LlmPage() {
           isEnabled: s.isEnabled,
         })),
       );
-      setModels((res.models ?? []).map((m) => ({ ...m, apiKeyInput: "", clearApiKey: false })));
+      setModels(
+        (res.models ?? []).map((m) => ({
+          ...m,
+          apiKeyInput: "",
+          clearApiKey: false,
+          priceInInput: m.priceInCnyPer1M === null ? "" : String(m.priceInCnyPer1M),
+          priceOutInput: m.priceOutCnyPer1M === null ? "" : String(m.priceOutCnyPer1M),
+        })),
+      );
     } catch (e: any) {
       const err = e as ApiError;
       setError(`加载 AI 配置失败：${err.code}`);
@@ -116,13 +129,20 @@ export function LlmPage() {
     }
   };
 
-  const saveModel = async (m: ModelDraft) => {
+  const saveModel = async (m: ModelDraftUi) => {
     setError("");
     setNotice("");
-    const priceIn = m.priceInCnyPer1M === null ? null : Number(m.priceInCnyPer1M);
-    const priceOut = m.priceOutCnyPer1M === null ? null : Number(m.priceOutCnyPer1M);
-    if (priceIn !== null && (!Number.isFinite(priceIn) || priceIn < 0)) return setError("输入单价无效");
-    if (priceOut !== null && (!Number.isFinite(priceOut) || priceOut < 0)) return setError("输出单价无效");
+
+    const inStr = typeof m.priceInInput === "string" ? m.priceInInput.trim() : m.priceInCnyPer1M === null ? "" : String(m.priceInCnyPer1M);
+    const outStr = typeof m.priceOutInput === "string" ? m.priceOutInput.trim() : m.priceOutCnyPer1M === null ? "" : String(m.priceOutCnyPer1M);
+
+    if (!inStr) return setError("输入单价不能为空（元/1,000,000 tokens）");
+    if (!outStr) return setError("输出单价不能为空（元/1,000,000 tokens）");
+
+    const priceIn = Number(inStr);
+    const priceOut = Number(outStr);
+    if (!Number.isFinite(priceIn) || priceIn < 0) return setError("输入单价无效");
+    if (!Number.isFinite(priceOut) || priceOut < 0) return setError("输出单价无效");
 
     setBusy(true);
     try {
@@ -306,6 +326,9 @@ export function LlmPage() {
             const keyTag = m.hasApiKey ? "tagGreen" : "tagRed";
             const keyText = m.hasApiKey ? `Key ${m.apiKeyMasked || "****"}` : "无 Key";
 
+            const testTagClass = !m.testResult ? "" : m.testResult.ok ? "tagGreen" : "tagRed";
+            const testText = !m.testResult ? "未测速" : m.testResult.ok ? `OK ${m.testResult.latencyMs ?? "-"}ms` : `FAIL ${m.testResult.status ?? "-"}`;
+
             return (
               <div key={m.id} className="modelCard">
                 <div className="modelCardTop">
@@ -313,6 +336,7 @@ export function LlmPage() {
                     <div className="modelName">{m.model}</div>
                     <span className={`tag ${kindTag}`}>{kind}</span>
                     <span className={`tag ${keyTag}`}>{keyText}</span>
+                    <span className={`tag ${testTagClass}`}>{testText}</span>
                     {m.billingGroup ? <span className="tag">{`group ${m.billingGroup}`}</span> : null}
                   </div>
 
@@ -378,20 +402,20 @@ export function LlmPage() {
                     <div className="modelDouble">
                       <input
                         className="input"
-                        value={m.priceInCnyPer1M === null ? "" : String(m.priceInCnyPer1M)}
+                        value={(m as any).priceInInput ?? (m.priceInCnyPer1M === null ? "" : String(m.priceInCnyPer1M))}
                         onChange={(e) =>
                           setModels((prev) =>
-                            prev.map((x) => (x.id === m.id ? { ...x, priceInCnyPer1M: e.target.value ? Number(e.target.value) : null } : x)),
+                            prev.map((x) => (x.id === m.id ? ({ ...x, priceInInput: e.target.value } as any) : x)),
                           )
                         }
                         placeholder="in"
                       />
                       <input
                         className="input"
-                        value={m.priceOutCnyPer1M === null ? "" : String(m.priceOutCnyPer1M)}
+                        value={(m as any).priceOutInput ?? (m.priceOutCnyPer1M === null ? "" : String(m.priceOutCnyPer1M))}
                         onChange={(e) =>
                           setModels((prev) =>
-                            prev.map((x) => (x.id === m.id ? { ...x, priceOutCnyPer1M: e.target.value ? Number(e.target.value) : null } : x)),
+                            prev.map((x) => (x.id === m.id ? ({ ...x, priceOutInput: e.target.value } as any) : x)),
                           )
                         }
                         placeholder="out"
