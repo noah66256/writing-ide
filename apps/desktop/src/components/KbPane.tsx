@@ -15,7 +15,11 @@ export function KbPane() {
   const setCurrentLibrary = useKbStore((s) => s.setCurrentLibrary);
 
   const attached = useRunStore((s) => s.kbAttachedLibraryIds ?? []);
-  const toggleAttached = (id: string) => useRunStore.getState().toggleKbAttachedLibrary(id);
+  const toggleAttached = async (id: string) => {
+    // 确保库元信息（purpose/facetPack 等）已加载，否则 Context Pack 里可能只有 {id,name:id} 导致 Gateway 闸门无法识别风格库
+    await refreshLibraries().catch(() => void 0);
+    useRunStore.getState().toggleKbAttachedLibrary(id);
+  };
 
   const [msg, setMsg] = useState<string>("");
   const currentName = useMemo(() => libraries.find((l) => l.id === currentLibraryId)?.name ?? "", [libraries, currentLibraryId]);
@@ -106,7 +110,7 @@ export function KbPane() {
                       <button
                         className={`btn btnIcon ${isAttached ? "btnPrimary" : ""}`}
                         type="button"
-                        onClick={() => toggleAttached(l.id)}
+                        onClick={() => void toggleAttached(l.id)}
                         disabled={isLoading}
                         title="关联到右侧 Agent（多选）"
                       >

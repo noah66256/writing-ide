@@ -339,7 +339,7 @@ export const RefComposer = forwardRef<
       onKeyDown={(e) => {
         if ((e as any).isComposing) return;
         if (e.key === "Enter" && props.onEnterSend) {
-          if (e.ctrlKey || e.metaKey) return; // Ctrl/⌘ + Enter：换行（默认行为）
+          if (e.shiftKey || e.ctrlKey || e.metaKey) return; // Shift/Ctrl/⌘ + Enter：换行（默认行为）
           e.preventDefault();
           props.onEnterSend();
           return;

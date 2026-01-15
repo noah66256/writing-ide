@@ -38,6 +38,76 @@ export type ToolDefinition = {
   run: (args: Record<string, unknown>, ctx: { mode: Mode }) => Promise<ToolExecResult> | ToolExecResult;
 };
 
+function gatewayBaseUrl() {
+  try {
+    return String((import.meta as any).env?.VITE_GATEWAY_URL ?? "").trim().replace(/\/+$/g, "");
+  } catch {
+    return "";
+  }
+}
+
+function normalizeTextForStats(text: string) {
+  return String(text ?? "").replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+}
+
+function splitSentences(text: string) {
+  const t = normalizeTextForStats(text);
+  const parts = t
+    .split(/[\n。！？!?]+/g)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return parts.length ? parts : t.trim() ? [t.trim()] : [];
+}
+
+function countRegex(text: string, re: RegExp) {
+  const m = text.match(re);
+  return m ? m.length : 0;
+}
+
+function clamp01(x: number) {
+  if (!Number.isFinite(x)) return 0;
+  return Math.max(0, Math.min(1, x));
+}
+
+function computeDraftStats(text: string) {
+  const t = normalizeTextForStats(text);
+  const chars = t.length;
+  const sentences = splitSentences(t);
+  const sentenceCount = sentences.length;
+
+  const avgSentenceLen = sentenceCount ? sentences.reduce((a, s) => a + s.length, 0) / sentenceCount : 0;
+  const shortSentenceRate = sentenceCount ? sentences.filter((s) => s.length <= 12).length / sentenceCount : 0;
+
+  const questionSentences = sentenceCount
+    ? sentences.filter((s) => /[？?]/.test(s) || /(吗|呢|为什么|怎么|何以|问题来了)/.test(s)).length
+    : 0;
+  const questionRatePer100Sentences = sentenceCount ? (questionSentences / sentenceCount) * 100 : 0;
+
+  const exclaimSentences = sentenceCount ? sentences.filter((s) => /[！!]/.test(s)).length : 0;
+  const exclaimRatePer100Sentences = sentenceCount ? (exclaimSentences / sentenceCount) * 100 : 0;
+
+  const per1k = (n: number) => (chars ? (n / chars) * 1000 : 0);
+  const firstPersonPer1kChars = per1k(countRegex(t, /我|咱|咱们|我们/g));
+  const secondPersonPer1kChars = per1k(countRegex(t, /你|你们/g));
+  const particlePer1kChars = per1k(countRegex(t, /啊|呢|吧|呀|哎|诶|呐/g));
+  const digitPer1kChars = per1k(countRegex(t, /\d/g));
+
+  return {
+    chars,
+    sentences: sentenceCount,
+    stats: {
+      questionRatePer100Sentences: Number(questionRatePer100Sentences.toFixed(2)),
+      exclaimRatePer100Sentences: Number(exclaimRatePer100Sentences.toFixed(2)),
+      avgSentenceLen: Number(avgSentenceLen.toFixed(2)),
+      shortSentenceRate: Number(clamp01(shortSentenceRate).toFixed(4)),
+      firstPersonPer1kChars: Number(firstPersonPer1kChars.toFixed(2)),
+      secondPersonPer1kChars: Number(secondPersonPer1kChars.toFixed(2)),
+      particlePer1kChars: Number(particlePer1kChars.toFixed(2)),
+      digitPer1kChars: Number(digitPer1kChars.toFixed(2)),
+    },
+  };
+}
+
 function sanitizeFileName(input: string) {
   let s = String(input ?? "").trim();
   s = s.replace(/\s+/g, " ");
@@ -447,6 +517,10 @@ const tools: ToolDefinition[] = [
       { name: "kind", desc: '可选：artifact kind（"card"|"outline"|"paragraph"），默认 card' },
       { name: "libraryIds", desc: "可选：库 ID 数组；不传则用右侧已关联库" },
       { name: "facetIds", desc: "可选：outlineFacet id 数组（多选）" },
+      { name: "cardTypes", desc: "可选：仅 kind=card 时生效；限制 cardType（例如 hook/one_liner/ending/outline/thesis）" },
+      { name: "anchorParagraphIndexMax", desc: "可选：只搜前 N 段（开头样例；paragraphIndex < N）" },
+      { name: "anchorFromEndMax", desc: "可选：只搜距结尾 N 段内（结尾样例）" },
+      { name: "debug", desc: "可选：返回检索诊断信息（默认 true）" },
       { name: "perDocTopN", desc: "每篇文档最多返回多少条命中（默认 3）" },
       { name: "topDocs", desc: "最多返回多少篇文档（默认 12）" },
       { name: "useVector", desc: "可选：是否用向量做重排（默认 true；需要 Gateway 配置 embeddings 代理）" },
@@ -461,6 +535,10 @@ const tools: ToolDefinition[] = [
       const kindRaw = String(args.kind ?? "card").trim();
       const kind = (kindRaw === "outline" || kindRaw === "paragraph" || kindRaw === "card" ? kindRaw : "card") as any;
       const facetIds = Array.isArray(args.facetIds) ? (args.facetIds as any[]).map((x) => String(x ?? "").trim()).filter(Boolean) : [];
+      const cardTypes = Array.isArray(args.cardTypes) ? (args.cardTypes as any[]).map((x) => String(x ?? "").trim()).filter(Boolean) : [];
+      const anchorParagraphIndexMax = typeof args.anchorParagraphIndexMax === "number" ? Math.max(0, Math.floor(args.anchorParagraphIndexMax)) : undefined;
+      const anchorFromEndMax = typeof args.anchorFromEndMax === "number" ? Math.max(0, Math.floor(args.anchorFromEndMax)) : undefined;
+      const debug = args.debug === undefined ? true : Boolean(args.debug);
       const perDocTopN = typeof args.perDocTopN === "number" ? Math.max(1, Math.floor(args.perDocTopN)) : 3;
       const topDocs = typeof args.topDocs === "number" ? Math.max(1, Math.floor(args.topDocs)) : 12;
       const useVector = args.useVector === undefined ? true : Boolean(args.useVector);
@@ -470,7 +548,7 @@ const tools: ToolDefinition[] = [
       const libraryIds = explicitLibs.length ? explicitLibs : attached;
       if (!libraryIds.length) return { ok: false, error: "NO_LIBRARY_SELECTED" };
 
-      const ret = await useKbStore.getState().searchForAgent({ query, kind, facetIds, libraryIds, perDocTopN, topDocs, useVector, embeddingModel });
+      const ret = await useKbStore.getState().searchForAgent({ query, kind, facetIds, cardTypes, anchorParagraphIndexMax, anchorFromEndMax, debug, libraryIds, perDocTopN, topDocs, useVector, embeddingModel });
       if (!ret.ok) return { ok: false, error: ret.error ?? "SEARCH_FAILED" };
 
       // 输出精简：按文档分组
@@ -492,7 +570,143 @@ const tools: ToolDefinition[] = [
         })),
       }));
 
-      return { ok: true, output: { ok: true, query, kind, libraryIds, useVector, embeddingModel: embeddingModel ?? null, groups }, undoable: false };
+      return { ok: true, output: { ok: true, query, kind, libraryIds, useVector, embeddingModel: embeddingModel ?? null, groups, debug: (ret as any).debug ?? null }, undoable: false };
+    },
+  },
+
+  {
+    name: "lint.style",
+    description:
+      "风格 Linter：对照已绑定的风格库（purpose=style）的统计指纹/口癖/样例，找出候选稿“不像点”，并给出 rewritePrompt。",
+    args: [
+      { name: "text", required: false, desc: "要检查的候选稿文本（text/path 二选一必填）" },
+      { name: "path", required: false, desc: "要检查的文件路径（text/path 二选一必填；会优先读取提案态内容）" },
+      { name: "libraryIds", required: false, desc: "可选：风格库 ID 数组；不传则默认使用右侧已绑定的风格库（purpose=style）" },
+      { name: "model", required: false, desc: "可选：用于 linter 的模型（默认用服务端 LLM_LINTER_MODEL/LLM_CARD_MODEL）" },
+      { name: "maxIssues", required: false, desc: "可选：最多返回多少条“不像点”（默认 10）" },
+    ],
+    riskLevel: "low",
+    applyPolicy: "proposal",
+    reversible: false,
+    run: async (args) => {
+      const textArg = typeof args.text === "string" ? String(args.text) : "";
+      const pathArg = typeof args.path === "string" ? String(args.path) : "";
+      if (!textArg && !pathArg) return { ok: false, error: "MISSING_TEXT_OR_PATH" };
+
+      const draftText = await (async () => {
+        if (textArg) return textArg;
+        const p0 = normalizeRelPath(pathArg);
+        if (!p0) return "";
+        const proj = useProjectStore.getState();
+        const file = proj.getFileByPath(p0);
+        if (!file) return "";
+        const disk = await proj.ensureLoaded(file.path).catch(() => file.content ?? "");
+        const virt = getVirtualFileContentFromPendingProposals(file.path);
+        return virt?.content ?? disk ?? "";
+      })();
+
+      if (!draftText.trim()) return { ok: false, error: "EMPTY_DRAFT" };
+
+      // 选择风格库（优先 purpose=style）
+      const explicitLibs = Array.isArray(args.libraryIds) ? (args.libraryIds as any[]).map((x) => String(x ?? "").trim()).filter(Boolean) : [];
+      const attached = useRunStore.getState().kbAttachedLibraryIds ?? [];
+      await useKbStore.getState().refreshLibraries().catch(() => void 0);
+      const libsMeta = useKbStore.getState().libraries ?? [];
+      const metaById = new Map(libsMeta.map((l: any) => [String(l.id ?? ""), l]));
+      const candidates = (explicitLibs.length ? explicitLibs : attached).map((x: any) => String(x ?? "").trim()).filter(Boolean);
+      const styleLibIds = candidates.filter((id: string) => String(metaById.get(id)?.purpose ?? "") === "style");
+      const libraryIds = (styleLibIds.length ? styleLibIds : candidates).slice(0, 6);
+      if (!libraryIds.length) return { ok: false, error: "NO_LIBRARY_SELECTED" };
+
+      const base = gatewayBaseUrl();
+      const url = base ? `${base}/api/kb/dev/lint_style` : "/api/kb/dev/lint_style";
+
+      const draftFp = computeDraftStats(draftText);
+      const librariesPayload: any[] = [];
+
+      const isPlaybookDoc = (doc: any) => {
+        const rel = String(doc?.importedFrom?.kind === "project" ? doc?.importedFrom?.relPath ?? "" : "").trim();
+        return rel.startsWith("__kb_playbook__/library/");
+      };
+
+      for (const libId of libraryIds) {
+        const meta = metaById.get(libId);
+        const name = String(meta?.name ?? libId);
+
+        const fpRet = await useKbStore.getState().getLatestLibraryFingerprint(libId).catch(() => ({ ok: false } as any));
+        const snapshot = fpRet?.ok ? (fpRet as any).snapshot : null;
+
+        // 样例：优先取“最近片段”（不走向量，避免成本/超时）
+        const sret = await useKbStore
+          .getState()
+          .searchForAgent({
+            query: "__lint_style_samples__",
+            kind: "paragraph",
+            libraryIds: [libId],
+            perDocTopN: 3,
+            topDocs: 6,
+            useVector: false,
+            debug: false,
+          } as any)
+          .catch(() => ({ ok: false } as any));
+
+        const samples: any[] = [];
+        if (sret?.ok && Array.isArray((sret as any).groups)) {
+          for (const g of (sret as any).groups) {
+            const doc = g?.sourceDoc;
+            if (!doc || isPlaybookDoc(doc)) continue;
+            for (const h of (g?.hits ?? []) as any[]) {
+              const a = h?.artifact;
+              const content = String(a?.content ?? "").replace(/\s+/g, " ").trim();
+              if (!content) continue;
+              samples.push({
+                docId: String(doc?.id ?? ""),
+                docTitle: String(doc?.title ?? ""),
+                paragraphIndex: typeof a?.anchor?.paragraphIndex === "number" ? a.anchor.paragraphIndex : undefined,
+                text: content.slice(0, 1200),
+              });
+              if (samples.length >= 24) break;
+            }
+            if (samples.length >= 24) break;
+          }
+        }
+
+        librariesPayload.push({
+          id: libId,
+          name,
+          corpus: snapshot?.corpus ?? undefined,
+          stats: snapshot?.stats ?? undefined,
+          topNgrams: Array.isArray(snapshot?.topNgrams) ? snapshot.topNgrams.slice(0, 16) : undefined,
+          samples: samples.slice(0, 24),
+        });
+      }
+
+      const model = typeof args.model === "string" ? String(args.model).trim() : "";
+      const maxIssues = typeof args.maxIssues === "number" ? Math.max(3, Math.min(24, Math.floor(args.maxIssues))) : 10;
+
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: model || undefined,
+            maxIssues,
+            draft: { text: draftText, chars: draftFp.chars, sentences: draftFp.sentences, stats: draftFp.stats },
+            libraries: librariesPayload,
+          }),
+        });
+        const json = await res.json().catch(() => null);
+        if (!res.ok) {
+          const msg = json?.error ? String(json.error) : `HTTP_${res.status}`;
+          const hint = json?.hint ? String(json.hint) : "";
+          const detail = json?.message ? String(json.message) : json?.detail ? String(json.detail) : "";
+          return { ok: false, error: hint ? `${msg}: ${hint}` : msg, output: { ok: false, msg, hint, detail } };
+        }
+        return { ok: true, output: { ok: true, ...(json ?? {}), libraryIds }, undoable: false };
+      } catch (e: any) {
+        const msg = e?.message ? String(e.message) : String(e);
+        return { ok: false, error: `LINTER_FETCH_FAILED:${msg}` };
+      }
     },
   },
   {

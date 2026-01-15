@@ -1,9 +1,9 @@
-import { Fragment } from "react";
+import { Fragment, type ReactElement } from "react";
 
-function renderInline(text: string): Array<string | JSX.Element> {
+function renderInline(text: string): Array<string | ReactElement> {
   // inline code: `code`
   const parts = text.split(/(`[^`]+`)/g);
-  const out: Array<string | JSX.Element> = [];
+  const out: Array<string | ReactElement> = [];
 
   for (let i = 0; i < parts.length; i += 1) {
     const p = parts[i] ?? "";
@@ -39,7 +39,7 @@ export function RichText(props: { text: string }) {
   const text = props.text ?? "";
   const lines = text.split("\n");
 
-  const blocks: JSX.Element[] = [];
+  const blocks: ReactElement[] = [];
 
   let i = 0;
   while (i < lines.length) {
@@ -162,7 +162,3 @@ export function RichText(props: { text: string }) {
 
   return <div className="richText">{blocks}</div>;
 }
-
-
-
-

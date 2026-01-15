@@ -33,6 +33,27 @@ export const TOOL_LIST: ToolMeta[] = [
     modes: ["plan", "agent"],
   },
   {
+    name: "lint.style",
+    description:
+      "风格 Linter（强烈建议用于仿写/改写/润色终稿）。\n" +
+      "给定一段“候选稿”（text 或 path 指向的文件内容），以及绑定的风格库（purpose=style）的统计指纹/高频口癖/少量原文样例，使用强模型（默认 gpt-5）做对照检查：\n" +
+      "- 找出“不像”的具体点（含证据与可量化差异）\n" +
+      "- 生成一段可直接喂给工作模型（如 deepseek）的 rewritePrompt，用来二次改写\n" +
+      "\n" +
+      "【推荐工作流】（风格库已绑定且任务为写作类）：\n" +
+      "1) kb.search(kind=paragraph/outline, 只搜风格库) 拉 3–8 条可抄样例\n" +
+      "2) 先产出一版候选稿（不要立刻写入文件）\n" +
+      "3) lint.style(text=候选稿) → 拿 rewritePrompt 再改一版 → 最后 doc.write/doc.applyEdits\n",
+    args: [
+      { name: "text", required: false, desc: "要检查的候选稿文本（text/path 二选一必填）" },
+      { name: "path", required: false, desc: "要检查的文件路径（text/path 二选一必填；会优先读取提案态内容）" },
+      { name: "libraryIds", required: false, desc: "可选：风格库 ID 数组；不传则默认使用右侧已绑定的风格库（purpose=style）" },
+      { name: "model", required: false, desc: "可选：用于 linter 的强模型（默认优先 LLM_LINTER_MODEL，其次 LLM_CARD_MODEL）" },
+      { name: "maxIssues", required: false, desc: "可选：最多返回多少条“不像点”（默认 10）" },
+    ],
+    modes: ["plan", "agent"],
+  },
+  {
     name: "run.mainDoc.get",
     description: "读取本次 Run 的 Main Doc（主文档/主线）。",
     args: [],

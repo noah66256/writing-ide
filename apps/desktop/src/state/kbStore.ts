@@ -289,13 +289,17 @@ type KbState = {
     query: string;
     kind?: KbArtifactKind;
     facetIds?: string[];
+    cardTypes?: string[];
+    anchorParagraphIndexMax?: number;
+    anchorFromEndMax?: number;
+    debug?: boolean;
     libraryIds: string[];
     perDocTopN?: number;
     topDocs?: number;
     // 向量检索：默认开启；embeddingModel 可用于 A/B（例如 text-embedding-3-large / Embedding-V1）
     useVector?: boolean;
     embeddingModel?: string;
-  }) => Promise<{ ok: boolean; groups?: KbSearchGroup[]; error?: string }>;
+  }) => Promise<{ ok: boolean; groups?: KbSearchGroup[]; error?: string; debug?: any }>;
 };
 
 function nowIso() {
@@ -492,11 +496,20 @@ async function loadDb(args: { baseDir: string; ownerKey: string }): Promise<KbDb
 
     // migration: if no libraries provided, create a migrated library to hold existing docs
     const migratedLibId = "kb_lib_migrated";
-    const ensuredLibs =
+    const ensuredLibs: KbLibrary[] =
       libs.length > 0
-        ? libs
+        ? (libs as KbLibrary[])
         : rawSourceDocs.length > 0
-          ? [{ id: migratedLibId, name: "历史导入", purpose: "material", facetPackId: "speech_marketing_v1", createdAt: t, updatedAt: t }]
+          ? ([
+              {
+                id: migratedLibId,
+                name: "历史导入",
+                purpose: "material" as const,
+                facetPackId: "speech_marketing_v1",
+                createdAt: t,
+                updatedAt: t,
+              },
+            ] as KbLibrary[])
           : [];
 
     const sourceDocs: KbSourceDoc[] = rawSourceDocs.map((d) => {
@@ -1226,14 +1239,51 @@ async function postClassifyGenre(args: {
 }
 
 function scoreArtifactText(args: { haystack: string; query: string }) {
-  const q = args.query.trim().toLowerCase();
+  const q = String(args.query ?? "").trim().toLowerCase();
   if (!q) return { score: 0, idx: -1 };
-  const h = args.haystack.toLowerCase();
-  const idx = h.indexOf(q);
-  if (idx < 0) return { score: 0, idx: -1 };
-  // simple: early hit + length
-  const score = Math.max(1, 1000 - idx) + Math.min(120, q.length) * 3;
-  return { score, idx };
+  const h = String(args.haystack ?? "").toLowerCase();
+  if (!h) return { score: 0, idx: -1 };
+
+  // 兼容“多关键词/空格分隔”的 query：否则像 "中国 反制 日本 稀土" 在中文正文里几乎必然 0 命中
+  // 性能：同一个 query 会在一次检索里被反复用于 N 个 artifact，做一个小缓存避免重复分词
+  const queryPartsCache = (scoreArtifactText as any)._qCache as Map<string, string[]> | undefined;
+  const cache: Map<string, string[]> =
+    queryPartsCache ?? (((scoreArtifactText as any)._qCache = new Map<string, string[]>()) as Map<string, string[]>);
+  let parts = cache.get(q);
+  if (!parts) {
+    const rawTokens = q.match(/[0-9a-z\u4e00-\u9fff]+/gi) ?? [];
+    const tokens = rawTokens
+      .map((s) => String(s ?? "").trim().toLowerCase())
+      .filter(Boolean)
+      .filter((s) => s.length >= 2); // 过滤过短 token（噪声大）
+    parts = tokens.length ? Array.from(new Set(tokens)) : [q];
+    cache.set(q, parts);
+    // 简单限额：避免无限增长
+    if (cache.size > 64) {
+      const first = cache.keys().next().value;
+      if (first) cache.delete(first);
+    }
+  }
+
+  let score = 0;
+  let bestIdx = -1;
+  let hitCount = 0;
+  for (const t of parts) {
+    const idx = h.indexOf(t);
+    if (idx < 0) continue;
+    hitCount += 1;
+    if (bestIdx < 0 || idx < bestIdx) bestIdx = idx;
+    // 简单启发式：更早出现 + token 更长 => 更相关
+    const early = Math.max(1, 900 - idx);
+    const len = Math.min(120, t.length) * 6;
+    score += early + len;
+  }
+  if (!hitCount) return { score: 0, idx: -1 };
+
+  // 覆盖率加成：命中 token 越多越靠前
+  const coverage = hitCount / Math.max(1, parts.length);
+  score += Math.round(Math.min(1, coverage) * 800);
+  return { score, idx: bestIdx };
 }
 
 function cosineSim(a: number[], b: number[]) {
@@ -2345,6 +2395,8 @@ export const useKbStore = create<KbState>()(
         };
         set({ isLoading: true, error: null });
 
+        const errors: Array<{ path: string; error: string }> = [];
+
         try {
           const db = await loadDb({ baseDir, ownerKey });
           if (!db.libraries.some((l) => l.id === libId)) {
@@ -2356,7 +2408,6 @@ export const useKbStore = create<KbState>()(
           const kbApi = window.desktop?.kb;
           if (!kbApi) throw new Error("NO_KB_API");
 
-          const errors: Array<{ path: string; error: string }> = [];
           const unique = Array.from(new Set((absPaths ?? []).map((p) => String(p ?? "").trim()).filter(Boolean)));
           for (const absPath of unique) {
             const format = extToFormat(absPath);
@@ -2579,8 +2630,8 @@ export const useKbStore = create<KbState>()(
               const rawCardType = typeof c?.cardType === "string" ? String(c.cardType).trim() : "";
               const cardType =
                 ["hook", "thesis", "ending", "one_liner", "outline", "other"].includes(rawCardType) ? rawCardType : "other";
-              const rawFacetIds = Array.isArray(c?.facetIds) ? c.facetIds.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
-              const facetIds = rawFacetIds.filter((x) => packFacetIdSet.has(x)).slice(0, 6);
+              const rawFacetIds: string[] = Array.isArray(c?.facetIds) ? c.facetIds.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
+              const facetIds: string[] = rawFacetIds.filter((x: string) => packFacetIdSet.has(x)).slice(0, 6);
               const safeFacetIds = facetIds.length ? facetIds : [fallbackFacetId];
 
               newArts.push({
@@ -2710,6 +2761,67 @@ export const useKbStore = create<KbState>()(
             };
           }
 
+          // =========================
+          // 0) 画像（styleProfile）：优先用“本地确定性统计版”秒出，避免上游慢/超时导致整个手册无法生成
+          // =========================
+          const docTexts = docs
+            .map((d) => ({ docId: d.id, docTitle: d.title, text: buildDocTextFromParagraphArtifacts({ docId: d.id, artifacts: db.artifacts }) }))
+            .filter((x) => x.text.trim());
+          const allText = docTexts.map((d) => d.text).join("\n\n");
+          const fp = computeTextFingerprintStats(allText);
+          const ngrams = computeTopNgrams({ docs: docTexts.map((d) => ({ docId: d.docId, text: d.text })), maxItems: 10 });
+
+          const pickEvidence = () => {
+            for (const a of docCards) {
+              const pi =
+                Array.isArray((a as any).evidenceParagraphIndices) && (a as any).evidenceParagraphIndices.length
+                  ? Number((a as any).evidenceParagraphIndices[0])
+                  : typeof a.anchor?.paragraphIndex === "number"
+                    ? Number(a.anchor.paragraphIndex)
+                    : 0;
+              const quote = String(a.content ?? "")
+                .replaceAll("\r\n", "\n")
+                .replaceAll("\r", "\n")
+                .replace(/```[\s\S]*?```/g, " ")
+                .replace(/^#{1,6}\s+/gm, "")
+                .replace(/\s+/g, " ")
+                .trim()
+                .slice(0, 60);
+              if (!quote) continue;
+              const docTitle = docById.get(a.sourceDocId)?.title ?? a.sourceDocId;
+              return [{ docId: a.sourceDocId, docTitle, paragraphIndex: Number.isFinite(pi) ? pi : 0, quote }];
+            }
+            const d0 = docsPayload[0];
+            if (!d0) return [];
+            const it0 = d0.items?.[0];
+            if (!it0) return [];
+            const pi = Number((it0.paragraphIndices ?? [0])[0] ?? 0);
+            const quote = String(it0.content ?? "").replace(/\s+/g, " ").trim().slice(0, 60);
+            return quote ? [{ docId: d0.id, docTitle: d0.title, paragraphIndex: Number.isFinite(pi) ? pi : 0, quote }] : [];
+          };
+
+          const pct = (x: number) => `${(Math.max(0, Math.min(1, x)) * 100).toFixed(1)}%`;
+          const stats = fp.stats as any;
+          const styleProfile: any = {
+            title: "写法画像（统计版）",
+            content:
+              [
+                `> 说明：该卡由本地确定性统计生成（不依赖上游模型），用于保证“生成风格手册”永远可用。`,
+                ``,
+                `- 样本：${docs.length} 篇 · ${fp.chars} 字符 · ${fp.sentences} 句`,
+                `- 问句率（每100句）：${stats.questionRatePer100Sentences ?? 0}；感叹率（每100句）：${stats.exclaimRatePer100Sentences ?? 0}`,
+                `- 平均句长：${stats.avgSentenceLen ?? 0}；短句率（<=12字）：${pct(stats.shortSentenceRate ?? 0)}`,
+                `- 我/我们密度（每1000字）：${stats.firstPersonPer1kChars ?? 0}；你/你们密度：${stats.secondPersonPer1kChars ?? 0}`,
+                `- 语气词密度（每1000字）：${stats.particlePer1kChars ?? 0}；数字密度：${stats.digitPer1kChars ?? 0}`,
+                ``,
+                `#### 高频口癖 Top（n-gram）`,
+                ...(ngrams.length
+                  ? ngrams.slice(0, 8).map((g) => `- ${g.text}（${g.per1kChars.toFixed(2)}/1k · 覆盖${Math.round(g.docCoverage * 100)}%文档）`)
+                  : [`- （样本不足，暂无稳定高频短语）`]),
+              ].join("\n") + "\n",
+            evidence: pickEvidence(),
+          };
+
           kbLog("info", "kb.playbook.request", {
             libId,
             facetCount: packFacetIds.length,
@@ -2717,10 +2829,9 @@ export const useKbStore = create<KbState>()(
             itemsTotal: docsPayload.reduce((s, d) => s + (d.items?.length ?? 0), 0),
           });
           // 分批生成（稳定性优先）：
-          // - 第一次用 part=full 生成 styleProfile（只带 1 个 facet，避免重复生成 styleProfile 浪费 token/时间）
           // - 其余 facets 用 part=facets 分批生成；若超时则对该批次二分递归（避免“7→4→2 全量重跑”造成 20min 等待）
           const facetById = new Map<string, any>();
-          let styleProfile: any = null;
+          // styleProfile 已由本地统计生成（可后续重跑覆盖）
 
           const isTimeoutErr = (msg: string) => /UPSTREAM_TIMEOUT|timeout|504/.test(String(msg ?? ""));
           const isAbortErr = (msg: string) => /aborted|AbortError|signal is aborted/i.test(String(msg ?? ""));
@@ -2728,8 +2839,7 @@ export const useKbStore = create<KbState>()(
           const mode: "lite" | "full" = docsPayload.length <= 2 && docsPayload.reduce((s, d) => s + (d.items?.length ?? 0), 0) <= 40 ? "lite" : "full";
 
           const merge = (ret: { styleProfile: any; playbookFacets: any[] }) => {
-            const sp = ret?.styleProfile;
-            if (!styleProfile && sp && String(sp?.content ?? "").trim()) styleProfile = sp;
+            // styleProfile 已由本地统计生成，稳定可用；不再用上游返回覆盖，避免不确定性与潜在报错
             for (const f of ret.playbookFacets ?? []) {
               const fid = String(f?.facetId ?? "").trim();
               if (!fid) continue;
@@ -2759,20 +2869,60 @@ export const useKbStore = create<KbState>()(
               if (!left.ok) return left;
               return await ensureFacetsChunk(facetIds.slice(mid));
             }
+            // 兜底：如果已经拆到最小仍失败（尤其是上游慢/504），就给“骨架版维度卡”并继续，保证不失败
+            if (facetIds.length === 1) {
+              const fid = String(facetIds[0] ?? "").trim();
+              if (fid && !facetById.has(fid)) {
+                const label = pack.facets.find((f) => f.id === fid)?.label ?? fid;
+                const candidates = docCards
+                  .filter((c) => Array.isArray((c as any).facetIds) && (c as any).facetIds.includes(fid))
+                  .slice(0, 6);
+                const typeCount: Record<string, number> = {};
+                for (const c of candidates) {
+                  const t = String((c as any).cardType ?? "other");
+                  typeCount[t] = (typeCount[t] ?? 0) + 1;
+                }
+                const examples = candidates.slice(0, 3).map((c) => {
+                  const t = String((c as any).cardType ?? "other");
+                  const title = String(c.title ?? "").trim() || "（无标题）";
+                  const snippet = String(c.content ?? "")
+                    .replaceAll("\r\n", "\n")
+                    .replaceAll("\r", "\n")
+                    .replace(/\s+/g, " ")
+                    .trim()
+                    .slice(0, 80);
+                  return `- [${t}] ${title}：${snippet}`;
+                });
+                const ev = pickEvidence();
+                facetById.set(fid, {
+                  facetId: fid,
+                  title: `（骨架版）${label}`,
+                  content:
+                    [
+                      `> 提示：上游生成超时/失败（${err.split("\n")[0] || "unknown"}），该维度已用“样本驱动骨架版”生成。可稍后重跑覆盖。`,
+                      ``,
+                      `#### 样本概况`,
+                      `- 命中要素卡：${candidates.length} 条`,
+                      `- 卡片类型分布：${Object.keys(typeCount).length ? Object.entries(typeCount).map(([k, v]) => `${k}×${v}`).join("，") : "（无）"}`,
+                      ``,
+                      `#### 代表例子（来自已抽要素卡）`,
+                      ...(examples.length ? examples : [`- （该维度样本不足）`]),
+                      ``,
+                      `#### 自检（通用）`,
+                      `- 这一段/这一节是否能用 1 句“硬结论句”概括？`,
+                      `- 是否有对应的证据/推演链支撑，而不是空判断？`,
+                    ].join("\n") + "\n",
+                  evidence: ev,
+                });
+                report({ generatedFacets: facetById.size, phase: "facets" });
+              }
+              if (!isAbortErr(err)) kbLog("warn", "kb.playbook.fallback_facet", { libId, facetId: fid, error: err });
+              return { ok: true };
+            }
             if (!isAbortErr(err)) kbLog("error", "kb.playbook.failed.batch", { libId, part: "facets", facetCount: facetIds.length, error: err });
             return { ok: false, error: err || "PLAYBOOK_FAILED" };
           };
 
-          // 1) 先生成一次 styleProfile（full，但 facetIds 只带 1 个维度）
-          const firstFacetIds = packFacetIds.slice(0, 1);
-          const first = await requestBatch(firstFacetIds, "full", { batchNo: 1, batchCount: 1, note: "styleProfile" });
-          if (!first.ok) {
-            const err = String(first.error ?? "");
-            if (!isAbortErr(err)) kbLog("error", "kb.playbook.failed.batch", { libId, part: "full", facetCount: firstFacetIds.length, error: err });
-            kbLog("error", "kb.playbook.failed", { libId, error: err });
-            return { ok: false, error: err || "PLAYBOOK_FAILED" };
-          }
-          merge(first);
           report({ generatedStyleProfile: true, generatedFacets: facetById.size, phase: "facets" });
 
           // 2) 其余 facets：初始每批 4 个；该批超时则二分递归
@@ -2790,12 +2940,10 @@ export const useKbStore = create<KbState>()(
           // 校验：必须覆盖全部 facetId（否则提示缺失）
           const missing = packFacetIds.filter((id) => !facetById.has(id));
           if (!styleProfile || missing.length) {
-            const msg =
-              `PLAYBOOK_INCOMPLETE\n` +
-              `- styleProfile: ${styleProfile ? "ok" : "missing"}\n` +
-              `- missingFacets(${missing.length}): ${missing.slice(0, 8).join(", ")}${missing.length > 8 ? "..." : ""}`;
-            kbLog("error", "kb.playbook.failed", { libId, error: msg });
-            return { ok: false, error: msg };
+            // 兜底：缺失 facet 也不再失败，统一补成骨架卡（避免“永远生成不了手册”）
+            for (const fid of missing) {
+              if (!facetById.has(fid)) facetById.set(fid, { facetId: fid, title: `（待补齐）${fid}`, content: `- （待补齐：该维度暂无足够样本或上游不可用）\n`, evidence: pickEvidence() });
+            }
           }
 
           const facetLabel = (id: string) => pack.facets.find((f) => f.id === id)?.label ?? id;
@@ -3216,6 +3364,10 @@ export const useKbStore = create<KbState>()(
         if (!query) return { ok: false, error: "EMPTY_QUERY" };
         const kind = args.kind;
         const facetIds = Array.isArray(args.facetIds) ? args.facetIds.map((x) => String(x ?? "").trim()).filter(Boolean) : [];
+        const cardTypes = Array.isArray(args.cardTypes) ? args.cardTypes.map((x) => String(x ?? "").trim()).filter(Boolean) : [];
+        const anchorParagraphIndexMax = typeof args.anchorParagraphIndexMax === "number" ? Math.max(0, Math.floor(args.anchorParagraphIndexMax)) : undefined;
+        const anchorFromEndMax = typeof args.anchorFromEndMax === "number" ? Math.max(0, Math.floor(args.anchorFromEndMax)) : undefined;
+        const debugEnabled = args.debug === undefined ? true : Boolean(args.debug);
         const perDocTopN = args.perDocTopN ?? 3;
         const topDocs = args.topDocs ?? 12;
         const libraryIds = Array.from(new Set((args.libraryIds ?? []).map((x) => String(x ?? "").trim()).filter(Boolean)));
@@ -3251,6 +3403,51 @@ export const useKbStore = create<KbState>()(
           const docsById = new Map(db.sourceDocs.map((d) => [d.id, d]));
           const hitsByDoc = new Map<string, KbSearchGroup>();
 
+          const debugOut: any = debugEnabled
+            ? {
+                query,
+                kind: kind ?? null,
+                facetIds: facetIds.slice(0, 16),
+                cardTypes: cardTypes.slice(0, 16),
+                anchorParagraphIndexMax: anchorParagraphIndexMax ?? null,
+                anchorFromEndMax: anchorFromEndMax ?? null,
+                useVector,
+                stages: { lex: { docs: 0, hits: 0 }, vector: { enabled: useVector, mode: null as null | 'rerank' | 'fallback' }, recentFallback: false },
+              }
+            : null;
+
+          const docMaxParaIndex = new Map<string, number>();
+          if (anchorFromEndMax !== undefined) {
+            for (const a of db.artifacts) {
+              if (a.kind !== 'paragraph') continue;
+              const doc = docsById.get(a.sourceDocId);
+              if (!doc) continue;
+              if (!allowLibs.has(String(doc.libraryId ?? ''))) continue;
+              const pi = Number(a.anchor?.paragraphIndex);
+              if (!Number.isFinite(pi)) continue;
+              const prev = docMaxParaIndex.get(doc.id);
+              if (prev === undefined || pi > prev) docMaxParaIndex.set(doc.id, pi);
+            }
+          }
+
+          const passesExtra = (a: KbArtifact) => {
+            if (cardTypes.length > 0 && a.kind === 'card') {
+              const t = String((a as any).cardType ?? '');
+              if (!cardTypes.includes(t)) return false;
+            }
+            if (anchorParagraphIndexMax !== undefined) {
+              const pi = Number(a.anchor?.paragraphIndex);
+              if (!Number.isFinite(pi) || pi >= anchorParagraphIndexMax) return false;
+            }
+            if (anchorFromEndMax !== undefined) {
+              const pi = Number(a.anchor?.paragraphIndex);
+              const maxPi = docMaxParaIndex.get(a.sourceDocId);
+              if (!Number.isFinite(pi) || maxPi === undefined) return false;
+              if (maxPi - pi >= anchorFromEndMax) return false;
+            }
+            return true;
+          };
+
           stage("正在知识库检索：词法召回…", { resetTimer: true });
           for (const a of db.artifacts) {
             if (kind && a.kind !== kind) continue;
@@ -3271,6 +3468,12 @@ export const useKbStore = create<KbState>()(
             hitsByDoc.set(doc.id, g);
           }
 
+
+          if (debugOut) {
+            debugOut.stages.lex.docs = hitsByDoc.size;
+            debugOut.stages.lex.hits = Array.from(hitsByDoc.values()).reduce((n, g) => n + (g.hits?.length ?? 0), 0);
+          }
+
           let groups = Array.from(hitsByDoc.values())
             .map((g) => ({
               ...g,
@@ -3285,6 +3488,7 @@ export const useKbStore = create<KbState>()(
 
           // 可选：向量重排（先词法召回，再对候选集做 embedding cosine similarity）
           if (useVector && groups.length > 0) {
+            if (debugOut) debugOut.stages.vector.mode = 'rerank';
             stage("正在知识库检索：向量检索（重排）…", { resetTimer: true });
             const q = query.slice(0, 800); // 控制 query 长度
             const qEmb = await fetchEmbedding({ model: embeddingModel, input: q });
@@ -3363,6 +3567,7 @@ export const useKbStore = create<KbState>()(
               .sort((a, b) => b.bestScore - a.bestScore)
               .slice(0, topDocs);
           } else if (useVector && groups.length === 0) {
+            if (debugOut) debugOut.stages.vector.mode = 'fallback';
             // 向量兜底召回：当词法召回为 0 时，仍可通过 embedding 从库内候选集中找相似内容
             stage("正在知识库检索：向量检索（兜底召回）…", { resetTimer: true });
             const q = query.slice(0, 800);
@@ -3380,7 +3585,7 @@ export const useKbStore = create<KbState>()(
               const artsByDoc = new Map<string, KbArtifact[]>();
               for (const a of db.artifacts) {
                 if (kind && a.kind !== kind) continue;
-                if (!docIdSet.has(a.sourceDocId)) continue;
+                    if (!docIdSet.has(a.sourceDocId)) continue;
                 if (facetIds.length > 0) {
                   const setIds = new Set(a.facetIds ?? []);
                   const any = facetIds.some((f) => setIds.has(f));
@@ -3466,8 +3671,41 @@ export const useKbStore = create<KbState>()(
             }
           }
 
+          // 兜底：如果仍无命中（例如 query 主题与库无关，且 embeddings 不可用），返回“最近片段”作为风格样例
+          // 目的：仿写时“宁可给一些可抄样例”，也不要空结果导致 Agent 直接放弃检索。
+          if (groups.length === 0) {
+            stage("正在知识库检索：兜底（最近片段）…", { resetTimer: true });
+            const docsInLib = db.sourceDocs
+              .filter((d) => allowLibs.has(String(d.libraryId ?? "")))
+              .slice()
+              .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
+            const fallbackGroups: KbSearchGroup[] = [];
+            for (const doc of docsInLib) {
+              const hits = db.artifacts
+                .filter((a) => {
+                  if (a.sourceDocId !== doc.id) return false;
+                  if (kind && a.kind !== kind) return false;
+                  if (!passesExtra(a)) return false;
+                  if (facetIds.length > 0) {
+                    const setIds = new Set(a.facetIds ?? []);
+                    const any = facetIds.some((f) => setIds.has(f));
+                    if (!any) return false;
+                  }
+                  return true;
+                })
+                .slice()
+                .sort((a, b) => (Number(a.anchor?.paragraphIndex ?? 0) || 0) - (Number(b.anchor?.paragraphIndex ?? 0) || 0))
+                .slice(0, perDocTopN)
+                .map((a) => ({ artifact: a, score: 0, snippet: makeSnippet({ text: a.content, matchIndex: -1, queryLen: 0 }) }));
+              if (!hits.length) continue;
+              fallbackGroups.push({ sourceDoc: doc, bestScore: 0, hits });
+              if (fallbackGroups.length >= topDocs) break;
+            }
+            groups = fallbackGroups;
+          }
+
           // kb.search 完成：把状态留给上层（gatewayAgent 会设置“等待模型继续/生成…”）
-          return { ok: true, groups };
+          return debugOut ? { ok: true, groups, debug: debugOut } : { ok: true, groups };
         } catch (e: any) {
           return { ok: false, error: String(e?.message ?? e) };
         }

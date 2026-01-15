@@ -16,16 +16,11 @@ function stripCodeFences(text: string) {
 
 function extractXmlBlock(text: string): string | null {
   const t = stripCodeFences(text).trim();
-  const i1 = t.indexOf("<tool_calls");
-  if (i1 >= 0) {
-    const i2 = t.indexOf("</tool_calls>");
-    if (i2 >= 0) return t.slice(i1, i2 + "</tool_calls>".length);
-  }
-  const j1 = t.indexOf("<tool_call");
-  if (j1 >= 0) {
-    const j2 = t.indexOf("</tool_call>");
-    if (j2 >= 0) return t.slice(j1, j2 + "</tool_call>".length);
-  }
+  // 允许前后夹杂杂质（例如某些模型会输出 <|begin_of_sentence|>），只截取 XML 主体
+  const m1 = t.match(/<tool_calls\b[\s\S]*?<\/tool_calls\s*>/);
+  if (m1?.[0]) return m1[0];
+  const m2 = t.match(/<tool_call\b[\s\S]*?<\/tool_call\s*>/);
+  if (m2?.[0]) return m2[0];
   if (t.startsWith("<tool_calls") || t.startsWith("<tool_call")) return t;
   return null;
 }
@@ -50,19 +45,22 @@ export function parseToolCalls(text: string): ParsedToolCall[] | null {
   };
 
   const calls: ParsedToolCall[] = [];
-  const toolRe = /<tool_call\b[^>]*name\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/tool_call>/g;
+  // 容错：允许 name= 未加引号（部分模型偶发），并允许 </tool_call\s*>
+  const toolRe =
+    /<tool_call\b[^>]*name\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))[^>]*>([\s\S]*?)<\/tool_call\s*>/g;
   let m: RegExpExecArray | null;
   while ((m = toolRe.exec(xml))) {
-    const name = (m[1] ?? "").trim();
-    const body = m[2] ?? "";
+    const name = (m[1] ?? m[2] ?? m[3] ?? "").trim();
+    const body = m[4] ?? "";
     if (!name) continue;
     const args: Record<string, string> = {};
-    const argRe = /<arg\b[^>]*name\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/arg>/g;
+    const argRe =
+      /<arg\b[^>]*name\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))[^>]*>([\s\S]*?)<\/arg\s*>/g;
     let am: RegExpExecArray | null;
     while ((am = argRe.exec(body))) {
-      const argName = (am[1] ?? "").trim();
+      const argName = (am[1] ?? am[2] ?? am[3] ?? "").trim();
       if (!argName) continue;
-      args[argName] = stripCdata(am[2] ?? "");
+      args[argName] = stripCdata(am[4] ?? "");
     }
     calls.push({ name, args });
   }

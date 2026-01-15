@@ -504,7 +504,7 @@ export function AgentPane() {
                         placeholder="输入写作任务（例如：帮我写一条小红书爆款选题）…"
                         ref={historyTextareaRef}
                         onKeyDown={(e) => {
-                          if (e.isComposing) return;
+                          if ((e.nativeEvent as any)?.isComposing) return;
                           if (e.key === "Escape") {
                             e.preventDefault();
                             setEditingId(null);
@@ -513,8 +513,8 @@ export function AgentPane() {
                           }
                           if (e.key !== "Enter") return;
 
-                          // Ctrl/⌘ + Enter：换行（不提交）
-                          if (e.ctrlKey || e.metaKey) {
+                          // Shift/Ctrl/⌘ + Enter：换行（不提交）
+                          if (e.shiftKey || e.ctrlKey || e.metaKey) {
                             e.preventDefault();
                             const el = e.currentTarget;
                             const start = el.selectionStart ?? editingText.length;
@@ -902,7 +902,7 @@ export function AgentPane() {
         ) : null}
 
         <div style={{ color: "var(--muted)", fontSize: 12 }}>
-          快捷键：Enter 发送；Ctrl/⌘ + Enter 换行（Chat 模式不会调用写入类工具）。
+          快捷键：Enter 发送；Shift/Ctrl/⌘ + Enter 换行（Chat 模式不会调用写入类工具）。
         </div>
       </div>
 

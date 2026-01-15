@@ -106,6 +106,31 @@ function getEmbedEnv() {
   };
 }
 
+function getLinterEnv() {
+  // 默认策略：复用“抽卡模型/Key/BaseUrl”（LLM_CARD_*）作为 Style Linter 的强模型。
+  // 如需单独覆盖，再显式配置 LLM_LINTER_*。
+  const baseUrl =
+    String(process.env.LLM_CARD_BASE_URL ?? "").trim() ||
+    String(process.env.LLM_LINTER_BASE_URL ?? "").trim() ||
+    String(process.env.LLM_BASE_URL ?? "").trim();
+  const apiKey =
+    String(process.env.LLM_CARD_API_KEY ?? "").trim() ||
+    String(process.env.LLM_LINTER_API_KEY ?? "").trim() ||
+    String(process.env.LLM_API_KEY ?? "").trim();
+  const defaultModel =
+    String(process.env.LLM_CARD_MODEL ?? "").trim() ||
+    String(process.env.LLM_LINTER_MODEL ?? "").trim() ||
+    String(process.env.LLM_MODEL ?? "").trim();
+  const timeoutMs = Number(process.env.LLM_LINTER_TIMEOUT_MS ?? 60_000);
+  return {
+    baseUrl,
+    apiKey,
+    defaultModel,
+    timeoutMs,
+    ok: Boolean(baseUrl && apiKey && defaultModel),
+  };
+}
+
 // ======== LLM（OpenAI-compatible，开发期最小闭环） ========
 
 fastify.get("/api/llm/models", async () => {
@@ -269,7 +294,10 @@ function buildAgentProtocolPrompt(mode: AgentMode) {
         `1) 产 Todo List（可追踪，必须）：你必须立刻调用 run.setTodoList。\n` +
         `   - 即使你需要澄清，也必须先把“澄清问题/默认假设/下一步动作”写进 todo（澄清最多 5 个高价值问题：平台画像/受众/目标/口吻人设/素材来源）。\n` +
         `   - 若用户明确说“先直接开始/先仿写看看/先给版本/不要再问”：你必须把澄清项标为可跳过，并基于合理默认假设直接推进写作。\n` +
-        `   - 若右侧已关联知识库，且 KB_SELECTED_LIBRARIES 中存在 purpose=style（风格库），并且任务是“写作/仿写/改写/润色”：todo 中必须包含“先 kb.search 拉样例（优先 kind=paragraph/outline）再写”的步骤。\n` +
+        `   - 若右侧已关联知识库，且 KB_SELECTED_LIBRARIES 中存在 purpose=style（风格库），并且任务是“写作/仿写/改写/润色”：todo 中必须包含“三段式”步骤：\n` +
+        `     1) 先 kb.search（只搜风格库，优先 kind=paragraph/outline）拉 3–8 条可抄样例；\n` +
+        `     2) 产出候选稿（先别急着写入文件）；\n` +
+        `     3) 调用 lint.style（强模型）对照库原文/指纹找“不像点”，按其 rewritePrompt 改成终稿后再写入/输出。\n` +
         `2) 执行（由你自主决定是否调用工具）：素材收集（@引用/读文件/KB 检索）→ 结构（先 outline）→ 初稿 → 改写润色 → 自检。\n` +
         `3) 进度记录：完成/推进每个关键步骤时，调用 run.updateTodo；关键决策与约束调用 run.mainDoc.update。\n` +
         `输出约束：\n` +
@@ -377,20 +405,44 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   }
 
   const kbSelected = parseKbSelectedLibrariesFromContextPack(body.contextPack);
-  const hasStyleLibrary =
-    mode !== "chat" &&
-    Array.isArray(kbSelected) &&
-    kbSelected.some((l: any) => String(l?.purpose ?? "").trim() === "style");
+  const kbSelectedList = Array.isArray(kbSelected) ? kbSelected : [];
+  const styleLibIds = kbSelectedList
+    .filter((l: any) => String(l?.purpose ?? "").trim() === "style")
+    .map((l: any) => String(l?.id ?? "").trim())
+    .filter(Boolean);
+  const styleLibIdSet = new Set(styleLibIds);
+  const nonStyleLibIds = kbSelectedList
+    .filter((l: any) => String(l?.purpose ?? "").trim() !== "style")
+    .map((l: any) => String(l?.id ?? "").trim())
+    .filter(Boolean);
+
+  const hasStyleLibrary = mode !== "chat" && styleLibIds.length > 0;
+  const hasNonStyleLibraries = mode !== "chat" && nonStyleLibIds.length > 0;
 
   const isWritingTask =
     mode !== "chat" &&
     /(仿写|改写|润色|续写|扩写|写(一篇|一段|一条|稿|文|文章|脚本|文案)|生成(文章|稿|文案)|按.+风格)/.test(userPrompt);
+  const skipLint = /(跳过|不用|不要).{0,12}(linter|风格检查|风格对齐|风格校验|像不像检查)/i.test(userPrompt);
+  // 注意：用户“跳过 linter”只应跳过风格校验，不应跳过“先 kb.search 拉样例”
+  const styleGateEnabled = hasStyleLibrary && isWritingTask;
+  const lintGateEnabled = styleGateEnabled && !skipLint;
+  const lintPassScore = Number(process.env.STYLE_LINT_PASS_SCORE ?? 80);
+  const lintMaxRework = Number(process.env.STYLE_LINT_MAX_REWORK ?? 2);
 
   let hasTodoList = false;
   let hasWriteOps = false;
   let hasAnyToolCall = false;
   let hasKbSearch = false;
-  let autoRetryBudget = 2;
+  let hasStyleKbSearch = false; // 风格库样例检索是否已完成（kb.search(kind=paragraph/outline, 只搜风格库)）
+  let styleLintPassed = false; // 风格对齐是否“通过闸门”
+  let styleLintFailCount = 0; // 未通过次数（每次未通过=一次“回炉”机会）
+  let lastStyleLint: null | {
+    score: number | null;
+    highIssues: number;
+    summary: string;
+    rewritePrompt: string;
+  } = null;
+  let autoRetryBudget = 3;
 
   function looksLikeClarifyQuestions(text: string) {
     const t = String(text ?? "").trim();
@@ -411,6 +463,41 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       name === "doc.restoreSnapshot" ||
       name === "doc.splitToDir"
     );
+  }
+
+  function normalizeIdList(v: any): string[] {
+    if (!Array.isArray(v)) return [];
+    return v.map((x: any) => String(x ?? "").trim()).filter(Boolean);
+  }
+
+  function isStyleExampleKbSearch(call: any) {
+    if (!call || String(call?.name ?? "") !== "kb.search") return false;
+    const args = call?.args ?? {};
+    const kind = String((args as any)?.kind ?? "card").trim().toLowerCase();
+    if (kind !== "paragraph" && kind !== "outline" && kind !== "card") return false;
+
+    // 风格/手法样例：允许用 card（但必须带 cardTypes），也允许 paragraph/outline
+    if (kind === "card") {
+      const cardTypes = normalizeIdList((args as any)?.cardTypes);
+      if (!cardTypes.length) return false;
+    }
+
+    const libs = normalizeIdList((args as any)?.libraryIds);
+    // 同时绑定了非风格库时：要求显式限制到风格库，避免“样例被素材库污染”
+    if (!libs.length) return !hasNonStyleLibraries;
+    if (!libs.some((id) => styleLibIdSet.has(id))) return false;
+    return libs.every((id) => styleLibIdSet.has(id));
+  }
+
+  function parseStyleLintResult(output: any): { score: number | null; highIssues: number; summary: string; rewritePrompt: string } {
+    const o: any = output && typeof output === "object" ? output : {};
+    const scoreRaw = Number(o?.similarityScore);
+    const score = Number.isFinite(scoreRaw) ? scoreRaw : null;
+    const issues = Array.isArray(o?.issues) ? o.issues : [];
+    const highIssues = issues.filter((x: any) => String(x?.severity ?? "").toLowerCase() === "high").length;
+    const summary = String(o?.summary ?? "").trim();
+    const rewritePrompt = String(o?.rewritePrompt ?? "").trim();
+    return { score, highIssues, summary, rewritePrompt };
   }
 
   const maxTurns = mode === "agent" ? 48 : mode === "plan" ? 32 : 12;
@@ -486,16 +573,20 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           // 关键：在 Plan/Agent 模式，todo 是“可追踪执行”的入口。即使需要澄清，也必须先设置 todo。
           const needTodo = !hasTodoList;
           const needWrite = wantsWrite && !hasWriteOps && !isClarify;
-          const needKb = hasStyleLibrary && isWritingTask && !hasKbSearch && !isClarify;
+          const needKb = styleGateEnabled && !hasStyleKbSearch && !isClarify;
+          const needLint = lintGateEnabled && !styleLintPassed && styleLintFailCount <= lintMaxRework && !isClarify;
 
-          if (isEmpty || needTodo || needWrite || needKb) {
+          if (isEmpty || needTodo || needWrite || needKb || needLint) {
             autoRetryBudget -= 1;
             writeEvent("assistant.delta", {
               delta:
                 "\n\n[系统提示] 检测到本次任务尚未进入可追踪执行（Todo 未设置 / 或尚未完成写入目标），我会让模型自动继续一次（无需你输入）。\n" +
                 "请它：先 run.setTodoList（永远第一步）；todo 中可包含澄清步骤与默认假设；" +
                 (needKb
-                  ? "若已绑定风格库且任务是写作类：先 kb.search 拉 paragraph/outline 样例再写；"
+                  ? "若已绑定风格库且任务是写作类：先 kb.search（kind=paragraph/outline，且只搜风格库）拉样例；"
+                  : "") +
+                (needLint
+                  ? "再 lint.style（强模型）做终稿闸门；若未通过则按 rewritePrompt 回炉改写并复检（最多 2 次）后再输出/写入；"
                   : "") +
                 "若用户要求写入项目/分割到文件夹，请务必用工具执行（例如 doc.write / doc.splitToDir）。"
             });
@@ -510,8 +601,9 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
                 "- 你必须先输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
                 "  - 至少包含 run.setTodoList（永远第一步）\n" +
                 (needKb
-                  ? "  - 若 KB_SELECTED_LIBRARIES 中存在 purpose=style（风格库）且任务为写作类：必须先调用 kb.search（优先 kind=paragraph/outline）拉样例，再开始写稿。\n"
+                  ? "  - 若 KB_SELECTED_LIBRARIES 中存在 purpose=style（风格库）且任务为写作类：必须先调用 kb.search（kind=paragraph/outline；且只搜风格库）拉样例。\n"
                   : "") +
+                (needLint ? "  - 然后调用 lint.style 做终稿闸门；未通过则按 rewritePrompt 回炉改写并复检（最多 2 次）后再输出/写入。\n" : "") +
                 "  - 若用户要求写入/分割到文件夹：请调用 doc.splitToDir（或 doc.write 等）完成写入。\n" +
                 "- 在你成功设置 todo 之后，如果仍需要澄清：下一条消息再输出最多 5 个问题（纯文本 Markdown），并在 todo 中标记为 blocked/等待用户输入；用户不答时写明默认假设继续推进。"
             });
@@ -529,6 +621,59 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       }
 
       messages.push({ role: "assistant", content: assistantText });
+
+      // 风格库写作强约束：
+      // - 为了保证“先检索样例→再生成→再对齐”的可控闭环，避免同一轮把 kb.search / lint.style / 写入类工具混在一起
+      //   （否则模型拿不到 tool_result，就无法真正用上检索/对齐结果）。
+      if (mode !== "chat" && autoRetryBudget > 0 && hasStyleLibrary && isWritingTask) {
+        const batchHasWrite = toolCalls.some((c: any) => isWriteLikeTool(String(c?.name ?? "")));
+        const batchHasKb = toolCalls.some((c: any) => String(c?.name ?? "") === "kb.search");
+        const batchHasLint = toolCalls.some((c: any) => String(c?.name ?? "") === "lint.style");
+        const batchHasStyleKb = toolCalls.some((c: any) => isStyleExampleKbSearch(c));
+
+        const needStyleKb = !hasStyleKbSearch;
+        const enforceLint = !skipLint;
+        const lintExhausted = enforceLint && !styleLintPassed && styleLintFailCount > lintMaxRework;
+        const needStyleLint = enforceLint && !styleLintPassed;
+
+        let violation: string | null = null;
+        if (batchHasKb && batchHasLint) violation = "KB_AND_LINT_SAME_TURN";
+        else if (batchHasKb && batchHasWrite) violation = "KB_AND_WRITE_SAME_TURN";
+        else if (batchHasLint && batchHasWrite) violation = "LINT_AND_WRITE_SAME_TURN";
+        else if (batchHasLint && needStyleKb) violation = "LINT_BEFORE_KB";
+        else if (batchHasWrite && needStyleKb) violation = "WRITE_BEFORE_KB";
+        else if (batchHasWrite && needStyleLint) violation = lintExhausted ? "WRITE_BLOCKED_LINT_EXHAUSTED" : "WRITE_BEFORE_LINT_PASS";
+        else if (batchHasKb && needStyleKb && !batchHasStyleKb) violation = "KB_NOT_STYLE_EXAMPLES";
+
+        if (violation) {
+          autoRetryBudget -= 1;
+          writeEvent("assistant.delta", {
+            delta:
+              "\n\n[系统提示] 风格库写作任务已启用“强闭环”：先 kb.search 拉风格样例 → 再 lint.style 对齐 → 最后才允许写入。\n" +
+              `本轮工具调用不满足前置条件（${violation}），我会让模型自动重试一次（无需你输入）。\n` +
+              "请它：把 kb.search / lint.style / 写入操作拆到不同回合（每回合只做一类关键动作）。"
+          });
+          writeEvent("assistant.done", { reason: "auto_retry_style_workflow" });
+
+          messages.push({
+            role: "system",
+            content:
+              "你上一轮的 tool_calls 违反了“风格库写作强闭环”约束，请立刻重试并按下面顺序推进：\n" +
+              "A) kb.search：只搜风格库（purpose=style），kind=paragraph/outline，先拉 3–8 条可抄样例；本轮不要调用 lint.style 或任何写入类工具。\n" +
+              (enforceLint
+                ? `B) lint.style（终稿闸门）：基于样例与指纹对照候选稿，输出 issues + rewritePrompt；必须通过闸门（score>=${lintPassScore} 且无 high issue）。未通过则按 rewritePrompt 回炉改写并再次 lint.style（最多回炉 ${lintMaxRework} 次）。本轮不要调用 kb.search 或任何写入类工具。\n`
+                : "") +
+              (enforceLint
+                ? "C) 写入：只有 lint.style 通过闸门后，才允许写入/输出终稿（doc.write/doc.applyEdits 等）。\n"
+                : "C) 写入：在拿到 kb.search 的 tool_result 后，再写入/输出终稿（doc.write/doc.applyEdits 等）。\n") +
+              (hasNonStyleLibraries
+                ? `提示：当前同时绑定了非风格库，因此 kb.search 必须显式传 libraryIds（仅限风格库）：${JSON.stringify(styleLibIds)}。\n`
+                : "") +
+              "注意：风格样例检索允许 kind=card（必须带 cardTypes）或 kind=paragraph/outline。"
+          });
+          continue;
+        }
+      }
 
       // tool_calls：逐个 emit tool.call，等待 Desktop 回传 tool_result
       for (const call of toolCalls) {
@@ -572,8 +717,64 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         if (payload.ok && payload.name === "run.setTodoList") hasTodoList = true;
         if (payload.ok && isWriteLikeTool(payload.name)) hasWriteOps = true;
         if (payload.ok && payload.name === "kb.search") hasKbSearch = true;
+        if (payload.ok && String(call.name ?? "") === "kb.search" && isStyleExampleKbSearch(call)) hasStyleKbSearch = true;
+        if (String(call.name ?? "") === "lint.style") {
+          if (payload.ok) {
+            const parsedLint = parseStyleLintResult(payload.output);
+            const passed =
+              parsedLint.score !== null && Number.isFinite(parsedLint.score) && parsedLint.score >= lintPassScore && parsedLint.highIssues === 0;
+            lastStyleLint = parsedLint;
+            styleLintPassed = passed;
+            if (!passed) styleLintFailCount += 1;
+          } else {
+            // 工具本身失败：视为未通过闸门（不计入回炉次数，让模型决定重试或提示用户跳过）
+            styleLintPassed = false;
+          }
+        }
 
         messages.push({ role: "system", content: renderToolResultXml(call.name, payload.output) });
+
+        // 风格 Linter 终稿闸门：未通过则自动回炉（最多 lintMaxRework 次）；超过上限则提示用户是否跳过
+        if (lintGateEnabled && String(call.name ?? "") === "lint.style") {
+          const scoreText = lastStyleLint?.score !== null && lastStyleLint?.score !== undefined ? String(lastStyleLint.score) : "null";
+          const hi = Number.isFinite(Number(lastStyleLint?.highIssues ?? 0)) ? Number(lastStyleLint?.highIssues ?? 0) : 0;
+
+          if (payload.ok && !styleLintPassed) {
+            // 未通过：自动回炉
+            if (styleLintFailCount <= lintMaxRework) {
+              writeEvent("assistant.delta", {
+                delta:
+                  `\n\n[系统提示] 风格对齐未通过（score=${scoreText}，high=${hi}）。正在自动回炉（${styleLintFailCount}/${lintMaxRework}）…`
+              });
+              messages.push({
+                role: "system",
+                content:
+                  "你刚刚的 lint.style 未通过终稿闸门。你必须立刻按 tool_result 里的 rewritePrompt 回炉改写“上一版候选稿”，然后再次调用 lint.style 复检。\n" +
+                  "- 下一条消息必须且只能输出 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
+                  "- 本轮只调用 lint.style（不要 kb.search；不要任何写入类工具）。\n" +
+                  "- lint.style 的 arg text 填你回炉后的新稿全文（不新增事实）。"
+              });
+              continue;
+            }
+
+            // 超过回炉上限：终止并提示用户
+            writeEvent("assistant.delta", {
+              delta:
+                `\n\n[系统提示] 风格对齐已连续 ${styleLintFailCount} 次未通过，已达到最大回炉次数（${lintMaxRework}）。\n` +
+                `- 你可以回复“跳过linter”来强制输出（不再做风格校验）\n` +
+                `- 或者调整阈值（STYLE_LINT_PASS_SCORE，当前=${lintPassScore}）后再试`
+            });
+            writeEvent("run.end", { runId, reason: "style_lint_exhausted", turn, failCount: styleLintFailCount, passScore: lintPassScore });
+            writeEvent("assistant.done", { reason: "style_lint_exhausted" });
+            reply.raw.end();
+            agentRunWaiters.delete(runId);
+            return;
+          }
+
+          if (payload.ok && styleLintPassed) {
+            writeEvent("assistant.delta", { delta: `\n\n[系统提示] ✅ 风格对齐通过（score=${scoreText}，high=${hi}）。` });
+          }
+        }
 
         // proposal-first：工具返回需要用户确认的提案，终止本次 run，等待用户 Keep/Undo 后再继续对话
         if (payload.meta?.applyPolicy === "proposal" && payload.meta?.hasApply) {
@@ -882,7 +1083,7 @@ fastify.post(
     });
 
     return {
-      results: results.map((r) => ({
+      results: results.map((r: any) => ({
         id: r.card.id,
         title: r.card.title,
         score: r.score,
@@ -1643,6 +1844,214 @@ fastify.post("/api/kb/dev/classify_genre", async (request, reply) => {
     return reply.send({ ok: true, primary, candidates: sorted });
   } catch (e: any) {
     return reply.code(500).send({ error: "INVALID_MODEL_OUTPUT", hint: "模型未返回合法 JSON", detail: String(e?.message ?? e) });
+  }
+});
+
+/**
+ * Style Linter：对照“风格库”原文统计指纹/口癖/样例，找出候选稿“不像点”，并生成可直接用于二次改写的 rewritePrompt。
+ * - 设计目标：少依赖“硬约束 prompt”，尽量让数据（率/分布/n-gram）驱动修正。
+ * - 输出：结构化 issues + rewritePrompt（给工作模型如 deepseek 用）
+ */
+fastify.post("/api/kb/dev/lint_style", async (request, reply) => {
+  const ngramSchema = z.object({
+    n: z.number().int().min(1).max(8).optional(),
+    text: z.string().min(1).max(120),
+    per1kChars: z.number().optional(),
+    docCoverage: z.number().optional(),
+  });
+
+  const sampleSchema = z.object({
+    docId: z.string().min(1).optional(),
+    docTitle: z.string().optional(),
+    paragraphIndex: z.number().int().min(0).optional(),
+    text: z.string().min(1).max(1200),
+  });
+
+  const libSchema = z.object({
+    id: z.string().optional(),
+    name: z.string().optional(),
+    corpus: z
+      .object({
+        docs: z.number().int().min(0).optional(),
+        chars: z.number().int().min(0).optional(),
+        sentences: z.number().int().min(0).optional(),
+      })
+      .optional(),
+    stats: z.record(z.string(), z.any()).optional(),
+    topNgrams: z.array(ngramSchema).max(32).optional(),
+    samples: z.array(sampleSchema).max(24).optional(),
+  });
+
+  const bodySchema = z.object({
+    model: z.string().optional(),
+    maxIssues: z.number().int().min(3).max(24).optional(),
+    draft: z.object({
+      text: z.string().min(1),
+      chars: z.number().int().min(0).optional(),
+      sentences: z.number().int().min(0).optional(),
+      stats: z.record(z.string(), z.any()).optional(),
+    }),
+    libraries: z.array(libSchema).min(1).max(6),
+  });
+  const body = bodySchema.parse((request as any).body);
+
+  const env = getLinterEnv();
+  if (!env.ok) {
+    return reply.code(500).send({
+      error: "LINTER_NOT_CONFIGURED",
+      hint:
+        "lint.style 默认复用抽卡配置（LLM_CARD_MODEL/LLM_CARD_API_KEY/LLM_CARD_BASE_URL）；如需单独覆盖再配置 LLM_LINTER_*；也可回退到默认 LLM_*。",
+    });
+  }
+
+  const model = body.model ?? env.defaultModel;
+  const maxIssues = Number.isFinite(body.maxIssues as any) ? Number(body.maxIssues) : 10;
+  const timeoutMs = env.timeoutMs;
+
+  const sys = [
+    "你是写作 IDE 的「风格 Linter（对齐检查器）」。",
+    "",
+    "你会收到：",
+    "1) draft：候选稿（以及它的确定性统计 draft.stats：每100句/每1000字等）。",
+    "2) libraries：风格库的“确定性统计指纹”（libraries[*].stats）、高频口癖 Top（topNgrams，带 per1kChars）、以及少量原文样例（samples）。",
+    "",
+    "任务：",
+    "- 逐条指出 draft 跟风格库“不像”的地方（不是泛泛而谈，必须可执行）。",
+    "- 尽量用“数据差异”来支撑（例如：第一人称密度/问句率/短句率/语气词密度明显偏低）。",
+    "- 证据：每条 issue 至少给 1 条 draft 里的原句片段（quote）；尽量再给 1 条风格库证据（可引用 topNgrams 或 samples 里的原句）。",
+    "- 最后生成一段 rewritePrompt：给工作模型（如 deepseek）使用，要求它在“不新增事实”的前提下，把 draft 改到更像风格库。",
+    "",
+    "硬约束：",
+    "- stats/topNgrams 是确定性数据，你不得编造或篡改数字。",
+    "- 不要新增事实/事件/数字；只允许改写表达方式与结构。",
+    "",
+    "输出要求：你必须且只能输出一个 JSON 对象（不要代码块，不要多余文字）。",
+    "JSON 结构：",
+    "{",
+    '  "similarityScore": number(0~100),',
+    '  "summary": string,',
+    '  "issues": [',
+    "    {",
+    '      "id": string,',
+    '      "title": string,',
+    '      "severity": "high"|"medium"|"low",',
+    '      "metric": { "name": string, "draft": number|null, "baseline": number|null, "unit": string|null } | null,',
+    '      "evidence": { "draft": string[], "reference": string[] },',
+    '      "fix": string',
+    "    }",
+    "  ],",
+    '  "rewritePrompt": string',
+    "}",
+    "",
+    `限制：issues 最多 ${Math.max(3, Math.min(24, maxIssues))} 条；rewritePrompt 要短、硬、可执行（建议分条）。`,
+  ].join("\n");
+
+  const user = JSON.stringify(
+    {
+      draft: {
+        text: String(body.draft.text ?? "").trim(),
+        chars: body.draft.chars ?? null,
+        sentences: body.draft.sentences ?? null,
+        stats: body.draft.stats ?? null,
+      },
+      libraries: (body.libraries ?? []).map((l) => ({
+        id: l.id ?? "",
+        name: l.name ?? "",
+        corpus: l.corpus ?? null,
+        stats: l.stats ?? null,
+        topNgrams: (l.topNgrams ?? []).slice(0, 16),
+        samples: (l.samples ?? []).map((s) => ({
+          docId: s.docId ?? "",
+          docTitle: s.docTitle ?? "",
+          paragraphIndex: typeof s.paragraphIndex === "number" ? s.paragraphIndex : null,
+          text: String(s.text ?? "").replace(/\s+/g, " ").trim(),
+        })),
+      })),
+    },
+    null,
+    2
+  );
+
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), timeoutMs);
+  const ret = await chatCompletionOnce({
+    config: { baseUrl: env.baseUrl, apiKey: env.apiKey },
+    model,
+    messages: [
+      { role: "system", content: sys },
+      { role: "user", content: user },
+    ],
+    temperature: 0.2,
+    signal: abort.signal,
+  });
+  clearTimeout(timer);
+
+  if (!ret?.ok) {
+    const errText = String((ret as any)?.error ?? "");
+    const isTimeout = /aborted|AbortError|timeout/i.test(errText);
+    return reply
+      .code(isTimeout ? 504 : (ret as any)?.status === 429 ? 503 : 502)
+      .send({
+        error: isTimeout ? "UPSTREAM_TIMEOUT" : "UPSTREAM_ERROR",
+        message: isTimeout ? `upstream timeout after ${timeoutMs}ms` : errText || "upstream error",
+        status: (ret as any)?.status ?? null,
+        modelUsed: model,
+      });
+  }
+
+  const raw = String((ret as any).content ?? "").trim();
+  const tryParse = (s: string) => {
+    try {
+      return JSON.parse(s);
+    } catch {
+      return null;
+    }
+  };
+  let parsed: any = tryParse(raw);
+  if (!parsed) {
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (m?.[0]) parsed = tryParse(m[0]);
+  }
+  if (!parsed || typeof parsed !== "object") {
+    return reply.code(500).send({ error: "INVALID_MODEL_OUTPUT", hint: "模型未返回合法 JSON 对象" });
+  }
+
+  const outSchema = z.object({
+    similarityScore: z.number().min(0).max(100),
+    summary: z.string().min(1),
+    issues: z
+      .array(
+        z.object({
+          id: z.string().min(1),
+          title: z.string().min(1),
+          severity: z.enum(["high", "medium", "low"]),
+          metric: z
+            .object({
+              name: z.string().min(1),
+              draft: z.number().nullable().optional(),
+              baseline: z.number().nullable().optional(),
+              unit: z.string().nullable().optional(),
+            })
+            .nullable()
+            .optional(),
+          evidence: z
+            .object({
+              draft: z.array(z.string().min(1)).max(6).optional(),
+              reference: z.array(z.string().min(1)).max(6).optional(),
+            })
+            .optional(),
+          fix: z.string().min(1),
+        })
+      )
+      .max(24),
+    rewritePrompt: z.string().min(1),
+  });
+
+  try {
+    const out = outSchema.parse(parsed);
+    return reply.send({ ok: true, modelUsed: model, timeoutMs, ...out });
+  } catch (e: any) {
+    return reply.code(500).send({ error: "INVALID_MODEL_OUTPUT", hint: "输出 schema 不符合预期", detail: String(e?.message ?? e) });
   }
 });
 

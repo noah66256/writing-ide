@@ -474,11 +474,19 @@ export function startGatewayRun(args: {
         await proj.ensureLoaded(proj.activePath).catch(() => void 0);
       }
 
+      // 关键：确保 KB 库列表（含 purpose=style 等元信息）已刷新，否则 Context Pack 里可能注入不到风格库用途，导致 Gateway 不开启“风格库强闭环闸门”
+      const kb = useKbStore.getState();
+      const attached = useRunStore.getState().kbAttachedLibraryIds ?? [];
+      if (Array.isArray(attached) && attached.length) {
+        await kb.refreshLibraries().catch(() => void 0);
+      }
+
       // 记录 Context Pack 摘要（便于排查“上下文不对/自动终止”）
       try {
         const todo = useRunStore.getState().todoList ?? [];
         const done = todo.filter((t) => t.status === "done").length;
         const refs = parseRefsFromPrompt(args.prompt);
+        const kbLibCount = (useKbStore.getState().libraries ?? []).length;
         const ed = proj.editorRef;
         const hasSelection = (() => {
           const model = ed?.getModel();
