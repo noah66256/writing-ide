@@ -36,6 +36,7 @@ export function LlmPage() {
   const [stages, setStages] = useState<StageDraft[]>([]);
   const [testing, setTesting] = useState<Record<string, boolean>>({});
   const [bulkTest, setBulkTest] = useState<{ done: number; total: number } | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
 
   // 创建模型表单
   const [newModel, setNewModel] = useState("");
@@ -120,7 +121,17 @@ export function LlmPage() {
         description: newDesc.trim() || undefined,
       });
       setNotice("模型已创建（热生效）");
+      setCreateOpen(false);
+      setNewModel("");
+      setNewBaseURL("");
+      setNewEndpoint("/v1/chat/completions");
       setNewApiKey("");
+      setNewPriceIn("");
+      setNewPriceOut("");
+      setNewBillingGroup("");
+      setNewEnabled(true);
+      setNewSortOrder("0");
+      setNewDesc("");
       await refresh();
     } catch (e: any) {
       const err = e as ApiError;
@@ -170,11 +181,8 @@ export function LlmPage() {
   };
 
   const testOne = async (id: string) => {
-    setError("");
-    setNotice("");
     setTesting((prev) => ({ ...prev, [id]: true }));
     try {
-      setNotice("测速中…（单个模型超时 20 秒）");
       const res = await aiConfigTestModel(id);
       const tr = res.result;
       setModels((prev) =>
@@ -187,10 +195,19 @@ export function LlmPage() {
             : x,
         ),
       );
-      setNotice(`测速完成：${tr.ok ? "OK" : "FAIL"} · ${tr.latencyMs ?? "-"}ms · ${String(tr.testedAt).slice(0, 19).replace("T", " ")}`);
     } catch (e: any) {
       const err = e as ApiError;
-      setError(`测速失败：${err.code}`);
+      const testedAt = new Date().toISOString();
+      setModels((prev) =>
+        prev.map((x) =>
+          x.id === id
+            ? {
+                ...x,
+                testResult: { ok: false, latencyMs: null, status: err.status, error: err.code, testedAt },
+              }
+            : x,
+        ),
+      );
     } finally {
       setTesting((prev) => ({ ...prev, [id]: false }));
     }
@@ -198,7 +215,6 @@ export function LlmPage() {
 
   const testAll = async () => {
     setError("");
-    setNotice("");
     const ids = models.map((m) => m.id);
     if (!ids.length) return setError("暂无模型可测速");
     if (!confirm(`确认对 ${ids.length} 个模型执行一键测速？\\n- 单个模型超时：20 秒\\n- 会写回并覆盖上次测速结果`)) return;
@@ -250,10 +266,7 @@ export function LlmPage() {
     };
 
     try {
-      setNotice(`一键测速中… 0/${ids.length}`);
       await Promise.all(Array.from({ length: concurrency }, () => worker()));
-      setNotice(`一键测速完成：${ids.length}/${ids.length}`);
-      await refresh();
     } finally {
       setBulkTest(null);
       setBusy(false);
@@ -325,6 +338,9 @@ export function LlmPage() {
           <button className="btn" type="button" onClick={() => void refresh()} disabled={busy}>
             刷新
           </button>
+          <button className="btn" type="button" onClick={() => setCreateOpen(true)} disabled={busy}>
+            新建模型
+          </button>
           <button className="btn" type="button" onClick={() => void testAll()} disabled={busy || models.length === 0}>
             {bulkTest ? `一键测速 ${bulkTest.done}/${bulkTest.total}` : "一键测速"}
           </button>
@@ -339,62 +355,6 @@ export function LlmPage() {
 
       {notice ? <div className="hint">{notice}</div> : null}
       {error ? <div className="error">{error}</div> : null}
-
-      <div className="tableWrap" style={{ padding: 14, marginBottom: 14 }}>
-        <div style={{ fontWeight: 900, marginBottom: 10 }}>新建模型（价格必填，用于按 token 扣积分）</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-          <label className="field">
-            <div className="label">model</div>
-            <input className="input" value={newModel} onChange={(e) => setNewModel(e.target.value)} placeholder="deepseek-v3.2" />
-          </label>
-          <label className="field">
-            <div className="label">baseURL</div>
-            <input className="input" value={newBaseURL} onChange={(e) => setNewBaseURL(e.target.value)} placeholder="https://xh.v1api.cc" />
-          </label>
-          <label className="field">
-            <div className="label">endpoint</div>
-            <select className="input" value={newEndpoint} onChange={(e) => setNewEndpoint(e.target.value)}>
-              <option value="/v1/chat/completions">/v1/chat/completions</option>
-              <option value="/v1/embeddings">/v1/embeddings</option>
-            </select>
-          </label>
-          <label className="field">
-            <div className="label">apiKey（服务端加密存储）</div>
-            <input className="input" type="password" value={newApiKey} onChange={(e) => setNewApiKey(e.target.value)} placeholder="sk-..." />
-          </label>
-          <label className="field">
-            <div className="label">输入单价（元/1,000,000 tokens）</div>
-            <input className="input" value={newPriceIn} onChange={(e) => setNewPriceIn(e.target.value)} placeholder="0.8" />
-          </label>
-          <label className="field">
-            <div className="label">输出单价（元/1,000,000 tokens）</div>
-            <input className="input" value={newPriceOut} onChange={(e) => setNewPriceOut(e.target.value)} placeholder="1.6" />
-          </label>
-          <label className="field">
-            <div className="label">billingGroup（可选）</div>
-            <input className="input" value={newBillingGroup} onChange={(e) => setNewBillingGroup(e.target.value)} placeholder="thirdparty-A" />
-          </label>
-          <label className="field">
-            <div className="label">sortOrder</div>
-            <input className="input" value={newSortOrder} onChange={(e) => setNewSortOrder(e.target.value)} />
-          </label>
-          <label className="field" style={{ gridColumn: "1 / span 2" }}>
-            <div className="label">description（可选）</div>
-            <input className="input" value={newDesc} onChange={(e) => setNewDesc(e.target.value)} placeholder="备注/渠道说明" />
-          </label>
-          <label className="field" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <input type="checkbox" checked={newEnabled} onChange={(e) => setNewEnabled(e.target.checked)} />
-            <div className="label" style={{ margin: 0 }}>
-              启用
-            </div>
-          </label>
-        </div>
-        <div style={{ marginTop: 10 }}>
-          <button className="btn primary" type="button" onClick={() => void create()} disabled={busy}>
-            创建
-          </button>
-        </div>
-      </div>
 
       <div className="tableWrap" style={{ padding: 14, marginBottom: 14 }}>
         <div style={{ fontWeight: 900, marginBottom: 10 }}>AI 模型管理</div>
@@ -659,6 +619,80 @@ export function LlmPage() {
         说明：旧版 <code>/api/admin/llm/config</code>（BaseURL/Models JSON）仍保留但已视为过渡。新版本以 <code>/api/ai-config/*</code> 为准，
         key 服务端加密存储，定价挂在模型上，stage 统一路由，保存后秒级热生效。
       </div>
+
+      {createOpen ? (
+        <div className="drawerMask" onClick={() => setCreateOpen(false)} role="presentation">
+          <div className="drawer" onClick={(e) => e.stopPropagation()} role="presentation">
+            <div className="drawerHeader">
+              <div style={{ fontWeight: 900 }}>新建模型</div>
+              <button className="btn" type="button" onClick={() => setCreateOpen(false)} disabled={busy}>
+                关闭
+              </button>
+            </div>
+
+            <div className="muted" style={{ marginBottom: 12 }}>
+              价格必填用于按 token 扣积分；apiKey 服务端加密存储；单个模型测速超时为 20 秒。
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+              <label className="field">
+                <div className="label">model</div>
+                <input className="input" value={newModel} onChange={(e) => setNewModel(e.target.value)} placeholder="deepseek-v3.2" />
+              </label>
+              <label className="field">
+                <div className="label">baseURL</div>
+                <input className="input" value={newBaseURL} onChange={(e) => setNewBaseURL(e.target.value)} placeholder="https://xh.v1api.cc" />
+              </label>
+              <label className="field">
+                <div className="label">endpoint</div>
+                <select className="input" value={newEndpoint} onChange={(e) => setNewEndpoint(e.target.value)}>
+                  <option value="/v1/chat/completions">/v1/chat/completions</option>
+                  <option value="/v1/embeddings">/v1/embeddings</option>
+                </select>
+              </label>
+              <label className="field">
+                <div className="label">apiKey（服务端加密存储）</div>
+                <input className="input" type="password" value={newApiKey} onChange={(e) => setNewApiKey(e.target.value)} placeholder="sk-..." />
+              </label>
+              <label className="field">
+                <div className="label">输入单价（元/1,000,000 tokens）</div>
+                <input className="input" value={newPriceIn} onChange={(e) => setNewPriceIn(e.target.value)} placeholder="0.8" />
+              </label>
+              <label className="field">
+                <div className="label">输出单价（元/1,000,000 tokens）</div>
+                <input className="input" value={newPriceOut} onChange={(e) => setNewPriceOut(e.target.value)} placeholder="1.6" />
+              </label>
+              <label className="field">
+                <div className="label">billingGroup（可选）</div>
+                <input className="input" value={newBillingGroup} onChange={(e) => setNewBillingGroup(e.target.value)} placeholder="thirdparty-A" />
+              </label>
+              <label className="field">
+                <div className="label">sortOrder</div>
+                <input className="input" value={newSortOrder} onChange={(e) => setNewSortOrder(e.target.value)} />
+              </label>
+              <label className="field" style={{ gridColumn: "1 / span 2" }}>
+                <div className="label">description（可选）</div>
+                <input className="input" value={newDesc} onChange={(e) => setNewDesc(e.target.value)} placeholder="备注/渠道说明" />
+              </label>
+              <label className="field" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <input type="checkbox" checked={newEnabled} onChange={(e) => setNewEnabled(e.target.checked)} />
+                <div className="label" style={{ margin: 0 }}>
+                  启用
+                </div>
+              </label>
+            </div>
+
+            <div style={{ marginTop: 10, display: "flex", gap: 10 }}>
+              <button className="btn primary" type="button" onClick={() => void create()} disabled={busy}>
+                创建
+              </button>
+              <button className="btn" type="button" onClick={() => setCreateOpen(false)} disabled={busy}>
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
