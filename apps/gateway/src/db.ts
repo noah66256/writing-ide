@@ -56,13 +56,59 @@ export type LlmConfig = {
   pricing?: Record<string, LlmModelPrice>;
 };
 
+export type AiModelTestResult = {
+  ok: boolean;
+  latencyMs: number | null;
+  status: number | null;
+  error: string | null;
+  testedAt: string;
+  headers?: Record<string, string>;
+};
+
+export type AiModel = {
+  id: string;
+  model: string;
+  baseURL: string;
+  endpoint: string;
+  apiKeyEnc: string | null;
+  apiKeyLast4: string | null;
+  priceInCnyPer1M: number | null;
+  priceOutCnyPer1M: number | null;
+  billingGroup: string | null;
+  isEnabled: boolean;
+  sortOrder: number;
+  description: string | null;
+  testResult: AiModelTestResult | null;
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AiStageConfig = {
+  stage: string;
+  modelId: string | null; // 对应 AiModel.id
+  temperature: number | null;
+  maxTokens: number | null;
+  isEnabled: boolean;
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AiConfig = {
+  updatedAt: string;
+  models: AiModel[];
+  stages: AiStageConfig[];
+};
+
 export type Db = {
   users: User[];
   pointsTransactions: PointsTransaction[];
   llmConfig?: LlmConfig;
+  aiConfig?: AiConfig;
 };
 
-const DEFAULT_DB: Db = { users: [], pointsTransactions: [], llmConfig: undefined };
+const DEFAULT_DB: Db = { users: [], pointsTransactions: [], llmConfig: undefined, aiConfig: undefined };
 
 function getDbFilePath() {
   return path.resolve(process.cwd(), "data", "db.json");
@@ -184,7 +230,85 @@ export async function loadDb(): Promise<Db> {
       return out;
     })();
 
-    return { users, pointsTransactions, llmConfig };
+    const rawAi = (parsed as any)?.aiConfig;
+    const aiConfig: Db["aiConfig"] = (() => {
+      if (!rawAi || typeof rawAi !== "object") return undefined;
+      const a: any = rawAi;
+      const updatedAt = normStr(a?.updatedAt) || nowIso;
+
+      const modelsRaw = Array.isArray(a?.models) ? (a.models as any[]) : [];
+      const models: AiModel[] = modelsRaw
+        .map((m) => {
+          const id = normStr(m?.id) || normStr(m?.model);
+          const model = normStr(m?.model);
+          const baseURL = normStr(m?.baseURL);
+          const endpoint = normStr(m?.endpoint) || "/v1/chat/completions";
+          if (!id || !model || !baseURL) return null;
+
+          const apiKeyEnc = typeof m?.apiKeyEnc === "string" ? String(m.apiKeyEnc) : null;
+          const apiKeyLast4 = typeof m?.apiKeyLast4 === "string" ? normStr(m.apiKeyLast4) : null;
+          const priceIn = normNum(m?.priceInCnyPer1M);
+          const priceOut = normNum(m?.priceOutCnyPer1M);
+          const billingGroup = typeof m?.billingGroup === "string" ? normStr(m.billingGroup) : null;
+          const isEnabled = m?.isEnabled === false ? false : true;
+          const sortOrder = Number.isFinite(m?.sortOrder) ? Number(m.sortOrder) : 0;
+          const description = typeof m?.description === "string" ? String(m.description).trim() : null;
+          const updatedBy = typeof m?.updatedBy === "string" ? normStr(m.updatedBy) : null;
+          const createdAt = typeof m?.createdAt === "string" ? normStr(m.createdAt) || nowIso : nowIso;
+          const updatedAt2 = typeof m?.updatedAt === "string" ? normStr(m.updatedAt) || createdAt : createdAt;
+          const tr = m?.testResult && typeof m.testResult === "object" ? (m.testResult as any) : null;
+          const testResult: AiModelTestResult | null = tr
+            ? {
+                ok: Boolean(tr.ok),
+                latencyMs: normNum(tr.latencyMs),
+                status: normNum(tr.status),
+                error: typeof tr.error === "string" ? String(tr.error).slice(0, 800) : null,
+                testedAt: typeof tr.testedAt === "string" ? normStr(tr.testedAt) || nowIso : nowIso,
+                headers: tr.headers && typeof tr.headers === "object" ? (tr.headers as any) : undefined,
+              }
+            : null;
+
+          return {
+            id,
+            model,
+            baseURL,
+            endpoint,
+            apiKeyEnc,
+            apiKeyLast4,
+            priceInCnyPer1M: priceIn,
+            priceOutCnyPer1M: priceOut,
+            billingGroup,
+            isEnabled,
+            sortOrder,
+            description,
+            testResult,
+            updatedBy,
+            createdAt,
+            updatedAt: updatedAt2,
+          };
+        })
+        .filter((x): x is AiModel => Boolean(x));
+
+      const stagesRaw = Array.isArray(a?.stages) ? (a.stages as any[]) : [];
+      const stages: AiStageConfig[] = stagesRaw
+        .map((s) => {
+          const stage = normStr(s?.stage);
+          if (!stage) return null;
+          const modelId = typeof s?.modelId === "string" ? normStr(s.modelId) : null;
+          const temperature = normNum(s?.temperature);
+          const maxTokens = normNum(s?.maxTokens);
+          const isEnabled = s?.isEnabled === false ? false : true;
+          const updatedBy = typeof s?.updatedBy === "string" ? normStr(s.updatedBy) : null;
+          const createdAt = typeof s?.createdAt === "string" ? normStr(s.createdAt) || nowIso : nowIso;
+          const updatedAt2 = typeof s?.updatedAt === "string" ? normStr(s.updatedAt) || createdAt : createdAt;
+          return { stage, modelId, temperature, maxTokens, isEnabled, updatedBy, createdAt, updatedAt: updatedAt2 };
+        })
+        .filter((x): x is AiStageConfig => Boolean(x));
+
+      return { updatedAt, models, stages };
+    })();
+
+    return { users, pointsTransactions, llmConfig, aiConfig };
   } catch {
     return { ...DEFAULT_DB };
   }

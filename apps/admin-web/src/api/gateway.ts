@@ -50,6 +50,123 @@ export type AdminLlmConfigEffective = {
   linter: { baseUrl: string; defaultModel: string; timeoutMs: number };
 };
 
+// ======== AI Config（对齐「锦李2.0」：模型管理 + stage 路由） ========
+
+export type AiModelTestResultDto = {
+  ok: boolean;
+  latencyMs: number | null;
+  status: number | null;
+  error: string | null;
+  testedAt: string;
+  headers?: Record<string, string>;
+};
+
+export type AiModelDto = {
+  id: string;
+  model: string;
+  baseURL: string;
+  endpoint: string;
+  priceInCnyPer1M: number | null;
+  priceOutCnyPer1M: number | null;
+  billingGroup: string | null;
+  isEnabled: boolean;
+  sortOrder: number;
+  description: string | null;
+  hasApiKey: boolean;
+  apiKeyMasked: string | null;
+  testResult: AiModelTestResultDto | null;
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AiStageDto = {
+  stage: string;
+  name: string;
+  description: string;
+  modelId: string | null;
+  model: string;
+  baseURL: string;
+  endpoint: string;
+  temperature: number | null;
+  maxTokens: number | null;
+  isEnabled: boolean;
+};
+
+export async function aiConfigListModels() {
+  return apiFetchJson<{ models: AiModelDto[] }>("/api/ai-config/models");
+}
+
+export async function aiConfigCreateModel(body: {
+  model: string;
+  baseURL: string;
+  endpoint?: string;
+  apiKey?: string;
+  copyFromId?: string;
+  priceInCnyPer1M: number;
+  priceOutCnyPer1M: number;
+  billingGroup?: string;
+  isEnabled?: boolean;
+  sortOrder?: number;
+  description?: string;
+}) {
+  return apiFetchJson<{ ok: true; id: string }>("/api/ai-config/models", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function aiConfigUpdateModel(id: string, body: Partial<{
+  baseURL: string;
+  endpoint: string;
+  apiKey: string;
+  clearApiKey: boolean;
+  priceInCnyPer1M: number | null;
+  priceOutCnyPer1M: number | null;
+  billingGroup: string | null;
+  isEnabled: boolean;
+  sortOrder: number;
+  description: string | null;
+}>) {
+  return apiFetchJson<{ ok: true }>(`/api/ai-config/models/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function aiConfigDeleteModel(id: string) {
+  return apiFetchJson<{ ok: true }>(`/api/ai-config/models/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function aiConfigTestModel(id: string) {
+  return apiFetchJson<{ ok: true; result: any }>(`/api/ai-config/models/${encodeURIComponent(id)}/test`, {
+    method: "POST",
+  });
+}
+
+export async function aiConfigDedupeModels() {
+  return apiFetchJson<{ ok: true; result: any }>(`/api/ai-config/models/dedupe`, { method: "POST" });
+}
+
+export async function aiConfigGetStages() {
+  return apiFetchJson<{ stages: AiStageDto[]; models: AiModelDto[] }>("/api/ai-config/stages");
+}
+
+export async function aiConfigUpdateStages(stages: Array<{
+  stage: string;
+  modelId?: string | null;
+  temperature?: number | null;
+  maxTokens?: number | null;
+  isEnabled?: boolean;
+}>) {
+  return apiFetchJson<{ ok: true }>("/api/ai-config/stages", {
+    method: "PUT",
+    body: JSON.stringify({ stages }),
+  });
+}
+
 export async function requestEmailCode(email: string) {
   return apiFetchJson<{
     requestId: string;

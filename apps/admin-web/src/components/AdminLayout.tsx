@@ -24,7 +24,7 @@ export function AdminLayout(props: {
         <div className="brand">写作 IDE</div>
         <div className="nav">
           <NavItem id="users" label="用户管理" />
-          <NavItem id="llm" label="LLM 管理" />
+          <NavItem id="llm" label="AI 配置" />
         </div>
       </aside>
       <div className="main">

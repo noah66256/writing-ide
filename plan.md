@@ -390,7 +390,8 @@
 - ✅ Desktop：三栏 + Dock Panel；Monaco Markdown（Tab）；右侧 Agent（Plan/Agent/Chat）+ 流式输出 + Tool Blocks（Keep/Undo）
 - ✅ 右侧 Agent：长正文 DraftBox（文本框+复制）+ “只看正文/显示步骤”开关（隐藏/展开工具步骤）
 - ✅ 风格仿写闭环（style 库）：`kb.search` 增强（cardTypes/anchor filters + debug 可观测）→ `lint.style` 对齐（上游超时降级为本地确定性 lint）→ 回炉改写/写入
-- ✅ Gateway：邮箱登录（devCode）、OpenAI-compatible SSE 代理（`/api/llm/chat/stream`）、模型列表（`/api/llm/models`）、KB 最小检索演示
+- ✅ Gateway：邮箱登录（devCode）、OpenAI-compatible SSE 代理（`/api/llm/chat/stream`）、模型列表（`/api/llm/models`）、KB 最小检索演示、积分余额/流水/扣费接口
+- ✅ Admin Web（B端，MVP）：邮箱验证码登录、用户管理（角色/充值/流水）、LLM 配置与单价（热生效），并已接入“按 token usage × 单价扣积分”的后端链路（开发期）
 - ✅ 编辑器：Tab 预览/固定/关闭（单击=预览替换；双击=固定新 Tab；× 关闭不影响左侧）
 - ✅ 本地项目落盘（MVP）：打开真实目录、读写磁盘文件、最近项目（自动恢复上次项目）
 - ✅ Explorer（增强）：树形目录；右键新建文件/文件夹、重命名、移动、删除；外部文件变更自动刷新（dirty 不覆盖）
@@ -421,6 +422,14 @@
 - **P2（治理与审计）**
   - [ ] Gateway Tool Registry（Schema+XML）完善 + 工具执行迁回 Gateway（鉴权/审计/计费）
   - [ ] Run 审计：Run 列表、工具调用记录、费用 usage 归因
+  - [ ] B 端（管理后台）补齐：Run/Tool/费用审计页、积分流水详情（展示 meta）、导出（CSV）
+  - [ ] 部署治理：用 Nginx/域名统一承载 Admin/Gateway（HTTPS、限流、只允许管理员访问 B 端），避免长期暴露裸端口
+  - [ ] **AI 配置对齐「锦李2.0」**（模型提交/热生效/计费一致口径）：
+    - [ ] 按“模型维度”管理（CRUD）：`model/baseURL/endpoint/apiKey(服务端加密)/输入输出单价(必填)/isEnabled/sortOrder/description`
+    - [ ] 按“环节(stage)维度”路由：每个 stage 选择一个模型 + 参数（temperature/maxTokens/isEnabled）
+    - [ ] 运行时统一走 `resolveStage(stage)`（禁止散落硬编码 baseURL/model），并做**短 TTL 缓存 + B 端保存后 clearCache**
+    - [ ] 提供模型测速（test）与重复模型清理（dedupe），并在 B 端展示结果/一键操作
+    - [ ] 增加 stage 覆盖审计脚本（避免“代码里引用了 stage，但 B 端不可配”）
 
 ### 9. 仍待确认的问题（决定实现细节）
 - **邮箱登录形态**：验证码（推荐）还是邮箱+密码？（会影响后端表结构与安全策略）

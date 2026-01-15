@@ -10,9 +10,10 @@ import { loadDb, saveDb, type Db, type LlmConfig, type LlmModelPrice, type User 
 import { kbSearch, type KbCard } from "@writing-ide/kb-core";
 import { MemoryKbStore } from "./kb/memoryStore.js";
 import { adjustUserPoints, calculateCostPoints, listUserTransactions, type LlmTokenUsage } from "./billing.js";
-import { chatCompletionOnce, streamChatCompletions, type OpenAiChatMessage } from "./llm/openaiCompat.js";
+import { chatCompletionOnce, openAiCompatUrl, streamChatCompletions, type OpenAiChatMessage } from "./llm/openaiCompat.js";
 import { isToolCallMessage, parseToolCalls, renderToolResultXml } from "./agent/xmlProtocol.js";
 import { toolNamesForMode, toolsPrompt, type AgentMode } from "./agent/toolRegistry.js";
+import { createAiConfigService } from "./aiConfig.js";
 
 // 允许使用项目根目录的 .env（你可以用 env.example 复制出来），也支持 apps/gateway/.env 覆盖
 const __filename = fileURLToPath(import.meta.url);
@@ -36,10 +37,14 @@ type CodeRequest = {
 
 const codeRequests = new Map<string, CodeRequest>();
 const kbStore = new MemoryKbStore();
+const aiConfig = createAiConfigService({ loadDb, saveDb });
 
 const fastify = Fastify({
   logger: true
 });
+
+// 对齐「锦李2.0」：AI 配置（模型/环节）在启动时确保有默认兜底（来自 env）。
+await aiConfig.ensureDefaults().catch(() => void 0);
 
 declare module "fastify" {
   interface FastifyInstance {
@@ -88,6 +93,16 @@ async function tryGetJwtUser(request: any): Promise<{ id: string; email?: string
 function getModelPriceFromDb(db: Db, modelId: string): LlmModelPrice | null {
   const id = normStr(modelId);
   if (!id) return null;
+  // 优先：ai-config（对齐锦李2.0：定价挂在模型上）
+  const m = (db.aiConfig as any)?.models?.find?.((x: any) => String(x?.id || x?.model || "").trim() === id);
+  if (m) {
+    const priceIn = Number(m?.priceInCnyPer1M);
+    const priceOut = Number(m?.priceOutCnyPer1M);
+    if (Number.isFinite(priceIn) && Number.isFinite(priceOut) && priceIn >= 0 && priceOut >= 0) {
+      return { priceInCnyPer1M: priceIn, priceOutCnyPer1M: priceOut };
+    }
+  }
+
   const raw = (db.llmConfig as any)?.pricing?.[id];
   if (!raw || typeof raw !== "object") return null;
   const priceIn = Number((raw as any).priceInCnyPer1M);
@@ -179,25 +194,60 @@ function normStrList(v: any) {
 }
 
 async function getLlmEnv(db?: Db) {
+  // 优先走 ai-config（对齐锦李2.0 的 stage 路由）
+  try {
+    const r = await aiConfig.resolveStage("llm.chat");
+    const modelsAll = await aiConfig.listModels();
+    const models = modelsAll
+      .filter((m) => m.isEnabled && /chat\/completions/i.test(String(m.endpoint || "")))
+      .map((m) => m.model)
+      .filter(Boolean);
+    const defaultModel = r.model || models[0] || "";
+    return {
+      baseUrl: r.baseURL,
+      apiKey: r.apiKey,
+      models: models.length ? models : defaultModel ? [defaultModel] : [],
+      defaultModel,
+      ok: Boolean(r.baseURL && r.apiKey && defaultModel),
+    };
+  } catch {
+    // ignore
+  }
+
   const d = db ?? (await loadDb());
   const cfg = d.llmConfig as LlmConfig | undefined;
   const baseUrl = normUrl(cfg?.llm?.baseUrl) || normUrl(process.env.LLM_BASE_URL ?? "");
   const apiKey = normStr(cfg?.llm?.apiKey) || normStr(process.env.LLM_API_KEY ?? "");
   const modelsCfg = normStrList(cfg?.llm?.models);
-  const defaultModel =
-    normStr(cfg?.llm?.defaultModel) || normStr(process.env.LLM_MODEL ?? "") || modelsCfg[0] || "";
+  const defaultModel = normStr(cfg?.llm?.defaultModel) || normStr(process.env.LLM_MODEL ?? "") || modelsCfg[0] || "";
   const models = modelsCfg.length ? modelsCfg : defaultModel ? [defaultModel] : [];
   return { baseUrl, apiKey, models, defaultModel, ok: Boolean(baseUrl && apiKey && defaultModel) };
 }
 
 async function getEmbedEnv(db?: Db) {
+  try {
+    const r = await aiConfig.resolveStage("embedding");
+    const modelsAll = await aiConfig.listModels();
+    const models = modelsAll
+      .filter((m) => m.isEnabled && /\/embeddings/i.test(String(m.endpoint || "")))
+      .map((m) => m.model)
+      .filter(Boolean);
+    const defaultModel = r.model || models[0] || "";
+    return {
+      baseUrl: r.baseURL,
+      apiKey: r.apiKey,
+      models,
+      defaultModel,
+      ok: Boolean(r.baseURL && r.apiKey && models.length > 0),
+    };
+  } catch {
+    // ignore
+  }
+
   const d = db ?? (await loadDb());
   const cfg = d.llmConfig as LlmConfig | undefined;
 
-  const baseUrl =
-    normUrl(cfg?.embeddings?.baseUrl) ||
-    normUrl(process.env.LLM_EMBED_BASE_URL ?? "") ||
-    normUrl(process.env.LLM_BASE_URL ?? "");
+  const baseUrl = normUrl(cfg?.embeddings?.baseUrl) || normUrl(process.env.LLM_EMBED_BASE_URL ?? "") || normUrl(process.env.LLM_BASE_URL ?? "");
   const apiKeyDefault =
     normStr(cfg?.embeddings?.apiKey) ||
     normStr(process.env.LLM_EMBED_API_KEY ?? "") ||
@@ -208,16 +258,17 @@ async function getEmbedEnv(db?: Db) {
   const modelsEnv = parseCsv(process.env.LLM_EMBED_MODELS ?? "");
   const models = modelsCfg.length ? modelsCfg : modelsEnv;
   const defaultModel = normStr(cfg?.embeddings?.defaultModel) || models[0] || "";
-  return {
-    baseUrl,
-    apiKey: apiKeyDefault,
-    models,
-    defaultModel,
-    ok: Boolean(baseUrl && apiKeyDefault && models.length > 0),
-  };
+  return { baseUrl, apiKey: apiKeyDefault, models, defaultModel, ok: Boolean(baseUrl && apiKeyDefault && models.length > 0) };
 }
 
 async function getCardEnv(db?: Db) {
+  try {
+    const r = await aiConfig.resolveStage("rag.ingest.extract_cards");
+    return { baseUrl: r.baseURL, apiKey: r.apiKey, defaultModel: r.model, ok: Boolean(r.baseURL && r.apiKey && r.model) };
+  } catch {
+    // ignore
+  }
+
   const d = db ?? (await loadDb());
   const cfg = d.llmConfig as LlmConfig | undefined;
 
@@ -239,7 +290,35 @@ async function getCardEnv(db?: Db) {
   return { baseUrl, apiKey, defaultModel, ok: Boolean(baseUrl && apiKey && defaultModel) };
 }
 
+async function getPlaybookEnv(db?: Db) {
+  try {
+    const r = await aiConfig.resolveStage("rag.ingest.build_library_playbook");
+    return { baseUrl: r.baseURL, apiKey: r.apiKey, defaultModel: r.model, ok: Boolean(r.baseURL && r.apiKey && r.model) };
+  } catch {
+    // 兜底：复用抽卡配置
+    return getCardEnv(db);
+  }
+}
+
 async function getLinterEnv(db?: Db) {
+  // 优先：ai-config 的 lint.style
+  try {
+    const r = await aiConfig.resolveStage("lint.style");
+    const timeoutMsRaw = Number(
+      String(process.env.LLM_LINTER_TIMEOUT_MS ?? process.env.LLM_LINTER_TIMEOUT ?? "").trim(),
+    );
+    const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? Math.floor(timeoutMsRaw) : 60_000;
+    return {
+      baseUrl: r.baseURL,
+      apiKey: r.apiKey,
+      defaultModel: r.model,
+      timeoutMs,
+      ok: Boolean(r.baseURL && r.apiKey && r.model),
+    };
+  } catch {
+    // ignore
+  }
+
   const d = db ?? (await loadDb());
   const cfg = d.llmConfig as LlmConfig | undefined;
 
@@ -299,15 +378,31 @@ fastify.post("/api/llm/embeddings", async (request, reply) => {
     });
   }
 
-  const model = (body.model && env.models.includes(body.model) ? body.model : env.defaultModel) || env.defaultModel;
-  const base = env.baseUrl.replace(/\/+$/g, "");
+  let model = (body.model && env.models.includes(body.model) ? body.model : env.defaultModel) || env.defaultModel;
+  let base = env.baseUrl.replace(/\/+$/g, "");
+  let apiKey = env.apiKey;
+  let endpoint = "/v1/embeddings";
+
+  if (body.model) {
+    try {
+      const m = await aiConfig.resolveModel(body.model);
+      if (/\/embeddings/i.test(String(m.endpoint || ""))) {
+        model = m.model;
+        base = m.baseURL.replace(/\/+$/g, "");
+        apiKey = m.apiKey;
+        endpoint = m.endpoint || endpoint;
+      }
+    } catch {
+      // ignore
+    }
+  }
 
   try {
-    const resp = await fetch(`${base}/v1/embeddings`, {
+    const resp = await fetch(openAiCompatUrl(base, endpoint), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${env.apiKey}`
+        Authorization: `Bearer ${apiKey}`
       },
       body: JSON.stringify({ model, input: body.input })
     });
@@ -352,7 +447,34 @@ fastify.post("/api/llm/chat/stream", async (request, reply) => {
   if (!env.ok) return reply.code(500).send({ error: "LLM_NOT_CONFIGURED" });
 
   const jwtUser = await tryGetJwtUser(request as any);
-  const model = body.model ?? env.defaultModel;
+
+  let stageTemp: number | undefined = undefined;
+  let stageMaxTokens: number | undefined = undefined;
+  try {
+    const st = await aiConfig.resolveStage("llm.chat");
+    if (typeof st.temperature === "number") stageTemp = st.temperature;
+    if (typeof st.maxTokens === "number") stageMaxTokens = st.maxTokens;
+  } catch {
+    // ignore
+  }
+
+  let model = body.model ?? env.defaultModel;
+  let baseUrl = env.baseUrl;
+  let apiKey = env.apiKey;
+  if (body.model) {
+    try {
+      const m = await aiConfig.resolveModel(body.model);
+      if (/chat\/completions/i.test(String(m.endpoint || ""))) {
+        model = m.model;
+        baseUrl = m.baseURL;
+        apiKey = m.apiKey;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  const temperature = body.temperature ?? stageTemp;
   const messages: OpenAiChatMessage[] =
     body.messages?.length
       ? (body.messages as any)
@@ -394,10 +516,11 @@ fastify.post("/api/llm/chat/stream", async (request, reply) => {
 
   try {
     for await (const ev of streamChatCompletions({
-      config: { baseUrl: env.baseUrl, apiKey: env.apiKey },
+      config: { baseUrl, apiKey },
       model,
       messages,
-      temperature: body.temperature,
+      temperature,
+      maxTokens: stageMaxTokens ?? null,
       includeUsage: true,
       signal: abort.signal
     })) {
@@ -492,7 +615,34 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   if (!env.ok) return reply.code(500).send({ error: "LLM_NOT_CONFIGURED" });
 
   const jwtUser = await tryGetJwtUser(request as any);
-  const model = body.model ?? env.defaultModel;
+
+  let stageTemp: number | undefined = undefined;
+  let stageMaxTokens: number | undefined = undefined;
+  try {
+    const st = await aiConfig.resolveStage("agent.run");
+    if (typeof st.temperature === "number") stageTemp = st.temperature;
+    if (typeof st.maxTokens === "number") stageMaxTokens = st.maxTokens;
+  } catch {
+    // ignore
+  }
+
+  let model = body.model ?? env.defaultModel;
+  let baseUrl = env.baseUrl;
+  let apiKey = env.apiKey;
+  if (body.model) {
+    try {
+      const m = await aiConfig.resolveModel(body.model);
+      if (/chat\/completions/i.test(String(m.endpoint || ""))) {
+        model = m.model;
+        baseUrl = m.baseURL;
+        apiKey = m.apiKey;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  const temperature = stageTemp;
   const mode = (body.mode ?? "agent") as AgentMode;
   const runId = randomUUID();
   const allowedToolNames = toolNamesForMode(mode);
@@ -707,9 +857,11 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       let lastUsage: LlmTokenUsage | null = null;
 
       for await (const ev of streamChatCompletions({
-        config: { baseUrl: env.baseUrl, apiKey: env.apiKey },
+        config: { baseUrl, apiKey },
         model,
         messages,
+        temperature,
+        maxTokens: stageMaxTokens ?? null,
         includeUsage: true,
         signal: abort.signal
       })) {
@@ -1275,6 +1427,185 @@ fastify.get(
   }
 );
 
+// ======== AI Config（对齐「锦李2.0」：模型管理 + stage 路由） ========
+
+fastify.get(
+  "/api/ai-config/models",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async () => {
+    const models = await aiConfig.listModels();
+    return { models };
+  },
+);
+
+fastify.post(
+  "/api/ai-config/models",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async (request, reply) => {
+    const bodySchema = z.object({
+      model: z.string().min(1),
+      baseURL: z.string().min(1),
+      endpoint: z.string().optional(),
+      apiKey: z.string().optional(),
+      copyFromId: z.string().optional(),
+      priceInCnyPer1M: z.number().min(0),
+      priceOutCnyPer1M: z.number().min(0),
+      billingGroup: z.string().optional(),
+      isEnabled: z.boolean().optional(),
+      sortOrder: z.number().int().optional(),
+      description: z.string().optional(),
+    });
+    const body = bodySchema.parse((request as any).body ?? {});
+    const updatedBy = String((request as any).user?.email ?? (request as any).user?.sub ?? "admin");
+    try {
+      const id = await aiConfig.createModel({
+        model: body.model,
+        baseURL: body.baseURL,
+        endpoint: body.endpoint,
+        apiKey: body.apiKey,
+        copyFromId: body.copyFromId,
+        priceInCnyPer1M: body.priceInCnyPer1M,
+        priceOutCnyPer1M: body.priceOutCnyPer1M,
+        billingGroup: body.billingGroup ?? null,
+        isEnabled: body.isEnabled,
+        sortOrder: body.sortOrder,
+        description: body.description ?? null,
+        updatedBy,
+      });
+      return reply.send({ ok: true, id });
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : String(e);
+      return reply.code(400).send({ error: msg });
+    }
+  },
+);
+
+fastify.patch(
+  "/api/ai-config/models/:id",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async (request, reply) => {
+    const paramsSchema = z.object({ id: z.string().min(1) });
+    const bodySchema = z.object({
+      baseURL: z.string().optional(),
+      endpoint: z.string().optional(),
+      apiKey: z.string().optional(),
+      clearApiKey: z.boolean().optional(),
+      priceInCnyPer1M: z.number().min(0).nullable().optional(),
+      priceOutCnyPer1M: z.number().min(0).nullable().optional(),
+      billingGroup: z.string().nullable().optional(),
+      isEnabled: z.boolean().optional(),
+      sortOrder: z.number().int().optional(),
+      description: z.string().nullable().optional(),
+    });
+    const { id } = paramsSchema.parse((request as any).params);
+    const body = bodySchema.parse((request as any).body ?? {});
+    const updatedBy = String((request as any).user?.email ?? (request as any).user?.sub ?? "admin");
+    try {
+      await aiConfig.updateModel(id, { ...body, updatedBy });
+      return reply.send({ ok: true });
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : String(e);
+      return reply.code(400).send({ error: msg });
+    }
+  },
+);
+
+fastify.delete(
+  "/api/ai-config/models/:id",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async (request, reply) => {
+    const paramsSchema = z.object({ id: z.string().min(1) });
+    const { id } = paramsSchema.parse((request as any).params);
+    try {
+      await aiConfig.deleteModel(id);
+      return reply.send({ ok: true });
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : String(e);
+      return reply.code(400).send({ error: msg });
+    }
+  },
+);
+
+fastify.post(
+  "/api/ai-config/models/:id/test",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async (request, reply) => {
+    const paramsSchema = z.object({ id: z.string().min(1) });
+    const { id } = paramsSchema.parse((request as any).params);
+    try {
+      const result = await aiConfig.testModel(id);
+      return reply.send({ ok: true, result });
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : String(e);
+      return reply.code(400).send({ error: msg });
+    }
+  },
+);
+
+fastify.post(
+  "/api/ai-config/models/dedupe",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async () => {
+    const result = await aiConfig.dedupeModels();
+    return { ok: true, result };
+  },
+);
+
+fastify.get(
+  "/api/ai-config/stages",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async () => {
+    const [stages, models] = await Promise.all([aiConfig.listStages(), aiConfig.listModels()]);
+    return { stages, models };
+  },
+);
+
+fastify.put(
+  "/api/ai-config/stages",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async (request, reply) => {
+    const bodySchema = z.object({
+      stages: z
+        .array(
+          z.object({
+            stage: z.string().min(1),
+            modelId: z.string().nullable().optional(),
+            temperature: z.number().nullable().optional(),
+            maxTokens: z.number().int().nullable().optional(),
+            isEnabled: z.boolean().optional(),
+          }),
+        )
+        .min(1)
+        .max(200),
+    });
+    const body = bodySchema.parse((request as any).body ?? {});
+    const updatedBy = String((request as any).user?.email ?? (request as any).user?.sub ?? "admin");
+    try {
+      await aiConfig.upsertStages(body.stages as any, updatedBy);
+      return reply.send({ ok: true });
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : String(e);
+      return reply.code(400).send({ error: msg });
+    }
+  },
+);
+
 // ======== Admin：LLM 配置（热生效） ========
 
 function maskSecret(s: string) {
@@ -1493,7 +1824,7 @@ fastify.post("/api/kb/dev/extract_cards", async (request, reply) => {
   });
   const body = bodySchema.parse((request as any).body);
 
-  const cardEnv = await getCardEnv();
+  const cardEnv = await getPlaybookEnv();
   const cardBaseUrl = cardEnv.baseUrl;
   const cardApiKey = cardEnv.apiKey;
   const cardModelDefault = cardEnv.defaultModel;
@@ -1505,7 +1836,29 @@ fastify.post("/api/kb/dev/extract_cards", async (request, reply) => {
     });
   }
 
-  const model = body.model ?? cardModelDefault;
+  let stageMaxTokens: number | undefined = undefined;
+  try {
+    const st = await aiConfig.resolveStage("rag.ingest.extract_cards");
+    if (typeof st.maxTokens === "number") stageMaxTokens = st.maxTokens;
+  } catch {
+    // ignore
+  }
+
+  let model = body.model ?? cardModelDefault;
+  let baseUrl = cardBaseUrl;
+  let apiKey = cardApiKey;
+  if (body.model) {
+    try {
+      const m = await aiConfig.resolveModel(body.model);
+      if (/chat\/completions/i.test(String(m.endpoint || ""))) {
+        model = m.model;
+        baseUrl = m.baseURL;
+        apiKey = m.apiKey;
+      }
+    } catch {
+      // ignore
+    }
+  }
   const maxCards = body.maxCards ?? 18;
   const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 3);
   const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
@@ -1641,13 +1994,14 @@ fastify.post("/api/kb/dev/extract_cards", async (request, reply) => {
     const user = buildUser(body.paragraphs as any, maxCount, maxCharsPerPara);
 
     ret = await chatCompletionOnce({
-      config: { baseUrl: cardBaseUrl, apiKey: cardApiKey },
+      config: { baseUrl, apiKey },
       model,
       messages: [
         { role: "system", content: sys },
         { role: "user", content: user }
       ],
-      temperature: 0.2
+      temperature: 0.2,
+      maxTokens: stageMaxTokens ?? null,
     });
 
     if (ret.ok) break;
@@ -1787,7 +2141,29 @@ fastify.post("/api/kb/dev/build_library_playbook", async (request, reply) => {
     });
   }
 
-  const model = body.model ?? cardModelDefault;
+  let stageMaxTokens: number | undefined = undefined;
+  try {
+    const st = await aiConfig.resolveStage("rag.ingest.build_library_playbook");
+    if (typeof st.maxTokens === "number") stageMaxTokens = st.maxTokens;
+  } catch {
+    // ignore
+  }
+
+  let model = body.model ?? cardModelDefault;
+  let baseUrl = cardBaseUrl;
+  let apiKey = cardApiKey;
+  if (body.model) {
+    try {
+      const m = await aiConfig.resolveModel(body.model);
+      if (/chat\/completions/i.test(String(m.endpoint || ""))) {
+        model = m.model;
+        baseUrl = m.baseURL;
+        apiKey = m.apiKey;
+      }
+    } catch {
+      // ignore
+    }
+  }
   const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 3);
   const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
   const timeoutMs = Number(process.env.LLM_CARD_TIMEOUT_MS ?? 120_000);
@@ -1927,13 +2303,14 @@ fastify.post("/api/kb/dev/build_library_playbook", async (request, reply) => {
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), timeoutMs);
     ret = await chatCompletionOnce({
-      config: { baseUrl: cardBaseUrl, apiKey: cardApiKey },
+      config: { baseUrl, apiKey },
       model,
       messages: [
         { role: "system", content: sys },
         { role: "user", content: user }
       ],
       temperature: 0.2,
+      maxTokens: stageMaxTokens ?? null,
       signal: abort.signal
     });
     clearTimeout(timer);
@@ -2271,7 +2648,29 @@ fastify.post("/api/kb/dev/lint_style", async (request, reply) => {
     });
   }
 
-  const model = body.model ?? env.defaultModel;
+  let stageMaxTokens: number | undefined = undefined;
+  try {
+    const st = await aiConfig.resolveStage("lint.style");
+    if (typeof st.maxTokens === "number") stageMaxTokens = st.maxTokens;
+  } catch {
+    // ignore
+  }
+
+  let model = body.model ?? env.defaultModel;
+  let baseUrl = env.baseUrl;
+  let apiKey = env.apiKey;
+  if (body.model) {
+    try {
+      const m = await aiConfig.resolveModel(body.model);
+      if (/chat\/completions/i.test(String(m.endpoint || ""))) {
+        model = m.model;
+        baseUrl = m.baseURL;
+        apiKey = m.apiKey;
+      }
+    } catch {
+      // ignore
+    }
+  }
   const maxIssues = Number.isFinite(body.maxIssues as any) ? Number(body.maxIssues) : 10;
   const timeoutMs = env.timeoutMs;
 
@@ -2515,13 +2914,14 @@ fastify.post("/api/kb/dev/lint_style", async (request, reply) => {
   const upstreamTimeoutMs = Math.max(10_000, Math.min(timeoutMs, Number(process.env.LLM_LINTER_UPSTREAM_TIMEOUT_MS ?? 25_000)));
   const timer = setTimeout(() => abort.abort(), upstreamTimeoutMs);
   const ret = await chatCompletionOnce({
-    config: { baseUrl: env.baseUrl, apiKey: env.apiKey },
+    config: { baseUrl, apiKey },
     model,
     messages: [
       { role: "system", content: sys },
       { role: "user", content: user },
     ],
     temperature: 0.2,
+    maxTokens: stageMaxTokens ?? null,
     signal: abort.signal,
   });
   clearTimeout(timer);

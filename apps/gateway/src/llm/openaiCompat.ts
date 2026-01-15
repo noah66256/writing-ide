@@ -21,7 +21,13 @@ export function withV1(baseUrl: string) {
 
 export function openAiCompatUrl(baseUrl: string, path: string) {
   const p = path.startsWith("/") ? path : `/${path}`;
-  return `${withV1(baseUrl)}${p}`;
+  // 兼容两种用法：
+  // 1) 传 "/chat/completions"（自动补 /v1）
+  // 2) 传 "/v1/chat/completions"（不重复拼 /v1，便于对齐「锦李2.0」的 endpoint 存储）
+  const b0 = normalizeBaseUrl(baseUrl);
+  const bNoV1 = b0.endsWith("/v1") ? b0.slice(0, -3) : b0;
+  if (p === "/v1" || p.startsWith("/v1/")) return `${bNoV1}${p}`;
+  return `${withV1(b0)}${p}`;
 }
 
 export type StreamDeltaEvent =
@@ -65,6 +71,7 @@ export async function* streamChatCompletions(args: {
   model: string;
   messages: OpenAiChatMessage[];
   temperature?: number;
+  maxTokens?: number | null;
   signal?: AbortSignal;
   includeUsage?: boolean;
 }): AsyncGenerator<StreamDeltaEvent> {
@@ -79,6 +86,8 @@ export async function* streamChatCompletions(args: {
       temperature: args.temperature,
       stream: true
     };
+    const mt = Number(args.maxTokens);
+    if (Number.isFinite(mt) && mt > 0) body.max_tokens = Math.floor(mt);
     if (withUsage) body.stream_options = { include_usage: true };
     return fetch(url, {
       method: "POST",
@@ -183,6 +192,7 @@ export async function chatCompletionOnce(args: {
   model: string;
   messages: OpenAiChatMessage[];
   temperature?: number;
+  maxTokens?: number | null;
   signal?: AbortSignal;
 }): Promise<ChatCompletionOnceResult> {
   const url = openAiCompatUrl(args.config.baseUrl, "/chat/completions");
@@ -199,6 +209,9 @@ export async function chatCompletionOnce(args: {
         model: args.model,
         messages: args.messages,
         temperature: args.temperature,
+        ...(Number.isFinite(Number(args.maxTokens)) && Number(args.maxTokens) > 0
+          ? { max_tokens: Math.floor(Number(args.maxTokens)) }
+          : {}),
         stream: false,
       }),
       signal: args.signal,
