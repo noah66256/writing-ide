@@ -69,13 +69,13 @@ fastify.decorate("authenticate", async (request: any, reply: any) => {
   try {
     await request.jwtVerify();
   } catch {
-    reply.code(401).send({ error: "UNAUTHORIZED" });
+    return reply.code(401).send({ error: "UNAUTHORIZED" });
   }
 });
 
-function requireAdmin(request: any, reply: any) {
+async function requireAdmin(request: any, reply: any) {
   if (request.user?.role !== "admin") {
-    reply.code(403).send({ error: "FORBIDDEN" });
+    return reply.code(403).send({ error: "FORBIDDEN" });
   }
 }
 
