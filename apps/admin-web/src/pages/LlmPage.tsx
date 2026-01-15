@@ -297,132 +297,34 @@ export function LlmPage() {
         </div>
       </div>
 
-      <div className="tableWrap" style={{ marginBottom: 14 }}>
-        <table className="table">
-          <thead>
-            <tr>
-              <th style={{ width: 180 }}>模型</th>
-              <th>BaseURL</th>
-              <th style={{ width: 180 }}>Endpoint</th>
-              <th style={{ width: 180 }}>定价（in/out）</th>
-              <th style={{ width: 160 }}>Key</th>
-              <th style={{ width: 120 }}>状态</th>
-              <th style={{ width: 220 }}>测速</th>
-              <th style={{ width: 210 }}>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {models.map((m) => (
-              <tr key={m.id}>
-                <td style={{ fontWeight: 900 }}>{m.model}</td>
-                <td>
-                  <input
-                    className="input"
-                    value={m.baseURL}
-                    onChange={(e) => setModels((prev) => prev.map((x) => (x.id === m.id ? { ...x, baseURL: e.target.value } : x)))}
-                  />
-                  <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-                    sortOrder：
-                    <input
-                      className="input"
-                      style={{ width: 90, display: "inline-block", marginLeft: 6 }}
-                      value={String(m.sortOrder)}
-                      onChange={(e) =>
-                        setModels((prev) =>
-                          prev.map((x) =>
-                            x.id === m.id ? { ...x, sortOrder: Number(e.target.value || 0) } : x,
-                          ),
-                        )
-                      }
-                    />
+      <div className="tableWrap" style={{ padding: 14, marginBottom: 14 }}>
+        <div style={{ fontWeight: 900, marginBottom: 10 }}>AI 模型管理</div>
+        <div className="modelList">
+          {models.map((m) => {
+            const kind = endpointLabel(m.endpoint);
+            const kindTag = kind === "Embeddings" ? "tagPurple" : "tagBlue";
+            const keyTag = m.hasApiKey ? "tagGreen" : "tagRed";
+            const keyText = m.hasApiKey ? `Key ${m.apiKeyMasked || "****"}` : "无 Key";
+
+            return (
+              <div key={m.id} className="modelCard">
+                <div className="modelCardTop">
+                  <div className="modelCardTitle">
+                    <div className="modelName">{m.model}</div>
+                    <span className={`tag ${kindTag}`}>{kind}</span>
+                    <span className={`tag ${keyTag}`}>{keyText}</span>
+                    {m.billingGroup ? <span className="tag">{`group ${m.billingGroup}`}</span> : null}
                   </div>
-                </td>
-                <td>
-                  <select
-                    className="input"
-                    value={m.endpoint}
-                    onChange={(e) => setModels((prev) => prev.map((x) => (x.id === m.id ? { ...x, endpoint: e.target.value } : x)))}
-                  >
-                    <option value="/v1/chat/completions">/v1/chat/completions</option>
-                    <option value="/v1/embeddings">/v1/embeddings</option>
-                  </select>
-                  <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-                    {endpointLabel(m.endpoint)}
-                  </div>
-                </td>
-                <td>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                    <input
-                      className="input"
-                      value={m.priceInCnyPer1M === null ? "" : String(m.priceInCnyPer1M)}
-                      onChange={(e) =>
-                        setModels((prev) =>
-                          prev.map((x) => (x.id === m.id ? { ...x, priceInCnyPer1M: e.target.value ? Number(e.target.value) : null } : x)),
-                        )
-                      }
-                      placeholder="in"
-                    />
-                    <input
-                      className="input"
-                      value={m.priceOutCnyPer1M === null ? "" : String(m.priceOutCnyPer1M)}
-                      onChange={(e) =>
-                        setModels((prev) =>
-                          prev.map((x) => (x.id === m.id ? { ...x, priceOutCnyPer1M: e.target.value ? Number(e.target.value) : null } : x)),
-                        )
-                      }
-                      placeholder="out"
-                    />
-                  </div>
-                </td>
-                <td>
-                  <div className="muted" style={{ fontSize: 12 }}>
-                    {m.hasApiKey ? `已配置（${m.apiKeyMasked || "****"}）` : "未配置"}
-                  </div>
-                  <input
-                    className="input"
-                    type="password"
-                    value={m.apiKeyInput || ""}
-                    onChange={(e) => setModels((prev) => prev.map((x) => (x.id === m.id ? { ...x, apiKeyInput: e.target.value } : x)))}
-                    placeholder="留空=不改"
-                    style={{ marginTop: 8 }}
-                  />
-                  <label className="muted" style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, fontSize: 12 }}>
-                    <input
-                      type="checkbox"
-                      checked={Boolean(m.clearApiKey)}
-                      onChange={(e) => setModels((prev) => prev.map((x) => (x.id === m.id ? { ...x, clearApiKey: e.target.checked } : x)))}
-                    />
-                    清空 apiKey
-                  </label>
-                </td>
-                <td>
-                  <label className="muted" style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-                    <input
-                      type="checkbox"
-                      checked={Boolean(m.isEnabled)}
-                      onChange={(e) => setModels((prev) => prev.map((x) => (x.id === m.id ? { ...x, isEnabled: e.target.checked } : x)))}
-                    />
-                    启用
-                  </label>
-                  <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-                    {m.billingGroup ? `group=${m.billingGroup}` : "group=-"}
-                  </div>
-                </td>
-                <td>
-                  {!m.testResult ? (
-                    <div className="muted">-</div>
-                  ) : (
-                    <div className="muted" style={{ fontSize: 12 }}>
-                      <div>
-                        {m.testResult.ok ? "OK" : "FAIL"} · {m.testResult.latencyMs ?? "-"}ms · {m.testResult.status ?? "-"}
-                      </div>
-                      <div>{m.testResult.error ? String(m.testResult.error).slice(0, 60) : ""}</div>
-                      <div>{m.testResult.testedAt ? String(m.testResult.testedAt).slice(0, 19).replace("T", " ") : ""}</div>
-                    </div>
-                  )}
-                </td>
-                <td>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+
+                  <div className="modelCardActions">
+                    <label className="toggleSm">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(m.isEnabled)}
+                        onChange={(e) => setModels((prev) => prev.map((x) => (x.id === m.id ? { ...x, isEnabled: e.target.checked } : x)))}
+                      />
+                      启用
+                    </label>
                     <button className="btn primary" type="button" disabled={busy} onClick={() => void saveModel(m)}>
                       保存
                     </button>
@@ -433,11 +335,128 @@ export function LlmPage() {
                       删除
                     </button>
                   </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                </div>
+
+                <div className="modelFieldsGrid">
+                  <label className="field">
+                    <div className="label">BaseURL</div>
+                    <input
+                      className="input"
+                      value={m.baseURL}
+                      onChange={(e) => setModels((prev) => prev.map((x) => (x.id === m.id ? { ...x, baseURL: e.target.value } : x)))}
+                    />
+                  </label>
+
+                  <label className="field">
+                    <div className="label">Endpoint</div>
+                    <select
+                      className="input"
+                      value={m.endpoint}
+                      onChange={(e) => setModels((prev) => prev.map((x) => (x.id === m.id ? { ...x, endpoint: e.target.value } : x)))}
+                    >
+                      <option value="/v1/chat/completions">/v1/chat/completions</option>
+                      <option value="/v1/embeddings">/v1/embeddings</option>
+                    </select>
+                  </label>
+
+                  <label className="field">
+                    <div className="label">sortOrder</div>
+                    <input
+                      className="input"
+                      value={String(m.sortOrder ?? 0)}
+                      onChange={(e) =>
+                        setModels((prev) =>
+                          prev.map((x) => (x.id === m.id ? { ...x, sortOrder: Number(e.target.value || 0) } : x)),
+                        )
+                      }
+                      placeholder="0"
+                    />
+                  </label>
+
+                  <label className="field">
+                    <div className="label">定价（元/1,000,000 tokens，in / out）</div>
+                    <div className="modelDouble">
+                      <input
+                        className="input"
+                        value={m.priceInCnyPer1M === null ? "" : String(m.priceInCnyPer1M)}
+                        onChange={(e) =>
+                          setModels((prev) =>
+                            prev.map((x) => (x.id === m.id ? { ...x, priceInCnyPer1M: e.target.value ? Number(e.target.value) : null } : x)),
+                          )
+                        }
+                        placeholder="in"
+                      />
+                      <input
+                        className="input"
+                        value={m.priceOutCnyPer1M === null ? "" : String(m.priceOutCnyPer1M)}
+                        onChange={(e) =>
+                          setModels((prev) =>
+                            prev.map((x) => (x.id === m.id ? { ...x, priceOutCnyPer1M: e.target.value ? Number(e.target.value) : null } : x)),
+                          )
+                        }
+                        placeholder="out"
+                      />
+                    </div>
+                  </label>
+
+                  <label className="field">
+                    <div className="label">billingGroup（可选）</div>
+                    <input
+                      className="input"
+                      value={m.billingGroup ?? ""}
+                      onChange={(e) => setModels((prev) => prev.map((x) => (x.id === m.id ? { ...x, billingGroup: e.target.value } : x)))}
+                      placeholder="thirdparty-A"
+                    />
+                  </label>
+
+                  <label className="field">
+                    <div className="label">apiKey（留空=不改）</div>
+                    <input
+                      className="input"
+                      type="password"
+                      value={m.apiKeyInput || ""}
+                      onChange={(e) => setModels((prev) => prev.map((x) => (x.id === m.id ? { ...x, apiKeyInput: e.target.value } : x)))}
+                      placeholder="sk-..."
+                    />
+                    <label className="muted" style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, fontSize: 12 }}>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(m.clearApiKey)}
+                        onChange={(e) => setModels((prev) => prev.map((x) => (x.id === m.id ? { ...x, clearApiKey: e.target.checked } : x)))}
+                      />
+                      清空 apiKey
+                    </label>
+                  </label>
+
+                  <label className="field spanAll">
+                    <div className="label">description（可选）</div>
+                    <input
+                      className="input"
+                      value={m.description ?? ""}
+                      onChange={(e) => setModels((prev) => prev.map((x) => (x.id === m.id ? { ...x, description: e.target.value } : x)))}
+                      placeholder="备注/渠道说明"
+                    />
+                  </label>
+                </div>
+
+                <div className="modelTest">
+                  {!m.testResult ? (
+                    <div className="muted">还未测速</div>
+                  ) : (
+                    <>
+                      <div>
+                        <span className={m.testResult.ok ? "modelTestOk" : "modelTestFail"}>{m.testResult.ok ? "OK" : "FAIL"}</span> ·{" "}
+                        {m.testResult.latencyMs ?? "-"}ms · {m.testResult.status ?? "-"}
+                      </div>
+                      {m.testResult.error ? <div>{String(m.testResult.error).slice(0, 180)}</div> : null}
+                      {m.testResult.testedAt ? <div>{String(m.testResult.testedAt).slice(0, 19).replace("T", " ")}</div> : null}
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       <div className="tableWrap">

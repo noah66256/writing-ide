@@ -256,7 +256,7 @@
   border: 1px solid #e2e8f0;
   border-radius: 14px;
   background: white;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .table {
@@ -278,6 +278,145 @@
   padding: 10px 12px;
   border-bottom: 1px solid #f1f5f9;
   vertical-align: top;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #334155;
+  font-weight: 800;
+}
+
+.tagBlue {
+  border-color: rgba(14, 165, 233, 0.35);
+  background: rgba(14, 165, 233, 0.12);
+  color: #0369a1;
+}
+
+.tagPurple {
+  border-color: rgba(168, 85, 247, 0.35);
+  background: rgba(168, 85, 247, 0.12);
+  color: #6b21a8;
+}
+
+.tagGreen {
+  border-color: rgba(22, 163, 74, 0.35);
+  background: rgba(22, 163, 74, 0.12);
+  color: #166534;
+}
+
+.tagRed {
+  border-color: rgba(220, 38, 38, 0.35);
+  background: rgba(220, 38, 38, 0.12);
+  color: #991b1b;
+}
+
+.modelList {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.modelCard {
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  padding: 12px;
+  background: #ffffff;
+}
+
+.modelCardTop {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.modelCardTitle {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.modelName {
+  font-weight: 900;
+  font-size: 14px;
+  color: #0f172a;
+}
+
+.modelCardActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.toggleSm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #475569;
+  font-weight: 800;
+  user-select: none;
+}
+
+.modelFieldsGrid {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+@media (max-width: 980px) {
+  .modelFieldsGrid {
+    grid-template-columns: repeat(2, minmax(240px, 1fr));
+  }
+}
+
+@media (max-width: 680px) {
+  .modelFieldsGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.spanAll {
+  grid-column: 1 / -1;
+}
+
+.modelDouble {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.modelTest {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed #e2e8f0;
+  font-size: 12px;
+  color: #475569;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.modelTestOk {
+  color: #166534;
+  font-weight: 900;
+}
+
+.modelTestFail {
+  color: #991b1b;
+  font-weight: 900;
 }
 
 .drawerMask {
