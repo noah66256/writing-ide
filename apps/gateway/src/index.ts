@@ -295,7 +295,7 @@ function buildAgentProtocolPrompt(mode: AgentMode) {
         `   - 即使你需要澄清，也必须先把“澄清问题/默认假设/下一步动作”写进 todo（澄清最多 5 个高价值问题：平台画像/受众/目标/口吻人设/素材来源）。\n` +
         `   - 若用户明确说“先直接开始/先仿写看看/先给版本/不要再问”：你必须把澄清项标为可跳过，并基于合理默认假设直接推进写作。\n` +
         `   - 若右侧已关联知识库，且 KB_SELECTED_LIBRARIES 中存在 purpose=style（风格库），并且任务是“写作/仿写/改写/润色”：todo 中必须包含“三段式”步骤：\n` +
-        `     1) 先 kb.search（只搜风格库，优先 kind=paragraph/outline）拉 3–8 条可抄样例；\n` +
+        `     1) 先 kb.search（只搜风格库，优先 kind=card + cardTypes）拉 6–12 条“套路模板/金句形状/结构骨架”；必要时再补 kb.search(kind=paragraph, anchorParagraphIndexMax/anchorFromEndMax) 拉开头/结尾证据段；\n` +
         `     2) 产出候选稿（先别急着写入文件）；\n` +
         `     3) 调用 lint.style（强模型）对照库原文/指纹找“不像点”，按其 rewritePrompt 改成终稿后再写入/输出。\n` +
         `2) 执行（由你自主决定是否调用工具）：素材收集（@引用/读文件/KB 检索）→ 结构（先 outline）→ 初稿 → 改写润色 → 自检。\n` +
@@ -433,7 +433,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   let hasWriteOps = false;
   let hasAnyToolCall = false;
   let hasKbSearch = false;
-  let hasStyleKbSearch = false; // 风格库样例检索是否已完成（kb.search(kind=paragraph/outline, 只搜风格库)）
+  let hasStyleKbSearch = false; // 风格库样例检索是否已完成（以 tool_result.groups 非空为准）
   let styleLintPassed = false; // 风格对齐是否“通过闸门”
   let styleLintFailCount = 0; // 未通过次数（每次未通过=一次“回炉”机会）
   let lastStyleLint: null | {
@@ -450,6 +450,13 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     if (t.length > 2000) return false;
     // 简单启发式：包含问号/疑问词，且不像是在输出最终结果
     return /[?？]/.test(t) || /(请问|是否|能否|方便|要不要|需要你)/.test(t);
+  }
+
+  function looksLikeFIMLeak(text: string) {
+    const t = String(text ?? "").trimStart();
+    if (!t) return false;
+    if (!t.startsWith("<|")) return false;
+    return /<\|fim_begin\|>|<\|begin_of_sentence\|>/i.test(t);
   }
 
   function isWriteLikeTool(name: string) {
@@ -523,7 +530,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             const t = assistantText.trimStart();
             if (t.startsWith("<tool_calls") || t.startsWith("<tool_call")) decided = "tool";
             else if (t.length > 0 && !t.startsWith("<")) decided = "text";
-            else if (t.length > 96 && t.startsWith("<") && !t.startsWith("<tool_calls") && !t.startsWith("<tool_call"))
+            else if (t.length > 96 && t.startsWith("<") && !t.startsWith("<tool_calls") && !t.startsWith("<tool_call") && !t.startsWith("<|"))
               decided = "text";
           }
           // 一旦判断为 text，需要把此前积累但未发出的内容补发，否则会出现“输出中断/缺头”
@@ -568,6 +575,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         if (mode !== "chat" && autoRetryBudget > 0) {
           const t = assistantText.trim();
           const isEmpty = t.length === 0;
+          const isFIMLeak = looksLikeFIMLeak(assistantText);
           const isClarify = looksLikeClarifyQuestions(t) && !forceProceed;
 
           // 关键：在 Plan/Agent 模式，todo 是“可追踪执行”的入口。即使需要澄清，也必须先设置 todo。
@@ -576,10 +584,11 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           const needKb = styleGateEnabled && !hasStyleKbSearch && !isClarify;
           const needLint = lintGateEnabled && !styleLintPassed && styleLintFailCount <= lintMaxRework && !isClarify;
 
-          if (isEmpty || needTodo || needWrite || needKb || needLint) {
+          if (isFIMLeak || isEmpty || needTodo || needWrite || needKb || needLint) {
             autoRetryBudget -= 1;
             const reasons: string[] = [];
-            if (isEmpty) reasons.push("输出为空");
+            if (isFIMLeak) reasons.push("模型输出异常(FIM token)");
+            else if (isEmpty) reasons.push("输出为空");
             if (needTodo) reasons.push("Todo 未设置");
             if (needKb) reasons.push("风格样例未检索");
             if (needLint) reasons.push("未进行风格对齐(lint.style)");
@@ -605,7 +614,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             writeEvent("assistant.done", { reason: "auto_retry_incomplete" });
 
             // 记录本轮输出（即使为空），并要求下一轮按协议继续
-            messages.push({ role: "assistant", content: assistantText });
+            messages.push({ role: "assistant", content: isFIMLeak ? "" : assistantText });
             messages.push({
               role: "system",
               content:
@@ -675,7 +684,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             role: "system",
             content:
               "你上一轮的 tool_calls 违反了“风格库写作强闭环”约束，请立刻重试并按下面顺序推进：\n" +
-              "A) kb.search：只搜风格库（purpose=style），kind=paragraph/outline，先拉 3–8 条可抄样例；本轮不要调用 lint.style 或任何写入类工具。\n" +
+              "A) kb.search（手法/模板）：只搜风格库（purpose=style），优先 kind=card + cardTypes 先拉 6–12 条“可抄模板/金句形状/结构骨架”；如需证据段再用 kind=paragraph/outline + anchorParagraphIndexMax/anchorFromEndMax。 本轮不要调用 lint.style 或任何写入类工具。\n" +
               (enforceLint
                 ? `B) lint.style（终稿闸门）：基于样例与指纹对照候选稿，输出 issues + rewritePrompt；必须通过闸门（score>=${lintPassScore} 且无 high issue）。未通过则按 rewritePrompt 回炉改写并再次 lint.style（最多回炉 ${lintMaxRework} 次）。本轮不要调用 kb.search 或任何写入类工具。\n`
                 : "") +
@@ -685,7 +694,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               (hasNonStyleLibraries
                 ? `提示：当前同时绑定了非风格库，因此 kb.search 必须显式传 libraryIds（仅限风格库）：${JSON.stringify(styleLibIds)}。\n`
                 : "") +
-              "注意：风格样例检索允许 kind=card（必须带 cardTypes）或 kind=paragraph/outline。"
+              "注意：手法/模板检索优先 kind=card 且必须带 cardTypes；如需原文证据段再用 kind=paragraph/outline，并建议用 anchorParagraphIndexMax/anchorFromEndMax 做位置过滤。"
           });
           continue;
         }
@@ -733,7 +742,10 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         if (payload.ok && payload.name === "run.setTodoList") hasTodoList = true;
         if (payload.ok && isWriteLikeTool(payload.name)) hasWriteOps = true;
         if (payload.ok && payload.name === "kb.search") hasKbSearch = true;
-        if (payload.ok && String(call.name ?? "") === "kb.search" && isStyleExampleKbSearch(call)) hasStyleKbSearch = true;
+        if (payload.ok && String(call.name ?? "") === "kb.search" && isStyleExampleKbSearch(call)) {
+          const groups = Array.isArray((payload.output as any)?.groups) ? (payload.output as any).groups : [];
+          if (groups.length > 0) hasStyleKbSearch = true;
+        }
         if (String(call.name ?? "") === "lint.style") {
           if (payload.ok) {
             const parsedLint = parseStyleLintResult(payload.output);
