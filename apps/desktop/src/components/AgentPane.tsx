@@ -2,15 +2,32 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { startGatewayRun } from "../agent/gatewayAgent";
 import { useRunStore } from "../state/runStore";
 import { useProjectStore } from "../state/projectStore";
-import { IconAt, IconCopy, IconGlobe, IconImage, IconMic, IconRewind, IconSend, IconStop } from "./Icons";
+import { IconAt, IconChevronDown, IconCopy, IconGlobe, IconImage, IconMic, IconRewind, IconSend, IconStop } from "./Icons";
 import { PillSelect } from "./PillSelect";
 import { ToolBlock } from "./ToolBlock";
 import { RichText } from "./RichText";
 import { RefComposer, type RefComposerHandle, type RefItem } from "./RefComposer";
 import { useKbStore } from "../state/kbStore";
 import { useConversationStore, type RunSnapshot, type SerializableStep } from "../state/conversationStore";
+import { ModelPickerModal, type ModelPickerItem } from "./ModelPickerModal";
 
 type RunController = { cancel: () => void };
+
+type LlmSelectorDto = {
+  ok: boolean;
+  updatedAt: string;
+  models: Array<{
+    id: string;
+    model: string;
+    providerId: string | null;
+    providerName: string | null;
+    endpoint: string;
+  }>;
+  stages: {
+    chat: { modelIds: string[]; defaultModelId: string };
+    agent: { modelIds: string[]; defaultModelId: string };
+  };
+};
 
 function stripToolXml(text: string) {
   if (!text) return "";
@@ -31,9 +48,11 @@ export function AgentPane() {
 
   const setMode = useRunStore((s) => s.setMode);
   const setModel = useRunStore((s) => s.setModel);
+  const setModelForMode = useRunStore((s) => s.setModelForMode);
 
   const [input, setInput] = useState("");
-  const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [llmSelector, setLlmSelector] = useState<LlmSelectorDto | null>(null);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composerRef = useRef<RefComposerHandle | null>(null);
   const historyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -114,22 +133,76 @@ export function AgentPane() {
     }
   };
 
+  const refreshLlmSelector = async () => {
+    const doFetch = async (base: string) => {
+      const url = base ? `${base}/api/llm/selector` : "/api/llm/selector";
+      return fetch(url, { cache: "no-store" });
+    };
+
+    try {
+      let res: Response;
+      try {
+        res = await doFetch(gatewayUrl);
+      } catch (e: any) {
+        const msg = e?.message ? String(e.message) : String(e);
+        if (msg.includes("Failed to fetch") && String(gatewayUrl).includes("localhost")) {
+          const fallback = String(gatewayUrl).replace("localhost", "127.0.0.1");
+          res = await doFetch(fallback);
+        } else {
+          throw e;
+        }
+      }
+      if (!res.ok) return;
+      const data = (await res.json().catch(() => null)) as LlmSelectorDto | null;
+      if (!data?.ok) return;
+      setLlmSelector(data);
+
+      const chatIds = Array.isArray(data?.stages?.chat?.modelIds) ? data.stages.chat.modelIds.filter(Boolean) : [];
+      const agentIds = Array.isArray(data?.stages?.agent?.modelIds) ? data.stages.agent.modelIds.filter(Boolean) : [];
+      const chatDefault = String(data?.stages?.chat?.defaultModelId ?? "").trim() || chatIds[0] || "";
+      const agentDefault = String(data?.stages?.agent?.defaultModelId ?? "").trim() || agentIds[0] || "";
+
+      const st = useRunStore.getState();
+      if (chatDefault && (!st.chatModel || (chatIds.length && !chatIds.includes(st.chatModel)))) {
+        st.setModelForMode("chat", chatDefault);
+      }
+      if (agentDefault && (!st.agentModel || (agentIds.length && !agentIds.includes(st.agentModel)))) {
+        st.setModelForMode("agent", agentDefault);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
   useEffect(() => {
-    // 尽量从 Gateway 拉取模型列表
-    fetch(`${gatewayUrl}/api/llm/models`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((data) => {
-        const ids = Array.isArray(data?.models) ? data.models.map((m: any) => String(m.id)) : [];
-        const next = ids.filter(Boolean);
-        setModelOptions(Array.from(new Set(next)));
-        if (!next.length) return;
-        if (!model || !next.includes(model)) setModel(next[0]);
-      })
-      .catch(() => {
-        // ignore
-      });
+    void refreshLlmSelector();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const modelPickerItems = useMemo((): ModelPickerItem[] => {
+    const data = llmSelector;
+    if (!data?.ok) return [];
+    const stageKey = mode === "chat" ? "chat" : "agent";
+    const ids = stageKey === "chat" ? data.stages.chat.modelIds : data.stages.agent.modelIds;
+    const map = new Map((data.models ?? []).map((m) => [m.id, m]));
+    return (ids ?? [])
+      .map((id) => {
+        const m = map.get(id);
+        return {
+          id,
+          label: m?.model || id,
+          providerId: m?.providerId ?? null,
+          providerName: m?.providerName ?? null,
+        };
+      })
+      .filter((x) => Boolean(x.id));
+  }, [llmSelector, mode]);
+
+  const modelLabel = useMemo(() => {
+    const data = llmSelector;
+    const found = (data?.models ?? []).find((m) => m.id === model) || null;
+    return found?.model || model || "选择模型";
+  }, [llmSelector, model]);
 
   // Context 使用量（估算）：Main Doc + 最近消息 + 当前输入
   const mainDocChars = JSON.stringify(mainDoc).length;
@@ -579,14 +652,25 @@ export function AgentPane() {
                             minWidth={86}
                             maxWidth={120}
                           />
-                          <PillSelect
-                            value={model}
-                            options={modelOptions.map((m) => ({ value: m, label: m }))}
-                            onChange={(v) => setModel(v)}
-                            title={model || "未选择模型"}
-                            minWidth={120}
-                            maxWidth={220}
-                          />
+                          <div
+                            className="pillSelect"
+                            style={{ minWidth: 120, maxWidth: 220 }}
+                            title={model ? `模型：${model}` : "未选择模型"}
+                          >
+                            <button
+                              className="pillBtn"
+                              type="button"
+                              onClick={() => {
+                                setModelPickerOpen(true);
+                                void refreshLlmSelector();
+                              }}
+                            >
+                              <span className="pillLabel">{modelLabel}</span>
+                              <span className={`pillChevron ${modelPickerOpen ? "pillChevronOpen" : ""}`}>
+                                <IconChevronDown />
+                              </span>
+                            </button>
+                          </div>
                           <div className="ctxPill" title={ctxTitle} aria-label="Context 使用量">
                             CTX {ctxPct}%
                           </div>
@@ -844,14 +928,21 @@ export function AgentPane() {
                 minWidth={86}
                 maxWidth={120}
               />
-              <PillSelect
-                value={model}
-                options={modelOptions.map((m) => ({ value: m, label: m }))}
-                onChange={(v) => setModel(v)}
-                title={model || "未选择模型"}
-                minWidth={120}
-                maxWidth={220}
-              />
+              <div className="pillSelect" style={{ minWidth: 120, maxWidth: 220 }} title={model ? `模型：${model}` : "未选择模型"}>
+                <button
+                  className="pillBtn"
+                  type="button"
+                  onClick={() => {
+                    setModelPickerOpen(true);
+                    void refreshLlmSelector();
+                  }}
+                >
+                  <span className="pillLabel">{modelLabel}</span>
+                  <span className={`pillChevron ${modelPickerOpen ? "pillChevronOpen" : ""}`}>
+                    <IconChevronDown />
+                  </span>
+                </button>
+              </div>
               <div className="ctxPill" title={ctxTitle} aria-label="Context 使用量">
                 CTX {ctxPct}%
               </div>
@@ -966,6 +1057,15 @@ export function AgentPane() {
           快捷键：Enter 发送；Shift/Ctrl/⌘ + Enter 换行（Chat 模式不会调用写入类工具）。
         </div>
       </div>
+
+      <ModelPickerModal
+        open={modelPickerOpen}
+        title={mode === "chat" ? "选择 Chat 模型" : "选择 Agent 模型"}
+        items={modelPickerItems}
+        value={model}
+        onChange={(id) => setModel(id)}
+        onClose={() => setModelPickerOpen(false)}
+      />
 
       {refPickerOpen && (
         <div

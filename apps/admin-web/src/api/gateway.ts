@@ -76,9 +76,26 @@ export type AiModelTestRunDto = AiModelTestResultDto & {
   endpointUrl: string;
 };
 
+export type AiProviderDto = {
+  id: string;
+  name: string;
+  baseURL: string;
+  isEnabled: boolean;
+  sortOrder: number;
+  description: string | null;
+  hasApiKey: boolean;
+  apiKeyMasked: string | null;
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type AiModelDto = {
   id: string;
   model: string;
+  providerId: string | null;
+  providerName: string | null;
+  providerBaseURL: string | null;
   baseURL: string;
   endpoint: string;
   priceInCnyPer1M: number | null;
@@ -100,6 +117,7 @@ export type AiStageDto = {
   name: string;
   description: string;
   modelId: string | null;
+  modelIds: string[] | null;
   model: string;
   baseURL: string;
   endpoint: string;
@@ -108,13 +126,45 @@ export type AiStageDto = {
   isEnabled: boolean;
 };
 
+export async function aiConfigListProviders() {
+  return apiFetchJson<{ providers: AiProviderDto[] }>("/api/ai-config/providers");
+}
+
+export async function aiConfigCreateProvider(body: {
+  name: string;
+  baseURL: string;
+  apiKey?: string;
+  isEnabled?: boolean;
+  sortOrder?: number;
+  description?: string | null;
+}) {
+  return apiFetchJson<{ ok: true; id: string }>("/api/ai-config/providers", { method: "POST", body: JSON.stringify(body) });
+}
+
+export async function aiConfigUpdateProvider(id: string, body: Partial<{
+  name: string;
+  baseURL: string;
+  apiKey: string;
+  clearApiKey: boolean;
+  isEnabled: boolean;
+  sortOrder: number;
+  description: string | null;
+}>) {
+  return apiFetchJson<{ ok: true }>(`/api/ai-config/providers/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(body) });
+}
+
+export async function aiConfigDeleteProvider(id: string) {
+  return apiFetchJson<{ ok: true }>(`/api/ai-config/providers/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
 export async function aiConfigListModels() {
   return apiFetchJson<{ models: AiModelDto[] }>("/api/ai-config/models");
 }
 
 export async function aiConfigCreateModel(body: {
   model: string;
-  baseURL: string;
+  providerId?: string;
+  baseURL?: string;
   endpoint?: string;
   apiKey?: string;
   copyFromId?: string;
@@ -132,6 +182,7 @@ export async function aiConfigCreateModel(body: {
 }
 
 export async function aiConfigUpdateModel(id: string, body: Partial<{
+  providerId: string | null;
   baseURL: string;
   endpoint: string;
   apiKey: string;
@@ -166,12 +217,13 @@ export async function aiConfigDedupeModels() {
 }
 
 export async function aiConfigGetStages() {
-  return apiFetchJson<{ stages: AiStageDto[]; models: AiModelDto[] }>("/api/ai-config/stages");
+  return apiFetchJson<{ stages: AiStageDto[]; models: AiModelDto[]; providers: AiProviderDto[] }>("/api/ai-config/stages");
 }
 
 export async function aiConfigUpdateStages(stages: Array<{
   stage: string;
   modelId?: string | null;
+  modelIds?: string[] | null;
   temperature?: number | null;
   maxTokens?: number | null;
   isEnabled?: boolean;

@@ -87,6 +87,10 @@ export type RunActivity = {
 
 type RunState = {
   mode: Mode;
+  /** Chat 模式选中的模型（可与 Agent/Plan 分开记忆） */
+  chatModel: string;
+  /** Plan/Agent 模式选中的模型（共用） */
+  agentModel: string;
   model: string;
   mainDoc: MainDoc;
   todoList: TodoItem[];
@@ -103,6 +107,7 @@ type RunState = {
 
   setMode: (mode: Mode) => void;
   setModel: (model: string) => void;
+  setModelForMode: (mode: "chat" | "agent", model: string) => void;
   setMainDoc: (mainDoc: MainDoc) => void;
   resetRun: () => void;
   // 会话/历史：加载一段历史快照到当前 Run（用于“对话历史/切换”）
@@ -155,6 +160,8 @@ export const useRunStore = create<RunState>()(
   persist(
     (set, get) => ({
   mode: "plan",
+  chatModel: "",
+  agentModel: "",
   model: "",
   mainDoc: { goal: "" },
   todoList: [],
@@ -164,8 +171,23 @@ export const useRunStore = create<RunState>()(
   activity: null,
   kbAttachedLibraryIds: [],
 
-  setMode: (mode) => set({ mode }),
-  setModel: (model) => set({ model }),
+  setMode: (mode) =>
+    set((s) => {
+      const nextModel = mode === "chat" ? s.chatModel || s.model : s.agentModel || s.model;
+      return { mode, model: nextModel };
+    }),
+  setModel: (model) =>
+    set((s) => {
+      const v = String(model ?? "").trim();
+      if (s.mode === "chat") return { model: v, chatModel: v };
+      return { model: v, agentModel: v };
+    }),
+  setModelForMode: (modeKey, model) =>
+    set((s) => {
+      const v = String(model ?? "").trim();
+      if (modeKey === "chat") return { chatModel: v, ...(s.mode === "chat" ? { model: v } : {}) };
+      return { agentModel: v, ...(s.mode !== "chat" ? { model: v } : {}) };
+    }),
   setMainDoc: (mainDoc) => set({ mainDoc }),
   setRunning: (running) =>
     set((s) => ({
@@ -205,9 +227,16 @@ export const useRunStore = create<RunState>()(
       }
       return step as Step;
     });
+    const mode = s.mode === "plan" || s.mode === "agent" || s.mode === "chat" ? s.mode : get().mode;
+    const model = typeof s.model === "string" ? s.model : get().model;
+    const prev = get();
+    const chatModel = mode === "chat" ? model : prev.chatModel;
+    const agentModel = mode !== "chat" ? model : prev.agentModel;
     set({
-      mode: s.mode === "plan" || s.mode === "agent" || s.mode === "chat" ? s.mode : get().mode,
-      model: typeof s.model === "string" ? s.model : get().model,
+      mode,
+      model,
+      chatModel,
+      agentModel,
       mainDoc: (s.mainDoc && typeof s.mainDoc === "object" ? s.mainDoc : get().mainDoc) as MainDoc,
       todoList: Array.isArray(s.todoList) ? (s.todoList as TodoItem[]) : [],
       steps: normalized,

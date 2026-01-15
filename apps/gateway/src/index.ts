@@ -362,6 +362,42 @@ fastify.get("/api/llm/models", async () => {
   return { models: ids.map((id) => ({ id })) };
 });
 
+// Desktop 模型选择器：按供应商分组 + stage（llm.chat/agent.run）多选下发
+fastify.get("/api/llm/selector", async () => {
+  try {
+    await aiConfig.ensureDefaults();
+  } catch {
+    // ignore
+  }
+
+  const [stages, models, providers] = await Promise.all([aiConfig.listStages(), aiConfig.listModels(), aiConfig.listProviders()]);
+  const chat = stages.find((s: any) => s.stage === "llm.chat") as any;
+  const agent = stages.find((s: any) => s.stage === "agent.run") as any;
+
+  const pickStage = (s: any) => {
+    const ids = Array.isArray(s?.modelIds) ? (s.modelIds as string[]).filter(Boolean) : [];
+    const defaultId = typeof s?.modelId === "string" && s.modelId ? String(s.modelId) : ids[0] || "";
+    return { modelIds: ids.length ? ids : defaultId ? [defaultId] : [], defaultModelId: defaultId || "" };
+  };
+
+  return {
+    ok: true,
+    updatedAt: new Date().toISOString(),
+    providers: (providers ?? []).map((p: any) => ({ id: p.id, name: p.name })),
+    models: (models ?? []).map((m: any) => ({
+      id: m.id,
+      model: m.model,
+      providerId: m.providerId ?? null,
+      providerName: m.providerName ?? null,
+      endpoint: m.endpoint,
+    })),
+    stages: {
+      chat: pickStage(chat),
+      agent: pickStage(agent),
+    },
+  };
+});
+
 fastify.get("/api/llm/embedding_models", async () => {
   const env = await getEmbedEnv();
   return { models: (env.models ?? []).map((id) => ({ id })) };
@@ -452,6 +488,17 @@ fastify.post("/api/llm/chat/stream", async (request, reply) => {
 
   const jwtUser = await tryGetJwtUser(request as any);
 
+  let stageAllowedIds: string[] | null = null;
+  let stageDefaultId: string | null = null;
+  try {
+    const stages = await aiConfig.listStages();
+    const st = (stages as any[]).find((s: any) => s.stage === "llm.chat") || null;
+    stageAllowedIds = Array.isArray(st?.modelIds) ? (st.modelIds as string[]).filter(Boolean) : null;
+    stageDefaultId = typeof st?.modelId === "string" ? String(st.modelId) : null;
+  } catch {
+    // ignore
+  }
+
   let stageTemp: number | undefined = undefined;
   let stageMaxTokens: number | undefined = undefined;
   try {
@@ -462,12 +509,18 @@ fastify.post("/api/llm/chat/stream", async (request, reply) => {
     // ignore
   }
 
-  let model = body.model ?? env.defaultModel;
+  const requestedIdRaw = body.model ? String(body.model).trim() : "";
+  const requestedId =
+    requestedIdRaw && stageAllowedIds?.length ? (stageAllowedIds.includes(requestedIdRaw) ? requestedIdRaw : "") : requestedIdRaw;
+  const pickedId =
+    requestedId || stageDefaultId || (stageAllowedIds?.length ? stageAllowedIds[0] : "") || env.defaultModel || "";
+
+  let model = pickedId || env.defaultModel;
   let baseUrl = env.baseUrl;
   let apiKey = env.apiKey;
-  if (body.model) {
+  if (pickedId) {
     try {
-      const m = await aiConfig.resolveModel(body.model);
+      const m = await aiConfig.resolveModel(pickedId);
       if (/chat\/completions/i.test(String(m.endpoint || ""))) {
         model = m.model;
         baseUrl = m.baseURL;
@@ -620,6 +673,17 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
   const jwtUser = await tryGetJwtUser(request as any);
 
+  let stageAllowedIds: string[] | null = null;
+  let stageDefaultId: string | null = null;
+  try {
+    const stages = await aiConfig.listStages();
+    const st = (stages as any[]).find((s: any) => s.stage === "agent.run") || null;
+    stageAllowedIds = Array.isArray(st?.modelIds) ? (st.modelIds as string[]).filter(Boolean) : null;
+    stageDefaultId = typeof st?.modelId === "string" ? String(st.modelId) : null;
+  } catch {
+    // ignore
+  }
+
   let stageTemp: number | undefined = undefined;
   let stageMaxTokens: number | undefined = undefined;
   try {
@@ -630,12 +694,18 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     // ignore
   }
 
-  let model = body.model ?? env.defaultModel;
+  const requestedIdRaw = body.model ? String(body.model).trim() : "";
+  const requestedId =
+    requestedIdRaw && stageAllowedIds?.length ? (stageAllowedIds.includes(requestedIdRaw) ? requestedIdRaw : "") : requestedIdRaw;
+  const pickedId =
+    requestedId || stageDefaultId || (stageAllowedIds?.length ? stageAllowedIds[0] : "") || env.defaultModel || "";
+
+  let model = pickedId || env.defaultModel;
   let baseUrl = env.baseUrl;
   let apiKey = env.apiKey;
-  if (body.model) {
+  if (pickedId) {
     try {
-      const m = await aiConfig.resolveModel(body.model);
+      const m = await aiConfig.resolveModel(pickedId);
       if (/chat\/completions/i.test(String(m.endpoint || ""))) {
         model = m.model;
         baseUrl = m.baseURL;
@@ -1469,6 +1539,98 @@ fastify.get(
 // ======== AI Config（对齐「锦李2.0」：模型管理 + stage 路由） ========
 
 fastify.get(
+  "/api/ai-config/providers",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async () => {
+    const providers = await aiConfig.listProviders();
+    return { providers };
+  },
+);
+
+fastify.post(
+  "/api/ai-config/providers",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async (request, reply) => {
+    const bodySchema = z.object({
+      name: z.string().min(1),
+      baseURL: z.string().min(1),
+      apiKey: z.string().optional(),
+      isEnabled: z.boolean().optional(),
+      sortOrder: z.number().int().optional(),
+      description: z.string().nullable().optional(),
+    });
+    const body = bodySchema.parse((request as any).body ?? {});
+    const updatedBy = String((request as any).user?.email ?? (request as any).user?.sub ?? "admin");
+    try {
+      const id = await aiConfig.createProvider({
+        name: body.name,
+        baseURL: body.baseURL,
+        apiKey: body.apiKey,
+        isEnabled: body.isEnabled,
+        sortOrder: body.sortOrder,
+        description: body.description ?? null,
+        updatedBy,
+      });
+      return reply.send({ ok: true, id });
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : String(e);
+      return reply.code(400).send({ error: msg });
+    }
+  },
+);
+
+fastify.patch(
+  "/api/ai-config/providers/:id",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async (request, reply) => {
+    const paramsSchema = z.object({ id: z.string().min(1) });
+    const bodySchema = z.object({
+      name: z.string().min(1).optional(),
+      baseURL: z.string().min(1).optional(),
+      apiKey: z.string().optional(),
+      clearApiKey: z.boolean().optional(),
+      isEnabled: z.boolean().optional(),
+      sortOrder: z.number().int().optional(),
+      description: z.string().nullable().optional(),
+    });
+    const { id } = paramsSchema.parse((request as any).params);
+    const body = bodySchema.parse((request as any).body ?? {});
+    const updatedBy = String((request as any).user?.email ?? (request as any).user?.sub ?? "admin");
+    try {
+      await aiConfig.updateProvider(id, { ...body, updatedBy });
+      return reply.send({ ok: true });
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : String(e);
+      return reply.code(400).send({ error: msg });
+    }
+  },
+);
+
+fastify.delete(
+  "/api/ai-config/providers/:id",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async (request, reply) => {
+    const paramsSchema = z.object({ id: z.string().min(1) });
+    const { id } = paramsSchema.parse((request as any).params);
+    try {
+      await aiConfig.deleteProvider(id);
+      return reply.send({ ok: true });
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : String(e);
+      return reply.code(400).send({ error: msg });
+    }
+  },
+);
+
+fastify.get(
   "/api/ai-config/models",
   {
     preHandler: [(fastify as any).authenticate, requireAdmin],
@@ -1487,7 +1649,8 @@ fastify.post(
   async (request, reply) => {
     const bodySchema = z.object({
       model: z.string().min(1),
-      baseURL: z.string().min(1),
+      providerId: z.string().optional(),
+      baseURL: z.string().optional(),
       endpoint: z.string().optional(),
       apiKey: z.string().optional(),
       copyFromId: z.string().optional(),
@@ -1503,6 +1666,7 @@ fastify.post(
     try {
       const id = await aiConfig.createModel({
         model: body.model,
+        providerId: body.providerId,
         baseURL: body.baseURL,
         endpoint: body.endpoint,
         apiKey: body.apiKey,
@@ -1531,6 +1695,7 @@ fastify.patch(
   async (request, reply) => {
     const paramsSchema = z.object({ id: z.string().min(1) });
     const bodySchema = z.object({
+      providerId: z.string().nullable().optional(),
       baseURL: z.string().optional(),
       endpoint: z.string().optional(),
       apiKey: z.string().optional(),
@@ -1608,8 +1773,8 @@ fastify.get(
     preHandler: [(fastify as any).authenticate, requireAdmin],
   },
   async () => {
-    const [stages, models] = await Promise.all([aiConfig.listStages(), aiConfig.listModels()]);
-    return { stages, models };
+    const [stages, models, providers] = await Promise.all([aiConfig.listStages(), aiConfig.listModels(), aiConfig.listProviders()]);
+    return { stages, models, providers };
   },
 );
 
@@ -1625,6 +1790,7 @@ fastify.put(
           z.object({
             stage: z.string().min(1),
             modelId: z.string().nullable().optional(),
+            modelIds: z.array(z.string().min(1)).nullable().optional(),
             temperature: z.number().nullable().optional(),
             maxTokens: z.number().int().nullable().optional(),
             isEnabled: z.boolean().optional(),

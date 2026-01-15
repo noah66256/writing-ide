@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import type { AiConfig, AiModel, AiModelTestResult, AiStageConfig, Db, LlmModelPrice } from "./db.js";
+import type { AiConfig, AiModel, AiModelTestResult, AiProvider, AiStageConfig, Db, LlmModelPrice } from "./db.js";
 
 export type AiStageDefinition = {
   key: string;
@@ -31,6 +31,13 @@ export type ResolvedAiModelRuntime = {
 };
 
 export type AiModelListItem = Omit<AiModel, "apiKeyEnc"> & {
+  hasApiKey: boolean;
+  apiKeyMasked: string | null;
+  providerName: string | null;
+  providerBaseURL: string | null;
+};
+
+export type AiProviderListItem = Omit<AiProvider, "apiKeyEnc"> & {
   hasApiKey: boolean;
   apiKeyMasked: string | null;
 };
@@ -114,6 +121,18 @@ function clampList<T>(arr: T[], max: number) {
 
 function normalizeModelId(model: string) {
   return String(model || "").trim();
+}
+
+function normalizeProviderId(idOrName: string) {
+  const raw = String(idOrName || "").trim();
+  if (!raw) return "";
+  const ascii = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (ascii) return ascii.slice(0, 64);
+  const hash = crypto.createHash("sha1").update(raw).digest("hex").slice(0, 10);
+  return `provider-${hash}`;
 }
 
 function hasPricing(m: AiModel) {
@@ -223,6 +242,7 @@ export function createAiConfigService(args: {
         ? db.aiConfig
         : {
             updatedAt: nowIso(),
+            providers: [],
             models: [],
             stages: [],
           };
@@ -234,6 +254,7 @@ export function createAiConfigService(args: {
     const db = await args.loadDb();
     const next: AiConfig = { ...ai, updatedAt: nowIso() };
     // 轻量修正：保证模型/阶段字段存在
+    next.providers = Array.isArray((next as any).providers) ? (next as any).providers : [];
     next.models = Array.isArray(next.models) ? next.models : [];
     next.stages = Array.isArray(next.stages) ? next.stages : [];
     db.aiConfig = next;
@@ -249,6 +270,7 @@ export function createAiConfigService(args: {
         ? db.aiConfig
         : {
             updatedAt: nowIso(),
+            providers: [],
             models: [],
             stages: [],
           };
@@ -291,6 +313,7 @@ export function createAiConfigService(args: {
       const m: AiModel = {
         id,
         model: id,
+        providerId: null,
         baseURL: creds.baseURL,
         endpoint: normalizeEndpoint(endpoint, "/v1/chat/completions"),
         apiKeyEnc: enc ? enc.enc : null,
@@ -325,6 +348,7 @@ export function createAiConfigService(args: {
       const s: AiStageConfig = {
         stage: d.key,
         modelId: m ? m.id : null,
+        modelIds: d.key === "llm.chat" || d.key === "agent.run" ? (m ? [m.id] : null) : null,
         temperature: d.defaultTemperature,
         maxTokens: d.defaultMaxTokens,
         isEnabled: true,
@@ -341,16 +365,187 @@ export function createAiConfigService(args: {
     clearCache();
   };
 
+  const listProviders = async (): Promise<AiProviderListItem[]> => {
+    const ai = await getAiConfig();
+    const providers = Array.isArray((ai as any).providers) ? ((ai as any).providers as AiProvider[]).slice() : [];
+    providers.sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || String(a.name).localeCompare(String(b.name)));
+    return providers.map((p) => {
+      const { apiKeyEnc, ...rest } = p as any;
+      const hasApiKey = Boolean(apiKeyEnc);
+      const apiKeyMasked = p.apiKeyLast4 ? `****${p.apiKeyLast4}` : null;
+      return { ...(rest as any), hasApiKey, apiKeyMasked } as AiProviderListItem;
+    });
+  };
+
+  const getProviderById = (ai: AiConfig, id: string): AiProvider | null => {
+    const key = normalizeProviderId(id);
+    if (!key) return null;
+    const providers = Array.isArray((ai as any).providers) ? ((ai as any).providers as AiProvider[]) : [];
+    return providers.find((p) => p.id === key) || null;
+  };
+
+  const createProvider = async (params: {
+    name: string;
+    baseURL: string;
+    apiKey?: string;
+    isEnabled?: boolean;
+    sortOrder?: number;
+    description?: string | null;
+    updatedBy?: string | null;
+  }): Promise<string> => {
+    const ai = await getAiConfig();
+    const name = String(params.name || "").trim();
+    if (!name) throw new Error("provider_name_required");
+    const baseURL = normalizeBaseURL(params.baseURL);
+    if (!baseURL) throw new Error("provider_baseURL_required");
+
+    const providers = Array.isArray((ai as any).providers) ? (((ai as any).providers as AiProvider[]) ?? []) : [];
+    const byId = new Map(providers.map((p) => [p.id, p]));
+
+    const baseId = normalizeProviderId(name);
+    let id = baseId;
+    if (!id) id = normalizeProviderId(`provider-${Date.now()}`);
+    if (!id) throw new Error("provider_id_invalid");
+    if (byId.has(id)) {
+      let i = 2;
+      while (byId.has(`${id}-${i}`)) i += 1;
+      id = `${id}-${i}`;
+    }
+
+    const apiKeyInput = normalizeApiKeyInput(params.apiKey || "");
+    let apiKeyEnc: string | null = null;
+    let apiKeyLast4: string | null = null;
+    if (apiKeyInput) {
+      const enc = encryptApiKey(apiKeyInput);
+      apiKeyEnc = enc.enc;
+      apiKeyLast4 = enc.last4;
+    }
+
+    const t = nowIso();
+    const item: AiProvider = {
+      id,
+      name,
+      baseURL,
+      apiKeyEnc,
+      apiKeyLast4,
+      isEnabled: params.isEnabled === false ? false : true,
+      sortOrder: Number.isFinite(params.sortOrder as any) ? Number(params.sortOrder) : 0,
+      description: params.description !== undefined ? (params.description === null ? null : String(params.description)) : null,
+      updatedBy: params.updatedBy ?? null,
+      createdAt: t,
+      updatedAt: t,
+    };
+
+    const next: AiConfig = {
+      ...ai,
+      updatedAt: t,
+      providers: clampList([...(providers ?? []), item], 200),
+      models: ai.models ?? [],
+      stages: ai.stages ?? [],
+    };
+    await saveAiConfig(next, params.updatedBy);
+    return item.id;
+  };
+
+  const updateProvider = async (
+    id: string,
+    patch: Partial<{
+      name: string;
+      baseURL: string;
+      apiKey: string;
+      clearApiKey: boolean;
+      isEnabled: boolean;
+      sortOrder: number;
+      description: string | null;
+      updatedBy: string | null;
+    }>,
+  ) => {
+    const ai = await getAiConfig();
+    const key = normalizeProviderId(id);
+    if (!key) throw new Error("provider_id_invalid");
+    const providers = Array.isArray((ai as any).providers) ? (((ai as any).providers as AiProvider[]) ?? []) : [];
+    const cur = providers.find((p) => p.id === key) || null;
+    if (!cur) throw new Error("provider_not_found");
+
+    const nextName = patch.name !== undefined ? String(patch.name || "").trim() : cur.name;
+    if (!nextName) throw new Error("provider_name_required");
+    const nextBaseURL = patch.baseURL !== undefined ? normalizeBaseURL(patch.baseURL) : cur.baseURL;
+    if (!nextBaseURL) throw new Error("provider_baseURL_required");
+
+    let apiKeyEnc = cur.apiKeyEnc;
+    let apiKeyLast4 = cur.apiKeyLast4;
+    if (patch.clearApiKey) {
+      apiKeyEnc = null;
+      apiKeyLast4 = null;
+    } else if (patch.apiKey !== undefined) {
+      const apiKey = normalizeApiKeyInput(patch.apiKey);
+      if (apiKey) {
+        const enc = encryptApiKey(apiKey);
+        apiKeyEnc = enc.enc;
+        apiKeyLast4 = enc.last4;
+      }
+    }
+
+    const t = nowIso();
+    const updated: AiProvider = {
+      ...cur,
+      name: nextName,
+      baseURL: nextBaseURL,
+      apiKeyEnc,
+      apiKeyLast4,
+      isEnabled: patch.isEnabled !== undefined ? Boolean(patch.isEnabled) : cur.isEnabled,
+      sortOrder: patch.sortOrder !== undefined ? Number(patch.sortOrder) : cur.sortOrder,
+      description: patch.description !== undefined ? patch.description : cur.description,
+      updatedBy: patch.updatedBy ?? cur.updatedBy,
+      updatedAt: t,
+    };
+
+    const next: AiConfig = {
+      ...ai,
+      updatedAt: t,
+      providers: providers.map((p) => (p.id === cur.id ? updated : p)),
+      models: ai.models ?? [],
+      stages: ai.stages ?? [],
+    };
+    await saveAiConfig(next, patch.updatedBy);
+  };
+
+  const deleteProvider = async (id: string) => {
+    const ai = await getAiConfig();
+    const key = normalizeProviderId(id);
+    if (!key) throw new Error("provider_id_invalid");
+    const models = ai.models ?? [];
+    if (models.some((m) => (m as any).providerId === key)) throw new Error("provider_in_use");
+    const providers = Array.isArray((ai as any).providers) ? (((ai as any).providers as AiProvider[]) ?? []) : [];
+    const next: AiConfig = {
+      ...ai,
+      updatedAt: nowIso(),
+      providers: providers.filter((p) => p.id !== key),
+      models,
+      stages: ai.stages ?? [],
+    };
+    await saveAiConfig(next);
+  };
+
   const listModels = async (): Promise<AiModelListItem[]> => {
     const ai = await getAiConfig();
+    const providers = Array.isArray((ai as any).providers) ? (((ai as any).providers as AiProvider[]) ?? []) : [];
+    const providerMap = new Map(providers.map((p) => [p.id, p]));
     const models = Array.isArray(ai.models) ? ai.models.slice() : [];
     models.sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || String(a.model).localeCompare(String(b.model)));
-    return models.map((m) => ({
-      ...m,
-      apiKeyEnc: null, // never expose
-      hasApiKey: Boolean(m.apiKeyEnc),
-      apiKeyMasked: m.apiKeyLast4 ? `****${m.apiKeyLast4}` : null,
-    }));
+    return models.map((m) => {
+      const provider = m.providerId ? providerMap.get(m.providerId) || null : null;
+      const last4 = m.apiKeyLast4 || provider?.apiKeyLast4 || null;
+      const hasApiKey = Boolean(m.apiKeyEnc) || Boolean(provider?.apiKeyEnc);
+      const { apiKeyEnc: _apiKeyEnc, ...rest } = m as any;
+      return {
+        ...(rest as any),
+        hasApiKey,
+        apiKeyMasked: last4 ? `****${last4}` : null,
+        providerName: provider?.name ?? null,
+        providerBaseURL: provider ? normalizeBaseURL(provider.baseURL) : null,
+      } as AiModelListItem;
+    });
   };
 
   const getModelById = async (id: string): Promise<AiModel | null> => {
@@ -380,12 +575,15 @@ export function createAiConfigService(args: {
     const modelDoc = (ai.models ?? []).find((m) => m.id === modelId) || null;
     if (!modelDoc || !modelDoc.isEnabled) throw new Error(`model_not_available:${modelId}`);
 
-    const apiKey = modelDoc.apiKeyEnc ? normalizeApiKeyInput(decryptApiKey(modelDoc.apiKeyEnc)) : "";
+    const provider = modelDoc.providerId ? getProviderById(ai, modelDoc.providerId) : null;
+    if (provider && !provider.isEnabled) throw new Error(`provider_not_available:${provider.id}`);
+    const apiKeyEnc = modelDoc.apiKeyEnc || provider?.apiKeyEnc || null;
+    const apiKey = apiKeyEnc ? normalizeApiKeyInput(decryptApiKey(apiKeyEnc)) : "";
     const endpoint = normalizeEndpoint(modelDoc.endpoint, def.defaultEndpoint);
     return {
       stage: key,
       modelId: modelDoc.id,
-      baseURL: normalizeBaseURL(modelDoc.baseURL),
+      baseURL: normalizeBaseURL(provider?.baseURL || modelDoc.baseURL),
       endpoint,
       apiKey,
       model: modelDoc.model,
@@ -400,11 +598,14 @@ export function createAiConfigService(args: {
     const ai = await getAiConfig();
     const modelDoc = (ai.models ?? []).find((m) => m.id === id) || null;
     if (!modelDoc || !modelDoc.isEnabled) throw new Error(`model_not_available:${id}`);
-    const apiKey = modelDoc.apiKeyEnc ? normalizeApiKeyInput(decryptApiKey(modelDoc.apiKeyEnc)) : "";
+    const provider = modelDoc.providerId ? getProviderById(ai, modelDoc.providerId) : null;
+    if (provider && !provider.isEnabled) throw new Error(`provider_not_available:${provider.id}`);
+    const apiKeyEnc = modelDoc.apiKeyEnc || provider?.apiKeyEnc || null;
+    const apiKey = apiKeyEnc ? normalizeApiKeyInput(decryptApiKey(apiKeyEnc)) : "";
     const endpoint = normalizeEndpoint(modelDoc.endpoint, "/v1/chat/completions");
     return {
       modelId: modelDoc.id,
-      baseURL: normalizeBaseURL(modelDoc.baseURL),
+      baseURL: normalizeBaseURL(provider?.baseURL || modelDoc.baseURL),
       endpoint,
       apiKey,
       model: modelDoc.model,
@@ -420,7 +621,8 @@ export function createAiConfigService(args: {
 
   const createModel = async (params: {
     model: string;
-    baseURL: string;
+    providerId?: string | null;
+    baseURL?: string;
     endpoint?: string;
     apiKey?: string;
     copyFromId?: string;
@@ -435,7 +637,13 @@ export function createAiConfigService(args: {
     const ai = await getAiConfig();
     const model = normalizeModelId(params.model);
     if (!model) throw new Error("model_required");
-    const baseURL = normalizeBaseURL(params.baseURL);
+
+    let providerId: string | null = params.providerId ? normalizeProviderId(params.providerId) : null;
+    let provider: AiProvider | null = providerId ? getProviderById(ai, providerId) : null;
+    if (providerId && !provider) throw new Error("provider_not_found");
+    if (provider && !provider.isEnabled) throw new Error("provider_not_available");
+
+    const baseURL = normalizeBaseURL(provider?.baseURL || String(params.baseURL || ""));
     if (!baseURL) throw new Error("baseURL_required");
     const endpoint = normalizeEndpoint(params.endpoint || "/v1/chat/completions", "/v1/chat/completions");
     const priceIn = Number(params.priceInCnyPer1M);
@@ -452,13 +660,24 @@ export function createAiConfigService(args: {
     } else if (params.copyFromId) {
       const src = (ai.models ?? []).find((m) => m.id === String(params.copyFromId).trim()) || null;
       if (!src) throw new Error("copyFrom_not_found");
+      // 允许 copyFrom 带出 provider（便于“同供应商下新增模型”）
+      if (!providerId && src.providerId) {
+        const pid = normalizeProviderId(src.providerId);
+        const p = pid ? getProviderById(ai, pid) : null;
+        if (p && p.isEnabled) {
+          providerId = pid;
+          provider = p;
+        }
+      }
       if (src.apiKeyEnc) {
         apiKeyEnc = src.apiKeyEnc;
         apiKeyLast4 = src.apiKeyLast4;
       }
     }
 
-    if (!apiKeyEnc) throw new Error("apiKey_required");
+    // apiKey：允许“模型不存 key，仅引用 provider 的 key”
+    if (!apiKeyEnc && !provider?.apiKeyEnc) throw new Error("apiKey_required");
+    if (!apiKeyLast4) apiKeyLast4 = provider?.apiKeyLast4 ?? null;
 
     // 防止“看起来一模一样”的重复（model/baseURL/endpoint/key后四位相同）
     const dup = (ai.models ?? []).find(
@@ -474,6 +693,7 @@ export function createAiConfigService(args: {
     const item: AiModel = {
       id: model,
       model,
+      providerId: providerId || null,
       baseURL,
       endpoint,
       apiKeyEnc,
@@ -504,6 +724,7 @@ export function createAiConfigService(args: {
     id: string,
     patch: Partial<{
       model: string;
+      providerId: string | null;
       baseURL: string;
       endpoint: string;
       apiKey: string;
@@ -523,11 +744,26 @@ export function createAiConfigService(args: {
     if (!cur) throw new Error("model_not_found");
 
     const nextModel = patch.model !== undefined ? normalizeModelId(patch.model) : cur.model;
-    const nextBase = patch.baseURL !== undefined ? normalizeBaseURL(patch.baseURL) : cur.baseURL;
+
+    const nextProviderId =
+      patch.providerId !== undefined ? (patch.providerId ? normalizeProviderId(patch.providerId) : null) : cur.providerId ?? null;
+    const nextProvider = nextProviderId ? getProviderById(ai, nextProviderId) : null;
+    if (nextProviderId && !nextProvider) throw new Error("provider_not_found");
+    if (nextProvider && !nextProvider.isEnabled) throw new Error("provider_not_available");
+
+    const nextBase = nextProvider ? normalizeBaseURL(nextProvider.baseURL) : patch.baseURL !== undefined ? normalizeBaseURL(patch.baseURL) : cur.baseURL;
     const nextEndpoint = patch.endpoint !== undefined ? normalizeEndpoint(patch.endpoint, cur.endpoint) : cur.endpoint;
 
     let apiKeyEnc = cur.apiKeyEnc;
     let apiKeyLast4 = cur.apiKeyLast4;
+
+    // 切换到 provider：默认清掉模型自带 key，让 key 统一从 provider 读取（除非本次显式传 apiKey 覆盖）
+    if (patch.providerId !== undefined && nextProviderId && nextProviderId !== cur.providerId) {
+      if (patch.apiKey === undefined && !patch.clearApiKey) {
+        apiKeyEnc = null;
+        apiKeyLast4 = null;
+      }
+    }
     if (patch.clearApiKey) {
       apiKeyEnc = null;
       apiKeyLast4 = null;
@@ -539,6 +775,8 @@ export function createAiConfigService(args: {
         apiKeyLast4 = enc.last4;
       }
     }
+
+    if (!apiKeyLast4) apiKeyLast4 = nextProvider?.apiKeyLast4 ?? null;
 
     const priceIn =
       patch.priceInCnyPer1M !== undefined ? (patch.priceInCnyPer1M === null ? null : Number(patch.priceInCnyPer1M)) : cur.priceInCnyPer1M;
@@ -567,6 +805,7 @@ export function createAiConfigService(args: {
     const updated: AiModel = {
       ...cur,
       model: nextModel,
+      providerId: nextProviderId || null,
       baseURL: nextBase,
       endpoint: nextEndpoint,
       apiKeyEnc,
@@ -593,7 +832,7 @@ export function createAiConfigService(args: {
   const deleteModel = async (id: string) => {
     const ai = await getAiConfig();
     const key = normalizeModelId(id);
-    const inUse = (ai.stages ?? []).some((s) => s.modelId === key);
+    const inUse = (ai.stages ?? []).some((s) => s.modelId === key || (Array.isArray((s as any).modelIds) && ((s as any).modelIds as string[]).includes(key)));
     if (inUse) throw new Error("model_in_use");
     const next: AiConfig = {
       ...ai,
@@ -606,19 +845,33 @@ export function createAiConfigService(args: {
 
   const listStages = async () => {
     const ai = await getAiConfig();
+    const providers = Array.isArray((ai as any).providers) ? (((ai as any).providers as AiProvider[]) ?? []) : [];
+    const providerMap = new Map(providers.map((p) => [p.id, p]));
     const models = ai.models ?? [];
     const stageMap = new Map<string, AiStageConfig>((ai.stages ?? []).map((s) => [s.stage, s]));
     return defs.map((d) => {
       const s = stageMap.get(d.key) || null;
       const modelId = s?.modelId || normalizeModelId(d.defaultModel);
       const m = models.find((x) => x.id === modelId) || null;
+      const p = m?.providerId ? providerMap.get(m.providerId) || null : null;
+      const stageModelIds =
+        Array.isArray((s as any)?.modelIds) && ((s as any).modelIds as any[]).length
+          ? (((s as any).modelIds as any[]).map((x) => String(x)).filter(Boolean) as string[])
+          : d.key === "llm.chat" || d.key === "agent.run"
+            ? m
+              ? [m.id]
+              : modelId
+                ? [modelId]
+                : null
+            : null;
       return {
         stage: d.key,
         name: d.name,
         description: d.description,
         modelId: m ? m.id : modelId,
         model: m ? m.model : d.defaultModel,
-        baseURL: m ? m.baseURL : "",
+        modelIds: stageModelIds,
+        baseURL: m ? normalizeBaseURL(p?.baseURL || m.baseURL) : "",
         endpoint: m ? m.endpoint : d.defaultEndpoint,
         temperature: s?.temperature ?? d.defaultTemperature,
         maxTokens: s?.maxTokens ?? d.defaultMaxTokens,
@@ -643,9 +896,37 @@ export function createAiConfigService(args: {
         const m = models.find((x) => x.id === modelId) || null;
         if (!m || !m.isEnabled) throw new Error(`model_not_available:${modelId}`);
       }
+
+       const allowMulti = stage === "llm.chat" || stage === "agent.run";
+      const nextModelIdsRaw =
+        c.modelIds !== undefined
+          ? Array.isArray(c.modelIds)
+            ? (c.modelIds as any[]).map((x) => normalizeModelId(String(x))).filter(Boolean)
+            : null
+          : prev?.modelIds ?? null;
+      let modelIds: string[] | null = allowMulti
+        ? nextModelIdsRaw && Array.isArray(nextModelIdsRaw) && nextModelIdsRaw.length
+          ? Array.from(new Set(nextModelIdsRaw)).slice(0, 60)
+          : null
+        : null;
+
+      if (allowMulti && modelIds) {
+        for (const id of modelIds) {
+          const m = models.find((x) => x.id === id) || null;
+          if (!m || !m.isEnabled) throw new Error(`model_not_available:${id}`);
+        }
+      }
+
+      // 默认模型必须在可选列表里（Desktop 侧用）
+      if (allowMulti) {
+        const set = new Set(modelIds ?? []);
+        if (modelId) set.add(modelId);
+        modelIds = set.size ? Array.from(set).slice(0, 60) : null;
+      }
       stageMap.set(stage, {
         stage,
         modelId,
+        modelIds,
         temperature: c.temperature !== undefined ? (c.temperature === null ? null : Number(c.temperature)) : prev?.temperature ?? null,
         maxTokens: c.maxTokens !== undefined ? (c.maxTokens === null ? null : Number(c.maxTokens)) : prev?.maxTokens ?? null,
         isEnabled: c.isEnabled !== undefined ? Boolean(c.isEnabled) : prev?.isEnabled ?? true,
@@ -665,9 +946,17 @@ export function createAiConfigService(args: {
     const stages = ai.stages ?? [];
     const useCount = new Map<string, number>();
     for (const s of stages) {
+      const ids: string[] = [];
       const id = s.modelId ? String(s.modelId) : "";
-      if (!id) continue;
-      useCount.set(id, (useCount.get(id) || 0) + 1);
+      if (id) ids.push(id);
+      const arr = Array.isArray((s as any).modelIds) ? (((s as any).modelIds as any[]) ?? []) : [];
+      for (const x of arr) {
+        const mid = String(x || "").trim();
+        if (mid) ids.push(mid);
+      }
+      for (const mid of ids) {
+        useCount.set(mid, (useCount.get(mid) || 0) + 1);
+      }
     }
 
     const groups = new Map<string, AiModel[]>();
@@ -711,12 +1000,26 @@ export function createAiConfigService(args: {
 
     if (removeSet.size) {
       for (const s of stageNext) {
-        if (!s.modelId) continue;
-        const k = keepMap.get(s.modelId);
-        if (!k) continue;
-        s.modelId = k;
-        s.updatedAt = nowIso();
-        updatedStages += 1;
+        let touched = false;
+        if (s.modelId) {
+          const k = keepMap.get(s.modelId);
+          if (k) {
+            s.modelId = k;
+            touched = true;
+          }
+        }
+        if (Array.isArray((s as any).modelIds) && ((s as any).modelIds as any[]).length) {
+          const before = ((s as any).modelIds as any[]).map((x) => String(x || "").trim()).filter(Boolean);
+          const after = Array.from(new Set(before.map((x) => keepMap.get(x) || x))).filter(Boolean);
+          if (before.join("||") !== after.join("||")) {
+            (s as any).modelIds = after.length ? after : null;
+            touched = true;
+          }
+        }
+        if (touched) {
+          s.updatedAt = nowIso();
+          updatedStages += 1;
+        }
       }
       removedModels = removeSet.size;
     }
@@ -733,7 +1036,25 @@ export function createAiConfigService(args: {
     if (!m) throw new Error("model_not_found");
 
     const endpoint = normalizeEndpoint(m.endpoint, "/v1/chat/completions");
-    const endpointUrl = joinUrl(m.baseURL, endpoint);
+
+    const ai = await getAiConfig();
+    const provider = m.providerId ? getProviderById(ai, m.providerId) : null;
+    if (provider && !provider.isEnabled) {
+      const tr: AiModelTestResult = { ok: false, latencyMs: null, status: null, error: "provider_not_available", testedAt: nowIso() };
+      const now = nowIso();
+      const next: AiConfig = {
+        ...ai,
+        updatedAt: now,
+        models: (ai.models ?? []).map((x) => (x.id === m.id ? { ...x, testResult: tr, updatedAt: now, updatedBy: "system" } : x)),
+        stages: ai.stages ?? [],
+        providers: (ai as any).providers ?? [],
+      };
+      await saveAiConfig(next, "system");
+      return { modelId: m.id, model: m.model, baseURL: m.baseURL, endpoint, endpointUrl: joinUrl(m.baseURL, endpoint), ...tr };
+    }
+
+    const baseURL = normalizeBaseURL(provider?.baseURL || m.baseURL);
+    const endpointUrl = joinUrl(baseURL, endpoint);
 
     const writeResult = async (tr: AiModelTestResult) => {
       const ai = await getAiConfig();
@@ -751,14 +1072,15 @@ export function createAiConfigService(args: {
     if (!m.isEnabled) {
       const tr: AiModelTestResult = { ok: false, latencyMs: null, status: null, error: "model_disabled", testedAt: nowIso() };
       await writeResult(tr);
-      return { modelId: m.id, model: m.model, baseURL: m.baseURL, endpoint, endpointUrl, ...tr };
+      return { modelId: m.id, model: m.model, baseURL, endpoint, endpointUrl, ...tr };
     }
 
-    const apiKey = m.apiKeyEnc ? normalizeApiKeyInput(decryptApiKey(m.apiKeyEnc)) : "";
+    const apiKeyEnc = m.apiKeyEnc || provider?.apiKeyEnc || null;
+    const apiKey = apiKeyEnc ? normalizeApiKeyInput(decryptApiKey(apiKeyEnc)) : "";
     if (!apiKey) {
       const tr: AiModelTestResult = { ok: false, latencyMs: null, status: null, error: "apiKey_missing", testedAt: nowIso() };
       await writeResult(tr);
-      return { modelId: m.id, model: m.model, baseURL: m.baseURL, endpoint, endpointUrl, ...tr };
+      return { modelId: m.id, model: m.model, baseURL, endpoint, endpointUrl, ...tr };
     }
 
     const isEmbedding = /\/embeddings/i.test(endpoint);
@@ -827,6 +1149,10 @@ export function createAiConfigService(args: {
     defs,
     clearCache,
     ensureDefaults,
+    listProviders,
+    createProvider,
+    updateProvider,
+    deleteProvider,
     listModels,
     createModel,
     updateModel,

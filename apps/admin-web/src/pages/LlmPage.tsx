@@ -2,18 +2,23 @@ import { useEffect, useMemo, useState } from "react";
 import type { ApiError } from "../api/client";
 import {
   aiConfigCreateModel,
+  aiConfigCreateProvider,
   aiConfigDeleteModel,
+  aiConfigDeleteProvider,
   aiConfigDedupeModels,
   aiConfigGetStages,
   aiConfigTestModel,
   aiConfigUpdateModel,
+  aiConfigUpdateProvider,
   aiConfigUpdateStages,
   type AiModelDto,
+  type AiProviderDto,
   type AiStageDto,
 } from "../api/gateway";
 
 type ModelDraft = AiModelDto & { apiKeyInput?: string; clearApiKey?: boolean };
-type StageDraft = Pick<AiStageDto, "stage" | "name" | "description" | "modelId" | "temperature" | "maxTokens" | "isEnabled">;
+type ProviderDraft = AiProviderDto & { apiKeyInput?: string; clearApiKey?: boolean };
+type StageDraft = Pick<AiStageDto, "stage" | "name" | "description" | "modelId" | "modelIds" | "temperature" | "maxTokens" | "isEnabled">;
 
 type ModelDraftUi = ModelDraft & {
   priceInInput?: string;
@@ -32,13 +37,16 @@ export function LlmPage() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
+  const [providers, setProviders] = useState<ProviderDraft[]>([]);
   const [models, setModels] = useState<ModelDraftUi[]>([]);
   const [stages, setStages] = useState<StageDraft[]>([]);
   const [testing, setTesting] = useState<Record<string, boolean>>({});
   const [bulkTest, setBulkTest] = useState<{ done: number; total: number } | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [providerOpen, setProviderOpen] = useState(false);
 
   // 创建模型表单
+  const [newProviderId, setNewProviderId] = useState("");
   const [newModel, setNewModel] = useState("");
   const [newBaseURL, setNewBaseURL] = useState("");
   const [newEndpoint, setNewEndpoint] = useState("/v1/chat/completions");
@@ -50,17 +58,33 @@ export function LlmPage() {
   const [newSortOrder, setNewSortOrder] = useState("0");
   const [newDesc, setNewDesc] = useState("");
 
+  // 创建供应商表单
+  const [newProvName, setNewProvName] = useState("");
+  const [newProvBaseURL, setNewProvBaseURL] = useState("");
+  const [newProvApiKey, setNewProvApiKey] = useState("");
+  const [newProvEnabled, setNewProvEnabled] = useState(true);
+  const [newProvSortOrder, setNewProvSortOrder] = useState("0");
+  const [newProvDesc, setNewProvDesc] = useState("");
+
   const refresh = async () => {
     setError("");
     setBusy(true);
     try {
       const res = await aiConfigGetStages();
+      setProviders(
+        (res.providers ?? []).map((p) => ({
+          ...p,
+          apiKeyInput: "",
+          clearApiKey: false,
+        })),
+      );
       setStages(
         (res.stages ?? []).map((s) => ({
           stage: s.stage,
           name: s.name,
           description: s.description,
           modelId: s.modelId,
+          modelIds: s.modelIds ?? null,
           temperature: s.temperature,
           maxTokens: s.maxTokens,
           isEnabled: s.isEnabled,
@@ -99,9 +123,15 @@ export function LlmPage() {
     const priceIn = Number(newPriceIn);
     const priceOut = Number(newPriceOut);
     const sortOrder = Number(newSortOrder);
+    const selectedProvider = newProviderId ? providers.find((p) => p.id === newProviderId) || null : null;
     if (!newModel.trim()) return setError("model 不能为空");
-    if (!newBaseURL.trim()) return setError("baseURL 不能为空");
-    if (!newApiKey.trim()) return setError("apiKey 不能为空");
+    if (selectedProvider) {
+      if (!selectedProvider.isEnabled) return setError("所选供应商未启用");
+      if (!selectedProvider.hasApiKey) return setError("所选供应商未配置 apiKey");
+    } else {
+      if (!newBaseURL.trim()) return setError("baseURL 不能为空");
+      if (!newApiKey.trim()) return setError("apiKey 不能为空");
+    }
     if (!Number.isFinite(priceIn) || priceIn < 0) return setError("输入单价必须是 >=0 的数字（元/1,000,000 tokens）");
     if (!Number.isFinite(priceOut) || priceOut < 0) return setError("输出单价必须是 >=0 的数字（元/1,000,000 tokens）");
     if (!Number.isFinite(sortOrder) || !Number.isInteger(sortOrder)) return setError("sortOrder 必须是整数");
@@ -110,9 +140,8 @@ export function LlmPage() {
     try {
       await aiConfigCreateModel({
         model: newModel.trim(),
-        baseURL: newBaseURL.trim(),
+        ...(selectedProvider ? { providerId: selectedProvider.id } : { baseURL: newBaseURL.trim(), apiKey: newApiKey.trim() }),
         endpoint: newEndpoint.trim(),
-        apiKey: newApiKey.trim(),
         priceInCnyPer1M: priceIn,
         priceOutCnyPer1M: priceOut,
         billingGroup: newBillingGroup.trim() || undefined,
@@ -122,6 +151,7 @@ export function LlmPage() {
       });
       setNotice("模型已创建（热生效）");
       setCreateOpen(false);
+      setNewProviderId("");
       setNewModel("");
       setNewBaseURL("");
       setNewEndpoint("/v1/chat/completions");
@@ -136,6 +166,87 @@ export function LlmPage() {
     } catch (e: any) {
       const err = e as ApiError;
       setError(`创建失败：${err.code}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createProvider = async () => {
+    setError("");
+    setNotice("");
+    const sortOrder = Number(newProvSortOrder);
+    if (!newProvName.trim()) return setError("供应商名称不能为空");
+    if (!newProvBaseURL.trim()) return setError("供应商 baseURL 不能为空");
+    if (!newProvApiKey.trim()) return setError("供应商 apiKey 不能为空");
+    if (!Number.isFinite(sortOrder) || !Number.isInteger(sortOrder)) return setError("供应商 sortOrder 必须是整数");
+
+    setBusy(true);
+    try {
+      await aiConfigCreateProvider({
+        name: newProvName.trim(),
+        baseURL: newProvBaseURL.trim(),
+        apiKey: newProvApiKey.trim(),
+        isEnabled: newProvEnabled,
+        sortOrder,
+        description: newProvDesc.trim() ? newProvDesc.trim() : null,
+      });
+      setNotice("供应商已创建（热生效）");
+      setNewProvName("");
+      setNewProvBaseURL("");
+      setNewProvApiKey("");
+      setNewProvEnabled(true);
+      setNewProvSortOrder("0");
+      setNewProvDesc("");
+      await refresh();
+    } catch (e: any) {
+      const err = e as ApiError;
+      setError(`创建供应商失败：${err.code}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveProvider = async (p: ProviderDraft) => {
+    setError("");
+    setNotice("");
+    const sortOrder = Number(p.sortOrder);
+    if (!p.name.trim()) return setError("供应商名称不能为空");
+    if (!p.baseURL.trim()) return setError("供应商 baseURL 不能为空");
+    if (!Number.isFinite(sortOrder) || !Number.isInteger(sortOrder)) return setError("供应商 sortOrder 必须是整数");
+
+    setBusy(true);
+    try {
+      await aiConfigUpdateProvider(p.id, {
+        name: p.name.trim(),
+        baseURL: p.baseURL.trim(),
+        isEnabled: Boolean(p.isEnabled),
+        sortOrder,
+        description: p.description ?? null,
+        ...(p.clearApiKey ? { clearApiKey: true } : {}),
+        ...(p.apiKeyInput?.trim() ? { apiKey: p.apiKeyInput.trim() } : {}),
+      });
+      setNotice(`已保存供应商：${p.name}`);
+      await refresh();
+    } catch (e: any) {
+      const err = e as ApiError;
+      setError(`保存供应商失败：${err.code}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const delProvider = async (id: string) => {
+    setError("");
+    setNotice("");
+    if (!confirm("确认删除该供应商？（若有模型引用会拒绝）")) return;
+    setBusy(true);
+    try {
+      await aiConfigDeleteProvider(id);
+      setNotice("供应商已删除");
+      await refresh();
+    } catch (e: any) {
+      const err = e as ApiError;
+      setError(`删除供应商失败：${err.code}`);
     } finally {
       setBusy(false);
     }
@@ -159,6 +270,7 @@ export function LlmPage() {
     setBusy(true);
     try {
       await aiConfigUpdateModel(m.id, {
+        providerId: m.providerId ?? null,
         baseURL: m.baseURL.trim(),
         endpoint: m.endpoint.trim(),
         priceInCnyPer1M: priceIn,
@@ -315,6 +427,7 @@ export function LlmPage() {
         stages.map((s) => ({
           stage: s.stage,
           modelId: s.modelId ?? null,
+          modelIds: s.modelIds ?? null,
           temperature: s.temperature ?? null,
           maxTokens: s.maxTokens ?? null,
           isEnabled: s.isEnabled,
@@ -340,6 +453,9 @@ export function LlmPage() {
           </button>
           <button className="btn" type="button" onClick={() => setCreateOpen(true)} disabled={busy}>
             新建模型
+          </button>
+          <button className="btn" type="button" onClick={() => setProviderOpen(true)} disabled={busy}>
+            供应商
           </button>
           <button className="btn" type="button" onClick={() => void testAll()} disabled={busy || models.length === 0}>
             {bulkTest ? `一键测速 ${bulkTest.done}/${bulkTest.total}` : "一键测速"}
@@ -380,6 +496,7 @@ export function LlmPage() {
                 <div className="modelCardTop">
                   <div className="modelCardTitle">
                     <div className="modelName">{m.model}</div>
+                    {m.providerName ? <span className="tag">{m.providerName}</span> : m.providerId ? <span className="tag">{m.providerId}</span> : null}
                     <span className={`tag ${kindTag}`}>{kind}</span>
                     <span className={`tag ${keyTag}`}>{keyText}</span>
                     <span className={`tag ${testTagClass}`}>{testText}</span>
@@ -409,11 +526,51 @@ export function LlmPage() {
 
                 <div className="modelFieldsGrid">
                   <label className="field">
+                    <div className="label">供应商</div>
+                    <select
+                      className="input"
+                      value={m.providerId ?? ""}
+                      onChange={(e) => {
+                        const pid = e.target.value || null;
+                        const p = pid ? providers.find((x) => x.id === pid) || null : null;
+                        setModels((prev) =>
+                          prev.map((x) =>
+                            x.id === m.id
+                              ? {
+                                  ...x,
+                                  providerId: pid,
+                                  providerName: p?.name ?? null,
+                                  providerBaseURL: p?.baseURL ?? null,
+                                  baseURL: p?.baseURL ?? x.baseURL,
+                                }
+                              : x,
+                          ),
+                        );
+                      }}
+                    >
+                      <option value="">（手动填写）</option>
+                      {providers
+                        .slice()
+                        .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.name.localeCompare(b.name))
+                        .map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name} {p.hasApiKey ? "" : "(无key)"}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+
+                  <label className="field">
                     <div className="label">BaseURL</div>
                     <input
                       className="input"
-                      value={m.baseURL}
-                      onChange={(e) => setModels((prev) => prev.map((x) => (x.id === m.id ? { ...x, baseURL: e.target.value } : x)))}
+                      value={m.providerId ? m.providerBaseURL || m.baseURL : m.baseURL}
+                      disabled={Boolean(m.providerId)}
+                      onChange={(e) =>
+                        setModels((prev) =>
+                          prev.map((x) => (x.id === m.id ? { ...x, baseURL: e.target.value } : x)),
+                        )
+                      }
                     />
                   </label>
 
@@ -542,8 +699,24 @@ export function LlmPage() {
             </tr>
           </thead>
           <tbody>
-            {stages.map((s) => (
-              <tr key={s.stage}>
+            {stages.map((s) => {
+              const allowMulti = s.stage === "llm.chat" || s.stage === "agent.run";
+              const stageEndpointWant = allowMulti ? "Chat" : null;
+              const selectableModels = modelOptions.filter((m) => {
+                if (!m.isEnabled) return false;
+                if (stageEndpointWant === "Chat") return endpointLabel(m.endpoint) !== "Embeddings";
+                return true;
+              });
+              const multiValue = allowMulti
+                ? Array.isArray(s.modelIds) && s.modelIds.length
+                  ? s.modelIds
+                  : s.modelId
+                    ? [s.modelId]
+                    : []
+                : [];
+
+              return (
+                <tr key={s.stage}>
                 <td style={{ fontWeight: 900 }}>
                   {s.name}
                   <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
@@ -552,24 +725,78 @@ export function LlmPage() {
                 </td>
                 <td className="muted">{s.description}</td>
                 <td>
-                  <select
-                    className="input"
-                    value={s.modelId ?? ""}
-                    onChange={(e) =>
-                      setStages((prev) =>
-                        prev.map((x) => (x.stage === s.stage ? { ...x, modelId: e.target.value || null } : x)),
-                      )
-                    }
-                  >
-                    <option value="">（不设置）</option>
-                    {modelOptions
-                      .filter((m) => m.isEnabled)
-                      .map((m) => (
+                  {allowMulti ? (
+                    <div style={{ display: "grid", gap: 8 }}>
+                      <select
+                        className="input"
+                        value={s.modelId ?? ""}
+                        onChange={(e) => {
+                          const v = e.target.value || null;
+                          setStages((prev) =>
+                            prev.map((x) => {
+                              if (x.stage !== s.stage) return x;
+                              const set = new Set<string>(Array.isArray(x.modelIds) ? x.modelIds : []);
+                              if (v) set.add(v);
+                              return { ...x, modelId: v, modelIds: set.size ? Array.from(set) : null };
+                            }),
+                          );
+                        }}
+                        title="默认模型（Desktop 默认选中）"
+                      >
+                        <option value="">（不设置）</option>
+                        {selectableModels.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.model} {m.hasApiKey ? "" : "(无key)"}
+                          </option>
+                        ))}
+                      </select>
+
+                      <select
+                        className="input"
+                        multiple
+                        size={Math.min(8, Math.max(4, selectableModels.length))}
+                        value={multiValue}
+                        onChange={(e) => {
+                          const picked = Array.from(e.currentTarget.selectedOptions)
+                            .map((o) => o.value)
+                            .filter(Boolean);
+                          setStages((prev) =>
+                            prev.map((x) => {
+                              if (x.stage !== s.stage) return x;
+                              const set = new Set<string>(picked);
+                              if (x.modelId) set.add(x.modelId);
+                              const arr = Array.from(set).slice(0, 60);
+                              return { ...x, modelIds: arr.length ? arr : null };
+                            }),
+                          );
+                        }}
+                        title="可选模型（Desktop 选择器列表）"
+                      >
+                        {selectableModels.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.model} {m.hasApiKey ? "" : "(无key)"}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  ) : (
+                    <select
+                      className="input"
+                      value={s.modelId ?? ""}
+                      onChange={(e) =>
+                        setStages((prev) =>
+                          prev.map((x) => (x.stage === s.stage ? { ...x, modelId: e.target.value || null } : x)),
+                        )
+                      }
+                    >
+                      <option value="">（不设置）</option>
+                      {selectableModels.map((m) => (
                         <option key={m.id} value={m.id}>
                           {m.model} {m.hasApiKey ? "" : "(无key)"} {endpointLabel(m.endpoint) === "Embeddings" ? "[Emb]" : ""}
                         </option>
                       ))}
-                  </select>
+                    </select>
+                  )}
                 </td>
                 <td>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
@@ -609,8 +836,9 @@ export function LlmPage() {
                     启用
                   </label>
                 </td>
-              </tr>
-            ))}
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -640,8 +868,40 @@ export function LlmPage() {
                 <input className="input" value={newModel} onChange={(e) => setNewModel(e.target.value)} placeholder="deepseek-v3.2" />
               </label>
               <label className="field">
+                <div className="label">供应商（可选）</div>
+                <select
+                  className="input"
+                  value={newProviderId}
+                  onChange={(e) => {
+                    const v = e.target.value || "";
+                    setNewProviderId(v);
+                    const p = v ? providers.find((x) => x.id === v) || null : null;
+                    if (p) {
+                      setNewBaseURL(p.baseURL);
+                      setNewApiKey("");
+                    }
+                  }}
+                >
+                  <option value="">（手动填写 baseURL + apiKey）</option>
+                  {providers
+                    .slice()
+                    .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.name.localeCompare(b.name))
+                    .map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} {p.hasApiKey ? "" : "(无key)"}
+                      </option>
+                    ))}
+                </select>
+              </label>
+              <label className="field">
                 <div className="label">baseURL</div>
-                <input className="input" value={newBaseURL} onChange={(e) => setNewBaseURL(e.target.value)} placeholder="https://xh.v1api.cc" />
+                <input
+                  className="input"
+                  value={newProviderId ? providers.find((p) => p.id === newProviderId)?.baseURL ?? newBaseURL : newBaseURL}
+                  onChange={(e) => setNewBaseURL(e.target.value)}
+                  placeholder="https://api.openai.com"
+                  disabled={Boolean(newProviderId)}
+                />
               </label>
               <label className="field">
                 <div className="label">endpoint</div>
@@ -650,10 +910,19 @@ export function LlmPage() {
                   <option value="/v1/embeddings">/v1/embeddings</option>
                 </select>
               </label>
-              <label className="field">
-                <div className="label">apiKey（服务端加密存储）</div>
-                <input className="input" type="password" value={newApiKey} onChange={(e) => setNewApiKey(e.target.value)} placeholder="sk-..." />
-              </label>
+              {newProviderId ? (
+                <div className="field">
+                  <div className="label">apiKey</div>
+                  <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+                    使用供应商 apiKey（服务端加密存储）。如需更换请到「供应商」里修改。
+                  </div>
+                </div>
+              ) : (
+                <label className="field">
+                  <div className="label">apiKey（服务端加密存储）</div>
+                  <input className="input" type="password" value={newApiKey} onChange={(e) => setNewApiKey(e.target.value)} placeholder="sk-..." />
+                </label>
+              )}
               <label className="field">
                 <div className="label">输入单价（元/1,000,000 tokens）</div>
                 <input className="input" value={newPriceIn} onChange={(e) => setNewPriceIn(e.target.value)} placeholder="0.8" />
@@ -689,6 +958,157 @@ export function LlmPage() {
               <button className="btn" type="button" onClick={() => setCreateOpen(false)} disabled={busy}>
                 取消
               </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {providerOpen ? (
+        <div className="drawerMask" onClick={() => setProviderOpen(false)} role="presentation">
+          <div className="drawer" onClick={(e) => e.stopPropagation()} role="presentation">
+            <div className="drawerHeader">
+              <div style={{ fontWeight: 900 }}>供应商（Provider）</div>
+              <button className="btn" type="button" onClick={() => setProviderOpen(false)} disabled={busy}>
+                关闭
+              </button>
+            </div>
+
+            <div className="muted" style={{ marginBottom: 12 }}>
+              供应商保存 baseURL + apiKey（加密存储）。新建模型时可直接选择供应商，避免重复填写。
+            </div>
+
+            <div className="tableWrap" style={{ padding: 14, marginBottom: 14 }}>
+              <div style={{ fontWeight: 900, marginBottom: 10 }}>新增供应商</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                <label className="field">
+                  <div className="label">名称</div>
+                  <input className="input" value={newProvName} onChange={(e) => setNewProvName(e.target.value)} placeholder="openai / 智谱" />
+                </label>
+                <label className="field">
+                  <div className="label">baseURL</div>
+                  <input className="input" value={newProvBaseURL} onChange={(e) => setNewProvBaseURL(e.target.value)} placeholder="https://api.openai.com" />
+                </label>
+                <label className="field">
+                  <div className="label">apiKey（服务端加密存储）</div>
+                  <input className="input" type="password" value={newProvApiKey} onChange={(e) => setNewProvApiKey(e.target.value)} placeholder="sk-..." />
+                </label>
+                <label className="field">
+                  <div className="label">sortOrder</div>
+                  <input className="input" value={newProvSortOrder} onChange={(e) => setNewProvSortOrder(e.target.value)} placeholder="0" />
+                </label>
+                <label className="field spanAll">
+                  <div className="label">description（可选）</div>
+                  <input className="input" value={newProvDesc} onChange={(e) => setNewProvDesc(e.target.value)} placeholder="渠道/备注" />
+                </label>
+                <label className="field" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <input type="checkbox" checked={newProvEnabled} onChange={(e) => setNewProvEnabled(e.target.checked)} />
+                  <div className="label" style={{ margin: 0 }}>
+                    启用
+                  </div>
+                </label>
+              </div>
+              <div style={{ marginTop: 10 }}>
+                <button className="btn primary" type="button" onClick={() => void createProvider()} disabled={busy}>
+                  创建供应商
+                </button>
+              </div>
+            </div>
+
+            <div className="tableWrap" style={{ padding: 14 }}>
+              <div style={{ fontWeight: 900, marginBottom: 10 }}>供应商列表</div>
+              <div className="modelList">
+                {providers.map((p) => {
+                  const keyTag = p.hasApiKey ? "tagGreen" : "tagRed";
+                  const keyText = p.hasApiKey ? `Key ${p.apiKeyMasked || "****"}` : "无 Key";
+                  return (
+                    <div key={p.id} className="modelCard">
+                      <div className="modelCardTop">
+                        <div className="modelCardTitle">
+                          <div className="modelName">{p.name}</div>
+                          <span className={`tag ${keyTag}`}>{keyText}</span>
+                        </div>
+                        <div className="modelCardActions">
+                          <label className="toggleSm">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(p.isEnabled)}
+                              onChange={(e) =>
+                                setProviders((prev) => prev.map((x) => (x.id === p.id ? { ...x, isEnabled: e.target.checked } : x)))
+                              }
+                            />
+                            启用
+                          </label>
+                          <button className="btn primary" type="button" disabled={busy} onClick={() => void saveProvider(p)}>
+                            保存
+                          </button>
+                          <button className="btn" type="button" disabled={busy} onClick={() => void delProvider(p.id)}>
+                            删除
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="modelFieldsGrid">
+                        <label className="field">
+                          <div className="label">名称</div>
+                          <input
+                            className="input"
+                            value={p.name}
+                            onChange={(e) => setProviders((prev) => prev.map((x) => (x.id === p.id ? { ...x, name: e.target.value } : x)))}
+                          />
+                        </label>
+                        <label className="field">
+                          <div className="label">BaseURL</div>
+                          <input
+                            className="input"
+                            value={p.baseURL}
+                            onChange={(e) => setProviders((prev) => prev.map((x) => (x.id === p.id ? { ...x, baseURL: e.target.value } : x)))}
+                          />
+                        </label>
+                        <label className="field">
+                          <div className="label">sortOrder</div>
+                          <input
+                            className="input"
+                            value={String(p.sortOrder ?? 0)}
+                            onChange={(e) =>
+                              setProviders((prev) => prev.map((x) => (x.id === p.id ? { ...x, sortOrder: Number(e.target.value || 0) } : x)))
+                            }
+                          />
+                        </label>
+                        <label className="field">
+                          <div className="label">apiKey（留空=不改）</div>
+                          <input
+                            className="input"
+                            type="password"
+                            value={p.apiKeyInput || ""}
+                            onChange={(e) =>
+                              setProviders((prev) => prev.map((x) => (x.id === p.id ? { ...x, apiKeyInput: e.target.value } : x)))
+                            }
+                            placeholder="sk-..."
+                          />
+                          <label className="muted" style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, fontSize: 12 }}>
+                            <input
+                              type="checkbox"
+                              checked={Boolean(p.clearApiKey)}
+                              onChange={(e) =>
+                                setProviders((prev) => prev.map((x) => (x.id === p.id ? { ...x, clearApiKey: e.target.checked } : x)))
+                              }
+                            />
+                            清空 apiKey
+                          </label>
+                        </label>
+                        <label className="field spanAll">
+                          <div className="label">description（可选）</div>
+                          <input
+                            className="input"
+                            value={p.description ?? ""}
+                            onChange={(e) => setProviders((prev) => prev.map((x) => (x.id === p.id ? { ...x, description: e.target.value } : x)))}
+                          />
+                        </label>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </div>

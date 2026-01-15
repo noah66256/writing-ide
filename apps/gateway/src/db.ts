@@ -65,9 +65,24 @@ export type AiModelTestResult = {
   headers?: Record<string, string>;
 };
 
+export type AiProvider = {
+  id: string;
+  name: string;
+  baseURL: string;
+  apiKeyEnc: string | null;
+  apiKeyLast4: string | null;
+  isEnabled: boolean;
+  sortOrder: number;
+  description: string | null;
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type AiModel = {
   id: string;
   model: string;
+  providerId: string | null;
   baseURL: string;
   endpoint: string;
   apiKeyEnc: string | null;
@@ -87,6 +102,8 @@ export type AiModel = {
 export type AiStageConfig = {
   stage: string;
   modelId: string | null; // 对应 AiModel.id
+  /** 仅 llm.chat / agent.run 使用：可选模型列表（Desktop 用）。为空时表示只使用 modelId。 */
+  modelIds: string[] | null;
   temperature: number | null;
   maxTokens: number | null;
   isEnabled: boolean;
@@ -97,6 +114,7 @@ export type AiStageConfig = {
 
 export type AiConfig = {
   updatedAt: string;
+  providers: AiProvider[];
   models: AiModel[];
   stages: AiStageConfig[];
 };
@@ -236,11 +254,45 @@ export async function loadDb(): Promise<Db> {
       const a: any = rawAi;
       const updatedAt = normStr(a?.updatedAt) || nowIso;
 
+      const providersRaw = Array.isArray(a?.providers) ? (a.providers as any[]) : [];
+      const providers: AiProvider[] = providersRaw
+        .map((p) => {
+          const id = normStr(p?.id);
+          const name = normStr(p?.name);
+          const baseURL = normStr(p?.baseURL);
+          if (!id || !name || !baseURL) return null;
+
+          const apiKeyEnc = typeof p?.apiKeyEnc === "string" ? String(p.apiKeyEnc) : null;
+          const apiKeyLast4 = typeof p?.apiKeyLast4 === "string" ? normStr(p.apiKeyLast4) : null;
+          const isEnabled = p?.isEnabled === false ? false : true;
+          const sortOrder = Number.isFinite(p?.sortOrder) ? Number(p.sortOrder) : 0;
+          const description = typeof p?.description === "string" ? String(p.description).trim() : null;
+          const updatedBy = typeof p?.updatedBy === "string" ? normStr(p.updatedBy) : null;
+          const createdAt = typeof p?.createdAt === "string" ? normStr(p.createdAt) || nowIso : nowIso;
+          const updatedAt2 = typeof p?.updatedAt === "string" ? normStr(p.updatedAt) || createdAt : createdAt;
+
+          return {
+            id,
+            name,
+            baseURL,
+            apiKeyEnc,
+            apiKeyLast4,
+            isEnabled,
+            sortOrder,
+            description,
+            updatedBy,
+            createdAt,
+            updatedAt: updatedAt2,
+          };
+        })
+        .filter((x): x is AiProvider => Boolean(x));
+
       const modelsRaw = Array.isArray(a?.models) ? (a.models as any[]) : [];
       const models: AiModel[] = modelsRaw
         .map((m) => {
           const id = normStr(m?.id) || normStr(m?.model);
           const model = normStr(m?.model);
+          const providerId = typeof m?.providerId === "string" ? normStr(m.providerId) : null;
           const baseURL = normStr(m?.baseURL);
           const endpoint = normStr(m?.endpoint) || "/v1/chat/completions";
           if (!id || !model || !baseURL) return null;
@@ -271,6 +323,7 @@ export async function loadDb(): Promise<Db> {
           return {
             id,
             model,
+            providerId,
             baseURL,
             endpoint,
             apiKeyEnc,
@@ -295,17 +348,28 @@ export async function loadDb(): Promise<Db> {
           const stage = normStr(s?.stage);
           if (!stage) return null;
           const modelId = typeof s?.modelId === "string" ? normStr(s.modelId) : null;
+          const modelIds =
+            Array.isArray((s as any)?.modelIds) && (s as any).modelIds.length
+              ? Array.from(
+                  new Set(
+                    ((s as any).modelIds as any[])
+                      .map((x) => normStr(x))
+                      .filter(Boolean)
+                      .slice(0, 200),
+                  ),
+                )
+              : null;
           const temperature = normNum(s?.temperature);
           const maxTokens = normNum(s?.maxTokens);
           const isEnabled = s?.isEnabled === false ? false : true;
           const updatedBy = typeof s?.updatedBy === "string" ? normStr(s.updatedBy) : null;
           const createdAt = typeof s?.createdAt === "string" ? normStr(s.createdAt) || nowIso : nowIso;
           const updatedAt2 = typeof s?.updatedAt === "string" ? normStr(s.updatedAt) || createdAt : createdAt;
-          return { stage, modelId, temperature, maxTokens, isEnabled, updatedBy, createdAt, updatedAt: updatedAt2 };
+          return { stage, modelId, modelIds, temperature, maxTokens, isEnabled, updatedBy, createdAt, updatedAt: updatedAt2 };
         })
         .filter((x): x is AiStageConfig => Boolean(x));
 
-      return { updatedAt, models, stages };
+      return { updatedAt, providers, models, stages };
     })();
 
     return { users, pointsTransactions, llmConfig, aiConfig };
