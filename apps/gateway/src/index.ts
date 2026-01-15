@@ -1456,6 +1456,16 @@ fastify.get(
   }
 );
 
+fastify.get(
+  "/api/admin/ping",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async () => {
+    return { ok: true };
+  },
+);
+
 // ======== AI Config（对齐「锦李2.0」：模型管理 + stage 路由） ========
 
 fastify.get(
