@@ -26,6 +26,11 @@ export function openAiCompatUrl(baseUrl: string, path: string) {
 
 export type StreamDeltaEvent =
   | { type: "delta"; delta: string }
+  | {
+      type: "usage";
+      usage: { promptTokens: number; completionTokens: number; totalTokens?: number };
+      raw?: any;
+    }
   | { type: "done" }
   | { type: "error"; error: string };
 
@@ -61,25 +66,45 @@ export async function* streamChatCompletions(args: {
   messages: OpenAiChatMessage[];
   temperature?: number;
   signal?: AbortSignal;
+  includeUsage?: boolean;
 }): AsyncGenerator<StreamDeltaEvent> {
   const url = openAiCompatUrl(args.config.baseUrl, "/chat/completions");
 
-  let res: Response;
-  try {
-    res = await fetch(url, {
+  const wantsUsage = Boolean(args.includeUsage);
+
+  const doFetch = async (withUsage: boolean) => {
+    const body: any = {
+      model: args.model,
+      messages: args.messages,
+      temperature: args.temperature,
+      stream: true
+    };
+    if (withUsage) body.stream_options = { include_usage: true };
+    return fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${args.config.apiKey}`
       },
-      body: JSON.stringify({
-        model: args.model,
-        messages: args.messages,
-        temperature: args.temperature,
-        stream: true
-      }),
+      body: JSON.stringify(body),
       signal: args.signal
     });
+  };
+
+  let res: Response;
+  try {
+    res = await doFetch(wantsUsage);
+    if (!res.ok && wantsUsage) {
+      const text = await res.text().catch(() => "");
+      // 兼容性兜底：有些 OpenAI-compatible 不接受 stream_options/include_usage
+      if (res.status === 400 && /stream_options|include_usage/i.test(text)) {
+        res = await doFetch(false);
+      } else {
+        // 复用已读到的错误文本
+        yield { type: "error", error: text || `UPSTREAM_${res.status}` };
+        return;
+      }
+    }
   } catch (e: any) {
     yield { type: "error", error: String(e?.message ?? e) };
     return;
@@ -95,6 +120,7 @@ export async function* streamChatCompletions(args: {
     return;
   }
 
+  let sawFinishReason = false;
   for await (const line of readLines(res.body)) {
     if (!line) continue;
     if (line.startsWith(":")) continue; // sse comment/ping
@@ -115,6 +141,22 @@ export async function* streamChatCompletions(args: {
       continue;
     }
 
+    const usageRaw = json?.usage;
+    if (usageRaw && typeof usageRaw === "object") {
+      const pt = Number((usageRaw as any)?.prompt_tokens);
+      const ct = Number((usageRaw as any)?.completion_tokens);
+      const tt = Number((usageRaw as any)?.total_tokens);
+      const usage = {
+        promptTokens: Number.isFinite(pt) ? pt : 0,
+        completionTokens: Number.isFinite(ct) ? ct : 0,
+        ...(Number.isFinite(tt) ? { totalTokens: tt } : {})
+      };
+      // 仅当至少有一种 token 计数有效时才上报
+      if (usage.promptTokens > 0 || usage.completionTokens > 0 || (usage as any).totalTokens > 0) {
+        yield { type: "usage", usage, raw: json };
+      }
+    }
+
     const choice = json?.choices?.[0];
     const delta = choice?.delta?.content;
     if (typeof delta === "string" && delta.length > 0) {
@@ -123,9 +165,16 @@ export async function* streamChatCompletions(args: {
 
     const finishReason = choice?.finish_reason;
     if (finishReason) {
-      yield { type: "done" };
-      return;
+      sawFinishReason = true;
+      if (!wantsUsage) {
+        yield { type: "done" };
+        return;
+      }
     }
+  }
+
+  if (sawFinishReason) {
+    yield { type: "done" };
   }
 }
 

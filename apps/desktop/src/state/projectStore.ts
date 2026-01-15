@@ -79,8 +79,7 @@ const DEFAULT_DOC_RULES =
   `### 引用与事实\n` +
   `- 涉及事实/数据/年份：尽量给来源；不确定就提示风险，不要编造。\n\n` +
   `### 输出格式约束（Plan/Agent）\n` +
-  `- 优先输出结构（outline）再展开正文。\n` +
-  `- 涉及文件改动必须给可应用 diff；写入前需要用户确认。\n`;
+  `- 优先输出结构（outline）再展开正文。\n`;
 
 const saveTimers = new Map<string, number>();
 let refreshInFlight: Promise<void> | null = null;

@@ -6,10 +6,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import dotenv from "dotenv";
-import { loadDb, saveDb, type User } from "./db.js";
+import { loadDb, saveDb, type Db, type LlmConfig, type LlmModelPrice, type User } from "./db.js";
 import { kbSearch, type KbCard } from "@writing-ide/kb-core";
 import { MemoryKbStore } from "./kb/memoryStore.js";
-import { adjustUserPoints, listUserTransactions } from "./billing.js";
+import { adjustUserPoints, calculateCostPoints, listUserTransactions, type LlmTokenUsage } from "./billing.js";
 import { chatCompletionOnce, streamChatCompletions, type OpenAiChatMessage } from "./llm/openaiCompat.js";
 import { isToolCallMessage, parseToolCalls, renderToolResultXml } from "./agent/xmlProtocol.js";
 import { toolNamesForMode, toolsPrompt, type AgentMode } from "./agent/toolRegistry.js";
@@ -70,77 +70,217 @@ function requireAdmin(request: any, reply: any) {
   }
 }
 
+async function tryGetJwtUser(request: any): Promise<{ id: string; email?: string; role?: string } | null> {
+  const auth = String(request?.headers?.authorization ?? "").trim();
+  if (!auth) return null;
+  try {
+    await request.jwtVerify();
+    return {
+      id: String(request.user?.sub ?? ""),
+      email: request.user?.email ? String(request.user.email) : undefined,
+      role: request.user?.role ? String(request.user.role) : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getModelPriceFromDb(db: Db, modelId: string): LlmModelPrice | null {
+  const id = normStr(modelId);
+  if (!id) return null;
+  const raw = (db.llmConfig as any)?.pricing?.[id];
+  if (!raw || typeof raw !== "object") return null;
+  const priceIn = Number((raw as any).priceInCnyPer1M);
+  const priceOut = Number((raw as any).priceOutCnyPer1M);
+  if (!Number.isFinite(priceIn) || !Number.isFinite(priceOut) || priceIn < 0 || priceOut < 0) return null;
+  return { priceInCnyPer1M: priceIn, priceOutCnyPer1M: priceOut };
+}
+
+async function chargeUserForLlmUsage(args: {
+  userId: string;
+  modelId: string;
+  usage: LlmTokenUsage;
+  source: string;
+}) {
+  const userId = normStr(args.userId);
+  const modelId = normStr(args.modelId);
+  if (!userId || !modelId) return { ok: false as const, reason: "MISSING_USER_OR_MODEL" as const };
+
+  const db = await loadDb();
+  const user = db.users.find((u) => u.id === userId);
+  if (!user) return { ok: false as const, reason: "USER_NOT_FOUND" as const };
+
+  const price = getModelPriceFromDb(db, modelId);
+  if (!price) return { ok: false as const, reason: "PRICE_NOT_CONFIGURED" as const };
+
+  const usage: LlmTokenUsage = {
+    promptTokens: Math.max(0, Math.floor(Number(args.usage.promptTokens) || 0)),
+    completionTokens: Math.max(0, Math.floor(Number(args.usage.completionTokens) || 0)),
+    ...(Number.isFinite(args.usage.totalTokens as any) ? { totalTokens: Math.floor(Number(args.usage.totalTokens)) } : {}),
+  };
+
+  const costCny = (usage.promptTokens / 1_000_000) * price.priceInCnyPer1M + (usage.completionTokens / 1_000_000) * price.priceOutCnyPer1M;
+  const costPoints = calculateCostPoints({ usage, price, pointsPerCny: 1000 });
+  if (costPoints <= 0) return { ok: false as const, reason: "ZERO_COST" as const };
+
+  const meta = {
+    kind: "llm_cost_v1",
+    source: args.source,
+    modelId,
+    usage,
+    price,
+    costCny,
+    costPoints,
+    pointsPerCny: 1000,
+  };
+
+  // 尽量扣满；不足则扣到 0（开发期兜底，避免负数）
+  let charged = 0;
+  try {
+    const { tx } = adjustUserPoints({ db, userId, delta: -costPoints, type: "consume", reason: args.source });
+    tx.meta = meta;
+    charged = costPoints;
+  } catch (e: any) {
+    const msg = e?.message ? String(e.message) : String(e);
+    if (msg !== "INSUFFICIENT_POINTS") return { ok: false as const, reason: "DEDUCT_FAILED" as const, detail: msg };
+    const avail = Math.max(0, Math.floor(Number(user.pointsBalance) || 0));
+    if (avail <= 0) return { ok: false as const, reason: "INSUFFICIENT_POINTS" as const };
+    const { tx } = adjustUserPoints({ db, userId, delta: -avail, type: "consume", reason: args.source });
+    tx.meta = { ...meta, chargedPoints: avail, note: "insufficient_points_partial_charge" };
+    charged = avail;
+  }
+
+  await saveDb(db);
+  return { ok: true as const, chargedPoints: charged, costPoints };
+}
+
 fastify.get("/api/health", async () => {
   return { ok: true };
 });
 
-function getLlmEnv() {
-  const baseUrl = String(process.env.LLM_BASE_URL ?? "").trim();
-  const apiKey = String(process.env.LLM_API_KEY ?? "").trim();
-  const defaultModel = String(process.env.LLM_MODEL ?? "").trim();
-  return {
-    baseUrl,
-    apiKey,
-    defaultModel,
-    ok: Boolean(baseUrl && apiKey && defaultModel)
-  };
+function normStr(v: any) {
+  return typeof v === "string" ? v.trim() : "";
 }
 
-function getEmbedEnv() {
-  const baseUrl = String(process.env.LLM_EMBED_BASE_URL ?? process.env.LLM_BASE_URL ?? "").trim();
-  const apiKeyDefault =
-    String(process.env.LLM_EMBED_API_KEY ?? "").trim() ||
-    String(process.env.LLM_CARD_API_KEY ?? "").trim() ||
-    String(process.env.LLM_API_KEY ?? "").trim();
-  const models = String(process.env.LLM_EMBED_MODELS ?? "")
+function normUrl(v: any) {
+  return normStr(v).replace(/\/+$/g, "");
+}
+
+function parseCsv(v: any) {
+  return String(v ?? "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  const defaultModel = models[0] ?? "";
+}
+
+function normStrList(v: any) {
+  if (!Array.isArray(v)) return [];
+  return v.map((x) => normStr(x)).filter(Boolean);
+}
+
+async function getLlmEnv(db?: Db) {
+  const d = db ?? (await loadDb());
+  const cfg = d.llmConfig as LlmConfig | undefined;
+  const baseUrl = normUrl(cfg?.llm?.baseUrl) || normUrl(process.env.LLM_BASE_URL ?? "");
+  const apiKey = normStr(cfg?.llm?.apiKey) || normStr(process.env.LLM_API_KEY ?? "");
+  const modelsCfg = normStrList(cfg?.llm?.models);
+  const defaultModel =
+    normStr(cfg?.llm?.defaultModel) || normStr(process.env.LLM_MODEL ?? "") || modelsCfg[0] || "";
+  const models = modelsCfg.length ? modelsCfg : defaultModel ? [defaultModel] : [];
+  return { baseUrl, apiKey, models, defaultModel, ok: Boolean(baseUrl && apiKey && defaultModel) };
+}
+
+async function getEmbedEnv(db?: Db) {
+  const d = db ?? (await loadDb());
+  const cfg = d.llmConfig as LlmConfig | undefined;
+
+  const baseUrl =
+    normUrl(cfg?.embeddings?.baseUrl) ||
+    normUrl(process.env.LLM_EMBED_BASE_URL ?? "") ||
+    normUrl(process.env.LLM_BASE_URL ?? "");
+  const apiKeyDefault =
+    normStr(cfg?.embeddings?.apiKey) ||
+    normStr(process.env.LLM_EMBED_API_KEY ?? "") ||
+    normStr(process.env.LLM_CARD_API_KEY ?? "") ||
+    normStr(process.env.LLM_API_KEY ?? "");
+
+  const modelsCfg = normStrList(cfg?.embeddings?.models);
+  const modelsEnv = parseCsv(process.env.LLM_EMBED_MODELS ?? "");
+  const models = modelsCfg.length ? modelsCfg : modelsEnv;
+  const defaultModel = normStr(cfg?.embeddings?.defaultModel) || models[0] || "";
   return {
     baseUrl,
     apiKey: apiKeyDefault,
     models,
     defaultModel,
-    ok: Boolean(baseUrl && apiKeyDefault && models.length > 0)
+    ok: Boolean(baseUrl && apiKeyDefault && models.length > 0),
   };
 }
 
-function getLinterEnv() {
-  // 默认策略：复用“抽卡模型/Key/BaseUrl”（LLM_CARD_*）作为 Style Linter 的强模型。
-  // 如需单独覆盖，再显式配置 LLM_LINTER_*。
+async function getCardEnv(db?: Db) {
+  const d = db ?? (await loadDb());
+  const cfg = d.llmConfig as LlmConfig | undefined;
+
   const baseUrl =
-    String(process.env.LLM_CARD_BASE_URL ?? "").trim() ||
-    String(process.env.LLM_LINTER_BASE_URL ?? "").trim() ||
-    String(process.env.LLM_BASE_URL ?? "").trim();
+    normUrl(cfg?.card?.baseUrl) ||
+    normUrl(process.env.LLM_CARD_BASE_URL ?? "") ||
+    normUrl(cfg?.llm?.baseUrl) ||
+    normUrl(process.env.LLM_BASE_URL ?? "");
   const apiKey =
-    String(process.env.LLM_CARD_API_KEY ?? "").trim() ||
-    String(process.env.LLM_LINTER_API_KEY ?? "").trim() ||
-    String(process.env.LLM_API_KEY ?? "").trim();
+    normStr(cfg?.card?.apiKey) ||
+    normStr(process.env.LLM_CARD_API_KEY ?? "") ||
+    normStr(cfg?.llm?.apiKey) ||
+    normStr(process.env.LLM_API_KEY ?? "");
   const defaultModel =
-    String(process.env.LLM_CARD_MODEL ?? "").trim() ||
-    String(process.env.LLM_LINTER_MODEL ?? "").trim() ||
-    String(process.env.LLM_MODEL ?? "").trim();
-  const timeoutMs = Number(process.env.LLM_LINTER_TIMEOUT_MS ?? 60_000);
-  return {
-    baseUrl,
-    apiKey,
-    defaultModel,
-    timeoutMs,
-    ok: Boolean(baseUrl && apiKey && defaultModel),
-  };
+    normStr(cfg?.card?.defaultModel) ||
+    normStr(process.env.LLM_CARD_MODEL ?? "") ||
+    normStr(cfg?.llm?.defaultModel) ||
+    normStr(process.env.LLM_MODEL ?? "");
+  return { baseUrl, apiKey, defaultModel, ok: Boolean(baseUrl && apiKey && defaultModel) };
+}
+
+async function getLinterEnv(db?: Db) {
+  const d = db ?? (await loadDb());
+  const cfg = d.llmConfig as LlmConfig | undefined;
+
+  // 默认策略：复用“抽卡模型/Key/BaseUrl”（card）作为 Style Linter 的强模型。
+  // 如需单独覆盖，再显式配置 linter。
+  const baseUrl =
+    normUrl(cfg?.linter?.baseUrl) ||
+    normUrl(cfg?.card?.baseUrl) ||
+    normUrl(process.env.LLM_LINTER_BASE_URL ?? "") ||
+    normUrl(process.env.LLM_CARD_BASE_URL ?? "") ||
+    normUrl(process.env.LLM_BASE_URL ?? "");
+  const apiKey =
+    normStr(cfg?.linter?.apiKey) ||
+    normStr(cfg?.card?.apiKey) ||
+    normStr(process.env.LLM_LINTER_API_KEY ?? "") ||
+    normStr(process.env.LLM_CARD_API_KEY ?? "") ||
+    normStr(process.env.LLM_API_KEY ?? "");
+  const defaultModel =
+    normStr(cfg?.linter?.defaultModel) ||
+    normStr(cfg?.card?.defaultModel) ||
+    normStr(process.env.LLM_LINTER_MODEL ?? "") ||
+    normStr(process.env.LLM_CARD_MODEL ?? "") ||
+    normStr(process.env.LLM_MODEL ?? "");
+  const timeoutMsCfg = cfg?.linter?.timeoutMs;
+  const timeoutMs =
+    Number.isFinite(timeoutMsCfg as any) && Number(timeoutMsCfg) > 0
+      ? Number(timeoutMsCfg)
+      : Number(process.env.LLM_LINTER_TIMEOUT_MS ?? 60_000);
+  return { baseUrl, apiKey, defaultModel, timeoutMs, ok: Boolean(baseUrl && apiKey && defaultModel) };
 }
 
 // ======== LLM（OpenAI-compatible，开发期最小闭环） ========
 
 fastify.get("/api/llm/models", async () => {
-  const env = getLlmEnv();
-  if (!env.defaultModel) return { models: [] };
-  return { models: [{ id: env.defaultModel }] };
+  const env = await getLlmEnv();
+  const ids = env.models.length ? env.models : env.defaultModel ? [env.defaultModel] : [];
+  return { models: ids.map((id) => ({ id })) };
 });
 
 fastify.get("/api/llm/embedding_models", async () => {
-  const env = getEmbedEnv();
+  const env = await getEmbedEnv();
   return { models: (env.models ?? []).map((id) => ({ id })) };
 });
 
@@ -151,7 +291,7 @@ fastify.post("/api/llm/embeddings", async (request, reply) => {
   });
   const body = bodySchema.parse((request as any).body);
 
-  const env = getEmbedEnv();
+  const env = await getEmbedEnv();
   if (!env.ok) {
     return reply.code(500).send({
       error: "EMBEDDINGS_NOT_CONFIGURED",
@@ -208,9 +348,10 @@ fastify.post("/api/llm/chat/stream", async (request, reply) => {
   });
   const body = bodySchema.parse((request as any).body);
 
-  const env = getLlmEnv();
+  const env = await getLlmEnv();
   if (!env.ok) return reply.code(500).send({ error: "LLM_NOT_CONFIGURED" });
 
+  const jwtUser = await tryGetJwtUser(request as any);
   const model = body.model ?? env.defaultModel;
   const messages: OpenAiChatMessage[] =
     body.messages?.length
@@ -249,17 +390,25 @@ fastify.post("/api/llm/chat/stream", async (request, reply) => {
 
   writeEvent("run.start", { model });
 
+  let lastUsage: LlmTokenUsage | null = null;
+
   try {
     for await (const ev of streamChatCompletions({
       config: { baseUrl: env.baseUrl, apiKey: env.apiKey },
       model,
       messages,
       temperature: body.temperature,
+      includeUsage: true,
       signal: abort.signal
     })) {
       if (ev.type === "delta") writeEvent("assistant.delta", { delta: ev.delta });
+      else if (ev.type === "usage") lastUsage = ev.usage as any;
       else if (ev.type === "done") writeEvent("assistant.done", {});
       else if (ev.type === "error") writeEvent("error", { error: ev.error });
+    }
+
+    if (jwtUser?.id && lastUsage) {
+      await chargeUserForLlmUsage({ userId: jwtUser.id, modelId: model, usage: lastUsage, source: "llm.chat" });
     }
   } catch (e: any) {
     const msg = e?.message ? String(e.message) : String(e);
@@ -339,9 +488,10 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   });
   const body = bodySchema.parse((request as any).body);
 
-  const env = getLlmEnv();
+  const env = await getLlmEnv();
   if (!env.ok) return reply.code(500).send({ error: "LLM_NOT_CONFIGURED" });
 
+  const jwtUser = await tryGetJwtUser(request as any);
   const model = body.model ?? env.defaultModel;
   const mode = (body.mode ?? "agent") as AgentMode;
   const runId = randomUUID();
@@ -554,11 +704,13 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       let assistantText = "";
       let decided: "unknown" | "tool" | "text" = "unknown";
       let flushed = 0;
+      let lastUsage: LlmTokenUsage | null = null;
 
       for await (const ev of streamChatCompletions({
         config: { baseUrl: env.baseUrl, apiKey: env.apiKey },
         model,
         messages,
+        includeUsage: true,
         signal: abort.signal
       })) {
         if (ev.type === "delta") {
@@ -582,6 +734,9 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             }
           }
         }
+        if (ev.type === "usage") {
+          lastUsage = ev.usage as any;
+        }
         if (ev.type === "error") {
           writeEvent("error", { error: ev.error });
           reply.raw.end();
@@ -589,6 +744,10 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           return;
         }
         if (ev.type === "done") break;
+      }
+
+      if (jwtUser?.id && lastUsage) {
+        await chargeUserForLlmUsage({ userId: jwtUser.id, modelId: model, usage: lastUsage, source: `agent.${mode}` });
       }
 
       const toolCalls = parseToolCalls(assistantText);
@@ -1103,6 +1262,143 @@ fastify.post(
   }
 );
 
+fastify.get(
+  "/api/admin/users/:id/points/transactions",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin]
+  },
+  async (request) => {
+    const paramsSchema = z.object({ id: z.string().min(1) });
+    const { id } = paramsSchema.parse((request as any).params);
+    const db = await loadDb();
+    return { transactions: listUserTransactions(db, id) };
+  }
+);
+
+// ======== Admin：LLM 配置（热生效） ========
+
+function maskSecret(s: string) {
+  const t = String(s ?? "").trim();
+  if (!t) return "";
+  if (t.length <= 6) return "******";
+  return `${t.slice(0, 2)}******${t.slice(-2)}`;
+}
+
+function sanitizeLlmConfigForAdmin(cfg?: LlmConfig) {
+  const c = cfg && typeof cfg === "object" ? cfg : undefined;
+  const stageOut = (x: any) => {
+    const baseUrl = normUrl(x?.baseUrl);
+    const apiKey = normStr(x?.apiKey);
+    const defaultModel = normStr(x?.defaultModel);
+    const models = normStrList(x?.models);
+    return {
+      baseUrl,
+      apiKeyMasked: apiKey ? maskSecret(apiKey) : "",
+      hasApiKey: Boolean(apiKey),
+      models,
+      defaultModel,
+    };
+  };
+  return {
+    updatedAt: normStr((c as any)?.updatedAt),
+    llm: stageOut((c as any)?.llm),
+    embeddings: stageOut((c as any)?.embeddings),
+    card: stageOut((c as any)?.card),
+    linter: { ...stageOut((c as any)?.linter), timeoutMs: Number((c as any)?.linter?.timeoutMs ?? 0) || 0 },
+    pricing: (c as any)?.pricing && typeof (c as any).pricing === "object" ? (c as any).pricing : {},
+  };
+}
+
+fastify.get(
+  "/api/admin/llm/config",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async () => {
+    const db = await loadDb();
+    const stored = sanitizeLlmConfigForAdmin(db.llmConfig);
+    const llm = await getLlmEnv(db);
+    const embeddings = await getEmbedEnv(db);
+    const linter = await getLinterEnv(db);
+    return {
+      stored,
+      effective: {
+        llm: { baseUrl: llm.baseUrl, defaultModel: llm.defaultModel, models: llm.models },
+        embeddings: { baseUrl: embeddings.baseUrl, defaultModel: embeddings.defaultModel, models: embeddings.models },
+        linter: { baseUrl: linter.baseUrl, defaultModel: linter.defaultModel, timeoutMs: linter.timeoutMs },
+      },
+    };
+  }
+);
+
+fastify.put(
+  "/api/admin/llm/config",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async (request) => {
+    const stageSchema = z
+      .object({
+        baseUrl: z.string().optional(),
+        apiKey: z.string().optional(),
+        models: z.array(z.string().min(1)).max(200).optional(),
+        defaultModel: z.string().optional(),
+      })
+      .partial();
+
+    const priceSchema = z.object({
+      priceInCnyPer1M: z.number().min(0),
+      priceOutCnyPer1M: z.number().min(0),
+    });
+
+    const bodySchema = z.object({
+      llm: stageSchema.optional(),
+      embeddings: stageSchema.optional(),
+      card: stageSchema.optional(),
+      linter: stageSchema.extend({ timeoutMs: z.number().int().min(1).optional() }).optional(),
+      pricing: z.record(priceSchema).optional(),
+    });
+
+    const body = bodySchema.parse((request as any).body ?? {});
+    const db = await loadDb();
+    const prev: LlmConfig = db.llmConfig && typeof db.llmConfig === "object" ? db.llmConfig : { updatedAt: new Date().toISOString() };
+
+    const mergeStage = (dst: any, src: any) => {
+      const out: any = { ...(dst && typeof dst === "object" ? dst : {}) };
+      if (!src || typeof src !== "object") return out;
+      if (src.baseUrl !== undefined) out.baseUrl = normUrl(src.baseUrl);
+      if (src.apiKey !== undefined) out.apiKey = String(src.apiKey ?? "").trim(); // 允许空字符串清空
+      if (src.models !== undefined) out.models = normStrList(src.models);
+      if (src.defaultModel !== undefined) out.defaultModel = normStr(src.defaultModel);
+      return out;
+    };
+
+    const next: LlmConfig = {
+      ...prev,
+      updatedAt: new Date().toISOString(),
+      llm: mergeStage(prev.llm, body.llm),
+      embeddings: mergeStage(prev.embeddings, body.embeddings),
+      card: mergeStage(prev.card, body.card),
+      linter: { ...mergeStage(prev.linter, body.linter), ...(body.linter?.timeoutMs ? { timeoutMs: body.linter.timeoutMs } : {}) },
+      pricing: { ...(prev.pricing ?? {}), ...(body.pricing ?? {}) },
+    };
+
+    // 清理空对象
+    const prune = (x: any) => (x && typeof x === "object" && Object.keys(x).length ? x : undefined);
+    db.llmConfig = {
+      updatedAt: next.updatedAt,
+      ...(prune(next.llm) ? { llm: prune(next.llm) } : {}),
+      ...(prune(next.embeddings) ? { embeddings: prune(next.embeddings) } : {}),
+      ...(prune(next.card) ? { card: prune(next.card) } : {}),
+      ...(prune(next.linter) ? { linter: prune(next.linter) } : {}),
+      ...(next.pricing && Object.keys(next.pricing).length ? { pricing: next.pricing } : {}),
+    };
+
+    await saveDb(db);
+    return { ok: true, stored: sanitizeLlmConfigForAdmin(db.llmConfig) };
+  }
+);
+
 /**
  * KB: 仅用于验证“kb-core 可复用”的最小闭环接口。
  * - 暂不做 embedding：返回结果主要靠你后续接入 embedding & semantic parse。
@@ -1197,15 +1493,12 @@ fastify.post("/api/kb/dev/extract_cards", async (request, reply) => {
   });
   const body = bodySchema.parse((request as any).body);
 
-  const baseUrlDefault = String(process.env.LLM_BASE_URL ?? "").trim();
-  const apiKeyDefault = String(process.env.LLM_API_KEY ?? "").trim();
-  const modelDefault = String(process.env.LLM_MODEL ?? "").trim();
+  const cardEnv = await getCardEnv();
+  const cardBaseUrl = cardEnv.baseUrl;
+  const cardApiKey = cardEnv.apiKey;
+  const cardModelDefault = cardEnv.defaultModel;
 
-  const cardBaseUrl = String(process.env.LLM_CARD_BASE_URL ?? "").trim() || baseUrlDefault;
-  const cardApiKey = String(process.env.LLM_CARD_API_KEY ?? "").trim() || apiKeyDefault;
-  const cardModelDefault = String(process.env.LLM_CARD_MODEL ?? "").trim() || modelDefault;
-
-  if (!cardBaseUrl || !cardApiKey || !cardModelDefault) {
+  if (!cardEnv.ok) {
     return reply.code(500).send({
       error: "LLM_NOT_CONFIGURED",
       hint: "请配置 LLM_BASE_URL/LLM_MODEL/LLM_API_KEY；若抽卡需不同 key/model，请配置 LLM_CARD_MODEL/LLM_CARD_API_KEY（可选 LLM_CARD_BASE_URL）。"
@@ -1482,15 +1775,12 @@ fastify.post("/api/kb/dev/build_library_playbook", async (request, reply) => {
   });
   const body = bodySchema.parse((request as any).body);
 
-  const baseUrlDefault = String(process.env.LLM_BASE_URL ?? "").trim();
-  const apiKeyDefault = String(process.env.LLM_API_KEY ?? "").trim();
-  const modelDefault = String(process.env.LLM_MODEL ?? "").trim();
+  const cardEnv = await getCardEnv();
+  const cardBaseUrl = cardEnv.baseUrl;
+  const cardApiKey = cardEnv.apiKey;
+  const cardModelDefault = cardEnv.defaultModel;
 
-  const cardBaseUrl = String(process.env.LLM_CARD_BASE_URL ?? "").trim() || baseUrlDefault;
-  const cardApiKey = String(process.env.LLM_CARD_API_KEY ?? "").trim() || apiKeyDefault;
-  const cardModelDefault = String(process.env.LLM_CARD_MODEL ?? "").trim() || modelDefault;
-
-  if (!cardBaseUrl || !cardApiKey || !cardModelDefault) {
+  if (!cardEnv.ok) {
     return reply.code(500).send({
       error: "LLM_NOT_CONFIGURED",
       hint: "请配置 LLM_BASE_URL/LLM_MODEL/LLM_API_KEY；若抽卡需不同 key/model，请配置 LLM_CARD_MODEL/LLM_CARD_API_KEY（可选 LLM_CARD_BASE_URL）。"
@@ -1794,14 +2084,12 @@ fastify.post("/api/kb/dev/classify_genre", async (request, reply) => {
   });
   const body = bodySchema.parse((request as any).body);
 
-  const baseUrlDefault = String(process.env.LLM_BASE_URL ?? "").trim();
-  const apiKeyDefault = String(process.env.LLM_API_KEY ?? "").trim();
-  const modelDefault = String(process.env.LLM_MODEL ?? "").trim();
-  if (!baseUrlDefault || !apiKeyDefault || !modelDefault) {
+  const llmEnv = await getLlmEnv();
+  if (!llmEnv.ok) {
     return reply.code(500).send({ error: "LLM_NOT_CONFIGURED", hint: "请配置 LLM_BASE_URL/LLM_MODEL/LLM_API_KEY" });
   }
 
-  const model = body.model ?? modelDefault;
+  const model = body.model ?? llmEnv.defaultModel;
   const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 3);
   const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -1846,7 +2134,7 @@ fastify.post("/api/kb/dev/classify_genre", async (request, reply) => {
   let ret: any = null;
   for (let attempt = 0; attempt <= retryMax; attempt += 1) {
     ret = await chatCompletionOnce({
-      config: { baseUrl: baseUrlDefault, apiKey: apiKeyDefault },
+      config: { baseUrl: llmEnv.baseUrl, apiKey: llmEnv.apiKey },
       model,
       messages: [
         { role: "system", content: sys },
@@ -1974,7 +2262,7 @@ fastify.post("/api/kb/dev/lint_style", async (request, reply) => {
   });
   const body = bodySchema.parse((request as any).body);
 
-  const env = getLinterEnv();
+  const env = await getLinterEnv();
   if (!env.ok) {
     return reply.code(500).send({
       error: "LINTER_NOT_CONFIGURED",
