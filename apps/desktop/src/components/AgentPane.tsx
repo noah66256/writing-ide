@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { startGatewayRun } from "../agent/gatewayAgent";
 import { useRunStore } from "../state/runStore";
 import { useProjectStore } from "../state/projectStore";
-import { IconAt, IconGlobe, IconImage, IconMic, IconRewind, IconSend, IconStop } from "./Icons";
+import { IconAt, IconCopy, IconGlobe, IconImage, IconMic, IconRewind, IconSend, IconStop } from "./Icons";
 import { PillSelect } from "./PillSelect";
 import { ToolBlock } from "./ToolBlock";
 import { RichText } from "./RichText";
@@ -63,6 +63,21 @@ export function AgentPane() {
   const deleteConversation = useConversationStore((s) => s.deleteConversation);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [copiedHint, setCopiedHint] = useState<string | null>(null);
+  const [hideToolSteps, setHideToolSteps] = useState(() => {
+    try {
+      return window.localStorage.getItem("agent.hideToolSteps") === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("agent.hideToolSteps", hideToolSteps ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }, [hideToolSteps]);
 
   // 运行状态耗时刷新（0.5s）
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -85,6 +100,19 @@ export function AgentPane() {
   const gatewayUrl = (import.meta as any).env?.VITE_GATEWAY_URL ?? "";
   const kbAttached = useRunStore((s) => s.kbAttachedLibraryIds);
   const openKbManager = useKbStore((s) => s.openKbManager);
+
+  const writeClipboard = async (text: string) => {
+    // Electron/浏览器剪贴板在窗口未聚焦时可能失败：优先尝试浏览器剪贴板，失败则走原生 clipboard IPC
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      const api = window.desktop?.clipboard;
+      if (!api?.writeText) throw new Error("CLIPBOARD_NOT_AVAILABLE");
+      const r = await api.writeText(text);
+      if (!r?.ok) throw new Error(r?.error ?? "CLIPBOARD_WRITE_FAILED");
+    }
+  };
 
   useEffect(() => {
     // 尽量从 Gateway 拉取模型列表
@@ -255,15 +283,7 @@ export function AgentPane() {
       };
 
       const text = JSON.stringify(diag, null, 2);
-      // Electron/浏览器剪贴板在窗口未聚焦时可能失败：优先尝试浏览器剪贴板，失败则走原生 clipboard IPC
-      try {
-        await navigator.clipboard.writeText(text);
-      } catch {
-        const api = window.desktop?.clipboard;
-        if (!api?.writeText) throw new Error("CLIPBOARD_NOT_AVAILABLE");
-        const r = await api.writeText(text);
-        if (!r?.ok) throw new Error(r?.error ?? "CLIPBOARD_WRITE_FAILED");
-      }
+      await writeClipboard(text);
       setCopiedHint(`已复制诊断信息（${text.length} chars）`);
       setTimeout(() => setCopiedHint(null), 1600);
     } catch (e: any) {
@@ -415,6 +435,14 @@ export function AgentPane() {
             </button>
             <button className="btn" type="button" onClick={onCopyDiagnostics} disabled={isRunning}>
               复制诊断
+            </button>
+            <button
+              className="btn"
+              type="button"
+              onClick={() => setHideToolSteps((v) => !v)}
+              title={hideToolSteps ? "显示工具步骤（Tool Blocks）" : "隐藏工具步骤（只看正文）"}
+            >
+              {hideToolSteps ? "显示步骤" : "只看正文"}
             </button>
             <button className="btn btnDanger" type="button" onClick={onDeleteCurrent} disabled={isRunning}>
               删除
@@ -658,12 +686,45 @@ export function AgentPane() {
           }
           if (step.type === "assistant") {
             if (step.hidden) return null;
+            const raw = stripToolXml(step.text);
+            const text = raw.trim();
+            const lineCount = text.split("\n").filter((x) => x.trim()).length;
+            const looksLikeDraft = text.length >= 480 || lineCount >= 10;
             return (
               <div key={step.id} className="msgAssistant">
-                <RichText text={stripToolXml(step.text)} />
+                <div className="assistantMsgHeader">
+                  <div className="assistantMsgTitle">输出</div>
+                  <button
+                    className="btn btnIcon"
+                    type="button"
+                    title="复制该段输出"
+                    onClick={() => {
+                      if (!text) return;
+                      const tryCopy = async () => {
+                        try {
+                          await writeClipboard(text);
+                          setCopiedHint(`已复制输出（${text.length} chars）`);
+                          setTimeout(() => setCopiedHint(null), 1200);
+                        } catch (e: any) {
+                          const msg = e?.message ? String(e.message) : String(e);
+                          window.alert(`复制失败：${msg}\n\n提示：请确保窗口处于前台（聚焦），或稍后重试。`);
+                        }
+                      };
+                      void tryCopy();
+                    }}
+                  >
+                    <IconCopy />
+                  </button>
+                </div>
+                {looksLikeDraft ? (
+                  <textarea className="assistantTextArea" readOnly spellCheck={false} value={text} />
+                ) : (
+                  <RichText text={raw} />
+                )}
               </div>
             );
           }
+          if (hideToolSteps) return null;
           return <ToolBlock key={step.id} step={step} />;
         })}
         <div ref={bottomRef} />

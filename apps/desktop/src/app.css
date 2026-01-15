@@ -922,6 +922,33 @@ body {
   min-width: 0;
 }
 
+.assistantMsgHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.assistantMsgTitle {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.assistantTextArea {
+  width: 100%;
+  min-height: 220px;
+  max-height: 560px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.02);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.5;
+}
+
 .toolBlock {
   border: 1px solid var(--border);
   border-radius: 10px;
