@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "npm run -w @writing-ide/kb-core build && tsx watch src/index.ts",
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "audit:ai": "tsx scripts/audit-ai-stages.ts"
   },
   "dependencies": {
     "@fastify/cors": "^8.5.0",
