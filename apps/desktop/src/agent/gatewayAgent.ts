@@ -733,6 +733,23 @@ export function startGatewayRun(args: {
       setActivity(null);
     } catch (e: any) {
       const msg = e?.message ? String(e.message) : String(e);
+      // 用户点击“停止/取消”会触发 AbortController.abort；这不应显示为“网络错误”
+      const aborted =
+        abort.signal.aborted ||
+        String(e?.name ?? "") === "AbortError" ||
+        /BodyStreamBuffer was aborted/i.test(msg) ||
+        /\baborted\b/i.test(msg);
+      if (aborted) {
+        log("info", "gateway.run.aborted", { message: msg });
+        setRunning(false);
+        setActivity(null);
+        if (currentAssistantId) {
+          finishAssistant(currentAssistantId);
+          currentAssistantId = null;
+        }
+        return;
+      }
+
       log("error", "gateway.network_error", { message: msg });
       const a = currentAssistantId ?? addAssistant("", false, false);
       patchAssistant(a, { hidden: false });
@@ -749,7 +766,10 @@ export function startGatewayRun(args: {
       abort.abort();
       setRunning(false);
       setActivity(null);
-      if (currentAssistantId) finishAssistant(currentAssistantId);
+      if (currentAssistantId) {
+        finishAssistant(currentAssistantId);
+        currentAssistantId = null;
+      }
     }
   };
 }

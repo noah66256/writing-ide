@@ -578,12 +578,24 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
           if (isEmpty || needTodo || needWrite || needKb || needLint) {
             autoRetryBudget -= 1;
+            const reasons: string[] = [];
+            if (isEmpty) reasons.push("输出为空");
+            if (needTodo) reasons.push("Todo 未设置");
+            if (needKb) reasons.push("风格样例未检索");
+            if (needLint) reasons.push("未进行风格对齐(lint.style)");
+            if (needWrite) reasons.push("写入未执行");
+            const reasonText = reasons.join(" / ");
             writeEvent("assistant.delta", {
               delta:
-                "\n\n[系统提示] 检测到本次任务尚未进入可追踪执行（Todo 未设置 / 或尚未完成写入目标），我会让模型自动继续一次（无需你输入）。\n" +
-                "请它：先 run.setTodoList（永远第一步）；todo 中可包含澄清步骤与默认假设；" +
+                `
+
+[系统提示] 检测到本次任务尚未完成（${reasonText}），我会让模型自动继续一次（无需你输入）。
+` +
+                (needTodo
+                  ? "请它：先 run.setTodoList（永远第一步）；todo 中可包含澄清步骤与默认假设；"
+                  : "请它：不要重复 run.setTodoList（本次 Run 已有 todo），直接推进下一步；") +
                 (needKb
-                  ? "若已绑定风格库且任务是写作类：先 kb.search（kind=paragraph/outline，且只搜风格库）拉样例；"
+                  ? "若已绑定风格库且任务是写作类：先 kb.search（kind=card + cardTypes，且只搜风格库）拉“套路模板/金句形状/结构骨架”；必要时再补 kb.search(kind=paragraph, anchorParagraphIndexMax/anchorFromEndMax) 拉原文段落；"
                   : "") +
                 (needLint
                   ? "再 lint.style（强模型）做终稿闸门；若未通过则按 rewritePrompt 回炉改写并复检（最多 2 次）后再输出/写入；"
@@ -599,13 +611,17 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               content:
                 "你刚才输出了纯文本，但任务尚未完成。\n" +
                 "- 你必须先输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
-                "  - 至少包含 run.setTodoList（永远第一步）\n" +
+                (needTodo
+                  ? "  - 先调用 run.setTodoList（永远第一步）\n"
+                  : "  - 不要重复调用 run.setTodoList（本次 Run 已有 todo）\n") +
                 (needKb
-                  ? "  - 若 KB_SELECTED_LIBRARIES 中存在 purpose=style（风格库）且任务为写作类：必须先调用 kb.search（kind=paragraph/outline；且只搜风格库）拉样例。\n"
+                  ? "  - 若 KB_SELECTED_LIBRARIES 中存在 purpose=style（风格库）且任务为写作类：必须先调用 kb.search（kind=card；且带 cardTypes；且只搜风格库）拉“套路模板/金句形状”。必要时再补 paragraph 并用 anchorParagraphIndexMax/anchorFromEndMax 做位置过滤。\n"
                   : "") +
                 (needLint ? "  - 然后调用 lint.style 做终稿闸门；未通过则按 rewritePrompt 回炉改写并复检（最多 2 次）后再输出/写入。\n" : "") +
                 "  - 若用户要求写入/分割到文件夹：请调用 doc.splitToDir（或 doc.write 等）完成写入。\n" +
-                "- 在你成功设置 todo 之后，如果仍需要澄清：下一条消息再输出最多 5 个问题（纯文本 Markdown），并在 todo 中标记为 blocked/等待用户输入；用户不答时写明默认假设继续推进。"
+                (needTodo
+                  ? "- 在你成功设置 todo 之后，如果仍需要澄清：下一条消息再输出最多 5 个问题（纯文本 Markdown），并在 todo 中标记为 blocked/等待用户输入；用户不答时写明默认假设继续推进。"
+                  : "- 如仍需要澄清：下一条消息再输出最多 5 个问题（纯文本 Markdown），并明确默认假设后继续推进（不要重置 todo）。")
             });
             continue;
           }
