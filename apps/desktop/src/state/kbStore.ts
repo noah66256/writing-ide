@@ -89,7 +89,9 @@ export type KbLibraryFingerprintSnapshot = {
   // 用于 UI 的“傻瓜徽章”
   badge?: { primaryLabel: string; confidence: number; stability: KbFingerprintStabilityLevel };
   // 样本概况（用于“稳不稳”）
-  corpus: { docs: number; chars: number; sentences: number };
+  // - docs：源文档数（sourceDocs；可能一篇源文档包含多篇稿件）
+  // - segments：样本段数（对源文档做规则切分后的“近似文章单元”，用于稳定性/覆盖率统计）
+  corpus: { docs: number; segments?: number; chars: number; sentences: number };
   // 确定性统计（核心：每100句/每1000字）
   stats: Record<string, any>;
   // 开集体裁/声音标签（LLM 生成或兜底 unknown）
@@ -97,7 +99,9 @@ export type KbLibraryFingerprintSnapshot = {
   // 稳定性（库内一致性）
   stability: { level: KbFingerprintStabilityLevel; note?: string; outlierDocIds?: string[] };
   // 高频短语（n-gram）
-  topNgrams: Array<{ n: number; text: string; per1kChars: number; docCoverage: number }>;
+  // - docCoverage：覆盖率（0~1；相对“样本段”或旧版相对“源文档”）
+  // - docCoverageCount：覆盖样本数（样本段/源文档数量；旧版快照可能缺失该字段）
+  topNgrams: Array<{ n: number; text: string; per1kChars: number; docCoverage: number; docCoverageCount?: number }>;
   // 文档级（用于找离群）
   perDoc: Array<{
     docId: string;
@@ -105,6 +109,15 @@ export type KbLibraryFingerprintSnapshot = {
     chars: number;
     sentences: number;
     badge?: { primaryLabel: string; confidence: number };
+    stats: Record<string, any>;
+  }>;
+  // 样本段级（用于解决“多篇稿件塞到一个源文档”导致的稳定性/离群判断失真）
+  perSegment?: Array<{
+    segmentId: string;
+    sourceDocId: string;
+    sourceDocTitle: string;
+    chars: number;
+    sentences: number;
     stats: Record<string, any>;
   }>;
   // 证据覆盖率：帮助判断“手册会不会胡”
@@ -709,17 +722,105 @@ function computeTextFingerprintStats(text: string) {
 }
 
 function buildDocTextFromParagraphArtifacts(args: { docId: string; artifacts: KbArtifact[] }) {
+  const normalizePara = (raw: string) => {
+    let s = normalizeTextForStats(raw).trim();
+    if (!s) return "";
+    // 常见拼接稿格式的元信息/分隔符：不纳入“声音指纹”
+    if (/^-{3,}$/.test(s)) return "";
+    if (/^标题[:：]/.test(s)) return "";
+    if (/^文案[:：]/.test(s)) {
+      s = s.replace(/^文案[:：]\s*/, "").trim();
+      if (!s) return "";
+    }
+    return s;
+  };
+
   const paras = args.artifacts
     .filter((a) => a.sourceDocId === args.docId && a.kind === "paragraph")
     .sort((a, b) => (Number(a.anchor?.paragraphIndex ?? 0) || 0) - (Number(b.anchor?.paragraphIndex ?? 0) || 0))
-    .map((a) => String(a.content ?? "").trim())
+    .map((a) => normalizePara(String(a.content ?? "")))
     .filter(Boolean);
   return paras.join("\n");
+}
+
+function buildDocSegmentsFromParagraphArtifacts(args: {
+  sourceDocId: string;
+  sourceDocTitle: string;
+  paragraphs: KbArtifact[];
+  maxSegments?: number;
+  maxCharsPerSegment?: number;
+}): Array<{ segmentId: string; sourceDocId: string; sourceDocTitle: string; paragraphIndexStart: number | null; text: string }> {
+  const maxSegments = Math.max(1, Math.min(200, Number(args.maxSegments ?? 80)));
+  const maxChars = Math.max(800, Math.min(20_000, Number(args.maxCharsPerSegment ?? 8000)));
+
+  const norm = (raw: string) => normalizeTextForStats(raw).trim();
+  const isSep = (s: string) => /^-{3,}$/.test(s);
+  const isTitle = (s: string) => /^标题[:：]/.test(s);
+  const isScript = (s: string) => /^文案[:：]/.test(s);
+  const stripScript = (s: string) => s.replace(/^文案[:：]\s*/, "").trim();
+
+  const segments: Array<{ segmentId: string; sourceDocId: string; sourceDocTitle: string; paragraphIndexStart: number | null; text: string }> = [];
+  let segIdx = 0;
+  let buf: string[] = [];
+  let bufChars = 0;
+  let startPi: number | null = null;
+
+  const flush = () => {
+    const text = buf.join("\n").trim();
+    buf = [];
+    bufChars = 0;
+    const pi0 = startPi;
+    startPi = null;
+    if (!text) return;
+    segments.push({
+      segmentId: `${args.sourceDocId}#seg${segIdx++}`,
+      sourceDocId: args.sourceDocId,
+      sourceDocTitle: args.sourceDocTitle,
+      paragraphIndexStart: pi0,
+      text,
+    });
+  };
+
+  for (const a of args.paragraphs.slice()) {
+    if (a.kind !== "paragraph") continue;
+    const raw = norm(String(a.content ?? ""));
+    if (!raw) continue;
+
+    const pi = typeof (a.anchor as any)?.paragraphIndex === "number" ? Number((a.anchor as any).paragraphIndex) : null;
+
+    // 分隔符/标题：视为边界，但不纳入文本
+    if (isSep(raw) || isTitle(raw)) {
+      flush();
+      continue;
+    }
+
+    // “文案：”前缀：剥离标签，保留正文；同时视为“新稿开始”的强信号（若前面已有内容则先切段）
+    if (isScript(raw)) {
+      if (buf.length) flush();
+      const t = stripScript(raw);
+      if (!t) continue;
+      if (startPi === null && pi !== null) startPi = pi;
+      buf.push(t);
+      bufChars += t.length + 1;
+    } else {
+      if (startPi === null && pi !== null) startPi = pi;
+      buf.push(raw);
+      bufChars += raw.length + 1;
+    }
+
+    // 超长兜底切分：避免单段过大导致“样本单元=1”
+    if (bufChars >= maxChars) flush();
+    if (segments.length >= maxSegments) break;
+  }
+  flush();
+
+  return segments;
 }
 
 function computeTopNgrams(args: { docs: Array<{ docId: string; text: string }>; maxItems?: number }) {
   const maxItems = Math.max(6, Math.min(32, Number(args.maxItems ?? 12)));
   const totalChars = args.docs.reduce((a, d) => a + (d.text?.length ?? 0), 0) || 0;
+  const totalDocs = args.docs.length || 0;
 
   const totalCounts = new Map<string, { n: number; count: number; docs: Set<string> }>();
   const segRe = /[0-9A-Za-z\u4e00-\u9fff]+/g;
@@ -756,7 +857,9 @@ function computeTopNgrams(args: { docs: Array<{ docId: string; text: string }>; 
     .map(([key, v]) => {
       const text = key.split(":").slice(1).join(":");
       const per1kChars = totalChars ? (v.count / totalChars) * 1000 : 0;
-      return { n: v.n, text, per1kChars, docCoverage: v.docs.size };
+      const docCoverageCount = v.docs.size;
+      const docCoverage = totalDocs ? docCoverageCount / totalDocs : 0;
+      return { n: v.n, text, per1kChars, docCoverage: Number(docCoverage.toFixed(3)), docCoverageCount };
     })
     .sort((a, b) => b.per1kChars - a.per1kChars)
     .slice(0, maxItems)
@@ -771,7 +874,9 @@ function computeStability(args: { perDoc: Array<{ docId: string; stats: any; cha
   outlierDocIds?: string[];
 } {
   const docs = args.perDoc;
-  if (docs.length <= 1) return { level: "high", note: "样本较少：默认视为稳定" };
+  if (docs.length <= 1) {
+    return { level: "medium", note: "样本不足：仅 1 个样本单元，稳定性无法评估；建议增加样本或先做切分后再体检" };
+  }
 
   const keys = ["questionRatePer100Sentences", "avgSentenceLen", "particlePer1kChars"];
   const valuesByKey = new Map<string, number[]>();
@@ -2764,12 +2869,50 @@ export const useKbStore = create<KbState>()(
           // =========================
           // 0) 画像（styleProfile）：优先用“本地确定性统计版”秒出，避免上游慢/超时导致整个手册无法生成
           // =========================
+          const docIdSet = new Set(docs.map((d) => d.id));
+
+          // 预分组 paragraph artifacts（避免重复 filter 全量数组）
+          const parasByDoc = new Map<string, KbArtifact[]>();
+          for (const a of db.artifacts) {
+            if (a.kind !== "paragraph") continue;
+            if (!docIdSet.has(a.sourceDocId)) continue;
+            const arr = parasByDoc.get(a.sourceDocId) ?? [];
+            arr.push(a);
+            parasByDoc.set(a.sourceDocId, arr);
+          }
+
           const docTexts = docs
-            .map((d) => ({ docId: d.id, docTitle: d.title, text: buildDocTextFromParagraphArtifacts({ docId: d.id, artifacts: db.artifacts }) }))
+            .map((d) => {
+              const paras = parasByDoc.get(d.id) ?? [];
+              const text = buildDocTextFromParagraphArtifacts({ docId: d.id, artifacts: paras.length ? paras : db.artifacts });
+              return { docId: d.id, docTitle: d.title, text };
+            })
             .filter((x) => x.text.trim());
-          const allText = docTexts.map((d) => d.text).join("\n\n");
+
+          // 样本段（segments）：解决“多篇稿件塞进一个源文档”导致的“样本=1篇”失真
+          const segTexts: Array<{ docId: string; docTitle: string; text: string }> = [];
+          for (const d of docs) {
+            const paras = (parasByDoc.get(d.id) ?? [])
+              .slice()
+              .sort((a, b) => (Number((a.anchor as any)?.paragraphIndex ?? 0) || 0) - (Number((b.anchor as any)?.paragraphIndex ?? 0) || 0));
+            if (!paras.length) continue;
+            const segs = buildDocSegmentsFromParagraphArtifacts({
+              sourceDocId: d.id,
+              sourceDocTitle: d.title,
+              paragraphs: paras,
+              maxSegments: 120,
+              maxCharsPerSegment: 8000,
+            });
+            for (const s of segs) segTexts.push({ docId: s.segmentId, docTitle: d.title, text: s.text });
+          }
+
+          const unitTexts = segTexts.length ? segTexts : docTexts;
+          const unitLabel = segTexts.length ? "段" : "篇";
+          const unitTotal = unitTexts.length;
+
+          const allText = unitTexts.map((d) => d.text).join("\n\n");
           const fp = computeTextFingerprintStats(allText);
-          const ngrams = computeTopNgrams({ docs: docTexts.map((d) => ({ docId: d.docId, text: d.text })), maxItems: 10 });
+          const ngrams = computeTopNgrams({ docs: unitTexts.map((d) => ({ docId: d.docId, text: d.text })), maxItems: 10 });
 
           const pickEvidence = () => {
             for (const a of docCards) {
@@ -2808,7 +2951,7 @@ export const useKbStore = create<KbState>()(
               [
                 `> 说明：该卡由本地确定性统计生成（不依赖上游模型），用于保证“生成风格手册”永远可用。`,
                 ``,
-                `- 样本：${docs.length} 篇 · ${fp.chars} 字符 · ${fp.sentences} 句`,
+                `- 样本：${docs.length} 篇${segTexts.length ? ` · ${segTexts.length} 段` : ""} · ${fp.chars} 字符 · ${fp.sentences} 句`,
                 `- 问句率（每100句）：${stats.questionRatePer100Sentences ?? 0}；感叹率（每100句）：${stats.exclaimRatePer100Sentences ?? 0}`,
                 `- 平均句长：${stats.avgSentenceLen ?? 0}；短句率（<=12字）：${pct(stats.shortSentenceRate ?? 0)}`,
                 `- 我/我们密度（每1000字）：${stats.firstPersonPer1kChars ?? 0}；你/你们密度：${stats.secondPersonPer1kChars ?? 0}`,
@@ -2816,7 +2959,12 @@ export const useKbStore = create<KbState>()(
                 ``,
                 `#### 高频口癖 Top（n-gram）`,
                 ...(ngrams.length
-                  ? ngrams.slice(0, 8).map((g) => `- ${g.text}（${g.per1kChars.toFixed(2)}/1k · 覆盖${Math.round(g.docCoverage * 100)}%文档）`)
+                  ? ngrams
+                      .slice(0, 8)
+                      .map(
+                        (g) =>
+                          `- ${g.text}（${g.per1kChars.toFixed(2)}/1k · 覆盖${Number((g as any).docCoverageCount ?? 0)}/${unitTotal}${unitLabel} · ${Math.round(g.docCoverage * 100)}%）`,
+                      )
                   : [`- （样本不足，暂无稳定高频短语）`]),
               ].join("\n") + "\n",
             evidence: pickEvidence(),
@@ -3152,28 +3300,92 @@ export const useKbStore = create<KbState>()(
           const docs = db.sourceDocs.filter((d) => d.libraryId === libId && !isPlaybookDoc(d));
           if (!docs.length) return { ok: false, error: "NO_DOCS_IN_LIBRARY" };
 
-          // 文档级：从 paragraph artifacts 还原文本并做统计（这一步确定性，不依赖 LLM）
+          const docIdSet = new Set(docs.map((d) => d.id));
+          const docById = new Map(docs.map((d) => [d.id, d]));
+
+          // 预分组 paragraph artifacts（避免每篇 doc 反复 filter 全量数组）
+          const parasByDoc = new Map<string, KbArtifact[]>();
+          for (const a of db.artifacts) {
+            if (a.kind !== "paragraph") continue;
+            if (!docIdSet.has(a.sourceDocId)) continue;
+            const arr = parasByDoc.get(a.sourceDocId) ?? [];
+            arr.push(a);
+            parasByDoc.set(a.sourceDocId, arr);
+          }
+
+          // 1) 样本段级（segment）：用于解决“一篇大文档塞多篇稿”导致的稳定性/覆盖率失真
+          const segmentUnits: Array<{
+            segmentId: string;
+            sourceDocId: string;
+            sourceDocTitle: string;
+            paragraphIndexStart: number | null;
+            text: string;
+            chars: number;
+            sentences: number;
+            stats: Record<string, any>;
+          }> = [];
+
+          for (const d of docs) {
+            const paras = (parasByDoc.get(d.id) ?? [])
+              .slice()
+              .sort((a, b) => (Number((a.anchor as any)?.paragraphIndex ?? 0) || 0) - (Number((b.anchor as any)?.paragraphIndex ?? 0) || 0));
+            if (!paras.length) continue;
+            const segs = buildDocSegmentsFromParagraphArtifacts({
+              sourceDocId: d.id,
+              sourceDocTitle: d.title,
+              paragraphs: paras,
+              maxSegments: 120,
+              maxCharsPerSegment: 8000,
+            });
+            for (const s of segs) {
+              const fp = computeTextFingerprintStats(s.text);
+              segmentUnits.push({
+                segmentId: s.segmentId,
+                sourceDocId: s.sourceDocId,
+                sourceDocTitle: s.sourceDocTitle,
+                paragraphIndexStart: s.paragraphIndexStart ?? null,
+                text: s.text,
+                chars: fp.chars,
+                sentences: fp.sentences,
+                stats: fp.stats,
+              });
+            }
+          }
+
+          // 2) 源文档级（doc）：仍保留，便于 UI 对照与回溯
           const perDoc = docs.map((d) => {
-            const text = buildDocTextFromParagraphArtifacts({ docId: d.id, artifacts: db.artifacts });
+            const paras = parasByDoc.get(d.id) ?? [];
+            const text = buildDocTextFromParagraphArtifacts({ docId: d.id, artifacts: paras.length ? paras : db.artifacts });
             const fp = computeTextFingerprintStats(text);
             return { docId: d.id, docTitle: d.title, text, chars: fp.chars, sentences: fp.sentences, stats: fp.stats };
           });
 
-          const corpus = {
-            docs: perDoc.length,
-            chars: perDoc.reduce((a, d) => a + d.chars, 0),
-            sentences: perDoc.reduce((a, d) => a + d.sentences, 0),
-          };
-
-          // 库级 stats：按“全文拼接”口径统计（避免均值误导）
-          const allText = perDoc.map((d) => d.text).join("\n\n");
+          // 3) 库级 stats：按“全文拼接”口径统计（避免均值误导）
+          const allText =
+            segmentUnits.length > 0 ? segmentUnits.map((s) => s.text).join("\n\n") : perDoc.map((d) => d.text).join("\n\n");
           const libFp = computeTextFingerprintStats(allText);
 
-          const topNgrams = computeTopNgrams({ docs: perDoc.map((d) => ({ docId: d.docId, text: d.text })), maxItems: 12 });
-          const stability = computeStability({ perDoc: perDoc.map((d) => ({ docId: d.docId, stats: d.stats, chars: d.chars, sentences: d.sentences })) });
+          const corpus = {
+            docs: docs.length,
+            segments: segmentUnits.length,
+            chars: libFp.chars,
+            sentences: libFp.sentences,
+          };
+
+          const topNgrams = computeTopNgrams({
+            docs: (segmentUnits.length ? segmentUnits : perDoc).map((d: any) => ({ docId: String(d.segmentId ?? d.docId), text: String(d.text ?? "") })),
+            maxItems: 12,
+          });
+          const stability = computeStability({
+            perDoc: (segmentUnits.length ? segmentUnits : perDoc).map((d: any) => ({
+              docId: String(d.segmentId ?? d.docId),
+              stats: d.stats,
+              chars: d.chars,
+              sentences: d.sentences,
+            })),
+          });
 
           // 证据覆盖率：doc_v2 卡（有 evidenceParagraphIndices）与 playbook 卡（有证据段落索引列表）
-          const docIdSet = new Set(docs.map((d) => d.id));
           const docCards = db.artifacts.filter((a) => a.kind === "card" && docIdSet.has(a.sourceDocId));
           const docCardsWithEvidence = docCards.filter((a) => Array.isArray(a.evidenceParagraphIndices) && a.evidenceParagraphIndices.length > 0);
 
@@ -3191,16 +3403,15 @@ export const useKbStore = create<KbState>()(
           };
 
           // 开集体裁识别：优先让 Gateway LLM 做归纳（带置信度与证据）；失败则退化为 unknown
-          const samples = db.artifacts
-            .filter((a) => docIdSet.has(a.sourceDocId) && a.kind === "paragraph")
+          const samples = (segmentUnits.length ? segmentUnits : perDoc)
             .slice(0, 18)
-            .map((p) => ({
-              docId: p.sourceDocId,
-              docTitle: docs.find((d) => d.id === p.sourceDocId)?.title ?? "",
-              paragraphIndex: typeof p.anchor?.paragraphIndex === "number" ? p.anchor.paragraphIndex : null,
-              text: String(p.content ?? "").trim().slice(0, 360),
+            .map((s: any) => ({
+              docId: String(s.sourceDocId ?? s.docId ?? ""),
+              docTitle: String(s.sourceDocTitle ?? s.docTitle ?? docById.get(String(s.sourceDocId ?? s.docId ?? ""))?.title ?? ""),
+              paragraphIndex: typeof s.paragraphIndexStart === "number" ? s.paragraphIndexStart : null,
+              text: String(s.text ?? "").trim().slice(0, 360),
             }))
-            .filter((x) => x.text);
+            .filter((x) => x.docId && x.text);
 
           let genres: { primary: KbFingerprintGenre; candidates: KbFingerprintGenre[] } = {
             primary: { label: "unknown", confidence: 0, why: "（未识别：未启用或不可用）" },
@@ -3236,11 +3447,131 @@ export const useKbStore = create<KbState>()(
               sentences: d.sentences,
               stats: d.stats,
             })),
+            perSegment: segmentUnits
+              .slice(0, 600)
+              .map((s) => ({ segmentId: s.segmentId, sourceDocId: s.sourceDocId, sourceDocTitle: s.sourceDocTitle, chars: s.chars, sentences: s.sentences, stats: s.stats })),
             evidence: {
               cardsWithEvidenceRate: clamp01(evidence.cardsWithEvidenceRate),
               playbookCardsWithEvidenceRate: clamp01(evidence.playbookCardsWithEvidenceRate),
             },
           };
+
+          // 同步（轻量、不触发上游模型）：如果该库已经有「仿写手册」文档，则把其中的“写法画像（统计版）/终稿润色清单”卡更新到最新指纹口径。
+          // 目的：避免用户在“库体检”里看到新指纹，但“卡片预览”仍显示旧版统计卡（造成困惑）。
+          try {
+            const playbookRel = `__kb_playbook__/library/${libId}.md`;
+            const playbookDoc = db.sourceDocs.find(
+              (d) => d.libraryId === libId && d.importedFrom?.kind === "project" && d.importedFrom.relPath === playbookRel,
+            );
+            if (playbookDoc) {
+              const stats = snapshot.stats as any;
+              const ngrams = Array.isArray(snapshot.topNgrams) ? snapshot.topNgrams : [];
+              const docsN = Number(snapshot.corpus?.docs ?? 0) || docs.length;
+              const segsN = Number((snapshot.corpus as any)?.segments ?? 0) || 0;
+              const unitTotal = segsN > 0 ? segsN : docsN;
+              const unitLabel = segsN > 0 ? "段" : "篇";
+              const pct = (x: number) => `${(Math.max(0, Math.min(1, x)) * 100).toFixed(1)}%`;
+
+              const styleTitle = "写法画像（统计版）";
+              const styleBody =
+                [
+                  `> 说明：该卡由本地确定性统计生成（不依赖上游模型），用于保证“生成风格手册”永远可用。`,
+                  ``,
+                  `- 样本：${docsN} 篇${segsN > 0 ? ` · ${segsN} 段` : ""} · ${Number(snapshot.corpus?.chars ?? 0) || 0} 字符 · ${Number(snapshot.corpus?.sentences ?? 0) || 0} 句`,
+                  `- 问句率（每100句）：${stats.questionRatePer100Sentences ?? 0}；感叹率（每100句）：${stats.exclaimRatePer100Sentences ?? 0}`,
+                  `- 平均句长：${stats.avgSentenceLen ?? 0}；短句率（<=12字）：${pct(stats.shortSentenceRate ?? 0)}`,
+                  `- 我/我们密度（每1000字）：${stats.firstPersonPer1kChars ?? 0}；你/你们密度：${stats.secondPersonPer1kChars ?? 0}`,
+                  `- 语气词密度（每1000字）：${stats.particlePer1kChars ?? 0}；数字密度：${stats.digitPer1kChars ?? 0}`,
+                  ``,
+                  `#### 高频口癖 Top（n-gram）`,
+                  ...(ngrams.length
+                    ? ngrams.slice(0, 8).map((g: any) => {
+                        const per1k = Number(g?.per1kChars ?? 0);
+                        const covCount = typeof g?.docCoverageCount === "number" ? Number(g.docCoverageCount) : Number(g?.docCoverage ?? 0);
+                        const covRate =
+                          typeof g?.docCoverageCount === "number"
+                            ? Number(g?.docCoverage ?? 0)
+                            : unitTotal
+                              ? covCount / unitTotal
+                              : 0;
+                        return `- ${String(g?.text ?? "").trim()}（${per1k.toFixed(2)}/1k · 覆盖${covCount}/${unitTotal}${unitLabel} · ${Math.round(covRate * 100)}%）`;
+                      })
+                    : [`- （样本不足，暂无稳定高频短语）`]),
+                ].join("\n") + "\n";
+
+              const marker = `\n\n---\n\n#### 证据（可追溯）\n`;
+              const spCard = db.artifacts.find((a: any) => a.kind === "card" && a.sourceDocId === playbookDoc.id && a.cardType === "style_profile") as any;
+              const keepEvidence = (oldContent: string) => {
+                const idx = String(oldContent ?? "").indexOf(marker);
+                return idx >= 0 ? String(oldContent).slice(idx) : "";
+              };
+              const nextSpContent = `### ${styleTitle}\n\n${styleBody.trim()}` + (spCard ? keepEvidence(spCard.content) : "");
+
+              if (spCard) {
+                spCard.title = styleTitle;
+                spCard.content = nextSpContent;
+              } else {
+                db.artifacts.push({
+                  id: makeId("kb_card"),
+                  sourceDocId: playbookDoc.id,
+                  kind: "card",
+                  title: styleTitle,
+                  cardType: "style_profile",
+                  content: nextSpContent,
+                  facetIds: undefined,
+                  anchor: { paragraphIndex: 0 },
+                } as any);
+              }
+
+              // 终稿润色清单：引用 styleBody 摘要，属于确定性产物，也一并同步
+              const polish = [
+                `### 终稿润色清单（final polish）`,
+                ``,
+                `> 目标：把稿子从“写得像”推进到“像本人写的”。先按顺序过一遍，再做第二遍小修。`,
+                ``,
+                `#### 0. 先锁定“本人声音”（从 Style Profile 抄规则，不要自作主张）`,
+                `- 口吻/人设：按「${styleTitle}」执行（硬核、结论先行、战场感、少废话）`,
+                `- 禁用：避免空泛解释/教学口吻（如“总的来说/我们可以看到/简单来说”）`,
+                `- 句式：多短句+硬转折；少长解释段`,
+                ``,
+                `#### 1. 开头 3 段：必须“钩子→结论→战场坐标”`,
+                `- 第 1 段就给冲突/博弈点（别铺垫）`,
+                `- 第 2 段直接给结论/判断（别卖关子）`,
+                `- 第 3 段给坐标：谁在反制、代价是什么、读者该怎么理解`,
+                ``,
+                `#### 2. 结构收束：用“要点编号/五环”把逻辑拎起来`,
+                `- 每个小节开头先抛一句“结论句”（再解释证据）`,
+                `- 结尾必须回扣：这盘棋下一步可能怎么走 + 对普通人/产业的影响`,
+                ``,
+                `#### 3. 语言层：把 AI 腔擦干净（逐段扫）`,
+                `- 删除解释型过渡句：例如“因此/此外/同时”改成“关键是/问题在于/说白了”`,
+                `- 把“中性陈述”改成“带判断的硬句”`,
+                `- 一段一重点：每段只留一个主句，其余是证据/推演`,
+                ``,
+                `#### 4. 金句与节奏（可选加分）`,
+                `- 每 3–5 段至少有 1 句“硬金句”（不必押韵，但要有判断和力量）`,
+                `- 节奏：长段拆短；关键句单独成段`,
+                ``,
+                `#### 5. 自检（最后 2 分钟）`,
+                `- 读一遍：像不像“本人”？如果像“新闻通稿/百科”，立刻重写开头与转折`,
+                `- 读一遍：有没有“空结论”？每个判断都要有证据或推演链`,
+                ``,
+                `---`,
+                ``,
+                `#### Style Profile 摘要（供对照）`,
+                styleBody ? styleBody.slice(0, 1200) + (styleBody.length > 1200 ? "\n…(truncated)\n" : "") : "（空）",
+              ].join("\n");
+              const polishCard = db.artifacts.find(
+                (a: any) => a.kind === "card" && a.sourceDocId === playbookDoc.id && a.cardType === "final_polish_checklist",
+              ) as any;
+              if (polishCard) {
+                polishCard.title = "终稿润色清单";
+                polishCard.content = polish;
+              }
+            }
+          } catch (e: any) {
+            kbLog("warn", "kb.fingerprint.sync_playbook_failed", { libId, error: String(e?.message ?? e) });
+          }
 
           // 写回：每库保留最近 5 份快照
           const all = Array.isArray(db.fingerprints) ? db.fingerprints.slice(0) : [];

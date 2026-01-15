@@ -876,6 +876,9 @@ body {
   background: var(--panel);
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
   padding: 14px;
+  /* IDE 模式下 body 禁止整页滚动；modal 本身需要可滚动，避免“内容超出一屏看不到” */
+  max-height: calc(100vh - 24px);
+  overflow: auto;
 }
 
 .modalTitle {

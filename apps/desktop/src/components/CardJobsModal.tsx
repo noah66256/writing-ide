@@ -711,7 +711,9 @@ export function CardJobsModal() {
                         {fpAdvanced ? (
                           <div style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel2)", padding: 10, display: "grid", gap: 10 }}>
                             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                              <span className="ctxPill">样本：{fp.corpus?.docs ?? 0} 篇</span>
+                              <span className="ctxPill">
+                                样本：{fp.corpus?.docs ?? 0} 篇{(fp.corpus as any)?.segments ? ` · ${(fp.corpus as any).segments} 段` : ""}
+                              </span>
                               <span className="ctxPill">字数：{fp.corpus?.chars ?? 0}</span>
                               <span className="ctxPill">句子：{fp.corpus?.sentences ?? 0}</span>
                               <span className="ctxPill">证据覆盖（卡片）：{Math.round((fp.evidence?.cardsWithEvidenceRate ?? 0) * 100)}%</span>
@@ -728,17 +730,48 @@ export function CardJobsModal() {
                               <div style={{ display: "grid", gap: 6 }}>
                                 {(fp.topNgrams ?? []).map((ng) => (
                                   <div key={`${ng.n}:${ng.text}`} style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                                    {(() => {
+                                      const totalUnits =
+                                        (fp.corpus as any)?.segments && Number((fp.corpus as any).segments) > 0
+                                          ? Number((fp.corpus as any).segments)
+                                          : Number(fp.corpus?.docs ?? 0);
+                                      const unitLabel = (fp.corpus as any)?.segments && Number((fp.corpus as any).segments) > 0 ? "段" : "篇";
+                                      const covCount =
+                                        typeof (ng as any)?.docCoverageCount === "number"
+                                          ? Number((ng as any).docCoverageCount)
+                                          : Number((ng as any)?.docCoverage ?? 0);
+                                      const covRate =
+                                        typeof (ng as any)?.docCoverageCount === "number"
+                                          ? Number((ng as any)?.docCoverage ?? 0)
+                                          : totalUnits
+                                            ? covCount / totalUnits
+                                            : 0;
+                                      return (
+                                        <>
                                     <span className="ctxPill">{ng.n}-gram</span>
                                     <span style={{ fontWeight: 800 }}>{ng.text}</span>
                                     <span className="ctxPill">每千字 {ng.per1kChars}</span>
-                                    <span className="ctxPill">覆盖 {ng.docCoverage} 篇</span>
+                                    <span className="ctxPill">
+                                      覆盖 {covCount}/{totalUnits}
+                                      {unitLabel} · {Math.round(covRate * 100)}%
+                                    </span>
+                                        </>
+                                      );
+                                    })()}
                                   </div>
                                 ))}
                               </div>
                             </div>
 
+                            {Array.isArray((fp as any).perSegment) && (fp as any).perSegment.length ? (
+                              <div style={{ display: "grid", gap: 8 }}>
+                                <div style={{ fontWeight: 800 }}>样本段级（更适合找“混合体裁/离群”）</div>
+                                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify((fp as any).perSegment ?? [], null, 2)}</pre>
+                              </div>
+                            ) : null}
+
                             <div style={{ display: "grid", gap: 8 }}>
-                              <div style={{ fontWeight: 800 }}>文档级（找离群/混合体裁）</div>
+                              <div style={{ fontWeight: 800 }}>源文档级（找离群/混合体裁）</div>
                               <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(fp.perDoc ?? [], null, 2)}</pre>
                             </div>
                           </div>
