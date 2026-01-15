@@ -29,6 +29,10 @@ const ADMIN_EMAILS = String(process.env.ADMIN_EMAILS ?? "")
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
 
+const ADMIN_USERNAME = String(process.env.ADMIN_USERNAME ?? "").trim() || "admin";
+// 生产环境建议显式配置；否则管理员登录直接报错，避免默认弱口令暴露在公网
+const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD ?? "").trim() || (IS_DEV ? "admin123456" : "");
+
 type CodeRequest = {
   email: string;
   code: string;
@@ -530,7 +534,7 @@ fastify.post("/api/llm/chat/stream", async (request, reply) => {
       else if (ev.type === "error") writeEvent("error", { error: ev.error });
     }
 
-    if (jwtUser?.id && lastUsage) {
+    if (jwtUser?.id && lastUsage && jwtUser.role !== "admin") {
       await chargeUserForLlmUsage({ userId: jwtUser.id, modelId: model, usage: lastUsage, source: "llm.chat" });
     }
   } catch (e: any) {
@@ -898,7 +902,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         if (ev.type === "done") break;
       }
 
-      if (jwtUser?.id && lastUsage) {
+      if (jwtUser?.id && lastUsage && jwtUser.role !== "admin") {
         await chargeUserForLlmUsage({ userId: jwtUser.id, modelId: model, usage: lastUsage, source: `agent.${mode}` });
       }
 
@@ -1297,6 +1301,31 @@ fastify.post("/api/auth/email/verify", async (request, reply) => {
   });
 });
 
+// ======== Admin Auth（B 端专用：账号+密码） ========
+
+fastify.post("/api/admin/auth/login", async (request, reply) => {
+  const bodySchema = z.object({
+    username: z.string().min(1),
+    password: z.string().min(1),
+  });
+  const { username, password } = bodySchema.parse((request as any).body ?? {});
+
+  if (!ADMIN_PASSWORD) {
+    return reply.code(500).send({ error: "ADMIN_PASSWORD_NOT_SET" });
+  }
+
+  if (String(username).trim() !== ADMIN_USERNAME || String(password) !== ADMIN_PASSWORD) {
+    return reply.code(400).send({ error: "INVALID_CREDENTIALS" });
+  }
+
+  const sub = `admin:${ADMIN_USERNAME}`;
+  const accessToken = fastify.jwt.sign({ sub, email: ADMIN_USERNAME, role: "admin" });
+  return reply.send({
+    accessToken,
+    user: { id: sub, email: ADMIN_USERNAME, role: "admin" as const },
+  });
+});
+
 fastify.get(
   "/api/me",
   {
@@ -1310,7 +1339,7 @@ fastify.get(
         id: request.user.sub,
         email: request.user.email,
         role: request.user.role,
-        pointsBalance: me?.pointsBalance ?? 0
+        pointsBalance: request.user.role === "admin" ? 0 : me?.pointsBalance ?? 0
       }
     };
   }

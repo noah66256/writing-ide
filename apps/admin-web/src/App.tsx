@@ -101,9 +101,6 @@ function App() {
           <div className="muted">{me.email}</div>
           <div className="meMeta">
             <span className="pill pillAdmin">admin</span>
-            <span className="muted" style={{ fontVariantNumeric: "tabular-nums" }}>
-              积分：{me.pointsBalance ?? 0}
-            </span>
             <button
               className="btn"
               type="button"

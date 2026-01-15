@@ -4,9 +4,19 @@ export type ApiError = {
   detail?: unknown;
 };
 
-const API_BASE = String(import.meta.env.VITE_GATEWAY_URL ?? "")
-  .trim()
-  .replace(/\/+$/g, "");
+const API_BASE = (() => {
+  const cfg = String(import.meta.env.VITE_GATEWAY_URL ?? "")
+    .trim()
+    .replace(/\/+$/g, "");
+  if (cfg) return cfg;
+
+  // 生产环境当前是：admin-web(8001) + gateway(8000) 分端口部署。
+  // 若未来接入 Nginx/同域反代（/api 走同源），则不应强行改端口。
+  if (typeof window !== "undefined" && String(window.location?.port ?? "") === "8001") {
+    return `${window.location.protocol}//${window.location.hostname}:8000`;
+  }
+  return "";
+})();
 
 const TOKEN_KEY = "writing-ide.admin.accessToken.v1";
 

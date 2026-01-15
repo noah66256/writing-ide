@@ -50,6 +50,13 @@ export type AdminLlmConfigEffective = {
   linter: { baseUrl: string; defaultModel: string; timeoutMs: number };
 };
 
+export async function adminLogin(args: { username: string; password: string }) {
+  return apiFetchJson<{ accessToken: string; user: { id: string; email: string; role: "admin" } }>(
+    "/api/admin/auth/login",
+    { method: "POST", body: JSON.stringify(args) },
+  );
+}
+
 // ======== AI Config（对齐「锦李2.0」：模型管理 + stage 路由） ========
 
 export type AiModelTestResultDto = {
