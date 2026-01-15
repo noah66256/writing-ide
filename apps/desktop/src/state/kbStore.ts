@@ -3782,7 +3782,9 @@ export const useKbStore = create<KbState>()(
           stage("正在知识库检索：词法召回…", { resetTimer: true });
           for (const a of db.artifacts) {
             if (kind && a.kind !== kind) continue;
-            if (facetIds.length > 0) {
+            // facetIds 目前主要用于 card（playbook_facet / style_profile 等）。paragraph/outline 默认没有 facetIds。
+            // 若对 paragraph/outline 也做硬过滤，会导致“段落检索永远为空”（影响风格证据段拉取与强闭环判断）。
+            if (facetIds.length > 0 && a.kind === "card") {
               const setIds = new Set(a.facetIds ?? []);
               const any = facetIds.some((f) => setIds.has(f));
               if (!any) continue;
@@ -3917,7 +3919,7 @@ export const useKbStore = create<KbState>()(
               for (const a of db.artifacts) {
                 if (kind && a.kind !== kind) continue;
                     if (!docIdSet.has(a.sourceDocId)) continue;
-                if (facetIds.length > 0) {
+                if (facetIds.length > 0 && a.kind === "card") {
                   const setIds = new Set(a.facetIds ?? []);
                   const any = facetIds.some((f) => setIds.has(f));
                   if (!any) continue;
@@ -4006,6 +4008,7 @@ export const useKbStore = create<KbState>()(
           // 目的：仿写时“宁可给一些可抄样例”，也不要空结果导致 Agent 直接放弃检索。
           if (groups.length === 0) {
             stage("正在知识库检索：兜底（最近片段）…", { resetTimer: true });
+            if (debugOut) debugOut.stages.recentFallback = true;
             const docsInLib = db.sourceDocs
               .filter((d) => allowLibs.has(String(d.libraryId ?? "")))
               .slice()
@@ -4017,7 +4020,7 @@ export const useKbStore = create<KbState>()(
                   if (a.sourceDocId !== doc.id) return false;
                   if (kind && a.kind !== kind) return false;
                   if (!passesExtra(a)) return false;
-                  if (facetIds.length > 0) {
+                  if (facetIds.length > 0 && a.kind === "card") {
                     const setIds = new Set(a.facetIds ?? []);
                     const any = facetIds.some((f) => setIds.has(f));
                     if (!any) return false;

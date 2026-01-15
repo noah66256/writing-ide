@@ -519,10 +519,12 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     const kind = String((args as any)?.kind ?? "card").trim().toLowerCase();
     if (kind !== "paragraph" && kind !== "outline" && kind !== "card") return false;
 
-    // 风格/手法样例：允许用 card（但必须带 cardTypes），也允许 paragraph/outline
+    // 风格/手法样例：允许用 card，也允许 paragraph/outline
     if (kind === "card") {
       const cardTypes = normalizeIdList((args as any)?.cardTypes);
-      if (!cardTypes.length) return false;
+      // 同时绑定了非风格库时：必须显式限制 cardTypes，避免“样例被素材库污染”。
+      // 仅绑定风格库时：允许省略（减少强闭环误伤/不必要重试）。
+      if (!cardTypes.length && hasNonStyleLibraries) return false;
     }
 
     const libs = normalizeIdList((args as any)?.libraryIds);
@@ -662,7 +664,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
                   ? "  - 先调用 run.setTodoList（永远第一步）\n"
                   : "  - 不要重复调用 run.setTodoList（本次 Run 已有 todo）\n") +
                 (needKb
-                  ? "  - 若 KB_SELECTED_LIBRARIES 中存在 purpose=style（风格库）且任务为写作类：必须先调用 kb.search（kind=card；且带 cardTypes；且只搜风格库）拉“套路模板/金句形状”。必要时再补 paragraph 并用 anchorParagraphIndexMax/anchorFromEndMax 做位置过滤。\n"
+                  ? "  - 若 KB_SELECTED_LIBRARIES 中存在 purpose=style（风格库）且任务为写作类：先调用 kb.search 拉风格样例（优先 kind=card；若同时绑定了非风格库则必须带 cardTypes 且只搜风格库）。必要时再补 paragraph 并用 anchorParagraphIndexMax/anchorFromEndMax 做位置过滤。\n"
                   : "") +
                 (needLint ? "  - 然后调用 lint.style 做终稿闸门；未通过则按 rewritePrompt 回炉改写并复检（最多 2 次）后再输出/写入。\n" : "") +
                 "  - 若用户要求写入/分割到文件夹：请调用 doc.splitToDir（或 doc.write 等）完成写入。\n" +
@@ -741,7 +743,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               (hasNonStyleLibraries
                 ? `提示：当前同时绑定了非风格库，因此 kb.search 必须显式传 libraryIds（仅限风格库）：${JSON.stringify(styleLibIds)}。\n`
                 : "") +
-              "注意：手法/模板检索优先 kind=card 且必须带 cardTypes；如需原文证据段再用 kind=paragraph/outline，并建议用 anchorParagraphIndexMax/anchorFromEndMax 做位置过滤。"
+              "注意：手法/模板检索优先 kind=card；若同时绑定了非风格库则必须带 cardTypes 并显式限制到风格库。如需原文证据段再用 kind=paragraph/outline，并建议用 anchorParagraphIndexMax/anchorFromEndMax 做位置过滤。"
           });
           continue;
         }
