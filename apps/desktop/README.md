@@ -16,6 +16,7 @@
 - 三栏布局 + Dock Panel（中下方）
 - Monaco Editor（Markdown）
 - 右侧 Agent：流式输出 + Tool Blocks（Keep/Undo）
+- 右侧正文 DraftBox（文本框+一键复制）+ “只看正文/显示步骤”切换（隐藏/展开工具步骤）
 - Plan/Agent：支持 **ReAct（XML `<tool_calls>`）** 的工具调用（开发期先在 Desktop 本地执行最小工具集）
 - Topic Lab 最小版：生成选题/标题/角度，选中后写入 Main Doc 并新建草稿文件（可 Undo）
 
@@ -34,6 +35,8 @@ Plan/Agent 模式会按回合注入 Context Pack：
 - `run.mainDoc.get` / `run.mainDoc.update`（low / auto_apply / 可 Undo）
 - `project.listFiles` / `project.docRules.get`（只读）
 - `doc.read`（只读）
+- `kb.search`（只读：检索 KB 的段落/卡片；用于仿写取样例/模板）
+- `lint.style`（只读：对齐风格库，输出 issues + rewritePrompt）
 - `doc.write`（仅新建文件；low / auto_apply / 可 Undo）
 - `doc.getSelection` / `doc.replaceSelection`（选段改写；low / auto_apply / 可 Undo）
 - `doc.applyEdits`（**proposal-first**：先出预览，点击 Keep 才应用；Undo 可回滚）

@@ -388,6 +388,8 @@
 
 #### 当前进度（开发期已落地）
 - ✅ Desktop：三栏 + Dock Panel；Monaco Markdown（Tab）；右侧 Agent（Plan/Agent/Chat）+ 流式输出 + Tool Blocks（Keep/Undo）
+- ✅ 右侧 Agent：长正文 DraftBox（文本框+复制）+ “只看正文/显示步骤”开关（隐藏/展开工具步骤）
+- ✅ 风格仿写闭环（style 库）：`kb.search` 增强（cardTypes/anchor filters + debug 可观测）→ `lint.style` 对齐（上游超时降级为本地确定性 lint）→ 回炉改写/写入
 - ✅ Gateway：邮箱登录（devCode）、OpenAI-compatible SSE 代理（`/api/llm/chat/stream`）、模型列表（`/api/llm/models`）、KB 最小检索演示
 - ✅ 编辑器：Tab 预览/固定/关闭（单击=预览替换；双击=固定新 Tab；× 关闭不影响左侧）
 - ✅ 本地项目落盘（MVP）：打开真实目录、读写磁盘文件、最近项目（自动恢复上次项目）

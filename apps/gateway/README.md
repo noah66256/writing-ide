@@ -16,6 +16,7 @@
     - 抽卡：`POST /api/kb/dev/extract_cards`
     - 生成库级仿写手册：`POST /api/kb/dev/build_library_playbook`
     - 库体检（体裁/声音开集标签）：`POST /api/kb/dev/classify_genre`
+    - 风格对齐检查（lint.style）：`POST /api/kb/dev/lint_style`（给 Desktop 的 `lint.style` 工具使用）
   - 积分余额/流水与管理员充值接口（演示用）
 - 待实现：
   - Tool Registry（Schema + XML）与执行器（把 Desktop 本地工具逐步迁回 Gateway）
@@ -53,6 +54,10 @@ ssh writing 'bash -lc "export NVM_DIR=/www/server/nvm; [ -s \"$NVM_DIR/nvm.sh\" 
 - `LLM_BASE_URL`：OpenAI-compatible base url（不要带 `/v1`，Gateway 会自动补）
 - `LLM_MODEL`：默认模型 id
 - `LLM_API_KEY`：密钥
+
+如需启用 `lint.style`（风格对齐检查）：
+- 默认复用抽卡配置：`LLM_CARD_MODEL/LLM_CARD_API_KEY/LLM_CARD_BASE_URL`（不配则回退到 `LLM_*`）
+- 如需单独覆盖，可配置 `LLM_LINTER_*`；上游超时阈值可用 `LLM_LINTER_UPSTREAM_TIMEOUT_MS` 调整
 
 如需启用 Embeddings 代理（推荐，用于 KB 检索向量重排/A-B）：
 - `LLM_EMBED_MODELS`：逗号分隔的 embedding 模型列表（第一项为默认）
