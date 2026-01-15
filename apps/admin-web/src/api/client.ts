@@ -34,7 +34,8 @@ export async function apiFetchJson<T>(path: string, init?: RequestInit): Promise
   if (token) headers.set("Authorization", `Bearer ${token}`);
 
   const url = /^https?:\/\//.test(path) ? path : API_BASE ? `${API_BASE}${path}` : path;
-  const res = await fetch(url, { ...init, headers });
+  // 管理后台 API 默认不走缓存，避免“测速/保存后刷新不更新”等错觉
+  const res = await fetch(url, { cache: "no-store", ...init, headers });
   const text = await res.text().catch(() => "");
   let json: any = null;
   try {

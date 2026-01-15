@@ -68,6 +68,14 @@ export type AiModelTestResultDto = {
   headers?: Record<string, string>;
 };
 
+export type AiModelTestRunDto = AiModelTestResultDto & {
+  modelId: string;
+  model: string;
+  baseURL: string;
+  endpoint: string;
+  endpointUrl: string;
+};
+
 export type AiModelDto = {
   id: string;
   model: string;
@@ -148,7 +156,7 @@ export async function aiConfigDeleteModel(id: string) {
 }
 
 export async function aiConfigTestModel(id: string) {
-  return apiFetchJson<{ ok: true; result: any }>(`/api/ai-config/models/${encodeURIComponent(id)}/test`, {
+  return apiFetchJson<{ ok: true; result: AiModelTestRunDto }>(`/api/ai-config/models/${encodeURIComponent(id)}/test`, {
     method: "POST",
   });
 }

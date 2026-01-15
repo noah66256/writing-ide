@@ -32,8 +32,10 @@ export function LlmPage() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
-  const [models, setModels] = useState<ModelDraft[]>([]);
+  const [models, setModels] = useState<ModelDraftUi[]>([]);
   const [stages, setStages] = useState<StageDraft[]>([]);
+  const [testing, setTesting] = useState<Record<string, boolean>>({});
+  const [bulkTest, setBulkTest] = useState<{ done: number; total: number } | null>(null);
 
   // 创建模型表单
   const [newModel, setNewModel] = useState("");
@@ -49,7 +51,6 @@ export function LlmPage() {
 
   const refresh = async () => {
     setError("");
-    setNotice("");
     setBusy(true);
     try {
       const res = await aiConfigGetStages();
@@ -171,15 +172,90 @@ export function LlmPage() {
   const testOne = async (id: string) => {
     setError("");
     setNotice("");
-    setBusy(true);
+    setTesting((prev) => ({ ...prev, [id]: true }));
     try {
-      await aiConfigTestModel(id);
-      setNotice("测速已完成（结果已写回）");
-      await refresh();
+      setNotice("测速中…（单个模型超时 20 秒）");
+      const res = await aiConfigTestModel(id);
+      const tr = res.result;
+      setModels((prev) =>
+        prev.map((x) =>
+          x.id === id
+            ? {
+                ...x,
+                testResult: { ok: tr.ok, latencyMs: tr.latencyMs, status: tr.status, error: tr.error, testedAt: tr.testedAt, headers: tr.headers },
+              }
+            : x,
+        ),
+      );
+      setNotice(`测速完成：${tr.ok ? "OK" : "FAIL"} · ${tr.latencyMs ?? "-"}ms · ${String(tr.testedAt).slice(0, 19).replace("T", " ")}`);
     } catch (e: any) {
       const err = e as ApiError;
       setError(`测速失败：${err.code}`);
     } finally {
+      setTesting((prev) => ({ ...prev, [id]: false }));
+    }
+  };
+
+  const testAll = async () => {
+    setError("");
+    setNotice("");
+    const ids = models.map((m) => m.id);
+    if (!ids.length) return setError("暂无模型可测速");
+    if (!confirm(`确认对 ${ids.length} 个模型执行一键测速？\\n- 单个模型超时：20 秒\\n- 会写回并覆盖上次测速结果`)) return;
+
+    setBusy(true);
+    setBulkTest({ done: 0, total: ids.length });
+
+    let done = 0;
+    const queue = ids.slice();
+    const concurrency = Math.max(1, Math.min(3, queue.length));
+
+    const worker = async () => {
+      while (queue.length) {
+        const id = queue.shift();
+        if (!id) return;
+        setTesting((prev) => ({ ...prev, [id]: true }));
+        try {
+          const res = await aiConfigTestModel(id);
+          const tr = res.result;
+          setModels((prev) =>
+            prev.map((x) =>
+              x.id === id
+                ? {
+                    ...x,
+                    testResult: { ok: tr.ok, latencyMs: tr.latencyMs, status: tr.status, error: tr.error, testedAt: tr.testedAt, headers: tr.headers },
+                  }
+                : x,
+            ),
+          );
+        } catch (e: any) {
+          const err = e as ApiError;
+          const testedAt = new Date().toISOString();
+          setModels((prev) =>
+            prev.map((x) =>
+              x.id === id
+                ? {
+                    ...x,
+                    testResult: { ok: false, latencyMs: null, status: err.status, error: err.code, testedAt },
+                  }
+                : x,
+            ),
+          );
+        } finally {
+          setTesting((prev) => ({ ...prev, [id]: false }));
+          done += 1;
+          setBulkTest({ done, total: ids.length });
+        }
+      }
+    };
+
+    try {
+      setNotice(`一键测速中… 0/${ids.length}`);
+      await Promise.all(Array.from({ length: concurrency }, () => worker()));
+      setNotice(`一键测速完成：${ids.length}/${ids.length}`);
+      await refresh();
+    } finally {
+      setBulkTest(null);
       setBusy(false);
     }
   };
@@ -248,6 +324,9 @@ export function LlmPage() {
         <div className="pageActions">
           <button className="btn" type="button" onClick={() => void refresh()} disabled={busy}>
             刷新
+          </button>
+          <button className="btn" type="button" onClick={() => void testAll()} disabled={busy || models.length === 0}>
+            {bulkTest ? `一键测速 ${bulkTest.done}/${bulkTest.total}` : "一键测速"}
           </button>
           <button className="btn" type="button" onClick={() => void dedupe()} disabled={busy}>
             清理重复
@@ -321,13 +400,20 @@ export function LlmPage() {
         <div style={{ fontWeight: 900, marginBottom: 10 }}>AI 模型管理</div>
         <div className="modelList">
           {models.map((m) => {
+            const isTesting = Boolean(testing[m.id]);
             const kind = endpointLabel(m.endpoint);
             const kindTag = kind === "Embeddings" ? "tagPurple" : "tagBlue";
             const keyTag = m.hasApiKey ? "tagGreen" : "tagRed";
             const keyText = m.hasApiKey ? `Key ${m.apiKeyMasked || "****"}` : "无 Key";
 
-            const testTagClass = !m.testResult ? "" : m.testResult.ok ? "tagGreen" : "tagRed";
-            const testText = !m.testResult ? "未测速" : m.testResult.ok ? `OK ${m.testResult.latencyMs ?? "-"}ms` : `FAIL ${m.testResult.status ?? "-"}`;
+            const testTagClass = isTesting ? "" : !m.testResult ? "" : m.testResult.ok ? "tagGreen" : "tagRed";
+            const testText = isTesting
+              ? "测速中…"
+              : !m.testResult
+                ? "未测速"
+                : m.testResult.ok
+                  ? `OK ${m.testResult.latencyMs ?? "-"}ms`
+                  : `FAIL ${m.testResult.status ?? "-"}`;
 
             return (
               <div key={m.id} className="modelCard">
@@ -349,13 +435,13 @@ export function LlmPage() {
                       />
                       启用
                     </label>
-                    <button className="btn primary" type="button" disabled={busy} onClick={() => void saveModel(m)}>
+                    <button className="btn primary" type="button" disabled={busy || isTesting} onClick={() => void saveModel(m)}>
                       保存
                     </button>
-                    <button className="btn" type="button" disabled={busy} onClick={() => void testOne(m.id)}>
-                      测速
+                    <button className="btn" type="button" disabled={busy || isTesting} onClick={() => void testOne(m.id)}>
+                      {isTesting ? "测速中…" : "测速"}
                     </button>
-                    <button className="btn" type="button" disabled={busy} onClick={() => void delOne(m.id)}>
+                    <button className="btn" type="button" disabled={busy || isTesting} onClick={() => void delOne(m.id)}>
                       删除
                     </button>
                   </div>

@@ -731,12 +731,36 @@ export function createAiConfigService(args: {
   const testModel = async (id: string) => {
     const m = await getModelById(id);
     if (!m) throw new Error("model_not_found");
-    if (!m.isEnabled) throw new Error("model_disabled");
-    const apiKey = m.apiKeyEnc ? normalizeApiKeyInput(decryptApiKey(m.apiKeyEnc)) : "";
-    if (!apiKey) throw new Error("apiKey_missing");
 
     const endpoint = normalizeEndpoint(m.endpoint, "/v1/chat/completions");
     const endpointUrl = joinUrl(m.baseURL, endpoint);
+
+    const writeResult = async (tr: AiModelTestResult) => {
+      const ai = await getAiConfig();
+      const now = nowIso();
+      const next: AiConfig = {
+        ...ai,
+        updatedAt: now,
+        models: (ai.models ?? []).map((x) => (x.id === m.id ? { ...x, testResult: tr, updatedAt: now, updatedBy: "system" } : x)),
+        stages: ai.stages ?? [],
+      };
+      await saveAiConfig(next, "system");
+    };
+
+    // 这些“失败”也要写回 testResult，避免前端看起来“点了没反应/没变化”
+    if (!m.isEnabled) {
+      const tr: AiModelTestResult = { ok: false, latencyMs: null, status: null, error: "model_disabled", testedAt: nowIso() };
+      await writeResult(tr);
+      return { modelId: m.id, model: m.model, baseURL: m.baseURL, endpoint, endpointUrl, ...tr };
+    }
+
+    const apiKey = m.apiKeyEnc ? normalizeApiKeyInput(decryptApiKey(m.apiKeyEnc)) : "";
+    if (!apiKey) {
+      const tr: AiModelTestResult = { ok: false, latencyMs: null, status: null, error: "apiKey_missing", testedAt: nowIso() };
+      await writeResult(tr);
+      return { modelId: m.id, model: m.model, baseURL: m.baseURL, endpoint, endpointUrl, ...tr };
+    }
+
     const isEmbedding = /\/embeddings/i.test(endpoint);
     const controller = new AbortController();
     const timeoutMs = 20_000;
@@ -784,14 +808,7 @@ export function createAiConfigService(args: {
       }
 
       const tr: AiModelTestResult = { ok, latencyMs, status, error, testedAt, ...(headersObj ? { headers: headersObj } : {}) };
-      const ai = await getAiConfig();
-      const next: AiConfig = {
-        ...ai,
-        updatedAt: nowIso(),
-        models: (ai.models ?? []).map((x) => (x.id === m.id ? { ...x, testResult: tr, updatedAt: nowIso(), updatedBy: "system" } : x)),
-        stages: ai.stages ?? [],
-      };
-      await saveAiConfig(next, "system");
+      await writeResult(tr);
       return { modelId: m.id, model: m.model, baseURL: m.baseURL, endpoint, endpointUrl, ...tr };
     } catch (e: any) {
       const msg = String(e?.name ?? "") === "AbortError" ? `请求超时（>${Math.round(timeoutMs / 1000)}s）` : String(e?.message ?? e);
@@ -799,14 +816,7 @@ export function createAiConfigService(args: {
       const latencyMs = null;
       const testedAt = nowIso();
       const tr: AiModelTestResult = { ok: false, latencyMs, status, error: msg.slice(0, 400), testedAt };
-      const ai = await getAiConfig();
-      const next: AiConfig = {
-        ...ai,
-        updatedAt: nowIso(),
-        models: (ai.models ?? []).map((x) => (x.id === m.id ? { ...x, testResult: tr, updatedAt: nowIso(), updatedBy: "system" } : x)),
-        stages: ai.stages ?? [],
-      };
-      await saveAiConfig(next, "system");
+      await writeResult(tr);
       return { modelId: m.id, model: m.model, baseURL: m.baseURL, endpoint, endpointUrl, ...tr };
     } finally {
       clearTimeout(timer);
