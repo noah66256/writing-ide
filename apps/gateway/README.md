@@ -43,8 +43,10 @@ npm run dev:gateway
 推荐命令形态（示例）：
 
 ```bash
-ssh writing 'bash -lc "export NVM_DIR=/www/server/nvm; [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\"; nvm use 22 >/dev/null; cd /www/wwwroot/writing-ide && npm run build -w @writing-ide/gateway && pm2 restart writing-gateway"'
+ssh writing 'bash -lc "export NVM_DIR=/www/server/nvm; [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\"; nvm use 22 >/dev/null; cd /www/wwwroot/writing-ide && git fetch origin && git reset --hard origin/master && npm run build -w @writing-ide/gateway && pm2 restart writing-gateway"'
 ```
+
+说明：如服务器本地曾被手改导致 `git pull` 提示分歧（divergent），推荐用 `git fetch && git reset --hard origin/master` 强制与远端一致（会丢弃服务器本地未提交改动）。
 
 ### 环境变量（根目录 `.env`）
 从 `env.example` 复制为 `.env` 并填写：

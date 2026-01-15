@@ -85,9 +85,9 @@ npm run dev:admin
   - **停止语义**：点击 **■** 停止会把当前任务标记为“已取消”（不会记为失败）。
   - **彻底兜底（不再卡死）**：若上游模型超时/不可用，系统会自动降级生成“统计版写法画像 + 样本驱动骨架维度卡”，确保手册仍可产出（可后续重跑覆盖为模型生成版）。
 - **库体检（像什么/稳不稳/怎么修）**：在库管理的“库”页，对某个库点 `库体检`。默认只给三张傻瓜卡；点 `我懂点，展开细节` 才显示统计率/n‑gram/证据覆盖率/离群文档等。体检快照保存在本地 `kb.v1.json` 的 `fingerprints` 字段（每库保留最近 5 次，支持“上次 vs 这次”对比）。
-- **库用途（风格/素材/产品）**：在库管理的“库”页可切换库用途。**只有“风格库”会触发“绑定后写作类任务默认先 kb.search(kind=paragraph/outline) 拉样例，再写稿”的策略**。
+- **库用途（风格/素材/产品）**：在库管理的“库”页可切换库用途。**只有“风格库”会触发“先检索样例→再写→再 lint.style 对齐”的默认策略**。
 - **关联右侧 Agent**：在“库”页点“关联到右侧”，右侧输入区会显示 `KB N库`；Agent 运行时会自动注入已关联库的“仿写手册”，并可调用工具 `kb.search` 检索更多素材。
-- **仿写检索（强烈建议）**：仿写/按库风格改写时，优先让 Agent 先调用 `kb.search` 拉样例（优先 `kind=paragraph/outline`），再开始写稿；必要时可指定 `embeddingModel` 做 A/B 测试（见 `env.example` 的 `LLM_EMBED_MODELS`）。
+- **仿写检索（强烈建议）**：仿写/按库风格改写时，建议把“风格模板”和“内容证据”分开检索：先 `kb.search(kind=card, cardTypes=[hook,one_liner,ending,outline,thesis,style_profile])` 拉“套路模板/金句形状/结构骨架”；必要时再 `kb.search(kind=paragraph, anchorParagraphIndexMax=3 或 anchorFromEndMax=3)` 拉开头/结尾原文段；再写候选稿 → `lint.style` → 回炉改写 → 写入。
   - **两段式检索（关键）**：`kb.search` 默认“先词法召回”；若词法 0 命中且 `useVector=true`，会启用**向量兜底召回**（从目标库内候选集中计算 embedding，相似度重排后按 `source_doc` 分组返回），确保像“反差破题/五环结构”这类概念型 query 也能命中。
   - **性能/超时保护**：向量阶段采用 **批量 embeddings + 时间预算/候选上限**，避免等待过久导致 Run 失败。
   - **缓存策略**：embedding 会按 `KbArtifact.embeddings[embeddingModel]` 缓存在本地 KB 数据中，减少重复调用与费用。

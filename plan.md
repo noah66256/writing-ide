@@ -169,7 +169,7 @@
       - 体裁/媒介标签允许开集：用 LLM 归纳“像什么（含置信度与证据锚点）”，但统计数字必须来自确定性计算
       - UI 原则：后台可以复杂，但前台只回答三件事——**像什么 / 稳不稳 / 怎么修**（其余放“高级展开”）
     - **库用途（Library Purpose）**：同一个“库”可能承担不同角色，策略应随用途变化（避免所有绑定库都强制检索/强制注入）
-      - `style`（风格库）：用于仿写/改写；**绑定后写作类任务默认先 kb.search 拉 paragraph/outline 样例，再写稿**
+      - `style`（风格库）：用于仿写/改写；**绑定后写作类任务默认先 kb.search(kind=card + cardTypes) 拉模板，再按需补 paragraph/outline（anchorParagraphIndexMax/anchorFromEndMax），并在写入前 lint.style 对齐**
       - `material`（素材库）：用于事实素材/资料摘录；默认不强制“先检索再写”（由 Agent 自主决定）
       - `product`（产品库）：用于产品/规范/PRD/设计决策；默认走“读规则/查资料”类流程
     - **细分类（Facet Pack：维度集，可选/可扩展）**
