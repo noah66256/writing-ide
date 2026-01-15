@@ -4,6 +4,10 @@ export type ApiError = {
   detail?: unknown;
 };
 
+const API_BASE = String(import.meta.env.VITE_GATEWAY_URL ?? "")
+  .trim()
+  .replace(/\/+$/g, "");
+
 const TOKEN_KEY = "writing-ide.admin.accessToken.v1";
 
 export function getAccessToken(): string | null {
@@ -25,7 +29,8 @@ export async function apiFetchJson<T>(path: string, init?: RequestInit): Promise
   if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   if (token) headers.set("Authorization", `Bearer ${token}`);
 
-  const res = await fetch(path, { ...init, headers });
+  const url = /^https?:\/\//.test(path) ? path : API_BASE ? `${API_BASE}${path}` : path;
+  const res = await fetch(url, { ...init, headers });
   const text = await res.text().catch(() => "");
   let json: any = null;
   try {
