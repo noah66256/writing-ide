@@ -612,7 +612,9 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           const t = assistantText.trim();
           const isEmpty = t.length === 0;
           const isFIMLeak = looksLikeFIMLeak(assistantText);
-          const isClarify = looksLikeClarifyQuestions(t) && !forceProceed;
+          // 关键修正：口播正文里会大量出现“问题来了/是不是？”等问句，不能误判为“向用户澄清”。
+          // 若看起来像正文稿，则一律不视为澄清（否则会导致 needLint/needWrite 被关闭，Run 提前结束）。
+          const isClarify = looksLikeClarifyQuestions(t) && !forceProceed && !looksLikeDraftText(t);
 
           // 关键：在 Plan/Agent 模式，todo 是“可追踪执行”的入口。即使需要澄清，也必须先设置 todo。
           const needTodo = !hasTodoList;
