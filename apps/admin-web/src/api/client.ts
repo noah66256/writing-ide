@@ -30,7 +30,12 @@ export function clearAccessToken() {
 export async function apiFetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getAccessToken();
   const headers = new Headers(init?.headers ?? undefined);
-  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  // 只有在确实有 body 时才设置 Content-Type
+  // 否则像 POST /test 这种无 body 请求会被 Fastify 当作“空 JSON”解析，从而报 400
+  if (!headers.has("Content-Type") && init && init.body !== undefined && init.body !== null) {
+    // 我们项目目前 body 都是 JSON.stringify 出来的 string
+    headers.set("Content-Type", "application/json");
+  }
   if (token) headers.set("Authorization", `Bearer ${token}`);
 
   const url = /^https?:\/\//.test(path) ? path : API_BASE ? `${API_BASE}${path}` : path;
