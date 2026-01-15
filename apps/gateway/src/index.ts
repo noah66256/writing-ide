@@ -1356,7 +1356,7 @@ fastify.put(
       embeddings: stageSchema.optional(),
       card: stageSchema.optional(),
       linter: stageSchema.extend({ timeoutMs: z.number().int().min(1).optional() }).optional(),
-      pricing: z.record(priceSchema).optional(),
+      pricing: z.record(z.string(), priceSchema).optional(),
     });
 
     const body = bodySchema.parse((request as any).body ?? {});
