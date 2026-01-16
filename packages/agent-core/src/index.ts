@@ -20,6 +20,7 @@ export {
   createInitialRunState,
   parseMainDocFromContextPack,
   parseKbSelectedLibrariesFromContextPack,
+  parseRunTodoFromContextPack,
   detectRunIntent,
   deriveStyleGate,
   looksLikeClarifyQuestions,

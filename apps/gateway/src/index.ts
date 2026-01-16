@@ -42,6 +42,7 @@ import {
   pickSkillStageKeyForAgentRun,
   parseKbSelectedLibrariesFromContextPack,
   parseMainDocFromContextPack,
+  parseRunTodoFromContextPack,
   parseStyleLintResult,
   styleNeedsCta,
 } from "@writing-ide/agent-core";
@@ -805,7 +806,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   const userPrompt = String(body.prompt ?? "");
   const mainDocFromPack = parseMainDocFromContextPack(body.contextPack);
   const kbSelectedList = parseKbSelectedLibrariesFromContextPack(body.contextPack);
-  const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: (mainDocFromPack as any)?.runIntent });
+  const runTodoFromPack = parseRunTodoFromContextPack(body.contextPack);
+  const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: (mainDocFromPack as any)?.runIntent, runTodo: runTodoFromPack });
   const activeSkills = activateSkills({
     mode,
     userPrompt,
@@ -1026,6 +1028,9 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   // Run 内部状态（显式 State；由 policy 函数分析与更新）
   // 预算拆分：避免一个 budget 同时承担“协议修复/完成性重试/风格门禁”等语义
   const runState = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: lintMaxRework });
+  // 关键：续跑时 Context Pack 可能已包含 RUN_TODO（但本次 run 未必会再次 run.setTodoList），
+  // 不应因此触发 AutoRetryPolicy 的 need_todo 误判。
+  if (Array.isArray(runTodoFromPack) && runTodoFromPack.length) runState.hasTodoList = true;
 
   const stateSnapshot = () => ({
     protocolRetryBudget: runState.protocolRetryBudget,

@@ -151,6 +151,26 @@ async function main() {
     assert.ok(Array.isArray(skills[0]?.activatedBy?.reasonCodes));
   }
   {
+    // 续跑/澄清回复：用户 prompt 很短（例如“继续/视频脚本”），但 RUN_TODO 明确属于写作闭环，应激活 style_imitate
+    const mode = "agent" as const;
+    const userPrompt = "继续";
+    const runTodo = [
+      { id: "vs", text: "确认需求：形式（视频脚本vs文章）与素材扩充边界", status: "blocked", note: "等待用户回复" },
+      { id: "t2", text: "检索风格素材：拉取直男财经样例", status: "todo" },
+      { id: "lint_style", text: "风格自检：使用 lint.style", status: "todo" },
+    ];
+    const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: "auto", runTodo });
+    assert.equal(intent.isWritingTask, true);
+    const skills = activateSkills({
+      mode,
+      userPrompt,
+      mainDocRunIntent: "auto",
+      kbSelected: [{ id: "style-1", purpose: "style" }],
+      intent,
+    });
+    assert.equal(skills.some((s) => s.id === "style_imitate"), true);
+  }
+  {
     const mode = "agent" as const;
     const userPrompt = "帮我分析一下这段话";
     const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: "analysis" });

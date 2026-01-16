@@ -111,7 +111,26 @@ export function parseKbSelectedLibrariesFromContextPack(ctx?: string): KbSelecte
   }
 }
 
-export function detectRunIntent(args: { mode: AgentMode; userPrompt: string; mainDocRunIntent?: unknown }): RunIntent {
+export function parseRunTodoFromContextPack(ctx?: string): any[] {
+  const text = String(ctx ?? "");
+  if (!text) return [];
+  const m = text.match(/RUN_TODO\(JSON\):\n([\s\S]*?)\n\n/);
+  const raw = m?.[1] ? String(m[1]).trim() : "";
+  if (!raw) return [];
+  try {
+    const j = JSON.parse(raw);
+    return Array.isArray(j) ? (j as any[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function detectRunIntent(args: {
+  mode: AgentMode;
+  userPrompt: string;
+  mainDocRunIntent?: unknown;
+  runTodo?: any[];
+}): RunIntent {
   const { mode } = args;
   const userPrompt = String(args.userPrompt ?? "");
   const forceProceed =
@@ -133,12 +152,36 @@ export function detectRunIntent(args: { mode: AgentMode; userPrompt: string; mai
   // 结构化意图（优先级高于正则启发式）：来自 Main Doc/UI（例如 Desktop 选择“意图：分析/操作”避免误触写作强闭环）
   const mainDocIntentRaw = String(args.mainDocRunIntent ?? "").trim().toLowerCase();
   const mainDocIntent = mainDocIntentRaw === "auto" ? "" : mainDocIntentRaw;
-  const isWritingTaskFinal =
+  let isWritingTaskFinal =
     mainDocIntent === "writing" || mainDocIntent === "rewrite" || mainDocIntent === "polish"
       ? true
       : mainDocIntent === "analysis" || mainDocIntent === "ops"
         ? false
         : isWritingTask;
+
+  // 关键增强：当用户在回答“澄清问题/等待确认”的续跑对话时，userPrompt 往往非常短（例如“继续/视频脚本/按这个来”），
+  // 仅靠正则会误判为非写作任务，导致 style_imitate/写作闭环不激活。
+  // 这里在 mainDocIntent=auto 且当前未判为写作任务时，参考 RUN_TODO 来判断是否应继承“写作闭环”意图。
+  if (!mainDocIntent && !isWritingTaskFinal) {
+    const todoRaw = Array.isArray(args.runTodo) ? args.runTodo : [];
+    const todo = todoRaw.slice(0, 50);
+    const shortOrContinue = userPrompt.length <= 60 || /^(继续|好|可以|行|没问题|确认|按这个来|就这样|ok|OK)\b/.test(userPrompt);
+    const hasWaiting = todo.some((t: any) => {
+      const status = String(t?.status ?? "").trim().toLowerCase();
+      const note = String(t?.note ?? "").trim();
+      if (status === "blocked") return true;
+      if (/^blocked\b/i.test(note)) return true;
+      if (/(等待用户|等待你|待确认|等你确认|需要你确认|请确认)/.test(note)) return true;
+      return false;
+    });
+    const todoLooksWriting = todo.some((t: any) => /(写|仿写|改写|润色|脚本|文案|终稿|写入|lint\.style)/.test(String(t?.text ?? "")));
+    const looksNonWriting =
+      /(分析|排查|报错|bug|为什么|怎么修|白屏|崩溃|日志|报错栈)/.test(userPrompt) &&
+      !/(写|仿写|改写|润色|脚本|文案|终稿|写入)/.test(userPrompt);
+    if (!looksNonWriting && todoLooksWriting && (hasWaiting || shortOrContinue)) {
+      isWritingTaskFinal = true;
+    }
+  }
 
   return { forceProceed, wantsWrite, wantsOkOnly, isWritingTask: isWritingTaskFinal, skipLint, skipCta };
 }
