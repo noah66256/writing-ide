@@ -28,6 +28,7 @@ export type ResolvedAiModelRuntime = {
   endpoint: string;
   apiKey: string;
   model: string;
+  toolResultFormat: "xml" | "text";
 };
 
 export type AiModelListItem = Omit<AiModel, "apiKeyEnc"> & {
@@ -316,6 +317,7 @@ export function createAiConfigService(args: {
         providerId: null,
         baseURL: creds.baseURL,
         endpoint: normalizeEndpoint(endpoint, "/v1/chat/completions"),
+        toolResultFormat: "xml",
         apiKeyEnc: enc ? enc.enc : null,
         apiKeyLast4: enc ? enc.last4 : null,
         priceInCnyPer1M: null,
@@ -609,6 +611,7 @@ export function createAiConfigService(args: {
       endpoint,
       apiKey,
       model: modelDoc.model,
+      toolResultFormat: modelDoc.toolResultFormat === "text" ? "text" : "xml",
     };
   };
 
@@ -626,6 +629,7 @@ export function createAiConfigService(args: {
     endpoint?: string;
     apiKey?: string;
     copyFromId?: string;
+    toolResultFormat?: "xml" | "text";
     priceInCnyPer1M: number;
     priceOutCnyPer1M: number;
     billingGroup?: string | null;
@@ -653,6 +657,7 @@ export function createAiConfigService(args: {
     const apiKeyInput = normalizeApiKeyInput(params.apiKey || "");
     let apiKeyEnc: string | null = null;
     let apiKeyLast4: string | null = null;
+    let toolResultFormat: "xml" | "text" = params.toolResultFormat === "text" ? "text" : "xml";
     if (apiKeyInput) {
       const enc = encryptApiKey(apiKeyInput);
       apiKeyEnc = enc.enc;
@@ -673,6 +678,8 @@ export function createAiConfigService(args: {
         apiKeyEnc = src.apiKeyEnc;
         apiKeyLast4 = src.apiKeyLast4;
       }
+      // 继承 tool_result 兼容性配置（若本次未显式指定）
+      if (params.toolResultFormat === undefined && src.toolResultFormat === "text") toolResultFormat = "text";
     }
 
     // apiKey：允许“模型不存 key，仅引用 provider 的 key”
@@ -696,6 +703,7 @@ export function createAiConfigService(args: {
       providerId: providerId || null,
       baseURL,
       endpoint,
+      toolResultFormat,
       apiKeyEnc,
       apiKeyLast4,
       priceInCnyPer1M: priceIn,
@@ -727,6 +735,7 @@ export function createAiConfigService(args: {
       providerId: string | null;
       baseURL: string;
       endpoint: string;
+      toolResultFormat: "xml" | "text";
       apiKey: string;
       clearApiKey: boolean;
       priceInCnyPer1M: number | null;
@@ -753,6 +762,7 @@ export function createAiConfigService(args: {
 
     const nextBase = nextProvider ? normalizeBaseURL(nextProvider.baseURL) : patch.baseURL !== undefined ? normalizeBaseURL(patch.baseURL) : cur.baseURL;
     const nextEndpoint = patch.endpoint !== undefined ? normalizeEndpoint(patch.endpoint, cur.endpoint) : cur.endpoint;
+    const nextToolResultFormat = patch.toolResultFormat !== undefined ? (patch.toolResultFormat === "text" ? "text" : "xml") : cur.toolResultFormat === "text" ? "text" : "xml";
 
     let apiKeyEnc = cur.apiKeyEnc;
     let apiKeyLast4 = cur.apiKeyLast4;
@@ -808,6 +818,7 @@ export function createAiConfigService(args: {
       providerId: nextProviderId || null,
       baseURL: nextBase,
       endpoint: nextEndpoint,
+      toolResultFormat: nextToolResultFormat,
       apiKeyEnc,
       apiKeyLast4,
       priceInCnyPer1M: priceIn,

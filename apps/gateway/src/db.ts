@@ -85,6 +85,12 @@ export type AiModel = {
   providerId: string | null;
   baseURL: string;
   endpoint: string;
+  /**
+   * Agent tool_result 注入格式：
+   * - xml：system role 的 `<tool_result><![CDATA[json]]></tool_result>`（默认）
+   * - text：user role 的纯文本 `[tool_result] json [/tool_result]`（兼容某些 OpenAI-compatible 代理）
+   */
+  toolResultFormat?: "xml" | "text";
   apiKeyEnc: string | null;
   apiKeyLast4: string | null;
   priceInCnyPer1M: number | null;

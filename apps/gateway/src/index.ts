@@ -666,7 +666,9 @@ function buildAgentProtocolPrompt(mode: AgentMode) {
     `规则：\n` +
     `- 如果你输出 tool_call/tool_calls，则消息里禁止夹杂任何其它自然语言。\n` +
     `- <arg> 内可以放 JSON（不要代码块，不要反引号）。\n` +
-    `- 工具结果会由系统用 XML 回传（system message）：<tool_result name="xxx"><![CDATA[{...json}]]></tool_result>\n\n` +
+    `- 工具结果会由系统回传为以下两种等价格式之一（不同模型/代理兼容性不同；你必须都能识别并使用）：\n` +
+    `  A) XML（通常为 system message）：<tool_result name="xxx"><![CDATA[{...json}]]></tool_result>\n` +
+    `  B) 纯文本（可能为 user message）：[tool_result name="xxx"]\\n{...json}\\n[/tool_result]\n\n` +
     `你可用的工具如下（只能调用这里列出的）：\n\n` +
     toolsPrompt(mode)
   );
@@ -719,6 +721,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   let baseUrl = env.baseUrl;
   let apiKey = env.apiKey;
   let endpoint = "/v1/chat/completions";
+  let toolResultFormat: "xml" | "text" = "xml";
   if (pickedId) {
     try {
       const m = await aiConfig.resolveModel(pickedId);
@@ -726,6 +729,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       baseUrl = m.baseURL;
       apiKey = m.apiKey;
       endpoint = m.endpoint || endpoint;
+      toolResultFormat = m.toolResultFormat;
     } catch {
       // ignore
     }
@@ -1253,9 +1257,9 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           }
         }
 
-        // 兼容性：部分 OpenAI-compatible 网关（尤其是 Gemini 代理）对 system role 的 “<tool_result><![CDATA[...]]>” 不友好，
-        // 会出现上游返回 200 但 choices:[] / completion_tokens=0 的空输出。
-        // 对 gemini(openai-compat) 将 tool_result 降级为普通对话内容（user role + 方括号包裹），避免触发网关的特殊处理。
+        // 兼容性：tool_result 注入格式为“模型级配置”。
+        // - xml：system role 的 `<tool_result><![CDATA[json]]></tool_result>`（默认）
+        // - text：user role 的纯文本 `[tool_result] json [/tool_result]`（兼容部分 OpenAI-compatible 代理）
         const toolResultXml = renderToolResultXml(call.name, payload.output);
         let toolResultJson = "";
         try {
@@ -1264,8 +1268,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           toolResultJson = JSON.stringify({ ok: false, error: "RESULT_NOT_SERIALIZABLE" });
         }
         const toolResultText = `[tool_result name="${String(call.name ?? "")}"]\n${toolResultJson}\n[/tool_result]`;
-        const geminiViaOpenAiCompat = /gemini/i.test(String(model || "")) && /chat\/completions/i.test(String(endpoint || ""));
-        messages.push({ role: geminiViaOpenAiCompat ? "user" : "system", content: geminiViaOpenAiCompat ? toolResultText : toolResultXml });
+        const useText = toolResultFormat === "text";
+        messages.push({ role: useText ? "user" : "system", content: useText ? toolResultText : toolResultXml });
 
         // 风格 Linter 终稿闸门：未通过则自动回炉（最多 lintMaxRework 次）；超过上限则提示用户是否跳过
         if (lintGateEnabled && String(call.name ?? "") === "lint.style") {
@@ -1723,6 +1727,7 @@ fastify.post(
       providerId: z.string().optional(),
       baseURL: z.string().optional(),
       endpoint: z.string().optional(),
+      toolResultFormat: z.enum(["xml", "text"]).optional(),
       apiKey: z.string().optional(),
       copyFromId: z.string().optional(),
       priceInCnyPer1M: z.number().min(0),
@@ -1740,6 +1745,7 @@ fastify.post(
         providerId: body.providerId,
         baseURL: body.baseURL,
         endpoint: body.endpoint,
+        toolResultFormat: body.toolResultFormat,
         apiKey: body.apiKey,
         copyFromId: body.copyFromId,
         priceInCnyPer1M: body.priceInCnyPer1M,
@@ -1769,6 +1775,7 @@ fastify.patch(
       providerId: z.string().nullable().optional(),
       baseURL: z.string().optional(),
       endpoint: z.string().optional(),
+      toolResultFormat: z.enum(["xml", "text"]).optional(),
       apiKey: z.string().optional(),
       clearApiKey: z.boolean().optional(),
       priceInCnyPer1M: z.number().min(0).nullable().optional(),
@@ -1824,6 +1831,113 @@ fastify.post(
       const msg = e?.message ? String(e.message) : String(e);
       return reply.code(400).send({ error: msg });
     }
+  },
+);
+
+fastify.post(
+  "/api/ai-config/models/:id/tool-compat",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async (request, reply) => {
+    const paramsSchema = z.object({ id: z.string().min(1) });
+    const bodySchema = z
+      .object({
+        timeoutMs: z.number().int().min(1000).max(60_000).optional(),
+      })
+      .optional();
+    const { id } = paramsSchema.parse((request as any).params);
+    const body = bodySchema?.parse((request as any).body ?? {}) ?? {};
+    const timeoutMs = Number.isFinite((body as any).timeoutMs) ? Number((body as any).timeoutMs) : 15_000;
+
+    let runtime: Awaited<ReturnType<typeof aiConfig.resolveModel>>;
+    try {
+      runtime = await aiConfig.resolveModel(id);
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : String(e);
+      return reply.code(400).send({ error: msg });
+    }
+
+    const endpoint = String(runtime.endpoint || "");
+    if (/\/embeddings/i.test(endpoint)) return reply.code(400).send({ error: "NOT_CHAT_MODEL" });
+
+    const isGeminiEndpoint = /:streamGenerateContent/i.test(endpoint) || /:generateContent/i.test(endpoint) || /\/v1beta\/models\//i.test(endpoint);
+
+    const runOnce = async (fmt: "xml" | "text") => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const startedAt = Date.now();
+      let out = "";
+      let err: string | null = null;
+
+      const toolPayload = { ok: true, tool: "run.setTodoList", testedAt: new Date().toISOString() };
+      const toolJson = JSON.stringify(toolPayload);
+      const toolXml = `<tool_result name="run.setTodoList"><![CDATA[${toolJson}]]></tool_result>`;
+      const toolText = `[tool_result name="run.setTodoList"]\n${toolJson}\n[/tool_result]`;
+
+      const messages: OpenAiChatMessage[] = [
+        {
+          role: "system",
+          content:
+            "你是兼容性检测器。请严格只输出 `OK` 两个字符（不带引号），不要输出任何其它内容。",
+        },
+        ...(fmt === "xml" ? ([{ role: "system", content: toolXml }] as any) : ([{ role: "user", content: toolText }] as any)),
+        { role: "user", content: "只回复 OK" },
+      ];
+
+      try {
+        const iter = isGeminiEndpoint
+          ? streamGeminiGenerateContent({
+              baseUrl: runtime.baseURL,
+              endpoint: runtime.endpoint,
+              apiKey: runtime.apiKey,
+              messages,
+              temperature: 0,
+              maxTokens: 16,
+              signal: controller.signal,
+            })
+          : streamChatCompletions({
+              config: { baseUrl: runtime.baseURL, apiKey: runtime.apiKey },
+              endpoint: runtime.endpoint,
+              model: runtime.model,
+              messages,
+              temperature: 0,
+              maxTokens: 16,
+              includeUsage: true,
+              signal: controller.signal,
+            });
+
+        for await (const ev of iter as any) {
+          if (ev.type === "delta") out += String(ev.delta ?? "");
+          else if (ev.type === "error") {
+            err = String(ev.error ?? "UPSTREAM_ERROR");
+            break;
+          } else if (ev.type === "done") break;
+        }
+      } catch (e: any) {
+        const msg = String(e?.name ?? "") === "AbortError" ? `TIMEOUT_${Math.round(timeoutMs / 1000)}s` : String(e?.message ?? e);
+        err = msg;
+      } finally {
+        clearTimeout(timer);
+      }
+
+      const latencyMs = Date.now() - startedAt;
+      const ok = !err && out.trim().length > 0;
+      return { ok, format: fmt, latencyMs, outputSample: out.trim().slice(0, 120) || null, error: err };
+    };
+
+    const [xml, text] = await Promise.all([runOnce("xml"), runOnce("text")]);
+    const recommended: "xml" | "text" | null =
+      xml.ok && !text.ok ? "xml" : text.ok && !xml.ok ? "text" : xml.ok && text.ok ? runtime.toolResultFormat : null;
+
+    return reply.send({
+      ok: true,
+      modelId: runtime.modelId,
+      model: runtime.model,
+      endpoint: runtime.endpoint,
+      results: { xml, text },
+      recommended,
+    });
   },
 );
 
