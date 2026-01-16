@@ -635,7 +635,7 @@ function buildAgentProtocolPrompt(mode: AgentMode) {
       ? `当前模式：Chat（纯对话）。\n- 你**不允许调用任何工具**（包括读写文件）。\n- 你只需用 Markdown 输出可读内容即可。\n\n`
       : `当前模式：${mode === "plan" ? "Plan（逐步）" : "Agent（一次成型+迭代）"}。\n` +
         `你需要按“写作闭环”工作，并把进度写入 Main Doc / Todo。\n` +
-        `- **用户指令优先级**：如果用户明确要求“只要一个短回复/确认”（例如：只回 OK、只回 是/否、只要一句话），且你判断不需要读文件/不需要工具/不需要写入，那么你应当**直接按用户要求回复并结束**（不要自作主张进入写作闭环；不要 run.setTodoList；不要 doc.read）。\n` +
+        `- **用户指令优先级**：如果用户明确要求“只要一个短回复/确认”（例如：只回 OK、只回 是/否、只要一句话），且你判断不需要读文件/不需要工具/不需要写入，那么你应当**严格只输出用户要求的那段短文本**并结束（不要追加解释/建议/下一步；不要自作主张进入写作闭环；不要 run.setTodoList；不要 doc.read）。\n` +
         `- **确认再动手（必须）**：若你准备进行任何“主动行为”（读项目文件/KB 检索/改写或生成正文/写入文件/批量工具调用），必须先用 Markdown 向用户确认（最多 5 个高价值问题：平台画像/受众/目标/口吻人设/素材来源）；用户确认后再动手。\n` +
         `- **范围控制（必须）**：不要因为 activePath/openPaths/目录里看起来“相关”，就自行 doc.read；只有当用户任务明确需要，且用户已确认你可以读取时，才读。\n` +
         `- **完成即停（必须）**：当你已经满足用户本轮目标（例如已回复 OK/已回答问题/已完成写入），立刻停止，不要追加新任务或开启下一段流程。\n\n` +
@@ -1046,7 +1046,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           const isClarify = looksLikeClarifyQuestions(t) && !forceProceed && !looksLikeDraftText(t);
 
           // 关键：在 Plan/Agent 模式，todo 是“可追踪执行”的入口。即使需要澄清，也必须先设置 todo。
-          const needTodo = !hasTodoList;
+          // 用户只要短确认（例如“回个 OK 就行”）时，不应强制 Todo，否则会触发 autoRetry 并在 UI 里出现“系统提示”噪音。
+          const needTodo = !hasTodoList && !wantsOkOnly;
           const needWrite = wantsWrite && !hasWriteOps && !isClarify;
           const needKb = styleGateEnabled && !hasStyleKbSearch && !isClarify;
           const needLint = lintGateEnabled && !styleLintPassed && styleLintFailCount <= lintMaxRework && !isClarify;
