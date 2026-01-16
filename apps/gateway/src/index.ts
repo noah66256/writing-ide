@@ -1181,53 +1181,72 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       // 风格库写作强约束：
       // - 为了保证“先检索样例→再生成→再对齐”的可控闭环，避免同一轮把 kb.search / lint.style / 写入类工具混在一起
       //   （否则模型拿不到 tool_result，就无法真正用上检索/对齐结果）。
-      if (mode !== "chat" && autoRetryBudget > 0 && hasStyleLibrary && isWritingTask) {
+      if (mode !== "chat" && hasStyleLibrary) {
         const batchHasWrite = toolCalls.some((c: any) => isWriteLikeTool(String(c?.name ?? "")));
         const batchHasKb = toolCalls.some((c: any) => String(c?.name ?? "") === "kb.search");
         const batchHasLint = toolCalls.some((c: any) => String(c?.name ?? "") === "lint.style");
         const batchHasStyleKb = toolCalls.some((c: any) => isStyleExampleKbSearch(c));
 
-        const needStyleKb = !hasStyleKbSearch;
-        const enforceLint = !skipLint;
-        const lintExhausted = enforceLint && !styleLintPassed && styleLintFailCount > lintMaxRework;
-        const needStyleLint = enforceLint && !styleLintPassed;
+        // 仅当“写作闭环相关动作”出现时才启用强闭环（避免 style 库挂着但做别的任务时被误伤）
+        const shouldEnforce = isWritingTask || batchHasWrite || batchHasLint;
+        if (shouldEnforce) {
+          const needStyleKb = !hasStyleKbSearch;
+          const enforceLint = !skipLint;
+          const lintExhausted = enforceLint && !styleLintPassed && styleLintFailCount > lintMaxRework;
+          const needStyleLint = enforceLint && !styleLintPassed;
 
-        let violation: string | null = null;
-        if (batchHasKb && batchHasLint) violation = "KB_AND_LINT_SAME_TURN";
-        else if (batchHasKb && batchHasWrite) violation = "KB_AND_WRITE_SAME_TURN";
-        else if (batchHasLint && batchHasWrite) violation = "LINT_AND_WRITE_SAME_TURN";
-        else if (batchHasLint && needStyleKb) violation = "LINT_BEFORE_KB";
-        else if (batchHasWrite && needStyleKb) violation = "WRITE_BEFORE_KB";
-        else if (batchHasWrite && needStyleLint) violation = lintExhausted ? "WRITE_BLOCKED_LINT_EXHAUSTED" : "WRITE_BEFORE_LINT_PASS";
-        else if (batchHasKb && needStyleKb && !batchHasStyleKb) violation = "KB_NOT_STYLE_EXAMPLES";
+          let violation: string | null = null;
+          if (batchHasKb && batchHasLint) violation = "KB_AND_LINT_SAME_TURN";
+          else if (batchHasKb && batchHasWrite) violation = "KB_AND_WRITE_SAME_TURN";
+          else if (batchHasLint && batchHasWrite) violation = "LINT_AND_WRITE_SAME_TURN";
+          else if (batchHasLint && needStyleKb) violation = "LINT_BEFORE_KB";
+          else if (batchHasWrite && needStyleKb) violation = "WRITE_BEFORE_KB";
+          else if (batchHasWrite && needStyleLint) violation = lintExhausted ? "WRITE_BLOCKED_LINT_EXHAUSTED" : "WRITE_BEFORE_LINT_PASS";
+          else if (batchHasKb && needStyleKb && !batchHasStyleKb) violation = "KB_NOT_STYLE_EXAMPLES";
 
-        if (violation) {
-          autoRetryBudget -= 1;
-          writeEvent("assistant.delta", {
-            delta:
-              "\n\n[系统提示] 风格库写作任务已启用“强闭环”：先 kb.search 拉风格样例 → 再 lint.style 对齐 → 最后才允许写入。\n" +
-              `本轮工具调用不满足前置条件（${violation}），我会让模型自动重试一次（无需你输入）。\n` +
-              "请它：把 kb.search / lint.style / 写入操作拆到不同回合（每回合只做一类关键动作）。"
-          });
-          writeEvent("assistant.done", { reason: "auto_retry_style_workflow" });
+          if (violation) {
+            if (autoRetryBudget > 0) {
+              autoRetryBudget -= 1;
+              writeEvent("assistant.delta", {
+                delta:
+                  "\n\n[系统提示] 风格库写作任务已启用“强闭环”：先 kb.search 拉风格样例 → 再 lint.style 对齐 → 最后才允许写入。\n" +
+                  `本轮工具调用不满足前置条件（${violation}），我会让模型自动重试一次（无需你输入）。\n` +
+                  "请它：把 kb.search / lint.style / 写入操作拆到不同回合（每回合只做一类关键动作）。"
+              });
+              writeEvent("assistant.done", { reason: "auto_retry_style_workflow" });
 
-          messages.push({
-            role: "system",
-            content:
-              "你上一轮的 tool_calls 违反了“风格库写作强闭环”约束，请立刻重试并按下面顺序推进：\n" +
-              "A) kb.search（手法/模板）：只搜风格库（purpose=style），优先 kind=card + cardTypes 先拉 6–12 条“可抄模板/金句形状/结构骨架”；如需证据段再用 kind=paragraph/outline + anchorParagraphIndexMax/anchorFromEndMax。 本轮不要调用 lint.style 或任何写入类工具。\n" +
-              (enforceLint
-                ? `B) lint.style（终稿闸门）：基于样例与指纹对照候选稿，输出 issues + rewritePrompt；必须通过闸门（score>=${lintPassScore} 且无 high issue）。未通过则按 rewritePrompt 回炉改写并再次 lint.style（最多回炉 ${lintMaxRework} 次）。本轮不要调用 kb.search 或任何写入类工具。\n`
-                : "") +
-              (enforceLint
-                ? "C) 写入：只有 lint.style 通过闸门后，才允许写入/输出终稿（doc.write/doc.applyEdits 等）。\n"
-                : "C) 写入：在拿到 kb.search 的 tool_result 后，再写入/输出终稿（doc.write/doc.applyEdits 等）。\n") +
-              (hasNonStyleLibraries
-                ? `提示：当前同时绑定了非风格库，因此 kb.search 必须显式传 libraryIds（仅限风格库）：${JSON.stringify(styleLibIds)}。\n`
-                : "") +
-              "注意：手法/模板检索优先 kind=card；若同时绑定了非风格库则必须带 cardTypes 并显式限制到风格库。如需原文证据段再用 kind=paragraph/outline，并建议用 anchorParagraphIndexMax/anchorFromEndMax 做位置过滤。"
-          });
-          continue;
+              messages.push({
+                role: "system",
+                content:
+                  "你上一轮的 tool_calls 违反了“风格库写作强闭环”约束，请立刻重试并按下面顺序推进：\n" +
+                  "A) kb.search（手法/模板）：只搜风格库（purpose=style），优先 kind=card + cardTypes 先拉 6–12 条“可抄模板/金句形状/结构骨架”；如需证据段再用 kind=paragraph/outline + anchorParagraphIndexMax/anchorFromEndMax。 本轮不要调用 lint.style 或任何写入类工具。\n" +
+                  (enforceLint
+                    ? `B) lint.style（终稿闸门）：基于样例与指纹对照候选稿，输出 issues + rewritePrompt；必须通过闸门（score>=${lintPassScore} 且无 high issue）。未通过则按 rewritePrompt 回炉改写并再次 lint.style（最多回炉 ${lintMaxRework} 次）。本轮不要调用 kb.search 或任何写入类工具。\n`
+                    : "") +
+                  (enforceLint
+                    ? "C) 写入：只有 lint.style 通过闸门后，才允许写入/输出终稿（doc.write/doc.applyEdits 等）。\n"
+                    : "C) 写入：在拿到 kb.search 的 tool_result 后，再写入/输出终稿（doc.write/doc.applyEdits 等）。\n") +
+                  (hasNonStyleLibraries
+                    ? `提示：当前同时绑定了非风格库，因此 kb.search 必须显式传 libraryIds（仅限风格库）：${JSON.stringify(styleLibIds)}。\n`
+                    : "") +
+                  "注意：手法/模板检索优先 kind=card；若同时绑定了非风格库则必须带 cardTypes 并显式限制到风格库。如需原文证据段再用 kind=paragraph/outline，并建议用 anchorParagraphIndexMax/anchorFromEndMax 做位置过滤。"
+              });
+              continue;
+            }
+
+            // 自动重试预算耗尽：也不允许放行写入（否则会出现“未 lint 先写入 → proposal_waiting 直接结束”）
+            writeEvent("assistant.delta", {
+              delta:
+                "\n\n[系统提示] 风格库强闭环拦截：当前仍不满足写入前置条件，但已达到自动重试上限。\n" +
+                "- 你可以回复“跳过linter”强制写入（不做风格校验）\n" +
+                "- 或回复“继续”让我再尝试一次"
+            });
+            writeEvent("run.end", { runId, reason: "style_workflow_blocked", turn, violation });
+            writeEvent("assistant.done", { reason: "style_workflow_blocked" });
+            reply.raw.end();
+            agentRunWaiters.delete(runId);
+            return;
+          }
         }
       }
 
