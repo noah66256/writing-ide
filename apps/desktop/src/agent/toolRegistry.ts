@@ -654,7 +654,7 @@ const tools: ToolDefinition[] = [
   {
     name: "kb.search",
     description:
-      "在本地知识库中检索（按库过滤、按 source_doc 分组）。默认只在右侧已关联的库里搜索。用于写作引用素材（结构/卡片/段落）。",
+      "在本地知识库中检索（按库过滤、按 source_doc 分组）。默认只在右侧已关联的库里搜索。用于写作引用素材（套路卡片/段落证据）。提示：kind=outline 仅对含 Markdown 标题(#)的文档有效；想找结构套路更建议 kind=card + cardTypes=[outline]。",
     args: [
       { name: "query", required: true, desc: "搜索关键词/问题" },
       { name: "kind", desc: '可选：artifact kind（"card"|"outline"|"paragraph"），默认 card' },

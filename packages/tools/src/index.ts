@@ -37,11 +37,12 @@ export const TOOL_LIST: ToolMeta[] = [
     name: "kb.search",
     description:
       "在本地知识库中检索（按库过滤、按 source_doc 分组返回）。\n" +
-      "【仿写检索 skill（强烈建议）】当用户要求“按某库风格仿写/改写”时：先用 kb.search 拉 3–8 条可抄的原文样例（优先 kind=paragraph / outline），再写稿；写作中遇到具体段落（开头/转折/结尾/金句）再补一次 kb.search。\n" +
+      "【仿写检索 skill（强烈建议）】当用户要求“按某库风格仿写/改写”时：先用 kb.search 拉 3–8 条可抄样例，再写稿；写作中遇到具体段落（开头/转折/结尾/金句）再补一次 kb.search。\n" +
       "【查询建议】\n" +
-      "- 结构：kind=outline，query=“这篇文章的结构/分段/节奏/五环结构/结论先行”\n" +
-      "- 口吻/句式：kind=paragraph，query=“直男财经 口吻/金句/反差破题/转折句式/收尾 CTA”\n" +
-      "- 维度：传 facetIds（来自 FacetPack，例如 opening_design/logic_framework/ending 等）缩小检索范围。\n" +
+      "- 结构套路/五段论：kind=card，cardTypes=[outline,thesis]（这是“抽卡产物”，更适合口播/无标题文本）\n" +
+      "- Markdown 标题目录：kind=outline（仅当源文档含 # 标题时才会命中；0 命中不代表库为空）\n" +
+      "- 口吻/句式/金句：kind=paragraph，配合 anchorParagraphIndexMax/anchorFromEndMax 拉开头/结尾原文段\n" +
+      "- 维度：传 facetIds（FacetPack，例如 opening_design/logic_framework/ending 等；主要对 kind=card 生效）\n" +
       "【提示】如未关联库，会报错 NO_LIBRARY_SELECTED；请先在右侧把库关联上。",
     args: [
       { name: "query", required: true, desc: "搜索关键词/问题", type: "string" },
@@ -87,7 +88,7 @@ export const TOOL_LIST: ToolMeta[] = [
       "- 生成一段可直接喂给工作模型（如 deepseek）的 rewritePrompt，用来二次改写\n" +
       "\n" +
       "【推荐工作流】（风格库已绑定且任务为写作类）：\n" +
-      "1) kb.search(kind=paragraph/outline, 只搜风格库) 拉 3–8 条可抄样例\n" +
+      "1) 先 kb.search(kind=card, cardTypes=[hook,one_liner,ending,outline,thesis]) 拉套路/结构，再按需 kb.search(kind=paragraph, anchorParagraphIndexMax/anchorFromEndMax) 拉原文证据\n" +
       "2) 先产出一版候选稿（不要立刻写入文件）\n" +
       "3) lint.style(text=候选稿) → 拿 rewritePrompt 再改一版 → 最后 doc.write/doc.applyEdits\n",
     args: [

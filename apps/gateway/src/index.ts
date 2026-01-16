@@ -1042,6 +1042,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     hasWriteApplied: runState.hasWriteApplied,
     hasKbSearch: runState.hasKbSearch,
     hasStyleKbSearch: runState.hasStyleKbSearch,
+    hasStyleKbHit: (runState as any).hasStyleKbHit === true,
     styleKbDegraded: runState.styleKbDegraded,
     styleLintPassed: runState.styleLintPassed,
     styleLintFailCount: runState.styleLintFailCount,
@@ -1872,9 +1873,12 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           isStyleExampleKbSearch({ call: call as any, styleLibIdSet: gates.styleLibIdSet, hasNonStyleLibraries: gates.hasNonStyleLibraries })
         ) {
           const groups = Array.isArray((payload.output as any)?.groups) ? (payload.output as any).groups : [];
+          const hadHitBefore = (runState as any).hasStyleKbHit === true;
           // 关键修正：把“做过检索”与“有命中”解耦。0 命中也算完成（进入降级），避免风格闭环卡死。
           runState.hasStyleKbSearch = true;
-          if (groups.length === 0 && !runState.styleKbDegraded) {
+          if (groups.length > 0) (runState as any).hasStyleKbHit = true;
+          // 关键修正：如果本轮已命中过风格样例（例如 paragraph 已有命中），后续某次（例如 kind=outline）0 命中不应再触发“降级”提示（避免误报噪音）。
+          if (groups.length === 0 && !runState.styleKbDegraded && !hadHitBefore) {
             runState.styleKbDegraded = true;
             writePolicyDecision({
               turn,
@@ -1887,6 +1891,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               delta:
                 "\n\n[系统提示] ⚠️ 风格样例检索 0 命中，已进入降级模式：将继续推进 lint.style / 写作闭环，但风格一致性可能变弱。\n" +
                 "- 建议：换个 query（更像“手法/句式/节奏”而不是主题词）\n" +
+                "- 提示：kind=outline 仅对含 Markdown 标题(#)的文档有效；想找结构套路可用 kind=card + cardTypes=[outline]\n" +
                 "- 或检查风格库是否为空/未生成手册"
             });
           }

@@ -46,6 +46,7 @@ export type RunState = {
   hasAnyToolCall: boolean;
   hasKbSearch: boolean;
   hasStyleKbSearch: boolean; // 风格库样例检索是否已完成（以“已尝试检索”为准；0 命中也算完成，避免卡死）
+  hasStyleKbHit: boolean; // 风格库样例检索是否曾命中（groups>0）；用于避免“后续某次 0 命中”误触发降级提示
   styleKbDegraded: boolean; // 风格样例检索 0 命中降级（仅警告，不再卡死）
   styleLintPassed: boolean;
   styleLintFailCount: number;
@@ -69,6 +70,7 @@ export function createInitialRunState(args?: { protocolRetryBudget?: number; wor
     hasAnyToolCall: false,
     hasKbSearch: false,
     hasStyleKbSearch: false,
+    hasStyleKbHit: false,
     styleKbDegraded: false,
     styleLintPassed: false,
     styleLintFailCount: 0,
