@@ -138,14 +138,17 @@ export function detectRunIntent(args: {
     /(先(直接)?(开始|写|仿写|给一版|给版本|产出|干活)|不要(再)?问|别问了|先做|直接写|继续)/.test(userPrompt);
   const wantsWrite =
     mode !== "chat" &&
-    (/@\{[^}]+\/\}/.test(userPrompt) || /(分割|拆分|切分|写入|保存|生成|放到|移动到|导出|新建|删除|重命名)/.test(userPrompt));
+    (/@\{[^}]+\/\}/.test(userPrompt) || // 目录引用（@{dir/}）通常意味着要写入/落盘到该目录
+      /(分割|拆分|切分|写入|保存|生成|放到|移动到|导出|新建|删除|重命名)/.test(userPrompt) ||
+      /(写|仿写|改写|润色|续写|扩写)\s*@\{[^}]+\}/.test(userPrompt)); // 写@{file}：目标文件写作/改写
   const wantsOkOnly =
     mode !== "chat" &&
     /(回(个|我)?\s*ok|回复\s*ok|回\s*ok|只要\s*ok|给我\s*ok)/i.test(userPrompt) &&
     /(不用回别的|别回别的|不要回别的|就行)/.test(userPrompt);
   const isWritingTask =
     mode !== "chat" &&
-    /(仿写|改写|润色|续写|扩写|写(一篇|一段|一条|稿|文|文章|脚本|文案)|生成(文章|稿|文案)|按.+风格)/.test(userPrompt);
+    (/(仿写|改写|润色|续写|扩写|写(一篇|一段|一条|稿|文|文章|脚本|文案)|写.{0,8}\d{2,5}字|生成(文章|稿|文案)|按.+风格)/.test(userPrompt) ||
+      /(写|仿写|改写|润色|续写|扩写)\s*@\{[^}]+\}/.test(userPrompt)); // 写@{示例.md}
   const skipLint = /(跳过|不用|不要).{0,12}(linter|风格检查|风格对齐|风格校验|像不像检查)/i.test(userPrompt);
   const skipCta = /(跳过|不用|不要).{0,12}(cta|点赞|关注|评论|转发|收藏|三连|一键三连)/i.test(userPrompt);
 

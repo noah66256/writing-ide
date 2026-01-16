@@ -151,6 +151,15 @@ async function main() {
     assert.ok(Array.isArray(skills[0]?.activatedBy?.reasonCodes));
   }
   {
+    // 真实场景：写@{file}（目标文件）+ runIntent=auto，应判为写作任务并激活 style_imitate
+    const mode = "agent" as const;
+    const userPrompt = "严格用绑定风格库的口吻写@{示例.md}，1200字左右";
+    const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: "auto" });
+    assert.equal(intent.isWritingTask, true);
+    const skills = activateSkills({ mode, userPrompt, mainDocRunIntent: "auto", kbSelected: [{ id: "style-1", purpose: "style" }], intent });
+    assert.equal(skills.some((s) => s.id === "style_imitate"), true);
+  }
+  {
     // 续跑/澄清回复：用户 prompt 很短（例如“继续/视频脚本”），但 RUN_TODO 明确属于写作闭环，应激活 style_imitate
     const mode = "agent" as const;
     const userPrompt = "继续";
