@@ -123,6 +123,21 @@ export function AgentPane() {
   const openKbManager = useKbStore((s) => s.openKbManager);
   const kbLibraries = useKbStore((s) => s.libraries);
 
+  type RunIntentValue = NonNullable<MainDoc["runIntent"]>;
+  const runIntentValue = (mainDoc?.runIntent ?? "auto") as RunIntentValue;
+  const runIntentLabel =
+    runIntentValue === "writing"
+      ? "写作"
+      : runIntentValue === "rewrite"
+        ? "改写"
+        : runIntentValue === "polish"
+          ? "润色"
+          : runIntentValue === "analysis"
+            ? "分析"
+            : runIntentValue === "ops"
+              ? "操作"
+              : "自动";
+
   const skillPrompt = useMemo(() => {
     const typed = String(input ?? "").trim();
     if (typed) return typed;
@@ -270,21 +285,6 @@ export function AgentPane() {
     `- Recent: ~${Math.ceil(recentTextChars / 4)}\n` +
     `- Input: ~${Math.ceil(inputChars / 4)}\n` +
     `（提示：后续接入真实 usage 后会用真实 token 计数替代）`;
-
-  type RunIntentValue = NonNullable<MainDoc["runIntent"]>;
-  const runIntentValue = (mainDoc?.runIntent ?? "auto") as RunIntentValue;
-  const runIntentLabel =
-    runIntentValue === "writing"
-      ? "写作"
-      : runIntentValue === "rewrite"
-        ? "改写"
-        : runIntentValue === "polish"
-          ? "润色"
-          : runIntentValue === "analysis"
-            ? "分析"
-            : runIntentValue === "ops"
-              ? "操作"
-              : "自动";
 
   const startTurn = (text: string) => {
     if (isRunning) return;
