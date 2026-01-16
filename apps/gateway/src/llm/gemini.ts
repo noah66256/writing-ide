@@ -60,19 +60,36 @@ function extractGeminiUsage(json: any): { promptTokens: number; completionTokens
 }
 
 function buildGeminiBody(args: { messages: OpenAiChatMessage[]; temperature?: number; maxTokens?: number | null }) {
-  const system = args.messages
-    .filter((m) => m.role === "system")
-    .map((m) => String(m.content || "").trim())
-    .filter(Boolean)
-    .join("\n\n");
+  const isToolResultSystem = (text: string) => {
+    const t = String(text ?? "").trimStart();
+    return t.startsWith("<tool_result") || t.includes("<tool_result");
+  };
 
-  const contents = args.messages
-    .filter((m) => m.role !== "system" && m.role !== "tool")
-    .map((m) => {
-      const role = m.role === "assistant" ? "model" : "user";
-      return { role, parts: [{ text: String(m.content ?? "") }] };
-    })
-    .filter((x) => Array.isArray(x.parts) && typeof x.parts?.[0]?.text === "string" && x.parts[0].text.length > 0);
+  // Gemini 建议：systemInstruction 用于“全局规则”，不适合塞动态的 tool_result。
+  // 否则在多回合（tool_result 后）更容易出现“候选为空/无输出”的情况。
+  const systemParts: string[] = [];
+  const contents: Array<{ role: "user" | "model"; parts: Array<{ text: string }> }> = [];
+
+  for (const m of args.messages) {
+    const raw = String(m.content ?? "");
+    const text = raw.trim();
+    if (!text) continue;
+
+    if (m.role === "system") {
+      if (isToolResultSystem(text)) {
+        contents.push({ role: "user", parts: [{ text }] });
+      } else {
+        systemParts.push(text);
+      }
+      continue;
+    }
+    if (m.role === "tool") continue;
+
+    const role = m.role === "assistant" ? "model" : "user";
+    contents.push({ role, parts: [{ text }] });
+  }
+
+  const system = systemParts.join("\n\n");
 
   const generationConfig: any = {};
   if (typeof args.temperature === "number" && Number.isFinite(args.temperature)) generationConfig.temperature = args.temperature;
