@@ -1092,12 +1092,20 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
         // 纯文本：认为本次 run 已给出用户可读输出，结束
         // 口播风格兜底：正文输出缺少 CTA 时自动补齐（不额外占用模型/工具预算）
+        // 重要：有些模型会用短标签包裹最终输出（例如 <final>...</final>），导致上面“决定 text 并流式转发”的逻辑不触发，
+        // 从而前端看起来“run.end 了但没任何回复”。这里在结束前兜底 flush 一次。
+        if (flushed < assistantText.length) {
+          const remain = assistantText.slice(flushed);
+          if (remain) writeEvent("assistant.delta", { delta: remain });
+          flushed = assistantText.length;
+        }
         if (styleNeedsCta()) {
           const t0 = assistantText.trim();
           if (looksLikeDraftText(t0) && !looksLikeHasCTA(t0)) {
             const cta = "\n\n——\n\n家人们，点个赞、关注一下，评论区聊聊：你觉得日本这波是继续嘴硬，还是准备认怂？";
             writeEvent("assistant.delta", { delta: cta });
             assistantText += cta;
+            flushed = assistantText.length;
           }
         }
         messages.push({ role: "assistant", content: assistantText });
