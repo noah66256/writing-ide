@@ -215,6 +215,7 @@ async function main() {
     const gw = await readRepoFile("apps/gateway/src/index.ts");
     assert.ok(gw.includes("\"policy.decision\""), "Gateway 缺少 policy.decision SSE（可观测性回退）");
     assert.ok(gw.includes("SkillPolicy"), "Gateway 缺少 SkillPolicy 决策记录（Skills 可解释性回退）");
+    assert.ok(gw.includes("SkillToolCapsPolicy"), "Gateway 缺少 SkillToolCapsPolicy（skills toolCaps/阶段门禁可能回退）");
     assert.ok(gw.includes("reasonCodes"), "Gateway run.end 未携带 reasonCodes（可解释性回退）");
     assert.ok(gw.includes("style_kb_zero_hit"), "Gateway 缺少 kb 0 命中降级标记（可能再次卡死）");
     assert.ok(gw.includes("reason: \"clarify_waiting\""), "Gateway 缺少 clarify_waiting 分支（可能再次“问你但仍继续跑”）");

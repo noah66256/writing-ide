@@ -29,6 +29,7 @@ import { ensureRunAuditEnded, persistRunAudit, recordRunAuditEvent, sanitizeForA
 import {
   analyzeAutoRetryText,
   analyzeStyleWorkflowBatch,
+  SKILL_MANIFESTS_V1,
   activateSkills,
   createInitialRunState,
   detectRunIntent,
@@ -815,6 +816,23 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   const activeSkillIds = (activeSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
   const stageKeyForRun = pickSkillStageKeyForAgentRun(activeSkills, "agent.run");
   const billingSource = stageKeyForRun.startsWith("agent.skill.") ? stageKeyForRun : `agent.${mode}`;
+  const skillManifestById = new Map((SKILL_MANIFESTS_V1 as any[]).map((m: any) => [String(m?.id ?? "").trim(), m]));
+
+  const skillsSystemPrompt = (() => {
+    if (!activeSkillIds.length) return "";
+    const frags = activeSkillIds
+      .map((id: string) => {
+        const m: any = skillManifestById.get(id);
+        const s = String(m?.promptFragments?.system ?? "").trim();
+        return s;
+      })
+      .filter(Boolean);
+    if (!frags.length) return "";
+    return (
+      `【Active Skills】${activeSkillIds.join(", ")}（stageKey=${stageKeyForRun}）\n` +
+      frags.map((x) => `- ${x}`).join("\n")
+    );
+  })();
 
   const env = await getLlmEnv();
   if (!env.ok) return reply.code(500).send({ error: "LLM_NOT_CONFIGURED" });
@@ -868,7 +886,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
   const temperature = stageTemp;
   const runId = randomUUID();
-  const allowedToolNames = toolNamesForMode(mode);
+  const baseAllowedToolNames = toolNamesForMode(mode);
 
   const origin = String((request as any).headers?.origin ?? "").trim();
   if (origin) {
@@ -989,6 +1007,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
   const messages: OpenAiChatMessage[] = [
     { role: "system", content: buildAgentProtocolPrompt(mode) },
+    ...(skillsSystemPrompt ? [{ role: "system", content: skillsSystemPrompt } as OpenAiChatMessage] : []),
     ...(body.contextPack ? [{ role: "system", content: body.contextPack } as OpenAiChatMessage] : []),
     { role: "user", content: body.prompt }
   ];
@@ -1052,6 +1071,78 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     detail: { stageKey: stageKeyForRun, activeSkillIds, activeSkills },
   });
 
+  type SkillToolCapsPhase = "none" | "style_need_kb" | "style_need_lint" | "style_can_write";
+
+  const ALWAYS_ALLOW_TOOL_NAMES = new Set<string>(["run.setTodoList", "run.updateTodo", "run.mainDoc.get", "run.mainDoc.update"]);
+
+  let lastToolCapsPhase: SkillToolCapsPhase = "none";
+
+  const computeToolCapsForTurn = (): { phase: SkillToolCapsPhase; allowed: Set<string>; hint: string; reasonCodes: string[] } => {
+    // base allowlist（mode 级）
+    let allowed = new Set<string>(Array.from(baseAllowedToolNames as any as Set<string>));
+    const reasonCodes: string[] = [];
+
+    // 1) toolCaps（manifest 级：allow/deny）
+    for (const id of activeSkillIds) {
+      const m: any = skillManifestById.get(id);
+      const caps: any = m?.toolCaps ?? null;
+      if (!caps || typeof caps !== "object") continue;
+
+      const allowTools = Array.isArray(caps.allowTools) ? (caps.allowTools as any[]).map((x) => String(x ?? "").trim()).filter(Boolean) : [];
+      const denyTools = Array.isArray(caps.denyTools) ? (caps.denyTools as any[]).map((x) => String(x ?? "").trim()).filter(Boolean) : [];
+
+      if (allowTools.length) {
+        const allowSet = new Set<string>([...allowTools, ...Array.from(ALWAYS_ALLOW_TOOL_NAMES)]);
+        for (const name of Array.from(allowed)) {
+          if (!allowSet.has(name)) allowed.delete(name);
+        }
+        reasonCodes.push(`toolcaps:allow:${id}`);
+      }
+      if (denyTools.length) {
+        for (const name of denyTools) allowed.delete(name);
+        reasonCodes.push(`toolcaps:deny:${id}`);
+      }
+    }
+
+    // 2) StyleImitateSkill（状态级：need_kb / need_lint / can_write）
+    let phase: SkillToolCapsPhase = "none";
+    let hint = "";
+    if (gates.styleGateEnabled) {
+      if (!runState.hasStyleKbSearch) {
+        phase = "style_need_kb";
+        // 禁止 lint.style & 写入类 doc.*，避免 “LINT_BEFORE_KB / WRITE_BEFORE_KB”
+        allowed.delete("lint.style");
+        for (const name of Array.from(allowed)) {
+          if (isWriteLikeTool(name)) allowed.delete(name);
+        }
+        hint =
+          "【Skill: style_imitate】当前阶段：need_kb_examples。\n" +
+          "- 本回合禁止调用 lint.style 与任何写入类 doc.*（doc.write/doc.applyEdits/doc.replaceSelection/doc.splitToDir/...）。\n" +
+          "- 请先调用 kb.search（只搜风格库）拉样例；或仅更新 todo/mainDoc。";
+        reasonCodes.push("phase:style_need_kb");
+      } else if (gates.lintGateEnabled && !runState.styleLintPassed && runState.styleLintFailCount <= lintMaxRework) {
+        phase = "style_need_lint";
+        // 禁止写入类 doc.*，避免 “WRITE_BEFORE_LINT_PASS”
+        for (const name of Array.from(allowed)) {
+          if (isWriteLikeTool(name)) allowed.delete(name);
+        }
+        hint =
+          "【Skill: style_imitate】当前阶段：need_lint。\n" +
+          "- 本回合禁止调用任何写入类 doc.*（doc.write/doc.applyEdits/doc.replaceSelection/doc.splitToDir/...）。\n" +
+          "- 你可以输出候选稿（纯文本），然后调用 lint.style(text=候选稿) 做终稿闸门。";
+        reasonCodes.push("phase:style_need_lint");
+      } else {
+        phase = "style_can_write";
+        hint =
+          "【Skill: style_imitate】当前阶段：can_write。\n" +
+          "- 已满足前置条件（kb 已完成，且 lint 已通过/跳过/降级），本回合允许写入类 doc.*。";
+        reasonCodes.push("phase:style_can_write");
+      }
+    }
+
+    return { phase, allowed, hint, reasonCodes };
+  };
+
   const maxTurns = mode === "agent" ? 48 : mode === "plan" ? 32 : 12;
 
 
@@ -1063,6 +1154,22 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       currentTurn = turn;
       // SSE 强边界：每次模型调用都显式标记“新一条 assistant 气泡开始”（Desktop 可据此切分 turn）
       writeEvent("assistant.start", { runId, turn });
+
+      const toolCaps = computeToolCapsForTurn();
+      const allowedToolNames = toolCaps.allowed;
+      const toolCapsPhase = toolCaps.phase;
+      if (toolCaps.phase !== lastToolCapsPhase && toolCaps.hint) {
+        writePolicyDecision({
+          turn,
+          policy: "SkillToolCapsPolicy",
+          decision: "phase",
+          reasonCodes: toolCaps.reasonCodes,
+          detail: { phase: toolCaps.phase, activeSkillIds },
+        });
+        // 仅在阶段变化时注入一次，避免 context 过度膨胀
+        messages.push({ role: "system", content: toolCaps.hint });
+        lastToolCapsPhase = toolCaps.phase;
+      }
 
       let assistantText = "";
       let decided: "unknown" | "tool" | "text" = "unknown";
@@ -1356,6 +1463,83 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       messages.push({ role: "assistant", content: assistantText });
       // 关键：tool_calls 分支也要显式结束当前 assistant 气泡边界（否则 Desktop 只能在 tool.call 时猜测性 finish）
       writeEvent("assistant.done", { reason: "tool_calls", turn });
+
+      // Skill tool caps（阶段化门禁）：在执行任何工具前先拦截“不允许的工具”，并自动要求模型重试。
+      // 说明：这里区分
+      // - baseAllowedToolNames（mode 级硬安全）：不在其中直接 block_end
+      // - allowedToolNames（skills/state 级门禁）：可重试修正（避免误伤）
+      const modeDenied = toolCalls.find((c: any) => !c?.name || !baseAllowedToolNames.has(String(c.name ?? "")));
+      if (modeDenied) {
+        writePolicyDecision({
+          turn,
+          policy: "SafetyPolicy",
+          decision: "block_end",
+          reasonCodes: ["tool_not_allowed"],
+          detail: { tool: String(modeDenied?.name ?? "") },
+        });
+        writeEvent("error", { error: `TOOL_NOT_ALLOWED:${String(modeDenied?.name ?? "")}` });
+        writeEvent("run.end", { runId, reason: "tool_not_allowed", reasonCodes: ["tool_not_allowed"], turn, tool: String(modeDenied?.name ?? "") });
+        reply.raw.end();
+        agentRunWaiters.delete(runId);
+        return;
+      }
+
+      const capDeniedTools = toolCalls
+        .filter((c: any) => c?.name && baseAllowedToolNames.has(String(c.name ?? "")) && !allowedToolNames.has(String(c.name ?? "")))
+        .map((c: any) => String(c.name ?? ""))
+        .filter(Boolean);
+      if (capDeniedTools.length) {
+        if (runState.workflowRetryBudget > 0) {
+          writePolicyDecision({
+            turn,
+            policy: "SkillToolCapsPolicy",
+            decision: "retry",
+            reasonCodes: ["tool_caps_violation", `phase:${toolCapsPhase}`, ...capDeniedTools.slice(0, 6).map((t: string) => `tool:${t}`)],
+            detail: {
+              phase: toolCapsPhase,
+              denied: capDeniedTools.slice(0, 12),
+              budget: "workflow",
+              budgetBefore: runState.workflowRetryBudget,
+              budgetAfter: Math.max(0, runState.workflowRetryBudget - 1),
+            },
+          });
+          runState.workflowRetryBudget -= 1;
+          writeEvent("assistant.delta", {
+            delta:
+              `\n\n[系统提示] 当前技能门禁（phase=${toolCapsPhase}）不允许本轮调用：${capDeniedTools.slice(0, 6).join(", ")}。\n` +
+              "我会让模型自动重试一次（无需你输入）：请按阶段要求选择允许的工具（或先输出候选稿纯文本）。",
+          });
+          writeEvent("assistant.done", { reason: "auto_retry_tool_caps", turn });
+          messages.push({
+            role: "system",
+            content:
+              "你上一轮 tool_calls 触发了技能门禁（SkillToolCapsPolicy），包含当前阶段不允许的工具。\n" +
+              "- 下一条消息必须且只能输出 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
+              `- 当前 phase=${toolCapsPhase} 禁止工具：${capDeniedTools.join(", ")}\n` +
+              "- 请改为：只调用本阶段允许的工具；或先输出候选稿（纯文本）再进入下一阶段。",
+          });
+          continue;
+        }
+
+        writePolicyDecision({
+          turn,
+          policy: "SkillToolCapsPolicy",
+          decision: "block_end",
+          reasonCodes: ["tool_caps_blocked", `phase:${toolCapsPhase}`, "auto_retry_budget_exhausted"],
+          detail: { phase: toolCapsPhase, denied: capDeniedTools.slice(0, 12) },
+        });
+        writeEvent("assistant.delta", {
+          delta:
+            "\n\n[系统提示] 技能门禁拦截：当前仍调用了本阶段不允许的工具，但已达到自动重试上限。\n" +
+            "- 你可以回复“继续”让我再尝试一次\n" +
+            "- 或调整意图/解除风格库绑定后再试",
+        });
+        writeEvent("run.end", { runId, reason: "tool_caps_blocked", reasonCodes: ["tool_caps_blocked"], turn, phase: toolCapsPhase });
+        writeEvent("assistant.done", { reason: "tool_caps_blocked", turn });
+        reply.raw.end();
+        agentRunWaiters.delete(runId);
+        return;
+      }
 
       // 风格库写作强约束：
       // - 为了保证“先检索样例→再生成→再对齐”的可控闭环，避免同一轮把 kb.search / lint.style / 写入类工具混在一起
