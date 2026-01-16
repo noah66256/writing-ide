@@ -1267,7 +1267,10 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         } catch {
           toolResultJson = JSON.stringify({ ok: false, error: "RESULT_NOT_SERIALIZABLE" });
         }
-        const toolResultText = `[tool_result name="${String(call.name ?? "")}"]\n${toolResultJson}\n[/tool_result]`;
+        const toolResultText =
+          `[tool_result name="${String(call.name ?? "")}"]\n${toolResultJson}\n[/tool_result]\n` +
+          // 兼容部分代理：tool_result 作为最后一条 user 消息时，可能会出现“choices 为空不续写”。补一行继续指令提高稳定性。
+          "请基于以上 tool_result 继续完成任务。";
         const useText = toolResultFormat === "text";
         messages.push({ role: useText ? "user" : "system", content: useText ? toolResultText : toolResultXml });
 
@@ -1873,7 +1876,7 @@ fastify.post(
       const toolPayload = { ok: true, tool: "run.setTodoList", testedAt: new Date().toISOString() };
       const toolJson = JSON.stringify(toolPayload);
       const toolXml = `<tool_result name="run.setTodoList"><![CDATA[${toolJson}]]></tool_result>`;
-      const toolText = `[tool_result name="run.setTodoList"]\n${toolJson}\n[/tool_result]`;
+      const toolText = `[tool_result name="run.setTodoList"]\n${toolJson}\n[/tool_result]\n请基于以上 tool_result 继续完成任务。`;
       const fakeToolCallXml =
         `<tool_calls>` +
         `<tool_call name="run.setTodoList">` +
