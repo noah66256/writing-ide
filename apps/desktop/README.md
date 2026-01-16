@@ -18,11 +18,12 @@
 - 右侧 Agent：流式输出 + Tool Blocks（Keep/Undo）
 - 右侧正文 DraftBox（文本框+一键复制）+ “只看正文/显示步骤”切换（隐藏/展开工具步骤）
 - Plan/Agent：支持 **ReAct（XML `<tool_calls>`）** 的工具调用（开发期先在 Desktop 本地执行最小工具集）
+- 输入区支持“结构化意图（runIntent）”（开发期已落地）：`自动/写作/改写/润色/分析/操作`，会写入 Main Doc 并注入 Context Pack（减少写作强闭环误伤/漏判；为 M3 Skills 做准备）
 - Topic Lab 最小版：生成选题/标题/角度，选中后写入 Main Doc 并新建草稿文件（可 Undo）
 
 ### ReAct（开发期：本地工具执行）
 Plan/Agent 模式会按回合注入 Context Pack：
-- Main Doc（本次 Run 主线）
+- Main Doc（本次 Run 主线；含结构化意图 `runIntent`）
 - Doc Rules（项目级：`doc.rules.md`）
 - 编辑器选区（`EDITOR_SELECTION`：路径/范围/选中文本，带截断）
 - 项目状态（打开文件、activePath、文件列表摘要）
@@ -32,6 +33,7 @@ Plan/Agent 模式会按回合注入 Context Pack：
 - 系统执行工具后用 `<tool_result/>` 回传（system message）
 - 协议硬约束：工具调用 XML 必须“整条消息独占”，不得夹杂自然语言；否则 Gateway 会自动要求模型重试（避免“问你但仍继续跑”）
 - 当 todo 中出现 `blocked/等待确认/请确认`，Gateway 会以 `clarify_waiting` 暂停等待用户输入；你也可以回复“继续”让它按默认假设推进（可能偏离你的偏好）。
+- SSE 边界增强（开发期已落地）：Gateway 会在每次模型调用前发送 `assistant.start(turn)`，并为 `assistant.delta/assistant.done` 补齐 `turn` 字段；Desktop 据此切分回合边界（减少 UI 串气泡/时序猜测）。
 
 当前最小工具集：
 - `run.mainDoc.get` / `run.mainDoc.update`（low / auto_apply / 可 Undo）

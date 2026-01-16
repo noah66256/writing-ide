@@ -148,6 +148,9 @@
 - Todo/进度：`run.setTodoList` / `run.updateTodo`（工具）+ Context Pack 注入 + Dock/Runs 展示（可追踪闭环）
 - Agent 写入任务闭环：Plan/Agent 下若 Todo 未设置或用户要求写入但尚未发生写入工具调用，Gateway 不会直接 `reason=text` 结束，会自动要求模型继续
 - 文稿拆分工具：`doc.splitToDir`（proposal-first）把“标题/文案(正文)”大篇切成多文件写入目录（Keep/Undo）
+- 结构化意图（runIntent，开发期已落地）：输入区可选 `自动/写作/改写/润色/分析/操作`，写入 Main Doc 并注入 Context Pack；Gateway 会优先按该意图判定是否启用“写作强闭环”（减少误伤/漏判；为后续 Skills 自动启用做准备）
+- SSE 边界增强（开发期已落地）：Gateway 发送 `assistant.start(turn)`，并为 `assistant.delta/assistant.done` 补齐 `turn`；Desktop 用 turn 切分回合边界（减少串气泡/时序猜测）
+- 预算拆分（开发期已落地）：把“协议修复/工作流重试/风格回炉”预算拆开（`protocolRetryBudget/workflowRetryBudget/lintReworkBudget`），并在 `policy.decision` 里记录消耗原因（更可解释、也更不容易被绕过）
 
 建议下一步补齐（写作正事会强依赖）：
 - `Outline`：从 Markdown 标题树生成大纲，并与编辑器联动（点击定位）

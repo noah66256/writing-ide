@@ -18,15 +18,26 @@
     - 库体检（体裁/声音开集标签）：`POST /api/kb/dev/classify_genre`
     - 风格对齐检查（lint.style）：`POST /api/kb/dev/lint_style`（给 Desktop 的 `lint.style` 工具使用）
   - 积分余额/流水与管理员充值接口（演示用）
+  - ProviderAdapter（已落地）：Gemini/OpenAI-compat 的流式选择 + one-shot（`completionOnceViaProvider`）+ tool_result 注入逻辑收敛
+  - Agent 可观测/可解释（已落地）：
+    - `run.end` 统一携带 `reasonCodes`
+    - 结构化决策事件：`policy.decision`（含 policy/decision/reasonCodes/state）
+    - assistant 边界增强：`assistant.start(turn)` / `assistant.done(turn)`（减少前端猜测性 finish）
+  - 工具契约与参数校验（已落地）：`packages/tools` 提供 `inputSchema`；Gateway 在下发 tool.call 前做校验，失败则触发自动重试修正参数
+  - Server-side 工具试点（已落地）：`serverToolRunner` + `tool.call.executedBy`
+    - 目前支持：`lint.style(text=...)`、`project.listFiles`、`project.docRules.get`（其余仍由 Desktop 执行兜底）
+  - 计费与审计（开发期已落地）：尽量提取上游 usage，对 `llm.chat` / `agent.run` / `tool.lint.style` 扣费并落审计（`db.json.runAudits`）
+  - Admin 审计接口（开发期已落地）：`GET /api/admin/audit/runs`、`GET /api/admin/audit/runs/:id`
 - 待实现：
-  - Tool Registry（Schema + XML）与执行器（把 Desktop 本地工具逐步迁回 Gateway）
-  - run/step 事件流（SSE/WebSocket）、toolRun 记录、undoToken/撤销策略、Run 审计查询接口
+  - 更完整的工具执行迁回 Gateway（含写入类的 proposal-first/Undo 策略对齐；Desktop 仍保留本地 fs/编辑器能力）
+  - Tool 契约完善：outputSchema/统一错误码/更强结果校验
   - Postgres+pgvector KB 存储层、webSearch/导入/抽取、LLM 配置热生效（B 端配置）
 
 ### Agent Run（开发期：SSE）
 已实现（开发期最小闭环）：
 - `POST /api/agent/run/stream`：启动一次 Plan/Agent 运行（SSE），Gateway 负责 ReAct 编排
-  - SSE 事件：`run.start` / `assistant.delta` / `assistant.done` / `tool.call` / `tool.result` / `error`
+  - SSE 事件：`run.start` / `assistant.start` / `assistant.delta` / `assistant.done` / `tool.call` / `tool.result` / `policy.decision` / `run.end` / `error`
+    - 其中 `assistant.*` 事件会携带 `turn`（回合边界），用于前端稳定切分气泡与定位问题。
   - 工具执行：Gateway 发 `tool.call` 给 Desktop；Desktop 执行后调用 `POST /api/agent/run/:runId/tool_result` 回传
   - 关键规则（对齐写作 IDE，不跑偏）：
     - 工具调用必须 **XML 独占消息**：`<tool_calls>/<tool_call>` 必须是整条消息唯一内容（不得夹杂自然语言）；若混杂会自动要求模型重试，避免“问用户但继续跑”。

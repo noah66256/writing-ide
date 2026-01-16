@@ -12,13 +12,15 @@
 
 ### 主要模块（规划）
 - `xmlProtocol`（已实现）：统一解析/渲染 `<tool_calls>/<tool_call>/<tool_result>`（Desktop/Gateway 复用）。
-- `runMachine`（已实现）：最小 RunState + Policy 函数（意图识别、StyleGate/AutoRetry/Proposal 判定等），用于把 Gateway 的“散落 if”收敛为可复用的纯函数。
+- `runMachine`（已实现）：最小 RunState + Policy 函数（结构化意图 runIntent、预算拆分、StyleGate/AutoRetry/Proposal 判定等），用于把 Gateway 的“散落 if”收敛为可复用的纯函数。
 - `providers`（规划）：模型 Provider 抽象（OpenAI/Claude/Gemini/…）
 - `planner`（规划）：todo 生成与重规划
 
 ### UI 事件模型（规划）
-- `assistant.delta`：流式文本增量
+- `run.start` / `run.end`：一次 Run 的开始/结束（`run.end` 会携带 reasonCodes）
+- `assistant.start` / `assistant.delta` / `assistant.done`：assistant 气泡边界 + 流式增量（`assistant.*` 会携带 turn，用于稳定切分回合）
 - `tool.call` / `tool.result`：工具调用与结果（用于渲染工具卡片）
+- `policy.decision`：结构化策略决策记录（policy/decision/reasonCodes/state），用于排查“为什么重试/为什么拦截/为什么扣费”
 - `step.keep` / `step.undo`：用户对该步骤的 Keep/Undo 操作（Undo 需调用工具的撤销策略）
 
 
