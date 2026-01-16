@@ -778,6 +778,11 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     mode !== "chat" &&
     (/@\{[^}]+\/\}/.test(userPrompt) ||
       /(分割|拆分|切分|写入|保存|生成|放到|移动到|导出|新建|删除|重命名)/.test(userPrompt));
+  // 轻量“连通性测试”识别：用户明确只要一个 OK（用于空输出兜底）
+  const wantsOkOnly =
+    mode !== "chat" &&
+    /(回(个|我)?\s*ok|回复\s*ok|回\s*ok|只要\s*ok|给我\s*ok)/i.test(userPrompt) &&
+    /(不用回别的|别回别的|不要回别的|就行)/.test(userPrompt);
 
   function parseKbSelectedLibrariesFromContextPack(ctx?: string): any[] {
     const text = String(ctx ?? "");
@@ -1037,12 +1042,15 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           const needWrite = wantsWrite && !hasWriteOps && !isClarify;
           const needKb = styleGateEnabled && !hasStyleKbSearch && !isClarify;
           const needLint = lintGateEnabled && !styleLintPassed && styleLintFailCount <= lintMaxRework && !isClarify;
+          // 仅仅因为“输出为空”而触发重试：通常表示模型没有给用户最终可读回复（Gemini 更常见）
+          const needFinalText = isEmpty && !needTodo && !needWrite && !needKb && !needLint;
 
           if (isFIMLeak || isEmpty || needTodo || needWrite || needKb || needLint) {
             autoRetryBudget -= 1;
             const reasons: string[] = [];
             if (isFIMLeak) reasons.push("模型输出异常(FIM token)");
             else if (isEmpty) reasons.push("输出为空");
+            if (needFinalText) reasons.push("缺少最终回复");
             if (needTodo) reasons.push("Todo 未设置");
             if (needKb) reasons.push("风格样例未检索");
             if (needLint) reasons.push("未进行风格对齐(lint.style)");
@@ -1054,9 +1062,11 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
 [系统提示] 检测到本次任务尚未完成（${reasonText}），我会让模型自动继续一次（无需你输入）。
 ` +
-                (needTodo
-                  ? "请它：先 run.setTodoList（永远第一步）；todo 中可包含澄清步骤与默认假设；"
-                  : "请它：不要重复 run.setTodoList（本次 Run 已有 todo），直接推进下一步；") +
+                (needFinalText
+                  ? "请它：直接输出对用户可读的最终回复（Markdown），不要再调用工具、不要输出任何 <tool_calls>/<tool_call>；"
+                  : needTodo
+                    ? "请它：先 run.setTodoList（永远第一步）；todo 中可包含澄清步骤与默认假设；"
+                    : "请它：不要重复 run.setTodoList（本次 Run 已有 todo），直接推进下一步；") +
                 (needKb
                   ? "若已绑定风格库且任务是写作类：先 kb.search（kind=card + cardTypes，且只搜风格库）拉“套路模板/金句形状/结构骨架”；必要时再补 kb.search(kind=paragraph, anchorParagraphIndexMax/anchorFromEndMax) 拉原文段落；"
                   : "") +
@@ -1072,19 +1082,24 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             messages.push({
               role: "system",
               content:
-                "你刚才输出了纯文本，但任务尚未完成。\n" +
-                "- 你必须先输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
-                (needTodo
-                  ? "  - 先调用 run.setTodoList（永远第一步）\n"
-                  : "  - 不要重复调用 run.setTodoList（本次 Run 已有 todo）\n") +
-                (needKb
-                  ? "  - 若 KB_SELECTED_LIBRARIES 中存在 purpose=style（风格库）且任务为写作类：先调用 kb.search 拉风格样例（优先 kind=card；若同时绑定了非风格库则必须带 cardTypes 且只搜风格库）。必要时再补 paragraph 并用 anchorParagraphIndexMax/anchorFromEndMax 做位置过滤。\n"
-                  : "") +
-                (needLint ? "  - 然后调用 lint.style 做终稿闸门；未通过则按 rewritePrompt 回炉改写并复检（最多 2 次）后再输出/写入。\n" : "") +
-                "  - 若用户要求写入/分割到文件夹：请调用 doc.splitToDir（或 doc.write 等）完成写入。\n" +
-                (needTodo
-                  ? "- 在你成功设置 todo 之后，如果仍需要澄清：下一条消息再输出最多 5 个问题（纯文本 Markdown），并在 todo 中标记为 blocked/等待用户输入；用户不答时写明默认假设继续推进。"
-                  : "- 如仍需要澄清：下一条消息再输出最多 5 个问题（纯文本 Markdown），并明确默认假设后继续推进（不要重置 todo）。")
+                (needFinalText
+                  ? "你上一条输出为空（没有给用户最终可读内容）。\n" +
+                    "- 你现在必须直接输出对用户的最终回复（Markdown 纯文本，至少 1 个可见字符）。\n" +
+                    "- 不要调用任何工具；不要输出 <tool_calls>/<tool_call>；不要输出 XML。\n" +
+                    (wantsOkOnly ? "- 用户只要求连通性确认：请直接回复 `OK`。\n" : "")
+                  : "你刚才输出了纯文本，但任务尚未完成。\n" +
+                    "- 你必须先输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
+                    (needTodo
+                      ? "  - 先调用 run.setTodoList（永远第一步）\n"
+                      : "  - 不要重复调用 run.setTodoList（本次 Run 已有 todo）\n") +
+                    (needKb
+                      ? "  - 若 KB_SELECTED_LIBRARIES 中存在 purpose=style（风格库）且任务为写作类：先调用 kb.search 拉风格样例（优先 kind=card；若同时绑定了非风格库则必须带 cardTypes 且只搜风格库）。必要时再补 paragraph 并用 anchorParagraphIndexMax/anchorFromEndMax 做位置过滤。\n"
+                      : "") +
+                    (needLint ? "  - 然后调用 lint.style 做终稿闸门；未通过则按 rewritePrompt 回炉改写并复检（最多 2 次）后再输出/写入。\n" : "") +
+                    "  - 若用户要求写入/分割到文件夹：请调用 doc.splitToDir（或 doc.write 等）完成写入。\n" +
+                    (needTodo
+                      ? "- 在你成功设置 todo 之后，如果仍需要澄清：下一条消息再输出最多 5 个问题（纯文本 Markdown），并在 todo 中标记为 blocked/等待用户输入；用户不答时写明默认假设继续推进。"
+                      : "- 如仍需要澄清：下一条消息再输出最多 5 个问题（纯文本 Markdown），并明确默认假设后继续推进（不要重置 todo）。"))
             });
             continue;
           }
@@ -1094,6 +1109,13 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         // 口播风格兜底：正文输出缺少 CTA 时自动补齐（不额外占用模型/工具预算）
         // 重要：有些模型会用短标签包裹最终输出（例如 <final>...</final>），导致上面“决定 text 并流式转发”的逻辑不触发，
         // 从而前端看起来“run.end 了但没任何回复”。这里在结束前兜底 flush 一次。
+        // 兜底：如果最终仍然为空（常见于 Gemini 在 tool_result 后不输出），避免 UI 空白结束。
+        if (assistantText.trim().length === 0) {
+          const fallback = wantsOkOnly ? "OK" : "（模型输出为空：请重试或切换模型）";
+          writeEvent("assistant.delta", { delta: fallback });
+          assistantText = fallback;
+          flushed = assistantText.length;
+        }
         if (flushed < assistantText.length) {
           const remain = assistantText.slice(flushed);
           if (remain) writeEvent("assistant.delta", { delta: remain });
