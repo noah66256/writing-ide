@@ -286,7 +286,10 @@
     - **MVP 输入**：允许用户直接粘贴字幕/文案 + 可选链接（先解决合规与工程复杂度；后续再逐步自动化采集）。
 - **数据层**
   - 项目文件：Markdown + 资源文件（图片/引用）
-  - 索引（云端 KB）：PostgreSQL + **pgvector**
+  - **KB（短期决策：不上云）**：
+    - **短期（当前）**：KB 仍为 **Desktop 本地 KB**（本地文件/索引），`kb.search` 由 Desktop 执行；Gateway 负责 **编排/审计/计费**，不承载 KB 检索服务（避免为了“迁工具”引入云端数据依赖）。
+    - **长期（可选里程碑）**：当需要多端同步/多人/更强检索与审计时，再把 KB 迁到 Gateway（可先本地服务化，后续再上云），并接入 Postgres+pgvector。
+  - 索引（长期：云端/服务端 KB）：PostgreSQL + **pgvector**
     - 全文检索：Postgres `tsvector`（用于关键词召回/候选缩小）
     - 向量检索：pgvector（用于语义相似）
     - 元数据：JSONB（平台画像、目标、情绪、人设、结构等结构化字段）
@@ -397,7 +400,7 @@
 - ✅ Explorer（增强）：树形目录；右键新建文件/文件夹、重命名、移动、删除；外部文件变更自动刷新（dirty 不覆盖）
 - ✅ ReAct（开发期）：Gateway 负责 `/api/agent/run/stream` 编排（SSE：`tool.call/tool.result`），Desktop 执行工具并回传 `tool_result`
 - ✅ Todo/进度（写作闭环锚点）：`run.setTodoList` / `run.updateTodo`（工具）+ Context Pack 注入 + Dock/Runs 富文本展示
-- ✅ 对话稳定性（防“自言自语/臆造继续/顺序错乱/自动终止”）：Plan/Agent Context Pack 移除 RECENT_DIALOGUE；Gateway 提示词强约束“工具 XML 独占消息”；前端过滤漏出的 `<tool_call>` 并支持自动滚动；工具 XML 解析失败会自动重试；SSE 增加 `run.end`（原因）便于排查；Todo 状态兼容 `in-progress` 等别名
+- ✅ 对话稳定性（防“自言自语/臆造继续/顺序错乱/自动终止”）：Plan/Agent Context Pack 仅注入少量 `RECENT_DIALOGUE`（最多 6 条、每条截断）；Gateway 强约束“工具 XML 独占消息”（混杂自然语言会自动重试）、工具 XML 解析失败会自动重试；当 todo 标记 blocked/等待确认时以 `clarify_waiting` 暂停等待用户；前端过滤漏出的 `<tool_call>` 并支持自动滚动；SSE 增加 `run.end`（原因）便于排查；Todo 状态兼容 `in-progress` 等别名
 - ✅ Agent 写入任务闭环：Plan/Agent 下若 Todo 未设置或用户要求写入但尚未发生写入工具调用，不直接 `reason=text` 结束，会自动要求模型继续（减少“只读就停”）
 - ✅ 文稿拆分（proposal-first）：`doc.splitToDir` 把“标题/文案(正文)”大篇切成多文件写入目录（Keep 才落盘；Undo 可回滚）
 - ✅ 开发体验：Desktop dev 端口支持 `DESKTOP_DEV_PORT`；Electron dev 等待地址使用 `localhost`（兼容 Vite 仅监听 `::1` 的情况）

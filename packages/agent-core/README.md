@@ -11,10 +11,10 @@
 - **proposal-first 写入**：写入默认先提案，用户 Keep 才 apply，Undo 必须可回撤。
 
 ### 主要模块（规划）
-- `run`：Run 记录与 step 状态机（可暂停/取消/续跑）
-- `planner`：todo 生成与重规划
-- `tooling`：Tool Registry + XML 协议 + schema 校验
-- `providers`：模型 Provider 抽象（OpenAI/Claude/Gemini/…）
+- `xmlProtocol`（已实现）：统一解析/渲染 `<tool_calls>/<tool_call>/<tool_result>`（Desktop/Gateway 复用）。
+- `runMachine`（已实现）：最小 RunState + Policy 函数（意图识别、StyleGate/AutoRetry/Proposal 判定等），用于把 Gateway 的“散落 if”收敛为可复用的纯函数。
+- `providers`（规划）：模型 Provider 抽象（OpenAI/Claude/Gemini/…）
+- `planner`（规划）：todo 生成与重规划
 
 ### UI 事件模型（规划）
 - `assistant.delta`：流式文本增量

@@ -108,6 +108,86 @@ function computeDraftStats(text: string) {
   };
 }
 
+export async function buildStyleLinterLibrariesSidecar(args?: {
+  /** 优先使用显式指定；否则用右侧已关联库 */
+  libraryIds?: string[];
+  /** 最多携带多少个库（默认 6，与服务端 schema 对齐） */
+  maxLibraries?: number;
+}) {
+  const maxLibraries = typeof args?.maxLibraries === "number" ? Math.max(1, Math.min(6, Math.floor(args!.maxLibraries))) : 6;
+  const explicit = Array.isArray(args?.libraryIds) ? args!.libraryIds.map((x) => String(x ?? "").trim()).filter(Boolean) : [];
+  const attached = useRunStore.getState().kbAttachedLibraryIds ?? [];
+
+  await useKbStore.getState().refreshLibraries().catch(() => void 0);
+  const libsMeta = useKbStore.getState().libraries ?? [];
+  const metaById = new Map(libsMeta.map((l: any) => [String(l.id ?? ""), l]));
+
+  const candidates = (explicit.length ? explicit : attached).map((x: any) => String(x ?? "").trim()).filter(Boolean);
+  const styleLibIds = candidates.filter((id: string) => String(metaById.get(id)?.purpose ?? "") === "style");
+  const libraryIds = (styleLibIds.length ? styleLibIds : []).slice(0, maxLibraries);
+  if (!libraryIds.length) return { ok: false as const, error: "NO_STYLE_LIBRARY_SELECTED" as const };
+
+  const isPlaybookDoc = (doc: any) => {
+    const rel = String(doc?.importedFrom?.kind === "project" ? doc?.importedFrom?.relPath ?? "" : "").trim();
+    return rel.startsWith("__kb_playbook__/library/");
+  };
+
+  const librariesPayload: any[] = [];
+  for (const libId of libraryIds) {
+    const meta = metaById.get(libId);
+    const name = String(meta?.name ?? libId);
+
+    const fpRet = await useKbStore.getState().getLatestLibraryFingerprint(libId).catch(() => ({ ok: false } as any));
+    const snapshot = fpRet?.ok ? (fpRet as any).snapshot : null;
+
+    // 样例：优先取“最近片段”（不走向量，避免成本/超时）
+    const sret = await useKbStore
+      .getState()
+      .searchForAgent({
+        query: "__lint_style_samples__",
+        kind: "paragraph",
+        libraryIds: [libId],
+        perDocTopN: 3,
+        topDocs: 6,
+        useVector: false,
+        debug: false,
+      } as any)
+      .catch(() => ({ ok: false } as any));
+
+    const samples: any[] = [];
+    if (sret?.ok && Array.isArray((sret as any).groups)) {
+      for (const g of (sret as any).groups) {
+        const doc = g?.sourceDoc;
+        if (!doc || isPlaybookDoc(doc)) continue;
+        for (const h of (g?.hits ?? []) as any[]) {
+          const a = h?.artifact;
+          const content = String(a?.content ?? "").replace(/\s+/g, " ").trim();
+          if (!content) continue;
+          samples.push({
+            docId: String(doc?.id ?? ""),
+            docTitle: String(doc?.title ?? ""),
+            paragraphIndex: typeof a?.anchor?.paragraphIndex === "number" ? a.anchor.paragraphIndex : undefined,
+            text: content.slice(0, 1200),
+          });
+          if (samples.length >= 24) break;
+        }
+        if (samples.length >= 24) break;
+      }
+    }
+
+    librariesPayload.push({
+      id: libId,
+      name,
+      corpus: snapshot?.corpus ?? undefined,
+      stats: snapshot?.stats ?? undefined,
+      topNgrams: Array.isArray(snapshot?.topNgrams) ? snapshot.topNgrams.slice(0, 16) : undefined,
+      samples: samples.slice(0, 24),
+    });
+  }
+
+  return { ok: true as const, libraryIds, libraries: librariesPayload };
+}
+
 function sanitizeFileName(input: string) {
   let s = String(input ?? "").trim();
   s = s.replace(/\s+/g, " ");
@@ -242,15 +322,45 @@ function applyTextEdits(args: {
   return { after };
 }
 
-function getVirtualFileContentFromPendingProposals(path: string): { content: string; sources: string[] } | null {
+// doc.splitToDir 的“提案态新文件内容”只保存在本地内存，不回传给 Gateway（避免 tool_result 过大）
+const splitToDirProposalStore = new Map<string, Array<{ path: string; content: string }>>();
+function saveSplitToDirProposal(proposalId: string, files: Array<{ path: string; content: string }>) {
+  if (!proposalId) return;
+  splitToDirProposalStore.set(proposalId, files);
+  // cap，避免内存无限增长（仅保留最近 20 个）
+  const max = 20;
+  if (splitToDirProposalStore.size > max) {
+    const keys = Array.from(splitToDirProposalStore.keys());
+    const drop = keys.slice(0, Math.max(0, keys.length - max));
+    for (const k of drop) splitToDirProposalStore.delete(k);
+  }
+}
+function getSplitToDirProposalFile(proposalId: string, path: string): { path: string; content: string } | null {
+  const id = String(proposalId ?? "").trim();
   const p = normalizeRelPath(path);
+  if (!id || !p) return null;
+  const list = splitToDirProposalStore.get(id);
+  if (!list) return null;
+  return list.find((x) => normalizeRelPath(x.path) === p) ?? null;
+}
+
+function makeProposalId(prefix: string) {
+  const anyCrypto = globalThis as any;
+  const uuid = typeof anyCrypto?.crypto?.randomUUID === "function" ? anyCrypto.crypto.randomUUID() : null;
+  return `${prefix}_${uuid ?? `${Date.now()}_${Math.random().toString(16).slice(2)}`}`;
+}
+
+function getVirtualFileContentFromPendingProposals(args: {
+  path: string;
+  baseExists: boolean;
+  baseContent: string;
+}): { exists: boolean; content: string; sources: string[] } | null {
+  const p = normalizeRelPath(args.path);
   if (!p) return null;
   const proj = useProjectStore.getState();
-  const file = proj.getFileByPath(p);
-  if (!file) return null;
 
-  // 基线：当前文件内容（磁盘/内存）
-  let content = file.content ?? "";
+  let exists = Boolean(args.baseExists);
+  let content = String(args.baseContent ?? "");
   const sources: string[] = [];
 
   const steps = useRunStore.getState().steps ?? [];
@@ -263,22 +373,55 @@ function getVirtualFileContentFromPendingProposals(path: string): { content: str
       s.applyPolicy === "proposal" &&
       s.applied !== true &&
       s.status !== "undone" &&
-      (s.toolName === "doc.write" || s.toolName === "doc.applyEdits"),
+      (s.toolName === "doc.write" || s.toolName === "doc.applyEdits" || s.toolName === "doc.restoreSnapshot" || s.toolName === "doc.splitToDir"),
   ) as any[];
 
-  // 按出现顺序顺推，叠加提案
+  // 按出现顺序顺推，叠加提案（proposal-first）
   for (const st of pending) {
+    if (st.toolName === "doc.restoreSnapshot") {
+      const snapshotId = String(st.input?.snapshotId ?? st.output?.snapshotId ?? "").trim();
+      if (!snapshotId) continue;
+      const rec = proj.getSnapshot(snapshotId);
+      if (!rec) continue;
+      const snapFile = rec.snap.files.find((f) => normalizeRelPath(f.path) === p) ?? null;
+      if (snapFile) {
+        exists = true;
+        content = String(snapFile.content ?? "");
+        sources.push(`doc.restoreSnapshot(proposal):${st.id}`);
+      } else {
+        // 快照中不存在：视为该文件将被删除（仅在当前本来存在时记录）
+        if (exists) sources.push(`doc.restoreSnapshot(delete ${p}):${st.id}`);
+        exists = false;
+        content = "";
+      }
+      continue;
+    }
+
+    if (st.toolName === "doc.splitToDir") {
+      const proposalId = String(st.output?.proposalId ?? "").trim();
+      if (!proposalId) continue;
+      const f = getSplitToDirProposalFile(proposalId, p);
+      if (!f) continue;
+      exists = true;
+      content = String(f.content ?? "");
+      sources.push(`doc.splitToDir(proposal):${st.id}`);
+      continue;
+    }
+
     if (st.toolName === "doc.write") {
       const inPath = normalizeRelPath(String(st.input?.path ?? ""));
       if (inPath !== p) continue;
       const next = String(st.input?.content ?? "");
+      exists = true;
       content = next;
       sources.push(`doc.write(proposal):${st.id}`);
       continue;
     }
+
     if (st.toolName === "doc.applyEdits") {
       const inPath = normalizeRelPath(String(st.input?.path ?? proj.activePath ?? ""));
       if (inPath !== p) continue;
+      if (!exists) continue;
       const edits = Array.isArray(st.input?.edits) ? st.input.edits : null;
       if (!edits) continue;
       const norm = edits
@@ -298,7 +441,7 @@ function getVirtualFileContentFromPendingProposals(path: string): { content: str
   }
 
   if (!sources.length) return null;
-  return { content, sources };
+  return { exists, content, sources };
 }
 
 function unifiedDiff(args: { path: string; before: string; after: string; context?: number; maxCells?: number; maxHunkLines?: number }) {
@@ -599,87 +742,25 @@ const tools: ToolDefinition[] = [
         if (!p0) return "";
         const proj = useProjectStore.getState();
         const file = proj.getFileByPath(p0);
-        if (!file) return "";
-        const disk = await proj.ensureLoaded(file.path).catch(() => file.content ?? "");
-        const virt = getVirtualFileContentFromPendingProposals(file.path);
-        return virt?.content ?? disk ?? "";
+        const disk = file ? await proj.ensureLoaded(file.path).catch(() => file.content ?? "") : "";
+        const virt = getVirtualFileContentFromPendingProposals({ path: p0, baseExists: Boolean(file), baseContent: disk ?? "" });
+        if (virt && virt.exists) return virt.content;
+        return disk ?? "";
       })();
 
       if (!draftText.trim()) return { ok: false, error: "EMPTY_DRAFT" };
 
       // 选择风格库（优先 purpose=style）
       const explicitLibs = Array.isArray(args.libraryIds) ? (args.libraryIds as any[]).map((x) => String(x ?? "").trim()).filter(Boolean) : [];
-      const attached = useRunStore.getState().kbAttachedLibraryIds ?? [];
-      await useKbStore.getState().refreshLibraries().catch(() => void 0);
-      const libsMeta = useKbStore.getState().libraries ?? [];
-      const metaById = new Map(libsMeta.map((l: any) => [String(l.id ?? ""), l]));
-      const candidates = (explicitLibs.length ? explicitLibs : attached).map((x: any) => String(x ?? "").trim()).filter(Boolean);
-      const styleLibIds = candidates.filter((id: string) => String(metaById.get(id)?.purpose ?? "") === "style");
-      const libraryIds = (styleLibIds.length ? styleLibIds : candidates).slice(0, 6);
-      if (!libraryIds.length) return { ok: false, error: "NO_LIBRARY_SELECTED" };
+      const sidecar = await buildStyleLinterLibrariesSidecar({ libraryIds: explicitLibs, maxLibraries: 6 }).catch(() => ({ ok: false } as any));
+      if (!sidecar?.ok) return { ok: false, error: "NO_LIBRARY_SELECTED" };
+      const libraryIds = sidecar.libraryIds ?? [];
 
       const base = gatewayBaseUrl();
       const url = base ? `${base}/api/kb/dev/lint_style` : "/api/kb/dev/lint_style";
 
       const draftFp = computeDraftStats(draftText);
-      const librariesPayload: any[] = [];
-
-      const isPlaybookDoc = (doc: any) => {
-        const rel = String(doc?.importedFrom?.kind === "project" ? doc?.importedFrom?.relPath ?? "" : "").trim();
-        return rel.startsWith("__kb_playbook__/library/");
-      };
-
-      for (const libId of libraryIds) {
-        const meta = metaById.get(libId);
-        const name = String(meta?.name ?? libId);
-
-        const fpRet = await useKbStore.getState().getLatestLibraryFingerprint(libId).catch(() => ({ ok: false } as any));
-        const snapshot = fpRet?.ok ? (fpRet as any).snapshot : null;
-
-        // 样例：优先取“最近片段”（不走向量，避免成本/超时）
-        const sret = await useKbStore
-          .getState()
-          .searchForAgent({
-            query: "__lint_style_samples__",
-            kind: "paragraph",
-            libraryIds: [libId],
-            perDocTopN: 3,
-            topDocs: 6,
-            useVector: false,
-            debug: false,
-          } as any)
-          .catch(() => ({ ok: false } as any));
-
-        const samples: any[] = [];
-        if (sret?.ok && Array.isArray((sret as any).groups)) {
-          for (const g of (sret as any).groups) {
-            const doc = g?.sourceDoc;
-            if (!doc || isPlaybookDoc(doc)) continue;
-            for (const h of (g?.hits ?? []) as any[]) {
-              const a = h?.artifact;
-              const content = String(a?.content ?? "").replace(/\s+/g, " ").trim();
-              if (!content) continue;
-              samples.push({
-                docId: String(doc?.id ?? ""),
-                docTitle: String(doc?.title ?? ""),
-                paragraphIndex: typeof a?.anchor?.paragraphIndex === "number" ? a.anchor.paragraphIndex : undefined,
-                text: content.slice(0, 1200),
-              });
-              if (samples.length >= 24) break;
-            }
-            if (samples.length >= 24) break;
-          }
-        }
-
-        librariesPayload.push({
-          id: libId,
-          name,
-          corpus: snapshot?.corpus ?? undefined,
-          stats: snapshot?.stats ?? undefined,
-          topNgrams: Array.isArray(snapshot?.topNgrams) ? snapshot.topNgrams.slice(0, 16) : undefined,
-          samples: samples.slice(0, 24),
-        });
-      }
+      const librariesPayload: any[] = Array.isArray(sidecar.libraries) ? sidecar.libraries : [];
 
       const model = typeof args.model === "string" ? String(args.model).trim() : "";
       const maxIssues = typeof args.maxIssues === "number" ? Math.max(3, Math.min(24, Math.floor(args.maxIssues))) : 10;
@@ -876,19 +957,20 @@ const tools: ToolDefinition[] = [
     applyPolicy: "proposal",
     reversible: false,
     run: async (args) => {
-      const path = String(args.path ?? "");
+      const path = normalizeRelPath(String(args.path ?? ""));
       if (!path) return { ok: false, error: "MISSING_PATH" };
       const s = useProjectStore.getState();
       const file = s.getFileByPath(path);
-      if (!file) return { ok: false, error: "FILE_NOT_FOUND" };
-      const diskContent = await s.ensureLoaded(file.path);
-      const virt = getVirtualFileContentFromPendingProposals(file.path);
-      const content = virt?.content ?? diskContent;
+      const diskContent = file ? await s.ensureLoaded(file.path) : "";
+      const virt = getVirtualFileContentFromPendingProposals({ path, baseExists: Boolean(file), baseContent: diskContent });
+      if (!file && (!virt || !virt.exists)) return { ok: false, error: "FILE_NOT_FOUND" };
+      if (virt && !virt.exists) return { ok: false, error: "FILE_NOT_FOUND" };
+      const content = virt && virt.exists ? virt.content : diskContent;
       return {
         ok: true,
         output: {
           ok: true,
-          path: file.path,
+          path,
           content,
           virtualFromProposal: Boolean(virt),
           proposalSources: virt?.sources ?? [],
@@ -1151,8 +1233,16 @@ const tools: ToolDefinition[] = [
         return { path: rel, title, content: b.trimEnd() + "\n" };
       });
 
+      // 仅保存在本地：用于 doc.read 读取“提案态新文件”（不要求 Keep）
+      const proposalId = makeProposalId("splitToDir");
+      saveSplitToDirProposal(
+        proposalId,
+        out.map((f) => ({ path: f.path, content: f.content })),
+      );
+
       const preview = {
         ok: true,
+        proposalId,
         sourcePath: srcPath,
         targetDir: `${targetDir}/`,
         count: out.length,
@@ -1187,6 +1277,8 @@ const tools: ToolDefinition[] = [
                 else s.updateFile(f.path, f.content);
               }
             }
+            // apply 成功后，可清理对应提案缓存（此时文件已在内存/磁盘可读）
+            splitToDirProposalStore.delete(proposalId);
           } catch (e: any) {
             useRunStore.getState().log("error", "splitToDir.failed", { message: String(e?.message ?? e) });
             s.restore(snap as any);

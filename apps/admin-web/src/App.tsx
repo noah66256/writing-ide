@@ -3,6 +3,7 @@ import "./App.css";
 import { clearAccessToken, getAccessToken, setAccessToken, type ApiError } from "./api/client";
 import { getMe } from "./api/gateway";
 import { AdminLayout, type AdminPageKey } from "./components/AdminLayout";
+import { AuditRunsPage } from "./pages/AuditRunsPage";
 import { LlmPage } from "./pages/LlmPage";
 import { LoginPage } from "./pages/LoginPage";
 import { UsersPage } from "./pages/UsersPage";
@@ -117,6 +118,7 @@ function App() {
     >
       {page === "users" ? <UsersPage /> : null}
       {page === "llm" ? <LlmPage /> : null}
+      {page === "audit" ? <AuditRunsPage /> : null}
     </AdminLayout>
   );
 }

@@ -6,15 +6,42 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import dotenv from "dotenv";
-import { loadDb, saveDb, type Db, type LlmConfig, type LlmModelPrice, type User } from "./db.js";
+import { loadDb, saveDb, updateDb, type Db, type LlmConfig, type LlmModelPrice, type RunAudit, type RunAuditEvent, type User } from "./db.js";
 import { kbSearch, type KbCard } from "@writing-ide/kb-core";
 import { MemoryKbStore } from "./kb/memoryStore.js";
 import { adjustUserPoints, calculateCostPoints, listUserTransactions, type LlmTokenUsage } from "./billing.js";
-import { chatCompletionOnce, openAiCompatUrl, streamChatCompletions, type OpenAiChatMessage } from "./llm/openaiCompat.js";
-import { streamGeminiGenerateContent } from "./llm/gemini.js";
+import { openAiCompatUrl, type OpenAiChatMessage } from "./llm/openaiCompat.js";
+import {
+  buildInjectedToolResultMessages,
+  completionOnceViaProvider,
+  isGeminiLikeEndpoint,
+  streamChatCompletionViaProvider,
+} from "./llm/providerAdapter.js";
 import { isToolCallMessage, parseToolCalls, renderToolResultXml } from "./agent/xmlProtocol.js";
 import { toolNamesForMode, toolsPrompt, type AgentMode } from "./agent/toolRegistry.js";
 import { createAiConfigService } from "./aiConfig.js";
+import { validateToolCallArgs } from "@writing-ide/tools";
+import {
+  decideServerToolExecution,
+  executeServerToolOnGateway,
+} from "./agent/serverToolRunner.js";
+import { ensureRunAuditEnded, persistRunAudit, recordRunAuditEvent, sanitizeForAudit } from "./audit/runAudit.js";
+import {
+  analyzeAutoRetryText,
+  analyzeStyleWorkflowBatch,
+  createInitialRunState,
+  detectRunIntent,
+  deriveStyleGate,
+  isProposalWaitingMeta,
+  isStyleExampleKbSearch,
+  isWriteLikeTool,
+  looksLikeDraftText,
+  looksLikeHasCTA,
+  parseKbSelectedLibrariesFromContextPack,
+  parseMainDocFromContextPack,
+  parseStyleLintResult,
+  styleNeedsCta,
+} from "@writing-ide/agent-core";
 
 // 允许使用项目根目录的 .env（你可以用 env.example 复制出来），也支持 apps/gateway/.env 覆盖
 const __filename = fileURLToPath(import.meta.url);
@@ -42,7 +69,7 @@ type CodeRequest = {
 
 const codeRequests = new Map<string, CodeRequest>();
 const kbStore = new MemoryKbStore();
-const aiConfig = createAiConfigService({ loadDb, saveDb });
+const aiConfig = createAiConfigService({ loadDb, saveDb, updateDb });
 
 const fastify = Fastify({
   logger: true
@@ -99,7 +126,11 @@ function getModelPriceFromDb(db: Db, modelId: string): LlmModelPrice | null {
   const id = normStr(modelId);
   if (!id) return null;
   // 优先：ai-config（对齐锦李2.0：定价挂在模型上）
-  const m = (db.aiConfig as any)?.models?.find?.((x: any) => String(x?.id || x?.model || "").trim() === id);
+  const m = (db.aiConfig as any)?.models?.find?.((x: any) => {
+    const mid = String(x?.id ?? "").trim();
+    const mm = String(x?.model ?? "").trim();
+    return mid === id || mm === id;
+  });
   if (m) {
     const priceIn = Number(m?.priceInCnyPer1M);
     const priceOut = Number(m?.priceOutCnyPer1M);
@@ -121,57 +152,60 @@ async function chargeUserForLlmUsage(args: {
   modelId: string;
   usage: LlmTokenUsage;
   source: string;
+  metaExtra?: unknown;
 }) {
   const userId = normStr(args.userId);
   const modelId = normStr(args.modelId);
   if (!userId || !modelId) return { ok: false as const, reason: "MISSING_USER_OR_MODEL" as const };
 
-  const db = await loadDb();
-  const user = db.users.find((u) => u.id === userId);
-  if (!user) return { ok: false as const, reason: "USER_NOT_FOUND" as const };
+  return updateDb((db) => {
+    const user = db.users.find((u) => u.id === userId);
+    if (!user) return { ok: false as const, reason: "USER_NOT_FOUND" as const };
 
-  const price = getModelPriceFromDb(db, modelId);
-  if (!price) return { ok: false as const, reason: "PRICE_NOT_CONFIGURED" as const };
+    const price = getModelPriceFromDb(db, modelId);
+    if (!price) return { ok: false as const, reason: "PRICE_NOT_CONFIGURED" as const };
 
-  const usage: LlmTokenUsage = {
-    promptTokens: Math.max(0, Math.floor(Number(args.usage.promptTokens) || 0)),
-    completionTokens: Math.max(0, Math.floor(Number(args.usage.completionTokens) || 0)),
-    ...(Number.isFinite(args.usage.totalTokens as any) ? { totalTokens: Math.floor(Number(args.usage.totalTokens)) } : {}),
-  };
+    const usage: LlmTokenUsage = {
+      promptTokens: Math.max(0, Math.floor(Number(args.usage.promptTokens) || 0)),
+      completionTokens: Math.max(0, Math.floor(Number(args.usage.completionTokens) || 0)),
+      ...(Number.isFinite(args.usage.totalTokens as any) ? { totalTokens: Math.floor(Number(args.usage.totalTokens)) } : {}),
+    };
 
-  const costCny = (usage.promptTokens / 1_000_000) * price.priceInCnyPer1M + (usage.completionTokens / 1_000_000) * price.priceOutCnyPer1M;
-  const costPoints = calculateCostPoints({ usage, price, pointsPerCny: 1000 });
-  if (costPoints <= 0) return { ok: false as const, reason: "ZERO_COST" as const };
+    const costCny =
+      (usage.promptTokens / 1_000_000) * price.priceInCnyPer1M + (usage.completionTokens / 1_000_000) * price.priceOutCnyPer1M;
+    const costPoints = calculateCostPoints({ usage, price, pointsPerCny: 1000 });
+    if (costPoints <= 0) return { ok: false as const, reason: "ZERO_COST" as const };
 
-  const meta = {
-    kind: "llm_cost_v1",
-    source: args.source,
-    modelId,
-    usage,
-    price,
-    costCny,
-    costPoints,
-    pointsPerCny: 1000,
-  };
+    const meta = {
+      kind: "llm_cost_v1",
+      source: args.source,
+      modelId,
+      usage,
+      price,
+      costCny,
+      costPoints,
+      pointsPerCny: 1000,
+      ...(args.metaExtra !== undefined ? { extra: args.metaExtra } : {}),
+    };
 
-  // 尽量扣满；不足则扣到 0（开发期兜底，避免负数）
-  let charged = 0;
-  try {
-    const { tx } = adjustUserPoints({ db, userId, delta: -costPoints, type: "consume", reason: args.source });
-    tx.meta = meta;
-    charged = costPoints;
-  } catch (e: any) {
-    const msg = e?.message ? String(e.message) : String(e);
-    if (msg !== "INSUFFICIENT_POINTS") return { ok: false as const, reason: "DEDUCT_FAILED" as const, detail: msg };
-    const avail = Math.max(0, Math.floor(Number(user.pointsBalance) || 0));
-    if (avail <= 0) return { ok: false as const, reason: "INSUFFICIENT_POINTS" as const };
-    const { tx } = adjustUserPoints({ db, userId, delta: -avail, type: "consume", reason: args.source });
-    tx.meta = { ...meta, chargedPoints: avail, note: "insufficient_points_partial_charge" };
-    charged = avail;
-  }
+    // 尽量扣满；不足则扣到 0（开发期兜底，避免负数）
+    let charged = 0;
+    try {
+      const { tx } = adjustUserPoints({ db, userId, delta: -costPoints, type: "consume", reason: args.source });
+      tx.meta = meta;
+      charged = costPoints;
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : String(e);
+      if (msg !== "INSUFFICIENT_POINTS") return { ok: false as const, reason: "DEDUCT_FAILED" as const, detail: msg };
+      const avail = Math.max(0, Math.floor(Number(user.pointsBalance) || 0));
+      if (avail <= 0) return { ok: false as const, reason: "INSUFFICIENT_POINTS" as const };
+      const { tx } = adjustUserPoints({ db, userId, delta: -avail, type: "consume", reason: args.source });
+      tx.meta = { ...meta, chargedPoints: avail, note: "insufficient_points_partial_charge" };
+      charged = avail;
+    }
 
-  await saveDb(db);
-  return { ok: true as const, chargedPoints: charged, costPoints };
+    return { ok: true as const, chargedPoints: charged, costPoints };
+  });
 }
 
 fastify.get("/api/health", async () => {
@@ -210,6 +244,7 @@ async function getLlmEnv(db?: Db) {
     const defaultModel = r.model || models[0] || "";
     return {
       baseUrl: r.baseURL,
+      endpoint: r.endpoint || "/v1/chat/completions",
       apiKey: r.apiKey,
       models: models.length ? models : defaultModel ? [defaultModel] : [],
       defaultModel,
@@ -222,11 +257,12 @@ async function getLlmEnv(db?: Db) {
   const d = db ?? (await loadDb());
   const cfg = d.llmConfig as LlmConfig | undefined;
   const baseUrl = normUrl(cfg?.llm?.baseUrl) || normUrl(process.env.LLM_BASE_URL ?? "");
+  const endpoint = "/v1/chat/completions";
   const apiKey = normStr(cfg?.llm?.apiKey) || normStr(process.env.LLM_API_KEY ?? "");
   const modelsCfg = normStrList(cfg?.llm?.models);
   const defaultModel = normStr(cfg?.llm?.defaultModel) || normStr(process.env.LLM_MODEL ?? "") || modelsCfg[0] || "";
   const models = modelsCfg.length ? modelsCfg : defaultModel ? [defaultModel] : [];
-  return { baseUrl, apiKey, models, defaultModel, ok: Boolean(baseUrl && apiKey && defaultModel) };
+  return { baseUrl, endpoint, apiKey, models, defaultModel, ok: Boolean(baseUrl && apiKey && defaultModel) };
 }
 
 async function getEmbedEnv(db?: Db) {
@@ -269,7 +305,13 @@ async function getEmbedEnv(db?: Db) {
 async function getCardEnv(db?: Db) {
   try {
     const r = await aiConfig.resolveStage("rag.ingest.extract_cards");
-    return { baseUrl: r.baseURL, apiKey: r.apiKey, defaultModel: r.model, ok: Boolean(r.baseURL && r.apiKey && r.model) };
+    return {
+      baseUrl: r.baseURL,
+      endpoint: r.endpoint || "/v1/chat/completions",
+      apiKey: r.apiKey,
+      defaultModel: r.model,
+      ok: Boolean(r.baseURL && r.apiKey && r.model),
+    };
   } catch {
     // ignore
   }
@@ -292,13 +334,19 @@ async function getCardEnv(db?: Db) {
     normStr(process.env.LLM_CARD_MODEL ?? "") ||
     normStr(cfg?.llm?.defaultModel) ||
     normStr(process.env.LLM_MODEL ?? "");
-  return { baseUrl, apiKey, defaultModel, ok: Boolean(baseUrl && apiKey && defaultModel) };
+  return { baseUrl, endpoint: "/v1/chat/completions", apiKey, defaultModel, ok: Boolean(baseUrl && apiKey && defaultModel) };
 }
 
 async function getPlaybookEnv(db?: Db) {
   try {
     const r = await aiConfig.resolveStage("rag.ingest.build_library_playbook");
-    return { baseUrl: r.baseURL, apiKey: r.apiKey, defaultModel: r.model, ok: Boolean(r.baseURL && r.apiKey && r.model) };
+    return {
+      baseUrl: r.baseURL,
+      endpoint: r.endpoint || "/v1/chat/completions",
+      apiKey: r.apiKey,
+      defaultModel: r.model,
+      ok: Boolean(r.baseURL && r.apiKey && r.model),
+    };
   } catch {
     // 兜底：复用抽卡配置
     return getCardEnv(db);
@@ -315,6 +363,7 @@ async function getLinterEnv(db?: Db) {
     const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? Math.floor(timeoutMsRaw) : 60_000;
     return {
       baseUrl: r.baseURL,
+      endpoint: r.endpoint || "/v1/chat/completions",
       apiKey: r.apiKey,
       defaultModel: r.model,
       timeoutMs,
@@ -352,7 +401,7 @@ async function getLinterEnv(db?: Db) {
     Number.isFinite(timeoutMsCfg as any) && Number(timeoutMsCfg) > 0
       ? Number(timeoutMsCfg)
       : Number(process.env.LLM_LINTER_TIMEOUT_MS ?? 60_000);
-  return { baseUrl, apiKey, defaultModel, timeoutMs, ok: Boolean(baseUrl && apiKey && defaultModel) };
+  return { baseUrl, endpoint: "/v1/chat/completions", apiKey, defaultModel, timeoutMs, ok: Boolean(baseUrl && apiKey && defaultModel) };
 }
 
 // ======== LLM（OpenAI-compatible，开发期最小闭环） ========
@@ -563,37 +612,65 @@ fastify.post("/api/llm/chat/stream", async (request, reply) => {
   request.raw.on("aborted", () => abort.abort());
   reply.raw.on("close", () => abort.abort());
 
-  const writeEvent = (event: string, data: unknown) => {
+  const writeEventRaw = (event: string, data: unknown) => {
     reply.raw.write(`event: ${event}\n`);
     reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
   };
 
-  writeEvent("run.start", { model });
+  const runId = randomUUID();
+  const audit: RunAudit = {
+    id: runId,
+    kind: "llm.chat",
+    mode: "chat",
+    userId: jwtUser?.id ? String(jwtUser.id) : null,
+    model: model || null,
+    endpoint: endpoint || null,
+    startedAt: new Date().toISOString(),
+    endedAt: null,
+    endReason: null,
+    endReasonCodes: [],
+    usage: null,
+    chargedPoints: null,
+    events: [],
+    meta: sanitizeForAudit({ messageCount: messages.length }),
+  };
+
+  let auditPersisted = false;
+  const persistOnce = async (forced?: { endReason?: string; endReasonCodes?: string[] }) => {
+    if (auditPersisted) return;
+    auditPersisted = true;
+    ensureRunAuditEnded(audit, forced);
+    try {
+      await persistRunAudit(audit);
+    } catch {
+      // ignore
+    }
+  };
+  reply.raw.on("close", () => void persistOnce({ endReason: "aborted", endReasonCodes: ["aborted"] }));
+  reply.raw.on("finish", () => void persistOnce());
+
+  const writeEvent = (event: string, data: unknown) => {
+    writeEventRaw(event, data);
+    // 审计：只记录关键事件；assistant.delta 过大不落库
+    if (event !== "assistant.delta") recordRunAuditEvent(audit, event, data);
+  };
+
+  writeEvent("run.start", { runId, model });
 
   let lastUsage: LlmTokenUsage | null = null;
 
   try {
-    const isGemini = /:streamGenerateContent/i.test(endpoint) || /:generateContent/i.test(endpoint) || /\/v1beta\/models\//i.test(endpoint);
-    const iter = isGemini
-      ? streamGeminiGenerateContent({
-          baseUrl,
-          endpoint,
-          apiKey,
-          messages,
-          temperature,
-          maxTokens: stageMaxTokens ?? null,
-          signal: abort.signal,
-        })
-      : streamChatCompletions({
-          config: { baseUrl, apiKey },
-          endpoint,
-          model,
-          messages,
-          temperature,
-          maxTokens: stageMaxTokens ?? null,
-          includeUsage: true,
-          signal: abort.signal,
-        });
+    const iter = streamChatCompletionViaProvider({
+      baseUrl,
+      endpoint,
+      apiKey,
+      model,
+      messages,
+      temperature,
+      maxTokens: stageMaxTokens ?? null,
+      includeUsage: true,
+      signal: abort.signal,
+    });
 
     for await (const ev of iter) {
       if (ev.type === "delta") writeEvent("assistant.delta", { delta: ev.delta });
@@ -603,12 +680,27 @@ fastify.post("/api/llm/chat/stream", async (request, reply) => {
     }
 
     if (jwtUser?.id && lastUsage && jwtUser.role !== "admin") {
-      await chargeUserForLlmUsage({ userId: jwtUser.id, modelId: model, usage: lastUsage, source: "llm.chat" });
+      const charged = await chargeUserForLlmUsage({
+        userId: jwtUser.id,
+        modelId: model,
+        usage: lastUsage,
+        source: "llm.chat",
+        metaExtra: { runId, endpoint },
+      });
+      if (charged.ok) audit.chargedPoints = (audit.chargedPoints ?? 0) + Number(charged.chargedPoints ?? 0);
     }
+    audit.usage = lastUsage as any;
   } catch (e: any) {
     const msg = e?.message ? String(e.message) : String(e);
     writeEvent("error", { error: msg });
+    audit.endReason = "error";
+    audit.endReasonCodes = ["error"];
   } finally {
+    if (!audit.endReason) {
+      audit.endReason = "done";
+      audit.endReasonCodes = ["done"];
+    }
+    void persistOnce();
     reply.raw.end();
   }
 });
@@ -685,7 +777,24 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     model: z.string().optional(),
     mode: z.enum(["plan", "agent", "chat"]).optional(),
     prompt: z.string().min(1),
-    contextPack: z.string().optional()
+    contextPack: z.string().optional(),
+    toolSidecar: z
+      .object({
+        // 用于“工具逐步迁回 Gateway”：携带本地只读上下文（不注入模型 messages）。
+        // 当前仅用于 lint.style(text=...) 的风格库指纹/样例 payload。
+        styleLinterLibraries: z.array(z.any()).max(6).optional(),
+        // 只读：项目文件列表快照（用于 server-side project.listFiles）
+        projectFiles: z.array(z.object({ path: z.string().min(1).max(500) })).max(5000).optional(),
+        // 只读：Doc Rules 快照（用于 server-side project.docRules.get）
+        docRules: z
+          .object({
+            path: z.string().min(1).max(500),
+            content: z.string(),
+          })
+          .nullable()
+          .optional(),
+      })
+      .optional(),
   });
   const body = bodySchema.parse((request as any).body);
 
@@ -762,13 +871,92 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   request.raw.on("aborted", () => abort.abort());
   reply.raw.on("close", () => abort.abort());
 
-  const writeEvent = (event: string, data: unknown) => {
+  const writeEventRaw = (event: string, data: unknown) => {
     reply.raw.write(`event: ${event}\n`);
     reply.raw.write(`data: ${JSON.stringify(data)}\n\n`);
   };
 
   const waiters = new Map<string, (payload: ToolResultPayload) => void>();
   agentRunWaiters.set(runId, waiters);
+
+  const toolSidecar = (body as any)?.toolSidecar ?? null;
+  const styleLinterLibraries = Array.isArray(toolSidecar?.styleLinterLibraries) ? (toolSidecar.styleLinterLibraries as any[]) : [];
+  const projectFilesCount = Array.isArray(toolSidecar?.projectFiles) ? (toolSidecar.projectFiles as any[]).length : 0;
+  const docRulesChars = typeof toolSidecar?.docRules?.content === "string" ? String(toolSidecar.docRules.content).length : 0;
+
+  const audit: RunAudit = {
+    id: runId,
+    kind: "agent.run",
+    mode: mode as any,
+    userId: jwtUser?.id ? String(jwtUser.id) : null,
+    model: model || null,
+    endpoint: endpoint || null,
+    startedAt: new Date().toISOString(),
+    endedAt: null,
+    endReason: null,
+    endReasonCodes: [],
+    usage: null,
+    chargedPoints: null,
+    events: [],
+    meta: sanitizeForAudit({
+      promptPreview: String(body.prompt ?? "").slice(0, 240),
+      promptChars: String(body.prompt ?? "").length,
+      contextPackChars: String(body.contextPack ?? "").length,
+      toolResultFormat,
+      pickedId,
+      requestedIdRaw,
+      toolSidecar: {
+        styleLinterLibraries: styleLinterLibraries.length,
+        projectFiles: projectFilesCount,
+        docRulesChars,
+      },
+    }),
+  };
+
+  let usageSumPrompt = 0;
+  let usageSumCompletion = 0;
+  let usageSumTotal = 0;
+
+  let auditPersisted = false;
+  const persistOnce = async (forced?: { endReason?: string; endReasonCodes?: string[] }) => {
+    if (auditPersisted) return;
+    auditPersisted = true;
+    const totalTokens = usageSumTotal || usageSumPrompt + usageSumCompletion;
+    audit.usage =
+      usageSumPrompt > 0 || usageSumCompletion > 0 || totalTokens > 0
+        ? { promptTokens: usageSumPrompt, completionTokens: usageSumCompletion, ...(totalTokens > 0 ? { totalTokens } : {}) }
+        : null;
+    ensureRunAuditEnded(audit, forced);
+    try {
+      await persistRunAudit(audit);
+    } catch {
+      // ignore
+    }
+  };
+  reply.raw.on("close", () => void persistOnce({ endReason: "aborted", endReasonCodes: ["aborted"] }));
+  reply.raw.on("finish", () => void persistOnce());
+
+  const writeEvent = (event: string, data: unknown) => {
+    writeEventRaw(event, data);
+    if (event !== "assistant.delta") recordRunAuditEvent(audit, event, data);
+    if (event === "run.end") {
+      const p: any = data && typeof data === "object" ? (data as any) : null;
+      ensureRunAuditEnded(audit, { endReason: String(p?.reason ?? "run.end"), endReasonCodes: Array.isArray(p?.reasonCodes) ? p.reasonCodes : [] });
+      audit.endReason = typeof p?.reason === "string" ? p.reason : audit.endReason;
+      audit.endReasonCodes = Array.isArray(p?.reasonCodes) ? (p.reasonCodes as any[]).map((x) => String(x ?? "")).filter(Boolean).slice(0, 32) : audit.endReasonCodes;
+    }
+    if (event === "policy.decision") {
+      const p: any = data && typeof data === "object" ? (data as any) : null;
+      if (String(p?.policy ?? "") === "BillingPolicy" && String(p?.decision ?? "") === "charged") {
+        const cp = Number(p?.detail?.chargedPoints ?? p?.detail?.chargedPoints ?? 0);
+        if (Number.isFinite(cp) && cp > 0) audit.chargedPoints = (audit.chargedPoints ?? 0) + Math.floor(cp);
+      }
+    }
+    if (event === "error") {
+      audit.endReason = "error";
+      audit.endReasonCodes = ["error"];
+    }
+  };
 
   writeEvent("run.start", { runId, model, mode });
 
@@ -779,204 +967,60 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   ];
 
   const userPrompt = String(body.prompt ?? "");
-  const forceProceed =
-    mode !== "chat" &&
-    /(先(直接)?(开始|写|仿写|给一版|给版本|产出|干活)|不要(再)?问|别问了|先做|直接写)/.test(userPrompt);
-  const wantsWrite =
-    mode !== "chat" &&
-    (/@\{[^}]+\/\}/.test(userPrompt) ||
-      /(分割|拆分|切分|写入|保存|生成|放到|移动到|导出|新建|删除|重命名)/.test(userPrompt));
-  // 轻量“连通性测试”识别：用户明确只要一个 OK（用于空输出兜底）
-  const wantsOkOnly =
-    mode !== "chat" &&
-    /(回(个|我)?\s*ok|回复\s*ok|回\s*ok|只要\s*ok|给我\s*ok)/i.test(userPrompt) &&
-    /(不用回别的|别回别的|不要回别的|就行)/.test(userPrompt);
 
-  function parseMainDocFromContextPack(ctx?: string): any | null {
-    const text = String(ctx ?? "");
-    if (!text) return null;
-    const m = text.match(/MAIN_DOC\(JSON\):\n([\s\S]*?)\n\n/);
-    const raw = m?.[1] ? String(m[1]).trim() : "";
-    if (!raw) return null;
-    try {
-      const j = JSON.parse(raw);
-      return j && typeof j === "object" ? j : null;
-    } catch {
-      return null;
-    }
-  }
   const mainDocFromPack = parseMainDocFromContextPack(body.contextPack);
+  const kbSelectedList = parseKbSelectedLibrariesFromContextPack(body.contextPack);
 
-  function parseKbSelectedLibrariesFromContextPack(ctx?: string): any[] {
-    const text = String(ctx ?? "");
-    if (!text) return [];
-    const m = text.match(/KB_SELECTED_LIBRARIES\(JSON\):\n([\s\S]*?)\n\n/);
-    const raw = m?.[1] ? String(m[1]).trim() : "";
-    if (!raw) return [];
-    try {
-      const j = JSON.parse(raw);
-      return Array.isArray(j) ? j : [];
-    } catch {
-      return [];
-    }
-  }
+  const intent = detectRunIntent({ mode, userPrompt });
 
-  const kbSelected = parseKbSelectedLibrariesFromContextPack(body.contextPack);
-  const kbSelectedList = Array.isArray(kbSelected) ? kbSelected : [];
-  const styleLibIds = kbSelectedList
-    .filter((l: any) => String(l?.purpose ?? "").trim() === "style")
-    .map((l: any) => String(l?.id ?? "").trim())
-    .filter(Boolean);
-  const styleLibIdSet = new Set(styleLibIds);
-  const nonStyleLibIds = kbSelectedList
-    .filter((l: any) => String(l?.purpose ?? "").trim() !== "style")
-    .map((l: any) => String(l?.id ?? "").trim())
-    .filter(Boolean);
-
-  const hasStyleLibrary = mode !== "chat" && styleLibIds.length > 0;
-  const hasNonStyleLibraries = mode !== "chat" && nonStyleLibIds.length > 0;
-
-  const isWritingTask =
-    mode !== "chat" &&
-    /(仿写|改写|润色|续写|扩写|写(一篇|一段|一条|稿|文|文章|脚本|文案)|生成(文章|稿|文案)|按.+风格)/.test(userPrompt);
-  const skipLint = /(跳过|不用|不要).{0,12}(linter|风格检查|风格对齐|风格校验|像不像检查)/i.test(userPrompt);
-  const skipCta = /(跳过|不用|不要).{0,12}(cta|点赞|关注|评论|转发|收藏|三连|一键三连)/i.test(userPrompt);
-  // 注意：用户“跳过 linter”只应跳过风格校验，不应跳过“先 kb.search 拉样例”
-  const styleGateEnabled = hasStyleLibrary && isWritingTask;
-  const lintGateEnabled = styleGateEnabled && !skipLint;
   const lintPassScore = Number(process.env.STYLE_LINT_PASS_SCORE ?? 80);
   const lintMaxRework = Number(process.env.STYLE_LINT_MAX_REWORK ?? 2);
+
+  // 注意：用户“跳过 linter”只应跳过风格校验，不应跳过“先 kb.search 拉样例”
+  const gates = deriveStyleGate({ mode, kbSelected: kbSelectedList as any, intent });
+  const styleLibIds = gates.styleLibIds;
+
   const keepBestOnLintExhausted =
     /(lint|linter|风格(对齐|校验|检查)).{0,30}(不过|不通过).{0,30}(保留|留下|用).{0,30}(最高分|最好|最佳)/i.test(userPrompt) ||
     String((mainDocFromPack as any)?.styleLintFailPolicy ?? "").trim() === "keep_best";
 
-  let hasTodoList = false;
-  let hasWriteOps = false;
-  let hasAnyToolCall = false;
-  let hasKbSearch = false;
-  let hasStyleKbSearch = false; // 风格库样例检索是否已完成（以 tool_result.groups 非空为准）
-  let styleLintPassed = false; // 风格对齐是否“通过闸门”
-  let styleLintFailCount = 0; // 未通过次数（每次未通过=一次“回炉”机会）
-  let lintGateDegraded = false; // lint.style 降级（local_heuristic）后不再强制闸门，避免卡死
-  let bestStyleDraft: null | { score: number; highIssues: number; text: string } = null; // 记录最高分稿件（用于“保留最高分”）
-  let lastStyleLint: null | {
-    score: number | null;
-    highIssues: number;
-    summary: string;
-    rewritePrompt: string;
-  } = null;
-  let autoRetryBudget = 3;
+  // Run 内部状态（显式 State；由 policy 函数分析与更新）
+  const runState = createInitialRunState({ autoRetryBudget: 3 });
 
-  function looksLikeClarifyQuestions(text: string) {
-    const t = String(text ?? "").trim();
-    if (!t) return false;
-    if (t.length > 2000) return false;
-    // 简单启发式：包含问号/疑问词，且不像是在输出最终结果
-    return /[?？]/.test(t) || /(请问|是否|能否|方便|要不要|需要你)/.test(t);
-  }
+  const stateSnapshot = () => ({
+    autoRetryBudget: runState.autoRetryBudget,
+    hasTodoList: runState.hasTodoList,
+    hasWriteOps: runState.hasWriteOps,
+    hasKbSearch: runState.hasKbSearch,
+    hasStyleKbSearch: runState.hasStyleKbSearch,
+    styleKbDegraded: runState.styleKbDegraded,
+    styleLintPassed: runState.styleLintPassed,
+    styleLintFailCount: runState.styleLintFailCount,
+    lintGateDegraded: runState.lintGateDegraded,
+  });
 
-  function looksLikeFIMLeak(text: string) {
-    const t = String(text ?? "").trimStart();
-    if (!t) return false;
-    if (!t.startsWith("<|")) return false;
-    return /<\|fim_begin\|>|<\|begin_of_sentence\|>/i.test(t);
-  }
-
-  function looksLikeDraftText(text: string) {
-    const t = String(text ?? "").trim();
-    if (!t) return false;
-    const len = t.length;
-    const paras = t.split(/\n{2,}/).map((x) => x.trim()).filter(Boolean);
-    const paraCount = paras.length;
-    const hasManyPunct = /[。！？]/.test(t) && (t.match(/[。！？]/g)?.length ?? 0) >= 8;
-    const hasBulletHeavy = /^[\s>*-]*\d+\.|^[\s>*-]*[-*]\s+/m.test(t);
-    const hasOnlyOutlineSignals =
-      /(大纲|提纲|结构|目录|outline)/i.test(t) && paraCount <= 10 && hasBulletHeavy && len < 1200;
-    if (hasOnlyOutlineSignals) return false;
-    if (len >= 1200) return true;
-    if (paraCount >= 6 && hasManyPunct) return true;
-    return false;
-  }
-
-  function looksLikeHasCTA(text: string) {
-    const t = String(text ?? "");
-    // 常见口播 CTA（允许变体）
-    return /(点赞|点个赞|关注|加关注|评论区|评论|留言|转发|收藏|三连|一键三连|点一点|安排上|走一波)/.test(t);
-  }
-
-  function styleNeedsCta() {
-    if (!styleGateEnabled || skipCta) return false;
-    // 当前只对“口播/短视频/营销”风格库启用 CTA 兜底
-    const styleLibs = kbSelectedList.filter((l: any) => String(l?.purpose ?? "").trim() === "style");
-    for (const l of styleLibs) {
-      const facet = String(l?.facetPackId ?? "").trim();
-      const label = String(l?.fingerprint?.primaryLabel ?? "").trim();
-      if (/speech_marketing/i.test(facet)) return true;
-      if (/(口播|短视频|直播|带货|营销)/.test(label)) return true;
-    }
-    return false;
-  }
-
-  function isWriteLikeTool(name: string) {
-    return (
-      name === "doc.write" ||
-      name === "doc.applyEdits" ||
-      name === "doc.replaceSelection" ||
-      name === "doc.mkdir" ||
-      name === "doc.renamePath" ||
-      name === "doc.deletePath" ||
-      name === "doc.restoreSnapshot" ||
-      name === "doc.splitToDir"
-    );
-  }
-
-  function normalizeIdList(v: any): string[] {
-    if (!Array.isArray(v)) return [];
-    return v.map((x: any) => String(x ?? "").trim()).filter(Boolean);
-  }
-
-  function isStyleExampleKbSearch(call: any) {
-    if (!call || String(call?.name ?? "") !== "kb.search") return false;
-    const args = call?.args ?? {};
-    const kind = String((args as any)?.kind ?? "card").trim().toLowerCase();
-    if (kind !== "paragraph" && kind !== "outline" && kind !== "card") return false;
-
-    // 风格/手法样例：允许用 card，也允许 paragraph/outline
-    if (kind === "card") {
-      const cardTypes = normalizeIdList((args as any)?.cardTypes);
-      // 同时绑定了非风格库时：必须显式限制 cardTypes，避免“样例被素材库污染”。
-      // 仅绑定风格库时：允许省略（减少强闭环误伤/不必要重试）。
-      if (!cardTypes.length && hasNonStyleLibraries) return false;
-    }
-
-    const libs = normalizeIdList((args as any)?.libraryIds);
-    // 同时绑定了非风格库时：要求显式限制到风格库，避免“样例被素材库污染”
-    if (!libs.length) return !hasNonStyleLibraries;
-    if (!libs.some((id) => styleLibIdSet.has(id))) return false;
-    return libs.every((id) => styleLibIdSet.has(id));
-  }
-
-  function parseStyleLintResult(output: any): {
-    score: number | null;
-    highIssues: number;
-    summary: string;
-    rewritePrompt: string;
-    modelUsed: string;
-    usedHeuristic: boolean;
-  } {
-    const o: any = output && typeof output === "object" ? output : {};
-    const modelUsed = String(o?.modelUsed ?? "").trim();
-    const usedHeuristic = /^local_heuristic\(/.test(modelUsed);
-    const scoreRaw = Number(o?.similarityScore);
-    const score = Number.isFinite(scoreRaw) ? scoreRaw : null;
-    const issues = Array.isArray(o?.issues) ? o.issues : [];
-    const highIssues = issues.filter((x: any) => String(x?.severity ?? "").toLowerCase() === "high").length;
-    const summary = String(o?.summary ?? "").trim();
-    const rewritePrompt = String(o?.rewritePrompt ?? "").trim();
-    return { score, highIssues, summary, rewritePrompt, modelUsed, usedHeuristic };
-  }
+  const writePolicyDecision = (args: {
+    turn: number;
+    policy: string;
+    decision: string;
+    reasonCodes: string[];
+    detail?: unknown;
+  }) => {
+    writeEvent("policy.decision", {
+      runId,
+      ts: Date.now(),
+      turn: args.turn,
+      policy: args.policy,
+      decision: args.decision,
+      reasonCodes: args.reasonCodes,
+      detail: args.detail ?? null,
+      state: stateSnapshot(),
+    });
+  };
 
   const maxTurns = mode === "agent" ? 48 : mode === "plan" ? 32 : 12;
+
+
 
   try {
     for (let turn = 0; turn < maxTurns; turn += 1) {
@@ -987,27 +1031,17 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       let flushed = 0;
       let lastUsage: LlmTokenUsage | null = null;
 
-      const isGemini = /:streamGenerateContent/i.test(endpoint) || /:generateContent/i.test(endpoint) || /\/v1beta\/models\//i.test(endpoint);
-      const iter = isGemini
-        ? streamGeminiGenerateContent({
-            baseUrl,
-            endpoint,
-            apiKey,
-            messages,
-            temperature,
-            maxTokens: stageMaxTokens ?? null,
-            signal: abort.signal,
-          })
-        : streamChatCompletions({
-            config: { baseUrl, apiKey },
-            endpoint,
-            model,
-            messages,
-            temperature,
-            maxTokens: stageMaxTokens ?? null,
-            includeUsage: true,
-            signal: abort.signal,
-          });
+      const iter = streamChatCompletionViaProvider({
+        baseUrl,
+        endpoint,
+        apiKey,
+        model,
+        messages,
+        temperature,
+        maxTokens: stageMaxTokens ?? null,
+        includeUsage: true,
+        signal: abort.signal,
+      });
 
       for await (const ev of iter) {
         if (ev.type === "delta") {
@@ -1043,14 +1077,85 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         if (ev.type === "done") break;
       }
 
+      if (lastUsage) {
+        usageSumPrompt += Math.max(0, Math.floor(Number((lastUsage as any).promptTokens) || 0));
+        usageSumCompletion += Math.max(0, Math.floor(Number((lastUsage as any).completionTokens) || 0));
+        const tt = Number((lastUsage as any).totalTokens);
+        if (Number.isFinite(tt) && tt > 0) usageSumTotal += Math.max(0, Math.floor(tt));
+      }
+
       if (jwtUser?.id && lastUsage && jwtUser.role !== "admin") {
-        await chargeUserForLlmUsage({ userId: jwtUser.id, modelId: model, usage: lastUsage, source: `agent.${mode}` });
+        const charged = await chargeUserForLlmUsage({
+          userId: jwtUser.id,
+          modelId: model,
+          usage: lastUsage,
+          source: `agent.${mode}`,
+          metaExtra: { runId, mode, endpoint },
+        });
+        writePolicyDecision({
+          turn,
+          policy: "BillingPolicy",
+          decision: charged.ok ? "charged" : "charge_failed",
+          reasonCodes: charged.ok ? ["run_billing_charged"] : ["run_billing_failed"],
+          detail: charged,
+        });
+      }
+
+      function stripCodeFencesLocal(text: string) {
+        const t = String(text ?? "").trim();
+        if (!t.startsWith("```")) return String(text ?? "");
+        const firstNl = t.indexOf("\n");
+        if (firstNl < 0) return String(text ?? "");
+        const body = t.slice(firstNl + 1);
+        const end = body.lastIndexOf("```");
+        if (end < 0) return body;
+        return body.slice(0, end);
+      }
+      function isToolCallXmlExclusive(text: string) {
+        const t = stripCodeFencesLocal(text).trim();
+        // 只接受“整条消息仅包含 XML”（允许首尾空白）；否则视为协议违规（避免“问用户但仍继续跑”）
+        const m1 = t.match(/^<tool_calls\b[\s\S]*?<\/tool_calls\s*>$/);
+        if (m1?.[0]) return true;
+        const m2 = t.match(/^<tool_call\b[\s\S]*?<\/tool_call\s*>$/);
+        if (m2?.[0]) return true;
+        return false;
       }
 
       const toolCalls = parseToolCalls(assistantText);
+      if (toolCalls && !isToolCallXmlExclusive(assistantText)) {
+        writePolicyDecision({
+          turn,
+          policy: "ProtocolPolicy",
+          decision: "retry",
+          reasonCodes: ["tool_xml_mixed_with_text"],
+          detail: { hint: "tool_calls/tool_call 消息必须 XML 独占" }
+        });
+        writeEvent("assistant.delta", {
+          delta:
+            "\n\n[解析提示] 检测到工具调用 XML 夹杂了自然语言（未做到“XML 独占消息”）。\n" +
+            "为避免出现“问你确认但工作流仍继续跑”的误导行为，我会让模型自动重试：\n" +
+            "- 若确实需要你回答：请它只输出纯文本问题并停止（不要输出任何 <tool_calls>）\n" +
+            "- 否则：请它只输出纯 XML 的 <tool_calls>（不要夹杂自然语言）"
+        });
+        writeEvent("assistant.done", { reason: "tool_xml_mixed_with_text_retry" });
+        messages.push({
+          role: "system",
+          content:
+            "你上一条消息包含工具调用 XML，但夹杂了自然语言，违反协议（tool_calls/tool_call 消息必须 XML 独占）。请立刻重试：\n" +
+            "- 若你需要用户先回答：只输出纯文本问题（最多 5 个）并停止，不要输出任何 <tool_calls>/<tool_call>。\n" +
+            "- 否则：只输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。"
+        });
+        continue;
+      }
       if (!toolCalls) {
         // 如果看起来像 tool_calls 但解析失败：不要直接终止 run，要求模型立刻重试一次（避免用户手动“继续”）
         if (isToolCallMessage(assistantText)) {
+          writePolicyDecision({
+            turn,
+            policy: "ProtocolPolicy",
+            decision: "retry",
+            reasonCodes: ["tool_xml_parse_failed"]
+          });
           writeEvent("assistant.delta", {
             delta:
               "\n\n[解析提示] 该条看起来像工具调用，但 XML 解析失败；我会让模型自动重试一次（无需你输入）。\n" +
@@ -1066,40 +1171,35 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         }
 
         // Plan/Agent：避免“只读完 doc 就停 / 没有 todo 就结束 / 明明要写入却没写入”
-        if (mode !== "chat" && autoRetryBudget > 0) {
-          const t = assistantText.trim();
-          const isEmpty = t.length === 0;
-          const isFIMLeak = looksLikeFIMLeak(assistantText);
-          // 关键修正：口播正文里会大量出现“问题来了/是不是？”等问句，不能误判为“向用户澄清”。
-          // 若看起来像正文稿，则一律不视为澄清（否则会导致 needLint/needWrite 被关闭，Run 提前结束）。
-          const isClarify = looksLikeClarifyQuestions(t) && !forceProceed && !looksLikeDraftText(t);
+        if (mode !== "chat" && runState.autoRetryBudget > 0) {
+          const analysis = analyzeAutoRetryText({ assistantText, intent, gates, state: runState, lintMaxRework });
+          const needFinalText = analysis.needFinalText;
+          const needTodo = analysis.needTodo;
+          const needWrite = analysis.needWrite;
+          const needKb = analysis.needKb;
+          const needLint = analysis.needLint;
 
-          // 关键：在 Plan/Agent 模式，todo 是“可追踪执行”的入口。即使需要澄清，也必须先设置 todo。
-          // 用户只要短确认（例如“回个 OK 就行”）时，不应强制 Todo，否则会触发 autoRetry 并在 UI 里出现“系统提示”噪音。
-          const needTodo = !hasTodoList && !wantsOkOnly;
-          const needWrite = wantsWrite && !hasWriteOps && !isClarify;
-          const needKb = styleGateEnabled && !hasStyleKbSearch && !isClarify;
-          const needLint = lintGateEnabled && !styleLintPassed && styleLintFailCount <= lintMaxRework && !isClarify;
-          // 仅仅因为“输出为空”而触发重试：通常表示模型没有给用户最终可读回复（Gemini 更常见）
-          const needFinalText = isEmpty && !needTodo && !needWrite && !needKb && !needLint;
-
-          if (isFIMLeak || isEmpty || needTodo || needWrite || needKb || needLint) {
-            autoRetryBudget -= 1;
-            const reasons: string[] = [];
-            if (isFIMLeak) reasons.push("模型输出异常(FIM token)");
-            else if (isEmpty) reasons.push("输出为空");
-            if (needFinalText) reasons.push("缺少最终回复");
-            if (needTodo) reasons.push("Todo 未设置");
-            if (needKb) reasons.push("风格样例未检索");
-            if (needLint) reasons.push("未进行风格对齐(lint.style)");
-            if (needWrite) reasons.push("写入未执行");
-            const reasonText = reasons.join(" / ");
+          if (analysis.shouldRetry) {
+            const reasonCodes: string[] = [];
+            if (analysis.isFIMLeak) reasonCodes.push("fim_leak");
+            if (analysis.isEmpty) reasonCodes.push("empty_output");
+            if (needFinalText) reasonCodes.push("need_final_text");
+            if (needTodo) reasonCodes.push("need_todo");
+            if (needKb) reasonCodes.push("need_style_kb");
+            if (needLint) reasonCodes.push("need_style_lint");
+            if (needWrite) reasonCodes.push("need_write");
+            writePolicyDecision({
+              turn,
+              policy: "AutoRetryPolicy",
+              decision: "retry",
+              reasonCodes,
+              detail: { reasons: analysis.reasons, budgetBefore: runState.autoRetryBudget, budgetAfter: Math.max(0, runState.autoRetryBudget - 1) }
+            });
+            runState.autoRetryBudget -= 1;
+            const reasonText = analysis.reasons.join(" / ");
             writeEvent("assistant.delta", {
               delta:
-                `
-
-[系统提示] 检测到本次任务尚未完成（${reasonText}），我会让模型自动继续一次（无需你输入）。
-` +
+                `\n\n[系统提示] 检测到本次任务尚未完成（${reasonText}），我会让模型自动继续一次（无需你输入）。\n` +
                 (needFinalText
                   ? "请它：直接输出对用户可读的最终回复（Markdown），不要再调用工具、不要输出任何 <tool_calls>/<tool_call>；"
                   : needTodo
@@ -1116,7 +1216,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             writeEvent("assistant.done", { reason: "auto_retry_incomplete" });
 
             // 记录本轮输出（即使为空），并要求下一轮按协议继续
-            messages.push({ role: "assistant", content: isFIMLeak ? "" : assistantText });
+            messages.push({ role: "assistant", content: analysis.isFIMLeak ? "" : assistantText });
             messages.push({
               role: "system",
               content:
@@ -1124,7 +1224,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
                   ? "你上一条输出为空（没有给用户最终可读内容）。\n" +
                     "- 你现在必须直接输出对用户的最终回复（Markdown 纯文本，至少 1 个可见字符）。\n" +
                     "- 不要调用任何工具；不要输出 <tool_calls>/<tool_call>；不要输出 XML。\n" +
-                    (wantsOkOnly ? "- 用户只要求连通性确认：请直接回复 `OK`。\n" : "")
+                    (intent.wantsOkOnly ? "- 用户只要求连通性确认：请直接回复 `OK`。\n" : "")
                   : "你刚才输出了纯文本，但任务尚未完成。\n" +
                     "- 你必须先输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
                     (needTodo
@@ -1133,7 +1233,9 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
                     (needKb
                       ? "  - 若 KB_SELECTED_LIBRARIES 中存在 purpose=style（风格库）且任务为写作类：先调用 kb.search 拉风格样例（优先 kind=card；若同时绑定了非风格库则必须带 cardTypes 且只搜风格库）。必要时再补 paragraph 并用 anchorParagraphIndexMax/anchorFromEndMax 做位置过滤。\n"
                       : "") +
-                    (needLint ? "  - 然后调用 lint.style 做终稿闸门；未通过则按 rewritePrompt 回炉改写并复检（最多 2 次）后再输出/写入。\n" : "") +
+                    (needLint
+                      ? "  - 然后调用 lint.style 做终稿闸门；未通过则按 rewritePrompt 回炉改写并复检（最多 2 次）后再输出/写入。\n"
+                      : "") +
                     "  - 若用户要求写入/分割到文件夹：请调用 doc.splitToDir（或 doc.write 等）完成写入。\n" +
                     (needTodo
                       ? "- 在你成功设置 todo 之后，如果仍需要澄清：下一条消息再输出最多 5 个问题（纯文本 Markdown），并在 todo 中标记为 blocked/等待用户输入；用户不答时写明默认假设继续推进。"
@@ -1149,7 +1251,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         // 从而前端看起来“run.end 了但没任何回复”。这里在结束前兜底 flush 一次。
         // 兜底：如果最终仍然为空（常见于 Gemini 在 tool_result 后不输出），避免 UI 空白结束。
         if (assistantText.trim().length === 0) {
-          const fallback = wantsOkOnly ? "OK" : "（模型输出为空：请重试或切换模型）";
+          const fallback = intent.wantsOkOnly ? "OK" : "（模型输出为空：请重试或切换模型）";
           writeEvent("assistant.delta", { delta: fallback });
           assistantText = fallback;
           flushed = assistantText.length;
@@ -1159,7 +1261,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           if (remain) writeEvent("assistant.delta", { delta: remain });
           flushed = assistantText.length;
         }
-        if (styleNeedsCta()) {
+        if (styleNeedsCta({ styleGateEnabled: gates.styleGateEnabled, skipCta: intent.skipCta, kbSelected: kbSelectedList as any })) {
           const t0 = assistantText.trim();
           if (looksLikeDraftText(t0) && !looksLikeHasCTA(t0)) {
             const cta = "\n\n——\n\n家人们，点个赞、关注一下，评论区聊聊：你觉得日本这波是继续嘴硬，还是准备认怂？";
@@ -1169,7 +1271,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           }
         }
         messages.push({ role: "assistant", content: assistantText });
-        writeEvent("run.end", { runId, reason: "text", turn });
+        writeEvent("run.end", { runId, reason: "text", reasonCodes: ["text"], turn });
         writeEvent("assistant.done", { reason: "text" });
         reply.raw.end();
         agentRunWaiters.delete(runId);
@@ -1177,110 +1279,221 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       }
 
       messages.push({ role: "assistant", content: assistantText });
+      // 关键：tool_calls 分支也要显式结束当前 assistant 气泡边界（否则 Desktop 只能在 tool.call 时猜测性 finish）
+      writeEvent("assistant.done", { reason: "tool_calls", turn });
 
       // 风格库写作强约束：
       // - 为了保证“先检索样例→再生成→再对齐”的可控闭环，避免同一轮把 kb.search / lint.style / 写入类工具混在一起
       //   （否则模型拿不到 tool_result，就无法真正用上检索/对齐结果）。
-      if (mode !== "chat" && hasStyleLibrary) {
-        const batchHasWrite = toolCalls.some((c: any) => isWriteLikeTool(String(c?.name ?? "")));
-        const batchHasKb = toolCalls.some((c: any) => String(c?.name ?? "") === "kb.search");
-        const batchHasLint = toolCalls.some((c: any) => String(c?.name ?? "") === "lint.style");
-        const batchHasStyleKb = toolCalls.some((c: any) => isStyleExampleKbSearch(c));
-
-        // 仅当“写作闭环相关动作”出现时才启用强闭环（避免 style 库挂着但做别的任务时被误伤）
-        const shouldEnforce = isWritingTask || batchHasWrite || batchHasLint;
-        if (shouldEnforce) {
-          const needStyleKb = !hasStyleKbSearch;
-          const enforceLint = !skipLint;
-          const lintExhausted = enforceLint && !styleLintPassed && styleLintFailCount > lintMaxRework;
-          const needStyleLint = enforceLint && !styleLintPassed;
-
-          let violation: string | null = null;
-          if (batchHasKb && batchHasLint) violation = "KB_AND_LINT_SAME_TURN";
-          else if (batchHasKb && batchHasWrite) violation = "KB_AND_WRITE_SAME_TURN";
-          else if (batchHasLint && batchHasWrite) violation = "LINT_AND_WRITE_SAME_TURN";
-          else if (batchHasLint && needStyleKb) violation = "LINT_BEFORE_KB";
-          else if (batchHasWrite && needStyleKb) violation = "WRITE_BEFORE_KB";
-          else if (batchHasWrite && needStyleLint) violation = lintExhausted ? "WRITE_BLOCKED_LINT_EXHAUSTED" : "WRITE_BEFORE_LINT_PASS";
-          else if (batchHasKb && needStyleKb && !batchHasStyleKb) violation = "KB_NOT_STYLE_EXAMPLES";
-
-          if (violation) {
-            if (autoRetryBudget > 0) {
-              autoRetryBudget -= 1;
-              writeEvent("assistant.delta", {
-                delta:
-                  "\n\n[系统提示] 风格库写作任务已启用“强闭环”：先 kb.search 拉风格样例 → 再 lint.style 对齐 → 最后才允许写入。\n" +
-                  `本轮工具调用不满足前置条件（${violation}），我会让模型自动重试一次（无需你输入）。\n` +
-                  "请它：把 kb.search / lint.style / 写入操作拆到不同回合（每回合只做一类关键动作）。"
-              });
-              writeEvent("assistant.done", { reason: "auto_retry_style_workflow" });
-
-              messages.push({
-                role: "system",
-                content:
-                  "你上一轮的 tool_calls 违反了“风格库写作强闭环”约束，请立刻重试并按下面顺序推进：\n" +
-                  "A) kb.search（手法/模板）：只搜风格库（purpose=style），优先 kind=card + cardTypes 先拉 6–12 条“可抄模板/金句形状/结构骨架”；如需证据段再用 kind=paragraph/outline + anchorParagraphIndexMax/anchorFromEndMax。 本轮不要调用 lint.style 或任何写入类工具。\n" +
-                  (enforceLint
-                    ? `B) lint.style（终稿闸门）：基于样例与指纹对照候选稿，输出 issues + rewritePrompt；必须通过闸门（score>=${lintPassScore} 且无 high issue）。未通过则按 rewritePrompt 回炉改写并再次 lint.style（最多回炉 ${lintMaxRework} 次）。本轮不要调用 kb.search 或任何写入类工具。\n`
-                    : "") +
-                  (enforceLint
-                    ? "C) 写入：只有 lint.style 通过闸门后，才允许写入/输出终稿（doc.write/doc.applyEdits 等）。\n"
-                    : "C) 写入：在拿到 kb.search 的 tool_result 后，再写入/输出终稿（doc.write/doc.applyEdits 等）。\n") +
-                  (hasNonStyleLibraries
-                    ? `提示：当前同时绑定了非风格库，因此 kb.search 必须显式传 libraryIds（仅限风格库）：${JSON.stringify(styleLibIds)}。\n`
-                    : "") +
-                  "注意：手法/模板检索优先 kind=card；若同时绑定了非风格库则必须带 cardTypes 并显式限制到风格库。如需原文证据段再用 kind=paragraph/outline，并建议用 anchorParagraphIndexMax/anchorFromEndMax 做位置过滤。"
-              });
-              continue;
-            }
-
-            // 自动重试预算耗尽：也不允许放行写入（否则会出现“未 lint 先写入 → proposal_waiting 直接结束”）
+      if (mode !== "chat" && gates.hasStyleLibrary) {
+        const batch = analyzeStyleWorkflowBatch({ mode, intent, gates, state: runState, lintMaxRework, toolCalls });
+        if (batch.shouldEnforce && batch.violation) {
+          const violation = batch.violation;
+          if (runState.autoRetryBudget > 0) {
+            writePolicyDecision({
+              turn,
+              policy: "StyleGatePolicy",
+              decision: "retry",
+              reasonCodes: ["style_workflow_violation", `violation:${String(violation ?? "")}`],
+              detail: { budgetBefore: runState.autoRetryBudget, budgetAfter: Math.max(0, runState.autoRetryBudget - 1) }
+            });
+            runState.autoRetryBudget -= 1;
             writeEvent("assistant.delta", {
               delta:
-                "\n\n[系统提示] 风格库强闭环拦截：当前仍不满足写入前置条件，但已达到自动重试上限。\n" +
-                "- 你可以回复“跳过linter”强制写入（不做风格校验）\n" +
-                "- 或回复“继续”让我再尝试一次"
+                "\n\n[系统提示] 风格库写作任务已启用“强闭环”：先 kb.search 拉风格样例 → 再 lint.style 对齐 → 最后才允许写入。\n" +
+                `本轮工具调用不满足前置条件（${violation}），我会让模型自动重试一次（无需你输入）。\n` +
+                "请它：把 kb.search / lint.style / 写入操作拆到不同回合（每回合只做一类关键动作）。"
             });
-            writeEvent("run.end", { runId, reason: "style_workflow_blocked", turn, violation });
-            writeEvent("assistant.done", { reason: "style_workflow_blocked" });
-            reply.raw.end();
-            agentRunWaiters.delete(runId);
-            return;
+            writeEvent("assistant.done", { reason: "auto_retry_style_workflow" });
+
+            messages.push({
+              role: "system",
+              content:
+                "你上一轮的 tool_calls 违反了“风格库写作强闭环”约束，请立刻重试并按下面顺序推进：\n" +
+                "A) kb.search（手法/模板）：只搜风格库（purpose=style），优先 kind=card + cardTypes 先拉 6–12 条“可抄模板/金句形状/结构骨架”；如需证据段再用 kind=paragraph/outline + anchorParagraphIndexMax/anchorFromEndMax。 本轮不要调用 lint.style 或任何写入类工具。\n" +
+                (batch.enforceLint
+                  ? `B) lint.style（终稿闸门）：基于样例与指纹对照候选稿，输出 issues + rewritePrompt；必须通过闸门（score>=${lintPassScore} 且无 high issue）。未通过则按 rewritePrompt 回炉改写并再次 lint.style（最多回炉 ${lintMaxRework} 次）。本轮不要调用 kb.search 或任何写入类工具。\n`
+                  : "") +
+                (batch.enforceLint
+                  ? "C) 写入：只有 lint.style 通过闸门后，才允许写入/输出终稿（doc.write/doc.applyEdits 等）。\n"
+                  : "C) 写入：在拿到 kb.search 的 tool_result 后，再写入/输出终稿（doc.write/doc.applyEdits 等）。\n") +
+                (gates.hasNonStyleLibraries
+                  ? `提示：当前同时绑定了非风格库，因此 kb.search 必须显式传 libraryIds（仅限风格库）：${JSON.stringify(styleLibIds)}。\n`
+                  : "") +
+                "注意：手法/模板检索优先 kind=card；若同时绑定了非风格库则必须带 cardTypes 并显式限制到风格库。如需原文证据段再用 kind=paragraph/outline，并建议用 anchorParagraphIndexMax/anchorFromEndMax 做位置过滤。"
+            });
+            continue;
           }
+
+          // 自动重试预算耗尽：也不允许放行写入（否则会出现“未 lint 先写入 → proposal_waiting 直接结束”）
+          writePolicyDecision({
+            turn,
+            policy: "StyleGatePolicy",
+            decision: "block_end",
+            reasonCodes: ["style_workflow_blocked", `violation:${String(violation ?? "")}`, "auto_retry_budget_exhausted"],
+            detail: { violation }
+          });
+          writeEvent("assistant.delta", {
+            delta:
+              "\n\n[系统提示] 风格库强闭环拦截：当前仍不满足写入前置条件，但已达到自动重试上限。\n" +
+              "- 你可以回复“跳过linter”强制写入（不做风格校验）\n" +
+              "- 或回复“继续”让我再尝试一次"
+          });
+          writeEvent("run.end", {
+            runId,
+            reason: "style_workflow_blocked",
+            reasonCodes: ["style_workflow_blocked", `violation:${String(violation ?? "")}`],
+            turn,
+            violation
+          });
+          writeEvent("assistant.done", { reason: "style_workflow_blocked" });
+          reply.raw.end();
+          agentRunWaiters.delete(runId);
+          return;
         }
       }
 
       // tool_calls：逐个 emit tool.call，等待 Desktop 回传 tool_result
+      // 参数校验（Schema）：tool_calls 的 <arg> 值都是 string，这里按工具契约做最小校验，避免把明显错误的参数下发到 Desktop 导致卡死/误判。
+      // - 校验失败：优先让模型重试修正参数（不执行任何工具）
+      if (toolCalls?.length) {
+        const bad = toolCalls
+          .map((c: any) => {
+            const name = String(c?.name ?? "");
+            const toolArgs = (c?.args ?? {}) as any;
+            const v = validateToolCallArgs({ name, toolArgs });
+            return v.ok ? null : { name, error: (v as any).error };
+          })
+          .filter(Boolean)[0] as any;
+
+        if (bad?.name) {
+          if (runState.autoRetryBudget > 0) {
+            writePolicyDecision({
+              turn,
+              policy: "ToolArgValidationPolicy",
+              decision: "retry",
+              reasonCodes: ["tool_args_invalid", `tool:${String(bad.name)}`, `code:${String(bad?.error?.code ?? "")}`],
+              detail: bad
+            });
+            runState.autoRetryBudget -= 1;
+            writeEvent("assistant.delta", {
+              delta:
+                `\n\n[解析提示] 工具参数校验失败：${String(bad?.error?.message ?? "INVALID_ARGS")}（tool=${String(bad.name)}）。我会让模型自动重试修正参数。`
+            });
+            writeEvent("assistant.done", { reason: "tool_args_invalid_retry" });
+            messages.push({
+              role: "system",
+              content:
+                "你上一轮的 tool_calls 参数未通过校验。请立刻重试：\n" +
+                "- 下一条消息必须且只能输出 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
+                `- 错误：tool=${String(bad.name)} code=${String(bad?.error?.code ?? "")} message=${String(bad?.error?.message ?? "")}\n` +
+                "- 注意：JSON 参数必须是合法 JSON（数组/对象按工具契约要求）。"
+            });
+            continue;
+          }
+
+          writePolicyDecision({
+            turn,
+            policy: "ToolArgValidationPolicy",
+            decision: "block_end",
+            reasonCodes: ["tool_args_invalid", `tool:${String(bad.name)}`, "auto_retry_budget_exhausted"],
+            detail: bad
+          });
+          writeEvent("run.end", {
+            runId,
+            reason: "tool_args_invalid",
+            reasonCodes: ["tool_args_invalid", `tool:${String(bad.name)}`],
+            turn,
+            tool: String(bad.name),
+            error: bad?.error ?? null
+          });
+          writeEvent("assistant.done", { reason: "tool_args_invalid" });
+          reply.raw.end();
+          agentRunWaiters.delete(runId);
+          return;
+        }
+      }
+
       for (const call of toolCalls) {
-        hasAnyToolCall = true;
+        runState.hasAnyToolCall = true;
         if (!call?.name || !allowedToolNames.has(call.name)) {
+          writePolicyDecision({
+            turn,
+            policy: "SafetyPolicy",
+            decision: "block_end",
+            reasonCodes: ["tool_not_allowed"],
+            detail: { tool: call?.name ?? "" }
+          });
           writeEvent("error", { error: `TOOL_NOT_ALLOWED:${call?.name ?? ""}` });
-          writeEvent("run.end", { runId, reason: "tool_not_allowed", turn, tool: call?.name ?? "" });
+          writeEvent("run.end", { runId, reason: "tool_not_allowed", reasonCodes: ["tool_not_allowed"], turn, tool: call?.name ?? "" });
           reply.raw.end();
           agentRunWaiters.delete(runId);
           return;
         }
 
         const toolCallId = randomUUID();
-        writeEvent("tool.call", { toolCallId, name: call.name, args: call.args });
-
-        const payload: ToolResultPayload = await new Promise((resolve, reject) => {
-          const timeout = setTimeout(() => reject(new Error("TOOL_RESULT_TIMEOUT")), 180_000);
-          waiters.set(toolCallId, (p) => {
-            clearTimeout(timeout);
-            resolve(p);
-          });
-          abort.signal.addEventListener(
-            "abort",
-            () => {
-              clearTimeout(timeout);
-              reject(new Error("ABORTED"));
-            },
-            { once: true }
-          );
+        const execDecision = decideServerToolExecution({
+          name: String(call.name ?? ""),
+          toolArgs: call.args,
+          toolSidecar,
         });
+        const executedBy = execDecision.executedBy;
+        writeEvent("tool.call", { toolCallId, name: call.name, args: call.args, executedBy });
 
-        waiters.delete(toolCallId);
+        let payload: ToolResultPayload;
+        if (executedBy === "gateway") {
+          writePolicyDecision({
+            turn,
+            policy: "ToolExecutionPolicy",
+            decision: "execute_on_gateway",
+            reasonCodes: ["tool_execute_on_gateway", ...execDecision.reasonCodes],
+            detail: { tool: call.name, executedBy, textLen: String((call?.args as any)?.text ?? "").length }
+          });
+
+          const ret = await executeServerToolOnGateway({ fastify, call, toolSidecar, styleLinterLibraries });
+
+          payload = ret.ok
+            ? {
+                toolCallId,
+                name: String(call.name ?? ""),
+                ok: true,
+                output: (ret as any).output,
+                meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
+              }
+            : {
+                toolCallId,
+                name: String(call.name ?? ""),
+                ok: false,
+                output: { ok: false, error: (ret as any).error ?? "SERVER_TOOL_FAILED", detail: (ret as any).detail ?? null },
+                meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
+              };
+        } else {
+          if (!execDecision.reasonCodes.includes("server_tool_not_allowed")) {
+            writePolicyDecision({
+              turn,
+              policy: "ToolExecutionPolicy",
+              decision: "execute_on_desktop",
+              reasonCodes: ["tool_execute_on_desktop", ...execDecision.reasonCodes],
+              detail: { tool: call.name, executedBy, hint: "fallback_to_desktop" },
+            });
+          }
+          payload = await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error("TOOL_RESULT_TIMEOUT")), 180_000);
+            waiters.set(toolCallId, (p) => {
+              clearTimeout(timeout);
+              resolve(p);
+            });
+            abort.signal.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(timeout);
+                reject(new Error("ABORTED"));
+              },
+              { once: true }
+            );
+          });
+          waiters.delete(toolCallId);
+        }
         writeEvent("tool.result", {
           toolCallId,
           name: payload.name,
@@ -1289,36 +1502,157 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           meta: payload.meta ?? null
         });
 
-        if (payload.ok && payload.name === "run.setTodoList") hasTodoList = true;
-        if (payload.ok && isWriteLikeTool(payload.name)) hasWriteOps = true;
-        if (payload.ok && payload.name === "kb.search") hasKbSearch = true;
-        if (payload.ok && String(call.name ?? "") === "kb.search" && isStyleExampleKbSearch(call)) {
+        // Gateway 执行的强模型工具：若上游返回 usage，按 usage 计费入账（不影响主流程）。
+        if (
+          executedBy === "gateway" &&
+          payload.ok &&
+          payload.name === "lint.style" &&
+          jwtUser?.id &&
+          jwtUser.role !== "admin"
+        ) {
+          try {
+            const usage = (payload.output as any)?.usage;
+            const modelUsed = String((payload.output as any)?.modelUsed ?? "").trim();
+            if (
+              usage &&
+              typeof usage === "object" &&
+              Number.isFinite((usage as any).promptTokens as any) &&
+              Number.isFinite((usage as any).completionTokens as any) &&
+              modelUsed
+            ) {
+              const charged = await chargeUserForLlmUsage({
+                userId: jwtUser.id,
+                modelId: modelUsed,
+                usage,
+                source: "tool.lint.style",
+                metaExtra: { runId, toolCallId, tool: payload.name, executedBy }
+              });
+              writePolicyDecision({
+                turn,
+                policy: "BillingPolicy",
+                decision: charged.ok ? "charged" : "charge_failed",
+                reasonCodes: charged.ok ? ["tool_billing_charged", "tool:lint.style"] : ["tool_billing_failed", "tool:lint.style"],
+                detail: charged.ok ? charged : { ...charged, tool: payload.name },
+              });
+            }
+          } catch {
+            // ignore billing failure
+          }
+        }
+
+        if (payload.ok && payload.name === "run.setTodoList") runState.hasTodoList = true;
+        if (payload.ok && isWriteLikeTool(payload.name)) runState.hasWriteOps = true;
+        if (payload.ok && payload.name === "kb.search") runState.hasKbSearch = true;
+
+        // 澄清等待：如果模型把某些 todo 标记为“等待用户确认/blocked”，则本轮应停止，等待用户回答（否则会出现“问你但仍继续跑”）。
+        if (
+          mode !== "chat" &&
+          !intent.forceProceed &&
+          payload.ok &&
+          (payload.name === "run.setTodoList" || payload.name === "run.updateTodo")
+        ) {
+          const todoList = Array.isArray((payload.output as any)?.todoList) ? ((payload.output as any).todoList as any[]) : [];
+          const blocked = todoList
+            .filter((t: any) => {
+              const status = String(t?.status ?? "").trim().toLowerCase();
+              const note = String(t?.note ?? "").trim();
+              if (status === "blocked") return true;
+              if (/^blocked\b/i.test(note)) return true;
+              if (/(等待用户|等待你|待确认|等你确认|需要你确认|请确认)/.test(note)) return true;
+              return false;
+            })
+            .slice(0, 5)
+            .map((t: any) => ({
+              id: String(t?.id ?? "").trim(),
+              text: String(t?.text ?? "").trim(),
+              note: String(t?.note ?? "").trim(),
+            }))
+            .filter((t: any) => t.text);
+
+          if (blocked.length) {
+            writePolicyDecision({
+              turn,
+              policy: "ClarifyPolicy",
+              decision: "wait_user",
+              reasonCodes: ["clarify_waiting"],
+              detail: { blocked: blocked.map((x: any) => x.id || x.text) }
+            });
+            const lines = blocked
+              .map((t: any) => `- ${t.text}${t.note ? `（${t.note}）` : ""}`)
+              .join("\n");
+            writeEvent("assistant.delta", {
+              delta:
+                `\n\n[需要你确认]\n${lines}\n\n` +
+                "你可以直接回答以上问题；或回复“继续”让我按默认假设继续推进（可能会偏离你的偏好）。"
+            });
+            writeEvent("run.end", {
+              runId,
+              reason: "clarify_waiting",
+              reasonCodes: ["clarify_waiting"],
+              turn,
+              blocked: blocked.map((x: any) => x.id || x.text)
+            });
+            writeEvent("assistant.done", { reason: "clarify_waiting" });
+            reply.raw.end();
+            agentRunWaiters.delete(runId);
+            return;
+          }
+        }
+        if (
+          payload.ok &&
+          String(call.name ?? "") === "kb.search" &&
+          isStyleExampleKbSearch({ call: call as any, styleLibIdSet: gates.styleLibIdSet, hasNonStyleLibraries: gates.hasNonStyleLibraries })
+        ) {
           const groups = Array.isArray((payload.output as any)?.groups) ? (payload.output as any).groups : [];
-          if (groups.length > 0) hasStyleKbSearch = true;
+          // 关键修正：把“做过检索”与“有命中”解耦。0 命中也算完成（进入降级），避免风格闭环卡死。
+          runState.hasStyleKbSearch = true;
+          if (groups.length === 0 && !runState.styleKbDegraded) {
+            runState.styleKbDegraded = true;
+            writePolicyDecision({
+              turn,
+              policy: "StyleGatePolicy",
+              decision: "kb_degraded",
+              reasonCodes: ["style_kb_zero_hit"],
+              detail: { query: String((call.args as any)?.query ?? ""), kind: String((call.args as any)?.kind ?? "") }
+            });
+            writeEvent("assistant.delta", {
+              delta:
+                "\n\n[系统提示] ⚠️ 风格样例检索 0 命中，已进入降级模式：将继续推进 lint.style / 写作闭环，但风格一致性可能变弱。\n" +
+                "- 建议：换个 query（更像“手法/句式/节奏”而不是主题词）\n" +
+                "- 或检查风格库是否为空/未生成手册"
+            });
+          }
         }
         if (String(call.name ?? "") === "lint.style") {
           if (payload.ok) {
             const parsedLint = parseStyleLintResult(payload.output);
             const candText = typeof (call?.args as any)?.text === "string" ? String((call.args as any).text) : "";
             if (candText.trim() && parsedLint.score !== null && Number.isFinite(parsedLint.score)) {
-              if (!bestStyleDraft || parsedLint.score > bestStyleDraft.score) {
-                bestStyleDraft = { score: parsedLint.score, highIssues: parsedLint.highIssues, text: candText };
+              if (!runState.bestStyleDraft || parsedLint.score > runState.bestStyleDraft.score) {
+                runState.bestStyleDraft = { score: parsedLint.score, highIssues: parsedLint.highIssues, text: candText };
               }
             }
 
             let passed =
               parsedLint.score !== null && Number.isFinite(parsedLint.score) && parsedLint.score >= lintPassScore && parsedLint.highIssues === 0;
-            lastStyleLint = parsedLint;
+            runState.lastStyleLint = parsedLint;
             // lint 工具已降级：不强制闸门（避免“永远过不了”卡死）
             if (parsedLint.usedHeuristic) {
-              lintGateDegraded = true;
+              runState.lintGateDegraded = true;
               passed = true;
+              writePolicyDecision({
+                turn,
+                policy: "LintPolicy",
+                decision: "degraded_pass",
+                reasonCodes: ["lint_degraded_heuristic"],
+                detail: { modelUsed: parsedLint.modelUsed, usedHeuristic: true }
+              });
             }
-            styleLintPassed = passed;
-            if (!passed) styleLintFailCount += 1;
+            runState.styleLintPassed = passed;
+            if (!passed) runState.styleLintFailCount += 1;
           } else {
             // 工具本身失败：视为未通过闸门（不计入回炉次数，让模型决定重试或提示用户跳过）
-            styleLintPassed = false;
+            runState.styleLintPassed = false;
           }
         }
 
@@ -1333,25 +1667,20 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           toolResultJson = JSON.stringify({ ok: false, error: "RESULT_NOT_SERIALIZABLE" });
         }
         const toolResultText = `[tool_result name="${String(call.name ?? "")}"]\n${toolResultJson}\n[/tool_result]`;
-        const useText = toolResultFormat === "text";
-        messages.push({ role: useText ? "user" : "system", content: useText ? toolResultText : toolResultXml });
-        // 兼容部分代理：当 tool_result 作为最后一条消息时，可能会出现“choices 为空不续写”。
-        // 这里额外补一条普通 user 消息，让模型明确“继续推进下一步”。（仅对 text 格式开启）
-        if (useText) {
-          messages.push({ role: "user", content: "继续。请基于以上 tool_result 推进下一步。若需要调用工具，请按协议输出 <tool_calls>。</tool_calls>" });
-        }
+        messages.push(...buildInjectedToolResultMessages({ toolResultFormat, toolResultXml, toolResultText }));
 
         // 风格 Linter 终稿闸门：未通过则自动回炉（最多 lintMaxRework 次）；超过上限则提示用户是否跳过
-        if (lintGateEnabled && String(call.name ?? "") === "lint.style") {
-          const scoreText = lastStyleLint?.score !== null && lastStyleLint?.score !== undefined ? String(lastStyleLint.score) : "null";
-          const hi = Number.isFinite(Number(lastStyleLint?.highIssues ?? 0)) ? Number(lastStyleLint?.highIssues ?? 0) : 0;
+        if (gates.lintGateEnabled && String(call.name ?? "") === "lint.style") {
+          const scoreText =
+            runState.lastStyleLint?.score !== null && runState.lastStyleLint?.score !== undefined ? String(runState.lastStyleLint.score) : "null";
+          const hi = Number.isFinite(Number(runState.lastStyleLint?.highIssues ?? 0)) ? Number(runState.lastStyleLint?.highIssues ?? 0) : 0;
 
-          if (payload.ok && !styleLintPassed) {
+          if (payload.ok && !runState.styleLintPassed) {
             // 未通过：自动回炉
-            if (styleLintFailCount <= lintMaxRework) {
+            if (runState.styleLintFailCount <= lintMaxRework) {
               writeEvent("assistant.delta", {
                 delta:
-                  `\n\n[系统提示] 风格对齐未通过（score=${scoreText}，high=${hi}）。正在自动回炉（${styleLintFailCount}/${lintMaxRework}）…`
+                  `\n\n[系统提示] 风格对齐未通过（score=${scoreText}，high=${hi}）。正在自动回炉（${runState.styleLintFailCount}/${lintMaxRework}）…`
               });
               messages.push({
                 role: "system",
@@ -1365,34 +1694,62 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             }
 
             // 超过回炉上限：终止并提示用户
-            if (keepBestOnLintExhausted && bestStyleDraft?.text) {
+            if (keepBestOnLintExhausted && runState.bestStyleDraft?.text) {
+              writePolicyDecision({
+                turn,
+                policy: "LintPolicy",
+                decision: "end_keep_best",
+                reasonCodes: ["style_lint_exhausted", "lint_keep_best"],
+                detail: { bestScore: runState.bestStyleDraft.score }
+              });
               writeEvent("assistant.delta", {
                 delta:
-                  `\n\n[系统提示] 风格对齐达到回炉上限，已按“保留最高分”策略输出最高分版本（score=${bestStyleDraft.score}）。\n\n` +
-                  bestStyleDraft.text,
+                  `\n\n[系统提示] 风格对齐达到回炉上限，已按“保留最高分”策略输出最高分版本（score=${runState.bestStyleDraft.score}）。\n\n` +
+                  runState.bestStyleDraft.text,
               });
-              writeEvent("run.end", { runId, reason: "text", turn, lint: "keep_best", bestScore: bestStyleDraft.score });
+              writeEvent("run.end", {
+                runId,
+                reason: "text",
+                reasonCodes: ["text", "lint_keep_best"],
+                turn,
+                lint: "keep_best",
+                bestScore: runState.bestStyleDraft.score
+              });
               writeEvent("assistant.done", { reason: "text" });
               reply.raw.end();
               agentRunWaiters.delete(runId);
               return;
             }
 
+            writePolicyDecision({
+              turn,
+              policy: "LintPolicy",
+              decision: "end_exhausted",
+              reasonCodes: ["style_lint_exhausted"],
+              detail: { failCount: runState.styleLintFailCount, passScore: lintPassScore }
+            });
             writeEvent("assistant.delta", {
               delta:
-                `\n\n[系统提示] 风格对齐已连续 ${styleLintFailCount} 次未通过，已达到最大回炉次数（${lintMaxRework}）。\n` +
+                `\n\n[系统提示] 风格对齐已连续 ${runState.styleLintFailCount} 次未通过，已达到最大回炉次数（${lintMaxRework}）。\n` +
                 `- 你可以回复“跳过linter”来强制输出（不再做风格校验）\n` +
                 `- 或者调整阈值（STYLE_LINT_PASS_SCORE，当前=${lintPassScore}）后再试`
             });
-            writeEvent("run.end", { runId, reason: "style_lint_exhausted", turn, failCount: styleLintFailCount, passScore: lintPassScore });
+            writeEvent("run.end", {
+              runId,
+              reason: "style_lint_exhausted",
+              reasonCodes: ["style_lint_exhausted"],
+              turn,
+              failCount: runState.styleLintFailCount,
+              passScore: lintPassScore
+            });
             writeEvent("assistant.done", { reason: "style_lint_exhausted" });
             reply.raw.end();
             agentRunWaiters.delete(runId);
             return;
           }
 
-          if (payload.ok && styleLintPassed) {
-            if (lintGateDegraded) {
+          if (payload.ok && runState.styleLintPassed) {
+            if (runState.lintGateDegraded) {
               writeEvent("assistant.delta", { delta: `\n\n[系统提示] ⚠️ lint.style 已降级为本地检查（非强模型），本次不强制闸门卡死。` });
             } else {
               writeEvent("assistant.delta", { delta: `\n\n[系统提示] ✅ 风格对齐通过（score=${scoreText}，high=${hi}）。` });
@@ -1401,7 +1758,14 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         }
 
         // proposal-first：工具返回需要用户确认的提案，终止本次 run，等待用户 Keep/Undo 后再继续对话
-        if (payload.meta?.applyPolicy === "proposal" && payload.meta?.hasApply) {
+        if (isProposalWaitingMeta(payload.meta)) {
+          writePolicyDecision({
+            turn,
+            policy: "ProposalPolicy",
+            decision: "wait_user_keep",
+            reasonCodes: ["proposal_waiting"],
+            detail: { tool: call.name }
+          });
           writeEvent("assistant.delta", {
             delta:
               "\n\n我已经生成一份“修改提案”（见上方 Tool Block）。\n\n" +
@@ -1410,7 +1774,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               "你也可以直接继续发下一条指令（例如：开始润色/继续改写下一段）。\n" +
               "提示：若后续需要读取该文件内容，请调用 doc.read；系统会优先返回“提案态最新内容”（不要求先 Keep）。"
           });
-          writeEvent("run.end", { runId, reason: "proposal_waiting", turn, tool: call.name });
+          writeEvent("run.end", { runId, reason: "proposal_waiting", reasonCodes: ["proposal_waiting"], turn, tool: call.name });
           writeEvent("assistant.done", { reason: "proposal_waiting" });
           reply.raw.end();
           agentRunWaiters.delete(runId);
@@ -1422,7 +1786,14 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     writeEvent("assistant.delta", {
       delta: "\n\n[提示] 已达到本次 Run 的最大工具循环轮数（maxTurns），为避免死循环已自动停止。"
     });
-    writeEvent("run.end", { runId, reason: "maxTurns", maxTurns });
+    writePolicyDecision({
+      turn: maxTurns,
+      policy: "LoopPolicy",
+      decision: "end_max_turns",
+      reasonCodes: ["max_turns"],
+      detail: { maxTurns }
+    });
+    writeEvent("run.end", { runId, reason: "maxTurns", reasonCodes: ["max_turns"], maxTurns });
     writeEvent("assistant.done", { reason: "maxTurns" });
   } catch (e: any) {
     const msg = e?.message ? String(e.message) : String(e);
@@ -1508,23 +1879,23 @@ fastify.post("/api/auth/email/verify", async (request, reply) => {
   }
   codeRequests.delete(requestId);
 
-  const db = await loadDb();
   const lowerEmail = email.toLowerCase();
-
-  let user = db.users.find((u) => u.email === lowerEmail);
-  if (!user) {
-    const isAdmin = ADMIN_EMAILS.includes(lowerEmail) || (IS_DEV && db.users.length === 0);
-    const role: User["role"] = isAdmin ? "admin" : "user";
-    user = {
-      id: randomUUID(),
-      email: lowerEmail,
-      role,
-      pointsBalance: 0,
-      createdAt: new Date().toISOString()
-    };
-    db.users.push(user);
-    await saveDb(db);
-  }
+  const user = await updateDb((db) => {
+    let user = db.users.find((u) => u.email === lowerEmail);
+    if (!user) {
+      const isAdmin = ADMIN_EMAILS.includes(lowerEmail) || (IS_DEV && db.users.length === 0);
+      const role: User["role"] = isAdmin ? "admin" : "user";
+      user = {
+        id: randomUUID(),
+        email: lowerEmail,
+        role,
+        pointsBalance: 0,
+        createdAt: new Date().toISOString()
+      };
+      db.users.push(user);
+    }
+    return user;
+  });
 
   const accessToken = fastify.jwt.sign({ sub: user.id, email: user.email, role: user.role });
   return reply.send({
@@ -1634,12 +2005,12 @@ fastify.patch(
     const { id } = paramsSchema.parse((request as any).params);
     const { role } = bodySchema.parse((request as any).body);
 
-    const db = await loadDb();
-    const user = db.users.find((u) => u.id === id);
-    if (!user) return { error: "USER_NOT_FOUND" };
-    user.role = role;
-    await saveDb(db);
-    return { ok: true };
+    return updateDb((db) => {
+      const user = db.users.find((u) => u.id === id);
+      if (!user) return { error: "USER_NOT_FOUND" };
+      user.role = role;
+      return { ok: true };
+    });
   }
 );
 
@@ -1657,17 +2028,18 @@ fastify.post(
     const { id } = paramsSchema.parse((request as any).params);
     const { points, reason } = bodySchema.parse((request as any).body);
 
-    const db = await loadDb();
     try {
-      const { user, tx } = adjustUserPoints({
-        db,
-        userId: id,
-        delta: points,
-        type: "recharge",
-        reason: reason ?? "admin_recharge"
+      const ret = await updateDb((db) => {
+        const { user, tx } = adjustUserPoints({
+          db,
+          userId: id,
+          delta: points,
+          type: "recharge",
+          reason: reason ?? "admin_recharge"
+        });
+        return { ok: true, pointsBalance: user.pointsBalance, tx };
       });
-      await saveDb(db);
-      return reply.send({ ok: true, pointsBalance: user.pointsBalance, tx });
+      return reply.send(ret);
     } catch (e: any) {
       const msg = e?.message ? String(e.message) : String(e);
       return reply.code(400).send({ error: msg });
@@ -1695,6 +2067,66 @@ fastify.get(
   },
   async () => {
     return { ok: true };
+  },
+);
+
+// ======== Admin：Run/Tool 审计（开发期落本地 db.json） ========
+
+fastify.get(
+  "/api/admin/audit/runs",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async (request) => {
+    const qSchema = z.object({
+      top: z.coerce.number().int().min(1).max(500).optional(),
+      kind: z.enum(["llm.chat", "agent.run"]).optional(),
+      userId: z.string().min(1).optional(),
+    });
+    const q = qSchema.parse((request as any).query ?? {});
+    const top = q.top ?? 80;
+    const db = await loadDb();
+    let runs = Array.isArray((db as any).runAudits) ? (((db as any).runAudits as any[]) ?? []) : [];
+    if (q.kind) runs = runs.filter((r: any) => String(r?.kind ?? "") === q.kind);
+    if (q.userId) runs = runs.filter((r: any) => String(r?.userId ?? "") === q.userId);
+    runs = runs
+      .slice()
+      .sort((a: any, b: any) => String(b?.startedAt ?? "").localeCompare(String(a?.startedAt ?? "")))
+      .slice(0, top);
+    return {
+      runs: runs.map((r: any) => ({
+        id: r.id,
+        kind: r.kind,
+        mode: r.mode,
+        userId: r.userId ?? null,
+        model: r.model ?? null,
+        endpoint: r.endpoint ?? null,
+        startedAt: r.startedAt,
+        endedAt: r.endedAt ?? null,
+        endReason: r.endReason ?? null,
+        endReasonCodes: Array.isArray(r.endReasonCodes) ? r.endReasonCodes : [],
+        usage: r.usage ?? null,
+        chargedPoints: r.chargedPoints ?? null,
+        eventCount: Array.isArray(r.events) ? r.events.length : 0,
+        meta: r.meta ?? null,
+      })),
+    };
+  },
+);
+
+fastify.get(
+  "/api/admin/audit/runs/:id",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async (request, reply) => {
+    const paramsSchema = z.object({ id: z.string().min(1) });
+    const { id } = paramsSchema.parse((request as any).params ?? {});
+    const db = await loadDb();
+    const runs = Array.isArray((db as any).runAudits) ? (((db as any).runAudits as any[]) ?? []) : [];
+    const found = runs.find((r: any) => String(r?.id ?? "") === id) || null;
+    if (!found) return reply.code(404).send({ error: "RUN_NOT_FOUND" });
+    return reply.send({ run: found });
   },
 );
 
@@ -1948,8 +2380,6 @@ fastify.post(
     const endpoint = String(runtime.endpoint || "");
     if (/\/embeddings/i.test(endpoint)) return reply.code(400).send({ error: "NOT_CHAT_MODEL" });
 
-    const isGeminiEndpoint = /:streamGenerateContent/i.test(endpoint) || /:generateContent/i.test(endpoint) || /\/v1beta\/models\//i.test(endpoint);
-
     const runOnce = async (fmt: "xml" | "text") => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -1981,28 +2411,18 @@ fastify.post(
       ];
 
       try {
-        const iter = isGeminiEndpoint
-          ? streamGeminiGenerateContent({
-              baseUrl: runtime.baseURL,
-              endpoint: runtime.endpoint,
-              apiKey: runtime.apiKey,
-              messages,
-              temperature: 0,
-              // 兼容“带 reasoning_content 的代理”：给足 completion tokens，避免只吐推理不吐最终 OK
-              maxTokens: 256,
-              signal: controller.signal,
-            })
-          : streamChatCompletions({
-              config: { baseUrl: runtime.baseURL, apiKey: runtime.apiKey },
-              endpoint: runtime.endpoint,
-              model: runtime.model,
-              messages,
-              temperature: 0,
-              // 兼容“带 reasoning_content 的代理”：给足 completion tokens，避免只吐推理不吐最终 OK
-              maxTokens: 256,
-              includeUsage: true,
-              signal: controller.signal,
-            });
+        const iter = streamChatCompletionViaProvider({
+          baseUrl: runtime.baseURL,
+          endpoint: runtime.endpoint,
+          apiKey: runtime.apiKey,
+          model: runtime.model,
+          messages,
+          temperature: 0,
+          // 兼容“带 reasoning_content 的代理”：给足 completion tokens，避免只吐推理不吐最终 OK
+          maxTokens: 256,
+          includeUsage: true,
+          signal: controller.signal,
+        });
 
         for await (const ev of iter as any) {
           if (ev.type === "delta") out += String(ev.delta ?? "");
@@ -2178,42 +2598,43 @@ fastify.put(
     });
 
     const body = bodySchema.parse((request as any).body ?? {});
-    const db = await loadDb();
-    const prev: LlmConfig = db.llmConfig && typeof db.llmConfig === "object" ? db.llmConfig : { updatedAt: new Date().toISOString() };
 
-    const mergeStage = (dst: any, src: any) => {
-      const out: any = { ...(dst && typeof dst === "object" ? dst : {}) };
-      if (!src || typeof src !== "object") return out;
-      if (src.baseUrl !== undefined) out.baseUrl = normUrl(src.baseUrl);
-      if (src.apiKey !== undefined) out.apiKey = String(src.apiKey ?? "").trim(); // 允许空字符串清空
-      if (src.models !== undefined) out.models = normStrList(src.models);
-      if (src.defaultModel !== undefined) out.defaultModel = normStr(src.defaultModel);
-      return out;
-    };
+    return updateDb((db) => {
+      const prev: LlmConfig = db.llmConfig && typeof db.llmConfig === "object" ? db.llmConfig : { updatedAt: new Date().toISOString() };
 
-    const next: LlmConfig = {
-      ...prev,
-      updatedAt: new Date().toISOString(),
-      llm: mergeStage(prev.llm, body.llm),
-      embeddings: mergeStage(prev.embeddings, body.embeddings),
-      card: mergeStage(prev.card, body.card),
-      linter: { ...mergeStage(prev.linter, body.linter), ...(body.linter?.timeoutMs ? { timeoutMs: body.linter.timeoutMs } : {}) },
-      pricing: { ...(prev.pricing ?? {}), ...(body.pricing ?? {}) },
-    };
+      const mergeStage = (dst: any, src: any) => {
+        const out: any = { ...(dst && typeof dst === "object" ? dst : {}) };
+        if (!src || typeof src !== "object") return out;
+        if (src.baseUrl !== undefined) out.baseUrl = normUrl(src.baseUrl);
+        if (src.apiKey !== undefined) out.apiKey = String(src.apiKey ?? "").trim(); // 允许空字符串清空
+        if (src.models !== undefined) out.models = normStrList(src.models);
+        if (src.defaultModel !== undefined) out.defaultModel = normStr(src.defaultModel);
+        return out;
+      };
 
-    // 清理空对象
-    const prune = (x: any) => (x && typeof x === "object" && Object.keys(x).length ? x : undefined);
-    db.llmConfig = {
-      updatedAt: next.updatedAt,
-      ...(prune(next.llm) ? { llm: prune(next.llm) } : {}),
-      ...(prune(next.embeddings) ? { embeddings: prune(next.embeddings) } : {}),
-      ...(prune(next.card) ? { card: prune(next.card) } : {}),
-      ...(prune(next.linter) ? { linter: prune(next.linter) } : {}),
-      ...(next.pricing && Object.keys(next.pricing).length ? { pricing: next.pricing } : {}),
-    };
+      const next: LlmConfig = {
+        ...prev,
+        updatedAt: new Date().toISOString(),
+        llm: mergeStage(prev.llm, body.llm),
+        embeddings: mergeStage(prev.embeddings, body.embeddings),
+        card: mergeStage(prev.card, body.card),
+        linter: { ...mergeStage(prev.linter, body.linter), ...(body.linter?.timeoutMs ? { timeoutMs: body.linter.timeoutMs } : {}) },
+        pricing: { ...(prev.pricing ?? {}), ...(body.pricing ?? {}) },
+      };
 
-    await saveDb(db);
-    return { ok: true, stored: sanitizeLlmConfigForAdmin(db.llmConfig) };
+      // 清理空对象
+      const prune = (x: any) => (x && typeof x === "object" && Object.keys(x).length ? x : undefined);
+      db.llmConfig = {
+        updatedAt: next.updatedAt,
+        ...(prune(next.llm) ? { llm: prune(next.llm) } : {}),
+        ...(prune(next.embeddings) ? { embeddings: prune(next.embeddings) } : {}),
+        ...(prune(next.card) ? { card: prune(next.card) } : {}),
+        ...(prune(next.linter) ? { linter: prune(next.linter) } : {}),
+        ...(next.pricing && Object.keys(next.pricing).length ? { pricing: next.pricing } : {}),
+      };
+
+      return { ok: true, stored: sanitizeLlmConfigForAdmin(db.llmConfig) };
+    });
   }
 );
 
@@ -2311,8 +2732,9 @@ fastify.post("/api/kb/dev/extract_cards", async (request, reply) => {
   });
   const body = bodySchema.parse((request as any).body);
 
-  const cardEnv = await getPlaybookEnv();
+  const cardEnv = await getCardEnv();
   const cardBaseUrl = cardEnv.baseUrl;
+  const cardEndpoint = (cardEnv as any).endpoint || "/v1/chat/completions";
   const cardApiKey = cardEnv.apiKey;
   const cardModelDefault = cardEnv.defaultModel;
 
@@ -2333,14 +2755,17 @@ fastify.post("/api/kb/dev/extract_cards", async (request, reply) => {
 
   let model = body.model ?? cardModelDefault;
   let baseUrl = cardBaseUrl;
+  let endpoint = cardEndpoint;
   let apiKey = cardApiKey;
   if (body.model) {
     try {
       const m = await aiConfig.resolveModel(body.model);
-      if (/chat\/completions/i.test(String(m.endpoint || ""))) {
+      const ep = String(m.endpoint || "").trim();
+      if (ep && (/chat\/completions/i.test(ep) || isGeminiLikeEndpoint(ep))) {
         model = m.model;
         baseUrl = m.baseURL;
         apiKey = m.apiKey;
+        endpoint = ep;
       }
     } catch {
       // ignore
@@ -2480,8 +2905,10 @@ fastify.post("/api/kb/dev/extract_cards", async (request, reply) => {
     const maxCharsPerPara = attempt <= 0 ? 520 : attempt === 1 ? 360 : attempt === 2 ? 260 : 220;
     const user = buildUser(body.paragraphs as any, maxCount, maxCharsPerPara);
 
-    ret = await chatCompletionOnce({
-      config: { baseUrl, apiKey },
+    ret = await completionOnceViaProvider({
+      baseUrl,
+      endpoint,
+      apiKey,
       model,
       messages: [
         { role: "system", content: sys },
@@ -2616,12 +3043,13 @@ fastify.post("/api/kb/dev/build_library_playbook", async (request, reply) => {
   });
   const body = bodySchema.parse((request as any).body);
 
-  const cardEnv = await getCardEnv();
-  const cardBaseUrl = cardEnv.baseUrl;
-  const cardApiKey = cardEnv.apiKey;
-  const cardModelDefault = cardEnv.defaultModel;
+  const playbookEnv = await getPlaybookEnv();
+  const playbookBaseUrl = playbookEnv.baseUrl;
+  const playbookEndpoint = (playbookEnv as any).endpoint || "/v1/chat/completions";
+  const playbookApiKey = playbookEnv.apiKey;
+  const playbookModelDefault = playbookEnv.defaultModel;
 
-  if (!cardEnv.ok) {
+  if (!playbookEnv.ok) {
     return reply.code(500).send({
       error: "LLM_NOT_CONFIGURED",
       hint: "请配置 LLM_BASE_URL/LLM_MODEL/LLM_API_KEY；若抽卡需不同 key/model，请配置 LLM_CARD_MODEL/LLM_CARD_API_KEY（可选 LLM_CARD_BASE_URL）。"
@@ -2636,16 +3064,19 @@ fastify.post("/api/kb/dev/build_library_playbook", async (request, reply) => {
     // ignore
   }
 
-  let model = body.model ?? cardModelDefault;
-  let baseUrl = cardBaseUrl;
-  let apiKey = cardApiKey;
+  let model = body.model ?? playbookModelDefault;
+  let baseUrl = playbookBaseUrl;
+  let endpoint = playbookEndpoint;
+  let apiKey = playbookApiKey;
   if (body.model) {
     try {
       const m = await aiConfig.resolveModel(body.model);
-      if (/chat\/completions/i.test(String(m.endpoint || ""))) {
+      const ep = String(m.endpoint || "").trim();
+      if (ep && (/chat\/completions/i.test(ep) || isGeminiLikeEndpoint(ep))) {
         model = m.model;
         baseUrl = m.baseURL;
         apiKey = m.apiKey;
+        endpoint = ep;
       }
     } catch {
       // ignore
@@ -2789,8 +3220,10 @@ fastify.post("/api/kb/dev/build_library_playbook", async (request, reply) => {
     const user = usedMode === "lite" ? userLite : userFull;
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), timeoutMs);
-    ret = await chatCompletionOnce({
-      config: { baseUrl, apiKey },
+    ret = await completionOnceViaProvider({
+      baseUrl,
+      endpoint,
+      apiKey,
       model,
       messages: [
         { role: "system", content: sys },
@@ -2954,6 +3387,9 @@ fastify.post("/api/kb/dev/classify_genre", async (request, reply) => {
   }
 
   const model = body.model ?? llmEnv.defaultModel;
+  const baseUrl = llmEnv.baseUrl;
+  const endpoint = (llmEnv as any).endpoint || "/v1/chat/completions";
+  const apiKey = llmEnv.apiKey;
   const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 3);
   const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -2997,8 +3433,10 @@ fastify.post("/api/kb/dev/classify_genre", async (request, reply) => {
 
   let ret: any = null;
   for (let attempt = 0; attempt <= retryMax; attempt += 1) {
-    ret = await chatCompletionOnce({
-      config: { baseUrl: llmEnv.baseUrl, apiKey: llmEnv.apiKey },
+    ret = await completionOnceViaProvider({
+      baseUrl,
+      endpoint,
+      apiKey,
       model,
       messages: [
         { role: "system", content: sys },
@@ -3145,14 +3583,17 @@ fastify.post("/api/kb/dev/lint_style", async (request, reply) => {
 
   let model = body.model ?? env.defaultModel;
   let baseUrl = env.baseUrl;
+  let endpoint = (env as any).endpoint || "/v1/chat/completions";
   let apiKey = env.apiKey;
   if (body.model) {
     try {
       const m = await aiConfig.resolveModel(body.model);
-      if (/chat\/completions/i.test(String(m.endpoint || ""))) {
+      const ep = String(m.endpoint || "").trim();
+      if (ep && (/chat\/completions/i.test(ep) || isGeminiLikeEndpoint(ep))) {
         model = m.model;
         baseUrl = m.baseURL;
         apiKey = m.apiKey;
+        endpoint = ep;
       }
     } catch {
       // ignore
@@ -3406,8 +3847,10 @@ fastify.post("/api/kb/dev/lint_style", async (request, reply) => {
       ? Math.max(10_000, Math.min(timeoutMs, Math.floor(upstreamTimeoutMsCfg)))
       : Math.max(10_000, Math.floor(timeoutMs));
   const timer = setTimeout(() => abort.abort(), upstreamTimeoutMs);
-  const ret = await chatCompletionOnce({
-    config: { baseUrl, apiKey },
+  const ret = await completionOnceViaProvider({
+    baseUrl,
+    endpoint,
+    apiKey,
     model,
     messages: [
       { role: "system", content: sys },
@@ -3426,6 +3869,7 @@ fastify.post("/api/kb/dev/lint_style", async (request, reply) => {
     return reply.send(buildHeuristicOut({ reason: isTimeout ? `timeout after ${upstreamTimeoutMs}ms` : errText || "upstream error" }));
   }
 
+  const usage = (ret as any)?.usage ?? null;
   const raw = String((ret as any).content ?? "").trim();
   const tryParse = (s: string) => {
     try {
@@ -3476,7 +3920,7 @@ fastify.post("/api/kb/dev/lint_style", async (request, reply) => {
 
   try {
     const out = outSchema.parse(parsed);
-    return reply.send({ ok: true, modelUsed: model, timeoutMs, ...out });
+    return reply.send({ ok: true, modelUsed: model, timeoutMs, ...(usage ? { usage } : {}), ...out });
   } catch (e: any) {
     return reply.send(buildHeuristicOut({ reason: `INVALID_OUTPUT_SCHEMA:${String(e?.message ?? e)}` }));
   }

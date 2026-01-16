@@ -121,7 +121,7 @@ async function* readLines(stream: ReadableStream<Uint8Array>) {
   if (buf.length > 0) yield buf.replace(/\r$/, "");
 }
 
-function isGeminiEndpoint(endpoint: string) {
+export function isGeminiEndpoint(endpoint: string) {
   const e = String(endpoint || "");
   return /:streamGenerateContent/i.test(e) || /:generateContent/i.test(e) || /\/v1beta\/models\//i.test(e);
 }

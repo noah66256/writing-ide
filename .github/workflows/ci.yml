@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-regress:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install
+        run: npm ci
+
+      - name: Build gateway
+        run: npm run -w @writing-ide/gateway build
+
+      - name: Regress agent flow (styleGate / clarify_waiting / proposal / xml protocol)
+        run: npm run -w @writing-ide/gateway regress:agent
+
+      - name: Audit AI stages (resolveStage coverage)
+        run: npm run -w @writing-ide/gateway audit:ai
+
+      - name: Build desktop (renderer)
+        run: npm run -w @writing-ide/desktop build
+
+      - name: Build admin-web
+        run: npm run -w @writing-ide/admin-web build
+
+

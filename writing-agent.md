@@ -168,7 +168,7 @@
 - `Main Doc` ≈ `task_plan.md`（run 主线锚点）
 - `RUN_TODO` + Dock/Runs ≈ 计划/进度（更适合 UI 化）
 - 后续可补一个 `findings.md`（或 Dock/KB 面板）承载“素材与发现”
-- 稳定性补丁：Plan/Agent Context Pack 不注入完整历史对话（避免臆造“你说继续”）；若模型违规把工具 XML 混入正文，前端会过滤 `<tool_call>` 片段并保持输出顺序清晰；消息区支持自动跟随滚动（上滑浏览历史时不抢滚动）；若工具 XML 解析失败，Gateway 会自动要求模型重试（减少“任务中断/要你手动继续”）
+- 稳定性补丁：Plan/Agent Context Pack 不注入完整历史对话（仅少量 `RECENT_DIALOGUE`，避免臆造“你说继续”）；工具调用必须 **XML 独占消息**（若模型把自然语言混进 `<tool_calls>`，Gateway 会强制重试而不执行工具）；若工具 XML 解析失败，Gateway 会自动要求模型重试（减少“任务中断/要你手动继续”）；当 todo 标记为 `blocked/等待确认/请确认` 时，Run 会以 `clarify_waiting` 暂停等待用户（避免“问你但仍继续跑”）；消息区支持自动跟随滚动（上滑浏览历史时不抢滚动）
 
 ---
 

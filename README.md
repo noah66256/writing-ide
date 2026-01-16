@@ -18,9 +18,11 @@
   - `kb.search` 会在卡片头部显示 debug 摘要（lex/vec/fallback/hits），便于快速判断检索效果。
   - `Keep`：采纳该步产物并纳入后续上下文
   - `Undo`：撤销该步副作用（如有）并从上下文移除
-  - 写入默认走“提案→确认→执行”，避免直接落盘；可撤销类工具用 `undoToken` 支持回滚
+  - 写入按风险分级：**中/高风险默认 proposal-first（先提案，Keep 才 apply）**；低风险允许 `auto_apply` 但必须可 Undo 回滚
  - **运行状态指示（防“卡死”错觉）**：Run 进行中会在输入框下方显示“正在… + 已耗时”（例如正在向量检索/正在执行工具），用于提示当前进度。
- - **提案态可续跑（关键体验）**：当出现 `doc.write/doc.applyEdits` 的“提案等待 Keep”时，你可以先不点 Keep 继续让 Agent 做下一步（例如“开始润色”）。后续若调用 `doc.read` 读取该文件，系统会优先返回“提案态最新内容”（避免出现“没有初稿”的断档）。
+ - **提案态可续跑（关键体验）**：当出现 `doc.write/doc.applyEdits/doc.restoreSnapshot/doc.splitToDir` 的“提案等待 Keep”时，你可以先不点 Keep 继续让 Agent 做下一步（例如“开始润色”）。后续若调用 `doc.read` 读取相关文件，系统会优先返回“提案态最新内容”（避免出现“没有初稿”的断档）。
+ - **需要你确认时会暂停（clarify_waiting）**：当 Plan/Agent 在 todo 里标记“blocked/等待用户确认/请确认”时，Gateway 会结束本次 Run 等你回复；你也可以回复“继续”让它按默认假设继续推进。
+ - **工具调用协议硬约束**：当模型要调用工具时，必须输出 **且只能输出** `<tool_calls>/<tool_call>` XML（整条消息不得夹杂自然语言）。若混杂，Gateway 会要求模型自动重试，避免“问你但仍继续跑”。
 
 补充（开发期已实现）：
 - **proposal-first 写入**：例如 `doc.applyEdits` 会先生成“修改提案”Tool Block，用户点 **Keep** 才真正应用到编辑器；点 **Undo** 丢弃提案/回滚。

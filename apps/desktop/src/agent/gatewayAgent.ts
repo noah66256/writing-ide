@@ -1,7 +1,7 @@
 import { useProjectStore } from "../state/projectStore";
 import { useRunStore, type Mode } from "../state/runStore";
 import { useKbStore } from "../state/kbStore";
-import { executeToolCall, toolsPrompt } from "./toolRegistry";
+import { buildStyleLinterLibrariesSidecar, executeToolCall, getTool, toolsPrompt } from "./toolRegistry";
 import { isToolCallMessage, parseToolCalls, renderToolErrorXml, renderToolResultXml } from "./xmlProtocol";
 
 type GatewayRunController = {
@@ -15,6 +15,29 @@ type SseEvent = {
   event: string;
   data: string;
 };
+
+function coerceSseArgValue(v: string): unknown {
+  const raw = String(v ?? "");
+  const s = raw.trim();
+  if (!s) return "";
+  if ((s.startsWith("{") && s.endsWith("}")) || (s.startsWith("[") && s.endsWith("]"))) {
+    try {
+      return JSON.parse(s);
+    } catch {
+      return raw;
+    }
+  }
+  if (s === "true") return true;
+  if (s === "false") return false;
+  if (/^-?\d+(\.\d+)?$/.test(s) && s.length < 32) return Number(s);
+  return raw;
+}
+
+function parseSseToolArgs(rawArgs: Record<string, string>) {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(rawArgs ?? {})) out[k] = coerceSseArgValue(v);
+  return out;
+}
 
 function parseSseBlock(block: string): SseEvent | null {
   // Very small SSE parser: expects lines like "event: xxx" and "data: {...}"
@@ -516,6 +539,47 @@ export function startGatewayRun(args: {
         const done = todo.filter((t) => t.status === "done").length;
         const refs = parseRefsFromPrompt(args.prompt);
         const kbLibCount = (useKbStore.getState().libraries ?? []).length;
+        const pendingProposals = (() => {
+          const steps = useRunStore.getState().steps ?? [];
+          const out: Array<{ toolName: string; path?: string }> = [];
+          for (const st of steps as any[]) {
+            if (!st || typeof st !== "object") continue;
+            if (st.type !== "tool") continue;
+            if (st.status !== "success") continue;
+            if (st.applyPolicy !== "proposal") continue;
+            if (st.applied === true) continue;
+            if (st.status === "undone") continue;
+            if (st.toolName === "doc.write") {
+              out.push({
+                toolName: "doc.write",
+                path: typeof st.input?.path === "string" ? st.input.path : typeof st.output?.path === "string" ? st.output.path : undefined,
+              });
+              continue;
+            }
+            if (st.toolName === "doc.applyEdits") {
+              out.push({
+                toolName: "doc.applyEdits",
+                path: typeof st.output?.path === "string" ? st.output.path : typeof st.input?.path === "string" ? st.input.path : undefined,
+              });
+              continue;
+            }
+            if (st.toolName === "doc.splitToDir") {
+              out.push({
+                toolName: "doc.splitToDir",
+                path: typeof st.output?.targetDir === "string" ? st.output.targetDir : undefined,
+              });
+              continue;
+            }
+            if (st.toolName === "doc.restoreSnapshot") {
+              out.push({
+                toolName: "doc.restoreSnapshot",
+                path: typeof st.output?.preview?.path === "string" ? st.output.preview.path : undefined,
+              });
+              continue;
+            }
+          }
+          return out.slice(-20);
+        })();
         const ed = proj.editorRef;
         const hasSelection = (() => {
           const model = ed?.getModel();
@@ -533,6 +597,7 @@ export function startGatewayRun(args: {
           docRulesChars,
           refs: refs.map((r) => ({ kind: r.kind, path: r.path })),
           todo: { done, total: todo.length },
+          pendingProposals: { total: pendingProposals.length, tail: pendingProposals.slice(-6) },
           hasSelection,
         });
       } catch {
@@ -566,6 +631,28 @@ export function startGatewayRun(args: {
       const url = args.gatewayUrl ? `${args.gatewayUrl}/api/agent/run/stream` : "/api/agent/run/stream";
 
       setActivity("正在请求模型…", { resetTimer: true });
+      // toolSidecar：用于“工具逐步迁回 Gateway”时携带必要的本地只读上下文（不注入模型 messages，避免 token 爆炸）
+      const toolSidecar = await (async () => {
+        const proj = useProjectStore.getState();
+        const projectFiles = (proj.files ?? [])
+          .map((f: any) => ({ path: String(f?.path ?? "").trim() }))
+          .filter((f: any) => f.path)
+          .slice(0, 5000);
+        const docRulesFile = proj.getFileByPath("doc.rules.md");
+        const docRules = docRulesFile ? { path: docRulesFile.path, content: docRulesFile.content ?? "" } : null;
+
+        const attached = useRunStore.getState().kbAttachedLibraryIds ?? [];
+        let styleLinterLibraries: any[] | undefined = undefined;
+        if (Array.isArray(attached) && attached.length) {
+          // 仅携带风格库的 lint 所需 payload（stats/ngrams/samples）；非风格库不带
+          const ret = await buildStyleLinterLibrariesSidecar({ maxLibraries: 6 }).catch(() => ({ ok: false } as any));
+          if (ret?.ok && Array.isArray(ret.libraries) && ret.libraries.length) styleLinterLibraries = ret.libraries;
+        }
+
+        const out: any = { projectFiles, docRules };
+        if (styleLinterLibraries) out.styleLinterLibraries = styleLinterLibraries;
+        return out;
+      })();
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -574,6 +661,7 @@ export function startGatewayRun(args: {
           mode: args.mode,
           prompt: args.prompt,
           contextPack: await buildContextPack({ referencesText }),
+          toolSidecar,
         }),
         signal: abort.signal,
       });
@@ -646,6 +734,15 @@ export function startGatewayRun(args: {
             log("info", "agent.run.end", evt.data);
           }
 
+          if (evt.event === "policy.decision") {
+            try {
+              const payload = JSON.parse(evt.data);
+              log("info", "policy.decision", payload);
+            } catch {
+              log("info", "policy.decision", evt.data);
+            }
+          }
+
           if (evt.event === "assistant.delta") {
             try {
               const payload = JSON.parse(evt.data);
@@ -678,16 +775,36 @@ export function startGatewayRun(args: {
             const toolCallId = String(payload?.toolCallId ?? "");
             const name = String(payload?.name ?? "");
             const rawArgs = (payload?.args ?? {}) as Record<string, string>;
+            const executedBy = String(payload?.executedBy ?? "desktop");
 
             log("info", "tool.call", { toolCallId, name });
-            setActivity(`正在执行工具：${name}…`, { resetTimer: true });
+            setActivity(executedBy === "gateway" ? `正在等待 Gateway 执行工具：${name}…` : `正在执行工具：${name}…`, { resetTimer: true });
 
-            // 关键：Gateway 侧不会在每次模型调用结束都发 assistant.done。
+            // 兼容：旧实现里 Gateway 可能不会在每次模型调用结束都发 assistant.done（现在 tool_calls 分支也会发）。
             // 如果此时不手动结束当前 assistant 气泡，后续新的 assistant.delta 会继续追加到“上面那条气泡”，
             // 造成视觉上“工具卡片插入后，内容在中间继续生成/自动滚动失效”。
             if (assistantId) {
               finishAssistant(assistantId);
               assistantId = null;
+            }
+
+            // Gateway 执行：Desktop 只创建占位 ToolBlock（running），等待 tool.result 回填，不执行本地工具也不回传 tool_result。
+            if (executedBy === "gateway") {
+              const def = getTool(name);
+              const parsedArgs = parseSseToolArgs(rawArgs);
+              addTool({
+                id: toolCallId || undefined,
+                toolName: name,
+                status: "running",
+                input: parsedArgs,
+                output: null,
+                riskLevel: def?.riskLevel ?? "high",
+                applyPolicy: def?.applyPolicy ?? "proposal",
+                undoable: false,
+                kept: false,
+                applied: false,
+              });
+              continue;
             }
 
             const exec = await executeToolCall({ toolName: name, rawArgs, mode: args.mode });
@@ -730,9 +847,33 @@ export function startGatewayRun(args: {
           }
 
           if (evt.event === "tool.result") {
-            // 预留：未来支持 server-side tool 时，可在这里 patchTool(toolCallId,...)
-            // 当前 client-side 工具已经本地更新 ToolBlock，这里只打日志即可。
-            log("info", "tool.result", evt.data);
+            // server-side tool：tool.call 只占位（running），tool.result 在这里回填
+            try {
+              const payload = JSON.parse(evt.data);
+              const toolCallId = String(payload?.toolCallId ?? "");
+              const ok0 = Boolean(payload?.ok);
+              const out = payload?.output;
+              const meta = payload?.meta ?? null;
+              if (toolCallId) {
+                const st = (useRunStore.getState().steps ?? []).find((s: any) => s && s.type === "tool" && s.id === toolCallId);
+                if (st && st.type === "tool" && st.status === "running") {
+                  patchTool(toolCallId, {
+                    status: ok0 ? "success" : "failed",
+                    output: out,
+                    ...(meta && typeof meta === "object"
+                      ? {
+                          applyPolicy: (meta as any).applyPolicy ?? st.applyPolicy,
+                          riskLevel: (meta as any).riskLevel ?? st.riskLevel,
+                        }
+                      : {}),
+                  });
+                  if (useRunStore.getState().isRunning) setActivity("正在等待模型继续…", { resetTimer: true });
+                }
+              }
+              log("info", "tool.result", payload);
+            } catch {
+              log("info", "tool.result", evt.data);
+            }
           }
 
           if (evt.event === "error") {

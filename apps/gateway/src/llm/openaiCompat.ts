@@ -41,7 +41,7 @@ export type StreamDeltaEvent =
   | { type: "error"; error: string };
 
 export type ChatCompletionOnceResult =
-  | { ok: true; content: string; raw: any }
+  | { ok: true; content: string; raw: any; usage?: { promptTokens: number; completionTokens: number; totalTokens?: number } }
   | { ok: false; error: string; status?: number; rawText?: string };
 
 async function* readLines(stream: ReadableStream<Uint8Array>) {
@@ -326,7 +326,19 @@ export async function chatCompletionOnce(args: {
   if (typeof content !== "string") {
     return { ok: false, error: "UPSTREAM_EMPTY_CONTENT", status: res.status, rawText: JSON.stringify(json) };
   }
-  return { ok: true, content, raw: json };
+  const u = json?.usage;
+  const pt = Number(u?.prompt_tokens ?? u?.promptTokens);
+  const ct = Number(u?.completion_tokens ?? u?.completionTokens);
+  const tt = Number(u?.total_tokens ?? u?.totalTokens);
+  const usage =
+    (Number.isFinite(pt) || Number.isFinite(ct) || Number.isFinite(tt))
+      ? {
+          promptTokens: Number.isFinite(pt) ? Math.max(0, Math.floor(pt)) : 0,
+          completionTokens: Number.isFinite(ct) ? Math.max(0, Math.floor(ct)) : 0,
+          ...(Number.isFinite(tt) ? { totalTokens: Math.max(0, Math.floor(tt)) } : {}),
+        }
+      : undefined;
+  return usage ? { ok: true, content, raw: json, usage } : { ok: true, content, raw: json };
 }
 
 

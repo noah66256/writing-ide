@@ -488,3 +488,17 @@
   margin-top: 6px;
   font-size: 12px;
 }
+
+.codeBlock {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #0b1220;
+  color: #e2e8f0;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow: auto;
+  max-height: 60vh;
+  white-space: pre;
+}

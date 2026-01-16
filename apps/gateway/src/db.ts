@@ -130,9 +130,36 @@ export type Db = {
   pointsTransactions: PointsTransaction[];
   llmConfig?: LlmConfig;
   aiConfig?: AiConfig;
+  /** Run 审计（开发期先落本地 JSON；后续可迁 Postgres） */
+  runAudits?: RunAudit[];
 };
 
-const DEFAULT_DB: Db = { users: [], pointsTransactions: [], llmConfig: undefined, aiConfig: undefined };
+export type RunAuditKind = "llm.chat" | "agent.run";
+
+export type RunAuditEvent = {
+  ts: number; // epoch ms
+  event: string; // run.start/run.end/tool.call/tool.result/policy.decision/error...
+  data: unknown;
+};
+
+export type RunAudit = {
+  id: string; // runId
+  kind: RunAuditKind;
+  mode: "chat" | "plan" | "agent";
+  userId: string | null;
+  model: string | null;
+  endpoint: string | null;
+  startedAt: string; // ISO
+  endedAt: string | null; // ISO
+  endReason: string | null;
+  endReasonCodes: string[];
+  usage: { promptTokens: number; completionTokens: number; totalTokens?: number } | null;
+  chargedPoints: number | null;
+  events: RunAuditEvent[];
+  meta: unknown | null;
+};
+
+const DEFAULT_DB: Db = { users: [], pointsTransactions: [], llmConfig: undefined, aiConfig: undefined, runAudits: [] };
 
 function getDbFilePath() {
   return path.resolve(process.cwd(), "data", "db.json");
@@ -380,7 +407,48 @@ export async function loadDb(): Promise<Db> {
       return { updatedAt, providers, models, stages };
     })();
 
-    return { users, pointsTransactions, llmConfig, aiConfig };
+    const runAuditsRaw = Array.isArray((parsed as any).runAudits) ? (((parsed as any).runAudits as any[]) ?? []) : [];
+    const runAudits = runAuditsRaw
+      .map((r) => {
+        const id = typeof r?.id === "string" ? r.id : "";
+        const kind: RunAuditKind = r?.kind === "agent.run" ? "agent.run" : "llm.chat";
+        const mode: RunAudit["mode"] = r?.mode === "plan" ? "plan" : r?.mode === "agent" ? "agent" : "chat";
+        if (!id) return null;
+        const userId = typeof r?.userId === "string" ? String(r.userId) : null;
+        const model = typeof r?.model === "string" ? String(r.model) : null;
+        const endpoint = typeof r?.endpoint === "string" ? String(r.endpoint) : null;
+        const startedAt = typeof r?.startedAt === "string" ? String(r.startedAt) : nowIso;
+        const endedAt = typeof r?.endedAt === "string" ? String(r.endedAt) : null;
+        const endReason = typeof r?.endReason === "string" ? String(r.endReason) : null;
+        const endReasonCodes = Array.isArray(r?.endReasonCodes)
+          ? (r.endReasonCodes as any[]).map((x) => String(x ?? "")).filter(Boolean).slice(0, 32)
+          : [];
+        const usageRaw = r?.usage && typeof r.usage === "object" ? (r.usage as any) : null;
+        const usage =
+          usageRaw && (Number.isFinite(usageRaw.promptTokens) || Number.isFinite(usageRaw.completionTokens) || Number.isFinite(usageRaw.totalTokens))
+            ? {
+                promptTokens: Math.max(0, Math.floor(Number(usageRaw.promptTokens) || 0)),
+                completionTokens: Math.max(0, Math.floor(Number(usageRaw.completionTokens) || 0)),
+                ...(Number.isFinite(usageRaw.totalTokens) ? { totalTokens: Math.max(0, Math.floor(Number(usageRaw.totalTokens))) } : {}),
+              }
+            : null;
+        const chargedPoints = Number.isFinite((r as any)?.chargedPoints) ? Math.floor(Number((r as any).chargedPoints)) : null;
+        const eventsRaw = Array.isArray(r?.events) ? (r.events as any[]) : [];
+        const events: RunAuditEvent[] = eventsRaw
+          .map((e) => {
+            const ts = Number(e?.ts);
+            const event = typeof e?.event === "string" ? String(e.event) : "";
+            if (!Number.isFinite(ts) || !event) return null;
+            return { ts: Math.floor(ts), event, data: (e as any).data };
+          })
+          .filter((x): x is RunAuditEvent => Boolean(x))
+          .slice(0, 5000);
+        const meta = (r as any)?.meta ?? null;
+        return { id, kind, mode, userId, model, endpoint, startedAt, endedAt, endReason, endReasonCodes, usage, chargedPoints, events, meta };
+      })
+      .filter((x): x is RunAudit => Boolean(x));
+
+    return { users, pointsTransactions, llmConfig, aiConfig, runAudits };
   } catch {
     return { ...DEFAULT_DB };
   }
@@ -392,6 +460,27 @@ export async function saveDb(db: Db): Promise<void> {
   const tmp = `${file}.tmp`;
   await writeFile(tmp, JSON.stringify(db, null, 2), "utf-8");
   await rename(tmp, file);
+}
+
+// ======== DB 原子更新（串行化 load-modify-save，避免并发覆盖） ========
+
+let dbUpdateQueue: Promise<void> = Promise.resolve();
+
+export function updateDb<T>(fn: (db: Db) => Promise<T> | T): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    dbUpdateQueue = dbUpdateQueue
+      .catch(() => void 0)
+      .then(async () => {
+        try {
+          const db = await loadDb();
+          const ret = await fn(db);
+          await saveDb(db);
+          resolve(ret);
+        } catch (e) {
+          reject(e);
+        }
+      });
+  });
 }
 
 

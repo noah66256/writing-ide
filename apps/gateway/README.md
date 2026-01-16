@@ -28,6 +28,10 @@
 - `POST /api/agent/run/stream`：启动一次 Plan/Agent 运行（SSE），Gateway 负责 ReAct 编排
   - SSE 事件：`run.start` / `assistant.delta` / `assistant.done` / `tool.call` / `tool.result` / `error`
   - 工具执行：Gateway 发 `tool.call` 给 Desktop；Desktop 执行后调用 `POST /api/agent/run/:runId/tool_result` 回传
+  - 关键规则（对齐写作 IDE，不跑偏）：
+    - 工具调用必须 **XML 独占消息**：`<tool_calls>/<tool_call>` 必须是整条消息唯一内容（不得夹杂自然语言）；若混杂会自动要求模型重试，避免“问用户但继续跑”。
+    - 当 `run.setTodoList/run.updateTodo` 的 todo 中出现 `blocked/等待确认/请确认`，Run 会以 `clarify_waiting` 暂停等待用户输入；用户也可回复“继续”按默认假设推进。
+    - 绑定风格库且任务为写作类时启用强闭环：`kb.search → lint.style → 写入`；若 `lint.style` 上游超时/失败，会降级为本地确定性 lint 并放行（避免卡死）。
 - `POST /api/agent/run/:runId/tool_result`：回传工具执行结果（供下一回合继续）
 
 ### 运行（本地）

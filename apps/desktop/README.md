@@ -30,14 +30,16 @@ Plan/Agent 模式会按回合注入 Context Pack：
 工具调用协议：
 - 模型要调用工具时输出 **且只能输出** XML：`<tool_call/>` 或 `<tool_calls/>`
 - 系统执行工具后用 `<tool_result/>` 回传（system message）
+- 协议硬约束：工具调用 XML 必须“整条消息独占”，不得夹杂自然语言；否则 Gateway 会自动要求模型重试（避免“问你但仍继续跑”）
+- 当 todo 中出现 `blocked/等待确认/请确认`，Gateway 会以 `clarify_waiting` 暂停等待用户输入；你也可以回复“继续”让它按默认假设推进（可能偏离你的偏好）。
 
 当前最小工具集：
 - `run.mainDoc.get` / `run.mainDoc.update`（low / auto_apply / 可 Undo）
 - `project.listFiles` / `project.docRules.get`（只读）
-- `doc.read`（只读）
+- `doc.read`（只读；会优先读取提案态最新内容：`doc.write/doc.applyEdits/doc.restoreSnapshot/doc.splitToDir`，不要求先 Keep）
 - `kb.search`（只读：检索 KB 的段落/卡片；用于仿写取样例/模板）
 - `lint.style`（只读：对齐风格库，输出 issues + rewritePrompt）
-- `doc.write`（仅新建文件；low / auto_apply / 可 Undo）
+- `doc.write`（新建文件：low / auto_apply / 可 Undo；覆盖已有文件：medium / proposal-first，Keep 才覆盖）
 - `doc.getSelection` / `doc.replaceSelection`（选段改写；low / auto_apply / 可 Undo）
 - `doc.applyEdits`（**proposal-first**：先出预览，点击 Keep 才应用；Undo 可回滚）
 

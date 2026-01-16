@@ -22,6 +22,42 @@ export type PointsTransactionDto = {
   meta?: any;
 };
 
+export type RunAuditKind = "llm.chat" | "agent.run";
+export type RunAuditMode = "chat" | "plan" | "agent";
+
+export type RunAuditUsageDto = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens?: number;
+};
+
+export type RunAuditEventDto = {
+  ts: number;
+  event: string;
+  data: any;
+};
+
+export type RunAuditDto = {
+  id: string;
+  kind: RunAuditKind;
+  mode: RunAuditMode;
+  userId: string | null;
+  model: string | null;
+  endpoint: string | null;
+  startedAt: string;
+  endedAt: string | null;
+  endReason: string | null;
+  endReasonCodes: string[];
+  usage: RunAuditUsageDto | null;
+  chargedPoints: number | null;
+  events: RunAuditEventDto[];
+  meta: any;
+};
+
+export type RunAuditListItemDto = Omit<RunAuditDto, "events"> & {
+  eventCount: number;
+};
+
 export type LlmModelPriceDto = {
   priceInCnyPer1M: number;
   priceOutCnyPer1M: number;
@@ -55,6 +91,21 @@ export async function adminLogin(args: { username: string; password: string }) {
     "/api/admin/auth/login",
     { method: "POST", body: JSON.stringify(args) },
   );
+}
+
+// ======== Run/Tool 审计 ========
+
+export async function adminListAuditRuns(args?: { top?: number; kind?: RunAuditKind; userId?: string }) {
+  const qs = new URLSearchParams();
+  if (args?.top) qs.set("top", String(args.top));
+  if (args?.kind) qs.set("kind", String(args.kind));
+  if (args?.userId) qs.set("userId", String(args.userId));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return apiFetchJson<{ runs: RunAuditListItemDto[] }>(`/api/admin/audit/runs${suffix}`);
+}
+
+export async function adminGetAuditRun(args: { runId: string }) {
+  return apiFetchJson<{ run: RunAuditDto }>(`/api/admin/audit/runs/${encodeURIComponent(args.runId)}`);
 }
 
 // ======== AI Config（对齐「锦李2.0」：模型管理 + stage 路由） ========

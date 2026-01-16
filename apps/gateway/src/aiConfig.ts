@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type { AiConfig, AiModel, AiModelTestResult, AiProvider, AiStageConfig, Db, LlmModelPrice } from "./db.js";
+import { isGeminiEndpoint } from "./llm/gemini.js";
 
 export type AiStageDefinition = {
   key: string;
@@ -221,6 +222,7 @@ export function getDefaultStageDefinitionsFromEnv(): AiStageDefinition[] {
 export function createAiConfigService(args: {
   loadDb: () => Promise<Db>;
   saveDb: (db: Db) => Promise<void>;
+  updateDb?: <T>(fn: (db: Db) => Promise<T> | T) => Promise<T>;
   cacheTtlMs?: number;
   stageDefinitions?: AiStageDefinition[];
 }) {
@@ -252,29 +254,35 @@ export function createAiConfigService(args: {
   };
 
   const saveAiConfig = async (ai: AiConfig, updatedBy?: string | null) => {
-    const db = await args.loadDb();
     const next: AiConfig = { ...ai, updatedAt: nowIso() };
     // 轻量修正：保证模型/阶段字段存在
     next.providers = Array.isArray((next as any).providers) ? (next as any).providers : [];
     next.models = Array.isArray(next.models) ? next.models : [];
     next.stages = Array.isArray(next.stages) ? next.stages : [];
-    db.aiConfig = next;
-    await args.saveDb(db);
+    if (args.updateDb) {
+      await args.updateDb((db) => {
+        db.aiConfig = next;
+      });
+    } else {
+      const db = await args.loadDb();
+      db.aiConfig = next;
+      await args.saveDb(db);
+    }
     clearCache();
     void updatedBy;
   };
 
   const ensureDefaults = async () => {
-    const db = await args.loadDb();
-    const ai: AiConfig =
-      db.aiConfig && typeof db.aiConfig === "object"
-        ? db.aiConfig
-        : {
-            updatedAt: nowIso(),
-            providers: [],
-            models: [],
-            stages: [],
-          };
+    const apply = async (db: Db) => {
+      const ai: AiConfig =
+        db.aiConfig && typeof db.aiConfig === "object"
+          ? db.aiConfig
+          : {
+              updatedAt: nowIso(),
+              providers: [],
+              models: [],
+              stages: [],
+            };
 
     const byId = new Map<string, AiModel>((ai.models ?? []).map((m) => [m.id, m]));
 
@@ -362,8 +370,18 @@ export function createAiConfigService(args: {
       ai.stages = [...(ai.stages ?? []), s];
     }
 
-    db.aiConfig = { ...ai, updatedAt: nowIso() };
-    await args.saveDb(db);
+      db.aiConfig = { ...ai, updatedAt: nowIso() };
+    };
+
+    if (args.updateDb) {
+      await args.updateDb(async (db) => {
+        await apply(db);
+      });
+    } else {
+      const db = await args.loadDb();
+      await apply(db);
+      await args.saveDb(db);
+    }
     clearCache();
   };
 
@@ -1094,7 +1112,7 @@ export function createAiConfigService(args: {
       return { modelId: m.id, model: m.model, baseURL, endpoint, endpointUrl, ...tr };
     }
 
-    const isGemini = /:streamGenerateContent/i.test(endpoint) || /:generateContent/i.test(endpoint) || /\/v1beta\/models\//i.test(endpoint);
+    const isGemini = isGeminiEndpoint(endpoint);
     const isEmbedding = /\/embeddings/i.test(endpoint);
     const controller = new AbortController();
     const timeoutMs = 20_000;
