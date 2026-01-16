@@ -98,6 +98,7 @@ export type AiModelDto = {
   providerBaseURL: string | null;
   baseURL: string;
   endpoint: string;
+  toolResultFormat?: "xml" | "text";
   priceInCnyPer1M: number | null;
   priceOutCnyPer1M: number | null;
   billingGroup: string | null;
@@ -168,6 +169,7 @@ export async function aiConfigCreateModel(body: {
   endpoint?: string;
   apiKey?: string;
   copyFromId?: string;
+  toolResultFormat?: "xml" | "text";
   priceInCnyPer1M: number;
   priceOutCnyPer1M: number;
   billingGroup?: string;
@@ -185,6 +187,7 @@ export async function aiConfigUpdateModel(id: string, body: Partial<{
   providerId: string | null;
   baseURL: string;
   endpoint: string;
+  toolResultFormat: "xml" | "text";
   apiKey: string;
   clearApiKey: boolean;
   priceInCnyPer1M: number | null;
@@ -208,6 +211,27 @@ export async function aiConfigDeleteModel(id: string) {
 
 export async function aiConfigTestModel(id: string) {
   return apiFetchJson<{ ok: true; result: AiModelTestRunDto }>(`/api/ai-config/models/${encodeURIComponent(id)}/test`, {
+    method: "POST",
+  });
+}
+
+export type AiToolCompatRunDto = {
+  ok: boolean;
+  format: "xml" | "text";
+  latencyMs: number;
+  outputSample: string | null;
+  error: string | null;
+};
+
+export async function aiConfigToolCompat(id: string) {
+  return apiFetchJson<{
+    ok: true;
+    modelId: string;
+    model: string;
+    endpoint: string;
+    results: { xml: AiToolCompatRunDto; text: AiToolCompatRunDto };
+    recommended: "xml" | "text" | null;
+  }>(`/api/ai-config/models/${encodeURIComponent(id)}/tool-compat`, {
     method: "POST",
   });
 }

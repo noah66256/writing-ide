@@ -7,6 +7,7 @@ import {
   aiConfigDeleteProvider,
   aiConfigDedupeModels,
   aiConfigGetStages,
+  aiConfigToolCompat,
   aiConfigTestModel,
   aiConfigUpdateModel,
   aiConfigUpdateProvider,
@@ -89,6 +90,7 @@ export function LlmPage() {
   const [models, setModels] = useState<ModelDraftUi[]>([]);
   const [stages, setStages] = useState<StageDraft[]>([]);
   const [testing, setTesting] = useState<Record<string, boolean>>({});
+  const [compatTesting, setCompatTesting] = useState<Record<string, boolean>>({});
   const [bulkTest, setBulkTest] = useState<{ done: number; total: number } | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [providerOpen, setProviderOpen] = useState(false);
@@ -98,6 +100,7 @@ export function LlmPage() {
   const [newModel, setNewModel] = useState("");
   const [newBaseURL, setNewBaseURL] = useState("");
   const [newEndpoint, setNewEndpoint] = useState(() => safeGetLocalStorage(ENDPOINT_LAST_KEY) || "/v1/chat/completions");
+  const [newToolResultFormat, setNewToolResultFormat] = useState<"xml" | "text">("xml");
   const [newApiKey, setNewApiKey] = useState("");
   const [newPriceIn, setNewPriceIn] = useState("");
   const [newPriceOut, setNewPriceOut] = useState("");
@@ -214,6 +217,7 @@ export function LlmPage() {
         model: newModel.trim(),
         ...(selectedProvider ? { providerId: selectedProvider.id } : { baseURL: newBaseURL.trim(), apiKey: newApiKey.trim() }),
         endpoint: normalizeEndpointInput(newEndpoint),
+        toolResultFormat: newToolResultFormat,
         priceInCnyPer1M: priceIn,
         priceOutCnyPer1M: priceOut,
         billingGroup: newBillingGroup.trim() || undefined,
@@ -227,6 +231,7 @@ export function LlmPage() {
       setNewProviderId("");
       setNewModel("");
       setNewBaseURL("");
+      setNewToolResultFormat("xml");
       setNewApiKey("");
       setNewPriceIn("");
       setNewPriceOut("");
@@ -330,6 +335,7 @@ export function LlmPage() {
 
     const endpoint = normalizeEndpointInput(m.endpoint);
     if (!endpoint) return setError("Endpoint 不能为空");
+    const toolResultFormat = m.toolResultFormat === "text" ? "text" : "xml";
 
     const inStr = typeof m.priceInInput === "string" ? m.priceInInput.trim() : m.priceInCnyPer1M === null ? "" : String(m.priceInCnyPer1M);
     const outStr = typeof m.priceOutInput === "string" ? m.priceOutInput.trim() : m.priceOutCnyPer1M === null ? "" : String(m.priceOutCnyPer1M);
@@ -348,6 +354,7 @@ export function LlmPage() {
         providerId: m.providerId ?? null,
         baseURL: m.baseURL.trim(),
         endpoint,
+        toolResultFormat,
         priceInCnyPer1M: priceIn,
         priceOutCnyPer1M: priceOut,
         billingGroup: (m.billingGroup ?? null) ? String(m.billingGroup).trim() : null,
@@ -365,6 +372,38 @@ export function LlmPage() {
       setError(`保存失败：${err.code}`);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const toolCompat = async (m: ModelDraftUi) => {
+    setError("");
+    setNotice("");
+    setCompatTesting((prev) => ({ ...prev, [m.id]: true }));
+    try {
+      const res = await aiConfigToolCompat(m.id);
+      const xmlOk = Boolean(res.results?.xml?.ok);
+      const textOk = Boolean(res.results?.text?.ok);
+      const rec = res.recommended;
+
+      const msg =
+        `工具适配检测：XML ${xmlOk ? "OK" : "FAIL"} / 文本 ${textOk ? "OK" : "FAIL"}` +
+        (rec ? `，建议：${rec === "xml" ? "XML" : "文本"}` : "");
+      setNotice(msg);
+
+      const curFmt = m.toolResultFormat === "text" ? "text" : "xml";
+      if (rec && rec !== curFmt) {
+        const ok = confirm(`检测建议将该模型的 tool_result 格式设置为「${rec === "xml" ? "XML" : "文本"}」。\n是否立即写入并热生效？`);
+        if (ok) {
+          await aiConfigUpdateModel(m.id, { toolResultFormat: rec });
+          setNotice(`已写入 tool_result=${rec}（热生效）`);
+          await refresh();
+        }
+      }
+    } catch (e: any) {
+      const err = e as ApiError;
+      setError(`适配检测失败：${err.code}`);
+    } finally {
+      setCompatTesting((prev) => ({ ...prev, [m.id]: false }));
     }
   };
 
@@ -559,10 +598,12 @@ export function LlmPage() {
         <div className="modelList">
           {models.map((m) => {
             const isTesting = Boolean(testing[m.id]);
+            const isCompat = Boolean(compatTesting[m.id]);
             const kind = endpointLabel(m.endpoint);
             const kindTag = kind === "Embeddings" ? "tagPurple" : "tagBlue";
             const keyTag = m.hasApiKey ? "tagGreen" : "tagRed";
             const keyText = m.hasApiKey ? `Key ${m.apiKeyMasked || "****"}` : "无 Key";
+            const trf = m.toolResultFormat === "text" ? "tool:text" : "tool:xml";
 
             const testTagClass = isTesting ? "" : !m.testResult ? "" : m.testResult.ok ? "tagGreen" : "tagRed";
             const testText = isTesting
@@ -580,6 +621,7 @@ export function LlmPage() {
                     <div className="modelName">{m.model}</div>
                     {m.providerName ? <span className="tag">{m.providerName}</span> : m.providerId ? <span className="tag">{m.providerId}</span> : null}
                     <span className={`tag ${kindTag}`}>{kind}</span>
+                    <span className="tag">{trf}</span>
                     <span className={`tag ${keyTag}`}>{keyText}</span>
                     <span className={`tag ${testTagClass}`}>{testText}</span>
                     {m.billingGroup ? <span className="tag">{`group ${m.billingGroup}`}</span> : null}
@@ -599,6 +641,9 @@ export function LlmPage() {
                     </button>
                     <button className="btn" type="button" disabled={busy || isTesting} onClick={() => void testOne(m.id)}>
                       {isTesting ? "测速中…" : "测速"}
+                    </button>
+                    <button className="btn" type="button" disabled={busy || isTesting || isCompat} onClick={() => void toolCompat(m)}>
+                      {isCompat ? "检测中…" : "适配检测"}
                     </button>
                     <button className="btn" type="button" disabled={busy || isTesting} onClick={() => void delOne(m.id)}>
                       删除
@@ -665,6 +710,20 @@ export function LlmPage() {
                       onChange={(e) => setModels((prev) => prev.map((x) => (x.id === m.id ? { ...x, endpoint: e.target.value } : x)))}
                       placeholder="/v1/chat/completions 或 /v1beta/models/...:generateContent"
                     />
+                  </label>
+
+                  <label className="field">
+                    <div className="label">tool_result 格式（Agent）</div>
+                    <select
+                      className="input"
+                      value={m.toolResultFormat === "text" ? "text" : "xml"}
+                      onChange={(e) =>
+                        setModels((prev) => prev.map((x) => (x.id === m.id ? { ...x, toolResultFormat: e.target.value === "text" ? "text" : "xml" } : x)))
+                      }
+                    >
+                      <option value="xml">XML（system &lt;tool_result&gt;...CDATA...&lt;/tool_result&gt;）</option>
+                      <option value="text">文本（user [tool_result] JSON [/tool_result]）</option>
+                    </select>
                   </label>
 
                   <label className="field">
@@ -993,6 +1052,13 @@ export function LlmPage() {
                   onChange={(e) => setNewEndpoint(e.target.value)}
                   placeholder="/v1/chat/completions 或 /v1beta/models/...:generateContent"
                 />
+              </label>
+              <label className="field">
+                <div className="label">tool_result 格式（Agent）</div>
+                <select className="input" value={newToolResultFormat} onChange={(e) => setNewToolResultFormat(e.target.value === "text" ? "text" : "xml")}>
+                  <option value="xml">XML（默认）</option>
+                  <option value="text">文本（兼容部分代理）</option>
+                </select>
               </label>
               {newProviderId ? (
                 <div className="field">
