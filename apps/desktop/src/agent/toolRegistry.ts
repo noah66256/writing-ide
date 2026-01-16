@@ -807,20 +807,35 @@ const tools: ToolDefinition[] = [
     name: "run.updateTodo",
     description: "更新某一条 Todo 的状态/备注（用于记录进度）。",
     args: [
-      { name: "id", required: true, desc: "Todo ID（来自 run.setTodoList 的返回）" },
+      { name: "id", required: false, desc: "Todo ID（来自 run.setTodoList 的返回）。若当前仅有 1 条 todo，可省略。" },
       { name: "patch", required: true, desc: "JSON 对象：{ status?, note?, text? }" },
     ],
     riskLevel: "low",
     applyPolicy: "auto_apply",
     reversible: true,
     run: async (args) => {
-      const id = String(args.id ?? "").trim();
-      if (!id) return { ok: false, error: "MISSING_ID" };
       const patch = args.patch as any;
       if (!patch || typeof patch !== "object") return { ok: false, error: "INVALID_PATCH" };
 
       const s = useRunStore.getState();
       const cur = s.todoList ?? [];
+
+      let id = String(args.id ?? "").trim();
+      if (!id) {
+        if (cur.length === 1 && cur[0]?.id) id = String(cur[0].id);
+        else {
+          return {
+            ok: false,
+            error: "MISSING_ID",
+            output: {
+              ok: false,
+              error: "MISSING_ID",
+              hint: cur.length === 0 ? "当前 todoList 为空，请先 run.setTodoList。" : "请传入 todo.id；或确保 todoList 只有 1 条后再省略 id。",
+              available: cur.map((t: any) => ({ id: t.id, text: t.text, status: t.status })),
+            },
+          };
+        }
+      }
       const findIdx = (needle: string) =>
         cur.findIndex((t: any) => String(t?.id ?? "") === needle);
       let foundId = id;
