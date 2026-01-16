@@ -1909,18 +1909,6 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             let passed =
               parsedLint.score !== null && Number.isFinite(parsedLint.score) && parsedLint.score >= lintPassScore && parsedLint.highIssues === 0;
             runState.lastStyleLint = parsedLint;
-            // lint 工具已降级：不强制闸门（避免“永远过不了”卡死）
-            if (parsedLint.usedHeuristic) {
-              runState.lintGateDegraded = true;
-              passed = true;
-              writePolicyDecision({
-                turn,
-                policy: "LintPolicy",
-                decision: "degraded_pass",
-                reasonCodes: ["lint_degraded_heuristic"],
-                detail: { modelUsed: parsedLint.modelUsed, usedHeuristic: true }
-              });
-            }
             runState.styleLintPassed = passed;
             if (!passed) runState.styleLintFailCount += 1;
             // lint 回炉预算：表示“还剩多少次回炉机会（包含当前这次）”
@@ -2027,11 +2015,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           }
 
           if (payload.ok && runState.styleLintPassed) {
-            if (runState.lintGateDegraded) {
-              writeEvent("assistant.delta", { delta: `\n\n[系统提示] ⚠️ lint.style 已降级为本地检查（非强模型），本次不强制闸门卡死。` });
-            } else {
-              writeEvent("assistant.delta", { delta: `\n\n[系统提示] ✅ 风格对齐通过（score=${scoreText}，high=${hi}）。` });
-            }
+            writeEvent("assistant.delta", { delta: `\n\n[系统提示] ✅ 风格对齐通过（score=${scoreText}，high=${hi}）。` });
           }
         }
 
@@ -3880,176 +3864,8 @@ fastify.post("/api/kb/dev/lint_style", async (request, reply) => {
   const maxIssues = Number.isFinite(body.maxIssues as any) ? Number(body.maxIssues) : 10;
   const timeoutMs = env.timeoutMs;
 
-  const clamp01 = (x: number) => (Number.isFinite(x) ? Math.max(0, Math.min(1, x)) : 0);
-  const clamp = (x: number, a: number, b: number) => (Number.isFinite(x) ? Math.max(a, Math.min(b, x)) : a);
-
-  const hasCta = (text: string) => /(点赞|点个赞|关注|加关注|评论区|评论|留言|转发|收藏|三连|一键三连)/.test(String(text ?? ""));
-  const splitSentences = (text: string) =>
-    String(text ?? "")
-      .replace(/\r\n/g, "\n")
-      .replace(/\r/g, "\n")
-      .split(/[\n。！？!?]+/g)
-      .map((s) => s.trim())
-      .filter(Boolean);
-  const pickDraftEvidence = (text: string, n: number) => {
-    const sents = splitSentences(text);
-    if (!sents.length) return [];
-    const picks: string[] = [];
-    const candidates = [
-      ...sents.filter((s) => /[?？]/.test(s) || /(是不是|问题来了|你看|说白了)/.test(s)),
-      ...sents,
-    ];
-    for (const s of candidates) {
-      const x = s.slice(0, 60);
-      if (!x) continue;
-      if (picks.includes(x)) continue;
-      picks.push(x);
-      if (picks.length >= n) break;
-    }
-    return picks;
-  };
-  const pickRefEvidence = (lib: any, n: number) => {
-    const out: string[] = [];
-    const fromSamples = Array.isArray(lib?.samples) ? lib.samples : [];
-    for (const s of fromSamples) {
-      const x = String(s?.text ?? "").replace(/\s+/g, " ").trim().slice(0, 60);
-      if (!x) continue;
-      if (out.includes(x)) continue;
-      out.push(x);
-      if (out.length >= n) break;
-    }
-    const fromNgrams = Array.isArray(lib?.topNgrams) ? lib.topNgrams : [];
-    for (const g of fromNgrams) {
-      const x = String(g?.text ?? "").trim();
-      if (!x) continue;
-      if (out.includes(x)) continue;
-      out.push(`口癖：${x}`);
-      if (out.length >= n) break;
-    }
-    return out.slice(0, n);
-  };
-
-  const buildHeuristicOut = (args: { reason: string }) => {
-    const draftText = String(body?.draft?.text ?? "").trim();
-    const draftStats = (body?.draft?.stats ?? {}) as any;
-    const lib0 = (body?.libraries ?? [])[0] ?? {};
-    const baseStats = (lib0?.stats ?? {}) as any;
-
-    const metrics = [
-      { key: "questionRatePer100Sentences", title: "问句推进不足（互动感不够）", unit: "每100句", weight: 1.0 },
-      { key: "particlePer1kChars", title: "语气词密度偏低（口播颗粒不够）", unit: "每1000字", weight: 1.0 },
-      { key: "firstPersonPer1kChars", title: "第一人称镜头不足（人设不够）", unit: "每1000字", weight: 0.8 },
-      { key: "secondPersonPer1kChars", title: "第二人称互动不足（对话感弱）", unit: "每1000字", weight: 0.6 },
-      { key: "digitPer1kChars", title: "数字/量化不足（少“算账锤”）", unit: "每1000字", weight: 0.8 },
-      { key: "avgSentenceLen", title: "句子偏长（节奏不够硬）", unit: "字符/句", weight: 0.5 },
-      { key: "shortSentenceRate", title: "短句率偏低（不够利落）", unit: "比例", weight: 0.5 },
-    ];
-
-    const issues: any[] = [];
-    const scored: Array<{ metric: any; severity: "high" | "medium" | "low"; penalty: number }> = [];
-    const num = (x: any) => {
-      const v = Number(x);
-      return Number.isFinite(v) ? v : null;
-    };
-
-    for (const m of metrics) {
-      const d = num(draftStats?.[m.key]);
-      const b = num(baseStats?.[m.key]);
-      if (d === null || b === null) continue;
-      const rel = b === 0 ? 0 : d / b;
-      // 越小越差（avgSentenceLen 相反）
-      const isLongerWorse = m.key === "avgSentenceLen";
-      let sev: "high" | "medium" | "low" = "low";
-      let penalty = 0;
-      if (!isLongerWorse) {
-        if (rel <= 0.55) {
-          sev = "high";
-          penalty = 14 * m.weight;
-        } else if (rel <= 0.75) {
-          sev = "medium";
-          penalty = 8 * m.weight;
-        } else if (rel <= 0.9) {
-          sev = "low";
-          penalty = 4 * m.weight;
-        } else continue;
-      } else {
-        const rel2 = d / (b || 1);
-        if (rel2 >= 1.25) {
-          sev = "medium";
-          penalty = 6 * m.weight;
-        } else if (rel2 >= 1.1) {
-          sev = "low";
-          penalty = 3 * m.weight;
-        } else continue;
-      }
-      scored.push({ metric: { ...m, draft: d, baseline: b }, severity: sev, penalty });
-    }
-
-    const missingCta = draftText ? !hasCta(draftText) : false;
-    if (missingCta) {
-      scored.push({
-        metric: { key: "cta", title: "缺少 CTA（点赞/关注/评论）", unit: null, weight: 1.0, draft: null, baseline: null },
-        severity: "medium",
-        penalty: 8,
-      });
-    }
-
-    scored.sort((a, b) => b.penalty - a.penalty);
-    const takeN = Math.max(3, Math.min(24, maxIssues));
-    for (const it of scored.slice(0, takeN)) {
-      const m = it.metric;
-      const sev = it.severity;
-      const id = `heur_${String(m.key ?? "metric")}`;
-      const metric = m.key === "cta" ? null : { name: String(m.key), draft: m.draft ?? null, baseline: m.baseline ?? null, unit: m.unit ?? null };
-      issues.push({
-        id,
-        title: String(m.title),
-        severity: sev,
-        metric,
-        evidence: {
-          draft: pickDraftEvidence(draftText, 2),
-          reference: pickRefEvidence(lib0, 2),
-        },
-        fix:
-          m.key === "cta"
-            ? "结尾补 1–2 句口播 CTA（点赞+关注+评论区互动），不要新增事实。"
-            : "按该指标方向回炉：多用设问→自答、口头禅（你看/说白了/问题来了）、短句拆段，保持事实不变。",
-      });
-    }
-
-    // similarityScore：从 92 起，按 penalty 扣分；最低 0 最高 100
-    const penaltySum = scored.slice(0, takeN).reduce((s, x) => s + (Number(x.penalty) || 0), 0);
-    const similarityScore = clamp(Math.round(92 - penaltySum), 0, 100);
-
-    const topNgrams = Array.isArray(lib0?.topNgrams) ? lib0.topNgrams : [];
-    const ngramHints = topNgrams
-      .map((x: any) => String(x?.text ?? "").trim())
-      .filter(Boolean)
-      .slice(0, 8);
-
-    const rewritePrompt =
-      [
-        "按下面要求把 draft 回炉成更像风格库的版本（不新增任何事实/事件/数字，只改表达与结构）：",
-        "1) 节奏：长句拆短，关键句单独成段；每段先给硬结论，再给解释。",
-        "2) 推进：多用“设问→自答→再设问”，提升问句率；多用口头禅承接（你看/说白了/问题来了/是不是）。",
-        "3) 人设：加入“我/咱们/我跟你说”镜头，增强现场感；同时多对读者说“你”。",
-        "4) 量化：把已有信息改成“成本账/代价账/后果链条”的数字化表达（不加新数字）。",
-        missingCta ? "5) 结尾：补 1–2 句 CTA（点赞+关注+评论区互动），最后用一个落点问句收尾。" : "5) 结尾：用一个落点问句收尾（可带 CTA）。",
-        ngramHints.length ? `可借用的高频口癖/词：${ngramHints.join("、")}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n");
-
-    return {
-      ok: true,
-      modelUsed: `local_heuristic(${model})`,
-      timeoutMs,
-      similarityScore,
-      summary: `lint.style 上游超时/失败（${args.reason}），已降级为本地确定性 Lint（基于 stats/topNgrams/规则）输出可执行改写指令。`,
-      issues,
-      rewritePrompt,
-    };
-  };
+  // 不再提供本地 heuristic 降级输出：lint.style 必须依赖上游模型返回结构化 JSON；
+  // 上游失败/输出不合法时返回错误，便于在 B 端更换/调整 lint.style 的模型后重试。
 
   const sys = [
     "你是写作 IDE 的「风格 Linter（对齐检查器）」。",
@@ -4143,8 +3959,14 @@ fastify.post("/api/kb/dev/lint_style", async (request, reply) => {
   if (!ret?.ok) {
     const errText = String((ret as any)?.error ?? "");
     const isTimeout = /aborted|AbortError|timeout/i.test(errText);
-    // 降级：不要把 lint.style 变成硬失败；返回可用的结构化结果，让工作流继续。
-    return reply.send(buildHeuristicOut({ reason: isTimeout ? `timeout after ${upstreamTimeoutMs}ms` : errText || "upstream error" }));
+    return reply
+      .code(isTimeout ? 504 : 502)
+      .send({
+        ok: false,
+        error: isTimeout ? "LINT_UPSTREAM_TIMEOUT" : "LINT_UPSTREAM_FAILED",
+        hint: "lint.style 上游模型调用失败/超时。请在 B 端将 stage=lint.style 切换到稳定模型后重试。",
+        detail: { model, upstreamTimeoutMs, timeoutMs, message: errText || "upstream error" },
+      });
   }
 
   const usage = (ret as any)?.usage ?? null;
@@ -4162,7 +3984,12 @@ fastify.post("/api/kb/dev/lint_style", async (request, reply) => {
     if (m?.[0]) parsed = tryParse(m[0]);
   }
   if (!parsed || typeof parsed !== "object") {
-    return reply.send(buildHeuristicOut({ reason: "INVALID_MODEL_OUTPUT" }));
+    return reply.code(502).send({
+      ok: false,
+      error: "INVALID_LINTER_OUTPUT",
+      hint: "lint.style 模型未返回合法 JSON。请在 B 端更换 lint.style 模型（并确保严格输出 JSON）后重试。",
+      detail: { model, timeoutMs, raw: raw.slice(0, 2000) },
+    });
   }
 
   const outSchema = z.object({
@@ -4200,7 +4027,12 @@ fastify.post("/api/kb/dev/lint_style", async (request, reply) => {
     const out = outSchema.parse(parsed);
     return reply.send({ ok: true, modelUsed: model, timeoutMs, ...(usage ? { usage } : {}), ...out });
   } catch (e: any) {
-    return reply.send(buildHeuristicOut({ reason: `INVALID_OUTPUT_SCHEMA:${String(e?.message ?? e)}` }));
+    return reply.code(502).send({
+      ok: false,
+      error: "INVALID_LINTER_OUTPUT_SCHEMA",
+      hint: "lint.style 模型输出 JSON 字段不符合约定。请在 B 端更换 lint.style 模型后重试。",
+      detail: { model, timeoutMs, message: String(e?.message ?? e), raw: raw.slice(0, 2000) },
+    });
   }
 });
 
