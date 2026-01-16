@@ -81,6 +81,34 @@ export async function* streamChatCompletions(args: {
 
   const wantsUsage = Boolean(args.includeUsage);
 
+  // 诊断：用于定位“上游返回了东西，但我们解析不到 delta（例如字段不兼容 / 非 SSE data: 格式）”的根因。
+  // 仅在“整段流结束后 deltaChars==0”时输出少量信息（pm2 logs 可见），避免污染正常日志。
+  const diag = {
+    model: String(args.model || ""),
+    url,
+    status: 0,
+    contentType: "" as string,
+    sawDataLine: false,
+    dataLinesSample: [] as string[],
+    parsedJsonOk: 0,
+    parsedJsonFail: 0,
+    sampleShape: null as null | {
+      keys: string[];
+      hasChoices: boolean;
+      choice0Keys: string[];
+      deltaKeys: string[];
+      hasDeltaContent: boolean;
+      deltaContentType: string;
+      hasMessageContent: boolean;
+      messageContentType: string;
+      hasToolCalls: boolean;
+      hasReasoning: boolean;
+    },
+    deltaChars: 0,
+    sawFinishReason: false,
+    sawDone: false,
+  };
+
   const doFetch = async (withUsage: boolean) => {
     const body: any = {
       model: args.model,
@@ -121,6 +149,9 @@ export async function* streamChatCompletions(args: {
     return;
   }
 
+  diag.status = res.status;
+  diag.contentType = String(res.headers.get("content-type") ?? "").trim();
+
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     yield { type: "error", error: text || `UPSTREAM_${res.status}` };
@@ -137,19 +168,50 @@ export async function* streamChatCompletions(args: {
     if (line.startsWith(":")) continue; // sse comment/ping
     if (!line.startsWith("data:")) continue;
 
+    diag.sawDataLine = true;
     const data = line.slice("data:".length).trim();
     if (!data) continue;
 
     if (data === "[DONE]") {
+      diag.sawDone = true;
       yield { type: "done" };
       return;
+    }
+
+    if (diag.dataLinesSample.length < 6) {
+      // 仅保留少量 sample；避免日志过大
+      diag.dataLinesSample.push(data.length > 500 ? `${data.slice(0, 500)}…` : data);
     }
 
     let json: any;
     try {
       json = JSON.parse(data);
+      diag.parsedJsonOk += 1;
     } catch {
+      diag.parsedJsonFail += 1;
       continue;
+    }
+
+    if (!diag.sampleShape) {
+      const keys = json && typeof json === "object" ? Object.keys(json) : [];
+      const c0 = json?.choices?.[0];
+      const choice0Keys = c0 && typeof c0 === "object" ? Object.keys(c0) : [];
+      const d0 = c0?.delta;
+      const deltaKeys = d0 && typeof d0 === "object" ? Object.keys(d0) : [];
+      const deltaContent = d0?.content;
+      const msgContent = c0?.message?.content;
+      diag.sampleShape = {
+        keys,
+        hasChoices: Array.isArray(json?.choices),
+        choice0Keys,
+        deltaKeys,
+        hasDeltaContent: deltaContent !== undefined,
+        deltaContentType: typeof deltaContent,
+        hasMessageContent: msgContent !== undefined,
+        messageContentType: typeof msgContent,
+        hasToolCalls: Boolean((d0 as any)?.tool_calls || (c0 as any)?.tool_calls),
+        hasReasoning: Boolean((d0 as any)?.reasoning || (d0 as any)?.reasoning_content || (c0 as any)?.reasoning),
+      };
     }
 
     const usageRaw = json?.usage;
@@ -171,12 +233,14 @@ export async function* streamChatCompletions(args: {
     const choice = json?.choices?.[0];
     const delta = choice?.delta?.content;
     if (typeof delta === "string" && delta.length > 0) {
+      diag.deltaChars += delta.length;
       yield { type: "delta", delta };
     }
 
     const finishReason = choice?.finish_reason;
     if (finishReason) {
       sawFinishReason = true;
+      diag.sawFinishReason = true;
       if (!wantsUsage) {
         yield { type: "done" };
         return;
@@ -186,6 +250,13 @@ export async function* streamChatCompletions(args: {
 
   if (sawFinishReason) {
     yield { type: "done" };
+  } else {
+    // 关键：如果整个流里没有任何 delta，且没有标准结束信号，输出诊断信息（用于定位上游格式差异）。
+    // 这会帮助判断是“上游真的空输出”还是“我们 parser 没覆盖字段/格式”。不会影响返回值（仍然结束 generator）。
+    if (diag.deltaChars === 0) {
+      // eslint-disable-next-line no-console
+      console.warn("[openaiCompat] upstream stream produced 0 delta chars", diag);
+    }
   }
 }
 
