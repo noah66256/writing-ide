@@ -951,6 +951,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       let lastUsage: LlmTokenUsage | null = null;
 
       const isGemini = /:streamGenerateContent/i.test(endpoint) || /:generateContent/i.test(endpoint) || /\/v1beta\/models\//i.test(endpoint);
+      const isGeminiViaOpenAiCompat = !isGemini && /gemini/i.test(String(model || "")) && /chat\/completions/i.test(String(endpoint || ""));
       const iter = isGemini
         ? streamGeminiGenerateContent({
             baseUrl,
@@ -968,7 +969,10 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             messages,
             temperature,
             maxTokens: stageMaxTokens ?? null,
-            includeUsage: true,
+            // 兼容性：部分 OpenAI-compatible 网关在 Gemini 模型上对 stream_options/include_usage 支持不完整，
+            // 会出现 “choices:[] + usage 有但无内容” 的空输出。这里对 gemini(openai-compat) 先禁用 includeUsage，优先保证可用性。
+            // 计费：此类情况下 usage 可能缺失，chargeUserForLlmUsage 会自动跳过（不扣积分）。
+            includeUsage: !isGeminiViaOpenAiCompat,
             signal: abort.signal,
           });
 
