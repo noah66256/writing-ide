@@ -792,6 +792,21 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     /(回(个|我)?\s*ok|回复\s*ok|回\s*ok|只要\s*ok|给我\s*ok)/i.test(userPrompt) &&
     /(不用回别的|别回别的|不要回别的|就行)/.test(userPrompt);
 
+  function parseMainDocFromContextPack(ctx?: string): any | null {
+    const text = String(ctx ?? "");
+    if (!text) return null;
+    const m = text.match(/MAIN_DOC\(JSON\):\n([\s\S]*?)\n\n/);
+    const raw = m?.[1] ? String(m[1]).trim() : "";
+    if (!raw) return null;
+    try {
+      const j = JSON.parse(raw);
+      return j && typeof j === "object" ? j : null;
+    } catch {
+      return null;
+    }
+  }
+  const mainDocFromPack = parseMainDocFromContextPack(body.contextPack);
+
   function parseKbSelectedLibrariesFromContextPack(ctx?: string): any[] {
     const text = String(ctx ?? "");
     if (!text) return [];
@@ -831,6 +846,9 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   const lintGateEnabled = styleGateEnabled && !skipLint;
   const lintPassScore = Number(process.env.STYLE_LINT_PASS_SCORE ?? 80);
   const lintMaxRework = Number(process.env.STYLE_LINT_MAX_REWORK ?? 2);
+  const keepBestOnLintExhausted =
+    /(lint|linter|风格(对齐|校验|检查)).{0,30}(不过|不通过).{0,30}(保留|留下|用).{0,30}(最高分|最好|最佳)/i.test(userPrompt) ||
+    String((mainDocFromPack as any)?.styleLintFailPolicy ?? "").trim() === "keep_best";
 
   let hasTodoList = false;
   let hasWriteOps = false;
@@ -839,6 +857,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   let hasStyleKbSearch = false; // 风格库样例检索是否已完成（以 tool_result.groups 非空为准）
   let styleLintPassed = false; // 风格对齐是否“通过闸门”
   let styleLintFailCount = 0; // 未通过次数（每次未通过=一次“回炉”机会）
+  let lintGateDegraded = false; // lint.style 降级（local_heuristic）后不再强制闸门，避免卡死
+  let bestStyleDraft: null | { score: number; highIssues: number; text: string } = null; // 记录最高分稿件（用于“保留最高分”）
   let lastStyleLint: null | {
     score: number | null;
     highIssues: number;
@@ -936,15 +956,24 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     return libs.every((id) => styleLibIdSet.has(id));
   }
 
-  function parseStyleLintResult(output: any): { score: number | null; highIssues: number; summary: string; rewritePrompt: string } {
+  function parseStyleLintResult(output: any): {
+    score: number | null;
+    highIssues: number;
+    summary: string;
+    rewritePrompt: string;
+    modelUsed: string;
+    usedHeuristic: boolean;
+  } {
     const o: any = output && typeof output === "object" ? output : {};
+    const modelUsed = String(o?.modelUsed ?? "").trim();
+    const usedHeuristic = /^local_heuristic\(/.test(modelUsed);
     const scoreRaw = Number(o?.similarityScore);
     const score = Number.isFinite(scoreRaw) ? scoreRaw : null;
     const issues = Array.isArray(o?.issues) ? o.issues : [];
     const highIssues = issues.filter((x: any) => String(x?.severity ?? "").toLowerCase() === "high").length;
     const summary = String(o?.summary ?? "").trim();
     const rewritePrompt = String(o?.rewritePrompt ?? "").trim();
-    return { score, highIssues, summary, rewritePrompt };
+    return { score, highIssues, summary, rewritePrompt, modelUsed, usedHeuristic };
   }
 
   const maxTurns = mode === "agent" ? 48 : mode === "plan" ? 32 : 12;
@@ -1251,9 +1280,21 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         if (String(call.name ?? "") === "lint.style") {
           if (payload.ok) {
             const parsedLint = parseStyleLintResult(payload.output);
-            const passed =
+            const candText = typeof (call?.args as any)?.text === "string" ? String((call.args as any).text) : "";
+            if (candText.trim() && parsedLint.score !== null && Number.isFinite(parsedLint.score)) {
+              if (!bestStyleDraft || parsedLint.score > bestStyleDraft.score) {
+                bestStyleDraft = { score: parsedLint.score, highIssues: parsedLint.highIssues, text: candText };
+              }
+            }
+
+            let passed =
               parsedLint.score !== null && Number.isFinite(parsedLint.score) && parsedLint.score >= lintPassScore && parsedLint.highIssues === 0;
             lastStyleLint = parsedLint;
+            // lint 工具已降级：不强制闸门（避免“永远过不了”卡死）
+            if (parsedLint.usedHeuristic) {
+              lintGateDegraded = true;
+              passed = true;
+            }
             styleLintPassed = passed;
             if (!passed) styleLintFailCount += 1;
           } else {
@@ -1305,6 +1346,19 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             }
 
             // 超过回炉上限：终止并提示用户
+            if (keepBestOnLintExhausted && bestStyleDraft?.text) {
+              writeEvent("assistant.delta", {
+                delta:
+                  `\n\n[系统提示] 风格对齐达到回炉上限，已按“保留最高分”策略输出最高分版本（score=${bestStyleDraft.score}）。\n\n` +
+                  bestStyleDraft.text,
+              });
+              writeEvent("run.end", { runId, reason: "text", turn, lint: "keep_best", bestScore: bestStyleDraft.score });
+              writeEvent("assistant.done", { reason: "text" });
+              reply.raw.end();
+              agentRunWaiters.delete(runId);
+              return;
+            }
+
             writeEvent("assistant.delta", {
               delta:
                 `\n\n[系统提示] 风格对齐已连续 ${styleLintFailCount} 次未通过，已达到最大回炉次数（${lintMaxRework}）。\n` +
@@ -1319,7 +1373,11 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           }
 
           if (payload.ok && styleLintPassed) {
-            writeEvent("assistant.delta", { delta: `\n\n[系统提示] ✅ 风格对齐通过（score=${scoreText}，high=${hi}）。` });
+            if (lintGateDegraded) {
+              writeEvent("assistant.delta", { delta: `\n\n[系统提示] ⚠️ lint.style 已降级为本地检查（非强模型），本次不强制闸门卡死。` });
+            } else {
+              writeEvent("assistant.delta", { delta: `\n\n[系统提示] ✅ 风格对齐通过（score=${scoreText}，high=${hi}）。` });
+            }
           }
         }
 
@@ -3320,8 +3378,14 @@ fastify.post("/api/kb/dev/lint_style", async (request, reply) => {
   );
 
   const abort = new AbortController();
-  // 上游超时兜底：避免整条链路卡死。默认给上游 25s（可用 env 覆盖），超时则降级为本地确定性 lint。
-  const upstreamTimeoutMs = Math.max(10_000, Math.min(timeoutMs, Number(process.env.LLM_LINTER_UPSTREAM_TIMEOUT_MS ?? 25_000)));
+  // 上游超时兜底：避免整条链路卡死。
+  // - 默认：跟随 linter stage 的 timeoutMs（默认 60s）
+  // - 若显式配置 LLM_LINTER_UPSTREAM_TIMEOUT_MS，则使用该值（但不超过 timeoutMs）
+  const upstreamTimeoutMsCfg = Number(String(process.env.LLM_LINTER_UPSTREAM_TIMEOUT_MS ?? "").trim());
+  const upstreamTimeoutMs =
+    Number.isFinite(upstreamTimeoutMsCfg) && upstreamTimeoutMsCfg > 0
+      ? Math.max(10_000, Math.min(timeoutMs, Math.floor(upstreamTimeoutMsCfg)))
+      : Math.max(10_000, Math.floor(timeoutMs));
   const timer = setTimeout(() => abort.abort(), upstreamTimeoutMs);
   const ret = await chatCompletionOnce({
     config: { baseUrl, apiKey },

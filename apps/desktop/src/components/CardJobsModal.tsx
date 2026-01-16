@@ -87,6 +87,24 @@ export function CardJobsModal() {
   const promptInputRef = useRef<HTMLInputElement | null>(null);
   const ask = (p: Omit<PromptState, "value"> & { value?: string }) => setPrompt({ ...p, value: p.value ?? "" });
 
+  // Esc 关闭（避免 modalMask 挡住输入框）
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      // 优先关内层 prompt，其次关整个 KB 管理
+      if (prompt) {
+        e.preventDefault();
+        setPrompt(null);
+        return;
+      }
+      e.preventDefault();
+      close();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open, prompt, close]);
+
   // 进度/耗时估算：每秒刷新一次
   const [tick, setTick] = useState(0);
   useEffect(() => {

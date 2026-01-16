@@ -17,6 +17,8 @@ export type MainDoc = {
   angle?: string;
   title?: string;
   outline?: string;
+  // 风格 Lint 未通过时的策略（用于 Context Pack 注入与后端行为）
+  styleLintFailPolicy?: "ask_user" | "keep_best" | "skip";
 };
 
 export type TodoStatus = "todo" | "in_progress" | "done" | "blocked" | "skipped";

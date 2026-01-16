@@ -199,6 +199,27 @@ async function buildContextPack(extra?: { referencesText?: string }) {
     };
   })();
 
+  // 最近对话片段（只注入少量，避免上下文噪音；关键决策仍应写入 Main Doc）
+  const recentDialogue = (() => {
+    const stripToolXml = (text: string) =>
+      String(text ?? "")
+        .replace(/<tool_calls[\s\S]*?<\/tool_calls>/g, "")
+        .replace(/<tool_call[\s\S]*?<\/tool_call>/g, "")
+        .trim();
+    const all = useRunStore.getState().steps ?? [];
+    const msgs = all
+      .filter((s: any) => s && typeof s === "object" && (s.type === "user" || s.type === "assistant"))
+      .map((s: any) => ({
+        role: s.type === "user" ? "user" : "assistant",
+        text: stripToolXml(String(s.text ?? "")).slice(0, 800),
+      }))
+      .filter((x: any) => String(x.text ?? "").trim());
+    // 去掉最后一条 user（通常是“本轮 prompt”，它会单独作为 user message 发送）
+    const trimmed = msgs.length && msgs[msgs.length - 1].role === "user" ? msgs.slice(0, -1) : msgs;
+    const recent = trimmed.slice(-6);
+    return recent.length ? `RECENT_DIALOGUE(JSON):\n${JSON.stringify(recent, null, 2)}\n\n` : "";
+  })();
+
   const refs = extra?.referencesText ? `${extra.referencesText}\n\n` : "";
   const kbText = (() => {
     const ids = Array.isArray(kbAttached) ? kbAttached.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
@@ -282,6 +303,7 @@ async function buildContextPack(extra?: { referencesText?: string }) {
     `MAIN_DOC(JSON):\n${JSON.stringify(mainDoc, null, 2)}\n\n` +
     `RUN_TODO(JSON):\n${JSON.stringify(todoList, null, 2)}\n\n` +
     `DOC_RULES(Markdown):\n${docRules}\n\n` +
+    recentDialogue +
     refs +
     kbText +
     playbookSection +
@@ -291,7 +313,7 @@ async function buildContextPack(extra?: { referencesText?: string }) {
     `注意：\n` +
     `- 已提供当前编辑器选区（EDITOR_SELECTION）。若用户说“改写我选中的这段”，优先用该选区。\n` +
     `- 如需文件正文请调用 doc.read；如需刷新选区也可调用 doc.getSelection。\n` +
-    `- 本次 Context Pack 不包含完整历史对话；关键决策请写入 Main Doc（run.mainDoc.update），历史素材请用 @{} 显式引用。`
+    `- 本次 Context Pack 仅注入少量最近对话片段（RECENT_DIALOGUE），不是完整历史；关键决策请写入 Main Doc（run.mainDoc.update），历史素材请用 @{} 显式引用。`
   );
 }
 
@@ -455,6 +477,13 @@ export function startGatewayRun(args: {
     const short = oneLine.length > max ? oneLine.slice(0, max) + "…（已截断；原始输入见置顶回合/历史）" : oneLine;
     updateMainDoc({ goal: short });
   }
+
+  // 用户偏好：lint 不过就保留最高分（写入 Main Doc，跨本轮对话生效）
+  const wantsKeepBestOnLintFail =
+    /(lint|linter|风格(对齐|校验|检查)).{0,30}(不过|不通过).{0,30}(保留|留下|用).{0,30}(最高分|最好|最佳)/i.test(
+      String(args.prompt ?? ""),
+    );
+  if (wantsKeepBestOnLintFail) updateMainDoc({ styleLintFailPolicy: "keep_best" });
 
   const abort = new AbortController();
   let currentAssistantId: string | null = null;
