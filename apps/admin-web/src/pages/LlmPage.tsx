@@ -29,7 +29,55 @@ function endpointLabel(endpoint: string) {
   const e = String(endpoint || "");
   if (/\/embeddings/i.test(e)) return "Embeddings";
   if (/chat\/completions/i.test(e)) return "Chat";
+  if (/:streamGenerateContent/i.test(e) || /:generateContent/i.test(e) || /\/v1beta\/models\//i.test(e)) return "Gemini";
   return e || "-";
+}
+
+const ENDPOINT_LAST_KEY = "writing-ide.admin.endpointLast.v1";
+const ENDPOINT_HISTORY_KEY = "writing-ide.admin.endpointHistory.v1";
+const ENDPOINT_HISTORY_MAX = 30;
+
+function safeGetLocalStorage(key: string): string {
+  try {
+    return String(window.localStorage.getItem(key) ?? "");
+  } catch {
+    return "";
+  }
+}
+
+function safeSetLocalStorage(key: string, value: string) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // ignore
+  }
+}
+
+function normalizeEndpointInput(raw: string): string {
+  const t = String(raw ?? "").trim();
+  if (!t) return "";
+  return t.startsWith("/") ? t : `/${t}`;
+}
+
+function loadEndpointHistory(): string[] {
+  const raw = safeGetLocalStorage(ENDPOINT_HISTORY_KEY);
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return Array.from(new Set(arr.map((x) => normalizeEndpointInput(String(x))).filter(Boolean))).slice(0, ENDPOINT_HISTORY_MAX);
+  } catch {
+    return [];
+  }
+}
+
+function rememberEndpoint(endpoint: string) {
+  const ep = normalizeEndpointInput(endpoint);
+  if (!ep) return;
+  safeSetLocalStorage(ENDPOINT_LAST_KEY, ep);
+  const cur = loadEndpointHistory();
+  const next = [ep, ...cur.filter((x) => x !== ep)].slice(0, ENDPOINT_HISTORY_MAX);
+  safeSetLocalStorage(ENDPOINT_HISTORY_KEY, JSON.stringify(next));
 }
 
 export function LlmPage() {
@@ -49,7 +97,7 @@ export function LlmPage() {
   const [newProviderId, setNewProviderId] = useState("");
   const [newModel, setNewModel] = useState("");
   const [newBaseURL, setNewBaseURL] = useState("");
-  const [newEndpoint, setNewEndpoint] = useState("/v1/chat/completions");
+  const [newEndpoint, setNewEndpoint] = useState(() => safeGetLocalStorage(ENDPOINT_LAST_KEY) || "/v1/chat/completions");
   const [newApiKey, setNewApiKey] = useState("");
   const [newPriceIn, setNewPriceIn] = useState("");
   const [newPriceOut, setNewPriceOut] = useState("");
@@ -111,10 +159,33 @@ export function LlmPage() {
     void refresh();
   }, []);
 
+  useEffect(() => {
+    const ep = normalizeEndpointInput(newEndpoint);
+    if (ep) safeSetLocalStorage(ENDPOINT_LAST_KEY, ep);
+  }, [newEndpoint]);
+
   const modelOptions = useMemo(() => {
     const arr = models.slice();
     arr.sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0) || a.model.localeCompare(b.model));
     return arr;
+  }, [models]);
+
+  const endpointSuggestions = useMemo(() => {
+    const defaults = [
+      "/v1/chat/completions",
+      "/v1/embeddings",
+      // Gemini（示例）：用户可把 model 名替换成实际的 gemini-xxx
+      "/v1beta/models/gemini-3-flash-preview:generateContent",
+      "/v1beta/models/gemini-3-flash-preview:streamGenerateContent",
+    ];
+    const fromModels = models.map((m) => normalizeEndpointInput(m.endpoint)).filter(Boolean);
+    const fromHistory = loadEndpointHistory();
+    const set = new Set<string>();
+    for (const x of [...defaults, ...fromHistory, ...fromModels]) {
+      const ep = normalizeEndpointInput(x);
+      if (ep) set.add(ep);
+    }
+    return Array.from(set).slice(0, 80);
   }, [models]);
 
   const create = async () => {
@@ -125,6 +196,7 @@ export function LlmPage() {
     const sortOrder = Number(newSortOrder);
     const selectedProvider = newProviderId ? providers.find((p) => p.id === newProviderId) || null : null;
     if (!newModel.trim()) return setError("model 不能为空");
+    if (!newEndpoint.trim()) return setError("endpoint 不能为空");
     if (selectedProvider) {
       if (!selectedProvider.isEnabled) return setError("所选供应商未启用");
       if (!selectedProvider.hasApiKey) return setError("所选供应商未配置 apiKey");
@@ -141,7 +213,7 @@ export function LlmPage() {
       await aiConfigCreateModel({
         model: newModel.trim(),
         ...(selectedProvider ? { providerId: selectedProvider.id } : { baseURL: newBaseURL.trim(), apiKey: newApiKey.trim() }),
-        endpoint: newEndpoint.trim(),
+        endpoint: normalizeEndpointInput(newEndpoint),
         priceInCnyPer1M: priceIn,
         priceOutCnyPer1M: priceOut,
         billingGroup: newBillingGroup.trim() || undefined,
@@ -149,12 +221,12 @@ export function LlmPage() {
         sortOrder,
         description: newDesc.trim() || undefined,
       });
+      rememberEndpoint(newEndpoint);
       setNotice("模型已创建（热生效）");
       setCreateOpen(false);
       setNewProviderId("");
       setNewModel("");
       setNewBaseURL("");
-      setNewEndpoint("/v1/chat/completions");
       setNewApiKey("");
       setNewPriceIn("");
       setNewPriceOut("");
@@ -256,6 +328,9 @@ export function LlmPage() {
     setError("");
     setNotice("");
 
+    const endpoint = normalizeEndpointInput(m.endpoint);
+    if (!endpoint) return setError("Endpoint 不能为空");
+
     const inStr = typeof m.priceInInput === "string" ? m.priceInInput.trim() : m.priceInCnyPer1M === null ? "" : String(m.priceInCnyPer1M);
     const outStr = typeof m.priceOutInput === "string" ? m.priceOutInput.trim() : m.priceOutCnyPer1M === null ? "" : String(m.priceOutCnyPer1M);
 
@@ -272,7 +347,7 @@ export function LlmPage() {
       await aiConfigUpdateModel(m.id, {
         providerId: m.providerId ?? null,
         baseURL: m.baseURL.trim(),
-        endpoint: m.endpoint.trim(),
+        endpoint,
         priceInCnyPer1M: priceIn,
         priceOutCnyPer1M: priceOut,
         billingGroup: (m.billingGroup ?? null) ? String(m.billingGroup).trim() : null,
@@ -282,6 +357,7 @@ export function LlmPage() {
         ...(m.clearApiKey ? { clearApiKey: true } : {}),
         ...(m.apiKeyInput?.trim() ? { apiKey: m.apiKeyInput.trim() } : {}),
       });
+      rememberEndpoint(endpoint);
       setNotice(`已保存：${m.model}`);
       await refresh();
     } catch (e: any) {
@@ -472,6 +548,12 @@ export function LlmPage() {
       {notice ? <div className="hint">{notice}</div> : null}
       {error ? <div className="error">{error}</div> : null}
 
+      <datalist id="aiEndpointList">
+        {endpointSuggestions.map((ep) => (
+          <option key={ep} value={ep} />
+        ))}
+      </datalist>
+
       <div className="tableWrap" style={{ padding: 14, marginBottom: 14 }}>
         <div style={{ fontWeight: 900, marginBottom: 10 }}>AI 模型管理</div>
         <div className="modelList">
@@ -576,14 +658,13 @@ export function LlmPage() {
 
                   <label className="field">
                     <div className="label">Endpoint</div>
-                    <select
+                    <input
                       className="input"
+                      list="aiEndpointList"
                       value={m.endpoint}
                       onChange={(e) => setModels((prev) => prev.map((x) => (x.id === m.id ? { ...x, endpoint: e.target.value } : x)))}
-                    >
-                      <option value="/v1/chat/completions">/v1/chat/completions</option>
-                      <option value="/v1/embeddings">/v1/embeddings</option>
-                    </select>
+                      placeholder="/v1/chat/completions 或 /v1beta/models/...:generateContent"
+                    />
                   </label>
 
                   <label className="field">
@@ -905,10 +986,13 @@ export function LlmPage() {
               </label>
               <label className="field">
                 <div className="label">endpoint</div>
-                <select className="input" value={newEndpoint} onChange={(e) => setNewEndpoint(e.target.value)}>
-                  <option value="/v1/chat/completions">/v1/chat/completions</option>
-                  <option value="/v1/embeddings">/v1/embeddings</option>
-                </select>
+                <input
+                  className="input"
+                  list="aiEndpointList"
+                  value={newEndpoint}
+                  onChange={(e) => setNewEndpoint(e.target.value)}
+                  placeholder="/v1/chat/completions 或 /v1beta/models/...:generateContent"
+                />
               </label>
               {newProviderId ? (
                 <div className="field">

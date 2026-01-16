@@ -74,8 +74,10 @@ export async function* streamChatCompletions(args: {
   maxTokens?: number | null;
   signal?: AbortSignal;
   includeUsage?: boolean;
+  /** OpenAI-compatible endpoint（支持 /chat/completions 或 /v1/chat/completions） */
+  endpoint?: string;
 }): AsyncGenerator<StreamDeltaEvent> {
-  const url = openAiCompatUrl(args.config.baseUrl, "/chat/completions");
+  const url = openAiCompatUrl(args.config.baseUrl, args.endpoint || "/chat/completions");
 
   const wantsUsage = Boolean(args.includeUsage);
 
@@ -194,8 +196,10 @@ export async function chatCompletionOnce(args: {
   temperature?: number;
   maxTokens?: number | null;
   signal?: AbortSignal;
+  /** OpenAI-compatible endpoint（支持 /chat/completions 或 /v1/chat/completions） */
+  endpoint?: string;
 }): Promise<ChatCompletionOnceResult> {
-  const url = openAiCompatUrl(args.config.baseUrl, "/chat/completions");
+  const url = openAiCompatUrl(args.config.baseUrl, args.endpoint || "/chat/completions");
 
   let res: Response;
   try {

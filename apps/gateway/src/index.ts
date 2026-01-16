@@ -11,6 +11,7 @@ import { kbSearch, type KbCard } from "@writing-ide/kb-core";
 import { MemoryKbStore } from "./kb/memoryStore.js";
 import { adjustUserPoints, calculateCostPoints, listUserTransactions, type LlmTokenUsage } from "./billing.js";
 import { chatCompletionOnce, openAiCompatUrl, streamChatCompletions, type OpenAiChatMessage } from "./llm/openaiCompat.js";
+import { streamGeminiGenerateContent } from "./llm/gemini.js";
 import { isToolCallMessage, parseToolCalls, renderToolResultXml } from "./agent/xmlProtocol.js";
 import { toolNamesForMode, toolsPrompt, type AgentMode } from "./agent/toolRegistry.js";
 import { createAiConfigService } from "./aiConfig.js";
@@ -518,14 +519,14 @@ fastify.post("/api/llm/chat/stream", async (request, reply) => {
   let model = pickedId || env.defaultModel;
   let baseUrl = env.baseUrl;
   let apiKey = env.apiKey;
+  let endpoint = "/v1/chat/completions";
   if (pickedId) {
     try {
       const m = await aiConfig.resolveModel(pickedId);
-      if (/chat\/completions/i.test(String(m.endpoint || ""))) {
-        model = m.model;
-        baseUrl = m.baseURL;
-        apiKey = m.apiKey;
-      }
+      model = m.model;
+      baseUrl = m.baseURL;
+      apiKey = m.apiKey;
+      endpoint = m.endpoint || endpoint;
     } catch {
       // ignore
     }
@@ -572,15 +573,29 @@ fastify.post("/api/llm/chat/stream", async (request, reply) => {
   let lastUsage: LlmTokenUsage | null = null;
 
   try {
-    for await (const ev of streamChatCompletions({
-      config: { baseUrl, apiKey },
-      model,
-      messages,
-      temperature,
-      maxTokens: stageMaxTokens ?? null,
-      includeUsage: true,
-      signal: abort.signal
-    })) {
+    const isGemini = /:streamGenerateContent/i.test(endpoint) || /:generateContent/i.test(endpoint) || /\/v1beta\/models\//i.test(endpoint);
+    const iter = isGemini
+      ? streamGeminiGenerateContent({
+          baseUrl,
+          endpoint,
+          apiKey,
+          messages,
+          temperature,
+          maxTokens: stageMaxTokens ?? null,
+          signal: abort.signal,
+        })
+      : streamChatCompletions({
+          config: { baseUrl, apiKey },
+          endpoint,
+          model,
+          messages,
+          temperature,
+          maxTokens: stageMaxTokens ?? null,
+          includeUsage: true,
+          signal: abort.signal,
+        });
+
+    for await (const ev of iter) {
       if (ev.type === "delta") writeEvent("assistant.delta", { delta: ev.delta });
       else if (ev.type === "usage") lastUsage = ev.usage as any;
       else if (ev.type === "done") writeEvent("assistant.done", {});
@@ -703,14 +718,14 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   let model = pickedId || env.defaultModel;
   let baseUrl = env.baseUrl;
   let apiKey = env.apiKey;
+  let endpoint = "/v1/chat/completions";
   if (pickedId) {
     try {
       const m = await aiConfig.resolveModel(pickedId);
-      if (/chat\/completions/i.test(String(m.endpoint || ""))) {
-        model = m.model;
-        baseUrl = m.baseURL;
-        apiKey = m.apiKey;
-      }
+      model = m.model;
+      baseUrl = m.baseURL;
+      apiKey = m.apiKey;
+      endpoint = m.endpoint || endpoint;
     } catch {
       // ignore
     }
@@ -930,15 +945,29 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       let flushed = 0;
       let lastUsage: LlmTokenUsage | null = null;
 
-      for await (const ev of streamChatCompletions({
-        config: { baseUrl, apiKey },
-        model,
-        messages,
-        temperature,
-        maxTokens: stageMaxTokens ?? null,
-        includeUsage: true,
-        signal: abort.signal
-      })) {
+      const isGemini = /:streamGenerateContent/i.test(endpoint) || /:generateContent/i.test(endpoint) || /\/v1beta\/models\//i.test(endpoint);
+      const iter = isGemini
+        ? streamGeminiGenerateContent({
+            baseUrl,
+            endpoint,
+            apiKey,
+            messages,
+            temperature,
+            maxTokens: stageMaxTokens ?? null,
+            signal: abort.signal,
+          })
+        : streamChatCompletions({
+            config: { baseUrl, apiKey },
+            endpoint,
+            model,
+            messages,
+            temperature,
+            maxTokens: stageMaxTokens ?? null,
+            includeUsage: true,
+            signal: abort.signal,
+          });
+
+      for await (const ev of iter) {
         if (ev.type === "delta") {
           assistantText += ev.delta;
           const prevDecided = decided;

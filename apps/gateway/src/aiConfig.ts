@@ -1083,17 +1083,32 @@ export function createAiConfigService(args: {
       return { modelId: m.id, model: m.model, baseURL, endpoint, endpointUrl, ...tr };
     }
 
+    const isGemini = /:streamGenerateContent/i.test(endpoint) || /:generateContent/i.test(endpoint) || /\/v1beta\/models\//i.test(endpoint);
     const isEmbedding = /\/embeddings/i.test(endpoint);
     const controller = new AbortController();
     const timeoutMs = 20_000;
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     const headers: Record<string, string> = { "Content-Type": "application/json" };
-    headers.Authorization = `Bearer ${apiKey}`;
 
-    const body = isEmbedding
-      ? { model: m.model, input: "ping" }
-      : { model: m.model, messages: [{ role: "user", content: "ping" }], temperature: 0, max_tokens: 1, stream: false };
+    let url = endpointUrl;
+    let body: any;
+
+    if (isGemini) {
+      // Gemini：key 既支持 query param，也支持 x-goog-api-key（兼容代理）
+      if (!/[\?&]key=/.test(url)) url = `${url}${url.includes("?") ? "&" : "?"}key=${encodeURIComponent(apiKey)}`;
+      headers["x-goog-api-key"] = apiKey;
+      body = {
+        contents: [{ role: "user", parts: [{ text: "ping" }] }],
+        generationConfig: { temperature: 0, maxOutputTokens: 1 },
+      };
+    } else if (isEmbedding) {
+      headers.Authorization = `Bearer ${apiKey}`;
+      body = { model: m.model, input: "ping" };
+    } else {
+      headers.Authorization = `Bearer ${apiKey}`;
+      body = { model: m.model, messages: [{ role: "user", content: "ping" }], temperature: 0, max_tokens: 1, stream: false };
+    }
 
     const start = Date.now();
     let ok = false;
@@ -1102,7 +1117,7 @@ export function createAiConfigService(args: {
     let headersObj: Record<string, string> | undefined = undefined;
 
     try {
-      const resp = await fetch(endpointUrl, { method: "POST", headers, body: JSON.stringify(body), signal: controller.signal });
+      const resp = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: controller.signal });
       status = resp.status;
       const latencyMs = Date.now() - start;
       const testedAt = nowIso();
@@ -1131,7 +1146,7 @@ export function createAiConfigService(args: {
 
       const tr: AiModelTestResult = { ok, latencyMs, status, error, testedAt, ...(headersObj ? { headers: headersObj } : {}) };
       await writeResult(tr);
-      return { modelId: m.id, model: m.model, baseURL: m.baseURL, endpoint, endpointUrl, ...tr };
+      return { modelId: m.id, model: m.model, baseURL, endpoint, endpointUrl: url, ...tr };
     } catch (e: any) {
       const msg = String(e?.name ?? "") === "AbortError" ? `请求超时（>${Math.round(timeoutMs / 1000)}s）` : String(e?.message ?? e);
       status = null;
@@ -1139,7 +1154,7 @@ export function createAiConfigService(args: {
       const testedAt = nowIso();
       const tr: AiModelTestResult = { ok: false, latencyMs, status, error: msg.slice(0, 400), testedAt };
       await writeResult(tr);
-      return { modelId: m.id, model: m.model, baseURL: m.baseURL, endpoint, endpointUrl, ...tr };
+      return { modelId: m.id, model: m.model, baseURL, endpoint, endpointUrl: url, ...tr };
     } finally {
       clearTimeout(timer);
     }
