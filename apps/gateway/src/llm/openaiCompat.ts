@@ -107,6 +107,7 @@ export async function* streamChatCompletions(args: {
     deltaChars: 0,
     sawFinishReason: false,
     sawDone: false,
+    endedBy: "" as string,
   };
 
   const doFetch = async (withUsage: boolean) => {
@@ -174,6 +175,12 @@ export async function* streamChatCompletions(args: {
 
     if (data === "[DONE]") {
       diag.sawDone = true;
+      diag.endedBy = "DONE";
+      if (diag.deltaChars === 0) {
+        // 用 stdout，便于在 pm2 out.log 里直接看到
+        // eslint-disable-next-line no-console
+        console.log("[openaiCompat.diag] upstream ended with 0 delta chars", diag);
+      }
       yield { type: "done" };
       return;
     }
@@ -242,6 +249,11 @@ export async function* streamChatCompletions(args: {
       sawFinishReason = true;
       diag.sawFinishReason = true;
       if (!wantsUsage) {
+        diag.endedBy = `finish_reason:${String(finishReason)}`;
+        if (diag.deltaChars === 0) {
+          // eslint-disable-next-line no-console
+          console.log("[openaiCompat.diag] upstream finished with 0 delta chars", diag);
+        }
         yield { type: "done" };
         return;
       }
@@ -249,14 +261,16 @@ export async function* streamChatCompletions(args: {
   }
 
   if (sawFinishReason) {
+    diag.endedBy = diag.endedBy || "eof_after_finish_reason";
     yield { type: "done" };
   } else {
-    // 关键：如果整个流里没有任何 delta，且没有标准结束信号，输出诊断信息（用于定位上游格式差异）。
-    // 这会帮助判断是“上游真的空输出”还是“我们 parser 没覆盖字段/格式”。不会影响返回值（仍然结束 generator）。
-    if (diag.deltaChars === 0) {
-      // eslint-disable-next-line no-console
-      console.warn("[openaiCompat] upstream stream produced 0 delta chars", diag);
-    }
+    diag.endedBy = diag.endedBy || "eof_no_finish_reason";
+  }
+
+  // EOF 兜底诊断（无论是否 sawFinishReason，只要 deltaChars==0 都打印）
+  if (diag.deltaChars === 0) {
+    // eslint-disable-next-line no-console
+    console.log("[openaiCompat.diag] upstream stream ended with 0 delta chars", diag);
   }
 }
 
