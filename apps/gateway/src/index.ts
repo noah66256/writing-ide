@@ -1874,6 +1874,12 @@ fastify.post(
       const toolJson = JSON.stringify(toolPayload);
       const toolXml = `<tool_result name="run.setTodoList"><![CDATA[${toolJson}]]></tool_result>`;
       const toolText = `[tool_result name="run.setTodoList"]\n${toolJson}\n[/tool_result]`;
+      const fakeToolCallXml =
+        `<tool_calls>` +
+        `<tool_call name="run.setTodoList">` +
+        `<arg name="items"><![CDATA[[]]]></arg>` +
+        `</tool_call>` +
+        `</tool_calls>`;
 
       const messages: OpenAiChatMessage[] = [
         {
@@ -1881,6 +1887,8 @@ fastify.post(
           content:
             "兼容性检测：不要输出推理过程/解释；直接输出 OK（只允许输出 OK 两个字符）。",
         },
+        // 关键：模拟真实 Agent 流程（先出现 tool_calls，再注入 tool_result），用于复现部分代理的兼容性问题
+        { role: "assistant", content: fakeToolCallXml },
         ...(fmt === "xml" ? ([{ role: "system", content: toolXml }] as any) : ([{ role: "user", content: toolText }] as any)),
         { role: "user", content: "只回复 OK" },
       ];
