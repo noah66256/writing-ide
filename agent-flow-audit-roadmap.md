@@ -31,6 +31,11 @@
   - 工具契约 Schema（输入校验）：`packages/tools` 为每个工具补充 `inputSchema`，Gateway 在解析到 `<tool_calls>` 后先做参数校验；失败则触发 `ToolArgValidationPolicy` 自动重试（避免把错误参数下发到 Desktop 导致卡死/误判）。
   - Admin Web：新增“Run 审计”页面，直接消费 `/api/admin/audit/runs*` 展示列表与 events 详情（开发期先 JSON 展示，后续再做筛选/导出/聚合视图）。
 
+- 🟡 **M3（已确认方向，待落地）：Skills（能力包）框架**
+  - **自动启用为主**：按 Context Pack/意图判定自动激活 skills（减少用户手动开关成本）。
+  - **可见**：Desktop 需要在右侧明确展示“当前激活的 skills”（解释为什么会触发门禁/为什么提示某流程）。
+  - **独立 stage（计费/路由）**：每个 skill 对应独立 `stageKey`（例如 `agent.skill.style_imitate` / `agent.skill.topic_ideation`），可在 B 端配置模型/参数并单独计费归因与审计。
+
 ### 1. 目标与范围
 - **目标**：对 Desktop ↔ Gateway 的 Agent Run 全链路做“结构化审计”，找出逻辑硬伤，并给出不破坏产品定位的改造路线。
 - **范围**（本次聚焦）：
@@ -191,6 +196,95 @@
   - 参数校验（统一错误码）
   - UI 展示摘要（ToolBlock）
 
+#### 5.3 Skills（能力包）层：自动启用 + 可见 + 独立 stage（我们已确认的方向）
+> 说明：Skill 不是“写死的工作流”；它是一个**可组合的能力包**，用于把“提示词片段 + 策略门禁 +（可选）工具裁剪 + 计费归因”组织在一起。  
+> 目标：让“风格仿写闭环/选题/平台适配”等能力**模块化**，同时仍保持“LLM 自主决定调用哪些工具”的产品约束。
+
+**Skill 的最小定义（建议）**
+- `id`：稳定标识（如 `style_imitate` / `topic_ideation`）
+- `name/description`
+- `trigger`：激活条件（自动启用为主；可用 Context Pack + RunIntent + 少量启发式兜底）
+- `priority`：多 skill 同时满足时的优先级与冲突策略（明确规则，避免“隐式叠加”）
+- `stageKey`：独立 stage（用于模型路由/成本/计费归因/审计）
+- `promptFragments`：插入到 system/context 的提示片段（应短；避免把“重资源”塞进上下文）
+- `policies`：启用哪些 policy（例如 StyleGatePolicy/AutoRetryPolicy 的某些分支）
+- `toolCaps`（可选）：按 skill/state 裁剪“允许调用的工具集合”（仍不写死顺序，只做门禁）
+- `regressCases`：最小回归用例（确保未来重构不回退）
+
+**分层加载（业内常见做法，结合我们项目约束）**
+- `metadata`：永远轻量注入/可用于 UI 展示与触发判定
+- `instructions`：仅当 skill 激活时注入（短规则/注意事项/典型工具建议）
+- `resources`：重资源（样例/模板/长手册）按需通过工具拿（例如 `kb.search`/`doc.read`），避免 Context Pack 过载
+
+**Skill 激活的“可见性”与可审计性（必须）**
+- Desktop 右侧显示：`Active Skills: [style_imitate, ...]`（badge/tooltip）
+- Gateway SSE 增加 `policy.decision(SkillPolicy)` 或专门事件（例如 `skill.active`），并落库到 `runAudits`
+- Context Pack 增加：`ACTIVE_SKILLS(JSON)`（仅包含 id/name/stageKey/触发原因摘要，不包含重资源）
+
+**把“风格仿写强闭环”从“散落 if”升级为一个 Skill（核心）**
+- `StyleImitateSkill`（触发：存在 `purpose=style` 且 RunIntent=写作/仿写/改写/润色）
+  - 启用：StyleGatePolicy（门禁：kb.search → lint.style → write；允许 kb 0 命中降级；允许 lint 降级）
+  - 工具裁剪（可选）：在 `need_kb_examples` 状态优先允许 kb.search；在 `need_lint` 状态允许 lint.style；在 `can_write` 状态才允许 `doc.*` 写入类工具
+  - stageKey：`agent.skill.style_imitate`（模型/成本可单独配置；计费归因清晰）
+
+**未来可扩展的 Skills（示例，不写死）**
+- `TopicIdeationSkill`：选题/标题池/角度生成（stageKey：`agent.skill.topic_ideation`）
+- `PlatformAdaptSkill`：平台画像驱动适配（stageKey：`agent.skill.platform_adapt`）
+- `OutlineFirstSkill`：强制“先 outline 再 draft”的结构偏好（stageKey：`agent.skill.outline_first`）
+
+**SkillManifest v1（建议落到 packages/agent-core 或 packages/tools；供 Gateway/Desktop/回归脚本复用）**
+> 目的：把“自动启用/可见/独立 stage”变成强类型契约，避免未来又回到 scattered if/flag。  
+> 注意：这不是“链式工作流”；manifest 只描述“何时启用 + 启用后带来什么约束/提示/路由”，工具调用仍由 LLM 自主决定。
+
+- `SkillManifest`
+  - `id: string`：稳定 id（如 `style_imitate`）
+  - `name: string`
+  - `description: string`
+  - `priority: number`：越大越优先（冲突时决定先后；默认 0）
+  - `stageKey: string`：独立 stage（形如 `agent.skill.<id>`）
+  - `autoEnable: boolean`：默认 true（满足 trigger 即启用）
+  - `triggers: TriggerRule[]`：触发规则（可多条）
+  - `promptFragments: { system?: string; context?: string }`：短提示片段（禁止塞长资源）
+  - `policies: string[]`：启用哪些 policy（例如 `StyleGatePolicy`）
+  - `toolCaps?: { allowTools?: string[]; denyTools?: string[] }`：可选门禁（state 级细化可后置）
+  - `ui: { badge: string; color?: string }`：用于 Desktop 可视化展示
+
+- `TriggerRule`（最小可用）
+  - `when: "has_style_library" | "run_intent_in" | "mode_in" | "text_regex"`
+  - `args: object`：例如：
+    - `has_style_library`: `{ purpose: "style" }`
+    - `run_intent_in`: `{ intents: ["writing","rewrite","polish"] }`
+    - `mode_in`: `{ modes: ["plan","agent"] }`
+    - `text_regex`: `{ pattern: "仿写|按.*风格" }`
+
+- `ActiveSkill`（注入 Context Pack：`ACTIVE_SKILLS(JSON)`；并用于 UI 展示）
+  - `id/name/stageKey/badge`
+  - `activatedBy: { reasonCodes: string[]; detail?: object }`（必须可解释）
+
+**JSON 示例（文档层约定）**
+
+```json
+{
+  "id": "style_imitate",
+  "name": "风格仿写闭环",
+  "description": "绑定风格库后自动启用：先检索样例→再 lint.style→最后允许写入（支持降级/跳过）。",
+  "priority": 100,
+  "stageKey": "agent.skill.style_imitate",
+  "autoEnable": true,
+  "triggers": [
+    { "when": "mode_in", "args": { "modes": ["plan", "agent"] } },
+    { "when": "has_style_library", "args": { "purpose": "style" } },
+    { "when": "run_intent_in", "args": { "intents": ["writing", "rewrite", "polish"] } }
+  ],
+  "promptFragments": {
+    "system": "当 skill=style_imitate 激活时：写入前必须完成 kb.search 与 lint.style（或明确降级/用户显式跳过）。工具调用仍按 XML 协议输出。",
+    "context": "ACTIVE_SKILLS: style_imitate（原因见 reasonCodes；UI 需可见）"
+  },
+  "policies": ["StyleGatePolicy", "AutoRetryPolicy"],
+  "ui": { "badge": "STYLE", "color": "blue" }
+}
+```
+
 ### 6. 分阶段路线图（最小闭环 → 中期重构 → 长期演进）
 
 #### M0（止血 & 可观测，尽量不改行为）
@@ -214,12 +308,25 @@
   - 工具执行逐步迁移到 Gateway（鉴权/审计/计费更一致），Desktop 保留本地 fs/编辑器类能力
   - CI 回归：关键写作闭环用例（含 style 库强闭环）自动化
 
+#### M3（Skills 框架：能力包模块化 + 可见 + 独立 stage）
+> 目标：把“风格仿写闭环/选题/平台适配”等能力做成可组合的 skills，避免把业务策略继续堆回 `index.ts`。
+- **交付**
+  - `SkillManifest`（packages 层）：skill 的统一定义（id/trigger/stageKey/promptFragments/policies/toolCaps）
+  - `SkillActivation`：根据 Context Pack + RunIntent 计算 `activeSkills[]`（自动启用为主），并在 SSE/审计中可解释
+  - `ACTIVE_SKILLS(JSON)` 注入：Desktop 构建 Context Pack 时注入；UI 展示当前激活 skills
+  - `aiConfig` 增加 skill stages：`agent.skill.*` 可配置模型/参数/启用开关（与计费/审计归因对齐）
+  - StyleImitateSkill 首个落地：把现有 StyleGatePolicy 归入该 skill，并将“是否启用闭环”严格绑定到 `activeSkills`（避免误伤）
+
 ### 7. 回归清单（每阶段必须过的“不破坏行为”测试）
 - **Chat 模式**：永远不允许工具；不会出现 tool.call/tool.result。
 - **Plan/Agent**：工具调用必须 XML 独占消息；Keep/Undo 可用。
 - **绑定 style 库**：
   - 只有写作意图才强闭环；非写作任务不误伤
   - 写入前必须满足 kb→lint→write（或明确降级/用户显式跳过）
+- **Skills（新）**
+  - 自动启用：满足触发条件时应进入 `activeSkills`，且 Desktop 可见（UI）
+  - 可解释：SSE/审计中能看到 skill 激活原因（reasonCodes/state）
+  - 独立 stage：skill 走 `agent.skill.*` 的模型路由与计费归因（可在 B 端热配置）
 - **proposal-first**：覆盖写入一定是提案；Keep 才落盘；Undo 可回滚。
 - **Main Doc**：关键决策可持久；RECENT_DIALOGUE 只少量注入；不因上下文变大导致风格手册被淹没。
 
