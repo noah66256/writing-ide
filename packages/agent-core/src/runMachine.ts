@@ -52,10 +52,17 @@ export type RunState = {
   lintGateDegraded: boolean;
   bestStyleDraft: null | { score: number; highIssues: number; text: string };
   lastStyleLint: null | StyleLintParsed;
-  autoRetryBudget: number;
+  // 预算拆分：避免一个 budget 同时承担“协议修复/完成性重试/风格门禁”等多重语义
+  protocolRetryBudget: number;
+  workflowRetryBudget: number;
+  lintReworkBudget: number;
+
+  // proposal/write 语义：区分“已提案但未 Keep”与“已落盘/已应用”
+  hasWriteProposed: boolean;
+  hasWriteApplied: boolean;
 };
 
-export function createInitialRunState(args?: { autoRetryBudget?: number }): RunState {
+export function createInitialRunState(args?: { protocolRetryBudget?: number; workflowRetryBudget?: number; lintReworkBudget?: number }): RunState {
   return {
     hasTodoList: false,
     hasWriteOps: false,
@@ -68,7 +75,11 @@ export function createInitialRunState(args?: { autoRetryBudget?: number }): RunS
     lintGateDegraded: false,
     bestStyleDraft: null,
     lastStyleLint: null,
-    autoRetryBudget: Number.isFinite(args?.autoRetryBudget as any) ? Math.max(0, Math.floor(Number(args?.autoRetryBudget))) : 3,
+    protocolRetryBudget: Number.isFinite(args?.protocolRetryBudget as any) ? Math.max(0, Math.floor(Number(args?.protocolRetryBudget))) : 2,
+    workflowRetryBudget: Number.isFinite(args?.workflowRetryBudget as any) ? Math.max(0, Math.floor(Number(args?.workflowRetryBudget))) : 3,
+    lintReworkBudget: Number.isFinite(args?.lintReworkBudget as any) ? Math.max(0, Math.floor(Number(args?.lintReworkBudget))) : 2,
+    hasWriteProposed: false,
+    hasWriteApplied: false,
   };
 }
 
@@ -100,7 +111,7 @@ export function parseKbSelectedLibrariesFromContextPack(ctx?: string): KbSelecte
   }
 }
 
-export function detectRunIntent(args: { mode: AgentMode; userPrompt: string }): RunIntent {
+export function detectRunIntent(args: { mode: AgentMode; userPrompt: string; mainDocRunIntent?: unknown }): RunIntent {
   const { mode } = args;
   const userPrompt = String(args.userPrompt ?? "");
   const forceProceed =
@@ -118,7 +129,18 @@ export function detectRunIntent(args: { mode: AgentMode; userPrompt: string }): 
     /(仿写|改写|润色|续写|扩写|写(一篇|一段|一条|稿|文|文章|脚本|文案)|生成(文章|稿|文案)|按.+风格)/.test(userPrompt);
   const skipLint = /(跳过|不用|不要).{0,12}(linter|风格检查|风格对齐|风格校验|像不像检查)/i.test(userPrompt);
   const skipCta = /(跳过|不用|不要).{0,12}(cta|点赞|关注|评论|转发|收藏|三连|一键三连)/i.test(userPrompt);
-  return { forceProceed, wantsWrite, wantsOkOnly, isWritingTask, skipLint, skipCta };
+
+  // 结构化意图（优先级高于正则启发式）：来自 Main Doc/UI（例如 Desktop 选择“意图：分析/操作”避免误触写作强闭环）
+  const mainDocIntentRaw = String(args.mainDocRunIntent ?? "").trim().toLowerCase();
+  const mainDocIntent = mainDocIntentRaw === "auto" ? "" : mainDocIntentRaw;
+  const isWritingTaskFinal =
+    mainDocIntent === "writing" || mainDocIntent === "rewrite" || mainDocIntent === "polish"
+      ? true
+      : mainDocIntent === "analysis" || mainDocIntent === "ops"
+        ? false
+        : isWritingTask;
+
+  return { forceProceed, wantsWrite, wantsOkOnly, isWritingTask: isWritingTaskFinal, skipLint, skipCta };
 }
 
 export function deriveStyleGate(args: { mode: AgentMode; kbSelected: KbSelectedLibrary[]; intent: RunIntent }): RunGates {

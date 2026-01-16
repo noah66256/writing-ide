@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { startGatewayRun } from "../agent/gatewayAgent";
-import { useRunStore } from "../state/runStore";
+import { useRunStore, type MainDoc } from "../state/runStore";
 import { useProjectStore } from "../state/projectStore";
 import { IconAt, IconChevronDown, IconCopy, IconGlobe, IconImage, IconMic, IconRewind, IconSend, IconStop } from "./Icons";
 import { PillSelect } from "./PillSelect";
@@ -41,6 +41,7 @@ export function AgentPane() {
   const mode = useRunStore((s) => s.mode);
   const model = useRunStore((s) => s.model);
   const mainDoc = useRunStore((s) => s.mainDoc);
+  const updateMainDoc = useRunStore((s) => s.updateMainDoc);
   const todoList = useRunStore((s) => s.todoList);
   const steps = useRunStore((s) => s.steps);
   const isRunning = useRunStore((s) => s.isRunning);
@@ -220,6 +221,21 @@ export function AgentPane() {
     `- Recent: ~${Math.ceil(recentTextChars / 4)}\n` +
     `- Input: ~${Math.ceil(inputChars / 4)}\n` +
     `（提示：后续接入真实 usage 后会用真实 token 计数替代）`;
+
+  type RunIntentValue = NonNullable<MainDoc["runIntent"]>;
+  const runIntentValue = (mainDoc?.runIntent ?? "auto") as RunIntentValue;
+  const runIntentLabel =
+    runIntentValue === "writing"
+      ? "写作"
+      : runIntentValue === "rewrite"
+        ? "改写"
+        : runIntentValue === "polish"
+          ? "润色"
+          : runIntentValue === "analysis"
+            ? "分析"
+            : runIntentValue === "ops"
+              ? "操作"
+              : "自动";
 
   const startTurn = (text: string) => {
     if (isRunning) return;
@@ -652,6 +668,21 @@ export function AgentPane() {
                             minWidth={86}
                             maxWidth={120}
                           />
+                          <PillSelect
+                            value={runIntentValue}
+                            options={[
+                              { value: "auto", label: "意图：自动" },
+                              { value: "writing", label: "意图：写作" },
+                              { value: "rewrite", label: "意图：改写" },
+                              { value: "polish", label: "意图：润色" },
+                              { value: "analysis", label: "意图：分析" },
+                              { value: "ops", label: "意图：操作" },
+                            ]}
+                            onChange={(v) => updateMainDoc({ runIntent: v as RunIntentValue })}
+                            title={`意图（结构化）：${runIntentLabel}\n- 自动：后端启发式判断\n- 写作/改写/润色：会更倾向启用写作闭环门禁\n- 分析/操作：尽量避免误触写作强闭环`}
+                            minWidth={98}
+                            maxWidth={136}
+                          />
                           <div
                             className="pillSelect"
                             style={{ minWidth: 120, maxWidth: 220 }}
@@ -927,6 +958,21 @@ export function AgentPane() {
                 title="模式"
                 minWidth={86}
                 maxWidth={120}
+              />
+              <PillSelect
+                value={runIntentValue}
+                options={[
+                  { value: "auto", label: "意图：自动" },
+                  { value: "writing", label: "意图：写作" },
+                  { value: "rewrite", label: "意图：改写" },
+                  { value: "polish", label: "意图：润色" },
+                  { value: "analysis", label: "意图：分析" },
+                  { value: "ops", label: "意图：操作" },
+                ]}
+                onChange={(v) => updateMainDoc({ runIntent: v as RunIntentValue })}
+                title={`意图（结构化）：${runIntentLabel}\n- 自动：后端启发式判断\n- 写作/改写/润色：会更倾向启用写作闭环门禁\n- 分析/操作：尽量避免误触写作强闭环`}
+                minWidth={98}
+                maxWidth={136}
               />
               <div className="pillSelect" style={{ minWidth: 120, maxWidth: 220 }} title={model ? `模型：${model}` : "未选择模型"}>
                 <button

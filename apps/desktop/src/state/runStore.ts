@@ -8,6 +8,8 @@ export type ToolRiskLevel = "low" | "medium" | "high";
 
 export type MainDoc = {
   goal?: string;
+  // 结构化意图（优先于正则启发式；用于后端门禁/skills 自动启用）
+  runIntent?: "auto" | "writing" | "rewrite" | "polish" | "analysis" | "ops";
   platformType?: "feed_preview" | "search_click" | "long_subscription";
   audience?: string;
   persona?: string;

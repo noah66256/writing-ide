@@ -31,6 +31,12 @@
   - 工具契约 Schema（输入校验）：`packages/tools` 为每个工具补充 `inputSchema`，Gateway 在解析到 `<tool_calls>` 后先做参数校验；失败则触发 `ToolArgValidationPolicy` 自动重试（避免把错误参数下发到 Desktop 导致卡死/误判）。
   - Admin Web：新增“Run 审计”页面，直接消费 `/api/admin/audit/runs*` 展示列表与 events 详情（开发期先 JSON 展示，后续再做筛选/导出/聚合视图）。
 
+- ✅ **M2.5 已补齐（P0/P1：把“隐式风险点”补成可解释地基）**
+  - 预算拆分（H2）：把 Run 内预算显式拆为 `protocolRetryBudget` / `workflowRetryBudget` / `lintReworkBudget`，并在 `policy.decision` 中记录每次 budget 消耗原因（避免“一个 budget 多语义复用”再次引发绕过/误伤）。
+  - 结构化意图（H10）：Desktop Main Doc 增加 `runIntent`（UI 可选：自动/写作/改写/润色/分析/操作），Gateway 解析后**优先于正则启发式**用于 styleGate/autoRetry/skills 触发（减少误判）。
+  - SSE 强边界（H11）：Gateway 增加 `assistant.start(turn)`，并为 `assistant.delta/assistant.done` 自动补齐 `turn` 字段；Desktop 侧消费 `assistant.start` 强制切分回合边界（兼容旧事件）。
+  - proposal 语义可解释（H8）：RunState 区分 `hasWriteProposed` vs `hasWriteApplied`，并在 `policy.decision/stateSnapshot/runAudits` 中可见（避免“提案=已写入”的概念混淆）。
+
 - 🟡 **M3（已确认方向，待落地）：Skills（能力包）框架**
   - **自动启用为主**：按 Context Pack/意图判定自动激活 skills（减少用户手动开关成本）。
   - **可见**：Desktop 需要在右侧明确展示“当前激活的 skills”（解释为什么会触发门禁/为什么提示某流程）。

@@ -68,7 +68,7 @@ async function main() {
       intent,
       kbSelected: [{ id: "style-1", purpose: "style" }],
     });
-    const state = createInitialRunState({ autoRetryBudget: 3 });
+    const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
     const toolCalls: ParsedToolCall[] = [{ name: "doc.write", args: { path: "drafts/a.md", content: "x" } }];
     const batch = analyzeStyleWorkflowBatch({ mode, intent, gates, state, lintMaxRework: 2, toolCalls });
     assert.equal(batch.shouldEnforce, true);
@@ -79,7 +79,7 @@ async function main() {
     const mode = "agent" as const;
     const intent = detectRunIntent({ mode, userPrompt: "按风格库仿写一段（跳过linter）" });
     const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }] });
-    const state = createInitialRunState({ autoRetryBudget: 3 });
+    const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
     state.hasStyleKbSearch = true;
     const toolCalls: ParsedToolCall[] = [{ name: "doc.write", args: { path: "a.md", content: "x" } }];
     const batch = analyzeStyleWorkflowBatch({ mode, intent, gates, state, lintMaxRework: 2, toolCalls });
@@ -92,7 +92,7 @@ async function main() {
     const mode = "agent" as const;
     const intent = detectRunIntent({ mode, userPrompt: "按风格库仿写一段" });
     const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }] });
-    const state = createInitialRunState({ autoRetryBudget: 3 });
+    const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
     const toolCalls: ParsedToolCall[] = [
       { name: "kb.search", args: { kind: "card", query: "开场" } },
       { name: "lint.style", args: { text: "x" } },
@@ -104,7 +104,7 @@ async function main() {
     const mode = "agent" as const;
     const intent = detectRunIntent({ mode, userPrompt: "按风格库仿写一段" });
     const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }] });
-    const state = createInitialRunState({ autoRetryBudget: 3 });
+    const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
     state.hasStyleKbSearch = true;
     const toolCalls: ParsedToolCall[] = [
       { name: "lint.style", args: { text: "x" } },
@@ -117,7 +117,7 @@ async function main() {
     const mode = "agent" as const;
     const intent = detectRunIntent({ mode, userPrompt: "按风格库仿写一段" });
     const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }] });
-    const state = createInitialRunState({ autoRetryBudget: 3 });
+    const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
     state.hasStyleKbSearch = true;
     state.styleLintPassed = false;
     state.styleLintFailCount = 3;
@@ -132,7 +132,7 @@ async function main() {
     const mode = "agent" as const;
     const intent = detectRunIntent({ mode, userPrompt: "请写入 drafts/a.md" });
     const gates = deriveStyleGate({ mode, intent, kbSelected: [] });
-    const state = createInitialRunState({ autoRetryBudget: 3 });
+    const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
     state.hasTodoList = true;
     const a = analyzeAutoRetryText({ assistantText: "", intent, gates, state, lintMaxRework: 2 });
     assert.equal(a.isEmpty, true);
@@ -186,6 +186,10 @@ async function main() {
     assert.ok(gw.includes("style_kb_zero_hit"), "Gateway 缺少 kb 0 命中降级标记（可能再次卡死）");
     assert.ok(gw.includes("reason: \"clarify_waiting\""), "Gateway 缺少 clarify_waiting 分支（可能再次“问你但仍继续跑”）");
     assert.ok(gw.includes("reason: \"tool_calls\""), "Gateway tool_calls 分支未发送 assistant.done(tool_calls)（assistant 边界回退）");
+    assert.ok(gw.includes("\"assistant.start\""), "Gateway 缺少 assistant.start SSE（turn 边界可能回退）");
+    assert.ok(gw.includes("protocolRetryBudget"), "Gateway 缺少 protocolRetryBudget（预算拆分可能回退）");
+    assert.ok(gw.includes("workflowRetryBudget"), "Gateway 缺少 workflowRetryBudget（预算拆分可能回退）");
+    assert.ok(gw.includes("hasWriteProposed"), "Gateway 缺少 hasWriteProposed（proposal 语义可解释性可能回退）");
     assert.ok(gw.includes("executedBy"), "Gateway tool.call 未携带 executedBy（无法逐步迁回 Gateway）");
     assert.ok(gw.includes("styleLinterLibraries"), "Gateway 未读取 toolSidecar.styleLinterLibraries（server-side lint.style 无法落地）");
     assert.ok(gw.includes("completionOnceViaProvider"), "Gateway 未使用 completionOnceViaProvider（ProviderAdapter one-shot 可能回退）");
@@ -205,6 +209,7 @@ async function main() {
     assert.ok(desk.includes("toolSidecar"), "Desktop 未向 /api/agent/run/stream 发送 toolSidecar（server-side lint.style 无法落地）");
     assert.ok(desk.includes("projectFiles"), "Desktop 未在 toolSidecar 携带 projectFiles（server-side project.listFiles 无法落地）");
     assert.ok(desk.includes("docRules"), "Desktop 未在 toolSidecar 携带 docRules（server-side project.docRules.get 无法落地）");
+    assert.ok(desk.includes("assistant.start"), "Desktop 未处理 assistant.start（turn 边界可能回退）");
   }
   {
     const sr = await readRepoFile("apps/gateway/src/agent/serverToolRunner.ts");

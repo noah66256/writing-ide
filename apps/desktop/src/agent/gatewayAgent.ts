@@ -743,6 +743,21 @@ export function startGatewayRun(args: {
             }
           }
 
+          if (evt.event === "assistant.start") {
+            // SSE 强边界：Gateway 会在每次模型调用前发 assistant.start(turn)
+            // - 用于强制切分“回合边界”，避免下一轮 delta 追加到上一条 assistant 气泡
+            // - 兼容旧实现：如果 Gateway 不发 assistant.start，本地仍会在首个 delta 时创建气泡
+            try {
+              const payload = JSON.parse(evt.data);
+              log("info", "assistant.start", payload);
+            } catch {
+              log("info", "assistant.start", evt.data);
+            }
+            if (assistantId) finishAssistant(assistantId);
+            assistantId = null;
+            if (useRunStore.getState().isRunning) setActivity("正在生成…");
+          }
+
           if (evt.event === "assistant.delta") {
             try {
               const payload = JSON.parse(evt.data);

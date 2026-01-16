@@ -936,17 +936,27 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   reply.raw.on("close", () => void persistOnce({ endReason: "aborted", endReasonCodes: ["aborted"] }));
   reply.raw.on("finish", () => void persistOnce());
 
+  // 当前 turn（用于 SSE assistant.* 事件自动补齐 turn 字段；避免 Desktop 只能靠猜）
+  let currentTurn = 0;
+
   const writeEvent = (event: string, data: unknown) => {
-    writeEventRaw(event, data);
-    if (event !== "assistant.delta") recordRunAuditEvent(audit, event, data);
-    if (event === "run.end") {
+    const payload = (() => {
+      if (!String(event ?? "").startsWith("assistant.")) return data;
       const p: any = data && typeof data === "object" ? (data as any) : null;
+      if (!p) return data;
+      if (p.turn !== undefined) return data;
+      return { ...p, turn: currentTurn };
+    })();
+    writeEventRaw(event, payload);
+    if (event !== "assistant.delta") recordRunAuditEvent(audit, event, payload);
+    if (event === "run.end") {
+      const p: any = payload && typeof payload === "object" ? (payload as any) : null;
       ensureRunAuditEnded(audit, { endReason: String(p?.reason ?? "run.end"), endReasonCodes: Array.isArray(p?.reasonCodes) ? p.reasonCodes : [] });
       audit.endReason = typeof p?.reason === "string" ? p.reason : audit.endReason;
       audit.endReasonCodes = Array.isArray(p?.reasonCodes) ? (p.reasonCodes as any[]).map((x) => String(x ?? "")).filter(Boolean).slice(0, 32) : audit.endReasonCodes;
     }
     if (event === "policy.decision") {
-      const p: any = data && typeof data === "object" ? (data as any) : null;
+      const p: any = payload && typeof payload === "object" ? (payload as any) : null;
       if (String(p?.policy ?? "") === "BillingPolicy" && String(p?.decision ?? "") === "charged") {
         const cp = Number(p?.detail?.chargedPoints ?? p?.detail?.chargedPoints ?? 0);
         if (Number.isFinite(cp) && cp > 0) audit.chargedPoints = (audit.chargedPoints ?? 0) + Math.floor(cp);
@@ -971,7 +981,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   const mainDocFromPack = parseMainDocFromContextPack(body.contextPack);
   const kbSelectedList = parseKbSelectedLibrariesFromContextPack(body.contextPack);
 
-  const intent = detectRunIntent({ mode, userPrompt });
+  const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: (mainDocFromPack as any)?.runIntent });
 
   const lintPassScore = Number(process.env.STYLE_LINT_PASS_SCORE ?? 80);
   const lintMaxRework = Number(process.env.STYLE_LINT_MAX_REWORK ?? 2);
@@ -985,12 +995,17 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     String((mainDocFromPack as any)?.styleLintFailPolicy ?? "").trim() === "keep_best";
 
   // Run 内部状态（显式 State；由 policy 函数分析与更新）
-  const runState = createInitialRunState({ autoRetryBudget: 3 });
+  // 预算拆分：避免一个 budget 同时承担“协议修复/完成性重试/风格门禁”等语义
+  const runState = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: lintMaxRework });
 
   const stateSnapshot = () => ({
-    autoRetryBudget: runState.autoRetryBudget,
+    protocolRetryBudget: runState.protocolRetryBudget,
+    workflowRetryBudget: runState.workflowRetryBudget,
+    lintReworkBudget: runState.lintReworkBudget,
     hasTodoList: runState.hasTodoList,
     hasWriteOps: runState.hasWriteOps,
+    hasWriteProposed: runState.hasWriteProposed,
+    hasWriteApplied: runState.hasWriteApplied,
     hasKbSearch: runState.hasKbSearch,
     hasStyleKbSearch: runState.hasStyleKbSearch,
     styleKbDegraded: runState.styleKbDegraded,
@@ -1026,6 +1041,10 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     for (let turn = 0; turn < maxTurns; turn += 1) {
       if (abort.signal.aborted) break;
 
+      currentTurn = turn;
+      // SSE 强边界：每次模型调用都显式标记“新一条 assistant 气泡开始”（Desktop 可据此切分 turn）
+      writeEvent("assistant.start", { runId, turn });
+
       let assistantText = "";
       let decided: "unknown" | "tool" | "text" = "unknown";
       let flushed = 0;
@@ -1057,10 +1076,10 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           // 一旦判断为 text，需要把此前积累但未发出的内容补发，否则会出现“输出中断/缺头”
           if (decided === "text") {
             if (prevDecided !== "text") {
-              writeEvent("assistant.delta", { delta: assistantText.slice(flushed) });
+              writeEvent("assistant.delta", { delta: assistantText.slice(flushed), turn });
               flushed = assistantText.length;
             } else {
-              writeEvent("assistant.delta", { delta: ev.delta });
+              writeEvent("assistant.delta", { delta: ev.delta, turn });
               flushed = assistantText.length;
             }
           }
@@ -1123,55 +1142,87 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
       const toolCalls = parseToolCalls(assistantText);
       if (toolCalls && !isToolCallXmlExclusive(assistantText)) {
-        writePolicyDecision({
-          turn,
-          policy: "ProtocolPolicy",
-          decision: "retry",
-          reasonCodes: ["tool_xml_mixed_with_text"],
-          detail: { hint: "tool_calls/tool_call 消息必须 XML 独占" }
-        });
-        writeEvent("assistant.delta", {
-          delta:
-            "\n\n[解析提示] 检测到工具调用 XML 夹杂了自然语言（未做到“XML 独占消息”）。\n" +
-            "为避免出现“问你确认但工作流仍继续跑”的误导行为，我会让模型自动重试：\n" +
-            "- 若确实需要你回答：请它只输出纯文本问题并停止（不要输出任何 <tool_calls>）\n" +
-            "- 否则：请它只输出纯 XML 的 <tool_calls>（不要夹杂自然语言）"
-        });
-        writeEvent("assistant.done", { reason: "tool_xml_mixed_with_text_retry" });
-        messages.push({
-          role: "system",
-          content:
-            "你上一条消息包含工具调用 XML，但夹杂了自然语言，违反协议（tool_calls/tool_call 消息必须 XML 独占）。请立刻重试：\n" +
-            "- 若你需要用户先回答：只输出纯文本问题（最多 5 个）并停止，不要输出任何 <tool_calls>/<tool_call>。\n" +
-            "- 否则：只输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。"
-        });
-        continue;
-      }
-      if (!toolCalls) {
-        // 如果看起来像 tool_calls 但解析失败：不要直接终止 run，要求模型立刻重试一次（避免用户手动“继续”）
-        if (isToolCallMessage(assistantText)) {
+        if (runState.protocolRetryBudget > 0) {
           writePolicyDecision({
             turn,
             policy: "ProtocolPolicy",
             decision: "retry",
-            reasonCodes: ["tool_xml_parse_failed"]
+            reasonCodes: ["tool_xml_mixed_with_text"],
+            detail: { hint: "tool_calls/tool_call 消息必须 XML 独占", budget: "protocol", budgetBefore: runState.protocolRetryBudget, budgetAfter: Math.max(0, runState.protocolRetryBudget - 1) }
           });
+          runState.protocolRetryBudget -= 1;
           writeEvent("assistant.delta", {
             delta:
-              "\n\n[解析提示] 该条看起来像工具调用，但 XML 解析失败；我会让模型自动重试一次（无需你输入）。\n" +
-              "请它严格输出 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。"
+              "\n\n[解析提示] 检测到工具调用 XML 夹杂了自然语言（未做到“XML 独占消息”）。\n" +
+              "为避免出现“问你确认但工作流仍继续跑”的误导行为，我会让模型自动重试：\n" +
+              "- 若确实需要你回答：请它只输出纯文本问题并停止（不要输出任何 <tool_calls>）\n" +
+              "- 否则：请它只输出纯 XML 的 <tool_calls>（不要夹杂自然语言）"
           });
-          writeEvent("assistant.done", { reason: "tool_xml_parse_failed_retry" });
+        writeEvent("assistant.done", { reason: "tool_xml_mixed_with_text_retry", turn });
           messages.push({
             role: "system",
             content:
-              "你上一条输出看起来像工具调用，但 XML 解析失败。请立刻重新输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。"
+              "你上一条消息包含工具调用 XML，但夹杂了自然语言，违反协议（tool_calls/tool_call 消息必须 XML 独占）。请立刻重试：\n" +
+              "- 若你需要用户先回答：只输出纯文本问题（最多 5 个）并停止，不要输出任何 <tool_calls>/<tool_call>。\n" +
+              "- 否则：只输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。"
           });
           continue;
         }
 
+        writePolicyDecision({
+          turn,
+          policy: "ProtocolPolicy",
+          decision: "block_end",
+          reasonCodes: ["tool_xml_mixed_with_text", "protocol_retry_budget_exhausted"],
+          detail: { hint: "tool_calls/tool_call 消息必须 XML 独占", budget: "protocol" }
+        });
+        writeEvent("run.end", { runId, reason: "protocol_error", reasonCodes: ["tool_xml_mixed_with_text", "protocol_retry_budget_exhausted"], turn });
+        writeEvent("assistant.done", { reason: "protocol_error", turn });
+        reply.raw.end();
+        agentRunWaiters.delete(runId);
+        return;
+      }
+      if (!toolCalls) {
+        // 如果看起来像 tool_calls 但解析失败：不要直接终止 run，要求模型立刻重试一次（避免用户手动“继续”）
+        if (isToolCallMessage(assistantText)) {
+          if (runState.protocolRetryBudget > 0) {
+            writePolicyDecision({
+              turn,
+              policy: "ProtocolPolicy",
+              decision: "retry",
+              reasonCodes: ["tool_xml_parse_failed"],
+              detail: { budget: "protocol", budgetBefore: runState.protocolRetryBudget, budgetAfter: Math.max(0, runState.protocolRetryBudget - 1) }
+            });
+            runState.protocolRetryBudget -= 1;
+            writeEvent("assistant.delta", {
+              delta:
+                "\n\n[解析提示] 该条看起来像工具调用，但 XML 解析失败；我会让模型自动重试一次（无需你输入）。\n" +
+                "请它严格输出 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。"
+            });
+            writeEvent("assistant.done", { reason: "tool_xml_parse_failed_retry", turn });
+            messages.push({
+              role: "system",
+              content:
+                "你上一条输出看起来像工具调用，但 XML 解析失败。请立刻重新输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。"
+            });
+            continue;
+          }
+
+          writePolicyDecision({
+            turn,
+            policy: "ProtocolPolicy",
+            decision: "block_end",
+            reasonCodes: ["tool_xml_parse_failed", "protocol_retry_budget_exhausted"],
+          });
+          writeEvent("run.end", { runId, reason: "protocol_error", reasonCodes: ["tool_xml_parse_failed", "protocol_retry_budget_exhausted"], turn });
+          writeEvent("assistant.done", { reason: "protocol_error", turn });
+          reply.raw.end();
+          agentRunWaiters.delete(runId);
+          return;
+        }
+
         // Plan/Agent：避免“只读完 doc 就停 / 没有 todo 就结束 / 明明要写入却没写入”
-        if (mode !== "chat" && runState.autoRetryBudget > 0) {
+        if (mode !== "chat" && runState.workflowRetryBudget > 0) {
           const analysis = analyzeAutoRetryText({ assistantText, intent, gates, state: runState, lintMaxRework });
           const needFinalText = analysis.needFinalText;
           const needTodo = analysis.needTodo;
@@ -1193,9 +1244,14 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               policy: "AutoRetryPolicy",
               decision: "retry",
               reasonCodes,
-              detail: { reasons: analysis.reasons, budgetBefore: runState.autoRetryBudget, budgetAfter: Math.max(0, runState.autoRetryBudget - 1) }
+              detail: {
+                reasons: analysis.reasons,
+                budget: "workflow",
+                budgetBefore: runState.workflowRetryBudget,
+                budgetAfter: Math.max(0, runState.workflowRetryBudget - 1),
+              }
             });
-            runState.autoRetryBudget -= 1;
+            runState.workflowRetryBudget -= 1;
             const reasonText = analysis.reasons.join(" / ");
             writeEvent("assistant.delta", {
               delta:
@@ -1213,7 +1269,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
                   : "") +
                 "若用户要求写入项目/分割到文件夹，请务必用工具执行（例如 doc.write / doc.splitToDir）。"
             });
-            writeEvent("assistant.done", { reason: "auto_retry_incomplete" });
+            writeEvent("assistant.done", { reason: "auto_retry_incomplete", turn });
 
             // 记录本轮输出（即使为空），并要求下一轮按协议继续
             messages.push({ role: "assistant", content: analysis.isFIMLeak ? "" : assistantText });
@@ -1272,7 +1328,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         }
         messages.push({ role: "assistant", content: assistantText });
         writeEvent("run.end", { runId, reason: "text", reasonCodes: ["text"], turn });
-        writeEvent("assistant.done", { reason: "text" });
+        writeEvent("assistant.done", { reason: "text", turn });
         reply.raw.end();
         agentRunWaiters.delete(runId);
         return;
@@ -1289,22 +1345,22 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         const batch = analyzeStyleWorkflowBatch({ mode, intent, gates, state: runState, lintMaxRework, toolCalls });
         if (batch.shouldEnforce && batch.violation) {
           const violation = batch.violation;
-          if (runState.autoRetryBudget > 0) {
+          if (runState.workflowRetryBudget > 0) {
             writePolicyDecision({
               turn,
               policy: "StyleGatePolicy",
               decision: "retry",
               reasonCodes: ["style_workflow_violation", `violation:${String(violation ?? "")}`],
-              detail: { budgetBefore: runState.autoRetryBudget, budgetAfter: Math.max(0, runState.autoRetryBudget - 1) }
+              detail: { budget: "workflow", budgetBefore: runState.workflowRetryBudget, budgetAfter: Math.max(0, runState.workflowRetryBudget - 1) }
             });
-            runState.autoRetryBudget -= 1;
+            runState.workflowRetryBudget -= 1;
             writeEvent("assistant.delta", {
               delta:
                 "\n\n[系统提示] 风格库写作任务已启用“强闭环”：先 kb.search 拉风格样例 → 再 lint.style 对齐 → 最后才允许写入。\n" +
                 `本轮工具调用不满足前置条件（${violation}），我会让模型自动重试一次（无需你输入）。\n` +
                 "请它：把 kb.search / lint.style / 写入操作拆到不同回合（每回合只做一类关键动作）。"
             });
-            writeEvent("assistant.done", { reason: "auto_retry_style_workflow" });
+            writeEvent("assistant.done", { reason: "auto_retry_style_workflow", turn });
 
             messages.push({
               role: "system",
@@ -1346,7 +1402,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             turn,
             violation
           });
-          writeEvent("assistant.done", { reason: "style_workflow_blocked" });
+          writeEvent("assistant.done", { reason: "style_workflow_blocked", turn });
           reply.raw.end();
           agentRunWaiters.delete(runId);
           return;
@@ -1356,7 +1412,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       // tool_calls：逐个 emit tool.call，等待 Desktop 回传 tool_result
       // 参数校验（Schema）：tool_calls 的 <arg> 值都是 string，这里按工具契约做最小校验，避免把明显错误的参数下发到 Desktop 导致卡死/误判。
       // - 校验失败：优先让模型重试修正参数（不执行任何工具）
-      if (toolCalls?.length) {
+          if (toolCalls?.length) {
         const bad = toolCalls
           .map((c: any) => {
             const name = String(c?.name ?? "");
@@ -1367,20 +1423,20 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           .filter(Boolean)[0] as any;
 
         if (bad?.name) {
-          if (runState.autoRetryBudget > 0) {
+          if (runState.protocolRetryBudget > 0) {
             writePolicyDecision({
               turn,
               policy: "ToolArgValidationPolicy",
               decision: "retry",
               reasonCodes: ["tool_args_invalid", `tool:${String(bad.name)}`, `code:${String(bad?.error?.code ?? "")}`],
-              detail: bad
+              detail: { ...bad, budget: "protocol", budgetBefore: runState.protocolRetryBudget, budgetAfter: Math.max(0, runState.protocolRetryBudget - 1) }
             });
-            runState.autoRetryBudget -= 1;
+            runState.protocolRetryBudget -= 1;
             writeEvent("assistant.delta", {
               delta:
                 `\n\n[解析提示] 工具参数校验失败：${String(bad?.error?.message ?? "INVALID_ARGS")}（tool=${String(bad.name)}）。我会让模型自动重试修正参数。`
             });
-            writeEvent("assistant.done", { reason: "tool_args_invalid_retry" });
+            writeEvent("assistant.done", { reason: "tool_args_invalid_retry", turn });
             messages.push({
               role: "system",
               content:
@@ -1407,7 +1463,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             tool: String(bad.name),
             error: bad?.error ?? null
           });
-          writeEvent("assistant.done", { reason: "tool_args_invalid" });
+          writeEvent("assistant.done", { reason: "tool_args_invalid", turn });
           reply.raw.end();
           agentRunWaiters.delete(runId);
           return;
@@ -1541,7 +1597,11 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         }
 
         if (payload.ok && payload.name === "run.setTodoList") runState.hasTodoList = true;
-        if (payload.ok && isWriteLikeTool(payload.name)) runState.hasWriteOps = true;
+        if (payload.ok && isWriteLikeTool(payload.name)) {
+          runState.hasWriteOps = true;
+          if (isProposalWaitingMeta(payload.meta)) runState.hasWriteProposed = true;
+          else if (String((payload.meta as any)?.applyPolicy ?? "") === "auto_apply") runState.hasWriteApplied = true;
+        }
         if (payload.ok && payload.name === "kb.search") runState.hasKbSearch = true;
 
         // 澄清等待：如果模型把某些 todo 标记为“等待用户确认/blocked”，则本轮应停止，等待用户回答（否则会出现“问你但仍继续跑”）。
@@ -1592,7 +1652,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               turn,
               blocked: blocked.map((x: any) => x.id || x.text)
             });
-            writeEvent("assistant.done", { reason: "clarify_waiting" });
+            writeEvent("assistant.done", { reason: "clarify_waiting", turn });
             reply.raw.end();
             agentRunWaiters.delete(runId);
             return;
@@ -1650,6 +1710,11 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             }
             runState.styleLintPassed = passed;
             if (!passed) runState.styleLintFailCount += 1;
+            // lint 回炉预算：表示“还剩多少次回炉机会（包含当前这次）”
+            // - failCount=1 => budget=lintMaxRework（还能回炉 lintMaxRework 次）
+            // - failCount=lintMaxRework+1 => budget=0（耗尽）
+            const fc = Math.max(0, Math.floor(Number(runState.styleLintFailCount) || 0));
+            runState.lintReworkBudget = fc > 0 ? Math.max(0, Math.floor(lintMaxRework) - fc + 1) : Math.max(0, Math.floor(lintMaxRework));
           } else {
             // 工具本身失败：视为未通过闸门（不计入回炉次数，让模型决定重试或提示用户跳过）
             runState.styleLintPassed = false;
@@ -1677,7 +1742,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
           if (payload.ok && !runState.styleLintPassed) {
             // 未通过：自动回炉
-            if (runState.styleLintFailCount <= lintMaxRework) {
+            if (runState.lintReworkBudget > 0) {
               writeEvent("assistant.delta", {
                 delta:
                   `\n\n[系统提示] 风格对齐未通过（score=${scoreText}，high=${hi}）。正在自动回炉（${runState.styleLintFailCount}/${lintMaxRework}）…`
@@ -1715,7 +1780,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
                 lint: "keep_best",
                 bestScore: runState.bestStyleDraft.score
               });
-              writeEvent("assistant.done", { reason: "text" });
+              writeEvent("assistant.done", { reason: "text", turn });
               reply.raw.end();
               agentRunWaiters.delete(runId);
               return;
@@ -1742,7 +1807,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               failCount: runState.styleLintFailCount,
               passScore: lintPassScore
             });
-            writeEvent("assistant.done", { reason: "style_lint_exhausted" });
+            writeEvent("assistant.done", { reason: "style_lint_exhausted", turn });
             reply.raw.end();
             agentRunWaiters.delete(runId);
             return;
@@ -1775,7 +1840,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               "提示：若后续需要读取该文件内容，请调用 doc.read；系统会优先返回“提案态最新内容”（不要求先 Keep）。"
           });
           writeEvent("run.end", { runId, reason: "proposal_waiting", reasonCodes: ["proposal_waiting"], turn, tool: call.name });
-          writeEvent("assistant.done", { reason: "proposal_waiting" });
+          writeEvent("assistant.done", { reason: "proposal_waiting", turn });
           reply.raw.end();
           agentRunWaiters.delete(runId);
           return;
