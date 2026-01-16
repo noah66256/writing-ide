@@ -5,11 +5,13 @@ import { fileURLToPath } from "node:url";
 import {
   analyzeAutoRetryText,
   analyzeStyleWorkflowBatch,
+  activateSkills,
   createInitialRunState,
   detectRunIntent,
   deriveStyleGate,
   isStyleExampleKbSearch,
   isToolCallMessage,
+  pickSkillStageKeyForAgentRun,
   isProposalWaitingMeta,
   parseStyleLintResult,
   isWriteLikeTool,
@@ -62,11 +64,14 @@ async function main() {
   // ======== 2) StyleGate：workflow batch 判定 ========
   {
     const mode = "agent" as const;
-    const intent = detectRunIntent({ mode, userPrompt: "按风格库仿写一段，并写入 drafts/a.md" });
+    const userPrompt = "按风格库仿写一段，并写入 drafts/a.md";
+    const intent = detectRunIntent({ mode, userPrompt });
+    const active = activateSkills({ mode, userPrompt, kbSelected: [{ id: "style-1", purpose: "style" }], intent });
     const gates = deriveStyleGate({
       mode,
       intent,
       kbSelected: [{ id: "style-1", purpose: "style" }],
+      activeSkillIds: active.map((s) => s.id),
     });
     const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
     const toolCalls: ParsedToolCall[] = [{ name: "doc.write", args: { path: "drafts/a.md", content: "x" } }];
@@ -77,8 +82,10 @@ async function main() {
   }
   {
     const mode = "agent" as const;
-    const intent = detectRunIntent({ mode, userPrompt: "按风格库仿写一段（跳过linter）" });
-    const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }] });
+    const userPrompt = "按风格库仿写一段（跳过linter）";
+    const intent = detectRunIntent({ mode, userPrompt });
+    const active = activateSkills({ mode, userPrompt, kbSelected: [{ id: "style-1", purpose: "style" }], intent });
+    const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }], activeSkillIds: active.map((s) => s.id) });
     const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
     state.hasStyleKbSearch = true;
     const toolCalls: ParsedToolCall[] = [{ name: "doc.write", args: { path: "a.md", content: "x" } }];
@@ -90,8 +97,10 @@ async function main() {
   // ======== 2.1) StyleGate：更多组合（拆回合约束/回炉耗尽） ========
   {
     const mode = "agent" as const;
-    const intent = detectRunIntent({ mode, userPrompt: "按风格库仿写一段" });
-    const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }] });
+    const userPrompt = "按风格库仿写一段";
+    const intent = detectRunIntent({ mode, userPrompt });
+    const active = activateSkills({ mode, userPrompt, kbSelected: [{ id: "style-1", purpose: "style" }], intent });
+    const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }], activeSkillIds: active.map((s) => s.id) });
     const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
     const toolCalls: ParsedToolCall[] = [
       { name: "kb.search", args: { kind: "card", query: "开场" } },
@@ -102,8 +111,10 @@ async function main() {
   }
   {
     const mode = "agent" as const;
-    const intent = detectRunIntent({ mode, userPrompt: "按风格库仿写一段" });
-    const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }] });
+    const userPrompt = "按风格库仿写一段";
+    const intent = detectRunIntent({ mode, userPrompt });
+    const active = activateSkills({ mode, userPrompt, kbSelected: [{ id: "style-1", purpose: "style" }], intent });
+    const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }], activeSkillIds: active.map((s) => s.id) });
     const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
     state.hasStyleKbSearch = true;
     const toolCalls: ParsedToolCall[] = [
@@ -115,8 +126,10 @@ async function main() {
   }
   {
     const mode = "agent" as const;
-    const intent = detectRunIntent({ mode, userPrompt: "按风格库仿写一段" });
-    const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }] });
+    const userPrompt = "按风格库仿写一段";
+    const intent = detectRunIntent({ mode, userPrompt });
+    const active = activateSkills({ mode, userPrompt, kbSelected: [{ id: "style-1", purpose: "style" }], intent });
+    const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }], activeSkillIds: active.map((s) => s.id) });
     const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
     state.hasStyleKbSearch = true;
     state.styleLintPassed = false;
@@ -126,6 +139,25 @@ async function main() {
     assert.equal(batch.violation, "WRITE_BLOCKED_LINT_EXHAUSTED");
   }
   ok("styleGate.moreCombos");
+
+  // ======== 2.2) Skills：激活/可解释/独立 stageKey ========
+  {
+    const mode = "agent" as const;
+    const userPrompt = "按风格库仿写一段";
+    const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: "auto" });
+    const skills = activateSkills({ mode, userPrompt, mainDocRunIntent: "auto", kbSelected: [{ id: "style-1", purpose: "style" }], intent });
+    assert.equal(skills.some((s) => s.id === "style_imitate"), true);
+    assert.equal(pickSkillStageKeyForAgentRun(skills), "agent.skill.style_imitate");
+    assert.ok(Array.isArray(skills[0]?.activatedBy?.reasonCodes));
+  }
+  {
+    const mode = "agent" as const;
+    const userPrompt = "帮我分析一下这段话";
+    const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: "analysis" });
+    const skills = activateSkills({ mode, userPrompt, mainDocRunIntent: "analysis", kbSelected: [{ id: "style-1", purpose: "style" }], intent });
+    assert.equal(skills.length, 0);
+  }
+  ok("skills.activation");
 
   // ======== 3) AutoRetry：空输出/未写入/未 lint 等 ========
   {
@@ -182,6 +214,7 @@ async function main() {
   {
     const gw = await readRepoFile("apps/gateway/src/index.ts");
     assert.ok(gw.includes("\"policy.decision\""), "Gateway 缺少 policy.decision SSE（可观测性回退）");
+    assert.ok(gw.includes("SkillPolicy"), "Gateway 缺少 SkillPolicy 决策记录（Skills 可解释性回退）");
     assert.ok(gw.includes("reasonCodes"), "Gateway run.end 未携带 reasonCodes（可解释性回退）");
     assert.ok(gw.includes("style_kb_zero_hit"), "Gateway 缺少 kb 0 命中降级标记（可能再次卡死）");
     assert.ok(gw.includes("reason: \"clarify_waiting\""), "Gateway 缺少 clarify_waiting 分支（可能再次“问你但仍继续跑”）");
@@ -210,6 +243,11 @@ async function main() {
     assert.ok(desk.includes("projectFiles"), "Desktop 未在 toolSidecar 携带 projectFiles（server-side project.listFiles 无法落地）");
     assert.ok(desk.includes("docRules"), "Desktop 未在 toolSidecar 携带 docRules（server-side project.docRules.get 无法落地）");
     assert.ok(desk.includes("assistant.start"), "Desktop 未处理 assistant.start（turn 边界可能回退）");
+    assert.ok(desk.includes("ACTIVE_SKILLS(JSON)"), "Desktop 未注入 ACTIVE_SKILLS(JSON)（Skills 可见性回退）");
+  }
+  {
+    const ai = await readRepoFile("apps/gateway/src/aiConfig.ts");
+    assert.ok(ai.includes("agent.skill.style_imitate"), "aiConfig 未包含 agent.skill.style_imitate stage 默认定义（Skills stage 回退）");
   }
   {
     const sr = await readRepoFile("apps/gateway/src/agent/serverToolRunner.ts");

@@ -1,6 +1,7 @@
 import { useProjectStore } from "../state/projectStore";
 import { useRunStore, type Mode } from "../state/runStore";
 import { useKbStore } from "../state/kbStore";
+import { activateSkills } from "@writing-ide/agent-core";
 import { buildStyleLinterLibrariesSidecar, executeToolCall, getTool, toolsPrompt } from "./toolRegistry";
 import { isToolCallMessage, parseToolCalls, renderToolErrorXml, renderToolResultXml } from "./xmlProtocol";
 
@@ -181,13 +182,14 @@ async function buildReferencesText(prompt: string) {
   return parts.join("");
 }
 
-async function buildContextPack(extra?: { referencesText?: string }) {
+async function buildContextPack(extra?: { referencesText?: string; userPrompt?: string }) {
   const mainDoc = useRunStore.getState().mainDoc;
   const todoList = useRunStore.getState().todoList;
   const proj = useProjectStore.getState();
   const docRules = proj.getFileByPath("doc.rules.md")?.content ?? "";
   const kbAttached = useRunStore.getState().kbAttachedLibraryIds ?? [];
   const kbLibraries = useKbStore.getState().libraries ?? [];
+  const userPrompt = String(extra?.userPrompt ?? "");
   const files = proj.files.map((f) => ({ path: f.path, chars: f.content.length }));
   const state = {
     activePath: proj.activePath,
@@ -244,7 +246,7 @@ async function buildContextPack(extra?: { referencesText?: string }) {
   })();
 
   const refs = extra?.referencesText ? `${extra.referencesText}\n\n` : "";
-  const kbText = (() => {
+  const kbSelected = (() => {
     const ids = Array.isArray(kbAttached) ? kbAttached.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
     const map = new Map(
       kbLibraries.map((l: any) => [
@@ -259,10 +261,19 @@ async function buildContextPack(extra?: { referencesText?: string }) {
         },
       ]),
     );
-    const selected = ids.map((id: string) => map.get(id) ?? { id, name: id });
-    return `KB_SELECTED_LIBRARIES(JSON):\n${JSON.stringify(selected, null, 2)}\n\n` +
-      `提示：如需引用知识库内容，请调用工具 kb.search（默认只在已关联库中检索）。\n\n`;
+    return ids.map((id: string) => map.get(id) ?? { id, name: id });
   })();
+  const kbText =
+    `KB_SELECTED_LIBRARIES(JSON):\n${JSON.stringify(kbSelected, null, 2)}\n\n` +
+    `提示：如需引用知识库内容，请调用工具 kb.search（默认只在已关联库中检索）。\n\n`;
+
+  const activeSkills = activateSkills({
+    mode: useRunStore.getState().mode as any,
+    userPrompt,
+    mainDocRunIntent: (mainDoc as any)?.runIntent,
+    kbSelected: kbSelected as any,
+  });
+  const skillsText = `ACTIVE_SKILLS(JSON):\n${JSON.stringify(activeSkills, null, 2)}\n\n`;
 
   const playbookText = await useKbStore.getState().getPlaybookTextForLibraries(
     Array.isArray(kbAttached) ? kbAttached.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [],
@@ -329,6 +340,7 @@ async function buildContextPack(extra?: { referencesText?: string }) {
     recentDialogue +
     refs +
     kbText +
+    skillsText +
     playbookSection +
     pendingSection +
     `EDITOR_SELECTION(JSON):\n${JSON.stringify(selection, null, 2)}\n\n` +
@@ -660,7 +672,7 @@ export function startGatewayRun(args: {
           model: args.model,
           mode: args.mode,
           prompt: args.prompt,
-          contextPack: await buildContextPack({ referencesText }),
+          contextPack: await buildContextPack({ referencesText, userPrompt: args.prompt }),
           toolSidecar,
         }),
         signal: abort.signal,

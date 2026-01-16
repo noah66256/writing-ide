@@ -27,7 +27,7 @@ export type StyleGateDerived = {
 };
 
 export type RunGates = StyleGateDerived & {
-  styleGateEnabled: boolean; // hasStyleLibrary && isWritingTask
+  styleGateEnabled: boolean; // activeSkillIds includes "style_imitate"（通常等价于 hasStyleLibrary && isWritingTask）
   lintGateEnabled: boolean; // styleGateEnabled && !skipLint
 };
 
@@ -143,7 +143,12 @@ export function detectRunIntent(args: { mode: AgentMode; userPrompt: string; mai
   return { forceProceed, wantsWrite, wantsOkOnly, isWritingTask: isWritingTaskFinal, skipLint, skipCta };
 }
 
-export function deriveStyleGate(args: { mode: AgentMode; kbSelected: KbSelectedLibrary[]; intent: RunIntent }): RunGates {
+export function deriveStyleGate(args: {
+  mode: AgentMode;
+  kbSelected: KbSelectedLibrary[];
+  intent: RunIntent;
+  activeSkillIds?: string[];
+}): RunGates {
   const kbSelected = Array.isArray(args.kbSelected) ? args.kbSelected : [];
   const styleLibIds = kbSelected
     .filter((l: any) => String(l?.purpose ?? "").trim() === "style")
@@ -155,7 +160,9 @@ export function deriveStyleGate(args: { mode: AgentMode; kbSelected: KbSelectedL
     .filter(Boolean);
   const hasStyleLibrary = args.mode !== "chat" && styleLibIds.length > 0;
   const hasNonStyleLibraries = args.mode !== "chat" && nonStyleLibIds.length > 0;
-  const styleGateEnabled = hasStyleLibrary && args.intent.isWritingTask;
+  const skillIds = Array.isArray(args.activeSkillIds) ? args.activeSkillIds.map((x) => String(x ?? "").trim()).filter(Boolean) : null;
+  const styleSkillActive = skillIds ? new Set(skillIds).has("style_imitate") : false;
+  const styleGateEnabled = hasStyleLibrary && (skillIds ? styleSkillActive : args.intent.isWritingTask);
   const lintGateEnabled = styleGateEnabled && !args.intent.skipLint;
   return {
     hasStyleLibrary,

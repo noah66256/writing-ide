@@ -4,6 +4,9 @@ export type AgentMode = "plan" | "agent" | "chat";
 export type { ParsedToolCall } from "./xmlProtocol.js";
 export { isToolCallMessage, parseToolCalls, renderToolErrorXml, renderToolResultXml } from "./xmlProtocol.js";
 
+export type { TriggerRule, SkillManifest, ActiveSkill } from "./skills.js";
+export { SKILL_MANIFESTS_V1, STYLE_IMITATE_SKILL, activateSkills, pickSkillStageKeyForAgentRun, parseActiveSkillsFromContextPack } from "./skills.js";
+
 export type {
   KbSelectedLibrary,
   RunIntent,

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { activateSkills, type ActiveSkill } from "@writing-ide/agent-core";
 import { startGatewayRun } from "../agent/gatewayAgent";
 import { useRunStore, type MainDoc } from "../state/runStore";
 import { useProjectStore } from "../state/projectStore";
@@ -120,6 +121,54 @@ export function AgentPane() {
   const gatewayUrl = (import.meta as any).env?.VITE_GATEWAY_URL ?? "";
   const kbAttached = useRunStore((s) => s.kbAttachedLibraryIds);
   const openKbManager = useKbStore((s) => s.openKbManager);
+  const kbLibraries = useKbStore((s) => s.libraries);
+
+  const skillPrompt = useMemo(() => {
+    const typed = String(input ?? "").trim();
+    if (typed) return typed;
+    const all = steps ?? [];
+    for (let i = all.length - 1; i >= 0; i -= 1) {
+      const s: any = all[i];
+      if (s && s.type === "user" && typeof s.text === "string" && String(s.text).trim()) return String(s.text);
+    }
+    return "";
+  }, [input, steps]);
+
+  const activeSkills = useMemo((): ActiveSkill[] => {
+    const ids = Array.isArray(kbAttached) ? kbAttached.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
+    const map = new Map(
+      (kbLibraries ?? []).map((l: any) => [
+        l.id,
+        {
+          id: l.id,
+          name: l.name,
+          purpose: l.purpose ?? "material",
+          facetPackId: l.facetPackId,
+          docCount: l.docCount,
+          updatedAt: l.updatedAt,
+        },
+      ]),
+    );
+    const selected = ids.map((id: string) => map.get(id) ?? { id, name: id });
+    return activateSkills({ mode: mode as any, userPrompt: skillPrompt, mainDocRunIntent: runIntentValue, kbSelected: selected as any });
+  }, [kbAttached, kbLibraries, mode, runIntentValue, skillPrompt]);
+
+  const skillsLabel =
+    activeSkills.length === 0
+      ? "SKILLS 0"
+      : activeSkills.length === 1
+        ? `SKILL ${activeSkills[0].badge}`
+        : `SKILLS ${activeSkills[0].badge}+${activeSkills.length - 1}`;
+  const skillsTitle =
+    activeSkills.length === 0
+      ? "Active Skills：无"
+      : `Active Skills（按优先级）：\n` +
+        activeSkills
+          .map(
+            (s) =>
+              `- ${s.badge} ${s.id} (${s.stageKey})\n  reasonCodes: ${(s.activatedBy?.reasonCodes ?? []).join(", ")}`,
+          )
+          .join("\n");
 
   const writeClipboard = async (text: string) => {
     // Electron/浏览器剪贴板在窗口未聚焦时可能失败：优先尝试浏览器剪贴板，失败则走原生 clipboard IPC
@@ -991,6 +1040,9 @@ export function AgentPane() {
               </div>
               <div className="ctxPill" title={ctxTitle} aria-label="Context 使用量">
                 CTX {ctxPct}%
+              </div>
+              <div className="ctxPill" title={skillsTitle} aria-label="Active Skills">
+                {skillsLabel}
               </div>
               <button
                 className="ctxPill"

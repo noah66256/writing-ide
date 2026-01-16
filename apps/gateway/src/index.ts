@@ -29,6 +29,7 @@ import { ensureRunAuditEnded, persistRunAudit, recordRunAuditEvent, sanitizeForA
 import {
   analyzeAutoRetryText,
   analyzeStyleWorkflowBatch,
+  activateSkills,
   createInitialRunState,
   detectRunIntent,
   deriveStyleGate,
@@ -37,6 +38,7 @@ import {
   isWriteLikeTool,
   looksLikeDraftText,
   looksLikeHasCTA,
+  pickSkillStageKeyForAgentRun,
   parseKbSelectedLibrariesFromContextPack,
   parseMainDocFromContextPack,
   parseStyleLintResult,
@@ -798,6 +800,22 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   });
   const body = bodySchema.parse((request as any).body);
 
+  const mode = (body.mode ?? "agent") as AgentMode;
+  const userPrompt = String(body.prompt ?? "");
+  const mainDocFromPack = parseMainDocFromContextPack(body.contextPack);
+  const kbSelectedList = parseKbSelectedLibrariesFromContextPack(body.contextPack);
+  const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: (mainDocFromPack as any)?.runIntent });
+  const activeSkills = activateSkills({
+    mode,
+    userPrompt,
+    mainDocRunIntent: (mainDocFromPack as any)?.runIntent,
+    kbSelected: kbSelectedList as any,
+    intent,
+  });
+  const activeSkillIds = (activeSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
+  const stageKeyForRun = pickSkillStageKeyForAgentRun(activeSkills, "agent.run");
+  const billingSource = stageKeyForRun.startsWith("agent.skill.") ? stageKeyForRun : `agent.${mode}`;
+
   const env = await getLlmEnv();
   if (!env.ok) return reply.code(500).send({ error: "LLM_NOT_CONFIGURED" });
 
@@ -807,7 +825,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   let stageDefaultId: string | null = null;
   try {
     const stages = await aiConfig.listStages();
-    const st = (stages as any[]).find((s: any) => s.stage === "agent.run") || null;
+    const st = (stages as any[]).find((s: any) => s.stage === stageKeyForRun) || null;
     stageAllowedIds = Array.isArray(st?.modelIds) ? (st.modelIds as string[]).filter(Boolean) : null;
     stageDefaultId = typeof st?.modelId === "string" ? String(st.modelId) : null;
   } catch {
@@ -817,7 +835,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   let stageTemp: number | undefined = undefined;
   let stageMaxTokens: number | undefined = undefined;
   try {
-    const st = await aiConfig.resolveStage("agent.run");
+    const st = await aiConfig.resolveStage(stageKeyForRun);
     if (typeof st.temperature === "number") stageTemp = st.temperature;
     if (typeof st.maxTokens === "number") stageMaxTokens = st.maxTokens;
   } catch {
@@ -849,7 +867,6 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   }
 
   const temperature = stageTemp;
-  const mode = (body.mode ?? "agent") as AgentMode;
   const runId = randomUUID();
   const allowedToolNames = toolNamesForMode(mode);
 
@@ -976,18 +993,11 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     { role: "user", content: body.prompt }
   ];
 
-  const userPrompt = String(body.prompt ?? "");
-
-  const mainDocFromPack = parseMainDocFromContextPack(body.contextPack);
-  const kbSelectedList = parseKbSelectedLibrariesFromContextPack(body.contextPack);
-
-  const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: (mainDocFromPack as any)?.runIntent });
-
   const lintPassScore = Number(process.env.STYLE_LINT_PASS_SCORE ?? 80);
   const lintMaxRework = Number(process.env.STYLE_LINT_MAX_REWORK ?? 2);
 
   // 注意：用户“跳过 linter”只应跳过风格校验，不应跳过“先 kb.search 拉样例”
-  const gates = deriveStyleGate({ mode, kbSelected: kbSelectedList as any, intent });
+  const gates = deriveStyleGate({ mode, kbSelected: kbSelectedList as any, intent, activeSkillIds });
   const styleLibIds = gates.styleLibIds;
 
   const keepBestOnLintExhausted =
@@ -1032,6 +1042,15 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       state: stateSnapshot(),
     });
   };
+
+  // Skills：自动启用 + 可解释（SSE/policy.decision + 审计落库）
+  writePolicyDecision({
+    turn: 0,
+    policy: "SkillPolicy",
+    decision: activeSkills.length ? "activated" : "none",
+    reasonCodes: activeSkills.length ? ["skills_activated", ...activeSkillIds.map((id: string) => `skill:${id}`)] : ["skills_none"],
+    detail: { stageKey: stageKeyForRun, activeSkillIds, activeSkills },
+  });
 
   const maxTurns = mode === "agent" ? 48 : mode === "plan" ? 32 : 12;
 
@@ -1108,8 +1127,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           userId: jwtUser.id,
           modelId: model,
           usage: lastUsage,
-          source: `agent.${mode}`,
-          metaExtra: { runId, mode, endpoint },
+          source: billingSource,
+          metaExtra: { runId, mode, endpoint, stageKey: stageKeyForRun, activeSkillIds },
         });
         writePolicyDecision({
           turn,
@@ -1341,7 +1360,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       // 风格库写作强约束：
       // - 为了保证“先检索样例→再生成→再对齐”的可控闭环，避免同一轮把 kb.search / lint.style / 写入类工具混在一起
       //   （否则模型拿不到 tool_result，就无法真正用上检索/对齐结果）。
-      if (mode !== "chat" && gates.hasStyleLibrary) {
+      if (mode !== "chat" && gates.styleGateEnabled) {
         const batch = analyzeStyleWorkflowBatch({ mode, intent, gates, state: runState, lintMaxRework, toolCalls });
         if (batch.shouldEnforce && batch.violation) {
           const violation = batch.violation;

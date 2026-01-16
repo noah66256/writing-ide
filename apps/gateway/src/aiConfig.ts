@@ -181,6 +181,15 @@ export function getDefaultStageDefinitionsFromEnv(): AiStageDefinition[] {
       defaultEndpoint: "/v1/chat/completions",
     },
     {
+      key: "agent.skill.style_imitate",
+      name: "Skill：Style Imitate（风格仿写闭环）",
+      description: "style_imitate skill 激活时使用（独立 stageKey：agent.skill.style_imitate）",
+      defaultModel: llmModel,
+      defaultTemperature: 0.7,
+      defaultMaxTokens: 8000,
+      defaultEndpoint: "/v1/chat/completions",
+    },
+    {
       key: "embedding",
       name: "Embedding（向量）",
       description: "向量检索与入库 embedding（/v1/embeddings）",
