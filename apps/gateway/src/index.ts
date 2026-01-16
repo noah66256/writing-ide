@@ -1257,7 +1257,19 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           }
         }
 
-        messages.push({ role: "system", content: renderToolResultXml(call.name, payload.output) });
+        // 兼容性：部分 OpenAI-compatible 网关（尤其是 Gemini 代理）对 system role 的 “<tool_result><![CDATA[...]]>” 不友好，
+        // 会出现上游返回 200 但 choices:[] / completion_tokens=0 的空输出。
+        // 对 gemini(openai-compat) 将 tool_result 降级为普通对话内容（user role + 方括号包裹），避免触发网关的特殊处理。
+        const toolResultXml = renderToolResultXml(call.name, payload.output);
+        let toolResultJson = "";
+        try {
+          toolResultJson = JSON.stringify(payload.output ?? null);
+        } catch {
+          toolResultJson = JSON.stringify({ ok: false, error: "RESULT_NOT_SERIALIZABLE" });
+        }
+        const toolResultText = `[tool_result name="${String(call.name ?? "")}"]\n${toolResultJson}\n[/tool_result]`;
+        const geminiViaOpenAiCompat = /gemini/i.test(String(model || "")) && /chat\/completions/i.test(String(endpoint || ""));
+        messages.push({ role: geminiViaOpenAiCompat ? "user" : "system", content: geminiViaOpenAiCompat ? toolResultText : toolResultXml });
 
         // 风格 Linter 终稿闸门：未通过则自动回炉（最多 lintMaxRework 次）；超过上限则提示用户是否跳过
         if (lintGateEnabled && String(call.name ?? "") === "lint.style") {
