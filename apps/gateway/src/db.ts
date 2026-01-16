@@ -90,7 +90,7 @@ export type AiModel = {
    * - xml：system role 的 `<tool_result><![CDATA[json]]></tool_result>`（默认）
    * - text：user role 的纯文本 `[tool_result] json [/tool_result]`（兼容某些 OpenAI-compatible 代理）
    */
-  toolResultFormat?: "xml" | "text";
+  toolResultFormat: "xml" | "text";
   apiKeyEnc: string | null;
   apiKeyLast4: string | null;
   priceInCnyPer1M: number | null;
@@ -303,6 +303,7 @@ export async function loadDb(): Promise<Db> {
           const endpoint = normStr(m?.endpoint) || "/v1/chat/completions";
           if (!id || !model || !baseURL) return null;
 
+          const toolResultFormat: "xml" | "text" = m?.toolResultFormat === "text" ? "text" : "xml";
           const apiKeyEnc = typeof m?.apiKeyEnc === "string" ? String(m.apiKeyEnc) : null;
           const apiKeyLast4 = typeof m?.apiKeyLast4 === "string" ? normStr(m.apiKeyLast4) : null;
           const priceIn = normNum(m?.priceInCnyPer1M);
@@ -332,6 +333,7 @@ export async function loadDb(): Promise<Db> {
             providerId,
             baseURL,
             endpoint,
+            toolResultFormat,
             apiKeyEnc,
             apiKeyLast4,
             priceInCnyPer1M: priceIn,
