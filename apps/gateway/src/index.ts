@@ -1879,7 +1879,7 @@ fastify.post(
         {
           role: "system",
           content:
-            "你是兼容性检测器。请严格只输出 `OK` 两个字符（不带引号），不要输出任何其它内容。",
+            "兼容性检测：不要输出推理过程/解释；直接输出 OK（只允许输出 OK 两个字符）。",
         },
         ...(fmt === "xml" ? ([{ role: "system", content: toolXml }] as any) : ([{ role: "user", content: toolText }] as any)),
         { role: "user", content: "只回复 OK" },
@@ -1893,7 +1893,8 @@ fastify.post(
               apiKey: runtime.apiKey,
               messages,
               temperature: 0,
-              maxTokens: 16,
+              // 兼容“带 reasoning_content 的代理”：给足 completion tokens，避免只吐推理不吐最终 OK
+              maxTokens: 256,
               signal: controller.signal,
             })
           : streamChatCompletions({
@@ -1902,7 +1903,8 @@ fastify.post(
               model: runtime.model,
               messages,
               temperature: 0,
-              maxTokens: 16,
+              // 兼容“带 reasoning_content 的代理”：给足 completion tokens，避免只吐推理不吐最终 OK
+              maxTokens: 256,
               includeUsage: true,
               signal: controller.signal,
             });
