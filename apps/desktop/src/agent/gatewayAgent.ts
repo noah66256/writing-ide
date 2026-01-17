@@ -611,6 +611,7 @@ export function startGatewayRun(args: {
   (async () => {
     log("info", "gateway.run.start", { gatewayUrl: args.gatewayUrl, model: args.model, mode: args.mode });
     try {
+      let promptForGateway = String(args.prompt ?? "");
       const promptRefs = parseRefsFromPrompt(args.prompt);
       // refs：以“常驻 ctxRefs”为主；本轮 prompt 里的 @{} 作为增量补充
       const pinned = (useRunStore.getState().ctxRefs ?? []).map((r: any) => ({
@@ -745,6 +746,20 @@ export function startGatewayRun(args: {
 
             if (picked && shouldWriteContract) {
               const meta = metaById.get(libId) as any;
+              // 关键修正：用户回复“写法C/写法B/cluster_2”时，不要把这句话原样当成 userPrompt 交给模型；
+              // 否则模型可能把“写法C”误解为“C语言”，跑偏到编程话题。
+              // 这里把 prompt 改写成“继续（已选 cluster_x）”，并依赖 Main Doc 里的 goal + styleContractV1 继续写作闭环。
+              const pickedId = String(picked?.id ?? "").trim();
+              if (pickedId) {
+                const raw = String(args.prompt ?? "").trim();
+                const looksLikePureChoice =
+                  raw.length <= 16 &&
+                  (/^(写法\s*[ABC]\b|cluster[_-]\d+\b|继续|按推荐|用推荐|就用推荐|默认就行)[\s。！？!]*$/i.test(raw) ||
+                    /^就用写法\s*[ABC]\b[\s。！？!]*$/i.test(raw));
+                if (looksLikePureChoice) {
+                  promptForGateway = `继续（已选 ${pickedId}）`;
+                }
+              }
               updateMainDoc({
                 styleContractV1: {
                   v: 1,
@@ -895,8 +910,8 @@ export function startGatewayRun(args: {
         body: JSON.stringify({
           model: args.model,
           mode: args.mode,
-          prompt: args.prompt,
-          contextPack: await buildContextPack({ referencesText, userPrompt: args.prompt }),
+          prompt: promptForGateway,
+          contextPack: await buildContextPack({ referencesText, userPrompt: promptForGateway }),
           toolSidecar,
         }),
         signal: abort.signal,

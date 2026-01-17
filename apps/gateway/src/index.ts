@@ -1178,7 +1178,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           delta:
             `\n\n[需要你确认：选择写法候选]\n已绑定风格库「${libName}」，检测到多个“写法候选（子簇）”。请先选定写法再继续写作：\n` +
             `${lines}\n\n` +
-            `请回复：\n- 直接回复某个 clusterId（例如：${rec || "cluster_0"}）\n- 或直接回复“写法A/写法B/写法C”（与上面候选 label 对应）\n- 或回复“继续”采用推荐写法\n`,
+            `请回复：\n- 直接回复某个 clusterId（例如：${rec || "cluster_0"}）\n- 或直接回复“写法A/写法B/写法C”（与上面候选 label 对应）\n- 或回复“继续”采用推荐写法\n\n` +
+            `提示：这里的“写法C”是写作风格候选编号，不是“C语言/编程”。`,
         });
         writeEvent("run.end", {
           runId,
