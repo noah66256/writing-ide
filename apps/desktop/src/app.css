@@ -1383,6 +1383,8 @@ body {
   align-items: center;
   gap: 6px;
   min-width: 0;
+  flex: 1 1 auto; /* 让左侧 pills 吃剩余空间，优先被压缩 */
+  overflow: hidden; /* 宽度不足时，允许左侧被裁掉，保证右侧发送/停止可见 */
 }
 
 .composerBarRight {
@@ -1391,6 +1393,7 @@ body {
   gap: 6px;
   flex-wrap: nowrap;
   min-width: 0;
+  flex: 0 0 auto; /* 右侧整体不 shrink，避免发送/停止被顶出屏幕 */
 }
 
 .composerBarRightMain {
@@ -1409,7 +1412,8 @@ body {
 
 .pillSelect {
   position: relative;
-  min-width: 96px;
+  /* 不要定死最小宽度：窄宽时允许继续收缩（文本会省略号） */
+  min-width: 0;
   max-width: 220px;
 }
 
