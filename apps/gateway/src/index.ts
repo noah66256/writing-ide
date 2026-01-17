@@ -1049,7 +1049,10 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   const runState = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: lintMaxRework });
   // 关键：续跑时 Context Pack 可能已包含 RUN_TODO（但本次 run 未必会再次 run.setTodoList），
   // 不应因此触发 AutoRetryPolicy 的 need_todo 误判。
-  if (Array.isArray(runTodoFromPack) && runTodoFromPack.length) runState.hasTodoList = true;
+  if (Array.isArray(runTodoFromPack) && runTodoFromPack.length) {
+    runState.hasTodoList = true;
+    (runState as any).todoList = runTodoFromPack;
+  }
 
   const stateSnapshot = () => ({
     protocolRetryBudget: runState.protocolRetryBudget,
@@ -1788,34 +1791,76 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         }
       }
 
-      // 兼容层：部分模型会把 run.updateTodo 的 patch 拆成顶层参数（status/note/text），导致 ToolArgValidationPolicy 误杀。
-      // 这里把其自动封装回 patch(JSON)，提升跨模型稳定性（尤其 gemini/deepseek）。
+      // 兼容层：提高跨模型稳定性（尤其 gemini/deepseek）。
+      // - 1) run.updateTodo 可能把 patch 拆成顶层参数（status/note/text）
+      // - 2) run.updateTodo 可能漏传 id（当 todoList>1 时 Desktop 会返回 MISSING_ID）
       if (toolCalls?.length) {
         const isNonEmpty = (v: any) => typeof v === "string" && String(v).trim().length > 0;
-        let normalized = 0;
+        let normalizedPatch = 0;
+        let assignedId = 0;
+        const assignedIds: string[] = [];
+        // 从运行态已知 todoList 推断可用 id（优先未完成项）
+        const todoListRaw = (runState as any).todoList;
+        const todoList = Array.isArray(todoListRaw) ? (todoListRaw as any[]) : [];
+        const pendingIds = todoList
+          .filter((t: any) => {
+            const id = String(t?.id ?? "").trim();
+            if (!id) return false;
+            const status = String(t?.status ?? "").trim().toLowerCase();
+            if (status === "done" || status === "skipped") return false;
+            return true;
+          })
+          .map((t: any) => String(t?.id ?? "").trim())
+          .filter(Boolean);
+        // 没有 pending 时，回退用全部 id（至少让 updateTodo 不再 MISSING_ID）
+        const allIds = todoList.map((t: any) => String(t?.id ?? "").trim()).filter(Boolean);
+        const idPool = pendingIds.length ? pendingIds : allIds;
+        let idCursor = 0;
         toolCalls = toolCalls.map((c: any) => {
           const name = String(c?.name ?? "").trim();
           const rawArgs = (c?.args ?? {}) as Record<string, string>;
           if (name !== "run.updateTodo") return c;
-          if (isNonEmpty(rawArgs.patch)) return c;
+          let next = c;
 
-          const patch: any = {};
-          if (isNonEmpty((rawArgs as any).status)) patch.status = String((rawArgs as any).status).trim();
-          if (isNonEmpty((rawArgs as any).note)) patch.note = String((rawArgs as any).note);
-          if (isNonEmpty((rawArgs as any).text)) patch.text = String((rawArgs as any).text);
-          if (!Object.keys(patch).length) return c;
+          // 1) patch 兜底：把 status/note/text 封装进 patch(JSON)
+          if (!isNonEmpty(rawArgs.patch)) {
+            const patch: any = {};
+            if (isNonEmpty((rawArgs as any).status)) patch.status = String((rawArgs as any).status).trim();
+            if (isNonEmpty((rawArgs as any).note)) patch.note = String((rawArgs as any).note);
+            if (isNonEmpty((rawArgs as any).text)) patch.text = String((rawArgs as any).text);
+            if (Object.keys(patch).length) {
+              normalizedPatch += 1;
+              next = { ...next, args: { ...(next.args ?? {}), patch: JSON.stringify(patch) } };
+            }
+          }
 
-          normalized += 1;
-          return { ...c, args: { ...rawArgs, patch: JSON.stringify(patch) } };
+          // 2) id 兜底：当 todoList>1 且模型未传 id，自动按顺序分配（避免 Desktop 报 MISSING_ID）
+          const idRaw = String((next.args as any)?.id ?? "").trim();
+          if (!idRaw && idPool.length > 1) {
+            const picked = idPool[Math.min(idCursor, idPool.length - 1)];
+            idCursor += 1;
+            if (picked) {
+              assignedId += 1;
+              assignedIds.push(picked);
+              next = { ...next, args: { ...(next.args ?? {}), id: picked } };
+            }
+          }
+
+          return next;
         });
 
-        if (normalized > 0) {
+        if (normalizedPatch > 0 || assignedId > 0) {
           writePolicyDecision({
             turn,
             policy: "ToolArgNormalizationPolicy",
             decision: "normalized",
             reasonCodes: ["tool_args_normalized", "tool:run.updateTodo"],
-            detail: { normalized },
+            detail: {
+              normalizedPatch,
+              assignedId,
+              assignedIds: assignedIds.slice(0, 12),
+              idPoolSize: idPool.length,
+            },
           });
         }
       }
@@ -2007,7 +2052,13 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           }
         }
 
-        if (payload.ok && payload.name === "run.setTodoList") runState.hasTodoList = true;
+        if (payload.ok && (payload.name === "run.setTodoList" || payload.name === "run.updateTodo")) {
+          const todoList = Array.isArray((payload.output as any)?.todoList) ? ((payload.output as any).todoList as any[]) : [];
+          if (todoList.length) {
+            runState.hasTodoList = true;
+            (runState as any).todoList = todoList;
+          }
+        }
         if (payload.ok && isWriteLikeTool(payload.name)) {
           runState.hasWriteOps = true;
           if (isProposalWaitingMeta(payload.meta)) runState.hasWriteProposed = true;
