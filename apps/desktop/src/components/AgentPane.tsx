@@ -38,6 +38,53 @@ function stripToolXml(text: string) {
   return out.replace(/\n{3,}/g, "\n\n");
 }
 
+function normalizeRefPath(p: string) {
+  let s = String(p ?? "").trim().replaceAll("\\", "/");
+  s = s.replace(/\/+/g, "/");
+  s = s.replace(/^\.\//, "");
+  return s;
+}
+
+function tokenForRef(item: RefItem) {
+  const p = normalizeRefPath(item.path);
+  const path = item.kind === "dir" && p && !p.endsWith("/") ? `${p}/` : p;
+  return `@{${path}}`;
+}
+
+function parseRefsFromText(prompt: string): RefItem[] {
+  const out: RefItem[] = [];
+  const re = /@\{([^}]+)\}/g;
+  let m: RegExpExecArray | null = null;
+  while ((m = re.exec(String(prompt ?? ""))) !== null) {
+    const raw = String(m[1] ?? "").trim();
+    if (!raw) continue;
+    let p = normalizeRefPath(raw);
+    const isDir = p.endsWith("/");
+    if (isDir) p = p.replace(/\/+$/g, "");
+    if (!p) continue;
+    out.push({ kind: isDir ? "dir" : "file", path: p });
+  }
+  // 去重（保持顺序）
+  const seen = new Set<string>();
+  return out.filter((r) => {
+    const key = `${r.kind}:${r.path}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function escapeRegExp(s: string) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function removeOneRefTokenFromText(text: string, item: RefItem) {
+  const tok = tokenForRef(item);
+  const re = new RegExp(`\\s*${escapeRegExp(tok)}\\s*`, "g");
+  const next = String(text ?? "").replace(re, " ").replace(/\s{2,}/g, " ").trim();
+  return next;
+}
+
 export function AgentPane() {
   const mode = useRunStore((s) => s.mode);
   const model = useRunStore((s) => s.model);
@@ -55,6 +102,7 @@ export function AgentPane() {
   const [input, setInput] = useState("");
   const [llmSelector, setLlmSelector] = useState<LlmSelectorDto | null>(null);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [ctxStripOpen, setCtxStripOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composerRef = useRef<RefComposerHandle | null>(null);
   const historyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -120,8 +168,17 @@ export function AgentPane() {
   // 默认走相对路径（/api），由 Vite dev server 代理到本地 Gateway，避免跨域问题
   const gatewayUrl = (import.meta as any).env?.VITE_GATEWAY_URL ?? "";
   const kbAttached = useRunStore((s) => s.kbAttachedLibraryIds);
+  const toggleAttach = useRunStore((s) => s.toggleKbAttachedLibrary);
   const openKbManager = useKbStore((s) => s.openKbManager);
   const kbLibraries = useKbStore((s) => s.libraries);
+  const ctxRefs = useRunStore((s) => s.ctxRefs);
+  const addCtxRef = useRunStore((s) => s.addCtxRef);
+  const removeCtxRef = useRunStore((s) => s.removeCtxRef);
+  const attachedKbLibraries = useMemo(() => {
+    const ids = Array.isArray(kbAttached) ? kbAttached.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
+    const map = new Map((kbLibraries ?? []).map((l: any) => [String(l.id ?? "").trim(), l]));
+    return ids.map((id) => map.get(id) ?? { id, name: id }).filter((x: any) => x && x.id);
+  }, [kbAttached, kbLibraries]);
 
   type RunIntentValue = NonNullable<MainDoc["runIntent"]>;
   const runIntentValue = (mainDoc?.runIntent ?? "auto") as RunIntentValue;
@@ -300,6 +357,7 @@ export function AgentPane() {
       project: useProjectStore.getState().snapshot(),
       mainDoc: JSON.parse(JSON.stringify(useRunStore.getState().mainDoc ?? {})),
       todoList: JSON.parse(JSON.stringify(useRunStore.getState().todoList ?? [])),
+      ctxRefs: JSON.parse(JSON.stringify(useRunStore.getState().ctxRefs ?? [])),
     };
     useRunStore.getState().addUser(text, baseline as any);
 
@@ -352,6 +410,7 @@ export function AgentPane() {
       steps: serial,
       logs: JSON.parse(JSON.stringify(state.logs ?? [])),
       kbAttachedLibraryIds: JSON.parse(JSON.stringify(state.kbAttachedLibraryIds ?? [])),
+      ctxRefs: JSON.parse(JSON.stringify(state.ctxRefs ?? [])),
     };
   }
 
@@ -450,6 +509,7 @@ export function AgentPane() {
 
   const applyRef = (item: RefItem) => {
     if (refPickerTarget === "main") {
+      addCtxRef(item);
       composerRef.current?.insertRef(item);
       // 同步 state（用于 CTX 估算）
       setInput(composerRef.current?.getValue() ?? input);
@@ -457,7 +517,24 @@ export function AgentPane() {
     }
     // history：暂时仍用 textarea（后续再升级为同款 RefComposer）
     const token = `@{${item.kind === "dir" ? `${item.path.replace(/\/+$/g, "")}/` : item.path}}`;
+    addCtxRef(item);
     setEditingText((v) => (v ? v + " " + token + " " : token + " "));
+  };
+
+  // 把输入框里出现的 @{} 自动“钉”到 ctxRefs（只增不减），避免发送后 input 被清空导致上下文丢失。
+  useEffect(() => {
+    const refs = parseRefsFromText(input);
+    if (!refs.length) return;
+    for (const r of refs) addCtxRef(r);
+  }, [addCtxRef, input]);
+
+  const removeCtxRefAndInput = (item: RefItem) => {
+    removeCtxRef(item);
+    // 同时尽量从输入框里移除 token（若还存在），避免视觉与实际 scope 不一致
+    const cur = composerRef.current?.getValue() ?? input;
+    const next = removeOneRefTokenFromText(cur, item);
+    setInput(next);
+    composerRef.current?.setValue(next);
   };
 
   const mainDocSummary = useMemo(() => {
@@ -497,6 +574,7 @@ export function AgentPane() {
       useProjectStore.getState().restore(step.baseline.project);
       useRunStore.getState().setMainDoc(step.baseline.mainDoc);
       useRunStore.getState().setTodoList(step.baseline.todoList ?? []);
+      useRunStore.getState().setCtxRefs(step.baseline.ctxRefs ?? []);
       useRunStore.getState().truncateFrom(stepId);
 
       // 重新添加“编辑后的用户消息”（新 baseline）
@@ -504,6 +582,7 @@ export function AgentPane() {
         project: useProjectStore.getState().snapshot(),
         mainDoc: JSON.parse(JSON.stringify(useRunStore.getState().mainDoc ?? {})),
         todoList: JSON.parse(JSON.stringify(useRunStore.getState().todoList ?? [])),
+        ctxRefs: JSON.parse(JSON.stringify(useRunStore.getState().ctxRefs ?? [])),
       };
       useRunStore.getState().addUser(text, baseline as any);
     } else {
@@ -985,6 +1064,87 @@ export function AgentPane() {
 
       <div className="composer">
         <div className="composerBox">
+          <div className="composerCtxStrip">
+            <button
+              className="ctxPill"
+              type="button"
+              onClick={() => setCtxStripOpen((v) => !v)}
+              title={
+                "上下文范围（默认折叠）\n" +
+                "- 只有这里列出的“引用文件/目录（@{...}）”与“已关联 KB 库”会作为主要上下文\n" +
+                "- 不会因为光标所在文件就默认读它\n" +
+                "- 若需要全项目遍历/查找，再调用 project.listFiles"
+              }
+              style={{ cursor: "pointer", border: "none" }}
+            >
+              上下文 {ctxStripOpen ? "▾" : "▸"} · 引用 {ctxRefs.length} · KB {attachedKbLibraries.length}
+            </button>
+            <div className="composerCtxStripRight">
+              <div className="ctxPill" title={ctxTitle} aria-label="Context 使用量">
+                CTX {ctxPct}%
+              </div>
+              <div className="ctxPill" title={skillsTitle} aria-label="Active Skills">
+                {skillsLabel}
+              </div>
+              <button
+                className="ctxPill"
+                type="button"
+                title={attachedKbLibraries.length ? `已关联库：${attachedKbLibraries.length}` : "未关联任何库"}
+                onClick={() => openKbManager("libraries")}
+                style={{ cursor: "pointer", border: "none" }}
+              >
+                KB {attachedKbLibraries.length}库
+              </button>
+              <button className="ctxPill" type="button" title="@ 引用选择器" onClick={() => openRefPicker("main")} style={{ cursor: "pointer", border: "none" }}>
+                @{ctxRefs.length || 0}
+              </button>
+            </div>
+          </div>
+
+          {ctxStripOpen ? (
+            <div className="composerCtxPanel">
+              <div className="composerCtxSection">
+                <div className="composerCtxTitle">引用文件/目录（{ctxRefs.length}）</div>
+                <div className="composerCtxItems">
+                  {ctxRefs.length ? (
+                    ctxRefs.map((r) => (
+                      <span key={`${r.kind}:${r.path}`} className="refChip" title={r.kind === "dir" ? `${r.path}/` : r.path}>
+                        <span className="refChipLabel">{r.kind === "dir" ? `${r.path}/` : r.path}</span>
+                        <span className="refChipClose" onClick={() => removeCtxRefAndInput(r)}>
+                          ×
+                        </span>
+                      </span>
+                    ))
+                  ) : (
+                    <div className="explorerHint">未引用任何文件。用右侧「@」或上面的「@」按钮添加。</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="composerCtxSection">
+                <div className="composerCtxTitle">已关联 KB 库（{attachedKbLibraries.length}）</div>
+                <div className="composerCtxItems">
+                  {attachedKbLibraries.length ? (
+                    attachedKbLibraries.map((l: any) => (
+                      <span key={String(l.id ?? "")} className="refChip" title={`${l.name ?? l.id}（${l.id}）`}>
+                        <span className="refChipLabel">{String(l.name ?? l.id)}</span>
+                        <span className="refChipClose" onClick={() => toggleAttach(String(l.id ?? ""))}>
+                          ×
+                        </span>
+                      </span>
+                    ))
+                  ) : (
+                    <div className="explorerHint">未关联任何库。点上面的「KB 0库」去关联。</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="explorerHint">
+                提示：只会优先使用上述“引用文件/目录”与“已关联库”作为上下文；找不到再考虑全项目遍历（project.listFiles）。
+              </div>
+            </div>
+          ) : null}
+
           <RefComposer
             ref={composerRef}
             value={input}
@@ -1038,21 +1198,6 @@ export function AgentPane() {
                   </span>
                 </button>
               </div>
-              <div className="ctxPill" title={ctxTitle} aria-label="Context 使用量">
-                CTX {ctxPct}%
-              </div>
-              <div className="ctxPill" title={skillsTitle} aria-label="Active Skills">
-                {skillsLabel}
-              </div>
-              <button
-                className="ctxPill"
-                type="button"
-                title={(kbAttached ?? []).length ? `已关联库：${(kbAttached ?? []).length}` : "未关联任何库"}
-                onClick={() => openKbManager("libraries")}
-                style={{ cursor: "pointer", border: "none" }}
-              >
-                KB {(kbAttached ?? []).length || 0}库
-              </button>
             </div>
 
             <div className="composerBarRight">

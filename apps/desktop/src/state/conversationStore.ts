@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { MainDoc, TodoItem, Step, LogEntry, Mode, ToolBlockStep } from "./runStore";
+import type { MainDoc, TodoItem, Step, LogEntry, Mode, ToolBlockStep, CtxRefItem } from "./runStore";
 
 export type SerializableToolStep = Omit<ToolBlockStep, "apply" | "undo"> & {
   // 历史会话只做展示/续聊入口，不保留可执行的 apply/undo 函数
@@ -19,6 +19,7 @@ export type RunSnapshot = {
   steps: SerializableStep[];
   logs: LogEntry[];
   kbAttachedLibraryIds: string[];
+  ctxRefs?: CtxRefItem[];
 };
 
 export type Conversation = {

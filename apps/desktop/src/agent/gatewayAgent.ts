@@ -100,9 +100,9 @@ function parseRefsFromPrompt(prompt: string): Ref[] {
   });
 }
 
-async function buildReferencesText(prompt: string) {
-  const refs = parseRefsFromPrompt(prompt);
-  if (!refs.length) return "";
+async function buildReferencesTextFromRefs(refs: Ref[]) {
+  const list = Array.isArray(refs) ? refs : [];
+  if (!list.length) return "";
   const proj = useProjectStore.getState();
 
   const maxTotal = 60_000;
@@ -125,7 +125,7 @@ async function buildReferencesText(prompt: string) {
     parts,
   );
 
-  for (const ref of refs) {
+  for (const ref of list) {
     if (used >= maxTotal) break;
     const path = ref.path;
     if (!path) continue;
@@ -190,11 +190,10 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
   const kbAttached = useRunStore.getState().kbAttachedLibraryIds ?? [];
   const kbLibraries = useKbStore.getState().libraries ?? [];
   const userPrompt = String(extra?.userPrompt ?? "");
-  const files = proj.files.map((f) => ({ path: f.path, chars: f.content.length }));
+  // PROJECT_STATE：只提供最小信息（避免“光标文件/全量文件列表”对模型产生过强暗示）
   const state = {
-    activePath: proj.activePath,
-    openPaths: proj.openPaths,
-    files,
+    fileCount: proj.files.length,
+    // 说明：activePath/openPaths 仍存在于 Desktop 内部（工具默认路径等会用到），但不默认注入给模型
   };
 
   const selection = (() => {
@@ -208,9 +207,11 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
     const maxChars = 4000;
     const truncated = fullText.length > maxChars;
     const selectedText = truncated ? fullText.slice(0, maxChars) : fullText;
+    // 无选区时不要携带 path/range（避免模型把“光标文件”当作默认上下文）
+    if (!fullText.length) return { ok: true, hasSelection: false, reason: "EMPTY_SELECTION" as const };
     return {
       ok: true,
-      hasSelection: fullText.length > 0,
+      hasSelection: true,
       path: proj.activePath,
       selectedChars: fullText.length,
       truncated,
@@ -283,6 +284,88 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
       `提示：上面已注入库级“仿写手册”（Style Profile + 维度写法）。如需更多原文证据/更多样例，再调用 kb.search。\n\n`
     : "";
 
+  const styleClustersSection = await (async () => {
+    // M3：从最新声音指纹快照提取“写法候选（子簇）”，用于写作前选定写法并写入 Main Doc
+    const styleLibs = kbSelected.filter((l: any) => String(l?.purpose ?? "").trim() === "style").slice(0, 4);
+    if (!styleLibs.length) return "";
+
+    const rankStability = (s: string) => (s === "high" ? 3 : s === "medium" ? 2 : s === "low" ? 1 : 0);
+    const pickRecommended = (clusters: any[], defaultClusterId?: string) => {
+      const byId = new Map(clusters.map((c: any) => [String(c?.id ?? "").trim(), c]));
+      const d = String(defaultClusterId ?? "").trim();
+      if (d && byId.get(d)) return d;
+      // anchors 最多优先
+      let bestId = "";
+      let bestAnchors = -1;
+      for (const c of clusters) {
+        const cid = String(c?.id ?? "").trim();
+        const n = Array.isArray(c?.anchors) ? c.anchors.length : 0;
+        if (n > bestAnchors) {
+          bestAnchors = n;
+          bestId = cid;
+        }
+      }
+      if (bestId && bestAnchors > 0) return bestId;
+      // 稳定性优先，再覆盖率，再段数
+      let best: { id: string; score: number } | null = null;
+      for (const c of clusters) {
+        const cid = String(c?.id ?? "").trim();
+        if (!cid) continue;
+        const st = String(c?.stability ?? "").trim();
+        const cov = Number(c?.docCoverageRate ?? 0) || 0;
+        const seg = Number(c?.segmentCount ?? 0) || 0;
+        const score = rankStability(st) * 100_000 + cov * 1000 + seg;
+        if (!best || score > best.score) best = { id: cid, score };
+      }
+      return best?.id || String(clusters?.[0]?.id ?? "").trim() || "";
+    };
+
+    const payload: any[] = [];
+    for (const lib of styleLibs) {
+      const libId = String(lib?.id ?? "").trim();
+      if (!libId) continue;
+      const fpRet = await useKbStore.getState().getLatestLibraryFingerprint(libId).catch(() => ({ ok: false } as any));
+      const snapshot = fpRet?.ok ? (fpRet as any).snapshot : null;
+      const clustersRaw = Array.isArray(snapshot?.clustersV1) ? snapshot.clustersV1 : [];
+      const cfg = await useKbStore.getState().getLibraryStyleConfig(libId).catch(() => ({ ok: false, anchors: [] } as any));
+      const defaultClusterId = cfg?.ok ? (cfg as any).defaultClusterId : undefined;
+      const recommendedClusterId = clustersRaw.length ? pickRecommended(clustersRaw, defaultClusterId) : "";
+
+      const clusters = clustersRaw
+        .slice(0, 6)
+        .map((c: any) => ({
+          id: String(c?.id ?? "").trim(),
+          label: String(c?.label ?? "").trim(),
+          stability: String(c?.stability ?? "").trim(),
+          segmentCount: Number(c?.segmentCount ?? 0) || 0,
+          docCoverageCount: Number(c?.docCoverageCount ?? 0) || 0,
+          docCoverageRate: Number(c?.docCoverageRate ?? 0) || 0,
+          anchorsCount: Array.isArray(c?.anchors) ? c.anchors.length : 0,
+          softRanges: {
+            avgSentenceLen: (c?.softRanges as any)?.avgSentenceLen,
+            questionRatePer100Sentences: (c?.softRanges as any)?.questionRatePer100Sentences,
+            digitPer1kChars: (c?.softRanges as any)?.digitPer1kChars,
+          },
+          evidence: Array.isArray(c?.evidence) ? c.evidence.slice(0, 3).map((e: any) => String(e?.quote ?? "").trim()).filter(Boolean) : [],
+          facetIds: Array.isArray(c?.facetPlan) ? c.facetPlan.map((f: any) => String(f?.facetId ?? "").trim()).filter(Boolean).slice(0, 8) : [],
+        }))
+        .filter((c: any) => c.id);
+
+      payload.push({
+        id: libId,
+        name: String(lib?.name ?? libId),
+        defaultClusterId: defaultClusterId ? String(defaultClusterId) : undefined,
+        recommendedClusterId: recommendedClusterId || undefined,
+        clusters,
+      });
+    }
+    if (!payload.length) return "";
+    return (
+      `KB_STYLE_CLUSTERS(JSON):\n${JSON.stringify(payload, null, 2)}\n\n` +
+      `提示：这是“写法候选（子簇）”摘要。写作前请先选定写法（可改口），并把选择写入 Main Doc（run.mainDoc.update）。\n\n`
+    );
+  })();
+
   // Pending proposals：用于“proposal-first 不落盘”但仍可继续下一步（避免下一轮说‘没有初稿’）
   const pendingProposals = (() => {
     const steps = useRunStore.getState().steps ?? [];
@@ -342,6 +425,7 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
     kbText +
     skillsText +
     playbookSection +
+    styleClustersSection +
     pendingSection +
     `EDITOR_SELECTION(JSON):\n${JSON.stringify(selection, null, 2)}\n\n` +
     `PROJECT_STATE(JSON):\n${JSON.stringify(state, null, 2)}\n\n` +
@@ -366,9 +450,10 @@ function buildChatContextPack(extra?: { referencesText?: string }) {
     const maxChars = 4000;
     const truncated = fullText.length > maxChars;
     const selectedText = truncated ? fullText.slice(0, maxChars) : fullText;
+    if (!fullText.length) return { ok: true, hasSelection: false, reason: "EMPTY_SELECTION" as const };
     return {
       ok: true,
-      hasSelection: fullText.length > 0,
+      hasSelection: true,
       path: proj.activePath,
       selectedChars: fullText.length,
       truncated,
@@ -526,7 +611,36 @@ export function startGatewayRun(args: {
   (async () => {
     log("info", "gateway.run.start", { gatewayUrl: args.gatewayUrl, model: args.model, mode: args.mode });
     try {
-      const referencesText = await buildReferencesText(args.prompt).catch(() => "");
+      const promptRefs = parseRefsFromPrompt(args.prompt);
+      // refs：以“常驻 ctxRefs”为主；本轮 prompt 里的 @{} 作为增量补充
+      const pinned = (useRunStore.getState().ctxRefs ?? []).map((r: any) => ({
+        kind: r?.kind === "dir" ? ("dir" as const) : ("file" as const),
+        path: String(r?.path ?? "").trim(),
+      }));
+      const effectiveRefs = (() => {
+        const seen = new Set<string>();
+        const out: Ref[] = [];
+        const push = (r: Ref) => {
+          const kind = r.kind === "dir" ? "dir" : "file";
+          let p = String(r.path ?? "").trim().replaceAll("\\", "/").replace(/^\.\//, "");
+          p = p.replace(/\/+/g, "/");
+          if (!p) return;
+          if (kind === "dir") p = p.replace(/\/+$/g, "");
+          else p = p.replace(/\/+$/g, "");
+          const key = `${kind}:${p}`;
+          if (seen.has(key)) return;
+          seen.add(key);
+          out.push({ kind, path: p });
+        };
+        for (const r of pinned) push(r);
+        for (const r of promptRefs) push(r);
+        return out;
+      })();
+      // 把 prompt refs “钉”到 ctxRefs（避免下一轮只回“继续”时丢上下文）
+      if (promptRefs.length) {
+        for (const r of promptRefs) useRunStore.getState().addCtxRef({ kind: r.kind, path: r.path } as any);
+      }
+      const referencesText = await buildReferencesTextFromRefs(effectiveRefs).catch(() => "");
       setActivity("正在构建上下文…");
       // 尽量确保 doc.rules 与 activePath 已加载，避免“上下文不对”（空规则/空正文）
       const proj = useProjectStore.getState();
@@ -545,11 +659,86 @@ export function startGatewayRun(args: {
         await kb.refreshLibraries().catch(() => void 0);
       }
 
+      // M3：若已绑定风格库且已有子簇快照，但 Main Doc 尚未写入 styleContractV1，则本地先做一次“默认写法”落地（不依赖模型工具调用）
+      try {
+        const run = useRunStore.getState();
+        const main: any = run.mainDoc ?? {};
+        const existing = main?.styleContractV1;
+        const libsMeta = useKbStore.getState().libraries ?? [];
+        const metaById = new Map(libsMeta.map((l: any) => [String(l?.id ?? "").trim(), l]));
+        const styleLibIds = (run.kbAttachedLibraryIds ?? [])
+          .map((x: any) => String(x ?? "").trim())
+          .filter(Boolean)
+          .filter((id: string) => String((metaById.get(id) as any)?.purpose ?? "").trim() === "style");
+        const libId = styleLibIds.length ? styleLibIds[0] : "";
+
+        const shouldSeed = libId && (!existing || String(existing?.libraryId ?? "").trim() !== libId);
+        if (shouldSeed) {
+          const fpRet = await useKbStore.getState().getLatestLibraryFingerprint(libId).catch(() => ({ ok: false } as any));
+          const snapshot = fpRet?.ok ? (fpRet as any).snapshot : null;
+          const clusters = Array.isArray(snapshot?.clustersV1) ? snapshot.clustersV1 : [];
+          const cfg = await useKbStore.getState().getLibraryStyleConfig(libId).catch(() => ({ ok: false, anchors: [] } as any));
+          const defaultClusterId = cfg?.ok ? String((cfg as any).defaultClusterId ?? "").trim() : "";
+
+          if (clusters.length) {
+            const rankStability = (s: string) => (s === "high" ? 3 : s === "medium" ? 2 : s === "low" ? 1 : 0);
+            const byId = new Map(clusters.map((c: any) => [String(c?.id ?? "").trim(), c]));
+            let picked: any = null;
+            if (defaultClusterId && byId.get(defaultClusterId)) picked = byId.get(defaultClusterId);
+            if (!picked) {
+              // anchors 最多优先
+              picked = clusters
+                .slice()
+                .sort((a: any, b: any) => (Array.isArray(b?.anchors) ? b.anchors.length : 0) - (Array.isArray(a?.anchors) ? a.anchors.length : 0))[0];
+              const n = picked && Array.isArray(picked?.anchors) ? picked.anchors.length : 0;
+              if (!n) {
+                picked = clusters
+                  .slice()
+                  .sort((a: any, b: any) => {
+                    const sa = rankStability(String(a?.stability ?? "").trim());
+                    const sb = rankStability(String(b?.stability ?? "").trim());
+                    if (sb !== sa) return sb - sa;
+                    const ca = Number(a?.docCoverageRate ?? 0) || 0;
+                    const cb = Number(b?.docCoverageRate ?? 0) || 0;
+                    if (cb !== ca) return cb - ca;
+                    const na = Number(a?.segmentCount ?? 0) || 0;
+                    const nb = Number(b?.segmentCount ?? 0) || 0;
+                    return nb - na;
+                  })[0];
+              }
+            }
+
+            if (picked) {
+              const meta = metaById.get(libId) as any;
+              updateMainDoc({
+                styleContractV1: {
+                  v: 1,
+                  updatedAt: new Date().toISOString(),
+                  libraryId: libId,
+                  libraryName: String(meta?.name ?? libId),
+                  selectedCluster: {
+                    id: String(picked?.id ?? "").trim(),
+                    label: String(picked?.label ?? "").trim(),
+                  },
+                  anchors: Array.isArray(picked?.anchors) ? picked.anchors.slice(0, 8) : [],
+                  evidence: Array.isArray(picked?.evidence) ? picked.evidence.slice(0, 5) : [],
+                  softRanges: picked?.softRanges ?? {},
+                  facetPlan: Array.isArray(picked?.facetPlan) ? picked.facetPlan.slice(0, 8) : [],
+                  queries: Array.isArray(picked?.queries) ? picked.queries.slice(0, 8) : [],
+                },
+              } as any);
+            }
+          }
+        }
+      } catch {
+        // ignore：仅是“默认写法预填充”，失败不影响 run
+      }
+
       // 记录 Context Pack 摘要（便于排查“上下文不对/自动终止”）
       try {
         const todo = useRunStore.getState().todoList ?? [];
         const done = todo.filter((t) => t.status === "done").length;
-        const refs = parseRefsFromPrompt(args.prompt);
+        const refs = effectiveRefs;
         const kbLibCount = (useKbStore.getState().libraries ?? []).length;
         const pendingProposals = (() => {
           const steps = useRunStore.getState().steps ?? [];
@@ -744,6 +933,10 @@ export function startGatewayRun(args: {
 
           if (evt.event === "run.end") {
             log("info", "agent.run.end", evt.data);
+            // 关键：Gateway 已明确结束本次 Run（包括 clarify_waiting / proposal_waiting 等“等待用户”的结束态）
+            // UI 必须立刻停下来，否则底部会错误显示“正在生成/可停止”。
+            setRunning(false);
+            setActivity(null);
           }
 
           if (evt.event === "policy.decision") {

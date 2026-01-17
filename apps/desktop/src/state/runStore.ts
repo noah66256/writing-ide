@@ -6,6 +6,8 @@ export type Mode = "plan" | "agent" | "chat";
 export type ToolApplyPolicy = "proposal" | "auto_apply";
 export type ToolRiskLevel = "low" | "medium" | "high";
 
+export type CtxRefItem = { kind: "file" | "dir"; path: string };
+
 export type MainDoc = {
   goal?: string;
   // 结构化意图（优先于正则启发式；用于后端门禁/skills 自动启用）
@@ -21,6 +23,9 @@ export type MainDoc = {
   outline?: string;
   // 风格 Lint 未通过时的策略（用于 Context Pack 注入与后端行为）
   styleLintFailPolicy?: "ask_user" | "keep_best" | "skip";
+  // M3：风格契约（由“写法候选/anchors/默认写法”生成；跨回合注入，作为仿写的硬约束地基）
+  // 说明：保持短小可验证，不要塞长原文。
+  styleContractV1?: any;
 };
 
 export type TodoStatus = "todo" | "in_progress" | "done" | "blocked" | "skipped";
@@ -43,6 +48,7 @@ export type UserStep = {
     project: ProjectSnapshot;
     mainDoc: MainDoc;
     todoList: TodoItem[];
+    ctxRefs?: CtxRefItem[];
   };
 };
 
@@ -109,6 +115,13 @@ type RunState = {
   toggleKbAttachedLibrary: (id: string) => void;
   clearKbAttachedLibraries: () => void;
 
+  // Context：常驻“引用文件/目录”列表（用于构建 REFERENCES；不随输入框清空而丢失）
+  ctxRefs: CtxRefItem[];
+  setCtxRefs: (items: CtxRefItem[]) => void;
+  addCtxRef: (item: CtxRefItem) => void;
+  removeCtxRef: (item: CtxRefItem) => void;
+  clearCtxRefs: () => void;
+
   setMode: (mode: Mode) => void;
   setModel: (model: string) => void;
   setModelForMode: (mode: "chat" | "agent", model: string) => void;
@@ -123,6 +136,7 @@ type RunState = {
     steps: Array<Step | Omit<ToolBlockStep, "apply" | "undo">>;
     logs: LogEntry[];
     kbAttachedLibraryIds: string[];
+    ctxRefs?: CtxRefItem[];
   }) => void;
 
   addUser: (text: string, baseline?: UserStep["baseline"]) => string;
@@ -160,6 +174,36 @@ function makeId(prefix: string) {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
+function normalizeRefPath(p: string) {
+  let s = String(p ?? "").trim().replaceAll("\\", "/");
+  s = s.replace(/\/+/g, "/");
+  s = s.replace(/^\.\//, "");
+  s = s.replace(/\/+$/g, ""); // 统一不带末尾 /
+  return s;
+}
+
+function normalizeCtxRef(item: CtxRefItem | null | undefined): CtxRefItem | null {
+  const it = item && typeof item === "object" ? item : null;
+  const kind = it?.kind === "dir" ? "dir" : "file";
+  const path = normalizeRefPath(String((it as any)?.path ?? ""));
+  if (!path) return null;
+  return { kind, path };
+}
+
+function dedupeCtxRefs(items: CtxRefItem[]) {
+  const seen = new Set<string>();
+  const out: CtxRefItem[] = [];
+  for (const it of items ?? []) {
+    const norm = normalizeCtxRef(it);
+    if (!norm) continue;
+    const key = `${norm.kind}:${norm.path}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(norm);
+  }
+  return out;
+}
+
 export const useRunStore = create<RunState>()(
   persist(
     (set, get) => ({
@@ -173,6 +217,7 @@ export const useRunStore = create<RunState>()(
   logs: [],
   isRunning: false,
   activity: null,
+  ctxRefs: [],
   kbAttachedLibraryIds: [],
 
   setMode: (mode) =>
@@ -213,7 +258,7 @@ export const useRunStore = create<RunState>()(
         },
       };
     }),
-  resetRun: () => set({ steps: [], logs: [], isRunning: false, activity: null, mainDoc: { goal: "" }, todoList: [] }),
+  resetRun: () => set({ steps: [], logs: [], isRunning: false, activity: null, mainDoc: { goal: "" }, todoList: [], ctxRefs: [] }),
   loadSnapshot: (snap) => {
     const s = snap && typeof snap === "object" ? snap : ({} as any);
     const cleanSteps = Array.isArray(s.steps) ? s.steps : [];
@@ -248,6 +293,7 @@ export const useRunStore = create<RunState>()(
       kbAttachedLibraryIds: Array.isArray(s.kbAttachedLibraryIds)
         ? (s.kbAttachedLibraryIds as string[]).map((x) => String(x ?? "").trim()).filter(Boolean)
         : get().kbAttachedLibraryIds,
+      ctxRefs: Array.isArray((s as any).ctxRefs) ? dedupeCtxRefs((s as any).ctxRefs as any) : [],
       isRunning: false,
       activity: null,
     });
@@ -265,6 +311,25 @@ export const useRunStore = create<RunState>()(
     set({ kbAttachedLibraryIds: next });
   },
   clearKbAttachedLibraries: () => set({ kbAttachedLibraryIds: [] }),
+
+  setCtxRefs: (items) => set({ ctxRefs: dedupeCtxRefs(Array.isArray(items) ? items : []) }),
+  addCtxRef: (item) =>
+    set((s) => {
+      const norm = normalizeCtxRef(item);
+      if (!norm) return {};
+      const cur = Array.isArray(s.ctxRefs) ? s.ctxRefs : [];
+      const exists = cur.some((x) => x.kind === norm.kind && x.path === norm.path);
+      if (exists) return {};
+      return { ctxRefs: [...cur, norm] };
+    }),
+  removeCtxRef: (item) =>
+    set((s) => {
+      const norm = normalizeCtxRef(item);
+      if (!norm) return {};
+      const cur = Array.isArray(s.ctxRefs) ? s.ctxRefs : [];
+      return { ctxRefs: cur.filter((x) => !(x.kind === norm.kind && x.path === norm.path)) };
+    }),
+  clearCtxRefs: () => set({ ctxRefs: [] }),
 
   addUser: (text, baseline) => {
     const id = makeId("u");

@@ -195,7 +195,7 @@ async function main() {
     const gates = deriveStyleGate({ mode, intent, kbSelected: [] });
     const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
     state.hasTodoList = true;
-    const a = analyzeAutoRetryText({ assistantText: "", intent, gates, state, lintMaxRework: 2 });
+    const a = analyzeAutoRetryText({ assistantText: "", intent, gates, state, lintMaxRework: 2, targetChars: 1200 });
     assert.equal(a.isEmpty, true);
     assert.equal(a.shouldRetry, true);
     assert.ok(a.reasons.length >= 1);
@@ -261,6 +261,7 @@ async function main() {
     assert.ok(gw.includes("projectFiles"), "Gateway 未接收 toolSidecar.projectFiles（server-side project.listFiles 无法落地）");
     assert.ok(gw.includes("docRules"), "Gateway 未接收 toolSidecar.docRules（server-side project.docRules.get 无法落地）");
     assert.ok(gw.includes("/api/admin/audit/runs"), "Gateway 未暴露审计查询接口 /api/admin/audit/runs（审计落库回退）");
+    assert.ok(gw.includes("需确认") || gw.includes("澄清"), "Gateway ClarifyPolicy 未覆盖 需确认/澄清（可能再次自说自话继续跑）");
   }
   {
     const desk = await readRepoFile("apps/desktop/src/agent/toolRegistry.ts");
@@ -274,6 +275,17 @@ async function main() {
     assert.ok(desk.includes("docRules"), "Desktop 未在 toolSidecar 携带 docRules（server-side project.docRules.get 无法落地）");
     assert.ok(desk.includes("assistant.start"), "Desktop 未处理 assistant.start（turn 边界可能回退）");
     assert.ok(desk.includes("ACTIVE_SKILLS(JSON)"), "Desktop 未注入 ACTIVE_SKILLS(JSON)（Skills 可见性回退）");
+    assert.ok(desk.includes("KB_STYLE_CLUSTERS(JSON)"), "Desktop 未注入 KB_STYLE_CLUSTERS(JSON)（M3 写法候选回退）");
+    assert.ok(desk.includes("styleContractV1"), "Desktop 未落地 styleContractV1（M3 主文档风格契约回退）");
+  }
+  {
+    const run = await readRepoFile("apps/desktop/src/state/runStore.ts");
+    assert.ok(run.includes("styleContractV1"), "MainDoc 缺少 styleContractV1 字段（M3 回退）");
+  }
+  {
+    const skills = await readRepoFile("packages/agent-core/src/skills.ts");
+    assert.ok(skills.includes("KB_STYLE_CLUSTERS"), "style_imitate 未提示写法候选（M3 回退）");
+    assert.ok(skills.includes("styleContractV1"), "style_imitate 未要求写入 styleContractV1（M3 回退）");
   }
   {
     const ai = await readRepoFile("apps/gateway/src/aiConfig.ts");

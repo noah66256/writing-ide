@@ -17,9 +17,34 @@ function kbLog(level: "info" | "warn" | "error", message: string, data?: unknown
 type KbFormat = "md" | "mdx" | "txt" | "docx" | "pdf" | "unknown";
 type KbArtifactKind = "outline" | "paragraph" | "card";
 
-type ImportedFrom =
+export type ImportedFrom =
   | { kind: "project"; relPath: string; entryIndex?: number }
   | { kind: "file"; absPath: string; entryIndex?: number };
+
+export type KbTextSpanRefV1 = {
+  v: 1;
+  libraryId: string;
+  sourceDocId: string;
+  importedFrom?: ImportedFrom;
+  segmentId: string;
+  paragraphIndexStart: number | null;
+  headingPath?: string[];
+  quote: string; // <= 200 字；UI 预览与审计用（正文仍以回链读取为准）
+};
+
+export type KbLibraryStylePrefsV1 = {
+  updatedAt: string;
+  // M2+：用于“默认写法仅对本库生效”，M1 先占位
+  defaultClusterId?: string;
+  // M2：子簇改名（仅本库生效）
+  clusterLabelsV1?: Record<string, string>;
+  // M1：用户采纳的黄金样本（段级）
+  anchorsV1?: KbTextSpanRefV1[];
+};
+
+export type KbLibraryPrefsV1 = {
+  style?: KbLibraryStylePrefsV1;
+};
 
 export type KbLibrary = {
   id: string;
@@ -116,9 +141,33 @@ export type KbLibraryFingerprintSnapshot = {
     segmentId: string;
     sourceDocId: string;
     sourceDocTitle: string;
+    // 便于 UI 展示“文件名/路径”（旧快照可能没有）
+    sourceDocPath?: string;
+    // 便于 anchors/回链定位（旧快照可能没有）
+    paragraphIndexStart?: number | null;
+    // 段落预览（单行截断；旧快照可能没有）
+    preview?: string;
+    // M2：聚类结果（cluster_0/1/2；旧快照可能没有）
+    clusterId?: string;
     chars: number;
     sentences: number;
     stats: Record<string, any>;
+  }>;
+  // M2：写法候选（子簇规则卡；旧快照可能没有）
+  clustersV1?: Array<{
+    v: 1;
+    id: string; // cluster_0/1/2
+    label: string; // 默认 写法A/B/C，可被本库 prefs 覆盖
+    segmentCount: number;
+    docCoverageCount: number;
+    docCoverageRate: number; // 0~1（相对库内 docs）
+    stability: KbFingerprintStabilityLevel;
+    statsMean: Record<string, number>;
+    softRanges: Record<string, [number, number]>;
+    evidence: KbTextSpanRefV1[]; // 3~5 段代表样例（可回链）
+    anchors: KbTextSpanRefV1[]; // 本簇已采纳 anchors
+    facetPlan: Array<{ facetId: string; why?: string; kbQueries?: string[] }>;
+    queries: string[];
   }>;
   // 证据覆盖率：帮助判断“手册会不会胡”
   evidence: { cardsWithEvidenceRate: number; playbookCardsWithEvidenceRate: number };
@@ -158,7 +207,7 @@ type KbPendingImport = {
 };
 
 type KbDb = {
-  version: 3;
+  version: 4;
   ownerKey: string;
   createdAt: string;
   updatedAt: string;
@@ -166,6 +215,8 @@ type KbDb = {
   trash: KbLibraryTrashItem[];
   sourceDocs: KbSourceDoc[];
   artifacts: KbArtifact[];
+  // M1：库级偏好（例如风格库 anchors、后续默认写法等）
+  libraryPrefs?: Record<string, KbLibraryPrefsV1>;
   fingerprints?: KbLibraryFingerprintSnapshot[];
 };
 
@@ -270,6 +321,24 @@ type KbState = {
     | { ok: true; newer: KbLibraryFingerprintSnapshot; older: KbLibraryFingerprintSnapshot; diff: Record<string, any> }
     | { ok: false; error: string }
   >;
+
+  // M1：风格库 anchors（黄金样本，段级；仅对该库生效）
+  getLibraryStyleAnchors: (libraryId: string) => Promise<{ ok: boolean; anchors: KbTextSpanRefV1[]; error?: string }>;
+  saveLibraryStyleAnchorsFromSegments: (args: {
+    libraryId: string;
+    segments: Array<{ segmentId: string; sourceDocId: string; paragraphIndexStart: number | null; quote: string }>;
+  }) => Promise<{ ok: boolean; anchors?: KbTextSpanRefV1[]; error?: string }>;
+  clearLibraryStyleAnchors: (libraryId: string) => Promise<{ ok: boolean; anchors?: KbTextSpanRefV1[]; error?: string }>;
+  // M2：写法候选（子簇）配置（仅本库生效）
+  getLibraryStyleConfig: (libraryId: string) => Promise<{
+    ok: boolean;
+    anchors: KbTextSpanRefV1[];
+    defaultClusterId?: string;
+    clusterLabelsV1?: Record<string, string>;
+    error?: string;
+  }>;
+  setLibraryStyleClusterLabel: (args: { libraryId: string; clusterId: string; label: string }) => Promise<{ ok: boolean; error?: string }>;
+  setLibraryStyleDefaultCluster: (args: { libraryId: string; clusterId: string | null }) => Promise<{ ok: boolean; error?: string }>;
   // 供 Agent 的 Context Pack 注入：读取库级“仿写手册”（StyleProfile + 维度手册）
   getPlaybookTextForLibraries: (libraryIds: string[]) => Promise<string>;
 
@@ -478,6 +547,9 @@ async function loadDb(args: { baseDir: string; ownerKey: string }): Promise<KbDb
     const rawLibs: any[] = Array.isArray(parsed?.libraries) ? parsed.libraries : [];
     const rawTrash: any[] = Array.isArray(parsed?.trash) ? parsed.trash : [];
     const rawFingerprints: any[] = Array.isArray(parsed?.fingerprints) ? parsed.fingerprints : [];
+    const rawLibraryPrefs = (parsed as any)?.libraryPrefs;
+    const libraryPrefs =
+      rawLibraryPrefs && typeof rawLibraryPrefs === "object" && !Array.isArray(rawLibraryPrefs) ? (rawLibraryPrefs as any) : {};
 
     const libs: KbLibrary[] = rawLibs
       .map((x) => ({
@@ -541,7 +613,7 @@ async function loadDb(args: { baseDir: string; ownerKey: string }): Promise<KbDb
     });
 
     const db: KbDb = {
-      version: 3,
+      version: 4,
       ownerKey: String(parsed?.ownerKey ?? args.ownerKey),
       createdAt: String(parsed?.createdAt ?? t),
       updatedAt: String(parsed?.updatedAt ?? t),
@@ -554,6 +626,7 @@ async function loadDb(args: { baseDir: string; ownerKey: string }): Promise<KbDb
           embeddingsRaw && typeof embeddingsRaw === "object" && !Array.isArray(embeddingsRaw) ? (embeddingsRaw as any) : undefined;
         return { ...a, embeddings } as KbArtifact;
       }) as any,
+      libraryPrefs,
       fingerprints: rawFingerprints
         .map((x: any) => {
           const id = String(x?.id ?? "").trim();
@@ -570,7 +643,7 @@ async function loadDb(args: { baseDir: string; ownerKey: string }): Promise<KbDb
     if (msg.includes("ENOENT") || msg.includes("not found")) {
       const t = nowIso();
       return {
-        version: 3,
+        version: 4,
         ownerKey: args.ownerKey,
         createdAt: t,
         updatedAt: t,
@@ -578,13 +651,14 @@ async function loadDb(args: { baseDir: string; ownerKey: string }): Promise<KbDb
         trash: [],
         sourceDocs: [],
         artifacts: [],
+        libraryPrefs: {},
         fingerprints: [],
       };
     }
     // Bad JSON -> start new db (avoid bricking)
     const t = nowIso();
     return {
-      version: 3,
+      version: 4,
       ownerKey: args.ownerKey,
       createdAt: t,
       updatedAt: t,
@@ -592,6 +666,7 @@ async function loadDb(args: { baseDir: string; ownerKey: string }): Promise<KbDb
       trash: [],
       sourceDocs: [],
       artifacts: [],
+      libraryPrefs: {},
       fingerprints: [],
     };
   }
@@ -919,6 +994,99 @@ function computeStability(args: { perDoc: Array<{ docId: string; stats: any; cha
   }
 
   return { level, note, outlierDocIds: Array.from(outliers) };
+}
+
+function meanStd(arr: number[]) {
+  const n = arr.length || 1;
+  const mean = arr.reduce((a, x) => a + x, 0) / n;
+  const var0 = arr.reduce((a, x) => a + (x - mean) * (x - mean), 0) / n;
+  const sd = Math.sqrt(var0) || 1;
+  return { mean, sd };
+}
+
+function quantile(arr: number[], q: number) {
+  const xs = arr.slice().sort((a, b) => a - b);
+  if (!xs.length) return 0;
+  const t = Math.max(0, Math.min(1, q));
+  const pos = (xs.length - 1) * t;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  if (lo === hi) return xs[lo];
+  const w = pos - lo;
+  return xs[lo] * (1 - w) + xs[hi] * w;
+}
+
+function dist2(a: number[], b: number[]) {
+  let s = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    const d = a[i] - b[i];
+    s += d * d;
+  }
+  return s;
+}
+
+function kmeansDeterministic(vectors: number[][], k: 2 | 3): { ok: true; assign: number[]; centroids: number[][] } | { ok: false } {
+  if (vectors.length < k) return { ok: false };
+  const dim = vectors[0]?.length ?? 0;
+  if (dim <= 0) return { ok: false };
+
+  // init by min/max on dim0 (avgSentenceLen after z-score)
+  let minI = 0;
+  let maxI = 0;
+  for (let i = 1; i < vectors.length; i += 1) {
+    if (vectors[i][0] < vectors[minI][0]) minI = i;
+    if (vectors[i][0] > vectors[maxI][0]) maxI = i;
+  }
+  const centroids: number[][] = [vectors[minI].slice(), vectors[maxI].slice()];
+  if (k === 3) {
+    let bestI = 0;
+    let best = -Infinity;
+    for (let i = 0; i < vectors.length; i += 1) {
+      if (i === minI || i === maxI) continue;
+      const v = vectors[i];
+      const d = Math.min(dist2(v, centroids[0]), dist2(v, centroids[1]));
+      if (d > best) {
+        best = d;
+        bestI = i;
+      }
+    }
+    centroids.push(vectors[bestI].slice());
+  }
+
+  const assign = new Array(vectors.length).fill(0);
+  for (let iter = 0; iter < 30; iter += 1) {
+    let changed = 0;
+    for (let i = 0; i < vectors.length; i += 1) {
+      const v = vectors[i];
+      let bestK = 0;
+      let bestD = dist2(v, centroids[0]);
+      for (let j = 1; j < k; j += 1) {
+        const d = dist2(v, centroids[j]);
+        if (d < bestD) {
+          bestD = d;
+          bestK = j;
+        }
+      }
+      if (assign[i] !== bestK) {
+        assign[i] = bestK;
+        changed += 1;
+      }
+    }
+
+    const sums: number[][] = new Array(k).fill(0).map(() => new Array(dim).fill(0));
+    const counts: number[] = new Array(k).fill(0);
+    for (let i = 0; i < vectors.length; i += 1) {
+      const a = assign[i];
+      counts[a] += 1;
+      const v = vectors[i];
+      for (let d = 0; d < dim; d += 1) sums[a][d] += v[d];
+    }
+    if (counts.some((c) => c === 0)) return { ok: false };
+    for (let j = 0; j < k; j += 1) centroids[j] = sums[j].map((x) => x / counts[j]);
+    if (changed === 0) break;
+  }
+
+  return { ok: true, assign, centroids };
 }
 
 function stableJson(x: any) {
@@ -3221,8 +3389,243 @@ export const useKbStore = create<KbState>()(
           const db = await loadDb({ baseDir, ownerKey });
           const list = (db.fingerprints ?? []).filter((x) => String((x as any)?.libraryId ?? "") === libId);
           const sorted = list.sort((a, b) => String((b as any)?.computedAt ?? "").localeCompare(String((a as any)?.computedAt ?? "")));
-          const snapshot = sorted[0];
+          const snapshot = sorted[0] as any;
+          // overlay：对子簇 label 应用本库 prefs（不改历史快照，只改读出表现）
+          const style = (db.libraryPrefs as any)?.[libId]?.style ?? null;
+          const labels = style?.clusterLabelsV1 && typeof style.clusterLabelsV1 === "object" ? style.clusterLabelsV1 : null;
+          if (snapshot?.clustersV1 && Array.isArray(snapshot.clustersV1) && labels) {
+            snapshot.clustersV1 = snapshot.clustersV1.map((c: any) => ({
+              ...c,
+              label: String(labels?.[c.id] ?? c.label ?? ""),
+            }));
+          }
           return { ok: true, snapshot };
+        } catch (e: any) {
+          return { ok: false, error: String(e?.message ?? e) };
+        }
+      },
+
+      getLibraryStyleAnchors: async (libraryId) => {
+        const ok = await get().ensureReady();
+        if (!ok) return { ok: false, anchors: [], error: "KB_DIR_NOT_SET" };
+        const baseDir = get().baseDir!;
+        const ownerKey = get().ownerKey;
+        const libId = String(libraryId ?? "").trim();
+        if (!libId) return { ok: false, anchors: [], error: "LIBRARY_ID_REQUIRED" };
+        try {
+          const db = await loadDb({ baseDir, ownerKey });
+          const lib = db.libraries.find((l) => l.id === libId);
+          if (!lib) return { ok: false, anchors: [], error: "LIBRARY_NOT_FOUND" };
+          // 仅风格库生效；非风格库返回空（避免 UI 误用导致报错）
+          if (normalizeLibraryPurpose((lib as any)?.purpose) !== "style") return { ok: true, anchors: [] };
+          const raw = (db.libraryPrefs as any)?.[libId]?.style?.anchorsV1;
+          const anchors = Array.isArray(raw) ? (raw as KbTextSpanRefV1[]).filter(Boolean) : [];
+          return { ok: true, anchors };
+        } catch (e: any) {
+          return { ok: false, anchors: [], error: String(e?.message ?? e) };
+        }
+      },
+
+      saveLibraryStyleAnchorsFromSegments: async (args) => {
+        const ok = await get().ensureReady();
+        if (!ok) return { ok: false, error: "KB_DIR_NOT_SET" };
+        const baseDir = get().baseDir!;
+        const ownerKey = get().ownerKey;
+        const libId = String(args?.libraryId ?? "").trim();
+        if (!libId) return { ok: false, error: "LIBRARY_ID_REQUIRED" };
+        const segs = Array.isArray(args?.segments) ? args.segments : [];
+        try {
+          const db = await loadDb({ baseDir, ownerKey });
+          const lib = db.libraries.find((l) => l.id === libId);
+          if (!lib) return { ok: false, error: "LIBRARY_NOT_FOUND" };
+          if (normalizeLibraryPurpose((lib as any)?.purpose) !== "style") return { ok: false, error: "NOT_STYLE_LIBRARY" };
+
+          const docById = new Map(db.sourceDocs.map((d) => [d.id, d]));
+          const normQuote = (raw: string) =>
+            String(raw ?? "")
+              .replaceAll("\r\n", "\n")
+              .replaceAll("\r", "\n")
+              .replace(/\s+/g, " ")
+              .trim()
+              .slice(0, 200);
+
+          const out: KbTextSpanRefV1[] = [];
+          const usedSeg = new Set<string>();
+          const perDoc = new Map<string, number>();
+
+          // 约束：最多 8 段；同一 sourceDoc 最多 2 段（兜底，避免 UI/数据异常）
+          for (const s of segs) {
+            if (out.length >= 8) break;
+            const segmentId = String((s as any)?.segmentId ?? "").trim();
+            const sourceDocId = String((s as any)?.sourceDocId ?? "").trim();
+            if (!segmentId || !sourceDocId) continue;
+            if (usedSeg.has(segmentId)) continue;
+
+            const doc = docById.get(sourceDocId);
+            if (!doc) continue;
+            if (String((doc as any)?.libraryId ?? "").trim() !== libId) continue;
+
+            const cnt = perDoc.get(sourceDocId) ?? 0;
+            if (cnt >= 2) continue;
+
+            const piRaw = (s as any)?.paragraphIndexStart;
+            const paragraphIndexStart = typeof piRaw === "number" && Number.isFinite(piRaw) ? Number(piRaw) : null;
+            const quote = normQuote(String((s as any)?.quote ?? ""));
+            out.push({
+              v: 1,
+              libraryId: libId,
+              sourceDocId,
+              importedFrom: (doc as any)?.importedFrom,
+              segmentId,
+              paragraphIndexStart,
+              quote: quote || "（空）",
+            });
+            usedSeg.add(segmentId);
+            perDoc.set(sourceDocId, cnt + 1);
+          }
+
+          const prevPrefs = ((db.libraryPrefs as any)?.[libId] ?? {}) as KbLibraryPrefsV1;
+          const nextPrefs: KbLibraryPrefsV1 = {
+            ...prevPrefs,
+            style: {
+              ...(prevPrefs.style ?? {}),
+              updatedAt: nowIso(),
+              anchorsV1: out,
+            },
+          };
+          db.libraryPrefs = { ...(db.libraryPrefs ?? {}), [libId]: nextPrefs };
+          await saveDb({ baseDir, ownerKey, db });
+          return { ok: true, anchors: out };
+        } catch (e: any) {
+          return { ok: false, error: String(e?.message ?? e) };
+        }
+      },
+
+      clearLibraryStyleAnchors: async (libraryId) => {
+        const ok = await get().ensureReady();
+        if (!ok) return { ok: false, error: "KB_DIR_NOT_SET" };
+        const baseDir = get().baseDir!;
+        const ownerKey = get().ownerKey;
+        const libId = String(libraryId ?? "").trim();
+        if (!libId) return { ok: false, error: "LIBRARY_ID_REQUIRED" };
+        try {
+          const db = await loadDb({ baseDir, ownerKey });
+          const lib = db.libraries.find((l) => l.id === libId);
+          if (!lib) return { ok: false, error: "LIBRARY_NOT_FOUND" };
+          if (normalizeLibraryPurpose((lib as any)?.purpose) !== "style") return { ok: false, error: "NOT_STYLE_LIBRARY" };
+          const prevPrefs = ((db.libraryPrefs as any)?.[libId] ?? {}) as KbLibraryPrefsV1;
+          const nextPrefs: KbLibraryPrefsV1 = {
+            ...prevPrefs,
+            style: {
+              ...(prevPrefs.style ?? {}),
+              updatedAt: nowIso(),
+              anchorsV1: [],
+            },
+          };
+          db.libraryPrefs = { ...(db.libraryPrefs ?? {}), [libId]: nextPrefs };
+          await saveDb({ baseDir, ownerKey, db });
+          return { ok: true, anchors: [] };
+        } catch (e: any) {
+          return { ok: false, error: String(e?.message ?? e) };
+        }
+      },
+
+      getLibraryStyleConfig: async (libraryId) => {
+        const ok = await get().ensureReady();
+        if (!ok) return { ok: false, anchors: [], error: "KB_DIR_NOT_SET" };
+        const baseDir = get().baseDir!;
+        const ownerKey = get().ownerKey;
+        const libId = String(libraryId ?? "").trim();
+        if (!libId) return { ok: false, anchors: [], error: "LIBRARY_ID_REQUIRED" };
+        try {
+          const db = await loadDb({ baseDir, ownerKey });
+          const lib = db.libraries.find((l) => l.id === libId);
+          if (!lib) return { ok: false, anchors: [], error: "LIBRARY_NOT_FOUND" };
+          if (normalizeLibraryPurpose((lib as any)?.purpose) !== "style") return { ok: true, anchors: [] };
+          const style = (db.libraryPrefs as any)?.[libId]?.style ?? {};
+          const rawAnchors = style?.anchorsV1;
+          const anchors = Array.isArray(rawAnchors) ? (rawAnchors as KbTextSpanRefV1[]).filter(Boolean) : [];
+          const defaultClusterId = String(style?.defaultClusterId ?? "").trim() || undefined;
+          const clusterLabelsV1 =
+            style?.clusterLabelsV1 && typeof style.clusterLabelsV1 === "object" && !Array.isArray(style.clusterLabelsV1)
+              ? (style.clusterLabelsV1 as any)
+              : undefined;
+          return { ok: true, anchors, defaultClusterId, clusterLabelsV1 };
+        } catch (e: any) {
+          return { ok: false, anchors: [], error: String(e?.message ?? e) };
+        }
+      },
+
+      setLibraryStyleClusterLabel: async (args) => {
+        const ok = await get().ensureReady();
+        if (!ok) return { ok: false, error: "KB_DIR_NOT_SET" };
+        const baseDir = get().baseDir!;
+        const ownerKey = get().ownerKey;
+        const libId = String(args?.libraryId ?? "").trim();
+        const clusterId = String(args?.clusterId ?? "").trim();
+        const label = String(args?.label ?? "").trim();
+        if (!libId) return { ok: false, error: "LIBRARY_ID_REQUIRED" };
+        if (!clusterId) return { ok: false, error: "CLUSTER_ID_REQUIRED" };
+        try {
+          const db = await loadDb({ baseDir, ownerKey });
+          const lib = db.libraries.find((l) => l.id === libId);
+          if (!lib) return { ok: false, error: "LIBRARY_NOT_FOUND" };
+          if (normalizeLibraryPurpose((lib as any)?.purpose) !== "style") return { ok: false, error: "NOT_STYLE_LIBRARY" };
+
+          const prevPrefs = ((db.libraryPrefs as any)?.[libId] ?? {}) as KbLibraryPrefsV1;
+          const prevStyle = (prevPrefs.style ?? {}) as KbLibraryStylePrefsV1;
+          const prevLabels =
+            prevStyle.clusterLabelsV1 && typeof prevStyle.clusterLabelsV1 === "object" && !Array.isArray(prevStyle.clusterLabelsV1)
+              ? { ...(prevStyle.clusterLabelsV1 as any) }
+              : ({} as Record<string, string>);
+          if (label) prevLabels[clusterId] = label;
+          else delete prevLabels[clusterId];
+
+          const nextPrefs: KbLibraryPrefsV1 = {
+            ...prevPrefs,
+            style: {
+              ...prevStyle,
+              updatedAt: nowIso(),
+              clusterLabelsV1: prevLabels,
+            },
+          };
+          db.libraryPrefs = { ...(db.libraryPrefs ?? {}), [libId]: nextPrefs };
+          await saveDb({ baseDir, ownerKey, db });
+          return { ok: true };
+        } catch (e: any) {
+          return { ok: false, error: String(e?.message ?? e) };
+        }
+      },
+
+      setLibraryStyleDefaultCluster: async (args) => {
+        const ok = await get().ensureReady();
+        if (!ok) return { ok: false, error: "KB_DIR_NOT_SET" };
+        const baseDir = get().baseDir!;
+        const ownerKey = get().ownerKey;
+        const libId = String(args?.libraryId ?? "").trim();
+        const clusterIdRaw = args?.clusterId;
+        const clusterId = clusterIdRaw === null ? null : String(clusterIdRaw ?? "").trim();
+        if (!libId) return { ok: false, error: "LIBRARY_ID_REQUIRED" };
+        if (clusterId !== null && !clusterId) return { ok: false, error: "CLUSTER_ID_REQUIRED" };
+        try {
+          const db = await loadDb({ baseDir, ownerKey });
+          const lib = db.libraries.find((l) => l.id === libId);
+          if (!lib) return { ok: false, error: "LIBRARY_NOT_FOUND" };
+          if (normalizeLibraryPurpose((lib as any)?.purpose) !== "style") return { ok: false, error: "NOT_STYLE_LIBRARY" };
+
+          const prevPrefs = ((db.libraryPrefs as any)?.[libId] ?? {}) as KbLibraryPrefsV1;
+          const prevStyle = (prevPrefs.style ?? {}) as KbLibraryStylePrefsV1;
+          const nextPrefs: KbLibraryPrefsV1 = {
+            ...prevPrefs,
+            style: {
+              ...prevStyle,
+              updatedAt: nowIso(),
+              defaultClusterId: clusterId === null ? undefined : clusterId,
+            },
+          };
+          db.libraryPrefs = { ...(db.libraryPrefs ?? {}), [libId]: nextPrefs };
+          await saveDb({ baseDir, ownerKey, db });
+          return { ok: true };
         } catch (e: any) {
           return { ok: false, error: String(e?.message ?? e) };
         }
@@ -3425,6 +3828,246 @@ export const useKbStore = create<KbState>()(
             else genres = { ...genres, primary: { ...genres.primary, why: `（未识别：${ret.error}）` } };
           }
 
+          // M2：对子簇做确定性聚类（默认 k=3；降级 k=2/不分簇），产出 clustersV1 + perSegment.clusterId
+          const stylePrefs = ((db.libraryPrefs as any)?.[libId]?.style ?? {}) as KbLibraryStylePrefsV1;
+          const anchorsInPrefs = Array.isArray(stylePrefs?.anchorsV1) ? (stylePrefs.anchorsV1 as KbTextSpanRefV1[]) : [];
+          const clusterLabelsV1 =
+            stylePrefs?.clusterLabelsV1 && typeof stylePrefs.clusterLabelsV1 === "object" && !Array.isArray(stylePrefs.clusterLabelsV1)
+              ? (stylePrefs.clusterLabelsV1 as any as Record<string, string>)
+              : {};
+
+          const CLUSTER_FEATURES = ["avgSentenceLen", "digitPer1kChars", "questionRatePer100Sentences", "particlePer1kChars", "shortSentenceRate"] as const;
+          const eligible = segmentUnits
+            .filter((s) => Number(s.chars ?? 0) >= 400 && Number(s.sentences ?? 0) >= 2)
+            .slice()
+            .sort((a, b) => String(a.segmentId).localeCompare(String(b.segmentId)))
+            .slice(0, 1200);
+
+          const clusterResult = (() => {
+            const empty = {
+              clustersV1: undefined as KbLibraryFingerprintSnapshot["clustersV1"],
+              clusterBySegId: new Map<string, string>(),
+            };
+            if (eligible.length < 2) return empty;
+
+            const cols = CLUSTER_FEATURES.map((k) => eligible.map((x) => Number((x.stats as any)?.[k] ?? 0)));
+            const norms = cols.map((arr) => {
+              const { mean, sd } = meanStd(arr);
+              return { mean, sd: sd || 1 };
+            });
+            const vecOf = (stats: any) =>
+              CLUSTER_FEATURES.map((k, i) => {
+                const v = Number(stats?.[k] ?? 0);
+                const { mean, sd } = norms[i];
+                return (v - mean) / (sd || 1);
+              });
+
+            const vectors = eligible.map((x) => vecOf(x.stats));
+
+            const tryK = (k: 2 | 3) => {
+              const ret = kmeansDeterministic(vectors, k);
+              if (!ret.ok) return null;
+              // order clusters by avgSentenceLen ascending (convert from z-score to original unit)
+              const avgNorm = norms[0];
+              const order = ret.centroids
+                .map((c, idx) => ({ idx, avg: avgNorm.mean + c[0] * avgNorm.sd }))
+                .sort((a, b) => a.avg - b.avg)
+                .map((x) => x.idx);
+              const oldToNew = new Map<number, number>();
+              order.forEach((oldIdx, newIdx) => oldToNew.set(oldIdx, newIdx));
+              return { ...ret, oldToNew };
+            };
+
+            let km = eligible.length >= 10 ? tryK(3) : null;
+            if (!km) km = tryK(2);
+            if (!km) return empty;
+            const kFinal = km.centroids.length as 2 | 3;
+
+            const vecBySegId = new Map<string, number[]>();
+            const clusterBySegId = new Map<string, string>();
+            for (let i = 0; i < eligible.length; i += 1) {
+              const segId = String(eligible[i].segmentId);
+              vecBySegId.set(segId, vectors[i]);
+              const oldIdx = km.assign[i];
+              const newIdx = km.oldToNew.get(oldIdx) ?? 0;
+              clusterBySegId.set(segId, `cluster_${newIdx}`);
+            }
+
+            // group items by clusterId
+            const clusters: Array<{ id: string; items: typeof eligible; centroid: number[] }> = [];
+            for (let j = 0; j < kFinal; j += 1) {
+              const oldIdx = km.oldToNew.size ? Array.from(km.oldToNew.entries()).find(([, v]) => v === j)?.[0] ?? j : j;
+              const centroid = km.centroids[oldIdx] ?? km.centroids[j];
+              clusters.push({ id: `cluster_${j}`, items: [] as any, centroid });
+            }
+            const byId = new Map(clusters.map((c) => [c.id, c]));
+            for (const s of eligible) {
+              const cid = clusterBySegId.get(String(s.segmentId));
+              if (!cid) continue;
+              byId.get(cid)?.items.push(s as any);
+            }
+
+            const anchorsByCluster = new Map<string, KbTextSpanRefV1[]>();
+            for (const a of anchorsInPrefs) {
+              const cid = clusterBySegId.get(String((a as any)?.segmentId ?? ""));
+              if (!cid) continue;
+              const arr = anchorsByCluster.get(cid) ?? [];
+              arr.push(a);
+              anchorsByCluster.set(cid, arr);
+            }
+
+            const makeLabel = (cid: string) => {
+              const raw = String(clusterLabelsV1?.[cid] ?? "").trim();
+              if (raw) return raw;
+              const idx = Number(String(cid).replace("cluster_", ""));
+              const letter = Number.isFinite(idx) ? String.fromCharCode(65 + Math.max(0, Math.min(25, idx))) : "A";
+              return `写法${letter}`;
+            };
+
+            const keysForRanges = [
+              "avgSentenceLen",
+              "shortSentenceRate",
+              "questionRatePer100Sentences",
+              "exclaimRatePer100Sentences",
+              "particlePer1kChars",
+              "digitPer1kChars",
+              "firstPersonPer1kChars",
+              "secondPersonPer1kChars",
+            ];
+            const rangeOf = (vals: number[], key: string): [number, number] => {
+              const xs = vals.filter((x) => Number.isFinite(x));
+              if (!xs.length) return [0, 0];
+              let lo = xs.length >= 5 ? quantile(xs, 0.1) : Math.min(...xs);
+              let hi = xs.length >= 5 ? quantile(xs, 0.9) : Math.max(...xs);
+              if (key === "shortSentenceRate") {
+                lo = clamp01(lo);
+                hi = clamp01(hi);
+              } else {
+                lo = Math.max(0, lo);
+                hi = Math.max(lo, hi);
+              }
+              return [Number(lo.toFixed(3)), Number(hi.toFixed(3))];
+            };
+            const meanOf = (vals: number[]) => {
+              const xs = vals.filter((x) => Number.isFinite(x));
+              if (!xs.length) return 0;
+              return xs.reduce((a, x) => a + x, 0) / xs.length;
+            };
+
+            const defaultFacetPlan = [
+              { facetId: "opening_design", why: "开头钩子/破题" },
+              { facetId: "logic_framework", why: "机制拆解/算账链条" },
+              { facetId: "language_style", why: "口语化/标志性语块" },
+              { facetId: "one_liner_crafting", why: "金句/节奏锤" },
+              { facetId: "question_design", why: "问题链脚手架" },
+            ];
+
+            const clustersV1 = clusters
+              .filter((c) => c.items.length > 0)
+              .map((c) => {
+                const segCount = c.items.length;
+                const docSet = new Set(c.items.map((x) => String(x.sourceDocId)));
+                const docCoverageCount = docSet.size;
+                const docCoverageRate = docs.length ? docCoverageCount / docs.length : 0;
+
+                const st = computeStability({
+                  perDoc: c.items.map((x) => ({ docId: String(x.segmentId), stats: x.stats, chars: x.chars, sentences: x.sentences })),
+                }).level;
+
+                const statsMean: Record<string, number> = {};
+                const softRanges: Record<string, [number, number]> = {};
+                for (const k of keysForRanges) {
+                  const vals = c.items.map((x) => Number((x.stats as any)?.[k] ?? 0));
+                  statsMean[k] = Number(meanOf(vals).toFixed(3));
+                  softRanges[k] = rangeOf(vals, k);
+                }
+
+                const withD = c.items
+                  .map((x) => {
+                    const vec = vecBySegId.get(String(x.segmentId)) ?? [];
+                    return { x, d: vec.length ? Math.sqrt(dist2(vec, c.centroid)) : 0 };
+                  })
+                  .sort((a, b) => a.d - b.d);
+                const evidenceItems = withD.slice(0, Math.max(3, Math.min(5, Math.ceil(segCount / 6))));
+                const evidenceRefs: KbTextSpanRefV1[] = evidenceItems
+                  .map(({ x }) => {
+                    const doc = docById.get(x.sourceDocId);
+                    const quote = String(x.text ?? "")
+                      .replace(/\s+/g, " ")
+                      .trim()
+                      .slice(0, 200);
+                    return {
+                      v: 1,
+                      libraryId: libId,
+                      sourceDocId: x.sourceDocId,
+                      importedFrom: (doc as any)?.importedFrom,
+                      segmentId: x.segmentId,
+                      paragraphIndexStart: x.paragraphIndexStart ?? null,
+                      quote: quote || String((x as any)?.segmentId ?? "").slice(0, 200),
+                    };
+                  })
+                  .filter(Boolean);
+
+                const ngrams = computeTopNgrams({
+                  docs: c.items.slice(0, 800).map((x) => ({ docId: String(x.segmentId), text: String(x.text ?? "") })),
+                  maxItems: 8,
+                });
+                const queries = ngrams
+                  .slice(0, 6)
+                  .map((g) => String((g as any)?.text ?? "").trim())
+                  .filter(Boolean);
+
+                const anchors = anchorsByCluster.get(c.id) ?? [];
+
+                return {
+                  v: 1 as const,
+                  id: c.id,
+                  label: makeLabel(c.id),
+                  segmentCount: segCount,
+                  docCoverageCount,
+                  docCoverageRate: clamp01(docCoverageRate),
+                  stability: st,
+                  statsMean,
+                  softRanges,
+                  evidence: evidenceRefs,
+                  anchors,
+                  facetPlan: defaultFacetPlan.map((f) => ({ ...f, kbQueries: queries.slice(0, 3) })),
+                  queries,
+                };
+              });
+
+            return { clustersV1, clusterBySegId };
+          })();
+
+          const clustersV1 = clusterResult.clustersV1;
+          const clusterBySegId = clusterResult.clusterBySegId;
+
+          // perSegment（供 UI）：仅展示前 600
+          const perSegmentWithClusterId = segmentUnits.slice(0, 600).map((s) => {
+            const doc = docById.get(s.sourceDocId);
+            const imp: any = (doc as any)?.importedFrom;
+            const sourceDocPath = imp?.kind === "project" ? String(imp.relPath ?? "") : imp?.kind === "file" ? String(imp.absPath ?? "") : undefined;
+            const preview = String((s as any)?.text ?? "")
+              .trim()
+              .replaceAll("\r\n", "\n")
+              .replaceAll("\r", "\n")
+              .replace(/\s+/g, " ")
+              .slice(0, 140);
+            const clusterId = clusterBySegId.get(String(s.segmentId));
+            return {
+              segmentId: s.segmentId,
+              sourceDocId: s.sourceDocId,
+              sourceDocTitle: s.sourceDocTitle,
+              sourceDocPath: sourceDocPath || undefined,
+              paragraphIndexStart: typeof (s as any)?.paragraphIndexStart === "number" ? Number((s as any).paragraphIndexStart) : null,
+              preview: preview || undefined,
+              clusterId: clusterId || undefined,
+              chars: s.chars,
+              sentences: s.sentences,
+              stats: s.stats,
+            };
+          });
+
           const snapshot: KbLibraryFingerprintSnapshot = {
             id: makeId("kb_fp"),
             libraryId: libId,
@@ -3447,9 +4090,8 @@ export const useKbStore = create<KbState>()(
               sentences: d.sentences,
               stats: d.stats,
             })),
-            perSegment: segmentUnits
-              .slice(0, 600)
-              .map((s) => ({ segmentId: s.segmentId, sourceDocId: s.sourceDocId, sourceDocTitle: s.sourceDocTitle, chars: s.chars, sentences: s.sentences, stats: s.stats })),
+            perSegment: perSegmentWithClusterId,
+            clustersV1,
             evidence: {
               cardsWithEvidenceRate: clamp01(evidence.cardsWithEvidenceRate),
               playbookCardsWithEvidenceRate: clamp01(evidence.playbookCardsWithEvidenceRate),

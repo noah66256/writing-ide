@@ -734,6 +734,7 @@ function buildAgentProtocolPrompt(mode: AgentMode) {
         `- **用户指令优先级**：如果用户明确要求“只要一个短回复/确认”（例如：只回 OK、只回 是/否、只要一句话），且你判断不需要读文件/不需要工具/不需要写入，那么你应当**严格只输出用户要求的那段短文本**并结束（不要追加解释/建议/下一步；不要自作主张进入写作闭环；不要 run.setTodoList；不要 doc.read）。\n` +
         `- **确认再动手（必须）**：若你准备进行任何“主动行为”（读项目文件/KB 检索/改写或生成正文/写入文件/批量工具调用），必须先用 Markdown 向用户确认（最多 5 个高价值问题：平台画像/受众/目标/口吻人设/素材来源）；用户确认后再动手。\n` +
         `- **范围控制（必须）**：不要因为 activePath/openPaths/目录里看起来“相关”，就自行 doc.read；只有当用户任务明确需要，且用户已确认你可以读取时，才读。\n` +
+        `- **上下文优先级（必须）**：优先使用 Context Pack 中的 REFERENCES（来自 @{} 引用，已提供正文）与已关联 KB（KB_SELECTED_LIBRARIES/KB_LIBRARY_PLAYBOOK/KB_STYLE_CLUSTERS）。不要默认把“光标文件”当上下文；当且仅当显式引用/用户确认后才读其它文件。找不到信息时再调用 project.listFiles 做兜底遍历。\n` +
         `- **完成即停（必须）**：当你已经满足用户本轮目标（例如已回复 OK/已回答问题/已完成写入），立刻停止，不要追加新任务或开启下一段流程。\n\n` +
         `1) 产 Todo List（可追踪，默认需要）：在用户确认要你继续执行写作闭环后，你必须调用 run.setTodoList。\n` +
         `   - 即使你需要澄清，也必须先把“澄清问题/默认假设/下一步动作”写进 todo（澄清最多 5 个高价值问题：平台画像/受众/目标/口吻人设/素材来源）。\n` +
@@ -1016,14 +1017,32 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
   const lintPassScore = Number(process.env.STYLE_LINT_PASS_SCORE ?? 80);
   const lintMaxRework = Number(process.env.STYLE_LINT_MAX_REWORK ?? 2);
+  // lint 门禁策略（对齐 kb-manager-v2-spec.md 的“弱化门禁”）：默认 hint，不因风格分数卡死。
+  // - hint：不把 lint 当硬闸门（不强制通过，不触发 style_lint_exhausted）；仍允许模型/用户按需调用 lint.style 获取问题清单与 rewritePrompt
+  // - gate：沿用旧逻辑（lint 需通过，否则回炉/耗尽终止）
+  const lintModeRaw = String(process.env.STYLE_LINT_MODE ?? "hint").trim().toLowerCase();
+  const lintMode: "hint" | "gate" = lintModeRaw === "gate" || lintModeRaw === "hard" ? "gate" : "hint";
 
   // 注意：用户“跳过 linter”只应跳过风格校验，不应跳过“先 kb.search 拉样例”
   const gates = deriveStyleGate({ mode, kbSelected: kbSelectedList as any, intent, activeSkillIds });
+  const effectiveGates = { ...gates, lintGateEnabled: gates.lintGateEnabled && lintMode === "gate" };
   const styleLibIds = gates.styleLibIds;
 
   const keepBestOnLintExhausted =
     /(lint|linter|风格(对齐|校验|检查)).{0,30}(不过|不通过).{0,30}(保留|留下|用).{0,30}(最高分|最好|最佳)/i.test(userPrompt) ||
     String((mainDocFromPack as any)?.styleLintFailPolicy ?? "").trim() === "keep_best";
+
+  const targetChars = (() => {
+    const texts = [String(userPrompt ?? ""), String((mainDocFromPack as any)?.goal ?? "")];
+    for (const raw of texts) {
+      const t = String(raw ?? "");
+      const m = t.match(/(\d{2,5})\s*字/);
+      if (!m?.[1]) continue;
+      const n = Number(m[1]);
+      if (Number.isFinite(n) && n > 0) return Math.floor(n);
+    }
+    return null;
+  })();
 
   // Run 内部状态（显式 State；由 policy 函数分析与更新）
   // 预算拆分：避免一个 budget 同时承担“协议修复/完成性重试/风格门禁”等语义
@@ -1047,6 +1066,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     styleLintPassed: runState.styleLintPassed,
     styleLintFailCount: runState.styleLintFailCount,
     lintGateDegraded: runState.lintGateDegraded,
+    lintMode,
+    targetChars,
   });
 
   const writePolicyDecision = (args: {
@@ -1113,7 +1134,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     // 2) StyleImitateSkill（状态级：need_kb / need_lint / can_write）
     let phase: SkillToolCapsPhase = "none";
     let hint = "";
-    if (gates.styleGateEnabled) {
+    if (effectiveGates.styleGateEnabled) {
       if (!runState.hasStyleKbSearch) {
         phase = "style_need_kb";
         // 禁止 lint.style & 写入类 doc.*，避免 “LINT_BEFORE_KB / WRITE_BEFORE_KB”
@@ -1126,7 +1147,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           "- 本回合禁止调用 lint.style 与任何写入类 doc.*（doc.write/doc.applyEdits/doc.replaceSelection/doc.splitToDir/...）。\n" +
           "- 请先调用 kb.search（只搜风格库）拉样例；或仅更新 todo/mainDoc。";
         reasonCodes.push("phase:style_need_kb");
-      } else if (gates.lintGateEnabled && !runState.styleLintPassed && runState.styleLintFailCount <= lintMaxRework) {
+      } else if (effectiveGates.lintGateEnabled && !runState.styleLintPassed && runState.styleLintFailCount <= lintMaxRework) {
         phase = "style_need_lint";
         // 禁止写入类 doc.*，避免 “WRITE_BEFORE_LINT_PASS”
         for (const name of Array.from(allowed)) {
@@ -1141,7 +1162,9 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         phase = "style_can_write";
         hint =
           "【Skill: style_imitate】当前阶段：can_write。\n" +
-          "- 已满足前置条件（kb 已完成，且 lint 已通过/跳过/降级），本回合允许写入类 doc.*。";
+          (effectiveGates.lintGateEnabled
+            ? "- 已满足前置条件（kb 已完成，且 lint 已通过/跳过/降级），本回合允许写入类 doc.*。"
+            : "- 已满足前置条件（kb 已完成；lint.style 为提示/可跳过，不做硬门禁），本回合允许写入类 doc.*。");
         reasonCodes.push("phase:style_can_write");
       }
     }
@@ -1355,12 +1378,13 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
         // Plan/Agent：避免“只读完 doc 就停 / 没有 todo 就结束 / 明明要写入却没写入”
         if (mode !== "chat" && runState.workflowRetryBudget > 0) {
-          const analysis = analyzeAutoRetryText({ assistantText, intent, gates, state: runState, lintMaxRework });
+          const analysis = analyzeAutoRetryText({ assistantText, intent, gates: effectiveGates, state: runState, lintMaxRework, targetChars });
           const needFinalText = analysis.needFinalText;
           const needTodo = analysis.needTodo;
           const needWrite = analysis.needWrite;
           const needKb = analysis.needKb;
           const needLint = analysis.needLint;
+          const needLength = analysis.needLength;
 
           if (analysis.shouldRetry) {
             const reasonCodes: string[] = [];
@@ -1370,6 +1394,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             if (needTodo) reasonCodes.push("need_todo");
             if (needKb) reasonCodes.push("need_style_kb");
             if (needLint) reasonCodes.push("need_style_lint");
+            if (needLength) reasonCodes.push("need_length");
             if (needWrite) reasonCodes.push("need_write");
             writePolicyDecision({
               turn,
@@ -1392,6 +1417,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
                   ? "请它：直接输出对用户可读的最终回复（Markdown），不要再调用工具、不要输出任何 <tool_calls>/<tool_call>；"
                   : needTodo
                     ? "请它：先 run.setTodoList（永远第一步）；todo 中可包含澄清步骤与默认假设；"
+                    : needLength
+                      ? `请它：把正文长度调整到目标字数附近（目标≈${targetChars}字；当前≈${assistantText.trim().length}字），并直接输出修订后的正文（Markdown 纯文本）；`
                     : "请它：不要重复 run.setTodoList（本次 Run 已有 todo），直接推进下一步；") +
                 (needKb
                   ? "若已绑定风格库且任务是写作类：先 kb.search（kind=card + cardTypes，且只搜风格库）拉“套路模板/金句形状/结构骨架”；必要时再补 kb.search(kind=paragraph, anchorParagraphIndexMax/anchorFromEndMax) 拉原文段落；"
@@ -1413,6 +1440,11 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
                     "- 你现在必须直接输出对用户的最终回复（Markdown 纯文本，至少 1 个可见字符）。\n" +
                     "- 不要调用任何工具；不要输出 <tool_calls>/<tool_call>；不要输出 XML。\n" +
                     (intent.wantsOkOnly ? "- 用户只要求连通性确认：请直接回复 `OK`。\n" : "")
+                  : needLength
+                    ? `你上一条输出的正文长度与目标字数偏离较大。\n` +
+                      `- 目标：≈${targetChars}字；当前：≈${assistantText.trim().length}字。\n` +
+                      `- 你现在必须把正文扩写/删减到目标附近（允许上下浮动约 ±20%），并直接输出修订后的正文（Markdown 纯文本）。\n` +
+                      `- 不要调用任何工具；不要输出 <tool_calls>/<tool_call>；不要输出 XML。\n`
                   : "你刚才输出了纯文本，但任务尚未完成。\n" +
                     "- 你必须先输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
                     (needTodo
@@ -1550,8 +1582,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       // 风格库写作强约束：
       // - 为了保证“先检索样例→再生成→再对齐”的可控闭环，避免同一轮把 kb.search / lint.style / 写入类工具混在一起
       //   （否则模型拿不到 tool_result，就无法真正用上检索/对齐结果）。
-      if (mode !== "chat" && gates.styleGateEnabled) {
-        const batch = analyzeStyleWorkflowBatch({ mode, intent, gates, state: runState, lintMaxRework, toolCalls });
+      if (mode !== "chat" && effectiveGates.styleGateEnabled) {
+        const batch = analyzeStyleWorkflowBatch({ mode, intent, gates: effectiveGates as any, state: runState, lintMaxRework, toolCalls });
         if (batch.shouldEnforce && batch.violation) {
           const violation = batch.violation;
           if (runState.workflowRetryBudget > 0) {
@@ -1565,7 +1597,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             runState.workflowRetryBudget -= 1;
             writeEvent("assistant.delta", {
               delta:
-                "\n\n[系统提示] 风格库写作任务已启用“强闭环”：先 kb.search 拉风格样例 → 再 lint.style 对齐 → 最后才允许写入。\n" +
+                "\n\n[系统提示] 风格库写作任务已启用“闭环约束”：先 kb.search 拉风格样例 → 再写作/写入；lint.style 在当前策略下为提示（不做硬门禁）。\n" +
                 `本轮工具调用不满足前置条件（${violation}），我会让模型自动重试一次（无需你输入）。\n` +
                 "请它：把 kb.search / lint.style / 写入操作拆到不同回合（每回合只做一类关键动作）。"
             });
@@ -1824,10 +1856,15 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           const blocked = todoList
             .filter((t: any) => {
               const status = String(t?.status ?? "").trim().toLowerCase();
+              // 已完成/已跳过的条目不应触发“等待用户确认”
+              if (status === "done" || status === "skipped") return false;
+              const text = String(t?.text ?? "").trim();
               const note = String(t?.note ?? "").trim();
               if (status === "blocked") return true;
               if (/^blocked\b/i.test(note)) return true;
-              if (/(等待用户|等待你|待确认|等你确认|需要你确认|请确认)/.test(note)) return true;
+              // 既看 note 也看 text：模型常把“需确认/澄清”写在 todo.text 里
+              const hint = `${text}\n${note}`.trim();
+              if (/(等待用户|等待你|待确认|等你确认|需要你确认|请确认|需确认|需要确认|澄清|确认需求)/.test(hint)) return true;
               return false;
             })
             .slice(0, 5)
@@ -1935,8 +1972,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         const toolResultText = `[tool_result name="${String(call.name ?? "")}"]\n${toolResultJson}\n[/tool_result]`;
         messages.push(...buildInjectedToolResultMessages({ toolResultFormat, toolResultXml, toolResultText }));
 
-        // 风格 Linter 终稿闸门：未通过则自动回炉（最多 lintMaxRework 次）；超过上限则提示用户是否跳过
-        if (gates.lintGateEnabled && String(call.name ?? "") === "lint.style") {
+        // 风格 Linter 终稿闸门：仅在 lintMode=gate 时启用。hint 模式下仅作为提示，不做回炉/不做耗尽终止。
+        if (effectiveGates.lintGateEnabled && String(call.name ?? "") === "lint.style") {
           const scoreText =
             runState.lastStyleLint?.score !== null && runState.lastStyleLint?.score !== undefined ? String(runState.lastStyleLint.score) : "null";
           const hi = Number.isFinite(Number(runState.lastStyleLint?.highIssues ?? 0)) ? Number(runState.lastStyleLint?.highIssues ?? 0) : 0;

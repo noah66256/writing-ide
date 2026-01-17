@@ -1213,6 +1213,51 @@ body {
   overflow: visible; /* 下拉菜单需要覆盖到上方消息区 */
 }
 
+.composerCtxStrip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  border-top-left-radius: 14px;
+  border-top-right-radius: 14px;
+  background: rgba(0, 0, 0, 0.01);
+}
+
+.composerCtxStripRight {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.composerCtxPanel {
+  border-bottom: 1px solid var(--border);
+  padding: 8px 8px 10px;
+  display: grid;
+  gap: 10px;
+  background: rgba(0, 0, 0, 0.01);
+}
+
+.composerCtxSection {
+  display: grid;
+  gap: 6px;
+}
+
+.composerCtxTitle {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.composerCtxItems {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .composerTextarea {
   width: 100%;
   border: none;

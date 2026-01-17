@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useKbStore, type KbCardJob, type KbLibraryFingerprintSnapshot } from "../state/kbStore";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useKbStore, type KbCardJob, type KbLibraryFingerprintSnapshot, type KbTextSpanRefV1 } from "../state/kbStore";
 import { useRunStore } from "../state/runStore";
 import { FACET_PACKS, facetPackLabel, getFacetPack } from "../kb/facets";
 import { RichText } from "./RichText";
@@ -74,6 +74,11 @@ export function CardJobsModal() {
   const getLatestLibraryFingerprint = useKbStore((s) => s.getLatestLibraryFingerprint);
   const computeLibraryFingerprint = useKbStore((s) => s.computeLibraryFingerprint);
   const compareLatestLibraryFingerprints = useKbStore((s) => s.compareLatestLibraryFingerprints);
+  const saveLibraryStyleAnchorsFromSegments = useKbStore((s) => s.saveLibraryStyleAnchorsFromSegments);
+  const clearLibraryStyleAnchors = useKbStore((s) => s.clearLibraryStyleAnchors);
+  const getLibraryStyleConfig = useKbStore((s) => s.getLibraryStyleConfig);
+  const setLibraryStyleClusterLabel = useKbStore((s) => s.setLibraryStyleClusterLabel);
+  const setLibraryStyleDefaultCluster = useKbStore((s) => s.setLibraryStyleDefaultCluster);
 
   type PromptState = {
     title: string;
@@ -86,12 +91,21 @@ export function CardJobsModal() {
   const [prompt, setPrompt] = useState<PromptState | null>(null);
   const promptInputRef = useRef<HTMLInputElement | null>(null);
   const ask = (p: Omit<PromptState, "value"> & { value?: string }) => setPrompt({ ...p, value: p.value ?? "" });
+  // 需要在 Esc handler useEffect 之前声明，避免 TDZ（Cannot access before initialization）
+  const [anchorPickerOpen, setAnchorPickerOpen] = useState(false);
 
   // Esc 关闭（避免 modalMask 挡住输入框）
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
+      // 优先关内层 anchors 选择器
+      if (anchorPickerOpen) {
+        e.preventDefault();
+        setAnchorPickerOpen(false);
+        setAnchorPickerNotice(null);
+        return;
+      }
       // 优先关内层 prompt，其次关整个 KB 管理
       if (prompt) {
         e.preventDefault();
@@ -103,7 +117,7 @@ export function CardJobsModal() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [open, prompt, close]);
+  }, [open, anchorPickerOpen, prompt, close]);
 
   // 进度/耗时估算：每秒刷新一次
   const [tick, setTick] = useState(0);
@@ -122,11 +136,16 @@ export function CardJobsModal() {
     void refreshLibraries().catch(() => void 0);
   }, [open, refreshLibraries]);
 
-  useEffect(() => {
+  // 关键：确保内层 prompt 打开后立刻可输入（避免“弹窗出现但焦点仍在编辑器，打不了字”）
+  useLayoutEffect(() => {
     if (!prompt) return;
-    const t = window.setTimeout(() => promptInputRef.current?.focus(), 0);
-    return () => window.clearTimeout(t);
-  }, [prompt]);
+    try {
+      promptInputRef.current?.focus();
+      promptInputRef.current?.select?.();
+    } catch {
+      // ignore
+    }
+  }, [prompt?.title]);
 
   const summary = useMemo(() => {
     const total = jobs.length + playbookJobs.length;
@@ -204,6 +223,251 @@ export function CardJobsModal() {
   const [fpAdvanced, setFpAdvanced] = useState(false);
   const [fpCompare, setFpCompare] = useState<null | { diff: any; olderAt: string; newerAt: string }>(null);
 
+  // M1：anchors（黄金样本，仅风格库）
+  const [anchorsLoading, setAnchorsLoading] = useState(false);
+  const [anchorsErr, setAnchorsErr] = useState<string | null>(null);
+  const [anchors, setAnchors] = useState<KbTextSpanRefV1[]>([]);
+  const [defaultClusterId, setDefaultClusterId] = useState<string | null>(null);
+  const [clusterLabels, setClusterLabels] = useState<Record<string, string> | null>(null);
+  const [anchorPickerAdvanced, setAnchorPickerAdvanced] = useState(false);
+  const [anchorPickerNotice, setAnchorPickerNotice] = useState<string | null>(null);
+  const [anchorPickerSelected, setAnchorPickerSelected] = useState<Record<string, boolean>>({});
+  const [anchorPickerClusterId, setAnchorPickerClusterId] = useState<string | null>(null);
+  const [segmentFilter, setSegmentFilter] = useState<string>("");
+
+  const viewLib = useMemo(() => libraries.find((x) => x.id === viewLibId) ?? null, [libraries, viewLibId]);
+  const isStyleLib = (viewLib as any)?.purpose === "style";
+
+  const fpSegments = useMemo(() => {
+    const list = Array.isArray((fp as any)?.perSegment) ? ((fp as any).perSegment as any[]) : [];
+    return list.filter(Boolean);
+  }, [fp]);
+
+  const fpClusters = useMemo(() => {
+    const list = Array.isArray((fp as any)?.clustersV1) ? ((fp as any).clustersV1 as any[]) : [];
+    return list.filter(Boolean);
+  }, [fp]);
+
+  const fpSegmentById = useMemo(() => {
+    const m = new Map<string, any>();
+    for (const s of fpSegments) {
+      const id = String((s as any)?.segmentId ?? "").trim();
+      if (!id) continue;
+      m.set(id, s);
+    }
+    return m;
+  }, [fpSegments]);
+
+  const anchorClusterCounts = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const a of anchors) {
+      const seg = fpSegmentById.get(String(a.segmentId ?? "").trim());
+      const cid = String((seg as any)?.clusterId ?? "").trim();
+      if (!cid) continue;
+      m.set(cid, (m.get(cid) ?? 0) + 1);
+    }
+    return m;
+  }, [anchors, fpSegmentById]);
+
+  const recommendedClusterId = useMemo(() => {
+    // 1) 若 anchors 已覆盖某簇：优先 anchors 最多的簇
+    if (anchorClusterCounts.size > 0) {
+      let bestId = "";
+      let bestN = -1;
+      for (const [cid, n] of anchorClusterCounts.entries()) {
+        if (n > bestN) {
+          bestN = n;
+          bestId = cid;
+        }
+      }
+      if (bestId) return bestId;
+    }
+    // 2) 否则按簇稳定性优先（high>medium>low），再按覆盖率
+    const rank = (s: string) => (s === "high" ? 3 : s === "medium" ? 2 : 1);
+    let best: any = null;
+    for (const c of fpClusters) {
+      const st = String((c as any)?.stability ?? "");
+      const cov = Number((c as any)?.docCoverageRate ?? 0) || 0;
+      const score = rank(st) * 10_000 + cov * 100;
+      if (!best || score > best.score) best = { id: String((c as any)?.id ?? ""), score };
+    }
+    return best?.id ? String(best.id) : null;
+  }, [anchorClusterCounts, fpClusters]);
+
+  const openAnchorPicker = (opts?: { clusterId?: string | null }) => {
+    setAnchorPickerNotice(null);
+    const clusterId = String(opts?.clusterId ?? "").trim() || null;
+    setAnchorPickerClusterId(clusterId);
+    if (!fpSegments.length) {
+      setAnchorPickerNotice("没有样本段数据：先点「生成：声音指纹（数字版）」刷新。");
+      return;
+    }
+
+    const existing = anchors.map((a) => String(a.segmentId ?? "").trim()).filter(Boolean);
+    const pickRecommended = () => {
+      const items = fpSegments
+        .map((s) => ({
+          ...s,
+          _chars: Number((s as any)?.chars ?? 0) || 0,
+          _doc: String((s as any)?.sourceDocId ?? "").trim(),
+          _preview: String((s as any)?.preview ?? "").trim(),
+          _clusterId: String((s as any)?.clusterId ?? "").trim(),
+        }))
+        .filter((s) => s._doc && s._chars >= 400 && (!clusterId || s._clusterId === clusterId))
+        .sort((a, b) => Math.abs(a._chars - 1600) - Math.abs(b._chars - 1600));
+      const picked: string[] = [];
+      const perDoc = new Map<string, number>();
+      for (const s of items) {
+        if (picked.length >= 5) break;
+        const id = String((s as any)?.segmentId ?? "").trim();
+        if (!id) continue;
+        const docId = s._doc;
+        const cnt = perDoc.get(docId) ?? 0;
+        if (cnt >= 2) continue;
+        perDoc.set(docId, cnt + 1);
+        picked.push(id);
+      }
+      // 兜底：样本太少时就按原顺序补满
+      if (picked.length < 5) {
+        const perDoc2 = new Map(perDoc);
+        for (const s of fpSegments) {
+          if (picked.length >= 5) break;
+          const id = String((s as any)?.segmentId ?? "").trim();
+          const docId = String((s as any)?.sourceDocId ?? "").trim();
+          const cid = String((s as any)?.clusterId ?? "").trim();
+          if (!id || !docId) continue;
+          if (clusterId && cid !== clusterId) continue;
+          if (picked.includes(id)) continue;
+          const cnt = perDoc2.get(docId) ?? 0;
+          if (cnt >= 2) continue;
+          perDoc2.set(docId, cnt + 1);
+          picked.push(id);
+        }
+      }
+      return picked;
+    };
+
+    const selectedIds = existing.length ? existing : pickRecommended();
+    const next: Record<string, boolean> = {};
+    for (const id of selectedIds) next[id] = true;
+    setAnchorPickerSelected(next);
+    setAnchorPickerAdvanced(selectedIds.length > 5);
+    // 默认把筛选框填成簇 id（避免“我点了某簇采纳，但列表里看不出”）
+    if (clusterId) setSegmentFilter(clusterId);
+    setAnchorPickerOpen(true);
+  };
+
+  const closeAnchorPicker = () => {
+    setAnchorPickerOpen(false);
+    setAnchorPickerNotice(null);
+    setAnchorPickerClusterId(null);
+  };
+
+  const toggleAnchorPick = (segmentId: string) => {
+    const id = String(segmentId ?? "").trim();
+    if (!id) return;
+    const seg = fpSegmentById.get(id);
+    if (!seg) return;
+    const maxPick = anchorPickerAdvanced ? 8 : 5;
+    const docId = String((seg as any)?.sourceDocId ?? "").trim();
+    if (!docId) return;
+
+    setAnchorPickerSelected((prev) => {
+      const was = Boolean(prev[id]);
+      if (was) return { ...prev, [id]: false };
+
+      const selectedIds = Object.keys(prev).filter((k) => prev[k]);
+      if (selectedIds.length >= maxPick) {
+        setAnchorPickerNotice(`最多选择 ${maxPick} 段。`);
+        return prev;
+      }
+      const perDoc = new Map<string, number>();
+      for (const sid of selectedIds) {
+        const s2 = fpSegmentById.get(sid);
+        if (!s2) continue;
+        const d2 = String((s2 as any)?.sourceDocId ?? "").trim();
+        if (!d2) continue;
+        perDoc.set(d2, (perDoc.get(d2) ?? 0) + 1);
+      }
+      if ((perDoc.get(docId) ?? 0) >= 2) {
+        setAnchorPickerNotice("同一篇文档最多选择 2 段。");
+        return prev;
+      }
+      setAnchorPickerNotice(null);
+      return { ...prev, [id]: true };
+    });
+  };
+
+  const saveAnchorsFromSelected = async () => {
+    if (!viewLibId) return;
+    const selectedIds = Object.keys(anchorPickerSelected).filter((k) => anchorPickerSelected[k]);
+    const anchorById = new Map(anchors.map((a) => [String(a.segmentId ?? "").trim(), a]));
+    const segs = selectedIds
+      .map((id) => {
+        const s = fpSegmentById.get(id);
+        if (s) {
+          return {
+            segmentId: String((s as any)?.segmentId ?? "").trim(),
+            sourceDocId: String((s as any)?.sourceDocId ?? "").trim(),
+            paragraphIndexStart: typeof (s as any)?.paragraphIndexStart === "number" ? Number((s as any).paragraphIndexStart) : null,
+            quote: String((s as any)?.preview ?? "").trim(),
+          };
+        }
+        const a = anchorById.get(String(id ?? "").trim());
+        if (!a) return null;
+        return {
+          segmentId: String(a.segmentId ?? "").trim(),
+          sourceDocId: String(a.sourceDocId ?? "").trim(),
+          paragraphIndexStart: typeof a.paragraphIndexStart === "number" ? a.paragraphIndexStart : null,
+          quote: String(a.quote ?? "").trim(),
+        };
+      })
+      .filter(Boolean)
+      .filter((s: any) => s.segmentId && s.sourceDocId) as any;
+
+    setAnchorsLoading(true);
+    setAnchorsErr(null);
+    const r = await saveLibraryStyleAnchorsFromSegments({ libraryId: viewLibId, segments: segs });
+    if (!r.ok) {
+      setAnchorsErr(r.error ?? "SAVE_FAILED");
+    } else {
+      setAnchors(Array.isArray(r.anchors) ? r.anchors : []);
+      closeAnchorPicker();
+    }
+    setAnchorsLoading(false);
+  };
+
+  const clearAnchors = async () => {
+    if (!viewLibId) return;
+    setAnchorsLoading(true);
+    setAnchorsErr(null);
+    const r = await clearLibraryStyleAnchors(viewLibId);
+    if (!r.ok) setAnchorsErr(r.error ?? "CLEAR_FAILED");
+    else setAnchors([]);
+    setAnchorsLoading(false);
+  };
+
+  const removeAnchor = async (segmentId: string) => {
+    if (!viewLibId) return;
+    const id = String(segmentId ?? "").trim();
+    if (!id) return;
+    const remain = anchors.filter((a) => String(a.segmentId ?? "").trim() !== id);
+    setAnchorsLoading(true);
+    setAnchorsErr(null);
+    const r = await saveLibraryStyleAnchorsFromSegments({
+      libraryId: viewLibId,
+      segments: remain.map((a) => ({
+        segmentId: String(a.segmentId ?? "").trim(),
+        sourceDocId: String(a.sourceDocId ?? "").trim(),
+        paragraphIndexStart: typeof a.paragraphIndexStart === "number" ? a.paragraphIndexStart : null,
+        quote: String(a.quote ?? "").trim(),
+      })),
+    });
+    if (!r.ok) setAnchorsErr(r.error ?? "SAVE_FAILED");
+    else setAnchors(Array.isArray(r.anchors) ? r.anchors : []);
+    setAnchorsLoading(false);
+  };
+
   useEffect(() => {
     if (!open) return;
     if (tab !== "libraries") return;
@@ -249,6 +513,39 @@ export function CardJobsModal() {
       setFpLoading(false);
     })();
   }, [open, tab, viewLibId, viewTab, getLatestLibraryFingerprint]);
+
+  useEffect(() => {
+    if (!open) return;
+    if (tab !== "libraries") return;
+    if (!viewLibId) return;
+    if (viewTab !== "health") return;
+    // 仅风格库展示 style config（anchors/default/labels）
+    if (!isStyleLib) {
+      setAnchors([]);
+      setAnchorsErr(null);
+      setAnchorsLoading(false);
+      setDefaultClusterId(null);
+      setClusterLabels(null);
+      setAnchorPickerOpen(false);
+      return;
+    }
+    void (async () => {
+      setAnchorsLoading(true);
+      setAnchorsErr(null);
+      const r = await getLibraryStyleConfig(viewLibId);
+      if (!r.ok) {
+        setAnchorsErr(r.error ?? "LOAD_FAILED");
+        setAnchors([]);
+        setDefaultClusterId(null);
+        setClusterLabels(null);
+      } else {
+        setAnchors(Array.isArray(r.anchors) ? r.anchors : []);
+        setDefaultClusterId(r.defaultClusterId ? String(r.defaultClusterId) : null);
+        setClusterLabels(r.clusterLabelsV1 && typeof r.clusterLabelsV1 === "object" ? (r.clusterLabelsV1 as any) : null);
+      }
+      setAnchorsLoading(false);
+    })();
+  }, [open, tab, viewLibId, viewTab, isStyleLib, getLibraryStyleConfig]);
 
   if (!open) return null;
 
@@ -714,6 +1011,330 @@ export function CardJobsModal() {
                           </div>
                         </div>
 
+                        {isStyleLib ? (
+                          <>
+                            <div style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel2)", padding: 10, display: "grid", gap: 10 }}>
+                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                                <div style={{ fontWeight: 800 }}>写法候选（子簇）</div>
+                                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                                  {defaultClusterId ? (
+                                    <button
+                                      className="btn btnIcon"
+                                      type="button"
+                                      disabled={anchorsLoading}
+                                      onClick={() => {
+                                        if (!viewLibId) return;
+                                        void (async () => {
+                                          setAnchorsLoading(true);
+                                          setAnchorsErr(null);
+                                          const r = await setLibraryStyleDefaultCluster({ libraryId: viewLibId, clusterId: null });
+                                          if (!r.ok) setAnchorsErr(r.error ?? "SAVE_FAILED");
+                                          else setDefaultClusterId(null);
+                                          setAnchorsLoading(false);
+                                        })();
+                                      }}
+                                      title="取消“仅对该库生效”的默认写法"
+                                    >
+                                      取消默认
+                                    </button>
+                                  ) : null}
+                                </div>
+                              </div>
+
+                              {!fpClusters.length ? (
+                                <div className="explorerHint">样本不足或未生成子簇：先点「生成：声音指纹（数字版）」刷新。</div>
+                              ) : (
+                                <div style={{ display: "grid", gap: 10 }}>
+                                  {fpClusters.map((c: any) => {
+                                    const cid = String(c?.id ?? "").trim();
+                                    if (!cid) return null;
+                                    const label = String((clusterLabels as any)?.[cid] ?? c?.label ?? cid).trim() || cid;
+                                    const isDefault = defaultClusterId === cid;
+                                    const isRec = recommendedClusterId === cid;
+                                    const st = String(c?.stability ?? "");
+                                    const docCovCount = Number(c?.docCoverageCount ?? 0) || 0;
+                                    const docCovRate = Number(c?.docCoverageRate ?? 0) || 0;
+                                    const anchorN = anchorClusterCounts.get(cid) ?? 0;
+                                    const sr = (c?.softRanges ?? {}) as any;
+                                    const fmtRange = (r: any) => (Array.isArray(r) && r.length === 2 ? `${r[0]}~${r[1]}` : "-");
+                                    const evidence = Array.isArray(c?.evidence) ? c.evidence.slice(0, 4) : [];
+
+                                    return (
+                                      <div key={cid} style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel)", padding: 10 }}>
+                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+                                          <div style={{ minWidth: 0 }}>
+                                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                                              <span className="ctxPill">{cid}</span>
+                                              {isRec ? <span className="ctxPill">Recommended</span> : null}
+                                              {isDefault ? <span className="ctxPill">默认写法</span> : null}
+                                              {st ? <span className="ctxPill">稳定：{st === "high" ? "高" : st === "medium" ? "中" : "低"}</span> : null}
+                                              <span className="ctxPill">
+                                                覆盖 {docCovCount}/{Number(fp?.corpus?.docs ?? 0) || 0} 篇 · {Math.round(docCovRate * 100)}%
+                                              </span>
+                                              {anchorN ? <span className="ctxPill">anchors：{anchorN}</span> : null}
+                                            </div>
+                                            <div style={{ marginTop: 6, fontSize: 14, fontWeight: 900, color: "var(--text)" }}>{label}</div>
+                                            <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                                              <span className="ctxPill" title="平均句长">
+                                                句长 {fmtRange(sr.avgSentenceLen)}
+                                              </span>
+                                              <span className="ctxPill" title="问句率（每100句）">
+                                                问句 {fmtRange(sr.questionRatePer100Sentences)}
+                                              </span>
+                                              <span className="ctxPill" title="数字密度（每1000字符）">
+                                                数字 {fmtRange(sr.digitPer1kChars)}
+                                              </span>
+                                            </div>
+                                          </div>
+                                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                                            <button
+                                              className="btn btnIcon"
+                                              type="button"
+                                              disabled={anchorsLoading}
+                                              onClick={() => {
+                                                if (!viewLibId) return;
+                                                ask({
+                                                  title: "重命名写法",
+                                                  desc: `clusterId: ${cid}`,
+                                                  placeholder: "例如：直男财经·算账长文",
+                                                  value: label,
+                                                  confirmText: "保存",
+                                                  onConfirm: async (v) => {
+                                                    setAnchorsLoading(true);
+                                                    setAnchorsErr(null);
+                                                    const r = await setLibraryStyleClusterLabel({ libraryId: viewLibId, clusterId: cid, label: v });
+                                                    if (!r.ok) setAnchorsErr(r.error ?? "SAVE_FAILED");
+                                                    else setClusterLabels((prev) => ({ ...(prev ?? {}), [cid]: String(v ?? "").trim() }));
+                                                    setAnchorsLoading(false);
+                                                  },
+                                                });
+                                              }}
+                                            >
+                                              改名
+                                            </button>
+                                            <button
+                                              className={`btn btnIcon ${isDefault ? "btnPrimary" : ""}`}
+                                              type="button"
+                                              disabled={anchorsLoading}
+                                              onClick={() => {
+                                                if (!viewLibId) return;
+                                                void (async () => {
+                                                  setAnchorsLoading(true);
+                                                  setAnchorsErr(null);
+                                                  const r = await setLibraryStyleDefaultCluster({ libraryId: viewLibId, clusterId: cid });
+                                                  if (!r.ok) setAnchorsErr(r.error ?? "SAVE_FAILED");
+                                                  else setDefaultClusterId(cid);
+                                                  setAnchorsLoading(false);
+                                                })();
+                                              }}
+                                              title="设为默认写法（仅本库）"
+                                            >
+                                              {isDefault ? "默认" : "设为默认"}
+                                            </button>
+                                            <button className="btn btnIcon" type="button" disabled={anchorsLoading} onClick={() => openAnchorPicker({ clusterId: cid })}>
+                                              采纳 anchors（本簇）
+                                            </button>
+                                          </div>
+                                        </div>
+
+                                        {evidence.length ? (
+                                          <div style={{ marginTop: 8, display: "grid", gap: 6 }}>
+                                            <div style={{ fontWeight: 800, fontSize: 12, color: "var(--muted)" }}>代表样例（证据）</div>
+                                            {evidence.map((e: any) => (
+                                              <div key={String(e?.segmentId ?? Math.random())} style={{ color: "var(--muted)", fontSize: 12, whiteSpace: "pre-wrap" }}>
+                                                - {String(e?.quote ?? "").trim()}
+                                              </div>
+                                            ))}
+                                          </div>
+                                        ) : null}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+
+                            <div style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel2)", padding: 10, display: "grid", gap: 10 }}>
+                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                                <div style={{ fontWeight: 800 }}>Anchors（黄金样本）</div>
+                                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                                  <button
+                                    className="btn btnIcon"
+                                    type="button"
+                                    disabled={anchorsLoading || fpSegments.length === 0}
+                                    onClick={() => (anchorPickerOpen ? closeAnchorPicker() : openAnchorPicker())}
+                                    title={fpSegments.length ? "采纳推荐段落作为“本库口味代表作”" : "需要先生成声音指纹（数字版）"}
+                                  >
+                                    {anchorPickerOpen ? "收起选择" : "采纳 anchors（推荐5段）"}
+                                  </button>
+                                  <button className="btn btnDanger btnIcon" type="button" disabled={anchorsLoading || anchors.length === 0} onClick={() => void clearAnchors()}>
+                                    清空
+                                  </button>
+                                </div>
+                              </div>
+
+                              <div className="explorerHint">
+                                已选 {anchors.length} 段（默认 5；高级最多 8；同文档最多 2 段；仅对该库生效）
+                              </div>
+
+                              {anchorsErr ? <div className="explorerError">配置错误：{anchorsErr}</div> : null}
+                              {anchorsLoading ? <div className="explorerHint">加载/保存中…</div> : null}
+
+                              {anchors.length ? (
+                                <div style={{ display: "grid", gap: 8 }}>
+                                  {anchors.map((a) => {
+                                    const imp: any = (a as any)?.importedFrom;
+                                    const path = imp?.kind === "project" ? String(imp.relPath ?? "") : imp?.kind === "file" ? String(imp.absPath ?? "") : "";
+                                    const title = path || String(a.sourceDocId ?? "");
+                                    const seg = fpSegmentById.get(String(a.segmentId ?? "").trim());
+                                    const cid = String((seg as any)?.clusterId ?? "").trim();
+                                    return (
+                                      <div
+                                        key={`${a.segmentId}`}
+                                        style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel)", padding: 10 }}
+                                      >
+                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+                                          <div style={{ minWidth: 0 }}>
+                                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                                              <span className="ctxPill" title={title}>
+                                                {title ? title.replaceAll("\\", "/").split("/").slice(-1)[0] : a.sourceDocId}
+                                              </span>
+                                              {cid ? <span className="ctxPill">{cid}</span> : <span className="ctxPill">未分簇</span>}
+                                              {typeof a.paragraphIndexStart === "number" ? <span className="ctxPill">段落#{a.paragraphIndexStart}</span> : null}
+                                              <span className="ctxPill">{a.segmentId}</span>
+                                            </div>
+                                            <div style={{ marginTop: 6, color: "var(--muted)", fontSize: 12, whiteSpace: "pre-wrap" }}>
+                                              {String(a.quote ?? "").trim() || "（空）"}
+                                            </div>
+                                          </div>
+                                          <button className="btn btnIcon" type="button" disabled={anchorsLoading} onClick={() => void removeAnchor(a.segmentId)}>
+                                            移除
+                                          </button>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              ) : (
+                                <div className="explorerHint">还没有 anchors。建议先采纳推荐 5 段，再按需要微调。</div>
+                              )}
+
+                              {anchorPickerOpen ? (
+                                <div style={{ border: "1px dashed var(--border)", borderRadius: 12, background: "var(--panel)", padding: 10, display: "grid", gap: 10 }}>
+                                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                                      <span className="ctxPill">选择 anchors</span>
+                                      {anchorPickerClusterId ? <span className="ctxPill">限定：{anchorPickerClusterId}</span> : null}
+                                      <button
+                                        className="btn btnIcon"
+                                        type="button"
+                                        onClick={() => {
+                                          setAnchorPickerNotice(null);
+                                          setAnchorPickerAdvanced((v) => {
+                                            const next = !v;
+                                            if (!next) {
+                                              // 从高级回到默认（最多5段）：简单截断
+                                              setAnchorPickerSelected((prev) => {
+                                                const ids = Object.keys(prev).filter((k) => prev[k]).slice(0, 5);
+                                                const m: Record<string, boolean> = {};
+                                                for (const id of ids) m[id] = true;
+                                                return m;
+                                              });
+                                            }
+                                            return next;
+                                          });
+                                        }}
+                                        title="高级模式：最多选择 8 段"
+                                      >
+                                        {anchorPickerAdvanced ? "退出高级（最多5段）" : "高级（最多8段）"}
+                                      </button>
+                                    </div>
+                                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                                      <button className="btn btnIcon" type="button" disabled={anchorsLoading} onClick={() => void saveAnchorsFromSelected()}>
+                                        确认采纳
+                                      </button>
+                                      <button className="btn btnIcon" type="button" onClick={() => closeAnchorPicker()}>
+                                        取消
+                                      </button>
+                                    </div>
+                                  </div>
+
+                                  {anchorPickerNotice ? <div className="explorerHint">{anchorPickerNotice}</div> : null}
+
+                                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                                    <input
+                                      className="modalInput"
+                                      style={{ maxWidth: 360 }}
+                                      value={segmentFilter}
+                                      placeholder="筛选段落（文件名/预览）…"
+                                      onChange={(e) => setSegmentFilter(e.target.value)}
+                                    />
+                                    <span className="ctxPill">
+                                      已选 {Object.keys(anchorPickerSelected).filter((k) => anchorPickerSelected[k]).length} / {anchorPickerAdvanced ? 8 : 5}
+                                    </span>
+                                  </div>
+
+                                  <div style={{ maxHeight: "min(32vh, 320px)", overflow: "auto", display: "grid", gap: 8 }}>
+                                    {fpSegments
+                                      .filter((s: any) => {
+                                        const cid = String(s?.clusterId ?? "").trim();
+                                        if (anchorPickerClusterId && cid !== anchorPickerClusterId) return false;
+                                        const q = segmentFilter.trim();
+                                        if (!q) return true;
+                                        const path = String(s?.sourceDocPath ?? s?.sourceDocTitle ?? "");
+                                        const preview = String(s?.preview ?? "");
+                                        return (path + "\n" + preview).toLowerCase().includes(q.toLowerCase());
+                                      })
+                                      .slice(0, 120)
+                                      .map((s: any) => {
+                                        const id = String(s?.segmentId ?? "");
+                                        const checked = Boolean(anchorPickerSelected[id]);
+                                        const path = String(s?.sourceDocPath ?? s?.sourceDocTitle ?? "");
+                                        const file = path ? path.replaceAll("\\", "/").split("/").slice(-1)[0] : String(s?.sourceDocTitle ?? "");
+                                        const cid = String(s?.clusterId ?? "").trim();
+                                        return (
+                                          <label
+                                            key={id}
+                                            style={{
+                                              border: "1px solid var(--border)",
+                                              borderRadius: 12,
+                                              background: "var(--panel2)",
+                                              padding: 10,
+                                              display: "flex",
+                                              gap: 10,
+                                              alignItems: "flex-start",
+                                              cursor: "pointer",
+                                            }}
+                                          >
+                                            <input
+                                              type="checkbox"
+                                              checked={checked}
+                                              onChange={() => toggleAnchorPick(id)}
+                                              style={{ marginTop: 2 }}
+                                            />
+                                            <div style={{ minWidth: 0 }}>
+                                              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                                                <span className="ctxPill" title={path || file || id}>
+                                                  {file || id}
+                                                </span>
+                                                {cid ? <span className="ctxPill">{cid}</span> : null}
+                                                {typeof s?.paragraphIndexStart === "number" ? <span className="ctxPill">段落#{s.paragraphIndexStart}</span> : null}
+                                                <span className="ctxPill">{id}</span>
+                                              </div>
+                                              <div style={{ marginTop: 6, color: "var(--muted)", fontSize: 12, whiteSpace: "pre-wrap" }}>
+                                                {String(s?.preview ?? "").trim() || "（旧快照无预览：建议重新生成声音指纹）"}
+                                              </div>
+                                            </div>
+                                          </label>
+                                        );
+                                      })}
+                                  </div>
+                                </div>
+                              ) : null}
+                            </div>
+                          </>
+                        ) : null}
+
                         {fpCompare ? (
                           <div style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel2)", padding: 10 }}>
                             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
@@ -781,10 +1402,54 @@ export function CardJobsModal() {
                               </div>
                             </div>
 
-                            {Array.isArray((fp as any).perSegment) && (fp as any).perSegment.length ? (
+                            {fpSegments.length ? (
                               <div style={{ display: "grid", gap: 8 }}>
-                                <div style={{ fontWeight: 800 }}>样本段级（更适合找“混合体裁/离群”）</div>
-                                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify((fp as any).perSegment ?? [], null, 2)}</pre>
+                                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", justifyContent: "space-between" }}>
+                                  <div style={{ fontWeight: 800 }}>样本段级（segments，更适合找“混合体裁/离群”）</div>
+                                  <span className="ctxPill">共 {fpSegments.length} 段（展示前 120）</span>
+                                </div>
+                                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                                  <input
+                                    className="modalInput"
+                                    style={{ maxWidth: 360 }}
+                                    value={segmentFilter}
+                                    placeholder="筛选段落（文件名/预览）…"
+                                    onChange={(e) => setSegmentFilter(e.target.value)}
+                                  />
+                                </div>
+                                <div style={{ maxHeight: "min(28vh, 280px)", overflow: "auto", display: "grid", gap: 8 }}>
+                                  {fpSegments
+                                    .filter((s: any) => {
+                                      const q = segmentFilter.trim();
+                                      if (!q) return true;
+                                      const path = String(s?.sourceDocPath ?? s?.sourceDocTitle ?? "");
+                                      const preview = String(s?.preview ?? "");
+                                      return (path + "\n" + preview).toLowerCase().includes(q.toLowerCase());
+                                    })
+                                    .slice(0, 120)
+                                    .map((s: any) => {
+                                      const id = String(s?.segmentId ?? "");
+                                      const path = String(s?.sourceDocPath ?? s?.sourceDocTitle ?? "");
+                                      const file = path ? path.replaceAll("\\", "/").split("/").slice(-1)[0] : String(s?.sourceDocTitle ?? "");
+                                      return (
+                                        <div
+                                          key={id}
+                                          style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel2)", padding: 10 }}
+                                        >
+                                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                                            <span className="ctxPill" title={path || file || id}>
+                                              {file || id}
+                                            </span>
+                                            {typeof s?.paragraphIndexStart === "number" ? <span className="ctxPill">段落#{s.paragraphIndexStart}</span> : null}
+                                            <span className="ctxPill">{id}</span>
+                                          </div>
+                                          <div style={{ marginTop: 6, color: "var(--muted)", fontSize: 12, whiteSpace: "pre-wrap" }}>
+                                            {String(s?.preview ?? "").trim() || "（旧快照无预览：建议重新生成声音指纹）"}
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                </div>
                               </div>
                             ) : null}
 
@@ -1223,7 +1888,26 @@ export function CardJobsModal() {
             if (e.target === e.currentTarget) setPrompt(null);
           }}
         >
-          <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
+          <div
+            className="modal"
+            onMouseDown={(e) => {
+              e.stopPropagation();
+              // 兜底：如果因为某些原因未聚焦，点弹窗任意位置也让输入框可输入
+              try {
+                promptInputRef.current?.focus();
+              } catch {
+                // ignore
+              }
+            }}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              try {
+                promptInputRef.current?.focus();
+              } catch {
+                // ignore
+              }
+            }}
+          >
             <div className="modalTitle">{prompt.title}</div>
             {prompt.desc ? <div className="modalDesc">{prompt.desc}</div> : null}
             <input

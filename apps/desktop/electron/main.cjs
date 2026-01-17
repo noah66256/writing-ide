@@ -492,6 +492,21 @@ function createWindow() {
   mainWindow = win;
   updateMenu();
 
+  // 诊断：避免“白屏但不知道加载失败/渲染进程崩溃”
+  try {
+    win.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
+      console.error("[electron] did-fail-load", { errorCode, errorDescription, validatedURL });
+    });
+    win.webContents.on("render-process-gone", (_event, details) => {
+      console.error("[electron] render-process-gone", details);
+    });
+    win.webContents.on("unresponsive", () => {
+      console.error("[electron] webContents unresponsive");
+    });
+  } catch {
+    // ignore
+  }
+
   const devServerUrl = process.env.VITE_DEV_SERVER_URL;
   if (devServerUrl) {
     win.loadURL(devServerUrl);

@@ -352,6 +352,7 @@ export type AutoRetryAnalysis = {
   needWrite: boolean;
   needKb: boolean;
   needLint: boolean;
+  needLength: boolean;
   needFinalText: boolean;
   reasons: string[];
 };
@@ -362,6 +363,7 @@ export function analyzeAutoRetryText(args: {
   gates: RunGates;
   state: RunState;
   lintMaxRework: number;
+  targetChars?: number | null;
 }) : AutoRetryAnalysis {
   const t = String(args.assistantText ?? "").trim();
   const isEmpty = t.length === 0;
@@ -375,6 +377,16 @@ export function analyzeAutoRetryText(args: {
   const needKb = args.gates.styleGateEnabled && !args.state.hasStyleKbSearch && !isClarify;
   const needLint =
     args.gates.lintGateEnabled && !args.state.styleLintPassed && args.state.styleLintFailCount <= args.lintMaxRework && !isClarify;
+  const target = Number.isFinite(Number(args.targetChars as any)) ? Math.max(0, Number(args.targetChars)) : 0;
+  const looksDraft =
+    looksLikeDraftText(t) || (t.length >= 400 && /[。！？]/.test(t) && t.split(/\n{2,}/).filter(Boolean).length >= 3);
+  const needLength =
+    !isClarify &&
+    target >= 200 &&
+    looksDraft &&
+    args.intent.isWritingTask &&
+    // 只做“明显偏离”提醒（避免卡在细微误差）
+    (t.length < target * 0.72 || t.length > target * 1.35);
   const needFinalText = isEmpty && !needTodo && !needWrite && !needKb && !needLint;
 
   const reasons: string[] = [];
@@ -384,10 +396,11 @@ export function analyzeAutoRetryText(args: {
   if (needTodo) reasons.push("Todo 未设置");
   if (needKb) reasons.push("风格样例未检索");
   if (needLint) reasons.push("未进行风格对齐(lint.style)");
+  if (needLength) reasons.push("字数与目标偏离较大");
   if (needWrite) reasons.push("写入未执行");
 
-  const shouldRetry = isFIMLeak || isEmpty || needTodo || needWrite || needKb || needLint;
-  return { shouldRetry, isEmpty, isFIMLeak, isClarify, needTodo, needWrite, needKb, needLint, needFinalText, reasons };
+  const shouldRetry = isFIMLeak || isEmpty || needTodo || needWrite || needKb || needLint || needLength;
+  return { shouldRetry, isEmpty, isFIMLeak, isClarify, needTodo, needWrite, needKb, needLint, needLength, needFinalText, reasons };
 }
 
 export type StyleWorkflowBatchAnalysis = {
@@ -421,7 +434,8 @@ export function analyzeStyleWorkflowBatch(args: {
 
   const shouldEnforce = args.intent.isWritingTask || batchHasWrite || batchHasLint;
   const needStyleKb = !args.state.hasStyleKbSearch;
-  const enforceLint = !args.intent.skipLint;
+  // 是否“强制要求 lint”：由 gates.lintGateEnabled 统一控制（Gateway 可根据产品策略选择 hint/gate）
+  const enforceLint = args.gates.lintGateEnabled === true;
   const lintExhausted = enforceLint && !args.state.styleLintPassed && args.state.styleLintFailCount > args.lintMaxRework;
   const needStyleLint = enforceLint && !args.state.styleLintPassed;
 

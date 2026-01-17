@@ -14,6 +14,17 @@ import time
 PORT = 5173
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+def _safe_reconfigure_stdio():
+    # Windows 下某些终端（尤其是 Git Bash）stdout 可能是 gbk，无法输出部分 unicode（例如 ✓）导致脚本异常。
+    # 这里统一切到 utf-8，并用 replace 兜底，避免“清端口失败→Vite strictPort 启动失败→Electron 白屏/加载不上”。
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 
 def get_pids_on_port(port: int) -> list[int]:
     """获取占用指定端口的所有 PID（Windows）"""
@@ -53,7 +64,7 @@ def kill_pid(pid: int) -> bool:
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
         if result.returncode == 0:
-            print(f"[✓] 已结束进程 PID={pid}")
+            print(f"[OK] 已结束进程 PID={pid}")
             return True
         else:
             # 可能进程已不存在
@@ -101,6 +112,7 @@ def start_desktop():
 
 
 def main():
+    _safe_reconfigure_stdio()
     print("=" * 50)
     print("  写作 IDE - Desktop 重启脚本")
     print("=" * 50)
