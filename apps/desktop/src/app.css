@@ -1372,19 +1372,20 @@ body {
 .composerBar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
   border-top: 1px solid var(--border);
   padding: 6px 8px;
+  /* 不要用 space-between：改用 margin-left: auto 把右侧推到最右 */
 }
 
 .composerBarLeft {
   display: flex;
   align-items: center;
   gap: 6px;
+  /* 基础大小 0：只占用剩余空间，可完全被压缩 */
+  flex: 1 1 0;
   min-width: 0;
-  flex: 1 1 auto; /* 让左侧 pills 吃剩余空间，优先被压缩 */
-  overflow: hidden; /* 宽度不足时，允许左侧被裁掉，保证右侧发送/停止可见 */
+  overflow: hidden;
 }
 
 .composerBarRight {
@@ -1392,24 +1393,24 @@ body {
   align-items: center;
   gap: 6px;
   flex-wrap: nowrap;
-  min-width: 0;
-  /* 右侧整体允许 shrink（避免整条 bar 溢出被 agent 的 overflow:hidden 裁剪）；
-     shrink 时优先裁掉右侧 main icons，保留最右发送/停止。 */
   flex: 0 1 auto;
+  min-width: 40px; /* 至少容纳发送按钮 */
+  margin-left: auto;
+  /* 不设 overflow:hidden → 发送按钮不会被裁；图标区有自己的 overflow:hidden */
 }
 
 .composerBarRightMain {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex: 1 1 auto;
+  flex: 1 1 0; /* 增长填充可用空间，可完全收缩到 0 */
   min-width: 0;
   overflow: hidden;
-  justify-content: flex-end; /* 宽度不足时，优先裁掉左侧 icon，保留右侧 */
+  justify-content: flex-start; /* 图标从左开始排，溢出时右边图标被裁 */
 }
 
 .composerBarRightSend {
-  flex: 0 0 auto;
+  flex: 0 0 auto; /* 永不收缩 */
 }
 
 .pillSelect {
