@@ -816,8 +816,6 @@ export function AgentPane() {
                             ]}
                             onChange={(v) => setMode(v as typeof mode)}
                             title="模式"
-                            minWidth={86}
-                            maxWidth={120}
                           />
                           <PillSelect
                             value={runIntentValue}
@@ -831,12 +829,10 @@ export function AgentPane() {
                             ]}
                             onChange={(v) => updateMainDoc({ runIntent: v as RunIntentValue })}
                             title={`意图（结构化）：${runIntentLabel}\n- 自动：后端启发式判断\n- 写作/改写/润色：会更倾向启用写作闭环门禁\n- 分析/操作：尽量避免误触写作强闭环`}
-                            minWidth={98}
-                            maxWidth={136}
                           />
                           <div
                             className="pillSelect"
-                            style={{ minWidth: 120, maxWidth: 220 }}
+                            style={{ minWidth: 0, maxWidth: 220 }}
                             title={model ? `模型：${model}` : "未选择模型"}
                           >
                             <button
@@ -1192,8 +1188,6 @@ export function AgentPane() {
                 ]}
                 onChange={(v) => setMode(v as typeof mode)}
                 title="模式"
-                minWidth={86}
-                maxWidth={120}
               />
               <PillSelect
                 value={runIntentValue}
@@ -1207,10 +1201,8 @@ export function AgentPane() {
                 ]}
                 onChange={(v) => updateMainDoc({ runIntent: v as RunIntentValue })}
                 title={`意图（结构化）：${runIntentLabel}\n- 自动：后端启发式判断\n- 写作/改写/润色：会更倾向启用写作闭环门禁\n- 分析/操作：尽量避免误触写作强闭环`}
-                minWidth={98}
-                maxWidth={136}
               />
-              <div className="pillSelect" style={{ minWidth: 120, maxWidth: 220 }} title={model ? `模型：${model}` : "未选择模型"}>
+              <div className="pillSelect" style={{ minWidth: 0, maxWidth: 220 }} title={model ? `模型：${model}` : "未选择模型"}>
                 <button
                   className="pillBtn"
                   type="button"

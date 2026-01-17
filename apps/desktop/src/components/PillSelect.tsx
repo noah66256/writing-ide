@@ -75,7 +75,8 @@ export function PillSelect(props: {
       className="pillSelect"
       ref={rootRef}
       style={{
-        minWidth: props.minWidth ?? 96,
+        // 允许在窄宽时继续收缩（避免把右侧“发送/停止”顶出屏幕）
+        minWidth: props.minWidth ?? 0,
         maxWidth: props.maxWidth ?? 220,
       }}
       title={props.title}
