@@ -1,6 +1,7 @@
 import { useProjectStore } from "../state/projectStore";
 import { useRunStore, type Mode } from "../state/runStore";
 import { useKbStore } from "../state/kbStore";
+import { facetLabel, getFacetPack } from "../kb/facets";
 import { activateSkills } from "@writing-ide/agent-core";
 import { buildStyleLinterLibrariesSidecar, executeToolCall, getTool, toolsPrompt } from "./toolRegistry";
 import { isToolCallMessage, parseToolCalls, renderToolErrorXml, renderToolResultXml } from "./xmlProtocol";
@@ -261,6 +262,251 @@ function computeTopicFitV1(topicText: string, clusterText: string): { score: num
     }
   }
   return { score, hits: hits.slice(0, 8) };
+}
+
+type SelectorStageIdV1 = "opening" | "outline" | "draft" | "ending" | "polish" | "unknown";
+
+function detectWritingStageV1(args: {
+  userPrompt: string;
+  todoList: any[];
+}): { id: SelectorStageIdV1; label: string; by: string; evidence?: string } {
+  const prompt = String(args?.userPrompt ?? "").trim();
+  const todoList = Array.isArray(args?.todoList) ? args.todoList : [];
+  const activeTodo = todoList.find((t: any) => {
+    const s = String(t?.status ?? "").trim().toLowerCase();
+    return s && s !== "done" && s !== "skipped";
+  });
+  const todoHint = activeTodo ? `${String(activeTodo?.text ?? "").trim()}\n${String(activeTodo?.note ?? "").trim()}`.trim() : "";
+  const hay = `${prompt}\n${todoHint}`.trim();
+  const by = todoHint ? "todo+prompt" : "prompt";
+
+  const hit = (re: RegExp) => re.test(hay);
+  if (hit(/润色|终稿|定稿|校对|自检|lint|polish/i)) return { id: "polish", label: "润色/终稿", by, evidence: todoHint || prompt };
+  if (hit(/结尾|收尾|结论|总结|升华|CTA|call\s*to\s*action/i)) return { id: "ending", label: "收尾/结尾", by, evidence: todoHint || prompt };
+  if (hit(/开头|开场|破题|钩子|hook|标题/i)) return { id: "opening", label: "开头/开场", by, evidence: todoHint || prompt };
+  if (hit(/大纲|提纲|outline|结构|框架/i)) return { id: "outline", label: "大纲/结构", by, evidence: todoHint || prompt };
+  if (hit(/改写|仿写|续写|扩写|写一篇|写\s*\d{2,5}\s*字/i)) return { id: "draft", label: "撰写/正文", by, evidence: todoHint || prompt };
+
+  // 写作任务默认视为正文阶段（Selector v1：避免 unknown 导致选卡过于保守）
+  return { id: "draft", label: "撰写/正文", by: "default", evidence: todoHint || prompt };
+}
+
+function topicBriefForKbQueryV1(args: { userPrompt: string; mainDoc: any }): string {
+  const g = String(args?.mainDoc?.goal ?? "").trim();
+  const p = String(args?.userPrompt ?? "").trim();
+  const base = g || p;
+  return base.replace(/\s+/g, " ").trim().slice(0, 80);
+}
+
+function stageFacetWeightsV1(
+  packId: string,
+  stageId: SelectorStageIdV1,
+): { essential: string[]; supportive: string[]; k: number } {
+  const pid = String(packId ?? "").trim() || "speech_marketing_v1";
+  // 口播/营销（v1）
+  if (pid === "speech_marketing_v1") {
+    if (stageId === "opening")
+      return {
+        essential: ["opening_design", "intro", "question_design", "emotion_mobilization", "voice_rhythm", "one_liner_crafting"],
+        supportive: ["reader_interaction", "scene_building", "rhetoric"],
+        k: 6,
+      };
+    if (stageId === "outline")
+      return {
+        essential: ["narrative_structure", "logic_framework", "structure_patterns"],
+        supportive: ["topic_selection", "persuasion", "reader_interaction"],
+        k: 5,
+      };
+    if (stageId === "ending")
+      return {
+        essential: ["values_embedding", "resonance", "structure_patterns"],
+        supportive: ["one_liner_crafting", "reader_interaction", "emotion_mobilization"],
+        k: 5,
+      };
+    if (stageId === "polish")
+      return {
+        essential: ["language_style", "voice_rhythm", "special_markers", "ai_clone_strategy"],
+        supportive: ["one_liner_crafting", "rhetoric"],
+        k: 4,
+      };
+    // draft / unknown
+    return {
+      essential: ["logic_framework", "narrative_structure", "persuasion", "voice_rhythm", "emotion_mobilization"],
+      supportive: ["reader_interaction", "scene_building", "one_liner_crafting", "rhetoric"],
+      k: 7,
+    };
+  }
+
+  // 小说（v1，占位）
+  if (pid === "novel_v1") {
+    if (stageId === "opening") return { essential: ["viewpoint_voice", "pacing_tension", "world_setting"], supportive: ["foreshadowing_payoff"], k: 4 };
+    if (stageId === "outline") return { essential: ["plot_structure", "character_arc"], supportive: ["world_setting"], k: 4 };
+    if (stageId === "ending") return { essential: ["foreshadowing_payoff", "pacing_tension"], supportive: ["character_arc"], k: 4 };
+    if (stageId === "polish") return { essential: ["viewpoint_voice", "dialogue"], supportive: ["pacing_tension"], k: 4 };
+    return { essential: ["plot_structure", "character_arc", "scene_goal_conflict"], supportive: ["dialogue", "pacing_tension"], k: 5 };
+  }
+
+  return { essential: [], supportive: [], k: 6 };
+}
+
+type SelectedFacetV1 = {
+  facetId: string;
+  label: string;
+  score: number;
+  topicFit: number;
+  stageFit: number;
+  basePlan: boolean;
+  why: string;
+  kbQueries: string[];
+  topicHits?: string[];
+};
+
+function pickFacetsSelectorV1(args: {
+  facetPackId: string;
+  cluster: any;
+  topicText: string;
+  topicBrief: string;
+  stageId: SelectorStageIdV1;
+}): { selected: SelectedFacetV1[]; trace: any } {
+  const pack = getFacetPack(args.facetPackId);
+  const packFacetIds = pack.facets.map((f) => f.id);
+  const order = new Map(pack.facets.map((f, i) => [f.id, i]));
+
+  const planItems = Array.isArray(args.cluster?.facetPlan) ? (args.cluster.facetPlan as any[]) : [];
+  const planById = new Map(
+    planItems
+      .map((x) => ({
+        facetId: String(x?.facetId ?? "").trim(),
+        why: String(x?.why ?? "").trim(),
+        kbQueries: Array.isArray(x?.kbQueries) ? x.kbQueries.map((q: any) => String(q ?? "").trim()).filter(Boolean) : [],
+      }))
+      .filter((x) => x.facetId),
+  );
+
+  const candidateIds = Array.from(
+    new Set([
+      ...packFacetIds,
+      ...planItems.map((x: any) => String(x?.facetId ?? "").trim()).filter(Boolean), // 兜底：允许 pack 外的 facetId
+    ]),
+  );
+
+  const stage = stageFacetWeightsV1(pack.id, args.stageId);
+  const essential = new Set(stage.essential);
+  const supportive = new Set(stage.supportive);
+
+  const scored: Array<{
+    facetId: string;
+    label: string;
+    basePlan: boolean;
+    stageFit: number;
+    rawTopicScore: number;
+    topicHits: string[];
+    planWhy: string;
+    planKbQueries: string[];
+  }> = [];
+
+  for (const facetId of candidateIds) {
+    const label = facetLabel(facetId);
+    const plan = planById.get(facetId);
+    const planWhy = plan?.why ?? "";
+    const planKbQueries = plan?.kbQueries ?? [];
+    const basePlan = planById.has(facetId);
+    const stageFit = essential.has(facetId) ? 1 : supportive.has(facetId) ? 0.6 : 0;
+    const facetText = [label, facetId, planWhy, planKbQueries.join(" ")].filter(Boolean).join("\n");
+    const tf = computeTopicFitV1(args.topicText, facetText);
+    scored.push({
+      facetId,
+      label,
+      basePlan,
+      stageFit,
+      rawTopicScore: tf.score,
+      topicHits: tf.hits,
+      planWhy,
+      planKbQueries,
+    });
+  }
+
+  const maxRaw = scored.reduce((m, x) => Math.max(m, x.rawTopicScore), 0);
+  const withFinal = scored.map((x) => {
+    const topicFit = maxRaw > 0 ? x.rawTopicScore / maxRaw : 0;
+    const basePlanScore = x.basePlan ? 1 : 0;
+    const score = 0.55 * topicFit + 0.30 * x.stageFit + 0.15 * basePlanScore;
+    return { ...x, topicFit, score };
+  });
+
+  // 先强制纳入 essential，再按总分补齐
+  const k = Math.max(4, Math.min(8, stage.k || 6));
+  const selectedIds: string[] = [];
+  const seen = new Set<string>();
+  const push = (id: string) => {
+    const k = String(id ?? "").trim();
+    if (!k || seen.has(k)) return;
+    seen.add(k);
+    selectedIds.push(k);
+  };
+
+  // essential（按 facet pack 顺序）
+  for (const fid of stage.essential) {
+    if (selectedIds.length >= k) break;
+    if (!candidateIds.includes(fid)) continue;
+    push(fid);
+  }
+
+  const sorted = withFinal
+    .slice()
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      if (Number(b.basePlan) !== Number(a.basePlan)) return Number(b.basePlan) - Number(a.basePlan);
+      if (b.stageFit !== a.stageFit) return b.stageFit - a.stageFit;
+      const oa = order.get(a.facetId) ?? 999;
+      const ob = order.get(b.facetId) ?? 999;
+      if (oa !== ob) return oa - ob;
+      return String(a.facetId).localeCompare(String(b.facetId));
+    });
+
+  for (const it of sorted) {
+    if (selectedIds.length >= k) break;
+    push(it.facetId);
+  }
+
+  const selected = selectedIds
+    .map((fid) => withFinal.find((x) => x.facetId === fid))
+    .filter(Boolean)
+    .map((x: any) => {
+      const q0 = String(args.topicBrief ?? "").trim();
+      const base = q0 ? `${q0} ${x.label}`.trim() : x.label;
+      const hint = String((x.planKbQueries?.[0] ?? (Array.isArray(args.cluster?.queries) ? args.cluster.queries[0] : "") ?? "") as any).trim();
+      const q1 = base.slice(0, 96);
+      const q2 = hint ? `${base} ${hint}`.trim().slice(0, 110) : "";
+      const kbQueries = Array.from(new Set([q1, q2].map((s) => String(s ?? "").trim()).filter(Boolean))).slice(0, 2);
+      const whyParts = [
+        x.planWhy ? `plan:${x.planWhy}` : "",
+        x.stageFit > 0.8 ? "stage:必备" : x.stageFit > 0.3 ? "stage:辅助" : "",
+        x.topicHits?.length ? `topic:${x.topicHits.slice(0, 3).join("、")}` : "",
+      ].filter(Boolean);
+      return {
+        facetId: x.facetId,
+        label: x.label,
+        score: Number(x.score.toFixed(4)),
+        topicFit: Number(x.topicFit.toFixed(4)),
+        stageFit: Number(x.stageFit.toFixed(2)),
+        basePlan: Boolean(x.basePlan),
+        why: whyParts.join("；").slice(0, 220),
+        kbQueries,
+        topicHits: Array.isArray(x.topicHits) ? x.topicHits.slice(0, 5) : undefined,
+      } as SelectedFacetV1;
+    });
+
+  return {
+    selected,
+    trace: {
+      method: "selector_v1_facets",
+      stage: args.stageId,
+      k,
+      maxRawTopic: maxRaw,
+      top: sorted.slice(0, 6).map((x) => ({ facetId: x.facetId, score: Number(x.score.toFixed(4)) })),
+    },
+  };
 }
 
 function pickClusterSelectorV1(args: {
@@ -553,6 +799,8 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
 
   const styleSelectorSection = await (async () => {
     // Selector v1：为“自动选簇/选卡”提供结构化输出，保证换生成模型也稳定可用
+    const styleSkillActive = Array.isArray(activeSkills) && activeSkills.some((s: any) => String(s?.id ?? "") === "style_imitate");
+    if (!styleSkillActive) return "";
     const styleLibs = kbSelected.filter((l: any) => String(l?.purpose ?? "").trim() === "style").slice(0, 1);
     if (!styleLibs.length) return "";
     const lib = styleLibs[0];
@@ -568,6 +816,7 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
     const defaultClusterId = cfg?.ok ? String((cfg as any).defaultClusterId ?? "").trim() : "";
 
     const topicText = buildTopicTextForSelectorV1({ userPrompt, mainDoc });
+    const topicBrief = topicBriefForKbQueryV1({ userPrompt, mainDoc });
     const autoPick = pickClusterSelectorV1({ clusters: clustersRaw, defaultClusterId, topicText });
 
     const existing: any = (mainDoc as any)?.styleContractV1 ?? null;
@@ -581,34 +830,76 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
     const selectedClusterId = selectedByMainDoc || String(autoPick.selectedId ?? "").trim();
     const byId = new Map(clustersRaw.map((c: any) => [String(c?.id ?? "").trim(), c]));
     const selected = selectedClusterId ? (byId.get(selectedClusterId) as any) : null;
-    const selectedFacetIds = selected ? pickFacetIdsV1(selected, 8) : [];
+    const stage = detectWritingStageV1({ userPrompt, todoList });
+    const facetPackId = String(lib?.facetPackId ?? "speech_marketing_v1").trim() || "speech_marketing_v1";
+    const facetPick = selected
+      ? pickFacetsSelectorV1({
+          facetPackId,
+          cluster: selected,
+          topicText,
+          topicBrief,
+          stageId: stage.id,
+        })
+      : { selected: [] as SelectedFacetV1[], trace: { method: "selector_v1_facets", stage: stage.id, k: 0, maxRawTopic: 0 } };
+    const selectedFacets = facetPick.selected;
+    const selectedFacetIds = selectedFacets.map((x) => x.facetId).filter(Boolean);
 
     const why: string[] = [];
     if (selectedByMainDoc) why.push("已按 Main Doc 锁定写法（用户可改口覆盖）。");
     const anchorsCount = selected && Array.isArray(selected?.anchors) ? selected.anchors.length : 0;
     if (anchorsCount > 0) why.push(`本簇已采纳 anchors：${anchorsCount} 段（优先“更像原文”）。`);
     if (autoPick.topicHits?.length) why.push(`话题命中关键词：${autoPick.topicHits.slice(0, 4).join("、")}`);
+    why.push(`写作阶段：${stage.label}（${stage.by}）`);
+    if (selectedFacetIds.length) why.push(`本次维度子集：${selectedFacetIds.length} 张（TopK，选出来就必须执行）`);
     const st = String(selected?.stability ?? "").trim();
     const cov = Number(selected?.docCoverageRate ?? 0) || 0;
     const seg = Number(selected?.segmentCount ?? 0) || 0;
     if (st || cov || seg) why.push(`稳定性=${st || "unknown"}；覆盖率=${Math.round(cov * 100)}%；段数=${seg}`);
     if (defaultClusterId && selectedClusterId === defaultClusterId) why.push("命中本库默认写法。");
 
+    const facetCardsSection = await (async () => {
+      if (!selectedFacetIds.length) return "";
+      const ret = await useKbStore
+        .getState()
+        .getPlaybookFacetCardsForLibrary({ libraryId: libId, facetIds: selectedFacetIds, maxCharsPerCard: 1000, maxTotalChars: 6500 })
+        .catch(() => ({ ok: false, cards: [] } as any));
+      const cards = ret?.ok && Array.isArray(ret.cards) ? ret.cards : [];
+      const body = cards
+        .map((c: any) => String(c?.content ?? "").trim())
+        .filter(Boolean)
+        .join("\n\n");
+      if (!body) return "";
+      return (
+        `STYLE_FACETS_SELECTED(Markdown):\n${body}\n\n` +
+        `提示：以上为本次 Selector 选出的“维度卡子集”（只执行这些卡；不要自行扩展到 21 张）。如需更多原文证据，请调用 kb.search 并带 facetIds 过滤。\n\n`
+      );
+    })();
+
     const payload = {
-      v: 1,
+      v: 2,
       libraryId: libId,
       libraryName: String(lib?.name ?? libId),
+      facetPackId,
       selectedClusterId: selectedClusterId || null,
       selectedFacetIds,
+      selectedFacets: selectedFacets.map((f) => ({
+        facetId: f.facetId,
+        label: f.label,
+        why: f.why,
+        kbQueries: f.kbQueries,
+        score: f.score,
+      })),
+      stage,
       why: why.slice(0, 6),
       trace: {
         ...autoPick.trace,
+        facets: facetPick.trace,
         selectedBy: selectedByMainDoc ? "mainDoc" : "auto",
         selectedClusterId: selectedClusterId || null,
       },
     };
 
-    return `STYLE_SELECTOR(JSON):\n${JSON.stringify(payload, null, 2)}\n\n`;
+    return `STYLE_SELECTOR(JSON):\n${JSON.stringify(payload, null, 2)}\n\n` + facetCardsSection;
   })();
 
   // Pending proposals：用于“proposal-first 不落盘”但仍可继续下一步（避免下一轮说‘没有初稿’）

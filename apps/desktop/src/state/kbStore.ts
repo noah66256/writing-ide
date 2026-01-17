@@ -341,6 +341,13 @@ type KbState = {
   setLibraryStyleDefaultCluster: (args: { libraryId: string; clusterId: string | null }) => Promise<{ ok: boolean; error?: string }>;
   // 供 Agent 的 Context Pack 注入：读取库级“仿写手册”（StyleProfile + 维度手册）
   getPlaybookTextForLibraries: (libraryIds: string[]) => Promise<string>;
+  // Selector v1：读取 playbook_facet 维度卡（按 facetIds）供 Context Pack 注入（避免模型看不见/不执行）
+  getPlaybookFacetCardsForLibrary: (args: {
+    libraryId: string;
+    facetIds: string[];
+    maxCharsPerCard?: number;
+    maxTotalChars?: number;
+  }) => Promise<{ ok: boolean; cards: Array<{ facetId: string; title: string; content: string }>; error?: string }>;
 
   openKbManager: (tab?: KbState["kbManagerTab"], notice?: string | null) => void;
   closeKbManager: () => void;
@@ -4752,6 +4759,70 @@ export const useKbStore = create<KbState>()(
           return parts.join("");
         } catch {
           return "";
+        }
+      },
+
+      getPlaybookFacetCardsForLibrary: async (args) => {
+        const ok = await get().ensureReady();
+        if (!ok) return { ok: false, cards: [], error: "KB_DIR_NOT_SET" };
+        const baseDir = get().baseDir!;
+        const ownerKey = get().ownerKey;
+
+        const libId = String(args?.libraryId ?? "").trim();
+        const facetIds = Array.from(new Set((args?.facetIds ?? []).map((x) => String(x ?? "").trim()).filter(Boolean)));
+        const maxCharsPerCard = typeof args?.maxCharsPerCard === "number" ? Math.max(200, Math.floor(args.maxCharsPerCard)) : 1200;
+        const maxTotalChars = typeof args?.maxTotalChars === "number" ? Math.max(800, Math.floor(args.maxTotalChars)) : 9000;
+        if (!libId || !facetIds.length) return { ok: true, cards: [] };
+
+        try {
+          const db = await loadDb({ baseDir, ownerKey });
+          const lib = db.libraries.find((l) => l.id === libId);
+          if (!lib) return { ok: false, cards: [], error: "LIBRARY_NOT_FOUND" };
+
+          const pack = getFacetPack(lib.facetPackId ?? "speech_marketing_v1");
+          const facetOrder = new Map(pack.facets.map((f, i) => [f.id, i]));
+          const wanted = new Set(facetIds);
+
+          const playbookRel = `__kb_playbook__/library/${libId}.md`;
+          const playbookDoc = db.sourceDocs.find(
+            (d) => d.libraryId === libId && d.importedFrom?.kind === "project" && d.importedFrom.relPath === playbookRel,
+          );
+          if (!playbookDoc) return { ok: true, cards: [] };
+
+          const raw = db.artifacts
+            .filter((a: any) => {
+              if (a.kind !== "card") return false;
+              if (a.sourceDocId !== playbookDoc.id) return false;
+              if (String(a.cardType ?? "") !== "playbook_facet") return false;
+              const fid = String(a.facetIds?.[0] ?? "").trim();
+              if (!fid) return false;
+              return wanted.has(fid);
+            })
+            .slice()
+            .sort(
+              (a: any, b: any) =>
+                (facetOrder.get(String(a.facetIds?.[0] ?? "")) ?? 999) - (facetOrder.get(String(b.facetIds?.[0] ?? "")) ?? 999),
+            );
+
+          let used = 0;
+          const cards: Array<{ facetId: string; title: string; content: string }> = [];
+          for (const a of raw) {
+            if (used >= maxTotalChars) break;
+            const facetId = String(a.facetIds?.[0] ?? "").trim();
+            if (!facetId) continue;
+            const title = String(a.title ?? facetId).trim() || facetId;
+            const contentRaw = String(a.content ?? "");
+            const truncated = contentRaw.length > maxCharsPerCard;
+            const content = truncated ? contentRaw.slice(0, maxCharsPerCard) + "\n…(facet card truncated)\n" : contentRaw;
+            const left = maxTotalChars - used;
+            const chunk = content.length > left ? content.slice(0, left) + "\n…(selected facets truncated)\n" : content;
+            cards.push({ facetId, title, content: chunk });
+            used += chunk.length;
+          }
+
+          return { ok: true, cards };
+        } catch (e: any) {
+          return { ok: false, cards: [], error: String(e?.message ?? e) };
         }
       },
     }),
