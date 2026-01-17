@@ -6,6 +6,9 @@ const fsp = require("node:fs/promises");
 const IGNORE_DIRS = new Set(["node_modules", ".git", "dist", "out", "build", ".next"]);
 const TEXT_EXT = new Set([".md", ".mdx", ".txt"]);
 
+const HISTORY_DIRNAME = "writing-ide-data";
+const HISTORY_FILENAME = "conversations.v1.json";
+
 let mainWindow = null;
 let recentProjects = [];
 let watcher = null;
@@ -116,6 +119,72 @@ function stopWatch() {
     clearTimeout(watchTimer);
     watchTimer = null;
   }
+}
+
+function historyCandidateDirs() {
+  const userDataDir = (() => {
+    try {
+      return path.join(app.getPath("userData"), HISTORY_DIRNAME);
+    } catch {
+      return null;
+    }
+  })();
+
+  const installDir = (() => {
+    try {
+      if (!app.isPackaged) return null;
+      const exeDir = path.dirname(app.getPath("exe"));
+      return path.join(exeDir, HISTORY_DIRNAME);
+    } catch {
+      return null;
+    }
+  })();
+
+  // 默认优先安装目录（仅 packaged），否则退到 userData
+  const primary = installDir || userDataDir || null;
+  const fallback = userDataDir || installDir || null;
+  return { primary, fallback };
+}
+
+async function fileExists(p) {
+  try {
+    await fsp.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveHistoryFileForRead() {
+  const { primary, fallback } = historyCandidateDirs();
+  const p1 = primary ? path.join(primary, HISTORY_FILENAME) : null;
+  const p2 = fallback ? path.join(fallback, HISTORY_FILENAME) : null;
+
+  if (p1 && (await fileExists(p1))) return { dir: primary, file: p1, used: "primary" };
+  if (p2 && (await fileExists(p2))) return { dir: fallback, file: p2, used: "fallback" };
+  if (p1) return { dir: primary, file: p1, used: "primary" };
+  if (p2) return { dir: fallback, file: p2, used: "fallback" };
+  throw new Error("NO_HISTORY_DIR");
+}
+
+async function resolveHistoryFileForWrite() {
+  const { primary, fallback } = historyCandidateDirs();
+  const p1 = primary ? path.join(primary, HISTORY_FILENAME) : null;
+  const p2 = fallback ? path.join(fallback, HISTORY_FILENAME) : null;
+
+  if (p1) {
+    try {
+      await fsp.mkdir(primary, { recursive: true });
+      return { dir: primary, file: p1, used: "primary" };
+    } catch {
+      // ignore and fallback
+    }
+  }
+  if (p2) {
+    await fsp.mkdir(fallback, { recursive: true });
+    return { dir: fallback, file: p2, used: "fallback" };
+  }
+  throw new Error("NO_HISTORY_DIR");
 }
 
 function startWatch(rootDir) {
@@ -474,6 +543,44 @@ function registerIpc() {
     recentProjects = [];
     updateMenu();
     return { ok: true };
+  });
+
+  ipcMain.handle("history.getInfo", async () => {
+    try {
+      const { primary, fallback } = historyCandidateDirs();
+      return { ok: true, primaryDir: primary, fallbackDir: fallback, filename: HISTORY_FILENAME };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
+  ipcMain.handle("history.loadConversations", async () => {
+    try {
+      const { file, used } = await resolveHistoryFileForRead();
+      try {
+        const raw = await fsp.readFile(file, "utf-8");
+        const parsed = JSON.parse(String(raw ?? ""));
+        const list = Array.isArray(parsed?.conversations) ? parsed.conversations : Array.isArray(parsed) ? parsed : [];
+        return { ok: true, conversations: list, used, file };
+      } catch (e) {
+        const msg = String(e?.code ?? e?.message ?? e);
+        if (msg.includes("ENOENT")) return { ok: true, conversations: [], used, file };
+        return { ok: false, error: "READ_OR_PARSE_FAILED", detail: String(e?.message ?? e) };
+      }
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
+  ipcMain.handle("history.saveConversations", async (_event, payload) => {
+    try {
+      const { file, used } = await resolveHistoryFileForWrite();
+      const text = typeof payload === "string" ? payload : JSON.stringify(payload ?? null);
+      await fsp.writeFile(file, text, "utf-8");
+      return { ok: true, used, file };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
   });
 }
 

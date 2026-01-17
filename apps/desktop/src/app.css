@@ -665,6 +665,34 @@ body {
   flex: 0 0 auto;
 }
 
+.iconBtnDanger {
+  color: rgba(220, 38, 38, 0.92);
+  border-color: rgba(220, 38, 38, 0.30);
+  background: rgba(220, 38, 38, 0.08);
+}
+
+.iconBtnDanger:hover {
+  color: rgba(220, 38, 38, 0.98);
+  background: rgba(220, 38, 38, 0.12);
+}
+
+.iconBadge {
+  position: absolute;
+  right: -4px;
+  top: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.92);
+  color: white;
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  pointer-events: none;
+}
+
 .pinnedTurnBar {
   border-top: 1px solid var(--border);
   padding-top: 8px;
@@ -1362,6 +1390,21 @@ body {
   align-items: center;
   gap: 6px;
   flex-wrap: nowrap;
+  min-width: 0;
+}
+
+.composerBarRightMain {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  justify-content: flex-end; /* 宽度不足时，优先裁掉左侧 icon，保留右侧 */
+}
+
+.composerBarRightSend {
+  flex: 0 0 auto;
 }
 
 .pillSelect {

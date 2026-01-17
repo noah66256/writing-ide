@@ -67,6 +67,17 @@ contextBridge.exposeInMainWorld("desktop", {
       return ipcRenderer.invoke("workspace.clearRecentProjects");
     },
   },
+  history: {
+    loadConversations() {
+      return ipcRenderer.invoke("history.loadConversations");
+    },
+    saveConversations(payload) {
+      return ipcRenderer.invoke("history.saveConversations", payload);
+    },
+    getInfo() {
+      return ipcRenderer.invoke("history.getInfo");
+    },
+  },
   clipboard: {
     writeText(text) {
       return ipcRenderer.invoke("clipboard.writeText", text);

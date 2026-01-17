@@ -3,7 +3,7 @@ import { activateSkills, type ActiveSkill } from "@writing-ide/agent-core";
 import { startGatewayRun } from "../agent/gatewayAgent";
 import { useRunStore, type MainDoc } from "../state/runStore";
 import { useProjectStore } from "../state/projectStore";
-import { IconAt, IconChevronDown, IconCopy, IconGlobe, IconImage, IconMic, IconRewind, IconSend, IconStop } from "./Icons";
+import { IconAt, IconChevronDown, IconClock, IconCopy, IconEye, IconGlobe, IconImage, IconList, IconMic, IconPlus, IconRewind, IconSend, IconStop, IconTrash } from "./Icons";
 import { PillSelect } from "./PillSelect";
 import { ToolBlock } from "./ToolBlock";
 import { RichText } from "./RichText";
@@ -130,6 +130,7 @@ export function AgentPane() {
   const conversations = useConversationStore((s) => s.conversations);
   const addConversation = useConversationStore((s) => s.addConversation);
   const deleteConversation = useConversationStore((s) => s.deleteConversation);
+  const hydrateConversationsFromDisk = useConversationStore((s) => s.hydrateFromDisk);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [copiedHint, setCopiedHint] = useState<string | null>(null);
   const [hideToolSteps, setHideToolSteps] = useState(() => {
@@ -636,6 +637,11 @@ export function AgentPane() {
     requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ block: "end" }));
   }, [steps, isRunning]);
 
+  // 历史对话：优先从磁盘加载（packaged 默认安装目录；dev 默认 userData），再由 localStorage 兜底
+  useEffect(() => {
+    void hydrateConversationsFromDisk().catch(() => void 0);
+  }, [hydrateConversationsFromDisk]);
+
   return (
     <>
       <div className="mainDoc">
@@ -644,25 +650,42 @@ export function AgentPane() {
             {mainDocSummary}
           </div>
           <div className="agentTopActions">
-            <button className="btn" type="button" onClick={onNewConversation} disabled={isRunning}>
-              新对话
-            </button>
-            <button className="btn" type="button" onClick={() => setHistoryOpen(true)} disabled={isRunning}>
-              历史 {conversations.length ? `(${conversations.length})` : ""}
-            </button>
-            <button className="btn" type="button" onClick={onCopyDiagnostics} disabled={isRunning}>
-              复制诊断
+            <button className="iconBtn" type="button" onClick={onNewConversation} disabled={isRunning} title="新对话" aria-label="新对话">
+              <IconPlus />
             </button>
             <button
-              className="btn"
+              className="iconBtn"
+              type="button"
+              onClick={() => setHistoryOpen(true)}
+              disabled={isRunning}
+              title={conversations.length ? `历史（${conversations.length}）` : "历史"}
+              aria-label="历史"
+              style={{ position: "relative" }}
+            >
+              <IconClock />
+              {conversations.length ? <span className="iconBadge">{Math.min(99, conversations.length)}</span> : null}
+            </button>
+            <button className="iconBtn" type="button" onClick={onCopyDiagnostics} disabled={isRunning} title="复制诊断" aria-label="复制诊断">
+              <IconCopy />
+            </button>
+            <button
+              className="iconBtn"
               type="button"
               onClick={() => setHideToolSteps((v) => !v)}
               title={hideToolSteps ? "显示工具步骤（Tool Blocks）" : "隐藏工具步骤（只看正文）"}
+              aria-label={hideToolSteps ? "显示步骤" : "只看正文"}
             >
-              {hideToolSteps ? "显示步骤" : "只看正文"}
+              {hideToolSteps ? <IconList /> : <IconEye />}
             </button>
-            <button className="btn btnDanger" type="button" onClick={onDeleteCurrent} disabled={isRunning}>
-              删除
+            <button
+              className="iconBtn iconBtnDanger"
+              type="button"
+              onClick={onDeleteCurrent}
+              disabled={isRunning}
+              title="删除当前对话"
+              aria-label="删除当前对话"
+            >
+              <IconTrash />
             </button>
           </div>
         </div>
@@ -836,85 +859,89 @@ export function AgentPane() {
                         </div>
 
                         <div className="composerBarRight">
-                          <button
-                            className="iconBtn"
-                            type="button"
-                            aria-label="@ 引用"
-                            title="@ 引用选择器"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openRefPicker("history");
-                            }}
-                          >
-                            <IconAt />
-                          </button>
-                          <button
-                            className="iconBtn"
-                            type="button"
-                            aria-label="联网/网页引用"
-                            title="联网/网页引用（占位：后续接 webSearch）"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              useRunStore.getState().addAssistant("（webSearch 按钮占位：后续接入）");
-                            }}
-                          >
-                            <IconGlobe />
-                          </button>
-                          <button
-                            className="iconBtn"
-                            type="button"
-                            aria-label="图片"
-                            title="图片输入（占位：后续接入上传/解析/OCR）"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              fileInputRef.current?.click();
-                            }}
-                          >
-                            <IconImage />
-                          </button>
-                          <button
-                            className="iconBtn"
-                            type="button"
-                            aria-label="语音"
-                            title="语音输入（占位：后续接入 start/stop）"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              useRunStore.getState().addAssistant("（语音输入接口已预留，后续接入）");
-                            }}
-                          >
-                            <IconMic />
-                          </button>
+                          <div className="composerBarRightMain">
+                            <button
+                              className="iconBtn"
+                              type="button"
+                              aria-label="@ 引用"
+                              title="@ 引用选择器"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openRefPicker("history");
+                              }}
+                            >
+                              <IconAt />
+                            </button>
+                            <button
+                              className="iconBtn"
+                              type="button"
+                              aria-label="联网/网页引用"
+                              title="联网/网页引用（占位：后续接 webSearch）"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                useRunStore.getState().addAssistant("（webSearch 按钮占位：后续接入）");
+                              }}
+                            >
+                              <IconGlobe />
+                            </button>
+                            <button
+                              className="iconBtn"
+                              type="button"
+                              aria-label="图片"
+                              title="图片输入（占位：后续接入上传/解析/OCR）"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                fileInputRef.current?.click();
+                              }}
+                            >
+                              <IconImage />
+                            </button>
+                            <button
+                              className="iconBtn"
+                              type="button"
+                              aria-label="语音"
+                              title="语音输入（占位：后续接入 start/stop）"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                useRunStore.getState().addAssistant("（语音输入接口已预留，后续接入）");
+                              }}
+                            >
+                              <IconMic />
+                            </button>
+                          </div>
 
-                          {isRunning ? (
-                            <button
-                              className="sendBtn"
-                              type="button"
-                              aria-label="停止"
-                              title="停止"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onStop();
-                              }}
-                            >
-                              <IconStop />
-                            </button>
-                          ) : (
-                            <button
-                              className="sendBtn"
-                              type="button"
-                              aria-label="提交"
-                              title="提交"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                const t = editingText.trim();
-                                if (!t) return;
-                                setSubmitFromHistory({ stepId: step.id, text: t });
-                              }}
-                              disabled={!editingText.trim() || !model}
-                            >
-                              <IconSend />
-                            </button>
-                          )}
+                          <div className="composerBarRightSend">
+                            {isRunning ? (
+                              <button
+                                className="sendBtn"
+                                type="button"
+                                aria-label="停止"
+                                title="停止"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onStop();
+                                }}
+                              >
+                                <IconStop />
+                              </button>
+                            ) : (
+                              <button
+                                className="sendBtn"
+                                type="button"
+                                aria-label="提交"
+                                title="提交"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const t = editingText.trim();
+                                  if (!t) return;
+                                  setSubmitFromHistory({ stepId: step.id, text: t });
+                                }}
+                                disabled={!editingText.trim() || !model}
+                              >
+                                <IconSend />
+                              </button>
+                            )}
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -1201,90 +1228,71 @@ export function AgentPane() {
             </div>
 
             <div className="composerBarRight">
-              <button
-                className="iconBtn"
-                type="button"
-                aria-label="@ 引用"
-                title="@ 引用选择器"
-                onClick={() => openRefPicker("main")}
-              >
-                <IconAt />
-              </button>
-              <button
-                className="iconBtn"
-                type="button"
-                aria-label="联网/网页引用"
-                title="联网/网页引用（占位：后续接 webSearch）"
-                onClick={() =>
-                  useRunStore.getState().addAssistant("（webSearch 按钮占位：后续接入）")
-                }
-              >
-                <IconGlobe />
-              </button>
-              <button
-                className="iconBtn"
-                type="button"
-                aria-label="图片"
-                title="图片输入（占位：后续接入上传/解析/OCR）"
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <IconImage />
-              </button>
-              <button
-                className="iconBtn"
-                type="button"
-                aria-label="语音"
-                title="语音输入（占位：后续接入 start/stop）"
-                onClick={() =>
-                  useRunStore.getState().addAssistant("（语音输入接口已预留，后续接入）")
-                }
-              >
-                <IconMic />
-              </button>
-
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                style={{ display: "none" }}
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (!f) return;
-                  useRunStore.getState().addTool({
-                    toolName: "media.attachImage",
-                    status: "success",
-                    input: { name: f.name, size: f.size, type: f.type },
-                    output: { ok: true },
-                    riskLevel: "low",
-                    applyPolicy: "proposal",
-                    undoable: false
-                  });
-                  e.currentTarget.value = "";
-                }}
-              />
-
-              {isRunning ? (
-                <button
-                  className="sendBtn"
-                  type="button"
-                  aria-label="停止"
-                  title="停止"
-                  onClick={onStop}
-                >
-                  <IconStop />
+              <div className="composerBarRightMain">
+                <button className="iconBtn" type="button" aria-label="@ 引用" title="@ 引用选择器" onClick={() => openRefPicker("main")}>
+                  <IconAt />
                 </button>
-              ) : (
                 <button
-                  className="sendBtn"
+                  className="iconBtn"
                   type="button"
-                  aria-label="发送"
-                  title="发送"
-                  onClick={onSend}
-                  disabled={!input.trim()}
+                  aria-label="联网/网页引用"
+                  title="联网/网页引用（占位：后续接 webSearch）"
+                  onClick={() => useRunStore.getState().addAssistant("（webSearch 按钮占位：后续接入）")}
                 >
-                  <IconSend />
+                  <IconGlobe />
                 </button>
-              )}
+                <button
+                  className="iconBtn"
+                  type="button"
+                  aria-label="图片"
+                  title="图片输入（占位：后续接入上传/解析/OCR）"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <IconImage />
+                </button>
+                <button
+                  className="iconBtn"
+                  type="button"
+                  aria-label="语音"
+                  title="语音输入（占位：后续接入 start/stop）"
+                  onClick={() => useRunStore.getState().addAssistant("（语音输入接口已预留，后续接入）")}
+                >
+                  <IconMic />
+                </button>
+
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0];
+                    if (!f) return;
+                    useRunStore.getState().addTool({
+                      toolName: "media.attachImage",
+                      status: "success",
+                      input: { name: f.name, size: f.size, type: f.type },
+                      output: { ok: true },
+                      riskLevel: "low",
+                      applyPolicy: "proposal",
+                      undoable: false
+                    });
+                    e.currentTarget.value = "";
+                  }}
+                />
+              </div>
+
+              <div className="composerBarRightSend">
+                {isRunning ? (
+                  <button className="sendBtn" type="button" aria-label="停止" title="停止" onClick={onStop}>
+                    <IconStop />
+                  </button>
+                ) : (
+                  <button className="sendBtn" type="button" aria-label="发送" title="发送" onClick={onSend} disabled={!input.trim()}>
+                    <IconSend />
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>

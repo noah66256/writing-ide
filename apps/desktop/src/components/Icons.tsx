@@ -328,4 +328,53 @@ export function IconX(props: SvgProps) {
   );
 }
 
+export function IconPlus(props: SvgProps) {
+  const s = props.size ?? 18;
+  return (
+    <svg {...baseProps(s)}>
+      <path d="M12 5v14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M5 12h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function IconClock(props: SvgProps) {
+  const s = props.size ?? 18;
+  return (
+    <svg {...baseProps(s)}>
+      <path d="M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M12 7v5l3 2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+export function IconEye(props: SvgProps) {
+  const s = props.size ?? 18;
+  return (
+    <svg {...baseProps(s)}>
+      <path
+        d="M2.5 12s3.2-6.5 9.5-6.5S21.5 12 21.5 12s-3.2 6.5-9.5 6.5S2.5 12 2.5 12Z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinejoin="round"
+      />
+      <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" stroke="currentColor" strokeWidth="1.8" />
+    </svg>
+  );
+}
+
+export function IconList(props: SvgProps) {
+  const s = props.size ?? 18;
+  return (
+    <svg {...baseProps(s)}>
+      <path d="M7 7h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M7 12h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M7 17h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M3.5 7h.01" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+      <path d="M3.5 12h.01" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+      <path d="M3.5 17h.01" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 

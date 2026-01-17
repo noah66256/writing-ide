@@ -41,6 +41,18 @@ declare global {
         setRecentProjects: (dirs: string[]) => Promise<{ ok: boolean; error?: string }>;
         clearRecentProjects: () => Promise<{ ok: boolean; error?: string }>;
       };
+      history?: {
+        getInfo: () => Promise<{ ok: boolean; primaryDir?: string | null; fallbackDir?: string | null; filename?: string; error?: string }>;
+        loadConversations: () => Promise<{
+          ok: boolean;
+          conversations?: any[];
+          used?: "primary" | "fallback";
+          file?: string;
+          error?: string;
+          detail?: string;
+        }>;
+        saveConversations: (payload: any) => Promise<{ ok: boolean; used?: "primary" | "fallback"; file?: string; error?: string }>;
+      };
       clipboard?: {
         writeText: (text: string) => Promise<{ ok: boolean; error?: string }>;
       };
