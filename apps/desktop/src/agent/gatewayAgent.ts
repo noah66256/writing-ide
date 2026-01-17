@@ -659,7 +659,8 @@ export function startGatewayRun(args: {
         await kb.refreshLibraries().catch(() => void 0);
       }
 
-      // M3：若已绑定风格库且已有子簇快照，但 Main Doc 尚未写入 styleContractV1，则本地先做一次“默认写法”落地（不依赖模型工具调用）
+      // M3(A)：不要在“第一次写作请求”时静默预填 styleContract（会导致模型跳过“写法候选”展示）。
+      // 仅当用户显式选择/接受（例如输入 cluster_1 / 写法B / 继续）时，才把选择写入 Main Doc，供后续回合稳定沿用。
       try {
         const run = useRunStore.getState();
         const main: any = run.mainDoc ?? {};
@@ -672,8 +673,8 @@ export function startGatewayRun(args: {
           .filter((id: string) => String((metaById.get(id) as any)?.purpose ?? "").trim() === "style");
         const libId = styleLibIds.length ? styleLibIds[0] : "";
 
-        const shouldSeed = libId && (!existing || String(existing?.libraryId ?? "").trim() !== libId);
-        if (shouldSeed) {
+        const shouldConsider = libId && (!existing || String(existing?.libraryId ?? "").trim() !== libId);
+        if (shouldConsider) {
           const fpRet = await useKbStore.getState().getLatestLibraryFingerprint(libId).catch(() => ({ ok: false } as any));
           const snapshot = fpRet?.ok ? (fpRet as any).snapshot : null;
           const clusters = Array.isArray(snapshot?.clustersV1) ? snapshot.clustersV1 : [];
@@ -681,10 +682,39 @@ export function startGatewayRun(args: {
           const defaultClusterId = cfg?.ok ? String((cfg as any).defaultClusterId ?? "").trim() : "";
 
           if (clusters.length) {
+            const prompt = String(args.prompt ?? "").trim();
+            const pickedByPrompt = (() => {
+              // 1) 用户直接输入 clusterId（最稳）
+              const m = prompt.match(/\b(cluster[_-]\d+)\b/i);
+              if (m?.[1]) {
+                const cid = String(m[1]).replace("-", "_");
+                const byId = new Map(clusters.map((c: any) => [String(c?.id ?? "").trim(), c]));
+                if (byId.get(cid)) return byId.get(cid);
+              }
+              // 2) 用户输入“写法A/B/C”
+              const m2 = prompt.match(/写法\s*([ABC])\b/i);
+              if (m2?.[1]) {
+                const letter = String(m2[1]).toUpperCase();
+                const label = `写法${letter}`;
+                const hit = clusters.find((c: any) => String(c?.label ?? "").includes(label));
+                if (hit) return hit;
+              }
+              // 3) 用户输入“继续/按推荐/就用推荐”：接受推荐写法
+              if (/^(继续|按推荐|用推荐|就用推荐|默认就行)$/i.test(prompt)) {
+                // 下面会走 pickRecommended
+                return "__USE_RECOMMENDED__" as any;
+              }
+              return null;
+            })();
+
             const rankStability = (s: string) => (s === "high" ? 3 : s === "medium" ? 2 : s === "low" ? 1 : 0);
             const byId = new Map(clusters.map((c: any) => [String(c?.id ?? "").trim(), c]));
             let picked: any = null;
-            if (defaultClusterId && byId.get(defaultClusterId)) picked = byId.get(defaultClusterId);
+            if (pickedByPrompt && pickedByPrompt !== "__USE_RECOMMENDED__") picked = pickedByPrompt;
+            if (!picked && pickedByPrompt === "__USE_RECOMMENDED__") {
+              // 允许用户“继续”直接采用推荐（优先 defaultClusterId，否则走稳定性/覆盖率/段数）
+              if (defaultClusterId && byId.get(defaultClusterId)) picked = byId.get(defaultClusterId);
+            }
             if (!picked) {
               // anchors 最多优先
               picked = clusters
@@ -708,7 +738,12 @@ export function startGatewayRun(args: {
               }
             }
 
-            if (picked) {
+            // 仅当用户显式选择/接受时才写入（避免静默跳过“候选展示”）
+            const shouldWriteContract =
+              pickedByPrompt === "__USE_RECOMMENDED__" ||
+              (pickedByPrompt && pickedByPrompt !== "__USE_RECOMMENDED__");
+
+            if (picked && shouldWriteContract) {
               const meta = metaById.get(libId) as any;
               updateMainDoc({
                 styleContractV1: {

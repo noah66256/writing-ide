@@ -1098,6 +1098,106 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     detail: { stageKey: stageKeyForRun, activeSkillIds, activeSkills },
   });
 
+  // ======== M3(A)：写法候选必须先出 & 等用户确认（clarify_waiting） ========
+  // 触发条件：绑定 style 库 + style_imitate 已激活 + Context Pack 注入了 KB_STYLE_CLUSTERS(JSON) + Main Doc 尚未选簇
+  // 说明：这是“硬步骤”，避免模型跳过候选直接写作/自选写法（对齐 kb-manager-v2-spec.md 第 38 行）。
+  try {
+    const hasStyleSkill = activeSkillIds.includes("style_imitate");
+    const styleLibId = String(styleLibIds?.[0] ?? "").trim();
+    const styleContract: any = (mainDocFromPack as any)?.styleContractV1 ?? null;
+    const hasSelectedCluster =
+      Boolean(styleContract) &&
+      String(styleContract?.libraryId ?? "").trim() === styleLibId &&
+      String(styleContract?.selectedCluster?.id ?? "").trim().length > 0;
+
+    const clustersPayload = (() => {
+      const text = String(body.contextPack ?? "");
+      if (!text) return null;
+      const m = text.match(/KB_STYLE_CLUSTERS\(JSON\):\n([\s\S]*?)\n\n/);
+      const raw = m?.[1] ? String(m[1]).trim() : "";
+      if (!raw) return null;
+      try {
+        const j = JSON.parse(raw);
+        return Array.isArray(j) ? (j as any[]) : null;
+      } catch {
+        return null;
+      }
+    })();
+
+    if (mode !== "chat" && hasStyleSkill && styleLibId && clustersPayload && !hasSelectedCluster) {
+      const entry = clustersPayload.find((x: any) => String(x?.id ?? "").trim() === styleLibId) ?? clustersPayload[0];
+      const libName = String(entry?.name ?? styleLibId);
+      const recommendedId = String(entry?.recommendedClusterId ?? "").trim();
+      const clusters = Array.isArray(entry?.clusters) ? (entry.clusters as any[]) : [];
+      const byId = new Map(clusters.map((c: any) => [String(c?.id ?? "").trim(), c]));
+      const rec = (recommendedId && byId.get(recommendedId)) ? recommendedId : String(clusters?.[0]?.id ?? "").trim();
+      const ordered = (() => {
+        const out: any[] = [];
+        const seen = new Set<string>();
+        const push = (c: any) => {
+          const id = String(c?.id ?? "").trim();
+          if (!id || seen.has(id)) return;
+          seen.add(id);
+          out.push(c);
+        };
+        if (rec && byId.get(rec)) push(byId.get(rec));
+        for (const c of clusters) push(c);
+        return out.slice(0, 3);
+      })();
+
+      // 若没有足够候选（例如没有聚类快照），则不拦截（让模型继续走旧逻辑）
+      if (ordered.length >= 2) {
+        writePolicyDecision({
+          turn: 0,
+          policy: "StyleClusterSelectPolicy",
+          decision: "wait_user",
+          reasonCodes: ["style_cluster_select"],
+          detail: {
+            styleLibId,
+            styleLibName: libName,
+            recommendedClusterId: rec || null,
+            candidates: ordered.map((c: any) => ({
+              id: String(c?.id ?? "").trim(),
+              label: String(c?.label ?? "").trim(),
+              evidence: Array.isArray(c?.evidence) ? c.evidence.slice(0, 1) : [],
+            })),
+          },
+        });
+
+        const lines = ordered
+          .map((c: any, idx: number) => {
+            const id = String(c?.id ?? "").trim();
+            const label = String(c?.label ?? `写法${idx + 1}`).trim();
+            const ev = Array.isArray(c?.evidence) ? String(c.evidence?.[0] ?? "").trim() : "";
+            const mark = rec && id === rec ? "（推荐）" : "";
+            return `- ${label}${mark}：${id}${ev ? `｜证据：${ev.slice(0, 80)}${ev.length > 80 ? "…" : ""}` : ""}`;
+          })
+          .join("\n");
+
+        writeEvent("assistant.delta", {
+          delta:
+            `\n\n[需要你确认：选择写法候选]\n已绑定风格库「${libName}」，检测到多个“写法候选（子簇）”。请先选定写法再继续写作：\n` +
+            `${lines}\n\n` +
+            `请回复：\n- 直接回复某个 clusterId（例如：${rec || "cluster_0"}）\n- 或回复“继续”采用推荐写法\n`,
+        });
+        writeEvent("run.end", {
+          runId,
+          reason: "clarify_waiting",
+          reasonCodes: ["style_cluster_select"],
+          turn: 0,
+          styleLibId,
+          recommendedClusterId: rec || null,
+        });
+        writeEvent("assistant.done", { reason: "style_cluster_select", turn: 0 });
+        reply.raw.end();
+        agentRunWaiters.delete(runId);
+        return;
+      }
+    }
+  } catch {
+    // ignore：选簇提示失败不应影响主流程
+  }
+
   type SkillToolCapsPhase = "none" | "style_need_kb" | "style_need_lint" | "style_can_write";
 
   const ALWAYS_ALLOW_TOOL_NAMES = new Set<string>(["run.setTodoList", "run.updateTodo", "run.mainDoc.get", "run.mainDoc.update"]);
