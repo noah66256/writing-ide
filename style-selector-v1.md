@@ -1,97 +1,97 @@
-## Style Selector v1（自动选簇 + 自动选 21 卡，按题材/话题适配）方案草案
+## Style Selector v1（自动选簇 + 自动选 21 卡，按题材/话题适配）
+
+> 状态：已落地（2026-01-17）。Selector 在 **Desktop 侧**计算并注入 Context Pack，确保“换生成模型不影响选簇/选卡”。  
+> 运行态注入：`KB_STYLE_CLUSTERS(JSON)` + `STYLE_SELECTOR(JSON)` + `STYLE_FACETS_SELECTED(Markdown)`（仅写作类任务/`style_imitate` 激活时）。
 
 ### 0. 目标（对应诉求）
-- **R1 自动选**：Agent 在写作任务中默认自动选簇（cluster），不再要求用户先手选；但必须可解释、可改口。
-- **R2 按话题适配**：同一风格库可能混杂题材/写法；系统要能根据“当前选题/话题”选到更合适的簇，以及更合适的结构/金句/情绪调动（21维度子集）。
-- **R3 与生成模型解耦**：无论 Desktop 端选择哪个生成模型（Claude/DeepSeek/Gemini/...），Selector 的选择结果应稳定一致；生成模型只负责“写”，不负责“选”。
-- **R4 可观测**：每次自动选择都要能在日志/审计里说明“为什么选它”（reasonCodes + 证据）。
+- **R1 自动选**：写作任务默认自动选簇（cluster），不再强制用户先手选；但必须可解释、可改口。
+- **R2 按话题适配**：同一风格库混题材时，系统要能按“当前选题/话题”选到更合适的簇，并选到更合适的 21 维度子集（TopK）。
+- **R3 与生成模型解耦**：Desktop 端切换 Claude/DeepSeek/Gemini…只影响“写的质量”，不应影响“选簇/选卡”。
+- **R4 可观测**：每次选择都要有 why/trace，且在日志/审计可追溯。
 
 ### 1. 非目标（v1 不做）
-- 不做跨库自动匹配（只在“已绑定的 style 库”内做选择）。
-- 不在写作 Run 内做重计算/重聚类（沿用库体检产出的快照）。
-- 不强依赖 LLM 做路由（避免换模型导致选簇漂移）。
+- 不做跨库自动匹配（仅在已绑定的 style 库内选择）。
+- 不在写作 Run 内重聚类（聚类/规则在“库体检”生成并落盘，Run 只读快照）。
+- 不依赖 LLM“临场选簇/选卡”（避免换模型导致漂移）。
 
-### 2. Selector 的定位：一个可测的“选择器”，而不是提示词玄学
-Selector 是一个“纯函数（或近似纯函数）”：
-- 输入：库快照 + 当前任务话题信号 + 写作阶段（粗粒度） + 用户显式覆盖
-- 输出：selectedClusterId + selectedFacetIds + why/trace
+### 2. Selector 的定位：一个可测的“选择器”，不是提示词玄学
+Selector 是一个近似纯函数：
+- **输入**：库快照（clustersV1 + cluster rules）+ 话题信号 + 写作阶段（stage）+ 用户显式覆盖
+- **输出**：selectedClusterId + selectedFacets(TopK) + why/trace
 
-### 3. 输入 / 输出
+### 3. 输入 / 输出（当前实现口径）
 
 #### 3.1 输入
-- **已绑定 style 库**：`KB_SELECTED_LIBRARIES` 中 `purpose=style` 的库（可多库，v1 先按“当前主库/第一库”处理）。
+- **已绑定 style 库**：`KB_SELECTED_LIBRARIES` 中 `purpose=style` 的库（v1 先按“当前主库/第一库”处理）。
 - **库体检快照**：
-  - `fingerprint.clustersV1`
-  - `perSegment.clusterId`
-  - `cluster rules`（含 facetPlan/queries/evidence/anchors/checks/softRanges）
-- **话题信号**（尽量结构化）：
+  - `fingerprint.clustersV1`（簇列表：label/stability/coverage/anchors/evidence/queries/facetPlan…）
+- **话题信号**：
   - `mainDoc.goal`
   - `userPrompt`
-  - 可选：显式引用 `@{...}` 的文件名/标题（只当弱信号）
-- **写作阶段（stage）**：开头/正文/收尾/润色（v1 先启发式：按 todo 当前项/或 prompt 关键词判定）。
+- **写作阶段 stage（启发式）**：从 `RUN_TODO` 当前未完成项 + prompt 关键词判断：`opening/outline/draft/ending/polish`。
 
-#### 3.2 输出
-- **selectedClusterId**：例如 `cluster_0/cluster_1/cluster_2`
-- **selectedFacetIds[]**：从 21 维度中选出本次要“真正执行”的 4–8 张（随阶段变化）
-- **why[]**：给人看的 2–4 条理由（必须带证据引用句/命中点）
-- **trace**：给系统审计用的分数字段（topicFit/stability/anchorBonus/defaultBonus 等）
+#### 3.2 输出（Context Pack）
+- **`STYLE_SELECTOR(JSON)`（v=2）**：
+  - `selectedClusterId`
+  - `stage`：`{id,label,by,evidence?}`
+  - `selectedFacetIds`：TopK（4–8）
+  - `selectedFacets[]`：`{facetId,label,why,kbQueries,score}`
+  - `why[]` + `trace{ cluster..., facets... }`
+- **`STYLE_FACETS_SELECTED(Markdown)`**：把入选 facet 对应的 `playbook_facet` 卡正文注入（控量/截断），让生成模型“看得见就必须执行”。
 
-### 4. v1 核心策略：不靠模型“临场选”，靠“快照 + 检索信号”选
+### 4. v1 核心策略（当前实现）
 
-#### 4.1 自动选簇（cluster）评分：Topic-aware + Stability-aware
-对每个 cluster 计算总分（示意）：
-- `score = 0.55*topicFit + 0.25*stability + 0.15*anchorBonus + 0.05*defaultBonus`
+#### 4.1 自动选簇（cluster）：按优先级，不用公式硬套
+优先级（从高到低）：
+1) **anchors 优先**：若某簇已采纳 anchors，则优先选 anchors 多的簇（更像原文）。
+2) **topicFit（词法命中）**：用 `mainDoc.goal + userPrompt` 对簇的 `label/queries/evidence.quote` 做命中打分，取最高分簇（同分用稳定性/覆盖率/段数打破）。
+3) **defaultClusterId**（仅本库）：若库设置了默认写法则优先。
+4) **兜底排序**：`stability` > `docCoverageRate` > `segmentCount`。
 
-其中：
-- **topicFit（话题契合度）**：推荐“先词法后向量（可开关）”
-  - 词法：用 `userPrompt/mainDoc.goal` 与 cluster 的 `queries/evidence/topNgrams` 做重叠命中
-  - 向量兜底（可选开关）：用 `kb.search(useVector=true)` 召回后，统计命中段落分属哪个 cluster 更多
-- **stability**：直接使用库体检的稳定性（high/medium/low → 1/0.6/0.3）
-- **anchorBonus**：该簇已采纳 anchors → 加权提升（优先“更像原文”）
-- **defaultBonus**：库配置里设为默认写法 → 小幅加权
+> 说明：文档草案里提到的“向量兜底统计命中簇”在 v1 **未启用**（后续可增量）。
 
-#### 4.2 自动选 21 卡：只选“本次要用的”，选出来就必须执行
-目标不是“覆盖21”，而是“选出来就必须执行”，避免 21 卡沦为噪音。
+#### 4.2 自动选 21 卡（facet）：全量候选 + stage/话题重排 + TopK
+候选集合：
+- **facetPack 全量 facets**（默认 21）
+- + **该簇 facetPlan**（避免 cluster rules 的默认卡丢失）
 
-步骤：
-- 从 `cluster rules.facetPlan` 取候选集合（优先来源）
-- 按 stage（开头/正文/收尾/润色）补 1–2 张“阶段必备卡”
-- 对候选卡做话题排序（词法优先，必要时向量兜底），取 TopK（建议 4–8）
-- 对每张入选 facet：用 facet 的 `kbQueries` 再拉 1–2 段“同题材/近题材”的原文段落作为执行锚点（evidence/anchors 级别的短引用）
+stage 必备/辅助卡（speech_marketing_v1，摘要）：
+- **opening**：opening_design/intro/question_design/emotion_mobilization/voice_rhythm/one_liner_crafting…
+- **outline**：narrative_structure/logic_framework/structure_patterns…
+- **draft**：logic_framework/narrative_structure/persuasion/voice_rhythm/emotion_mobilization…
+- **ending**：values_embedding/resonance/structure_patterns…
+- **polish**：language_style/voice_rhythm/special_markers/ai_clone_strategy…
+
+评分（当前实现）：
+- `topicFit`：词法命中归一化
+- `stageFit`：必备=1，辅助=0.6，其它=0
+- `basePlan`：来自 cluster.facetPlan=1，否则=0
+- **`score = 0.55*topicFit + 0.30*stageFit + 0.15*basePlan`**
+
+选择规则：
+- 先强制纳入 stage 必备卡（存在才纳入）
+- 再按 score 补齐到 TopK（4–8，随 stage 变化）
+
+每张入选 facet 会生成 1–2 条 `kbQueries`（供后续 `kb.search` 用）：
+- `q1 = <topicBrief + facetLabel>`
+- `q2 = q1 + <cluster/plan hint>`（可选）
 
 ### 5. 注入与消费：保证换生成模型也能用
-- **Main Doc（最靠前）**：写入/更新 `styleContractV1`（selectedCluster + hardRules + anchors + softRanges）
-- **Context Pack（短 JSON）**：新增 `STYLE_SELECTOR(JSON)`：
-  - `{ selectedClusterId, selectedFacetIds, why[], trace{} }`
-- **可见但不强制手选**：仍展示 2–3 个候选写法（证据句+理由），但默认自动选择推荐并继续写；用户改口则覆盖并固化。
+- **Main Doc**：继续使用 `styleContractV1` 固化“选簇/anchors/默认 facetPlan”等长期约束（不塞长文）。
+- **Context Pack（运行态）**：
+  - `KB_STYLE_CLUSTERS(JSON)`：候选簇摘要（含 recommended/default）
+  - `STYLE_SELECTOR(JSON)`：本次选簇/选卡（TopK）结果
+  - `STYLE_FACETS_SELECTED(Markdown)`：本次入选维度卡正文
 
 ### 6. 可改口（Override）规则
-- 用户显式输入：`写法A/B/C` 或 `cluster_0/1/2` 或 “换成写法X”
-  - 立即把选择写入 `mainDoc.styleContractV1`
-  - 后续回合固定，不再漂移（除非用户再次改口）
+- 用户显式输入：`写法A/B/C`、`cluster_0/1/2`、或“换成写法X”
+  - 立即覆盖并写入 `mainDoc.styleContractV1`（后续回合固定沿用，除非再次改口）。
 
-### 7. 与 Skills / Gateway 现有流程的对齐
-- `style_imitate` skill 仍负责“写作闭环门禁”（kb.search → lint.style → write），不改变其核心纪律。
-- Selector 只负责“选簇/选卡”，并把结果放进 Main Doc/Context Pack，供任何模型稳定消费。
+### 7. 与 Skills / Gateway 的对齐
+- `style_imitate` skill 仍负责写作闭环纪律：`kb.search →（可选）lint.style → write`。
+- Selector 只负责“选簇/选卡”，并把结果结构化注入，供任何生成模型稳定消费。
 
-### 8. 实施步骤（下一步要改哪些）
-
-#### 8.1 文档层（已落盘）
-- `plan.md` 增加导航入口
-- `kb-manager-v2-spec.md`：写法候选口径改为“默认自动选推荐并继续；可改口”
-
-#### 8.2 代码层（下一步开工，单独 PR）
-- **Gateway**：
-  - 将 `StyleClusterSelectPolicy` 从“强制 clarify_waiting”调整为“默认自动选并继续”（仍输出候选+理由+可改口指令）。
-  - 将每次选择结果写入审计：policy.decision 增加 Selector 的 trace。
-- **Desktop**：
-  - 让选择结果持久化到 `mainDoc.styleContractV1`，保证换模型/续跑不丢。
-- **agent-core**：
-  - 增加 `StyleClusterAutoSelectPolicy/FacetSelectPolicy` 的 reasonCodes 与回归用例。
-
-### 9. 验收标准（可一句话判断对不对）
-- 同一风格库混题材：输入不同话题，自动选的 cluster 会合理变化（并能解释“为什么”）。
-- Desktop 换生成模型：选簇/选卡不变；只是“写出来的质量”随模型变化。
-- 用户说“用写法B”：立刻切换并持续沿用，不再被后续短回复（继续/好的）带偏。
+### 8. 稳定性补丁（跨模型）
+- Gateway 在 Schema 校验后，会对 `run.updateTodo` 常见参数错误做兼容修复（缺 `patch` 自动封装；缺 `id` 自动分配），并通过 `policy.decision(ToolArgNormalizationPolicy)` 可观测。
 
 

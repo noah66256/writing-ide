@@ -2,7 +2,7 @@
 
 > 说明：本文**只做方案与路线图**，不改任何现有代码。  
 > 目标：把“现状链路 → 硬伤根因 → 目标架构 → 分阶段落地与验收”写清楚，后续所有改动都以本文为准逐条推进。  
-> 更新时间：2026-01-16
+> 更新时间：2026-01-17
 
 ### 0. 实施进度（与本文对齐，不跑偏）
 > 说明：我们已开始按本文推进改造；以下仅记录“已落地内容”与“不变量口径”，便于后续继续按路线图推进与回归。
@@ -29,6 +29,7 @@
   - 计费归因补强：`llm.chat` / `agent.run` / `tool.lint.style` 扣费都会写入 `meta.extra`（含 runId/toolCallId/endpoint/mode 等），并在 Agent SSE 中通过 `policy.decision(BillingPolicy)` 记录扣费结果（便于 Runs/Logs 审计与定位异常）。
   - 审计落库（开发期）：Gateway 把 `run.start/run.end/tool.call/tool.result/policy.decision/error` 汇总为 `runAudits` 落入本地 `db.json`，并提供 admin 只读接口 `/api/admin/audit/runs`（列表）与 `/api/admin/audit/runs/:id`（详情）。
   - 工具契约 Schema（输入校验）：`packages/tools` 为每个工具补充 `inputSchema`，Gateway 在解析到 `<tool_calls>` 后先做参数校验；失败则触发 `ToolArgValidationPolicy` 自动重试（避免把错误参数下发到 Desktop 导致卡死/误判）。
+  - 工具参数兼容修复（跨模型稳定性）：在 Schema 校验之后增加 `ToolArgNormalizationPolicy`，对 `run.updateTodo` 的常见模型错误做兼容（缺 `patch` 自动封装；缺 `id` 自动分配），避免无效重试与预算耗尽。
   - Admin Web：新增“Run 审计”页面，直接消费 `/api/admin/audit/runs*` 展示列表与 events 详情（开发期先 JSON 展示，后续再做筛选/导出/聚合视图）。
 
 - ✅ **M2.5 已补齐（P0/P1：把“隐式风险点”补成可解释地基）**
@@ -37,10 +38,12 @@
   - SSE 强边界（H11）：Gateway 增加 `assistant.start(turn)`，并为 `assistant.delta/assistant.done` 自动补齐 `turn` 字段；Desktop 侧消费 `assistant.start` 强制切分回合边界（兼容旧事件）。
   - proposal 语义可解释（H8）：RunState 区分 `hasWriteProposed` vs `hasWriteApplied`，并在 `policy.decision/stateSnapshot/runAudits` 中可见（避免“提案=已写入”的概念混淆）。
 
-- 🟡 **M3（已确认方向，待落地）：Skills（能力包）框架**
+- ✅ **M3 已落地（阶段性）：Skills（能力包）框架**
   - **自动启用为主**：按 Context Pack/意图判定自动激活 skills（减少用户手动开关成本）。
-  - **可见**：Desktop 需要在右侧明确展示“当前激活的 skills”（解释为什么会触发门禁/为什么提示某流程）。
-  - **独立 stage（计费/路由）**：每个 skill 对应独立 `stageKey`（例如 `agent.skill.style_imitate` / `agent.skill.topic_ideation`），可在 B 端配置模型/参数并单独计费归因与审计。
+  - **可见**：Desktop 右侧展示“当前激活的 skills”（解释为什么会触发门禁/为什么提示某流程）。
+  - **独立 stage（计费/路由）**：每个 skill 对应独立 `stageKey`（例如 `agent.skill.style_imitate`），可在 B 端配置模型/参数并单独计费归因与审计。
+  - **首个技能已迁移**：`style_imitate`（由旧 styleGate 迁移而来），并配套注入 `ACTIVE_SKILLS(JSON)`。
+  - **Selector v1 已落地**：Desktop 侧自动选簇/选 21 维度 TopK，注入 `STYLE_SELECTOR(JSON)` + `STYLE_FACETS_SELECTED(Markdown)`，与生成模型解耦。
 
 ### 1. 目标与范围
 - **目标**：对 Desktop ↔ Gateway 的 Agent Run 全链路做“结构化审计”，找出逻辑硬伤，并给出不破坏产品定位的改造路线。

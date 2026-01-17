@@ -146,6 +146,7 @@
 - Tool Blocks（Keep/Undo）+ 文件级 diff 预览（NEW/MOD + +X/-Y）
 - proposal-first 写入（覆盖写入/批量/回滚等）
 - Todo/进度：`run.setTodoList` / `run.updateTodo`（工具）+ Context Pack 注入 + Dock/Runs 展示（可追踪闭环）
+- 工具参数容错（Gateway 已落地）：对 `run.updateTodo` 的常见模型错误做兼容修复（缺 `patch` 自动封装；缺 `id` 自动分配），并在 `policy.decision(ToolArgNormalizationPolicy)` 可观测（减少卡死与无效重试）。
 - Agent 写入任务闭环：Plan/Agent 下若 Todo 未设置或用户要求写入但尚未发生写入工具调用，Gateway 不会直接 `reason=text` 结束，会自动要求模型继续
 - 文稿拆分工具：`doc.splitToDir`（proposal-first）把“标题/文案(正文)”大篇切成多文件写入目录（Keep/Undo）
 - 结构化意图（runIntent，开发期已落地）：输入区可选 `自动/写作/改写/润色/分析/操作`，写入 Main Doc 并注入 Context Pack；Gateway 会优先按该意图判定是否启用“写作强闭环”（减少误伤/漏判；为后续 Skills 自动启用做准备）

@@ -26,6 +26,10 @@
 #### 1.2 当前“风格册”的注入/使用方式
 - **注入方式**：`KB_LIBRARY_PLAYBOOK(Markdown)` 注入 Context Pack（存在总长度截断上限，模型阅读依赖自觉）。
 - **skill 侧**：`style_imitate` 目前主要做“门禁闭环”（先 kb.search / lint.style / 再写入），不保证“先对齐总口味契约”。
+- **补充（已落地）**：写作类任务且 `style_imitate` 激活时，Context Pack 还会注入：
+  - `KB_STYLE_CLUSTERS(JSON)`：写法候选摘要（含 recommended/default）
+  - `STYLE_SELECTOR(JSON)`：本次自动选簇 + 自动选 21 卡（TopK）结果（含 stage/why/trace）
+  - `STYLE_FACETS_SELECTED(Markdown)`：本次入选维度卡正文（来自 playbook_facet），用于约束生成模型“只执行入选卡”
 
 #### 1.3 已暴露问题（与“更像原文”直接相关）
 - **单一口径**：同一库可能混多种写法/题材，单一 baseline 容易把方向带偏。
@@ -115,6 +119,16 @@
 #### 4.0 写法选择优先级（必须一致）
 - 用户在对话中显式指定写法/簇 > Main Doc 已锁定 > **库默认写法（仅该库）** > 体检推荐（无 anchors 时按 stability 优先）。
 
+#### 4.0.1 Selector v1（已落地）：运行态产物（Context Pack）
+> 目标：把“选簇/选卡”的结果结构化注入，保证换生成模型也能稳定消费（生成模型只负责写，不负责选）。
+- `KB_STYLE_CLUSTERS(JSON)`：候选簇摘要（含 recommendedClusterId/defaultClusterId/关键指标）。
+- `STYLE_SELECTOR(JSON)`：本次选择结果（v=2），包含：
+  - `selectedClusterId`
+  - `stage`（opening/outline/draft/ending/polish）
+  - `selectedFacetIds` + `selectedFacets[]`（TopK 4–8；每张含 why/kbQueries/score）
+  - `why[]/trace{}`（可观测/可审计）
+- `STYLE_FACETS_SELECTED(Markdown)`：把入选维度卡正文注入（来自 playbook_facet），用于约束生成模型“只执行入选卡”。
+
 #### 4.1 Agent 推荐写法（可改口）
 - 输出 2–3 个候选：每个候选都带（label + 适用场景 + 证据句 + 默认 facetPlan）
 - 用户一句话切换：“用 XX 写法” → 立即切换选簇与 facetPlan
@@ -125,7 +139,7 @@
 - **字段建议**：
   - selectedCluster（必须包含 id；label 可编辑但不作主键）
   - hardRules（<=8 条；must/avoid/templates/evidence/checks）
-  - facetPlan（本次要用的维度子集）
+  - facetPlan（该簇默认维度子集；本次 stage 的 TopK 子集由 `STYLE_SELECTOR(JSON).selectedFacetIds` 提供）
   - anchors（引用到哪些黄金样本）
   - softRanges（用于提示跑偏，不做黑箱门禁）
 
