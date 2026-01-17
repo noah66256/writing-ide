@@ -224,6 +224,12 @@ body {
   color: var(--muted);
 }
 
+.sidebarSectionBody {
+  /* 层级感：Section 标题（大菜单）与内容（小菜单）区分缩进 */
+  padding-left: 10px;
+  padding-right: 4px;
+}
+
 .sidebarSectionBodyCollapsed {
   display: none;
 }
@@ -1016,6 +1022,20 @@ body {
 
 .btnIcon {
   padding: 7px 10px;
+}
+
+.btnIconOnly {
+  padding: 6px;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+
+.btnIconOnly svg {
+  display: block;
 }
 
 .btnPrimary {

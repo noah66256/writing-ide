@@ -5,6 +5,7 @@ import { useKbStore } from "../state/kbStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useRunStore } from "../state/runStore";
 import { useUiStore } from "../state/uiStore";
+import { IconFilePlus, IconFolderOpen, IconFolderPlus, IconImport, IconMove, IconRefresh, IconTrash, IconX } from "./Icons";
 
 type TreeNode =
   | { kind: "dir"; name: string; path: string; children: TreeNode[] }
@@ -656,19 +657,47 @@ export function Explorer() {
           {rootDir ? rootDir : "（未打开项目：当前为内存草稿）"}
         </div>
         <div style={{ display: "flex", gap: 6 }}>
-          <button className="btn btnIcon" type="button" onClick={openProject} disabled={isLoading}>
-            打开
+          <button
+            className="btn btnIconOnly"
+            type="button"
+            onClick={openProject}
+            disabled={isLoading}
+            title="打开项目"
+            aria-label="打开项目"
+          >
+            <IconFolderOpen />
           </button>
           {rootDir ? (
             <>
-              <button className="btn btnIcon" type="button" onClick={() => actionNewFile("")} disabled={isLoading}>
-                新建文件
+              <button
+                className="btn btnIconOnly"
+                type="button"
+                onClick={() => actionNewFile("")}
+                disabled={isLoading}
+                title="新建文件"
+                aria-label="新建文件"
+              >
+                <IconFilePlus />
               </button>
-              <button className="btn btnIcon" type="button" onClick={() => actionNewFolder("")} disabled={isLoading}>
-                新建文件夹
+              <button
+                className="btn btnIconOnly"
+                type="button"
+                onClick={() => actionNewFolder("")}
+                disabled={isLoading}
+                title="新建文件夹"
+                aria-label="新建文件夹"
+              >
+                <IconFolderPlus />
               </button>
-              <button className="btn btnIcon" type="button" onClick={() => void doRefresh()} disabled={isLoading}>
-                刷新
+              <button
+                className="btn btnIconOnly"
+                type="button"
+                onClick={() => void doRefresh()}
+                disabled={isLoading}
+                title="刷新"
+                aria-label="刷新"
+              >
+                <IconRefresh />
               </button>
             </>
           ) : null}
@@ -751,17 +780,29 @@ export function Explorer() {
           {selected.length ? (
             <div className="selBar">
               <div className="selCount">已选 {selected.length} 项</div>
-              <button className="btn btnIcon" type="button" onClick={() => actionImportToKb(selected)}>
-                导入并抽卡
+              <button
+                className="btn btnIconOnly"
+                type="button"
+                onClick={() => actionImportToKb(selected)}
+                title="导入并抽卡"
+                aria-label="导入并抽卡"
+              >
+                <IconImport />
               </button>
-              <button className="btn btnIcon" type="button" onClick={actionMoveSelected}>
-                批量移动
+              <button className="btn btnIconOnly" type="button" onClick={actionMoveSelected} title="批量移动" aria-label="批量移动">
+                <IconMove />
               </button>
-              <button className="btn btnDanger btnIcon" type="button" onClick={actionDeleteSelected}>
-                批量删除
+              <button
+                className="btn btnDanger btnIconOnly"
+                type="button"
+                onClick={actionDeleteSelected}
+                title="批量删除"
+                aria-label="批量删除"
+              >
+                <IconTrash />
               </button>
-              <button className="btn btnIcon" type="button" onClick={clearSelection}>
-                清空
+              <button className="btn btnIconOnly" type="button" onClick={clearSelection} title="清空选择" aria-label="清空选择">
+                <IconX />
               </button>
             </div>
           ) : null}

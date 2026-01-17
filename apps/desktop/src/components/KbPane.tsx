@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useKbStore } from "../state/kbStore";
 import { useRunStore } from "../state/runStore";
 
@@ -27,6 +27,12 @@ export function KbPane() {
     const map = new Map(libraries.map((l) => [l.id, l.name]));
     return (attached ?? []).map((id: string) => map.get(id) ?? id).filter(Boolean);
   }, [attached, libraries]);
+
+  // 选择/恢复 KB 目录后，自动刷新库列表（避免必须手动点“刷新库”）
+  useEffect(() => {
+    if (!baseDir) return;
+    void refreshLibraries().catch(() => void 0);
+  }, [baseDir, refreshLibraries]);
 
   return (
     <div className="list">
