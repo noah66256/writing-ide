@@ -55,6 +55,9 @@ export function EditorPane() {
           onMount={(ed: editor.IStandaloneCodeEditor) => setEditorRef(ed)}
           onChange={(value) => updateFile(activePath, value ?? "")}
           options={{
+            // 关键：当拖动左右分割条 / Dock 分割条 / 窗口缩放时，Monaco 自动重新 layout，
+            // 避免“编辑器输入区被 Dock/面板遮挡（其实是尺寸没刷新）”。
+            automaticLayout: true,
             minimap: { enabled: false },
             wordWrap: "on",
             fontSize: 14,
