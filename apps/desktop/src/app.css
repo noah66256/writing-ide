@@ -1393,7 +1393,9 @@ body {
   gap: 6px;
   flex-wrap: nowrap;
   min-width: 0;
-  flex: 0 0 auto; /* 右侧整体不 shrink，避免发送/停止被顶出屏幕 */
+  /* 右侧整体允许 shrink（避免整条 bar 溢出被 agent 的 overflow:hidden 裁剪）；
+     shrink 时优先裁掉右侧 main icons，保留最右发送/停止。 */
+  flex: 0 1 auto;
 }
 
 .composerBarRightMain {
