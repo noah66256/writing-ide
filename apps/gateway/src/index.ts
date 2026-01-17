@@ -1098,9 +1098,9 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     detail: { stageKey: stageKeyForRun, activeSkillIds, activeSkills },
   });
 
-  // ======== M3(A)：写法候选必须先出 & 等用户确认（clarify_waiting） ========
+  // ======== Selector v1：写法候选先出，但默认自动选推荐并继续（可改口） ========
   // 触发条件：绑定 style 库 + style_imitate 已激活 + Context Pack 注入了 KB_STYLE_CLUSTERS(JSON) + Main Doc 尚未选簇
-  // 说明：这是“硬步骤”，避免模型跳过候选直接写作/自选写法（对齐 kb-manager-v2-spec.md 第 38 行）。
+  // 说明：对齐 `style-selector-v1.md`：不再用 clarify_waiting 强制用户先选；系统默认采用推荐写法并继续写作，同时仍展示 2–3 个候选供用户随时改口覆盖。
   try {
     const hasStyleSkill = activeSkillIds.includes("style_imitate");
     const styleLibId = String(styleLibIds?.[0] ?? "").trim();
@@ -1145,16 +1145,32 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         return out.slice(0, 3);
       })();
 
-      // 若没有足够候选（例如没有聚类快照），则不拦截（让模型继续走旧逻辑）
+      // 若没有足够候选（例如没有聚类快照），则不提示（让模型继续走旧逻辑）
       if (ordered.length >= 2) {
+        const selectedId = rec || String(ordered?.[0]?.id ?? "").trim();
+        const selectedLabel = selectedId ? String((byId.get(selectedId) as any)?.label ?? "").trim() : "";
+        // 让“生成模型”也明确知道系统已默认选择哪个写法，避免它在未写入 Main Doc 时自选写法跑偏
+        // （Desktop 新版本会自动写入 mainDoc.styleContractV1，但这里作为服务端兜底与可解释提示）
+        try {
+          const insertAt = Math.max(0, messages.length - 1);
+          messages.splice(insertAt, 0, {
+            role: "system",
+            content:
+              `【写法选择（Selector v1）】本次已默认采用写法：${selectedLabel ? `${selectedLabel}（${selectedId}）` : (selectedId || "cluster_0")}。` +
+              `请按该写法继续写作；用户可随时改口切换写法。`,
+          } as any);
+        } catch {
+          // ignore
+        }
         writePolicyDecision({
           turn: 0,
           policy: "StyleClusterSelectPolicy",
-          decision: "wait_user",
-          reasonCodes: ["style_cluster_select"],
+          decision: "auto_selected",
+          reasonCodes: ["style_cluster_auto_selected"],
           detail: {
             styleLibId,
             styleLibName: libName,
+            selectedClusterId: selectedId || null,
             recommendedClusterId: rec || null,
             candidates: ordered.map((c: any) => ({
               id: String(c?.id ?? "").trim(),
@@ -1169,30 +1185,18 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             const id = String(c?.id ?? "").trim();
             const label = String(c?.label ?? `写法${idx + 1}`).trim();
             const ev = Array.isArray(c?.evidence) ? String(c.evidence?.[0] ?? "").trim() : "";
-            const mark = rec && id === rec ? "（推荐）" : "";
+            const mark = selectedId && id === selectedId ? "（本次默认）" : rec && id === rec ? "（推荐）" : "";
             return `- ${label}${mark}：${id}${ev ? `｜证据：${ev.slice(0, 80)}${ev.length > 80 ? "…" : ""}` : ""}`;
           })
           .join("\n");
 
         writeEvent("assistant.delta", {
           delta:
-            `\n\n[需要你确认：选择写法候选]\n已绑定风格库「${libName}」，检测到多个“写法候选（子簇）”。请先选定写法再继续写作：\n` +
+            `\n\n[写法候选（已自动选择）]\n已绑定风格库「${libName}」，检测到多个“写法候选（子簇）”。本次默认采用：${selectedLabel || "推荐写法"}（${selectedId || rec || "cluster_0"}）。你可随时改口切换：\n` +
             `${lines}\n\n` +
-            `请回复：\n- 直接回复某个 clusterId（例如：${rec || "cluster_0"}）\n- 或直接回复“写法A/写法B/写法C”（与上面候选 label 对应）\n- 或回复“继续”采用推荐写法\n\n` +
+            `如需切换请回复：\n- 直接回复某个 clusterId（例如：${selectedId || rec || "cluster_0"}）\n- 或直接回复“写法A/写法B/写法C”（与上面候选 label 对应）\n\n` +
             `提示：这里的“写法C”是写作风格候选编号，不是“C语言/编程”。`,
         });
-        writeEvent("run.end", {
-          runId,
-          reason: "clarify_waiting",
-          reasonCodes: ["style_cluster_select"],
-          turn: 0,
-          styleLibId,
-          recommendedClusterId: rec || null,
-        });
-        writeEvent("assistant.done", { reason: "style_cluster_select", turn: 0 });
-        reply.raw.end();
-        agentRunWaiters.delete(runId);
-        return;
       }
     }
   } catch {

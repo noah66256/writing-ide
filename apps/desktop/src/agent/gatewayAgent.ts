@@ -182,6 +182,221 @@ async function buildReferencesTextFromRefs(refs: Ref[]) {
   return parts.join("");
 }
 
+function rankStabilityForSelectorV1(stability: string): number {
+  const s = String(stability ?? "").trim().toLowerCase();
+  return s === "high" ? 3 : s === "medium" ? 2 : s === "low" ? 1 : 0;
+}
+
+function buildTopicTextForSelectorV1(args: { userPrompt: string; mainDoc: any }): string {
+  const g = String(args?.mainDoc?.goal ?? "").trim();
+  const p = String(args?.userPrompt ?? "").trim();
+  return [g, p].filter(Boolean).join("\n");
+}
+
+function extractTopicTokensV1(topicTextRaw: string): string[] {
+  const text = String(topicTextRaw ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (t: string) => {
+    const v = String(t ?? "").trim();
+    if (!v) return;
+    if (v.length < 2) return;
+    if (v.length > 12) return;
+    const key = v.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(v);
+  };
+
+  // English words / numbers
+  {
+    const words = text.match(/[a-zA-Z]{3,}/g) ?? [];
+    for (const w of words.slice(0, 60)) push(w);
+    const nums = text.match(/\d{2,}/g) ?? [];
+    for (const n of nums.slice(0, 40)) push(n);
+  }
+
+  // Chinese char ngrams（2~4）
+  {
+    const segs = text.match(/[\u4e00-\u9fff]{2,}/g) ?? [];
+    let budget = 220;
+    for (const seg0 of segs) {
+      if (budget <= 0) break;
+      const seg = String(seg0 ?? "").trim();
+      if (!seg) continue;
+      // 太长的片段用 ngram 覆盖即可，不保留整段
+      const maxLen = Math.min(seg.length, 28);
+      const s = seg.slice(0, maxLen);
+      for (const n of [4, 3, 2]) {
+        for (let i = 0; i + n <= s.length; i += 1) {
+          if (budget <= 0) break;
+          push(s.slice(i, i + n));
+          budget -= 1;
+        }
+      }
+    }
+  }
+
+  return out.slice(0, 260);
+}
+
+function computeTopicFitV1(topicText: string, clusterText: string): { score: number; hits: string[] } {
+  const tokens = extractTopicTokensV1(topicText);
+  if (!tokens.length) return { score: 0, hits: [] };
+  const hay = String(clusterText ?? "").toLowerCase();
+  let score = 0;
+  const hits: string[] = [];
+  const seenHit = new Set<string>();
+  for (const raw of tokens) {
+    const t = String(raw ?? "");
+    const key = t.toLowerCase();
+    if (!key) continue;
+    if (!hay.includes(key)) continue;
+    const w = Math.min(16, key.length);
+    score += w * w;
+    if (!seenHit.has(key)) {
+      seenHit.add(key);
+      hits.push(t);
+    }
+  }
+  return { score, hits: hits.slice(0, 8) };
+}
+
+function pickClusterSelectorV1(args: {
+  clusters: any[];
+  defaultClusterId?: string;
+  topicText?: string;
+}): { selectedId: string; trace: any; topicHits: string[] } {
+  const clusters = Array.isArray(args.clusters) ? args.clusters : [];
+  const byId = new Map(clusters.map((c: any) => [String(c?.id ?? "").trim(), c]));
+  const d = String(args.defaultClusterId ?? "").trim();
+  const hasDefault = Boolean(d && byId.get(d));
+  const topicText = String(args.topicText ?? "").trim();
+
+  // 1) anchors 优先（更像原文）
+  let maxAnchors = 0;
+  for (const c of clusters) {
+    const n = Array.isArray(c?.anchors) ? c.anchors.length : 0;
+    if (n > maxAnchors) maxAnchors = n;
+  }
+  if (maxAnchors > 0) {
+    const picked = clusters
+      .slice()
+      .sort((a: any, b: any) => {
+        const na = Array.isArray(a?.anchors) ? a.anchors.length : 0;
+        const nb = Array.isArray(b?.anchors) ? b.anchors.length : 0;
+        if (nb !== na) return nb - na;
+        const sa = rankStabilityForSelectorV1(String(a?.stability ?? ""));
+        const sb = rankStabilityForSelectorV1(String(b?.stability ?? ""));
+        if (sb !== sa) return sb - sa;
+        const ca = Number(a?.docCoverageRate ?? 0) || 0;
+        const cb = Number(b?.docCoverageRate ?? 0) || 0;
+        if (cb !== ca) return cb - ca;
+        const sega = Number(a?.segmentCount ?? 0) || 0;
+        const segb = Number(b?.segmentCount ?? 0) || 0;
+        return segb - sega;
+      })[0];
+    const selectedId = String(picked?.id ?? "").trim() || (hasDefault ? d : String(clusters?.[0]?.id ?? "").trim());
+    return {
+      selectedId,
+      topicHits: [],
+      trace: { method: "selector_v1", pickedBy: "anchors", maxAnchors, defaultClusterId: hasDefault ? d : null },
+    };
+  }
+
+  // 2) topicFit（同库混题材时优先按话题匹配）
+  const topicScores: Array<{ id: string; score: number; hits: string[] }> = [];
+  for (const c of clusters) {
+    const id = String(c?.id ?? "").trim();
+    if (!id) continue;
+    const quotes = Array.isArray(c?.evidence) ? c.evidence.map((e: any) => String(e?.quote ?? "").trim()).filter(Boolean) : [];
+    const queries = Array.isArray(c?.queries) ? c.queries.map((q: any) => String(q ?? "").trim()).filter(Boolean) : [];
+    const label = String(c?.label ?? "").trim();
+    const clusterText = [label, ...queries.slice(0, 8), ...quotes.slice(0, 5)].filter(Boolean).join("\n");
+    const fit = topicText ? computeTopicFitV1(topicText, clusterText) : { score: 0, hits: [] };
+    topicScores.push({ id, score: fit.score, hits: fit.hits });
+  }
+  const maxTopic = topicScores.reduce((m, x) => Math.max(m, x.score), 0);
+  if (maxTopic > 0) {
+    const best = topicScores
+      .slice()
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        const ca = byId.get(a.id);
+        const cb = byId.get(b.id);
+        const sa = rankStabilityForSelectorV1(String(ca?.stability ?? ""));
+        const sb = rankStabilityForSelectorV1(String(cb?.stability ?? ""));
+        if (sb !== sa) return sb - sa;
+        const cova = Number(ca?.docCoverageRate ?? 0) || 0;
+        const covb = Number(cb?.docCoverageRate ?? 0) || 0;
+        if (covb !== cova) return covb - cova;
+        const sega = Number(ca?.segmentCount ?? 0) || 0;
+        const segb = Number(cb?.segmentCount ?? 0) || 0;
+        return segb - sega;
+      })[0];
+    const selectedId = best?.id || (hasDefault ? d : String(clusters?.[0]?.id ?? "").trim());
+    const hits = best?.hits ?? [];
+    return {
+      selectedId,
+      topicHits: hits,
+      trace: {
+        method: "selector_v1",
+        pickedBy: "topicFit",
+        maxTopicScore: maxTopic,
+        defaultClusterId: hasDefault ? d : null,
+        top: topicScores
+          .slice()
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 3)
+          .map((x) => ({ id: x.id, score: x.score })),
+      },
+    };
+  }
+
+  // 3) 无话题信号：默认写法（仅本库）优先，否则稳定性/覆盖率/段数
+  if (hasDefault) {
+    return { selectedId: d, topicHits: [], trace: { method: "selector_v1", pickedBy: "defaultCluster", defaultClusterId: d } };
+  }
+  const picked = clusters
+    .slice()
+    .sort((a: any, b: any) => {
+      const sa = rankStabilityForSelectorV1(String(a?.stability ?? ""));
+      const sb = rankStabilityForSelectorV1(String(b?.stability ?? ""));
+      if (sb !== sa) return sb - sa;
+      const ca = Number(a?.docCoverageRate ?? 0) || 0;
+      const cb = Number(b?.docCoverageRate ?? 0) || 0;
+      if (cb !== ca) return cb - ca;
+      const sega = Number(a?.segmentCount ?? 0) || 0;
+      const segb = Number(b?.segmentCount ?? 0) || 0;
+      return segb - sega;
+    })[0];
+  const selectedId = String(picked?.id ?? "").trim() || String(clusters?.[0]?.id ?? "").trim() || "";
+  return { selectedId, topicHits: [], trace: { method: "selector_v1", pickedBy: "stability", defaultClusterId: null } };
+}
+
+function pickFacetIdsV1(cluster: any, max = 8): string[] {
+  const plan = Array.isArray(cluster?.facetPlan) ? (cluster.facetPlan as any[]) : [];
+  const all = plan.map((f: any) => String(f?.facetId ?? "").trim()).filter(Boolean);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const push = (id: string) => {
+    const k = String(id ?? "").trim();
+    if (!k || seen.has(k)) return;
+    seen.add(k);
+    out.push(k);
+  };
+  // 先把“常见关键卡”放前面（存在才加入）
+  for (const id of ["opening_design", "narrative_structure", "one_liner_crafting", "emotion_mobilization", "logic_framework", "voice_rhythm"]) {
+    if (all.includes(id)) push(id);
+  }
+  for (const id of all) {
+    if (out.length >= max) break;
+    push(id);
+  }
+  return out.slice(0, max);
+}
+
 async function buildContextPack(extra?: { referencesText?: string; userPrompt?: string }) {
   const mainDoc = useRunStore.getState().mainDoc;
   const todoList = useRunStore.getState().todoList;
@@ -288,37 +503,7 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
     // M3：从最新声音指纹快照提取“写法候选（子簇）”，用于写作前选定写法并写入 Main Doc
     const styleLibs = kbSelected.filter((l: any) => String(l?.purpose ?? "").trim() === "style").slice(0, 4);
     if (!styleLibs.length) return "";
-
-    const rankStability = (s: string) => (s === "high" ? 3 : s === "medium" ? 2 : s === "low" ? 1 : 0);
-    const pickRecommended = (clusters: any[], defaultClusterId?: string) => {
-      const byId = new Map(clusters.map((c: any) => [String(c?.id ?? "").trim(), c]));
-      const d = String(defaultClusterId ?? "").trim();
-      if (d && byId.get(d)) return d;
-      // anchors 最多优先
-      let bestId = "";
-      let bestAnchors = -1;
-      for (const c of clusters) {
-        const cid = String(c?.id ?? "").trim();
-        const n = Array.isArray(c?.anchors) ? c.anchors.length : 0;
-        if (n > bestAnchors) {
-          bestAnchors = n;
-          bestId = cid;
-        }
-      }
-      if (bestId && bestAnchors > 0) return bestId;
-      // 稳定性优先，再覆盖率，再段数
-      let best: { id: string; score: number } | null = null;
-      for (const c of clusters) {
-        const cid = String(c?.id ?? "").trim();
-        if (!cid) continue;
-        const st = String(c?.stability ?? "").trim();
-        const cov = Number(c?.docCoverageRate ?? 0) || 0;
-        const seg = Number(c?.segmentCount ?? 0) || 0;
-        const score = rankStability(st) * 100_000 + cov * 1000 + seg;
-        if (!best || score > best.score) best = { id: cid, score };
-      }
-      return best?.id || String(clusters?.[0]?.id ?? "").trim() || "";
-    };
+    const topicText = buildTopicTextForSelectorV1({ userPrompt, mainDoc });
 
     const payload: any[] = [];
     for (const lib of styleLibs) {
@@ -329,7 +514,7 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
       const clustersRaw = Array.isArray(snapshot?.clustersV1) ? snapshot.clustersV1 : [];
       const cfg = await useKbStore.getState().getLibraryStyleConfig(libId).catch(() => ({ ok: false, anchors: [] } as any));
       const defaultClusterId = cfg?.ok ? (cfg as any).defaultClusterId : undefined;
-      const recommendedClusterId = clustersRaw.length ? pickRecommended(clustersRaw, defaultClusterId) : "";
+      const recommendedClusterId = clustersRaw.length ? pickClusterSelectorV1({ clusters: clustersRaw, defaultClusterId, topicText }).selectedId : "";
 
       const clusters = clustersRaw
         .slice(0, 6)
@@ -362,8 +547,68 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
     if (!payload.length) return "";
     return (
       `KB_STYLE_CLUSTERS(JSON):\n${JSON.stringify(payload, null, 2)}\n\n` +
-      `提示：这是“写法候选（子簇）”摘要。写作前请先选定写法（可改口），并把选择写入 Main Doc（run.mainDoc.update）。\n\n`
+      `提示：这是“写法候选（子簇）”摘要。系统可能已默认选定推荐写法继续写作；你也可随时改口切换（回复 clusterId 或 “写法A/写法B/写法C”）。\n\n`
     );
+  })();
+
+  const styleSelectorSection = await (async () => {
+    // Selector v1：为“自动选簇/选卡”提供结构化输出，保证换生成模型也稳定可用
+    const styleLibs = kbSelected.filter((l: any) => String(l?.purpose ?? "").trim() === "style").slice(0, 1);
+    if (!styleLibs.length) return "";
+    const lib = styleLibs[0];
+    const libId = String(lib?.id ?? "").trim();
+    if (!libId) return "";
+
+    const fpRet = await useKbStore.getState().getLatestLibraryFingerprint(libId).catch(() => ({ ok: false } as any));
+    const snapshot = fpRet?.ok ? (fpRet as any).snapshot : null;
+    const clustersRaw = Array.isArray(snapshot?.clustersV1) ? snapshot.clustersV1 : [];
+    if (!clustersRaw.length) return "";
+
+    const cfg = await useKbStore.getState().getLibraryStyleConfig(libId).catch(() => ({ ok: false, anchors: [] } as any));
+    const defaultClusterId = cfg?.ok ? String((cfg as any).defaultClusterId ?? "").trim() : "";
+
+    const topicText = buildTopicTextForSelectorV1({ userPrompt, mainDoc });
+    const autoPick = pickClusterSelectorV1({ clusters: clustersRaw, defaultClusterId, topicText });
+
+    const existing: any = (mainDoc as any)?.styleContractV1 ?? null;
+    const selectedByMainDoc =
+      existing &&
+      String(existing?.libraryId ?? "").trim() === libId &&
+      String(existing?.selectedCluster?.id ?? "").trim().length > 0
+        ? String(existing.selectedCluster.id).trim()
+        : "";
+
+    const selectedClusterId = selectedByMainDoc || String(autoPick.selectedId ?? "").trim();
+    const byId = new Map(clustersRaw.map((c: any) => [String(c?.id ?? "").trim(), c]));
+    const selected = selectedClusterId ? (byId.get(selectedClusterId) as any) : null;
+    const selectedFacetIds = selected ? pickFacetIdsV1(selected, 8) : [];
+
+    const why: string[] = [];
+    if (selectedByMainDoc) why.push("已按 Main Doc 锁定写法（用户可改口覆盖）。");
+    const anchorsCount = selected && Array.isArray(selected?.anchors) ? selected.anchors.length : 0;
+    if (anchorsCount > 0) why.push(`本簇已采纳 anchors：${anchorsCount} 段（优先“更像原文”）。`);
+    if (autoPick.topicHits?.length) why.push(`话题命中关键词：${autoPick.topicHits.slice(0, 4).join("、")}`);
+    const st = String(selected?.stability ?? "").trim();
+    const cov = Number(selected?.docCoverageRate ?? 0) || 0;
+    const seg = Number(selected?.segmentCount ?? 0) || 0;
+    if (st || cov || seg) why.push(`稳定性=${st || "unknown"}；覆盖率=${Math.round(cov * 100)}%；段数=${seg}`);
+    if (defaultClusterId && selectedClusterId === defaultClusterId) why.push("命中本库默认写法。");
+
+    const payload = {
+      v: 1,
+      libraryId: libId,
+      libraryName: String(lib?.name ?? libId),
+      selectedClusterId: selectedClusterId || null,
+      selectedFacetIds,
+      why: why.slice(0, 6),
+      trace: {
+        ...autoPick.trace,
+        selectedBy: selectedByMainDoc ? "mainDoc" : "auto",
+        selectedClusterId: selectedClusterId || null,
+      },
+    };
+
+    return `STYLE_SELECTOR(JSON):\n${JSON.stringify(payload, null, 2)}\n\n`;
   })();
 
   // Pending proposals：用于“proposal-first 不落盘”但仍可继续下一步（避免下一轮说‘没有初稿’）
@@ -426,6 +671,7 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
     skillsText +
     playbookSection +
     styleClustersSection +
+    styleSelectorSection +
     pendingSection +
     `EDITOR_SELECTION(JSON):\n${JSON.stringify(selection, null, 2)}\n\n` +
     `PROJECT_STATE(JSON):\n${JSON.stringify(state, null, 2)}\n\n` +
@@ -660,8 +906,9 @@ export function startGatewayRun(args: {
         await kb.refreshLibraries().catch(() => void 0);
       }
 
-      // M3(A)：不要在“第一次写作请求”时静默预填 styleContract（会导致模型跳过“写法候选”展示）。
-      // 仅当用户显式选择/接受（例如输入 cluster_1 / 写法B / 继续）时，才把选择写入 Main Doc，供后续回合稳定沿用。
+      // Selector v1：写作任务默认自动选簇并写入 styleContractV1（可改口、可解释、与生成模型解耦）
+      // - 不再强制 clarify_waiting 卡住用户
+      // - 但用户仍可随时改口（写法A/B/C 或 cluster_0/1/2）
       try {
         const run = useRunStore.getState();
         const main: any = run.mainDoc ?? {};
@@ -674,17 +921,38 @@ export function startGatewayRun(args: {
           .filter((id: string) => String((metaById.get(id) as any)?.purpose ?? "").trim() === "style");
         const libId = styleLibIds.length ? styleLibIds[0] : "";
 
-        const shouldConsider = libId && (!existing || String(existing?.libraryId ?? "").trim() !== libId);
+        const existingLibId = String(existing?.libraryId ?? "").trim();
+        const existingClusterId = String(existing?.selectedCluster?.id ?? "").trim();
+        const shouldConsider = libId && (!existing || existingLibId !== libId || !existingClusterId);
         if (shouldConsider) {
-          const fpRet = await useKbStore.getState().getLatestLibraryFingerprint(libId).catch(() => ({ ok: false } as any));
-          const snapshot = fpRet?.ok ? (fpRet as any).snapshot : null;
-          const clusters = Array.isArray(snapshot?.clustersV1) ? snapshot.clustersV1 : [];
-          const cfg = await useKbStore.getState().getLibraryStyleConfig(libId).catch(() => ({ ok: false, anchors: [] } as any));
-          const defaultClusterId = cfg?.ok ? String((cfg as any).defaultClusterId ?? "").trim() : "";
+          // 仅在“本轮会激活 style_imitate skill（写作/改写/润色类）”时才自动写入，避免非写作任务被误导
+          const kbSelectedForSkills = (run.kbAttachedLibraryIds ?? [])
+            .map((id: any) => String(id ?? "").trim())
+            .filter(Boolean)
+            .map((id: string) => {
+              const m = metaById.get(id) as any;
+              return { id, purpose: String(m?.purpose ?? "material") };
+            });
+          const activeForThisRun = activateSkills({
+            mode: args.mode as any,
+            userPrompt: String(args.prompt ?? ""),
+            mainDocRunIntent: main?.runIntent,
+            kbSelected: kbSelectedForSkills as any,
+          });
+          const hasStyleSkill = activeForThisRun.some((s: any) => String(s?.id ?? "") === "style_imitate");
+          if (!hasStyleSkill) {
+            // 非写作任务：不自动写入 styleContract
+          } else {
+            const fpRet = await useKbStore.getState().getLatestLibraryFingerprint(libId).catch(() => ({ ok: false } as any));
+            const snapshot = fpRet?.ok ? (fpRet as any).snapshot : null;
+            const clusters = Array.isArray(snapshot?.clustersV1) ? snapshot.clustersV1 : [];
+            const cfg = await useKbStore.getState().getLibraryStyleConfig(libId).catch(() => ({ ok: false, anchors: [] } as any));
+            const defaultClusterId = cfg?.ok ? String((cfg as any).defaultClusterId ?? "").trim() : "";
 
-          if (clusters.length) {
-            const prompt = String(args.prompt ?? "").trim();
-            const pickedByPrompt = (() => {
+            if (clusters.length) {
+              const prompt = String(args.prompt ?? "").trim();
+              const topicText = buildTopicTextForSelectorV1({ userPrompt: prompt, mainDoc: main });
+              const pickedByPrompt = (() => {
               // 1) 用户直接输入 clusterId（最稳）
               const m = prompt.match(/\b(cluster[_-]\d+)\b/i);
               if (m?.[1]) {
@@ -706,77 +974,50 @@ export function startGatewayRun(args: {
                 return "__USE_RECOMMENDED__" as any;
               }
               return null;
-            })();
+              })();
 
-            const rankStability = (s: string) => (s === "high" ? 3 : s === "medium" ? 2 : s === "low" ? 1 : 0);
-            const byId = new Map(clusters.map((c: any) => [String(c?.id ?? "").trim(), c]));
-            let picked: any = null;
-            if (pickedByPrompt && pickedByPrompt !== "__USE_RECOMMENDED__") picked = pickedByPrompt;
-            if (!picked && pickedByPrompt === "__USE_RECOMMENDED__") {
-              // 允许用户“继续”直接采用推荐（优先 defaultClusterId，否则走稳定性/覆盖率/段数）
-              if (defaultClusterId && byId.get(defaultClusterId)) picked = byId.get(defaultClusterId);
-            }
-            if (!picked) {
-              // anchors 最多优先
-              picked = clusters
-                .slice()
-                .sort((a: any, b: any) => (Array.isArray(b?.anchors) ? b.anchors.length : 0) - (Array.isArray(a?.anchors) ? a.anchors.length : 0))[0];
-              const n = picked && Array.isArray(picked?.anchors) ? picked.anchors.length : 0;
-              if (!n) {
-                picked = clusters
-                  .slice()
-                  .sort((a: any, b: any) => {
-                    const sa = rankStability(String(a?.stability ?? "").trim());
-                    const sb = rankStability(String(b?.stability ?? "").trim());
-                    if (sb !== sa) return sb - sa;
-                    const ca = Number(a?.docCoverageRate ?? 0) || 0;
-                    const cb = Number(b?.docCoverageRate ?? 0) || 0;
-                    if (cb !== ca) return cb - ca;
-                    const na = Number(a?.segmentCount ?? 0) || 0;
-                    const nb = Number(b?.segmentCount ?? 0) || 0;
-                    return nb - na;
-                  })[0];
+              const byId = new Map(clusters.map((c: any) => [String(c?.id ?? "").trim(), c]));
+              let picked: any = null;
+              if (pickedByPrompt && pickedByPrompt !== "__USE_RECOMMENDED__") picked = pickedByPrompt;
+              if (!picked) {
+                const auto = pickClusterSelectorV1({ clusters, defaultClusterId, topicText });
+                if (auto?.selectedId && byId.get(String(auto.selectedId).trim())) picked = byId.get(String(auto.selectedId).trim());
               }
-            }
 
-            // 仅当用户显式选择/接受时才写入（避免静默跳过“候选展示”）
-            const shouldWriteContract =
-              pickedByPrompt === "__USE_RECOMMENDED__" ||
-              (pickedByPrompt && pickedByPrompt !== "__USE_RECOMMENDED__");
-
-            if (picked && shouldWriteContract) {
-              const meta = metaById.get(libId) as any;
-              // 关键修正：用户回复“写法C/写法B/cluster_2”时，不要把这句话原样当成 userPrompt 交给模型；
-              // 否则模型可能把“写法C”误解为“C语言”，跑偏到编程话题。
-              // 这里把 prompt 改写成“继续（已选 cluster_x）”，并依赖 Main Doc 里的 goal + styleContractV1 继续写作闭环。
-              const pickedId = String(picked?.id ?? "").trim();
-              if (pickedId) {
-                const raw = String(args.prompt ?? "").trim();
-                const looksLikePureChoice =
-                  raw.length <= 16 &&
-                  (/^(写法\s*[ABC]\b|cluster[_-]\d+\b|继续|按推荐|用推荐|就用推荐|默认就行)[\s。！？!]*$/i.test(raw) ||
-                    /^就用写法\s*[ABC]\b[\s。！？!]*$/i.test(raw));
-                if (looksLikePureChoice) {
-                  promptForGateway = `继续（已选 ${pickedId}）`;
+              if (picked) {
+                const meta = metaById.get(libId) as any;
+                // 关键修正：用户回复“写法C/写法B/cluster_2”时，不要把这句话原样当成 userPrompt 交给模型；
+                // 否则模型可能把“写法C”误解为“C语言”，跑偏到编程话题。
+                // 这里把 prompt 改写成“继续（已选 cluster_x）”，并依赖 Main Doc 里的 goal + styleContractV1 继续写作闭环。
+                const pickedId = String(picked?.id ?? "").trim();
+                if (pickedId) {
+                  const raw = String(args.prompt ?? "").trim();
+                  const looksLikePureChoice =
+                    raw.length <= 16 &&
+                    (/^(写法\s*[ABC]\b|cluster[_-]\d+\b|继续|按推荐|用推荐|就用推荐|默认就行)[\s。！？!]*$/i.test(raw) ||
+                      /^就用写法\s*[ABC]\b[\s。！？!]*$/i.test(raw));
+                  if (looksLikePureChoice) {
+                    promptForGateway = `继续（已选 ${pickedId}）`;
+                  }
                 }
-              }
-              updateMainDoc({
-                styleContractV1: {
-                  v: 1,
-                  updatedAt: new Date().toISOString(),
-                  libraryId: libId,
-                  libraryName: String(meta?.name ?? libId),
-                  selectedCluster: {
-                    id: String(picked?.id ?? "").trim(),
-                    label: String(picked?.label ?? "").trim(),
+                updateMainDoc({
+                  styleContractV1: {
+                    v: 1,
+                    updatedAt: new Date().toISOString(),
+                    libraryId: libId,
+                    libraryName: String(meta?.name ?? libId),
+                    selectedCluster: {
+                      id: String(picked?.id ?? "").trim(),
+                      label: String(picked?.label ?? "").trim(),
+                    },
+                    anchors: Array.isArray(picked?.anchors) ? picked.anchors.slice(0, 8) : [],
+                    evidence: Array.isArray(picked?.evidence) ? picked.evidence.slice(0, 5) : [],
+                    softRanges: picked?.softRanges ?? {},
+                    facetPlan: Array.isArray(picked?.facetPlan) ? picked.facetPlan.slice(0, 8) : [],
+                    queries: Array.isArray(picked?.queries) ? picked.queries.slice(0, 8) : [],
                   },
-                  anchors: Array.isArray(picked?.anchors) ? picked.anchors.slice(0, 8) : [],
-                  evidence: Array.isArray(picked?.evidence) ? picked.evidence.slice(0, 5) : [],
-                  softRanges: picked?.softRanges ?? {},
-                  facetPlan: Array.isArray(picked?.facetPlan) ? picked.facetPlan.slice(0, 8) : [],
-                  queries: Array.isArray(picked?.queries) ? picked.queries.slice(0, 8) : [],
-                },
-              } as any);
+                } as any);
+              }
             }
           }
         }

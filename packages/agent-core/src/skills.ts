@@ -150,9 +150,10 @@ export const STYLE_IMITATE_SKILL: SkillManifest = {
   promptFragments: {
     system:
       "当 skill=style_imitate 激活时：\n" +
-      "0) 若 Context Pack 提供 KB_STYLE_CLUSTERS(JSON)（写法候选/子簇），请在写作前先给出 2–3 个写法候选（带 clusterId/label + 1 句代表证据 + 2~3 个关键数字口径），并标注推荐项；用户可随时改口。\n" +
-      "1) 选定写法后，必须调用 run.mainDoc.update 把选择写入 Main Doc：写入 mainDoc.styleContractV1（短 JSON：{v,libraryId,selectedCluster{id,label},anchors,evidence,softRanges,facetPlan,updatedAt}）。若 Main Doc 已有 styleContractV1 且用户未要求变更，则沿用。\n" +
-      "2) 写作时必须先 kb.search（只搜风格库）拉样例/模板；lint.style 用于“提示/审计/问题清单”，不要把分数当成唯一门禁：若 lint 不通过也不要卡死，请列出问题点并继续推进（或按用户要求回炉改写）。\n" +
+      "0) 若 Context Pack 提供 KB_STYLE_CLUSTERS(JSON)（写法候选/子簇）或 STYLE_SELECTOR(JSON)：请在输出开头用 1–2 句说明“本次默认采用的写法”（selectedClusterId/label），并列出另外 1–2 个备选写法（带 clusterId/label + 1 句代表证据 + 2~3 个关键数字口径）。不要停下来等用户确认：默认按推荐/已选写法继续写作；用户可随时改口切换。\n" +
+      "1) 若 Main Doc 尚未写入 styleContractV1（或用户改口要求切写法），再调用 run.mainDoc.update 写入/更新 mainDoc.styleContractV1（短 JSON：{v,libraryId,selectedCluster{id,label},anchors,evidence,softRanges,facetPlan,updatedAt}）。若 Main Doc 已有且用户未要求变更，则不要重复写入。\n" +
+      "2) 若提供 STYLE_SELECTOR(JSON).selectedFacetIds：把它当作本次优先执行的“维度子集”（不要求跑满 21 维度）；写作时先按这些维度去 kb.search 拉样例/模板，再落到正文。\n" +
+      "3) 写作时必须先 kb.search（只搜风格库）拉样例/模板；lint.style 用于“提示/审计/问题清单”，不要把分数当成唯一门禁：若 lint 不通过也不要卡死，请列出问题点并继续推进（或按用户要求回炉改写）。\n" +
       "工具调用仍按 XML 协议输出。",
     context: "ACTIVE_SKILLS: style_imitate（原因见 reasonCodes；UI 需可见）",
   },

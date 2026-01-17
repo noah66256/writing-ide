@@ -262,6 +262,9 @@ async function main() {
     assert.ok(gw.includes("docRules"), "Gateway 未接收 toolSidecar.docRules（server-side project.docRules.get 无法落地）");
     assert.ok(gw.includes("/api/admin/audit/runs"), "Gateway 未暴露审计查询接口 /api/admin/audit/runs（审计落库回退）");
     assert.ok(gw.includes("需确认") || gw.includes("澄清"), "Gateway ClarifyPolicy 未覆盖 需确认/澄清（可能再次自说自话继续跑）");
+    // Selector v1：写法候选不应再用 clarify_waiting 强制用户先选（默认自动选并继续）
+    assert.ok(gw.includes("policy: \"StyleClusterSelectPolicy\""), "Gateway 缺少 StyleClusterSelectPolicy（Selector v1 回退）");
+    assert.ok(gw.includes("decision: \"auto_selected\""), "StyleClusterSelectPolicy 未默认 auto_selected（Selector v1 回退）");
   }
   {
     const desk = await readRepoFile("apps/desktop/src/agent/toolRegistry.ts");
@@ -276,6 +279,7 @@ async function main() {
     assert.ok(desk.includes("assistant.start"), "Desktop 未处理 assistant.start（turn 边界可能回退）");
     assert.ok(desk.includes("ACTIVE_SKILLS(JSON)"), "Desktop 未注入 ACTIVE_SKILLS(JSON)（Skills 可见性回退）");
     assert.ok(desk.includes("KB_STYLE_CLUSTERS(JSON)"), "Desktop 未注入 KB_STYLE_CLUSTERS(JSON)（M3 写法候选回退）");
+    assert.ok(desk.includes("STYLE_SELECTOR(JSON)"), "Desktop 未注入 STYLE_SELECTOR(JSON)（Selector v1 回退）");
     assert.ok(desk.includes("styleContractV1"), "Desktop 未落地 styleContractV1（M3 主文档风格契约回退）");
   }
   {
@@ -285,6 +289,7 @@ async function main() {
   {
     const skills = await readRepoFile("packages/agent-core/src/skills.ts");
     assert.ok(skills.includes("KB_STYLE_CLUSTERS"), "style_imitate 未提示写法候选（M3 回退）");
+    assert.ok(skills.includes("STYLE_SELECTOR(JSON)"), "style_imitate 未提示 STYLE_SELECTOR(JSON)（Selector v1 回退）");
     assert.ok(skills.includes("styleContractV1"), "style_imitate 未要求写入 styleContractV1（M3 回退）");
   }
   {

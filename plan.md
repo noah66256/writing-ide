@@ -1,5 +1,12 @@
 ## 写作 IDE（内置 Agent）方案草案（plan.md）
 
+### 导航（常用入口）
+- [README（项目说明）](README.md)
+- [Agent 流程系统性审计与改造路线图（路线2）](agent-flow-audit-roadmap.md)
+- [KB Manager V2（更像原文）方案草案](kb-manager-v2-spec.md)
+- [Style Selector v1（自动选簇/选21卡，按话题适配，模型解耦）](style-selector-v1.md)
+- [writing-agent.md（写作 Agent 约定/协议）](writing-agent.md)
+
 ### 0. 背景与目标
 - **愿景**：做一个“写作 IDE”，把写作当成工程：项目化管理、可追溯修改、可复用模板/工作流，并内置一个能“调用工具”的 Agent 作为写作搭档。
 - **核心差异**：不是单纯聊天写作，而是“围绕文档/项目”的生成、改写、查证、结构化与发布（含审阅、diff、回滚）。
