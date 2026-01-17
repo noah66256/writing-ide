@@ -1178,7 +1178,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           delta:
             `\n\n[需要你确认：选择写法候选]\n已绑定风格库「${libName}」，检测到多个“写法候选（子簇）”。请先选定写法再继续写作：\n` +
             `${lines}\n\n` +
-            `请回复：\n- 直接回复某个 clusterId（例如：${rec || "cluster_0"}）\n- 或回复“继续”采用推荐写法\n`,
+            `请回复：\n- 直接回复某个 clusterId（例如：${rec || "cluster_0"}）\n- 或直接回复“写法A/写法B/写法C”（与上面候选 label 对应）\n- 或回复“继续”采用推荐写法\n`,
         });
         writeEvent("run.end", {
           runId,
@@ -1608,15 +1608,48 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       // - allowedToolNames（skills/state 级门禁）：可重试修正（避免误伤）
       const modeDenied = toolCalls.find((c: any) => !c?.name || !baseAllowedToolNames.has(String(c.name ?? "")));
       if (modeDenied) {
+        const badTool = String(modeDenied?.name ?? "");
+        // 关键修正：模型偶尔会“幻觉”出不存在的工具名（例如 fs.list）。这属于协议级错误，应自动提示重试一次（消耗 protocolRetryBudget），而不是直接终止。
+        if (runState.protocolRetryBudget > 0) {
+          writePolicyDecision({
+            turn,
+            policy: "SafetyPolicy",
+            decision: "retry",
+            reasonCodes: ["tool_not_allowed_retry", `tool:${badTool || "unknown"}`],
+            detail: {
+              tool: badTool,
+              budget: "protocol",
+              budgetBefore: runState.protocolRetryBudget,
+              budgetAfter: Math.max(0, runState.protocolRetryBudget - 1),
+            },
+          });
+          runState.protocolRetryBudget -= 1;
+          writeEvent("assistant.delta", {
+            delta:
+              `\n\n[解析提示] 你调用了不允许/不存在的工具：${badTool || "(empty)"}。我会让模型自动重试一次（无需你输入）。\n` +
+              "请它：改用允许的工具（例如 project.listFiles 列项目文件；doc.read 读文件；project.search 搜索），不要再调用 fs.list/fs.* 这类不存在工具名。",
+          });
+          writeEvent("assistant.done", { reason: "tool_not_allowed_retry", turn });
+          messages.push({
+            role: "system",
+            content:
+              `你上一轮 tool_calls 调用了不允许/不存在的工具：${badTool || "(empty)"}。\n` +
+              "- 你现在必须立刻重新输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
+              "- 只允许调用系统工具清单里的工具；不要再调用 fs.list/fs.*。\n" +
+              "- 若你想“列出项目文件/目录”，请调用 project.listFiles；若你想“读取某个文件内容”，请调用 doc.read；若你想“搜索”，请调用 project.search。\n",
+          });
+          continue;
+        }
+
         writePolicyDecision({
           turn,
           policy: "SafetyPolicy",
           decision: "block_end",
           reasonCodes: ["tool_not_allowed"],
-          detail: { tool: String(modeDenied?.name ?? "") },
+          detail: { tool: badTool },
         });
-        writeEvent("error", { error: `TOOL_NOT_ALLOWED:${String(modeDenied?.name ?? "")}` });
-        writeEvent("run.end", { runId, reason: "tool_not_allowed", reasonCodes: ["tool_not_allowed"], turn, tool: String(modeDenied?.name ?? "") });
+        writeEvent("error", { error: `TOOL_NOT_ALLOWED:${badTool}` });
+        writeEvent("run.end", { runId, reason: "tool_not_allowed", reasonCodes: ["tool_not_allowed"], turn, tool: badTool });
         reply.raw.end();
         agentRunWaiters.delete(runId);
         return;

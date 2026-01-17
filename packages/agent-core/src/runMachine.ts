@@ -151,7 +151,8 @@ export function detectRunIntent(args: {
     mode !== "chat" &&
     (/(仿写|改写|润色|续写|扩写|写(一篇|一段|一条|稿|文|文章|脚本|文案)|写.{0,8}\d{2,5}字|生成(文章|稿|文案)|按.+风格)/.test(userPrompt) ||
       /(写|仿写|改写|润色|续写|扩写)\s*@\{[^}]+\}/.test(userPrompt) || // 写@{示例.md}
-      /\bcluster[_-]\d+\b/i.test(userPrompt)); // 选簇续跑：用户仅回复 cluster_1 等，也应视为写作流程的一部分
+      /\bcluster[_-]\d+\b/i.test(userPrompt) || // 选簇续跑：用户仅回复 cluster_1 等，也应视为写作流程的一部分
+      /写法\s*[ABC]\b/i.test(userPrompt)); // 选簇续跑：用户仅回复“写法B/写法C”也应保持写作闭环
   const skipLint = /(跳过|不用|不要).{0,12}(linter|风格检查|风格对齐|风格校验|像不像检查)/i.test(userPrompt);
   const skipCta = /(跳过|不用|不要).{0,12}(cta|点赞|关注|评论|转发|收藏|三连|一键三连)/i.test(userPrompt);
 
