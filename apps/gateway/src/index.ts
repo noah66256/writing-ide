@@ -1400,7 +1400,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         return false;
       }
 
-      const toolCalls = parseToolCalls(assistantText);
+      let toolCalls = parseToolCalls(assistantText);
       if (toolCalls && !isToolCallXmlExclusive(assistantText)) {
         if (runState.protocolRetryBudget > 0) {
           writePolicyDecision({
@@ -1785,6 +1785,38 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           reply.raw.end();
           agentRunWaiters.delete(runId);
           return;
+        }
+      }
+
+      // 兼容层：部分模型会把 run.updateTodo 的 patch 拆成顶层参数（status/note/text），导致 ToolArgValidationPolicy 误杀。
+      // 这里把其自动封装回 patch(JSON)，提升跨模型稳定性（尤其 gemini/deepseek）。
+      if (toolCalls?.length) {
+        const isNonEmpty = (v: any) => typeof v === "string" && String(v).trim().length > 0;
+        let normalized = 0;
+        toolCalls = toolCalls.map((c: any) => {
+          const name = String(c?.name ?? "").trim();
+          const rawArgs = (c?.args ?? {}) as Record<string, string>;
+          if (name !== "run.updateTodo") return c;
+          if (isNonEmpty(rawArgs.patch)) return c;
+
+          const patch: any = {};
+          if (isNonEmpty((rawArgs as any).status)) patch.status = String((rawArgs as any).status).trim();
+          if (isNonEmpty((rawArgs as any).note)) patch.note = String((rawArgs as any).note);
+          if (isNonEmpty((rawArgs as any).text)) patch.text = String((rawArgs as any).text);
+          if (!Object.keys(patch).length) return c;
+
+          normalized += 1;
+          return { ...c, args: { ...rawArgs, patch: JSON.stringify(patch) } };
+        });
+
+        if (normalized > 0) {
+          writePolicyDecision({
+            turn,
+            policy: "ToolArgNormalizationPolicy",
+            decision: "normalized",
+            reasonCodes: ["tool_args_normalized", "tool:run.updateTodo"],
+            detail: { normalized },
+          });
         }
       }
 
