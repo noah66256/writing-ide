@@ -507,7 +507,13 @@ export const useRunStore = create<RunState>()(
 }),
     {
       name: "writing-ide.runprefs.v1",
-      partialize: (s) => ({ mode: s.mode, model: s.model, kbAttachedLibraryIds: s.kbAttachedLibraryIds }),
+      partialize: (s) => ({
+        mode: s.mode,
+        model: s.model,
+        chatModel: s.chatModel,
+        agentModel: s.agentModel,
+        kbAttachedLibraryIds: s.kbAttachedLibraryIds,
+      }),
     },
   ),
 );
