@@ -855,40 +855,6 @@ export function AgentPane() {
                         </div>
 
                         <div className="composerBarRight">
-                          {/* 发送按钮在 DOM 中先声明 → flex 布局优先分配空间；CSS order 保持视觉在右 */}
-                          <div className="composerBarRightSend">
-                            {isRunning ? (
-                              <button
-                                className="sendBtn"
-                                type="button"
-                                aria-label="停止"
-                                title="停止"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onStop();
-                                }}
-                              >
-                                <IconStop />
-                              </button>
-                            ) : (
-                              <button
-                                className="sendBtn"
-                                type="button"
-                                aria-label="提交"
-                                title="提交"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  const t = editingText.trim();
-                                  if (!t) return;
-                                  setSubmitFromHistory({ stepId: step.id, text: t });
-                                }}
-                                disabled={!editingText.trim() || !model}
-                              >
-                                <IconSend />
-                              </button>
-                            )}
-                          </div>
-
                           <div className="composerBarRightMain">
                             <button
                               className="iconBtn"
@@ -938,6 +904,39 @@ export function AgentPane() {
                             >
                               <IconMic />
                             </button>
+                          </div>
+
+                          <div className="composerBarRightSend">
+                            {isRunning ? (
+                              <button
+                                className="sendBtn"
+                                type="button"
+                                aria-label="停止"
+                                title="停止"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onStop();
+                                }}
+                              >
+                                <IconStop />
+                              </button>
+                            ) : (
+                              <button
+                                className="sendBtn"
+                                type="button"
+                                aria-label="提交"
+                                title="提交"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const t = editingText.trim();
+                                  if (!t) return;
+                                  setSubmitFromHistory({ stepId: step.id, text: t });
+                                }}
+                                disabled={!editingText.trim() || !model}
+                              >
+                                <IconSend />
+                              </button>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -1221,19 +1220,6 @@ export function AgentPane() {
             </div>
 
             <div className="composerBarRight">
-              {/* 发送按钮在 DOM 中先声明 → flex 布局优先分配空间；CSS order 保持视觉在右 */}
-              <div className="composerBarRightSend">
-                {isRunning ? (
-                  <button className="sendBtn" type="button" aria-label="停止" title="停止" onClick={onStop}>
-                    <IconStop />
-                  </button>
-                ) : (
-                  <button className="sendBtn" type="button" aria-label="发送" title="发送" onClick={onSend} disabled={!input.trim()}>
-                    <IconSend />
-                  </button>
-                )}
-              </div>
-
               <div className="composerBarRightMain">
                 <button className="iconBtn" type="button" aria-label="@ 引用" title="@ 引用选择器" onClick={() => openRefPicker("main")}>
                   <IconAt />
@@ -1286,6 +1272,18 @@ export function AgentPane() {
                     e.currentTarget.value = "";
                   }}
                 />
+              </div>
+
+              <div className="composerBarRightSend">
+                {isRunning ? (
+                  <button className="sendBtn" type="button" aria-label="停止" title="停止" onClick={onStop}>
+                    <IconStop />
+                  </button>
+                ) : (
+                  <button className="sendBtn" type="button" aria-label="发送" title="发送" onClick={onSend} disabled={!input.trim()}>
+                    <IconSend />
+                  </button>
+                )}
               </div>
             </div>
           </div>

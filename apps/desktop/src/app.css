@@ -1389,28 +1389,28 @@ body {
 }
 
 .composerBarRight {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 6px;
-  flex-wrap: nowrap;
+  column-gap: 6px;
   flex: 0 1 auto;
-  min-width: 40px; /* 至少容纳发送按钮 */
+  min-width: 0;
   margin-left: auto;
-  /* 不设 overflow:hidden → 发送按钮不会被裁；图标区有自己的 overflow:hidden */
 }
 
 .composerBarRightMain {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex: 1 1 0; /* 增长填充可用空间，可完全收缩到 0 */
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
-  justify-content: flex-start; /* 图标从左开始排，溢出时右边图标被裁 */
+  justify-content: flex-end; /* 图标贴近发送按钮，缩小时从左侧裁 */
 }
 
 .composerBarRightSend {
-  flex: 0 0 auto; /* 永不收缩 */
+  flex: 0 0 auto;
+  justify-self: end;
 }
 
 .pillSelect {
