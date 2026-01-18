@@ -167,6 +167,7 @@ sudo spctl --master-enable
 ## 4. 相关入口
 
 - Windows 打包与常见坑：`debug.md`
+- macOS 打包后常见问题（已损坏 / Monaco loading / KB 抽卡）：`debug.md`
 - Desktop 打包配置：`apps/desktop/package.json`（`scripts` 与 `build` 字段）
 
 

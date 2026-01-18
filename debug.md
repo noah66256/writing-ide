@@ -135,6 +135,52 @@ sudo spctl --master-enable
 - 用 Apple Notary Service 公证并 staple
 - 本仓库已提供 GitHub Actions：见 `docs/release/desktop-packaging.md` 的“3.4.3”
 
+---
+
+### 6) macOS 打包版「中间编辑器一直 loading / Monaco 初始化失败」
+
+#### 现象
+
+- 编辑器区域一直显示加载（或空白）
+- Console 可能出现：
+  - `Monaco initialization: error: Event`
+  - `net::ERR_CONNECTION_TIMED_OUT`（尝试拉取 Monaco 资源/worker）
+
+#### 根因（高概率）
+
+- `@monaco-editor/react` 默认会走 loader/CDN 拉 Monaco 资源；在打包/离线/网络受限环境会卡死。
+
+#### 解决（应用侧）
+
+- 在 `apps/desktop/src/monaco/setupMonaco.ts` 里强制：
+  - `loader.config({ monaco })`
+  - 并用 Vite worker 方式显式配置 `MonacoEnvironment.getWorker`
+
+---
+
+### 7) macOS 打包版「KB 抽卡/仿写手册接口报 ERR_FILE_NOT_FOUND」
+
+#### 现象
+
+- 抽卡直接失败
+- Network/Console 看到：
+  - `api/kb/dev/extract_cards: Failed to load resource: net::ERR_FILE_NOT_FOUND`
+
+#### 根因
+
+- 打包版 renderer origin 是 `app://-`。
+- 若代码仍用相对 `/api/...`，会被解析成 `app://-/api/...`（当成本地文件路径）→ 必然 `ERR_FILE_NOT_FOUND`。
+
+#### 解决（应用侧）
+
+- 统一 Gateway baseURL 解析：
+  - dev：`""`（走 `/api`，由 Vite proxy 转发）
+  - packaged：默认回落到 `DEFAULT_GATEWAY_URL`（必须绝对地址）
+  - 支持 `localStorage["writing-ide.gatewayUrl"]` 临时覆盖
+- 本项目实现入口：
+  - `apps/desktop/src/agent/gatewayUrl.ts`：`getGatewayBaseUrl()`
+  - `apps/desktop/src/state/kbStore.ts`：抽卡/手册相关请求必须用 `getGatewayBaseUrl()`
+
 ### 4) Git Bash 下 Windows 命令参数被“路径转换”坑到（taskkill/…）
 
 #### 现象
