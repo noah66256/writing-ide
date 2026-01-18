@@ -103,6 +103,38 @@ localStorage.setItem("writing-ide.gatewayUrl", "http://120.26.6.147:8000");
 
 ---
 
+### 5) macOS 打包后提示「App 已损坏/受到损坏，移到废纸篓」
+
+#### 现象
+
+- 在 macOS 上打开 DMG 安装后的 `写作IDE.app`，提示：
+  - “已损坏/受到损坏，无法打开，请移到废纸篓”
+
+#### 根因（高概率）
+
+- Gatekeeper 拦截：产物 **未 Developer ID 签名 / 未 Notarize / 未 staple**
+- 产物来自网络下载，带 `quarantine` 等扩展属性（macOS 14/15 更严格）
+
+#### 临时绕过（仅测试机）
+
+```bash
+sudo xattr -cr "/Applications/写作IDE.app"
+```
+
+若仍不行（不推荐长期）：
+
+```bash
+sudo spctl --master-disable
+# 测试完恢复：
+sudo spctl --master-enable
+```
+
+#### 正式解决（推荐）
+
+- 用 **Developer ID Application** 证书签名
+- 用 Apple Notary Service 公证并 staple
+- 本仓库已提供 GitHub Actions：见 `docs/release/desktop-packaging.md` 的“3.4.3”
+
 ### 4) Git Bash 下 Windows 命令参数被“路径转换”坑到（taskkill/…）
 
 #### 现象

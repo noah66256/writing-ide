@@ -101,6 +101,54 @@ npm run dist:desktop:mac:universal
 
 > 本项目暂未内置 notarize pipeline；需要时我们再补（会涉及 Apple Developer 账号、证书、CI secrets）。
 
+### 3.4.1 “已损坏/受到损坏，移到废纸篓”到底是什么
+
+现象（不同 macOS 文案略有差异）：
+- “`xxx.app` 已损坏，无法打开。你应该将它移到废纸篓。”
+
+这通常不是文件真的坏了，而是 **Gatekeeper 拦截**：
+- App/DMG **未签名（Developer ID）或签名无效**
+- App/DMG **未 Notarize（公证）或未 staple 票据**
+- 下载产物带了 `quarantine` 等扩展属性（来自互联网）
+
+若你已经 `xattr -cr` 仍不行，尤其是在较新的 macOS（例如 14/15）上，基本就需要走 **签名 + notarize** 才能“分发给别人的机器也能双击打开”。
+
+### 3.4.2 临时绕过（只用于测试机）
+
+> 风险：降低系统安全性，仅用于测试，跑通后请恢复。
+
+- 清理隔离属性（建议对 DMG 与 App 都做）：
+
+```bash
+sudo xattr -cr "/Applications/写作IDE.app"
+```
+
+- 若仍不行，可临时关闭 Gatekeeper（不推荐长期）：
+
+```bash
+sudo spctl --master-disable
+# 打开 App 测试完后记得恢复：
+sudo spctl --master-enable
+```
+
+### 3.4.3 正式分发（推荐）：GitHub Actions 生成“已签名 + 已公证 + 已 staple”的 DMG
+
+仓库已提供工作流：`.github/workflows/desktop-macos-dmg-notarized.yml`
+
+你需要先在 GitHub 仓库里配置 Secrets：
+- **签名证书**
+  - `MACOS_CERT_P12_BASE64`：Developer ID Application 证书 `.p12` 的 base64
+  - `MACOS_CERT_PASSWORD`：`.p12` 密码
+- **Notarize（推荐 App Store Connect API Key）**
+  - `APPLE_API_KEY_P8`：`.p8` 原文（包含 BEGIN/END）
+  - `APPLE_API_KEY_ID`：Key ID（10位）
+  - `APPLE_API_ISSUER`：Issuer ID（UUID）
+
+然后在 GitHub Actions：
+- 选择 `Desktop macOS DMG (Signed & Notarized)`
+- Run workflow，选 `arm64`（M 系列推荐）或 `universal`
+- 下载产物 `desktop-macos-notarized-<arch>`，里面的 `.dmg` 在别的 Mac 上通常就不会再提示“已损坏”
+
 ### 3.5 没有 Mac 环境也要“直接产 DMG”（推荐：GitHub Actions）
 
 仓库已提供工作流：`.github/workflows/desktop-macos-dmg.yml`
