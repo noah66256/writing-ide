@@ -1,134 +1,229 @@
-## Intent Routing（第一道门禁）调研与提案（v0.1）
+## Intent Routing（第一道门禁）工程说明（v0.2）
 
-### 0. 这份文档解决什么
-在进入“Todo + 工具调用 + 协议门禁（XML 独占）”之前，加一层 **Intent Router / Intent Gate**：
+> 状态：draft（先文档对齐 → 再按文档落地代码）  
+> 进阶版本选择：**方案 A（LLM Router stage）**
 
-- 先判断用户这句到底是 **要执行任务**，还是 **只想讨论/解释/排查**
-- 在**能力边界**（本轮可用工具/权限）内，决定下一步是：直接回答 / 问澄清 / 进入任务闭环（Todo + Tools）
-
----
-
-### 1. 与本仓库现状的关联（为什么需要第一道门禁）
-我们当前常见的“误伤”模式是：
-
-- 非任务型输入也被强行拉进闭环，触发 `need_todo` 等重试
-- 模型在工具调用上偶发“XML 夹自然语言”，触发 `tool_xml_mixed_with_text`，导致连续 retry
-- 用户只想聊/分析时，被迫“先 Todo/先工具” → 体验割裂
-
-因此需要一个 **Policy-0（入口路由）**：把“对话/解释”与“任务执行”分流，减少误触闭环与协议重试。
-
-> 备注：我们代码侧已经有 `AutoRetryPolicy/ProtocolPolicy`（见 `apps/gateway/src/index.ts`），Intent Gate 的定位是在它们之前做“是否进入闭环”的决策（本文只做设计提案，不改代码）。
+### 0. 摘要（TL;DR）
+- **要解决的问题**：Plan/Agent 模式里，非任务型输入被强制拉进“Todo + Tools + XML 协议门禁”，导致 `need_todo / tool_xml_mixed_with_text / empty_output` 等连环重试与体验割裂。
+- **核心做法**：在进入闭环前新增 **Policy-0：Intent Router / Intent Gate**，把输入路由为：
+  - `task_execution`（进入闭环：Todo+Tools）
+  - `discussion/debug/info`（不强制 todo、不允许工具，直接文本回答）
+  - `unclear`（问 1 个澄清问题，等待用户确认再进入闭环）
+- **落地分两阶段**：
+  - **Phase 0（MVP）**：不新增模型调用，利用现有信号（`mainDoc.runIntent`、`detectRunIntent()`、`RUN_TODO` 等）路由。
+  - **Phase 1（进阶：方案 A）**：新增一个 **LLM Router stage（例如 `agent.router`）** 输出结构化路由结果；失败/超时回退 Phase 0。
+- **可回滚**：提供开关（env/配置）一键关闭 Router，恢复现状。
 
 ---
 
-### 2. 主流实现怎么做（结论优先）
+### 1. 目标 / 非目标
 
-#### 2.1 路由粒度：每轮重路由 vs sticky（保留意图）
-主流做法大体两类：
+#### 1.1 目标（Goals）
+- **只在“任务型”时强制 Todo**：减少 `need_todo` 误判重试。
+- **只在“任务型”时允许工具协议（XML tool_calls）**：减少 `tool_xml_mixed_with_text` 误伤。
+- **能力边界明确**：非任务型输入默认不启用工具，避免“明明只是讨论却触发执行流程”。
+- **可观测/可调参/可灰度**：路由决策必须可记录，便于统计误判与调优。
 
-- **Per-message（每条用户消息都做一次路由）**：更灵活，适合用户频繁换话题
-- **Stateful/Sticky（在一段任务流里继承意图）**：减少“继续/好/按这个来”被误判；但必须能检测“用户显式切话题”来重置
-
-对我们项目更实用的折中（建议）：
-
-- **默认 per-message 路由**
-- 叠加“弱 sticky”：
-  - 若已有 `RUN_TODO` 且用户输入很短（如“继续/按这个来/OK”），优先继承上一次 `intentType`
-  - 若用户出现显式切换信号（如“换个话题/先不做了/只讨论原因/不要工具”），强制重置为 `discussion`
-
-参考：
-
-- `LangChain` multi-agent router（路由到子 agent/chain）：`https://docs.langchain.com/oss/javascript/langchain/multi-agent/router`
-- `LangChain` router knowledge base（路由到检索/非检索等分支的思路）：`https://docs.langchain.com/oss/python/langchain/multi-agent/router-knowledge-base`
-
-#### 2.2 低置信度默认策略：澄清 vs 保守回答
-主流套路基本一致：**阈值分段 + fallback**
-
-- 高置信度：自动进入对应分支（task 或 discussion）
-- 中等置信度：优先问 1 个澄清问题（不要 5 连问）
-- 低置信度：走保守路径（通常是 discussion/直接回答），并给用户一个显式“升级为任务”的入口
-
-对我们项目建议（可调参）：
-
-- **T_high**（如 0.80）：直接进入 task 闭环（Todo + Tools）
-- **[T_low, T_high)**（如 0.55~0.80）：问 1 个澄清：  
-  “你是希望我给可执行步骤/生成 Todo 并动手做，还是先讨论原因/思路？”
-- **< T_low**：默认 `discussion`（不强制 Todo/不要求工具），但提示：  
-  “如果你希望我执行任务/生成 Todo，请明确说‘开始执行’/‘生成 todo’”
-
-参考：
-
-- OpenAI《A practical guide to building AI agents》（强调 guardrails、fallback、人类确认等）：`https://openai.com/business/guides-and-resources/a-practical-guide-to-building-ai-agents/`
-- When2Call: When (not) to Call Tools（研究：何时不该调用工具）：`https://arxiv.org/abs/2504.18851`
-
-#### 2.3 能力边界显式化：工具元信息 + 工具可见性裁剪
-主流做法：**工具 = 能力边界**，并且把边界写清楚。
-
-- 工具定义不仅有 `name/description/schema`，还常带：
-  - 权限（read/write/network）
-  - 风险等级（low/medium/high）
-  - 是否可逆（reversible/undo）
-  - 是否幂等（idempotent）
-  - 适用意图（哪些 intentType 才能使用）
-- 路由/执行阶段会做“工具可见性裁剪”（只给当前意图/阶段允许的工具），减少误用
-
-对我们项目建议先从“最小可用的元信息”开始：
-
-- `permission`: read | write | network
-- `riskLevel`: low | medium | high
-- `applyPolicy`: proposal-first | auto-apply
-- `reversible`: boolean（是否支持 Undo）
-- `intentAllowList`: 支持的 intentType 列表（例如 discussion 禁用写工具）
-
-参考：
-
-- LangChain middleware（例如先做 tool selection 的中间件思路）：`https://docs.langchain.com/oss/python/langchain/middleware/built-in`
-- semantic-router（Embedding/语义路由开源实现）：`https://github.com/aurelio-labs/semantic-router`
-- OpenAI Agents SDK（tool_choice/工具门禁外置的思路）：`https://openai.github.io/openai-agents-js/guides/agents/`
+#### 1.2 非目标（Non-goals）
+- 不在这一阶段做“通用工作流平台/多代理编排器”。
+- 不在 Phase 0 引入 semantic-router/embedding 路由（可后续再评估）。
+- 不在本文阶段改动 Desktop UI（先从 Gateway policy 层落地）。
 
 ---
 
-### 3. Router 输出（建议 schema）
-Router 最好输出“可执行决策”，而不只是标签：
-
-- `intentType`: `task_execution | discussion | info | debug | unclear`
-- `confidence`: 0~1
-- `nextAction`: `respond_text | ask_clarify | enter_workflow`
-- `todoPolicy`: `skip | optional | required`
-- `toolPolicy`: `deny | allow_readonly | allow_tools`
-- `reason`: 一句话原因（用于日志/审计/可解释）
+### 2. 术语
+- **Intent Router / Intent Gate**：进入闭环前的“路由决策层（Policy-0）”。
+- **任务型（task_execution）**：用户期望系统**推进可执行步骤**（写作/改写/落盘/修复/生成/打包等），并可能需要工具链。
+- **非任务型（discussion/debug/info）**：用户期望**解释/讨论/排查/分析**，不要求系统推进“任务闭环”。
+- **弱 sticky**：当用户输入很短（如“继续/OK/按这个来”）且上文存在任务状态（如 `RUN_TODO`），倾向继承上一次意图，避免反复澄清。
 
 ---
 
-### 4. 决策表（建议默认行为）
+### 3. 输出契约（IntentRouteDecision）
+
+#### 3.1 TypeScript（建议）
+```ts
+export type IntentType = "task_execution" | "discussion" | "debug" | "info" | "unclear";
+export type NextAction = "respond_text" | "ask_clarify" | "enter_workflow";
+export type TodoPolicy = "skip" | "optional" | "required";
+export type ToolPolicy = "deny" | "allow_readonly" | "allow_tools";
+
+export type IntentRouteDecision = {
+  intentType: IntentType;
+  confidence: number; // 0~1
+  nextAction: NextAction;
+  todoPolicy: TodoPolicy;
+  toolPolicy: ToolPolicy;
+  reason: string; // 一句话解释（给日志/审计用）
+  derivedFrom?: string[]; // 用到的信号：runIntent/detectRunIntent/RUN_TODO/regex/llm_router...
+};
+```
+
+#### 3.2 阈值（建议默认）
+- `T_high = 0.80`
+- `T_low = 0.55`
+
+---
+
+### 4. 默认决策表（建议）
 | intentType | confidence | nextAction | todoPolicy | toolPolicy |
 |---|---:|---|---|---|
 | task_execution | ≥ T_high | enter_workflow | required | allow_tools |
 | task_execution | [T_low, T_high) | ask_clarify | optional | allow_readonly |
 | task_execution | < T_low | respond_text（保守） | skip | deny |
-| discussion / debug / info | 任意 | respond_text | skip | deny（或 allow_readonly，按需） |
+| discussion/debug/info | 任意 | respond_text | skip | deny（或 allow_readonly，按需） |
 | unclear | 任意 | ask_clarify | skip | deny |
 
 ---
 
-### 5. 例子（和我们遇到的问题对齐）
+### 5. Phase 0（MVP）：不新增模型调用的 Intent Router
 
-- **“看这个问题，先说你认为的原因，然后我们讨论解法”**  
-  → `discussion/debug`：不需要 Todo，不需要工具，直接解释即可。
+#### 5.1 可用信号（我们现在已经有）
+- `mode`：`plan | agent | chat`
+- `MAIN_DOC(JSON).runIntent`（UI/主文档结构化意图）：`auto/writing/rewrite/polish/analysis/ops`
+- `detectRunIntent()` 的派生信号（现有逻辑）：`wantsWrite/isWritingTask/forceProceed/wantsOkOnly/...`
+- `RUN_TODO(JSON)` 是否存在（用于弱 sticky）
+- 轻量关键词/正则（只做兜底，不追求完美）：例如“为什么/原因/解释/讨论/排查/报错/日志” vs “生成/写/实现/修复/打包/落盘/拆分”
 
-- **“把 Desktop 打包成 exe（electron-builder + NSIS），并且不要把 userData 打进去”**  
-  → `task_execution`：进入任务闭环（Todo + Tools + proposal-first 写入）。
+#### 5.2 路由算法（伪代码）
+```text
+if mode == chat:
+  -> discussion (confidence=1, respond_text, todo=skip, tools=deny)
 
-- **“继续”（且上文已有 todo/任务流）**  
-  → 弱 sticky 继承 `task_execution`：直接推进，不要重新强制问一堆澄清。
+if wantsOkOnly:
+  -> info (confidence=0.9, respond_text, todo=skip, tools=deny)
+
+if mainDoc.runIntent in [analysis, ops]:
+  -> discussion/debug (confidence=0.9)
+
+if mainDoc.runIntent in [writing, rewrite, polish]:
+  -> task_execution (confidence=0.9)
+
+if short_message AND RUN_TODO exists:
+  -> task_execution (confidence=0.75~0.85)  // 弱 sticky：延续任务流
+
+if detectRunIntent.wantsWrite OR detectRunIntent.isWritingTask:
+  -> task_execution (confidence=0.8~0.9)
+
+if looks_like_debug_question:
+  -> debug (confidence=0.8)
+
+else:
+  -> unclear (confidence=0.5~0.7, ask_clarify)
+```
+
+#### 5.3 如何接入现有 Policy 链（关键）
+落地位置（建议）：
+- **Gateway 入口**：`apps/gateway/src/index.ts` 的 `/api/agent/run/stream` 里，在 `detectRunIntent()` 之后、进入主循环之前，先算出 `IntentRouteDecision`。
+- **写日志**：发一条 `policy.decision`：`policy="IntentPolicy"`，记录 `intentType/confidence/nextAction/todoPolicy/toolPolicy/derivedFrom`。
+
+对现有策略的影响（必须做）：
+- **只在 `todoPolicy=required` 时才触发 `need_todo`**  
+  当前 `packages/agent-core/src/runMachine.ts` 的 `analyzeAutoRetryText()` 里 `needTodo = !hasTodoList` 是“无脑强制”。落地时要把它改成“由 Router 决定是否 required”。
+- **当 `toolPolicy=deny` 时，强制文本回答路径**  
+  - 不要暴露工具清单（或等价地把工具集裁剪为空）
+  - 如果模型仍输出 `<tool_calls>`：视为违规，要求它重试输出纯文本（避免走 ProtocolPolicy 的 XML-only 误伤循环）
+
+#### 5.4 ask_clarify 的统一话术（MVP）
+只问 1 个高价值问题（避免 5 连问）：
+- “你是希望我**生成 Todo 并推进执行**，还是先**讨论/解释原因**？”
 
 ---
 
-### 6. 可观察性（我们应该记录什么）
-建议每次路由都写一条可审计日志：
+### 6. Phase 1（进阶：方案 A LLM Router stage）
 
-- `intentType/confidence/nextAction`
-- 是否触发了 todo / tool / protocol gate
-- 误判样本（用户手动纠正：如“不是要你执行，只是聊聊”）用于调参/改规则
+#### 6.1 目标
+用一条“低成本的路由模型调用”替代大量启发式误判，让 Router 更稳：
+- 输出固定 schema（JSON）
+- 给出 confidence
+- 失败/超时回退 Phase 0
+
+#### 6.2 Stage 设计
+- 新增 stage：`agent.router`
+- 该 stage 的模型应偏便宜/快（比主 agent 模型更轻）
+- Router 调用必须：
+  - **不允许工具**（逻辑上等价 `tool_choice=none`）
+  - **只允许输出 JSON**（禁止 XML/Markdown）
+
+#### 6.3 Router Prompt（示意）
+system（要点）：
+- “你是 Intent Router，只输出严格 JSON”
+- “你不允许调用任何工具，不允许输出 `<tool_calls>`”
+- “字段必须齐全且值必须属于枚举”
+
+input：
+- `mode`
+- `userPrompt`
+- `mainDoc.runIntent`（若有）
+- `hasRunTodo`（boolean）
+- （可选）`lastIntentType`（若做 sticky）
+
+output：严格 `IntentRouteDecision`
+
+#### 6.4 失败回退
+- JSON parse 失败 / 超时 / schema 校验失败 → 回退 Phase 0
+- 回退同样写 `policy.decision`，并带 `reasonCodes: ["router_fallback"]`
+
+---
+
+### 7. 接入点（代码落地清单）
+（先文档对齐，后续按这里逐项做）
+
+- Gateway：
+  - `apps/gateway/src/index.ts`
+    - [ ] 在 `/api/agent/run/stream` 增加 `IntentPolicy`
+    - [ ] `policy.decision` 事件记录路由结果
+    - [ ] 根据 `toolPolicy` 裁剪工具可见性
+- Agent-core：
+  - `packages/agent-core/src/runMachine.ts`
+    - [ ] `analyzeAutoRetryText()` 增加“是否 todo required”的输入（或从 state 读取），避免无脑 `need_todo`
+- （进阶）LLM Router：
+  - `apps/gateway/src/index.ts`（或抽到 `apps/gateway/src/agent/*`）
+    - [ ] 调用 `agent.router` stage（方案 A）
+    - [ ] schema 校验 + fallback
+
+---
+
+### 8. 配置与开关（建议）
+- `INTENT_ROUTER_ENABLED=1|0`（默认 1）
+- `INTENT_ROUTER_MODE=heuristic|llm|hybrid`（默认 heuristic；后续切 llm/hybrid）
+- `INTENT_ROUTER_T_HIGH=0.80`
+- `INTENT_ROUTER_T_LOW=0.55`
+- `INTENT_ROUTER_STICKY=weak|off`（默认 weak）
+- `INTENT_ROUTER_LLM_STAGE=agent.router`（方案 A）
+- `INTENT_ROUTER_CLARIFY_TEMPLATE=...`（可选覆盖）
+
+---
+
+### 9. 可观察性（必须）
+- 每次 run 输出一条 `policy.decision(IntentPolicy)`：
+  - `intentType/confidence/nextAction/todoPolicy/toolPolicy/derivedFrom`
+- 关键指标（用于评估收益）：
+  - `need_todo` 触发次数（应显著下降）
+  - `tool_xml_mixed_with_text` 触发次数（应下降）
+  - 非任务型请求的平均 latency（应下降）
+  - 澄清率（ask_clarify 占比，过高则需调参）
+
+---
+
+### 10. 测试用例（最小集）
+| 输入 | 预期 intentType | 预期 nextAction |
+|---|---|---|
+| “看这个问题，先说原因，然后讨论解法” | discussion/debug | respond_text |
+| “继续”（且 RUN_TODO 存在） | task_execution（weak sticky） | enter_workflow 或 ask_clarify（视阈值） |
+| “只回 OK 就行” | info | respond_text |
+| “把 Desktop 打包成 exe 并排除 userData” | task_execution | enter_workflow |
+| “你刚刚的路由策略为什么这么定？” | discussion | respond_text |
+
+---
+
+### 11. 参考链接（精选）
+- LangChain multi-agent router：`https://docs.langchain.com/oss/javascript/langchain/multi-agent/router`
+- LangChain router knowledge base：`https://docs.langchain.com/oss/python/langchain/multi-agent/router-knowledge-base`
+- LangChain middleware（tool selection 思路）：`https://docs.langchain.com/oss/python/langchain/middleware/built-in`
+- semantic-router（参考实现）：`https://github.com/aurelio-labs/semantic-router`
+- OpenAI practical guide（guardrails/fallback 思路）：`https://openai.com/business/guides-and-resources/a-practical-guide-to-building-ai-agents/`
+- When2Call（何时不该调用工具）：`https://arxiv.org/abs/2504.18851`
+- OpenAI Agents SDK（工具门禁外置的理念）：`https://openai.github.io/openai-agents-js/guides/agents/`
 
 
