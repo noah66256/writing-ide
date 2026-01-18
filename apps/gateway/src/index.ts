@@ -827,6 +827,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   type NextAction = "respond_text" | "ask_clarify" | "enter_workflow";
   type TodoPolicy = "skip" | "optional" | "required";
   type ToolPolicy = "deny" | "allow_readonly" | "allow_tools";
+  type ClarifySlot = "target" | "action" | "permission";
+  type ClarifyPayload = { slot: ClarifySlot; question: string; options?: string[] };
   type IntentRouteDecision = {
     intentType: IntentType;
     confidence: number;
@@ -835,7 +837,60 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     toolPolicy: ToolPolicy;
     reason: string;
     derivedFrom: string[];
+    routeId?: string;
+    missingSlots?: ClarifySlot[];
+    clarify?: ClarifyPayload;
   };
+
+  const ROUTE_REGISTRY_V1 = [
+    {
+      routeId: "visibility_contract",
+      intentType: "info" as const,
+      todoPolicy: "skip" as const,
+      toolPolicy: "deny" as const,
+      nextAction: "respond_text" as const,
+      desc: "确认 IDE 可见性/状态（当前文件/选区/KB 关联等），不进入闭环，不调用工具",
+      examples: ["你能看到我当前文件吗", "我选中了这段你能看到吗", "你现在能看到什么"],
+    },
+    {
+      routeId: "discussion",
+      intentType: "discussion" as const,
+      todoPolicy: "skip" as const,
+      toolPolicy: "deny" as const,
+      nextAction: "respond_text" as const,
+      desc: "讨论/解释/分析类（非任务闭环），不强制 Todo，不调用工具",
+      examples: ["先说原因再讨论解法", "解释一下为什么会这样", "聊聊这个方案的利弊"],
+    },
+    {
+      routeId: "debug",
+      intentType: "debug" as const,
+      todoPolicy: "skip" as const,
+      toolPolicy: "deny" as const,
+      nextAction: "respond_text" as const,
+      desc: "排查/故障/错误分析类（默认不进入闭环），不调用工具",
+      examples: ["为什么报错", "这个错误怎么解决", "日志里这个是什么意思"],
+    },
+    {
+      routeId: "task_execution",
+      intentType: "task_execution" as const,
+      todoPolicy: "required" as const,
+      toolPolicy: "allow_tools" as const,
+      nextAction: "enter_workflow" as const,
+      desc: "任务执行/写作闭环（Todo + Tools）",
+      examples: ["帮我把这段改写并落盘", "把 Desktop 打包成 exe 并部署", "按这个需求实现并提交"],
+    },
+    {
+      routeId: "unclear",
+      intentType: "unclear" as const,
+      todoPolicy: "skip" as const,
+      toolPolicy: "deny" as const,
+      nextAction: "ask_clarify" as const,
+      desc: "意图不明确：只问 1 个澄清问题（slot-based）",
+      examples: ["现在呢", "这个呢", "继续"],
+    },
+  ] as const;
+  type RouteId = (typeof ROUTE_REGISTRY_V1)[number]["routeId"];
+  const RouteIdSchema = z.enum(ROUTE_REGISTRY_V1.map((r) => r.routeId) as [RouteId, ...RouteId[]]);
 
   function looksLikeVisibilityQuestion(text: string): boolean {
     const t = String(text ?? "").trim();
@@ -937,27 +992,47 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     );
   }
 
-  function buildClarifyQuestionSlotBased(args: { userPrompt: string; meta: ReturnType<typeof normalizeIdeMeta>; hasRunTodo: boolean }): string {
+  function buildClarifyQuestionSlotBased(args: {
+    userPrompt: string;
+    meta: ReturnType<typeof normalizeIdeMeta>;
+    hasRunTodo: boolean;
+  }): ClarifyPayload {
     const t = String(args.userPrompt ?? "").trim();
     const { meta } = args;
 
     // 权限敏感（用户看起来在要求执行/写入），但路由不确定：先问 permission
     if (looksLikeExecuteOrWriteIntent(t)) {
-      return "需要我动手（调用工具/写入）吗？\n- A 不用，只回答\n- B 需要";
+      return {
+        slot: "permission",
+        question: "需要我动手（调用工具/写入）吗？",
+        options: ["不用，只回答", "需要"],
+      };
     }
 
     // 典型 follow-up：已有选区但用户只说“现在呢/这样呢” -> 默认 target=selection，只问 action
     if (meta.hasSelection && looksLikeShortFollowUp(t)) {
-      return "你希望我对**当前选区**做什么？\n- A 解释/讨论\n- B 总结\n- C 改写\n- D 润色";
+      return {
+        slot: "action",
+        question: "你希望我对**当前选区**做什么？",
+        options: ["解释/讨论", "总结", "改写", "润色"],
+      };
     }
 
     // 若能确定用户在说“当前文件”且 activePath 已知，则只问 action
     if (/文件/.test(t) && !/(选区|选中|选择)/.test(t) && meta.activePath) {
-      return `你希望我对**当前文件**（\`${meta.activePath}\`）做什么？\n- A 解释/讨论\n- B 总结\n- C 改写\n- D 润色`;
+      return {
+        slot: "action",
+        question: `你希望我对**当前文件**（\`${meta.activePath}\`）做什么？`,
+        options: ["解释/讨论", "总结", "改写", "润色"],
+      };
     }
 
     // 默认：先澄清 target
-    return "你指的是哪个对象？\n- A 当前选区\n- B 当前文件\n- C 某个文件/目录（请用 @{} 引用或给路径）";
+    return {
+      slot: "target",
+      question: "你指的是哪个对象？",
+      options: ["当前选区", "当前文件", "某个文件/目录（请用 @{} 引用或给路径）"],
+    };
   }
 
   function computeIntentRouteDecisionPhase0(args: {
@@ -982,6 +1057,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         toolPolicy: "deny",
         reason: "mode=chat：纯对话，不进入闭环",
         derivedFrom: ["mode:chat", ...derivedFrom],
+        routeId: "discussion",
       };
     }
     if (args.intent?.wantsOkOnly) {
@@ -993,6 +1069,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         toolPolicy: "deny",
         reason: "用户只要求短确认（OK-only）",
         derivedFrom: ["intent:wantsOkOnly", ...derivedFrom],
+        routeId: "discussion",
       };
     }
 
@@ -1005,6 +1082,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         toolPolicy: "deny",
         reason: "用户在确认 IDE 可见性（当前文件/选区等元信息）",
         derivedFrom: ["regex:visibility", ...derivedFrom],
+        routeId: "visibility_contract",
       };
     }
 
@@ -1019,6 +1097,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         toolPolicy: "deny",
         reason: `mainDoc.runIntent=${mainDocIntent}：默认不进入任务闭环`,
         derivedFrom: [`mainDocIntent:${mainDocIntent}`, ...derivedFrom],
+        routeId: "debug",
       };
     }
     if (mainDocIntent === "writing" || mainDocIntent === "rewrite" || mainDocIntent === "polish") {
@@ -1030,6 +1109,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         toolPolicy: "allow_tools",
         reason: `mainDoc.runIntent=${mainDocIntent}：进入任务闭环`,
         derivedFrom: [`mainDocIntent:${mainDocIntent}`, ...derivedFrom],
+        routeId: "task_execution",
       };
     }
 
@@ -1046,6 +1126,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         toolPolicy: "allow_tools",
         reason: "弱 sticky：存在 RUN_TODO 且用户输入短（继续/确认类），延续任务流",
         derivedFrom: ["weakSticky:runTodo", ...derivedFrom],
+        routeId: "task_execution",
       };
     }
 
@@ -1058,6 +1139,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         toolPolicy: "allow_tools",
         reason: "detectRunIntent 判定为任务型（写作/写入/执行）",
         derivedFrom: ["detectRunIntent:task", ...derivedFrom],
+        routeId: "task_execution",
       };
     }
 
@@ -1073,6 +1155,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         toolPolicy: "deny",
         reason: "看起来是讨论/排查/解释类请求：默认不进入闭环",
         derivedFrom: ["regex:debug", ...derivedFrom],
+        routeId: "debug",
       };
     }
 
@@ -1085,6 +1168,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       toolPolicy: "deny",
       reason: "未检测到明确任务信号：默认按讨论/解释处理（不强制 Todo/不启用工具）",
       derivedFrom: ["default:discussion", ...derivedFrom],
+      routeId: "discussion",
     };
   }
 
@@ -1159,6 +1243,15 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     todoPolicy: z.enum(["skip", "optional", "required"]),
     toolPolicy: z.enum(["deny", "allow_readonly", "allow_tools"]),
     reason: z.string(),
+    routeId: RouteIdSchema.optional(),
+    missingSlots: z.array(z.enum(["target", "action", "permission"])).optional(),
+    clarify: z
+      .object({
+        slot: z.enum(["target", "action", "permission"]),
+        question: z.string(),
+        options: z.array(z.string()).optional(),
+      })
+      .optional(),
   });
 
   function clamp01(n: any, fallback = 0.5) {
@@ -1222,14 +1315,18 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             content:
               "你是写作 IDE 的 Intent Router（第一道门禁）。\n" +
               "你只输出一个 JSON 对象（不要 Markdown，不要代码块，不要解释，不要 <tool_calls>）。\n" +
-              "字段：intentType/confidence/nextAction/todoPolicy/toolPolicy/reason。\n" +
+              "字段：intentType/confidence/nextAction/todoPolicy/toolPolicy/reason/routeId/missingSlots/clarify。\n" +
               "枚举：\n" +
               '- intentType: "task_execution"|"discussion"|"debug"|"info"|"unclear"\n' +
               '- nextAction: "respond_text"|"ask_clarify"|"enter_workflow"\n' +
               '- todoPolicy: "skip"|"optional"|"required"\n' +
               '- toolPolicy: "deny"|"allow_readonly"|"allow_tools"\n' +
+              '- routeId: "visibility_contract"|"discussion"|"debug"|"task_execution"|"unclear"\n' +
+              '- missingSlots: ["target"|"action"|"permission", ...]\n' +
+              '- clarify: { slot: "target"|"action"|"permission", question: string, options?: string[] }\n' +
               "约束：confidence 为 0~1 之间的小数。\n" +
-              "提示：若用户在确认 IDE 可见性（例如“你能看到当前文件/选区吗”），通常应输出：intentType=info, nextAction=respond_text, todoPolicy=skip, toolPolicy=deny。\n",
+              "提示：若用户在确认 IDE 可见性（例如“你能看到当前文件/选区吗”），通常应输出：routeId=visibility_contract, intentType=info, nextAction=respond_text, todoPolicy=skip, toolPolicy=deny。\n" +
+              "提示：如果你不确定用户要做什么，优先 routeId=unclear 且 nextAction=ask_clarify，并输出 clarify（只问一个 slot）。\n",
           },
           {
             role: "user",
@@ -1249,6 +1346,15 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
                 name: String(x?.name ?? "").trim() || undefined,
                 purpose: String(x?.purpose ?? "").trim() || undefined,
               })),
+              routeRegistry: ROUTE_REGISTRY_V1.map((r) => ({
+                routeId: r.routeId,
+                intentType: r.intentType,
+                nextAction: r.nextAction,
+                todoPolicy: r.todoPolicy,
+                toolPolicy: r.toolPolicy,
+                desc: r.desc,
+                examples: r.examples.slice(0, 2),
+              })),
               phase0: {
                 intentType: intentRoute.intentType,
                 confidence: intentRoute.confidence,
@@ -1256,6 +1362,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
                 todoPolicy: intentRoute.todoPolicy,
                 toolPolicy: intentRoute.toolPolicy,
                 reason: intentRoute.reason,
+                routeId: intentRoute.routeId ?? null,
               },
             }),
           },
@@ -1270,6 +1377,34 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       if (!parsed.success) throw new Error("ROUTER_SCHEMA_INVALID");
 
       const d0 = parsed.data as any;
+
+      const routeId = (() => {
+        const raw = typeof d0?.routeId === "string" ? String(d0.routeId).trim() : "";
+        if (!raw) return null;
+        return ROUTE_REGISTRY_V1.some((r) => r.routeId === raw) ? raw : null;
+      })();
+
+      const missingSlots = (() => {
+        const a = Array.isArray(d0?.missingSlots) ? (d0.missingSlots as any[]) : [];
+        const norm = a
+          .map((x) => String(x ?? "").trim())
+          .filter((x) => x === "target" || x === "action" || x === "permission");
+        return norm.length ? (norm as any) : undefined;
+      })();
+
+      const clarify = (() => {
+        const c = d0?.clarify;
+        if (!c || typeof c !== "object") return undefined;
+        const slot = String((c as any).slot ?? "").trim();
+        if (slot !== "target" && slot !== "action" && slot !== "permission") return undefined;
+        const question = String((c as any).question ?? "").trim();
+        if (!question) return undefined;
+        const options = Array.isArray((c as any).options)
+          ? ((c as any).options as any[]).map((x) => String(x ?? "").trim()).filter(Boolean).slice(0, 8)
+          : undefined;
+        return { slot, question, ...(options?.length ? { options } : {}) } as any;
+      })();
+
       intentRoute = {
         intentType: d0.intentType,
         confidence: clamp01(d0.confidence, 0.6),
@@ -1278,6 +1413,9 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         toolPolicy: d0.toolPolicy,
         reason: String(d0.reason ?? "").trim() || "llm_router",
         derivedFrom: ["llm_router", `stage:${intentRouterStageKey}`],
+        routeId: routeId ?? undefined,
+        missingSlots,
+        clarify,
       };
       intentRouterTrace.ok = true;
     } catch (e: any) {
@@ -1597,7 +1735,14 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     const turn = 0;
     const meta = normalizeIdeMeta({ ideSummary: ideSummaryFromSidecar, contextPack: body.contextPack, kbSelected: kbSelectedList as any[] });
     const hasRunTodo = Array.isArray(runTodoFromPack) && runTodoFromPack.length > 0;
-    const question = buildClarifyQuestionSlotBased({ userPrompt, meta, hasRunTodo });
+    const clarify = (intentRoute.clarify && intentRoute.clarify.question) ? intentRoute.clarify : buildClarifyQuestionSlotBased({ userPrompt, meta, hasRunTodo });
+    const options = Array.isArray(clarify?.options) ? clarify.options : [];
+    const formatted = (() => {
+      if (!options.length) return String(clarify?.question ?? "").trim();
+      const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+      const lines = options.slice(0, 8).map((opt: string, idx: number) => `- ${letters[idx] ?? "-"} ${opt}`);
+      return `${String(clarify?.question ?? "").trim()}\n${lines.join("\n")}`;
+    })();
     const selectionHint =
       meta.hasSelection && looksLikeShortFollowUp(String(userPrompt ?? "").trim())
         ? `- 我现在看到你已选中一段文字（约 ${meta.selectionChars} 字符）。\n`
@@ -1609,13 +1754,13 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       policy: "IntentPolicy",
       decision: "wait_user",
       reasonCodes: ["clarify_waiting", `intent:${intentRoute.intentType}`],
-      detail: intentRoute,
+      detail: { ...intentRoute, routeId: intentRoute.routeId ?? "unclear", missingSlots: intentRoute.missingSlots ?? [clarify.slot], clarify },
     });
     writeEvent("assistant.delta", {
       delta:
         "\n\n[需要你确认]\n" +
         selectionHint +
-        `${question}\n\n` +
+        `${formatted}\n\n` +
         "你可以直接回答；或回复“继续”让我按默认假设继续推进。",
     });
     writeEvent("run.end", { runId, reason: "clarify_waiting", reasonCodes: ["clarify_waiting"], turn });

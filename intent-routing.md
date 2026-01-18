@@ -1,8 +1,9 @@
-## Intent Routing（第一道门禁）工程说明（v0.3）
+## Intent Routing（第一道门禁）工程说明（v0.4）
 
 > 状态：draft（先文档对齐 → 再按文档落地代码）  
 > 进阶版本选择：**方案 A（LLM Router stage）**
-> v0.3 变更：补齐“slot-based 澄清 + IDE 可见性契约 + 短追问/Follow-up 的路由策略”
+> v0.3 变更：补齐“slot-based 澄清 + IDE 可见性契约 + 短追问/Follow-up 的路由策略”  
+> v0.4 变更：引入“Route Registry（注册表）+ Router 输出澄清结构（missingSlots/clarify）”，让新增行为/题材/用途更多靠“注册”而不是堆 if/else
 
 ### 0. 摘要（TL;DR）
 - **要解决的问题**：Plan/Agent 模式里，非任务型输入被强制拉进“Todo + Tools + XML 协议门禁”，导致 `need_todo / tool_xml_mixed_with_text / empty_output` 等连环重试与体验割裂。
@@ -16,6 +17,9 @@
 - **关键补强（本次新增）**：
   - `ask_clarify` 不再固定问“Todo vs 讨论”，改为 **slot-based 澄清**（`target/action/permission` 缺什么问什么）。
   - 增加 **IDE 可见性契约（Visibility Contract）**：优先回答“我现在能看到哪些状态”，再引导用户 @引用/授权读取内容。
+- **扩展性策略（v0.4 新增）**：
+  - 引入 **Route Registry（注册表）**：新增“写小说/直播稿/朋友圈/联网检索”等用途时，优先新增注册项与样例，而不是继续膨胀 if/else。
+  - Router 允许输出 `missingSlots/clarify`：当置信度低或缺槽位时，让“澄清问法”也结构化（便于 UI/日志/后续学习）。
 - **可回滚**：提供开关（env/配置）一键关闭 Router，恢复现状。
 
 ---
@@ -57,6 +61,14 @@ export type NextAction = "respond_text" | "ask_clarify" | "enter_workflow";
 export type TodoPolicy = "skip" | "optional" | "required";
 export type ToolPolicy = "deny" | "allow_readonly" | "allow_tools";
 
+export type ClarifySlot = "target" | "action" | "permission";
+
+export type ClarifyPayload = {
+  slot: ClarifySlot;
+  question: string; // 只问 1 个问题
+  options?: string[]; // 可选：给 UI 用的选项（纯文本即可）
+};
+
 export type IntentRouteDecision = {
   intentType: IntentType;
   confidence: number; // 0~1
@@ -65,6 +77,11 @@ export type IntentRouteDecision = {
   toolPolicy: ToolPolicy;
   reason: string; // 一句话解释（给日志/审计用）
   derivedFrom?: string[]; // 用到的信号：runIntent/detectRunIntent/RUN_TODO/regex/llm_router...
+
+  // v0.4：可扩展结构（不影响现有闭环的最小新增）
+  routeId?: string; // 路由注册表里的稳定 id（便于扩展与统计）
+  missingSlots?: ClarifySlot[]; // 缺失的槽位（用于触发澄清或 UI 引导）
+  clarify?: ClarifyPayload; // 结构化澄清（当 nextAction=ask_clarify 时可用）
 };
 ```
 
@@ -212,6 +229,18 @@ input：
 
 output：严格 `IntentRouteDecision`
 
+#### 6.5 Route Registry（v0.4）
+动机：随着“行为/题材/用户用途”增长，继续堆 if/else 会失控。我们把“可扩展的部分”下沉为注册表：
+
+- **Route Registry**：一组可路由的“处理路径”定义（routeId + 语义说明 + 典型样例 + 默认策略）。
+- **Router（LLM 或其它）**：从注册表中选择 routeId，并填充 `IntentRouteDecision`。
+- **if/else（仍保留）**：只做“安全/权限/模式”类强约束与 fast-path（例如 chat/ok-only/可见性短路），不再承担无限扩展的细分题材判断。
+
+参考实现（可选演进方向）：
+- semantic-router：`https://github.com/aurelio-labs/semantic-router`
+- RouteLLM（成本/质量权衡的 router 框架）：`https://github.com/lm-sys/RouteLLM`
+- NVIDIA llm-router（intent-based/auto-router）：`https://github.com/NVIDIA-AI-Blueprints/llm-router`
+
 #### 6.4 失败回退
 - JSON parse 失败 / 超时 / schema 校验失败 → 回退 Phase 0
 - 回退同样写 `policy.decision`，并带 `reasonCodes: ["router_fallback"]`
@@ -276,6 +305,8 @@ output：严格 `IntentRouteDecision`
 - LangChain router knowledge base：`https://docs.langchain.com/oss/python/langchain/multi-agent/router-knowledge-base`
 - LangChain middleware（tool selection 思路）：`https://docs.langchain.com/oss/python/langchain/middleware/built-in`
 - semantic-router（参考实现）：`https://github.com/aurelio-labs/semantic-router`
+- RouteLLM（router 评估/阈值/成本权衡）：`https://github.com/lm-sys/RouteLLM`
+- NVIDIA llm-router（intent-based/auto-router）：`https://github.com/NVIDIA-AI-Blueprints/llm-router`
 - LlamaIndex Router Query Engine（路由器/selector 思路）：`https://docs.llamaindex.ai/`
 - Google Dialogflow CX 参数/slot 填充（澄清与参数收集）：`https://cloud.google.com/dialogflow/cx/docs`
 - Microsoft Bot Framework dialogs（对话状态/澄清/参数收集）：`https://learn.microsoft.com/azure/bot-service/`
