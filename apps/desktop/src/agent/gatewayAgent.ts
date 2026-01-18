@@ -1387,28 +1387,8 @@ export function startGatewayRun(args: {
         // ignore
       }
 
-      // Chat：纯对话，不启用工具循环
-      if (args.mode === "chat") {
-        setActivity("正在请求模型…", { resetTimer: true });
-        const assistantId = addAssistant("", true, false);
-        currentAssistantId = assistantId;
-        const ret = await fetchChatStream({
-          gatewayUrl: args.gatewayUrl,
-          model: args.model,
-          messages: [
-            { role: "system", content: buildChatContextPack({ referencesText }) },
-            { role: "user", content: args.prompt },
-          ],
-          abort,
-          onDelta: (d) => appendAssistantDelta(assistantId, d),
-          log,
-        });
-        if (!ret.ok) appendAssistantDelta(assistantId, `\n\n[模型错误] ${ret.error}`);
-        finishAssistant(assistantId);
-        setRunning(false);
-        setActivity(null);
-        return;
-      }
+      // Chat：也走 Gateway 的 /api/agent/run/stream（mode=chat），以支持只读 web.search/web.fetch（联网看资料）。
+      // 说明：Gateway 侧会按 mode=chat 严格限制工具列表（仅 web.*），不会触碰 doc/project 写入。
 
       // Plan/Agent：改为走 Gateway 的 /api/agent/run/stream（Gateway 负责 ReAct 循环；Desktop 负责执行工具并回传 tool_result）
       const url = args.gatewayUrl ? `${args.gatewayUrl}/api/agent/run/stream` : "/api/agent/run/stream";

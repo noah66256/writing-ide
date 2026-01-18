@@ -730,7 +730,10 @@ const agentRunWaiters = new Map<string, Map<string, (payload: ToolResultPayload)
 function buildAgentProtocolPrompt(mode: AgentMode) {
   const modePolicy =
     mode === "chat"
-      ? `当前模式：Chat（纯对话）。\n- 你**不允许调用任何工具**（包括读写文件）。\n- 你只需用 Markdown 输出可读内容即可。\n\n`
+      ? `当前模式：Chat（纯对话 + 只读联网）。\n` +
+        `- 你**允许**调用只读联网工具：web.search / web.fetch（用于“最新/时事/找素材/抓正文证据”）。\n` +
+        `- 除 web.* 外，**不要调用任何工具**（不要读写项目文件；不要改动项目）。\n` +
+        `- 你只需用 Markdown 输出可读内容即可。\n\n`
       : `当前模式：${mode === "plan" ? "Plan（逐步）" : "Agent（一次成型+迭代）"}。\n` +
         `你需要按“写作闭环”工作，并把进度写入 Main Doc / Todo。\n` +
         `- **用户指令优先级**：如果用户明确要求“只要一个短回复/确认”（例如：只回 OK、只回 是/否、只要一句话），且你判断不需要读文件/不需要工具/不需要写入，那么你应当**严格只输出用户要求的那段短文本**并结束（不要追加解释/建议/下一步；不要自作主张进入写作闭环；不要 run.setTodoList；不要 doc.read）。\n` +
@@ -1115,8 +1118,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         confidence: 1,
         nextAction: "respond_text",
         todoPolicy: "skip",
-        toolPolicy: "deny",
-        reason: "mode=chat：纯对话，不进入闭环",
+        toolPolicy: "allow_readonly",
+        reason: "mode=chat：纯对话；允许只读工具（仅以工具列表为准）",
         derivedFrom: ["mode:chat", ...derivedFrom],
         routeId: "discussion",
       };
@@ -1766,6 +1769,18 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     return null;
   })();
 
+  const sourcesPolicyRaw = String((mainDocFromPack as any)?.sourcesPolicy ?? "")
+    .trim()
+    .toLowerCase();
+  const sourcesPolicy = sourcesPolicyRaw === "web" || sourcesPolicyRaw === "kb_and_web" ? sourcesPolicyRaw : "";
+  const hasUrlInPrompt = /https?:\/\/\S+/i.test(userPrompt);
+  const webTriggerByText = /(联网|上网|全网|查资料|找素材|最新|今天|最近|时事|新闻|刚刚|实时)/.test(userPrompt);
+  const webGate = {
+    enabled: hasUrlInPrompt || webTriggerByText || sourcesPolicy === "web" || sourcesPolicy === "kb_and_web",
+    needsSearch: !hasUrlInPrompt && (webTriggerByText || sourcesPolicy === "web" || sourcesPolicy === "kb_and_web"),
+    needsFetch: hasUrlInPrompt || webTriggerByText || sourcesPolicy === "web" || sourcesPolicy === "kb_and_web",
+  };
+
   // Run 内部状态（显式 State；由 policy 函数分析与更新）
   // 预算拆分：避免一个 budget 同时承担“协议修复/完成性重试/风格门禁”等语义
   const runState = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: lintMaxRework });
@@ -1785,6 +1800,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     hasWriteProposed: runState.hasWriteProposed,
     hasWriteApplied: runState.hasWriteApplied,
     hasKbSearch: runState.hasKbSearch,
+    hasWebSearch: runState.hasWebSearch,
+    hasWebFetch: runState.hasWebFetch,
     hasStyleKbSearch: runState.hasStyleKbSearch,
     hasStyleKbHit: (runState as any).hasStyleKbHit === true,
     styleKbDegraded: runState.styleKbDegraded,
@@ -1793,6 +1810,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     lintGateDegraded: runState.lintGateDegraded,
     lintMode,
     targetChars,
+    webGate: { ...webGate },
   });
 
   const writePolicyDecision = (args: {
@@ -2014,7 +2032,13 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     // ignore：选簇提示失败不应影响主流程
   }
 
-  type SkillToolCapsPhase = "none" | "style_need_kb" | "style_need_lint" | "style_can_write";
+  type SkillToolCapsPhase =
+    | "none"
+    | "web_need_search"
+    | "web_need_fetch"
+    | "style_need_kb"
+    | "style_need_lint"
+    | "style_can_write";
 
   const ALWAYS_ALLOW_TOOL_NAMES = new Set<string>(["run.setTodoList", "run.updateTodo", "run.mainDoc.get", "run.mainDoc.update"]);
 
@@ -2047,9 +2071,36 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       }
     }
 
-    // 2) StyleImitateSkill（状态级：need_kb / need_lint / can_write）
     let phase: SkillToolCapsPhase = "none";
     let hint = "";
+
+    // 2) WebGate（强制联网证据：need_search / need_fetch）
+    if (webGate.enabled) {
+      if (webGate.needsSearch && !runState.hasWebSearch) {
+        phase = "web_need_search";
+        const allowSet = new Set<string>(["web.search", ...Array.from(ALWAYS_ALLOW_TOOL_NAMES)]);
+        for (const name of Array.from(allowed)) if (!allowSet.has(name)) allowed.delete(name);
+        hint =
+          "【Web Gate】当前阶段：need_search。\n" +
+          "- 你必须先调用 web.search(query=...) 获取联网结果。\n" +
+          "- 本回合除 web.search 与 run.* 进度工具外，不要调用任何其它工具；不要输出最终回答。";
+        reasonCodes.push("phase:web_need_search");
+        return { phase, allowed, hint, reasonCodes };
+      }
+      if (webGate.needsFetch && !runState.hasWebFetch) {
+        phase = "web_need_fetch";
+        const allowSet = new Set<string>(["web.fetch", "web.search", ...Array.from(ALWAYS_ALLOW_TOOL_NAMES)]);
+        for (const name of Array.from(allowed)) if (!allowSet.has(name)) allowed.delete(name);
+        hint =
+          "【Web Gate】当前阶段：need_fetch。\n" +
+          "- 你必须至少调用 1 次 web.fetch(url=...) 抓正文证据（可从 web.search 结果里挑 URL）。\n" +
+          "- 本回合除 web.fetch/web.search 与 run.* 进度工具外，不要调用任何其它工具；不要输出最终回答。";
+        reasonCodes.push("phase:web_need_fetch");
+        return { phase, allowed, hint, reasonCodes };
+      }
+    }
+
+    // 3) StyleImitateSkill（状态级：need_kb / need_lint / can_write）
     if (effectiveGates.styleGateEnabled) {
       if (!runState.hasStyleKbSearch) {
         phase = "style_need_kb";
@@ -2335,6 +2386,57 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           reply.raw.end();
           agentRunWaiters.delete(runId);
           return;
+        }
+
+        // Web Gate：若本轮需要联网检索/抓正文证据，但模型直接输出了纯文本，则强制要求先 web.search/web.fetch（Chat 也生效）
+        if (
+          webGate.enabled &&
+          runState.workflowRetryBudget > 0 &&
+          ((webGate.needsSearch && !runState.hasWebSearch) || (webGate.needsFetch && !runState.hasWebFetch))
+        ) {
+          const needSearch = webGate.needsSearch && !runState.hasWebSearch;
+          const needFetch = webGate.needsFetch && !runState.hasWebFetch;
+          const reasonCodes = [
+            needSearch ? "need_web_search" : null,
+            needFetch ? "need_web_fetch" : null,
+          ].filter(Boolean) as string[];
+
+          writePolicyDecision({
+            turn,
+            policy: "WebGatePolicy",
+            decision: "retry",
+            reasonCodes,
+            detail: {
+              budget: "workflow",
+              budgetBefore: runState.workflowRetryBudget,
+              budgetAfter: Math.max(0, runState.workflowRetryBudget - 1),
+              webGate,
+            },
+          });
+          runState.workflowRetryBudget -= 1;
+
+          writeEvent("assistant.delta", {
+            delta: `\n\n[系统提示] 本轮触发了“联网证据”门禁，我会让模型自动先调用 web.search/web.fetch，再给最终回答（无需你输入）。`,
+          });
+          writeEvent("assistant.done", { reason: "web_gate_retry", turn });
+
+          // 记录本轮输出（即使它可能不完整），并要求下一轮严格走 tool_calls
+          messages.push({ role: "assistant", content: assistantText });
+          messages.push({
+            role: "system",
+            content:
+              (needSearch
+                ? "你上一条直接输出了纯文本，但本轮触发了 Web Gate（需要联网证据）。\n" +
+                  "- 你现在必须先调用 web.search(query=...)。\n" +
+                  "- 然后至少调用 1 次 web.fetch(url=...) 抓正文证据（可从 web.search 结果里挑 URL）。\n" +
+                  "- 最后再输出最终回答（Markdown），并基于抓到的正文证据。\n" +
+                  "- 下一条消息必须且只能输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。"
+                : "你上一条直接输出了纯文本，但本轮触发了 Web Gate（需要正文证据）。\n" +
+                  "- 你现在必须至少调用 1 次 web.fetch(url=...) 抓正文证据。\n" +
+                  "- 最后再输出最终回答（Markdown），并基于抓到的正文证据。\n" +
+                  "- 下一条消息必须且只能输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。"),
+          });
+          continue;
         }
 
         // Plan/Agent：避免“只读完 doc 就停 / 没有 todo 就结束 / 明明要写入却没写入”
@@ -2970,6 +3072,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           else if (String((payload.meta as any)?.applyPolicy ?? "") === "auto_apply") runState.hasWriteApplied = true;
         }
         if (payload.ok && payload.name === "kb.search") runState.hasKbSearch = true;
+        if (payload.ok && payload.name === "web.search") runState.hasWebSearch = true;
+        if (payload.ok && payload.name === "web.fetch") runState.hasWebFetch = true;
 
         // 澄清等待：如果模型把某些 todo 标记为“等待用户确认/blocked”，则本轮应停止，等待用户回答（否则会出现“问你但仍继续跑”）。
         if (

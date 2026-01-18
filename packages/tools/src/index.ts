@@ -34,6 +34,60 @@ export type ToolMeta = {
 // - Desktop 用于工具说明/参数校验提示（后续逐步对齐）
 export const TOOL_LIST: ToolMeta[] = [
   {
+    name: "web.search",
+    description:
+      "联网搜索（默认使用博查 Bocha Web Search API），返回结构化结果供你后续 web.fetch 抓正文证据。\n" +
+      "【何时用】\n" +
+      "- 用户明确要求“联网/上网/全网/查资料/找素材/最新/时事/新闻”\n" +
+      "- 或你判断问题强依赖最新信息（防止过时/幻觉）\n" +
+      "【建议】\n" +
+      "- freshness 推荐用：oneDay/oneWeek/oneMonth/oneYear/noLimit；也支持 YYYY-MM-DD 或 YYYY-MM-DD..YYYY-MM-DD\n" +
+      "- count 1–50，默认 10\n" +
+      "- summary=true 可返回更长摘要（更适合 AI 使用）",
+    args: [
+      { name: "query", required: true, desc: "搜索词/问题", type: "string" },
+      { name: "freshness", required: false, desc: "时间范围：noLimit|oneYear|oneMonth|oneWeek|oneDay|YYYY-MM-DD|YYYY-MM-DD..YYYY-MM-DD", type: "string" },
+      { name: "count", required: false, desc: "返回条数（1-50，默认 10）", type: "number" },
+      { name: "summary", required: false, desc: "是否返回摘要（默认 true）", type: "boolean" },
+    ],
+    modes: ["chat", "plan", "agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        freshness: { type: "string" },
+        count: { type: "number" },
+        summary: { type: "boolean" },
+      },
+      required: ["query"],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: "web.fetch",
+    description:
+      "抓取网页正文（只读）。用于把 web.search 的 URL 抓成可复核的“正文证据”。\n" +
+      "【注意】仅抓取公开网页；遵守域名 allow/deny 配置；超时/失败会返回结构化错误。",
+    args: [
+      { name: "url", required: true, desc: "目标网页 URL", type: "string" },
+      { name: "format", required: false, desc: '返回格式："markdown"|"text"（默认 markdown）', type: "string" },
+      { name: "timeoutMs", required: false, desc: "超时毫秒（默认 10000）", type: "number" },
+      { name: "maxChars", required: false, desc: "最大返回字符数（默认 20000，用于截断保护）", type: "number" },
+    ],
+    modes: ["chat", "plan", "agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string" },
+        format: { type: "string" },
+        timeoutMs: { type: "number" },
+        maxChars: { type: "number" },
+      },
+      required: ["url"],
+      additionalProperties: true,
+    },
+  },
+  {
     name: "kb.search",
     description:
       "在本地知识库中检索（按库过滤、按 source_doc 分组返回）。\n" +
