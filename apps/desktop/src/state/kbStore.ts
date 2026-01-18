@@ -1344,9 +1344,11 @@ function buildArtifacts(args: { format: KbFormat; sourceDocId: string; text: str
 }
 
 function gatewayBaseUrl() {
-  // 与 AgentPane 的策略一致：优先用 env，缺省走同源 /api（dev 通过 Vite proxy 转发）
-  const raw = (import.meta as any).env?.VITE_GATEWAY_URL ?? "";
-  return String(raw ?? "").trim();
+  // 与 AgentPane 的策略一致：
+  // - dev：返回 ""，让 fetch 走相对 /api（Vite proxy）
+  // - packaged(app://)：必须走绝对地址，否则会变成 app://-/api/... → net::ERR_FILE_NOT_FOUND
+  // - 支持 localStorage 覆盖（writing-ide.gatewayUrl）
+  return getGatewayBaseUrl();
 }
 
 async function postExtractCards(args: {
