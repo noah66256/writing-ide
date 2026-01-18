@@ -2,6 +2,12 @@
 
 > 目标：把“我大概想要……”的模糊需求，稳定收敛成可执行计划、可审阅 diff、可验证结果。
 
+### 0) 2 分钟复用（丢进任意新工程就能用）
+- 复制本仓库的模板文件：[`AGENTS.template.md`](AGENTS.template.md)
+- 放到你新工程根目录并重命名为 `AGENTS.md`，先把“填空区”补齐（项目目标/验收/约束/常用命令）
+- 如果你用 Cursor：可以只保留 `AGENTS.md`（或让 `.cursorrules` 与 `AGENTS.md` 内容一致）
+- 建议同时建 2 个落盘文件：`plan.md`（导航索引）+ `debug.md`（常见坑）
+
 ### 1) 什么是 vibe coding（以及它的坑）
 - 定义：在编程中，vibe coding 是一种 AI 辅助软件开发方式，开发者通过对话描述任务，由大模型产出/修改代码（参考 [Wikipedia: Vibe coding](https://en.wikipedia.org/wiki/Vibe_coding)）。
 - 常见坑：
