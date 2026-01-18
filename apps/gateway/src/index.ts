@@ -809,6 +809,143 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   const kbSelectedList = parseKbSelectedLibrariesFromContextPack(body.contextPack);
   const runTodoFromPack = parseRunTodoFromContextPack(body.contextPack);
   const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: (mainDocFromPack as any)?.runIntent, runTodo: runTodoFromPack });
+
+  type IntentType = "task_execution" | "discussion" | "debug" | "info" | "unclear";
+  type NextAction = "respond_text" | "ask_clarify" | "enter_workflow";
+  type TodoPolicy = "skip" | "optional" | "required";
+  type ToolPolicy = "deny" | "allow_readonly" | "allow_tools";
+  type IntentRouteDecision = {
+    intentType: IntentType;
+    confidence: number;
+    nextAction: NextAction;
+    todoPolicy: TodoPolicy;
+    toolPolicy: ToolPolicy;
+    reason: string;
+    derivedFrom: string[];
+  };
+
+  function computeIntentRouteDecisionPhase0(args: {
+    mode: AgentMode;
+    userPrompt: string;
+    mainDocRunIntent?: unknown;
+    runTodo?: any[];
+    intent: any;
+  }): IntentRouteDecision {
+    const derivedFrom: string[] = ["phase0_heuristic"];
+    const p = String(args.userPrompt ?? "");
+    const pTrim = p.trim();
+    const mode = args.mode;
+
+    if (mode === "chat") {
+      return {
+        intentType: "discussion",
+        confidence: 1,
+        nextAction: "respond_text",
+        todoPolicy: "skip",
+        toolPolicy: "deny",
+        reason: "mode=chat：纯对话，不进入闭环",
+        derivedFrom: ["mode:chat", ...derivedFrom],
+      };
+    }
+    if (args.intent?.wantsOkOnly) {
+      return {
+        intentType: "info",
+        confidence: 0.95,
+        nextAction: "respond_text",
+        todoPolicy: "skip",
+        toolPolicy: "deny",
+        reason: "用户只要求短确认（OK-only）",
+        derivedFrom: ["intent:wantsOkOnly", ...derivedFrom],
+      };
+    }
+
+    const mainDocIntentRaw = String(args.mainDocRunIntent ?? "").trim().toLowerCase();
+    const mainDocIntent = mainDocIntentRaw === "auto" ? "" : mainDocIntentRaw;
+    if (mainDocIntent === "analysis" || mainDocIntent === "ops") {
+      return {
+        intentType: "debug",
+        confidence: 0.9,
+        nextAction: "respond_text",
+        todoPolicy: "skip",
+        toolPolicy: "deny",
+        reason: `mainDoc.runIntent=${mainDocIntent}：默认不进入任务闭环`,
+        derivedFrom: [`mainDocIntent:${mainDocIntent}`, ...derivedFrom],
+      };
+    }
+    if (mainDocIntent === "writing" || mainDocIntent === "rewrite" || mainDocIntent === "polish") {
+      return {
+        intentType: "task_execution",
+        confidence: 0.9,
+        nextAction: "enter_workflow",
+        todoPolicy: "required",
+        toolPolicy: "allow_tools",
+        reason: `mainDoc.runIntent=${mainDocIntent}：进入任务闭环`,
+        derivedFrom: [`mainDocIntent:${mainDocIntent}`, ...derivedFrom],
+      };
+    }
+
+    const todo = Array.isArray(args.runTodo) ? args.runTodo : [];
+    const shortOrContinue =
+      pTrim.length <= 60 || /^(继续|好|可以|行|没问题|确认|按这个来|就这样|ok|OK)\b/.test(pTrim);
+    const looksExplicitNonTask = /(只讨论|先讨论|先聊|只聊|别执行|不要执行|别动手|先别做|不需要你做|不用动手)/.test(pTrim);
+    if (todo.length && shortOrContinue && !looksExplicitNonTask) {
+      return {
+        intentType: "task_execution",
+        confidence: 0.82,
+        nextAction: "enter_workflow",
+        todoPolicy: "required",
+        toolPolicy: "allow_tools",
+        reason: "弱 sticky：存在 RUN_TODO 且用户输入短（继续/确认类），延续任务流",
+        derivedFrom: ["weakSticky:runTodo", ...derivedFrom],
+      };
+    }
+
+    if (args.intent?.wantsWrite || args.intent?.isWritingTask) {
+      return {
+        intentType: "task_execution",
+        confidence: 0.86,
+        nextAction: "enter_workflow",
+        todoPolicy: "required",
+        toolPolicy: "allow_tools",
+        reason: "detectRunIntent 判定为任务型（写作/写入/执行）",
+        derivedFrom: ["detectRunIntent:task", ...derivedFrom],
+      };
+    }
+
+    const looksDebug =
+      /(为什么|原因|解释|讨论|原理|报错|错误|bug|日志|排查|怎么修|怎么解决|失败|卡住|空的|不行)/.test(pTrim) &&
+      !/(写|仿写|改写|润色|生成|写入|保存|落盘|打包|安装包|exe|nsis|portable)/.test(pTrim);
+    if (looksDebug) {
+      return {
+        intentType: "debug",
+        confidence: 0.8,
+        nextAction: "respond_text",
+        todoPolicy: "skip",
+        toolPolicy: "deny",
+        reason: "看起来是讨论/排查/解释类请求：默认不进入闭环",
+        derivedFrom: ["regex:debug", ...derivedFrom],
+      };
+    }
+
+    // 默认保守：不强制 Todo、不启用工具，先按讨论回答；当用户明确说“开始执行/生成todo”时再进入闭环
+    return {
+      intentType: "discussion",
+      confidence: 0.7,
+      nextAction: "respond_text",
+      todoPolicy: "skip",
+      toolPolicy: "deny",
+      reason: "未检测到明确任务信号：默认按讨论/解释处理（不强制 Todo/不启用工具）",
+      derivedFrom: ["default:discussion", ...derivedFrom],
+    };
+  }
+
+  const intentRoute = computeIntentRouteDecisionPhase0({
+    mode,
+    userPrompt,
+    mainDocRunIntent: (mainDocFromPack as any)?.runIntent,
+    runTodo: runTodoFromPack,
+    intent,
+  });
   const activeSkills = activateSkills({
     mode,
     userPrompt,
@@ -889,7 +1026,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
   const temperature = stageTemp;
   const runId = randomUUID();
-  const baseAllowedToolNames = toolNamesForMode(mode);
+  const baseAllowedToolNames = intentRoute.toolPolicy === "deny" ? new Set<string>() : toolNamesForMode(mode);
 
   const origin = String((request as any).headers?.origin ?? "").trim();
   if (origin) {
@@ -1091,6 +1228,56 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       state: stateSnapshot(),
     });
   };
+
+  // ======== Policy-0：Intent Router（Phase 0：启发式） ========
+  writePolicyDecision({
+    turn: 0,
+    policy: "IntentPolicy",
+    decision: "route",
+    reasonCodes: [`intent:${intentRoute.intentType}`, `todo:${intentRoute.todoPolicy}`, `tools:${intentRoute.toolPolicy}`],
+    detail: intentRoute,
+  });
+
+  // 非任务型：强制提示模型“不要调用工具/不要 Todo”，减少 XML 协议误伤与无意义重试
+  if (intentRoute.toolPolicy === "deny") {
+    try {
+      const insertAt = Math.max(0, messages.length - 1);
+      messages.splice(insertAt, 0, {
+        role: "system",
+        content:
+          "【Intent Routing】本轮判定为讨论/解释（非任务闭环）。\n" +
+          "- 不要求设置 Todo（不要调用 run.setTodoList）。\n" +
+          "- 禁止调用任何工具（不要输出任何 <tool_calls>/<tool_call>）。\n" +
+          "- 请直接用 Markdown 纯文本给出可读回答。\n",
+      } as any);
+    } catch {
+      // ignore
+    }
+  }
+
+  // 若需要澄清（可选）：Phase 0 仅在“用户未 forceProceed”时才问 1 个问题并暂停等待
+  if (mode !== "chat" && intentRoute.nextAction === "ask_clarify" && !intent.forceProceed) {
+    const turn = 0;
+    writeEvent("assistant.start", { runId, turn });
+    writePolicyDecision({
+      turn,
+      policy: "IntentPolicy",
+      decision: "wait_user",
+      reasonCodes: ["clarify_waiting", `intent:${intentRoute.intentType}`],
+      detail: intentRoute,
+    });
+    writeEvent("assistant.delta", {
+      delta:
+        "\n\n[需要你确认]\n" +
+        "- 你是希望我**生成 Todo 并推进执行**，还是先**讨论/解释原因**？\n\n" +
+        "你可以直接回答；或回复“继续”让我按默认假设继续推进。",
+    });
+    writeEvent("run.end", { runId, reason: "clarify_waiting", reasonCodes: ["clarify_waiting"], turn });
+    writeEvent("assistant.done", { reason: "clarify_waiting", turn });
+    reply.raw.end();
+    agentRunWaiters.delete(runId);
+    return;
+  }
 
   // Skills：自动启用 + 可解释（SSE/policy.decision + 审计落库）
   writePolicyDecision({
@@ -1486,7 +1673,15 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
         // Plan/Agent：避免“只读完 doc 就停 / 没有 todo 就结束 / 明明要写入却没写入”
         if (mode !== "chat" && runState.workflowRetryBudget > 0) {
-          const analysis = analyzeAutoRetryText({ assistantText, intent, gates: effectiveGates, state: runState, lintMaxRework, targetChars });
+          const analysis = analyzeAutoRetryText({
+            assistantText,
+            intent,
+            gates: effectiveGates,
+            state: runState,
+            lintMaxRework,
+            targetChars,
+            todoPolicy: intentRoute.todoPolicy,
+          });
           const needFinalText = analysis.needFinalText;
           const needTodo = analysis.needTodo;
           const needWrite = analysis.needWrite;

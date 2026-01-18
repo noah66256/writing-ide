@@ -366,6 +366,10 @@ export function analyzeAutoRetryText(args: {
   state: RunState;
   lintMaxRework: number;
   targetChars?: number | null;
+  // Intent Router（Policy-0）：只有当 todoPolicy=required 时才强制 need_todo。
+  // - required：沿用现状（没有 todo 就会触发 need_todo 自动重试）
+  // - optional/skip：不再强制 todo（避免“讨论/解释类”被误伤进入闭环）
+  todoPolicy?: "skip" | "optional" | "required";
 }) : AutoRetryAnalysis {
   const t = String(args.assistantText ?? "").trim();
   const isEmpty = t.length === 0;
@@ -374,7 +378,8 @@ export function analyzeAutoRetryText(args: {
   // 若看起来像正文稿，则一律不视为澄清（否则会导致 needLint/needWrite 被关闭，Run 提前结束）。
   const isClarify = looksLikeClarifyQuestions(t) && !args.intent.forceProceed && !looksLikeDraftText(t);
 
-  const needTodo = !args.state.hasTodoList && !args.intent.wantsOkOnly;
+  const todoPolicy: "skip" | "optional" | "required" = args.todoPolicy ?? "required";
+  const needTodo = todoPolicy === "required" && !args.state.hasTodoList && !args.intent.wantsOkOnly;
   const needWrite = args.intent.wantsWrite && !args.state.hasWriteOps && !isClarify;
   const needKb = args.gates.styleGateEnabled && !args.state.hasStyleKbSearch && !isClarify;
   const needLint =
