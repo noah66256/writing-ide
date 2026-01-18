@@ -1,7 +1,8 @@
-## Intent Routing（第一道门禁）工程说明（v0.2）
+## Intent Routing（第一道门禁）工程说明（v0.3）
 
 > 状态：draft（先文档对齐 → 再按文档落地代码）  
 > 进阶版本选择：**方案 A（LLM Router stage）**
+> v0.3 变更：补齐“slot-based 澄清 + IDE 可见性契约 + 短追问/Follow-up 的路由策略”
 
 ### 0. 摘要（TL;DR）
 - **要解决的问题**：Plan/Agent 模式里，非任务型输入被强制拉进“Todo + Tools + XML 协议门禁”，导致 `need_todo / tool_xml_mixed_with_text / empty_output` 等连环重试与体验割裂。
@@ -12,6 +13,9 @@
 - **落地分两阶段**：
   - **Phase 0（MVP）**：不新增模型调用，利用现有信号（`mainDoc.runIntent`、`detectRunIntent()`、`RUN_TODO` 等）路由。
   - **Phase 1（进阶：方案 A）**：新增一个 **LLM Router stage（例如 `agent.router`）** 输出结构化路由结果；失败/超时回退 Phase 0。
+- **关键补强（本次新增）**：
+  - `ask_clarify` 不再固定问“Todo vs 讨论”，改为 **slot-based 澄清**（`target/action/permission` 缺什么问什么）。
+  - 增加 **IDE 可见性契约（Visibility Contract）**：优先回答“我现在能看到哪些状态”，再引导用户 @引用/授权读取内容。
 - **可回滚**：提供开关（env/配置）一键关闭 Router，恢复现状。
 
 ---
@@ -36,6 +40,11 @@
 - **任务型（task_execution）**：用户期望系统**推进可执行步骤**（写作/改写/落盘/修复/生成/打包等），并可能需要工具链。
 - **非任务型（discussion/debug/info）**：用户期望**解释/讨论/排查/分析**，不要求系统推进“任务闭环”。
 - **弱 sticky**：当用户输入很短（如“继续/OK/按这个来”）且上文存在任务状态（如 `RUN_TODO`），倾向继承上一次意图，避免反复澄清。
+- **可见性契约（Visibility Contract）**：明确 Agent 在本轮“能看到的 IDE 元信息”（如 activePath、hasSelection、KB 关联）与“看不到的内容”（如文件全文/选区正文需 @引用或授权读取），避免用户误解与反复追问“现在呢？”。
+- **slot-based 澄清（Slot-filling Clarification）**：澄清的目标不是“要不要 Todo”，而是补齐缺失槽位：
+  - `target`：你指的是哪个对象（选区/当前文件/某个文件/KB/Run 日志…）
+  - `action`：你希望我对该对象做什么（解释/总结/改写/润色/继续执行…）
+  - `permission`：是否允许我动手（只读回答 vs 允许工具/写入）
 
 ---
 
@@ -83,6 +92,11 @@ export type IntentRouteDecision = {
 - `MAIN_DOC(JSON).runIntent`（UI/主文档结构化意图）：`auto/writing/rewrite/polish/analysis/ops`
 - `detectRunIntent()` 的派生信号（现有逻辑）：`wantsWrite/isWritingTask/forceProceed/wantsOkOnly/...`
 - `RUN_TODO(JSON)` 是否存在（用于弱 sticky）
+- IDE 元信息（来自 Context Pack summary / Desktop 侧状态，建议统一注入给 Router）：
+  - `activePath`：当前活动文件路径（文件名级别即可）
+  - `openPaths`：打开文件数（仅数量/列表可选）
+  - `hasSelection`：是否存在选区（可选：`selectionChars` 仅长度）
+  - `kbAttachedLibraries`：已关联 KB（用途=style/material 等）
 - 轻量关键词/正则（只做兜底，不追求完美）：例如“为什么/原因/解释/讨论/排查/报错/日志” vs “生成/写/实现/修复/打包/落盘/拆分”
 
 #### 5.2 路由算法（伪代码）
@@ -92,6 +106,10 @@ if mode == chat:
 
 if wantsOkOnly:
   -> info (confidence=0.9, respond_text, todo=skip, tools=deny)
+
+// IDE 可见性/能力确认类：优先走“可见性契约”回答（不进入闭环）
+if looks_like_visibility_question:
+  -> info (confidence=0.85, respond_text, todo=skip, tools=deny)
 
 if mainDoc.runIntent in [analysis, ops]:
   -> discussion/debug (confidence=0.9)
@@ -124,9 +142,41 @@ else:
   - 不要暴露工具清单（或等价地把工具集裁剪为空）
   - 如果模型仍输出 `<tool_calls>`：视为违规，要求它重试输出纯文本（避免走 ProtocolPolicy 的 XML-only 误伤循环）
 
-#### 5.4 ask_clarify 的统一话术（MVP）
-只问 1 个高价值问题（避免 5 连问）：
-- “你是希望我**生成 Todo 并推进执行**，还是先**讨论/解释原因**？”
+#### 5.4 ask_clarify（升级：slot-based 澄清）
+原则：
+- **一次只问 1 个问题**，但要选对澄清轴（`target/action/permission`）。
+- **优先澄清 target/action**，避免把所有模糊都收敛成“Todo vs 讨论”。
+- 若能从上下文确定 target（例如 `hasSelection=true`），就不要再问 target，直接问 action。
+
+建议的最小槽位：
+- `target`：`selection | active_file | file_by_ref | kb | run_log | unknown`
+- `action`：`just_check_visibility | explain | summarize | rewrite | polish | continue_workflow | execute | unknown`
+- `permission`：`readonly | allow_tools | allow_write`（映射到 `toolPolicy/todoPolicy`）
+
+优先级（IDE 场景）：
+1) 如果是“你能看到什么/我选中后你能看到吗/现在呢？”这类 → 先走 5.5 的可见性契约回答
+2) `hasSelection=true` 且用户短追问（“现在呢/这样行吗/继续”）→ 默认 `target=selection`，**只问 action**
+3) 有 `RUN_TODO` 且短追问 → 弱 sticky 继续任务流，但允许用户显式说“只讨论/别执行”退出闭环
+
+澄清模板（只选一个）：
+- 缺 target：`你指的是哪个对象：A 当前选区 / B 当前文件 / C 某个文件（请用 @ 引用或给路径）？`
+- 缺 action：`你希望我对 {target} 做什么：A 解释/讨论 B 总结 C 改写 D 润色？`
+- 权限敏感：`需要我动手（调用工具/写入）吗？A 不用，只回答 B 需要`
+
+> 产物建议：Router 未来可扩展输出 `missingSlots`（例如 `["action"]`），便于 Gateway 生成正确的澄清问题（而不是固定话术）。
+
+#### 5.5 IDE 可见性契约（Visibility Contract，新增）
+目标：对“你能看到我现在的文件/选区吗？”这类输入，**先回答我能看到的状态**，再说明看不到的内容与如何授权，减少“现在呢”反复追问。
+
+建议回答结构（toolPolicy=deny 时也适用）：
+- 我当前**能看到**（元信息）：
+  - 当前活动文件：`{activePath}`（若有）
+  - 是否有选区：`{hasSelection}`（可选：选区长度约 `{selectionChars}`）
+  - 已关联 KB：`{kbAttachedLibraries[]}`（用途=style/material）
+- 我当前**看不到**（默认不注入/需授权）：
+  - 当前文件全文、以及选区的具体正文（除非你 @ 引用文件/选区，或允许我读取）
+- 你希望我下一步做什么（action）：
+  - 例如：解释 / 总结 / 改写 / 润色（如果要改写润色，请把选区内容发我或 @ 引用）
 
 ---
 
@@ -156,6 +206,8 @@ input：
 - `userPrompt`
 - `mainDoc.runIntent`（若有）
 - `hasRunTodo`（boolean）
+- `activePath` / `hasSelection`（可选：`selectionChars`）
+- `kbAttachedLibraries`（可选：只给 id/name/purpose）
 - （可选）`lastIntentType`（若做 sticky）
 
 output：严格 `IntentRouteDecision`
@@ -214,6 +266,8 @@ output：严格 `IntentRouteDecision`
 | “只回 OK 就行” | info | respond_text |
 | “把 Desktop 打包成 exe 并排除 userData” | task_execution | enter_workflow |
 | “你刚刚的路由策略为什么这么定？” | discussion | respond_text |
+| “我现在选的这份文件能看到么？”（activePath 存在） | info | respond_text（走可见性契约） |
+| “现在呢？”（hasSelection: false → true） | info/unclear | respond_text（先说明可见性）或 ask_clarify（只问 action） |
 
 ---
 
@@ -222,6 +276,9 @@ output：严格 `IntentRouteDecision`
 - LangChain router knowledge base：`https://docs.langchain.com/oss/python/langchain/multi-agent/router-knowledge-base`
 - LangChain middleware（tool selection 思路）：`https://docs.langchain.com/oss/python/langchain/middleware/built-in`
 - semantic-router（参考实现）：`https://github.com/aurelio-labs/semantic-router`
+- LlamaIndex Router Query Engine（路由器/selector 思路）：`https://docs.llamaindex.ai/`
+- Google Dialogflow CX 参数/slot 填充（澄清与参数收集）：`https://cloud.google.com/dialogflow/cx/docs`
+- Microsoft Bot Framework dialogs（对话状态/澄清/参数收集）：`https://learn.microsoft.com/azure/bot-service/`
 - OpenAI practical guide（guardrails/fallback 思路）：`https://openai.com/business/guides-and-resources/a-practical-guide-to-building-ai-agents/`
 - When2Call（何时不该调用工具）：`https://arxiv.org/abs/2504.18851`
 - OpenAI Agents SDK（工具门禁外置的理念）：`https://openai.github.io/openai-agents-js/guides/agents/`

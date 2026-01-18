@@ -1432,7 +1432,25 @@ export function startGatewayRun(args: {
           if (ret?.ok && Array.isArray(ret.libraries) && ret.libraries.length) styleLinterLibraries = ret.libraries;
         }
 
-        const out: any = { projectFiles, docRules };
+        // ideSummary：用于 Gateway 侧的 Intent Router/澄清（不注入模型 messages，避免“光标文件/默认文件”过强暗示）。
+        // 仅提供最小元信息（不含正文/不含 openPaths 列表）。
+        const ed = proj.editorRef;
+        const { hasSelection, selectionChars } = (() => {
+          const model = ed?.getModel();
+          const sel = ed?.getSelection();
+          if (!ed || !model || !sel) return { hasSelection: false, selectionChars: 0 };
+          const n = model.getValueInRange(sel).length;
+          return { hasSelection: n > 0, selectionChars: n };
+        })();
+        const ideSummary = {
+          activePath: proj.activePath ?? null,
+          openPaths: proj.openPaths?.length ?? 0,
+          fileCount: proj.files?.length ?? 0,
+          hasSelection,
+          selectionChars,
+        };
+
+        const out: any = { projectFiles, docRules, ideSummary };
         if (styleLinterLibraries) out.styleLinterLibraries = styleLinterLibraries;
         return out;
       })();

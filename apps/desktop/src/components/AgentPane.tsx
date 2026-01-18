@@ -11,6 +11,7 @@ import { RefComposer, type RefComposerHandle, type RefItem } from "./RefComposer
 import { useKbStore } from "../state/kbStore";
 import { useConversationStore, type RunSnapshot, type SerializableStep } from "../state/conversationStore";
 import { ModelPickerModal, type ModelPickerItem } from "./ModelPickerModal";
+import { getGatewayBaseUrl } from "../agent/gatewayUrl";
 
 type RunController = { cancel: () => void };
 
@@ -166,8 +167,8 @@ export function AgentPane() {
     return `${mm}:${ss}`;
   };
 
-  // 默认走相对路径（/api），由 Vite dev server 代理到本地 Gateway，避免跨域问题
-  const gatewayUrl = (import.meta as any).env?.VITE_GATEWAY_URL ?? "";
+  // dev：留空 => 走 /api（Vite proxy）；packaged(file://)：默认回落到 DEFAULT_GATEWAY_URL
+  const gatewayUrl = getGatewayBaseUrl();
   const kbAttached = useRunStore((s) => s.kbAttachedLibraryIds);
   const toggleAttach = useRunStore((s) => s.toggleKbAttachedLibrary);
   const openKbManager = useKbStore((s) => s.openKbManager);

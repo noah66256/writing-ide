@@ -1,7 +1,7 @@
 {
   "name": "@writing-ide/desktop",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.0.3",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -9,7 +9,10 @@
     "dev:renderer": "vite",
     "dev:electron": "node scripts/dev-electron.cjs",
     "build": "npm run -w @writing-ide/agent-core build && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "dist:win": "npm run build && electron-builder --win nsis --x64",
+    "dist:win:portable": "npm run build && electron-builder --win portable --x64",
+    "dist:win:all": "npm run build && electron-builder --win nsis portable --x64"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
@@ -28,9 +31,51 @@
     "@vitejs/plugin-react": "^5.1.1",
     "concurrently": "^9.1.2",
     "cross-env": "^7.0.3",
-    "electron": "^34.1.1",
+    "electron": "34.5.8",
+    "electron-builder": "^24.13.3",
     "typescript": "~5.9.3",
     "vite": "^7.2.4",
     "wait-on": "^8.0.3"
+  },
+  "build": {
+    "appId": "com.writing-ide.desktop",
+    "productName": "写作IDE",
+    "directories": {
+      "output": "out"
+    },
+    "asar": true,
+    "npmRebuild": false,
+    "files": [
+      "**/*",
+      "!src/**",
+      "!**/*.map",
+      "!**/*.md",
+      "!**/.env*",
+      "!**/writing-ide-data/**",
+      "!**/node_modules/.cache/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   }
 }

@@ -1,6 +1,7 @@
 import { useProjectStore } from "../state/projectStore";
 import { useRunStore, type Mode, type ToolApplyPolicy, type ToolRiskLevel } from "../state/runStore";
 import { useKbStore } from "../state/kbStore";
+import { getGatewayBaseUrl } from "./gatewayUrl";
 
 export type ToolArgSpec = {
   name: string;
@@ -39,11 +40,7 @@ export type ToolDefinition = {
 };
 
 function gatewayBaseUrl() {
-  try {
-    return String((import.meta as any).env?.VITE_GATEWAY_URL ?? "").trim().replace(/\/+$/g, "");
-  } catch {
-    return "";
-  }
+  return getGatewayBaseUrl();
 }
 
 function normalizeTextForStats(text: string) {

@@ -1,7 +1,30 @@
-const { app, BrowserWindow, Menu, shell, ipcMain, dialog, clipboard } = require("electron");
+const { app, BrowserWindow, Menu, shell, ipcMain, dialog, clipboard, protocol, session } = require("electron");
 const path = require("path");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
+
+// ======== Custom protocol（避免 packaged(file://) 环境下 fetch/XHR 跨域受限） ========
+// 说明：
+// - Electron 打包后默认 loadFile -> file://，Chromium 对 file:// 发起网络请求有额外限制，容易导致“Failed to fetch / 模型列表为空”。
+// - 使用 app://-/... 作为 renderer origin，并启用 corsEnabled/supportFetchAPI，使其像 http(s) 一样可进行跨域请求（由 Gateway CORS 放行）。
+try {
+  protocol.registerSchemesAsPrivileged([
+    {
+      scheme: "app",
+      privileges: {
+        standard: true,
+        // 注意：Gateway 目前是 http://，如果把 app:// 设为 secure，会触发 Chromium 的 mixed content 限制，
+        // 导致 fetch http 资源在 renderer 侧直接失败（表现为 CORS/ERR_FAILED）。
+        // 这里保持非 secure，允许正常访问 http Gateway；后续若 Gateway 上 https，可再切回 secure。
+        secure: false,
+        supportFetchAPI: true,
+        corsEnabled: true,
+      },
+    },
+  ]);
+} catch {
+  // ignore
+}
 
 const IGNORE_DIRS = new Set(["node_modules", ".git", "dist", "out", "build", ".next"]);
 const TEXT_EXT = new Set([".md", ".mdx", ".txt"]);
@@ -15,6 +38,29 @@ let watcher = null;
 let watchedRoot = null;
 let watchTimer = null;
 let watchChanged = new Set();
+
+function registerAppProtocol() {
+  try {
+    protocol.registerFileProtocol("app", (request, callback) => {
+      try {
+        const u = new URL(String(request?.url ?? ""));
+        let pathname = decodeURIComponent(u.pathname || "/");
+        // app://-/ -> index.html
+        if (!pathname || pathname === "/") pathname = "/index.html";
+        const rel = pathname.replace(/^\/+/g, "").replaceAll("\\", "/");
+        if (!rel || rel.includes("\0")) return callback({ error: -324 }); // net::ERR_EMPTY_RESPONSE
+        if (rel.split("/").some((p) => p === "..")) return callback({ error: -10 }); // net::ERR_ACCESS_DENIED
+        const root = path.join(__dirname, "../dist");
+        const filePath = path.join(root, ...rel.split("/"));
+        callback({ path: filePath });
+      } catch {
+        callback({ error: -324 });
+      }
+    });
+  } catch {
+    // ignore
+  }
+}
 
 function normalizeRelPath(p) {
   const raw = String(p ?? "");
@@ -130,19 +176,21 @@ function historyCandidateDirs() {
     }
   })();
 
-  const installDir = (() => {
+  const portableDir = (() => {
     try {
-      if (!app.isPackaged) return null;
-      const exeDir = path.dirname(app.getPath("exe"));
-      return path.join(exeDir, HISTORY_DIRNAME);
+      const d = process.env.PORTABLE_EXECUTABLE_DIR;
+      return d ? String(d) : null;
     } catch {
       return null;
     }
   })();
 
-  // 默认优先安装目录（仅 packaged），否则退到 userData
-  const primary = installDir || userDataDir || null;
-  const fallback = userDataDir || installDir || null;
+  const portableDataDir = portableDir ? path.join(portableDir, HISTORY_DIRNAME) : null;
+
+  // 安装版：始终写 userData（避免权限/卸载丢数据）
+  // 便携版：优先写到 exe 同目录旁边（PORTABLE_EXECUTABLE_DIR）
+  const primary = portableDataDir || userDataDir || null;
+  const fallback = portableDataDir ? userDataDir : null;
   return { primary, fallback };
 }
 
@@ -618,12 +666,24 @@ function createWindow() {
   if (devServerUrl) {
     win.loadURL(devServerUrl);
   } else {
-    win.loadFile(path.join(__dirname, "../dist/index.html"));
+    // 用自定义协议加载，避免 file:// 环境下跨域 fetch 受限
+    win.loadURL("app://-/index.html");
   }
 }
 
 app.whenReady().then(() => {
+  // ======== Network（packaged） ========
+  // Electron/Chromium 默认会使用系统代理设置；在某些机器上会导致访问自建 Gateway（IP:port）返回 502（代理无法转发）。
+  // 这里对 packaged 强制直连，避免“模型列表为空/Failed to fetch”。
+  try {
+    if (app.isPackaged) {
+      void session.defaultSession.setProxy({ proxyRules: "direct://" }).catch(() => void 0);
+    }
+  } catch {
+    // ignore
+  }
   registerIpc();
+  registerAppProtocol();
   createWindow();
 
   app.on("activate", () => {

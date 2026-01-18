@@ -798,10 +798,23 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           })
           .nullable()
           .optional(),
+        // 只读：IDE 元信息摘要（用于 Intent Router / 澄清；不注入模型 messages）
+        ideSummary: z
+          .object({
+            activePath: z.string().min(1).max(500).nullable().optional(),
+            openPaths: z.number().int().nonnegative().optional(),
+            fileCount: z.number().int().nonnegative().optional(),
+            hasSelection: z.boolean().optional(),
+            selectionChars: z.number().int().nonnegative().optional(),
+          })
+          .optional(),
       })
       .optional(),
   });
   const body = bodySchema.parse((request as any).body);
+
+  const toolSidecar = (body as any)?.toolSidecar ?? null;
+  const ideSummaryFromSidecar = (toolSidecar && typeof toolSidecar === "object") ? ((toolSidecar as any).ideSummary ?? null) : null;
 
   const mode = (body.mode ?? "agent") as AgentMode;
   const userPrompt = String(body.prompt ?? "");
@@ -824,12 +837,136 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     derivedFrom: string[];
   };
 
+  function looksLikeVisibilityQuestion(text: string): boolean {
+    const t = String(text ?? "").trim();
+    if (!t) return false;
+    // “现在呢/那呢/这样呢”更像 follow-up，不直接归为 visibility question（交由 slot 澄清处理）
+    if (/^(现在呢|现在|那呢|这样呢|这下呢|那现在呢|现在怎么样)\s*[?？]?$/.test(t)) return false;
+    const hit =
+      /(能(不)?看到|看(不)?到|你能看到|你看得到|能看见|看见|能否看到|能不能看到|你现在能看到|现在能看到)/.test(t);
+    const obj = /(文件|当前文件|这(份|个)文件|选区|选中|选择|光标|左侧|默认|active\s*file|selection)/i.test(t);
+    return hit && (obj || t.length <= 20);
+  }
+
+  function looksLikeShortFollowUp(text: string): boolean {
+    const t = String(text ?? "").trim();
+    if (!t) return false;
+    if (t.length > 12) return false;
+    return /^(现在呢|那呢|这样呢|这下呢|然后呢|继续|行吗|可以吗|可以了|可以|好|行|没问题|确认)\s*[?？]?$/.test(t);
+  }
+
+  function looksLikeExecuteOrWriteIntent(text: string): boolean {
+    const t = String(text ?? "").trim();
+    if (!t) return false;
+    if (/(只讨论|先讨论|先聊|只聊|别执行|不要执行|别动手|先别做|不需要你做|不用动手)/.test(t)) return false;
+    return /(执行|动手|写入|落盘|应用|改(一下)?|修改|修复|实现|打包|部署|提交|生成\s*todo|todo\b)/i.test(t);
+  }
+
+  function parseEditorSelectionFromContextPack(ctx?: string): any | null {
+    const text = String(ctx ?? "");
+    if (!text) return null;
+    const m = text.match(/EDITOR_SELECTION\(JSON\):\n([\s\S]*?)\n\n/);
+    const raw = m?.[1] ? String(m[1]).trim() : "";
+    if (!raw) return null;
+    try {
+      const j = JSON.parse(raw);
+      return j && typeof j === "object" ? j : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function coerceNonEmptyString(v: any): string | null {
+    const s = typeof v === "string" ? v.trim() : "";
+    return s ? s : null;
+  }
+
+  function normalizeIdeMeta(args: { ideSummary: any; contextPack?: string; kbSelected: any[] }) {
+    const sel = parseEditorSelectionFromContextPack(args.contextPack);
+    const packHasSelection = Boolean(sel && typeof sel === "object" && (sel as any).hasSelection === true);
+    const packSelectionChars = typeof (sel as any)?.selectedChars === "number" ? Math.max(0, Math.floor(Number((sel as any).selectedChars))) : null;
+    const packSelectionPath = coerceNonEmptyString((sel as any)?.path);
+
+    const ide = args.ideSummary && typeof args.ideSummary === "object" ? args.ideSummary : null;
+    const activePath = packSelectionPath || coerceNonEmptyString(ide?.activePath) || null;
+    const openPaths = typeof ide?.openPaths === "number" ? Math.max(0, Math.floor(Number(ide.openPaths))) : null;
+    const fileCount = typeof ide?.fileCount === "number" ? Math.max(0, Math.floor(Number(ide.fileCount))) : null;
+    const hasSelection = Boolean(ide?.hasSelection) || packHasSelection;
+    const selectionChars = typeof ide?.selectionChars === "number"
+      ? Math.max(0, Math.floor(Number(ide.selectionChars)))
+      : (packSelectionChars ?? (hasSelection ? 1 : 0));
+
+    const kbAttached = Array.isArray(args.kbSelected) ? args.kbSelected : [];
+
+    return { activePath, openPaths, fileCount, hasSelection, selectionChars, kbAttached };
+  }
+
+  function formatKbAttachedBrief(kbAttached: any[]): string {
+    const list = Array.isArray(kbAttached) ? kbAttached : [];
+    if (!list.length) return "（无）";
+    const names = list
+      .map((x: any) => {
+        const name = String(x?.name ?? x?.id ?? "").trim();
+        const purpose = String(x?.purpose ?? "").trim();
+        if (!name) return "";
+        return purpose ? `${name}(${purpose})` : name;
+      })
+      .filter(Boolean);
+    return names.length ? names.join("、") : "（无）";
+  }
+
+  function buildVisibilityContractText(meta: ReturnType<typeof normalizeIdeMeta>): string {
+    const active = meta.activePath ? `\`${meta.activePath}\`` : "（当前未注入 activePath）";
+    const sel = meta.hasSelection ? `是（约 ${meta.selectionChars} 字符）` : "否";
+    const open = typeof meta.openPaths === "number" ? String(meta.openPaths) : "（未知）";
+    const kb = formatKbAttachedBrief(meta.kbAttached);
+    return (
+      "\n\n" +
+      "我现在能看到（元信息）：\n" +
+      `- 当前活动文件：${active}\n` +
+      `- 是否有选区：${sel}\n` +
+      `- 打开的文件数：${open}\n` +
+      `- 已关联 KB：${kb}\n\n` +
+      "我现在看不到（默认不注入/需授权）：\n" +
+      "- 当前文件全文、以及选区的具体正文（除非你用 @{} 引用文件/目录，或明确让我读取）。\n\n" +
+      "你希望我下一步做什么（选一个）：\n" +
+      "- A 解释/讨论\n" +
+      "- B 总结\n" +
+      "- C 改写\n" +
+      "- D 润色\n"
+    );
+  }
+
+  function buildClarifyQuestionSlotBased(args: { userPrompt: string; meta: ReturnType<typeof normalizeIdeMeta>; hasRunTodo: boolean }): string {
+    const t = String(args.userPrompt ?? "").trim();
+    const { meta } = args;
+
+    // 权限敏感（用户看起来在要求执行/写入），但路由不确定：先问 permission
+    if (looksLikeExecuteOrWriteIntent(t)) {
+      return "需要我动手（调用工具/写入）吗？\n- A 不用，只回答\n- B 需要";
+    }
+
+    // 典型 follow-up：已有选区但用户只说“现在呢/这样呢” -> 默认 target=selection，只问 action
+    if (meta.hasSelection && looksLikeShortFollowUp(t)) {
+      return "你希望我对**当前选区**做什么？\n- A 解释/讨论\n- B 总结\n- C 改写\n- D 润色";
+    }
+
+    // 若能确定用户在说“当前文件”且 activePath 已知，则只问 action
+    if (/文件/.test(t) && !/(选区|选中|选择)/.test(t) && meta.activePath) {
+      return `你希望我对**当前文件**（\`${meta.activePath}\`）做什么？\n- A 解释/讨论\n- B 总结\n- C 改写\n- D 润色`;
+    }
+
+    // 默认：先澄清 target
+    return "你指的是哪个对象？\n- A 当前选区\n- B 当前文件\n- C 某个文件/目录（请用 @{} 引用或给路径）";
+  }
+
   function computeIntentRouteDecisionPhase0(args: {
     mode: AgentMode;
     userPrompt: string;
     mainDocRunIntent?: unknown;
     runTodo?: any[];
     intent: any;
+    ideSummary?: any;
   }): IntentRouteDecision {
     const derivedFrom: string[] = ["phase0_heuristic"];
     const p = String(args.userPrompt ?? "");
@@ -856,6 +993,18 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         toolPolicy: "deny",
         reason: "用户只要求短确认（OK-only）",
         derivedFrom: ["intent:wantsOkOnly", ...derivedFrom],
+      };
+    }
+
+    if (looksLikeVisibilityQuestion(pTrim)) {
+      return {
+        intentType: "info",
+        confidence: 0.85,
+        nextAction: "respond_text",
+        todoPolicy: "skip",
+        toolPolicy: "deny",
+        reason: "用户在确认 IDE 可见性（当前文件/选区等元信息）",
+        derivedFrom: ["regex:visibility", ...derivedFrom],
       };
     }
 
@@ -945,6 +1094,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     mainDocRunIntent: (mainDocFromPack as any)?.runIntent,
     runTodo: runTodoFromPack,
     intent,
+    ideSummary: ideSummaryFromSidecar,
   });
   const activeSkills = activateSkills({
     mode,
@@ -1078,7 +1228,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               '- nextAction: "respond_text"|"ask_clarify"|"enter_workflow"\n' +
               '- todoPolicy: "skip"|"optional"|"required"\n' +
               '- toolPolicy: "deny"|"allow_readonly"|"allow_tools"\n' +
-              "约束：confidence 为 0~1 之间的小数。\n",
+              "约束：confidence 为 0~1 之间的小数。\n" +
+              "提示：若用户在确认 IDE 可见性（例如“你能看到当前文件/选区吗”），通常应输出：intentType=info, nextAction=respond_text, todoPolicy=skip, toolPolicy=deny。\n",
           },
           {
             role: "user",
@@ -1087,6 +1238,17 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               userPrompt,
               mainDocRunIntent: String((mainDocFromPack as any)?.runIntent ?? ""),
               hasRunTodo: Array.isArray(runTodoFromPack) && runTodoFromPack.length > 0,
+              ide: {
+                activePath: coerceNonEmptyString(ideSummaryFromSidecar?.activePath),
+                openPaths: typeof ideSummaryFromSidecar?.openPaths === "number" ? ideSummaryFromSidecar.openPaths : null,
+                hasSelection: typeof ideSummaryFromSidecar?.hasSelection === "boolean" ? ideSummaryFromSidecar.hasSelection : null,
+                selectionChars: typeof ideSummaryFromSidecar?.selectionChars === "number" ? ideSummaryFromSidecar.selectionChars : null,
+              },
+              kbAttachedLibraries: (Array.isArray(kbSelectedList) ? kbSelectedList : []).map((x: any) => ({
+                id: String(x?.id ?? "").trim(),
+                name: String(x?.name ?? "").trim() || undefined,
+                purpose: String(x?.purpose ?? "").trim() || undefined,
+              })),
               phase0: {
                 intentType: intentRoute.intentType,
                 confidence: intentRoute.confidence,
@@ -1210,7 +1372,6 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   const waiters = new Map<string, (payload: ToolResultPayload) => void>();
   agentRunWaiters.set(runId, waiters);
 
-  const toolSidecar = (body as any)?.toolSidecar ?? null;
   const styleLinterLibraries = Array.isArray(toolSidecar?.styleLinterLibraries) ? (toolSidecar.styleLinterLibraries as any[]) : [];
   const projectFilesCount = Array.isArray(toolSidecar?.projectFiles) ? (toolSidecar.projectFiles as any[]).length : 0;
   const docRulesChars = typeof toolSidecar?.docRules?.content === "string" ? String(toolSidecar.docRules.content).length : 0;
@@ -1411,9 +1572,37 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     }
   }
 
+  // IDE 可见性确认：无需调用模型，直接按“可见性契约”回答（更快、更确定、也避免模型臆造 activePath/selection）
+  if (mode !== "chat" && intentRoute.toolPolicy === "deny" && looksLikeVisibilityQuestion(userPrompt)) {
+    const turn = 0;
+    const meta = normalizeIdeMeta({ ideSummary: ideSummaryFromSidecar, contextPack: body.contextPack, kbSelected: kbSelectedList as any[] });
+    writeEvent("assistant.start", { runId, turn });
+    writePolicyDecision({
+      turn,
+      policy: "IntentPolicy",
+      decision: "respond_visibility",
+      reasonCodes: ["visibility_contract", `intent:${intentRoute.intentType}`],
+      detail: { ...intentRoute, meta: { activePath: meta.activePath, hasSelection: meta.hasSelection, selectionChars: meta.selectionChars } },
+    });
+    writeEvent("assistant.delta", { delta: buildVisibilityContractText(meta) });
+    writeEvent("run.end", { runId, reason: "text", reasonCodes: ["text", "visibility_contract"], turn });
+    writeEvent("assistant.done", { reason: "text", turn });
+    reply.raw.end();
+    agentRunWaiters.delete(runId);
+    return;
+  }
+
   // 若需要澄清（可选）：Phase 0 仅在“用户未 forceProceed”时才问 1 个问题并暂停等待
   if (mode !== "chat" && intentRoute.nextAction === "ask_clarify" && !intent.forceProceed) {
     const turn = 0;
+    const meta = normalizeIdeMeta({ ideSummary: ideSummaryFromSidecar, contextPack: body.contextPack, kbSelected: kbSelectedList as any[] });
+    const hasRunTodo = Array.isArray(runTodoFromPack) && runTodoFromPack.length > 0;
+    const question = buildClarifyQuestionSlotBased({ userPrompt, meta, hasRunTodo });
+    const selectionHint =
+      meta.hasSelection && looksLikeShortFollowUp(String(userPrompt ?? "").trim())
+        ? `- 我现在看到你已选中一段文字（约 ${meta.selectionChars} 字符）。\n`
+        : "";
+
     writeEvent("assistant.start", { runId, turn });
     writePolicyDecision({
       turn,
@@ -1425,7 +1614,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     writeEvent("assistant.delta", {
       delta:
         "\n\n[需要你确认]\n" +
-        "- 你是希望我**生成 Todo 并推进执行**，还是先**讨论/解释原因**？\n\n" +
+        selectionHint +
+        `${question}\n\n` +
         "你可以直接回答；或回复“继续”让我按默认假设继续推进。",
     });
     writeEvent("run.end", { runId, reason: "clarify_waiting", reasonCodes: ["clarify_waiting"], turn });

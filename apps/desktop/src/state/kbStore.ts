@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { useWorkspaceStore } from "./workspaceStore";
+import { getGatewayBaseUrl } from "../agent/gatewayUrl";
 import { useProjectStore } from "./projectStore";
 import { useLayoutStore } from "./layoutStore";
 import { useRunStore } from "./runStore";
@@ -1585,11 +1586,7 @@ function cosineSim(a: number[], b: number[]) {
 }
 
 function getGatewayUrl() {
-  try {
-    return String((import.meta as any).env?.VITE_GATEWAY_URL ?? "").trim();
-  } catch {
-    return "";
-  }
+  return getGatewayBaseUrl();
 }
 
 async function fetchEmbedding(args: { model?: string; input: string }): Promise<{ ok: true; embedding: number[]; modelUsed?: string } | { ok: false; error: string }> {
