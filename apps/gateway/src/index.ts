@@ -34,6 +34,7 @@ import {
   createInitialRunState,
   detectRunIntent,
   deriveStyleGate,
+  looksLikeClarifyQuestions,
   isProposalWaitingMeta,
   isStyleExampleKbSearch,
   isWriteLikeTool,
@@ -1236,23 +1237,20 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     ok: false,
   };
 
-  const intentRouteSchema = z.object({
-    intentType: z.enum(["task_execution", "discussion", "debug", "info", "unclear"]),
-    confidence: z.number(),
-    nextAction: z.enum(["respond_text", "ask_clarify", "enter_workflow"]),
-    todoPolicy: z.enum(["skip", "optional", "required"]),
-    toolPolicy: z.enum(["deny", "allow_readonly", "allow_tools"]),
-    reason: z.string(),
-    routeId: RouteIdSchema.optional(),
-    missingSlots: z.array(z.enum(["target", "action", "permission"])).optional(),
-    clarify: z
-      .object({
-        slot: z.enum(["target", "action", "permission"]),
-        question: z.string(),
-        options: z.array(z.string()).optional(),
-      })
-      .optional(),
-  });
+  // Router 输出：尽量容错（不同模型对 JSON 类型/枚举大小写不稳定），最终仍会被 routeRegistry 兜底约束
+  const intentRouteSchema = z
+    .object({
+      routeId: z.string().optional(),
+      intentType: z.string().optional(),
+      confidence: z.union([z.number(), z.string()]).optional(),
+      nextAction: z.string().optional(),
+      todoPolicy: z.string().optional(),
+      toolPolicy: z.string().optional(),
+      reason: z.string().optional(),
+      missingSlots: z.any().optional(),
+      clarify: z.any().optional(),
+    })
+    .passthrough();
 
   function clamp01(n: any, fallback = 0.5) {
     const x = Number(n);
@@ -1280,6 +1278,72 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     const last = t0.lastIndexOf("}");
     if (first < 0 || last < 0 || last <= first) return null;
     return t0.slice(first, last + 1);
+  }
+
+  function normalizeIntentRouteFromRouterAny(d0: any): IntentRouteDecision | null {
+    const allowedIntentTypes = new Set(["task_execution", "discussion", "debug", "info", "unclear"]);
+    const allowedNextActions = new Set(["respond_text", "ask_clarify", "enter_workflow"]);
+    const allowedTodoPolicies = new Set(["skip", "optional", "required"]);
+    const allowedToolPolicies = new Set(["deny", "allow_readonly", "allow_tools"]);
+
+    const normEnum = (v: any, allowed: Set<string>) => {
+      const s = typeof v === "string" ? String(v).trim() : "";
+      if (!s) return null;
+      const key = s.toLowerCase();
+      return allowed.has(key) ? key : null;
+    };
+
+    const routeId = (() => {
+      const raw = typeof d0?.routeId === "string" ? String(d0.routeId).trim() : "";
+      if (!raw) return null;
+      const key = raw.trim();
+      return ROUTE_REGISTRY_V1.some((r) => r.routeId === key) ? key : null;
+    })();
+    const route = routeId ? (ROUTE_REGISTRY_V1.find((r) => r.routeId === routeId) as any) : null;
+
+    const intentType = (route?.intentType as string | undefined) ?? normEnum(d0?.intentType, allowedIntentTypes);
+    const nextAction = (route?.nextAction as string | undefined) ?? normEnum(d0?.nextAction, allowedNextActions);
+    const todoPolicy = (route?.todoPolicy as string | undefined) ?? normEnum(d0?.todoPolicy, allowedTodoPolicies);
+    const toolPolicy = (route?.toolPolicy as string | undefined) ?? normEnum(d0?.toolPolicy, allowedToolPolicies);
+    if (!intentType || !nextAction || !todoPolicy || !toolPolicy) return null;
+
+    const missingSlots = (() => {
+      const raw = (d0 as any)?.missingSlots;
+      const a = Array.isArray(raw) ? (raw as any[]) : typeof raw === "string" ? String(raw).split(/[,\s]+/g) : [];
+      const norm = a
+        .map((x) => String(x ?? "").trim().toLowerCase())
+        .filter((x) => x === "target" || x === "action" || x === "permission");
+      return norm.length ? (norm as any) : undefined;
+    })();
+
+    const clarify = (() => {
+      const c = (d0 as any)?.clarify;
+      if (!c || typeof c !== "object") return undefined;
+      const slot = String((c as any).slot ?? "").trim().toLowerCase();
+      if (slot !== "target" && slot !== "action" && slot !== "permission") return undefined;
+      const question = String((c as any).question ?? "").trim();
+      if (!question) return undefined;
+      const options = Array.isArray((c as any).options)
+        ? ((c as any).options as any[]).map((x) => String(x ?? "").trim()).filter(Boolean).slice(0, 8)
+        : undefined;
+      return { slot, question, ...(options?.length ? { options } : {}) } as any;
+    })();
+
+    const confidence = clamp01((d0 as any)?.confidence, 0.6);
+    const reason = String((d0 as any)?.reason ?? "").trim() || (routeId ? `llm_router:${routeId}` : "llm_router");
+
+    return {
+      intentType: intentType as any,
+      confidence,
+      nextAction: nextAction as any,
+      todoPolicy: todoPolicy as any,
+      toolPolicy: toolPolicy as any,
+      reason,
+      derivedFrom: [], // caller 再补
+      routeId: routeId ?? undefined,
+      missingSlots,
+      clarify,
+    };
   }
 
   const shouldTryLlmRouter = (() => {
@@ -1376,46 +1440,12 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       const parsed = intentRouteSchema.safeParse(JSON.parse(jsonText));
       if (!parsed.success) throw new Error("ROUTER_SCHEMA_INVALID");
 
-      const d0 = parsed.data as any;
-
-      const routeId = (() => {
-        const raw = typeof d0?.routeId === "string" ? String(d0.routeId).trim() : "";
-        if (!raw) return null;
-        return ROUTE_REGISTRY_V1.some((r) => r.routeId === raw) ? raw : null;
-      })();
-
-      const missingSlots = (() => {
-        const a = Array.isArray(d0?.missingSlots) ? (d0.missingSlots as any[]) : [];
-        const norm = a
-          .map((x) => String(x ?? "").trim())
-          .filter((x) => x === "target" || x === "action" || x === "permission");
-        return norm.length ? (norm as any) : undefined;
-      })();
-
-      const clarify = (() => {
-        const c = d0?.clarify;
-        if (!c || typeof c !== "object") return undefined;
-        const slot = String((c as any).slot ?? "").trim();
-        if (slot !== "target" && slot !== "action" && slot !== "permission") return undefined;
-        const question = String((c as any).question ?? "").trim();
-        if (!question) return undefined;
-        const options = Array.isArray((c as any).options)
-          ? ((c as any).options as any[]).map((x) => String(x ?? "").trim()).filter(Boolean).slice(0, 8)
-          : undefined;
-        return { slot, question, ...(options?.length ? { options } : {}) } as any;
-      })();
+      const normalized = normalizeIntentRouteFromRouterAny(parsed.data);
+      if (!normalized) throw new Error("ROUTER_SCHEMA_INCOMPLETE");
 
       intentRoute = {
-        intentType: d0.intentType,
-        confidence: clamp01(d0.confidence, 0.6),
-        nextAction: d0.nextAction,
-        todoPolicy: d0.todoPolicy,
-        toolPolicy: d0.toolPolicy,
-        reason: String(d0.reason ?? "").trim() || "llm_router",
+        ...normalized,
         derivedFrom: ["llm_router", `stage:${intentRouterStageKey}`],
-        routeId: routeId ?? undefined,
-        missingSlots,
-        clarify,
       };
       intentRouterTrace.ok = true;
     } catch (e: any) {
@@ -1990,6 +2020,9 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       let decided: "unknown" | "tool" | "text" = "unknown";
       let flushed = 0;
       let lastUsage: LlmTokenUsage | null = null;
+      // 经验：部分模型会先吐一句“好的/我将…”再输出 <tool_calls>，若提前判为 text 会导致 UI 先显示废话且触发 ProtocolPolicy 重试。
+      // 这里做一个短 holdback：在前 N 字符内先观察是否出现 tool_calls，再决定是否开始流式输出文本。
+      const HOLD_DECIDE_CHARS = 280;
 
       const iter = streamChatCompletionViaProvider({
         baseUrl,
@@ -2009,9 +2042,17 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           const prevDecided = decided;
           if (decided === "unknown") {
             const t = assistantText.trimStart();
-            if (t.startsWith("<tool_calls") || t.startsWith("<tool_call")) decided = "tool";
-            else if (t.length > 0 && !t.startsWith("<")) decided = "text";
-            else if (t.length > 96 && t.startsWith("<") && !t.startsWith("<tool_calls") && !t.startsWith("<tool_call") && !t.startsWith("<|"))
+            // 只要在 holdback 窗口内出现 tool_calls/tool_call，就直接视为 tool（即便前面有少量废话前缀）
+            if (t.includes("<tool_calls") || t.includes("<tool_call")) decided = "tool";
+            // 未见 tool_calls：只有当累计到一定长度后才判为 text（避免过早开始 streaming）
+            else if (t.length >= HOLD_DECIDE_CHARS && t.length > 0 && !t.startsWith("<")) decided = "text";
+            else if (
+              t.length >= HOLD_DECIDE_CHARS &&
+              t.startsWith("<") &&
+              !t.startsWith("<tool_calls") &&
+              !t.startsWith("<tool_call") &&
+              !t.startsWith("<|")
+            )
               decided = "text";
           }
           // 一旦判断为 text，需要把此前积累但未发出的内容补发，否则会出现“输出中断/缺头”
@@ -2071,57 +2112,89 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         if (end < 0) return body;
         return body.slice(0, end);
       }
-      function isToolCallXmlExclusive(text: string) {
-        const t = stripCodeFencesLocal(text).trim();
-        // 只接受“整条消息仅包含 XML”（允许首尾空白）；否则视为协议违规（避免“问用户但仍继续跑”）
-        const m1 = t.match(/^<tool_calls\b[\s\S]*?<\/tool_calls\s*>$/);
-        if (m1?.[0]) return true;
-        const m2 = t.match(/^<tool_call\b[\s\S]*?<\/tool_call\s*>$/);
-        if (m2?.[0]) return true;
-        return false;
+      function splitToolCallXmlBlock(text: string): { xml: string; outside: string } | null {
+        const t = stripCodeFencesLocal(text);
+        const re1 = /<tool_calls\b[\s\S]*?<\/tool_calls\s*>/;
+        const m1 = re1.exec(t);
+        if (m1?.[0] && typeof m1.index === "number") {
+          const start = m1.index;
+          const end = start + m1[0].length;
+          const outside = `${t.slice(0, start)}\n${t.slice(end)}`.trim();
+          return { xml: m1[0], outside };
+        }
+        const re2 = /<tool_call\b[\s\S]*?<\/tool_call\s*>/;
+        const m2 = re2.exec(t);
+        if (m2?.[0] && typeof m2.index === "number") {
+          const start = m2.index;
+          const end = start + m2[0].length;
+          const outside = `${t.slice(0, start)}\n${t.slice(end)}`.trim();
+          return { xml: m2[0], outside };
+        }
+        return null;
       }
 
       let toolCalls = parseToolCalls(assistantText);
-      if (toolCalls && !isToolCallXmlExclusive(assistantText)) {
-        if (runState.protocolRetryBudget > 0) {
+      if (toolCalls) {
+        const split = splitToolCallXmlBlock(assistantText);
+        const outside = String(split?.outside ?? "").trim();
+        // 如果夹杂内容看起来像“向用户澄清/要用户确认”，则仍按协议违规处理（避免“问你确认但工作流仍继续跑”）
+        if (outside && looksLikeClarifyQuestions(outside)) {
+          if (runState.protocolRetryBudget > 0) {
+            writePolicyDecision({
+              turn,
+              policy: "ProtocolPolicy",
+              decision: "retry",
+              reasonCodes: ["tool_xml_mixed_with_text"],
+              detail: { hint: "tool_calls/tool_call 消息必须 XML 独占", budget: "protocol", budgetBefore: runState.protocolRetryBudget, budgetAfter: Math.max(0, runState.protocolRetryBudget - 1) }
+            });
+            runState.protocolRetryBudget -= 1;
+            writeEvent("assistant.delta", {
+              delta:
+                "\n\n[解析提示] 检测到工具调用 XML 夹杂了自然语言（未做到“XML 独占消息”）。\n" +
+                "为避免出现“问你确认但工作流仍继续跑”的误导行为，我会让模型自动重试：\n" +
+                "- 若确实需要你回答：请它只输出纯文本问题并停止（不要输出任何 <tool_calls>）\n" +
+                "- 否则：请它只输出纯 XML 的 <tool_calls>（不要夹杂自然语言）"
+            });
+          writeEvent("assistant.done", { reason: "tool_xml_mixed_with_text_retry", turn });
+            messages.push({
+              role: "system",
+              content:
+                "你上一条消息包含工具调用 XML，但夹杂了自然语言，违反协议（tool_calls/tool_call 消息必须 XML 独占）。请立刻重试：\n" +
+                "- 若你需要用户先回答：只输出纯文本问题（最多 5 个）并停止，不要输出任何 <tool_calls>/<tool_call>。\n" +
+                "- 否则：只输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。"
+            });
+            continue;
+          }
+
           writePolicyDecision({
             turn,
             policy: "ProtocolPolicy",
-            decision: "retry",
-            reasonCodes: ["tool_xml_mixed_with_text"],
-            detail: { hint: "tool_calls/tool_call 消息必须 XML 独占", budget: "protocol", budgetBefore: runState.protocolRetryBudget, budgetAfter: Math.max(0, runState.protocolRetryBudget - 1) }
+            decision: "block_end",
+            reasonCodes: ["tool_xml_mixed_with_text", "protocol_retry_budget_exhausted"],
+            detail: { hint: "tool_calls/tool_call 消息必须 XML 独占", budget: "protocol" }
           });
-          runState.protocolRetryBudget -= 1;
-          writeEvent("assistant.delta", {
-            delta:
-              "\n\n[解析提示] 检测到工具调用 XML 夹杂了自然语言（未做到“XML 独占消息”）。\n" +
-              "为避免出现“问你确认但工作流仍继续跑”的误导行为，我会让模型自动重试：\n" +
-              "- 若确实需要你回答：请它只输出纯文本问题并停止（不要输出任何 <tool_calls>）\n" +
-              "- 否则：请它只输出纯 XML 的 <tool_calls>（不要夹杂自然语言）"
-          });
-        writeEvent("assistant.done", { reason: "tool_xml_mixed_with_text_retry", turn });
-          messages.push({
-            role: "system",
-            content:
-              "你上一条消息包含工具调用 XML，但夹杂了自然语言，违反协议（tool_calls/tool_call 消息必须 XML 独占）。请立刻重试：\n" +
-              "- 若你需要用户先回答：只输出纯文本问题（最多 5 个）并停止，不要输出任何 <tool_calls>/<tool_call>。\n" +
-              "- 否则：只输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。"
-          });
-          continue;
+          writeEvent("run.end", { runId, reason: "protocol_error", reasonCodes: ["tool_xml_mixed_with_text", "protocol_retry_budget_exhausted"], turn });
+          writeEvent("assistant.done", { reason: "protocol_error", turn });
+          reply.raw.end();
+          agentRunWaiters.delete(runId);
+          return;
         }
 
-        writePolicyDecision({
-          turn,
-          policy: "ProtocolPolicy",
-          decision: "block_end",
-          reasonCodes: ["tool_xml_mixed_with_text", "protocol_retry_budget_exhausted"],
-          detail: { hint: "tool_calls/tool_call 消息必须 XML 独占", budget: "protocol" }
-        });
-        writeEvent("run.end", { runId, reason: "protocol_error", reasonCodes: ["tool_xml_mixed_with_text", "protocol_retry_budget_exhausted"], turn });
-        writeEvent("assistant.done", { reason: "protocol_error", turn });
-        reply.raw.end();
-        agentRunWaiters.delete(runId);
-        return;
+        // 其余情况：视为“可忽略前后缀”（多数是“好的/我将…”），不再消耗 retry budget，直接执行 tool_calls。
+        if (outside) {
+          writePolicyDecision({
+            turn,
+            policy: "ProtocolPolicy",
+            decision: "coerce_execute",
+            reasonCodes: ["tool_xml_mixed_with_text_ignored"],
+            detail: { outsideLen: outside.length, outsidePreview: outside.slice(0, 160), budget: "protocol", budgetLeft: runState.protocolRetryBudget }
+          });
+          // 仅执行 XML 主体，避免后续逻辑再次误判
+          if (split?.xml) {
+            assistantText = split.xml;
+            toolCalls = parseToolCalls(assistantText) || toolCalls;
+          }
+        }
       }
       if (!toolCalls) {
         // 如果看起来像 tool_calls 但解析失败：不要直接终止 run，要求模型立刻重试一次（避免用户手动“继续”）
