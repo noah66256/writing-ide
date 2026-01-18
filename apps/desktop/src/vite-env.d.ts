@@ -46,6 +46,7 @@ declare global {
         loadConversations: () => Promise<{
           ok: boolean;
           conversations?: any[];
+          draftSnapshot?: any | null;
           used?: "primary" | "fallback";
           file?: string;
           error?: string;

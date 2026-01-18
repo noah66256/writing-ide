@@ -32,10 +32,13 @@ export type Conversation = {
 
 type ConversationState = {
   conversations: Conversation[];
+  /** 当前“草稿对话”（未归档到历史，也无需点 +），用于重启后自动恢复右侧内容 */
+  draftSnapshot: RunSnapshot | null;
   hydrateFromDisk: () => Promise<void>;
   addConversation: (c: Omit<Conversation, "id" | "createdAt" | "updatedAt"> & { id?: string }) => string;
   deleteConversation: (id: string) => void;
   renameConversation: (id: string, title: string) => void;
+  setDraftSnapshot: (snap: RunSnapshot | null) => void;
   clearAll: () => void;
 };
 
@@ -59,14 +62,17 @@ function capConversations(list: Conversation[]) {
   return arr.length > 20 ? arr.slice(0, 20) : arr;
 }
 
-function schedulePersistToDisk(conversations: Conversation[]) {
+function schedulePersistToDisk(args: { conversations: Conversation[]; draftSnapshot: RunSnapshot | null }) {
   const api = window.desktop?.history;
   if (!api?.saveConversations) return;
 
+  const conversations = capConversations(args.conversations);
+  const draftSnapshot = args.draftSnapshot ?? null;
   pendingPayload = {
     version: 1,
     updatedAt: Date.now(),
-    conversations: capConversations(conversations),
+    conversations,
+    draftSnapshot,
   };
 
   if (persistTimer) return;
@@ -82,6 +88,7 @@ export const useConversationStore = create<ConversationState>()(
   persist(
     (set, get) => ({
       conversations: [],
+      draftSnapshot: null,
       hydrateFromDisk: async () => {
         if (diskHydrated) return;
         diskHydrated = true;
@@ -91,17 +98,21 @@ export const useConversationStore = create<ConversationState>()(
         try {
           const res = await api.loadConversations();
           const list = Array.isArray((res as any)?.conversations) ? ((res as any).conversations as any[]) : [];
-          if (!list.length) return;
+          const diskDraft = ((res as any)?.draftSnapshot ?? null) as any;
 
-          // 如果 localStorage 已有内容，优先保留（避免“覆盖用户最近操作”）
-          const cur = get().conversations ?? [];
-          if (cur.length) {
-            // 但仍把当前内容同步到磁盘，保证“换端口/装包”也能恢复
-            schedulePersistToDisk(cur);
-            return;
-          }
+          // localStorage 优先：但允许“分别补齐”缺失项（例如本地有 conversations，但没有 draft）
+          const curConvs = get().conversations ?? [];
+          const curDraft = get().draftSnapshot ?? null;
 
-          set({ conversations: capConversations(list as any) });
+          const patch: Partial<ConversationState> = {};
+          if (!curConvs.length && list.length) patch.conversations = capConversations(list as any);
+          if (!curDraft && diskDraft && typeof diskDraft === "object") patch.draftSnapshot = diskDraft as any;
+          if (Object.keys(patch).length) set(patch as any);
+
+          const finalConvs = (patch.conversations ?? curConvs) as any;
+          const finalDraft = (patch.draftSnapshot ?? curDraft) as any;
+          // 把“最终态”同步回磁盘，保证 dev/packaged/迁移都能恢复
+          schedulePersistToDisk({ conversations: finalConvs, draftSnapshot: finalDraft });
         } catch {
           // ignore
         }
@@ -120,7 +131,7 @@ export const useConversationStore = create<ConversationState>()(
           const prev = get().conversations ?? [];
           const merged = [next, ...prev.filter((x) => x.id !== id)];
           const capped = capConversations(merged);
-          schedulePersistToDisk(capped);
+          schedulePersistToDisk({ conversations: capped, draftSnapshot: get().draftSnapshot ?? null });
           return { conversations: capped };
         });
         return id;
@@ -130,7 +141,7 @@ export const useConversationStore = create<ConversationState>()(
         if (!v) return;
         set((s) => {
           const next = (s.conversations ?? []).filter((x) => x.id !== v);
-          schedulePersistToDisk(next);
+          schedulePersistToDisk({ conversations: next, draftSnapshot: get().draftSnapshot ?? null });
           return { conversations: next };
         });
       },
@@ -139,14 +150,22 @@ export const useConversationStore = create<ConversationState>()(
         if (!v) return;
         set((s) => {
           const next = (s.conversations ?? []).map((x) => (x.id === v ? { ...x, title: clampTitle(title), updatedAt: Date.now() } : x));
-          schedulePersistToDisk(next);
+          schedulePersistToDisk({ conversations: next, draftSnapshot: get().draftSnapshot ?? null });
           return { conversations: next };
+        });
+      },
+      setDraftSnapshot: (snap) => {
+        const next = snap && typeof snap === "object" ? (snap as any) : null;
+        set(() => {
+          const conversations = get().conversations ?? [];
+          schedulePersistToDisk({ conversations, draftSnapshot: next });
+          return { draftSnapshot: next };
         });
       },
       clearAll: () =>
         set(() => {
-          schedulePersistToDisk([]);
-          return { conversations: [] };
+          schedulePersistToDisk({ conversations: [], draftSnapshot: null });
+          return { conversations: [], draftSnapshot: null };
         }),
     }),
     { name: "writing-ide.conversations.v1" },

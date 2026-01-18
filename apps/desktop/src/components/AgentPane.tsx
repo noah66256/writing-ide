@@ -132,6 +132,8 @@ export function AgentPane() {
   const addConversation = useConversationStore((s) => s.addConversation);
   const deleteConversation = useConversationStore((s) => s.deleteConversation);
   const hydrateConversationsFromDisk = useConversationStore((s) => s.hydrateFromDisk);
+  const draftSnapshot = useConversationStore((s) => s.draftSnapshot);
+  const setDraftSnapshot = useConversationStore((s) => s.setDraftSnapshot);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [copiedHint, setCopiedHint] = useState<string | null>(null);
   const [hideToolSteps, setHideToolSteps] = useState(() => {
@@ -642,6 +644,40 @@ export function AgentPane() {
   useEffect(() => {
     void hydrateConversationsFromDisk().catch(() => void 0);
   }, [hydrateConversationsFromDisk]);
+
+  // Draft：自动保存当前对话（避免“重启后右侧空白”）
+  useEffect(() => {
+    // 空状态就清掉草稿，避免“新对话”也被恢复
+    const hasAny =
+      (steps ?? []).length > 0 ||
+      Object.values(mainDoc ?? {}).some((v) => String(v ?? "").trim()) ||
+      (todoList ?? []).length > 0 ||
+      (ctxRefs ?? []).length > 0;
+    if (!hasAny) {
+      setDraftSnapshot(null);
+      return;
+    }
+    // 复用现有的“安全快照”（裁剪 steps/移除 apply/undo）
+    setDraftSnapshot(buildSnapshot());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [steps, mainDoc, todoList, ctxRefs, mode, model, kbAttachedLibraryIds, setDraftSnapshot]);
+
+  // 启动自动恢复：若当前 run 为空，则加载 draftSnapshot
+  const restoredDraftRef = useRef(false);
+  useEffect(() => {
+    if (restoredDraftRef.current) return;
+    if (isRunning) return;
+    if (!draftSnapshot) return;
+    const curSteps = useRunStore.getState().steps ?? [];
+    const curHasAny =
+      curSteps.length > 0 || Object.values(useRunStore.getState().mainDoc ?? {}).some((v) => String(v ?? "").trim());
+    if (curHasAny) {
+      restoredDraftRef.current = true;
+      return;
+    }
+    useRunStore.getState().loadSnapshot(draftSnapshot as any);
+    restoredDraftRef.current = true;
+  }, [draftSnapshot, isRunning]);
 
   return (
     <>

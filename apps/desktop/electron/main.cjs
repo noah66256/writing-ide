@@ -609,10 +609,11 @@ function registerIpc() {
         const raw = await fsp.readFile(file, "utf-8");
         const parsed = JSON.parse(String(raw ?? ""));
         const list = Array.isArray(parsed?.conversations) ? parsed.conversations : Array.isArray(parsed) ? parsed : [];
-        return { ok: true, conversations: list, used, file };
+        const draftSnapshot = parsed && typeof parsed === "object" ? (parsed.draftSnapshot ?? null) : null;
+        return { ok: true, conversations: list, draftSnapshot, used, file };
       } catch (e) {
         const msg = String(e?.code ?? e?.message ?? e);
-        if (msg.includes("ENOENT")) return { ok: true, conversations: [], used, file };
+        if (msg.includes("ENOENT")) return { ok: true, conversations: [], draftSnapshot: null, used, file };
         return { ok: false, error: "READ_OR_PARSE_FAILED", detail: String(e?.message ?? e) };
       }
     } catch (e) {
