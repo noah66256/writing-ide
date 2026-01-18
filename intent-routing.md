@@ -169,6 +169,14 @@ else:
   - 不要暴露工具清单（或等价地把工具集裁剪为空）
   - 如果模型仍输出 `<tool_calls>`：视为违规，要求它重试输出纯文本（避免走 ProtocolPolicy 的 XML-only 误伤循环）
 
+#### 5.3.1 proposal-first 与 auto-apply（补充：IDE 操作体验）
+在写作 IDE 场景里，“文件/目录操作”往往希望更像传统 IDE：**操作即时生效，但可 Undo 回滚**。
+
+建议原则（当前项目实现）：
+- **文件/目录操作（ops）**：`doc.deletePath/doc.renamePath/doc.mkdir` 默认 `auto_apply`，并返回 Undo（回到执行前快照）。
+- **正文写入（writing）**：`doc.write(覆盖)/doc.applyEdits/doc.splitToDir/doc.restoreSnapshot` 默认 `proposal-first`（Keep 才 apply；Undo 回滚）。
+- **批量应用提案**：UI 提供 `KeepAll`，一键应用全部 pending proposals，避免逐个点击。
+
 #### 5.4 ask_clarify（升级：slot-based 澄清）
 原则：
 - **一次只问 1 个问题**，但要选对澄清轴（`target/action/permission`）。

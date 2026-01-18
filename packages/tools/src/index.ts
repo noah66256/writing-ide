@@ -203,7 +203,7 @@ export const TOOL_LIST: ToolMeta[] = [
   },
   {
     name: "doc.renamePath",
-    description: "重命名/移动 文件或目录（fromPath → toPath）。高风险操作，默认 proposal-first（Keep 才真正执行）。",
+    description: "重命名/移动 文件或目录（fromPath → toPath）。默认自动执行（可 Undo 回滚）。",
     args: [
       { name: "fromPath", required: true, desc: "源路径（文件或目录）", type: "string" },
       { name: "toPath", required: true, desc: "目标路径（文件或目录）", type: "string" },
@@ -218,7 +218,7 @@ export const TOOL_LIST: ToolMeta[] = [
   },
   {
     name: "doc.deletePath",
-    description: "删除文件或目录（path）。真删磁盘内容；高风险操作，默认 proposal-first（Keep 才真正执行；Undo 可回滚）。",
+    description: "删除文件或目录（path）。真删磁盘内容；默认自动执行（可 Undo 回滚）。",
     args: [{ name: "path", required: true, desc: "文件或目录路径", type: "string" }],
     modes: ["plan", "agent"],
     inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: true },

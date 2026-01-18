@@ -160,6 +160,7 @@ type RunState = {
 
   keepStep: (stepId: string) => void;
   undoStep: (stepId: string) => void;
+  keepAllProposals: () => void;
 
   updateMainDoc: (patch: Partial<MainDoc>) => { undo: () => void };
   setTodoList: (items: TodoItem[]) => { undo: () => void };
@@ -465,6 +466,20 @@ export const useRunStore = create<RunState>()(
           : x,
       ),
     }));
+  },
+  keepAllProposals: () => {
+    const steps = get().steps ?? [];
+    const pending = steps
+      .filter((s: any) => s && s.type === "tool")
+      .filter((s: any) => s.applyPolicy === "proposal" && s.status === "success" && !s.kept)
+      .filter((s: any) => typeof s.apply === "function"); // 只处理“真的需要 Keep 才会应用”的提案
+    for (const st of pending) {
+      try {
+        get().keepStep(String((st as any).id ?? ""));
+      } catch {
+        // ignore：单个提案失败不应影响其它提案
+      }
+    }
   },
 
   updateMainDoc: (patch) => {

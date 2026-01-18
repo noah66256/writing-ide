@@ -1276,6 +1276,27 @@ export function AgentPane() {
               </div>
 
               <div className="composerBarRightSend">
+                {(() => {
+                  const pending = (steps ?? [])
+                    .filter((s: any) => s && s.type === "tool")
+                    .filter((s: any) => s.applyPolicy === "proposal" && s.status === "success" && !s.kept)
+                    .filter((s: any) => typeof s.apply === "function");
+                  const n = pending.length;
+                  if (!n) return null;
+                  if (isRunning) return null;
+                  return (
+                    <button
+                      className="iconBtn"
+                      type="button"
+                      aria-label="KeepAll"
+                      title={`KeepAll：一键应用全部提案（${n}）`}
+                      onClick={() => useRunStore.getState().keepAllProposals()}
+                      style={{ marginRight: 6, fontSize: 11, fontWeight: 700 }}
+                    >
+                      K{n}
+                    </button>
+                  );
+                })()}
                 {isRunning ? (
                   <button className="sendBtn" type="button" aria-label="停止" title="停止" onClick={onStop}>
                     <IconStop />

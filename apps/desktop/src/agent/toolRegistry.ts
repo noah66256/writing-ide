@@ -1138,21 +1138,23 @@ const tools: ToolDefinition[] = [
     run: async (args) => {
       const dir = normalizeRelPath(String(args.path ?? ""));
       if (!dir) return { ok: false, error: "MISSING_PATH" };
+      const snap = useProjectStore.getState().snapshot();
       const s = useProjectStore.getState();
       await s.mkdir(dir);
-      const undo = () => void useProjectStore.getState().deletePath(dir);
+      // 目录的“严格 Undo”：回到执行前快照（避免误删到其它同时创建的文件）
+      const undo = () => useProjectStore.getState().restore(snap);
       return { ok: true, output: { ok: true, path: dir }, undoable: true, undo };
     },
   },
   {
     name: "doc.renamePath",
-    description: "重命名/移动 文件或目录（fromPath → toPath）。默认 proposal-first（Keep 才真正执行；Undo 可回滚）。",
+    description: "重命名/移动 文件或目录（fromPath → toPath）。默认自动执行（可 Undo 回滚）。",
     args: [
       { name: "fromPath", required: true, desc: "源路径（文件或目录）" },
       { name: "toPath", required: true, desc: "目标路径（文件或目录）" },
     ],
     riskLevel: "medium",
-    applyPolicy: "proposal",
+    applyPolicy: "auto_apply",
     reversible: true,
     run: async (args) => {
       const fromPath = normalizeRelPath(String((args as any).fromPath ?? ""));
@@ -1179,12 +1181,9 @@ const tools: ToolDefinition[] = [
         return proj.files.filter((f) => f.path === fromPath || f.path.startsWith(prefix)).length;
       })();
 
-      const apply = () => {
-        const snap = useProjectStore.getState().snapshot();
-        void useProjectStore.getState().renamePath(fromPath, toPath);
-        return { undo: () => useProjectStore.getState().restore(snap) };
-      };
-
+      const snap = useProjectStore.getState().snapshot();
+      await useProjectStore.getState().renamePath(fromPath, toPath);
+      const undo = () => useProjectStore.getState().restore(snap);
       return {
         ok: true,
         output: {
@@ -1194,21 +1193,21 @@ const tools: ToolDefinition[] = [
           kind: isFile ? "file" : "dir",
           filesCount,
           previewMappings,
-          note: "这是重命名/移动提案：点击 Keep 才会真正执行；Undo 可回滚。",
+          note: "已执行重命名/移动（可 Undo 回滚）。",
         },
         riskLevel: "medium",
-        applyPolicy: "proposal",
-        apply,
-        undoable: false,
+        applyPolicy: "auto_apply",
+        undoable: true,
+        undo,
       };
     },
   },
   {
     name: "doc.deletePath",
-    description: "删除文件或目录（path）。真删磁盘内容；默认 proposal-first（Keep 才真正执行；Undo 可回滚）。",
+    description: "删除文件或目录（path）。真删磁盘内容；默认自动执行（可 Undo 回滚）。",
     args: [{ name: "path", required: true, desc: "文件或目录路径" }],
     riskLevel: "high",
-    applyPolicy: "proposal",
+    applyPolicy: "auto_apply",
     reversible: true,
     run: async (args) => {
       const path0 = normalizeRelPath(String(args.path ?? ""));
@@ -1239,11 +1238,9 @@ const tools: ToolDefinition[] = [
 
       const previewResolved = preview ? await preview.catch(() => null) : null;
 
-      const apply = () => {
-        const snap = useProjectStore.getState().snapshot();
-        void useProjectStore.getState().deletePath(path0);
-        return { undo: () => useProjectStore.getState().restore(snap) };
-      };
+      const snap = useProjectStore.getState().snapshot();
+      await useProjectStore.getState().deletePath(path0);
+      const undo = () => useProjectStore.getState().restore(snap);
 
       return {
         ok: true,
@@ -1254,12 +1251,12 @@ const tools: ToolDefinition[] = [
           filesCount,
           previewFiles,
           ...(previewResolved ? { preview: previewResolved } : {}),
-          note: "这是删除提案：点击 Keep 才会真正删除；Undo 可回滚。",
+          note: "已执行删除（可 Undo 回滚）。",
         },
         riskLevel: "high",
-        applyPolicy: "proposal",
-        apply,
-        undoable: false,
+        applyPolicy: "auto_apply",
+        undoable: true,
+        undo,
       };
     },
   },
