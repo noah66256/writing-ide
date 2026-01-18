@@ -939,7 +939,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     };
   }
 
-  const intentRoute = computeIntentRouteDecisionPhase0({
+  let intentRoute = computeIntentRouteDecisionPhase0({
     mode,
     userPrompt,
     mainDocRunIntent: (mainDocFromPack as any)?.runIntent,
@@ -978,6 +978,156 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   if (!env.ok) return reply.code(500).send({ error: "LLM_NOT_CONFIGURED" });
 
   const jwtUser = await tryGetJwtUser(request as any);
+
+  // ======== Phase 1（方案A）：LLM Router stage（失败/超时回退 Phase 0） ========
+  const intentRouterEnabled = String(process.env.INTENT_ROUTER_ENABLED ?? "1").trim() !== "0";
+  const intentRouterModeRaw = String(process.env.INTENT_ROUTER_MODE ?? (IS_DEV ? "hybrid" : "heuristic")).trim().toLowerCase();
+  const intentRouterMode: "heuristic" | "llm" | "hybrid" =
+    intentRouterModeRaw === "llm" || intentRouterModeRaw === "hybrid" || intentRouterModeRaw === "heuristic"
+      ? (intentRouterModeRaw as any)
+      : (IS_DEV ? "hybrid" : "heuristic");
+  const intentRouterStageKey = String(process.env.INTENT_ROUTER_LLM_STAGE ?? "agent.router").trim() || "agent.router";
+
+  const intentRouterTrace: {
+    mode: string;
+    stageKey: string;
+    attempted: boolean;
+    ok: boolean;
+    error?: string;
+    model?: string;
+  } = {
+    mode: intentRouterMode,
+    stageKey: intentRouterStageKey,
+    attempted: false,
+    ok: false,
+  };
+
+  const intentRouteSchema = z.object({
+    intentType: z.enum(["task_execution", "discussion", "debug", "info", "unclear"]),
+    confidence: z.number(),
+    nextAction: z.enum(["respond_text", "ask_clarify", "enter_workflow"]),
+    todoPolicy: z.enum(["skip", "optional", "required"]),
+    toolPolicy: z.enum(["deny", "allow_readonly", "allow_tools"]),
+    reason: z.string(),
+  });
+
+  function clamp01(n: any, fallback = 0.5) {
+    const x = Number(n);
+    if (!Number.isFinite(x)) return fallback;
+    return Math.max(0, Math.min(1, x));
+  }
+
+  function stripCodeFencesOne(text: string) {
+    const t = String(text ?? "").trim();
+    if (!t.startsWith("```")) return t;
+    const firstNl = t.indexOf("\n");
+    if (firstNl < 0) return t;
+    const body = t.slice(firstNl + 1);
+    const end = body.lastIndexOf("```");
+    if (end < 0) return body.trim();
+    return body.slice(0, end).trim();
+  }
+
+  function extractJsonObject(text: string): string | null {
+    const t0 = stripCodeFencesOne(String(text ?? "").trim());
+    if (!t0) return null;
+    // 安全：router 绝不允许返回 tool_calls
+    if (t0.includes("<tool_calls") || t0.includes("<tool_call")) return null;
+    const first = t0.indexOf("{");
+    const last = t0.lastIndexOf("}");
+    if (first < 0 || last < 0 || last <= first) return null;
+    return t0.slice(first, last + 1);
+  }
+
+  const shouldTryLlmRouter = (() => {
+    if (!intentRouterEnabled) return false;
+    if (mode === "chat") return false;
+    if (intentRouterMode === "heuristic") return false;
+    if (intentRouterMode === "llm") return true;
+    // hybrid：只在 Phase0 不确定/偏保守的分支上调用（降低成本）
+    const tags = new Set(intentRoute.derivedFrom ?? []);
+    return tags.has("regex:debug") || tags.has("default:discussion");
+  })();
+
+  if (shouldTryLlmRouter) {
+    intentRouterTrace.attempted = true;
+    try {
+      const st = await aiConfig.resolveStage(intentRouterStageKey);
+      intentRouterTrace.model = String(st.model ?? "");
+      const controller = new AbortController();
+      const timeoutMsRaw = Number(String(process.env.INTENT_ROUTER_TIMEOUT_MS ?? "15000").trim());
+      const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? Math.floor(timeoutMsRaw) : 15_000;
+      const t = setTimeout(() => controller.abort(), timeoutMs);
+      const res = await completionOnceViaProvider({
+        baseUrl: st.baseURL,
+        endpoint: st.endpoint || "/v1/chat/completions",
+        apiKey: st.apiKey,
+        model: st.model,
+        temperature: typeof st.temperature === "number" ? st.temperature : 0.2,
+        maxTokens: typeof st.maxTokens === "number" ? st.maxTokens : 600,
+        signal: controller.signal,
+        messages: [
+          {
+            role: "system",
+            content:
+              "你是写作 IDE 的 Intent Router（第一道门禁）。\n" +
+              "你只输出一个 JSON 对象（不要 Markdown，不要代码块，不要解释，不要 <tool_calls>）。\n" +
+              "字段：intentType/confidence/nextAction/todoPolicy/toolPolicy/reason。\n" +
+              "枚举：\n" +
+              '- intentType: "task_execution"|"discussion"|"debug"|"info"|"unclear"\n' +
+              '- nextAction: "respond_text"|"ask_clarify"|"enter_workflow"\n' +
+              '- todoPolicy: "skip"|"optional"|"required"\n' +
+              '- toolPolicy: "deny"|"allow_readonly"|"allow_tools"\n' +
+              "约束：confidence 为 0~1 之间的小数。\n",
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              mode,
+              userPrompt,
+              mainDocRunIntent: String((mainDocFromPack as any)?.runIntent ?? ""),
+              hasRunTodo: Array.isArray(runTodoFromPack) && runTodoFromPack.length > 0,
+              phase0: {
+                intentType: intentRoute.intentType,
+                confidence: intentRoute.confidence,
+                nextAction: intentRoute.nextAction,
+                todoPolicy: intentRoute.todoPolicy,
+                toolPolicy: intentRoute.toolPolicy,
+                reason: intentRoute.reason,
+              },
+            }),
+          },
+        ],
+      });
+      clearTimeout(t);
+
+      if (!res.ok) throw new Error(String(res.error ?? "ROUTER_UPSTREAM_ERROR"));
+      const jsonText = extractJsonObject(res.content);
+      if (!jsonText) throw new Error("ROUTER_INVALID_JSON");
+      const parsed = intentRouteSchema.safeParse(JSON.parse(jsonText));
+      if (!parsed.success) throw new Error("ROUTER_SCHEMA_INVALID");
+
+      const d0 = parsed.data as any;
+      intentRoute = {
+        intentType: d0.intentType,
+        confidence: clamp01(d0.confidence, 0.6),
+        nextAction: d0.nextAction,
+        todoPolicy: d0.todoPolicy,
+        toolPolicy: d0.toolPolicy,
+        reason: String(d0.reason ?? "").trim() || "llm_router",
+        derivedFrom: ["llm_router", `stage:${intentRouterStageKey}`],
+      };
+      intentRouterTrace.ok = true;
+    } catch (e: any) {
+      intentRouterTrace.ok = false;
+      intentRouterTrace.error = String(e?.message ?? e);
+      // fallback：保持 Phase0 的 intentRoute，但标记来源，便于观测
+      intentRoute = {
+        ...intentRoute,
+        derivedFrom: [...(intentRoute.derivedFrom ?? []), "router_fallback", `stage:${intentRouterStageKey}`],
+      };
+    }
+  }
 
   let stageAllowedIds: string[] | null = null;
   let stageDefaultId: string | null = null;
@@ -1026,7 +1176,13 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
   const temperature = stageTemp;
   const runId = randomUUID();
-  const baseAllowedToolNames = intentRoute.toolPolicy === "deny" ? new Set<string>() : toolNamesForMode(mode);
+  const allToolNamesForMode = toolNamesForMode(mode);
+  const baseAllowedToolNames =
+    intentRoute.toolPolicy === "deny"
+      ? new Set<string>()
+      : intentRoute.toolPolicy === "allow_readonly"
+        ? new Set(Array.from(allToolNamesForMode).filter((n) => !isWriteLikeTool(n)))
+        : allToolNamesForMode;
 
   const origin = String((request as any).headers?.origin ?? "").trim();
   if (origin) {
@@ -1235,7 +1391,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     policy: "IntentPolicy",
     decision: "route",
     reasonCodes: [`intent:${intentRoute.intentType}`, `todo:${intentRoute.todoPolicy}`, `tools:${intentRoute.toolPolicy}`],
-    detail: intentRoute,
+    detail: { ...intentRoute, trace: intentRouterTrace },
   });
 
   // 非任务型：强制提示模型“不要调用工具/不要 Todo”，减少 XML 协议误伤与无意义重试

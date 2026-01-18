@@ -181,6 +181,15 @@ export function getDefaultStageDefinitionsFromEnv(): AiStageDefinition[] {
       defaultEndpoint: "/v1/chat/completions",
     },
     {
+      key: "agent.router",
+      name: "Agent Router（意图门禁）",
+      description: "Intent Router（Phase 1：LLM Router stage）。只输出结构化路由决策 JSON；不调用工具；失败应回退到启发式路由。",
+      defaultModel: llmModel,
+      defaultTemperature: 0.2,
+      defaultMaxTokens: 600,
+      defaultEndpoint: "/v1/chat/completions",
+    },
+    {
       key: "agent.skill.style_imitate",
       name: "Skill：Style Imitate（风格仿写闭环）",
       description: "style_imitate skill 激活时使用（独立 stageKey：agent.skill.style_imitate）",
