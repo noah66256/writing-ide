@@ -660,7 +660,7 @@ export function AgentPane() {
     // 复用现有的“安全快照”（裁剪 steps/移除 apply/undo）
     setDraftSnapshot(buildSnapshot());
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [steps, mainDoc, todoList, ctxRefs, mode, model, kbAttachedLibraryIds, setDraftSnapshot]);
+  }, [steps, mainDoc, todoList, ctxRefs, mode, model, kbAttached, setDraftSnapshot]);
 
   // 启动自动恢复：若当前 run 为空，则加载 draftSnapshot
   const restoredDraftRef = useRef(false);
