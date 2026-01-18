@@ -1296,7 +1296,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     const routeId = (() => {
       const raw = typeof d0?.routeId === "string" ? String(d0.routeId).trim() : "";
       if (!raw) return null;
-      const key = raw.trim();
+      const key = raw.trim().toLowerCase();
       return ROUTE_REGISTRY_V1.some((r) => r.routeId === key) ? key : null;
     })();
     const route = routeId ? (ROUTE_REGISTRY_V1.find((r) => r.routeId === routeId) as any) : null;
