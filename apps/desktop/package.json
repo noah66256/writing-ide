@@ -12,7 +12,10 @@
     "preview": "vite preview",
     "dist:win": "npm run build && electron-builder --win nsis --x64",
     "dist:win:portable": "npm run build && electron-builder --win portable --x64",
-    "dist:win:all": "npm run build && electron-builder --win nsis portable --x64"
+    "dist:win:all": "npm run build && electron-builder --win nsis portable --x64",
+    "dist:mac": "npm run build && electron-builder --mac dmg zip --arm64",
+    "dist:mac:x64": "npm run build && electron-builder --mac dmg zip --x64",
+    "dist:mac:universal": "npm run build && electron-builder --mac dmg zip --universal"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
@@ -68,6 +71,12 @@
             "x64"
           ]
         }
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
       ]
     },
     "nsis": {

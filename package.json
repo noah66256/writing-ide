@@ -14,7 +14,10 @@
     "build:desktop": "npm run -w @writing-ide/desktop build",
     "dist:desktop:win": "npm run -w @writing-ide/desktop dist:win",
     "dist:desktop:win:portable": "npm run -w @writing-ide/desktop dist:win:portable",
-    "dist:desktop:win:all": "npm run -w @writing-ide/desktop dist:win:all"
+    "dist:desktop:win:all": "npm run -w @writing-ide/desktop dist:win:all",
+    "dist:desktop:mac": "npm run -w @writing-ide/desktop dist:mac",
+    "dist:desktop:mac:x64": "npm run -w @writing-ide/desktop dist:mac:x64",
+    "dist:desktop:mac:universal": "npm run -w @writing-ide/desktop dist:mac:universal"
   }
 }
 
