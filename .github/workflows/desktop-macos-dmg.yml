@@ -35,6 +35,25 @@ jobs:
       - name: Install
         run: npm ci
 
+      - name: Fix npm optional deps (rollup/esbuild native for macOS)
+        # 说明：
+        # - 我们的 package-lock 主要在 Windows 上生成，可能缺少 darwin 平台 optional deps 的 lock 记录
+        # - Rollup v4 / esbuild 依赖平台包（@rollup/rollup-darwin-arm64、@esbuild/darwin-arm64）
+        # - 在 macOS runner 上若缺失会直接导致 Vite build 崩溃
+        run: |
+          set -euo pipefail
+          node -e "const lock=require('./package-lock.json'); const v=lock?.packages?.['node_modules/rollup']?.version||''; console.log(v||'');" > /tmp/rollup_ver.txt
+          node -e "const lock=require('./package-lock.json'); const v=lock?.packages?.['node_modules/esbuild']?.version||''; console.log(v||'');" > /tmp/esbuild_ver.txt
+          ROLLUP_VER="$(cat /tmp/rollup_ver.txt | tr -d '\r' | head -n 1)"
+          ESBUILD_VER="$(cat /tmp/esbuild_ver.txt | tr -d '\r' | head -n 1)"
+          echo "rollup_ver=${ROLLUP_VER}"
+          echo "esbuild_ver=${ESBUILD_VER}"
+          # 只补当前 runner 平台需要的包（macos-14 为 arm64）
+          npm i --no-save --no-package-lock \
+            "@rollup/rollup-darwin-arm64@${ROLLUP_VER:-latest}" \
+            "@esbuild/darwin-arm64@${ESBUILD_VER:-latest}" \
+            --no-audit --no-fund
+
       - name: Clean output
         run: rm -rf apps/desktop/out
 
