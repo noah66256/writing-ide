@@ -101,6 +101,19 @@ npm run dist:desktop:mac:universal
 
 > 本项目暂未内置 notarize pipeline；需要时我们再补（会涉及 Apple Developer 账号、证书、CI secrets）。
 
+### 3.5 没有 Mac 环境也要“直接产 DMG”（推荐：GitHub Actions）
+
+仓库已提供工作流：`.github/workflows/desktop-macos-dmg.yml`
+
+- 打开 GitHub Actions → 选择 `Desktop macOS DMG`
+- 点击 `Run workflow`
+- 选择 arch：
+  - `arm64`（M 系列推荐）
+  - `universal`（更大，但双架构都能跑）
+- 等待完成后下载 artifact：`desktop-macos-<arch>`，里面有 `.dmg`
+
+> 注意：未签名的 DMG 在别的 Mac 上可能会被 Gatekeeper 拦截；可通过“右键打开”绕过一次，或移除隔离属性（仅测试用）。
+
 ---
 
 ## 4. 相关入口

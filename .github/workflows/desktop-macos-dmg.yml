@@ -1,0 +1,70 @@
+name: Desktop macOS DMG
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "Build arch"
+        required: true
+        default: "arm64"
+        type: choice
+        options:
+          - arm64
+          - x64
+          - universal
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # 说明：macOS 的 dmg 需要 hdiutil，建议在 macOS runner 上构建
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install
+        run: npm ci
+
+      - name: Clean output
+        run: rm -rf apps/desktop/out
+
+      - name: Build DMG
+        env:
+          # 没有签名证书时，明确关闭自动发现，避免构建期卡在 codesign/notarize 相关逻辑
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          set -euo pipefail
+          echo "arch=${{ inputs.arch }}"
+          if [ "${{ inputs.arch }}" = "arm64" ]; then
+            npm run dist:desktop:mac
+          elif [ "${{ inputs.arch }}" = "x64" ]; then
+            npm run dist:desktop:mac:x64
+          elif [ "${{ inputs.arch }}" = "universal" ]; then
+            npm run dist:desktop:mac:universal
+          else
+            echo "Unknown arch: ${{ inputs.arch }}"
+            exit 2
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-macos-${{ inputs.arch }}
+          path: |
+            apps/desktop/out/**/*.dmg
+            apps/desktop/out/**/*.zip
+            apps/desktop/out/**/builder-debug.yml
+            apps/desktop/out/**/latest*.yml
+          if-no-files-found: error
+
+
