@@ -2483,7 +2483,51 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       // - 为了保证“先检索样例→再生成→再对齐”的可控闭环，避免同一轮把 kb.search / lint.style / 写入类工具混在一起
       //   （否则模型拿不到 tool_result，就无法真正用上检索/对齐结果）。
       if (mode !== "chat" && effectiveGates.styleGateEnabled) {
-        const batch = analyzeStyleWorkflowBatch({ mode, intent, gates: effectiveGates as any, state: runState, lintMaxRework, toolCalls });
+        let batch = analyzeStyleWorkflowBatch({ mode, intent, gates: effectiveGates as any, state: runState, lintMaxRework, toolCalls });
+
+        // 容错：部分模型会把 kb.search 的 libraryIds/kind 填错（例如把文件名塞进 libraryIds，或 kind 写成非约定值），
+        // 结果被判为 “KB_NOT_STYLE_EXAMPLES” 并反复重试，导致 todo/kb/write 全卡死。
+        // 当且仅当本轮触发该违规时：自动把 kb.search 纠偏为“只搜已绑定的风格库 + 合法 kind”，从而继续推进闭环。
+        if (batch.shouldEnforce && batch.violation === "KB_NOT_STYLE_EXAMPLES" && toolCapsPhase === "style_need_kb") {
+          const before = toolCalls.slice();
+          const styleLibIdsJson = styleLibIds.length ? JSON.stringify(styleLibIds) : "[]";
+          const normalizeKbCall = (c: any) => {
+            if (!c || String(c?.name ?? "") !== "kb.search") return c;
+            const args = { ...(c.args ?? {}) } as Record<string, string>;
+            const kind0 = String(args.kind ?? "card").trim().toLowerCase();
+            const kind = kind0 === "card" || kind0 === "paragraph" || kind0 === "outline" ? kind0 : "card";
+            args.kind = kind;
+
+            // 强制限制到“已绑定风格库”，避免模型把 @{} 文件名/幻觉 id 塞进 libraryIds 导致误判与污染。
+            if (styleLibIds.length) args.libraryIds = styleLibIdsJson;
+
+            // 同时绑定了非风格库时：补默认 cardTypes，避免素材库污染（对齐 tool docs + system prompt 建议）
+            if (kind === "card" && effectiveGates.hasNonStyleLibraries) {
+              const ctRaw = String((args as any).cardTypes ?? "").trim();
+              const looksEmpty = !ctRaw || ctRaw === "[]" || ctRaw.toLowerCase() === "null" || ctRaw.toLowerCase() === "undefined";
+              if (looksEmpty) (args as any).cardTypes = JSON.stringify(["hook", "one_liner", "ending", "outline", "thesis"]);
+            }
+
+            return { ...c, args };
+          };
+          const after = before.map(normalizeKbCall);
+          toolCalls.splice(0, toolCalls.length, ...after);
+          const batch2 = analyzeStyleWorkflowBatch({ mode, intent, gates: effectiveGates as any, state: runState, lintMaxRework, toolCalls });
+          if (!batch2.violation) {
+            batch = batch2;
+            writePolicyDecision({
+              turn,
+              policy: "StyleGatePolicy",
+              decision: "coerce_kb_search",
+              reasonCodes: ["coerce_kb_search_style_examples"],
+              detail: { phase: toolCapsPhase, styleLibIds: styleLibIds.slice(0, 4) },
+            });
+          } else {
+            // 纠偏失败：回退保持原始 toolCalls，继续走原有拦截逻辑
+            toolCalls.splice(0, toolCalls.length, ...before);
+          }
+        }
+
         if (batch.shouldEnforce && batch.violation) {
           const violation = batch.violation;
           if (runState.workflowRetryBudget > 0) {
