@@ -29,6 +29,7 @@ export {
   looksLikeHasCTA,
   styleNeedsCta,
   isWriteLikeTool,
+  isContentWriteTool,
   isStyleExampleKbSearch,
   parseStyleLintResult,
   analyzeAutoRetryText,

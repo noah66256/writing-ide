@@ -158,9 +158,68 @@ export const TOOL_LIST: ToolMeta[] = [
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
+    name: "project.search",
+    description:
+      "在当前项目中搜索文本（跨文件）。\n" +
+      "- 这是 IDE 级“Find in Files”的基础能力。\n" +
+      "- 默认只搜索项目内可见的文本文件（如 .md/.mdx/.txt）。\n" +
+      "- 若要限定范围，请先用 project.listFiles 观察路径，再用 paths 传入文件/目录前缀过滤。",
+    args: [
+      { name: "query", required: true, desc: "搜索关键字（或正则表达式文本）", type: "string" },
+      { name: "useRegex", required: false, desc: "可选：是否按正则搜索（默认 false）", type: "boolean" },
+      { name: "caseSensitive", required: false, desc: "可选：是否大小写敏感（默认 false）", type: "boolean" },
+      { name: "paths", required: false, desc: "可选：限制搜索范围（JSON 数组：文件路径或目录前缀）", type: "json", jsonType: "array" },
+      { name: "maxResults", required: false, desc: "可选：最多返回多少条命中（默认 80，最大 500）", type: "number" },
+      { name: "maxPerFile", required: false, desc: "可选：每个文件最多返回多少条命中（默认 20，最大 200）", type: "number" },
+    ],
+    modes: ["plan", "agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        useRegex: { type: "boolean" },
+        caseSensitive: { type: "boolean" },
+        paths: { type: "json", jsonType: "array" },
+        maxResults: { type: "number" },
+        maxPerFile: { type: "number" },
+      },
+      required: ["query"],
+      additionalProperties: true,
+    },
+  },
+  {
     name: "doc.read",
     description: "读取文件内容（path）。",
     args: [{ name: "path", required: true, desc: "文件路径（如 drafts/draft.md）", type: "string" }],
+    modes: ["plan", "agent"],
+    inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: true },
+  },
+  {
+    name: "doc.mkdir",
+    description: "创建目录（path）。用于新建文件夹/目录结构。",
+    args: [{ name: "path", required: true, desc: "目录路径（如 drafts/ 或 assets/images/）", type: "string" }],
+    modes: ["plan", "agent"],
+    inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: true },
+  },
+  {
+    name: "doc.renamePath",
+    description: "重命名/移动 文件或目录（fromPath → toPath）。高风险操作，默认 proposal-first（Keep 才真正执行）。",
+    args: [
+      { name: "fromPath", required: true, desc: "源路径（文件或目录）", type: "string" },
+      { name: "toPath", required: true, desc: "目标路径（文件或目录）", type: "string" },
+    ],
+    modes: ["plan", "agent"],
+    inputSchema: {
+      type: "object",
+      properties: { fromPath: { type: "string" }, toPath: { type: "string" } },
+      required: ["fromPath", "toPath"],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: "doc.deletePath",
+    description: "删除文件或目录（path）。真删磁盘内容；高风险操作，默认 proposal-first（Keep 才真正执行；Undo 可回滚）。",
+    args: [{ name: "path", required: true, desc: "文件或目录路径", type: "string" }],
     modes: ["plan", "agent"],
     inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: true },
   },

@@ -5,6 +5,7 @@
 - [Agent 流程系统性审计与改造路线图（路线2）](agent-flow-audit-roadmap.md)
 - [Intent Routing（第一道门禁）](intent-routing.md)
 - [Vibe Coding Playbook（面向“非专业但有逻辑”的开发者）](vibe-coding-playbook.md)
+- [IDE 工具与全项目搜索（研究）](docs/research/ide-tools-search-and-file-ops-v1.md)
 - [KB Manager V2（更像原文）方案草案](kb-manager-v2-spec.md)
 - [Style Selector v1（自动选簇/选21卡，按话题适配，模型解耦）](style-selector-v1.md)
 - [writing-agent.md（写作 Agent 约定/协议）](writing-agent.md)

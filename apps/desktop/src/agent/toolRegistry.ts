@@ -800,6 +800,158 @@ const tools: ToolDefinition[] = [
     },
   },
   {
+    name: "project.search",
+    description:
+      "在当前项目中搜索文本（跨文件）。默认扫描项目内可见的文本文件（如 .md/.mdx/.txt）。可用 paths 限定范围。",
+    args: [
+      { name: "query", required: true, desc: "搜索关键字（或正则表达式文本）" },
+      { name: "useRegex", required: false, desc: "可选：是否按正则搜索（默认 false）" },
+      { name: "caseSensitive", required: false, desc: "可选：是否大小写敏感（默认 false）" },
+      { name: "paths", required: false, desc: "可选：限制搜索范围（JSON 数组：文件路径或目录前缀）" },
+      { name: "maxResults", required: false, desc: "可选：最多返回多少条命中（默认 80，最大 500）" },
+      { name: "maxPerFile", required: false, desc: "可选：每个文件最多返回多少条命中（默认 20，最大 200）" },
+    ],
+    riskLevel: "low",
+    applyPolicy: "proposal",
+    reversible: false,
+    run: async (args) => {
+      const query = String(args.query ?? "").trim();
+      if (!query) return { ok: false, error: "EMPTY_QUERY" };
+
+      const useRegex = Boolean(args.useRegex);
+      const caseSensitive = Boolean(args.caseSensitive);
+      const maxResults = typeof args.maxResults === "number" ? Math.max(1, Math.min(500, Math.floor(args.maxResults))) : 80;
+      const maxPerFile = typeof args.maxPerFile === "number" ? Math.max(1, Math.min(200, Math.floor(args.maxPerFile))) : 20;
+
+      const normalizeP = (p: string) =>
+        String(p ?? "")
+          .trim()
+          .replaceAll("\\", "/")
+          .replace(/^\.\//, "")
+          .replace(/\/+/g, "/");
+
+      const scopeRaw = Array.isArray(args.paths) ? (args.paths as any[]).map((x) => normalizeP(String(x ?? ""))).filter(Boolean) : [];
+      const scope = scopeRaw.slice(0, 50);
+
+      const inScope = (filePath: string) => {
+        if (!scope.length) return true;
+        const fp = normalizeP(filePath);
+        for (const raw of scope) {
+          const s = normalizeP(raw);
+          if (!s) continue;
+          const s0 = s.replace(/\/+$/g, "");
+          if (fp === s0) return true; // exact
+          if (fp.startsWith(s0 + "/")) return true; // treat as dir prefix
+        }
+        return false;
+      };
+
+      let re: RegExp | null = null;
+      if (useRegex) {
+        try {
+          re = new RegExp(query, caseSensitive ? "g" : "gi");
+        } catch (e: any) {
+          return { ok: false, error: `INVALID_REGEX:${String(e?.message ?? e)}` };
+        }
+      }
+
+      const proj = useProjectStore.getState();
+      const files = proj.files.filter((f) => inScope(f.path));
+
+      const hits: Array<{ path: string; line: number; col: number; match: string; preview: string }> = [];
+      const filesWithHits = new Set<string>();
+      let truncated = false;
+
+      for (const f of files) {
+        if (hits.length >= maxResults) {
+          truncated = true;
+          break;
+        }
+        const content = await proj.ensureLoaded(f.path).catch(() => f.content ?? "");
+        const lines = String(content ?? "").replaceAll("\r\n", "\n").replaceAll("\r", "\n").split("\n");
+        let perFile = 0;
+
+        for (let i = 0; i < lines.length; i += 1) {
+          if (hits.length >= maxResults) {
+            truncated = true;
+            break;
+          }
+          if (perFile >= maxPerFile) break;
+
+          const lineText = lines[i] ?? "";
+          if (!lineText) continue;
+
+          if (!useRegex) {
+            const hay = caseSensitive ? lineText : lineText.toLowerCase();
+            const needle = caseSensitive ? query : query.toLowerCase();
+            let idx = hay.indexOf(needle);
+            while (idx >= 0) {
+              filesWithHits.add(f.path);
+              hits.push({
+                path: f.path,
+                line: i + 1,
+                col: idx + 1,
+                match: lineText.slice(idx, idx + needle.length),
+                preview: lineText.length > 260 ? lineText.slice(0, 260) + "…" : lineText,
+              });
+              perFile += 1;
+              if (hits.length >= maxResults) {
+                truncated = true;
+                break;
+              }
+              if (perFile >= maxPerFile) break;
+              idx = hay.indexOf(needle, idx + Math.max(1, needle.length));
+            }
+          } else if (re) {
+            // 每行重置 regex 状态，避免跨行污染 lastIndex
+            re.lastIndex = 0;
+            let m: RegExpExecArray | null = null;
+            while ((m = re.exec(lineText)) !== null) {
+              const start = typeof m.index === "number" ? m.index : 0;
+              const matched = String(m[0] ?? "");
+              if (!matched) {
+                // 防止 zero-length match 死循环
+                re.lastIndex = start + 1;
+                continue;
+              }
+              filesWithHits.add(f.path);
+              hits.push({
+                path: f.path,
+                line: i + 1,
+                col: start + 1,
+                match: matched,
+                preview: lineText.length > 260 ? lineText.slice(0, 260) + "…" : lineText,
+              });
+              perFile += 1;
+              if (hits.length >= maxResults) {
+                truncated = true;
+                break;
+              }
+              if (perFile >= maxPerFile) break;
+              // continue loop; global regex will advance lastIndex
+            }
+          }
+        }
+      }
+
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          query,
+          useRegex,
+          caseSensitive,
+          scope,
+          hitsCount: hits.length,
+          filesCount: filesWithHits.size,
+          truncated,
+          hits,
+        },
+        undoable: false,
+      };
+    },
+  },
+  {
     name: "project.docRules.get",
     description: "读取项目级 Doc Rules（doc.rules.md）。写作风格/禁用项等约束在这里。",
     args: [],
@@ -972,6 +1124,141 @@ const tools: ToolDefinition[] = [
           virtualFromProposal: Boolean(virt),
           proposalSources: virt?.sources ?? [],
         },
+        undoable: false,
+      };
+    },
+  },
+  {
+    name: "doc.mkdir",
+    description: "创建目录（path）。用于新建文件夹/目录结构。",
+    args: [{ name: "path", required: true, desc: "目录路径（如 drafts/ 或 assets/images/）" }],
+    riskLevel: "low",
+    applyPolicy: "auto_apply",
+    reversible: true,
+    run: async (args) => {
+      const dir = normalizeRelPath(String(args.path ?? ""));
+      if (!dir) return { ok: false, error: "MISSING_PATH" };
+      const s = useProjectStore.getState();
+      await s.mkdir(dir);
+      const undo = () => void useProjectStore.getState().deletePath(dir);
+      return { ok: true, output: { ok: true, path: dir }, undoable: true, undo };
+    },
+  },
+  {
+    name: "doc.renamePath",
+    description: "重命名/移动 文件或目录（fromPath → toPath）。默认 proposal-first（Keep 才真正执行；Undo 可回滚）。",
+    args: [
+      { name: "fromPath", required: true, desc: "源路径（文件或目录）" },
+      { name: "toPath", required: true, desc: "目标路径（文件或目录）" },
+    ],
+    riskLevel: "medium",
+    applyPolicy: "proposal",
+    reversible: true,
+    run: async (args) => {
+      const fromPath = normalizeRelPath(String((args as any).fromPath ?? ""));
+      const toPath = normalizeRelPath(String((args as any).toPath ?? ""));
+      if (!fromPath) return { ok: false, error: "MISSING_FROM_PATH" };
+      if (!toPath) return { ok: false, error: "MISSING_TO_PATH" };
+
+      const proj = useProjectStore.getState();
+      const isFile = !!proj.files.find((f) => f.path === fromPath);
+      const isDir = proj.dirs.includes(fromPath);
+      if (!isFile && !isDir) return { ok: false, error: "PATH_NOT_FOUND" };
+
+      const previewMappings = (() => {
+        if (isFile) return [{ from: fromPath, to: toPath }];
+        const prefix = `${fromPath}/`;
+        const out = proj.files
+          .filter((f) => f.path === fromPath || f.path.startsWith(prefix))
+          .map((f) => ({ from: f.path, to: toPath + f.path.slice(fromPath.length) }));
+        return out.slice(0, 50);
+      })();
+      const filesCount = (() => {
+        if (isFile) return 1;
+        const prefix = `${fromPath}/`;
+        return proj.files.filter((f) => f.path === fromPath || f.path.startsWith(prefix)).length;
+      })();
+
+      const apply = () => {
+        const snap = useProjectStore.getState().snapshot();
+        void useProjectStore.getState().renamePath(fromPath, toPath);
+        return { undo: () => useProjectStore.getState().restore(snap) };
+      };
+
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          fromPath,
+          toPath,
+          kind: isFile ? "file" : "dir",
+          filesCount,
+          previewMappings,
+          note: "这是重命名/移动提案：点击 Keep 才会真正执行；Undo 可回滚。",
+        },
+        riskLevel: "medium",
+        applyPolicy: "proposal",
+        apply,
+        undoable: false,
+      };
+    },
+  },
+  {
+    name: "doc.deletePath",
+    description: "删除文件或目录（path）。真删磁盘内容；默认 proposal-first（Keep 才真正执行；Undo 可回滚）。",
+    args: [{ name: "path", required: true, desc: "文件或目录路径" }],
+    riskLevel: "high",
+    applyPolicy: "proposal",
+    reversible: true,
+    run: async (args) => {
+      const path0 = normalizeRelPath(String(args.path ?? ""));
+      if (!path0) return { ok: false, error: "MISSING_PATH" };
+      const proj = useProjectStore.getState();
+      const isFile = !!proj.files.find((f) => f.path === path0);
+      const isDir = proj.dirs.includes(path0);
+      if (!isFile && !isDir) return { ok: false, error: "PATH_NOT_FOUND" };
+
+      const affectedFiles = (() => {
+        if (isFile) return [path0];
+        const prefix = `${path0}/`;
+        return proj.files.filter((f) => f.path === path0 || f.path.startsWith(prefix)).map((f) => f.path);
+      })();
+      const filesCount = affectedFiles.length;
+      const previewFiles = affectedFiles.slice(0, 30);
+
+      const preview = (() => {
+        if (!isFile) return null;
+        // 删除文件：用 diff 表达“内容 -> 空”
+        return (async () => {
+          const f = proj.getFileByPath(path0);
+          const before = f ? await proj.ensureLoaded(f.path).catch(() => f.content ?? "") : "";
+          const d = unifiedDiff({ path: path0, before, after: "" });
+          return { diffUnified: d.diff, truncated: d.truncated, stats: d.stats ?? null };
+        })();
+      })();
+
+      const previewResolved = preview ? await preview.catch(() => null) : null;
+
+      const apply = () => {
+        const snap = useProjectStore.getState().snapshot();
+        void useProjectStore.getState().deletePath(path0);
+        return { undo: () => useProjectStore.getState().restore(snap) };
+      };
+
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          path: path0,
+          kind: isFile ? "file" : "dir",
+          filesCount,
+          previewFiles,
+          ...(previewResolved ? { preview: previewResolved } : {}),
+          note: "这是删除提案：点击 Keep 才会真正删除；Undo 可回滚。",
+        },
+        riskLevel: "high",
+        applyPolicy: "proposal",
+        apply,
         undoable: false,
       };
     },

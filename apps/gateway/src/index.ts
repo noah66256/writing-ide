@@ -38,6 +38,7 @@ import {
   isProposalWaitingMeta,
   isStyleExampleKbSearch,
   isWriteLikeTool,
+  isContentWriteTool,
   looksLikeDraftText,
   looksLikeHasCTA,
   pickSkillStageKeyForAgentRun,
@@ -854,6 +855,15 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       examples: ["你能看到我当前文件吗", "我选中了这段你能看到吗", "你现在能看到什么"],
     },
     {
+      routeId: "analysis_readonly",
+      intentType: "discussion" as const,
+      todoPolicy: "skip" as const,
+      toolPolicy: "allow_readonly" as const,
+      nextAction: "respond_text" as const,
+      desc: "分析/解释类：允许只读工具（doc.read/project.search 等），不强制 Todo，不做写入类操作",
+      examples: ["意图选了分析：解释一下原因", "分析下日志为什么这样", "先分析再给建议"],
+    },
+    {
       routeId: "discussion",
       intentType: "discussion" as const,
       todoPolicy: "skip" as const,
@@ -870,6 +880,24 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       nextAction: "respond_text" as const,
       desc: "排查/故障/错误分析类（默认不进入闭环），不调用工具",
       examples: ["为什么报错", "这个错误怎么解决", "日志里这个是什么意思"],
+    },
+    {
+      routeId: "project_search",
+      intentType: "task_execution" as const,
+      todoPolicy: "optional" as const,
+      toolPolicy: "allow_readonly" as const,
+      nextAction: "enter_workflow" as const,
+      desc: "项目内搜索/查找（只读工具闭环，不要求 Todo）",
+      examples: ["全项目搜索 tool_xml_mixed_with_text", "在项目里查一下哪里用到了 xxx", "Find in files: project.search"],
+    },
+    {
+      routeId: "file_ops",
+      intentType: "task_execution" as const,
+      todoPolicy: "required" as const,
+      toolPolicy: "allow_tools" as const,
+      nextAction: "enter_workflow" as const,
+      desc: "文件/目录操作闭环（新建/移动/重命名/删除等，高风险默认 proposal-first）",
+      examples: ["删那 4 篇旧稿", "把 @{drafts/old.md} 删除", "把 docs/ 重命名为 notes/"],
     },
     {
       routeId: "task_execution",
@@ -915,7 +943,39 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     const t = String(text ?? "").trim();
     if (!t) return false;
     if (/(只讨论|先讨论|先聊|只聊|别执行|不要执行|别动手|先别做|不需要你做|不用动手)/.test(t)) return false;
-    return /(执行|动手|写入|落盘|应用|改(一下)?|修改|修复|实现|打包|部署|提交|生成\s*todo|todo\b)/i.test(t);
+    return /(执行|动手|写入|落盘|应用|改(一下)?|修改|修复|实现|打包|部署|提交|生成\s*todo|todo\b|删除|删掉|删|移除|重命名|改名|移动|迁移|新建(文件夹|目录)|创建(文件夹|目录)|mkdir|rename|move|delete|rm\b|del\b)/i.test(
+      t,
+    );
+  }
+
+  function looksLikeProjectSearchIntent(text: string): boolean {
+    const t = String(text ?? "").trim();
+    if (!t) return false;
+    // “全网/上网搜”不是项目内搜索（若未来提供 web.search，再走网络路由）
+    if (/(全网|上网|网页|百度|谷歌|google|bing|github|stack\s*overflow)/i.test(t)) return false;
+    const hit = /(全局搜索|全项目搜索|项目内搜索|在项目里搜|搜一下|查找|搜索|find in files|ctrl\+shift\+f|ripgrep|\brg\b|\bgrep\b)/i.test(t);
+    if (!hit) return false;
+    // 避免把“搜索/查找原因”这种讨论误判为 project.search
+    const looksDiscussion = /(原因|为什么|怎么会|解释|讨论)/.test(t) && !/文件|目录|项目|代码|路径|\.md|\.ts|\.tsx|\.js|\.json/i.test(t);
+    if (looksDiscussion) return false;
+    return true;
+  }
+
+  function looksLikeFileOpsIntent(text: string): boolean {
+    const t = String(text ?? "").trim();
+    if (!t) return false;
+    // “删减/精简”通常是改文案，不是删文件
+    if (/(删减|精简|压缩|删到\d{2,6}字|删成\d{2,6}字)/.test(t)) return false;
+    const hasVerb = /(删除|删掉|删|移除|清理|清空|重命名|改名|移动|迁移|挪到|放到|新建(文件夹|目录)|创建(文件夹|目录)|mkdir|rename|move|delete|rm\b|del\b)/i.test(
+      t,
+    );
+    if (!hasVerb) return false;
+    const hasTargetHint =
+      /@\{[^}]+\}/.test(t) ||
+      /(文件|目录|文件夹|路径|path|旧稿|草稿|文稿|稿子|文档)/.test(t) ||
+      /\.(md|mdx|txt|ts|tsx|js|json)\b/i.test(t) ||
+      /[\\/]/.test(t);
+    return hasTargetHint;
   }
 
   function parseEditorSelectionFromContextPack(ctx?: string): any | null {
@@ -1089,16 +1149,28 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
     const mainDocIntentRaw = String(args.mainDocRunIntent ?? "").trim().toLowerCase();
     const mainDocIntent = mainDocIntentRaw === "auto" ? "" : mainDocIntentRaw;
-    if (mainDocIntent === "analysis" || mainDocIntent === "ops") {
+    if (mainDocIntent === "analysis") {
       return {
-        intentType: "debug",
+        intentType: "discussion",
         confidence: 0.9,
         nextAction: "respond_text",
         todoPolicy: "skip",
-        toolPolicy: "deny",
-        reason: `mainDoc.runIntent=${mainDocIntent}：默认不进入任务闭环`,
-        derivedFrom: [`mainDocIntent:${mainDocIntent}`, ...derivedFrom],
-        routeId: "debug",
+        toolPolicy: "allow_readonly",
+        reason: "mainDoc.runIntent=analysis：默认分析/讨论；允许只读工具，不允许写入/删除/重命名等",
+        derivedFrom: ["mainDocIntent:analysis", ...derivedFrom],
+        routeId: "analysis_readonly",
+      };
+    }
+    if (mainDocIntent === "ops") {
+      return {
+        intentType: "task_execution",
+        confidence: 0.9,
+        nextAction: "enter_workflow",
+        todoPolicy: "required",
+        toolPolicy: "allow_tools",
+        reason: "mainDoc.runIntent=ops：进入操作闭环（允许工具；避免误触写作强闭环）",
+        derivedFrom: ["mainDocIntent:ops", ...derivedFrom],
+        routeId: "file_ops",
       };
     }
     if (mainDocIntent === "writing" || mainDocIntent === "rewrite" || mainDocIntent === "polish") {
@@ -1111,6 +1183,34 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         reason: `mainDoc.runIntent=${mainDocIntent}：进入任务闭环`,
         derivedFrom: [`mainDocIntent:${mainDocIntent}`, ...derivedFrom],
         routeId: "task_execution",
+      };
+    }
+
+    // 项目内搜索/查找：只读工具闭环（不要求 Todo）
+    if (looksLikeProjectSearchIntent(pTrim)) {
+      return {
+        intentType: "task_execution",
+        confidence: 0.86,
+        nextAction: "enter_workflow",
+        todoPolicy: "optional",
+        toolPolicy: "allow_readonly",
+        reason: "用户在做项目内搜索/查找：允许只读工具（project.search/doc.read）",
+        derivedFrom: ["regex:project_search", ...derivedFrom],
+        routeId: "project_search",
+      };
+    }
+
+    // 文件/目录操作：删除/移动/重命名/新建目录等
+    if (looksLikeFileOpsIntent(pTrim)) {
+      return {
+        intentType: "task_execution",
+        confidence: 0.88,
+        nextAction: "enter_workflow",
+        todoPolicy: "required",
+        toolPolicy: "allow_tools",
+        reason: "用户在执行文件/目录操作（删除/移动/重命名/新建目录）：需要工具闭环",
+        derivedFrom: ["regex:file_ops", ...derivedFrom],
+        routeId: "file_ops",
       };
     }
 
@@ -1956,22 +2056,24 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         // 禁止 lint.style & 写入类 doc.*，避免 “LINT_BEFORE_KB / WRITE_BEFORE_KB”
         allowed.delete("lint.style");
         for (const name of Array.from(allowed)) {
-          if (isWriteLikeTool(name)) allowed.delete(name);
+          if (isContentWriteTool(name)) allowed.delete(name);
         }
         hint =
           "【Skill: style_imitate】当前阶段：need_kb_examples。\n" +
-          "- 本回合禁止调用 lint.style 与任何写入类 doc.*（doc.write/doc.applyEdits/doc.replaceSelection/doc.splitToDir/...）。\n" +
+          "- 本回合禁止调用 lint.style 与任何“正文写入类” doc.*（doc.write/doc.applyEdits/doc.replaceSelection/doc.restoreSnapshot/doc.splitToDir/...）。\n" +
+          "- 允许文件/目录操作（doc.deletePath/doc.renamePath/doc.mkdir），但高风险操作仍应走 proposal-first。\n" +
           "- 请先调用 kb.search（只搜风格库）拉样例；或仅更新 todo/mainDoc。";
         reasonCodes.push("phase:style_need_kb");
       } else if (effectiveGates.lintGateEnabled && !runState.styleLintPassed && runState.styleLintFailCount <= lintMaxRework) {
         phase = "style_need_lint";
         // 禁止写入类 doc.*，避免 “WRITE_BEFORE_LINT_PASS”
         for (const name of Array.from(allowed)) {
-          if (isWriteLikeTool(name)) allowed.delete(name);
+          if (isContentWriteTool(name)) allowed.delete(name);
         }
         hint =
           "【Skill: style_imitate】当前阶段：need_lint。\n" +
-          "- 本回合禁止调用任何写入类 doc.*（doc.write/doc.applyEdits/doc.replaceSelection/doc.splitToDir/...）。\n" +
+          "- 本回合禁止调用任何“正文写入类” doc.*（doc.write/doc.applyEdits/doc.replaceSelection/doc.restoreSnapshot/doc.splitToDir/...）。\n" +
+          "- 允许文件/目录操作（doc.deletePath/doc.renamePath/doc.mkdir），但高风险操作仍应走 proposal-first。\n" +
           "- 你可以输出候选稿（纯文本），然后调用 lint.style(text=候选稿) 做终稿闸门。";
         reasonCodes.push("phase:style_need_lint");
       } else {

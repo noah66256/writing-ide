@@ -141,7 +141,7 @@ export function detectRunIntent(args: {
   const wantsWrite =
     mode !== "chat" &&
     (/@\{[^}]+\/\}/.test(userPrompt) || // 目录引用（@{dir/}）通常意味着要写入/落盘到该目录
-      /(分割|拆分|切分|写入|保存|生成|放到|移动到|导出|新建|删除|重命名)/.test(userPrompt) ||
+      /(分割|拆分|切分|写入|保存|生成|放到|移动到|导出|新建|删除|删|重命名)/.test(userPrompt) ||
       /(写|仿写|改写|润色|续写|扩写)\s*@\{[^}]+\}/.test(userPrompt)); // 写@{file}：目标文件写作/改写
   const wantsOkOnly =
     mode !== "chat" &&
@@ -166,6 +166,23 @@ export function detectRunIntent(args: {
         ? false
         : isWritingTask;
 
+  // 文件/目录操作：不应被“写作闭环 sticky”误判为写作任务。
+  // 典型误伤：绑定风格库 + 旧 todo（写作）+ 用户短句“删那 4 篇旧稿” -> 不应触发 style gate 禁用 doc.deletePath。
+  const looksLikeFileOpsTask = (() => {
+    const t = String(userPrompt ?? "");
+    if (!t.trim()) return false;
+    // “删减/精简”通常指改文案字数，不是文件系统操作
+    if (/(删减|精简|压缩|删到\d{2,6}字|删成\d{2,6}字)/.test(t)) return false;
+    const hasVerb = /(删除|删掉|删|移除|清理|清空|重命名|改名|移动|迁移|挪到|放到|mkdir|rename|move|rm\b|del\b|delete\b)/i.test(t);
+    if (!hasVerb) return false;
+    const hasTargetHint =
+      /@\{[^}]+\}/.test(t) ||
+      /(文件|目录|文件夹|路径|path|旧稿|草稿|文稿|稿子|文档)/.test(t) ||
+      /\.(md|mdx|txt)\b/i.test(t) ||
+      /[\\/]/.test(t);
+    return hasTargetHint;
+  })();
+
   // 关键增强：当用户在回答“澄清问题/等待确认”的续跑对话时，userPrompt 往往非常短（例如“继续/视频脚本/按这个来”），
   // 仅靠正则会误判为非写作任务，导致 style_imitate/写作闭环不激活。
   // 这里在 mainDocIntent=auto 且当前未判为写作任务时，参考 RUN_TODO 来判断是否应继承“写作闭环”意图。
@@ -185,7 +202,7 @@ export function detectRunIntent(args: {
     const looksNonWriting =
       /(分析|排查|报错|bug|为什么|怎么修|白屏|崩溃|日志|报错栈)/.test(userPrompt) &&
       !/(写|仿写|改写|润色|脚本|文案|终稿|写入)/.test(userPrompt);
-    if (!looksNonWriting && todoLooksWriting && (hasWaiting || shortOrContinue)) {
+    if (!looksNonWriting && !looksLikeFileOpsTask && todoLooksWriting && (hasWaiting || shortOrContinue)) {
       isWritingTaskFinal = true;
     }
   }
@@ -282,6 +299,18 @@ export function isWriteLikeTool(name: string) {
     name === "doc.mkdir" ||
     name === "doc.renamePath" ||
     name === "doc.deletePath" ||
+    name === "doc.restoreSnapshot" ||
+    name === "doc.splitToDir"
+  );
+}
+
+// “正文写入”类工具：用于风格闭环门禁（StyleGate）。
+// 说明：doc.deletePath/doc.renamePath/doc.mkdir 也会改动项目，但它们不是“写正文”，不应被 style gate 当成 WRITE_BEFORE_KB/LINT。
+export function isContentWriteTool(name: string) {
+  return (
+    name === "doc.write" ||
+    name === "doc.applyEdits" ||
+    name === "doc.replaceSelection" ||
     name === "doc.restoreSnapshot" ||
     name === "doc.splitToDir"
   );
@@ -432,7 +461,7 @@ export function analyzeStyleWorkflowBatch(args: {
   toolCalls: ParsedToolCall[];
 }) : StyleWorkflowBatchAnalysis {
   const toolCalls = Array.isArray(args.toolCalls) ? args.toolCalls : [];
-  const batchHasWrite = toolCalls.some((c: any) => isWriteLikeTool(String(c?.name ?? "")));
+  const batchHasWrite = toolCalls.some((c: any) => isContentWriteTool(String(c?.name ?? "")));
   const batchHasKb = toolCalls.some((c: any) => String(c?.name ?? "") === "kb.search");
   const batchHasLint = toolCalls.some((c: any) => String(c?.name ?? "") === "lint.style");
   const batchHasStyleKb = toolCalls.some((c: any) =>

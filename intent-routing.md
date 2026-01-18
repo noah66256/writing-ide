@@ -128,11 +128,21 @@ if wantsOkOnly:
 if looks_like_visibility_question:
   -> info (confidence=0.85, respond_text, todo=skip, tools=deny)
 
-if mainDoc.runIntent in [analysis, ops]:
-  -> discussion/debug (confidence=0.9)
+if mainDoc.runIntent == analysis:
+  -> discussion (confidence=0.9, respond_text, todo=skip, tools=allow_readonly)
+
+if mainDoc.runIntent == ops:
+  -> task_execution (confidence=0.9, enter_workflow, todo=required, tools=allow_tools)  // 典型：文件/目录操作
 
 if mainDoc.runIntent in [writing, rewrite, polish]:
   -> task_execution (confidence=0.9)
+
+// 典型“IDE 操作类”任务（不写作也要用工具）
+if looks_like_project_search:
+  -> task_execution (confidence≈0.85, enter_workflow, todo=optional, tools=allow_readonly)
+
+if looks_like_file_ops: // delete/rename/move/mkdir...
+  -> task_execution (confidence≈0.88, enter_workflow, todo=required, tools=allow_tools)
 
 if short_message AND RUN_TODO exists:
   -> task_execution (confidence=0.75~0.85)  // 弱 sticky：延续任务流
