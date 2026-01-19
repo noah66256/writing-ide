@@ -56,6 +56,21 @@ npm run dev:gateway
 ### 生产部署（注意 nvm）
 服务器若使用 nvm（例如宝塔的 `/www/server/nvm`），**非交互 ssh 默认不会加载 `.bashrc`**，会导致 `node/npm/pm2` 找不到。
 
+#### 代理（本机 http_proxy/https_proxy）常见坑
+
+如果你的本机环境设置了 `http_proxy/https_proxy`（例如本地代理 `127.0.0.1:7890`），部署时**不要用本机 curl 去健康检查**（很容易因为代理开关/策略导致超时，从而误判“服务器挂了”）。
+
+- 推荐：通过 SSH 在服务器本机做健康检查（`curl http://127.0.0.1:8000/api/health`）
+- 如必须在本机访问服务器：用 `curl --noproxy '*' http://<server-ip>:8000/api/health` 或把服务器 IP 加入 `no_proxy`
+
+#### 推荐：一键部署脚本（不易被代理卡住）
+
+项目根目录：
+
+```bash
+bash scripts/deploy-gateway.sh
+```
+
 推荐命令形态（示例）：
 
 ```bash
