@@ -488,6 +488,7 @@ sudo spctl --master-enable
 #### 根因（范式层）
 - 不同 OpenAI-compatible 代理的**字段形态**与**流式承载格式**差异：
   - 有的返回 `choices[0].message.content` 或 `choices[0].text`；
+  - 有的返回 `delta.content` / `message.content` 为 **content parts（array/object）**（例如 `[{type:"text", text:"..."}]`）；
   - 有的不是严格 `data:` SSE 行（逐行 JSON / NDJSON / 甚至忽略 stream=true 直接回 application/json）。
   - 若解析器只认 `choices[0].delta.content` 且只认 `data:` 行，会导致 0 delta。
 - 部分上游会“成功但空内容”，需工程兜底。

@@ -44,6 +44,40 @@ export type ChatCompletionOnceResult =
   | { ok: true; content: string; raw: any; usage?: { promptTokens: number; completionTokens: number; totalTokens?: number } }
   | { ok: false; error: string; status?: number; rawText?: string };
 
+function kindOfContentLike(v: any): string {
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "array";
+  return typeof v;
+}
+
+// OpenAI-compatible：部分上游会把 content 返回为“content parts”（array/object），不是 string。
+// 若只认 string，会导致 deltaChars==0 → empty_output。
+function coerceOpenAiContentToText(v: any, depth = 0): string | null {
+  if (depth > 4) return null;
+  if (typeof v === "string") return v;
+  if (v === null || v === undefined) return null;
+  if (Array.isArray(v)) {
+    let out = "";
+    for (const part of v) {
+      const t = coerceOpenAiContentToText(part, depth + 1);
+      if (typeof t === "string" && t.length > 0) out += t;
+    }
+    return out.length > 0 ? out : null;
+  }
+  if (typeof v === "object") {
+    // 常见：{ type:"text", text:"..." }
+    const t1 = coerceOpenAiContentToText((v as any).text, depth + 1);
+    if (typeof t1 === "string" && t1.length > 0) return t1;
+    // 兼容：某些代理返回 { content: ... }
+    const t2 = coerceOpenAiContentToText((v as any).content, depth + 1);
+    if (typeof t2 === "string" && t2.length > 0) return t2;
+    // 宽松兜底：{ value:"..." }
+    const value = (v as any).value;
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return null;
+}
+
 async function* readLines(stream: ReadableStream<Uint8Array>) {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
@@ -183,12 +217,13 @@ export async function* streamChatCompletions(args: {
         return;
       }
 
-      const content =
+      const contentLike =
         json?.choices?.[0]?.message?.content ??
         (json?.choices?.[0] as any)?.text ??
         json?.choices?.[0]?.delta?.content;
-      if (typeof content === "string" && content.trim().length > 0) {
-        yield { type: "delta", delta: content };
+      const contentText = coerceOpenAiContentToText(contentLike);
+      if (typeof contentText === "string" && contentText.trim().length > 0) {
+        yield { type: "delta", delta: contentText };
       }
 
       const u = json?.usage;
@@ -215,6 +250,7 @@ export async function* streamChatCompletions(args: {
   let sawFinishReason = false;
   let lastMessageContent = "";
   let lastTextContent = "";
+  let lastDeltaContentCoerced = "";
   for await (const line0 of readLines(res.body)) {
     const line = String(line0 ?? "");
     if (!line) continue;
@@ -256,19 +292,19 @@ export async function* streamChatCompletions(args: {
       const d0 = c0?.delta;
       const deltaKeys = d0 && typeof d0 === "object" ? Object.keys(d0) : [];
       const deltaContent = d0?.content;
-    const msgContent = c0?.message?.content;
-    const textContent = (c0 as any)?.text;
+      const msgContent = c0?.message?.content;
+      const textContent = (c0 as any)?.text;
       diag.sampleShape = {
         keys,
         hasChoices: Array.isArray(json?.choices),
         choice0Keys,
         deltaKeys,
         hasDeltaContent: deltaContent !== undefined,
-        deltaContentType: typeof deltaContent,
+        deltaContentType: kindOfContentLike(deltaContent),
         hasMessageContent: msgContent !== undefined,
-        messageContentType: typeof msgContent,
-      hasTextContent: textContent !== undefined,
-      textContentType: typeof textContent,
+        messageContentType: kindOfContentLike(msgContent),
+        hasTextContent: textContent !== undefined,
+        textContentType: kindOfContentLike(textContent),
         hasToolCalls: Boolean((d0 as any)?.tool_calls || (c0 as any)?.tool_calls),
         hasReasoning: Boolean((d0 as any)?.reasoning || (d0 as any)?.reasoning_content || (c0 as any)?.reasoning),
       };
@@ -292,14 +328,21 @@ export async function* streamChatCompletions(args: {
 
     const choice = json?.choices?.[0];
     let emitted = false;
-    const delta = choice?.delta?.content;
-    if (typeof delta === "string" && delta.length > 0) {
-      diag.deltaChars += delta.length;
-      yield { type: "delta", delta };
-      emitted = true;
+    const deltaText = coerceOpenAiContentToText(choice?.delta?.content);
+    if (typeof deltaText === "string" && deltaText.length > 0) {
+      let piece = deltaText;
+      if (lastDeltaContentCoerced.length > 0 && deltaText.startsWith(lastDeltaContentCoerced)) {
+        piece = deltaText.slice(lastDeltaContentCoerced.length);
+      }
+      lastDeltaContentCoerced = deltaText;
+      if (piece.length > 0) {
+        diag.deltaChars += piece.length;
+        yield { type: "delta", delta: piece };
+        emitted = true;
+      }
     }
     if (!emitted) {
-      const msgContentNow = choice?.message?.content;
+      const msgContentNow = coerceOpenAiContentToText(choice?.message?.content);
       if (typeof msgContentNow === "string" && msgContentNow.length > 0) {
         const diff = msgContentNow.startsWith(lastMessageContent)
           ? msgContentNow.slice(lastMessageContent.length)
@@ -313,7 +356,7 @@ export async function* streamChatCompletions(args: {
       }
     }
     if (!emitted) {
-      const textContentNow = (choice as any)?.text;
+      const textContentNow = coerceOpenAiContentToText((choice as any)?.text);
       if (typeof textContentNow === "string" && textContentNow.length > 0) {
         const diff = textContentNow.startsWith(lastTextContent)
           ? textContentNow.slice(lastTextContent.length)
@@ -427,8 +470,12 @@ export async function chatCompletionOnce(args: {
     return { ok: false, error: "UPSTREAM_INVALID_JSON", status: res.status, rawText: text };
   }
 
-  const content = json?.choices?.[0]?.message?.content;
-  if (typeof content !== "string") {
+  const contentLike =
+    json?.choices?.[0]?.message?.content ??
+    (json?.choices?.[0] as any)?.text ??
+    json?.choices?.[0]?.delta?.content;
+  const content = coerceOpenAiContentToText(contentLike);
+  if (typeof content !== "string" || content.trim().length === 0) {
     return { ok: false, error: "UPSTREAM_EMPTY_CONTENT", status: res.status, rawText: JSON.stringify(json) };
   }
   const u = json?.usage;
