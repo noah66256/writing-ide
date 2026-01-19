@@ -52,6 +52,7 @@
   - providers/models/stages，测速、tool-compat 检测
 - **工具配置（v0.1 必做）**
   - Web Search（博查）配置：Key/endpoint/allow&deny domains/UA/测试
+  - Capabilities（工具/Skills 目录与门禁）：按模块展示 Tools/Skills，支持按 mode 禁用（热生效），并支持 locked tools（只能改不能禁用）
 - **Run 审计（已做，继续优化）**
   - 过滤、聚合视图（tool.call/policy.decision）、导出（v0.2+）
 - **计费与流水（已做基础，v0.2+ 丰富）**

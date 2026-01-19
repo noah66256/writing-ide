@@ -61,7 +61,7 @@
 
 - **写作 IDE 为中心**：所有 Agent/KB/面板能力都服务“写作产出与编辑体验”，不能跑偏成协作/流程平台。
 - **模式与权限边界**：
-  - **Chat**：纯对话，**禁用任何工具**，尤其禁止 `doc.*`/`project.*`/`kb.ingest*` 等写入类。
+  - **Chat**：纯对话 + **只读工具允许**（读文档/读项目/读网页），**禁止任何写入/副作用工具**（例如 `doc.write`/`doc.applyEdits`/`doc.deletePath`/`kb.ingest*` 等）。
   - **Plan / Agent**：允许工具，但必须可追溯、可中断、可回滚。
 - **强风格闭环只在满足条件时启用**：
   - 只有当 Context Pack 的 `KB_SELECTED_LIBRARIES` 中存在 `purpose=style` **且任务为写作/仿写/改写/润色类**时，才启用“先检索样例→再 lint.style→最后写入”的强约束。
@@ -327,7 +327,7 @@
   - StyleImitateSkill 首个落地：把现有 StyleGatePolicy 归入该 skill，并将“是否启用闭环”严格绑定到 `activeSkills`（避免误伤）
 
 ### 7. 回归清单（每阶段必须过的“不破坏行为”测试）
-- **Chat 模式**：永远不允许工具；不会出现 tool.call/tool.result。
+ - **Chat 模式**：允许只读工具（因此可能出现 tool.call/tool.result），但永远不允许写入/副作用工具。
 - **Plan/Agent**：工具调用必须 XML 独占消息；Keep/Undo 可用。
 - **绑定 style 库**：
   - 只有写作意图才强闭环；非写作任务不误伤

@@ -21,7 +21,7 @@ import { isToolCallMessage, parseToolCalls, renderToolResultXml } from "./agent/
 import { getToolsForMode, toolNamesForMode, type AgentMode } from "./agent/toolRegistry.js";
 import { createAiConfigService } from "./aiConfig.js";
 import { toolConfig } from "./toolConfig.js";
-import { validateToolCallArgs } from "@writing-ide/tools";
+import { TOOL_LIST, validateToolCallArgs } from "@writing-ide/tools";
 import {
   decideServerToolExecution,
   executeServerToolOnGateway,
@@ -747,10 +747,10 @@ function buildAgentProtocolPrompt(args: { mode: AgentMode; allowedToolNames?: Se
   const mode = args.mode;
   const modePolicy =
     mode === "chat"
-      ? `当前模式：Chat（纯对话 + 只读联网）。\n` +
-        `- 你**允许**调用只读工具：time.now / web.search / web.fetch（用于“最新/时事/找素材/抓正文证据”）。\n` +
-        `- 在调用 web.search 前，建议先调用 time.now 获取当前日期/年份，避免用错年份。\n` +
-        `- 除 time.now 与 web.* 外，**不要调用任何工具**（不要读写项目文件；不要改动项目）。\n` +
+      ? `当前模式：Chat（只读）。\n` +
+        `- 你**允许**调用只读工具（以“下方列出的工具”为准）：例如 doc.read / project.search / kb.search / time.now / web.search / web.fetch。\n` +
+        `- 禁止任何写入/副作用工具（例如 doc.write/doc.applyEdits/doc.deletePath/kb.ingest* 等）。\n` +
+        `- 时间敏感联网：当你要调用 web.search 时，建议先调用 time.now 获取当前日期/年份，再决定 query/freshness（避免在 2026 还搜索 2024）。\n` +
         `- 你只需用 Markdown 输出可读内容即可。\n\n`
       : `当前模式：${mode === "plan" ? "Plan（逐步）" : "Agent（一次成型+迭代）"}。\n` +
         `你需要按“写作闭环”工作，并把进度写入 Main Doc / Todo。\n` +
@@ -784,7 +784,7 @@ function buildAgentProtocolPrompt(args: { mode: AgentMode; allowedToolNames?: Se
     `能力边界（非常重要）：\n` +
     `- 你**只能**使用“下方列出的工具”。工具=能力边界；如果工具列表里没有某项能力，你就不具备该能力。\n` +
     `- 如果工具列表里没有联网检索工具（例如 web.search/webSearch），你**不得**声称你能上网/你查到了网络信息，也不得输出“来自网络”的引用。\n` +
-    `- 知识库（KB）只能通过 kb.search/kb.cite 等工具结果来引用；不得凭空说“KB 里有/KB 显示”。引用必须能回链到来源定位。\n\n` +
+    `- 知识库（KB）只能通过 kb.search 等工具结果来引用；不得凭空说“KB 里有/KB 显示”。引用必须能回链到来源定位。\n\n` +
     modePolicy +
     `你可以在需要时“调用工具”。当你要调用工具时，你必须输出 **且只能输出** 下面 XML 之一：\n` +
     `- 单次：<tool_call name="..."><arg name="...">...</arg></tool_call>\n` +
@@ -1420,12 +1420,19 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     intent,
     ideSummary: ideSummaryFromSidecar,
   });
+  const capsForSkills = await toolConfig.resolveCapabilitiesRuntime().catch(() => null as any);
+  const disabledSkillIds = new Set<string>(
+    capsForSkills && capsForSkills.disabledSkillIds ? Array.from(capsForSkills.disabledSkillIds as Set<string>) : [],
+  );
+  const skillManifestsEffective = (SKILL_MANIFESTS_V1 as any[]).filter((m: any) => !disabledSkillIds.has(String(m?.id ?? "").trim()));
+
   const rawActiveSkills = activateSkills({
     mode,
     userPrompt,
     mainDocRunIntent: (mainDocFromPack as any)?.runIntent,
     kbSelected: kbSelectedList as any,
     intent,
+    manifests: skillManifestsEffective as any,
   });
   const rawActiveSkillIds = (rawActiveSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
 
@@ -1458,7 +1465,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   const activeSkillIds = (activeSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
   const stageKeyForRun = pickSkillStageKeyForAgentRun(activeSkills, "agent.run");
   const billingSource = stageKeyForRun.startsWith("agent.skill.") ? stageKeyForRun : `agent.${mode}`;
-  const skillManifestById = new Map((SKILL_MANIFESTS_V1 as any[]).map((m: any) => [String(m?.id ?? "").trim(), m]));
+  const skillManifestById = new Map((skillManifestsEffective as any[]).map((m: any) => [String(m?.id ?? "").trim(), m]));
 
   const skillsSystemPrompt = (() => {
     if (!activeSkillIds.length) return "";
@@ -1774,12 +1781,21 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   const temperature = stageTemp;
   const runId = randomUUID();
   const allToolNamesForMode = toolNamesForMode(mode);
+  const capsForTools = await toolConfig.resolveCapabilitiesRuntime().catch(() => null as any);
+  const disabledToolNamesForMode =
+    capsForTools && capsForTools.disabledToolsByMode && (capsForTools.disabledToolsByMode as any)[mode]
+      ? ((capsForTools.disabledToolsByMode as any)[mode] as Set<string>)
+      : new Set<string>();
+  const allToolNamesForModeEffective =
+    disabledToolNamesForMode.size > 0
+      ? new Set(Array.from(allToolNamesForMode).filter((n) => !disabledToolNamesForMode.has(n)))
+      : allToolNamesForMode;
   const baseAllowedToolNames =
     intentRoute.toolPolicy === "deny"
       ? new Set<string>()
       : intentRoute.toolPolicy === "allow_readonly"
-        ? new Set(Array.from(allToolNamesForMode).filter((n) => !isWriteLikeTool(n)))
-        : allToolNamesForMode;
+        ? new Set(Array.from(allToolNamesForModeEffective).filter((n) => !isWriteLikeTool(n)))
+        : allToolNamesForModeEffective;
 
   const origin = String((request as any).headers?.origin ?? "").trim();
   if (origin) {
@@ -4911,6 +4927,91 @@ fastify.post(
     const ret = await toolConfig.testWebSearch(body.query);
     if (!ret.ok) return reply.code(400).send({ error: ret.error, latencyMs: (ret as any).latencyMs ?? null, detail: (ret as any).detail ?? null });
     return reply.send({ ok: true, latencyMs: ret.latencyMs, resultCount: ret.resultCount });
+  },
+);
+
+fastify.get(
+  "/api/tool-config/capabilities",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async () => {
+    const [stored, runtime] = await Promise.all([toolConfig.getStoredCapabilities(), toolConfig.resolveCapabilitiesRuntime()]);
+
+    const registry = {
+      tools: TOOL_LIST.map((t: any) => ({
+        name: String(t.name ?? ""),
+        module: String(t.name ?? "").split(".")[0] || "misc",
+        description: String(t.description ?? ""),
+        modes: Array.isArray(t.modes) && t.modes.length ? t.modes : (["plan", "agent"] as const),
+        args: Array.isArray(t.args) ? t.args : [],
+        inputSchema: (t as any).inputSchema ?? null,
+      })),
+      skills: (SKILL_MANIFESTS_V1 as any[]).map((s: any) => ({
+        id: String(s?.id ?? ""),
+        module: String(s?.id ?? "").split("_")[0] || "skill",
+        name: String(s?.name ?? ""),
+        description: String(s?.description ?? ""),
+        priority: Number.isFinite(s?.priority) ? Number(s.priority) : 0,
+        stageKey: String(s?.stageKey ?? ""),
+        autoEnable: Boolean(s?.autoEnable),
+        triggers: Array.isArray(s?.triggers) ? s.triggers : [],
+        toolCaps: (s as any)?.toolCaps ?? null,
+        policies: Array.isArray(s?.policies) ? s.policies : [],
+        ui: (s as any)?.ui ?? null,
+      })),
+      lockedTools: runtime.lockedTools,
+    };
+
+    const effective = {
+      lockedTools: runtime.lockedTools,
+      tools: {
+        disabledByMode: {
+          chat: Array.from(runtime.disabledToolsByMode.chat),
+          plan: Array.from(runtime.disabledToolsByMode.plan),
+          agent: Array.from(runtime.disabledToolsByMode.agent),
+        },
+      },
+      skills: { disabled: Array.from(runtime.disabledSkillIds) },
+    };
+
+    return { registry, stored, effective };
+  },
+);
+
+fastify.put(
+  "/api/tool-config/capabilities",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async (request, reply) => {
+    const bodySchema = z.object({
+      tools: z
+        .object({
+          disabledByMode: z
+            .object({
+              chat: z.union([z.array(z.string()), z.string()]).optional(),
+              plan: z.union([z.array(z.string()), z.string()]).optional(),
+              agent: z.union([z.array(z.string()), z.string()]).optional(),
+            })
+            .optional(),
+        })
+        .optional(),
+      skills: z
+        .object({
+          disabled: z.union([z.array(z.string()), z.string()]).optional(),
+        })
+        .optional(),
+    });
+    const body = bodySchema.parse((request as any).body ?? {});
+    const updatedBy = String((request as any).user?.email ?? (request as any).user?.sub ?? "admin");
+    try {
+      await toolConfig.upsertCapabilities({ ...body, updatedBy } as any);
+      return reply.send({ ok: true });
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : String(e);
+      return reply.code(400).send({ error: msg });
+    }
   },
 );
 

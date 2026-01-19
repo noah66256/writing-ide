@@ -147,9 +147,24 @@ export type WebSearchConfig = {
   updatedAt: string;
 };
 
+export type ToolMode = "chat" | "plan" | "agent";
+
+export type CapabilitiesConfig = {
+  tools: {
+    disabledByMode: Partial<Record<ToolMode, string[]>>;
+  };
+  skills: {
+    disabled: string[]; // skillId[]
+  };
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ToolConfig = {
   updatedAt: string;
   webSearch?: WebSearchConfig;
+  capabilities?: CapabilitiesConfig;
 };
 
 export type Db = {

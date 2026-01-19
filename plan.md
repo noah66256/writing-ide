@@ -10,6 +10,7 @@
 - [Web Search 选型与落地路径（研究 v1）](docs/research/web-search-v1.md)
 - [Web Search v0.1（spec）](docs/specs/web-search-v0.1.md)
 - [Admin Web（B端管理后台）v0.1（spec）](docs/specs/admin-web-v0.1.md)
+- [Capabilities Registry v0.1（spec：工具/Skills 配置与热生效）](docs/specs/capabilities-registry-v0.1.md)
 - [Todo 工具大搜（研究 v1）](docs/research/todo-tools-v1.md)
 - [Run Todo v0.2（spec）](docs/specs/run-todo-v0.2.md)
 - [Desktop 打包与发布（Windows/macOS）](docs/release/desktop-packaging.md)
@@ -71,10 +72,12 @@
 - **Agent 模式（一次成型 + 对话迭代）**
   - 同样先澄清（最多 5 个问题）→ LLM 自主调用工具把任务跑完 → 输出完整稿件（+diff）与校验报告
   - 再通过对话对“局部/整体”继续改（段落改写、结构重排、换平台体裁等）
-- **Chat 模式（纯对话工具）**
-  - 目标：像一个“多模态聊天工具”一样使用（保留模型选择与多模态输入）
-  - **权限限制**：无文件编辑权限（禁用 `doc.*` 写入/`project.*` 变更/`kb.ingest*` 等写入类工具）；默认不产出 diff
-  - 允许能力：回答问题、头脑风暴、总结、翻译、生成可复制文本（由用户自行粘贴到编辑器）
+- **Chat 模式（只读）**
+  - 目标：像一个“多模态聊天工具”一样使用，但允许“读”（读文档/读项目/读网页），减少来回粘贴与误解
+  - **权限边界（只读）**：
+    - 允许只读工具（以本轮提供的工具列表为准）：例如 `doc.read` / `project.listFiles` / `project.search` / `project.docRules.get` / `kb.search` / `time.now` / `web.search` / `web.fetch`
+    - 禁止任何写入/副作用工具：例如 `doc.write/doc.applyEdits/doc.replaceSelection/doc.renamePath/doc.deletePath/doc.mkdir/doc.commitSnapshot/doc.restoreSnapshot/doc.splitToDir/kb.ingest*` 等
+  - 输出形态：默认不产出 diff；若需要改稿，输出可复制文本或引导用户切到 Plan/Agent
 - **共同原则：两种模式都必须“可随时打断”**
   - 用户可随时：暂停/取消当前运行、接管编辑器手动修改、或在对话里改变目标（Agent 需要重规划 todo）
   - 运行层面：把一次任务执行成“若干原子步骤（step）”，每步之间天然可中断；长耗时/流式工具支持 cancel
@@ -132,8 +135,10 @@
       - 要求：执行成功必须返回 `undoToken`（或自动创建 `snapshotId`），保证点击 `Undo` 能回到执行前状态
       - 语义：若是新建文件，则 `Undo=删除该文件`（并从上下文移除该步产物）
     - **Medium/High：默认提案优先（proposal-first）**
-      - 覆盖：整篇重写、覆盖已有文件、重命名/移动/删除、KB ingest、批量修改等
+      - 覆盖：整篇重写、覆盖已有文件、KB ingest、批量修改等“内容写入类”高风险动作
       - 先产出 `diff/edits`；用户点 `Keep` 才真正 apply；点 `Undo` 则丢弃提案（不落盘）
+    - **文件/目录操作（IDE 操作类）**
+      - `doc.mkdir/doc.renamePath/doc.deletePath`：默认**立即生效（auto-apply）+ 可 Undo 回滚**（更像 IDE 的操作体验）
   - **只读工具**
     - `Undo` 语义为“从上下文移除/不采纳此结果”（不需要物理回滚）
 

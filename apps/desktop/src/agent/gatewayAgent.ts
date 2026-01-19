@@ -1450,8 +1450,7 @@ export function startGatewayRun(args: {
         // ignore
       }
 
-      // Chat：也走 Gateway 的 /api/agent/run/stream（mode=chat），以支持只读 web.search/web.fetch（联网看资料）。
-      // 说明：Gateway 侧会按 mode=chat 严格限制工具列表（仅 web.*），不会触碰 doc/project 写入。
+      // Chat：也走 Gateway 的 /api/agent/run/stream（mode=chat），允许只读工具（读文档/读项目/读网页），禁止任何写入/副作用工具。
 
       // Plan/Agent：改为走 Gateway 的 /api/agent/run/stream（Gateway 负责 ReAct 循环；Desktop 负责执行工具并回传 tool_result）
       const url = args.gatewayUrl ? `${args.gatewayUrl}/api/agent/run/stream` : "/api/agent/run/stream";
@@ -1504,7 +1503,10 @@ export function startGatewayRun(args: {
           model: args.model,
           mode: args.mode,
           prompt: promptForGateway,
-          contextPack: await buildContextPack({ referencesText, userPrompt: promptForGateway }),
+          contextPack:
+            args.mode === "chat"
+              ? buildChatContextPack({ referencesText })
+              : await buildContextPack({ referencesText, userPrompt: promptForGateway }),
           toolSidecar,
         }),
         signal: abort.signal,

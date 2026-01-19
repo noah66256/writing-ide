@@ -25,8 +25,8 @@
 ### 模式与权限
 
 #### Chat（只读）
-- **允许**：`web.search`、`web.fetch`
-- **禁止**：任何写入/副作用工具（`doc.*` 写入、项目变更等）
+- **允许（只读工具）**：`web.search`、`web.fetch`，以及其它只读类工具（如 `doc.read/project.search/...`），用于“读文档/读项目/读网页”
+- **禁止**：任何写入/副作用工具（`doc.*` 写入、项目变更、KB ingest 等）
 - **策略**：用户端不强制展示 sources，但 Tool Block / Runs 审计必须可展开查看证据字段
 
 #### Agent（可执行）

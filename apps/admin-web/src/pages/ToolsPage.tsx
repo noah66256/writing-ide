@@ -1,6 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ApiError } from "../api/client";
-import { toolConfigGetWebSearch, toolConfigTestWebSearch, toolConfigUpdateWebSearch, type WebSearchConfigEffectiveDto, type WebSearchConfigStoredDto } from "../api/gateway";
+import {
+  toolConfigGetCapabilities,
+  toolConfigGetWebSearch,
+  toolConfigTestWebSearch,
+  toolConfigUpdateCapabilities,
+  toolConfigUpdateWebSearch,
+  type CapabilitiesEffectiveDto,
+  type CapabilitiesRegistryDto,
+  type CapabilitiesStoredDto,
+  type CapabilitiesToolDto,
+  type CapabilitiesSkillDto,
+  type WebSearchConfigEffectiveDto,
+  type WebSearchConfigStoredDto,
+} from "../api/gateway";
 
 function normalizeDomainsText(text: string) {
   const t = String(text ?? "");
@@ -16,9 +29,18 @@ function domainsToText(domains: string[]) {
 }
 
 export function ToolsPage() {
+  const [tab, setTab] = useState<"web" | "tools" | "skills">("web");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+
+  const [capsRegistry, setCapsRegistry] = useState<CapabilitiesRegistryDto | null>(null);
+  const [capsStored, setCapsStored] = useState<CapabilitiesStoredDto | null>(null);
+  const [capsEffective, setCapsEffective] = useState<CapabilitiesEffectiveDto | null>(null);
+  const [capsQuery, setCapsQuery] = useState("");
+  const [capsSaving, setCapsSaving] = useState(false);
+  const [drawerTool, setDrawerTool] = useState<CapabilitiesToolDto | null>(null);
+  const [drawerSkill, setDrawerSkill] = useState<CapabilitiesSkillDto | null>(null);
 
   const [stored, setStored] = useState<WebSearchConfigStoredDto | null>(null);
   const [effective, setEffective] = useState<WebSearchConfigEffectiveDto | null>(null);
@@ -39,14 +61,18 @@ export function ToolsPage() {
     setNotice("");
     setBusy(true);
     try {
-      const res = await toolConfigGetWebSearch();
-      setStored(res.stored);
-      setEffective(res.effective);
-      setIsEnabled(Boolean(res.stored.isEnabled));
-      setEndpoint(res.stored.endpoint ?? "");
-      setAllowDomainsText(domainsToText(res.stored.allowDomains ?? []));
-      setDenyDomainsText(domainsToText(res.stored.denyDomains ?? []));
-      setFetchUa(res.stored.fetchUa ?? "");
+      const [web, caps] = await Promise.all([toolConfigGetWebSearch(), toolConfigGetCapabilities()]);
+      setStored(web.stored);
+      setEffective(web.effective);
+      setIsEnabled(Boolean(web.stored.isEnabled));
+      setEndpoint(web.stored.endpoint ?? "");
+      setAllowDomainsText(domainsToText(web.stored.allowDomains ?? []));
+      setDenyDomainsText(domainsToText(web.stored.denyDomains ?? []));
+      setFetchUa(web.stored.fetchUa ?? "");
+
+      setCapsRegistry(caps.registry);
+      setCapsStored(caps.stored);
+      setCapsEffective(caps.effective);
     } catch (e: any) {
       const err = e as ApiError;
       setError(`加载工具配置失败：${err.code}`);
@@ -114,24 +140,206 @@ export function ToolsPage() {
     }
   };
 
+  const lockSet = useMemo(() => new Set((capsEffective?.lockedTools ?? capsStored?.lockedTools ?? []) as string[]), [capsEffective, capsStored]);
+
+  const disabledByMode = useMemo(() => {
+    const s = capsStored?.tools?.disabledByMode ?? {};
+    return {
+      chat: Array.isArray((s as any).chat) ? ((s as any).chat as string[]) : [],
+      plan: Array.isArray((s as any).plan) ? ((s as any).plan as string[]) : [],
+      agent: Array.isArray((s as any).agent) ? ((s as any).agent as string[]) : [],
+    };
+  }, [capsStored]);
+
+  const isToolEnabledInMode = (name: string, mode: "chat" | "plan" | "agent") => {
+    if (lockSet.has(name)) return true;
+    return !(disabledByMode as any)[mode].includes(name);
+  };
+
+  const toggleToolMode = (name: string, mode: "chat" | "plan" | "agent", enabled: boolean) => {
+    if (!capsStored) return;
+    if (lockSet.has(name) && !enabled) return;
+    const cur = (capsStored.tools?.disabledByMode ?? {}) as any;
+    const arr = Array.isArray(cur[mode]) ? (cur[mode] as string[]) : [];
+    const set = new Set(arr);
+    if (enabled) set.delete(name);
+    else set.add(name);
+    const next = { ...cur, [mode]: Array.from(set) };
+    setCapsStored({ ...capsStored, tools: { ...(capsStored.tools as any), disabledByMode: next } });
+  };
+
+  const isSkillEnabled = (id: string) => {
+    const dis = new Set((capsStored?.skills?.disabled ?? []) as string[]);
+    return !dis.has(id);
+  };
+
+  const toggleSkill = (id: string, enabled: boolean) => {
+    if (!capsStored) return;
+    const arr = Array.isArray(capsStored.skills?.disabled) ? (capsStored.skills.disabled as string[]) : [];
+    const set = new Set(arr);
+    if (enabled) set.delete(id);
+    else set.add(id);
+    setCapsStored({ ...capsStored, skills: { ...(capsStored.skills as any), disabled: Array.from(set) } });
+  };
+
+  const saveCapabilities = async () => {
+    if (!capsStored) return;
+    setError("");
+    setNotice("");
+    setCapsSaving(true);
+    try {
+      await toolConfigUpdateCapabilities({
+        tools: { disabledByMode: capsStored.tools?.disabledByMode ?? {} },
+        skills: { disabled: capsStored.skills?.disabled ?? [] },
+      });
+      setNotice("已保存 Tools/Skills 配置（热生效）");
+      await refresh();
+    } catch (e: any) {
+      const err = e as ApiError;
+      setError(`保存失败：${err.code}`);
+    } finally {
+      setCapsSaving(false);
+    }
+  };
+
+  const toolsFiltered = useMemo(() => {
+    const list = capsRegistry?.tools ?? [];
+    const kw = capsQuery.trim().toLowerCase();
+    if (!kw) return list;
+    return list.filter((t) => String(t.name).toLowerCase().includes(kw) || String(t.module).toLowerCase().includes(kw) || String(t.description).toLowerCase().includes(kw));
+  }, [capsRegistry, capsQuery]);
+
+  const toolsGrouped = useMemo(() => {
+    const map = new Map<string, CapabilitiesToolDto[]>();
+    for (const t of toolsFiltered) {
+      const k = t.module || "misc";
+      if (!map.has(k)) map.set(k, []);
+      map.get(k)!.push(t);
+    }
+    const keys = Array.from(map.keys()).sort();
+    return keys.map((k) => ({ module: k, tools: (map.get(k) ?? []).slice().sort((a, b) => a.name.localeCompare(b.name)) }));
+  }, [toolsFiltered]);
+
+  const skillsFiltered = useMemo(() => {
+    const list = capsRegistry?.skills ?? [];
+    const kw = capsQuery.trim().toLowerCase();
+    if (!kw) return list;
+    return list.filter((s) => String(s.id).toLowerCase().includes(kw) || String(s.name).toLowerCase().includes(kw) || String(s.stageKey).toLowerCase().includes(kw));
+  }, [capsRegistry, capsQuery]);
+
   return (
     <div className="usersPage">
       <div className="pageHeader">
         <div className="pageTitle">工具配置</div>
         <div className="pageActions">
+          <div className="row" style={{ gap: 6 }}>
+            <button className="btn" type="button" onClick={() => setTab("web")} disabled={tab === "web"}>
+              Web Search
+            </button>
+            <button className="btn" type="button" onClick={() => setTab("tools")} disabled={tab === "tools"}>
+              Tools
+            </button>
+            <button className="btn" type="button" onClick={() => setTab("skills")} disabled={tab === "skills"}>
+              Skills
+            </button>
+          </div>
           <button className="btn" type="button" onClick={() => void refresh()} disabled={busy}>
             刷新
           </button>
-          <button className="btn primary" type="button" onClick={() => void save()} disabled={busy}>
-            保存
-          </button>
+          {tab === "web" ? (
+            <button className="btn primary" type="button" onClick={() => void save()} disabled={busy}>
+              保存
+            </button>
+          ) : (
+            <button className="btn primary" type="button" onClick={() => void saveCapabilities()} disabled={busy || capsSaving || !capsStored}>
+              {capsSaving ? "保存中…" : "保存"}
+            </button>
+          )}
         </div>
       </div>
 
       {notice ? <div className="hint">{notice}</div> : null}
       {error ? <div className="error">{error}</div> : null}
 
-      <div className="tableWrap" style={{ padding: 14, marginBottom: 14 }}>
+      {tab !== "web" ? (
+        <div className="tableWrap" style={{ padding: 14, marginBottom: 14 }}>
+          <div className="row" style={{ gap: 8, marginBottom: 10 }}>
+            <input className="input" placeholder="搜索（name/module/desc/skillId/stageKey）" value={capsQuery} onChange={(e) => setCapsQuery(e.target.value)} style={{ flex: 1 }} />
+            <span className="tag">locked {lockSet.size}</span>
+            <span className="tag">tools {capsRegistry?.tools?.length ?? 0}</span>
+            <span className="tag">skills {capsRegistry?.skills?.length ?? 0}</span>
+          </div>
+          <div className="muted" style={{ fontSize: 12 }}>
+            说明：这里是“能力目录（Tools/Skills）”的 enable/disable（热生效）。锁定工具（LOCKED）不可禁用。
+          </div>
+        </div>
+      ) : null}
+
+      {tab === "tools" ? (
+        <div className="tableWrap" style={{ padding: 14, marginBottom: 14 }}>
+          {toolsGrouped.map((g) => (
+            <div key={g.module} style={{ marginBottom: 14 }}>
+              <div style={{ fontWeight: 900, marginBottom: 8 }}>
+                {g.module} <span className="muted">({g.tools.length})</span>
+              </div>
+              <div className="modelList">
+                {g.tools.map((t) => {
+                  const locked = lockSet.has(t.name);
+                  const chatOk = isToolEnabledInMode(t.name, "chat");
+                  const planOk = isToolEnabledInMode(t.name, "plan");
+                  const agentOk = isToolEnabledInMode(t.name, "agent");
+                  return (
+                    <div key={t.name} className="modelCard" style={{ cursor: "pointer" }} onClick={() => setDrawerTool(t)} role="presentation">
+                      <div className="modelCardTop">
+                        <div className="modelCardTitle">
+                          <div className="modelName">{t.name}</div>
+                          {locked ? <span className="tag tagPurple">LOCKED</span> : null}
+                          <span className={`tag ${chatOk ? "tagGreen" : "tagRed"}`}>chat</span>
+                          <span className={`tag ${planOk ? "tagGreen" : "tagRed"}`}>plan</span>
+                          <span className={`tag ${agentOk ? "tagGreen" : "tagRed"}`}>agent</span>
+                        </div>
+                      </div>
+                      <div className="muted" style={{ fontSize: 12, lineHeight: 1.4 }}>
+                        {String(t.description ?? "").slice(0, 120)}
+                        {String(t.description ?? "").length > 120 ? "…" : ""}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {tab === "skills" ? (
+        <div className="tableWrap" style={{ padding: 14, marginBottom: 14 }}>
+          <div className="modelList">
+            {skillsFiltered.map((s) => {
+              const enabled = isSkillEnabled(s.id);
+              return (
+                <div key={s.id} className="modelCard" style={{ cursor: "pointer" }} onClick={() => setDrawerSkill(s)} role="presentation">
+                  <div className="modelCardTop">
+                    <div className="modelCardTitle">
+                      <div className="modelName">{s.name}</div>
+                      <span className="tag">{s.id}</span>
+                      <span className="tag">{s.stageKey}</span>
+                      <span className={`tag ${enabled ? "tagGreen" : "tagRed"}`}>{enabled ? "enabled" : "disabled"}</span>
+                    </div>
+                  </div>
+                  <div className="muted" style={{ fontSize: 12, lineHeight: 1.4 }}>
+                    {String(s.description ?? "").slice(0, 140)}
+                    {String(s.description ?? "").length > 140 ? "…" : ""}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+
+      {tab === "web" ? (
+        <div className="tableWrap" style={{ padding: 14, marginBottom: 14 }}>
         <div className="modelCard" style={{ marginBottom: 0 }}>
           <div className="modelCardTop">
             <div className="modelCardTitle">
@@ -213,7 +421,106 @@ export function ToolsPage() {
             </div>
           ) : null}
         </div>
+        </div>
       </div>
+      ) : null}
+
+      {drawerTool ? (
+        <div className="drawerMask" onClick={() => setDrawerTool(null)} role="presentation">
+          <div className="drawer" onClick={(e) => e.stopPropagation()} role="presentation">
+            <div className="drawerHeader">
+              <div style={{ fontWeight: 900 }}>{drawerTool.name}</div>
+              <button className="btn" type="button" onClick={() => setDrawerTool(null)}>
+                关闭
+              </button>
+            </div>
+
+            <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
+              module={drawerTool.module} {lockSet.has(drawerTool.name) ? "· LOCKED（不可禁用）" : ""}
+            </div>
+
+            <div style={{ display: "grid", gap: 10 }}>
+              <div>
+                <div style={{ fontWeight: 800, marginBottom: 6 }}>启用（按 mode）</div>
+                <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
+                  {(["chat", "plan", "agent"] as const).map((m) => {
+                    const enabled = isToolEnabledInMode(drawerTool.name, m);
+                    const locked = lockSet.has(drawerTool.name);
+                    return (
+                      <label key={m} className="toggleSm">
+                        <input
+                          type="checkbox"
+                          checked={enabled}
+                          disabled={locked}
+                          onChange={(e) => toggleToolMode(drawerTool.name, m, e.target.checked)}
+                        />{" "}
+                        {m}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div>
+                <div style={{ fontWeight: 800, marginBottom: 6 }}>说明</div>
+                <div className="muted" style={{ whiteSpace: "pre-wrap" }}>{drawerTool.description}</div>
+              </div>
+
+              <div>
+                <div style={{ fontWeight: 800, marginBottom: 6 }}>参数</div>
+                <pre className="codeBlock">{JSON.stringify(drawerTool.args ?? [], null, 2)}</pre>
+              </div>
+
+              <div>
+                <div style={{ fontWeight: 800, marginBottom: 6 }}>inputSchema（只读）</div>
+                <pre className="codeBlock">{JSON.stringify(drawerTool.inputSchema ?? null, null, 2)}</pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {drawerSkill ? (
+        <div className="drawerMask" onClick={() => setDrawerSkill(null)} role="presentation">
+          <div className="drawer" onClick={(e) => e.stopPropagation()} role="presentation">
+            <div className="drawerHeader">
+              <div style={{ fontWeight: 900 }}>{drawerSkill.name}</div>
+              <button className="btn" type="button" onClick={() => setDrawerSkill(null)}>
+                关闭
+              </button>
+            </div>
+
+            <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
+              id={drawerSkill.id} · stage={drawerSkill.stageKey}
+            </div>
+
+            <div style={{ display: "grid", gap: 10 }}>
+              <div>
+                <div style={{ fontWeight: 800, marginBottom: 6 }}>启用</div>
+                <label className="toggleSm">
+                  <input type="checkbox" checked={isSkillEnabled(drawerSkill.id)} onChange={(e) => toggleSkill(drawerSkill.id, e.target.checked)} /> enabled
+                </label>
+              </div>
+              <div>
+                <div style={{ fontWeight: 800, marginBottom: 6 }}>说明</div>
+                <div className="muted" style={{ whiteSpace: "pre-wrap" }}>{drawerSkill.description}</div>
+              </div>
+              <div>
+                <div style={{ fontWeight: 800, marginBottom: 6 }}>triggers</div>
+                <pre className="codeBlock">{JSON.stringify(drawerSkill.triggers ?? [], null, 2)}</pre>
+              </div>
+              <div>
+                <div style={{ fontWeight: 800, marginBottom: 6 }}>toolCaps</div>
+                <pre className="codeBlock">{JSON.stringify(drawerSkill.toolCaps ?? null, null, 2)}</pre>
+              </div>
+              <div>
+                <div style={{ fontWeight: 800, marginBottom: 6 }}>policies</div>
+                <pre className="codeBlock">{JSON.stringify(drawerSkill.policies ?? [], null, 2)}</pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

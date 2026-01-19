@@ -72,10 +72,10 @@
 
 ### 4.1 v1（本轮落地）
 
-- **文件工具（proposal-first + Undo）**
-  - `doc.deletePath`：删除文件/目录（真删磁盘；Keep 才执行；Undo 恢复）
-  - `doc.renamePath`：重命名/移动（Keep 才执行；Undo 恢复）
-  - `doc.mkdir`：创建目录（低风险可 auto_apply；Undo 可删除目录）
+- **文件工具（IDE 体验：立即生效 + Undo）**
+  - `doc.deletePath`：删除文件/目录（真删磁盘；**立即执行**；Undo 通过快照回滚恢复）
+  - `doc.renamePath`：重命名/移动（**立即执行**；Undo 通过快照回滚恢复）
+  - `doc.mkdir`：创建目录（低风险可 auto_apply；Undo 回滚）
 - **项目搜索**
   - `project.search`：跨项目搜索（先做扫描式实现；返回命中列表）
 
@@ -107,8 +107,7 @@
 - **工具可见性**
   - 在 Plan/Agent 模式：模型能看到 `project.search/doc.deletePath/doc.renamePath/doc.mkdir`
 - **真删 + 可撤销**
-  - 让 Agent 删除一个文件：应先出现 proposal（未 Keep 前磁盘不变）
-  - 点击 Keep：磁盘文件真实删除、Explorer 刷新
+  - 让 Agent 删除一个文件：应立即删除、Explorer 刷新
   - 点击 Undo：文件恢复（内容一致）
 - **风格库不再劫持文件操作**
   - 绑定 style 库 + 已有写作 todo 的情况下，输入“删那 4 篇旧稿”：应允许走删除工具，不被要求先 kb.search

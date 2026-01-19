@@ -123,7 +123,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "useVector", required: false, desc: "可选：是否使用向量做重排（true/false；默认 true）", type: "boolean" },
       { name: "embeddingModel", required: false, desc: '可选：向量模型 id（例如 "text-embedding-3-large" 或 "Embedding-V1"）', type: "string" },
     ],
-    modes: ["plan", "agent"],
+    modes: ["chat", "plan", "agent"],
     inputSchema: {
       type: "object",
       properties: {
@@ -268,14 +268,14 @@ export const TOOL_LIST: ToolMeta[] = [
     name: "project.listFiles",
     description: "列出当前项目文件列表（path）。",
     args: [],
-    modes: ["plan", "agent"],
+    modes: ["chat", "plan", "agent"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "project.docRules.get",
     description: "读取项目级 Doc Rules（doc.rules.md）。",
     args: [],
-    modes: ["plan", "agent"],
+    modes: ["chat", "plan", "agent"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -293,7 +293,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "maxResults", required: false, desc: "可选：最多返回多少条命中（默认 80，最大 500）", type: "number" },
       { name: "maxPerFile", required: false, desc: "可选：每个文件最多返回多少条命中（默认 20，最大 200）", type: "number" },
     ],
-    modes: ["plan", "agent"],
+    modes: ["chat", "plan", "agent"],
     inputSchema: {
       type: "object",
       properties: {
@@ -312,7 +312,7 @@ export const TOOL_LIST: ToolMeta[] = [
     name: "doc.read",
     description: "读取文件内容（path）。",
     args: [{ name: "path", required: true, desc: "文件路径（如 drafts/draft.md）", type: "string" }],
-    modes: ["plan", "agent"],
+    modes: ["chat", "plan", "agent"],
     inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: true },
   },
   {

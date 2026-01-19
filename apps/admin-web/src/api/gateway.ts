@@ -436,4 +436,58 @@ export async function toolConfigTestWebSearch(body: { query: string }) {
   return apiFetchJson<{ ok: true; latencyMs: number; resultCount: number }>("/api/tool-config/web-search/test", { method: "POST", body: JSON.stringify(body) });
 }
 
+export type CapabilitiesToolDto = {
+  name: string;
+  module: string;
+  description: string;
+  modes: Array<"chat" | "plan" | "agent">;
+  args: Array<{ name: string; required?: boolean; desc: string; type?: string; jsonType?: string }>;
+  inputSchema: any;
+};
+
+export type CapabilitiesSkillDto = {
+  id: string;
+  module: string;
+  name: string;
+  description: string;
+  priority: number;
+  stageKey: string;
+  autoEnable: boolean;
+  triggers: any[];
+  toolCaps: any;
+  policies: string[];
+  ui: any;
+};
+
+export type CapabilitiesStoredDto = {
+  tools: { disabledByMode: Partial<Record<"chat" | "plan" | "agent", string[]>> };
+  skills: { disabled: string[] };
+  lockedTools: string[];
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CapabilitiesEffectiveDto = {
+  lockedTools: string[];
+  tools: { disabledByMode: Record<"chat" | "plan" | "agent", string[]> };
+  skills: { disabled: string[] };
+};
+
+export type CapabilitiesRegistryDto = {
+  tools: CapabilitiesToolDto[];
+  skills: CapabilitiesSkillDto[];
+  lockedTools: string[];
+};
+
+export async function toolConfigGetCapabilities() {
+  return apiFetchJson<{ registry: CapabilitiesRegistryDto; stored: CapabilitiesStoredDto; effective: CapabilitiesEffectiveDto }>(
+    "/api/tool-config/capabilities",
+  );
+}
+
+export async function toolConfigUpdateCapabilities(body: Partial<{ tools: { disabledByMode?: any }; skills: { disabled?: any } }>) {
+  return apiFetchJson<{ ok: true }>("/api/tool-config/capabilities", { method: "PUT", body: JSON.stringify(body) });
+}
+
 

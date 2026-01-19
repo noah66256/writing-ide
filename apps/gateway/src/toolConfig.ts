@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { loadDb, saveDb, updateDb, type Db, type ToolConfig, type WebSearchConfig } from "./db.js";
+import { loadDb, saveDb, updateDb, type CapabilitiesConfig, type Db, type ToolConfig, type ToolMode, type WebSearchConfig } from "./db.js";
 
 function nowIso() {
   return new Date().toISOString();
@@ -119,12 +119,69 @@ export type WebSearchRuntime = {
   fetchUa: string | null;
 };
 
+const LOCKED_TOOL_NAMES_V1: string[] = [
+  "run.mainDoc.get",
+  "run.mainDoc.update",
+  "run.setTodoList",
+  "run.updateTodo",
+  "run.todo.upsertMany",
+  "run.todo.update",
+  "run.todo.remove",
+  "run.todo.clear",
+];
+
+function normalizeNameList(v: unknown, max = 400): string[] {
+  const raw = Array.isArray(v) ? v : typeof v === "string" ? v.split(/[\n,]+/g) : [];
+  const arr = raw
+    .map((x) => String(x ?? "").trim())
+    .filter(Boolean)
+    .slice(0, max);
+  // 去重保序
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const s of arr) {
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+function normalizeDisabledByMode(input: unknown): Partial<Record<ToolMode, string[]>> {
+  const o = (input && typeof input === "object" ? input : {}) as any;
+  const chat = normalizeNameList(o.chat ?? []);
+  const plan = normalizeNameList(o.plan ?? []);
+  const agent = normalizeNameList(o.agent ?? []);
+  const out: Partial<Record<ToolMode, string[]>> = {};
+  if (chat.length) out.chat = chat;
+  if (plan.length) out.plan = plan;
+  if (agent.length) out.agent = agent;
+  return out;
+}
+
+export type CapabilitiesConfigStoredView = {
+  tools: { disabledByMode: Partial<Record<ToolMode, string[]>> };
+  skills: { disabled: string[] };
+  lockedTools: string[];
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CapabilitiesRuntime = {
+  lockedTools: string[];
+  disabledToolsByMode: Record<ToolMode, Set<string>>;
+  disabledSkillIds: Set<string>;
+};
+
 export function createToolConfigService(args?: { cacheTtlMs?: number }) {
   const TTL = Number.isFinite(args?.cacheTtlMs as any) ? Math.max(0, Number(args?.cacheTtlMs)) : 5000;
   let cached: { at: number; tool: ToolConfig } | null = null;
+  let cachedCaps: { at: number; caps: CapabilitiesRuntime } | null = null;
 
   const clearCache = () => {
     cached = null;
+    cachedCaps = null;
   };
 
   const getToolConfig = async (): Promise<ToolConfig> => {
@@ -147,6 +204,13 @@ export function createToolConfigService(args?: { cacheTtlMs?: number }) {
       // 轻量修正：数组字段兜底
       next.webSearch.allowDomains = Array.isArray(next.webSearch.allowDomains) ? next.webSearch.allowDomains : [];
       next.webSearch.denyDomains = Array.isArray(next.webSearch.denyDomains) ? next.webSearch.denyDomains : [];
+    }
+    if (next.capabilities && typeof (next as any).capabilities === "object") {
+      const c = next.capabilities as any;
+      c.tools = c.tools && typeof c.tools === "object" ? c.tools : { disabledByMode: {} };
+      c.tools.disabledByMode = normalizeDisabledByMode(c.tools.disabledByMode ?? {});
+      c.skills = c.skills && typeof c.skills === "object" ? c.skills : { disabled: [] };
+      c.skills.disabled = normalizeNameList(c.skills.disabled ?? [], 200);
     }
     await updateDb((db: Db) => {
       db.toolConfig = next;
@@ -338,6 +402,86 @@ export function createToolConfigService(args?: { cacheTtlMs?: number }) {
     }
   };
 
+  const getStoredCapabilities = async (): Promise<CapabilitiesConfigStoredView> => {
+    const tool = await getToolConfig();
+    const cur = tool.capabilities ?? null;
+    const t = nowIso();
+    const base: CapabilitiesConfig =
+      cur ??
+      ({
+        tools: { disabledByMode: {} },
+        skills: { disabled: [] },
+        updatedBy: null,
+        createdAt: t,
+        updatedAt: t,
+      } as any);
+    const disabledByMode = normalizeDisabledByMode(base.tools?.disabledByMode ?? {});
+    const disabledSkills = normalizeNameList(base.skills?.disabled ?? [], 200);
+    return {
+      tools: { disabledByMode },
+      skills: { disabled: disabledSkills },
+      lockedTools: LOCKED_TOOL_NAMES_V1.slice(),
+      updatedBy: base.updatedBy ?? null,
+      createdAt: base.createdAt ?? t,
+      updatedAt: base.updatedAt ?? t,
+    };
+  };
+
+  const resolveCapabilitiesRuntime = async (): Promise<CapabilitiesRuntime> => {
+    const now = Date.now();
+    if (cachedCaps && now - cachedCaps.at < TTL) return cachedCaps.caps;
+    const stored = await getStoredCapabilities();
+    const locked = new Set(LOCKED_TOOL_NAMES_V1);
+    const toSet = (mode: ToolMode) => {
+      const arr = (stored.tools.disabledByMode as any)?.[mode] ?? [];
+      const set = new Set<string>();
+      for (const n of Array.isArray(arr) ? arr : []) {
+        const s = String(n ?? "").trim();
+        if (!s) continue;
+        if (locked.has(s)) continue;
+        set.add(s);
+      }
+      return set;
+    };
+    const caps: CapabilitiesRuntime = {
+      lockedTools: LOCKED_TOOL_NAMES_V1.slice(),
+      disabledToolsByMode: {
+        chat: toSet("chat"),
+        plan: toSet("plan"),
+        agent: toSet("agent"),
+      },
+      disabledSkillIds: new Set(stored.skills.disabled.map((x) => String(x ?? "").trim()).filter(Boolean)),
+    };
+    cachedCaps = { at: now, caps };
+    return caps;
+  };
+
+  const upsertCapabilities = async (
+    patch: Partial<{
+      tools: Partial<{ disabledByMode: Partial<Record<ToolMode, unknown>> }>;
+      skills: Partial<{ disabled: unknown }>;
+      updatedBy: string | null;
+    }>,
+  ) => {
+    const tool = await getToolConfig();
+    const cur = tool.capabilities ?? null;
+    const t = nowIso();
+    const next: CapabilitiesConfig = {
+      tools: {
+        disabledByMode: normalizeDisabledByMode(
+          patch?.tools?.disabledByMode !== undefined ? patch.tools.disabledByMode : cur?.tools?.disabledByMode ?? {},
+        ),
+      },
+      skills: {
+        disabled: normalizeNameList(patch?.skills?.disabled !== undefined ? patch.skills.disabled : cur?.skills?.disabled ?? [], 200),
+      },
+      updatedBy: patch.updatedBy !== undefined ? patch.updatedBy : cur?.updatedBy ?? null,
+      createdAt: cur?.createdAt ?? t,
+      updatedAt: t,
+    };
+    await saveToolConfig({ ...tool, capabilities: next, updatedAt: nowIso() });
+  };
+
   return {
     clearCache,
     getStoredWebSearch,
@@ -345,6 +489,9 @@ export function createToolConfigService(args?: { cacheTtlMs?: number }) {
     resolveWebSearchRuntime,
     upsertWebSearch,
     testWebSearch,
+    getStoredCapabilities,
+    resolveCapabilitiesRuntime,
+    upsertCapabilities,
   };
 }
 
