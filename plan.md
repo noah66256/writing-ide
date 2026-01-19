@@ -8,6 +8,7 @@
 - [IDE 工具与全项目搜索（研究）](docs/research/ide-tools-search-and-file-ops-v1.md)
 - [Web Search 选型与落地路径（研究 v1）](docs/research/web-search-v1.md)
 - [Web Search v0.1（spec）](docs/specs/web-search-v0.1.md)
+- [Admin Web（B端管理后台）v0.1（spec）](docs/specs/admin-web-v0.1.md)
 - [Desktop 打包与发布（Windows/macOS）](docs/release/desktop-packaging.md)
 - [KB Manager V2（更像原文）方案草案](kb-manager-v2-spec.md)
 - [Style Selector v1（自动选簇/选21卡，按话题适配，模型解耦）](style-selector-v1.md)

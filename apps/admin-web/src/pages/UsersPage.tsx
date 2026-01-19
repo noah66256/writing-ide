@@ -149,6 +149,15 @@ export function UsersPage() {
                     <button className="btn" type="button" disabled={busy} onClick={() => void openTransactions(u)}>
                       流水
                     </button>
+                    <button
+                      className="btn"
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(u.id).catch(() => void 0);
+                      }}
+                    >
+                      复制ID
+                    </button>
                     <button className="btn" type="button" disabled={busy} onClick={() => void onRecharge(u)}>
                       充值
                     </button>
@@ -200,6 +209,16 @@ export function UsersPage() {
                       {fmtTime(t.createdAt)}
                       {t.reason ? ` · ${t.reason}` : ""}
                     </div>
+                    {t.meta !== undefined ? (
+                      <details style={{ marginTop: 8 }}>
+                        <summary className="muted" style={{ cursor: "pointer", fontSize: 12 }}>
+                          meta
+                        </summary>
+                        <pre className="codeBlock" style={{ marginTop: 8 }}>
+                          {JSON.stringify(t.meta ?? null, null, 2)}
+                        </pre>
+                      </details>
+                    ) : null}
                   </div>
                 ))
               ) : (

@@ -125,11 +125,39 @@ export type AiConfig = {
   stages: AiStageConfig[];
 };
 
+// ======== Tool Config（B 端热配置：工具/外部服务） ========
+
+export type WebSearchProvider = "bocha";
+
+export type WebSearchConfig = {
+  provider: WebSearchProvider;
+  isEnabled: boolean;
+  /** 可选：覆盖默认 endpoint（例如 https://api.bochaai.com/v1/web-search） */
+  endpoint: string | null;
+  /** API Key 加密存储（AES-GCM） */
+  apiKeyEnc: string | null;
+  apiKeyLast4: string | null;
+  /** 域名治理（可选；为空表示不做 allow 限制；deny 优先生效） */
+  allowDomains: string[];
+  denyDomains: string[];
+  /** 抓取 UA（可选） */
+  fetchUa: string | null;
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ToolConfig = {
+  updatedAt: string;
+  webSearch?: WebSearchConfig;
+};
+
 export type Db = {
   users: User[];
   pointsTransactions: PointsTransaction[];
   llmConfig?: LlmConfig;
   aiConfig?: AiConfig;
+  toolConfig?: ToolConfig;
   /** Run 审计（开发期先落本地 JSON；后续可迁 Postgres） */
   runAudits?: RunAudit[];
 };
@@ -159,7 +187,7 @@ export type RunAudit = {
   meta: unknown | null;
 };
 
-const DEFAULT_DB: Db = { users: [], pointsTransactions: [], llmConfig: undefined, aiConfig: undefined, runAudits: [] };
+const DEFAULT_DB: Db = { users: [], pointsTransactions: [], llmConfig: undefined, aiConfig: undefined, toolConfig: undefined, runAudits: [] };
 
 function getDbFilePath() {
   return path.resolve(process.cwd(), "data", "db.json");
@@ -407,6 +435,39 @@ export async function loadDb(): Promise<Db> {
       return { updatedAt, providers, models, stages };
     })();
 
+    const rawTool = (parsed as any)?.toolConfig;
+    const toolConfig: Db["toolConfig"] = (() => {
+      if (!rawTool || typeof rawTool !== "object") return undefined;
+      const t: any = rawTool;
+      const updatedAt = normStr(t?.updatedAt) || nowIso;
+
+      const normList = (v: any) =>
+        Array.isArray(v) ? v.map((x: any) => normStr(x)).filter(Boolean).slice(0, 200) : [];
+
+      const webRaw = t?.webSearch && typeof t.webSearch === "object" ? (t.webSearch as any) : null;
+      const webSearch: WebSearchConfig | undefined = (() => {
+        if (!webRaw) return undefined;
+        const provider: WebSearchProvider = "bocha"; // v0.1：仅支持 bocha
+        const isEnabled = webRaw?.isEnabled === false ? false : true;
+        const endpoint = typeof webRaw?.endpoint === "string" ? normStr(webRaw.endpoint) : null;
+        const apiKeyEnc = typeof webRaw?.apiKeyEnc === "string" ? String(webRaw.apiKeyEnc) : null;
+        const apiKeyLast4 = typeof webRaw?.apiKeyLast4 === "string" ? normStr(webRaw.apiKeyLast4) : null;
+        const allowDomains = normList(webRaw?.allowDomains);
+        const denyDomains = normList(webRaw?.denyDomains);
+        const fetchUa = typeof webRaw?.fetchUa === "string" ? String(webRaw.fetchUa).trim() : null;
+        const updatedBy = typeof webRaw?.updatedBy === "string" ? normStr(webRaw.updatedBy) : null;
+        const createdAt = typeof webRaw?.createdAt === "string" ? normStr(webRaw.createdAt) || nowIso : nowIso;
+        const updatedAt2 = typeof webRaw?.updatedAt === "string" ? normStr(webRaw.updatedAt) || createdAt : createdAt;
+        return { provider, isEnabled, endpoint, apiKeyEnc, apiKeyLast4, allowDomains, denyDomains, fetchUa, updatedBy, createdAt, updatedAt: updatedAt2 };
+      })();
+
+      const out: ToolConfig = {
+        updatedAt,
+        ...(webSearch ? { webSearch } : {}),
+      };
+      return out;
+    })();
+
     const runAuditsRaw = Array.isArray((parsed as any).runAudits) ? (((parsed as any).runAudits as any[]) ?? []) : [];
     const runAudits = runAuditsRaw
       .map((r) => {
@@ -448,7 +509,7 @@ export async function loadDb(): Promise<Db> {
       })
       .filter((x): x is RunAudit => Boolean(x));
 
-    return { users, pointsTransactions, llmConfig, aiConfig, runAudits };
+    return { users, pointsTransactions, llmConfig, aiConfig, toolConfig, runAudits };
   } catch {
     return { ...DEFAULT_DB };
   }

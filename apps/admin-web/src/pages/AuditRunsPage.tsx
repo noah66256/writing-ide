@@ -21,12 +21,15 @@ export function AuditRunsPage() {
 
   const [kind, setKind] = useState<RunAuditKind | "all">("all");
   const [qUser, setQUser] = useState("");
+  const [q, setQ] = useState("");
   const [top, setTop] = useState(120);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<RunAuditDto | null>(null);
   const [detailBusy, setDetailBusy] = useState(false);
   const [detailError, setDetailError] = useState("");
+  const [eventType, setEventType] = useState<string>("all");
+  const [eventQ, setEventQ] = useState<string>("");
 
   const refresh = async () => {
     setBusy(true);
@@ -68,8 +71,29 @@ export function AuditRunsPage() {
   };
 
   const filtered = useMemo(() => {
-    return runs;
-  }, [runs]);
+    const kw = q.trim().toLowerCase();
+    if (!kw) return runs;
+    return runs.filter((r) => {
+      const id = String(r.id ?? "").toLowerCase();
+      const userId = String(r.userId ?? "").toLowerCase();
+      const model = String(r.model ?? "").toLowerCase();
+      const endReason = String(r.endReason ?? "").toLowerCase();
+      const codes = Array.isArray(r.endReasonCodes) ? r.endReasonCodes.join(" ").toLowerCase() : "";
+      return id.includes(kw) || userId.includes(kw) || model.includes(kw) || endReason.includes(kw) || codes.includes(kw);
+    });
+  }, [runs, q]);
+
+  const detailEvents = useMemo(() => {
+    const events = detail?.events ?? [];
+    let arr = events;
+    if (eventType !== "all") arr = arr.filter((e) => String(e?.event ?? "") === eventType);
+    const kw = eventQ.trim().toLowerCase();
+    if (!kw) return arr;
+    return arr.filter((e) => {
+      const hay = `${String(e.event ?? "")} ${JSON.stringify(e.data ?? null)}`.toLowerCase();
+      return hay.includes(kw);
+    });
+  }, [detail, eventType, eventQ]);
 
   return (
     <div className="usersPage">
@@ -81,6 +105,13 @@ export function AuditRunsPage() {
             <option value="agent.run">agent.run</option>
             <option value="llm.chat">llm.chat</option>
           </select>
+          <input
+            className="input"
+            placeholder="runId / model / endReason 过滤"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            style={{ width: 220 }}
+          />
           <input
             className="input"
             placeholder="userId 过滤（可选）"
@@ -115,6 +146,7 @@ export function AuditRunsPage() {
               <th style={{ width: 140 }}>end</th>
               <th style={{ width: 110 }}>charged</th>
               <th style={{ width: 100 }}>events</th>
+              <th style={{ width: 180 }}>tools/policy</th>
               <th style={{ width: 120 }}>操作</th>
             </tr>
           </thead>
@@ -134,7 +166,16 @@ export function AuditRunsPage() {
                   {r.endReason ?? "-"}
                 </td>
                 <td style={{ fontVariantNumeric: "tabular-nums" }}>{r.chargedPoints ?? 0}</td>
-                <td style={{ fontVariantNumeric: "tabular-nums" }}>{(r as any).eventCount ?? 0}</td>
+                <td style={{ fontVariantNumeric: "tabular-nums" }}>{r.eventCount ?? 0}</td>
+                <td className="muted" style={{ fontSize: 12, lineHeight: 1.35 }}>
+                  <div>
+                    tool {r.toolCallCount ?? 0}/{r.toolResultCount ?? 0} · policy {r.policyDecisionCount ?? 0}
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <span className={`tag ${r.errorCount ? "tagRed" : ""}`}>err {r.errorCount ?? 0}</span>
+                    <span className="tag">web {r.webToolCount ?? 0}</span>
+                  </div>
+                </td>
                 <td>
                   <div className="row">
                     <button className="btn" type="button" onClick={() => void openDetail(r.id)} disabled={detailBusy}>
@@ -155,7 +196,7 @@ export function AuditRunsPage() {
             ))}
             {!filtered.length ? (
               <tr>
-                <td colSpan={9} className="muted" style={{ padding: 16 }}>
+                <td colSpan={10} className="muted" style={{ padding: 16 }}>
                   {busy ? "加载中…" : "暂无数据"}
                 </td>
               </tr>
@@ -192,11 +233,37 @@ export function AuditRunsPage() {
                   <span className="pill pillUser">reason: {detail.endReason ?? "-"}</span>
                   <span className="pill pillUser">charged: {detail.chargedPoints ?? 0}</span>
                   <span className="pill pillUser">events: {detail.events?.length ?? 0}</span>
+                  {detail.usage ? (
+                    <span className="pill pillUser">
+                      tokens: {detail.usage.promptTokens}+{detail.usage.completionTokens}
+                    </span>
+                  ) : null}
                 </div>
 
                 <div>
-                  <div style={{ fontWeight: 700, marginBottom: 6 }}>events（JSON）</div>
-                  <pre className="codeBlock">{JSON.stringify(detail.events ?? [], null, 2)}</pre>
+                  <div style={{ fontWeight: 700, marginBottom: 6 }}>events（过滤后 JSON）</div>
+                  <div className="row" style={{ gap: 8, marginBottom: 8 }}>
+                    <select className="input" value={eventType} onChange={(e) => setEventType(e.target.value)} style={{ width: 180 }}>
+                      <option value="all">全部</option>
+                      <option value="policy.decision">policy.decision</option>
+                      <option value="tool.call">tool.call</option>
+                      <option value="tool.result">tool.result</option>
+                      <option value="error">error</option>
+                      <option value="assistant.delta">assistant.delta</option>
+                      <option value="assistant.done">assistant.done</option>
+                      <option value="run.start">run.start</option>
+                      <option value="run.end">run.end</option>
+                    </select>
+                    <input className="input" value={eventQ} onChange={(e) => setEventQ(e.target.value)} placeholder="搜索（event/data）" />
+                    <button
+                      className="btn"
+                      type="button"
+                      onClick={() => navigator.clipboard.writeText(JSON.stringify(detailEvents ?? [], null, 2)).catch(() => void 0)}
+                    >
+                      复制
+                    </button>
+                  </div>
+                  <pre className="codeBlock">{JSON.stringify(detailEvents ?? [], null, 2)}</pre>
                 </div>
               </div>
             ) : null}

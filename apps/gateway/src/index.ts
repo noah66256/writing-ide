@@ -20,6 +20,7 @@ import {
 import { isToolCallMessage, parseToolCalls, renderToolResultXml } from "./agent/xmlProtocol.js";
 import { toolNamesForMode, toolsPrompt, type AgentMode } from "./agent/toolRegistry.js";
 import { createAiConfigService } from "./aiConfig.js";
+import { toolConfig } from "./toolConfig.js";
 import { validateToolCallArgs } from "@writing-ide/tools";
 import {
   decideServerToolExecution,
@@ -3637,6 +3638,13 @@ fastify.get(
         usage: r.usage ?? null,
         chargedPoints: r.chargedPoints ?? null,
         eventCount: Array.isArray(r.events) ? r.events.length : 0,
+        toolCallCount: Array.isArray(r.events) ? r.events.filter((e: any) => String(e?.event ?? "") === "tool.call").length : 0,
+        toolResultCount: Array.isArray(r.events) ? r.events.filter((e: any) => String(e?.event ?? "") === "tool.result").length : 0,
+        policyDecisionCount: Array.isArray(r.events) ? r.events.filter((e: any) => String(e?.event ?? "") === "policy.decision").length : 0,
+        errorCount: Array.isArray(r.events) ? r.events.filter((e: any) => String(e?.event ?? "") === "error").length : 0,
+        webToolCount: Array.isArray(r.events)
+          ? r.events.filter((e: any) => String(e?.event ?? "") === "tool.call" && /^web\./.test(String((e as any)?.data?.name ?? ""))).length
+          : 0,
         meta: r.meta ?? null,
       })),
     };
@@ -4039,6 +4047,60 @@ fastify.put(
       const msg = e?.message ? String(e.message) : String(e);
       return reply.code(400).send({ error: msg });
     }
+  },
+);
+
+// ======== Tool Config（B端：工具/外部服务热配置） ========
+
+fastify.get(
+  "/api/tool-config/web-search",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async () => {
+    const [stored, effective] = await Promise.all([toolConfig.getStoredWebSearch(), toolConfig.getEffectiveWebSearch()]);
+    return { stored, effective };
+  },
+);
+
+fastify.put(
+  "/api/tool-config/web-search",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async (request, reply) => {
+    const bodySchema = z.object({
+      isEnabled: z.boolean().optional(),
+      endpoint: z.string().nullable().optional(),
+      apiKey: z.string().optional(),
+      clearApiKey: z.boolean().optional(),
+      allowDomains: z.union([z.array(z.string()), z.string()]).optional(),
+      denyDomains: z.union([z.array(z.string()), z.string()]).optional(),
+      fetchUa: z.string().nullable().optional(),
+    });
+    const body = bodySchema.parse((request as any).body ?? {});
+    const updatedBy = String((request as any).user?.email ?? (request as any).user?.sub ?? "admin");
+    try {
+      await toolConfig.upsertWebSearch({ ...body, updatedBy });
+      return reply.send({ ok: true });
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : String(e);
+      return reply.code(400).send({ error: msg });
+    }
+  },
+);
+
+fastify.post(
+  "/api/tool-config/web-search/test",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async (request, reply) => {
+    const bodySchema = z.object({ query: z.string().min(1).max(200) });
+    const body = bodySchema.parse((request as any).body ?? {});
+    const ret = await toolConfig.testWebSearch(body.query);
+    if (!ret.ok) return reply.code(400).send({ error: ret.error, latencyMs: (ret as any).latencyMs ?? null, detail: (ret as any).detail ?? null });
+    return reply.send({ ok: true, latencyMs: ret.latencyMs, resultCount: ret.resultCount });
   },
 );
 

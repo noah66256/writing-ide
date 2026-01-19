@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { createHash } from "node:crypto";
 import { computeDraftStatsForStyleLint } from "../kb/styleLintDraftStats.js";
+import { toolConfig } from "../toolConfig.js";
 
 export type ServerToolExecutionDecision = {
   executedBy: "gateway" | "desktop";
@@ -171,7 +172,13 @@ function matchDomain(hostname: string, rule: string) {
   return h.endsWith(`.${r}`);
 }
 
-function isUrlAllowed(url: string) {
+function isUrlAllowed(
+  url: string,
+  rules?: {
+    allowDomains?: string[];
+    denyDomains?: string[];
+  },
+) {
   let u: URL;
   try {
     u = new URL(url);
@@ -183,10 +190,11 @@ function isUrlAllowed(url: string) {
   const host = String(u.hostname ?? "").trim().toLowerCase();
   if (!host) return { ok: false as const, error: "INVALID_URL" as const };
 
-  const deny = parseDomainsEnv("WEB_DENY_DOMAINS");
+  // deny：优先 rules（B 端配置）；否则回退 env
+  const deny = Array.isArray(rules?.denyDomains) ? (rules!.denyDomains as string[]) : parseDomainsEnv("WEB_DENY_DOMAINS");
   for (const r of deny) if (matchDomain(host, r)) return { ok: false as const, error: "DOMAIN_DENIED" as const, hostname: host, rule: r };
 
-  const allow = parseDomainsEnv("WEB_ALLOW_DOMAINS");
+  const allow = Array.isArray(rules?.allowDomains) ? (rules!.allowDomains as string[]) : parseDomainsEnv("WEB_ALLOW_DOMAINS");
   if (allow.length) {
     for (const r of allow) if (matchDomain(host, r)) return { ok: true as const, hostname: host };
     return { ok: false as const, error: "DOMAIN_NOT_ALLOWED" as const, hostname: host };
@@ -212,20 +220,21 @@ export async function executeWebSearchOnGateway(args: { call: any }) {
   const query = String((call?.args as any)?.query ?? "").trim();
   if (!query) return { ok: false as const, error: "MISSING_QUERY" };
 
-  const apiKey = String(process.env.BOCHA_API_KEY ?? "").trim();
-  if (!apiKey) return { ok: false as const, error: "BOCHA_API_KEY_NOT_CONFIGURED" };
+  const rt = await toolConfig.resolveWebSearchRuntime().catch(() => null as any);
+  if (!rt || !rt.isEnabled) return { ok: false as const, error: "WEB_SEARCH_DISABLED" };
+  if (!String(rt.apiKey ?? "").trim()) return { ok: false as const, error: "BOCHA_API_KEY_NOT_CONFIGURED" };
 
   const freshness = String((call?.args as any)?.freshness ?? "noLimit").trim() || "noLimit";
   const count = clampInt((call?.args as any)?.count, 1, 50, 10);
   const summary = (call?.args as any)?.summary === undefined ? true : Boolean((call?.args as any)?.summary);
 
-  const endpoint = String(process.env.BOCHA_WEB_SEARCH_ENDPOINT ?? "https://api.bochaai.com/v1/web-search").trim();
+  const endpoint = String(rt.endpoint ?? "https://api.bochaai.com/v1/web-search").trim();
 
   try {
     const res = await fetchWithTimeout(endpoint, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${rt.apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ query, freshness, count, summary }),
@@ -282,7 +291,10 @@ export async function executeWebFetchOnGateway(args: { call: any }) {
   const url = String((call?.args as any)?.url ?? "").trim();
   if (!url) return { ok: false as const, error: "MISSING_URL" };
 
-  const allowed = isUrlAllowed(url);
+  const rt = await toolConfig.resolveWebSearchRuntime().catch(() => null as any);
+  if (!rt || !rt.isEnabled) return { ok: false as const, error: "WEB_SEARCH_DISABLED" };
+
+  const allowed = isUrlAllowed(url, { allowDomains: rt.allowDomains, denyDomains: rt.denyDomains });
   if (!allowed.ok) return { ok: false as const, error: allowed.error, detail: allowed };
 
   const formatRaw = String((call?.args as any)?.format ?? "markdown").trim().toLowerCase();
@@ -296,7 +308,7 @@ export async function executeWebFetchOnGateway(args: { call: any }) {
       headers: {
         // 尽量模拟普通浏览器，降低部分站点 403
         "User-Agent":
-          String(process.env.WEB_FETCH_UA ?? "").trim() ||
+          String(rt.fetchUa ?? "").trim() ||
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       },

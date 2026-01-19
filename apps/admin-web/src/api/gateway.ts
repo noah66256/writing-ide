@@ -56,6 +56,11 @@ export type RunAuditDto = {
 
 export type RunAuditListItemDto = Omit<RunAuditDto, "events"> & {
   eventCount: number;
+  toolCallCount: number;
+  toolResultCount: number;
+  policyDecisionCount: number;
+  errorCount: number;
+  webToolCount: number;
 };
 
 export type LlmModelPriceDto = {
@@ -377,6 +382,58 @@ export async function adminUpdateLlmConfig(body: {
     method: "PUT",
     body: JSON.stringify(body),
   });
+}
+
+// ======== Tool Config（B 端：工具/外部服务热配置） ========
+
+export type WebSearchConfigStoredDto = {
+  provider: "bocha";
+  isEnabled: boolean;
+  endpoint: string | null;
+  allowDomains: string[];
+  denyDomains: string[];
+  fetchUa: string | null;
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  hasApiKey: boolean;
+  apiKeyMasked: string | null;
+};
+
+export type WebSearchConfigEffectiveDto = {
+  provider: "bocha";
+  isEnabled: boolean;
+  endpoint: string;
+  allowDomains: string[];
+  denyDomains: string[];
+  fetchUa: string | null;
+  source: {
+    apiKey: "stored" | "env" | "none";
+    endpoint: "stored" | "env" | "default";
+    allowDomains: "stored" | "env" | "default";
+    denyDomains: "stored" | "env" | "default";
+    fetchUa: "stored" | "env" | "default";
+  };
+};
+
+export async function toolConfigGetWebSearch() {
+  return apiFetchJson<{ stored: WebSearchConfigStoredDto; effective: WebSearchConfigEffectiveDto }>("/api/tool-config/web-search");
+}
+
+export async function toolConfigUpdateWebSearch(body: Partial<{
+  isEnabled: boolean;
+  endpoint: string | null;
+  apiKey: string;
+  clearApiKey: boolean;
+  allowDomains: string[] | string;
+  denyDomains: string[] | string;
+  fetchUa: string | null;
+}>) {
+  return apiFetchJson<{ ok: true }>("/api/tool-config/web-search", { method: "PUT", body: JSON.stringify(body) });
+}
+
+export async function toolConfigTestWebSearch(body: { query: string }) {
+  return apiFetchJson<{ ok: true; latencyMs: number; resultCount: number }>("/api/tool-config/web-search/test", { method: "POST", body: JSON.stringify(body) });
 }
 
 

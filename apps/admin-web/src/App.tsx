@@ -6,6 +6,7 @@ import { AdminLayout, type AdminPageKey } from "./components/AdminLayout";
 import { AuditRunsPage } from "./pages/AuditRunsPage";
 import { LlmPage } from "./pages/LlmPage";
 import { LoginPage } from "./pages/LoginPage";
+import { ToolsPage } from "./pages/ToolsPage";
 import { UsersPage } from "./pages/UsersPage";
 
 type Me = { id: string; email: string; role: "admin" | "user"; pointsBalance: number };
@@ -118,6 +119,7 @@ function App() {
     >
       {page === "users" ? <UsersPage /> : null}
       {page === "llm" ? <LlmPage /> : null}
+      {page === "tools" ? <ToolsPage /> : null}
       {page === "audit" ? <AuditRunsPage /> : null}
     </AdminLayout>
   );
