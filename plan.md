@@ -16,6 +16,7 @@
 - [KB Manager V2（更像原文）方案草案](kb-manager-v2-spec.md)
 - [Style Selector v1（自动选簇/选21卡，按话题适配，模型解耦）](style-selector-v1.md)
 - [Style Skill 门禁（让风格库只在“开写”后介入，research v1）](docs/research/style-skill-gating-v1.md)
+- [doc.write 新写/覆盖策略（research v1）](docs/research/doc-write-ifexists-v1.md)
 - [writing-agent.md（写作 Agent 约定/协议）](writing-agent.md)
 
 ### 0. 背景与目标

@@ -235,6 +235,60 @@ function normalizeRelPath(p: string) {
   return s;
 }
 
+function extractTitleFromContent(content: string) {
+  const text = String(content ?? "")
+    .replace(/^\uFEFF/, "")
+    .replaceAll("\r\n", "\n")
+    .replaceAll("\r", "\n")
+    .trim();
+  if (!text) return "";
+  const mdTitle = text.match(/^#{1,6}\s+(.+?)\s*$/m);
+  if (mdTitle?.[1]) return String(mdTitle[1]).trim();
+  const cnTitle = text.match(/^标题\s*[：:]\s*(.+?)\s*$/m);
+  if (cnTitle?.[1]) return String(cnTitle[1]).trim();
+  const enTitle = text.match(/^title\s*[:：]\s*(.+?)\s*$/im);
+  if (enTitle?.[1]) return String(enTitle[1]).trim();
+  const firstLine = text.split("\n").map((l) => l.trim()).find(Boolean) ?? "";
+  return firstLine.slice(0, 60);
+}
+
+function splitPathParts(path: string) {
+  const idx = path.lastIndexOf("/");
+  const dir = idx >= 0 ? path.slice(0, idx) : "";
+  const name = idx >= 0 ? path.slice(idx + 1) : path;
+  const m = name.match(/^(.*?)(\.[^.]+)$/);
+  const base = m?.[1] ? String(m[1]) : name;
+  const ext = m?.[2] ? String(m[2]) : "";
+  return { dir, base, ext };
+}
+
+function resolveWritePath(args: {
+  path: string;
+  content: string;
+  suggestedName?: string;
+  ifExists: "rename" | "overwrite" | "error";
+  existingPaths: Set<string>;
+}) {
+  const { path, content, suggestedName, ifExists, existingPaths } = args;
+  const existed = existingPaths.has(path);
+  if (!existed) return { path, existed, renamedFrom: "" };
+  if (ifExists === "overwrite") return { path, existed, renamedFrom: "" };
+  if (ifExists === "error") return { path, existed, renamedFrom: "", error: "PATH_EXISTS" as const };
+
+  const parts = splitPathParts(path);
+  const sugg = String(suggestedName ?? "").trim();
+  const baseFromSuggest = sugg ? sanitizeFileName(sugg.replace(/\.[^.]+$/, "")) : "";
+  const baseFromContent = sanitizeFileName(extractTitleFromContent(content));
+  const base = baseFromSuggest || baseFromContent || parts.base || "untitled";
+  let n = 2;
+  let candidate = `${parts.dir ? `${parts.dir}/` : ""}${base}${parts.ext}`;
+  while (existingPaths.has(candidate)) {
+    const nextBase = sanitizeFileName(`${base}_${n++}`);
+    candidate = `${parts.dir ? `${parts.dir}/` : ""}${nextBase}${parts.ext}`;
+  }
+  return { path: candidate, existed, renamedFrom: path, chosenBase: base };
+}
+
 function splitTitleBlocks(content: string) {
   const text = String(content ?? "")
     .replace(/^\uFEFF/, "")
@@ -1455,15 +1509,17 @@ const tools: ToolDefinition[] = [
       { name: "path", required: true, desc: "文件路径" },
       { name: "newContent", required: false, desc: "新内容全文（JSON 字符串）" },
       { name: "edits", required: false, desc: "JSON 数组：TextEdit[]（同 doc.applyEdits）" },
+      { name: "ifExists", required: false, desc: "当文件已存在时的策略：rename(默认)/overwrite/error" },
+      { name: "suggestedName", required: false, desc: "建议的新文件名（仅 ifExists=rename 时使用）" },
     ],
     riskLevel: "low",
     applyPolicy: "proposal",
     reversible: false,
     run: async (args) => {
-      const path = normalizeRelPath(String(args.path ?? ""));
-      if (!path) return { ok: false, error: "MISSING_PATH" };
+      const pathRaw = normalizeRelPath(String(args.path ?? ""));
+      if (!pathRaw) return { ok: false, error: "MISSING_PATH" };
       const s = useProjectStore.getState();
-      const file = s.getFileByPath(path);
+      const file = s.getFileByPath(pathRaw);
       // 允许预览“新文件写入”（file 不存在时 before 视为空字符串）
       const before = file ? await s.ensureLoaded(file.path) : "";
       const newContent = typeof args.newContent === "string" ? String(args.newContent) : undefined;
@@ -1479,38 +1535,60 @@ const tools: ToolDefinition[] = [
         }));
         after = applyTextEdits({ before, edits: norm }).after;
       }
+      const ifExistsRaw = String((args as any).ifExists ?? "").trim().toLowerCase();
+      const ifExists = ifExistsRaw === "overwrite" ? "overwrite" : ifExistsRaw === "error" ? "error" : "rename";
+      const suggestedName = String((args as any).suggestedName ?? "").trim();
+      const existingPaths = new Set(s.files.map((f) => f.path));
+      const resolved = resolveWritePath({
+        path: pathRaw,
+        content: after,
+        suggestedName,
+        ifExists,
+        existingPaths,
+      });
+      if ((resolved as any).error === "PATH_EXISTS") {
+        return { ok: false, error: "PATH_EXISTS", output: { ok: false, path: pathRaw } };
+      }
+      const finalPath = resolved.path;
+      const diffBefore = resolved.renamedFrom ? "" : before;
       // 若既无 newContent 也无 edits，则视为“无变化预览”（避免报错卡住流程）
-      const d = unifiedDiff({ path, before, after });
-      const hasChange = before !== after;
+      const d = unifiedDiff({ path: finalPath, before: diffBefore, after });
+      const hasChange = diffBefore !== after;
       const nextContent = after;
       const apply = hasChange
         ? () => {
             const snap = useProjectStore.getState().snapshot();
             const st = useProjectStore.getState();
-            const exists = !!st.getFileByPath(path);
+            const exists = !!st.getFileByPath(finalPath);
             if (!exists) {
-              st.createFile(path, nextContent);
-            } else if (st.activePath === path && st.editorRef?.getModel()) {
+              st.createFile(finalPath, nextContent);
+            } else if (st.activePath === finalPath && st.editorRef?.getModel()) {
               const model = st.editorRef.getModel()!;
               const full = model.getFullModelRange();
               st.editorRef.executeEdits("agent", [{ range: full, text: nextContent, forceMoveMarkers: true }]);
               const written = st.editorRef.getModel()?.getValue() ?? nextContent;
-              st.updateFile(path, written);
+              st.updateFile(finalPath, written);
             } else {
-              st.updateFile(path, nextContent);
+              st.updateFile(finalPath, nextContent);
             }
             return { undo: () => useProjectStore.getState().restore(snap) };
           }
         : undefined;
+      const noteParts = [
+        resolved.renamedFrom ? "已自动改名新建，避免覆盖原文件。" : "",
+        hasChange ? "这是写入提案，点击 Keep 写入文件；Undo 可回滚。" : "",
+      ].filter(Boolean);
       return {
         ok: true,
         output: {
           ok: true,
-          path,
+          path: finalPath,
           diffUnified: d.diff,
           truncated: d.truncated,
           stats: d.stats ?? null,
-          ...(hasChange ? { note: "这是写入提案，点击 Keep 写入文件；Undo 可回滚。" } : {}),
+          ifExists,
+          ...(resolved.renamedFrom ? { renamedFrom: resolved.renamedFrom } : {}),
+          ...(noteParts.length ? { note: noteParts.join(" ") } : {}),
         },
         apply,
         undoable: false,
@@ -1623,14 +1701,32 @@ const tools: ToolDefinition[] = [
     args: [
       { name: "path", required: true, desc: "新文件路径（如 drafts/run-xxx.md）" },
       { name: "content", required: true, desc: "文件全文内容" },
+      { name: "ifExists", required: false, desc: "当文件已存在时的策略：rename(默认)/overwrite/error" },
+      { name: "suggestedName", required: false, desc: "建议的新文件名（仅 ifExists=rename 时使用）" },
     ],
     riskLevel: "low",
     applyPolicy: "auto_apply",
     reversible: true,
     run: async (args) => {
-      const path = normalizeRelPath(String(args.path ?? ""));
+      const pathRaw = normalizeRelPath(String(args.path ?? ""));
       const content = String(args.content ?? "");
-      if (!path) return { ok: false, error: "MISSING_PATH" };
+      if (!pathRaw) return { ok: false, error: "MISSING_PATH" };
+      const ifExistsRaw = String((args as any).ifExists ?? "").trim().toLowerCase();
+      const ifExists = ifExistsRaw === "overwrite" ? "overwrite" : ifExistsRaw === "error" ? "error" : "rename";
+      const suggestedName = String((args as any).suggestedName ?? "").trim();
+      const st0 = useProjectStore.getState();
+      const existingPaths = new Set(st0.files.map((f) => f.path));
+      const resolved = resolveWritePath({
+        path: pathRaw,
+        content,
+        suggestedName,
+        ifExists,
+        existingPaths,
+      });
+      if ((resolved as any).error === "PATH_EXISTS") {
+        return { ok: false, error: "PATH_EXISTS", output: { ok: false, path: pathRaw } };
+      }
+      const path = resolved.path;
       const exists = !!useProjectStore.getState().getFileByPath(path);
       if (!exists) {
         const snap = useProjectStore.getState().snapshot();
@@ -1639,7 +1735,16 @@ const tools: ToolDefinition[] = [
         const d = unifiedDiff({ path, before: "", after: content, maxCells: 400_000 });
         return {
           ok: true,
-          output: { ok: true, path, created: true, diffUnified: d.diff, truncated: d.truncated, stats: d.stats ?? null },
+          output: {
+            ok: true,
+            path,
+            created: true,
+            diffUnified: d.diff,
+            truncated: d.truncated,
+            stats: d.stats ?? null,
+            ifExists,
+            ...(resolved.renamedFrom ? { renamedFrom: resolved.renamedFrom, note: "已自动改名新建，避免覆盖原文件。" } : {}),
+          },
           applyPolicy: "auto_apply",
           riskLevel: "low",
           undoable: true,

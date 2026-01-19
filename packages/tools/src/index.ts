@@ -367,29 +367,44 @@ export const TOOL_LIST: ToolMeta[] = [
   },
   {
     name: "doc.previewDiff",
-    description: "生成 diff 预览（无副作用）。可传 newContent 或 edits。",
+    description: "生成 diff 预览（无副作用）。可传 newContent 或 edits。ifExists 默认 rename，避免覆盖已有文件。",
     args: [
       { name: "path", required: true, desc: "文件路径", type: "string" },
       { name: "newContent", required: false, desc: "新内容全文", type: "string" },
       { name: "edits", required: false, desc: "JSON 数组：TextEdit[]", type: "json", jsonType: "array" },
+      { name: "ifExists", required: false, desc: "文件已存在时的策略：rename/overwrite/error", type: "string" },
+      { name: "suggestedName", required: false, desc: "建议的新文件名（仅 ifExists=rename 时使用）", type: "string" },
     ],
     modes: ["plan", "agent"],
     inputSchema: {
       type: "object",
-      properties: { path: { type: "string" }, newContent: { type: "string" }, edits: { type: "json", jsonType: "array" } },
+      properties: {
+        path: { type: "string" },
+        newContent: { type: "string" },
+        edits: { type: "json", jsonType: "array" },
+        ifExists: { type: "string" },
+        suggestedName: { type: "string" },
+      },
       required: ["path"],
       additionalProperties: true,
     },
   },
   {
     name: "doc.write",
-    description: "写入文件（path, content）。新建可自动落盘；覆盖会走提案确认（Keep）。",
+    description: "写入文件（path, content）。新建可自动落盘；覆盖会走提案确认（Keep）。ifExists 默认 rename。",
     args: [
       { name: "path", required: true, desc: "文件路径", type: "string" },
       { name: "content", required: true, desc: "文件全文内容", type: "string" },
+      { name: "ifExists", required: false, desc: "文件已存在时的策略：rename/overwrite/error", type: "string" },
+      { name: "suggestedName", required: false, desc: "建议的新文件名（仅 ifExists=rename 时使用）", type: "string" },
     ],
     modes: ["plan", "agent"],
-    inputSchema: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"], additionalProperties: true },
+    inputSchema: {
+      type: "object",
+      properties: { path: { type: "string" }, content: { type: "string" }, ifExists: { type: "string" }, suggestedName: { type: "string" } },
+      required: ["path", "content"],
+      additionalProperties: true,
+    },
   },
   {
     name: "doc.splitToDir",

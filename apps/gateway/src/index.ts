@@ -2856,6 +2856,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
                       ? "  - 然后调用 lint.style 做终稿闸门；未通过则按 rewritePrompt 回炉改写并复检（最多 2 次）后再输出/写入。\n"
                       : "") +
                     "  - 若用户要求写入/分割到文件夹：请调用 doc.splitToDir（或 doc.write 等）完成写入。\n" +
+                    "  - 文件写入策略：默认新写不覆盖。若需要新文件且路径可能已存在，请在 doc.write/doc.previewDiff 里传 ifExists=\"rename\" 并给 suggestedName 起一个更合适的新文件名；若用户明确要求覆盖，则传 ifExists=\"overwrite\"。\n" +
                     (needTodo
                       ? "- 在你成功设置 todo 之后，如果仍需要澄清：下一条消息再输出最多 5 个问题（纯文本 Markdown），并在 todo 中标记为 blocked/等待用户输入；用户不答时写明默认假设继续推进。"
                       : "- 如仍需要澄清：下一条消息再输出最多 5 个问题（纯文本 Markdown），并明确默认假设后继续推进（不要重置 todo）。"))
@@ -3246,6 +3247,12 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         let assignedId = 0;
         const assignedIds: string[] = [];
         let repairedSetTodoList = 0;
+        const wantsOverwriteByPrompt = (() => {
+          const t = String(userPrompt ?? "");
+          if (!t.trim()) return false;
+          if (/(另存为|另写|新建|新增|保存为|存为|另起|新稿)/.test(t)) return false;
+          return /(覆盖|替换|更新|重写|改写|覆写|在原文上)/.test(t);
+        })();
         // 从运行态已知 todoList 推断可用 id（优先未完成项）
         const todoListRaw = (runState as any).todoList;
         const todoList = Array.isArray(todoListRaw) ? (todoListRaw as any[]) : [];
@@ -3367,6 +3374,16 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           }
 
           return next;
+        });
+
+        // doc.write / doc.previewDiff：默认 ifExists=rename，除非用户明确要求覆盖
+        toolCalls = toolCalls.map((c: any) => {
+          const name = String(c?.name ?? "").trim();
+          if (name !== "doc.write" && name !== "doc.previewDiff") return c;
+          const rawArgs = (c?.args ?? {}) as Record<string, string>;
+          const ifExistsRaw = String((rawArgs as any).ifExists ?? "").trim();
+          if (ifExistsRaw) return c;
+          return { ...c, args: { ...(c?.args ?? {}), ifExists: wantsOverwriteByPrompt ? "overwrite" : "rename" } };
         });
 
         if (repairedSetTodoList > 0) {
