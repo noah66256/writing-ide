@@ -173,7 +173,10 @@ export const WEB_TOPIC_RADAR_SKILL: SkillManifest = {
     {
       when: "text_regex",
       args: {
-        pattern: "(全网|上网|联网|网页|新闻|热点|时事|实时|最新|快讯|资讯|查资料|找素材|web\\.search|web\\.fetch)",
+        // 仅在“明确要联网搜索热点/新闻/时事”时触发，避免普通写作里提到“热点/新闻”就误启用
+        pattern:
+          "(?:搜索|检索|搜一下|查找|上网|全网|联网|web\\.search|web\\.fetch)[\\s\\S]{0,40}(?:热点|新闻|时事|实时|最新|快讯|资讯)|" +
+          "(?:热点|新闻|时事|实时|最新|快讯|资讯)[\\s\\S]{0,40}(?:搜索|检索|搜一下|查找|上网|全网|联网|web\\.search|web\\.fetch)",
       },
     },
   ],

@@ -770,11 +770,10 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
 
   const activeSkillIdSet = new Set((activeSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean));
   const styleSkillActive = activeSkillIdSet.has("style_imitate");
-  const webTopicRadarActive = activeSkillIdSet.has("web_topic_radar");
 
-  // 关键：风格 playbook/写法候选等“强引导”上下文，只在写作闭环真正激活时注入；
-  // 同时若本轮是“热点/素材盘点（广度优先）”，强制不注入，避免风格库抢跑导致过早收敛。
-  const allowInjectStyleContext = styleSkillActive && !webTopicRadarActive;
+  // 关键：风格 playbook/写法候选等“强引导”上下文，只在写作闭环真正激活时注入。
+  // （解决：仅做“搜索/盘点热点”时，绑定风格库也不应抢跑影响素材收集与选题广度）
+  const allowInjectStyleContext = styleSkillActive;
 
   const playbookSection = await (async () => {
     if (!allowInjectStyleContext) return "";
