@@ -181,6 +181,36 @@ sudo spctl --master-enable
   - `apps/desktop/src/agent/gatewayUrl.ts`：`getGatewayBaseUrl()`
   - `apps/desktop/src/state/kbStore.ts`：抽卡/手册相关请求必须用 `getGatewayBaseUrl()`
 
+---
+
+### 8) 右侧 Agent「新建会话 / 删除会话 / 删除历史会话」后输入框被遮罩挡住（光标不显示）
+
+#### 现象
+
+- 在右侧 Agent 面板点击 **新对话**，或删除当前对话 / 历史对话后：
+  - 底部输入框看起来像被“遮罩/蒙层”挡住
+  - 点击输入框 **不显示光标**（无法继续输入）
+
+#### 复现
+
+1) 右侧 Agent 任意对话中，点击 **新对话**；或点击 **删除当前对话**  
+2)（或）打开 **历史**，删除一条历史会话后关闭  
+3) 尝试点击底部输入框，观察光标是否出现
+
+#### 根因
+
+- `apps/desktop/src/components/AgentPane.tsx` 内存在多类全屏 `modalMask`（历史/从历史提交/@引用选择器/模型选择器）。
+- 在 **resetRun（新对话/删对话）**时，仅清空 Run Store，但**没有统一关闭这些 overlay，也没有在 overlay 关闭后把焦点还给输入框**。
+- 结果：overlay 状态残留或焦点丢失，用户感知为“遮罩挡住输入框/光标不显示”。
+
+#### 修复
+
+- 新建/删除会话时：统一 `closeAllOverlays()` 并 `focus()` 输入框
+- 任意 overlay 关闭时：自动把焦点还给输入框（避免“遮罩关闭了但无光标”的错觉）
+
+代码位置：
+- `apps/desktop/src/components/AgentPane.tsx`
+
 ### 4) Git Bash 下 Windows 命令参数被“路径转换”坑到（taskkill/…）
 
 #### 现象

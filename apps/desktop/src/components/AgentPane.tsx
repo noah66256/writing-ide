@@ -160,6 +160,33 @@ export function AgentPane() {
     return () => window.clearInterval(id);
   }, [isRunning, activity?.text, activity?.startedAt]);
 
+  // 统一处理：关闭遮罩类 overlay，并把焦点还给输入框
+  const focusComposerSoon = () => {
+    requestAnimationFrame(() => composerRef.current?.focus());
+  };
+
+  const closeAllOverlays = (opts?: { keepHistoryOpen?: boolean }) => {
+    setModelPickerOpen(false);
+    setRefPickerOpen(false);
+    setSubmitFromHistory(null);
+    setEditingId(null);
+    setEditingText("");
+    setRefPickerQuery("");
+    setCtxStripOpen(false);
+    setCopiedHint(null);
+    if (!opts?.keepHistoryOpen) setHistoryOpen(false);
+  };
+
+  // 任意 overlay 关闭后自动 focus：避免出现“遮罩关闭了但输入框无光标/无法打字”的错觉
+  const anyOverlayOpen = historyOpen || refPickerOpen || modelPickerOpen || Boolean(submitFromHistory);
+  const prevOverlayOpenRef = useRef(false);
+  useEffect(() => {
+    const prev = prevOverlayOpenRef.current;
+    prevOverlayOpenRef.current = anyOverlayOpen;
+    if (prev && !anyOverlayOpen) focusComposerSoon();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anyOverlayOpen]);
+
   const formatElapsed = (ms: number) => {
     const s = Math.max(0, Math.floor(ms / 1000));
     const m = Math.floor(s / 60);
@@ -427,6 +454,8 @@ export function AgentPane() {
 
   const onNewConversation = () => {
     if (isRunning) return;
+    // 防止“新对话后遮罩残留挡住输入框”
+    closeAllOverlays();
     // 归档当前对话到历史（若为空则直接清空）
     const hasAny =
       (useRunStore.getState().steps ?? []).length > 0 ||
@@ -435,6 +464,9 @@ export function AgentPane() {
       addConversation({ title: currentConversationTitle(), snapshot: buildSnapshot() });
     }
     useRunStore.getState().resetRun();
+    // 新对话：清掉 pinned（否则按钮可能“看起来可点但无效”）
+    setPinnedUserId(null);
+    focusComposerSoon();
   };
 
   const onDeleteCurrent = () => {
@@ -443,7 +475,10 @@ export function AgentPane() {
     if (!hasAny) return;
     const ok = window.confirm("删除当前对话？（仅清空右侧对话记录，不影响项目文件）");
     if (!ok) return;
+    closeAllOverlays();
     useRunStore.getState().resetRun();
+    setPinnedUserId(null);
+    focusComposerSoon();
   };
 
   const onCopyDiagnostics = async () => {
