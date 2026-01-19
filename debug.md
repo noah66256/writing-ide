@@ -290,12 +290,16 @@ sudo spctl --master-enable
   - 这会让前端把这些提示当作“真实输出气泡”渲染出来 → **刷屏**；
   - 更关键的是：在 `tool_calls` 分支里，我们已经发过一次 `assistant.done` 来切气泡边界，随后又在同一 `turn` 里追加了一次 `assistant.delta/assistant.done`（内部重试提示），导致 **同一 turn 内出现多条“assistant 气泡”**；
   - 一些渲染器/列表实现如果用 `turn`（或 step.turn）当 key，就会触发 **重复 key** 报警（表现为 `wx:key` 或类似 key warning）。
+- **toolCallId 的语义是“工具调用相关 ID”，不是“UI step.id”**：
+  - Desktop 曾直接把 `toolCallId`（常见为每回合从 `1/2/3...` 重新计数）当作 ToolBlock 的 `step.id`；
+  - 当一个 Run 有多回合工具调用时，会出现跨回合重复的 `step.id="1"` 等 → 触发 `wx:key` 重复警告。
 
 #### 修复（范式：内部提示走 notice，UI 气泡只承载“模型输出”）
 
 - **Gateway**：新增 SSE 事件 `run.notice`，把内部策略提示从 `assistant.delta` 迁移到 `run.notice`。
   - 这些 notice 会进入审计/日志（便于排查），但不再污染“输出气泡”。
 - **Desktop**：消费 `run.notice`，将其写入 logs，并用 ActivityBar 显示（例如 `系统：AutoRetry：任务未完成…`），**不新增 steps 输出气泡**。
+- **Desktop（补充）**：ToolBlock 的 UI `step.id` 不再复用 `toolCallId`；`toolCallId` 只用于与 Gateway 对齐（tool.call ↔ tool.result 回填），通过映射表关联到真正的 `step.id`。
 
 代码位置：
 - `apps/gateway/src/index.ts`：增加 `writeRunNotice()` 并替换内部重试/提示分支
@@ -368,6 +372,54 @@ sudo spctl --master-enable
 1) 触发 web radar（或其它会进入 `web_need_search/web_need_fetch` 的场景），跑到门禁满足配额后继续运行。  
 2) 点击“复制诊断”：logs 中应出现 `SkillToolCapsPolicy` 的 phase 变化记录，且 detail 含 `fromPhase`。  
 3) 观察后续回合：模型应能恢复调用 `doc.write/doc.applyEdits/kb.search` 等（视任务需要），不再出现“无写入权限/请手动保存”的误导 note。  
+
+---
+
+### 13) 绑定风格库后，“纯检索/调研”被误判为写作续跑，导致风格库强绑定抢跑
+
+#### 现象
+
+- 已绑定风格库（purpose=style），且 Run 中存在写作相关 `RUN_TODO`（例如之前在写稿/仿写）。
+- 用户此时提出 **纯检索/调研** 请求（不要求写成稿），例如：
+  - `查一查全网和github，看看这种问题怎么解决`
+  - `只跑搜索收集结果`
+- 实际表现：
+  - `style_imitate` 被激活/残留，风格手册/写法候选被注入；
+  - 模型输出偏“怎么写/按某风格写”，甚至抢跑进入风格闭环，而不是先完成检索/证据收集。
+
+#### 根因（范式层）
+
+- **双重 weak sticky 过宽**（把“短句”当成“继续写作”）：
+  - Agent-core `detectRunIntent`：在 `mainDoc.runIntent=auto` 且存在 `RUN_TODO` 时，用 `userPrompt.length<=60` 做“继承写作闭环”判断，容易把“查一下/调研”误判为写作；
+  - Gateway `IntentPolicy` phase0：同样用 `RUN_TODO + 短句` 把路由推到 `task_execution`（allow_tools），进一步放大误伤。
+- **research 场景漏判为 web_radar**：
+  - 早期 `web_radar`/`web_topic_radar` 偏“热点盘点”，对“全网+GitHub 大搜/查资料/调研方案”覆盖不足，导致 research 请求没有被分流到只读联网路径。
+- **风格 skill 不应在只读路由介入**：
+  - 即使 `toolPolicy=allow_readonly/deny`，若 `style_imitate` 仍作为 ActiveSkill 注入，会让“风格库”变成首要权重，污染检索/分析阶段。
+
+#### 修复（范式：路由先决定开写；风格库=按需 skill/tool）
+
+- **收紧 weak sticky**：
+  - 只有“继续/确认/格式切换/写法选择”等续跑信号才继承写作闭环；
+  - 对“查一下/搜索/检索/全网/GitHub/调研/研究/方案/怎么解决”等 **research-only** 信号，明确视为非写作（不继承写作闭环）。
+- **扩大 web_radar/web_topic_radar 覆盖**：
+  - 支持“全网 + GitHub 大搜/查资料/调研方案”触发只读联网路径（避免落入写作闭环）。
+- **只读路由强制 suppress `style_imitate`**：
+  - 当 `toolPolicy != allow_tools` 时，不让 `style_imitate` 进入 ActiveSkills（防止风格抢跑）。
+
+代码位置：
+- `packages/agent-core/src/runMachine.ts`：`detectRunIntent`（weak sticky 收紧 + research-only 识别）
+- `apps/gateway/src/index.ts`：`computeIntentRouteDecisionPhase0`（weak sticky 收紧）+ `looksLikeWebRadarIntent`（覆盖 research）+ ActiveSkills 抑制
+- `packages/agent-core/src/skills.ts`：`web_topic_radar` trigger 扩展（覆盖全网/GitHub 调研）
+
+#### 验证
+
+1) 绑定任意风格库（purpose=style），并确保 `RUN_TODO` 中有写作相关条目。  
+2) 输入：`查一查全网和github，看看这种问题怎么解决`。  
+3) 期望（诊断/日志）：
+   - `detectRunIntent.isWritingTask=false`
+   - `ACTIVE_SKILLS` 不包含 `style_imitate`，且包含 `web_topic_radar`（或 `IntentPolicy.routeId=web_radar`）
+4) 再输入明确写作指令（例如 `按风格库仿写一段，写入 drafts/a.md`），确认 `style_imitate` 能正常启用并走闭环。
 
 ### 4) Git Bash 下 Windows 命令参数被“路径转换”坑到（taskkill/…）
 

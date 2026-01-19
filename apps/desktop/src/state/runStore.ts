@@ -263,19 +263,32 @@ export const useRunStore = create<RunState>()(
   loadSnapshot: (snap) => {
     const s = snap && typeof snap === "object" ? snap : ({} as any);
     const cleanSteps = Array.isArray(s.steps) ? s.steps : [];
-    // 历史快照不携带可执行函数，统一清掉 apply/undo，并标记 undoable=false
+    // 历史快照不携带可执行函数，统一清掉 apply/undo，并标记 undoable=false。
+    // 同时做“契约修复”：确保 steps[].id 唯一（旧版本可能把 toolCallId=1/2/3… 当作 step.id，跨回合会重复，触发 wx:key 警告）。
+    const seenIds = new Set<string>();
     const normalized: Step[] = cleanSteps.map((step: any) => {
       if (!step || typeof step !== "object") return step as any;
-      if (step.type === "tool") {
+      const type0 = String((step as any).type ?? "");
+      const prefix = type0 === "user" ? "u" : type0 === "assistant" ? "a" : type0 === "tool" ? "t" : "s";
+      let id = typeof (step as any).id === "string" ? String((step as any).id) : "";
+      if (!id || seenIds.has(id)) {
+        let next = makeId(prefix);
+        while (seenIds.has(next)) next = makeId(prefix);
+        id = next;
+      }
+      seenIds.add(id);
+
+      if (type0 === "tool") {
         const t = step as any;
         return {
           ...t,
+          id,
           apply: undefined,
           undo: undefined,
           undoable: false,
         } as ToolBlockStep;
       }
-      return step as Step;
+      return { ...(step as any), id } as Step;
     });
     const mode = s.mode === "plan" || s.mode === "agent" || s.mode === "chat" ? s.mode : get().mode;
     const model = typeof s.model === "string" ? s.model : get().model;

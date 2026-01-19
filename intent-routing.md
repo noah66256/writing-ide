@@ -144,7 +144,8 @@ if looks_like_project_search:
 if looks_like_file_ops: // delete/rename/move/mkdir...
   -> task_execution (confidence≈0.88, enter_workflow, todo=required, tools=allow_tools)
 
-if short_message AND RUN_TODO exists:
+// 弱 sticky：只承接“续跑/确认/格式切换/写法选择”等 follow-up，避免把“查一下/全网+GitHub 大搜/调研方案”误判为写作续跑。
+if short_followup_like AND RUN_TODO exists AND NOT looks_like_research:
   -> task_execution (confidence=0.75~0.85)  // 弱 sticky：延续任务流
 
 if detectRunIntent.wantsWrite OR detectRunIntent.isWritingTask:

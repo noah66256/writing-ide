@@ -138,7 +138,7 @@ function matchTrigger(args: {
 export const STYLE_IMITATE_SKILL: SkillManifest = {
   id: "style_imitate",
   name: "风格仿写闭环",
-  description: "绑定风格库后自动启用：先检索样例→再 lint.style→最后允许写入（支持降级/跳过）。",
+  description: "绑定风格库后，仅在写作/改写/润色意图下自动启用：先检索样例→再 lint.style→最后允许写入（支持降级/跳过）。",
   priority: 100,
   stageKey: "agent.skill.style_imitate",
   autoEnable: true,
@@ -164,7 +164,8 @@ export const STYLE_IMITATE_SKILL: SkillManifest = {
 export const WEB_TOPIC_RADAR_SKILL: SkillManifest = {
   id: "web_topic_radar",
   name: "全网热点/素材雷达",
-  description: "面向“今日热点/新闻/找素材/盘点选题”：以广度优先收集候选话题与证据链接，避免过早收敛到 Top 3。",
+  description:
+    "面向“热点/新闻/找素材/盘点选题/全网+GitHub 调研”：以广度优先收集候选话题/资料与证据链接，避免过早收敛到 Top 3。",
   priority: 110,
   stageKey: "agent.skill.web_topic_radar",
   autoEnable: true,
@@ -184,7 +185,11 @@ export const WEB_TOPIC_RADAR_SKILL: SkillManifest = {
           // C) “盘点/选题/素材/雷达” + 时间敏感/热点信号（不要求出现“搜索”）
           "(?:盘点|汇总|整理|列表|清单|选题|话题|方向|素材|雷达)[\\s\\S]{0,80}(?:今天|今日|最新|最近|实时|快讯|资讯|热点|新闻|时事)|" +
           // D) 时间敏感/热点信号 + “盘点/选题/素材/雷达”
-          "(?:今天|今日|最新|最近|实时|快讯|资讯|热点|新闻|时事)[\\s\\S]{0,80}(?:盘点|汇总|整理|列表|清单|选题|话题|方向|素材|雷达)",
+          "(?:今天|今日|最新|最近|实时|快讯|资讯|热点|新闻|时事)[\\s\\S]{0,80}(?:盘点|汇总|整理|列表|清单|选题|话题|方向|素材|雷达)|" +
+          // E) “全网/GitHub 大搜/查资料/调研”类（不要求热点词）
+          "(?:全网|上网|联网|github|web\\.search|web\\.fetch)[\\s\\S]{0,80}(?:大搜|搜索|检索|搜一下|查找|查一下|调研|研究|最佳实践|方案|怎么解决|如何解决)|" +
+          // F) 反向：研究动词 + “全网/GitHub”
+          "(?:大搜|搜索|检索|搜一下|查找|查一下|调研|研究|最佳实践|方案|怎么解决|如何解决)[\\s\\S]{0,80}(?:全网|上网|联网|github|web\\.search|web\\.fetch)",
       },
     },
   ],

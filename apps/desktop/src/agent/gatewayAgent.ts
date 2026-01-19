@@ -1527,6 +1527,9 @@ export function startGatewayRun(args: {
       let buffer = "";
       let runId: string | null = null;
       let assistantId: string | null = null;
+      // 关键：toolCallId 是“与 Gateway 对齐的相关 ID”，不应直接当作 UI step.id（会跨回合重复：1/2/3…）
+      // 仅用于 gateway-executed tools：tool.call 创建占位 step，tool.result 回填时需要找到对应 stepId。
+      const gatewayToolStepIdsByCallId = new Map<string, string[]>();
 
       const ensureAssistant = () => {
         if (assistantId) return assistantId;
@@ -1672,8 +1675,7 @@ export function startGatewayRun(args: {
             if (executedBy === "gateway") {
               const def = getTool(name);
               const parsedArgs = parseSseToolArgs(rawArgs);
-              addTool({
-                id: toolCallId || undefined,
+              const stepId = addTool({
                 toolName: name,
                 status: "running",
                 input: parsedArgs,
@@ -1684,6 +1686,11 @@ export function startGatewayRun(args: {
                 kept: false,
                 applied: false,
               });
+              if (toolCallId) {
+                const q = gatewayToolStepIdsByCallId.get(toolCallId) ?? [];
+                q.push(stepId);
+                gatewayToolStepIdsByCallId.set(toolCallId, q);
+              }
               continue;
             }
 
@@ -1695,9 +1702,7 @@ export function startGatewayRun(args: {
               exec.result.ok ? exec.result.riskLevel ?? def?.riskLevel ?? "high" : def?.riskLevel ?? "high";
             const initialKept = stepApplyPolicy === "auto_apply";
 
-            // 用 toolCallId 作为 stepId，便于后续 tool.result 对齐（即使未来有 server-side tool）
             const stepId = addTool({
-              id: toolCallId || undefined,
               toolName: name,
               status: exec.result.ok ? "success" : "failed",
               input: exec.parsedArgs,
@@ -1735,9 +1740,13 @@ export function startGatewayRun(args: {
               const out = payload?.output;
               const meta = payload?.meta ?? null;
               if (toolCallId) {
-                const st = (useRunStore.getState().steps ?? []).find((s: any) => s && s.type === "tool" && s.id === toolCallId);
+                const q = gatewayToolStepIdsByCallId.get(toolCallId) ?? [];
+                const stepId = q.length ? q[0] : "";
+                const st = stepId
+                  ? (useRunStore.getState().steps ?? []).find((s: any) => s && s.type === "tool" && s.id === stepId)
+                  : null;
                 if (st && st.type === "tool" && st.status === "running") {
-                  patchTool(toolCallId, {
+                  patchTool(stepId, {
                     status: ok0 ? "success" : "failed",
                     output: out,
                     ...(meta && typeof meta === "object"
@@ -1747,6 +1756,10 @@ export function startGatewayRun(args: {
                         }
                       : {}),
                   });
+                  // 出队：避免同一个 toolCallId（跨回合复用 1/2/3…）导致映射错误或无限增长
+                  if (q.length) q.shift();
+                  if (q.length) gatewayToolStepIdsByCallId.set(toolCallId, q);
+                  else gatewayToolStepIdsByCallId.delete(toolCallId);
                   if (useRunStore.getState().isRunning) setActivity("正在等待模型继续…", { resetTimer: true });
                 }
               }

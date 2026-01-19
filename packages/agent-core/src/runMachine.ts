@@ -229,7 +229,16 @@ export function detectRunIntent(args: {
   if (!mainDocIntent && !isWritingTaskFinal) {
     const todoRaw = Array.isArray(args.runTodo) ? args.runTodo : [];
     const todo = todoRaw.slice(0, 50);
-    const shortOrContinue = userPrompt.length <= 60 || /^(继续|好|可以|行|没问题|确认|按这个来|就这样|ok|OK)\b/.test(userPrompt);
+    const promptTrim = String(userPrompt ?? "").trim();
+    // 注意：这里的“弱 sticky”只用于承接“写作闭环”的续跑（避免用户回一句“继续/视频脚本”导致写作闭环掉线）。
+    // 但不能把“查一下/搜一下/全网+GitHub 大搜”这类研究/检索请求误判为写作（否则会触发 style_imitate 抢跑，污染检索阶段）。
+    const looksLikeExplicitContinue = /^(继续|好|可以|行|没问题|确认|按这个来|就这样|ok|OK)\b/i.test(promptTrim);
+    const looksLikeFormatSwitch =
+      promptTrim.length <= 24 && /(视频脚本|脚本|文案|口播|小红书|公众号|B站|抖音|标题|大纲|提纲|终稿)/.test(promptTrim);
+    const looksLikeResearchOnly =
+      /(查(一下)?|查询|搜索|检索|全网|上网|联网|web\.search|web\.fetch|github|资料|来源|链接|引用|证据|大搜|调研|研究)/i.test(promptTrim) &&
+      !/(写|仿写|改写|润色|续写|扩写|脚本|文案|终稿|写入)/.test(promptTrim);
+    const shortFollowUpLike = (looksLikeExplicitContinue || looksLikeFormatSwitch) && promptTrim.length <= 60 && !looksLikeResearchOnly;
     const hasWaiting = todo.some((t: any) => {
       const status = String(t?.status ?? "").trim().toLowerCase();
       const note = String(t?.note ?? "").trim();
@@ -240,9 +249,10 @@ export function detectRunIntent(args: {
     });
     const todoLooksWriting = todo.some((t: any) => /(写|仿写|改写|润色|脚本|文案|终稿|写入|lint\.style)/.test(String(t?.text ?? "")));
     const looksNonWriting =
-      /(分析|排查|报错|bug|为什么|怎么修|白屏|崩溃|日志|报错栈)/.test(userPrompt) &&
-      !/(写|仿写|改写|润色|脚本|文案|终稿|写入)/.test(userPrompt);
-    if (!looksNonWriting && !looksLikeFileOpsTask && todoLooksWriting && (hasWaiting || shortOrContinue)) {
+      ((/(分析|排查|报错|bug|为什么|怎么修|怎么解决|白屏|崩溃|日志|报错栈)/.test(promptTrim) &&
+        !/(写|仿写|改写|润色|脚本|文案|终稿|写入)/.test(promptTrim)) ||
+        looksLikeResearchOnly);
+    if (!looksNonWriting && !looksLikeFileOpsTask && todoLooksWriting && (hasWaiting || shortFollowUpLike)) {
       isWritingTaskFinal = true;
     }
   }

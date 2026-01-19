@@ -911,7 +911,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       toolPolicy: "allow_readonly" as const,
       nextAction: "enter_workflow" as const,
       desc: "全网热点/新闻/素材盘点（广度优先：多轮 web.search + 多篇 web.fetch）",
-      examples: ["今天 AI 圈财经圈热点盘点", "全网热点雷达", "找一些最新资料/选题"],
+      examples: ["今天 AI 圈财经圈热点盘点", "全网热点雷达", "找一些最新资料/选题", "全网+GitHub 大搜：查一下这个问题怎么解决"],
     },
     {
       routeId: "project_search",
@@ -984,12 +984,23 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     const t = String(text ?? "").trim();
     if (!t) return false;
 
-    // 目的：识别“热点/新闻/时事/最新/盘点/找素材/选题”这类广度优先请求，避免误路由到 project_search。
+    // 目的：
+    // - 识别“全网热点/新闻/素材盘点（广度优先）”
+    // - 以及“全网/GitHub 大搜/查资料/研究方案（偏 research）”
+    // 避免误路由到 project_search（项目内搜索）。
     // 注意：尽量避免“整理这篇新闻/写一篇评论”这种编辑任务误触发。
-    const hasSearchVerb = /(搜索|检索|搜一下|查找|上网|全网|联网|web\.search|web\.fetch)/i.test(t);
+    const hasSearchVerb = /(搜索|检索|搜一下|查找|查(一下)?|上网|全网|联网|web\.search|web\.fetch)/i.test(t);
+    const hasWebSignal = /(全网|上网|联网|web\.search|web\.fetch)/i.test(t);
+    const hasGithubSignal = /github/i.test(t);
+    // 避免误伤：用户在做“项目内搜索/查配置”时也可能提到 github（例如 GitHub Actions）。
+    // 若明显有“项目提示词”，且没有明确 web 信号，则不当作 web_radar。
+    const hasProjectHints =
+      /(文件|目录|项目|代码|路径|\.md|\.mdx|\.ts|\.tsx|\.js|\.json|@\{[^}]+\}|src\/|apps\/|packages\/)/i.test(t) ||
+      /(哪里用到了|在哪(里)?用|引用|import|require|调用|定义|实现)/i.test(t);
     const hasHotSignal = /(热点|新闻|时事|快讯|资讯|盘前|盘中|盘后)/.test(t);
     const hasTimeSignal = /(今天|今日|最新|最近|实时|刚刚)/.test(t);
     const hasInventorySignal = /(盘点|汇总|整理|列表|清单|多少条|几条|选题|话题|方向|素材|雷达)/.test(t);
+    const hasResearchSignal = /(大搜|调研|研究|资料|论文|方案|最佳实践|best\s*practice|怎么解决|如何解决|怎么做|怎么搞)/i.test(t);
 
     // “整理这篇新闻/这条资讯”通常是编辑，不是全网雷达
     const looksLikeSingleDocEdit =
@@ -1000,6 +1011,10 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       !hasTimeSignal &&
       !/https?:\/\//i.test(t);
     if (looksLikeSingleDocEdit) return false;
+
+    // “全网/GitHub 查资料/研究方案”：不要求热点/时间信号，但必须同时具备“web/github 信号 + 搜索/研究动词”
+    // 典型：全网+GitHub 大搜、查资料、研究怎么解决
+    if ((hasWebSignal || (hasGithubSignal && !hasProjectHints)) && (hasSearchVerb || hasResearchSignal)) return true;
 
     // 触发条件（偏保守）：
     // - 明确要“搜/联网”且提到热点/时间敏感；或
@@ -1305,8 +1320,26 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     }
 
     const todo = Array.isArray(args.runTodo) ? args.runTodo : [];
+    // 弱 sticky：仅用于“续跑/确认/格式切换”这类承接上一个任务的短回复。
+    // 重要：不能把“查一下/全网+GitHub 大搜/研究方案”误当成写作续跑，否则会把风格库/写作闭环抢跑进来。
+    const looksLikeExplicitContinue = /^(继续|好|可以|行|没问题|确认|按这个来|就这样|ok|OK)\b/i.test(pTrim);
+    const looksLikeChoice = /^写法\s*[ABC]\b/i.test(pTrim) || /\bcluster[_-]\d+\b/i.test(pTrim);
+    const looksLikeFormatSwitch =
+      pTrim.length <= 24 && /(视频脚本|脚本|文案|口播|小红书|公众号|B站|抖音|标题|大纲|提纲|终稿)/.test(pTrim);
+    const looksLikeResearchOnly =
+      /(查(一下)?|查询|搜索|检索|全网|上网|联网|web\.search|web\.fetch|github|资料|来源|链接|引用|证据|大搜|调研|研究|方案|最佳实践|best\s*practice|怎么解决|如何解决)/i.test(pTrim) &&
+      !/(写|仿写|改写|润色|生成|写入|保存|落盘|打包|安装包|exe|nsis|portable)/.test(pTrim);
+    const hasWaiting = todo.some((t: any) => {
+      const status = String(t?.status ?? "").trim().toLowerCase();
+      const note = String(t?.note ?? "").trim();
+      if (status === "blocked") return true;
+      if (/^blocked\b/i.test(note)) return true;
+      if (/(等待用户|等待你|待确认|等你确认|需要你确认|请确认)/.test(note)) return true;
+      return false;
+    });
     const shortOrContinue =
-      pTrim.length <= 60 || /^(继续|好|可以|行|没问题|确认|按这个来|就这样|ok|OK)\b/.test(pTrim);
+      !looksLikeResearchOnly &&
+      (looksLikeShortFollowUp(pTrim) || looksLikeExplicitContinue || looksLikeChoice || looksLikeFormatSwitch || (hasWaiting && pTrim.length <= 24));
     const looksExplicitNonTask = /(只讨论|先讨论|先聊|只聊|别执行|不要执行|别动手|先别做|不需要你做|不用动手)/.test(pTrim);
     if (todo.length && shortOrContinue && !looksExplicitNonTask) {
       return {
@@ -1383,12 +1416,28 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   // Web Radar（热点/素材盘点）阶段：强制“先广度收集”，避免风格库/写作闭环抢跑导致过早收敛。
   // - 如果命中 web_topic_radar skill，或文本本身看起来是热点盘点，则本轮 suppress style_imitate（让它留到“用户明确要写稿”再开）。
   const webRadarByText = looksLikeWebRadarIntent(userPrompt);
-  const webRadarActive = rawActiveSkillIds.includes("web_topic_radar") || webRadarByText;
+  // 以路由为准：即使 skill 误触发，也不要在非 web_radar 路由里启用“雷达配额/门禁”。
+  //（典型误伤：项目内搜索里包含 “github” 关键词。）
+  const webRadarActive =
+    webRadarByText || (rawActiveSkillIds.includes("web_topic_radar") && String((intentRoute as any)?.routeId ?? "") === "web_radar");
+  // 额外门禁（范式）：当路由判定为“只读/不允许工具”（discussion/debug/analysis_readonly/project_search/web_radar 等）时，
+  // 不应让 style_imitate 作为 ActiveSkill 介入（否则会把“风格库”变成默认首要权重，干扰纯检索/分析/排查）。
+  const suppressStyleByToolPolicy = String((intentRoute as any)?.toolPolicy ?? "").trim() !== "allow_tools";
+  const suppressStyle = webRadarActive || suppressStyleByToolPolicy;
   const suppressedSkillIds: string[] = [];
-  const activeSkills = webRadarActive
-    ? (rawActiveSkills ?? []).filter((s: any) => String(s?.id ?? "").trim() !== "style_imitate")
-    : rawActiveSkills;
-  if (webRadarActive && rawActiveSkillIds.includes("style_imitate")) suppressedSkillIds.push("style_imitate");
+  const routeId0 = String((intentRoute as any)?.routeId ?? "").trim();
+  // project_search 路由：不应启用 web_topic_radar（避免把“项目内查 github actions”误导到 web.search/web.fetch）
+  const suppressWebRadarSkillByRoute = routeId0 === "project_search";
+
+  let activeSkills = (rawActiveSkills ?? []) as any[];
+  if (suppressWebRadarSkillByRoute) {
+    if (rawActiveSkillIds.includes("web_topic_radar")) suppressedSkillIds.push("web_topic_radar");
+    activeSkills = activeSkills.filter((s: any) => String(s?.id ?? "").trim() !== "web_topic_radar");
+  }
+  if (suppressStyle) {
+    if (rawActiveSkillIds.includes("style_imitate")) suppressedSkillIds.push("style_imitate");
+    activeSkills = activeSkills.filter((s: any) => String(s?.id ?? "").trim() !== "style_imitate");
+  }
 
   const activeSkillIds = (activeSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
   const stageKeyForRun = pickSkillStageKeyForAgentRun(activeSkills, "agent.run");
