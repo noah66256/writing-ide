@@ -17,6 +17,12 @@
 1) **OpenAI-compatible SSE 格式差异**
    - 有的代理不使用 `choices[0].delta.content`，而是 `choices[0].message.content` 或 `choices[0].text`。
    - 解析只认 delta 时会得到 0 delta。
+2) **“看似流式，但并非严格 SSE data: 行”**
+   - 一些代理/网关会返回：
+     - `text/event-stream` 但逐行直接输出 JSON（不带 `data:` 前缀）；
+     - 或直接返回 `application/x-ndjson` / `application/ndjson`；
+     - 或者**忽略 `stream=true`，直接返回 `application/json` 的一次性响应**。
+   - 若解析器只接受 `data:` 行，会导致**虽然上游有输出，但下游累计到 0 delta**，最终触发 `empty_output`。
 2) **上游成功但空内容**
    - finish_reason=STOP 但 content 空，SDK/代理未报错。
    - 若下游不做兜底，流程会被 AutoRetry 误认为“未完成”。
@@ -24,6 +30,10 @@
 ## 本项目的落地策略
 ### A. 解析兼容
 - 兼容解析 `delta.content` / `message.content` / `text` 三种形态。
+### A2. 行格式兼容（data: 与非 data:）
+- SSE 逐行读取时，除 `data:` 外，也接受“直接 JSON 行”（并跳过 `event:/id:/retry:` 等元信息行）。
+### A3. content-type 兼容（application/json）
+- 当 content-type 为 `application/json`（且非 event-stream/ndjson）时，按一次性 JSON 解析并产出 delta。
 ### B. 0 delta 兜底一次非流式
 - 仅当 **流结束且无任何 delta** 时触发一次非流式请求；
 - 避免影响正常流式与性能。

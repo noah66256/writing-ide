@@ -89,6 +89,7 @@ export async function* streamChatCompletions(args: {
     status: 0,
     contentType: "" as string,
     sawDataLine: false,
+    sawPayloadLine: false,
     dataLinesSample: [] as string[],
     parsedJsonOk: 0,
     parsedJsonFail: 0,
@@ -165,17 +166,68 @@ export async function* streamChatCompletions(args: {
     return;
   }
 
+  // 兼容：一些 OpenAI-compatible 会忽略 stream=true，直接返回 application/json（一次性 JSON）。
+  // 这时不应该按 SSE 的 data: 逐行去解析，否则会出现 0 delta / empty_output。
+  {
+    const ct = diag.contentType.toLowerCase();
+    const isEventStream = ct.includes("text/event-stream");
+    const isNdjson = ct.includes("application/x-ndjson") || ct.includes("application/ndjson");
+    const isJson = ct.includes("application/json");
+    if (!isEventStream && !isNdjson && isJson) {
+      const text = await res.text().catch(() => "");
+      let json: any = null;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        yield { type: "error", error: text || "UPSTREAM_INVALID_JSON" };
+        return;
+      }
+
+      const content =
+        json?.choices?.[0]?.message?.content ??
+        (json?.choices?.[0] as any)?.text ??
+        json?.choices?.[0]?.delta?.content;
+      if (typeof content === "string" && content.trim().length > 0) {
+        yield { type: "delta", delta: content };
+      }
+
+      const u = json?.usage;
+      const pt = Number(u?.prompt_tokens ?? u?.promptTokens);
+      const ct2 = Number(u?.completion_tokens ?? u?.completionTokens);
+      const tt = Number(u?.total_tokens ?? u?.totalTokens);
+      if (Number.isFinite(pt) || Number.isFinite(ct2) || Number.isFinite(tt)) {
+        yield {
+          type: "usage",
+          usage: {
+            promptTokens: Number.isFinite(pt) ? Math.max(0, Math.floor(pt)) : 0,
+            completionTokens: Number.isFinite(ct2) ? Math.max(0, Math.floor(ct2)) : 0,
+            ...(Number.isFinite(tt) ? { totalTokens: Math.max(0, Math.floor(tt)) } : {}),
+          },
+          raw: json,
+        };
+      }
+
+      yield { type: "done" };
+      return;
+    }
+  }
+
   let sawFinishReason = false;
   let lastMessageContent = "";
   let lastTextContent = "";
-  for await (const line of readLines(res.body)) {
+  for await (const line0 of readLines(res.body)) {
+    const line = String(line0 ?? "");
     if (!line) continue;
     if (line.startsWith(":")) continue; // sse comment/ping
-    if (!line.startsWith("data:")) continue;
+    if (line.startsWith("event:")) continue;
+    if (line.startsWith("id:")) continue;
+    if (line.startsWith("retry:")) continue;
 
-    diag.sawDataLine = true;
-    const data = line.slice("data:".length).trim();
+    const isData = line.startsWith("data:");
+    if (isData) diag.sawDataLine = true;
+    const data = isData ? line.slice("data:".length).trim() : line.trim();
     if (!data) continue;
+    diag.sawPayloadLine = true;
 
     if (data === "[DONE]") {
       diag.sawDone = true;
@@ -288,7 +340,7 @@ export async function* streamChatCompletions(args: {
 
   if (
     diag.deltaChars === 0 &&
-    (diag.sawDataLine || diag.sawDone || sawFinishReason) &&
+    (diag.sawPayloadLine || diag.sawDataLine || diag.sawDone || sawFinishReason) &&
     !args.signal?.aborted
   ) {
     const once = await chatCompletionOnce({
