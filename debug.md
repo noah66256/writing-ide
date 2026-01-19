@@ -476,6 +476,29 @@ sudo spctl --master-enable
 1) 触发一次写入流程（可含 `doc.write` 或 `doc.previewDiff`）。  
 2) 若模型最终输出为空，应自动补出“已完成写入/已生成提案”的结束语。  
 3) Run 不再以 `empty_output` 结束。  
+
+---
+
+### 16) 流式返回 0 delta 导致最终输出为空
+
+#### 现象
+- SSE 流结束（finish_reason=STOP 或 [DONE]），但 **assistantText 为空**。
+- 进而触发 `AutoRetryPolicy: empty_output / need_final_text`。
+
+#### 根因（范式层）
+- 不同 OpenAI-compatible 代理的 SSE 格式差异：
+  - 有的返回 `choices[0].message.content` 或 `choices[0].text`；
+  - 我们仅解析 `choices[0].delta.content`，导致 0 delta。
+- 部分上游会“成功但空内容”，需工程兜底。
+
+#### 修复
+- `openaiCompat.streamChatCompletions`：
+  - 兼容 `delta.content` / `message.content` / `text`；
+  - 当流结束且 0 delta 时，兜底一次非流式请求。
+
+#### 验证
+1) 复现用例中应不再出现 `empty_output`。
+2) 日志 `openaiCompat.diag` 不再出现频繁的 `deltaChars==0`。
 ### 4) Git Bash 下 Windows 命令参数被“路径转换”坑到（taskkill/…）
 
 #### 现象

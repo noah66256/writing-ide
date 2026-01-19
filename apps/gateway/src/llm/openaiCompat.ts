@@ -101,6 +101,8 @@ export async function* streamChatCompletions(args: {
       deltaContentType: string;
       hasMessageContent: boolean;
       messageContentType: string;
+      hasTextContent: boolean;
+      textContentType: string;
       hasToolCalls: boolean;
       hasReasoning: boolean;
     },
@@ -164,6 +166,8 @@ export async function* streamChatCompletions(args: {
   }
 
   let sawFinishReason = false;
+  let lastMessageContent = "";
+  let lastTextContent = "";
   for await (const line of readLines(res.body)) {
     if (!line) continue;
     if (line.startsWith(":")) continue; // sse comment/ping
@@ -176,13 +180,7 @@ export async function* streamChatCompletions(args: {
     if (data === "[DONE]") {
       diag.sawDone = true;
       diag.endedBy = "DONE";
-      if (diag.deltaChars === 0) {
-        // 用 stdout，便于在 pm2 out.log 里直接看到
-        // eslint-disable-next-line no-console
-        console.log("[openaiCompat.diag] upstream ended with 0 delta chars", diag);
-      }
-      yield { type: "done" };
-      return;
+      break;
     }
 
     if (diag.dataLinesSample.length < 6) {
@@ -206,7 +204,8 @@ export async function* streamChatCompletions(args: {
       const d0 = c0?.delta;
       const deltaKeys = d0 && typeof d0 === "object" ? Object.keys(d0) : [];
       const deltaContent = d0?.content;
-      const msgContent = c0?.message?.content;
+    const msgContent = c0?.message?.content;
+    const textContent = (c0 as any)?.text;
       diag.sampleShape = {
         keys,
         hasChoices: Array.isArray(json?.choices),
@@ -216,6 +215,8 @@ export async function* streamChatCompletions(args: {
         deltaContentType: typeof deltaContent,
         hasMessageContent: msgContent !== undefined,
         messageContentType: typeof msgContent,
+      hasTextContent: textContent !== undefined,
+      textContentType: typeof textContent,
         hasToolCalls: Boolean((d0 as any)?.tool_calls || (c0 as any)?.tool_calls),
         hasReasoning: Boolean((d0 as any)?.reasoning || (d0 as any)?.reasoning_content || (c0 as any)?.reasoning),
       };
@@ -238,10 +239,40 @@ export async function* streamChatCompletions(args: {
     }
 
     const choice = json?.choices?.[0];
+    let emitted = false;
     const delta = choice?.delta?.content;
     if (typeof delta === "string" && delta.length > 0) {
       diag.deltaChars += delta.length;
       yield { type: "delta", delta };
+      emitted = true;
+    }
+    if (!emitted) {
+      const msgContentNow = choice?.message?.content;
+      if (typeof msgContentNow === "string" && msgContentNow.length > 0) {
+        const diff = msgContentNow.startsWith(lastMessageContent)
+          ? msgContentNow.slice(lastMessageContent.length)
+          : msgContentNow;
+        lastMessageContent = msgContentNow;
+        if (diff.length > 0) {
+          diag.deltaChars += diff.length;
+          yield { type: "delta", delta: diff };
+          emitted = true;
+        }
+      }
+    }
+    if (!emitted) {
+      const textContentNow = (choice as any)?.text;
+      if (typeof textContentNow === "string" && textContentNow.length > 0) {
+        const diff = textContentNow.startsWith(lastTextContent)
+          ? textContentNow.slice(lastTextContent.length)
+          : textContentNow;
+        lastTextContent = textContentNow;
+        if (diff.length > 0) {
+          diag.deltaChars += diff.length;
+          yield { type: "delta", delta: diff };
+          emitted = true;
+        }
+      }
     }
 
     const finishReason = choice?.finish_reason;
@@ -250,17 +281,39 @@ export async function* streamChatCompletions(args: {
       diag.sawFinishReason = true;
       if (!wantsUsage) {
         diag.endedBy = `finish_reason:${String(finishReason)}`;
-        if (diag.deltaChars === 0) {
-          // eslint-disable-next-line no-console
-          console.log("[openaiCompat.diag] upstream finished with 0 delta chars", diag);
-        }
-        yield { type: "done" };
-        return;
+        break;
       }
     }
   }
 
-  if (sawFinishReason) {
+  if (
+    diag.deltaChars === 0 &&
+    (diag.sawDataLine || diag.sawDone || sawFinishReason) &&
+    !args.signal?.aborted
+  ) {
+    const once = await chatCompletionOnce({
+      config: args.config,
+      model: args.model,
+      messages: args.messages,
+      temperature: args.temperature,
+      maxTokens: args.maxTokens,
+      signal: args.signal,
+      endpoint: args.endpoint,
+    });
+    if (once.ok && once.content.trim().length > 0) {
+      // eslint-disable-next-line no-console
+      console.log("[openaiCompat.diag] stream empty, fallback to non-stream succeeded", {
+        model: args.model,
+        endpoint: args.endpoint,
+      });
+      yield { type: "delta", delta: once.content };
+      if (once.usage) yield { type: "usage", usage: once.usage, raw: once.raw };
+      yield { type: "done" };
+      return;
+    }
+  }
+
+  if (sawFinishReason || diag.sawDone) {
     diag.endedBy = diag.endedBy || "eof_after_finish_reason";
     yield { type: "done" };
   } else {
