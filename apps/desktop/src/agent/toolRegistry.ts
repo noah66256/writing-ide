@@ -1460,12 +1460,12 @@ const tools: ToolDefinition[] = [
     applyPolicy: "proposal",
     reversible: false,
     run: async (args) => {
-      const path = String(args.path ?? "");
+      const path = normalizeRelPath(String(args.path ?? ""));
       if (!path) return { ok: false, error: "MISSING_PATH" };
       const s = useProjectStore.getState();
       const file = s.getFileByPath(path);
-      if (!file) return { ok: false, error: "FILE_NOT_FOUND" };
-      const before = await s.ensureLoaded(file.path);
+      // 允许预览“新文件写入”（file 不存在时 before 视为空字符串）
+      const before = file ? await s.ensureLoaded(file.path) : "";
       const newContent = typeof args.newContent === "string" ? String(args.newContent) : undefined;
       const edits = args.edits as any;
       let after = newContent ?? before;
@@ -1479,6 +1479,7 @@ const tools: ToolDefinition[] = [
         }));
         after = applyTextEdits({ before, edits: norm }).after;
       }
+      // 若既无 newContent 也无 edits，则视为“无变化预览”（避免报错卡住流程）
       const d = unifiedDiff({ path, before, after });
       return {
         ok: true,
@@ -1604,7 +1605,7 @@ const tools: ToolDefinition[] = [
     applyPolicy: "auto_apply",
     reversible: true,
     run: async (args) => {
-      const path = String(args.path ?? "");
+      const path = normalizeRelPath(String(args.path ?? ""));
       const content = String(args.content ?? "");
       if (!path) return { ok: false, error: "MISSING_PATH" };
       const exists = !!useProjectStore.getState().getFileByPath(path);

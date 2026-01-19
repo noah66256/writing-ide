@@ -1279,11 +1279,27 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
     // 全网热点/新闻/素材盘点：只读联网工具闭环（广度优先，不要误判为项目内搜索）
     if (looksLikeWebRadarIntent(pTrim)) {
+      // 关键：若用户明确要求“生成/写入/保存为 Markdown 文件”，则不能走 allow_readonly（否则 doc.write 会被裁剪掉，模型会误判“无法创建物理文件”）。
+      // 仍保持 WebGate 广度门禁（由 webRadarByText/webRadarActive 触发），但最终允许写入类工具完成落盘。
+      const wantsWriteFile =
+        /(写入|保存|另存为|落盘|生成\s*(?:md|markdown)|生成.*\.(?:md|markdown)\b|写到|输出到|存到|创建\s*文件|doc\.write)/i.test(pTrim);
+      if (wantsWriteFile || args.intent?.wantsWrite || args.intent?.isWritingTask) {
+        return {
+          intentType: "task_execution",
+          confidence: 0.9,
+          nextAction: "enter_workflow",
+          todoPolicy: "required",
+          toolPolicy: "allow_tools",
+          reason: "web_radar 但用户明确要求生成/写入文件：允许工具闭环（最终写入 doc.write）",
+          derivedFrom: ["regex:web_radar", "signal:write_file", ...derivedFrom],
+          routeId: "task_execution",
+        };
+      }
       return {
         intentType: "task_execution",
         confidence: 0.88,
         nextAction: "enter_workflow",
-        todoPolicy: "optional",
+        todoPolicy: "required",
         toolPolicy: "allow_readonly",
         reason: "用户在做全网热点/新闻/素材盘点：允许只读联网工具（web.search/web.fetch）",
         derivedFrom: ["regex:web_radar", ...derivedFrom],
