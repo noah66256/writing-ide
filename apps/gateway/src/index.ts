@@ -18,7 +18,7 @@ import {
   streamChatCompletionViaProvider,
 } from "./llm/providerAdapter.js";
 import { isToolCallMessage, parseToolCalls, renderToolResultXml } from "./agent/xmlProtocol.js";
-import { toolNamesForMode, toolsPrompt, type AgentMode } from "./agent/toolRegistry.js";
+import { getToolsForMode, toolNamesForMode, type AgentMode } from "./agent/toolRegistry.js";
 import { createAiConfigService } from "./aiConfig.js";
 import { toolConfig } from "./toolConfig.js";
 import { validateToolCallArgs } from "@writing-ide/tools";
@@ -728,12 +728,29 @@ type ToolResultPayload = {
 
 const agentRunWaiters = new Map<string, Map<string, (payload: ToolResultPayload) => void>>();
 
-function buildAgentProtocolPrompt(mode: AgentMode) {
+function toolsPromptForAllowed(args: { mode: AgentMode; allowedToolNames?: Set<string> | null }) {
+  const allow = args.allowedToolNames ?? null;
+  const list = getToolsForMode(args.mode);
+  const filtered = allow ? list.filter((t) => allow.has(t.name)) : list;
+  if (!filtered.length) return "（当前模式不允许调用工具）\n";
+  return filtered
+    .map((t) => {
+      const argLines = t.args.length
+        ? t.args.map((a) => `- ${a.required ? "(必填) " : ""}${a.name}: ${a.desc}`).join("\n")
+        : "- （无参数）";
+      return `工具：${t.name}\n说明：${t.description}\n参数：\n${argLines}\n`;
+    })
+    .join("\n");
+}
+
+function buildAgentProtocolPrompt(args: { mode: AgentMode; allowedToolNames?: Set<string> | null }) {
+  const mode = args.mode;
   const modePolicy =
     mode === "chat"
       ? `当前模式：Chat（纯对话 + 只读联网）。\n` +
-        `- 你**允许**调用只读联网工具：web.search / web.fetch（用于“最新/时事/找素材/抓正文证据”）。\n` +
-        `- 除 web.* 外，**不要调用任何工具**（不要读写项目文件；不要改动项目）。\n` +
+        `- 你**允许**调用只读工具：time.now / web.search / web.fetch（用于“最新/时事/找素材/抓正文证据”）。\n` +
+        `- 在调用 web.search 前，建议先调用 time.now 获取当前日期/年份，避免用错年份。\n` +
+        `- 除 time.now 与 web.* 外，**不要调用任何工具**（不要读写项目文件；不要改动项目）。\n` +
         `- 你只需用 Markdown 输出可读内容即可。\n\n`
       : `当前模式：${mode === "plan" ? "Plan（逐步）" : "Agent（一次成型+迭代）"}。\n` +
         `你需要按“写作闭环”工作，并把进度写入 Main Doc / Todo。\n` +
@@ -741,6 +758,7 @@ function buildAgentProtocolPrompt(mode: AgentMode) {
         `- **确认再动手（必须）**：若你准备进行任何“主动行为”（读项目文件/KB 检索/改写或生成正文/写入文件/批量工具调用），必须先用 Markdown 向用户确认（最多 5 个高价值问题：平台画像/受众/目标/口吻人设/素材来源）；用户确认后再动手。\n` +
         `- **范围控制（必须）**：不要因为 activePath/openPaths/目录里看起来“相关”，就自行 doc.read；只有当用户任务明确需要，且用户已确认你可以读取时，才读。\n` +
         `- **上下文优先级（必须）**：优先使用 Context Pack 中的 REFERENCES（来自 @{} 引用，已提供正文）与已关联 KB（KB_SELECTED_LIBRARIES/KB_LIBRARY_PLAYBOOK/KB_STYLE_CLUSTERS）。不要默认把“光标文件”当上下文；当且仅当显式引用/用户确认后才读其它文件。找不到信息时再调用 project.listFiles 做兜底遍历。\n` +
+        `- **时间敏感联网（必须）**：当你要调用 web.search 时，先调用 time.now 获取当前日期/年份，再决定 query/freshness（避免在 2026 还搜索 2024）。\n` +
         `- **完成即停（必须）**：当你已经满足用户本轮目标（例如已回复 OK/已回答问题/已完成写入），立刻停止，不要追加新任务或开启下一段流程。\n\n` +
         `1) 产 Todo List（可追踪，默认需要）：在用户确认要你继续执行写作闭环后，你必须调用 run.setTodoList。\n` +
         `   - 即使你需要澄清，也必须先把“澄清问题/默认假设/下一步动作”写进 todo（澄清最多 5 个高价值问题：平台画像/受众/目标/口吻人设/素材来源）。\n` +
@@ -778,7 +796,7 @@ function buildAgentProtocolPrompt(mode: AgentMode) {
     `  A) XML（通常为 system message）：<tool_result name="xxx"><![CDATA[{...json}]]></tool_result>\n` +
     `  B) 纯文本（可能为 user message）：[tool_result name="xxx"]\\n{...json}\\n[/tool_result]\n\n` +
     `你可用的工具如下（只能调用这里列出的）：\n\n` +
-    toolsPrompt(mode)
+    toolsPromptForAllowed({ mode, allowedToolNames: args.allowedToolNames ?? null })
   );
 }
 
@@ -1815,7 +1833,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   writeEvent("run.start", { runId, model, mode });
 
   const messages: OpenAiChatMessage[] = [
-    { role: "system", content: buildAgentProtocolPrompt(mode) },
+    { role: "system", content: buildAgentProtocolPrompt({ mode, allowedToolNames: baseAllowedToolNames as any }) },
     ...(skillsSystemPrompt ? [{ role: "system", content: skillsSystemPrompt } as OpenAiChatMessage] : []),
     ...(body.contextPack ? [{ role: "system", content: body.contextPack } as OpenAiChatMessage] : []),
     { role: "user", content: body.prompt }
@@ -1904,6 +1922,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     hasWriteProposed: runState.hasWriteProposed,
     hasWriteApplied: runState.hasWriteApplied,
     hasKbSearch: runState.hasKbSearch,
+    hasTimeNow: runState.hasTimeNow,
+    lastTimeNowIso: runState.lastTimeNowIso,
     hasWebSearch: runState.hasWebSearch,
     hasWebFetch: runState.hasWebFetch,
     webSearchCount: runState.webSearchCount,
@@ -2185,6 +2205,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     | "style_can_write";
 
   const ALWAYS_ALLOW_TOOL_NAMES = new Set<string>([
+    "time.now",
     "run.mainDoc.get",
     "run.mainDoc.update",
     "run.setTodoList",
@@ -3219,10 +3240,62 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         }
       }
 
+      // TimePolicy：在调用 web.search 前必须先 time.now（避免年份/日期偏差）
+      if (toolCalls?.length) {
+        const hasWebSearchCall = toolCalls.some((c: any) => String(c?.name ?? "").trim() === "web.search");
+        const hasTimeNowCall = toolCalls.some((c: any) => String(c?.name ?? "").trim() === "time.now");
+        if (hasWebSearchCall && !runState.hasTimeNow && !hasTimeNowCall) {
+          const reasonCodes = ["need_time_now", "before:web.search"];
+          if (runState.protocolRetryBudget > 0) {
+            writePolicyDecision({
+              turn,
+              policy: "TimePolicy",
+              decision: "retry",
+              reasonCodes,
+              detail: { budget: "protocol", budgetBefore: runState.protocolRetryBudget, budgetAfter: Math.max(0, runState.protocolRetryBudget - 1) }
+            });
+            runState.protocolRetryBudget -= 1;
+            writeRunNotice({
+              turn,
+              kind: "info",
+              title: "TimePolicy：web.search 前需要 time.now",
+              message:
+                "检测到你准备调用 web.search，但尚未获取当前时间。系统将自动要求先 time.now，再进行 web.search（避免年份/日期偏差）。",
+              policy: "TimePolicy",
+              reasonCodes,
+              detail: { budget: "protocol", budgetBefore: runState.protocolRetryBudget + 1, budgetAfter: runState.protocolRetryBudget }
+            });
+            writeEvent("assistant.done", { reason: "time_now_required_retry", turn });
+            messages.push({
+              role: "system",
+              content:
+                "你准备调用 web.search，但系统要求你先获取当前时间（避免年份/日期偏差）。请立刻重试：\n" +
+                "- 下一条消息必须且只能输出 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
+                "- 请在同一个 tool_calls 中先调用 time.now。\n" +
+                "- 然后再调用 web.search(query=..., freshness=...)。\n" +
+                "- 规则：若 query 里包含年份，必须以 time.now 的当前年份为准（除非用户明确指定其它年份）。"
+            });
+            continue;
+          }
+
+          writePolicyDecision({
+            turn,
+            policy: "TimePolicy",
+            decision: "block_end",
+            reasonCodes: [...reasonCodes, "auto_retry_budget_exhausted"],
+          });
+          writeEvent("run.end", { runId, reason: "time_now_required", reasonCodes: reasonCodes, turn });
+          writeEvent("assistant.done", { reason: "time_now_required", turn });
+          reply.raw.end();
+          agentRunWaiters.delete(runId);
+          return;
+        }
+      }
+
       // tool_calls：逐个 emit tool.call，等待 Desktop 回传 tool_result
       // 参数校验（Schema）：tool_calls 的 <arg> 值都是 string，这里按工具契约做最小校验，避免把明显错误的参数下发到 Desktop 导致卡死/误判。
       // - 校验失败：优先让模型重试修正参数（不执行任何工具）
-          if (toolCalls?.length) {
+      if (toolCalls?.length) {
         const bad = toolCalls
           .map((c: any) => {
             const name = String(c?.name ?? "");
@@ -3430,6 +3503,11 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           else if (String((payload.meta as any)?.applyPolicy ?? "") === "auto_apply") runState.hasWriteApplied = true;
         }
         if (payload.ok && payload.name === "kb.search") runState.hasKbSearch = true;
+        if (payload.ok && payload.name === "time.now") {
+          runState.hasTimeNow = true;
+          const nowIso = typeof (payload.output as any)?.nowIso === "string" ? String((payload.output as any).nowIso).trim() : "";
+          if (nowIso) runState.lastTimeNowIso = nowIso;
+        }
         if (payload.ok && payload.name === "web.search") {
           runState.hasWebSearch = true;
           runState.webSearchCount = Math.max(0, Math.floor(Number(runState.webSearchCount ?? 0))) + 1;

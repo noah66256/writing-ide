@@ -305,6 +305,34 @@ sudo spctl --master-enable
 3) 点击“复制诊断”：
    - logs 中应包含 `run.notice` 记录（用于回放与排查）。
 
+---
+
+### 11) web.search 关键词年份漂移（2026 仍搜 2024）
+
+#### 现象
+
+- 在做“今天/最新/热点/找素材”等任务时，模型在 `web.search.query` 里夹带了过期年份（例如 2024），即使当前年份已经是 2026。  
+- 这会导致：
+  - 结果偏旧、错过最近信息；
+  - WebGate/AutoRetry 的多轮 search 里更容易出现“某一轮突然带错年份”的漂移。
+
+#### 根因（范式层）
+
+- **缺少“当前时间”这一硬锚点**：系统没有把“时间”提升为工具契约与门禁，模型只能凭训练分布猜测“现在是哪一年”，自然会出现年份漂移。
+
+#### 修复（范式：时间门禁 + 工具契约）
+
+- 新增只读工具 `time.now`（结构化输出 nowIso/year 等）。  
+- Gateway 增加 `TimePolicy`：当检测到本轮存在 `web.search` tool_call 且尚未 `time.now` 时，自动拦截并要求先 `time.now` 后再 `web.search`。  
+- 协议提示（system prompt）补充规则：`web.search` 前先 `time.now`，query/freshness 以当前年份为准（除非用户明确指定其它年份）。
+
+#### 验证
+
+1) 触发任意联网任务（尤其是 web radar）。  
+2) 观察 tool_calls：首次 `web.search` 之前必须先出现 `time.now`（同一轮 `<tool_calls>` 里先 `time.now` 再 `web.search` 也可）。  
+3) 点击“复制诊断”：state 中应包含 `hasTimeNow=true`、`lastTimeNowIso`。  
+4) `web.search.query` 中若包含年份，应与 `time.now` 的年份一致（除非用户明确指定其它年份）。
+
 ### 4) Git Bash 下 Windows 命令参数被“路径转换”坑到（taskkill/…）
 
 #### 现象

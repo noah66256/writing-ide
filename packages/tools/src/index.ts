@@ -34,6 +34,17 @@ export type ToolMeta = {
 // - Desktop 用于工具说明/参数校验提示（后续逐步对齐）
 export const TOOL_LIST: ToolMeta[] = [
   {
+    name: "time.now",
+    description:
+      "获取当前时间（只读、无副作用）。用于所有“时间敏感”的任务，尤其是 web.search 之前：\n" +
+      "- 让模型明确当前年份/日期，避免在 2026 还搜索 2024 之类的过期关键词\n" +
+      "- 便于根据今天/最近/最新选择 freshness（oneDay/oneWeek/...）\n" +
+      "输出包含：nowIso/year/month/day/weekday/unixMs/timezoneOffsetMinutes。",
+    args: [],
+    modes: ["chat", "plan", "agent"],
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
     name: "web.search",
     description:
       "联网搜索（默认使用博查 Bocha Web Search API），返回结构化结果供你后续 web.fetch 抓正文证据。\n" +

@@ -45,6 +45,9 @@ export type RunState = {
   hasWriteOps: boolean;
   hasAnyToolCall: boolean;
   hasKbSearch: boolean;
+  // 时间上下文：用于 web.search 等“时间敏感”工具调用前的门禁（避免模型用错年份/日期）
+  hasTimeNow: boolean;
+  lastTimeNowIso: string | null;
   hasWebSearch: boolean;
   hasWebFetch: boolean;
   // Web Gate（配额型）：用于“热点/素材盘点”等广度优先场景
@@ -77,6 +80,8 @@ export function createInitialRunState(args?: { protocolRetryBudget?: number; wor
     hasWriteOps: false,
     hasAnyToolCall: false,
     hasKbSearch: false,
+    hasTimeNow: false,
+    lastTimeNowIso: null,
     hasWebSearch: false,
     hasWebFetch: false,
     webSearchCount: 0,
@@ -152,11 +157,32 @@ export function detectRunIntent(args: {
   const forceProceed =
     mode !== "chat" &&
     /(先(直接)?(开始|写|仿写|给一版|给版本|产出|干活)|不要(再)?问|别问了|先做|直接写|继续)/.test(userPrompt);
-  const wantsWrite =
-    mode !== "chat" &&
-    (/@\{[^}]+\/\}/.test(userPrompt) || // 目录引用（@{dir/}）通常意味着要写入/落盘到该目录
-      /(分割|拆分|切分|写入|保存|生成|放到|移动到|导出|新建|删除|删|重命名)/.test(userPrompt) ||
-      /(写|仿写|改写|润色|续写|扩写)\s*@\{[^}]+\}/.test(userPrompt)); // 写@{file}：目标文件写作/改写
+  // wantsWrite：仅表示“用户明确要把结果写入项目/文件系统”，不要把“生成一篇/生成一份内容”误判为写入意图。
+  // 误判会导致 AutoRetryPolicy 以 need_write 卡住，甚至在 allow_readonly 路由里反复触发重试。
+  const wantsWrite = (() => {
+    if (mode === "chat") return false;
+    const t = String(userPrompt ?? "");
+    // 目录引用（@{dir/}）通常意味着要写入/落盘到该目录
+    if (/@\{[^}]+\/\}/.test(t)) return true;
+
+    const hasWriteTargetHint =
+      /@\{[^}]+\}/.test(t) || // 显式引用文件/目录
+      /\.(md|mdx|txt)\b/i.test(t) || // 显式文件名
+      /(文件|目录|文件夹|路径|path)/i.test(t); // 明确提到“文件/路径”等
+
+    // 明确文件系统动作（需要结合 target hint，避免“生成/删除=删减字数”等误伤）
+    const hasFileOpVerb = /(写入|保存|落盘|导出|放到|移动到|迁移到|新建|创建|删除|删掉|移除|重命名|改名)/.test(t);
+    if (hasFileOpVerb && hasWriteTargetHint) return true;
+
+    // “生成/输出 到 …”：只有当同时出现明确 target hint 才视为写入意图
+    const looksLikeGenerateTo = /(生成|输出).{0,12}(到|至)/.test(t);
+    if (looksLikeGenerateTo && hasWriteTargetHint) return true;
+
+    // 写@{file}：目标文件写作/改写（最稳）
+    if (/(写|仿写|改写|润色|续写|扩写)\s*@\{[^}]+\}/.test(t)) return true;
+
+    return false;
+  })();
   const wantsOkOnly =
     mode !== "chat" &&
     /(回(个|我)?\s*ok|回复\s*ok|回\s*ok|只要\s*ok|给我\s*ok)/i.test(userPrompt) &&

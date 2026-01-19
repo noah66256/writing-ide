@@ -38,6 +38,15 @@
 
 ### 工具契约（Tool Contract）
 
+#### `time.now`
+- **输入**：无
+- **输出（结构化 JSON）**
+  - `ok: true`
+  - `nowIso: string(ISO)`
+  - `unixMs: number`
+  - `utc: { year: number; month: number; day: number; weekday: number }`
+  - `local: { year: number; month: number; day: number; weekday: number; timezoneOffsetMinutes: number }`
+
 #### `web.search`
 - **输入**
   - `query`: string（必填）
@@ -79,6 +88,9 @@
 - **主文档偏好**：Main Doc `sourcesPolicy = "web" | "kb_and_web"`（若 UI 入口尚未完善，可先作为预留字段）
 
 #### 强制流程
+- **时间门禁（TimePolicy）**：
+  - 当本轮将要调用 `web.search` 时，系统必须确保先拿到 `time.now`（同一轮 `<tool_calls>` 里先 `time.now` 再 `web.search` 也可）。
+  - 目的：避免模型在 2026 还搜索 2024 之类的过期年份关键词；并为 freshness 选择提供锚点。
 - 若触发且本轮未发生 `web.search`：系统必须要求模型先 `web.search`
 - 若已 `web.search` 但未发生 `web.fetch`：系统必须要求至少 `web.fetch` 1 个结果 URL（抓正文证据）后再输出正文
 

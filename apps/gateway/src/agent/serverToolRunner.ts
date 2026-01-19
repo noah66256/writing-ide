@@ -23,7 +23,7 @@ function parseCsv(v: any) {
 
 function getServerToolAllowlist(): Set<string> {
   const cfg = String(process.env.GATEWAY_SERVER_TOOL_ALLOWLIST ?? "").trim();
-  const list = cfg ? parseCsv(cfg) : ["lint.style", "project.listFiles", "project.docRules.get", "web.search", "web.fetch"];
+  const list = cfg ? parseCsv(cfg) : ["lint.style", "project.listFiles", "project.docRules.get", "web.search", "web.fetch", "time.now"];
   return new Set(list.map((x) => String(x ?? "").trim()).filter(Boolean));
 }
 
@@ -58,6 +58,8 @@ export function decideServerToolExecution(args: {
   // web.*：完全 server-side（只读联网）；不依赖 Desktop sidecar
   if (name === "web.search") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "web_search_server_side"] };
   if (name === "web.fetch") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "web_fetch_server_side"] };
+  // time.*：完全 server-side（只读时间）；不依赖 Desktop sidecar
+  if (name === "time.now") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "time_now_server_side"] };
 
   // 逐步迁回：先落地 lint.style(text=...)（只读；需要 Desktop sidecar 提供指纹/样例）。
   if (name === "lint.style") {
@@ -449,12 +451,40 @@ export async function executeServerToolOnGateway(args: {
   styleLinterLibraries: any[];
 }) {
   const name = String(args.call?.name ?? "").trim();
+  if (name === "time.now") return executeTimeNowOnGateway();
   if (name === "web.search") return executeWebSearchOnGateway({ call: args.call });
   if (name === "web.fetch") return executeWebFetchOnGateway({ call: args.call });
   if (name === "lint.style") return executeLintStyleOnGateway({ fastify: args.fastify, call: args.call, styleLinterLibraries: args.styleLinterLibraries });
   if (name === "project.listFiles") return executeProjectListFilesOnGateway({ toolSidecar: args.toolSidecar });
   if (name === "project.docRules.get") return executeProjectDocRulesGetOnGateway({ toolSidecar: args.toolSidecar });
   return { ok: false as const, error: "SERVER_TOOL_NOT_IMPLEMENTED" };
+}
+
+function executeTimeNowOnGateway() {
+  const d = new Date();
+  const utc = {
+    year: d.getUTCFullYear(),
+    month: d.getUTCMonth() + 1,
+    day: d.getUTCDate(),
+    weekday: d.getUTCDay(), // 0=Sun..6=Sat
+  };
+  const local = {
+    year: d.getFullYear(),
+    month: d.getMonth() + 1,
+    day: d.getDate(),
+    weekday: d.getDay(),
+    timezoneOffsetMinutes: d.getTimezoneOffset(),
+  };
+  return {
+    ok: true as const,
+    output: {
+      ok: true,
+      nowIso: d.toISOString(),
+      unixMs: d.getTime(),
+      utc,
+      local,
+    },
+  };
 }
 
 

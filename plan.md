@@ -2,6 +2,7 @@
 
 ### 导航（常用入口）
 - [README（项目说明）](README.md)
+- [debug.md（问题记录/排查）](debug.md)
 - [Agent 流程系统性审计与改造路线图（路线2）](agent-flow-audit-roadmap.md)
 - [Intent Routing（第一道门禁）](intent-routing.md)
 - [Vibe Coding Playbook（面向“非专业但有逻辑”的开发者）](vibe-coding-playbook.md)
