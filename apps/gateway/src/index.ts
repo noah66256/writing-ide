@@ -1940,6 +1940,29 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     });
   };
 
+  const writeRunNotice = (args: {
+    turn: number;
+    kind: "info" | "warn" | "error";
+    title: string;
+    message?: string;
+    policy?: string;
+    reasonCodes?: string[];
+    detail?: unknown;
+  }) => {
+    writeEvent("run.notice", {
+      runId,
+      ts: Date.now(),
+      turn: args.turn,
+      kind: args.kind,
+      title: String(args.title ?? "").trim().slice(0, 160),
+      message: args.message ? String(args.message) : null,
+      policy: args.policy ? String(args.policy) : null,
+      reasonCodes: Array.isArray(args.reasonCodes) ? args.reasonCodes.slice(0, 32) : [],
+      detail: args.detail ?? null,
+      state: stateSnapshot(),
+    });
+  };
+
   // ======== Policy-0：Intent Router（Phase 0：启发式） ========
   writePolicyDecision({
     turn: 0,
@@ -2451,12 +2474,22 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               detail: { hint: "tool_calls/tool_call 消息必须 XML 独占", budget: "protocol", budgetBefore: runState.protocolRetryBudget, budgetAfter: Math.max(0, runState.protocolRetryBudget - 1) }
             });
             runState.protocolRetryBudget -= 1;
-            writeEvent("assistant.delta", {
-              delta:
-                "\n\n[解析提示] 检测到工具调用 XML 夹杂了自然语言（未做到“XML 独占消息”）。\n" +
-                "为避免出现“问你确认但工作流仍继续跑”的误导行为，我会让模型自动重试：\n" +
-                "- 若确实需要你回答：请它只输出纯文本问题并停止（不要输出任何 <tool_calls>）\n" +
-                "- 否则：请它只输出纯 XML 的 <tool_calls>（不要夹杂自然语言）"
+            writeRunNotice({
+              turn,
+              kind: "warn",
+              title: "工具 XML 夹杂自然语言：自动重试",
+              message:
+                "检测到工具调用 XML 夹杂了自然语言（未做到“XML 独占消息”）。系统将自动重试一次。\n" +
+                "- 若确实需要用户回答：只输出纯文本问题并停止（不要输出任何 <tool_calls>）\n" +
+                "- 否则：只输出纯 XML 的 <tool_calls>（不要夹杂自然语言）",
+              policy: "ProtocolPolicy",
+              reasonCodes: ["tool_xml_mixed_with_text"],
+              detail: {
+                hint: "tool_calls/tool_call 消息必须 XML 独占消息",
+                budget: "protocol",
+                budgetBefore: runState.protocolRetryBudget + 1,
+                budgetAfter: runState.protocolRetryBudget,
+              },
             });
           writeEvent("assistant.done", { reason: "tool_xml_mixed_with_text_retry", turn });
             messages.push({
@@ -2511,10 +2544,20 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               detail: { budget: "protocol", budgetBefore: runState.protocolRetryBudget, budgetAfter: Math.max(0, runState.protocolRetryBudget - 1) }
             });
             runState.protocolRetryBudget -= 1;
-            writeEvent("assistant.delta", {
-              delta:
-                "\n\n[解析提示] 该条看起来像工具调用，但 XML 解析失败；我会让模型自动重试一次（无需你输入）。\n" +
-                "请它严格输出 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。"
+            writeRunNotice({
+              turn,
+              kind: "warn",
+              title: "工具 XML 解析失败：自动重试",
+              message:
+                "该条看起来像工具调用，但 XML 解析失败；系统将自动重试一次。\n" +
+                "要求：严格输出 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。",
+              policy: "ProtocolPolicy",
+              reasonCodes: ["tool_xml_parse_failed"],
+              detail: {
+                budget: "protocol",
+                budgetBefore: runState.protocolRetryBudget + 1,
+                budgetAfter: runState.protocolRetryBudget,
+              },
             });
             writeEvent("assistant.done", { reason: "tool_xml_parse_failed_retry", turn });
             messages.push({
@@ -2583,8 +2626,19 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           });
           runState.workflowRetryBudget -= 1;
 
-          writeEvent("assistant.delta", {
-            delta: `\n\n[系统提示] 本轮触发了“联网证据”门禁，我会让模型自动先调用 web.search/web.fetch，再给最终回答（无需你输入）。`,
+          writeRunNotice({
+            turn,
+            kind: "info",
+            title: "Web Gate：需要联网证据，自动继续",
+            message: "本轮触发了“联网证据”门禁，系统将自动先调用 web.search/web.fetch，再给最终回答。",
+            policy: "WebGatePolicy",
+            reasonCodes,
+            detail: {
+              webGate,
+              budget: "workflow",
+              budgetBefore: runState.workflowRetryBudget + 1,
+              budgetAfter: runState.workflowRetryBudget,
+            },
           });
           writeEvent("assistant.done", { reason: "web_gate_retry", turn });
 
@@ -2649,23 +2703,29 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             });
             runState.workflowRetryBudget -= 1;
             const reasonText = analysis.reasons.join(" / ");
-            writeEvent("assistant.delta", {
-              delta:
-                `\n\n[系统提示] 检测到本次任务尚未完成（${reasonText}），我会让模型自动继续一次（无需你输入）。\n` +
+            writeRunNotice({
+              turn,
+              kind: "info",
+              title: `AutoRetry：任务未完成（${analysis.reasons.slice(0, 2).join(" / ")}${analysis.reasons.length > 2 ? "…" : ""}）`,
+              message:
+                `检测到本次任务尚未完成（${reasonText}），系统将自动继续一次。\n` +
                 (needFinalText
-                  ? "请它：直接输出对用户可读的最终回复（Markdown），不要再调用工具、不要输出任何 <tool_calls>/<tool_call>；"
+                  ? "要求：直接输出最终回复（Markdown），不要再调用工具。"
                   : needTodo
-                    ? "请它：先 run.setTodoList（永远第一步）；todo 中可包含澄清步骤与默认假设；"
+                    ? "要求：先设置 todo（run.setTodoList / run.todo.upsertMany），再继续推进。"
                     : needLength
-                      ? `请它：把正文长度调整到目标字数附近（目标≈${targetChars}字；当前≈${assistantText.trim().length}字），并直接输出修订后的正文（Markdown 纯文本）；`
-                    : "请它：不要重复 run.setTodoList（本次 Run 已有 todo）；如需增删改 todo，用 run.todo.upsertMany/run.todo.update/run.todo.remove；再继续推进下一步；") +
-                (needKb
-                  ? "若已绑定风格库且任务是写作类：先 kb.search（kind=card + cardTypes，且只搜风格库）拉“套路模板/金句形状/结构骨架”；必要时再补 kb.search(kind=paragraph, anchorParagraphIndexMax/anchorFromEndMax) 拉原文段落；"
-                  : "") +
-                (needLint
-                  ? "再 lint.style（强模型）做终稿闸门；若未通过则按 rewritePrompt 回炉改写并复检（最多 2 次）后再输出/写入；"
-                  : "") +
-                "若用户要求写入项目/分割到文件夹，请务必用工具执行（例如 doc.write / doc.splitToDir）。"
+                      ? `要求：把正文长度调整到目标字数附近（目标≈${targetChars}字）。`
+                      : "要求：不要覆盖既有 todo；需要调整用 run.todo.*。") +
+                (needKb ? "\n并且：若绑定风格库且是写作类，先 kb.search 拉样例。" : "") +
+                (needLint ? "\n并且：按需 lint.style 获取问题清单并回炉。" : ""),
+              policy: "AutoRetryPolicy",
+              reasonCodes,
+              detail: {
+                reasons: analysis.reasons,
+                budget: "workflow",
+                budgetBefore: runState.workflowRetryBudget + 1,
+                budgetAfter: runState.workflowRetryBudget,
+              },
             });
             writeEvent("assistant.done", { reason: "auto_retry_incomplete", turn });
 
@@ -2737,8 +2797,20 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               },
             });
             runState.workflowRetryBudget -= 1;
-            writeEvent("assistant.delta", {
-              delta: `\n\n[系统提示] 需要“广度优先”的热点盘点，但当前条数偏少（≈${topicCount}，目标>=${webGate.minTopics}）。我会让模型自动补足后再结束（无需你输入）。`,
+            writeRunNotice({
+              turn,
+              kind: "info",
+              title: "WebRadar：条数不足，自动补足",
+              message: `需要“广度优先”的热点盘点，但当前条数偏少（≈${topicCount}，目标>=${webGate.minTopics}）。系统将自动补足后再结束。`,
+              policy: "WebRadarPolicy",
+              reasonCodes: ["need_more_topics"],
+              detail: {
+                topicCount,
+                minTopics: webGate.minTopics,
+                budget: "workflow",
+                budgetBefore: runState.workflowRetryBudget + 1,
+                budgetAfter: runState.workflowRetryBudget,
+              },
             });
             writeEvent("assistant.done", { reason: "web_radar_retry", turn });
             messages.push({ role: "assistant", content: assistantText });
@@ -2814,10 +2886,21 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             },
           });
           runState.protocolRetryBudget -= 1;
-          writeEvent("assistant.delta", {
-            delta:
-              `\n\n[解析提示] 你调用了不允许/不存在的工具：${badTool || "(empty)"}。我会让模型自动重试一次（无需你输入）。\n` +
-              "请它：改用允许的工具（例如 project.listFiles 列项目文件；doc.read 读文件；project.search 搜索），不要再调用 fs.list/fs.* 这类不存在工具名。",
+          writeRunNotice({
+            turn,
+            kind: "warn",
+            title: `工具不允许/不存在：${badTool || "(empty)"}`,
+            message:
+              `你调用了不允许/不存在的工具：${badTool || "(empty)"}。\n` +
+              "系统将自动重试一次：请改用允许的工具（例如 project.listFiles / doc.read / project.search），不要再调用 fs.*。",
+            policy: "SafetyPolicy",
+            reasonCodes: ["tool_not_allowed_retry", `tool:${badTool || "unknown"}`],
+            detail: {
+              tool: badTool,
+              budget: "protocol",
+              budgetBefore: runState.protocolRetryBudget + 1,
+              budgetAfter: runState.protocolRetryBudget,
+            },
           });
           writeEvent("assistant.done", { reason: "tool_not_allowed_retry", turn });
           messages.push({
@@ -2865,10 +2948,22 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             },
           });
           runState.workflowRetryBudget -= 1;
-          writeEvent("assistant.delta", {
-            delta:
-              `\n\n[系统提示] 当前技能门禁（phase=${toolCapsPhase}）不允许本轮调用：${capDeniedTools.slice(0, 6).join(", ")}。\n` +
-              "我会让模型自动重试一次（无需你输入）：请按阶段要求选择允许的工具（或先输出候选稿纯文本）。",
+          writeRunNotice({
+            turn,
+            kind: "warn",
+            title: `工具门禁：phase=${toolCapsPhase}`,
+            message:
+              `当前技能门禁（phase=${toolCapsPhase}）不允许本轮调用：${capDeniedTools.slice(0, 8).join(", ")}。\n` +
+              "系统将自动重试一次：请按阶段要求选择允许的工具（或先输出候选稿纯文本）。",
+            policy: "SkillToolCapsPolicy",
+            reasonCodes: ["tool_caps_violation", `phase:${toolCapsPhase}`, ...capDeniedTools.slice(0, 6).map((t: string) => `tool:${t}`)],
+            detail: {
+              phase: toolCapsPhase,
+              denied: capDeniedTools.slice(0, 12),
+              budget: "workflow",
+              budgetBefore: runState.workflowRetryBudget + 1,
+              budgetAfter: runState.workflowRetryBudget,
+            },
           });
           writeEvent("assistant.done", { reason: "auto_retry_tool_caps", turn });
           messages.push({
@@ -2962,11 +3057,17 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               detail: { budget: "workflow", budgetBefore: runState.workflowRetryBudget, budgetAfter: Math.max(0, runState.workflowRetryBudget - 1) }
             });
             runState.workflowRetryBudget -= 1;
-            writeEvent("assistant.delta", {
-              delta:
-                "\n\n[系统提示] 风格库写作任务已启用“闭环约束”：先 kb.search 拉风格样例 → 再写作/写入；lint.style 在当前策略下为提示（不做硬门禁）。\n" +
-                `本轮工具调用不满足前置条件（${violation}），我会让模型自动重试一次（无需你输入）。\n` +
-                "请它：把 kb.search / lint.style / 写入操作拆到不同回合（每回合只做一类关键动作）。"
+            writeRunNotice({
+              turn,
+              kind: "warn",
+              title: "风格闭环约束：自动重试",
+              message:
+                "风格库写作任务已启用“闭环约束”：先 kb.search 拉风格样例 → 再写作/写入（lint.style 视策略而定）。\n" +
+                `本轮工具调用不满足前置条件（${violation}），系统将自动重试一次。\n` +
+                "要求：把 kb.search / lint.style / 写入操作拆到不同回合（每回合只做一类关键动作）。",
+              policy: "StyleGatePolicy",
+              reasonCodes: ["style_workflow_violation", `violation:${String(violation ?? "")}`],
+              detail: { violation, budget: "workflow", budgetBefore: runState.workflowRetryBudget + 1, budgetAfter: runState.workflowRetryBudget },
             });
             writeEvent("assistant.done", { reason: "auto_retry_style_workflow", turn });
 
@@ -3141,9 +3242,14 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               detail: { ...bad, budget: "protocol", budgetBefore: runState.protocolRetryBudget, budgetAfter: Math.max(0, runState.protocolRetryBudget - 1) }
             });
             runState.protocolRetryBudget -= 1;
-            writeEvent("assistant.delta", {
-              delta:
-                `\n\n[解析提示] 工具参数校验失败：${String(bad?.error?.message ?? "INVALID_ARGS")}（tool=${String(bad.name)}）。我会让模型自动重试修正参数。`
+            writeRunNotice({
+              turn,
+              kind: "warn",
+              title: `工具参数校验失败：${String(bad?.name ?? "")}`,
+              message: `工具参数校验失败：${String(bad?.error?.message ?? "INVALID_ARGS")}（tool=${String(bad.name)}）。系统将自动重试修正参数。`,
+              policy: "ToolArgValidationPolicy",
+              reasonCodes: ["tool_args_invalid", `tool:${String(bad.name)}`, `code:${String(bad?.error?.code ?? "")}`],
+              detail: { ...bad, budget: "protocol", budgetBefore: runState.protocolRetryBudget + 1, budgetAfter: runState.protocolRetryBudget },
             });
             writeEvent("assistant.done", { reason: "tool_args_invalid_retry", turn });
             messages.push({
@@ -3439,12 +3545,18 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               reasonCodes: ["style_kb_zero_hit"],
               detail: { query: String((call.args as any)?.query ?? ""), kind: String((call.args as any)?.kind ?? "") }
             });
-            writeEvent("assistant.delta", {
-              delta:
-                "\n\n[系统提示] ⚠️ 风格样例检索 0 命中，已进入降级模式：将继续推进 lint.style / 写作闭环，但风格一致性可能变弱。\n" +
+            writeRunNotice({
+              turn,
+              kind: "warn",
+              title: "风格样例检索 0 命中：进入降级模式",
+              message:
+                "风格样例检索 0 命中，已进入降级模式：将继续推进 lint.style / 写作闭环，但风格一致性可能变弱。\n" +
                 "- 建议：换个 query（更像“手法/句式/节奏”而不是主题词）\n" +
                 "- 提示：kind=outline 仅对含 Markdown 标题(#)的文档有效；想找结构套路可用 kind=card + cardTypes=[outline]\n" +
-                "- 或检查风格库是否为空/未生成手册"
+                "- 或检查风格库是否为空/未生成手册",
+              policy: "StyleGatePolicy",
+              reasonCodes: ["style_kb_zero_hit"],
+              detail: { query: String((call.args as any)?.query ?? ""), kind: String((call.args as any)?.kind ?? "") },
             });
           }
         }
@@ -3496,9 +3608,14 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           if (payload.ok && !runState.styleLintPassed) {
             // 未通过：自动回炉
             if (runState.lintReworkBudget > 0) {
-              writeEvent("assistant.delta", {
-                delta:
-                  `\n\n[系统提示] 风格对齐未通过（score=${scoreText}，high=${hi}）。正在自动回炉（${runState.styleLintFailCount}/${lintMaxRework}）…`
+              writeRunNotice({
+                turn,
+                kind: "warn",
+                title: `风格对齐未通过：自动回炉（${runState.styleLintFailCount}/${lintMaxRework}）`,
+                message: `风格对齐未通过（score=${scoreText}，high=${hi}）。正在自动回炉（${runState.styleLintFailCount}/${lintMaxRework}）…`,
+                policy: "LintPolicy",
+                reasonCodes: ["style_lint_failed_rework"],
+                detail: { score: scoreText, highIssues: hi, failCount: runState.styleLintFailCount, lintMaxRework },
               });
               messages.push({
                 role: "system",
@@ -3520,11 +3637,16 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
                 reasonCodes: ["style_lint_exhausted", "lint_keep_best"],
                 detail: { bestScore: runState.bestStyleDraft.score }
               });
-              writeEvent("assistant.delta", {
-                delta:
-                  `\n\n[系统提示] 风格对齐达到回炉上限，已按“保留最高分”策略输出最高分版本（score=${runState.bestStyleDraft.score}）。\n\n` +
-                  runState.bestStyleDraft.text,
+              writeRunNotice({
+                turn,
+                kind: "warn",
+                title: "风格对齐回炉上限：输出最高分版本",
+                message: `风格对齐达到回炉上限，已按“保留最高分”策略输出最高分版本（score=${runState.bestStyleDraft.score}）。`,
+                policy: "LintPolicy",
+                reasonCodes: ["style_lint_exhausted", "lint_keep_best"],
+                detail: { bestScore: runState.bestStyleDraft.score },
               });
+              writeEvent("assistant.delta", { delta: runState.bestStyleDraft.text });
               writeEvent("run.end", {
                 runId,
                 reason: "text",
@@ -3567,7 +3689,15 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           }
 
           if (payload.ok && runState.styleLintPassed) {
-            writeEvent("assistant.delta", { delta: `\n\n[系统提示] ✅ 风格对齐通过（score=${scoreText}，high=${hi}）。` });
+            writeRunNotice({
+              turn,
+              kind: "info",
+              title: `风格对齐通过（score=${scoreText}，high=${hi}）`,
+              message: `风格对齐通过（score=${scoreText}，high=${hi}）。`,
+              policy: "LintPolicy",
+              reasonCodes: ["style_lint_passed"],
+              detail: { score: scoreText, highIssues: hi },
+            });
           }
         }
 

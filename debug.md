@@ -266,6 +266,45 @@ sudo spctl --master-enable
 4) 观察工具调用：至少 3 次 `web.search`、至少 5 次 `web.fetch`，且 fetch 域名不应只来自单一站点。  
 5) 最终输出：话题条目 >= 15（每条带 URL 证据），且不应在收集阶段直接写成长篇成稿。
 
+---
+
+### 10) 右侧输出区被“系统提示”刷屏 + Console 报 `Do not set same key ... in wx:key`
+
+#### 现象
+
+- 在 Agent/Plan 模式跑任务时，右侧输出区出现多条重复的：
+  - `[系统提示] 检测到本次任务尚未完成（输出为空 / 写入未执行）…我会让模型自动继续一次…`
+  - 或类似 `[解析提示] ...我会让模型自动重试一次…`
+- 同时 Console 可能出现（某些渲染环境会显示为 `wx:key` 提示）：
+  - `For developer: Do not set same key "1" in wx:key.`
+
+#### 根因（范式层）
+
+- **turn 的语义是“模型调用回合”，不是“UI 消息 ID”**。
+- 旧实现里，Gateway 把很多“内部策略提示”（AutoRetry/WebGate/ToolCaps/Protocol/参数校验等）通过 `assistant.delta` 发给前端：
+  - 这会让前端把这些提示当作“真实输出气泡”渲染出来 → **刷屏**；
+  - 更关键的是：在 `tool_calls` 分支里，我们已经发过一次 `assistant.done` 来切气泡边界，随后又在同一 `turn` 里追加了一次 `assistant.delta/assistant.done`（内部重试提示），导致 **同一 turn 内出现多条“assistant 气泡”**；
+  - 一些渲染器/列表实现如果用 `turn`（或 step.turn）当 key，就会触发 **重复 key** 报警（表现为 `wx:key` 或类似 key warning）。
+
+#### 修复（范式：内部提示走 notice，UI 气泡只承载“模型输出”）
+
+- **Gateway**：新增 SSE 事件 `run.notice`，把内部策略提示从 `assistant.delta` 迁移到 `run.notice`。
+  - 这些 notice 会进入审计/日志（便于排查），但不再污染“输出气泡”。
+- **Desktop**：消费 `run.notice`，将其写入 logs，并用 ActivityBar 显示（例如 `系统：AutoRetry：任务未完成…`），**不新增 steps 输出气泡**。
+
+代码位置：
+- `apps/gateway/src/index.ts`：增加 `writeRunNotice()` 并替换内部重试/提示分支
+- `apps/desktop/src/agent/gatewayAgent.ts`：新增 `run.notice` 事件处理（ActivityBar + logs）
+
+#### 如何验证
+
+1) 触发一个会自动重试的场景（例如：模型输出空/工具参数不合法/工具名不在 allowlist）。  
+2) 观察右侧输出区：
+   - **不应再出现多条重复“系统提示”输出气泡**；
+   - ActivityBar 会显示类似 `系统：AutoRetry：任务未完成…` 的短提示。  
+3) 点击“复制诊断”：
+   - logs 中应包含 `run.notice` 记录（用于回放与排查）。
+
 ### 4) Git Bash 下 Windows 命令参数被“路径转换”坑到（taskkill/…）
 
 #### 现象

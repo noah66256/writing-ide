@@ -1582,6 +1582,23 @@ export function startGatewayRun(args: {
             }
           }
 
+          if (evt.event === "run.notice") {
+            try {
+              const payload = JSON.parse(evt.data);
+              const kind0 = String(payload?.kind ?? "info").trim().toLowerCase();
+              const level = kind0 === "error" ? "error" : kind0 === "warn" ? "warn" : "info";
+              log(level as any, "run.notice", payload);
+              const title = String(payload?.title ?? "").trim();
+              if (useRunStore.getState().isRunning && title) {
+                // 关键：内部策略提示不应作为“输出气泡”刷屏；用 ActivityBar 提示即可。
+                setActivity(`系统：${title}`, { resetTimer: true });
+              }
+            } catch {
+              log("info", "run.notice", evt.data);
+              if (useRunStore.getState().isRunning) setActivity("系统：正在自动调整流程…", { resetTimer: true });
+            }
+          }
+
           if (evt.event === "assistant.start") {
             // SSE 强边界：Gateway 会在每次模型调用前发 assistant.start(turn)
             // - 用于强制切分“回合边界”，避免下一轮 delta 追加到上一条 assistant 气泡
