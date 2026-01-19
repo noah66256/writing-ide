@@ -421,6 +421,35 @@ sudo spctl --master-enable
    - `ACTIVE_SKILLS` 不包含 `style_imitate`，且包含 `web_topic_radar`（或 `IntentPolicy.routeId=web_radar`）
 4) 再输入明确写作指令（例如 `按风格库仿写一段，写入 drafts/a.md`），确认 `style_imitate` 能正常启用并走闭环。
 
+---
+
+### 14) Run 里“Todo 完全不出现”：`run.setTodoList` 漏传 items 被校验拦截 + web_radar 未强制 todo
+
+#### 现象
+
+- 右侧 Run 开始后，Todo 区域为空（连默认 todo 都没有）。
+- 诊断里可见：
+  - `ToolArgValidationPolicy`：`run.setTodoList` 缺少必填参数 `items`。
+  - 随后可能进入 `WebGatePolicy` 重试（需要 web.search/web.fetch），但 todo 仍一直不存在。
+
+#### 根因（范式层）
+
+- **工具契约是硬边界**：`run.setTodoList(items=TodoItem[])` 的 `items` 是必填；模型偶发漏参会被 Gateway 拦截，导致 todo 不落地。
+- **web_radar 路由早期是 `todoPolicy=optional`**：即使 todo 没设置成功，也不会被 AutoRetry 视作“未完成”，从而出现“继续跑但 UI 没进度条”的体验。
+
+#### 修复
+
+- **Gateway：web_radar 改为强制 Todo**：`todoPolicy: required`（确保该路由下 todo 必出现）。
+- **Gateway：参数兜底修复**：在 tool_calls 兼容层中，当检测到 `run.setTodoList` 漏传 `items` 时：
+  - 自动补全一份“可追踪的默认 todo”（web_radar 会包含 time.now/web.search/web.fetch 的配额型步骤）；
+  - 注入 `run.notice` 提示（`ToolArgNormalizationPolicy: repaired`），便于诊断回放。
+
+#### 验证
+
+1) 触发任意 web_radar 场景（例如“全网热点雷达/全网+GitHub 大搜”）。  
+2) 即使模型偶发漏参，也应能看到 todo 自动出现（默认 5 项左右）。  
+3) “复制诊断”中应出现：`ToolArgNormalizationPolicy` 的 `repaired` 记录（reasonCodes 含 `missing_required:items`）。  
+
 ### 4) Git Bash 下 Windows 命令参数被“路径转换”坑到（taskkill/…）
 
 #### 现象

@@ -907,7 +907,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     {
       routeId: "web_radar",
       intentType: "task_execution" as const,
-      todoPolicy: "optional" as const,
+      todoPolicy: "required" as const,
       toolPolicy: "allow_readonly" as const,
       nextAction: "enter_workflow" as const,
       desc: "全网热点/新闻/素材盘点（广度优先：多轮 web.search + 多篇 web.fetch）",
@@ -3229,6 +3229,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         let normalizedPatch = 0;
         let assignedId = 0;
         const assignedIds: string[] = [];
+        let repairedSetTodoList = 0;
         // 从运行态已知 todoList 推断可用 id（优先未完成项）
         const todoListRaw = (runState as any).todoList;
         const todoList = Array.isArray(todoListRaw) ? (todoListRaw as any[]) : [];
@@ -3249,6 +3250,53 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         toolCalls = toolCalls.map((c: any) => {
           const name = String(c?.name ?? "").trim();
           const rawArgs = (c?.args ?? {}) as Record<string, string>;
+
+          // 0) run.setTodoList 兜底：部分模型会漏传 items（必填），导致 todo 根本不出现。
+          // - 若缺 items：自动生成一个“可追踪的默认 todo”（尤其 web_radar 的配额型流程）
+          if (name === "run.setTodoList") {
+            const itemsRaw = String((rawArgs as any).items ?? "").trim();
+            if (!itemsRaw) {
+              const pickAlt = (k: string) => String((rawArgs as any)[k] ?? "").trim();
+              const altRaw = pickAlt("todoList") || pickAlt("todos") || pickAlt("list") || pickAlt("value");
+              let itemsJson = altRaw;
+              if (itemsJson) {
+                try {
+                  const j = JSON.parse(itemsJson);
+                  if (!Array.isArray(j)) itemsJson = "";
+                } catch {
+                  itemsJson = "";
+                }
+              }
+              if (!itemsJson) {
+                const items: any[] = (() => {
+                  // web_radar / radar：优先给出“配额型 todo”，便于 UI 展示进度
+                  if (webGate?.enabled && webGate?.radar) {
+                    const searchN = Number(webGate?.requiredSearchCount) || 1;
+                    const fetchN = Number(webGate?.requiredFetchCount) || 1;
+                    const minTopics = Number(webGate?.minTopics) || 0;
+                    return [
+                      { id: "t_time", text: "获取当前时间（time.now）", status: "todo" },
+                      { id: "t_search", text: `联网搜索（web.search，至少 ${searchN} 次；换不同关键词/角度）`, status: "todo" },
+                      { id: "t_fetch", text: `抓取正文证据（web.fetch，至少 ${fetchN} 篇；覆盖不同来源站点）`, status: "todo" },
+                      { id: "t_summarize", text: minTopics > 0 ? `整理输出 ≥${minTopics} 条话题/素材并标注来源` : "整理输出并标注来源", status: "todo" },
+                      { id: "t_output", text: "输出最终结果（Markdown）", status: "todo" },
+                    ];
+                  }
+                  // 其它任务执行：给一个通用最小闭环（不强行加入写入）
+                  return [
+                    { id: "t1", text: "澄清目标/约束（如需要）", status: "todo" },
+                    { id: "t2", text: "执行核心步骤", status: "todo" },
+                    { id: "t3", text: "输出最终结果（Markdown）", status: "todo" },
+                  ];
+                })();
+                itemsJson = JSON.stringify(items);
+              }
+
+              repairedSetTodoList += 1;
+              return { ...c, args: { ...(c?.args ?? {}), items: itemsJson } };
+            }
+          }
+
           const isTodoUpdate = name === "run.updateTodo" || name === "run.todo.update";
           if (!isTodoUpdate) return c;
           let next = c;
@@ -3304,6 +3352,25 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
           return next;
         });
+
+        if (repairedSetTodoList > 0) {
+          writePolicyDecision({
+            turn,
+            policy: "ToolArgNormalizationPolicy",
+            decision: "repaired",
+            reasonCodes: ["tool_args_repaired", "tool:run.setTodoList", "missing_required:items"],
+            detail: { repairedSetTodoList, routeId: intentRoute.routeId ?? "", webRadar: Boolean(webGate?.radar) },
+          });
+          writeRunNotice({
+            turn,
+            kind: "info",
+            title: "Todo 初始化参数修复：自动补全 items",
+            message: "检测到 run.setTodoList 漏传必填 items，系统已自动补全默认 todo，避免右侧不显示进度。",
+            policy: "ToolArgNormalizationPolicy",
+            reasonCodes: ["tool_args_repaired", "tool:run.setTodoList", "missing_required:items"],
+            detail: { repairedSetTodoList, routeId: intentRoute.routeId ?? "", webGate },
+          });
+        }
 
         if (normalizedPatch > 0 || assignedId > 0) {
           writePolicyDecision({
