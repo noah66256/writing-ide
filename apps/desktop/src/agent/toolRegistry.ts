@@ -1481,6 +1481,27 @@ const tools: ToolDefinition[] = [
       }
       // 若既无 newContent 也无 edits，则视为“无变化预览”（避免报错卡住流程）
       const d = unifiedDiff({ path, before, after });
+      const hasChange = before !== after;
+      const nextContent = after;
+      const apply = hasChange
+        ? () => {
+            const snap = useProjectStore.getState().snapshot();
+            const st = useProjectStore.getState();
+            const exists = !!st.getFileByPath(path);
+            if (!exists) {
+              st.createFile(path, nextContent);
+            } else if (st.activePath === path && st.editorRef?.getModel()) {
+              const model = st.editorRef.getModel()!;
+              const full = model.getFullModelRange();
+              st.editorRef.executeEdits("agent", [{ range: full, text: nextContent, forceMoveMarkers: true }]);
+              const written = st.editorRef.getModel()?.getValue() ?? nextContent;
+              st.updateFile(path, written);
+            } else {
+              st.updateFile(path, nextContent);
+            }
+            return { undo: () => useProjectStore.getState().restore(snap) };
+          }
+        : undefined;
       return {
         ok: true,
         output: {
@@ -1489,7 +1510,9 @@ const tools: ToolDefinition[] = [
           diffUnified: d.diff,
           truncated: d.truncated,
           stats: d.stats ?? null,
+          ...(hasChange ? { note: "这是写入提案，点击 Keep 写入文件；Undo 可回滚。" } : {}),
         },
+        apply,
         undoable: false,
       };
     },
