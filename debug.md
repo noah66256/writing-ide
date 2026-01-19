@@ -338,6 +338,37 @@ sudo spctl --master-enable
 3) 点击“复制诊断”：state 中应包含 `hasTimeNow=true`、`lastTimeNowIso`。  
 4) `web.search.query` 中若包含年份，应与 `time.now` 的年份一致（除非用户明确指定其它年份）。
 
+---
+
+### 12) 门禁阶段结束后仍沿用“裁剪工具清单”，导致误判“无写入权限/无 doc.write”
+
+#### 现象
+
+- 运行中曾进入过 `web_need_search/web_need_fetch`（或其它 ToolCaps 门禁阶段），阶段完成后：
+  - 模型仍持续只调用 web.* 或 run.*，不再调用 `doc.write/doc.applyEdits/kb.search` 等；
+  - 甚至在 `run.updateTodo` 的 `note` 里写出类似：
+    - “因无直接文件写入权限，已将内容直接输出在回复中，请手动保存。”
+
+#### 根因（范式层）
+
+- Gateway 侧 `SkillToolCapsPolicy` 的“阶段提示 + 裁剪后的工具清单”注入逻辑，只在 **phase 变化且 hint 非空** 时触发。
+- 当阶段从 `web_need_* → none` 时，`hint=""`，导致：
+  - **不会注入“解除门禁/恢复工具清单”的提示**；
+  - 上一段 system prompt 中“以本段为准（裁剪工具清单）”变成了**永久有效**的强指令，模型误以为 `doc.write` 等能力不存在/没权限。
+
+#### 修复
+
+- Gateway：当 phase 发生变化，且从非 `none` 阶段退出时，也注入一次：
+  - `阶段已结束：fromPhase → none` 的提示
+  - + “当前允许调用的工具（裁剪版）”清单（恢复为 full allowlist）
+- 代码位置：`apps/gateway/src/index.ts`（`SkillToolCapsPolicy` 阶段注入处）
+
+#### 验证
+
+1) 触发 web radar（或其它会进入 `web_need_search/web_need_fetch` 的场景），跑到门禁满足配额后继续运行。  
+2) 点击“复制诊断”：logs 中应出现 `SkillToolCapsPolicy` 的 phase 变化记录，且 detail 含 `fromPhase`。  
+3) 观察后续回合：模型应能恢复调用 `doc.write/doc.applyEdits/kb.search` 等（视任务需要），不再出现“无写入权限/请手动保存”的误导 note。  
+
 ### 4) Git Bash 下 Windows 命令参数被“路径转换”坑到（taskkill/…）
 
 #### 现象

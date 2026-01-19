@@ -2351,26 +2351,31 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       const toolCaps = computeToolCapsForTurn();
       const allowedToolNames = toolCaps.allowed;
       const toolCapsPhase = toolCaps.phase;
-      if (toolCaps.phase !== lastToolCapsPhase && toolCaps.hint) {
+      const phaseChanged = toolCaps.phase !== lastToolCapsPhase;
+      // 关键：离开门禁阶段（例如 web_need_fetch -> none）时，也必须注入一次“解除门禁 + 当前允许工具清单”，
+      // 否则模型会继续沿用上一段“以本段为准”的裁剪清单，误以为 doc.write 等能力不存在/没权限。
+      if (phaseChanged && (toolCaps.hint || lastToolCapsPhase !== "none")) {
         writePolicyDecision({
           turn,
           policy: "SkillToolCapsPolicy",
           decision: "phase",
           reasonCodes: toolCaps.reasonCodes,
-          detail: { phase: toolCaps.phase, activeSkillIds },
+          detail: { phase: toolCaps.phase, fromPhase: lastToolCapsPhase, activeSkillIds },
         });
-        // 仅在阶段变化时注入一次，避免 context 过度膨胀。
-        // 关键：同时注入“裁剪后的可用工具清单”，覆盖开局的全量工具表，避免模型继续尝试被门禁禁用的工具（例如 kb.search/doc.write）。
         const toolList = toolsPromptForAllowed({ mode, allowedToolNames });
+        const header =
+          toolCaps.hint ||
+          `【SkillToolCapsPolicy】阶段已结束：${lastToolCapsPhase} → ${toolCaps.phase}。\n` +
+            "- 之前的“当前允许工具（已裁剪）”清单不再有效；请以本段为准继续执行。\n";
         messages.push({
           role: "system",
           content:
-            toolCaps.hint +
+            header +
             "\n\n【当前允许调用的工具（已裁剪；以本段为准，即使你在上面的工具总表里看到别的也不要调用）】\n" +
             toolList,
         });
-        lastToolCapsPhase = toolCaps.phase;
       }
+      if (phaseChanged) lastToolCapsPhase = toolCaps.phase;
 
       let assistantText = "";
       let decided: "unknown" | "tool" | "text" = "unknown";
