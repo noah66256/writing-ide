@@ -1099,6 +1099,193 @@ const tools: ToolDefinition[] = [
     },
   },
   {
+    name: "run.todo.upsertMany",
+    description:
+      "批量 upsert Todo（新增或更新）。\n" +
+      "- 若 id 命中现有：按提供字段 patch（未提供的不改）。\n" +
+      "- 若 id 不命中或未传 id：视为新增（需要 text），自动生成稳定 id 并追加到列表末尾。\n" +
+      "用于避免模型反复 run.setTodoList 覆盖进度。",
+    args: [
+      {
+        name: "items",
+        required: true,
+        desc: 'JSON 数组：Array<{ id?: string; text?: string; status?: "todo"|"in_progress"|"done"|"blocked"|"skipped"; note?: string }>',
+      },
+    ],
+    riskLevel: "low",
+    applyPolicy: "auto_apply",
+    reversible: true,
+    run: async (args) => {
+      const items = (args as any).items as any;
+      if (!Array.isArray(items)) return { ok: false, error: "INVALID_ITEMS" };
+
+      const s = useRunStore.getState();
+      const prev = Array.isArray(s.todoList) ? s.todoList : [];
+      const used = new Set<string>(prev.map((t: any) => String(t?.id ?? "").trim()).filter(Boolean));
+      let next = prev.slice();
+
+      const findIdx = (needle: string) => next.findIndex((t: any) => String(t?.id ?? "") === needle);
+
+      for (const x of items.slice(0, 80)) {
+        if (!x || typeof x !== "object") continue;
+
+        const idRaw = String((x as any).id ?? "").trim();
+        const textRaw = (x as any).text === undefined ? undefined : String((x as any).text ?? "").trim();
+        const statusRaw = (x as any).status === undefined ? undefined : normalizeTodoStatus((x as any).status);
+        const noteRaw = (x as any).note === undefined ? undefined : String((x as any).note ?? "");
+
+        if (idRaw) {
+          const idx = findIdx(idRaw);
+          if (idx >= 0) {
+            const cur = next[idx] as any;
+            const patched: any = { ...cur, id: cur.id };
+            if (textRaw !== undefined && textRaw) patched.text = textRaw;
+            if (statusRaw !== undefined) patched.status = statusRaw;
+            if (noteRaw !== undefined) patched.note = noteRaw;
+            next[idx] = patched;
+            continue;
+          }
+
+          // 新增：id 不命中
+          if (!textRaw) {
+            return {
+              ok: false,
+              error: "MISSING_TEXT_FOR_NEW_TODO",
+              output: {
+                ok: false,
+                error: "MISSING_TEXT_FOR_NEW_TODO",
+                hint: "当 id 不命中现有 todo 时，视为新增；请同时提供 text。",
+                id: idRaw,
+              },
+            };
+          }
+          let id = idRaw.replaceAll(" ", "_");
+          const base = id;
+          let n = 2;
+          while (used.has(id)) id = `${base}_${n++}`;
+          used.add(id);
+          next.push({ id, text: textRaw, status: statusRaw ?? "todo", note: noteRaw });
+          continue;
+        }
+
+        // 新增：未传 id
+        if (!textRaw) continue;
+        let id = slugifyTodoId(textRaw) || `t${next.length + 1}`;
+        id = id.replaceAll(" ", "_");
+        const base = id;
+        let n = 2;
+        while (used.has(id)) id = `${base}_${n++}`;
+        used.add(id);
+        next.push({ id, text: textRaw, status: statusRaw ?? "todo", note: noteRaw });
+      }
+
+      // cap：避免 todoList 过长
+      const cap = 120;
+      if (next.length > cap) next = next.slice(next.length - cap);
+
+      const { undo } = useRunStore.getState().setTodoList(next as any);
+      const todoList = useRunStore.getState().todoList;
+      return { ok: true, output: { ok: true, todoList }, undoable: true, undo };
+    },
+  },
+  {
+    name: "run.todo.update",
+    description:
+      "更新某一条 Todo（扁平参数版，LLM 更不容易漏 patch）。\n" +
+      "- 当 todoList 只有 1 条时可省略 id；否则必须传 id。",
+    args: [
+      { name: "id", required: false, desc: "Todo ID（可省略：仅当当前 todoList 只有 1 条）" },
+      { name: "text", required: false, desc: "可选：更新文本" },
+      { name: "status", required: false, desc: '可选：状态（"todo"|"in_progress"|"done"|"blocked"|"skipped"）' },
+      { name: "note", required: false, desc: "可选：备注/阻塞原因" },
+    ],
+    riskLevel: "low",
+    applyPolicy: "auto_apply",
+    reversible: true,
+    run: async (args) => {
+      const s = useRunStore.getState();
+      const cur = s.todoList ?? [];
+
+      let id = String((args as any).id ?? "").trim();
+      if (!id) {
+        if (cur.length === 1 && cur[0]?.id) id = String(cur[0].id);
+        else {
+          return {
+            ok: false,
+            error: "MISSING_ID",
+            output: {
+              ok: false,
+              error: "MISSING_ID",
+              hint: cur.length === 0 ? "当前 todoList 为空，请先 run.setTodoList。" : "请传入 todo.id；或确保 todoList 只有 1 条后再省略 id。",
+              available: cur.map((t: any) => ({ id: t.id, text: t.text, status: t.status })),
+            },
+          };
+        }
+      }
+      const findIdx = (needle: string) => cur.findIndex((t: any) => String(t?.id ?? "") === needle);
+      let foundId = id;
+      let idx = findIdx(foundId);
+      if (idx < 0) {
+        const alt = id.replaceAll("-", "_");
+        idx = findIdx(alt);
+        if (idx >= 0) foundId = alt;
+      }
+      if (idx < 0) {
+        return {
+          ok: false,
+          error: "TODO_NOT_FOUND",
+          output: {
+            ok: false,
+            error: "TODO_NOT_FOUND",
+            hint: "请使用现有 todo.id；或先 run.setTodoList / run.todo.upsertMany。",
+            available: cur.map((t: any) => ({ id: t.id, text: t.text, status: t.status })),
+          },
+        };
+      }
+
+      const nextPatch: any = {};
+      if ((args as any).text !== undefined) nextPatch.text = String((args as any).text ?? "");
+      if ((args as any).status !== undefined) nextPatch.status = normalizeTodoStatus((args as any).status);
+      if ((args as any).note !== undefined) nextPatch.note = String((args as any).note ?? "");
+
+      const { undo } = s.updateTodo(foundId, nextPatch);
+      const todoList = s.todoList;
+      return { ok: true, output: { ok: true, todoList }, undoable: true, undo };
+    },
+  },
+  {
+    name: "run.todo.remove",
+    description: "删除一条 Todo（按 id）。",
+    args: [{ name: "id", required: true, desc: "Todo ID" }],
+    riskLevel: "low",
+    applyPolicy: "auto_apply",
+    reversible: true,
+    run: async (args) => {
+      const id = String((args as any).id ?? "").trim();
+      if (!id) return { ok: false, error: "MISSING_ID" };
+      const s = useRunStore.getState();
+      const prev = s.todoList ?? [];
+      const next = prev.filter((t: any) => String(t?.id ?? "") !== id);
+      const { undo } = s.setTodoList(next as any);
+      const todoList = s.todoList;
+      return { ok: true, output: { ok: true, todoList }, undoable: true, undo };
+    },
+  },
+  {
+    name: "run.todo.clear",
+    description: "清空本次 Run 的 Todo List。",
+    args: [],
+    riskLevel: "low",
+    applyPolicy: "auto_apply",
+    reversible: true,
+    run: async () => {
+      const s = useRunStore.getState();
+      const { undo } = s.setTodoList([] as any);
+      const todoList = s.todoList;
+      return { ok: true, output: { ok: true, todoList }, undoable: true, undo };
+    },
+  },
+  {
     name: "doc.read",
     description: "读取文件内容（path）。需要基于现有文稿/规则做改写时使用。",
     args: [{ name: "path", required: true, desc: "文件路径（如 drafts/draft.md）" }],

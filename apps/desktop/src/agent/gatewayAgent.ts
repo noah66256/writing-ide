@@ -686,6 +686,37 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
     };
   })();
 
+  // RUN_TODO：注入给模型的 todo 要做裁剪（避免上下文膨胀）；UI 仍保留全量 todoList。
+  const runTodoForPack = (() => {
+    const normalizeOne = (t: any) => {
+      const id = String(t?.id ?? "").trim();
+      const text0 = String(t?.text ?? "").replace(/\s+/g, " ").trim();
+      const status0 = String(t?.status ?? "").trim().toLowerCase();
+      const status =
+        status0 === "done" || status0 === "todo" || status0 === "in_progress" || status0 === "blocked" || status0 === "skipped"
+          ? (status0 as any)
+          : ("todo" as const);
+      const note0 = t?.note === undefined ? undefined : String(t.note ?? "").replace(/\s+/g, " ").trim();
+      if (!id || !text0) return null;
+      const clip = (s: string, max: number) => (s.length > max ? s.slice(0, max).trimEnd() + "…" : s);
+      return {
+        id,
+        text: clip(text0, 120),
+        status,
+        ...(note0 ? { note: clip(note0, 220) } : {}),
+      };
+    };
+
+    const norm = (Array.isArray(todoList) ? todoList : []).map(normalizeOne).filter(Boolean) as any[];
+    const open = norm.filter((t) => t.status === "todo" || t.status === "in_progress" || t.status === "blocked").slice(0, 24);
+    const doneAll = norm.filter((t) => t.status === "done");
+    const done = doneAll.slice(Math.max(0, doneAll.length - 6));
+
+    // 兜底：如果 open 为空但存在其它状态（例如全 done），至少带一点最近 done
+    const merged = [...open, ...done];
+    return merged.slice(0, 32);
+  })();
+
   // 最近对话片段（只注入少量，避免上下文噪音；关键决策仍应写入 Main Doc）
   const recentDialogue = (() => {
     const stripToolXml = (text: string) =>
@@ -954,7 +985,7 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
     : "";
   return (
     `MAIN_DOC(JSON):\n${JSON.stringify(mainDoc, null, 2)}\n\n` +
-    `RUN_TODO(JSON):\n${JSON.stringify(todoList, null, 2)}\n\n` +
+    `RUN_TODO(JSON):\n${JSON.stringify(runTodoForPack, null, 2)}\n\n` +
     `DOC_RULES(Markdown):\n${docRules}\n\n` +
     recentDialogue +
     refs +

@@ -198,6 +198,62 @@ export const TOOL_LIST: ToolMeta[] = [
     inputSchema: { type: "object", properties: { id: { type: "string" }, patch: { type: "json", jsonType: "object" } }, required: ["patch"], additionalProperties: true },
   },
   {
+    name: "run.todo.upsertMany",
+    description:
+      "批量 upsert Todo（新增或更新）。\n" +
+      "- 若传入 id 且命中现有 todo：按提供字段 patch（未提供的不改）。\n" +
+      "- 若 id 不命中或未传 id：视为新增（需要 text），自动生成稳定 id 并追加到列表末尾。\n" +
+      "用于避免模型反复 run.setTodoList 覆盖进度。",
+    args: [
+      {
+        name: "items",
+        required: true,
+        desc: 'JSON 数组：Array<{ id?: string; text?: string; status?: "todo"|"in_progress"|"done"|"blocked"|"skipped"; note?: string }>',
+        type: "json",
+        jsonType: "array",
+      },
+    ],
+    modes: ["plan", "agent"],
+    inputSchema: { type: "object", properties: { items: { type: "json", jsonType: "array" } }, required: ["items"], additionalProperties: true },
+  },
+  {
+    name: "run.todo.update",
+    description:
+      "更新某一条 Todo（扁平参数版，LLM 更不容易漏 patch）。\n" +
+      "- 当 todoList 只有 1 条时可省略 id；否则必须传 id。",
+    args: [
+      { name: "id", required: false, desc: "Todo ID（可省略：仅当当前 todoList 只有 1 条）", type: "string" },
+      { name: "text", required: false, desc: "可选：更新文本", type: "string" },
+      { name: "status", required: false, desc: '可选：状态（"todo"|"in_progress"|"done"|"blocked"|"skipped"）', type: "string" },
+      { name: "note", required: false, desc: "可选：备注/阻塞原因", type: "string" },
+    ],
+    modes: ["plan", "agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string" },
+        text: { type: "string" },
+        status: { type: "string" },
+        note: { type: "string" },
+      },
+      additionalProperties: true,
+    },
+  },
+  {
+    name: "run.todo.remove",
+    description: "删除一条 Todo（按 id）。",
+    args: [{ name: "id", required: true, desc: "Todo ID", type: "string" }],
+    modes: ["plan", "agent"],
+    inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"], additionalProperties: true },
+  },
+  {
+    name: "run.todo.clear",
+    description: "清空本次 Run 的 Todo List。",
+    args: [],
+    modes: ["plan", "agent"],
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
     name: "project.listFiles",
     description: "列出当前项目文件列表（path）。",
     args: [],

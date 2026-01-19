@@ -9,6 +9,8 @@
 - [Web Search 选型与落地路径（研究 v1）](docs/research/web-search-v1.md)
 - [Web Search v0.1（spec）](docs/specs/web-search-v0.1.md)
 - [Admin Web（B端管理后台）v0.1（spec）](docs/specs/admin-web-v0.1.md)
+- [Todo 工具大搜（研究 v1）](docs/research/todo-tools-v1.md)
+- [Run Todo v0.2（spec）](docs/specs/run-todo-v0.2.md)
 - [Desktop 打包与发布（Windows/macOS）](docs/release/desktop-packaging.md)
 - [KB Manager V2（更像原文）方案草案](kb-manager-v2-spec.md)
 - [Style Selector v1（自动选簇/选21卡，按话题适配，模型解耦）](style-selector-v1.md)

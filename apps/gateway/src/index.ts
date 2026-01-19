@@ -745,12 +745,13 @@ function buildAgentProtocolPrompt(mode: AgentMode) {
         `1) 产 Todo List（可追踪，默认需要）：在用户确认要你继续执行写作闭环后，你必须调用 run.setTodoList。\n` +
         `   - 即使你需要澄清，也必须先把“澄清问题/默认假设/下一步动作”写进 todo（澄清最多 5 个高价值问题：平台画像/受众/目标/口吻人设/素材来源）。\n` +
         `   - 若用户明确说“先直接开始/先仿写看看/先给版本/不要再问”：你必须把澄清项标为可跳过，并基于合理默认假设直接推进写作。\n` +
+        `   - 重要：本次 Run 已有 todo 时，**不要重复 run.setTodoList 覆盖进度**；需要新增/调整 todo 时，优先用 run.todo.upsertMany / run.todo.update / run.todo.remove。\n` +
         `   - 若右侧已关联知识库，且 KB_SELECTED_LIBRARIES 中存在 purpose=style（风格库），并且任务是“写作/仿写/改写/润色”：todo 中必须包含“三段式”步骤：\n` +
         `     1) 先 kb.search（只搜风格库，优先 kind=card + cardTypes）拉 6–12 条“套路模板/金句形状/结构骨架”；必要时再补 kb.search(kind=paragraph, anchorParagraphIndexMax/anchorFromEndMax) 拉开头/结尾证据段；\n` +
         `     2) 产出候选稿（先别急着写入文件）；\n` +
         `     3) 调用 lint.style（强模型）对照库原文/指纹找“不像点”，按其 rewritePrompt 改成终稿后再写入/输出。\n` +
         `2) 执行（由你自主决定是否调用工具）：素材收集（@引用/读文件/KB 检索）→ 结构（先 outline）→ 初稿 → 改写润色 → 自检。\n` +
-        `3) 进度记录：完成/推进每个关键步骤时，调用 run.updateTodo；关键决策与约束调用 run.mainDoc.update。\n` +
+        `3) 进度记录：完成/推进每个关键步骤时，调用 run.todo.update（或兼容工具 run.updateTodo）；关键决策与约束调用 run.mainDoc.update。\n` +
         `输出约束：\n` +
         `- 给用户看的文字输出必须是 Markdown（富文本），不要输出 JSON。\n` +
         `- 不要输出思维链/自言自语（例如“我将…”“下一步我会…”）；只输出对用户有用的内容（澄清问题 / 结果 / 简短步骤摘要）。\n` +
@@ -2041,7 +2042,16 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     | "style_need_lint"
     | "style_can_write";
 
-  const ALWAYS_ALLOW_TOOL_NAMES = new Set<string>(["run.setTodoList", "run.updateTodo", "run.mainDoc.get", "run.mainDoc.update"]);
+  const ALWAYS_ALLOW_TOOL_NAMES = new Set<string>([
+    "run.mainDoc.get",
+    "run.mainDoc.update",
+    "run.setTodoList",
+    "run.updateTodo",
+    "run.todo.upsertMany",
+    "run.todo.update",
+    "run.todo.remove",
+    "run.todo.clear",
+  ]);
 
   let lastToolCapsPhase: SkillToolCapsPhase = "none";
 
@@ -2491,7 +2501,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
                     ? "请它：先 run.setTodoList（永远第一步）；todo 中可包含澄清步骤与默认假设；"
                     : needLength
                       ? `请它：把正文长度调整到目标字数附近（目标≈${targetChars}字；当前≈${assistantText.trim().length}字），并直接输出修订后的正文（Markdown 纯文本）；`
-                    : "请它：不要重复 run.setTodoList（本次 Run 已有 todo），直接推进下一步；") +
+                    : "请它：不要重复 run.setTodoList（本次 Run 已有 todo）；如需增删改 todo，用 run.todo.upsertMany/run.todo.update/run.todo.remove；再继续推进下一步；") +
                 (needKb
                   ? "若已绑定风格库且任务是写作类：先 kb.search（kind=card + cardTypes，且只搜风格库）拉“套路模板/金句形状/结构骨架”；必要时再补 kb.search(kind=paragraph, anchorParagraphIndexMax/anchorFromEndMax) 拉原文段落；"
                   : "") +
@@ -2521,7 +2531,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
                     "- 你必须先输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
                     (needTodo
                       ? "  - 先调用 run.setTodoList（永远第一步）\n"
-                      : "  - 不要重复调用 run.setTodoList（本次 Run 已有 todo）\n") +
+                      : "  - 不要重复调用 run.setTodoList（本次 Run 已有 todo）；如需增删改 todo，用 run.todo.upsertMany/run.todo.update/run.todo.remove\n") +
                     (needKb
                       ? "  - 若 KB_SELECTED_LIBRARIES 中存在 purpose=style（风格库）且任务为写作类：先调用 kb.search 拉风格样例（优先 kind=card；若同时绑定了非风格库则必须带 cardTypes 且只搜风格库）。必要时再补 paragraph 并用 anchorParagraphIndexMax/anchorFromEndMax 做位置过滤。\n"
                       : "") +
@@ -2801,7 +2811,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
       // 兼容层：提高跨模型稳定性（尤其 gemini/deepseek）。
       // - 1) run.updateTodo 可能把 patch 拆成顶层参数（status/note/text）
-      // - 2) run.updateTodo 可能漏传 id（当 todoList>1 时 Desktop 会返回 MISSING_ID）
+      // - 2) run.updateTodo / run.todo.update 可能漏传 id（当 todoList>1 时 Desktop 会返回 MISSING_ID）
+      // - 3) run.todo.update 可能误用旧参数：传 patch(JSON) 而不是扁平字段（status/note/text）
       if (toolCalls?.length) {
         const isNonEmpty = (v: any) => typeof v === "string" && String(v).trim().length > 0;
         let normalizedPatch = 0;
@@ -2827,18 +2838,44 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         toolCalls = toolCalls.map((c: any) => {
           const name = String(c?.name ?? "").trim();
           const rawArgs = (c?.args ?? {}) as Record<string, string>;
-          if (name !== "run.updateTodo") return c;
+          const isTodoUpdate = name === "run.updateTodo" || name === "run.todo.update";
+          if (!isTodoUpdate) return c;
           let next = c;
 
-          // 1) patch 兜底：把 status/note/text 封装进 patch(JSON)
-          if (!isNonEmpty(rawArgs.patch)) {
-            const patch: any = {};
-            if (isNonEmpty((rawArgs as any).status)) patch.status = String((rawArgs as any).status).trim();
-            if (isNonEmpty((rawArgs as any).note)) patch.note = String((rawArgs as any).note);
-            if (isNonEmpty((rawArgs as any).text)) patch.text = String((rawArgs as any).text);
-            if (Object.keys(patch).length) {
-              normalizedPatch += 1;
-              next = { ...next, args: { ...(next.args ?? {}), patch: JSON.stringify(patch) } };
+          // 1) patch 兜底 / 反兜底
+          // - run.updateTodo：把 status/note/text 封装进 patch(JSON)
+          // - run.todo.update：把 patch(JSON) 展开为 status/note/text（LLM 常沿用旧写法）
+          if (name === "run.updateTodo") {
+            if (!isNonEmpty(rawArgs.patch)) {
+              const patch: any = {};
+              if (isNonEmpty((rawArgs as any).status)) patch.status = String((rawArgs as any).status).trim();
+              if (isNonEmpty((rawArgs as any).note)) patch.note = String((rawArgs as any).note);
+              if (isNonEmpty((rawArgs as any).text)) patch.text = String((rawArgs as any).text);
+              if (Object.keys(patch).length) {
+                normalizedPatch += 1;
+                next = { ...next, args: { ...(next.args ?? {}), patch: JSON.stringify(patch) } };
+              }
+            }
+          } else if (name === "run.todo.update") {
+            const patchRaw = String((rawArgs as any).patch ?? "").trim();
+            if (isNonEmpty(patchRaw)) {
+              try {
+                const j = JSON.parse(patchRaw);
+                if (j && typeof j === "object") {
+                  const out: any = { ...(next.args ?? {}) };
+                  if (!isNonEmpty(out.status) && isNonEmpty(String((j as any).status ?? ""))) out.status = String((j as any).status).trim();
+                  if (!isNonEmpty(out.note) && isNonEmpty(String((j as any).note ?? ""))) out.note = String((j as any).note);
+                  if (!isNonEmpty(out.text) && isNonEmpty(String((j as any).text ?? ""))) out.text = String((j as any).text);
+                  // 清掉 patch，避免 Desktop 误以为“已经传了扁平字段”
+                  delete out.patch;
+                  if (!Object.is(out, next.args)) {
+                    normalizedPatch += 1;
+                    next = { ...next, args: out };
+                  }
+                }
+              } catch {
+                // ignore parse failure
+              }
             }
           }
 
@@ -2862,7 +2899,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             turn,
             policy: "ToolArgNormalizationPolicy",
             decision: "normalized",
-            reasonCodes: ["tool_args_normalized", "tool:run.updateTodo"],
+            reasonCodes: ["tool_args_normalized", "tool:todo_update_family"],
             detail: {
               normalizedPatch,
               assignedId,
@@ -3060,12 +3097,18 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           }
         }
 
-        if (payload.ok && (payload.name === "run.setTodoList" || payload.name === "run.updateTodo")) {
+        if (
+          payload.ok &&
+          (payload.name === "run.setTodoList" ||
+            payload.name === "run.updateTodo" ||
+            payload.name === "run.todo.upsertMany" ||
+            payload.name === "run.todo.update" ||
+            payload.name === "run.todo.remove" ||
+            payload.name === "run.todo.clear")
+        ) {
           const todoList = Array.isArray((payload.output as any)?.todoList) ? ((payload.output as any).todoList as any[]) : [];
-          if (todoList.length) {
-            runState.hasTodoList = true;
-            (runState as any).todoList = todoList;
-          }
+          runState.hasTodoList = todoList.length > 0;
+          (runState as any).todoList = todoList;
         }
         if (payload.ok && isWriteLikeTool(payload.name)) {
           runState.hasWriteOps = true;
@@ -3081,7 +3124,12 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           mode !== "chat" &&
           !intent.forceProceed &&
           payload.ok &&
-          (payload.name === "run.setTodoList" || payload.name === "run.updateTodo")
+          (payload.name === "run.setTodoList" ||
+            payload.name === "run.updateTodo" ||
+            payload.name === "run.todo.upsertMany" ||
+            payload.name === "run.todo.update" ||
+            payload.name === "run.todo.remove" ||
+            payload.name === "run.todo.clear")
         ) {
           const todoList = Array.isArray((payload.output as any)?.todoList) ? ((payload.output as any).todoList as any[]) : [];
           const blocked = todoList
