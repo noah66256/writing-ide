@@ -2278,7 +2278,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           (webGate.requiredUniqueFetchDomains > 0 && runState.webFetchUniqueDomains.length < webGate.requiredUniqueFetchDomains));
       if (needFetch) {
         phase = "web_need_fetch";
-        const allowSet = new Set<string>(["web.fetch", "web.search", ...Array.from(ALWAYS_ALLOW_TOOL_NAMES)]);
+        // 强制抓正文证据：进入 need_fetch 后不再允许继续 search，避免模型“只搜不抓”或转去 kb.search
+        const allowSet = new Set<string>(["web.fetch", ...Array.from(ALWAYS_ALLOW_TOOL_NAMES)]);
         for (const name of Array.from(allowed)) if (!allowSet.has(name)) allowed.delete(name);
         const uniqHint =
           webGate.requiredUniqueFetchDomains > 0
@@ -2287,8 +2288,8 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         hint =
           "【Web Gate】当前阶段：need_fetch。\n" +
           `- 你必须调用 web.fetch(url=...) 抓正文证据（至少 ${webGate.requiredFetchCount} 次；当前=${runState.webFetchCount}）${uniqHint}。\n` +
-          "- 可从 web.search 结果里挑 URL，尽量覆盖不同来源站点。\n" +
-          "- 本回合除 web.fetch/web.search 与 run.* 进度工具外，不要调用任何其它工具；不要输出最终回答。";
+          "- 优先从上一步 web.search 的结果里挑 URL；若用户已提供 url，则直接抓这些 url；尽量覆盖不同来源站点。\n" +
+          "- 本回合除 web.fetch 与 run.* 进度工具外，不要调用任何其它工具；不要输出最终回答。";
         reasonCodes.push("phase:web_need_fetch");
         return { phase, allowed, hint, reasonCodes };
       }
@@ -2358,8 +2359,16 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           reasonCodes: toolCaps.reasonCodes,
           detail: { phase: toolCaps.phase, activeSkillIds },
         });
-        // 仅在阶段变化时注入一次，避免 context 过度膨胀
-        messages.push({ role: "system", content: toolCaps.hint });
+        // 仅在阶段变化时注入一次，避免 context 过度膨胀。
+        // 关键：同时注入“裁剪后的可用工具清单”，覆盖开局的全量工具表，避免模型继续尝试被门禁禁用的工具（例如 kb.search/doc.write）。
+        const toolList = toolsPromptForAllowed({ mode, allowedToolNames });
+        messages.push({
+          role: "system",
+          content:
+            toolCaps.hint +
+            "\n\n【当前允许调用的工具（已裁剪；以本段为准，即使你在上面的工具总表里看到别的也不要调用）】\n" +
+            toolList,
+        });
         lastToolCapsPhase = toolCaps.phase;
       }
 
@@ -2992,8 +3001,14 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             content:
               "你上一轮 tool_calls 触发了技能门禁（SkillToolCapsPolicy），包含当前阶段不允许的工具。\n" +
               "- 下一条消息必须且只能输出 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
+              `- 当前 phase=${toolCapsPhase} 允许工具：${Array.from(allowedToolNames).sort().slice(0, 80).join(", ")}\n` +
               `- 当前 phase=${toolCapsPhase} 禁止工具：${capDeniedTools.join(", ")}\n` +
-              "- 请改为：只调用本阶段允许的工具；或先输出候选稿（纯文本）再进入下一阶段。",
+              (toolCapsPhase === "web_need_fetch"
+                ? "- 提示：从上轮 web.search 的 tool_result 里挑 URL，批量调用 web.fetch（尽量不同域名）。\n"
+                : toolCapsPhase === "web_need_search"
+                  ? "- 提示：请在同一轮先 time.now，再 web.search，并换不同关键词/角度。\n"
+                  : "") +
+              "- 请立即改为：只调用“允许工具”；满足门禁后系统会放开下一阶段。",
           });
           continue;
         }
@@ -3005,11 +3020,17 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           reasonCodes: ["tool_caps_blocked", `phase:${toolCapsPhase}`, "auto_retry_budget_exhausted"],
           detail: { phase: toolCapsPhase, denied: capDeniedTools.slice(0, 12) },
         });
-        writeEvent("assistant.delta", {
-          delta:
-            "\n\n[系统提示] 技能门禁拦截：当前仍调用了本阶段不允许的工具，但已达到自动重试上限。\n" +
+        writeRunNotice({
+          turn,
+          kind: "warn",
+          title: `工具门禁拦截：phase=${toolCapsPhase}`,
+          message:
+            "当前仍调用了本阶段不允许的工具，但已达到自动重试上限。\n" +
             "- 你可以回复“继续”让我再尝试一次\n" +
             "- 或调整意图/解除风格库绑定后再试",
+          policy: "SkillToolCapsPolicy",
+          reasonCodes: ["tool_caps_blocked", `phase:${toolCapsPhase}`],
+          detail: { phase: toolCapsPhase, denied: capDeniedTools.slice(0, 12) },
         });
         writeEvent("run.end", { runId, reason: "tool_caps_blocked", reasonCodes: ["tool_caps_blocked"], turn, phase: toolCapsPhase });
         writeEvent("assistant.done", { reason: "tool_caps_blocked", turn });
@@ -3119,11 +3140,17 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             reasonCodes: ["style_workflow_blocked", `violation:${String(violation ?? "")}`, "auto_retry_budget_exhausted"],
             detail: { violation }
           });
-          writeEvent("assistant.delta", {
-            delta:
-              "\n\n[系统提示] 风格库强闭环拦截：当前仍不满足写入前置条件，但已达到自动重试上限。\n" +
+          writeRunNotice({
+            turn,
+            kind: "warn",
+            title: "风格闭环拦截：达到自动重试上限",
+            message:
+              "风格库强闭环拦截：当前仍不满足写入前置条件，但已达到自动重试上限。\n" +
               "- 你可以回复“跳过linter”强制写入（不做风格校验）\n" +
-              "- 或回复“继续”让我再尝试一次"
+              "- 或回复“继续”让我再尝试一次",
+            policy: "StyleGatePolicy",
+            reasonCodes: ["style_workflow_blocked", `violation:${String(violation ?? "")}`, "auto_retry_budget_exhausted"],
+            detail: { violation },
           });
           writeEvent("run.end", {
             runId,
@@ -3746,11 +3773,17 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
               reasonCodes: ["style_lint_exhausted"],
               detail: { failCount: runState.styleLintFailCount, passScore: lintPassScore }
             });
-            writeEvent("assistant.delta", {
-              delta:
-                `\n\n[系统提示] 风格对齐已连续 ${runState.styleLintFailCount} 次未通过，已达到最大回炉次数（${lintMaxRework}）。\n` +
+            writeRunNotice({
+              turn,
+              kind: "warn",
+              title: "风格对齐：回炉次数耗尽",
+              message:
+                `风格对齐已连续 ${runState.styleLintFailCount} 次未通过，已达到最大回炉次数（${lintMaxRework}）。\n` +
                 `- 你可以回复“跳过linter”来强制输出（不再做风格校验）\n` +
-                `- 或者调整阈值（STYLE_LINT_PASS_SCORE，当前=${lintPassScore}）后再试`
+                `- 或者调整阈值（STYLE_LINT_PASS_SCORE，当前=${lintPassScore}）后再试`,
+              policy: "LintPolicy",
+              reasonCodes: ["style_lint_exhausted"],
+              detail: { failCount: runState.styleLintFailCount, passScore: lintPassScore },
             });
             writeEvent("run.end", {
               runId,

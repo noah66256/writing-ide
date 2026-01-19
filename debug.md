@@ -232,6 +232,8 @@ sudo spctl --master-enable
 - **Web Gate 过弱（布尔门禁）**：Gateway 侧 `hasWebSearch/hasWebFetch` 只要发生过一次就算通过，无法保证“多轮 search + 足量 fetch”的广度。
 - **风格上下文注入过早**：当 `style_imitate` 激活时，风格手册/写法候选被提前注入，会影响模型在“收集阶段”的搜索词选择与收敛策略。
 - **端侧/服务端技能判定不一致（历史遗留）**：Desktop 侧 `activateSkills` 未显式传入 `detectRunIntent(..., runTodo)`，导致某些续跑/短句场景下技能判断与 Gateway 不一致，从而出现“前端注入了风格上下文，但服务端未进入对应技能/阶段”的错配。
+- **门禁只“提示不裁剪工具清单”**：Gateway 开局 system prompt 提供了全量工具表；进入 `web_need_fetch` 阶段虽限制 `allowedToolNames`，但若未用“裁剪后的工具清单”覆盖提示，模型仍会看到/尝试 `kb.search` → 触发 `SkillToolCapsPolicy` 反复重试卡死。
+- **ACTIVE_SKILLS 信号残留**：Desktop 侧 `ACTIVE_SKILLS(JSON)` 在 web radar 阶段仍包含 `style_imitate`，会强化模型“去 kb.search/进风格闭环”的倾向。
 
 #### 修复
 
@@ -247,6 +249,9 @@ sudo spctl --master-enable
 - **抑制风格抢跑（收集阶段不注入风格强引导）**：
   - Desktop：当 `web_topic_radar` 激活时，不注入 `KB_LIBRARY_PLAYBOOK/KB_STYLE_CLUSTERS/STYLE_SELECTOR` 等风格强引导内容。
   - Gateway：当识别为 web radar 时，suppress `style_imitate`（让它留到“用户明确要写稿/定稿”再开）。
+- **门禁=工具清单裁剪（覆盖式）**：
+  - Gateway：阶段变化时注入“当前允许调用的工具（裁剪版）”覆盖开局工具表；并将 `web_need_fetch` 阶段限制为仅允许 `web.fetch`（强制抓正文证据）。
+  - Desktop：web radar 时 `ACTIVE_SKILLS(JSON)` suppress `style_imitate`，并弱化 KB 提示，避免再次诱导 `kb.search` 抢跑。
 - **输出广度兜底**：
   - Gateway 增加 `WebRadarPolicy`：若联网证据已满足但最终“盘点条数”明显不足，则自动继续一次补足后再结束。
 

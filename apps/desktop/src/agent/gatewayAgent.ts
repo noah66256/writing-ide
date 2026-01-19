@@ -756,11 +756,8 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
     );
     return ids.map((id: string) => map.get(id) ?? { id, name: id });
   })();
-  const kbText =
-    `KB_SELECTED_LIBRARIES(JSON):\n${JSON.stringify(kbSelected, null, 2)}\n\n` +
-    `提示：如需引用知识库内容，请调用工具 kb.search（默认只在已关联库中检索）。\n\n`;
 
-  const activeSkills = activateSkills({
+  const activeSkillsRaw = activateSkills({
     mode: useRunStore.getState().mode as any,
     userPrompt,
     mainDocRunIntent: (mainDoc as any)?.runIntent,
@@ -773,11 +770,23 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
       runTodo: runTodoForPack,
     }),
   });
+  const idSetRaw = new Set((activeSkillsRaw ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean));
+  const webTopicRadarActive = idSetRaw.has("web_topic_radar");
+
+  // 与 Gateway 对齐：WebRadar 收集阶段 suppress style_imitate（避免误导模型抢跑进入风格闭环）
+  const activeSkills = webTopicRadarActive
+    ? (activeSkillsRaw ?? []).filter((s: any) => String(s?.id ?? "").trim() !== "style_imitate")
+    : activeSkillsRaw;
+
   const skillsText = `ACTIVE_SKILLS(JSON):\n${JSON.stringify(activeSkills, null, 2)}\n\n`;
 
   const activeSkillIdSet = new Set((activeSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean));
   const styleSkillActive = activeSkillIdSet.has("style_imitate");
-  const webTopicRadarActive = activeSkillIdSet.has("web_topic_radar");
+
+  const kbHint = webTopicRadarActive
+    ? `提示：当前为“全网热点/素材收集（web_topic_radar）”。优先使用 web.search/web.fetch 完成素材收集；收集阶段不要调用 kb.search（尤其是风格库）。\n\n`
+    : `提示：如需引用知识库内容，请调用工具 kb.search（默认只在已关联库中检索）。\n\n`;
+  const kbText = `KB_SELECTED_LIBRARIES(JSON):\n${JSON.stringify(kbSelected, null, 2)}\n\n` + kbHint;
 
   // 关键：风格 playbook/写法候选等“强引导”上下文，只在写作闭环真正激活时注入。
   // （解决：仅做“搜索/盘点热点”时，绑定风格库也不应抢跑影响素材收集与选题广度）
