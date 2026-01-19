@@ -2763,6 +2763,16 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
         // Plan/Agent：避免“只读完 doc 就停 / 没有 todo 就结束 / 明明要写入却没写入”
         if (mode !== "chat" && runState.workflowRetryBudget > 0) {
+          const allowEmptyAfterWrite =
+            assistantText.trim().length === 0 &&
+            (runState.hasWriteApplied || runState.hasWriteProposed);
+          if (allowEmptyAfterWrite) {
+            assistantText = intent.wantsOkOnly
+              ? "OK"
+              : runState.hasWriteProposed
+                ? "已生成写入提案，请在工具卡片点击 Keep 完成写入。"
+                : "已完成写入，请查看生成的文件。";
+          }
           const analysis = analyzeAutoRetryText({
             assistantText,
             intent,

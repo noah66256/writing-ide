@@ -450,6 +450,32 @@ sudo spctl --master-enable
 2) 即使模型偶发漏参，也应能看到 todo 自动出现（默认 5 项左右）。  
 3) “复制诊断”中应出现：`ToolArgNormalizationPolicy` 的 `repaired` 记录（reasonCodes 含 `missing_required:items`）。  
 
+---
+
+### 15) 写入已完成但 Run 以“模型输出为空”结束
+
+#### 现象
+
+- 已成功生成文章并写入文件（或生成写入提案），但 Run 末尾仍出现：
+  - `AutoRetryPolicy: empty_output / need_final_text`
+  - 最终以“模型输出为空”收尾
+
+#### 根因（范式层）
+
+- 某些模型在 `doc.write`/`doc.previewDiff` 后未输出最终文本（空回复）。
+- `AutoRetryPolicy` 将其视作“未完成”并重试，直到预算耗尽。
+
+#### 修复
+
+- Gateway：当检测到 **已写入/已提案** 且文本为空时，直接补一个可读的结束语，
+  避免触发空输出重试。
+- 代码位置：`apps/gateway/src/index.ts`
+
+#### 验证
+
+1) 触发一次写入流程（可含 `doc.write` 或 `doc.previewDiff`）。  
+2) 若模型最终输出为空，应自动补出“已完成写入/已生成提案”的结束语。  
+3) Run 不再以 `empty_output` 结束。  
 ### 4) Git Bash 下 Windows 命令参数被“路径转换”坑到（taskkill/…）
 
 #### 现象

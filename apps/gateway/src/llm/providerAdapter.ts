@@ -57,10 +57,12 @@ export function buildInjectedToolResultMessages(args: {
     { role: useText ? "user" : "system", content: useText ? args.toolResultText : args.toolResultXml },
   ];
   // 兼容部分代理：当 tool_result 作为最后一条消息时，可能会出现“choices 为空不续写”。
-  // 这里额外补一条普通 user 消息，让模型明确“继续推进下一步”。（仅对 text 格式开启）
-  if (useText) {
-    out.push({ role: "user", content: "继续。请基于以上 tool_result 推进下一步。若需要调用工具，请按协议输出 <tool_calls>。</tool_calls>" });
-  }
+  // 这里额外补一条普通 user 消息，让模型明确“继续推进下一步”（XML/text 都加，避免空输出）。
+  out.push({
+    role: "user",
+    content:
+      "继续。请基于以上 tool_result 推进下一步。若需要调用工具，请按协议输出 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。",
+  });
   return out;
 }
 
