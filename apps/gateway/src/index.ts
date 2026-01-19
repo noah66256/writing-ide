@@ -3435,6 +3435,50 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       if (toolCalls?.length) {
         const hasWebSearchCall = toolCalls.some((c: any) => String(c?.name ?? "").trim() === "web.search");
         const hasTimeNowCall = toolCalls.some((c: any) => String(c?.name ?? "").trim() === "time.now");
+        const firstWebSearchIdx = toolCalls.findIndex((c: any) => String(c?.name ?? "").trim() === "web.search");
+        const firstTimeNowIdx = toolCalls.findIndex((c: any) => String(c?.name ?? "").trim() === "time.now");
+
+        // 顺序门禁：同一轮里若同时调用 time.now + web.search，必须 time.now 在前（否则模型拿不到时间结果，仍会带错年份）
+        if (
+          hasWebSearchCall &&
+          !runState.hasTimeNow &&
+          hasTimeNowCall &&
+          firstWebSearchIdx >= 0 &&
+          firstTimeNowIdx >= 0 &&
+          firstWebSearchIdx < firstTimeNowIdx
+        ) {
+          const reasonCodes = ["need_time_now_first", "order:time.now_before:web.search"];
+          if (runState.protocolRetryBudget > 0) {
+            writePolicyDecision({
+              turn,
+              policy: "TimePolicy",
+              decision: "retry",
+              reasonCodes,
+              detail: { budget: "protocol", budgetBefore: runState.protocolRetryBudget, budgetAfter: Math.max(0, runState.protocolRetryBudget - 1) }
+            });
+            runState.protocolRetryBudget -= 1;
+            writeRunNotice({
+              turn,
+              kind: "info",
+              title: "TimePolicy：time.now 必须在 web.search 之前",
+              message: "检测到同一轮 tool_calls 里 web.search 写在 time.now 之前。请把 time.now 放到前面执行，否则无法用当前年份约束 query。",
+              policy: "TimePolicy",
+              reasonCodes,
+              detail: { firstWebSearchIdx, firstTimeNowIdx }
+            });
+            writeEvent("assistant.done", { reason: "time_now_order_required_retry", turn });
+            messages.push({
+              role: "system",
+              content:
+                "你准备调用 web.search，但同一轮中必须先 time.now 再 web.search（否则你拿不到当前年份，容易带错年份）。请立刻重试：\n" +
+                "- 下一条消息必须且只能输出 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
+                "- 请在同一个 tool_calls 中先调用 time.now。\n" +
+                "- 然后再调用 web.search(query=..., freshness=...)。\n"
+            });
+            continue;
+          }
+        }
+
         if (hasWebSearchCall && !runState.hasTimeNow && !hasTimeNowCall) {
           const reasonCodes = ["need_time_now", "before:web.search"];
           if (runState.protocolRetryBudget > 0) {
@@ -3564,6 +3608,74 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           reply.raw.end();
           agentRunWaiters.delete(runId);
           return;
+        }
+
+        // WebSearchQueryNormalizationPolicy：用 time.now 的当前年份纠正 web.search.query 里的“年份漂移”
+        // - 仅在用户未明确要求查历史/旧年份，且 freshness 未显式指定年份/日期范围时生效
+        const webSearchYearCtx = (() => {
+          const p = String(userPrompt ?? "");
+          const hasYear = /\b20\d{2}\b/.test(p);
+          const negatedYear =
+            /(不要|避免|别|免得|防止|不想).{0,10}\b20\d{2}\b/.test(p) || /\b20\d{2}\b.{0,10}(不要|避免|别|免得|防止|不想)/.test(p);
+          const userExplicitYear = hasYear && !negatedYear;
+          const userWantsHistory = /(回顾|复盘|往年|历年|过去|历史|近几年|旧闻|旧资料)/.test(p);
+          return { userExplicitYear, userWantsHistory };
+        })();
+
+        if (String(call?.name ?? "").trim() === "web.search" && runState.hasTimeNow) {
+          const rawArgs = (call?.args ?? {}) as any;
+          const queryRaw = typeof rawArgs?.query === "string" ? String(rawArgs.query).trim() : "";
+          const freshnessRaw = typeof rawArgs?.freshness === "string" ? String(rawArgs.freshness).trim() : "";
+          const currentYear = (() => {
+            const iso = String(runState.lastTimeNowIso ?? "").trim();
+            if (iso) {
+              try {
+                const d = new Date(iso);
+                const y = d.getUTCFullYear();
+                if (Number.isFinite(y) && y > 2000) return y;
+              } catch {
+                // ignore parse error
+              }
+            }
+            return new Date().getFullYear();
+          })();
+
+          // freshness 如果显式指定年份/日期范围，则认为用户/模型在做历史检索，不做纠正
+          const freshnessHasYear = /\b20\d{2}\b/.test(freshnessRaw);
+          const years = queryRaw ? queryRaw.match(/\b20\d{2}\b/g) ?? [] : [];
+          const uniqYears = Array.from(new Set(years));
+          if (
+            queryRaw &&
+            !freshnessHasYear &&
+            uniqYears.length > 0 &&
+            !uniqYears.includes(String(currentYear)) &&
+            !webSearchYearCtx.userExplicitYear &&
+            !webSearchYearCtx.userWantsHistory
+          ) {
+            const newQuery =
+              uniqYears.length === 1
+                ? queryRaw.replaceAll(uniqYears[0], String(currentYear))
+                : `${queryRaw.replace(/\b20\d{2}\b/g, "").replace(/\s+/g, " ").trim()} ${currentYear}`.trim();
+            if (newQuery && newQuery !== queryRaw) {
+              (call as any).args = { ...(call as any).args, query: newQuery };
+              writePolicyDecision({
+                turn,
+                policy: "WebSearchQueryNormalizationPolicy",
+                decision: "normalized",
+                reasonCodes: ["web_search_year_corrected", "derived_from:time.now"],
+                detail: { from: queryRaw.slice(0, 200), to: newQuery.slice(0, 200), years: uniqYears, currentYear }
+              });
+              writeRunNotice({
+                turn,
+                kind: "info",
+                title: "web.search 年份纠正：使用当前年份",
+                message: `检测到 web.search.query 包含历史年份（${uniqYears.join(",")}），且用户未要求查历史。已按 time.now 的当前年份纠正为 ${currentYear}。`,
+                policy: "WebSearchQueryNormalizationPolicy",
+                reasonCodes: ["web_search_year_corrected", "derived_from:time.now"],
+                detail: { years: uniqYears, currentYear }
+              });
+            }
+          }
         }
 
         const toolCallId = randomUUID();
