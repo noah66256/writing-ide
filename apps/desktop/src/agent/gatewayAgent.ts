@@ -768,16 +768,31 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
   });
   const skillsText = `ACTIVE_SKILLS(JSON):\n${JSON.stringify(activeSkills, null, 2)}\n\n`;
 
-  const playbookText = await useKbStore.getState().getPlaybookTextForLibraries(
-    Array.isArray(kbAttached) ? kbAttached.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [],
-  );
-  const playbookSection = playbookText
-    ? `KB_LIBRARY_PLAYBOOK(Markdown):\n${playbookText}\n\n` +
+  const activeSkillIdSet = new Set((activeSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean));
+  const styleSkillActive = activeSkillIdSet.has("style_imitate");
+  const webTopicRadarActive = activeSkillIdSet.has("web_topic_radar");
+
+  // 关键：风格 playbook/写法候选等“强引导”上下文，只在写作闭环真正激活时注入；
+  // 同时若本轮是“热点/素材盘点（广度优先）”，强制不注入，避免风格库抢跑导致过早收敛。
+  const allowInjectStyleContext = styleSkillActive && !webTopicRadarActive;
+
+  const playbookSection = await (async () => {
+    if (!allowInjectStyleContext) return "";
+    const ids = Array.isArray(kbAttached) ? kbAttached.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
+    const playbookText = await useKbStore
+      .getState()
+      .getPlaybookTextForLibraries(ids)
+      .catch(() => "");
+    if (!playbookText) return "";
+    return (
+      `KB_LIBRARY_PLAYBOOK(Markdown):\n${playbookText}\n\n` +
       `提示：上面已注入库级“仿写手册”（Style Profile + 维度写法）。如需更多原文证据/更多样例，再调用 kb.search。\n\n`
-    : "";
+    );
+  })();
 
   const styleClustersSection = await (async () => {
     // M3：从最新声音指纹快照提取“写法候选（子簇）”，用于写作前选定写法并写入 Main Doc
+    if (!allowInjectStyleContext) return "";
     const styleLibs = kbSelected.filter((l: any) => String(l?.purpose ?? "").trim() === "style").slice(0, 4);
     if (!styleLibs.length) return "";
     const topicText = buildTopicTextForSelectorV1({ userPrompt, mainDoc });
@@ -830,6 +845,7 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
 
   const styleSelectorSection = await (async () => {
     // Selector v1：为“自动选簇/选卡”提供结构化输出，保证换生成模型也稳定可用
+    if (!allowInjectStyleContext) return "";
     const styleSkillActive = Array.isArray(activeSkills) && activeSkills.some((s: any) => String(s?.id ?? "") === "style_imitate");
     if (!styleSkillActive) return "";
     const styleLibs = kbSelected.filter((l: any) => String(l?.purpose ?? "").trim() === "style").slice(0, 1);

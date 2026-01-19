@@ -956,12 +956,27 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   function looksLikeProjectSearchIntent(text: string): boolean {
     const t = String(text ?? "").trim();
     if (!t) return false;
-    // “全网/上网搜”不是项目内搜索（若未来提供 web.search，再走网络路由）
-    if (/(全网|上网|网页|百度|谷歌|google|bing|github|stack\s*overflow)/i.test(t)) return false;
-    const hit = /(全局搜索|全项目搜索|项目内搜索|在项目里搜|搜一下|查找|搜索|find in files|ctrl\+shift\+f|ripgrep|\brg\b|\bgrep\b)/i.test(t);
-    if (!hit) return false;
+    // 明确的“项目内搜索”信号：直接通过
+    const explicit = /(全局搜索|全项目搜索|项目内搜索|在项目里搜|find in files|ctrl\+shift\+f|ripgrep|\brg\b|\bgrep\b)/i.test(t);
+    if (explicit) return true;
+
+    // 泛“搜索/查找”容易把“全网热点/新闻”误判为项目内搜索：需要额外的“项目提示词”
+    const genericVerb = /(搜一下|查找|搜索)/i.test(t);
+    if (!genericVerb) return false;
+
+    // 明显是全网/新闻/热点/链接类：默认不当作项目内搜索（除非同时出现明确项目提示词）
+    const looksWeb =
+      /(全网|上网|联网|网页|百度|谷歌|google|bing|github|stack\s*overflow|新闻|热点|时事|实时|最新|快讯|资讯|链接|网址|https?:\/\/)/i.test(t);
+
+    const hasProjectHints =
+      /(文件|目录|项目|代码|路径|\.md|\.mdx|\.ts|\.tsx|\.js|\.json|@\{[^}]+\}|src\/|apps\/|packages\/)/i.test(t) ||
+      /(哪里用到了|在哪(里)?用|引用|import|require|调用|定义|实现)/i.test(t);
+
+    if (looksWeb && !hasProjectHints) return false;
+    if (!hasProjectHints) return false;
+
     // 避免把“搜索/查找原因”这种讨论误判为 project.search
-    const looksDiscussion = /(原因|为什么|怎么会|解释|讨论)/.test(t) && !/文件|目录|项目|代码|路径|\.md|\.ts|\.tsx|\.js|\.json/i.test(t);
+    const looksDiscussion = /(原因|为什么|怎么会|解释|讨论)/.test(t) && !hasProjectHints;
     if (looksDiscussion) return false;
     return true;
   }

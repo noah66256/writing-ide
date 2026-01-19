@@ -161,7 +161,37 @@ export const STYLE_IMITATE_SKILL: SkillManifest = {
   ui: { badge: "STYLE", color: "blue" },
 };
 
-export const SKILL_MANIFESTS_V1: SkillManifest[] = [STYLE_IMITATE_SKILL];
+export const WEB_TOPIC_RADAR_SKILL: SkillManifest = {
+  id: "web_topic_radar",
+  name: "全网热点/素材雷达",
+  description: "面向“今日热点/新闻/找素材/盘点选题”：以广度优先收集候选话题与证据链接，避免过早收敛到 Top 3。",
+  priority: 110,
+  stageKey: "agent.skill.web_topic_radar",
+  autoEnable: true,
+  triggers: [
+    { when: "mode_in", args: { modes: ["plan", "agent"] } },
+    {
+      when: "text_regex",
+      args: {
+        pattern: "(全网|上网|联网|网页|新闻|热点|时事|实时|最新|快讯|资讯|查资料|找素材|web\\.search|web\\.fetch)",
+      },
+    },
+  ],
+  promptFragments: {
+    system:
+      "当 skill=web_topic_radar 激活时（全网热点/素材盘点）：\n" +
+      "- 目标是“广度优先”：先把候选话题池铺开，不要默认只选 Top 3 就开始写成稿。\n" +
+      "- 若用户未指定条数：默认给出 >=15 条候选话题（可更多），并去重（同一事件/同一来源不重复）。\n" +
+      "- 工具策略：优先多轮 web.search（不同关键词/角度），再对关键条目执行 web.fetch 获取正文证据；引用要带 url。\n" +
+      "- 输出形态：优先产出“热点/选题盘点报告”（多条话题 + 观点角度 + 证据链接），必要时再给“下一步深挖建议”。\n" +
+      "- 若同时绑定风格库：在完成素材/话题盘点前，不要用风格库的写作套路抢跑成稿；等用户明确要写/定稿再进入风格闭环。",
+    context: "ACTIVE_SKILLS: web_topic_radar（广度优先：热点/新闻/素材盘点）",
+  },
+  policies: [],
+  ui: { badge: "WEB", color: "purple" },
+};
+
+export const SKILL_MANIFESTS_V1: SkillManifest[] = [WEB_TOPIC_RADAR_SKILL, STYLE_IMITATE_SKILL];
 
 export function activateSkills(args: {
   mode: AgentMode;
