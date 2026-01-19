@@ -10,6 +10,10 @@
 - Gemini 2.5 系列存在 `finish_reason=STOP` 但 `response.text` 为空的已知问题讨论。
   - https://discuss.ai.google.dev/t/empty-response-text-from-gemini-2-5-pro-despite-no-safety-and-max-tokens-issues/98010
   - https://discuss.ai.google.dev/t/possible-bug-in-gemini-2-5-pro-behavior-empyty-response/98081
+- Google ADK（Python）也有“tool call 后最终 message 为空”的 issue。
+  - https://github.com/google/adk-python/issues/3525
+- Gemini CLI 有“API returned an empty response”的反馈（升级后/特定请求下返回空响应）。
+  - https://github.com/google-gemini/gemini-cli/issues/6306
 - 官方排障说明提到上下文过大/服务端压力可能导致异常或空响应。
   - https://ai.google.dev/gemini-api/docs/troubleshooting
 
@@ -26,6 +30,9 @@
 2) **上游成功但空内容**
    - finish_reason=STOP 但 content 空，SDK/代理未报错。
    - 若下游不做兜底，流程会被 AutoRetry 误认为“未完成”。
+3) **门禁预算语义混用导致“该继续时无法继续”**
+   - 典型：WebGate/工具阶段门禁依赖 workflow 完成性重试预算；当 workflow budget 被其它环节消耗殆尽后，门禁无法再推进，最终走到空输出兜底并结束。
+   - 对策：将“协议/阶段门禁”的推进预算与“完成性重试”分离；至少在 workflow budget 耗尽时允许门禁改用 protocol budget 再推进一次（仍保持上限）。
 
 ## 本项目的落地策略
 ### A. 解析兼容

@@ -2682,9 +2682,12 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         }
 
         // Web Gate：若本轮需要联网检索/抓正文证据，但模型直接输出了纯文本，则强制要求先 web.search/web.fetch（Chat 也生效）
+        // 关键修正：WebGate 属于“阶段门禁”，不应因 workflowRetryBudget（完成性重试预算）耗尽而失效；
+        // 否则会出现“仍需 fetch，但无法继续 -> 最终空输出兜底并 run.end(text)”的回归。
+        // 因此当 workflow budget 用尽时，允许 WebGate 使用 protocolRetryBudget 再推进一次（仍保持上限，避免无限重试）。
         if (
           webGate.enabled &&
-          runState.workflowRetryBudget > 0 &&
+          (runState.workflowRetryBudget > 0 || runState.protocolRetryBudget > 0) &&
           (() => {
             const needSearch =
               webGate.needsSearch &&
@@ -2712,19 +2715,25 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             needFetch ? "need_web_fetch" : null,
           ].filter(Boolean) as string[];
 
+          const useWorkflowBudget = runState.workflowRetryBudget > 0;
+          const budgetKind = useWorkflowBudget ? "workflow" : "protocol";
+          const budgetBefore = useWorkflowBudget ? runState.workflowRetryBudget : runState.protocolRetryBudget;
+          const budgetAfter = Math.max(0, budgetBefore - 1);
+
           writePolicyDecision({
             turn,
             policy: "WebGatePolicy",
             decision: "retry",
             reasonCodes,
             detail: {
-              budget: "workflow",
-              budgetBefore: runState.workflowRetryBudget,
-              budgetAfter: Math.max(0, runState.workflowRetryBudget - 1),
+              budget: budgetKind,
+              budgetBefore,
+              budgetAfter,
               webGate,
             },
           });
-          runState.workflowRetryBudget -= 1;
+          if (useWorkflowBudget) runState.workflowRetryBudget -= 1;
+          else runState.protocolRetryBudget -= 1;
 
           writeRunNotice({
             turn,
@@ -2735,9 +2744,9 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             reasonCodes,
             detail: {
               webGate,
-              budget: "workflow",
-              budgetBefore: runState.workflowRetryBudget + 1,
-              budgetAfter: runState.workflowRetryBudget,
+              budget: budgetKind,
+              budgetBefore,
+              budgetAfter,
             },
           });
           writeEvent("assistant.done", { reason: "web_gate_retry", turn });

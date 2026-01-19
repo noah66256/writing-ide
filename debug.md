@@ -502,6 +502,27 @@ sudo spctl --master-enable
 #### 验证
 1) 复现用例中应不再出现 `empty_output`。
 2) 日志 `openaiCompat.diag` 不再出现频繁的 `deltaChars==0`。
+
+---
+
+### 17) WebGate 仍需 fetch，但因 workflowRetryBudget 耗尽导致 Run 以“模型输出为空”结束
+
+#### 现象
+- 诊断日志显示仍处于 `SkillToolCapsPolicy phase=web_need_fetch`（或 WebGate 配额未满足），按理应继续 `web.fetch`。
+- 但 Run 却直接以 `run.end(reason=text)` 结束，并触发“模型输出为空/兜底文本”一类提示。
+
+#### 根因（范式层）
+- **预算语义混用**：`workflowRetryBudget` 同时承担了“完成性重试/闭环重试”的语义，但 WebGate 属于“阶段门禁/协议推进”（必须先搜/抓证据）。
+- 当 workflow budget 在前序流程（TimePolicy/ToolCaps/参数修复/AutoRetry 等）被耗尽后，WebGate 无法再触发 retry，导致“仍需 web.fetch 但无法推进”，最终走到空输出兜底并结束。
+
+#### 修复
+- Gateway：WebGatePolicy 在 `workflowRetryBudget==0` 时允许改用 `protocolRetryBudget` 再推进一次（仍有上限，避免无限重试）。
+- 代码位置：`apps/gateway/src/index.ts`（WebGatePolicy 分支）
+
+#### 验证
+1) 人为构造：让 workflow budget 耗尽，但 WebGate 仍需要 `web.fetch`。  
+2) 观察日志：应仍能看到 `WebGatePolicy: retry`（budget=protocol），并继续要求 `<tool_calls>` 调用 `web.fetch`。  
+3) 不应再出现“仍需 fetch 但直接 run.end(text) + 空输出兜底”。
 ### 4) Git Bash 下 Windows 命令参数被“路径转换”坑到（taskkill/…）
 
 #### 现象
