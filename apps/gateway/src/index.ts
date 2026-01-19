@@ -887,6 +887,15 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       examples: ["为什么报错", "这个错误怎么解决", "日志里这个是什么意思"],
     },
     {
+      routeId: "web_radar",
+      intentType: "task_execution" as const,
+      todoPolicy: "optional" as const,
+      toolPolicy: "allow_readonly" as const,
+      nextAction: "enter_workflow" as const,
+      desc: "全网热点/新闻/素材盘点（广度优先：多轮 web.search + 多篇 web.fetch）",
+      examples: ["今天 AI 圈财经圈热点盘点", "全网热点雷达", "找一些最新资料/选题"],
+    },
+    {
       routeId: "project_search",
       intentType: "task_execution" as const,
       todoPolicy: "optional" as const,
@@ -951,6 +960,35 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     return /(执行|动手|写入|落盘|应用|改(一下)?|修改|修复|实现|打包|部署|提交|生成\s*todo|todo\b|删除|删掉|删|移除|重命名|改名|移动|迁移|新建(文件夹|目录)|创建(文件夹|目录)|mkdir|rename|move|delete|rm\b|del\b)/i.test(
       t,
     );
+  }
+
+  function looksLikeWebRadarIntent(text: string): boolean {
+    const t = String(text ?? "").trim();
+    if (!t) return false;
+
+    // 目的：识别“热点/新闻/时事/最新/盘点/找素材/选题”这类广度优先请求，避免误路由到 project_search。
+    // 注意：尽量避免“整理这篇新闻/写一篇评论”这种编辑任务误触发。
+    const hasSearchVerb = /(搜索|检索|搜一下|查找|上网|全网|联网|web\.search|web\.fetch)/i.test(t);
+    const hasHotSignal = /(热点|新闻|时事|快讯|资讯|盘前|盘中|盘后)/.test(t);
+    const hasTimeSignal = /(今天|今日|最新|最近|实时|刚刚)/.test(t);
+    const hasInventorySignal = /(盘点|汇总|整理|列表|清单|多少条|几条|选题|话题|方向|素材|雷达)/.test(t);
+
+    // “整理这篇新闻/这条资讯”通常是编辑，不是全网雷达
+    const looksLikeSingleDocEdit =
+      /(整理|润色|改写|精简|扩写|续写)/.test(t) &&
+      /(这篇|这条|本文|该文|这则|这份)/.test(t) &&
+      /(新闻|资讯|快讯|文章)/.test(t) &&
+      !hasSearchVerb &&
+      !hasTimeSignal &&
+      !/https?:\/\//i.test(t);
+    if (looksLikeSingleDocEdit) return false;
+
+    // 触发条件（偏保守）：
+    // - 明确要“搜/联网”且提到热点/时间敏感；或
+    // - 明确是“盘点/选题/素材”且带热点或时间敏感信号。
+    if (hasSearchVerb && (hasHotSignal || hasTimeSignal || hasInventorySignal)) return true;
+    if (hasInventorySignal && (hasHotSignal || hasTimeSignal)) return true;
+    return false;
   }
 
   function looksLikeProjectSearchIntent(text: string): boolean {
@@ -1206,6 +1244,20 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       };
     }
 
+    // 全网热点/新闻/素材盘点：只读联网工具闭环（广度优先，不要误判为项目内搜索）
+    if (looksLikeWebRadarIntent(pTrim)) {
+      return {
+        intentType: "task_execution",
+        confidence: 0.88,
+        nextAction: "enter_workflow",
+        todoPolicy: "optional",
+        toolPolicy: "allow_readonly",
+        reason: "用户在做全网热点/新闻/素材盘点：允许只读联网工具（web.search/web.fetch）",
+        derivedFrom: ["regex:web_radar", ...derivedFrom],
+        routeId: "web_radar",
+      };
+    }
+
     // 项目内搜索/查找：只读工具闭环（不要求 Todo）
     if (looksLikeProjectSearchIntent(pTrim)) {
       return {
@@ -1301,13 +1353,25 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     intent,
     ideSummary: ideSummaryFromSidecar,
   });
-  const activeSkills = activateSkills({
+  const rawActiveSkills = activateSkills({
     mode,
     userPrompt,
     mainDocRunIntent: (mainDocFromPack as any)?.runIntent,
     kbSelected: kbSelectedList as any,
     intent,
   });
+  const rawActiveSkillIds = (rawActiveSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
+
+  // Web Radar（热点/素材盘点）阶段：强制“先广度收集”，避免风格库/写作闭环抢跑导致过早收敛。
+  // - 如果命中 web_topic_radar skill，或文本本身看起来是热点盘点，则本轮 suppress style_imitate（让它留到“用户明确要写稿”再开）。
+  const webRadarByText = looksLikeWebRadarIntent(userPrompt);
+  const webRadarActive = rawActiveSkillIds.includes("web_topic_radar") || webRadarByText;
+  const suppressedSkillIds: string[] = [];
+  const activeSkills = webRadarActive
+    ? (rawActiveSkills ?? []).filter((s: any) => String(s?.id ?? "").trim() !== "style_imitate")
+    : rawActiveSkills;
+  if (webRadarActive && rawActiveSkillIds.includes("style_imitate")) suppressedSkillIds.push("style_imitate");
+
   const activeSkillIds = (activeSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
   const stageKeyForRun = pickSkillStageKeyForAgentRun(activeSkills, "agent.run");
   const billingSource = stageKeyForRun.startsWith("agent.skill.") ? stageKeyForRun : `agent.${mode}`;
@@ -1791,11 +1855,34 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     .toLowerCase();
   const sourcesPolicy = sourcesPolicyRaw === "web" || sourcesPolicyRaw === "kb_and_web" ? sourcesPolicyRaw : "";
   const hasUrlInPrompt = /https?:\/\/\S+/i.test(userPrompt);
-  const webTriggerByText = /(联网|上网|全网|查资料|找素材|最新|今天|最近|时事|新闻|刚刚|实时)/.test(userPrompt);
+  const webTriggerByText = /(联网|上网|全网|查资料|找素材|最新|今天|今日|最近|时事|新闻|刚刚|实时)/.test(userPrompt);
+  const webGateBaseEnabled = hasUrlInPrompt || webTriggerByText || sourcesPolicy === "web" || sourcesPolicy === "kb_and_web";
+  const webGateNeedsSearch = !hasUrlInPrompt && (webTriggerByText || sourcesPolicy === "web" || sourcesPolicy === "kb_and_web");
+  const webGateNeedsFetch = hasUrlInPrompt || webTriggerByText || sourcesPolicy === "web" || sourcesPolicy === "kb_and_web";
+
+  const clampInt = (v: any, min: number, max: number, fallback: number) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(min, Math.min(max, Math.floor(n)));
+  };
+  // Web Radar 配额（可通过 env 覆盖；默认：3 搜索 + 5 抓正文 + 15 话题）
+  const radarMinSearch = clampInt(process.env.WEB_RADAR_MIN_SEARCH ?? 3, 1, 8, 3);
+  const radarMinFetch = clampInt(process.env.WEB_RADAR_MIN_FETCH ?? 5, 1, 12, 5);
+  const radarMinTopics = clampInt(process.env.WEB_RADAR_MIN_TOPICS ?? 15, 8, 40, 15);
+
   const webGate = {
-    enabled: hasUrlInPrompt || webTriggerByText || sourcesPolicy === "web" || sourcesPolicy === "kb_and_web",
-    needsSearch: !hasUrlInPrompt && (webTriggerByText || sourcesPolicy === "web" || sourcesPolicy === "kb_and_web"),
-    needsFetch: hasUrlInPrompt || webTriggerByText || sourcesPolicy === "web" || sourcesPolicy === "kb_and_web",
+    enabled: webGateBaseEnabled,
+    needsSearch: webGateNeedsSearch,
+    needsFetch: webGateNeedsFetch,
+    // 配额：默认 1/1；热点盘点(web_radar/web_topic_radar)提升为 3/5
+    requiredSearchCount: webGateNeedsSearch ? (webRadarActive ? radarMinSearch : 1) : 0,
+    requiredFetchCount: webGateNeedsFetch ? (webRadarActive ? radarMinFetch : 1) : 0,
+    // 轻量去重：避免 3 次 search 都是同一个 query；避免 fetch 全来自单一站点
+    requiredUniqueSearchQueries: webRadarActive ? Math.min(radarMinSearch, 3) : 0,
+    requiredUniqueFetchDomains: webRadarActive ? 3 : 0,
+    // 输出广度：热点盘点默认 >=15 条
+    minTopics: webRadarActive ? radarMinTopics : 0,
+    radar: webRadarActive,
   };
 
   // Run 内部状态（显式 State；由 policy 函数分析与更新）
@@ -1819,6 +1906,10 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     hasKbSearch: runState.hasKbSearch,
     hasWebSearch: runState.hasWebSearch,
     hasWebFetch: runState.hasWebFetch,
+    webSearchCount: runState.webSearchCount,
+    webFetchCount: runState.webFetchCount,
+    webSearchUniqueQueries: Array.isArray(runState.webSearchUniqueQueries) ? runState.webSearchUniqueQueries.slice(0, 6) : [],
+    webFetchUniqueDomains: Array.isArray(runState.webFetchUniqueDomains) ? runState.webFetchUniqueDomains.slice(0, 6) : [],
     hasStyleKbSearch: runState.hasStyleKbSearch,
     hasStyleKbHit: (runState as any).hasStyleKbHit === true,
     styleKbDegraded: runState.styleKbDegraded,
@@ -1940,8 +2031,21 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
     turn: 0,
     policy: "SkillPolicy",
     decision: activeSkills.length ? "activated" : "none",
-    reasonCodes: activeSkills.length ? ["skills_activated", ...activeSkillIds.map((id: string) => `skill:${id}`)] : ["skills_none"],
-    detail: { stageKey: stageKeyForRun, activeSkillIds, activeSkills },
+    reasonCodes: activeSkills.length
+      ? [
+          "skills_activated",
+          ...activeSkillIds.map((id: string) => `skill:${id}`),
+          ...(suppressedSkillIds.length ? suppressedSkillIds.map((id) => `skill_suppressed:${id}`) : []),
+        ]
+      : ["skills_none"],
+    detail: {
+      stageKey: stageKeyForRun,
+      activeSkillIds,
+      activeSkills,
+      ...(suppressedSkillIds.length ? { suppressedSkillIds, webRadarActive, webRadarByText } : {}),
+      // 便于排查“Desktop/Server 技能不一致”：保留原始判定
+      rawActiveSkillIds: rawActiveSkillIds.slice(0, 8),
+    },
   });
 
   // ======== Selector v1：写法候选先出，但默认自动选推荐并继续（可改口） ========
@@ -2102,24 +2206,44 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
     // 2) WebGate（强制联网证据：need_search / need_fetch）
     if (webGate.enabled) {
-      if (webGate.needsSearch && !runState.hasWebSearch) {
+      const needSearch =
+        webGate.needsSearch &&
+        (runState.webSearchCount < webGate.requiredSearchCount ||
+          (webGate.requiredUniqueSearchQueries > 0 && runState.webSearchUniqueQueries.length < webGate.requiredUniqueSearchQueries));
+      if (needSearch) {
         phase = "web_need_search";
         const allowSet = new Set<string>(["web.search", ...Array.from(ALWAYS_ALLOW_TOOL_NAMES)]);
         for (const name of Array.from(allowed)) if (!allowSet.has(name)) allowed.delete(name);
+        const uniqHint =
+          webGate.requiredUniqueSearchQueries > 0
+            ? `（uniqueQueries >= ${webGate.requiredUniqueSearchQueries}；当前=${runState.webSearchUniqueQueries.length}）`
+            : "";
         hint =
           "【Web Gate】当前阶段：need_search。\n" +
-          "- 你必须先调用 web.search(query=...) 获取联网结果。\n" +
+          `- 你必须先调用 web.search(query=...) 获取联网结果（至少 ${webGate.requiredSearchCount} 次；当前=${runState.webSearchCount}）${uniqHint}。\n` +
+          (webGate.radar
+            ? "- 提示：请换不同角度/不同关键词组合，优先铺开话题池（不要只围绕 1-2 个词）。\n"
+            : "") +
           "- 本回合除 web.search 与 run.* 进度工具外，不要调用任何其它工具；不要输出最终回答。";
         reasonCodes.push("phase:web_need_search");
         return { phase, allowed, hint, reasonCodes };
       }
-      if (webGate.needsFetch && !runState.hasWebFetch) {
+      const needFetch =
+        webGate.needsFetch &&
+        (runState.webFetchCount < webGate.requiredFetchCount ||
+          (webGate.requiredUniqueFetchDomains > 0 && runState.webFetchUniqueDomains.length < webGate.requiredUniqueFetchDomains));
+      if (needFetch) {
         phase = "web_need_fetch";
         const allowSet = new Set<string>(["web.fetch", "web.search", ...Array.from(ALWAYS_ALLOW_TOOL_NAMES)]);
         for (const name of Array.from(allowed)) if (!allowSet.has(name)) allowed.delete(name);
+        const uniqHint =
+          webGate.requiredUniqueFetchDomains > 0
+            ? `（uniqueDomains >= ${webGate.requiredUniqueFetchDomains}；当前=${runState.webFetchUniqueDomains.length}）`
+            : "";
         hint =
           "【Web Gate】当前阶段：need_fetch。\n" +
-          "- 你必须至少调用 1 次 web.fetch(url=...) 抓正文证据（可从 web.search 结果里挑 URL）。\n" +
+          `- 你必须调用 web.fetch(url=...) 抓正文证据（至少 ${webGate.requiredFetchCount} 次；当前=${runState.webFetchCount}）${uniqHint}。\n` +
+          "- 可从 web.search 结果里挑 URL，尽量覆盖不同来源站点。\n" +
           "- 本回合除 web.fetch/web.search 与 run.* 进度工具外，不要调用任何其它工具；不要输出最终回答。";
         reasonCodes.push("phase:web_need_fetch");
         return { phase, allowed, hint, reasonCodes };
@@ -2418,10 +2542,28 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         if (
           webGate.enabled &&
           runState.workflowRetryBudget > 0 &&
-          ((webGate.needsSearch && !runState.hasWebSearch) || (webGate.needsFetch && !runState.hasWebFetch))
+          (() => {
+            const needSearch =
+              webGate.needsSearch &&
+              (runState.webSearchCount < webGate.requiredSearchCount ||
+                (webGate.requiredUniqueSearchQueries > 0 &&
+                  runState.webSearchUniqueQueries.length < webGate.requiredUniqueSearchQueries));
+            const needFetch =
+              webGate.needsFetch &&
+              (runState.webFetchCount < webGate.requiredFetchCount ||
+                (webGate.requiredUniqueFetchDomains > 0 && runState.webFetchUniqueDomains.length < webGate.requiredUniqueFetchDomains));
+            return needSearch || needFetch;
+          })()
         ) {
-          const needSearch = webGate.needsSearch && !runState.hasWebSearch;
-          const needFetch = webGate.needsFetch && !runState.hasWebFetch;
+          const needSearch =
+            webGate.needsSearch &&
+            (runState.webSearchCount < webGate.requiredSearchCount ||
+              (webGate.requiredUniqueSearchQueries > 0 &&
+                runState.webSearchUniqueQueries.length < webGate.requiredUniqueSearchQueries));
+          const needFetch =
+            webGate.needsFetch &&
+            (runState.webFetchCount < webGate.requiredFetchCount ||
+              (webGate.requiredUniqueFetchDomains > 0 && runState.webFetchUniqueDomains.length < webGate.requiredUniqueFetchDomains));
           const reasonCodes = [
             needSearch ? "need_web_search" : null,
             needFetch ? "need_web_fetch" : null,
@@ -2453,12 +2595,12 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             content:
               (needSearch
                 ? "你上一条直接输出了纯文本，但本轮触发了 Web Gate（需要联网证据）。\n" +
-                  "- 你现在必须先调用 web.search(query=...)。\n" +
-                  "- 然后至少调用 1 次 web.fetch(url=...) 抓正文证据（可从 web.search 结果里挑 URL）。\n" +
+                  `- 你现在必须先调用 web.search(query=...)（至少 ${webGate.requiredSearchCount} 次；请换不同关键词/角度，避免重复 query）。\n` +
+                  `- 然后调用 web.fetch(url=...) 抓正文证据（至少 ${webGate.requiredFetchCount} 次；尽量覆盖不同来源站点）。\n` +
                   "- 最后再输出最终回答（Markdown），并基于抓到的正文证据。\n" +
                   "- 下一条消息必须且只能输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。"
                 : "你上一条直接输出了纯文本，但本轮触发了 Web Gate（需要正文证据）。\n" +
-                  "- 你现在必须至少调用 1 次 web.fetch(url=...) 抓正文证据。\n" +
+                  `- 你现在必须调用 web.fetch(url=...) 抓正文证据（至少 ${webGate.requiredFetchCount} 次）。\n` +
                   "- 最后再输出最终回答（Markdown），并基于抓到的正文证据。\n" +
                   "- 下一条消息必须且只能输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。"),
           });
@@ -2557,6 +2699,57 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
                     (needTodo
                       ? "- 在你成功设置 todo 之后，如果仍需要澄清：下一条消息再输出最多 5 个问题（纯文本 Markdown），并在 todo 中标记为 blocked/等待用户输入；用户不答时写明默认假设继续推进。"
                       : "- 如仍需要澄清：下一条消息再输出最多 5 个问题（纯文本 Markdown），并明确默认假设后继续推进（不要重置 todo）。"))
+            });
+            continue;
+          }
+        }
+
+        // Web Radar（广度优先）：如果已完成联网证据门禁，但最终“盘点条数”明显不足，则自动继续一次补足。
+        // 目的：防止模型拿到搜索结果后默认收敛到 2-3 条就直接成稿。
+        if (webGate.radar && webGate.minTopics > 0 && runState.workflowRetryBudget > 0) {
+          const countTopicLikeItems = (text: string) => {
+            const lines = String(text ?? "")
+              .replace(/\r/g, "")
+              .split("\n")
+              .map((x) => x.trim())
+              .filter(Boolean);
+            let n = 0;
+            for (const line of lines) {
+              if (/^[-*]\s+\S+/.test(line)) n += 1;
+              else if (/^\d{1,2}[.)]\s+\S+/.test(line)) n += 1;
+              else if (/^###\s+\S+/.test(line)) n += 1;
+            }
+            return n;
+          };
+          const topicCount = countTopicLikeItems(assistantText);
+          if (topicCount < webGate.minTopics) {
+            writePolicyDecision({
+              turn,
+              policy: "WebRadarPolicy",
+              decision: "retry",
+              reasonCodes: ["need_more_topics"],
+              detail: {
+                topicCount,
+                minTopics: webGate.minTopics,
+                budget: "workflow",
+                budgetBefore: runState.workflowRetryBudget,
+                budgetAfter: Math.max(0, runState.workflowRetryBudget - 1),
+              },
+            });
+            runState.workflowRetryBudget -= 1;
+            writeEvent("assistant.delta", {
+              delta: `\n\n[系统提示] 需要“广度优先”的热点盘点，但当前条数偏少（≈${topicCount}，目标>=${webGate.minTopics}）。我会让模型自动补足后再结束（无需你输入）。`,
+            });
+            writeEvent("assistant.done", { reason: "web_radar_retry", turn });
+            messages.push({ role: "assistant", content: assistantText });
+            messages.push({
+              role: "system",
+              content:
+                `你上一条输出的“热点/选题盘点”条数偏少。\n` +
+                `- 你现在必须把候选话题扩展到 >=${webGate.minTopics} 条（可更多），并去重（同一事件/同源不重复）。\n` +
+                `- 每条至少包含：一句话概述 + 观点角度（或看点） + 来源 URL。\n` +
+                `- 不要写成长篇成稿，不要过早收敛到 Top 3。\n` +
+                `- 下一条消息必须直接输出 Markdown 纯文本（不要调用工具、不要输出 <tool_calls>）。`,
             });
             continue;
           }
@@ -3131,8 +3324,36 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           else if (String((payload.meta as any)?.applyPolicy ?? "") === "auto_apply") runState.hasWriteApplied = true;
         }
         if (payload.ok && payload.name === "kb.search") runState.hasKbSearch = true;
-        if (payload.ok && payload.name === "web.search") runState.hasWebSearch = true;
-        if (payload.ok && payload.name === "web.fetch") runState.hasWebFetch = true;
+        if (payload.ok && payload.name === "web.search") {
+          runState.hasWebSearch = true;
+          runState.webSearchCount = Math.max(0, Math.floor(Number(runState.webSearchCount ?? 0))) + 1;
+          const q = typeof (call?.args as any)?.query === "string" ? String((call.args as any).query).trim() : "";
+          if (q) {
+            const key = q.toLowerCase();
+            const cur = Array.isArray(runState.webSearchUniqueQueries) ? runState.webSearchUniqueQueries : [];
+            const has = cur.some((x) => String(x ?? "").trim().toLowerCase() === key);
+            if (!has) runState.webSearchUniqueQueries = [...cur, q].slice(0, 12);
+          }
+        }
+        if (payload.ok && payload.name === "web.fetch") {
+          runState.hasWebFetch = true;
+          runState.webFetchCount = Math.max(0, Math.floor(Number(runState.webFetchCount ?? 0))) + 1;
+          const url0 = typeof (call?.args as any)?.url === "string" ? String((call.args as any).url).trim() : "";
+          const domain = (() => {
+            if (!url0) return "";
+            try {
+              const u = new URL(url0);
+              return String(u.hostname ?? "").replace(/^www\./i, "").trim().toLowerCase();
+            } catch {
+              return "";
+            }
+          })();
+          if (domain) {
+            const cur = Array.isArray(runState.webFetchUniqueDomains) ? runState.webFetchUniqueDomains : [];
+            const has = cur.some((x) => String(x ?? "").trim().toLowerCase() === domain);
+            if (!has) runState.webFetchUniqueDomains = [...cur, domain].slice(0, 12);
+          }
+        }
 
         // 澄清等待：如果模型把某些 todo 标记为“等待用户确认/blocked”，则本轮应停止，等待用户回答（否则会出现“问你但仍继续跑”）。
         if (

@@ -2,7 +2,7 @@ import { useProjectStore } from "../state/projectStore";
 import { useRunStore, type Mode } from "../state/runStore";
 import { useKbStore } from "../state/kbStore";
 import { facetLabel, getFacetPack } from "../kb/facets";
-import { activateSkills } from "@writing-ide/agent-core";
+import { activateSkills, detectRunIntent } from "@writing-ide/agent-core";
 import { buildStyleLinterLibrariesSidecar, executeToolCall, getTool, toolsPrompt } from "./toolRegistry";
 import { isToolCallMessage, parseToolCalls, renderToolErrorXml, renderToolResultXml } from "./xmlProtocol";
 
@@ -765,15 +765,23 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
     userPrompt,
     mainDocRunIntent: (mainDoc as any)?.runIntent,
     kbSelected: kbSelected as any,
+    // 关键：与 Gateway 对齐（detectRunIntent 会参考 RUN_TODO 做“续跑/短句”意图继承）
+    intent: detectRunIntent({
+      mode: useRunStore.getState().mode as any,
+      userPrompt,
+      mainDocRunIntent: (mainDoc as any)?.runIntent,
+      runTodo: runTodoForPack,
+    }),
   });
   const skillsText = `ACTIVE_SKILLS(JSON):\n${JSON.stringify(activeSkills, null, 2)}\n\n`;
 
   const activeSkillIdSet = new Set((activeSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean));
   const styleSkillActive = activeSkillIdSet.has("style_imitate");
+  const webTopicRadarActive = activeSkillIdSet.has("web_topic_radar");
 
   // 关键：风格 playbook/写法候选等“强引导”上下文，只在写作闭环真正激活时注入。
   // （解决：仅做“搜索/盘点热点”时，绑定风格库也不应抢跑影响素材收集与选题广度）
-  const allowInjectStyleContext = styleSkillActive;
+  const allowInjectStyleContext = styleSkillActive && !webTopicRadarActive;
 
   const playbookSection = await (async () => {
     if (!allowInjectStyleContext) return "";

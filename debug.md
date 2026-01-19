@@ -211,6 +211,61 @@ sudo spctl --master-enable
 代码位置：
 - `apps/desktop/src/components/AgentPane.tsx`
 
+---
+
+### 9) 绑定风格库后做“全网热点/素材盘点”出现窄搜（只围绕 2-3 个点）且被风格抢跑
+
+#### 现象
+
+- 用户绑定了风格库（purpose=style），在 Agent/Plan 模式提出：
+  - “今天/最新 AI + 财经 热点盘点”
+  - “全网热点雷达/找素材/选题”
+- 实际行为可能出现：
+  - web.search 只做 1 轮、关键词单一；
+  - web.fetch 抓的正文数量偏少；
+  - 最终只围绕 2-3 个话题展开（过早收敛），不像“盘点/雷达”；
+  - 甚至在“搜素材”阶段就开始按风格库写成稿（风格抢跑，影响 query 广度）。
+
+#### 根因
+
+- **Skill 触发过窄**：`web_topic_radar` 早期仅在同时出现“搜索词 + 热点词”时触发，像“今天AI财经热点盘点”这种不写“搜索”二字的请求会漏判。
+- **Web Gate 过弱（布尔门禁）**：Gateway 侧 `hasWebSearch/hasWebFetch` 只要发生过一次就算通过，无法保证“多轮 search + 足量 fetch”的广度。
+- **风格上下文注入过早**：当 `style_imitate` 激活时，风格手册/写法候选被提前注入，会影响模型在“收集阶段”的搜索词选择与收敛策略。
+- **端侧/服务端技能判定不一致（历史遗留）**：Desktop 侧 `activateSkills` 未显式传入 `detectRunIntent(..., runTodo)`，导致某些续跑/短句场景下技能判断与 Gateway 不一致，从而出现“前端注入了风格上下文，但服务端未进入对应技能/阶段”的错配。
+
+#### 修复
+
+- **Web Radar 作为单独意图路由**：
+  - Gateway `IntentPolicy` 增加 `web_radar` 路由，并在 `project_search` 之前判定，避免误判为项目内搜索。
+- **Web Gate 升级为配额/计数门禁（强约束）**：
+  - Gateway `RunState` 增加 `webSearchCount/webFetchCount + uniqueQueries/uniqueDomains`。
+  - 当处于热点盘点（web radar）时，默认要求：
+    - `web.search` **>= 3 次**（尽量不同 query）
+    - `web.fetch` **>= 5 次**（尽量覆盖不同域名）
+    - 最终输出话题条目 **>= 15 条**
+  - 若模型提前输出纯文本，触发 `WebGatePolicy` 自动重试并强制走工具调用，直到满足配额。
+- **抑制风格抢跑（收集阶段不注入风格强引导）**：
+  - Desktop：当 `web_topic_radar` 激活时，不注入 `KB_LIBRARY_PLAYBOOK/KB_STYLE_CLUSTERS/STYLE_SELECTOR` 等风格强引导内容。
+  - Gateway：当识别为 web radar 时，suppress `style_imitate`（让它留到“用户明确要写稿/定稿”再开）。
+- **输出广度兜底**：
+  - Gateway 增加 `WebRadarPolicy`：若联网证据已满足但最终“盘点条数”明显不足，则自动继续一次补足后再结束。
+
+可调参数（env，可选）：
+- `WEB_RADAR_MIN_SEARCH`（默认 3）
+- `WEB_RADAR_MIN_FETCH`（默认 5）
+- `WEB_RADAR_MIN_TOPICS`（默认 15）
+
+#### 验证
+
+1) 绑定任意风格库（purpose=style）。  
+2) Agent 模式输入：`今天 AI 圈 + 财经圈 热点盘点`（或类似“全网热点雷达/找素材/选题”）。  
+3) 观察 Run 审计/日志：
+   - `IntentPolicy.routeId=web_radar`
+   - `SkillPolicy` 含 `web_topic_radar`（或至少 `webGate.radar=true`）
+   - `webGate.requiredSearchCount>=3`、`webGate.requiredFetchCount>=5`、状态里 `webSearchCount/webFetchCount` 持续递增
+4) 观察工具调用：至少 3 次 `web.search`、至少 5 次 `web.fetch`，且 fetch 域名不应只来自单一站点。  
+5) 最终输出：话题条目 >= 15（每条带 URL 证据），且不应在收集阶段直接写成长篇成稿。
+
 ### 4) Git Bash 下 Windows 命令参数被“路径转换”坑到（taskkill/…）
 
 #### 现象

@@ -47,6 +47,12 @@ export type RunState = {
   hasKbSearch: boolean;
   hasWebSearch: boolean;
   hasWebFetch: boolean;
+  // Web Gate（配额型）：用于“热点/素材盘点”等广度优先场景
+  webSearchCount: number;
+  webFetchCount: number;
+  // 为了可观测/可解释：只保留少量 unique（避免无限增长）
+  webSearchUniqueQueries: string[];
+  webFetchUniqueDomains: string[];
   hasStyleKbSearch: boolean; // 风格库样例检索是否已完成（以“已尝试检索”为准；0 命中也算完成，避免卡死）
   hasStyleKbHit: boolean; // 风格库样例检索是否曾命中（groups>0）；用于避免“后续某次 0 命中”误触发降级提示
   styleKbDegraded: boolean; // 风格样例检索 0 命中降级（仅警告，不再卡死）
@@ -73,6 +79,10 @@ export function createInitialRunState(args?: { protocolRetryBudget?: number; wor
     hasKbSearch: false,
     hasWebSearch: false,
     hasWebFetch: false,
+    webSearchCount: 0,
+    webFetchCount: 0,
+    webSearchUniqueQueries: [],
+    webFetchUniqueDomains: [],
     hasStyleKbSearch: false,
     hasStyleKbHit: false,
     styleKbDegraded: false,
