@@ -67,8 +67,23 @@ npm -w @writing-ide/gateway run build
 pm2 restart ${PM2_APP} --update-env
 
 echo "[remote] health"
-curl -fsS -m 3 http://127.0.0.1:${PORT}/api/health
-echo
+health_ok=0
+health_out=""
+for i in {1..30}; do
+  # 注意：pm2 restart 返回很快，但 node 可能还没来得及 bind/listen；这里做短重试避免“假阴性”
+  health_out="\$(curl -fsS -m 2 http://127.0.0.1:${PORT}/api/health 2>/tmp/gateway-health.err || true)"
+  if [[ -n "\${health_out}" ]]; then
+    echo "\${health_out}"
+    health_ok=1
+    break
+  fi
+  echo "[remote] health retry \${i}/30 ..."
+  sleep 1
+done
+if [[ "\${health_ok}" != "1" ]]; then
+  echo "[remote] health FAILED after retries (port=${PORT})"
+  cat /tmp/gateway-health.err || true
+fi
 
 echo "[remote] listen"
 ss -ltnp | grep -E ":${PORT}\\\\b" || true
@@ -78,6 +93,10 @@ pm2 ls | sed -n "1,16p" || true
 
 echo "[remote] err tail"
 tail -n 60 /root/.pm2/logs/${PM2_APP}-error.log || true
+
+if [[ "\${health_ok}" != "1" ]]; then
+  exit 7
+fi
 EOF
 )"
 
