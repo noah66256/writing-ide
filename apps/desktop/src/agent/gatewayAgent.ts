@@ -664,6 +664,68 @@ function renderContextManifestV1(args: { mode: Mode; segments: ContextManifestSe
   return `CONTEXT_MANIFEST(JSON):\n${JSON.stringify(payload, null, 2)}\n\n`;
 }
 
+function stripToolXmlFromText(text: string) {
+  return String(text ?? "")
+    .replace(/<tool_calls[\s\S]*?<\/tool_calls>/g, "")
+    .replace(/<tool_call[\s\S]*?<\/tool_call>/g, "")
+    .trim();
+}
+
+type DialogueTurn = { user: string; assistant: string };
+
+function buildDialogueTurnsFromSteps(steps: any[]): DialogueTurn[] {
+  const all = Array.isArray(steps) ? steps : [];
+  const turns: DialogueTurn[] = [];
+  let curUser = "";
+  let curAssistant = "";
+  const flush = () => {
+    const u = String(curUser ?? "").trim();
+    const a = String(curAssistant ?? "").trim();
+    if (u) turns.push({ user: u, assistant: a });
+    curUser = "";
+    curAssistant = "";
+  };
+
+  for (const st of all) {
+    if (!st || typeof st !== "object") continue;
+    if (st.type === "user") {
+      if (curUser) flush();
+      curUser = stripToolXmlFromText(String(st.text ?? ""));
+      curAssistant = "";
+      continue;
+    }
+    if (st.type === "assistant") {
+      if (st.hidden) continue;
+      if (!curUser) continue;
+      const t = stripToolXmlFromText(String(st.text ?? ""));
+      if (!t) continue;
+      curAssistant = curAssistant ? `${curAssistant}\n${t}` : t;
+    }
+  }
+  if (curUser) flush();
+  return turns;
+}
+
+function buildRecentDialogueJsonFromTurns(turns: DialogueTurn[], maxTurns: number) {
+  const t = Array.isArray(turns) ? turns : [];
+  const n = Number.isFinite(Number(maxTurns)) ? Math.max(0, Math.floor(Number(maxTurns))) : 0;
+  if (n <= 0) return "";
+  const recentTurns = t.slice(-n);
+  const clip = (s: string, max: number) => {
+    const v = String(s ?? "").trim();
+    if (!v) return "";
+    return v.length > max ? v.slice(0, max).trimEnd() + "…" : v;
+  };
+  const msgs: Array<{ role: "user" | "assistant"; text: string }> = [];
+  for (const one of recentTurns) {
+    const u = clip(one.user, 800);
+    const a = clip(one.assistant, 800);
+    if (u) msgs.push({ role: "user", text: u });
+    if (a) msgs.push({ role: "assistant", text: a });
+  }
+  return msgs.length ? `RECENT_DIALOGUE(JSON):\n${JSON.stringify(msgs, null, 2)}\n\n` : "";
+}
+
 async function buildContextPack(extra?: { referencesText?: string; userPrompt?: string }) {
   const mainDoc = useRunStore.getState().mainDoc;
   const todoList = useRunStore.getState().todoList;
@@ -738,25 +800,18 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
     return merged.slice(0, 32);
   })();
 
-  // 最近对话片段（只注入少量，避免上下文噪音；关键决策仍应写入 Main Doc）
+  // 最近对话片段（只注入少量：最后 3 个完整回合；关键决策仍应写入 Main Doc/Run Todo）
   const recentDialogue = (() => {
-    const stripToolXml = (text: string) =>
-      String(text ?? "")
-        .replace(/<tool_calls[\s\S]*?<\/tool_calls>/g, "")
-        .replace(/<tool_call[\s\S]*?<\/tool_call>/g, "")
-        .trim();
-    const all = useRunStore.getState().steps ?? [];
-    const msgs = all
-      .filter((s: any) => s && typeof s === "object" && (s.type === "user" || s.type === "assistant"))
-      .map((s: any) => ({
-        role: s.type === "user" ? "user" : "assistant",
-        text: stripToolXml(String(s.text ?? "")).slice(0, 800),
-      }))
-      .filter((x: any) => String(x.text ?? "").trim());
-    // 去掉最后一条 user（通常是“本轮 prompt”，它会单独作为 user message 发送）
-    const trimmed = msgs.length && msgs[msgs.length - 1].role === "user" ? msgs.slice(0, -1) : msgs;
-    const recent = trimmed.slice(-6);
-    return recent.length ? `RECENT_DIALOGUE(JSON):\n${JSON.stringify(recent, null, 2)}\n\n` : "";
+    const turnsAll = buildDialogueTurnsFromSteps(useRunStore.getState().steps ?? []);
+    const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
+    return buildRecentDialogueJsonFromTurns(completeTurns, 3);
+  })();
+
+  const dialogueSummary = (() => {
+    const mode = useRunStore.getState().mode as Mode;
+    const byMode: any = (useRunStore.getState() as any).dialogueSummaryByMode ?? {};
+    const s = String(byMode?.[mode] ?? "").trim();
+    return s ? `DIALOGUE_SUMMARY(Markdown):\n${s}\n\n` : "";
   })();
 
   const refs = extra?.referencesText ? `${extra.referencesText}\n\n` : "";
@@ -1084,7 +1139,10 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
     source: "desktop",
   });
 
-  // p1: 最近对话/引用（引用视为不可信数据）
+  // p1: 滚动摘要/最近对话/引用（引用视为不可信数据）
+  if (dialogueSummary) {
+    pushSeg({ name: "DIALOGUE_SUMMARY", content: dialogueSummary, priority: "p1", trusted: true, source: "desktop" });
+  }
   if (recentDialogue) {
     pushSeg({ name: "RECENT_DIALOGUE", content: recentDialogue, priority: "p1", trusted: true, source: "desktop" });
   }
@@ -1192,6 +1250,22 @@ function buildChatContextPack(extra?: { referencesText?: string }) {
   };
 
   pushSeg({ name: "DOC_RULES", content: `DOC_RULES(Markdown):\n${docRules}\n\n`, priority: "p0", trusted: true, source: "desktop" });
+
+  // Chat：也携带“滚动摘要 + 最近 3 个完整回合”（用户要求：Chat 带历史，但仍保持上下文可控）
+  const chatSummary = (() => {
+    const byMode: any = (useRunStore.getState() as any).dialogueSummaryByMode ?? {};
+    const s = String(byMode?.chat ?? "").trim();
+    return s ? `DIALOGUE_SUMMARY(Markdown):\n${s}\n\n` : "";
+  })();
+  const chatRecentDialogue = (() => {
+    const turnsAll = buildDialogueTurnsFromSteps(useRunStore.getState().steps ?? []);
+    const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
+    return buildRecentDialogueJsonFromTurns(completeTurns, 3);
+  })();
+  if (chatSummary) pushSeg({ name: "DIALOGUE_SUMMARY", content: chatSummary, priority: "p1", trusted: true, source: "desktop" });
+  if (chatRecentDialogue)
+    pushSeg({ name: "RECENT_DIALOGUE", content: chatRecentDialogue, priority: "p1", trusted: true, source: "desktop" });
+
   if (refs) pushSeg({ name: "REFERENCES", content: refs, priority: "p1", trusted: false, source: "desktop" });
   pushSeg({
     name: "EDITOR_SELECTION",
@@ -1300,6 +1374,103 @@ async function fetchChatStream(args: {
   }
 
   return { ok: true as const, deltaCount, endedWithoutDone: true as const };
+}
+
+async function fetchContextSummaryOnce(args: {
+  gatewayUrl: string;
+  preferModelId: string;
+  previousSummary: string;
+  deltaTurns: Array<{ user: string; assistant?: string }>;
+  abort: AbortController;
+  log: (level: "info" | "warn" | "error", message: string, data?: unknown) => void;
+}) {
+  const doFetch = async (baseUrl: string) => {
+    const url = baseUrl ? `${baseUrl}/api/agent/context/summary` : "/api/agent/context/summary";
+    return fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        preferModelId: args.preferModelId,
+        previousSummary: args.previousSummary,
+        deltaTurns: args.deltaTurns,
+      }),
+      signal: args.abort.signal,
+    });
+  };
+
+  let res: Response | null = null;
+  try {
+    res = await doFetch(args.gatewayUrl);
+  } catch (e: any) {
+    const msg = e?.message ? String(e.message) : String(e);
+    if (msg.includes("Failed to fetch") && args.gatewayUrl.includes("localhost")) {
+      const fallback = args.gatewayUrl.replace("localhost", "127.0.0.1");
+      args.log("warn", "gateway.fetch_retry", { from: args.gatewayUrl, to: fallback });
+      res = await doFetch(fallback);
+    } else {
+      throw e;
+    }
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    return { ok: false as const, error: text || `HTTP_${res.status}` };
+  }
+  const json = await res.json().catch(() => null);
+  const ok = Boolean(json?.ok);
+  const summary = ok ? String(json?.summary ?? "") : "";
+  if (!ok || !summary.trim()) return { ok: false as const, error: String(json?.error ?? "SUMMARY_FAILED") };
+  return { ok: true as const, summary, modelIdUsed: json?.modelIdUsed ?? null };
+}
+
+async function rollDialogueSummaryIfNeeded(args: {
+  gatewayUrl: string;
+  mode: Mode;
+  abort: AbortController;
+  log: (level: "info" | "warn" | "error", message: string, data?: unknown) => void;
+}) {
+  const run: any = useRunStore.getState();
+  const turnsAll = buildDialogueTurnsFromSteps(run.steps ?? []);
+  const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
+
+  const RAW_KEEP_TURNS = 3; // Chat/Plan/Agent：都保留最近 3 个完整回合原文
+  const TRIGGER_MIN_TURNS = 3; // 每累计 3 个新回合就滚动一次摘要（“3–5轮摘要”先用 3）
+
+  const turnsToSummarize = Math.max(0, completeTurns.length - RAW_KEEP_TURNS);
+  const cursorByMode: any = run.dialogueSummaryTurnCursorByMode ?? {};
+  const cursor = Number.isFinite(Number(cursorByMode?.[args.mode])) ? Math.max(0, Math.floor(Number(cursorByMode[args.mode]))) : 0;
+  if (turnsToSummarize <= cursor) return { ok: true as const, rolled: false as const };
+
+  const delta = completeTurns.slice(cursor, turnsToSummarize).slice(0, 12);
+  if (delta.length < TRIGGER_MIN_TURNS) return { ok: true as const, rolled: false as const };
+
+  const summaryByMode: any = run.dialogueSummaryByMode ?? {};
+  const previousSummary = String(summaryByMode?.[args.mode] ?? "");
+  // 用户要求：摘要模型默认复用“agentModel”（即使在 chat 模式），后续可在 B 端单独配置 stage 覆盖/约束
+  const preferModelId = String(run.agentModel || "").trim() || String(run.model || "").trim();
+  if (!preferModelId) return { ok: true as const, rolled: false as const };
+
+  args.log("info", "context.summary.roll", { mode: args.mode, cursor, turnsToSummarize, deltaTurns: delta.length });
+  const ret = await fetchContextSummaryOnce({
+    gatewayUrl: args.gatewayUrl,
+    preferModelId,
+    previousSummary,
+    deltaTurns: delta.map((t) => ({ user: t.user, assistant: t.assistant })),
+    abort: args.abort,
+    log: args.log,
+  });
+  if (!ret.ok) {
+    args.log("warn", "context.summary.failed", { mode: args.mode, error: ret.error });
+    return { ok: false as const, error: ret.error };
+  }
+
+  // 写回 store（持久化），并推进 cursor 到 “已摘要覆盖的 turn 数”
+  try {
+    (useRunStore.getState() as any).setDialogueSummary(args.mode, ret.summary, turnsToSummarize);
+  } catch {
+    // ignore
+  }
+  return { ok: true as const, rolled: true as const };
 }
 
 export function startGatewayRun(args: {
@@ -1632,6 +1803,15 @@ export function startGatewayRun(args: {
         if (styleLinterLibraries) out.styleLinterLibraries = styleLinterLibraries;
         return out;
       })();
+
+      // 自动滚动摘要：Chat/Plan/Agent 都会用（Chat 也带历史）；失败不阻塞本轮 run
+      try {
+        const r = await rollDialogueSummaryIfNeeded({ gatewayUrl: args.gatewayUrl, mode: args.mode, abort, log });
+        if (r?.rolled) setActivity("正在构建上下文…", { resetTimer: false });
+      } catch (e: any) {
+        const msg = e?.message ? String(e.message) : String(e);
+        log("warn", "context.summary.exception", { error: msg });
+      }
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

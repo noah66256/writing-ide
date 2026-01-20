@@ -12,6 +12,7 @@
 - [Admin Web（B端管理后台）v0.1（spec）](docs/specs/admin-web-v0.1.md)
 - [Capabilities Registry v0.1（spec：工具/Skills 配置与热生效）](docs/specs/capabilities-registry-v0.1.md)
 - [Context Pack 改动方案 v0.1（spec）](docs/specs/context-pack-improvements-v0.1.md)
+- [对话滚动摘要 v0.1（spec：Chat 带历史 + 自动 3–5 轮压缩 + 独立可配 LLM stage）](docs/specs/dialogue-rolling-summary-v0.1.md)
 - [Desktop 编辑器设计调研 v1（research：写作 IDE 中间编辑器）](docs/research/editor-design-v1.md)
 - [Clipboard 导出 v0.1（spec：复制到小红书/公众号/知乎/飞书 + 不影响 Agent）](docs/specs/clipboard-export-v0.1.md)
 - [富文本/Markdown 编辑器高口碑功能池调研 v1（research）](docs/research/richtext-editor-feature-pool-v1.md)

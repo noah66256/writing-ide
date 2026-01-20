@@ -102,6 +102,11 @@ type RunState = {
   /** Plan/Agent 模式选中的模型（共用） */
   agentModel: string;
   model: string;
+  /** 对话滚动摘要（按 mode 存储；用于长对话上下文压缩） */
+  dialogueSummaryByMode: Record<Mode, string>;
+  /** 已纳入摘要的“完整回合数”（turn cursor），用于增量滚动 */
+  dialogueSummaryTurnCursorByMode: Record<Mode, number>;
+
   mainDoc: MainDoc;
   todoList: TodoItem[];
   steps: Step[];
@@ -125,6 +130,7 @@ type RunState = {
   setMode: (mode: Mode) => void;
   setModel: (model: string) => void;
   setModelForMode: (mode: "chat" | "agent", model: string) => void;
+  setDialogueSummary: (mode: Mode, summary: string, cursorTurns: number) => void;
   setMainDoc: (mainDoc: MainDoc) => void;
   resetRun: () => void;
   // 会话/历史：加载一段历史快照到当前 Run（用于“对话历史/切换”）
@@ -212,6 +218,8 @@ export const useRunStore = create<RunState>()(
   chatModel: "",
   agentModel: "",
   model: "",
+  dialogueSummaryByMode: { plan: "", agent: "", chat: "" },
+  dialogueSummaryTurnCursorByMode: { plan: 0, agent: 0, chat: 0 },
   mainDoc: { goal: "" },
   todoList: [],
   steps: [],
@@ -239,6 +247,16 @@ export const useRunStore = create<RunState>()(
       return { agentModel: v, ...(s.mode !== "chat" ? { model: v } : {}) };
     }),
   setMainDoc: (mainDoc) => set({ mainDoc }),
+  setDialogueSummary: (mode, summary, cursorTurns) =>
+    set((s) => {
+      const m: Mode = mode === "chat" ? "chat" : mode === "agent" ? "agent" : "plan";
+      const nextSummary = String(summary ?? "");
+      const nextCursor = Number.isFinite(Number(cursorTurns)) ? Math.max(0, Math.floor(Number(cursorTurns))) : 0;
+      return {
+        dialogueSummaryByMode: { ...s.dialogueSummaryByMode, [m]: nextSummary },
+        dialogueSummaryTurnCursorByMode: { ...s.dialogueSummaryTurnCursorByMode, [m]: nextCursor },
+      };
+    }),
   setRunning: (running) =>
     set((s) => ({
       isRunning: running,
@@ -259,7 +277,18 @@ export const useRunStore = create<RunState>()(
         },
       };
     }),
-  resetRun: () => set({ steps: [], logs: [], isRunning: false, activity: null, mainDoc: { goal: "" }, todoList: [], ctxRefs: [] }),
+  resetRun: () =>
+    set({
+      steps: [],
+      logs: [],
+      isRunning: false,
+      activity: null,
+      mainDoc: { goal: "" },
+      todoList: [],
+      ctxRefs: [],
+      dialogueSummaryByMode: { plan: "", agent: "", chat: "" },
+      dialogueSummaryTurnCursorByMode: { plan: 0, agent: 0, chat: 0 },
+    }),
   loadSnapshot: (snap) => {
     const s = snap && typeof snap === "object" ? snap : ({} as any);
     const cleanSteps = Array.isArray(s.steps) ? s.steps : [];
@@ -295,11 +324,29 @@ export const useRunStore = create<RunState>()(
     const prev = get();
     const chatModel = mode === "chat" ? model : prev.chatModel;
     const agentModel = mode !== "chat" ? model : prev.agentModel;
+    const ds = (s as any).dialogueSummaryByMode;
+    const dc = (s as any).dialogueSummaryTurnCursorByMode;
     set({
       mode,
       model,
       chatModel,
       agentModel,
+      dialogueSummaryByMode:
+        ds && typeof ds === "object"
+          ? {
+              plan: String((ds as any).plan ?? ""),
+              agent: String((ds as any).agent ?? ""),
+              chat: String((ds as any).chat ?? ""),
+            }
+          : { plan: "", agent: "", chat: "" },
+      dialogueSummaryTurnCursorByMode:
+        dc && typeof dc === "object"
+          ? {
+              plan: Number.isFinite(Number((dc as any).plan)) ? Math.max(0, Math.floor(Number((dc as any).plan))) : 0,
+              agent: Number.isFinite(Number((dc as any).agent)) ? Math.max(0, Math.floor(Number((dc as any).agent))) : 0,
+              chat: Number.isFinite(Number((dc as any).chat)) ? Math.max(0, Math.floor(Number((dc as any).chat))) : 0,
+            }
+          : { plan: 0, agent: 0, chat: 0 },
       mainDoc: (s.mainDoc && typeof s.mainDoc === "object" ? s.mainDoc : get().mainDoc) as MainDoc,
       todoList: Array.isArray(s.todoList) ? (s.todoList as TodoItem[]) : [],
       steps: normalized,

@@ -181,6 +181,16 @@ export function getDefaultStageDefinitionsFromEnv(): AiStageDefinition[] {
       defaultEndpoint: "/v1/chat/completions",
     },
     {
+      key: "agent.context_summary",
+      name: "Agent Context Summary（滚动摘要/上下文压缩）",
+      description:
+        "用于对话滚动摘要（每 3–5 轮压缩一次）以减少上下文膨胀；默认可复用 Agent 选用的模型，也可在 B 端独立配置（热生效）",
+      defaultModel: llmModel,
+      defaultTemperature: 0.2,
+      defaultMaxTokens: 1200,
+      defaultEndpoint: "/v1/chat/completions",
+    },
+    {
       key: "agent.router",
       name: "Agent Router（意图门禁）",
       description: "Intent Router（Phase 1：LLM Router stage）。只输出结构化路由决策 JSON；不调用工具；失败应回退到启发式路由。",
