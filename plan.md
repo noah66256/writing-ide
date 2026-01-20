@@ -21,6 +21,7 @@
 - [Desktop 打包与发布（Windows/macOS）](docs/release/desktop-packaging.md)
 - [Desktop 自动更新：方案调研 v1（research）](docs/research/desktop-auto-update-options-v1.md)
 - [Desktop 自动更新 v0.1（spec，Windows 安装版）](docs/specs/desktop-auto-update-v0.1.md)
+- [Desktop 自动更新发布脚本（Python：推 installer + latest.json）](scripts/push-desktop-update.py)
 - [KB Manager V2（更像原文）方案草案](kb-manager-v2-spec.md)
 - [Style Selector v1（自动选簇/选21卡，按话题适配，模型解耦）](style-selector-v1.md)
 - [Style Skill 门禁（让风格库只在“开写”后介入，research v1）](docs/research/style-skill-gating-v1.md)
