@@ -3228,20 +3228,20 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
         // 兜底：如果最终仍然为空（常见于 Gemini 在 tool_result 后不输出），避免 UI 空白结束。
         if (assistantText.trim().length === 0) {
           const fallback = intent.wantsOkOnly ? "OK" : "（模型输出为空：请重试或切换模型）";
-          writeEvent("assistant.delta", { delta: fallback });
+          writeEvent("assistant.delta", { delta: fallback, turn });
           assistantText = fallback;
           flushed = assistantText.length;
         }
         if (flushed < assistantText.length) {
           const remain = assistantText.slice(flushed);
-          if (remain) writeEvent("assistant.delta", { delta: remain });
+          if (remain) writeEvent("assistant.delta", { delta: remain, turn });
           flushed = assistantText.length;
         }
         if (styleNeedsCta({ styleGateEnabled: gates.styleGateEnabled, skipCta: intent.skipCta, kbSelected: kbSelectedList as any })) {
           const t0 = assistantText.trim();
           if (looksLikeDraftText(t0) && !looksLikeHasCTA(t0)) {
             const cta = "\n\n——\n\n家人们，点个赞、关注一下，评论区聊聊：你觉得日本这波是继续嘴硬，还是准备认怂？";
-            writeEvent("assistant.delta", { delta: cta });
+            writeEvent("assistant.delta", { delta: cta, turn });
             assistantText += cta;
             flushed = assistantText.length;
           }
