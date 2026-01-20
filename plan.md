@@ -11,6 +11,7 @@
 - [Web Search v0.1（spec）](docs/specs/web-search-v0.1.md)
 - [Admin Web（B端管理后台）v0.1（spec）](docs/specs/admin-web-v0.1.md)
 - [Capabilities Registry v0.1（spec：工具/Skills 配置与热生效）](docs/specs/capabilities-registry-v0.1.md)
+- [Context Pack 改动方案 v0.1（spec）](docs/specs/context-pack-improvements-v0.1.md)
 - [Desktop 编辑器设计调研 v1（research：写作 IDE 中间编辑器）](docs/research/editor-design-v1.md)
 - [Clipboard 导出 v0.1（spec：复制到小红书/公众号/知乎/飞书 + 不影响 Agent）](docs/specs/clipboard-export-v0.1.md)
 - [富文本/Markdown 编辑器高口碑功能池调研 v1（research）](docs/research/richtext-editor-feature-pool-v1.md)
@@ -22,6 +23,7 @@
 - [Style Skill 门禁（让风格库只在“开写”后介入，research v1）](docs/research/style-skill-gating-v1.md)
 - [doc.write 新写/覆盖策略（research v1）](docs/research/doc-write-ifexists-v1.md)
 - [流式输出空内容根因与修复（research v1）](docs/research/stream-empty-output-root-cause-v1.md)
+- [IDE Agent 上下文机制：劣势与完善方法（research v1）](docs/research/context-pack-mechanism-improvements-v1.md)
 - [writing-agent.md（写作 Agent 约定/协议）](writing-agent.md)
 
 ### 0. 背景与目标

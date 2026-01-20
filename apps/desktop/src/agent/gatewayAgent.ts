@@ -643,6 +643,27 @@ function pickFacetIdsV1(cluster: any, max = 8): string[] {
   return out.slice(0, max);
 }
 
+type ContextManifestPriorityV1 = "p0" | "p1" | "p2" | "p3";
+type ContextManifestSegmentV1 = {
+  name: string;
+  chars: number;
+  priority: ContextManifestPriorityV1;
+  trusted: boolean;
+  truncated: boolean;
+  source: "desktop" | "gateway";
+  note?: string;
+};
+
+function renderContextManifestV1(args: { mode: Mode; segments: ContextManifestSegmentV1[] }) {
+  const payload = {
+    v: 1,
+    generatedAt: new Date().toISOString(),
+    mode: args.mode,
+    segments: args.segments,
+  };
+  return `CONTEXT_MANIFEST(JSON):\n${JSON.stringify(payload, null, 2)}\n\n`;
+}
+
 async function buildContextPack(extra?: { referencesText?: string; userPrompt?: string }) {
   const mainDoc = useRunStore.getState().mainDoc;
   const todoList = useRunStore.getState().todoList;
@@ -1015,25 +1036,104 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
     ? `PENDING_FILE_PROPOSALS(JSON):\n${JSON.stringify(pendingProposals, null, 2)}\n\n` +
       `提示：存在未 Keep 的“文件提案”。后续若调用 doc.read 读取对应文件，系统会优先返回“提案态最新内容”（不要求先 Keep）。\n\n`
     : "";
-  return (
-    `MAIN_DOC(JSON):\n${JSON.stringify(mainDoc, null, 2)}\n\n` +
-    `RUN_TODO(JSON):\n${JSON.stringify(runTodoForPack, null, 2)}\n\n` +
-    `DOC_RULES(Markdown):\n${docRules}\n\n` +
-    recentDialogue +
-    refs +
-    kbText +
-    skillsText +
-    playbookSection +
-    styleClustersSection +
-    styleSelectorSection +
-    pendingSection +
-    `EDITOR_SELECTION(JSON):\n${JSON.stringify(selection, null, 2)}\n\n` +
-    `PROJECT_STATE(JSON):\n${JSON.stringify(state, null, 2)}\n\n` +
-    `注意：\n` +
-    `- 已提供当前编辑器选区（EDITOR_SELECTION）。若用户说“改写我选中的这段”，优先用该选区。\n` +
-    `- 如需文件正文请调用 doc.read；如需刷新选区也可调用 doc.getSelection。\n` +
-    `- 本次 Context Pack 仅注入少量最近对话片段（RECENT_DIALOGUE），不是完整历史；关键决策请写入 Main Doc（run.mainDoc.update），历史素材请用 @{} 显式引用。`
-  );
+
+  const segments: ContextManifestSegmentV1[] = [];
+  const parts: string[] = [];
+  const pushSeg = (seg: {
+    name: string;
+    content: string;
+    priority: ContextManifestPriorityV1;
+    trusted: boolean;
+    source: "desktop" | "gateway";
+    truncated?: boolean;
+    note?: string;
+  }) => {
+    const content = String(seg.content ?? "");
+    parts.push(content);
+    segments.push({
+      name: seg.name,
+      chars: content.length,
+      priority: seg.priority,
+      trusted: seg.trusted,
+      truncated: Boolean(seg.truncated),
+      source: seg.source,
+      ...(seg.note ? { note: seg.note } : {}),
+    });
+  };
+
+  // p0: 任务主线/约束（可信）
+  pushSeg({
+    name: "MAIN_DOC",
+    content: `MAIN_DOC(JSON):\n${JSON.stringify(mainDoc, null, 2)}\n\n`,
+    priority: "p0",
+    trusted: true,
+    source: "desktop",
+  });
+  pushSeg({
+    name: "RUN_TODO",
+    content: `RUN_TODO(JSON):\n${JSON.stringify(runTodoForPack, null, 2)}\n\n`,
+    priority: "p0",
+    trusted: true,
+    source: "desktop",
+  });
+  pushSeg({
+    name: "DOC_RULES",
+    content: `DOC_RULES(Markdown):\n${docRules}\n\n`,
+    priority: "p0",
+    trusted: true,
+    source: "desktop",
+  });
+
+  // p1: 最近对话/引用（引用视为不可信数据）
+  if (recentDialogue) {
+    pushSeg({ name: "RECENT_DIALOGUE", content: recentDialogue, priority: "p1", trusted: true, source: "desktop" });
+  }
+  if (refs) {
+    pushSeg({ name: "REFERENCES", content: refs, priority: "p1", trusted: false, source: "desktop" });
+  }
+
+  // p1: KB 元信息（可信）；KB 正文（手册/卡片/样例）视为不可信数据（仅供参考，不可覆盖系统规则）
+  pushSeg({ name: "KB_SELECTED_LIBRARIES", content: kbText, priority: "p1", trusted: true, source: "desktop" });
+  pushSeg({ name: "ACTIVE_SKILLS", content: skillsText, priority: "p1", trusted: true, source: "desktop" });
+  if (playbookSection) pushSeg({ name: "KB_LIBRARY_PLAYBOOK", content: playbookSection, priority: "p2", trusted: false, source: "desktop" });
+  if (styleClustersSection) pushSeg({ name: "KB_STYLE_CLUSTERS", content: styleClustersSection, priority: "p2", trusted: false, source: "desktop" });
+  if (styleSelectorSection) pushSeg({ name: "STYLE_SELECTOR", content: styleSelectorSection, priority: "p2", trusted: false, source: "desktop" });
+
+  // p2: 提案态提示（可信）
+  if (pendingSection) pushSeg({ name: "PENDING_FILE_PROPOSALS", content: pendingSection, priority: "p2", trusted: true, source: "desktop" });
+
+  // p2: 选区（可信，但可能截断）
+  pushSeg({
+    name: "EDITOR_SELECTION",
+    content: `EDITOR_SELECTION(JSON):\n${JSON.stringify(selection, null, 2)}\n\n`,
+    priority: "p2",
+    trusted: true,
+    source: "desktop",
+    truncated: Boolean((selection as any)?.truncated),
+  });
+
+  // p3: 项目状态最小信息（可信）
+  pushSeg({
+    name: "PROJECT_STATE",
+    content: `PROJECT_STATE(JSON):\n${JSON.stringify(state, null, 2)}\n\n`,
+    priority: "p3",
+    trusted: true,
+    source: "desktop",
+  });
+  pushSeg({
+    name: "NOTES",
+    content:
+      `注意：\n` +
+      `- 已提供当前编辑器选区（EDITOR_SELECTION）。若用户说“改写我选中的这段”，优先用该选区。\n` +
+      `- 如需文件正文请调用 doc.read；如需刷新选区也可调用 doc.getSelection。\n` +
+      `- 本次 Context Pack 仅注入少量最近对话片段（RECENT_DIALOGUE），不是完整历史；关键决策请写入 Main Doc（run.mainDoc.update），历史素材请用 @{} 显式引用。\n\n`,
+    priority: "p3",
+    trusted: true,
+    source: "desktop",
+  });
+
+  const manifest = renderContextManifestV1({ mode: useRunStore.getState().mode as Mode, segments });
+  return manifest + parts.join("");
 }
 
 function buildChatContextPack(extra?: { referencesText?: string }) {
@@ -1067,7 +1167,43 @@ function buildChatContextPack(extra?: { referencesText?: string }) {
     };
   })();
   const refs = extra?.referencesText ? `${extra.referencesText}\n\n` : "";
-  return `DOC_RULES(Markdown):\n${docRules}\n\n${refs}EDITOR_SELECTION(JSON):\n${JSON.stringify(selection, null, 2)}\n`;
+  const segments: ContextManifestSegmentV1[] = [];
+  const parts: string[] = [];
+  const pushSeg = (seg: {
+    name: string;
+    content: string;
+    priority: ContextManifestPriorityV1;
+    trusted: boolean;
+    source: "desktop" | "gateway";
+    truncated?: boolean;
+    note?: string;
+  }) => {
+    const content = String(seg.content ?? "");
+    parts.push(content);
+    segments.push({
+      name: seg.name,
+      chars: content.length,
+      priority: seg.priority,
+      trusted: seg.trusted,
+      truncated: Boolean(seg.truncated),
+      source: seg.source,
+      ...(seg.note ? { note: seg.note } : {}),
+    });
+  };
+
+  pushSeg({ name: "DOC_RULES", content: `DOC_RULES(Markdown):\n${docRules}\n\n`, priority: "p0", trusted: true, source: "desktop" });
+  if (refs) pushSeg({ name: "REFERENCES", content: refs, priority: "p1", trusted: false, source: "desktop" });
+  pushSeg({
+    name: "EDITOR_SELECTION",
+    content: `EDITOR_SELECTION(JSON):\n${JSON.stringify(selection, null, 2)}\n`,
+    priority: "p1",
+    trusted: true,
+    source: "desktop",
+    truncated: Boolean((selection as any)?.truncated),
+  });
+
+  const manifest = renderContextManifestV1({ mode: "chat", segments });
+  return manifest + parts.join("");
 }
 
 async function fetchChatStream(args: {

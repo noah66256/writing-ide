@@ -213,6 +213,47 @@ export async function* streamGeminiGenerateContent(args: {
     if (usage) lastUsage = usage;
   }
 
+  // 兜底：Gemini 偶发“流结束但 0 delta”（finish_reason=STOP 但 text 为空）。
+  // 这里按 research v1：仅当 0 delta 时，额外尝试一次非流式 generateContent。
+  if (!lastText) {
+    const endpoint2 = String(args.endpoint || "").replace(/:streamGenerateContent/i, ":generateContent");
+    if (endpoint2 && endpoint2 !== args.endpoint) {
+      const url2 = withApiKeyQuery(joinUrl(args.baseUrl, endpoint2), args.apiKey);
+      try {
+        const res2 = await fetch(url2, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": args.apiKey,
+          },
+          body: JSON.stringify(body),
+          signal: args.signal,
+        });
+        if (!res2.ok) {
+          const text2 = await res2.text().catch(() => "");
+          yield { type: "error", error: text2 || `UPSTREAM_${res2.status}` };
+          return;
+        }
+        const json2 = await res2.json().catch(() => null);
+        const text2 = extractGeminiText(json2);
+        const usage2 = extractGeminiUsage(json2);
+        if (text2) yield { type: "delta", delta: text2 };
+        if (usage2) yield { type: "usage", usage: usage2, raw: json2 };
+        if (!text2 || String(text2).trim().length === 0) {
+          yield { type: "error", error: "UPSTREAM_EMPTY_CONTENT" };
+          return;
+        }
+        yield { type: "done" };
+        return;
+      } catch (e: any) {
+        yield { type: "error", error: String(e?.message ?? e) };
+        return;
+      }
+    }
+    yield { type: "error", error: "UPSTREAM_EMPTY_CONTENT" };
+    return;
+  }
+
   if (lastUsage) yield { type: "usage", usage: lastUsage };
   yield { type: "done" };
 }
