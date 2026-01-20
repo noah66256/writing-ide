@@ -35,5 +35,6 @@ apps/gateway/data/
 
 # local build artifacts (downloaded from CI / packaging outputs)
 artifacts/
+desktop-updates/
 
 

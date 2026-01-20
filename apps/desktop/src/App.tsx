@@ -11,6 +11,8 @@ import { useLayoutStore } from "./state/layoutStore";
 import { useUiStore, type DockTabKey } from "./state/uiStore";
 import { useProjectStore } from "./state/projectStore";
 import { useWorkspaceStore } from "./state/workspaceStore";
+import { useUpdateStore } from "./state/updateStore";
+import { getUpdateBaseUrl } from "./agent/updateBaseUrl";
 
 function isDockTabKey(t: string): t is DockTabKey {
   return t === "outline" || t === "graph" || t === "problems" || t === "runs" || t === "logs";
@@ -66,6 +68,8 @@ export default function App() {
   const toggleSectionCollapsed = useLayoutStore((s) => s.toggleSectionCollapsed);
   const openSection = useLayoutStore((s) => s.openSection);
   const setDockTab = useUiStore((s) => s.setDockTab);
+  const setUpdateCheckResult = useUpdateStore((s) => s.setCheckResult);
+  const setDownload = useUpdateStore((s) => s.setDownload);
 
   const gutter = 6;
   const leftMin = 200;
@@ -165,6 +169,12 @@ export default function App() {
   useEffect(() => {
     const off = window.desktop?.onMenuAction?.((payload: any) => {
       if (!payload || typeof payload !== "object") return;
+      if (payload.type === "help.checkUpdates") {
+        const api = window.desktop?.update;
+        if (!api) return;
+        void api.checkInteractive({ baseUrl: getUpdateBaseUrl() });
+        return;
+      }
       if (payload.type === "dock.tab") {
         const tab = String(payload.tab ?? "");
         if (isDockTabKey(tab)) setDockTab(tab);
@@ -215,6 +225,47 @@ export default function App() {
       }
     };
   }, [setDockTab]);
+
+  // Update（v0.1）：启动 + 每 6 小时 silent check（只更新标记，不下载）
+  useEffect(() => {
+    const api = window.desktop?.update;
+    if (!api) return;
+    const run = async () => {
+      const r = await api.check({ baseUrl: getUpdateBaseUrl() }).catch((e) => ({ ok: false, error: String(e?.message ?? e) } as any));
+      if (!r?.ok) return setUpdateCheckResult({ updateAvailable: false, latestVersion: "", error: r?.error ?? "CHECK_FAILED" });
+      setUpdateCheckResult({ updateAvailable: Boolean(r.updateAvailable), latestVersion: String(r.latestVersion ?? ""), error: "" });
+    };
+    const t0 = window.setTimeout(() => void run(), 8000);
+    const id = window.setInterval(() => void run(), 6 * 60 * 60 * 1000);
+    return () => {
+      window.clearTimeout(t0);
+      window.clearInterval(id);
+    };
+  }, [setUpdateCheckResult]);
+
+  // Update download events（进度）
+  useEffect(() => {
+    const off = window.desktop?.update?.onEvent?.((evt: any) => {
+      const t = String(evt?.type ?? "");
+      if (t === "download.start") {
+        setDownload({ running: true, transferred: 0, total: 0 });
+        return;
+      }
+      if (t === "download.progress") {
+        const transferred = Number(evt?.transferred ?? 0) || 0;
+        const total = Number(evt?.total ?? 0) || 0;
+        setDownload({ running: true, transferred, total });
+        return;
+      }
+    });
+    return () => {
+      try {
+        off?.();
+      } catch {
+        // ignore
+      }
+    };
+  }, [setDownload]);
 
   const startDrag = (kind: "left" | "right" | "dock") => (e: React.PointerEvent) => {
     e.preventDefault();

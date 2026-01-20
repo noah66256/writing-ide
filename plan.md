@@ -19,6 +19,8 @@
 - [Todo 工具大搜（研究 v1）](docs/research/todo-tools-v1.md)
 - [Run Todo v0.2（spec）](docs/specs/run-todo-v0.2.md)
 - [Desktop 打包与发布（Windows/macOS）](docs/release/desktop-packaging.md)
+- [Desktop 自动更新：方案调研 v1（research）](docs/research/desktop-auto-update-options-v1.md)
+- [Desktop 自动更新 v0.1（spec，Windows 安装版）](docs/specs/desktop-auto-update-v0.1.md)
 - [KB Manager V2（更像原文）方案草案](kb-manager-v2-spec.md)
 - [Style Selector v1（自动选簇/选21卡，按话题适配，模型解耦）](style-selector-v1.md)
 - [Style Skill 门禁（让风格库只在“开写”后介入，research v1）](docs/research/style-skill-gating-v1.md)

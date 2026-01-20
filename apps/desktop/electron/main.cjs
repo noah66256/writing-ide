@@ -2,6 +2,9 @@ const { app, BrowserWindow, Menu, shell, ipcMain, dialog, clipboard, protocol, s
 const path = require("path");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
+const http = require("node:http");
+const https = require("node:https");
+const { spawn, exec } = require("node:child_process");
 
 // ======== Custom protocol（避免 packaged(file://) 环境下 fetch/XHR 跨域受限） ========
 // 说明：
@@ -38,6 +41,36 @@ let watcher = null;
 let watchedRoot = null;
 let watchTimer = null;
 let watchChanged = new Set();
+
+// ======== Single Instance Lock（防止多开导致新旧并行/占用文件） ========
+let gotSingleInstanceLock = true;
+try {
+  gotSingleInstanceLock = app.requestSingleInstanceLock();
+} catch {
+  gotSingleInstanceLock = true;
+}
+if (!gotSingleInstanceLock) {
+  try {
+    app.quit();
+  } catch {
+    // ignore
+  }
+} else {
+  try {
+    app.on("second-instance", () => {
+      try {
+        if (!mainWindow) return;
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+      } catch {
+        // ignore
+      }
+    });
+  } catch {
+    // ignore
+  }
+}
 
 function registerAppProtocol() {
   try {
@@ -364,6 +397,11 @@ function buildMenuTemplate() {
       label: "帮助",
       submenu: [
         {
+          label: "检查更新…",
+          click: () => send({ type: "help.checkUpdates" }),
+        },
+        { type: "separator" },
+        {
           label: "查看计划文档（plan.md）",
           click: () => send({ type: "help.openPlan" }),
         },
@@ -382,6 +420,309 @@ function updateMenu() {
   } catch {
     // ignore
   }
+}
+
+// ======== Desktop Update (v0.1: Windows installer only, confirm then download) ========
+const DEFAULT_GATEWAY_URL = "http://120.26.6.147:8000";
+function trimSlash(url) {
+  return String(url ?? "").trim().replace(/\/+$/g, "");
+}
+function getDefaultUpdateBaseUrl() {
+  const base = trimSlash(process.env.DESKTOP_UPDATE_BASE_URL || DEFAULT_GATEWAY_URL);
+  return `${base}/downloads/desktop/stable`;
+}
+
+function compareSemver(a, b) {
+  const pa = String(a ?? "").trim().split(".").map((x) => Number(x));
+  const pb = String(b ?? "").trim().split(".").map((x) => Number(x));
+  for (let i = 0; i < 3; i += 1) {
+    const na = Number.isFinite(pa[i]) ? pa[i] : 0;
+    const nb = Number.isFinite(pb[i]) ? pb[i] : 0;
+    if (na > nb) return 1;
+    if (na < nb) return -1;
+  }
+  return 0;
+}
+
+async function fetchJson(url, timeoutMs = 12_000) {
+  const u = new URL(String(url ?? ""));
+  const lib = u.protocol === "https:" ? https : http;
+  return await new Promise((resolve) => {
+    const req = lib.request(
+      u,
+      { method: "GET", headers: { "User-Agent": "writing-ide-desktop" } },
+      (res) => {
+        const code = Number(res.statusCode ?? 0);
+        const loc = res.headers?.location ? String(res.headers.location) : "";
+        if (code >= 300 && code < 400 && loc) {
+          res.resume();
+          const next = new URL(loc, u).toString();
+          return resolve(fetchJson(next, timeoutMs));
+        }
+        if (code < 200 || code >= 300) {
+          res.resume();
+          return resolve({ ok: false, error: `HTTP_${code}` });
+        }
+        let buf = "";
+        res.setEncoding("utf-8");
+        res.on("data", (chunk) => (buf += String(chunk ?? "")));
+        res.on("end", () => {
+          try {
+            const j = JSON.parse(buf || "{}");
+            resolve({ ok: true, json: j });
+          } catch (e) {
+            resolve({ ok: false, error: "JSON_PARSE_FAILED" });
+          }
+        });
+      },
+    );
+    req.on("error", (e) => resolve({ ok: false, error: String(e?.message ?? e) }));
+    req.setTimeout(timeoutMs, () => {
+      try {
+        req.destroy(new Error("TIMEOUT"));
+      } catch {
+        // ignore
+      }
+    });
+    req.end();
+  });
+}
+
+async function downloadToFile(url, targetPath, onProgress) {
+  const u = new URL(String(url ?? ""));
+  const lib = u.protocol === "https:" ? https : http;
+  await fsp.mkdir(path.dirname(targetPath), { recursive: true });
+
+  return await new Promise((resolve) => {
+    const req = lib.request(u, { method: "GET" }, (res) => {
+      const code = Number(res.statusCode ?? 0);
+      const loc = res.headers?.location ? String(res.headers.location) : "";
+      if (code >= 300 && code < 400 && loc) {
+        res.resume();
+        const next = new URL(loc, u).toString();
+        return resolve(downloadToFile(next, targetPath, onProgress));
+      }
+      if (code < 200 || code >= 300) {
+        res.resume();
+        return resolve({ ok: false, error: `HTTP_${code}` });
+      }
+
+      const total = Number(res.headers["content-length"] ?? 0) || 0;
+      let transferred = 0;
+      const file = fs.createWriteStream(targetPath);
+
+      res.on("data", (chunk) => {
+        transferred += Buffer.byteLength(chunk);
+        if (typeof onProgress === "function") {
+          try {
+            onProgress({ transferred, total });
+          } catch {
+            // ignore
+          }
+        }
+      });
+
+      res.pipe(file);
+      file.on("finish", () => {
+        try {
+          file.close(() => resolve({ ok: true }));
+        } catch {
+          resolve({ ok: true });
+        }
+      });
+      file.on("error", (e) => resolve({ ok: false, error: String(e?.message ?? e) }));
+    });
+    req.on("error", (e) => resolve({ ok: false, error: String(e?.message ?? e) }));
+    req.end();
+  });
+}
+
+async function countRunningProcessesByImageNameWin(imageName) {
+  const exeName = String(imageName ?? "").trim();
+  if (!exeName) return { ok: false, error: "MISSING_EXE_NAME" };
+  const cmd = `cmd.exe /c tasklist /FI "IMAGENAME eq ${exeName}" /FO CSV /NH`;
+  return await new Promise((resolve) => {
+    exec(cmd, { windowsHide: true, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+      if (err) return resolve({ ok: false, error: String(err?.message ?? err) });
+      const text = String(stdout ?? "").trim();
+      if (!text) return resolve({ ok: true, count: 0 });
+      // 如果不存在会输出：INFO: No tasks are running which match the specified criteria.
+      if (/No tasks are running/i.test(text)) return resolve({ ok: true, count: 0 });
+      const lines = text.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+      // 每行一条进程记录（CSV）
+      return resolve({ ok: true, count: lines.length });
+    });
+  });
+}
+
+async function checkForUpdates(args) {
+  const opts = args && typeof args === "object" ? args : {};
+  const baseUrl = trimSlash(opts.baseUrl || getDefaultUpdateBaseUrl());
+  const currentVersion = String(app.getVersion() ?? "").trim();
+
+  const latestUrl = `${baseUrl}/latest.json`;
+  const r = await fetchJson(latestUrl);
+  if (!r.ok) return { ok: false, error: r.error || "FETCH_FAILED", latestUrl, currentVersion };
+
+  const j = r.json && typeof r.json === "object" ? r.json : {};
+  const latestVersion = String(j.version ?? "").trim();
+  const notes = String(j.notes ?? "").trim();
+  const nsisUrl = String(j?.windows?.nsisUrl ?? "").trim();
+
+  if (!latestVersion) return { ok: false, error: "LATEST_VERSION_MISSING", latestUrl, currentVersion };
+
+  const newer = compareSemver(latestVersion, currentVersion) > 0;
+  return {
+    ok: true,
+    currentVersion,
+    latestVersion,
+    notes,
+    updateAvailable: newer,
+    nsisUrl,
+    baseUrl,
+    latestUrl,
+  };
+}
+
+async function interactiveUpdateFlow(args) {
+  const opts = args && typeof args === "object" ? args : {};
+  const baseUrl = trimSlash(opts.baseUrl || getDefaultUpdateBaseUrl());
+
+  // v0.1：仅 Windows
+  if (process.platform !== "win32") {
+    await dialog.showMessageBox(mainWindow ?? undefined, {
+      type: "info",
+      title: "检查更新",
+      message: "当前平台暂不支持自动安装更新（仅 Windows 安装版支持）。",
+    });
+    return { ok: true, supported: false };
+  }
+
+  // v0.1：portable 不支持自动安装（只提示去下载）
+  const isPortable = Boolean(process.env.PORTABLE_EXECUTABLE_DIR);
+  if (isPortable) {
+    await dialog.showMessageBox(mainWindow ?? undefined, {
+      type: "info",
+      title: "检查更新",
+      message: "当前为便携版（portable），暂不支持自动安装更新。请手动下载新版安装包。",
+    });
+    return { ok: true, supported: false, portable: true };
+  }
+
+  const info = await checkForUpdates({ baseUrl });
+  if (!info.ok) {
+    await dialog.showMessageBox(mainWindow ?? undefined, {
+      type: "error",
+      title: "检查更新失败",
+      message: `检查更新失败：${info.error || "unknown"}`,
+    });
+    return info;
+  }
+
+  if (!info.updateAvailable) {
+    await dialog.showMessageBox(mainWindow ?? undefined, {
+      type: "info",
+      title: "检查更新",
+      message: `已是最新版本（v${info.currentVersion}）。`,
+    });
+    return { ok: true, updateAvailable: false, currentVersion: info.currentVersion, latestVersion: info.latestVersion };
+  }
+
+  if (!info.nsisUrl) {
+    await dialog.showMessageBox(mainWindow ?? undefined, {
+      type: "error",
+      title: "检查更新失败",
+      message: "更新源缺少 Windows 安装包地址（windows.nsisUrl）。",
+    });
+    return { ok: false, error: "NSIS_URL_MISSING" };
+  }
+
+  const choice = await dialog.showMessageBox(mainWindow ?? undefined, {
+    type: "info",
+    title: "发现新版本",
+    message: `发现新版本 v${info.latestVersion}（当前 v${info.currentVersion}）。\n是否下载并安装？`,
+    detail: info.notes ? `更新说明：\n${info.notes}` : undefined,
+    buttons: ["下载并安装", "取消"],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (choice.response !== 0) return { ok: true, updateAvailable: true, cancelled: true };
+
+  const fileName = path.basename(new URL(info.nsisUrl).pathname || "");
+  const safeName = fileName || `写作IDE Setup ${info.latestVersion}.exe`;
+  const target = path.join(app.getPath("userData"), "updates", safeName);
+
+  try {
+    mainWindow?.webContents?.send("update.event", { type: "download.start", version: info.latestVersion, target });
+  } catch {
+    // ignore
+  }
+
+  const dl = await downloadToFile(info.nsisUrl, target, ({ transferred, total }) => {
+    try {
+      mainWindow?.webContents?.send("update.event", { type: "download.progress", transferred, total });
+    } catch {
+      // ignore
+    }
+  });
+  if (!dl.ok) {
+    await dialog.showMessageBox(mainWindow ?? undefined, {
+      type: "error",
+      title: "下载失败",
+      message: `下载更新失败：${dl.error || "unknown"}`,
+    });
+    return { ok: false, error: "DOWNLOAD_FAILED", detail: dl.error };
+  }
+
+  // 安装前：检查是否有其它实例还在跑（避免新旧并行/占用文件）
+  const exeName = path.basename(process.execPath);
+  const countRet = await countRunningProcessesByImageNameWin(exeName);
+  if (!countRet.ok) {
+    await dialog.showMessageBox(mainWindow ?? undefined, {
+      type: "warning",
+      title: "更新提示",
+      message: "无法确认是否存在其它正在运行的进程。为避免安装失败，请先关闭其它写作IDE窗口后再试。",
+    });
+    return { ok: false, error: "PROCESS_CHECK_FAILED" };
+  }
+  if ((countRet.count ?? 0) > 1) {
+    await dialog.showMessageBox(mainWindow ?? undefined, {
+      type: "warning",
+      title: "请先关闭其它实例",
+      message: "检测到还有其它写作IDE进程在运行。\n请先关闭后再安装更新（避免新旧同时运行导致安装失败）。",
+    });
+    return { ok: false, error: "OTHER_INSTANCE_RUNNING", count: countRet.count };
+  }
+
+  const confirmInstall = await dialog.showMessageBox(mainWindow ?? undefined, {
+    type: "info",
+    title: "准备安装更新",
+    message: "将启动安装程序。安装过程中应用会自动退出。",
+    buttons: ["开始安装", "取消"],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (confirmInstall.response !== 0) return { ok: true, cancelled: true };
+
+  try {
+    const child = spawn(target, [], { detached: true, stdio: "ignore" });
+    child.unref();
+  } catch (e) {
+    await dialog.showMessageBox(mainWindow ?? undefined, {
+      type: "error",
+      title: "启动安装失败",
+      message: `无法启动安装程序：${String(e?.message ?? e)}`,
+    });
+    return { ok: false, error: "INSTALLER_LAUNCH_FAILED" };
+  }
+
+  // 退出当前进程，让安装器替换文件
+  try {
+    setTimeout(() => app.quit(), 300);
+  } catch {
+    // ignore
+  }
+  return { ok: true, installing: true, target };
 }
 
 function registerIpc() {
@@ -643,6 +984,11 @@ function registerIpc() {
       return { ok: false, error: String(e?.message ?? e) };
     }
   });
+
+  // Update（v0.1）
+  ipcMain.handle("app.getVersion", async () => ({ ok: true, version: String(app.getVersion() ?? "") }));
+  ipcMain.handle("update.check", async (_event, opts) => checkForUpdates(opts));
+  ipcMain.handle("update.checkInteractive", async (_event, opts) => interactiveUpdateFlow(opts));
 }
 
 function createWindow() {

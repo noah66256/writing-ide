@@ -5,6 +5,24 @@ declare global {
     desktop?: {
       ping: () => string;
       onMenuAction?: (handler: (payload: any) => void) => () => void;
+      app?: {
+        getVersion: () => Promise<{ ok: boolean; version?: string; error?: string }>;
+      };
+      update?: {
+        check: (opts?: { baseUrl?: string }) => Promise<{
+          ok: boolean;
+          error?: string;
+          currentVersion?: string;
+          latestVersion?: string;
+          updateAvailable?: boolean;
+          nsisUrl?: string;
+          notes?: string;
+          baseUrl?: string;
+          latestUrl?: string;
+        }>;
+        checkInteractive: (opts?: { baseUrl?: string }) => Promise<any>;
+        onEvent?: (handler: (payload: any) => void) => () => void;
+      };
       fs?: {
         pickDirectory: () => Promise<{ ok: boolean; dir?: string; canceled?: boolean; error?: string }>;
         listFiles: (rootDir: string) => Promise<{ ok: boolean; files?: string[]; error?: string }>;

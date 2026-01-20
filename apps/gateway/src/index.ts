@@ -2,6 +2,8 @@ import cors from "@fastify/cors";
 import jwt from "@fastify/jwt";
 import Fastify from "fastify";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -431,6 +433,77 @@ fastify.get("/api/llm/models", async () => {
   const env = await getLlmEnv();
   const ids = env.models.length ? env.models : env.defaultModel ? [env.defaultModel] : [];
   return { models: ids.map((id) => ({ id })) };
+});
+
+// ======== Desktop 更新源（静态目录 + latest.json，v0.1） ========
+// 说明：
+// - v0.1 仅服务 Windows 安装包（NSIS）“确认后下载并安装”的最小闭环
+// - 文件通过 SSH/SCP 推到服务器目录；Gateway 仅负责暴露 HTTP 下载
+const DESKTOP_UPDATES_DIR = (() => {
+  const raw = String(process.env.DESKTOP_UPDATES_DIR ?? "").trim();
+  return raw ? path.resolve(raw) : path.resolve(process.cwd(), "desktop-updates");
+})();
+
+function safeStableFilePath(fileName: string) {
+  const name = String(fileName ?? "").trim();
+  if (!name) return null;
+  if (name.includes("/") || name.includes("\\") || name.includes("\0")) return null;
+  // 禁止路径穿越：只允许单文件名（basename 必须不变）
+  if (path.basename(name) !== name) return null;
+  // 允许中英文文件名；仅限制扩展名（避免任意读服务器文件）
+  const lower = name.toLowerCase();
+  const allowedExt = [".exe", ".zip", ".dmg", ".yml", ".yaml", ".blockmap", ".json"];
+  if (!allowedExt.some((ext) => lower.endsWith(ext))) return null;
+  return path.join(DESKTOP_UPDATES_DIR, "stable", name);
+}
+
+fastify.get("/downloads/desktop/stable/latest.json", async (_request, reply) => {
+  const p = path.join(DESKTOP_UPDATES_DIR, "stable", "latest.json");
+  try {
+    const raw = await fsp.readFile(p, "utf-8");
+    // 不强制 schema（发布侧可渐进演进），但要求至少是 JSON
+    let obj: any = null;
+    try {
+      obj = JSON.parse(String(raw ?? ""));
+    } catch {
+      return reply.code(500).send({ error: "LATEST_JSON_INVALID" });
+    }
+    reply.header("Cache-Control", "no-store");
+    return reply.type("application/json; charset=utf-8").send(obj ?? {});
+  } catch (e: any) {
+    const code = String(e?.code ?? "");
+    if (code === "ENOENT") return reply.code(404).send({ error: "NOT_FOUND" });
+    return reply.code(500).send({ error: "READ_FAILED", detail: String(e?.message ?? e) });
+  }
+});
+
+fastify.get("/downloads/desktop/stable/:file", async (request, reply) => {
+  const paramsSchema = z.object({ file: z.string().min(1).max(260) });
+  const { file } = paramsSchema.parse((request as any).params);
+  const p = safeStableFilePath(file);
+  if (!p) return reply.code(400).send({ error: "INVALID_FILE" });
+
+  try {
+    const st = await fsp.stat(p);
+    if (!st.isFile()) return reply.code(404).send({ error: "NOT_FOUND" });
+
+    const name = path.basename(p);
+    const ext = name.toLowerCase().split(".").pop() || "";
+    const contentType =
+      ext === "json" ? "application/json; charset=utf-8" : "application/octet-stream";
+
+    // RFC5987：filename*（支持中文）
+    const encoded = encodeURIComponent(name).replace(/%20/g, "+");
+    reply.header("Content-Type", contentType);
+    reply.header("Content-Length", String(st.size));
+    reply.header("Content-Disposition", `attachment; filename*=UTF-8''${encoded}`);
+    reply.header("Cache-Control", "no-store");
+    return reply.send(fs.createReadStream(p));
+  } catch (e: any) {
+    const code = String(e?.code ?? "");
+    if (code === "ENOENT") return reply.code(404).send({ error: "NOT_FOUND" });
+    return reply.code(500).send({ error: "READ_FAILED", detail: String(e?.message ?? e) });
+  }
 });
 
 // Desktop 模型选择器：按供应商分组 + stage（llm.chat/agent.run）多选下发

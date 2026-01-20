@@ -86,6 +86,25 @@ contextBridge.exposeInMainWorld("desktop", {
       return ipcRenderer.invoke("clipboard.writeRichText", payload);
     },
   },
+  app: {
+    getVersion() {
+      return ipcRenderer.invoke("app.getVersion");
+    },
+  },
+  update: {
+    check(opts) {
+      return ipcRenderer.invoke("update.check", opts);
+    },
+    checkInteractive(opts) {
+      return ipcRenderer.invoke("update.checkInteractive", opts);
+    },
+    onEvent(handler) {
+      if (typeof handler !== "function") return () => {};
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on("update.event", listener);
+      return () => ipcRenderer.removeListener("update.event", listener);
+    },
+  },
 });
 
 
