@@ -36,6 +36,8 @@ type ProjectState = {
   previewPath: string | null; // 单击预览：复用同一个“预览 tab”
   snapshots: SavedSnapshot[];
   editorRef: editor.IStandaloneCodeEditor | null;
+  docOpUndoByPath: Record<string, Array<{ label: string; before: string; after: string; ts: number }>>;
+  docOpRedoByPath: Record<string, Array<{ label: string; before: string; after: string; ts: number }>>;
 
   setEditorRef: (ref: editor.IStandaloneCodeEditor | null) => void;
   setActivePath: (path: string) => void;
@@ -62,6 +64,11 @@ type ProjectState = {
 
   snapshot: () => ProjectSnapshot;
   restore: (snap: ProjectSnapshot) => void;
+
+  // Doc Ops：结构操作（章节移动/升降级等）独立 Undo/Redo（不与 Monaco 文本输入 Undo 混在一起）
+  applyDocOp: (path: string, nextContent: string, label: string) => void;
+  undoDocOp: (path: string) => void;
+  redoDocOp: (path: string) => void;
 };
 
 const DEFAULT_DOC_RULES =
@@ -118,6 +125,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   previewPath: "drafts/draft.md",
   snapshots: [],
   editorRef: null,
+  docOpUndoByPath: {},
+  docOpRedoByPath: {},
 
   setEditorRef: (ref) => set({ editorRef: ref }),
   setActivePath: (path) => {
@@ -593,6 +602,43 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       .filter((p) => !snapPaths.has(p))
       .map((p) => api.deleteFile(rootDir, p).catch(() => ({ ok: false })));
     void Promise.allSettled([...writeOps, ...deleteOps]);
+  },
+
+  applyDocOp: (path, nextContent, label) => {
+    const p = normalizeRel(path);
+    if (!p) return;
+    const prev = get().getFileByPath(p)?.content ?? "";
+    if (prev === nextContent) return;
+    const rec = { label: String(label ?? "op"), before: prev, after: nextContent, ts: Date.now() };
+    set((s) => ({
+      docOpUndoByPath: { ...s.docOpUndoByPath, [p]: [...(s.docOpUndoByPath[p] ?? []), rec].slice(-200) },
+      docOpRedoByPath: { ...s.docOpRedoByPath, [p]: [] },
+    }));
+    get().updateFile(p, nextContent);
+  },
+  undoDocOp: (path) => {
+    const p = normalizeRel(path);
+    if (!p) return;
+    const undo = get().docOpUndoByPath[p] ?? [];
+    if (!undo.length) return;
+    const rec = undo[undo.length - 1]!;
+    set((s) => ({
+      docOpUndoByPath: { ...s.docOpUndoByPath, [p]: undo.slice(0, -1) },
+      docOpRedoByPath: { ...s.docOpRedoByPath, [p]: [...(s.docOpRedoByPath[p] ?? []), rec].slice(-200) },
+    }));
+    get().updateFile(p, rec.before);
+  },
+  redoDocOp: (path) => {
+    const p = normalizeRel(path);
+    if (!p) return;
+    const redo = get().docOpRedoByPath[p] ?? [];
+    if (!redo.length) return;
+    const rec = redo[redo.length - 1]!;
+    set((s) => ({
+      docOpRedoByPath: { ...s.docOpRedoByPath, [p]: redo.slice(0, -1) },
+      docOpUndoByPath: { ...s.docOpUndoByPath, [p]: [...(s.docOpUndoByPath[p] ?? []), rec].slice(-200) },
+    }));
+    get().updateFile(p, rec.after);
   },
 }));
 

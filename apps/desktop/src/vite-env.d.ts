@@ -56,6 +56,7 @@ declare global {
       };
       clipboard?: {
         writeText: (text: string) => Promise<{ ok: boolean; error?: string }>;
+        writeRichText: (payload: { html: string; text?: string }) => Promise<{ ok: boolean; error?: string }>;
       };
     };
   }

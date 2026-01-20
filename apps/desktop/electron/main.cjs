@@ -394,6 +394,18 @@ function registerIpc() {
     }
   });
 
+  ipcMain.handle("clipboard.writeRichText", async (_event, payload) => {
+    try {
+      const p = payload && typeof payload === "object" ? payload : {};
+      const html = typeof p.html === "string" ? p.html : "";
+      const text = typeof p.text === "string" ? p.text : "";
+      clipboard.write({ html, text });
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
   ipcMain.handle("project.pickDirectory", async () => {
     const win = BrowserWindow.getFocusedWindow();
     const result = await dialog.showOpenDialog(win ?? undefined, {

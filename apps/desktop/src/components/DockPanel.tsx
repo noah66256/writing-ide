@@ -2,6 +2,9 @@ import { useMemo, useState } from "react";
 import { useRunStore, type TodoItem, type TodoStatus } from "../state/runStore";
 import { useUiStore } from "../state/uiStore";
 import { RichText } from "./RichText";
+import { useProjectStore } from "../state/projectStore";
+import { parseMarkdownHeadings, moveSectionByHeadingLine, shiftHeadingLevelsInSection } from "../utils/markdown";
+import { DiffEditor } from "@monaco-editor/react";
 
 export function DockPanel() {
   const tab = useUiStore((s) => s.dockTab);
@@ -11,6 +14,50 @@ export function DockPanel() {
   const todoList = useRunStore((s) => s.todoList);
   const logs = useRunStore((s) => s.logs);
   const clearLogs = useRunStore((s) => s.clearLogs);
+
+  const activePath = useProjectStore((s) => s.activePath);
+  const getFileByPath = useProjectStore((s) => s.getFileByPath);
+  const editorRef = useProjectStore((s) => s.editorRef);
+  const applyDocOp = useProjectStore((s) => s.applyDocOp);
+  const undoDocOp = useProjectStore((s) => s.undoDocOp);
+  const redoDocOp = useProjectStore((s) => s.redoDocOp);
+  const snapshots = useProjectStore((s) => s.snapshots);
+  const commitSnapshot = useProjectStore((s) => s.commitSnapshot);
+  const getSnapshot = useProjectStore((s) => s.getSnapshot);
+  const restoreSnapshot = useProjectStore((s) => s.restore);
+
+  const activeText = getFileByPath(activePath)?.content ?? "";
+  const headings = useMemo(() => parseMarkdownHeadings(activeText, { maxLevel: 3 }), [activeText]);
+  const [pickedHeadingLine, setPickedHeadingLine] = useState<number | null>(null);
+
+  const [pickedSnapshotId, setPickedSnapshotId] = useState<string | null>(null);
+  const [diffOpen, setDiffOpen] = useState(false);
+
+  const jumpToLine = (line: number) => {
+    try {
+      const ed = editorRef;
+      if (!ed) return;
+      ed.focus();
+      ed.setPosition({ lineNumber: line, column: 1 });
+      ed.revealLineInCenter(line);
+    } catch {
+      // ignore
+    }
+  };
+
+  const runOp = (kind: "up" | "down" | "promote" | "demote") => {
+    const line = pickedHeadingLine ?? headings[0]?.line ?? null;
+    if (!line) return;
+    if (kind === "up" || kind === "down") {
+      const r = moveSectionByHeadingLine(activeText, line, kind, { maxLevel: 6 });
+      if (!r.ok) return;
+      applyDocOp(activePath, r.content, kind === "up" ? "move_section_up" : "move_section_down");
+      return;
+    }
+    const r = shiftHeadingLevelsInSection(activeText, line, kind === "promote" ? -1 : 1);
+    if (!r.ok) return;
+    applyDocOp(activePath, r.content, kind === "promote" ? "promote_section" : "demote_section");
+  };
 
   const toolSteps = useMemo(
     () => steps.filter((s) => s.type === "tool").map((s) => s),
@@ -61,7 +108,7 @@ export function DockPanel() {
           className={`dockTab ${tab === "graph" ? "dockTabActive" : ""}`}
           onClick={() => setTab("graph")}
         >
-          Graph
+          History
         </div>
         <div
           className={`dockTab ${tab === "problems" ? "dockTabActive" : ""}`}
@@ -84,8 +131,175 @@ export function DockPanel() {
       </div>
 
       <div className="dockContent">
-        {tab === "outline" && <div>（占位）后续从 Markdown 标题树生成 Outline。</div>}
-        {tab === "graph" && <div>（占位）后续显示文章结构图（思维导图）。</div>}
+        {tab === "outline" && (
+          <div style={{ display: "grid", gap: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+              <div style={{ color: "var(--text)" }}>Outline（当前文件：{activePath || "（无）"}）</div>
+              <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                <button className="btn" type="button" onClick={() => undoDocOp(activePath)}>
+                  Undo
+                </button>
+                <button className="btn" type="button" onClick={() => redoDocOp(activePath)}>
+                  Redo
+                </button>
+                <button className="btn" type="button" onClick={() => runOp("up")}>
+                  章节上移
+                </button>
+                <button className="btn" type="button" onClick={() => runOp("down")}>
+                  章节下移
+                </button>
+                <button className="btn" type="button" onClick={() => runOp("promote")}>
+                  升级标题
+                </button>
+                <button className="btn" type="button" onClick={() => runOp("demote")}>
+                  降级标题
+                </button>
+              </div>
+            </div>
+
+            {headings.length === 0 ? (
+              <div style={{ color: "var(--muted)" }}>未检测到标题（# / ## / ###）。</div>
+            ) : (
+              <div style={{ display: "grid", gap: 4 }}>
+                {headings.map((h) => {
+                  const active = pickedHeadingLine === h.line;
+                  const pad = (h.level - 1) * 12;
+                  return (
+                    <div
+                      key={`${h.line}-${h.text}`}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => {
+                        setPickedHeadingLine(h.line);
+                        jumpToLine(h.line);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setPickedHeadingLine(h.line);
+                          jumpToLine(h.line);
+                        }
+                      }}
+                      style={{
+                        padding: "6px 8px",
+                        borderRadius: 8,
+                        cursor: "pointer",
+                        outline: active ? "1px solid rgba(37,99,235,0.35)" : "1px solid transparent",
+                        background: active ? "rgba(37,99,235,0.06)" : "transparent",
+                        display: "flex",
+                        gap: 8,
+                        alignItems: "center",
+                      }}
+                      title={`L${h.line}`}
+                    >
+                      <span style={{ width: 46, color: "var(--muted)", fontSize: 12, flex: "0 0 auto" }}>{`H${h.level}`}</span>
+                      <span style={{ paddingLeft: pad, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {h.text || "（无标题）"}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+        {tab === "graph" && (
+          <div style={{ display: "grid", gap: 10, height: "100%", minHeight: 0 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
+              <div style={{ color: "var(--text)" }}>History（快照/版本对比）</div>
+              <div className="row" style={{ gap: 6, flexWrap: "wrap" }}>
+                <button
+                  className="btn"
+                  type="button"
+                  onClick={() => {
+                    const label = window.prompt("快照名称（可选）", "");
+                    const rec = commitSnapshot(label ?? undefined);
+                    setPickedSnapshotId(rec.id);
+                  }}
+                >
+                  创建快照
+                </button>
+                <button className="btn" type="button" disabled={!pickedSnapshotId} onClick={() => setDiffOpen(true)}>
+                  对比当前文件
+                </button>
+                <button
+                  className="btn"
+                  type="button"
+                  disabled={!pickedSnapshotId}
+                  onClick={() => {
+                    const rec = pickedSnapshotId ? getSnapshot(pickedSnapshotId) : null;
+                    if (!rec) return;
+                    if (!window.confirm(`确认恢复快照：${rec.label}？（会写回磁盘）`)) return;
+                    restoreSnapshot(rec.snap);
+                  }}
+                >
+                  恢复快照
+                </button>
+              </div>
+            </div>
+
+            <div style={{ display: "grid", gap: 6, overflow: "auto", minHeight: 0 }}>
+              {snapshots.length === 0 ? (
+                <div style={{ color: "var(--muted)" }}>暂无快照。建议在大改前点一次“创建快照”。</div>
+              ) : (
+                snapshots.map((s) => {
+                  const active = pickedSnapshotId === s.id;
+                  return (
+                    <div
+                      key={s.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setPickedSnapshotId(s.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setPickedSnapshotId(s.id);
+                        }
+                      }}
+                      style={{
+                        padding: "8px 10px",
+                        borderRadius: 10,
+                        border: "1px solid var(--border)",
+                        background: active ? "rgba(37,99,235,0.06)" : "var(--panel)",
+                        outline: active ? "1px solid rgba(37,99,235,0.28)" : "none",
+                        cursor: "pointer",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                        <div style={{ color: "var(--text)" }}>{s.label}</div>
+                        <div style={{ color: "var(--muted)", fontSize: 12 }}>{new Date(s.createdAt).toLocaleString()}</div>
+                      </div>
+                      <div style={{ color: "var(--muted)", fontSize: 12 }}>id={s.id}</div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {diffOpen ? (
+              <div className="drawerMask" onClick={() => setDiffOpen(false)} role="presentation">
+                <div className="drawer" onClick={(e) => e.stopPropagation()} role="presentation">
+                  <div className="drawerHeader">
+                    <div style={{ fontWeight: 900 }}>Diff（{activePath}）</div>
+                    <button className="btn" type="button" onClick={() => setDiffOpen(false)}>
+                      关闭
+                    </button>
+                  </div>
+                  {(() => {
+                    const rec = pickedSnapshotId ? getSnapshot(pickedSnapshotId) : null;
+                    const before = rec ? rec.snap.files.find((f) => f.path === activePath)?.content ?? "" : "";
+                    const after = activeText;
+                    return (
+                      <div style={{ height: 460, border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden" }}>
+                        <DiffEditor original={before} modified={after} language="markdown" theme="vs" options={{ readOnly: true, renderSideBySide: true }} />
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        )}
         {tab === "problems" && <div>（占位）后续接入 lint.style / lint.platform / lint.facts。</div>}
         {tab === "runs" && (
           <div style={{ display: "grid", gap: 10 }}>

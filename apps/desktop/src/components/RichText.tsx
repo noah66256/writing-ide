@@ -35,7 +35,7 @@ function renderInline(text: string): Array<string | ReactElement> {
   return out;
 }
 
-export function RichText(props: { text: string }) {
+export function RichText(props: { text: string; onHeadingClick?: (args: { level: 1 | 2 | 3; line: number; text: string }) => void }) {
   const text = props.text ?? "";
   const lines = text.split("\n");
 
@@ -73,9 +73,24 @@ export function RichText(props: { text: string }) {
       const level = h[1]?.length ?? 1;
       const content = h[2] ?? "";
       const Tag = level === 1 ? "h1" : level === 2 ? "h2" : "h3";
+      const lineNo = i + 1;
       blocks.push(
         <Tag key={`h-${blocks.length}`} className={`rtH rtH${level}`}>
-          {renderInline(content)}
+          <span
+            role={props.onHeadingClick ? "button" : undefined}
+            tabIndex={props.onHeadingClick ? 0 : undefined}
+            style={{ cursor: props.onHeadingClick ? "pointer" : undefined }}
+            onClick={() => props.onHeadingClick?.({ level: level as any, line: lineNo, text: String(content ?? "") })}
+            onKeyDown={(e) => {
+              if (!props.onHeadingClick) return;
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                props.onHeadingClick({ level: level as any, line: lineNo, text: String(content ?? "") });
+              }
+            }}
+          >
+            {renderInline(content)}
+          </span>
         </Tag>,
       );
       i += 1;

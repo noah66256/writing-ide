@@ -82,6 +82,9 @@ contextBridge.exposeInMainWorld("desktop", {
     writeText(text) {
       return ipcRenderer.invoke("clipboard.writeText", text);
     },
+    writeRichText(payload) {
+      return ipcRenderer.invoke("clipboard.writeRichText", payload);
+    },
   },
 });
 

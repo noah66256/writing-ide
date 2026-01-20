@@ -560,12 +560,68 @@ body {
   flex: 0 0 auto;
   min-height: 44px;
   display: flex;
-  gap: 6px;
+  gap: 8px;
   padding: 8px;
   border-bottom: 1px solid var(--border);
   background: rgba(0, 0, 0, 0.02);
+  overflow: hidden;
+  align-items: center;
+}
+
+.tabBarTabs {
+  display: flex;
+  gap: 6px;
   overflow-x: auto;
   overflow-y: hidden;
+  flex: 1;
+  min-width: 0;
+  padding-bottom: 2px; /* 避免滚动条挤压高度 */
+}
+
+.tabBarRight {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+/* Preview 分屏已移除（UI 过于拥挤）；保留 Outline/History/导出/复制等“交付链路”能力。 */
+
+.selectSmall {
+  width: auto;
+  max-width: 140px;
+  height: 32px;
+  padding: 4px 10px;
+  border-radius: 10px;
+}
+
+/* ======== overlays（简化 drawer，用于 diff/详情） ======== */
+.drawerMask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.28);
+  display: grid;
+  place-items: center;
+  z-index: 30;
+  padding: 16px;
+}
+
+.drawer {
+  width: min(1100px, calc(100vw - 24px));
+  max-height: min(760px, calc(100vh - 24px));
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: auto;
+  padding: 12px;
+}
+
+.drawerHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
 }
 
 .tab {
