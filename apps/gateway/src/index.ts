@@ -656,16 +656,6 @@ fastify.post("/api/llm/chat/stream", async (request, reply) => {
     meta: sanitizeForAudit({ messageCount: messages.length }),
   };
 
-  // 诊断：把上下文清单（manifest）打到服务端日志，便于排查“为什么跑偏/为什么 403/为什么 empty_output”
-  try {
-    const cm = (audit.meta as any)?.contextManifest ?? null;
-    if (cm && typeof cm === "object") {
-      fastify.log.info({ runId, mode, contextManifest: cm }, "context.pack.manifest");
-    }
-  } catch {
-    // ignore
-  }
-
   let auditPersisted = false;
   const persistOnce = async (forced?: { endReason?: string; endReasonCodes?: string[] }) => {
     if (auditPersisted) return;
@@ -1909,6 +1899,15 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       },
     }),
   };
+
+  // 诊断：把上下文清单（manifest）打到服务端日志，便于排查“为什么跑偏/为什么 403/为什么 empty_output”
+  try {
+    const cm = (audit.meta as any)?.contextManifest ?? null;
+    const hasSegs = cm && typeof cm === "object" && Number((cm as any)?.totalSegments ?? 0) > 0;
+    if (hasSegs) fastify.log.info({ runId, mode, contextManifest: cm }, "context.pack.manifest");
+  } catch {
+    // ignore
+  }
 
   let usageSumPrompt = 0;
   let usageSumCompletion = 0;
