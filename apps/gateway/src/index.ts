@@ -2618,11 +2618,20 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           webGate.requiredUniqueFetchDomains > 0
             ? `（uniqueDomains >= ${webGate.requiredUniqueFetchDomains}；当前=${runState.webFetchUniqueDomains.length}）`
             : "";
+        const candidates = (() => {
+          const urls = Array.isArray((runState as any).webSearchLastUrls) ? ((runState as any).webSearchLastUrls as any[]) : [];
+          return urls
+            .map((x) => String(x ?? "").trim())
+            .filter(Boolean)
+            .slice(0, 6);
+        })();
+        const candidatesHint = candidates.length ? `\n- 候选 URL（来自最近一次 web.search）：\n${candidates.map((u) => `  - ${u}`).join("\n")}` : "";
         hint =
           "【Web Gate】当前阶段：need_fetch。\n" +
           `- 你必须调用 web.fetch(url=...) 抓正文证据（至少 ${webGate.requiredFetchCount} 次；当前=${runState.webFetchCount}）${uniqHint}。\n` +
           "- 优先从上一步 web.search 的结果里挑 URL；若用户已提供 url，则直接抓这些 url；尽量覆盖不同来源站点。\n" +
-          "- 本回合除 web.fetch 与 run.* 进度工具外，不要调用任何其它工具；不要输出最终回答。";
+          "- 本回合除 web.fetch 与 run.* 进度工具外，不要调用任何其它工具；不要输出最终回答。" +
+          candidatesHint;
         reasonCodes.push("phase:web_need_fetch");
         return { phase, allowed, hint, reasonCodes };
       }
@@ -3013,7 +3022,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             turn,
             kind: "info",
             title: "Web Gate：需要联网证据，自动继续",
-            message: "本轮触发了“联网证据”门禁，系统将自动先调用 web.search/web.fetch，再给最终回答。",
+            message: "本轮触发了“联网证据”门禁，系统将自动继续一轮：请先调用 web.search/web.fetch 获取证据，再输出最终回答。",
             policy: "WebGatePolicy",
             reasonCodes,
             detail: {
@@ -3024,6 +3033,107 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             },
           });
           writeEvent("assistant.done", { reason: "web_gate_retry", turn });
+
+          // 兜底：当已完成 web.search（有候选 URL），但模型迟迟不肯调用 web.fetch（或一直输出纯文本），
+          // 网关可自动补 1 次 web.fetch（仅一次），避免在 need_fetch 阶段反复耗尽预算并最终空输出。
+          if (needFetch && !needSearch) {
+            const autoDone = (runState as any).webGateAutoFetchDone === true;
+            const already = Math.max(0, Math.floor(Number(runState.webFetchCount ?? 0)));
+            const remainNeed = Math.max(0, Math.floor(Number(webGate.requiredFetchCount ?? 0))) - already;
+            const candidates = Array.isArray((runState as any).webSearchLastUrls) ? ((runState as any).webSearchLastUrls as any[]) : [];
+            const urls = candidates.map((x) => String(x ?? "").trim()).filter(Boolean);
+            if (!autoDone && remainNeed > 0 && urls.length > 0) {
+              const pickedUrl = (() => {
+                const used = new Set(
+                  (Array.isArray(runState.webFetchUniqueDomains) ? runState.webFetchUniqueDomains : [])
+                    .map((x) => String(x ?? "").trim().toLowerCase())
+                    .filter(Boolean)
+                );
+                for (const u0 of urls) {
+                  try {
+                    const host = new URL(u0).hostname.replace(/^www\./i, "").trim().toLowerCase();
+                    if (host && !used.has(host)) return u0;
+                  } catch {
+                    // ignore
+                  }
+                }
+                return urls[0];
+              })();
+
+              if (pickedUrl) {
+                (runState as any).webGateAutoFetchDone = true;
+                const autoCall = { name: "web.fetch", args: { url: pickedUrl } } as any;
+                const toolCallId = randomUUID();
+                writePolicyDecision({
+                  turn,
+                  policy: "WebGatePolicy",
+                  decision: "auto_fetch",
+                  reasonCodes: ["auto_fetch", "phase:web_need_fetch"],
+                  detail: { url: pickedUrl },
+                });
+                writeEvent("tool.call", { toolCallId, name: autoCall.name, args: autoCall.args, executedBy: "gateway" });
+
+                const ret = await executeServerToolOnGateway({ fastify, call: autoCall, toolSidecar, styleLinterLibraries });
+                const payload: ToolResultPayload = ret.ok
+                  ? {
+                      toolCallId,
+                      name: String(autoCall.name ?? ""),
+                      ok: true,
+                      output: (ret as any).output,
+                      meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
+                    }
+                  : {
+                      toolCallId,
+                      name: String(autoCall.name ?? ""),
+                      ok: false,
+                      output: { ok: false, error: (ret as any).error ?? "SERVER_TOOL_FAILED", detail: (ret as any).detail ?? null },
+                      meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
+                    };
+                writeEvent("tool.result", {
+                  toolCallId,
+                  name: payload.name,
+                  ok: payload.ok,
+                  output: payload.output,
+                  meta: payload.meta ?? null
+                });
+
+                if (payload.ok) {
+                  runState.hasWebFetch = true;
+                  runState.webFetchCount = Math.max(0, Math.floor(Number(runState.webFetchCount ?? 0))) + 1;
+                  try {
+                    const u = new URL(pickedUrl);
+                    const domain = String(u.hostname ?? "").replace(/^www\./i, "").trim().toLowerCase();
+                    if (domain) {
+                      const cur = Array.isArray(runState.webFetchUniqueDomains) ? runState.webFetchUniqueDomains : [];
+                      const has = cur.some((x) => String(x ?? "").trim().toLowerCase() === domain);
+                      if (!has) runState.webFetchUniqueDomains = [...cur, domain].slice(0, 12);
+                    }
+                  } catch {
+                    // ignore
+                  }
+                }
+
+                const toolResultXml = renderToolResultXml(String(autoCall.name ?? ""), payload.output);
+                const toolResultJson = (() => {
+                  try {
+                    return JSON.stringify(payload.output ?? null);
+                  } catch {
+                    return JSON.stringify({ ok: false, error: "RESULT_NOT_SERIALIZABLE" });
+                  }
+                })();
+                const toolResultText = `[tool_result name="${String(autoCall.name ?? "")}"]\n${toolResultJson}\n[/tool_result]`;
+                messages.push(...buildInjectedToolResultMessages({ toolResultFormat, toolResultXml, toolResultText }));
+                messages.push({
+                  role: "system",
+                  content:
+                    "【Web Gate】系统已自动补齐 1 次 web.fetch 并注入 tool_result（用于避免 need_fetch 阶段卡死）。\n" +
+                    "- 你现在必须直接输出最终回答（Markdown 纯文本），并基于刚注入的证据。\n" +
+                    "- 不要再输出 <tool_calls>/<tool_call>，除非你确实还需要更多 web.fetch 证据。",
+                });
+                continue;
+              }
+            }
+          }
 
           // 记录本轮输出（即使它可能不完整），并要求下一轮严格走 tool_calls
           messages.push({ role: "assistant", content: assistantText });
@@ -3038,6 +3148,11 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
                   "- 下一条消息必须且只能输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。"
                 : "你上一条直接输出了纯文本，但本轮触发了 Web Gate（需要正文证据）。\n" +
                   `- 你现在必须调用 web.fetch(url=...) 抓正文证据（至少 ${webGate.requiredFetchCount} 次）。\n` +
+                  (() => {
+                    const urls = Array.isArray((runState as any).webSearchLastUrls) ? ((runState as any).webSearchLastUrls as any[]) : [];
+                    const list = urls.map((x) => String(x ?? "").trim()).filter(Boolean).slice(0, 6);
+                    return list.length ? `- 候选 URL（来自最近一次 web.search）：\n${list.map((u) => `  - ${u}`).join("\n")}\n` : "";
+                  })() +
                   "- 最后再输出最终回答（Markdown），并基于抓到的正文证据。\n" +
                   "- 下一条消息必须且只能输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。"),
           });
@@ -4103,6 +4218,17 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
             const cur = Array.isArray(runState.webSearchUniqueQueries) ? runState.webSearchUniqueQueries : [];
             const has = cur.some((x) => String(x ?? "").trim().toLowerCase() === key);
             if (!has) runState.webSearchUniqueQueries = [...cur, q].slice(0, 12);
+          }
+          // 兜底：缓存最近一次 web.search 的候选 URL，便于后续 web_need_fetch 阶段直接“复制粘贴”调用 web.fetch。
+          try {
+            const results = Array.isArray((payload.output as any)?.results) ? ((payload.output as any).results as any[]) : [];
+            const urls = results
+              .map((r: any) => String(r?.url ?? "").trim())
+              .filter(Boolean)
+              .slice(0, 12);
+            (runState as any).webSearchLastUrls = urls;
+          } catch {
+            // ignore
           }
         }
         if (payload.ok && payload.name === "web.fetch") {
