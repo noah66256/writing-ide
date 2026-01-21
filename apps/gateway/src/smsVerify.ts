@@ -1,4 +1,4 @@
-import Client, { CheckSmsVerifyCodeRequest, SendSmsVerifyCodeRequest } from "@alicloud/dypnsapi20170525";
+import DypnsapiModule, { CheckSmsVerifyCodeRequest, SendSmsVerifyCodeRequest } from "@alicloud/dypnsapi20170525";
 import { $OpenApiUtil } from "@alicloud/openapi-core";
 import type { SmsVerifyRuntime } from "./toolConfig.js";
 
@@ -17,7 +17,11 @@ export function normalizeCnPhone(raw: string): string {
   return x;
 }
 
-export function createDypnsClient(rt: SmsVerifyRuntime): Client {
+export function createDypnsClient(rt: SmsVerifyRuntime) {
+  // @alicloud/* 这类 SDK 通常是 CommonJS 导出：module.exports = { ..., default: Client }
+  // 在 Node ESM 下 `import x from` 拿到的是整个 module.exports（对象），构造器在 x.default 上；
+  // 如果直接 new x(...) 会报：Client is not a constructor
+  const ClientCtor = ((DypnsapiModule as any)?.default ?? DypnsapiModule) as any;
   const cfg = new $OpenApiUtil.Config({
     accessKeyId: rt.accessKeyId,
     accessKeySecret: rt.accessKeySecret,
@@ -25,7 +29,7 @@ export function createDypnsClient(rt: SmsVerifyRuntime): Client {
   });
   // Dypnsapi 是 RPC 风格；regionId 不强制，但留默认值更稳
   cfg.regionId = cfg.regionId || "cn-hangzhou";
-  return new Client(cfg);
+  return new ClientCtor(cfg);
 }
 
 export async function sendSmsVerifyCode(args: {
