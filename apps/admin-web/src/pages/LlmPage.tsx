@@ -16,6 +16,7 @@ import {
   type AiProviderDto,
   type AiStageDto,
 } from "../api/gateway";
+import { ModelIdMultiPicker, type MultiPickOption } from "../components/ModelIdMultiPicker";
 
 type ModelDraft = AiModelDto & { apiKeyInput?: string; clearApiKey?: boolean };
 type ProviderDraft = AiProviderDto & { apiKeyInput?: string; clearApiKey?: boolean };
@@ -32,6 +33,14 @@ function endpointLabel(endpoint: string) {
   if (/chat\/completions/i.test(e)) return "Chat";
   if (/:streamGenerateContent/i.test(e) || /:generateContent/i.test(e) || /\/v1beta\/models\//i.test(e)) return "Gemini";
   return e || "-";
+}
+
+function sortIdsByOrder(ids: string[], ordered: { id: string }[]) {
+  const order = new Map<string, number>(ordered.map((x, i) => [x.id, i]));
+  return ids
+    .filter(Boolean)
+    .slice()
+    .sort((a, b) => (order.get(a) ?? 99999) - (order.get(b) ?? 99999) || a.localeCompare(b));
 }
 
 const ENDPOINT_LAST_KEY = "writing-ide.admin.endpointLast.v1";
@@ -94,6 +103,7 @@ export function LlmPage() {
   const [bulkTest, setBulkTest] = useState<{ done: number; total: number } | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [providerOpen, setProviderOpen] = useState(false);
+  const [stagePickerOpen, setStagePickerOpen] = useState<string | null>(null);
 
   // 创建模型表单
   const [newProviderId, setNewProviderId] = useState("");
@@ -840,20 +850,23 @@ export function LlmPage() {
           </thead>
           <tbody>
             {stages.map((s) => {
-              const allowMulti = s.stage === "llm.chat" || s.stage === "agent.run";
+              const allowMulti = s.stage === "llm.chat" || s.stage === "agent.run" || s.stage === "agent.context_summary";
               const stageEndpointWant = allowMulti ? "Chat" : null;
               const selectableModels = modelOptions.filter((m) => {
                 if (!m.isEnabled) return false;
                 if (stageEndpointWant === "Chat") return endpointLabel(m.endpoint) !== "Embeddings";
                 return true;
               });
-              const multiValue = allowMulti
-                ? Array.isArray(s.modelIds) && s.modelIds.length
-                  ? s.modelIds
-                  : s.modelId
-                    ? [s.modelId]
-                    : []
-                : [];
+              const allowlistEnabled = Array.isArray(s.modelIds);
+              const allowlistIds = allowlistEnabled ? (s.modelIds as string[]) : [];
+              const allowlistPreview = (() => {
+                if (!allowlistEnabled) return { kind: "unlimited" as const, text: "不限制（展示全部启用模型）" };
+                if (!allowlistIds.length) return { kind: "empty" as const, text: "已启用但未选（等价于不限制）" };
+                const map = new Map(selectableModels.map((m) => [m.id, m.model] as const));
+                const names = allowlistIds.map((id) => map.get(id) || id).slice(0, 3);
+                const more = allowlistIds.length > 3 ? ` +${allowlistIds.length - 3}` : "";
+                return { kind: "picked" as const, text: `${names.join(" / ")}${more}` };
+              })();
 
               return (
                 <tr key={s.stage}>
@@ -875,9 +888,15 @@ export function LlmPage() {
                           setStages((prev) =>
                             prev.map((x) => {
                               if (x.stage !== s.stage) return x;
-                              const set = new Set<string>(Array.isArray(x.modelIds) ? x.modelIds : []);
-                              if (v) set.add(v);
-                              return { ...x, modelId: v, modelIds: set.size ? Array.from(set) : null };
+                              const limitEnabled = Array.isArray(x.modelIds);
+                              let nextModelIds = x.modelIds;
+                              if (limitEnabled) {
+                                const set = new Set<string>(Array.isArray(nextModelIds) ? nextModelIds : []);
+                                if (v) set.add(v);
+                                const arr = sortIdsByOrder(Array.from(set), selectableModels).slice(0, 60);
+                                nextModelIds = arr;
+                              }
+                              return { ...x, modelId: v, modelIds: (nextModelIds as any) ?? null };
                             }),
                           );
                         }}
@@ -891,33 +910,16 @@ export function LlmPage() {
                         ))}
                       </select>
 
-                      <select
-                        className="input"
-                        multiple
-                        size={Math.min(8, Math.max(4, selectableModels.length))}
-                        value={multiValue}
-                        onChange={(e) => {
-                          const picked = Array.from(e.currentTarget.selectedOptions)
-                            .map((o) => o.value)
-                            .filter(Boolean);
-                          setStages((prev) =>
-                            prev.map((x) => {
-                              if (x.stage !== s.stage) return x;
-                              const set = new Set<string>(picked);
-                              if (x.modelId) set.add(x.modelId);
-                              const arr = Array.from(set).slice(0, 60);
-                              return { ...x, modelIds: arr.length ? arr : null };
-                            }),
-                          );
-                        }}
-                        title="可选模型（Desktop 选择器列表）"
-                      >
-                        {selectableModels.map((m) => (
-                          <option key={m.id} value={m.id}>
-                            {m.model} {m.hasApiKey ? "" : "(无key)"}
-                          </option>
-                        ))}
-                      </select>
+                      <div className="multiPickRow">
+                        <div className="muted" style={{ fontSize: 12 }}>
+                          可选模型：{allowlistPreview.text}
+                        </div>
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          <button className="btn" type="button" onClick={() => setStagePickerOpen(s.stage)}>
+                            编辑…
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   ) : (
                     <select
@@ -1109,6 +1111,108 @@ export function LlmPage() {
                 取消
               </button>
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {stagePickerOpen ? (
+        <div className="drawerMask" onClick={() => setStagePickerOpen(null)} role="presentation">
+          <div className="drawer" onClick={(e) => e.stopPropagation()} role="presentation">
+            {(() => {
+              const s0 = stages.find((x) => x.stage === stagePickerOpen) || null;
+              if (!s0) return null;
+              const allowMulti = s0.stage === "llm.chat" || s0.stage === "agent.run" || s0.stage === "agent.context_summary";
+              const stageEndpointWant = allowMulti ? "Chat" : null;
+              const selectableModels = modelOptions.filter((m) => {
+                if (!m.isEnabled) return false;
+                if (stageEndpointWant === "Chat") return endpointLabel(m.endpoint) !== "Embeddings";
+                return true;
+              });
+              const allowlistEnabled = Array.isArray(s0.modelIds);
+              const allowlistIds = allowlistEnabled ? (s0.modelIds as string[]) : [];
+              const locked = allowlistEnabled && s0.modelId ? [s0.modelId] : [];
+
+              const pickerOptions: MultiPickOption[] = selectableModels.map((m) => {
+                const kind = endpointLabel(m.endpoint);
+                const kindTag = kind === "Embeddings" ? "tagPurple" : "tagBlue";
+                const keyTag = m.hasApiKey ? "tagGreen" : "tagRed";
+                const keyText = m.hasApiKey ? `Key ${m.apiKeyMasked || "****"}` : "无 Key";
+                return {
+                  id: m.id,
+                  label: m.model,
+                  subLabel: `${kind}${m.description ? ` · ${m.description}` : ""}`,
+                  tags: [
+                    { text: kind, className: kindTag },
+                    { text: keyText, className: keyTag, title: "是否配置 apiKey" },
+                  ],
+                };
+              });
+
+              return (
+                <>
+                  <div className="drawerHeader">
+                    <div style={{ fontWeight: 900 }}>
+                      编辑可选模型：{s0.name}
+                      <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                        {s0.stage}
+                      </div>
+                    </div>
+                    <button className="btn" type="button" onClick={() => setStagePickerOpen(null)} disabled={busy}>
+                      关闭
+                    </button>
+                  </div>
+
+                  <label className="toggleSm" style={{ marginBottom: 10 }}>
+                    <input
+                      type="checkbox"
+                      checked={allowlistEnabled}
+                      onChange={(e) => {
+                        const on = e.target.checked;
+                        setStages((prev) =>
+                          prev.map((x) => {
+                            if (x.stage !== s0.stage) return x;
+                            if (!on) return { ...x, modelIds: null };
+                            const cur = Array.isArray(x.modelIds) ? x.modelIds : [];
+                            const set = new Set<string>(cur);
+                            if (x.modelId) set.add(x.modelId);
+                            const arr = sortIdsByOrder(Array.from(set), selectableModels).slice(0, 60);
+                            return { ...x, modelIds: arr };
+                          }),
+                        );
+                      }}
+                    />
+                    限制可选模型（allowlist）
+                  </label>
+
+                  {!allowlistEnabled ? (
+                    <div className="hint" style={{ marginBottom: 10 }}>
+                      当前为“不限制”：Desktop 模型选择器会展示全部启用模型（自动过滤 Embeddings）。
+                    </div>
+                  ) : null}
+
+                  <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+                    <ModelIdMultiPicker
+                      options={pickerOptions}
+                      selectedIds={allowlistEnabled ? sortIdsByOrder(allowlistIds, selectableModels).slice(0, 60) : []}
+                      lockedIds={locked}
+                      onChange={(nextIds) => {
+                        setStages((prev) =>
+                          prev.map((x) => {
+                            if (x.stage !== s0.stage) return x;
+                            if (!Array.isArray(x.modelIds)) return x;
+                            const set = new Set<string>(nextIds);
+                            if (x.modelId) set.add(x.modelId);
+                            const arr = sortIdsByOrder(Array.from(set), selectableModels).slice(0, 60);
+                            return { ...x, modelIds: arr };
+                          }),
+                        );
+                      }}
+                      placeholder="搜索模型（支持 model/endpoint/备注）…"
+                    />
+                  </div>
+                </>
+              );
+            })()}
           </div>
         </div>
       ) : null}
