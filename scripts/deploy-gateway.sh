@@ -59,7 +59,9 @@ export PATH=${NODE_BIN}:\$PATH
 cd ${DIR}
 
 echo "[remote] before=\$(git rev-parse --short HEAD)"
-git pull --rebase origin ${BRANCH}
+# 服务器上可能存在未提交的临时改动（例如排查时手改文件）。
+# 为避免 git pull --rebase 直接失败，这里启用 autostash：先自动 stash，再 rebase，最后自动尝试恢复。
+git pull --rebase --autostash origin ${BRANCH}
 echo "[remote] after=\$(git rev-parse --short HEAD)"
 
 echo "[remote] npm install"
