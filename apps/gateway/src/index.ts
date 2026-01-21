@@ -4233,7 +4233,9 @@ fastify.post(
 
         let payload: ToolResultPayload;
         if (executedBy === "gateway") {
-          // lint.style 是强模型工具：无积分时禁止执行（避免“0 积分仍可跑强模型”）
+          // 工具门禁：
+          // - lint.style：强模型工具，0 积分禁止执行（避免“0 积分仍可跑强模型”）
+          // - web.search/web.fetch：按次数扣费（博查），余额不足时直接拒绝执行（避免触发外部付费 API）
           if (
             String(call.name ?? "") === "lint.style" &&
             jwtUser?.id &&
@@ -4248,6 +4250,56 @@ fastify.post(
               output: { ok: false, error: "INSUFFICIENT_POINTS", detail: { pointsBalance: userPointsBalance } },
               meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
             };
+          } else if (
+            (String(call.name ?? "") === "web.search" || String(call.name ?? "") === "web.fetch") &&
+            jwtUser?.id &&
+            jwtUser.role !== "admin" &&
+            userPointsBalance !== null
+          ) {
+            const rt = await toolConfig.resolveWebSearchRuntime().catch(() => null as any);
+            const need = String(call.name ?? "") === "web.search" ? Number(rt?.billPointsPerSearch ?? 0) : Number(rt?.billPointsPerFetch ?? 0);
+            const needPoints = Number.isFinite(need) && need > 0 ? Math.floor(need) : 0;
+            if (needPoints > 0 && userPointsBalance < needPoints) {
+              payload = {
+                toolCallId,
+                name: String(call.name ?? ""),
+                ok: false,
+                output: { ok: false, error: "INSUFFICIENT_POINTS", detail: { pointsBalance: userPointsBalance, needPoints } },
+                meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
+              };
+            } else {
+              writePolicyDecision({
+                turn,
+                policy: "ToolExecutionPolicy",
+                decision: "execute_on_gateway",
+                reasonCodes: ["tool_execute_on_gateway", ...execDecision.reasonCodes],
+                detail: { tool: call.name, executedBy, textLen: String((call?.args as any)?.text ?? "").length }
+              });
+
+              const ret = await executeServerToolOnGateway({
+                fastify,
+                call,
+                toolSidecar,
+                styleLinterLibraries,
+                authorization: String((request as any)?.headers?.authorization ?? ""),
+              });
+
+              payload = ret.ok
+                ? {
+                    toolCallId,
+                    name: String(call.name ?? ""),
+                    ok: true,
+                    output: (ret as any).output,
+                    meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
+                  }
+                : {
+                    toolCallId,
+                    name: String(call.name ?? ""),
+                    ok: false,
+                    output: { ok: false, error: (ret as any).error ?? "SERVER_TOOL_FAILED", detail: (ret as any).detail ?? null },
+                    meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
+                  };
+            }
           } else {
           writePolicyDecision({
             turn,
@@ -4316,65 +4368,64 @@ fastify.post(
           meta: payload.meta ?? null
         });
 
-        // Gateway 执行的强模型工具：若上游返回 usage，按 usage 计费入账（不影响主流程）。
+        // 计费（按次数）：web.search / web.fetch（博查）
         if (
           executedBy === "gateway" &&
           payload.ok &&
-          payload.name === "lint.style" &&
+          (payload.name === "web.search" || payload.name === "web.fetch") &&
           jwtUser?.id &&
           jwtUser.role !== "admin"
         ) {
           try {
-            // 若端点已返回 billing（Desktop 直调也需要扣费），此处不重复扣费，仅发 SSE
-            const billed = (payload.output as any)?.billing ?? null;
-            if (billed && typeof billed === "object" && (billed as any).ok && Number.isFinite((billed as any).chargedPoints as any)) {
+            const rt = await toolConfig.resolveWebSearchRuntime().catch(() => null as any);
+            const need = payload.name === "web.search" ? Number(rt?.billPointsPerSearch ?? 0) : Number(rt?.billPointsPerFetch ?? 0);
+            const needPoints = Number.isFinite(need) && need > 0 ? Math.floor(need) : 0;
+            if (needPoints > 0) {
+              const charged = await (async () => {
+                try {
+                  let txId = "";
+                  let newBalance = 0;
+                  await updateDb((db: any) => {
+                    const { user, tx } = adjustUserPoints({
+                      db,
+                      userId: jwtUser.id,
+                      delta: -needPoints,
+                      type: "consume",
+                      reason: payload.name === "web.search" ? "tool.web.search" : "tool.web.fetch",
+                    });
+                    txId = tx.id;
+                    newBalance = user.pointsBalance ?? 0;
+                  });
+                  return { ok: true as const, chargedPoints: needPoints, costPoints: needPoints, txId, newBalance };
+                } catch (e: any) {
+                  const msg = e?.message ? String(e.message) : String(e);
+                  return { ok: false as const, reason: msg || "CHARGE_FAILED" };
+                }
+              })();
+
               writePolicyDecision({
                 turn,
                 policy: "BillingPolicy",
-                decision: "charged",
-                reasonCodes: ["tool_billing_charged", "tool:lint.style", "billed_by_endpoint"],
-                detail: billed,
+                decision: charged.ok ? "charged" : "charge_failed",
+                reasonCodes: charged.ok
+                  ? ["tool_billing_charged", `tool:${payload.name}`]
+                  : ["tool_billing_failed", `tool:${payload.name}`],
+                detail: charged.ok ? charged : { ...charged, tool: payload.name, needPoints },
               });
-              const nb = Number.isFinite((billed as any).newBalance as any) ? Math.floor(Number((billed as any).newBalance)) : null;
-              if (typeof nb === "number" && Number.isFinite(nb)) userPointsBalance = Math.max(0, nb);
-              writeEvent("billing.charge", { ...(billed as any), source: "tool.lint.style", runId, turn, toolCallId });
-            } else {
-              // 兜底：按 usage 计费
-              const usage = (payload.output as any)?.usage;
-              const modelUsed = String((payload.output as any)?.modelUsed ?? "").trim();
-              if (
-                usage &&
-                typeof usage === "object" &&
-                Number.isFinite((usage as any).promptTokens as any) &&
-                Number.isFinite((usage as any).completionTokens as any) &&
-                modelUsed
-              ) {
-                const charged = await chargeUserForLlmUsage({
-                  userId: jwtUser.id,
-                  modelId: modelUsed,
-                  usage,
-                  source: "tool.lint.style",
-                  metaExtra: { runId, toolCallId, tool: payload.name, executedBy }
-                });
-                writePolicyDecision({
-                  turn,
-                  policy: "BillingPolicy",
-                  decision: charged.ok ? "charged" : "charge_failed",
-                  reasonCodes: charged.ok ? ["tool_billing_charged", "tool:lint.style"] : ["tool_billing_failed", "tool:lint.style"],
-                  detail: charged.ok ? charged : { ...charged, tool: payload.name },
-                });
-                if (charged.ok) {
-                  if (typeof charged.newBalance === "number" && Number.isFinite(charged.newBalance)) userPointsBalance = Math.max(0, Math.floor(charged.newBalance));
-                  writeEvent("billing.charge", { ...charged, source: "tool.lint.style", runId, turn, toolCallId });
-                } else {
-                  writeEvent("billing.charge", { ...charged, ok: false, source: "tool.lint.style", runId, turn, toolCallId });
-                }
+
+              if (charged.ok) {
+                userPointsBalance = Math.max(0, Math.floor(Number(charged.newBalance) || 0));
+                writeEvent("billing.charge", { ...charged, source: payload.name === "web.search" ? "tool.web.search" : "tool.web.fetch", runId, turn, toolCallId });
+              } else {
+                writeEvent("billing.charge", { ...charged, ok: false, source: payload.name === "web.search" ? "tool.web.search" : "tool.web.fetch", runId, turn, toolCallId });
               }
             }
           } catch {
-            // ignore billing failure
+            // ignore
           }
         }
+
+        // 按产品约定：纯工具不扣费（lint.style 等 tool 不按 usage 计费）。
 
         if (
           payload.ok &&
@@ -5620,6 +5671,8 @@ fastify.put(
       endpoint: z.string().nullable().optional(),
       apiKey: z.string().optional(),
       clearApiKey: z.boolean().optional(),
+      billPointsPerSearch: z.number().int().min(0).max(100000).nullable().optional(),
+      billPointsPerFetch: z.number().int().min(0).max(100000).nullable().optional(),
       allowDomains: z.union([z.array(z.string()), z.string()]).optional(),
       denyDomains: z.union([z.array(z.string()), z.string()]).optional(),
       fetchUa: z.string().nullable().optional(),
@@ -6408,13 +6461,45 @@ fastify.post(
   }
   const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 3);
   const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
-  const timeoutMs = Number(process.env.LLM_CARD_TIMEOUT_MS ?? 120_000);
+  // 说明：前端/网络层常见“连接空闲超时”会在 ~60-120s 把连接掐断，导致 Desktop 看到 Failed to fetch。
+  // 这里把单次上游调用限制在更短窗口，并在失败时返回“可用占位卡”（不中断整条风格手册生成）。
+  const timeoutMsCfg = Number(String(process.env.LLM_PLAYBOOK_TIMEOUT_MS ?? "").trim());
+  const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 90_000;
 
   const facetIds = body.facetIds.slice(0, 80);
-  const docs = body.docs.slice(0, 200);
+
+  const shrinkDocs = (docs0: any[]) => {
+    const docs = (Array.isArray(docs0) ? docs0 : []).slice(0, 200);
+    // 对 playbook 这种“库级总结”强约束 prompt 尺寸：极大降低超时概率
+    const MAX_DOCS = 18;
+    const MAX_ITEMS_PER_DOC = 10;
+    const MAX_ITEMS_TOTAL = 120;
+
+    const pickItems = (items0: any[]) => {
+      const items = Array.isArray(items0) ? items0 : [];
+      // part=facets 时，优先只取当前 facetIds 命中的要素卡
+      const hit = items.filter((it: any) => Array.isArray(it?.facetIds) && it.facetIds.some((x: any) => facetIds.includes(String(x ?? "").trim())));
+      const pool = (hit.length ? hit : items).slice(0, 200);
+      return pool.slice(0, MAX_ITEMS_PER_DOC);
+    };
+
+    const out = [];
+    let total = 0;
+    for (const d of docs.slice(0, MAX_DOCS)) {
+      const picked = pickItems(d?.items ?? []);
+      if (!picked.length) continue;
+      out.push({ ...d, items: picked });
+      total += picked.length;
+      if (total >= MAX_ITEMS_TOTAL) break;
+    }
+    return out;
+  };
+
+  const docs = shrinkDocs(body.docs);
   const itemsTotal = docs.reduce((s, d) => s + (d.items?.length ?? 0), 0);
+  // 默认更倾向 lite，避免长语料导致频繁超时；用户显式传 full 时才尝试 full
   const corpusSmall = docs.length <= 2 && itemsTotal <= 40;
-  const effectiveMode: "lite" | "full" = body.mode ?? (corpusSmall ? "lite" : "full");
+  const effectiveMode: "lite" | "full" = body.mode ?? (corpusSmall ? "lite" : "lite");
   const part: "full" | "facets" = body.part ?? "full";
 
   const stripForQuote = (s: string) =>
@@ -6501,7 +6586,7 @@ fastify.post(
           docs: docs.map((d) => ({
             id: d.id,
             title: d.title,
-            items: d.items.map((it) => ({
+            items: d.items.map((it: any) => ({
               cardType: it.cardType,
               title: it.title ?? "",
               // 传入的 content 可能较长：这里截一下，避免 prompt 爆
@@ -6586,16 +6671,37 @@ fastify.post(
     const is429 = Boolean(lastErr?.is429);
     const isTimeout = Boolean(lastErr?.isTimeout);
     const parsed = parseUpstream(String(lastDetail ?? ""));
-    const payload = {
-      error: is429 ? "UPSTREAM_BUSY" : isTimeout ? "UPSTREAM_TIMEOUT" : "UPSTREAM_ERROR",
-      message:
-        (isTimeout ? `upstream timeout after ${timeoutMs}ms` : parsed.message) || "upstream error",
-      hint: isTimeout ? "生成风格手册超时：请稍后重试，或换更快/更稳定的模型（LLM_CARD_MODEL）。" : undefined,
-      requestId: parsed.requestId,
-      status: lastStatus ?? null,
-      retry: { attempts: retryMax + 1, retryMax, retryBaseMs }
-    };
-    return reply.code(is429 ? 503 : isTimeout ? 504 : 502).send(payload);
+
+    // 不再用 5xx 失败中断前端任务：返回“占位卡”保证风格手册流程可完成（后续可重跑覆盖）。
+    const msg = (isTimeout ? `upstream timeout after ${timeoutMs}ms` : parsed.message) || "upstream error";
+    const spEvidence = fallbackEvidence.slice(0, 1);
+    const filled = facetIds.map((id) => ({
+      facetId: id,
+      title: `（上游失败）${id}`,
+      content:
+        `- （上游失败：${is429 ? "忙/限流" : isTimeout ? "超时" : "错误"}）\n` +
+        `- 建议：稍后重试；或在 B 端把 stage=rag.ingest.build_library_playbook 切到更快/更稳定的模型。\n` +
+        `- 备注：本卡为占位，便于整套手册生成不中断。`,
+      evidence: spEvidence,
+    }));
+
+    return reply.send({
+      ok: true,
+      styleProfile: {
+        title: "（占位）风格画像",
+        content: `- （上游失败：${msg}）\n- 已返回占位维度卡；可稍后重试覆盖。`,
+        evidence: spEvidence,
+      },
+      playbookFacets: filled,
+      upstream: {
+        ok: false,
+        error: is429 ? "UPSTREAM_BUSY" : isTimeout ? "UPSTREAM_TIMEOUT" : "UPSTREAM_ERROR",
+        message: msg,
+        requestId: parsed.requestId ?? null,
+        status: lastStatus ?? null,
+        retry: { attempts: retryMax + 1, retryMax, retryBaseMs },
+      },
+    });
   }
 
   const raw = String(ret.content ?? "").trim();
@@ -6898,9 +7004,9 @@ fastify.post(
  */
 fastify.post(
   "/api/kb/dev/lint_style",
+  // 纯工具：不扣费；但仍要求登录 + 有积分（避免无限滥用）
   { preHandler: [(fastify as any).authenticate, requirePositivePointsForLlm] },
   async (request: any, reply) => {
-  const jwtUser = await tryGetJwtUser(request as any);
   const ngramSchema = z.object({
     n: z.number().int().min(1).max(8).optional(),
     text: z.string().min(1).max(120),
@@ -7145,30 +7251,7 @@ fastify.post(
   try {
     const out = outSchema.parse(parsed);
 
-    // 计费（按 usage）：仅对非 admin。若上游不返回 usage，则不扣（保持和现有 LLM 计费一致）。
-    let billing: any = null;
-    try {
-      if (
-        jwtUser?.id &&
-        jwtUser.role !== "admin" &&
-        usage &&
-        typeof usage === "object" &&
-        Number.isFinite((usage as any).promptTokens as any) &&
-        Number.isFinite((usage as any).completionTokens as any)
-      ) {
-        billing = await chargeUserForLlmUsage({
-          userId: jwtUser.id,
-          modelId: model,
-          usage,
-          source: "kb.lint_style",
-          metaExtra: { timeoutMs, maxIssues },
-        });
-      }
-    } catch {
-      // ignore
-    }
-
-    return reply.send({ ok: true, modelUsed: model, timeoutMs, ...(usage ? { usage } : {}), ...(billing ? { billing } : {}), ...out });
+    return reply.send({ ok: true, modelUsed: model, timeoutMs, ...(usage ? { usage } : {}), ...out });
   } catch (e: any) {
     return reply.code(502).send({
       ok: false,

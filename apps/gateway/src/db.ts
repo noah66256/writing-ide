@@ -140,6 +140,12 @@ export type WebSearchConfig = {
   /** API Key 加密存储（AES-GCM） */
   apiKeyEnc: string | null;
   apiKeyLast4: string | null;
+  /**
+   * 计费（按调用次数）：纯工具不扣；但 web.search/web.fetch 属于外部付费 API，按“次”扣积分更直观。
+   * - 0 或 null：不扣费
+   */
+  billPointsPerSearch: number | null;
+  billPointsPerFetch: number | null;
   /** 域名治理（可选；为空表示不做 allow 限制；deny 优先生效） */
   allowDomains: string[];
   denyDomains: string[];
@@ -521,13 +527,29 @@ export async function loadDb(): Promise<Db> {
         const endpoint = typeof webRaw?.endpoint === "string" ? normStr(webRaw.endpoint) : null;
         const apiKeyEnc = typeof webRaw?.apiKeyEnc === "string" ? String(webRaw.apiKeyEnc) : null;
         const apiKeyLast4 = typeof webRaw?.apiKeyLast4 === "string" ? normStr(webRaw.apiKeyLast4) : null;
+        const billPointsPerSearch = normNum(webRaw?.billPointsPerSearch);
+        const billPointsPerFetch = normNum(webRaw?.billPointsPerFetch);
         const allowDomains = normList(webRaw?.allowDomains);
         const denyDomains = normList(webRaw?.denyDomains);
         const fetchUa = typeof webRaw?.fetchUa === "string" ? String(webRaw.fetchUa).trim() : null;
         const updatedBy = typeof webRaw?.updatedBy === "string" ? normStr(webRaw.updatedBy) : null;
         const createdAt = typeof webRaw?.createdAt === "string" ? normStr(webRaw.createdAt) || nowIso : nowIso;
         const updatedAt2 = typeof webRaw?.updatedAt === "string" ? normStr(webRaw.updatedAt) || createdAt : createdAt;
-        return { provider, isEnabled, endpoint, apiKeyEnc, apiKeyLast4, allowDomains, denyDomains, fetchUa, updatedBy, createdAt, updatedAt: updatedAt2 };
+        return {
+          provider,
+          isEnabled,
+          endpoint,
+          apiKeyEnc,
+          apiKeyLast4,
+          billPointsPerSearch,
+          billPointsPerFetch,
+          allowDomains,
+          denyDomains,
+          fetchUa,
+          updatedBy,
+          createdAt,
+          updatedAt: updatedAt2
+        };
       })();
 
       const smsRaw = t?.smsVerify && typeof t.smsVerify === "object" ? (t.smsVerify as any) : null;

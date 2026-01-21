@@ -391,6 +391,8 @@ export type WebSearchConfigStoredDto = {
   provider: "bocha";
   isEnabled: boolean;
   endpoint: string | null;
+  billPointsPerSearch: number | null;
+  billPointsPerFetch: number | null;
   allowDomains: string[];
   denyDomains: string[];
   fetchUa: string | null;
@@ -405,6 +407,8 @@ export type WebSearchConfigEffectiveDto = {
   provider: "bocha";
   isEnabled: boolean;
   endpoint: string;
+  billPointsPerSearch: number | null;
+  billPointsPerFetch: number | null;
   allowDomains: string[];
   denyDomains: string[];
   fetchUa: string | null;
@@ -426,6 +430,8 @@ export async function toolConfigUpdateWebSearch(body: Partial<{
   endpoint: string | null;
   apiKey: string;
   clearApiKey: boolean;
+  billPointsPerSearch: number | null;
+  billPointsPerFetch: number | null;
   allowDomains: string[] | string;
   denyDomains: string[] | string;
   fetchUa: string | null;

@@ -54,6 +54,8 @@ export function ToolsPage() {
   const [endpoint, setEndpoint] = useState("");
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [clearApiKey, setClearApiKey] = useState(false);
+  const [billPointsPerSearch, setBillPointsPerSearch] = useState("");
+  const [billPointsPerFetch, setBillPointsPerFetch] = useState("");
   const [allowDomainsText, setAllowDomainsText] = useState("");
   const [denyDomainsText, setDenyDomainsText] = useState("");
   const [fetchUa, setFetchUa] = useState("");
@@ -91,6 +93,8 @@ export function ToolsPage() {
       setEffective(web.effective);
       setIsEnabled(Boolean(web.stored.isEnabled));
       setEndpoint(web.stored.endpoint ?? "");
+      setBillPointsPerSearch(web.stored.billPointsPerSearch === null ? "" : String(web.stored.billPointsPerSearch));
+      setBillPointsPerFetch(web.stored.billPointsPerFetch === null ? "" : String(web.stored.billPointsPerFetch));
       setAllowDomainsText(domainsToText(web.stored.allowDomains ?? []));
       setDenyDomainsText(domainsToText(web.stored.denyDomains ?? []));
       setFetchUa(web.stored.fetchUa ?? "");
@@ -142,11 +146,20 @@ export function ToolsPage() {
     setNotice("");
     setBusy(true);
     try {
+      const toIntOrNull = (s: string) => {
+        const raw = String(s ?? "").trim();
+        if (!raw) return null;
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n < 0) return null;
+        return Math.floor(n);
+      };
       await toolConfigUpdateWebSearch({
         isEnabled,
         endpoint: endpoint.trim() ? endpoint.trim() : null,
         ...(apiKeyInput.trim() ? { apiKey: apiKeyInput.trim() } : {}),
         ...(clearApiKey ? { clearApiKey: true } : {}),
+        billPointsPerSearch: toIntOrNull(billPointsPerSearch),
+        billPointsPerFetch: toIntOrNull(billPointsPerFetch),
         allowDomains: normalizeDomainsText(allowDomainsText),
         denyDomains: normalizeDomainsText(denyDomainsText),
         fetchUa: fetchUa.trim() ? fetchUa.trim() : null,
@@ -598,6 +611,19 @@ export function ToolsPage() {
                 <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
                   留空表示使用 env 或默认值。
                 </div>
+              </label>
+
+              <label className="field">
+                <div className="label">计费：每次 web.search 扣积分（0/留空=不扣）</div>
+                <input className="input" value={billPointsPerSearch} onChange={(e) => setBillPointsPerSearch(e.target.value)} placeholder="例如 10" />
+                <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+                  说明：仅对 <code>web.search</code> 工具调用生效（按次数扣，避免按 token 计费）。
+                </div>
+              </label>
+
+              <label className="field">
+                <div className="label">计费：每次 web.fetch 扣积分（0/留空=不扣）</div>
+                <input className="input" value={billPointsPerFetch} onChange={(e) => setBillPointsPerFetch(e.target.value)} placeholder="例如 5" />
               </label>
 
               <label className="field">

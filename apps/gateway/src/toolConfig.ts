@@ -108,6 +108,8 @@ export type WebSearchConfigEffectiveView = {
   provider: "bocha";
   isEnabled: boolean;
   endpoint: string;
+  billPointsPerSearch: number | null;
+  billPointsPerFetch: number | null;
   allowDomains: string[];
   denyDomains: string[];
   fetchUa: string | null;
@@ -125,6 +127,8 @@ export type WebSearchRuntime = {
   isEnabled: boolean;
   endpoint: string;
   apiKey: string;
+  billPointsPerSearch: number;
+  billPointsPerFetch: number;
   allowDomains: string[];
   denyDomains: string[];
   fetchUa: string | null;
@@ -267,6 +271,11 @@ export function createToolConfigService(args?: { cacheTtlMs?: number }) {
       // 轻量修正：数组字段兜底
       next.webSearch.allowDomains = Array.isArray(next.webSearch.allowDomains) ? next.webSearch.allowDomains : [];
       next.webSearch.denyDomains = Array.isArray(next.webSearch.denyDomains) ? next.webSearch.denyDomains : [];
+      // 计费字段：只允许 >=0 的整数；<=0 视为不扣（null）
+      const s = Number((next.webSearch as any).billPointsPerSearch);
+      const f = Number((next.webSearch as any).billPointsPerFetch);
+      (next.webSearch as any).billPointsPerSearch = Number.isFinite(s) && s > 0 ? Math.floor(s) : null;
+      (next.webSearch as any).billPointsPerFetch = Number.isFinite(f) && f > 0 ? Math.floor(f) : null;
     }
     if (next.capabilities && typeof (next as any).capabilities === "object") {
       const c = next.capabilities as any;
@@ -292,6 +301,8 @@ export function createToolConfigService(args?: { cacheTtlMs?: number }) {
       endpoint: null,
       apiKeyEnc: null,
       apiKeyLast4: null,
+      billPointsPerSearch: null,
+      billPointsPerFetch: null,
       allowDomains: [],
       denyDomains: [],
       fetchUa: null,
@@ -571,11 +582,18 @@ export function createToolConfigService(args?: { cacheTtlMs?: number }) {
 
     const isEnabled = stored ? stored.isEnabled !== false : true;
 
+    const billSearch = Number(stored?.billPointsPerSearch ?? 0);
+    const billFetch = Number(stored?.billPointsPerFetch ?? 0);
+    const billPointsPerSearch = Number.isFinite(billSearch) && billSearch > 0 ? Math.floor(billSearch) : 0;
+    const billPointsPerFetch = Number.isFinite(billFetch) && billFetch > 0 ? Math.floor(billFetch) : 0;
+
     return {
       provider: "bocha",
       isEnabled,
       endpoint,
       apiKey,
+      billPointsPerSearch,
+      billPointsPerFetch,
       allowDomains: clampList(allowDomains.map((x) => String(x).trim().toLowerCase()).filter(Boolean), 200),
       denyDomains: clampList(denyDomains.map((x) => String(x).trim().toLowerCase()).filter(Boolean), 200),
       fetchUa: fetchUa ? fetchUa.slice(0, 400) : null,
@@ -612,10 +630,21 @@ export function createToolConfigService(args?: { cacheTtlMs?: number }) {
 
     const isEnabled = stored ? stored.isEnabled !== false : true;
 
+    const billPointsPerSearch =
+      Number.isFinite(Number(stored?.billPointsPerSearch as any)) && Number(stored?.billPointsPerSearch as any) > 0
+        ? Math.floor(Number(stored?.billPointsPerSearch as any))
+        : null;
+    const billPointsPerFetch =
+      Number.isFinite(Number(stored?.billPointsPerFetch as any)) && Number(stored?.billPointsPerFetch as any) > 0
+        ? Math.floor(Number(stored?.billPointsPerFetch as any))
+        : null;
+
     return {
       provider: "bocha",
       isEnabled,
       endpoint,
+      billPointsPerSearch,
+      billPointsPerFetch,
       allowDomains: clampList(allowDomains.map((x) => String(x).trim().toLowerCase()).filter(Boolean), 200),
       denyDomains: clampList(denyDomains.map((x) => String(x).trim().toLowerCase()).filter(Boolean), 200),
       fetchUa: fetchUa ? fetchUa.slice(0, 400) : null,
@@ -634,6 +663,8 @@ export function createToolConfigService(args?: { cacheTtlMs?: number }) {
     endpoint: string | null;
     apiKey: string;
     clearApiKey: boolean;
+    billPointsPerSearch: number | null;
+    billPointsPerFetch: number | null;
     allowDomains: unknown;
     denyDomains: unknown;
     fetchUa: string | null;
@@ -663,6 +694,18 @@ export function createToolConfigService(args?: { cacheTtlMs?: number }) {
       endpoint: patch.endpoint !== undefined ? (patch.endpoint ? String(patch.endpoint).trim() : null) : cur?.endpoint ?? null,
       apiKeyEnc,
       apiKeyLast4,
+      billPointsPerSearch:
+        patch.billPointsPerSearch !== undefined
+          ? patch.billPointsPerSearch === null
+            ? null
+            : Math.max(0, Math.floor(Number(patch.billPointsPerSearch)))
+          : cur?.billPointsPerSearch ?? null,
+      billPointsPerFetch:
+        patch.billPointsPerFetch !== undefined
+          ? patch.billPointsPerFetch === null
+            ? null
+            : Math.max(0, Math.floor(Number(patch.billPointsPerFetch)))
+          : cur?.billPointsPerFetch ?? null,
       allowDomains: patch.allowDomains !== undefined ? normalizeDomainsInput(patch.allowDomains) : cur?.allowDomains ?? [],
       denyDomains: patch.denyDomains !== undefined ? normalizeDomainsInput(patch.denyDomains) : cur?.denyDomains ?? [],
       fetchUa: patch.fetchUa !== undefined ? (patch.fetchUa ? String(patch.fetchUa).trim().slice(0, 400) : null) : cur?.fetchUa ?? null,
