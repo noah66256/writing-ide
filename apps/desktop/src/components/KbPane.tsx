@@ -18,7 +18,36 @@ export function KbPane() {
   const toggleAttached = async (id: string) => {
     // 确保库元信息（purpose/facetPack 等）已加载，否则 Context Pack 里可能只有 {id,name:id} 导致 Gateway 闸门无法识别风格库
     await refreshLibraries().catch(() => void 0);
-    useRunStore.getState().toggleKbAttachedLibrary(id);
+    const libId = String(id ?? "").trim();
+    if (!libId) return;
+
+    // 用 getState 确保拿到 refresh 后的最新元信息
+    const libs = useKbStore.getState().libraries ?? [];
+    const libById = new Map(libs.map((l: any) => [String(l.id ?? "").trim(), l]));
+    const isStyle = String(libById.get(libId)?.purpose ?? "") === "style";
+
+    const cur = (useRunStore.getState().kbAttachedLibraryIds ?? []).map((x: any) => String(x ?? "").trim()).filter(Boolean);
+    const has = cur.includes(libId);
+    if (has) {
+      useRunStore.getState().setKbAttachedLibraries(cur.filter((x: string) => x !== libId));
+      return;
+    }
+
+    if (isStyle) {
+      // 风格库：单选（切换风格库时自动替换旧风格库，避免多风格混用导致“乱写/不稳定”）
+      const styleIds = new Set(
+        libs
+          .filter((l: any) => String(l?.purpose ?? "") === "style")
+          .map((l: any) => String(l.id ?? "").trim())
+          .filter(Boolean),
+      );
+      const keep = cur.filter((x: string) => !styleIds.has(x));
+      useRunStore.getState().setKbAttachedLibraries([...keep, libId]);
+      return;
+    }
+
+    // 素材/产品库：允许多选
+    useRunStore.getState().setKbAttachedLibraries([...cur, libId]);
   };
 
   const [msg, setMsg] = useState<string>("");
@@ -118,7 +147,7 @@ export function KbPane() {
                         type="button"
                         onClick={() => void toggleAttached(l.id)}
                         disabled={isLoading}
-                        title="关联到右侧 Agent（多选）"
+                        title="关联到右侧 Agent（素材/产品库可多选；风格库默认单选，会替换已有风格库）"
                       >
                         {isAttached ? "已关联" : "关联到右侧"}
                       </button>

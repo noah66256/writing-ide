@@ -1640,7 +1640,8 @@ async function fetchEmbedding(args: { model?: string; input: string }): Promise<
     const json = await res.json().catch(() => null);
     if (!res.ok) {
       const code = json?.error ? String(json.error) : "";
-      if (res.status === 401 || code === "UNAUTHORIZED") {
+      // 只处理真实的登录失效；避免把上游模型/代理 401（如 API key 无效）误判成“用户未登录”
+      if (res.status === 401 && code === "UNAUTHORIZED") {
         try {
           useAuthStore.getState().logout?.();
           useAuthStore.getState().openLoginModal?.();
@@ -1689,7 +1690,7 @@ async function fetchEmbeddingsBatch(args: {
     const json = await res.json().catch(() => null);
     if (!res.ok) {
       const code = json?.error ? String(json.error) : "";
-      if (res.status === 401 || code === "UNAUTHORIZED") {
+      if (res.status === 401 && code === "UNAUTHORIZED") {
         try {
           useAuthStore.getState().logout?.();
           useAuthStore.getState().openLoginModal?.();

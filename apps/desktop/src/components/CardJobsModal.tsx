@@ -68,7 +68,36 @@ export function CardJobsModal() {
   const openKbManager = useKbStore((s) => s.openKbManager);
 
   const attached = useRunStore((s) => s.kbAttachedLibraryIds);
-  const toggleAttach = useRunStore((s) => s.toggleKbAttachedLibrary);
+  const toggleAttachSmart = async (id: string) => {
+    await refreshLibraries().catch(() => void 0);
+    const libId = String(id ?? "").trim();
+    if (!libId) return;
+
+    const libs = useKbStore.getState().libraries ?? [];
+    const libById = new Map(libs.map((l: any) => [String(l.id ?? "").trim(), l]));
+    const isStyle = String(libById.get(libId)?.purpose ?? "") === "style";
+
+    const cur = (useRunStore.getState().kbAttachedLibraryIds ?? []).map((x: any) => String(x ?? "").trim()).filter(Boolean);
+    const has = cur.includes(libId);
+    if (has) {
+      useRunStore.getState().setKbAttachedLibraries(cur.filter((x: string) => x !== libId));
+      return;
+    }
+
+    if (isStyle) {
+      const styleIds = new Set(
+        libs
+          .filter((l: any) => String(l?.purpose ?? "") === "style")
+          .map((l: any) => String(l.id ?? "").trim())
+          .filter(Boolean),
+      );
+      const keep = cur.filter((x: string) => !styleIds.has(x));
+      useRunStore.getState().setKbAttachedLibraries([...keep, libId]);
+      return;
+    }
+
+    useRunStore.getState().setKbAttachedLibraries([...cur, libId]);
+  };
 
   const listCardsForLibrary = useKbStore((s) => s.listCardsForLibrary);
   const getLatestLibraryFingerprint = useKbStore((s) => s.getLatestLibraryFingerprint);
@@ -787,7 +816,12 @@ export function CardJobsModal() {
                           >
                             {isCur ? "当前库" : "设为当前"}
                           </button>
-                          <button className={`btn btnIcon ${isAttached ? "btnPrimary" : ""}`} type="button" onClick={() => toggleAttach(l.id)}>
+                          <button
+                            className={`btn btnIcon ${isAttached ? "btnPrimary" : ""}`}
+                            type="button"
+                            title="关联到右侧 Agent（素材/产品库可多选；风格库默认单选，会替换已有风格库）"
+                            onClick={() => void toggleAttachSmart(l.id)}
+                          >
                             {isAttached ? "已关联右侧" : "关联到右侧"}
                           </button>
                           <button

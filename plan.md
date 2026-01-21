@@ -9,6 +9,7 @@
 - [Vibe Coding Playbook（面向“非专业但有逻辑”的开发者）](vibe-coding-playbook.md)
 - [IDE 工具与全项目搜索（研究）](docs/research/ide-tools-search-and-file-ops-v1.md)
 - [Web Search 选型与落地路径（研究 v1）](docs/research/web-search-v1.md)
+- [Cursor 类 IDE 多模型接口适配范式（research v1）](docs/research/cursor-like-multi-model-adapters-v1.md)
 - [阿里云短信验证码（号码认证服务 Dypnsapi）接入方案 v1（research）](docs/research/sms-verify-aliyun-dypnsapi-v1.md)
 - [Web Search v0.1（spec）](docs/specs/web-search-v0.1.md)
 - [Admin Web（B端管理后台）v0.1（spec）](docs/specs/admin-web-v0.1.md)

@@ -638,9 +638,12 @@ fastify.post(
       json = null;
     }
     if (!resp.ok) {
-      return reply.code(resp.status).send({
+      // 不透传上游 401/403，避免前端误判为“用户登录失效”
+      const upstreamStatus = resp.status;
+      const is429 = upstreamStatus === 429;
+      return reply.code(is429 ? 503 : 502).send({
         error: "UPSTREAM_ERROR",
-        status: resp.status,
+        upstreamStatus,
         detail: json ?? text
       });
     }

@@ -1868,7 +1868,9 @@ export function startGatewayRun(args: {
           parsed = null;
         }
         const code = parsed?.error ? String(parsed.error) : "";
-        if (res.status === 401 || code === "UNAUTHORIZED") {
+        // 只把“真正的用户鉴权失败”当作需要重新登录：Gateway 会返回 { error: "UNAUTHORIZED" }
+        // 避免把上游模型/代理 401（如 API key 无效）误判成“用户未登录”
+        if (res.status === 401 && code === "UNAUTHORIZED") {
           try {
             useAuthStore.getState().logout?.();
             useAuthStore.getState().openLoginModal?.();
