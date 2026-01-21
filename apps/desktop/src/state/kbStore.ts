@@ -5,6 +5,7 @@ import { getGatewayBaseUrl } from "../agent/gatewayUrl";
 import { useProjectStore } from "./projectStore";
 import { useLayoutStore } from "./layoutStore";
 import { useRunStore } from "./runStore";
+import { useAuthStore } from "./authStore";
 import { FACET_PACKS, getFacetPack } from "../kb/facets";
 
 function kbLog(level: "info" | "warn" | "error", message: string, data?: unknown) {
@@ -1591,15 +1592,22 @@ function getGatewayUrl() {
   return getGatewayBaseUrl();
 }
 
+function authHeader(): Record<string, string> {
+  const token = String(useAuthStore.getState().accessToken ?? "").trim();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 async function fetchEmbedding(args: { model?: string; input: string }): Promise<{ ok: true; embedding: number[]; modelUsed?: string } | { ok: false; error: string }> {
   const gatewayUrl = getGatewayUrl();
   const url = gatewayUrl ? `${gatewayUrl}/api/llm/embeddings` : "/api/llm/embeddings";
+  const auth = authHeader();
+  if (!auth.Authorization) return { ok: false, error: "AUTH_REQUIRED" };
   try {
     const body: any = { input: args.input };
     if (args.model) body.model = args.model;
     const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...auth },
       body: JSON.stringify(body),
     });
     const json = await res.json().catch(() => null);
@@ -1621,6 +1629,8 @@ async function fetchEmbeddingsBatch(args: {
 }): Promise<{ ok: true; embeddings: number[][]; modelUsed?: string } | { ok: false; error: string }> {
   const gatewayUrl = getGatewayUrl();
   const url = gatewayUrl ? `${gatewayUrl}/api/llm/embeddings` : "/api/llm/embeddings";
+  const auth = authHeader();
+  if (!auth.Authorization) return { ok: false, error: "AUTH_REQUIRED" };
   const inputs = Array.isArray(args.inputs) ? args.inputs.map((s) => String(s ?? "")) : [];
   if (!inputs.length) return { ok: false, error: "EMBEDDINGS_EMPTY_INPUTS" };
   try {
@@ -1628,7 +1638,7 @@ async function fetchEmbeddingsBatch(args: {
     if (args.model) body.model = args.model;
     const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...auth },
       body: JSON.stringify(body),
     });
     const json = await res.json().catch(() => null);

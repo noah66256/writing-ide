@@ -139,6 +139,23 @@ async function requireAdmin(request: any, reply: any) {
   }
 }
 
+async function requirePositivePointsForLlm(request: any, reply: any) {
+  // admin 不计费也不门禁（B 端调试/配置需要）
+  if (request.user?.role === "admin") return;
+  const userId = typeof request.user?.sub === "string" ? String(request.user.sub).trim() : "";
+  if (!userId) return reply.code(401).send({ error: "UNAUTHORIZED" });
+  const db = await loadDb();
+  const u = db.users.find((x) => x.id === userId);
+  const bal = Math.max(0, Math.floor(Number(u?.pointsBalance) || 0));
+  if (!u || bal <= 0) {
+    return reply.code(402).send({
+      error: "INSUFFICIENT_POINTS",
+      pointsBalance: bal,
+      hint: "积分不足，无法使用 LLM 能力。请在 Admin-Web 为该账号充值积分后重试。",
+    });
+  }
+}
+
 async function tryGetJwtUser(request: any): Promise<{ id: string; email?: string; phone?: string; role?: string } | null> {
   const auth = String(request?.headers?.authorization ?? "").trim();
   if (!auth) return null;
@@ -221,23 +238,31 @@ async function chargeUserForLlmUsage(args: {
       ...(args.metaExtra !== undefined ? { extra: args.metaExtra } : {}),
     };
 
-    // 尽量扣满；不足则扣到 0（开发期兜底，避免负数）
+    // 尽量扣满；不足则扣到 0（兜底：避免负数；并保证“没积分后续用不了”由门禁实现）
     let charged = 0;
+    let txId: string | null = null;
+    let newBalance: number | null = null;
+    let note: string | null = null;
     try {
-      const { tx } = adjustUserPoints({ db, userId, delta: -costPoints, type: "consume", reason: args.source });
+      const { user: u2, tx } = adjustUserPoints({ db, userId, delta: -costPoints, type: "consume", reason: args.source });
       tx.meta = meta;
       charged = costPoints;
+      txId = tx.id;
+      newBalance = u2.pointsBalance;
     } catch (e: any) {
       const msg = e?.message ? String(e.message) : String(e);
       if (msg !== "INSUFFICIENT_POINTS") return { ok: false as const, reason: "DEDUCT_FAILED" as const, detail: msg };
       const avail = Math.max(0, Math.floor(Number(user.pointsBalance) || 0));
       if (avail <= 0) return { ok: false as const, reason: "INSUFFICIENT_POINTS" as const };
-      const { tx } = adjustUserPoints({ db, userId, delta: -avail, type: "consume", reason: args.source });
+      const { user: u2, tx } = adjustUserPoints({ db, userId, delta: -avail, type: "consume", reason: args.source });
       tx.meta = { ...meta, chargedPoints: avail, note: "insufficient_points_partial_charge" };
       charged = avail;
+      txId = tx.id;
+      newBalance = u2.pointsBalance;
+      note = "insufficient_points_partial_charge";
     }
 
-    return { ok: true as const, chargedPoints: charged, costPoints };
+    return { ok: true as const, chargedPoints: charged, costPoints, txId, newBalance, ...(note ? { note } : {}) };
   });
 }
 
@@ -557,7 +582,10 @@ fastify.get("/api/llm/embedding_models", async () => {
   return { models: (env.models ?? []).map((id) => ({ id })) };
 });
 
-fastify.post("/api/llm/embeddings", async (request, reply) => {
+fastify.post(
+  "/api/llm/embeddings",
+  { preHandler: [(fastify as any).authenticate, requirePositivePointsForLlm] },
+  async (request: any, reply) => {
   const bodySchema = z.object({
     model: z.string().optional(),
     input: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)])
@@ -591,6 +619,8 @@ fastify.post("/api/llm/embeddings", async (request, reply) => {
     }
   }
 
+  const jwtUser = await tryGetJwtUser(request as any);
+
   try {
     const resp = await fetch(openAiCompatUrl(base, endpoint), {
       method: "POST",
@@ -614,15 +644,37 @@ fastify.post("/api/llm/embeddings", async (request, reply) => {
         detail: json ?? text
       });
     }
+
+    // embeddings usage 也计费：usage.prompt_tokens（completion=0）
+    let billing: any = null;
+    try {
+      const usage0 = json?.usage ?? null;
+      const pt = Number(usage0?.prompt_tokens ?? usage0?.promptTokens ?? NaN);
+      if (jwtUser?.id && jwtUser.role !== "admin" && Number.isFinite(pt) && pt > 0) {
+        const charged = await chargeUserForLlmUsage({
+          userId: jwtUser.id,
+          modelId: model,
+          usage: { promptTokens: Math.floor(pt), completionTokens: 0, totalTokens: Math.floor(pt) },
+          source: "llm.embeddings",
+          metaExtra: { endpoint },
+        });
+        billing = charged;
+      }
+    } catch {
+      // ignore billing failure
+    }
     // 尽量保持 OpenAI 兼容输出结构（data[0].embedding）
-    return { ...(json ?? {}), modelUsed: model };
+    return { ...(json ?? {}), modelUsed: model, ...(billing ? { billing } : {}) };
   } catch (e: any) {
     const msg = e?.message ? String(e.message) : String(e);
     return reply.code(500).send({ error: "EMBEDDINGS_FAILED", detail: msg });
   }
 });
 
-fastify.post("/api/llm/chat/stream", async (request, reply) => {
+fastify.post(
+  "/api/llm/chat/stream",
+  { preHandler: [(fastify as any).authenticate, requirePositivePointsForLlm] },
+  async (request: any, reply) => {
   if (!IS_DEV) return reply.code(404).send({ error: "NOT_AVAILABLE" });
 
   const msgSchema = z.object({
@@ -792,6 +844,11 @@ fastify.post("/api/llm/chat/stream", async (request, reply) => {
         metaExtra: { runId, endpoint },
       });
       if (charged.ok) audit.chargedPoints = (audit.chargedPoints ?? 0) + Number(charged.chargedPoints ?? 0);
+      if (charged.ok) {
+        writeEvent("billing.charge", { ...charged, source: "llm.chat", runId });
+      } else {
+        writeEvent("billing.charge", { ...charged, ok: false, source: "llm.chat", runId });
+      }
     }
     audit.usage = lastUsage as any;
   } catch (e: any) {
@@ -901,7 +958,10 @@ function buildAgentProtocolPrompt(args: { mode: AgentMode; allowedToolNames?: Se
   );
 }
 
-fastify.post("/api/agent/context/summary", async (request, reply) => {
+fastify.post(
+  "/api/agent/context/summary",
+  { preHandler: [(fastify as any).authenticate, requirePositivePointsForLlm] },
+  async (request: any, reply) => {
   if (!IS_DEV) return reply.code(404).send({ error: "NOT_AVAILABLE" });
 
   const bodySchema = z.object({
@@ -1008,6 +1068,8 @@ fastify.post("/api/agent/context/summary", async (request, reply) => {
     `新增对话回合（delta）：\n\n${formatTurns(deltaTurns)}\n\n` +
     `请输出“更新后的摘要”。`;
 
+  const jwtUser = await tryGetJwtUser(request as any);
+
   const ret = await completionOnceViaProvider({
     baseUrl,
     endpoint,
@@ -1024,10 +1086,37 @@ fastify.post("/api/agent/context/summary", async (request, reply) => {
   if (!ret.ok) {
     return reply.code(ret.status ?? 502).send({ error: "SUMMARY_FAILED", detail: ret.error, modelIdUsed });
   }
+
+  // 摘要也计费（usage 由 adapter 尽量返回）
+  try {
+    const usage = (ret as any).usage ?? null;
+    if (
+      jwtUser?.id &&
+      jwtUser.role !== "admin" &&
+      usage &&
+      typeof usage === "object" &&
+      Number.isFinite((usage as any).promptTokens as any) &&
+      Number.isFinite((usage as any).completionTokens as any)
+    ) {
+      await chargeUserForLlmUsage({
+        userId: jwtUser.id,
+        modelId: model,
+        usage,
+        source: "agent.context_summary",
+        metaExtra: { modelIdUsed },
+      });
+    }
+  } catch {
+    // ignore billing failure
+  }
+
   return { ok: true, summary: String(ret.content ?? ""), modelIdUsed, usage: (ret as any).usage ?? null };
 });
 
-fastify.post("/api/agent/run/stream", async (request, reply) => {
+fastify.post(
+  "/api/agent/run/stream",
+  { preHandler: [(fastify as any).authenticate, requirePositivePointsForLlm] },
+  async (request: any, reply) => {
   if (!IS_DEV) return reply.code(404).send({ error: "NOT_AVAILABLE" });
 
   const bodySchema = z.object({
@@ -1715,6 +1804,25 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
   if (!env.ok) return reply.code(500).send({ error: "LLM_NOT_CONFIGURED" });
 
   const jwtUser = await tryGetJwtUser(request as any);
+  // 供本次 run 内部“停机/门禁”使用：每次扣费后会更新（避免继续无积分跑 LLM/tool.lint.style）
+  let userPointsBalance: number | null = null;
+  if (jwtUser?.id && jwtUser.role !== "admin") {
+    try {
+      const db0 = await loadDb();
+      const u0 = db0.users.find((u) => u.id === jwtUser.id);
+      const bal0 = Math.max(0, Math.floor(Number(u0?.pointsBalance) || 0));
+      userPointsBalance = bal0;
+      if (!u0 || bal0 <= 0) {
+        return reply.code(402).send({
+          error: "INSUFFICIENT_POINTS",
+          pointsBalance: bal0,
+          hint: "积分不足，无法使用 LLM 能力。请在 Admin-Web 为该账号充值积分后重试。",
+        });
+      }
+    } catch {
+      // ignore：交由后续扣费/门禁兜底
+    }
+  }
 
   // ======== Phase 1（方案A）：LLM Router stage（失败/超时回退 Phase 0） ========
   const intentRouterEnabled = String(process.env.INTENT_ROUTER_ENABLED ?? "1").trim() !== "0";
@@ -2697,6 +2805,22 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
       if (abort.signal.aborted) break;
 
       currentTurn = turn;
+      // 积分门禁（运行中）：扣到 0 后，不再允许继续调用 LLM（避免“负数欠费/白嫖输出”）
+      if (userPointsBalance !== null && userPointsBalance <= 0) {
+        writeRunNotice({
+          turn,
+          kind: "error",
+          title: "积分不足：已暂停 LLM 能力",
+          message: "你的积分已用尽，本次运行已停止。请先充值积分后再继续使用基于 LLM 的功能。",
+          policy: "BillingPolicy",
+          reasonCodes: ["insufficient_points"],
+          detail: { pointsBalance: userPointsBalance },
+        });
+        writeEvent("run.end", { runId, reason: "insufficient_points", reasonCodes: ["insufficient_points"], turn });
+        reply.raw.end();
+        agentRunWaiters.delete(runId);
+        return;
+      }
       // SSE 强边界：每次模型调用都显式标记“新一条 assistant 气泡开始”（Desktop 可据此切分 turn）
       writeEvent("assistant.start", { runId, turn });
 
@@ -2819,6 +2943,12 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
           reasonCodes: charged.ok ? ["run_billing_charged"] : ["run_billing_failed"],
           detail: charged,
         });
+        if (charged.ok) {
+          if (typeof charged.newBalance === "number" && Number.isFinite(charged.newBalance)) userPointsBalance = Math.max(0, Math.floor(charged.newBalance));
+          writeEvent("billing.charge", { ...charged, source: billingSource, runId, turn });
+        } else {
+          writeEvent("billing.charge", { ...charged, ok: false, source: billingSource, runId, turn });
+        }
       }
 
       function stripCodeFencesLocal(text: string) {
@@ -4097,6 +4227,22 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
 
         let payload: ToolResultPayload;
         if (executedBy === "gateway") {
+          // lint.style 是强模型工具：无积分时禁止执行（避免“0 积分仍可跑强模型”）
+          if (
+            String(call.name ?? "") === "lint.style" &&
+            jwtUser?.id &&
+            jwtUser.role !== "admin" &&
+            userPointsBalance !== null &&
+            userPointsBalance <= 0
+          ) {
+            payload = {
+              toolCallId,
+              name: String(call.name ?? ""),
+              ok: false,
+              output: { ok: false, error: "INSUFFICIENT_POINTS", detail: { pointsBalance: userPointsBalance } },
+              meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
+            };
+          } else {
           writePolicyDecision({
             turn,
             policy: "ToolExecutionPolicy",
@@ -4122,6 +4268,7 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
                 output: { ok: false, error: (ret as any).error ?? "SERVER_TOOL_FAILED", detail: (ret as any).detail ?? null },
                 meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
               };
+          }
         } else {
           if (!execDecision.reasonCodes.includes("server_tool_not_allowed")) {
             writePolicyDecision({
@@ -4189,6 +4336,12 @@ fastify.post("/api/agent/run/stream", async (request, reply) => {
                 reasonCodes: charged.ok ? ["tool_billing_charged", "tool:lint.style"] : ["tool_billing_failed", "tool:lint.style"],
                 detail: charged.ok ? charged : { ...charged, tool: payload.name },
               });
+              if (charged.ok) {
+                if (typeof charged.newBalance === "number" && Number.isFinite(charged.newBalance)) userPointsBalance = Math.max(0, Math.floor(charged.newBalance));
+                writeEvent("billing.charge", { ...charged, source: "tool.lint.style", runId, turn, toolCallId });
+              } else {
+                writeEvent("billing.charge", { ...charged, ok: false, source: "tool.lint.style", runId, turn, toolCallId });
+              }
             }
           } catch {
             // ignore billing failure

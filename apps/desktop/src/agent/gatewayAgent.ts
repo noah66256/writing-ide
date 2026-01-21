@@ -1919,6 +1919,23 @@ export function startGatewayRun(args: {
             }
           }
 
+          if (evt.event === "billing.charge") {
+            try {
+              const payload = JSON.parse(evt.data);
+              const ok = payload?.ok === undefined ? true : Boolean(payload.ok);
+              const nb = Number(payload?.newBalance);
+              if (ok && Number.isFinite(nb)) {
+                const u = useAuthStore.getState().user;
+                if (u) {
+                  useAuthStore.setState({ user: { ...u, pointsBalance: Math.max(0, Math.floor(nb)) } });
+                }
+              }
+              log("info", "billing.charge", payload);
+            } catch {
+              // ignore
+            }
+          }
+
           if (evt.event === "run.notice") {
             try {
               const payload = JSON.parse(evt.data);
