@@ -297,6 +297,72 @@ Admin-Web 是静态资源 + 轻量 server：
 4. **风格可对齐**：风格库不是一堆原文，而是“结构化规则 + 检索样例 + lint 对齐”的闭环（先搜样例→再写→再自检→再回炉）。
 5. **结果可审阅**：写入走 diff；风险分级；Keep/Undo；必要时快照回滚 —— 这让“写作”变成一种可回滚的工程操作。
 
+#### 10.1) 核心：风格库（让写得像）的处理方式
+
+> 这里的“写得像”，指的是：**像某个作者/账号的原文口味**，并且能解释“为什么像/哪里不像/怎么修”。  
+> 这不是“把 200 篇原文丢进 prompt”，而是把库做成可检索、可对齐、可审计的工程系统。
+
+##### 10.1.1 我们把风格库拆成三层产物（避免卡片乱套）
+
+- **SourceDoc（原文层）**：每篇稿子/字幕/文章的全文与元数据，用于溯源与回链（“证据”）。
+- **Artifact（派生层）**：从原文抽取的可复用单元（写作时真正“拿来用”的套路/结构/句式），典型包括：
+  - `outline`（结构骨架）
+  - `hook`（开头钩子）
+  - `thesis`（核心观点）
+  - `one_liner`（金句形状）
+  - `ending`（结尾/CTA）
+- **StyleProfile / Playbook（聚合层）**：对“整个库/某个写法”的聚合总结（像什么、常用节奏、禁用项、软指标范围、推荐检索 query），用于给模型一个短而稳的“口味契约”。
+
+> 关键原则：写作时**默认先从 outline 入手**稳结构；需要开头/金句/结尾再切到对应类型检索；并且检索结果要 **按 source_doc 分组去重**，避免碎片刷屏。
+
+##### 10.1.2 生成风格库的流程（导入 → 抽卡 → 风格册/体检）
+
+1) **导入语料**（Desktop 本地 KB）  
+把 `.md/.mdx/.txt` 导入某个库（库用途设为 `style`）。
+
+2) **抽卡（Extract Cards）**  
+对每篇 SourceDoc 生成上述 Artifact（outline/hook/thesis/one_liner/ending）。  
+工程上要点：长文需要分段与截断保护，避免“只抽到开头/漏结尾”。
+
+3) **生成风格手册（Playbook）**  
+把整库聚合成“可注入写作上下文”的规则与模板（后续会逐步演进到 V2 的分簇/anchors 机制，见 `kb-manager-v2-spec.md`）。
+
+4) **库体检（Fingerprint/稳定性）**  
+用确定性统计得到“像什么/稳不稳/怎么修”的指标快照（例如句长、问句率、语气词密度、数字密度等），用于：
+- 解释“为什么不像”（可观测）
+- 给 lint.style 提供可验证的 softRanges（提示/审计，不做黑箱分数门禁）
+
+##### 10.1.3 写作时怎么用（最小闭环：先检索样例 → 再写 → 再对齐）
+
+当用户在右侧绑定了风格库（purpose=style），并且任务是写作/改写/润色：
+
+- **Step A：先拉“结构/套路”**（默认入口）  
+用 `kb.search(kind=card, cardTypes=[outline,thesis])` 拿结构骨架与论点形状；必要时再补 `hook/one_liner/ending`。
+
+- **Step B：再拉“原文证据”**（只在需要时）  
+写开头/结尾时，用 `kb.search(kind=paragraph, anchorParagraphIndexMax=3)` 或 `anchorFromEndMax=3` 拿原文段落当锚点（避免凭空仿写）。
+
+- **Step C：产出初稿**  
+先出草稿（不必立即写入），再进入对齐步骤。
+
+- **Step D：lint.style 对齐（最后 20%）**  
+用 `lint.style` 把“不像点”结构化输出（问题清单 + 改写提示），然后回炉改写一版；写入类动作走 proposal-first（diff + Keep/Undo）。
+
+> 这条链路之所以稳：它把“像”的问题拆成可执行步骤（检索→写→自检→回炉），而不是一次性生成碰运气。
+
+##### 10.1.4 运行时机制：Selector + Skill 门禁（避免误伤）
+
+- **Skill 门禁（style_imitate）**：风格库只在“明确写作类任务”时介入；用户只是讨论/排查时不会被强制拉进风格闭环（见 `intent-routing.md` 与 `docs/research/style-skill-gating-v1.md`）。
+- **Selector（选簇/选维度）**：运行时会产出结构化选择结果，约束生成模型“本次用哪种写法/执行哪些维度卡”（见 `style-selector-v1.md`、`kb-manager-v2-spec.md`）。
+- **Context Pack 注入（关键）**：写作 Run 会把风格库的 playbook/selector 结果注入到上下文前部，确保换模型也能稳定消费（不依赖模型记忆长文）。
+
+##### 10.1.5 代码入口（想看实现从这里开始）
+
+- **KB/抽卡/风格册/体检（Desktop）**：`apps/desktop/src/state/kbStore.ts`
+- **KB 检索核心（排序/去重/评分）**：`packages/kb-core/*`
+- **Skill 门禁与触发**：`packages/agent-core/src/skills.ts`（`style_imitate`）
+- **Selector 与 V2 方向**：`style-selector-v1.md`、`kb-manager-v2-spec.md`
+
 ---
 
 ### 11) 给新人/LLM 的最短学习路径（建议顺序）
