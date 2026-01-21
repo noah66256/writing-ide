@@ -125,6 +125,38 @@ function normalizeModelId(model: string) {
   return String(model || "").trim();
 }
 
+function truncateId(raw: string, max = 96) {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  return s.length > max ? s.slice(0, max) : s;
+}
+
+function makeUniqueId(existing: Set<string>, base: string) {
+  const b = truncateId(base || "", 96);
+  let id = b || `model-${Date.now()}`;
+  id = truncateId(id, 96);
+  if (!existing.has(id)) return id;
+  let i = 2;
+  while (existing.has(truncateId(`${b}-${i}`, 96))) i += 1;
+  return truncateId(`${b}-${i}`, 96);
+}
+
+function repairDuplicateModelIds(models: AiModel[]) {
+  const used = new Set<string>();
+  let changed = false;
+  const next = models.map((m) => {
+    const cur = String((m as any)?.id || "").trim();
+    const modelName = String((m as any)?.model || "").trim();
+    const providerId = String((m as any)?.providerId || "").trim();
+    const base = truncateId(cur || (providerId ? `${modelName}-${providerId}` : modelName) || "model", 96);
+    const id = cur && !used.has(cur) ? cur : makeUniqueId(used, base);
+    if (!cur || used.has(cur)) changed = true;
+    used.add(id);
+    return id === cur ? m : { ...m, id };
+  });
+  return { changed, models: next };
+}
+
 function normalizeProviderId(idOrName: string) {
   const raw = String(idOrName || "").trim();
   if (!raw) return "";
@@ -311,6 +343,12 @@ export function createAiConfigService(args: {
               models: [],
               stages: [],
             };
+
+    // 修复历史遗留：同名模型导致 id 重复，进而 B 端测速/适配“串台”
+    if (Array.isArray(ai.models) && ai.models.length) {
+      const repaired = repairDuplicateModelIds(ai.models);
+      if (repaired.changed) ai.models = repaired.models;
+    }
 
     const byId = new Map<string, AiModel>((ai.models ?? []).map((m) => [m.id, m]));
 
@@ -732,19 +770,25 @@ export function createAiConfigService(args: {
     if (!apiKeyEnc && !provider?.apiKeyEnc) throw new Error("apiKey_required");
     if (!apiKeyLast4) apiKeyLast4 = provider?.apiKeyLast4 ?? null;
 
-    // 防止“看起来一模一样”的重复（model/baseURL/endpoint/key后四位相同）
+    // 防止“看起来一模一样”的重复（model/provider/baseURL/endpoint/key后四位相同）
     const dup = (ai.models ?? []).find(
       (m) =>
         m.model === model &&
+        String(m.providerId || "") === String(providerId || "") &&
         normalizeBaseURL(m.baseURL) === baseURL &&
         normalizeEndpoint(m.endpoint, "/v1/chat/completions") === endpoint &&
         String(m.apiKeyLast4 || "") === String(apiKeyLast4 || ""),
     );
     if (dup) throw new Error("duplicate_model");
 
+    // 生成唯一 id：避免同名模型导致 B 端测速/适配状态串联（React key / Record key 都会撞）
+    const existingIds = new Set<string>((ai.models ?? []).map((m) => String(m.id || "").trim()).filter(Boolean));
+    const idBase = providerId ? `${model}-${providerId}` : model;
+    const id = makeUniqueId(existingIds, idBase);
+
     const t = nowIso();
     const item: AiModel = {
-      id: model,
+      id,
       model,
       providerId: providerId || null,
       baseURL,
@@ -841,15 +885,13 @@ export function createAiConfigService(args: {
     if (priceIn !== null && (!Number.isFinite(priceIn) || priceIn < 0)) throw new Error("pricing_invalid");
     if (priceOut !== null && (!Number.isFinite(priceOut) || priceOut < 0)) throw new Error("pricing_invalid");
 
-    // 重命名 id：当前实现以 model 作为 id，不支持变更（避免联动大量引用）
-    if (nextModel !== cur.id) throw new Error("model_id_immutable");
-
     // 防重复（排除自己）
     if (apiKeyLast4) {
       const dup = (ai.models ?? []).find(
         (m) =>
           m.id !== cur.id &&
           m.model === nextModel &&
+          String(m.providerId || "") === String(nextProviderId || "") &&
           normalizeBaseURL(m.baseURL) === nextBase &&
           normalizeEndpoint(m.endpoint, "/v1/chat/completions") === nextEndpoint &&
           String(m.apiKeyLast4 || "") === String(apiKeyLast4 || ""),
