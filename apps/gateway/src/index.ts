@@ -5976,8 +5976,11 @@ fastify.post(
  * - 不落库：由 Desktop 本地 KB 接口负责写入/断点续传。
  * - 不要求登录：因为 Desktop 目前还没接入真实登录态（后续可切到 authenticate）。
  */
-fastify.post("/api/kb/dev/extract_cards", async (request, reply) => {
-  if (!IS_DEV) return reply.code(404).send({ error: "NOT_AVAILABLE" });
+fastify.post(
+  "/api/kb/dev/extract_cards",
+  { preHandler: [(fastify as any).authenticate, requirePositivePointsForLlm] },
+  async (request: any, reply) => {
+  const jwtUser = await tryGetJwtUser(request as any);
 
   const bodySchema = z.object({
     model: z.string().optional(),
@@ -6268,15 +6271,42 @@ fastify.post("/api/kb/dev/extract_cards", async (request, reply) => {
     .filter((c: any) => c.title && c.content && c.paragraphIndices.length > 0)
     .slice(0, maxCards);
 
-  return reply.send({ ok: true, cards });
+  // 计费（按 usage）：仅对非 admin
+  let billing: any = null;
+  try {
+    const usage = (ret as any)?.usage ?? null;
+    if (
+      jwtUser?.id &&
+      jwtUser.role !== "admin" &&
+      usage &&
+      typeof usage === "object" &&
+      Number.isFinite((usage as any).promptTokens as any) &&
+      Number.isFinite((usage as any).completionTokens as any)
+    ) {
+      billing = await chargeUserForLlmUsage({
+        userId: jwtUser.id,
+        modelId: model,
+        usage,
+        source: "kb.extract_cards",
+        metaExtra: { mode, maxCards, paragraphs: body.paragraphs.length },
+      });
+    }
+  } catch {
+    // ignore
+  }
+
+  return reply.send({ ok: true, cards, ...(billing ? { billing } : {}) });
 });
 
 /**
  * KB 生成库级“仿写手册”（开发期）：输入单篇已抽出的结构化要素卡，输出库级 StyleProfile + Facet Playbook。
  * - 产物由 Desktop 负责落库（会落到一个“仿写手册”虚拟 SourceDoc 下）
  */
-fastify.post("/api/kb/dev/build_library_playbook", async (request, reply) => {
-  if (!IS_DEV) return reply.code(404).send({ error: "NOT_AVAILABLE" });
+fastify.post(
+  "/api/kb/dev/build_library_playbook",
+  { preHandler: [(fastify as any).authenticate, requirePositivePointsForLlm] },
+  async (request: any, reply) => {
+  const jwtUser = await tryGetJwtUser(request as any);
 
   const bodySchema = z.object({
     model: z.string().optional(),
@@ -6615,10 +6645,35 @@ fastify.post("/api/kb/dev/build_library_playbook", async (request, reply) => {
     }))
   ];
 
+  // 计费（按 usage）：仅对非 admin
+  let billing: any = null;
+  try {
+    const usage = (ret as any)?.usage ?? null;
+    if (
+      jwtUser?.id &&
+      jwtUser.role !== "admin" &&
+      usage &&
+      typeof usage === "object" &&
+      Number.isFinite((usage as any).promptTokens as any) &&
+      Number.isFinite((usage as any).completionTokens as any)
+    ) {
+      billing = await chargeUserForLlmUsage({
+        userId: jwtUser.id,
+        modelId: model,
+        usage,
+        source: "kb.build_library_playbook",
+        metaExtra: { mode: usedMode, part, docs: docs.length, itemsTotal },
+      });
+    }
+  } catch {
+    // ignore
+  }
+
   return reply.send({
     ok: true,
     styleProfile: { ...out.styleProfile, evidence: spEvidence },
-    playbookFacets: filled
+    playbookFacets: filled,
+    ...(billing ? { billing } : {})
   });
 });
 
@@ -6627,8 +6682,11 @@ fastify.post("/api/kb/dev/build_library_playbook", async (request, reply) => {
  * - 输入：统计摘要 + 少量样例片段
  * - 输出：开集标签（可为 unknown_*），附置信度与证据解释
  */
-fastify.post("/api/kb/dev/classify_genre", async (request, reply) => {
-  if (!IS_DEV) return reply.code(404).send({ error: "NOT_AVAILABLE" });
+fastify.post(
+  "/api/kb/dev/classify_genre",
+  { preHandler: [(fastify as any).authenticate, requirePositivePointsForLlm] },
+  async (request: any, reply) => {
+  const jwtUser = await tryGetJwtUser(request as any);
 
   const bodySchema = z.object({
     model: z.string().optional(),
@@ -6774,7 +6832,32 @@ fastify.post("/api/kb/dev/classify_genre", async (request, reply) => {
     const out = outSchema.parse(parsed);
     const sorted = [...out.candidates].sort((a, b) => b.confidence - a.confidence).slice(0, 8);
     const primary = sorted[0]!;
-    return reply.send({ ok: true, primary, candidates: sorted });
+
+    // 计费（按 usage）：仅对非 admin
+    let billing: any = null;
+    try {
+      const usage = (ret as any)?.usage ?? null;
+      if (
+        jwtUser?.id &&
+        jwtUser.role !== "admin" &&
+        usage &&
+        typeof usage === "object" &&
+        Number.isFinite((usage as any).promptTokens as any) &&
+        Number.isFinite((usage as any).completionTokens as any)
+      ) {
+        billing = await chargeUserForLlmUsage({
+          userId: jwtUser.id,
+          modelId: model,
+          usage,
+          source: "kb.classify_genre",
+          metaExtra: { samples: (body.samples ?? []).length },
+        });
+      }
+    } catch {
+      // ignore
+    }
+
+    return reply.send({ ok: true, primary, candidates: sorted, ...(billing ? { billing } : {}) });
   } catch (e: any) {
     return reply.code(500).send({ error: "INVALID_MODEL_OUTPUT", hint: "模型未返回合法 JSON", detail: String(e?.message ?? e) });
   }

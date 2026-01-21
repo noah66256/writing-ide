@@ -2,6 +2,15 @@ import { useEffect, useMemo, useState } from "react";
 import { getGatewayBaseUrl } from "../agent/gatewayUrl";
 import { useAuthStore } from "../state/authStore";
 
+function normalizeGatewayUrlOrEmpty(raw: string) {
+  let s = String(raw ?? "").trim();
+  if (!s) return "";
+  s = s.replace(/\s+/g, "");
+  s = s.replace(/^http:\/(?!\/)/i, "http://").replace(/^https:\/(?!\/)/i, "https://");
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(s)) s = `http://${s}`;
+  return s.replace(/\/+$/g, "");
+}
+
 function fmtTime(iso: string) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
@@ -49,7 +58,7 @@ export function AccountModal(props: { open: boolean; onClose: () => void; onOpen
   if (!open) return null;
 
   const onSaveGatewayOverride = () => {
-    const v = gatewayOverride.trim().replace(/\/+$/g, "");
+    const v = normalizeGatewayUrlOrEmpty(gatewayOverride);
     try {
       if (!v) window.localStorage.removeItem("writing-ide.gatewayUrl");
       else window.localStorage.setItem("writing-ide.gatewayUrl", v);

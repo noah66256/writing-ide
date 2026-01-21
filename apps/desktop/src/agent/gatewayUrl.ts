@@ -6,6 +6,18 @@ function trimSlash(url: string) {
     .replace(/\/+$/g, "");
 }
 
+function normalizeGatewayUrlOrEmpty(raw: string): string {
+  let s = String(raw ?? "").trim();
+  if (!s) return "";
+  // 去掉所有空白（避免粘贴时带换行/空格导致 URL 无效）
+  s = s.replace(/\s+/g, "");
+  // 修正常见粘贴错误：http:/xxx => http://xxx；https:/xxx => https://xxx
+  s = s.replace(/^http:\/(?!\/)/i, "http://").replace(/^https:\/(?!\/)/i, "https://");
+  // 没有协议时默认补 http://（用户常直接填 120.26.6.147:8000）
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(s)) s = `http://${s}`;
+  return trimSlash(s);
+}
+
 /**
  * 统一解析 Gateway baseURL（不带末尾斜杠）。
  *
@@ -16,7 +28,7 @@ function trimSlash(url: string) {
 export function getGatewayBaseUrl(): string {
   // 1) build-time env（打包时注入）
   try {
-    const fromEnv = trimSlash(String((import.meta as any).env?.VITE_GATEWAY_URL ?? ""));
+    const fromEnv = normalizeGatewayUrlOrEmpty(String((import.meta as any).env?.VITE_GATEWAY_URL ?? ""));
     if (fromEnv) return fromEnv;
   } catch {
     // ignore
@@ -24,7 +36,7 @@ export function getGatewayBaseUrl(): string {
 
   // 2) runtime override（用户本机临时切换）
   try {
-    const fromLs = trimSlash(String(window?.localStorage?.getItem("writing-ide.gatewayUrl") ?? ""));
+    const fromLs = normalizeGatewayUrlOrEmpty(String(window?.localStorage?.getItem("writing-ide.gatewayUrl") ?? ""));
     if (fromLs) return fromLs;
   } catch {
     // ignore
@@ -33,7 +45,7 @@ export function getGatewayBaseUrl(): string {
   // 3) packaged（production build）：没有 Vite /api proxy，必须走绝对地址
   try {
     if ((import.meta as any).env?.PROD) {
-      return DEFAULT_GATEWAY_URL;
+      return normalizeGatewayUrlOrEmpty(DEFAULT_GATEWAY_URL);
     }
   } catch {
     // ignore

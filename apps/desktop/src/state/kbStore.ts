@@ -1362,10 +1362,12 @@ async function postExtractCards(args: {
 }): Promise<{ ok: true; cards: any[] } | { ok: false; error: string }> {
   const base = gatewayBaseUrl();
   const url = base ? `${base}/api/kb/dev/extract_cards` : "/api/kb/dev/extract_cards";
+  if (!ensureLoginForKbLlm("生成风格手册/抽卡")) return { ok: false, error: "AUTH_REQUIRED" };
+  const auth = authHeader();
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...auth },
       signal: args.signal,
       body: JSON.stringify({
         model: args.model,
@@ -1412,10 +1414,12 @@ async function postBuildLibraryPlaybook(args: {
 > {
   const base = gatewayBaseUrl();
   const url = base ? `${base}/api/kb/dev/build_library_playbook` : "/api/kb/dev/build_library_playbook";
+  if (!ensureLoginForKbLlm("生成风格手册/仿写手册")) return { ok: false, error: "AUTH_REQUIRED" };
+  const auth = authHeader();
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...auth },
       signal: args.signal,
       body: JSON.stringify({
         model: args.model,
@@ -1452,8 +1456,9 @@ async function postBuildLibraryPlaybook(args: {
     const baseHint = base ? `gateway=${base}` : "gateway=同源(/api)";
     const msg = String(e?.message ?? e);
     const cause = e?.cause ? String(e.cause?.message ?? e.cause) : "";
+    const msgLower = msg.toLowerCase();
     const hint =
-      msg === "fetch failed"
+      msgLower === "fetch failed" || msgLower.includes("failed to fetch")
         ? "提示：这通常是网路/代理/证书/服务不可达导致。请确认 Gateway 可访问；若你在 dev 模式，确认本地 gateway 正在运行；若你连接远端，确认 VITE_GATEWAY_URL 正确。"
         : "";
     return { ok: false, error: `${msg}${cause ? `\nCAUSE: ${cause}` : ""}\n(${baseHint}, url=${url})${hint ? `\n${hint}` : ""}` };
@@ -1471,10 +1476,12 @@ async function postClassifyGenre(args: {
 > {
   const base = gatewayBaseUrl();
   const url = base ? `${base}/api/kb/dev/classify_genre` : "/api/kb/dev/classify_genre";
+  if (!ensureLoginForKbLlm("库体检/体裁识别")) return { ok: false, error: "AUTH_REQUIRED" };
+  const auth = authHeader();
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...auth },
       signal: args.signal,
       body: JSON.stringify({
         model: args.model,
@@ -1595,6 +1602,18 @@ function getGatewayUrl() {
 function authHeader(): Record<string, string> {
   const token = String(useAuthStore.getState().accessToken ?? "").trim();
   return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function ensureLoginForKbLlm(why: string): boolean {
+  const token = String(useAuthStore.getState().accessToken ?? "").trim();
+  if (token) return true;
+  try {
+    useAuthStore.getState().openLoginModal?.();
+    useAuthStore.setState({ error: `请先登录再使用：${why}` });
+  } catch {
+    // ignore
+  }
+  return false;
 }
 
 async function fetchEmbedding(args: { model?: string; input: string }): Promise<{ ok: true; embedding: number[]; modelUsed?: string } | { ok: false; error: string }> {
