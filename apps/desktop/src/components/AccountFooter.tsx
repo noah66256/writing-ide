@@ -2,13 +2,15 @@ import { useEffect, useState } from "react";
 import { useUpdateStore } from "../state/updateStore";
 import { useAuthStore } from "../state/authStore";
 import { AccountModal } from "./AccountModal";
+import { LoginModal } from "./LoginModal";
 
 export function AccountFooter() {
   const updateAvailable = useUpdateStore((s) => s.updateAvailable);
   const latestVersion = useUpdateStore((s) => s.latestVersion);
   const download = useUpdateStore((s) => s.download);
   const [version, setVersion] = useState<string>("");
-  const [open, setOpen] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [loginOpen, setLoginOpen] = useState(false);
 
   const user = useAuthStore((s) => s.user);
   const accessToken = useAuthStore((s) => s.accessToken);
@@ -30,10 +32,28 @@ export function AccountFooter() {
   return (
     <>
     <div className="accountFooter">
-      <div className="accountAvatar" aria-hidden="true">
+      <div
+        className="accountAvatar"
+        role="button"
+        tabIndex={0}
+        title={user ? "账户" : "登录"}
+        onClick={() => (user ? setAccountOpen(true) : setLoginOpen(true))}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") (user ? setAccountOpen(true) : setLoginOpen(true));
+        }}
+      >
         <span>我</span>
       </div>
-      <div className="accountMeta">
+      <div
+        className="accountMeta"
+        role="button"
+        tabIndex={0}
+        title={user ? "账户" : "登录"}
+        onClick={() => (user ? setAccountOpen(true) : setLoginOpen(true))}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") (user ? setAccountOpen(true) : setLoginOpen(true));
+        }}
+      >
         <div className="accountName">
           {user ? (user.phone ?? user.email ?? "已登录") : "未登录"}{" "}
           {updateAvailable ? (
@@ -65,12 +85,20 @@ export function AccountFooter() {
         className="btn btnIcon"
         type="button"
         title="账户/设置"
-        onClick={() => setOpen(true)}
+        onClick={() => setAccountOpen(true)}
       >
         设置
       </button>
     </div>
-    <AccountModal open={open} onClose={() => setOpen(false)} />
+    <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} />
+    <AccountModal
+      open={accountOpen}
+      onClose={() => setAccountOpen(false)}
+      onOpenLogin={() => {
+        setAccountOpen(false);
+        setLoginOpen(true);
+      }}
+    />
     </>
   );
 }

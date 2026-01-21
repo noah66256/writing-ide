@@ -112,12 +112,20 @@ export const useAuthStore = create<AuthState>()(
       },
 
       requestPhoneCode: async (args) => {
-        const r = await apiFetchJson<PhoneRequestRet>("/api/auth/phone/request-code", {
-          method: "POST",
-          auth: false,
-          body: JSON.stringify({ phoneNumber: args.phoneNumber, countryCode: args.countryCode ?? "86" }),
-        });
-        return r;
+        set({ busy: true, error: "" });
+        try {
+          const r = await apiFetchJson<PhoneRequestRet>("/api/auth/phone/request-code", {
+            method: "POST",
+            auth: false,
+            body: JSON.stringify({ phoneNumber: args.phoneNumber, countryCode: args.countryCode ?? "86" }),
+          });
+          return r;
+        } catch (e: any) {
+          set({ error: String(e?.code ?? e?.message ?? e) });
+          throw e;
+        } finally {
+          set({ busy: false });
+        }
       },
 
       verifyPhoneCode: async (args) => {
@@ -143,12 +151,20 @@ export const useAuthStore = create<AuthState>()(
       },
 
       requestEmailCode: async (email) => {
-        const r = await apiFetchJson<EmailRequestRet>("/api/auth/email/request-code", {
-          method: "POST",
-          auth: false,
-          body: JSON.stringify({ email }),
-        });
-        return r;
+        set({ busy: true, error: "" });
+        try {
+          const r = await apiFetchJson<EmailRequestRet>("/api/auth/email/request-code", {
+            method: "POST",
+            auth: false,
+            body: JSON.stringify({ email }),
+          });
+          return r;
+        } catch (e: any) {
+          set({ error: String(e?.code ?? e?.message ?? e) });
+          throw e;
+        } finally {
+          set({ busy: false });
+        }
       },
 
       verifyEmailCode: async (args) => {
