@@ -2,15 +2,20 @@ import { useEffect, useMemo, useState } from "react";
 import type { ApiError } from "../api/client";
 import {
   toolConfigGetCapabilities,
+  toolConfigGetSmsVerify,
   toolConfigGetWebSearch,
+  toolConfigTestSmsVerify,
   toolConfigTestWebSearch,
   toolConfigUpdateCapabilities,
+  toolConfigUpdateSmsVerify,
   toolConfigUpdateWebSearch,
   type CapabilitiesEffectiveDto,
   type CapabilitiesRegistryDto,
   type CapabilitiesStoredDto,
   type CapabilitiesToolDto,
   type CapabilitiesSkillDto,
+  type SmsVerifyConfigEffectiveDto,
+  type SmsVerifyConfigStoredDto,
   type WebSearchConfigEffectiveDto,
   type WebSearchConfigStoredDto,
 } from "../api/gateway";
@@ -29,7 +34,7 @@ function domainsToText(domains: string[]) {
 }
 
 export function ToolsPage() {
-  const [tab, setTab] = useState<"web" | "tools" | "skills">("web");
+  const [tab, setTab] = useState<"web" | "sms" | "tools" | "skills">("web");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -56,12 +61,32 @@ export function ToolsPage() {
   const [testQuery, setTestQuery] = useState("杭州 天气");
   const [testing, setTesting] = useState(false);
 
+  const [smsStored, setSmsStored] = useState<SmsVerifyConfigStoredDto | null>(null);
+  const [smsEffective, setSmsEffective] = useState<SmsVerifyConfigEffectiveDto | null>(null);
+  const [smsIsEnabled, setSmsIsEnabled] = useState(true);
+  const [smsEndpoint, setSmsEndpoint] = useState("");
+  const [smsAccessKeyIdInput, setSmsAccessKeyIdInput] = useState("");
+  const [smsAccessKeySecretInput, setSmsAccessKeySecretInput] = useState("");
+  const [smsClearAccessKeyId, setSmsClearAccessKeyId] = useState(false);
+  const [smsClearAccessKeySecret, setSmsClearAccessKeySecret] = useState(false);
+  const [smsSchemeName, setSmsSchemeName] = useState("");
+  const [smsSignName, setSmsSignName] = useState("");
+  const [smsTemplateCode, setSmsTemplateCode] = useState("");
+  const [smsTemplateMin, setSmsTemplateMin] = useState("5");
+  const [smsCodeLength, setSmsCodeLength] = useState("6");
+  const [smsValidTimeSeconds, setSmsValidTimeSeconds] = useState("300");
+  const [smsIntervalSeconds, setSmsIntervalSeconds] = useState("60");
+  const [smsDuplicatePolicy, setSmsDuplicatePolicy] = useState("1");
+  const [smsCodeType, setSmsCodeType] = useState("1");
+  const [smsAutoRetry, setSmsAutoRetry] = useState("1");
+  const [smsTesting, setSmsTesting] = useState(false);
+
   const refresh = async () => {
     setError("");
     setNotice("");
     setBusy(true);
     try {
-      const [web, caps] = await Promise.all([toolConfigGetWebSearch(), toolConfigGetCapabilities()]);
+      const [web, sms, caps] = await Promise.all([toolConfigGetWebSearch(), toolConfigGetSmsVerify(), toolConfigGetCapabilities()]);
       setStored(web.stored);
       setEffective(web.effective);
       setIsEnabled(Boolean(web.stored.isEnabled));
@@ -69,6 +94,21 @@ export function ToolsPage() {
       setAllowDomainsText(domainsToText(web.stored.allowDomains ?? []));
       setDenyDomainsText(domainsToText(web.stored.denyDomains ?? []));
       setFetchUa(web.stored.fetchUa ?? "");
+
+      setSmsStored(sms.stored);
+      setSmsEffective(sms.effective);
+      setSmsIsEnabled(Boolean(sms.stored.isEnabled));
+      setSmsEndpoint(sms.stored.endpoint ?? "");
+      setSmsSchemeName(sms.stored.schemeName ?? "");
+      setSmsSignName(sms.stored.signName ?? "");
+      setSmsTemplateCode(sms.stored.templateCode ?? "");
+      setSmsTemplateMin(String(sms.stored.templateMin ?? 5));
+      setSmsCodeLength(String(sms.stored.codeLength ?? 6));
+      setSmsValidTimeSeconds(String(sms.stored.validTimeSeconds ?? 300));
+      setSmsIntervalSeconds(String(sms.stored.intervalSeconds ?? 60));
+      setSmsDuplicatePolicy(String(sms.stored.duplicatePolicy ?? 1));
+      setSmsCodeType(String(sms.stored.codeType ?? 1));
+      setSmsAutoRetry(String(sms.stored.autoRetry ?? 1));
 
       setCapsRegistry(caps.registry);
       setCapsStored(caps.stored);
@@ -137,6 +177,62 @@ export function ToolsPage() {
       setError(`测试失败：${err.code}`);
     } finally {
       setTesting(false);
+    }
+  };
+
+  const saveSms = async () => {
+    setError("");
+    setNotice("");
+    setBusy(true);
+    try {
+      const nInt = (s: string) => {
+        const n = Number(String(s ?? "").trim());
+        return Number.isFinite(n) ? Math.floor(n) : null;
+      };
+      await toolConfigUpdateSmsVerify({
+        isEnabled: smsIsEnabled,
+        endpoint: smsEndpoint.trim() ? smsEndpoint.trim() : null,
+        ...(smsAccessKeyIdInput.trim() ? { accessKeyId: smsAccessKeyIdInput.trim() } : {}),
+        ...(smsAccessKeySecretInput.trim() ? { accessKeySecret: smsAccessKeySecretInput.trim() } : {}),
+        ...(smsClearAccessKeyId ? { clearAccessKeyId: true } : {}),
+        ...(smsClearAccessKeySecret ? { clearAccessKeySecret: true } : {}),
+        schemeName: smsSchemeName.trim() ? smsSchemeName.trim() : null,
+        signName: smsSignName.trim() ? smsSignName.trim() : null,
+        templateCode: smsTemplateCode.trim() ? smsTemplateCode.trim() : null,
+        templateMin: nInt(smsTemplateMin),
+        codeLength: nInt(smsCodeLength),
+        validTimeSeconds: nInt(smsValidTimeSeconds),
+        intervalSeconds: nInt(smsIntervalSeconds),
+        duplicatePolicy: nInt(smsDuplicatePolicy),
+        codeType: nInt(smsCodeType),
+        autoRetry: nInt(smsAutoRetry),
+      });
+      setNotice("已保存 SMS Verify 配置（热生效）");
+      setSmsAccessKeyIdInput("");
+      setSmsAccessKeySecretInput("");
+      setSmsClearAccessKeyId(false);
+      setSmsClearAccessKeySecret(false);
+      await refresh();
+    } catch (e: any) {
+      const err = e as ApiError;
+      setError(`保存失败：${err.code}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const testSms = async () => {
+    setError("");
+    setNotice("");
+    setSmsTesting(true);
+    try {
+      const res = await toolConfigTestSmsVerify();
+      setNotice(res.ok ? "测试通过：配置可用（未发送短信）" : "测试未通过");
+    } catch (e: any) {
+      const err = e as ApiError;
+      setError(`测试失败：${err.code}`);
+    } finally {
+      setSmsTesting(false);
     }
   };
 
@@ -236,6 +332,9 @@ export function ToolsPage() {
             <button className="btn" type="button" onClick={() => setTab("web")} disabled={tab === "web"}>
               Web Search
             </button>
+            <button className="btn" type="button" onClick={() => setTab("sms")} disabled={tab === "sms"}>
+              SMS Verify
+            </button>
             <button className="btn" type="button" onClick={() => setTab("tools")} disabled={tab === "tools"}>
               Tools
             </button>
@@ -250,6 +349,10 @@ export function ToolsPage() {
             <button className="btn primary" type="button" onClick={() => void save()} disabled={busy}>
               保存
             </button>
+          ) : tab === "sms" ? (
+            <button className="btn primary" type="button" onClick={() => void saveSms()} disabled={busy}>
+              保存
+            </button>
           ) : (
             <button className="btn primary" type="button" onClick={() => void saveCapabilities()} disabled={busy || capsSaving || !capsStored}>
               {capsSaving ? "保存中…" : "保存"}
@@ -261,7 +364,7 @@ export function ToolsPage() {
       {notice ? <div className="hint">{notice}</div> : null}
       {error ? <div className="error">{error}</div> : null}
 
-      {tab !== "web" ? (
+      {tab === "tools" || tab === "skills" ? (
         <div className="tableWrap" style={{ padding: 14, marginBottom: 14 }}>
           <div className="row" style={{ gap: 8, marginBottom: 10 }}>
             <input className="input" placeholder="搜索（name/module/desc/skillId/stageKey）" value={capsQuery} onChange={(e) => setCapsQuery(e.target.value)} style={{ flex: 1 }} />
@@ -334,6 +437,134 @@ export function ToolsPage() {
                 </div>
               );
             })}
+          </div>
+        </div>
+      ) : null}
+
+      {tab === "sms" ? (
+        <div className="tableWrap" style={{ padding: 14, marginBottom: 14 }}>
+          <div className="modelCard" style={{ marginBottom: 0 }}>
+            <div className="modelCardTop">
+              <div className="modelCardTitle">
+                <div className="modelName">SMS Verify（阿里云 Dypnsapi）</div>
+                <span className={`tag ${smsIsEnabled ? "tagGreen" : "tagRed"}`}>{smsIsEnabled ? "enabled" : "disabled"}</span>
+                {smsStored?.hasAccessKeyId ? (
+                  <span className="tag tagGreen">{smsStored.accessKeyIdMasked || "AK ****"}</span>
+                ) : (
+                  <span className="tag tagRed">无 AK</span>
+                )}
+                {smsStored?.hasAccessKeySecret ? (
+                  <span className="tag tagGreen">{smsStored.accessKeySecretMasked || "SK ****"}</span>
+                ) : (
+                  <span className="tag tagRed">无 SK</span>
+                )}
+                {smsEffective ? (
+                  <span className="tag">
+                    {`endpoint:${smsEffective.source.endpoint} · ak:${smsEffective.source.accessKeyId}/${smsEffective.source.accessKeySecret} · tpl:${smsEffective.source.signName}/${smsEffective.source.templateCode}`}
+                  </span>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="modelFieldsGrid" style={{ gridTemplateColumns: "repeat(2, minmax(240px, 1fr))" }}>
+              <label className="field">
+                <div className="label">启用</div>
+                <label className="toggleSm">
+                  <input type="checkbox" checked={smsIsEnabled} onChange={(e) => setSmsIsEnabled(e.target.checked)} /> SMS Verify
+                </label>
+                <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+                  关闭后：手机号验证码登录不可用。
+                </div>
+              </label>
+
+              <label className="field">
+                <div className="label">Endpoint（可选覆盖）</div>
+                <input className="input" value={smsEndpoint} onChange={(e) => setSmsEndpoint(e.target.value)} placeholder="dypnsapi.aliyuncs.com" />
+                <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+                  留空表示使用 env 或默认值。
+                </div>
+              </label>
+
+              <label className="field">
+                <div className="label">AccessKeyId（留空=不改）</div>
+                <input className="input" type="password" value={smsAccessKeyIdInput} onChange={(e) => setSmsAccessKeyIdInput(e.target.value)} placeholder="LTAI..." />
+                <label className="muted" style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, fontSize: 12 }}>
+                  <input type="checkbox" checked={smsClearAccessKeyId} onChange={(e) => setSmsClearAccessKeyId(e.target.checked)} />
+                  清空 AK（会回退到 env；若 env 也没配则不可用）
+                </label>
+              </label>
+
+              <label className="field">
+                <div className="label">AccessKeySecret（留空=不改）</div>
+                <input className="input" type="password" value={smsAccessKeySecretInput} onChange={(e) => setSmsAccessKeySecretInput(e.target.value)} placeholder="****" />
+                <label className="muted" style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, fontSize: 12 }}>
+                  <input type="checkbox" checked={smsClearAccessKeySecret} onChange={(e) => setSmsClearAccessKeySecret(e.target.checked)} />
+                  清空 SK（会回退到 env；若 env 也没配则不可用）
+                </label>
+              </label>
+
+              <label className="field">
+                <div className="label">SchemeName（可选）</div>
+                <input className="input" value={smsSchemeName} onChange={(e) => setSmsSchemeName(e.target.value)} placeholder="默认方案（留空）" />
+                <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+                  若发送接口使用了 SchemeName，则校验接口必须一致。
+                </div>
+              </label>
+
+              <label className="field">
+                <div className="label">SignName（赠送签名）</div>
+                <input className="input" value={smsSignName} onChange={(e) => setSmsSignName(e.target.value)} placeholder="速通互联验证码" />
+              </label>
+
+              <label className="field">
+                <div className="label">TemplateCode（赠送模板）</div>
+                <input className="input" value={smsTemplateCode} onChange={(e) => setSmsTemplateCode(e.target.value)} placeholder="100001" />
+              </label>
+
+              <label className="field">
+                <div className="label">TemplateParam.min（分钟）</div>
+                <input className="input" value={smsTemplateMin} onChange={(e) => setSmsTemplateMin(e.target.value)} placeholder="5" />
+              </label>
+
+              <label className="field">
+                <div className="label">CodeLength（4~8）</div>
+                <input className="input" value={smsCodeLength} onChange={(e) => setSmsCodeLength(e.target.value)} placeholder="6" />
+              </label>
+
+              <label className="field">
+                <div className="label">ValidTime（秒）</div>
+                <input className="input" value={smsValidTimeSeconds} onChange={(e) => setSmsValidTimeSeconds(e.target.value)} placeholder="300" />
+              </label>
+
+              <label className="field">
+                <div className="label">Interval（秒）</div>
+                <input className="input" value={smsIntervalSeconds} onChange={(e) => setSmsIntervalSeconds(e.target.value)} placeholder="60" />
+              </label>
+
+              <label className="field">
+                <div className="label">DuplicatePolicy（1覆盖/2保留）</div>
+                <input className="input" value={smsDuplicatePolicy} onChange={(e) => setSmsDuplicatePolicy(e.target.value)} placeholder="1" />
+              </label>
+
+              <label className="field">
+                <div className="label">CodeType（1=纯数字）</div>
+                <input className="input" value={smsCodeType} onChange={(e) => setSmsCodeType(e.target.value)} placeholder="1" />
+              </label>
+
+              <label className="field">
+                <div className="label">AutoRetry（1开启/0关闭）</div>
+                <input className="input" value={smsAutoRetry} onChange={(e) => setSmsAutoRetry(e.target.value)} placeholder="1" />
+              </label>
+            </div>
+
+            <div className="row" style={{ gap: 8, marginTop: 12 }}>
+              <button className="btn" type="button" onClick={() => void testSms()} disabled={busy || smsTesting}>
+                {smsTesting ? "测试中…" : "测试配置"}
+              </button>
+              <div className="muted" style={{ fontSize: 12 }}>
+                说明：测试不会发送短信，只校验配置完整性。
+              </div>
+            </div>
           </div>
         </div>
       ) : null}

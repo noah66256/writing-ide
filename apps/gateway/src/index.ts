@@ -23,6 +23,7 @@ import { isToolCallMessage, parseToolCalls, renderToolResultXml } from "./agent/
 import { getToolsForMode, toolNamesForMode, type AgentMode } from "./agent/toolRegistry.js";
 import { createAiConfigService } from "./aiConfig.js";
 import { toolConfig } from "./toolConfig.js";
+import { checkSmsVerifyCode, normalizeCnPhone, sendSmsVerifyCode } from "./smsVerify.js";
 import { TOOL_LIST, validateToolCallArgs } from "@writing-ide/tools";
 import {
   decideServerToolExecution,
@@ -91,6 +92,14 @@ type CodeRequest = {
 };
 
 const codeRequests = new Map<string, CodeRequest>();
+
+type PhoneCodeRequest = {
+  phoneNumber: string; // 已 normalize（国内 11 位）
+  countryCode: string; // 默认 86
+  expiresAt: number;
+};
+
+const phoneCodeRequests = new Map<string, PhoneCodeRequest>();
 const kbStore = new MemoryKbStore();
 const aiConfig = createAiConfigService({ loadDb, saveDb, updateDb });
 
@@ -130,7 +139,7 @@ async function requireAdmin(request: any, reply: any) {
   }
 }
 
-async function tryGetJwtUser(request: any): Promise<{ id: string; email?: string; role?: string } | null> {
+async function tryGetJwtUser(request: any): Promise<{ id: string; email?: string; phone?: string; role?: string } | null> {
   const auth = String(request?.headers?.authorization ?? "").trim();
   if (!auth) return null;
   try {
@@ -138,6 +147,7 @@ async function tryGetJwtUser(request: any): Promise<{ id: string; email?: string
     return {
       id: String(request.user?.sub ?? ""),
       email: request.user?.email ? String(request.user.email) : undefined,
+      phone: request.user?.phone ? String(request.user.phone) : undefined,
       role: request.user?.role ? String(request.user.role) : undefined,
     };
   } catch {
@@ -4574,6 +4584,143 @@ fastify.post("/api/agent/run/:runId/tool_result", async (request, reply) => {
   return reply.send({ ok: true });
 });
 
+// ======== Auth（C端：邮箱验证码 / 手机验证码） ========
+
+fastify.post("/api/auth/phone/request-code", async (request, reply) => {
+  const bodySchema = z.object({
+    phoneNumber: z.string().min(1),
+    countryCode: z.string().optional(),
+  });
+  const body = bodySchema.parse(request.body);
+  const countryCode = String(body.countryCode ?? "86").trim() || "86";
+  if (countryCode !== "86") return reply.code(400).send({ error: "UNSUPPORTED_COUNTRY" });
+
+  const phoneNumber = normalizeCnPhone(body.phoneNumber);
+  if (!/^\d{11}$/.test(phoneNumber)) return reply.code(400).send({ error: "MOBILE_NUMBER_ILLEGAL" });
+
+  const rt = await toolConfig.resolveSmsVerifyRuntime().catch(() => null as any);
+  if (!rt || rt.isEnabled === false) return reply.code(500).send({ error: "SMS_VERIFY_DISABLED" });
+  if (!rt.accessKeyId || !rt.accessKeySecret) return reply.code(500).send({ error: "SMS_VERIFY_NOT_CONFIGURED" });
+  if (!rt.signName || !rt.templateCode) return reply.code(500).send({ error: "SMS_TEMPLATE_NOT_CONFIGURED" });
+
+  const requestId = randomUUID();
+  const expiresInSeconds = Math.max(60, Math.floor(Number(rt.validTimeSeconds) || 300));
+
+  try {
+    const resp = await sendSmsVerifyCode({
+      rt,
+      phoneNumber,
+      countryCode,
+      outId: requestId,
+      returnVerifyCode: IS_DEV,
+    });
+    if (!resp?.success) {
+      return reply.code(500).send({
+        error: "SMS_SEND_FAILED",
+        detail: { code: resp?.code ?? null, message: resp?.message ?? null },
+      });
+    }
+
+    phoneCodeRequests.set(requestId, {
+      phoneNumber,
+      countryCode,
+      expiresAt: Date.now() + expiresInSeconds * 1000,
+    });
+
+    const devCode = resp?.model?.verifyCode !== undefined && resp?.model?.verifyCode !== null ? String(resp.model.verifyCode) : "";
+    return reply.send({
+      requestId,
+      expiresInSeconds,
+      bizId: resp?.model?.bizId ?? null,
+      aliyunRequestId: resp?.requestId ?? resp?.model?.requestId ?? null,
+      ...(IS_DEV && devCode ? { devCode } : {}),
+    });
+  } catch (e: any) {
+    const msg = e?.message ? String(e.message) : String(e);
+    return reply.code(500).send({ error: "SMS_SEND_FAILED", detail: msg.slice(0, 800) });
+  }
+});
+
+fastify.post("/api/auth/phone/verify", async (request, reply) => {
+  const bodySchema = z.object({
+    phoneNumber: z.string().min(1),
+    countryCode: z.string().optional(),
+    requestId: z.string().min(1),
+    code: z.string().min(1),
+  });
+  const body = bodySchema.parse(request.body);
+  const countryCode = String(body.countryCode ?? "86").trim() || "86";
+  if (countryCode !== "86") return reply.code(400).send({ error: "UNSUPPORTED_COUNTRY" });
+  const phoneNumber = normalizeCnPhone(body.phoneNumber);
+  if (!/^\d{11}$/.test(phoneNumber)) return reply.code(400).send({ error: "MOBILE_NUMBER_ILLEGAL" });
+  const code = String(body.code ?? "").trim();
+  if (!code) return reply.code(400).send({ error: "CODE_INVALID" });
+
+  const record = phoneCodeRequests.get(body.requestId);
+  if (!record || record.phoneNumber !== phoneNumber || record.countryCode !== countryCode) {
+    return reply.code(400).send({ error: "INVALID_REQUEST" });
+  }
+  if (Date.now() > record.expiresAt) {
+    phoneCodeRequests.delete(body.requestId);
+    return reply.code(400).send({ error: "CODE_EXPIRED" });
+  }
+
+  const rt = await toolConfig.resolveSmsVerifyRuntime().catch(() => null as any);
+  if (!rt || rt.isEnabled === false) return reply.code(500).send({ error: "SMS_VERIFY_DISABLED" });
+  if (!rt.accessKeyId || !rt.accessKeySecret) return reply.code(500).send({ error: "SMS_VERIFY_NOT_CONFIGURED" });
+  if (!rt.signName || !rt.templateCode) return reply.code(500).send({ error: "SMS_TEMPLATE_NOT_CONFIGURED" });
+
+  try {
+    const resp = await checkSmsVerifyCode({
+      rt,
+      phoneNumber,
+      countryCode,
+      verifyCode: code,
+      outId: body.requestId,
+      caseAuthPolicy: 1,
+    });
+
+    // 注意：Code=OK 不代表校验成功；以 Model.VerifyResult=PASS 为准。
+    const verifyResult = String(resp?.model?.verifyResult ?? "");
+    const passed = Boolean(resp?.success) && verifyResult === "PASS";
+    if (!passed) {
+      return reply.code(400).send({
+        error: "CODE_INVALID",
+        detail: { code: resp?.code ?? null, message: resp?.message ?? null, verifyResult: verifyResult || null },
+      });
+    }
+
+    phoneCodeRequests.delete(body.requestId);
+
+    const user = await updateDb((db) => {
+      let u = db.users.find((x) => x.phone === phoneNumber);
+      if (!u) {
+        u = {
+          id: randomUUID(),
+          email: null,
+          phone: phoneNumber,
+          role: "user",
+          pointsBalance: 0,
+          createdAt: new Date().toISOString(),
+        };
+        db.users.push(u);
+      }
+      return u;
+    });
+
+    const accessToken = fastify.jwt.sign({
+      sub: user.id,
+      role: user.role,
+      ...(user.email ? { email: user.email } : {}),
+      ...(user.phone ? { phone: user.phone } : {}),
+    });
+    return reply.send({ accessToken, user });
+  } catch (e: any) {
+    const msg = e?.message ? String(e.message) : String(e);
+    return reply.code(500).send({ error: "SMS_VERIFY_FAILED", detail: msg.slice(0, 800) });
+  }
+});
+
 fastify.post("/api/auth/email/request-code", async (request, reply) => {
   const bodySchema = z.object({
     email: z.string().email()
@@ -4628,6 +4775,7 @@ fastify.post("/api/auth/email/verify", async (request, reply) => {
       user = {
         id: randomUUID(),
         email: lowerEmail,
+        phone: null,
         role,
         pointsBalance: 0,
         createdAt: new Date().toISOString()
@@ -4637,7 +4785,12 @@ fastify.post("/api/auth/email/verify", async (request, reply) => {
     return user;
   });
 
-  const accessToken = fastify.jwt.sign({ sub: user.id, email: user.email, role: user.role });
+  const accessToken = fastify.jwt.sign({
+    sub: user.id,
+    role: user.role,
+    ...(user.email ? { email: user.email } : {}),
+    ...(user.phone ? { phone: user.phone } : {}),
+  });
   return reply.send({
     accessToken,
     user
@@ -4680,7 +4833,8 @@ fastify.get(
     return {
       user: {
         id: request.user.sub,
-        email: request.user.email,
+        email: (me?.email ?? (request.user.email ? String(request.user.email) : null)) as any,
+        phone: (me?.phone ?? (request.user.phone ? String(request.user.phone) : null)) as any,
         role: request.user.role,
         pointsBalance: request.user.role === "admin" ? 0 : me?.pointsBalance ?? 0
       }
@@ -4726,6 +4880,7 @@ fastify.get(
       users: db.users.map((u) => ({
         id: u.id,
         email: u.email,
+        phone: u.phone,
         role: u.role,
         pointsBalance: u.pointsBalance,
         createdAt: u.createdAt
@@ -4905,7 +5060,7 @@ fastify.post(
       description: z.string().nullable().optional(),
     });
     const body = bodySchema.parse((request as any).body ?? {});
-    const updatedBy = String((request as any).user?.email ?? (request as any).user?.sub ?? "admin");
+    const updatedBy = String((request as any).user?.email ?? (request as any).user?.phone ?? (request as any).user?.sub ?? "admin");
     try {
       const id = await aiConfig.createProvider({
         name: body.name,
@@ -4942,7 +5097,7 @@ fastify.patch(
     });
     const { id } = paramsSchema.parse((request as any).params);
     const body = bodySchema.parse((request as any).body ?? {});
-    const updatedBy = String((request as any).user?.email ?? (request as any).user?.sub ?? "admin");
+    const updatedBy = String((request as any).user?.email ?? (request as any).user?.phone ?? (request as any).user?.sub ?? "admin");
     try {
       await aiConfig.updateProvider(id, { ...body, updatedBy });
       return reply.send({ ok: true });
@@ -5004,7 +5159,7 @@ fastify.post(
       description: z.string().optional(),
     });
     const body = bodySchema.parse((request as any).body ?? {});
-    const updatedBy = String((request as any).user?.email ?? (request as any).user?.sub ?? "admin");
+    const updatedBy = String((request as any).user?.email ?? (request as any).user?.phone ?? (request as any).user?.sub ?? "admin");
     try {
       const id = await aiConfig.createModel({
         model: body.model,
@@ -5053,7 +5208,7 @@ fastify.patch(
     });
     const { id } = paramsSchema.parse((request as any).params);
     const body = bodySchema.parse((request as any).body ?? {});
-    const updatedBy = String((request as any).user?.email ?? (request as any).user?.sub ?? "admin");
+    const updatedBy = String((request as any).user?.email ?? (request as any).user?.phone ?? (request as any).user?.sub ?? "admin");
     try {
       await aiConfig.updateModel(id, { ...body, updatedBy });
       return reply.send({ ok: true });
@@ -5249,7 +5404,7 @@ fastify.put(
         .max(200),
     });
     const body = bodySchema.parse((request as any).body ?? {});
-    const updatedBy = String((request as any).user?.email ?? (request as any).user?.sub ?? "admin");
+    const updatedBy = String((request as any).user?.email ?? (request as any).user?.phone ?? (request as any).user?.sub ?? "admin");
     try {
       await aiConfig.upsertStages(body.stages as any, updatedBy);
       return reply.send({ ok: true });
@@ -5289,7 +5444,7 @@ fastify.put(
       fetchUa: z.string().nullable().optional(),
     });
     const body = bodySchema.parse((request as any).body ?? {});
-    const updatedBy = String((request as any).user?.email ?? (request as any).user?.sub ?? "admin");
+    const updatedBy = String((request as any).user?.email ?? (request as any).user?.phone ?? (request as any).user?.sub ?? "admin");
     try {
       await toolConfig.upsertWebSearch({ ...body, updatedBy });
       return reply.send({ ok: true });
@@ -5311,6 +5466,78 @@ fastify.post(
     const ret = await toolConfig.testWebSearch(body.query);
     if (!ret.ok) return reply.code(400).send({ error: ret.error, latencyMs: (ret as any).latencyMs ?? null, detail: (ret as any).detail ?? null });
     return reply.send({ ok: true, latencyMs: ret.latencyMs, resultCount: ret.resultCount });
+  },
+);
+
+fastify.get(
+  "/api/tool-config/sms-verify",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async () => {
+    const [stored, effective] = await Promise.all([toolConfig.getStoredSmsVerify(), toolConfig.getEffectiveSmsVerify()]);
+    return { stored, effective };
+  },
+);
+
+fastify.put(
+  "/api/tool-config/sms-verify",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async (request, reply) => {
+    const bodySchema = z.object({
+      isEnabled: z.boolean().optional(),
+      endpoint: z.string().nullable().optional(),
+      accessKeyId: z.string().optional(),
+      accessKeySecret: z.string().optional(),
+      clearAccessKeyId: z.boolean().optional(),
+      clearAccessKeySecret: z.boolean().optional(),
+      schemeName: z.string().nullable().optional(),
+      signName: z.string().nullable().optional(),
+      templateCode: z.string().nullable().optional(),
+      templateMin: z.number().int().min(1).max(60).nullable().optional(),
+      codeLength: z.number().int().min(4).max(8).nullable().optional(),
+      validTimeSeconds: z.number().int().min(60).max(3600).nullable().optional(),
+      duplicatePolicy: z.number().int().min(1).max(2).nullable().optional(),
+      intervalSeconds: z.number().int().min(1).max(3600).nullable().optional(),
+      codeType: z.number().int().min(1).max(7).nullable().optional(),
+      autoRetry: z.number().int().min(0).max(1).nullable().optional(),
+    });
+    const body = bodySchema.parse((request as any).body ?? {});
+    const updatedBy = String((request as any).user?.email ?? (request as any).user?.phone ?? (request as any).user?.sub ?? "admin");
+    try {
+      await toolConfig.upsertSmsVerify({ ...body, updatedBy } as any);
+      return reply.send({ ok: true });
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : String(e);
+      return reply.code(400).send({ error: msg });
+    }
+  },
+);
+
+fastify.post(
+  "/api/tool-config/sms-verify/test",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async (_request, reply) => {
+    const eff = await toolConfig.getEffectiveSmsVerify();
+    const rt = await toolConfig.resolveSmsVerifyRuntime();
+    const configured = Boolean(rt.accessKeyId && rt.accessKeySecret && rt.signName && rt.templateCode);
+    if (!eff.isEnabled) return reply.code(400).send({ error: "SMS_VERIFY_DISABLED" });
+    if (!configured) {
+      return reply.code(400).send({
+        error: "SMS_VERIFY_NOT_CONFIGURED",
+        detail: {
+          hasAccessKeyId: Boolean(rt.accessKeyId),
+          hasAccessKeySecret: Boolean(rt.accessKeySecret),
+          hasSignName: Boolean(rt.signName),
+          hasTemplateCode: Boolean(rt.templateCode),
+        },
+      });
+    }
+    return reply.send({ ok: true, configured: true });
   },
 );
 
@@ -5388,7 +5615,7 @@ fastify.put(
         .optional(),
     });
     const body = bodySchema.parse((request as any).body ?? {});
-    const updatedBy = String((request as any).user?.email ?? (request as any).user?.sub ?? "admin");
+    const updatedBy = String((request as any).user?.email ?? (request as any).user?.phone ?? (request as any).user?.sub ?? "admin");
     try {
       await toolConfig.upsertCapabilities({ ...body, updatedBy } as any);
       return reply.send({ ok: true });

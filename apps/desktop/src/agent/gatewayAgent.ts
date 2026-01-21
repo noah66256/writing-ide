@@ -1,10 +1,16 @@
 import { useProjectStore } from "../state/projectStore";
 import { useRunStore, type Mode } from "../state/runStore";
 import { useKbStore } from "../state/kbStore";
+import { useAuthStore } from "../state/authStore";
 import { facetLabel, getFacetPack } from "../kb/facets";
 import { activateSkills, detectRunIntent } from "@writing-ide/agent-core";
 import { buildStyleLinterLibrariesSidecar, executeToolCall, getTool, toolsPrompt } from "./toolRegistry";
 import { isToolCallMessage, parseToolCalls, renderToolErrorXml, renderToolResultXml } from "./xmlProtocol";
+
+function authHeader(): Record<string, string> {
+  const token = String(useAuthStore.getState().accessToken ?? "").trim();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
 
 type GatewayRunController = {
   cancel: () => void;
@@ -373,14 +379,15 @@ function pickFacetsSelectorV1(args: {
   const order = new Map(pack.facets.map((f, i) => [f.id, i]));
 
   const planItems = Array.isArray(args.cluster?.facetPlan) ? (args.cluster.facetPlan as any[]) : [];
-  const planById = new Map(
+  const planById = new Map<string, { why: string; kbQueries: string[] }>(
     planItems
-      .map((x) => ({
-        facetId: String(x?.facetId ?? "").trim(),
-        why: String(x?.why ?? "").trim(),
-        kbQueries: Array.isArray(x?.kbQueries) ? x.kbQueries.map((q: any) => String(q ?? "").trim()).filter(Boolean) : [],
-      }))
-      .filter((x) => x.facetId),
+      .map((x) => {
+        const facetId = String(x?.facetId ?? "").trim();
+        const why = String(x?.why ?? "").trim();
+        const kbQueries = Array.isArray(x?.kbQueries) ? x.kbQueries.map((q: any) => String(q ?? "").trim()).filter(Boolean) : [];
+        return [facetId, { why, kbQueries }] as const;
+      })
+      .filter(([facetId]) => Boolean(facetId)),
   );
 
   const candidateIds = Array.from(
@@ -970,7 +977,7 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
     const byId = new Map(clustersRaw.map((c: any) => [String(c?.id ?? "").trim(), c]));
     const selected = selectedClusterId ? (byId.get(selectedClusterId) as any) : null;
     const stage = detectWritingStageV1({ userPrompt, todoList });
-    const facetPackId = String(lib?.facetPackId ?? "speech_marketing_v1").trim() || "speech_marketing_v1";
+    const facetPackId = String((lib as any)?.facetPackId ?? "speech_marketing_v1").trim() || "speech_marketing_v1";
     const facetPick = selected
       ? pickFacetsSelectorV1({
           facetPackId,
@@ -1292,7 +1299,7 @@ async function fetchChatStream(args: {
     const url = baseUrl ? `${baseUrl}/api/llm/chat/stream` : "/api/llm/chat/stream";
     return fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeader() },
       body: JSON.stringify({
         model: args.model,
         messages: args.messages,
@@ -1388,7 +1395,7 @@ async function fetchContextSummaryOnce(args: {
     const url = baseUrl ? `${baseUrl}/api/agent/context/summary` : "/api/agent/context/summary";
     return fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeader() },
       body: JSON.stringify({
         preferModelId: args.preferModelId,
         previousSummary: args.previousSummary,
@@ -1814,7 +1821,7 @@ export function startGatewayRun(args: {
       }
       const res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeader() },
         body: JSON.stringify({
           model: args.model,
           mode: args.mode,
@@ -1863,7 +1870,7 @@ export function startGatewayRun(args: {
           : `/api/agent/run/${runId}/tool_result`;
         await fetch(postUrl, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...authHeader() },
           body: JSON.stringify(payload),
           signal: abort.signal,
         });

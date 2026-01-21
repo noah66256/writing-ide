@@ -3,7 +3,10 @@ import path from "node:path";
 
 export type User = {
   id: string;
-  email: string;
+  /** 兼容：允许仅手机号注册/登录；email 可为空（保留位置用于绑定/找回）。 */
+  email: string | null;
+  /** E.164 本地化简化：当前先存纯数字手机号（不带 +86），countryCode 统一默认 86。 */
+  phone: string | null;
   role: "admin" | "user";
   createdAt: string;
   pointsBalance: number; // 积分余额（整数）
@@ -164,7 +167,46 @@ export type CapabilitiesConfig = {
 export type ToolConfig = {
   updatedAt: string;
   webSearch?: WebSearchConfig;
+  smsVerify?: SmsVerifyConfig;
   capabilities?: CapabilitiesConfig;
+};
+
+// ======== SMS Verify Config（B 端热配置：手机号验证码登录/绑定） ========
+
+export type SmsVerifyProvider = "aliyun_dypnsapi";
+
+export type SmsVerifyConfig = {
+  provider: SmsVerifyProvider;
+  isEnabled: boolean;
+  /** 可选：覆盖默认 endpoint（例如 https://dypnsapi.aliyuncs.com 或 dypnsapi.aliyuncs.com） */
+  endpoint: string | null;
+
+  /** AccessKeyId/Secret 加密存储（AES-GCM） */
+  accessKeyIdEnc: string | null;
+  accessKeyIdLast4: string | null;
+  accessKeySecretEnc: string | null;
+  accessKeySecretLast4: string | null;
+
+  /** 方案名称（可选；为空=默认方案）。需要与发送接口一致。 */
+  schemeName: string | null;
+  /** 赠送签名（必填；生产必须配置） */
+  signName: string | null;
+  /** 赠送模板 CODE（必填；生产必须配置） */
+  templateCode: string | null;
+  /** 模板参数 min 的值（分钟，字符串传给 TemplateParam） */
+  templateMin: number | null;
+
+  /** 发送验证码参数（可选，默认会提供合理值） */
+  codeLength: number | null; // 4~8，默认建议 6
+  validTimeSeconds: number | null; // 默认 300
+  duplicatePolicy: number | null; // 1 覆盖（默认），2 保留
+  intervalSeconds: number | null; // 默认 60
+  codeType: number | null; // 1 纯数字（默认）
+  autoRetry: number | null; // 1 开启（默认）
+
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type Db = {
@@ -216,13 +258,17 @@ export async function loadDb(): Promise<Db> {
     const usersRaw = Array.isArray(parsed.users) ? (parsed.users as any[]) : [];
     const users: User[] = usersRaw
       .map((u) => {
-        const email = typeof u?.email === "string" ? u.email : "";
+        const emailRaw = typeof u?.email === "string" ? u.email : "";
+        const phoneRaw = typeof (u as any)?.phone === "string" ? String((u as any).phone) : "";
+        const email = emailRaw.trim() ? emailRaw.trim().toLowerCase() : null;
+        const phone = phoneRaw.trim() ? phoneRaw.trim() : null;
         const role = u?.role === "admin" ? "admin" : "user";
         const pointsBalance = Number.isFinite(u?.pointsBalance) ? Number(u.pointsBalance) : 0;
         const createdAt = typeof u?.createdAt === "string" ? u.createdAt : new Date().toISOString();
         const id = typeof u?.id === "string" ? u.id : "";
-        if (!id || !email) return null;
-        return { id, email, role, pointsBalance, createdAt };
+        // 兼容历史：旧数据一定有 email；新数据允许 phone-only 或 email-only
+        if (!id || (!email && !phone)) return null;
+        return { id, email, phone, role, pointsBalance, createdAt };
       })
       .filter((u): u is User => Boolean(u));
 
@@ -458,6 +504,14 @@ export async function loadDb(): Promise<Db> {
 
       const normList = (v: any) =>
         Array.isArray(v) ? v.map((x: any) => normStr(x)).filter(Boolean).slice(0, 200) : [];
+      const normNum = (v: any) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+      };
+      const normNullableStr = (v: any) => {
+        const s = typeof v === "string" ? String(v).trim() : "";
+        return s ? s : null;
+      };
 
       const webRaw = t?.webSearch && typeof t.webSearch === "object" ? (t.webSearch as any) : null;
       const webSearch: WebSearchConfig | undefined = (() => {
@@ -476,9 +530,75 @@ export async function loadDb(): Promise<Db> {
         return { provider, isEnabled, endpoint, apiKeyEnc, apiKeyLast4, allowDomains, denyDomains, fetchUa, updatedBy, createdAt, updatedAt: updatedAt2 };
       })();
 
+      const smsRaw = t?.smsVerify && typeof t.smsVerify === "object" ? (t.smsVerify as any) : null;
+      const smsVerify: SmsVerifyConfig | undefined = (() => {
+        if (!smsRaw) return undefined;
+        const provider: SmsVerifyProvider = "aliyun_dypnsapi";
+        const isEnabled = smsRaw?.isEnabled === false ? false : true;
+        const endpoint = normNullableStr(smsRaw?.endpoint);
+        const accessKeyIdEnc = typeof smsRaw?.accessKeyIdEnc === "string" ? String(smsRaw.accessKeyIdEnc) : null;
+        const accessKeyIdLast4 = typeof smsRaw?.accessKeyIdLast4 === "string" ? normStr(smsRaw.accessKeyIdLast4) : null;
+        const accessKeySecretEnc = typeof smsRaw?.accessKeySecretEnc === "string" ? String(smsRaw.accessKeySecretEnc) : null;
+        const accessKeySecretLast4 = typeof smsRaw?.accessKeySecretLast4 === "string" ? normStr(smsRaw.accessKeySecretLast4) : null;
+        const schemeName = normNullableStr(smsRaw?.schemeName);
+        const signName = normNullableStr(smsRaw?.signName);
+        const templateCode = normNullableStr(smsRaw?.templateCode);
+        const templateMin = normNum(smsRaw?.templateMin);
+        const codeLength = normNum(smsRaw?.codeLength);
+        const validTimeSeconds = normNum(smsRaw?.validTimeSeconds);
+        const duplicatePolicy = normNum(smsRaw?.duplicatePolicy);
+        const intervalSeconds = normNum(smsRaw?.intervalSeconds);
+        const codeType = normNum(smsRaw?.codeType);
+        const autoRetry = normNum(smsRaw?.autoRetry);
+        const updatedBy = typeof smsRaw?.updatedBy === "string" ? normStr(smsRaw.updatedBy) : null;
+        const createdAt = typeof smsRaw?.createdAt === "string" ? normStr(smsRaw.createdAt) || nowIso : nowIso;
+        const updatedAt2 = typeof smsRaw?.updatedAt === "string" ? normStr(smsRaw.updatedAt) || createdAt : createdAt;
+        return {
+          provider,
+          isEnabled,
+          endpoint,
+          accessKeyIdEnc,
+          accessKeyIdLast4,
+          accessKeySecretEnc,
+          accessKeySecretLast4,
+          schemeName,
+          signName,
+          templateCode,
+          templateMin,
+          codeLength,
+          validTimeSeconds,
+          duplicatePolicy,
+          intervalSeconds,
+          codeType,
+          autoRetry,
+          updatedBy,
+          createdAt,
+          updatedAt: updatedAt2,
+        };
+      })();
+
+      const capsRaw = t?.capabilities && typeof t.capabilities === "object" ? (t.capabilities as any) : null;
+      const capabilities: CapabilitiesConfig | undefined = (() => {
+        if (!capsRaw) return undefined;
+        const tools = capsRaw?.tools && typeof capsRaw.tools === "object" ? capsRaw.tools : { disabledByMode: {} };
+        const skills = capsRaw?.skills && typeof capsRaw.skills === "object" ? capsRaw.skills : { disabled: [] };
+        const updatedBy = typeof capsRaw?.updatedBy === "string" ? normStr(capsRaw.updatedBy) : null;
+        const createdAt = typeof capsRaw?.createdAt === "string" ? normStr(capsRaw.createdAt) || nowIso : nowIso;
+        const updatedAt2 = typeof capsRaw?.updatedAt === "string" ? normStr(capsRaw.updatedAt) || createdAt : createdAt;
+        return {
+          tools: { disabledByMode: tools.disabledByMode ?? {} },
+          skills: { disabled: Array.isArray(skills.disabled) ? skills.disabled.map((x: any) => normStr(x)).filter(Boolean).slice(0, 200) : [] },
+          updatedBy,
+          createdAt,
+          updatedAt: updatedAt2,
+        } as any;
+      })();
+
       const out: ToolConfig = {
         updatedAt,
         ...(webSearch ? { webSearch } : {}),
+        ...(smsVerify ? { smsVerify } : {}),
+        ...(capabilities ? { capabilities } : {}),
       };
       return out;
     })();

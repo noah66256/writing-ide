@@ -1,5 +1,16 @@
 import crypto from "node:crypto";
-import { loadDb, saveDb, updateDb, type CapabilitiesConfig, type Db, type ToolConfig, type ToolMode, type WebSearchConfig } from "./db.js";
+import {
+  loadDb,
+  saveDb,
+  updateDb,
+  type CapabilitiesConfig,
+  type Db,
+  type SmsVerifyConfig,
+  type SmsVerifyProvider,
+  type ToolConfig,
+  type ToolMode,
+  type WebSearchConfig,
+} from "./db.js";
 
 function nowIso() {
   return new Date().toISOString();
@@ -117,6 +128,58 @@ export type WebSearchRuntime = {
   allowDomains: string[];
   denyDomains: string[];
   fetchUa: string | null;
+};
+
+export type SmsVerifyConfigStoredView = Omit<
+  SmsVerifyConfig,
+  "accessKeyIdEnc" | "accessKeyIdLast4" | "accessKeySecretEnc" | "accessKeySecretLast4"
+> & {
+  hasAccessKeyId: boolean;
+  accessKeyIdMasked: string | null;
+  hasAccessKeySecret: boolean;
+  accessKeySecretMasked: string | null;
+};
+
+export type SmsVerifyConfigEffectiveView = {
+  provider: SmsVerifyProvider;
+  isEnabled: boolean;
+  endpoint: string;
+  schemeName: string | null;
+  signName: string | null;
+  templateCode: string | null;
+  templateMin: number | null;
+  codeLength: number | null;
+  validTimeSeconds: number | null;
+  duplicatePolicy: number | null;
+  intervalSeconds: number | null;
+  codeType: number | null;
+  autoRetry: number | null;
+  source: {
+    accessKeyId: "stored" | "env" | "none";
+    accessKeySecret: "stored" | "env" | "none";
+    endpoint: "stored" | "env" | "default";
+    schemeName: "stored" | "env" | "default";
+    signName: "stored" | "env" | "default";
+    templateCode: "stored" | "env" | "default";
+  };
+};
+
+export type SmsVerifyRuntime = {
+  provider: SmsVerifyProvider;
+  isEnabled: boolean;
+  endpoint: string;
+  accessKeyId: string;
+  accessKeySecret: string;
+  schemeName: string | null;
+  signName: string;
+  templateCode: string;
+  templateMin: number;
+  codeLength: number;
+  validTimeSeconds: number;
+  duplicatePolicy: number;
+  intervalSeconds: number;
+  codeType: number;
+  autoRetry: number;
 };
 
 const LOCKED_TOOL_NAMES_V1: string[] = [
@@ -238,6 +301,249 @@ export function createToolConfigService(args?: { cacheTtlMs?: number }) {
     };
     const { apiKeyEnc: _1, apiKeyLast4: _2, ...rest } = base as any;
     return { ...(rest as any), hasApiKey, apiKeyMasked };
+  };
+
+  const getStoredSmsVerify = async (): Promise<SmsVerifyConfigStoredView> => {
+    const tool = await getToolConfig();
+    const sms = tool.smsVerify ?? null;
+    const hasAccessKeyId = Boolean(sms?.accessKeyIdEnc);
+    const hasAccessKeySecret = Boolean(sms?.accessKeySecretEnc);
+    const accessKeyIdMasked = sms?.accessKeyIdLast4 ? `****${sms.accessKeyIdLast4}` : null;
+    const accessKeySecretMasked = sms?.accessKeySecretLast4 ? `****${sms.accessKeySecretLast4}` : null;
+    const t = nowIso();
+    const base: SmsVerifyConfig =
+      sms ?? ({
+        provider: "aliyun_dypnsapi",
+        isEnabled: true,
+        endpoint: null,
+        accessKeyIdEnc: null,
+        accessKeyIdLast4: null,
+        accessKeySecretEnc: null,
+        accessKeySecretLast4: null,
+        schemeName: null,
+        signName: null,
+        templateCode: null,
+        templateMin: 5,
+        codeLength: 6,
+        validTimeSeconds: 300,
+        duplicatePolicy: 1,
+        intervalSeconds: 60,
+        codeType: 1,
+        autoRetry: 1,
+        updatedBy: null,
+        createdAt: t,
+        updatedAt: t,
+      } as any);
+    const {
+      accessKeyIdEnc: _1,
+      accessKeyIdLast4: _2,
+      accessKeySecretEnc: _3,
+      accessKeySecretLast4: _4,
+      ...rest
+    } = base as any;
+    return { ...(rest as any), hasAccessKeyId, accessKeyIdMasked, hasAccessKeySecret, accessKeySecretMasked };
+  };
+
+  const resolveSmsVerifyRuntime = async (): Promise<SmsVerifyRuntime> => {
+    const tool = await getToolConfig();
+    const stored = tool.smsVerify ?? null;
+
+    const endpointDefault = "dypnsapi.aliyuncs.com";
+    const endpointEnv = String(process.env.ALIYUN_DYPNSAPI_ENDPOINT ?? "").trim();
+    const endpoint = (stored?.endpoint && String(stored.endpoint).trim()) || endpointEnv || endpointDefault;
+
+    // SDK 通用环境变量兼容
+    const akidEnv =
+      String(process.env.ALIYUN_ACCESS_KEY_ID ?? "").trim() || String(process.env.ALIBABA_CLOUD_ACCESS_KEY_ID ?? "").trim();
+    const aksEnv =
+      String(process.env.ALIYUN_ACCESS_KEY_SECRET ?? "").trim() ||
+      String(process.env.ALIBABA_CLOUD_ACCESS_KEY_SECRET ?? "").trim();
+    const akidStored = stored?.accessKeyIdEnc ? normalizeApiKeyInput(decryptSecret(stored.accessKeyIdEnc)) : "";
+    const aksStored = stored?.accessKeySecretEnc ? normalizeApiKeyInput(decryptSecret(stored.accessKeySecretEnc)) : "";
+    const accessKeyId = akidStored || akidEnv || "";
+    const accessKeySecret = aksStored || aksEnv || "";
+
+    const schemeEnv = String(process.env.ALIYUN_DYPNSAPI_SCHEME_NAME ?? "").trim();
+    const signEnv = String(process.env.ALIYUN_DYPNSAPI_SIGN_NAME ?? "").trim();
+    const tplEnv = String(process.env.ALIYUN_DYPNSAPI_TEMPLATE_CODE ?? "").trim();
+
+    const schemeName = (stored?.schemeName && String(stored.schemeName).trim()) || schemeEnv || null;
+    const signName = (stored?.signName && String(stored.signName).trim()) || signEnv || "";
+    const templateCode = (stored?.templateCode && String(stored.templateCode).trim()) || tplEnv || "";
+
+    const templateMin = Number.isFinite(stored?.templateMin as any) ? Math.max(1, Math.floor(Number(stored!.templateMin))) : 5;
+    const codeLength =
+      Number.isFinite(stored?.codeLength as any) ? Math.min(8, Math.max(4, Math.floor(Number(stored!.codeLength)))) : 6;
+    const validTimeSeconds =
+      Number.isFinite(stored?.validTimeSeconds as any) ? Math.max(60, Math.floor(Number(stored!.validTimeSeconds))) : 300;
+    const duplicatePolicy =
+      Number.isFinite(stored?.duplicatePolicy as any) ? Math.max(1, Math.min(2, Math.floor(Number(stored!.duplicatePolicy)))) : 1;
+    const intervalSeconds =
+      Number.isFinite(stored?.intervalSeconds as any) ? Math.max(1, Math.floor(Number(stored!.intervalSeconds))) : 60;
+    const codeType = Number.isFinite(stored?.codeType as any) ? Math.max(1, Math.floor(Number(stored!.codeType))) : 1;
+    const autoRetry = Number.isFinite(stored?.autoRetry as any) ? Math.max(0, Math.min(1, Math.floor(Number(stored!.autoRetry)))) : 1;
+
+    const isEnabled = stored ? stored.isEnabled !== false : true;
+
+    return {
+      provider: "aliyun_dypnsapi",
+      isEnabled,
+      endpoint,
+      accessKeyId,
+      accessKeySecret,
+      schemeName,
+      signName,
+      templateCode,
+      templateMin,
+      codeLength,
+      validTimeSeconds,
+      duplicatePolicy,
+      intervalSeconds,
+      codeType,
+      autoRetry,
+    };
+  };
+
+  const getEffectiveSmsVerify = async (): Promise<SmsVerifyConfigEffectiveView> => {
+    const tool = await getToolConfig();
+    const stored = tool.smsVerify ?? null;
+
+    const endpointDefault = "dypnsapi.aliyuncs.com";
+    const endpointEnv = String(process.env.ALIYUN_DYPNSAPI_ENDPOINT ?? "").trim();
+    const endpointStored = stored?.endpoint ? String(stored.endpoint).trim() : "";
+    const endpoint = endpointStored || endpointEnv || endpointDefault;
+    const endpointSrc: SmsVerifyConfigEffectiveView["source"]["endpoint"] = endpointStored ? "stored" : endpointEnv ? "env" : "default";
+
+    const akidEnv =
+      String(process.env.ALIYUN_ACCESS_KEY_ID ?? "").trim() || String(process.env.ALIBABA_CLOUD_ACCESS_KEY_ID ?? "").trim();
+    const aksEnv =
+      String(process.env.ALIYUN_ACCESS_KEY_SECRET ?? "").trim() ||
+      String(process.env.ALIBABA_CLOUD_ACCESS_KEY_SECRET ?? "").trim();
+    const akidStored = stored?.accessKeyIdEnc ? normalizeApiKeyInput(decryptSecret(stored.accessKeyIdEnc)) : "";
+    const aksStored = stored?.accessKeySecretEnc ? normalizeApiKeyInput(decryptSecret(stored.accessKeySecretEnc)) : "";
+    const akidSrc: SmsVerifyConfigEffectiveView["source"]["accessKeyId"] = akidStored ? "stored" : akidEnv ? "env" : "none";
+    const aksSrc: SmsVerifyConfigEffectiveView["source"]["accessKeySecret"] = aksStored ? "stored" : aksEnv ? "env" : "none";
+
+    const schemeEnv = String(process.env.ALIYUN_DYPNSAPI_SCHEME_NAME ?? "").trim();
+    const signEnv = String(process.env.ALIYUN_DYPNSAPI_SIGN_NAME ?? "").trim();
+    const tplEnv = String(process.env.ALIYUN_DYPNSAPI_TEMPLATE_CODE ?? "").trim();
+    const schemeStored = stored?.schemeName ? String(stored.schemeName).trim() : "";
+    const signStored = stored?.signName ? String(stored.signName).trim() : "";
+    const tplStored = stored?.templateCode ? String(stored.templateCode).trim() : "";
+    const schemeName = schemeStored || schemeEnv || null;
+    const signName = signStored || signEnv || null;
+    const templateCode = tplStored || tplEnv || null;
+
+    const schemeSrc: SmsVerifyConfigEffectiveView["source"]["schemeName"] = schemeStored ? "stored" : schemeEnv ? "env" : "default";
+    const signSrc: SmsVerifyConfigEffectiveView["source"]["signName"] = signStored ? "stored" : signEnv ? "env" : "default";
+    const tplSrc: SmsVerifyConfigEffectiveView["source"]["templateCode"] = tplStored ? "stored" : tplEnv ? "env" : "default";
+
+    const isEnabled = stored ? stored.isEnabled !== false : true;
+
+    return {
+      provider: "aliyun_dypnsapi",
+      isEnabled,
+      endpoint,
+      schemeName,
+      signName,
+      templateCode,
+      templateMin: stored?.templateMin ?? null,
+      codeLength: stored?.codeLength ?? null,
+      validTimeSeconds: stored?.validTimeSeconds ?? null,
+      duplicatePolicy: stored?.duplicatePolicy ?? null,
+      intervalSeconds: stored?.intervalSeconds ?? null,
+      codeType: stored?.codeType ?? null,
+      autoRetry: stored?.autoRetry ?? null,
+      source: {
+        accessKeyId: akidSrc,
+        accessKeySecret: aksSrc,
+        endpoint: endpointSrc,
+        schemeName: schemeSrc,
+        signName: signSrc,
+        templateCode: tplSrc,
+      },
+    };
+  };
+
+  const upsertSmsVerify = async (patch: Partial<{
+    isEnabled: boolean;
+    endpoint: string | null;
+    accessKeyId: string;
+    accessKeySecret: string;
+    clearAccessKeyId: boolean;
+    clearAccessKeySecret: boolean;
+    schemeName: string | null;
+    signName: string | null;
+    templateCode: string | null;
+    templateMin: number | null;
+    codeLength: number | null;
+    validTimeSeconds: number | null;
+    duplicatePolicy: number | null;
+    intervalSeconds: number | null;
+    codeType: number | null;
+    autoRetry: number | null;
+    updatedBy: string | null;
+  }>) => {
+    const tool = await getToolConfig();
+    const cur = tool.smsVerify ?? null;
+    const t = nowIso();
+
+    let accessKeyIdEnc = cur?.accessKeyIdEnc ?? null;
+    let accessKeyIdLast4 = cur?.accessKeyIdLast4 ?? null;
+    if (patch.clearAccessKeyId) {
+      accessKeyIdEnc = null;
+      accessKeyIdLast4 = null;
+    } else if (patch.accessKeyId !== undefined) {
+      const k = String(patch.accessKeyId ?? "").trim();
+      if (k) {
+        const enc = encryptSecret(k);
+        accessKeyIdEnc = enc.enc;
+        accessKeyIdLast4 = enc.last4;
+      }
+    }
+
+    let accessKeySecretEnc = cur?.accessKeySecretEnc ?? null;
+    let accessKeySecretLast4 = cur?.accessKeySecretLast4 ?? null;
+    if (patch.clearAccessKeySecret) {
+      accessKeySecretEnc = null;
+      accessKeySecretLast4 = null;
+    } else if (patch.accessKeySecret !== undefined) {
+      const k = String(patch.accessKeySecret ?? "").trim();
+      if (k) {
+        const enc = encryptSecret(k);
+        accessKeySecretEnc = enc.enc;
+        accessKeySecretLast4 = enc.last4;
+      }
+    }
+
+    const next: SmsVerifyConfig = {
+      provider: "aliyun_dypnsapi",
+      isEnabled: patch.isEnabled !== undefined ? Boolean(patch.isEnabled) : cur ? cur.isEnabled !== false : true,
+      endpoint: patch.endpoint !== undefined ? (patch.endpoint ? String(patch.endpoint).trim() : null) : cur?.endpoint ?? null,
+      accessKeyIdEnc,
+      accessKeyIdLast4,
+      accessKeySecretEnc,
+      accessKeySecretLast4,
+      schemeName: patch.schemeName !== undefined ? (patch.schemeName ? String(patch.schemeName).trim() : null) : cur?.schemeName ?? null,
+      signName: patch.signName !== undefined ? (patch.signName ? String(patch.signName).trim() : null) : cur?.signName ?? null,
+      templateCode:
+        patch.templateCode !== undefined ? (patch.templateCode ? String(patch.templateCode).trim() : null) : cur?.templateCode ?? null,
+      templateMin: patch.templateMin !== undefined ? (patch.templateMin === null ? null : Math.floor(Number(patch.templateMin))) : cur?.templateMin ?? null,
+      codeLength: patch.codeLength !== undefined ? (patch.codeLength === null ? null : Math.floor(Number(patch.codeLength))) : cur?.codeLength ?? null,
+      validTimeSeconds:
+        patch.validTimeSeconds !== undefined ? (patch.validTimeSeconds === null ? null : Math.floor(Number(patch.validTimeSeconds))) : cur?.validTimeSeconds ?? null,
+      duplicatePolicy:
+        patch.duplicatePolicy !== undefined ? (patch.duplicatePolicy === null ? null : Math.floor(Number(patch.duplicatePolicy))) : cur?.duplicatePolicy ?? null,
+      intervalSeconds:
+        patch.intervalSeconds !== undefined ? (patch.intervalSeconds === null ? null : Math.floor(Number(patch.intervalSeconds))) : cur?.intervalSeconds ?? null,
+      codeType: patch.codeType !== undefined ? (patch.codeType === null ? null : Math.floor(Number(patch.codeType))) : cur?.codeType ?? null,
+      autoRetry: patch.autoRetry !== undefined ? (patch.autoRetry === null ? null : Math.floor(Number(patch.autoRetry))) : cur?.autoRetry ?? null,
+      updatedBy: patch.updatedBy !== undefined ? patch.updatedBy : cur?.updatedBy ?? null,
+      createdAt: cur?.createdAt ?? t,
+      updatedAt: t,
+    };
+
+    await saveToolConfig({ ...tool, smsVerify: next, updatedAt: nowIso() });
   };
 
   const resolveWebSearchRuntime = async (): Promise<WebSearchRuntime> => {
@@ -489,6 +795,10 @@ export function createToolConfigService(args?: { cacheTtlMs?: number }) {
     resolveWebSearchRuntime,
     upsertWebSearch,
     testWebSearch,
+    getStoredSmsVerify,
+    getEffectiveSmsVerify,
+    resolveSmsVerifyRuntime,
+    upsertSmsVerify,
     getStoredCapabilities,
     resolveCapabilitiesRuntime,
     upsertCapabilities,

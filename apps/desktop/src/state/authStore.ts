@@ -1,0 +1,180 @@
+import { create } from "zustand";
+import { persist } from "zustand/middleware";
+import { getGatewayBaseUrl } from "../agent/gatewayUrl";
+
+export type AuthUser = {
+  id: string;
+  email: string | null;
+  phone: string | null;
+  role: "admin" | "user";
+  pointsBalance: number;
+};
+
+type PhoneRequestRet = { requestId: string; expiresInSeconds: number; devCode?: string };
+type EmailRequestRet = { requestId: string; expiresInSeconds: number; devCode?: string };
+
+type AuthState = {
+  accessToken: string;
+  user: AuthUser | null;
+  busy: boolean;
+  error: string;
+
+  setAccessToken: (token: string) => void;
+  logout: () => void;
+
+  init: () => Promise<void>;
+  refreshMe: () => Promise<void>;
+  refreshPoints: () => Promise<void>;
+
+  requestPhoneCode: (args: { phoneNumber: string; countryCode?: string }) => Promise<PhoneRequestRet>;
+  verifyPhoneCode: (args: { phoneNumber: string; countryCode?: string; requestId: string; code: string }) => Promise<void>;
+
+  requestEmailCode: (email: string) => Promise<EmailRequestRet>;
+  verifyEmailCode: (args: { email: string; requestId: string; code: string }) => Promise<void>;
+
+  listTransactions: () => Promise<Array<{ id: string; type: string; delta: number; createdAt: string; reason?: string; meta?: any }>>;
+};
+
+function apiUrl(path: string) {
+  const base = getGatewayBaseUrl();
+  return base ? `${base}${path}` : path;
+}
+
+async function apiFetchJson<T>(path: string, init?: RequestInit & { auth?: boolean }) {
+  const auth = init?.auth !== false;
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(init?.headers as any),
+  };
+  if (auth) {
+    const token = useAuthStore.getState().accessToken;
+    if (token) headers.Authorization = `Bearer ${token}`;
+  }
+  const res = await fetch(apiUrl(path), { ...init, headers, cache: "no-store" });
+  const text = await res.text().catch(() => "");
+  const json = (() => {
+    try {
+      return text ? JSON.parse(text) : null;
+    } catch {
+      return null;
+    }
+  })();
+  if (!res.ok) {
+    const code = (json && typeof json === "object" && (json as any).error) ? String((json as any).error) : `HTTP_${res.status}`;
+    const detail = json && typeof json === "object" ? (json as any).detail : text;
+    const err = new Error(code);
+    (err as any).code = code;
+    (err as any).detail = detail;
+    throw err;
+  }
+  return json as T;
+}
+
+export const useAuthStore = create<AuthState>()(
+  persist(
+    (set, get) => ({
+      accessToken: "",
+      user: null,
+      busy: false,
+      error: "",
+
+      setAccessToken: (token) => set({ accessToken: String(token ?? "").trim() }),
+      logout: () => set({ accessToken: "", user: null, error: "" }),
+
+      init: async () => {
+        const token = String(get().accessToken ?? "").trim();
+        if (!token) return;
+        await get().refreshMe().catch(() => void 0);
+      },
+
+      refreshMe: async () => {
+        set({ busy: true, error: "" });
+        try {
+          const res = await apiFetchJson<{ user: AuthUser }>("/api/me", { method: "GET" });
+          set({ user: res.user ?? null });
+        } catch (e: any) {
+          // token 失效：直接登出，避免死循环
+          set({ accessToken: "", user: null, error: String(e?.code ?? e?.message ?? e) });
+        } finally {
+          set({ busy: false });
+        }
+      },
+
+      refreshPoints: async () => {
+        const u = get().user;
+        if (!u) return;
+        try {
+          const r = await apiFetchJson<{ pointsBalance: number }>("/api/points/balance", { method: "GET" });
+          set({ user: { ...u, pointsBalance: Number(r.pointsBalance ?? 0) } });
+        } catch {
+          // ignore
+        }
+      },
+
+      requestPhoneCode: async (args) => {
+        const r = await apiFetchJson<PhoneRequestRet>("/api/auth/phone/request-code", {
+          method: "POST",
+          auth: false,
+          body: JSON.stringify({ phoneNumber: args.phoneNumber, countryCode: args.countryCode ?? "86" }),
+        });
+        return r;
+      },
+
+      verifyPhoneCode: async (args) => {
+        set({ busy: true, error: "" });
+        try {
+          const r = await apiFetchJson<{ accessToken: string; user: AuthUser }>("/api/auth/phone/verify", {
+            method: "POST",
+            auth: false,
+            body: JSON.stringify({
+              phoneNumber: args.phoneNumber,
+              countryCode: args.countryCode ?? "86",
+              requestId: args.requestId,
+              code: args.code,
+            }),
+          });
+          set({ accessToken: String(r.accessToken ?? "").trim(), user: r.user ?? null });
+        } catch (e: any) {
+          set({ error: String(e?.code ?? e?.message ?? e) });
+          throw e;
+        } finally {
+          set({ busy: false });
+        }
+      },
+
+      requestEmailCode: async (email) => {
+        const r = await apiFetchJson<EmailRequestRet>("/api/auth/email/request-code", {
+          method: "POST",
+          auth: false,
+          body: JSON.stringify({ email }),
+        });
+        return r;
+      },
+
+      verifyEmailCode: async (args) => {
+        set({ busy: true, error: "" });
+        try {
+          const r = await apiFetchJson<{ accessToken: string; user: AuthUser }>("/api/auth/email/verify", {
+            method: "POST",
+            auth: false,
+            body: JSON.stringify(args),
+          });
+          set({ accessToken: String(r.accessToken ?? "").trim(), user: r.user ?? null });
+        } catch (e: any) {
+          set({ error: String(e?.code ?? e?.message ?? e) });
+          throw e;
+        } finally {
+          set({ busy: false });
+        }
+      },
+
+      listTransactions: async () => {
+        const r = await apiFetchJson<{ transactions: any[] }>("/api/points/transactions", { method: "GET" });
+        return Array.isArray(r.transactions) ? r.transactions : [];
+      },
+    }),
+    { name: "writing-ide.auth.v1" },
+  ),
+);
+
+

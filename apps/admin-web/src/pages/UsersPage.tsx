@@ -48,12 +48,18 @@ export function UsersPage() {
   const filtered = useMemo(() => {
     const kw = q.trim().toLowerCase();
     if (!kw) return users;
-    return users.filter((u) => u.email.toLowerCase().includes(kw) || u.id.toLowerCase().includes(kw));
+    return users.filter((u) => {
+      const email = String(u.email ?? "").toLowerCase();
+      const phone = String((u as any).phone ?? "").toLowerCase();
+      const id = String(u.id ?? "").toLowerCase();
+      return email.includes(kw) || phone.includes(kw) || id.includes(kw);
+    });
   }, [users, q]);
 
   const onToggleRole = async (u: UserDto) => {
     const next: UserRole = u.role === "admin" ? "user" : "admin";
-    if (!confirm(`确认把 ${u.email} 的角色改为 ${next}？`)) return;
+    const label = String(u.phone ?? u.email ?? u.id);
+    if (!confirm(`确认把 ${label} 的角色改为 ${next}？`)) return;
     setBusy(true);
     setError("");
     try {
@@ -110,7 +116,7 @@ export function UsersPage() {
       <div className="pageHeader">
         <div className="pageTitle">用户管理</div>
         <div className="pageActions">
-          <input className="input" placeholder="搜索 email / id" value={q} onChange={(e) => setQ(e.target.value)} />
+          <input className="input" placeholder="搜索 phone / email / id" value={q} onChange={(e) => setQ(e.target.value)} />
           <button className="btn" type="button" onClick={() => void refresh()} disabled={busy}>
             刷新
           </button>
@@ -123,7 +129,7 @@ export function UsersPage() {
         <table className="table">
           <thead>
             <tr>
-              <th>邮箱</th>
+              <th>账号</th>
               <th>角色</th>
               <th>积分</th>
               <th>创建时间</th>
@@ -134,9 +140,9 @@ export function UsersPage() {
             {filtered.map((u) => (
               <tr key={u.id}>
                 <td>
-                  <div style={{ fontWeight: 600 }}>{u.email}</div>
+                  <div style={{ fontWeight: 600 }}>{u.phone ?? u.email ?? "（无）"}</div>
                   <div className="muted" style={{ fontSize: 12 }}>
-                    {u.id}
+                    {u.email ? `email: ${u.email}` : "email: （未绑定）"} · {u.phone ? `phone: ${u.phone}` : "phone: （未绑定）"} · {u.id}
                   </div>
                 </td>
                 <td>
@@ -190,7 +196,7 @@ export function UsersPage() {
             </div>
 
             <div className="muted" style={{ marginBottom: 8 }}>
-              {drawerUser.email} · {drawerUser.id}
+              {drawerUser.phone ?? drawerUser.email ?? "（无）"} · {drawerUser.id}
             </div>
 
             {txError ? <div className="error">{txError}</div> : null}

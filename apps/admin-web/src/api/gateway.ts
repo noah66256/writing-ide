@@ -4,7 +4,8 @@ export type UserRole = "admin" | "user";
 
 export type UserDto = {
   id: string;
-  email: string;
+  email: string | null;
+  phone?: string | null;
   role: UserRole;
   pointsBalance: number;
   createdAt: string;
@@ -336,7 +337,7 @@ export async function verifyEmailCode(args: { email: string; requestId: string; 
 }
 
 export async function getMe() {
-  return apiFetchJson<{ user: Pick<UserDto, "id" | "email" | "role" | "pointsBalance"> }>("/api/me");
+  return apiFetchJson<{ user: Pick<UserDto, "id" | "email" | "phone" | "role" | "pointsBalance"> }>("/api/me");
 }
 
 export async function adminListUsers() {
@@ -434,6 +435,82 @@ export async function toolConfigUpdateWebSearch(body: Partial<{
 
 export async function toolConfigTestWebSearch(body: { query: string }) {
   return apiFetchJson<{ ok: true; latencyMs: number; resultCount: number }>("/api/tool-config/web-search/test", { method: "POST", body: JSON.stringify(body) });
+}
+
+export type SmsVerifyConfigStoredDto = {
+  provider: "aliyun_dypnsapi";
+  isEnabled: boolean;
+  endpoint: string | null;
+  schemeName: string | null;
+  signName: string | null;
+  templateCode: string | null;
+  templateMin: number | null;
+  codeLength: number | null;
+  validTimeSeconds: number | null;
+  duplicatePolicy: number | null;
+  intervalSeconds: number | null;
+  codeType: number | null;
+  autoRetry: number | null;
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  hasAccessKeyId: boolean;
+  accessKeyIdMasked: string | null;
+  hasAccessKeySecret: boolean;
+  accessKeySecretMasked: string | null;
+};
+
+export type SmsVerifyConfigEffectiveDto = {
+  provider: "aliyun_dypnsapi";
+  isEnabled: boolean;
+  endpoint: string;
+  schemeName: string | null;
+  signName: string | null;
+  templateCode: string | null;
+  templateMin: number | null;
+  codeLength: number | null;
+  validTimeSeconds: number | null;
+  duplicatePolicy: number | null;
+  intervalSeconds: number | null;
+  codeType: number | null;
+  autoRetry: number | null;
+  source: {
+    accessKeyId: "stored" | "env" | "none";
+    accessKeySecret: "stored" | "env" | "none";
+    endpoint: "stored" | "env" | "default";
+    schemeName: "stored" | "env" | "default";
+    signName: "stored" | "env" | "default";
+    templateCode: "stored" | "env" | "default";
+  };
+};
+
+export async function toolConfigGetSmsVerify() {
+  return apiFetchJson<{ stored: SmsVerifyConfigStoredDto; effective: SmsVerifyConfigEffectiveDto }>("/api/tool-config/sms-verify");
+}
+
+export async function toolConfigUpdateSmsVerify(body: Partial<{
+  isEnabled: boolean;
+  endpoint: string | null;
+  accessKeyId: string;
+  accessKeySecret: string;
+  clearAccessKeyId: boolean;
+  clearAccessKeySecret: boolean;
+  schemeName: string | null;
+  signName: string | null;
+  templateCode: string | null;
+  templateMin: number | null;
+  codeLength: number | null;
+  validTimeSeconds: number | null;
+  duplicatePolicy: number | null;
+  intervalSeconds: number | null;
+  codeType: number | null;
+  autoRetry: number | null;
+}>) {
+  return apiFetchJson<{ ok: true }>("/api/tool-config/sms-verify", { method: "PUT", body: JSON.stringify(body) });
+}
+
+export async function toolConfigTestSmsVerify() {
+  return apiFetchJson<{ ok: true; configured: boolean }>("/api/tool-config/sms-verify/test", { method: "POST", body: JSON.stringify({}) });
 }
 
 export type CapabilitiesToolDto = {

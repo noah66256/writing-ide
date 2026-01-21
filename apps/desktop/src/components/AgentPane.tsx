@@ -12,6 +12,7 @@ import { useKbStore } from "../state/kbStore";
 import { useConversationStore, type RunSnapshot, type SerializableStep } from "../state/conversationStore";
 import { ModelPickerModal, type ModelPickerItem } from "./ModelPickerModal";
 import { getGatewayBaseUrl } from "../agent/gatewayUrl";
+import { useAuthStore } from "../state/authStore";
 
 type RunController = { cancel: () => void };
 
@@ -380,6 +381,13 @@ export function AgentPane() {
     controllerRef.current?.cancel();
     if (!model) {
       useRunStore.getState().addAssistant("（未选择模型：请先启动 Gateway 并选择一个模型）");
+      return;
+    }
+
+    // 真实积分：要求先登录再使用 AI（离线写作不受影响）
+    const me = useAuthStore.getState().user;
+    if (!me) {
+      useRunStore.getState().addAssistant("（未登录：请先点左下角【设置】用手机号验证码登录；登录后会启用真实积分扣费与余额展示。）");
       return;
     }
 

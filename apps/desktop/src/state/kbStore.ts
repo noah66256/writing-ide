@@ -4003,7 +4003,7 @@ export const useKbStore = create<KbState>()(
                       .trim()
                       .slice(0, 200);
                     return {
-                      v: 1,
+                      v: 1 as const,
                       libraryId: libId,
                       sourceDocId: x.sourceDocId,
                       importedFrom: (doc as any)?.importedFrom,
