@@ -524,6 +524,49 @@ sudo spctl --master-enable
 1) 人为构造：让 workflow budget 耗尽，但 WebGate 仍需要 `web.fetch`。  
 2) 观察日志：应仍能看到 `WebGatePolicy: retry`（budget=protocol），并继续要求 `<tool_calls>` 调用 `web.fetch`。  
 3) 不应再出现“仍需 fetch 但直接 run.end(text) + 空输出兜底”。
+
+---
+
+### 18) WebGate 卡在 need_fetch：模型不调用 web.fetch（或一直输出纯文本）导致反复重试/预算耗尽
+
+#### 现象
+- 日志/诊断显示：`need_web_fetch`、`SkillToolCapsPolicy phase=web_need_fetch`
+- 但模型没有发出 `web.fetch` tool_call（或反复输出纯文本）
+- 结果：反复重试直到预算耗尽，严重时会走“空输出兜底”
+
+#### 根因
+- `web_need_fetch` 阶段严格只放行 `web.fetch`，但模型拿不到/看不见可用 URL（或被其它上下文牵引到 kb.search 等）
+- 旧提示文案误导为“系统会自动调用 web.search/web.fetch”，导致模型/用户预期不一致
+
+#### 修复
+- Gateway 缓存最近一次 `web.search` 的候选 URL（用于后续直接提示）
+- `web_need_fetch` 阶段提示中直接列出候选 URL（降低“不会 fetch”的概率）
+- 兜底：若已具备候选 URL 但仍卡死，Gateway **自动补 1 次** `web.fetch` 并注入 tool_result（仅一次，避免无限循环）
+- 代码位置：`apps/gateway/src/index.ts`
+
+#### 验证
+1) 触发一个需要联网证据的任务，确保至少发生过一次 `web.search`。  
+2) 让 Run 进入 `web_need_fetch`：提示里应出现“候选 URL”。  
+3) 若模型仍不 fetch，日志应出现 `WebGatePolicy decision=auto_fetch`，随后能继续产出最终回答。
+
+---
+
+### 19) UI 看起来“空白结束”：run.end 了但看不到任何兜底文本
+
+#### 现象
+- Gateway 日志显示 `run.end(reason=text)`，但 Desktop UI 没有任何输出气泡
+
+#### 根因
+- Gateway 在“空输出兜底”分支发送 `assistant.delta` 时缺少 `turn` 字段
+- Desktop 侧按 `turn` 归属/切分气泡，导致该 delta 丢失或无法归属
+
+#### 修复
+- Gateway 兜底 `assistant.delta` 统一携带 `turn`
+- 代码位置：`apps/gateway/src/index.ts`
+
+#### 验证
+1) 人为构造一次“模型最终输出为空”的场景。  
+2) UI 必须能看到兜底文本，不应再出现“空白结束”。
 ### 4) Git Bash 下 Windows 命令参数被“路径转换”坑到（taskkill/…）
 
 #### 现象
