@@ -34,6 +34,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -141,11 +142,19 @@ def main() -> int:
             scp_cmd += ["-i", str(args.ssh_key)]
 
         # 1) mkdir -p remoteDir
-        mkdir_cmd = ssh_cmd + [args.ssh, f"mkdir -p {args.remote_dir}"]
+        # 重要：Windows Git Bash 下 args.remote_dir 可能会被 MSYS 路径转换污染（例如 /www/... 变成 C:/Program Files/Git/www/...）。
+        # 这里对 remote_dir 做一次“强制还原”：
+        # - 如果出现 "C:/Program Files/Git/www/..." 这种形式，截取从 "/www/" 开始的部分
+        # - 只在明显被污染时处理，不影响正常 Linux 路径
+        remote_dir = str(args.remote_dir)
+        m = re.search(r"(/www/.*)$", remote_dir)
+        if m:
+            remote_dir = m.group(1)
+        mkdir_cmd = ssh_cmd + [args.ssh, f"mkdir -p {remote_dir}"]
 
         # 2) 上传：installer 到 remoteDir（目录末尾 /，避免处理带空格的远端文件路径 quoting）
-        scp_exe_cmd = scp_cmd + [installer, f"{args.ssh}:{args.remote_dir}/"]
-        scp_latest_cmd = scp_cmd + [latest_path, f"{args.ssh}:{args.remote_dir}/latest.json"]
+        scp_exe_cmd = scp_cmd + [installer, f"{args.ssh}:{remote_dir}/"]
+        scp_latest_cmd = scp_cmd + [latest_path, f"{args.ssh}:{remote_dir}/latest.json"]
 
         print("-" * 60)
         print("[i] 将执行：")
