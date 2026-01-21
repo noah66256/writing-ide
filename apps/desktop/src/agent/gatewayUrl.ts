@@ -15,6 +15,8 @@ function normalizeGatewayUrlOrEmpty(raw: string): string {
   s = s.replace(/^http:\/(?!\/)/i, "http://").replace(/^https:\/(?!\/)/i, "https://");
   // 没有协议时默认补 http://（用户常直接填 120.26.6.147:8000）
   if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(s)) s = `http://${s}`;
+  // 用户常把完整接口 base（带 /api）粘贴进来：统一把末尾 /api 去掉，避免拼接时变成 /apikb 或 /api/api/...
+  s = s.replace(/\/api\/?$/i, "");
   return trimSlash(s);
 }
 

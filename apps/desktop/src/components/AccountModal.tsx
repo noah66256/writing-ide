@@ -8,6 +8,7 @@ function normalizeGatewayUrlOrEmpty(raw: string) {
   s = s.replace(/\s+/g, "");
   s = s.replace(/^http:\/(?!\/)/i, "http://").replace(/^https:\/(?!\/)/i, "https://");
   if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(s)) s = `http://${s}`;
+  s = s.replace(/\/api\/?$/i, "");
   return s.replace(/\/+$/g, "");
 }
 
