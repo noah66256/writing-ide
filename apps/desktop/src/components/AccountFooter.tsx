@@ -10,7 +10,9 @@ export function AccountFooter() {
   const download = useUpdateStore((s) => s.download);
   const [version, setVersion] = useState<string>("");
   const [accountOpen, setAccountOpen] = useState(false);
-  const [loginOpen, setLoginOpen] = useState(false);
+  const loginOpen = useAuthStore((s) => s.loginModalOpen);
+  const openLoginModal = useAuthStore((s) => s.openLoginModal);
+  const closeLoginModal = useAuthStore((s) => s.closeLoginModal);
 
   const user = useAuthStore((s) => s.user);
   const accessToken = useAuthStore((s) => s.accessToken);
@@ -37,9 +39,9 @@ export function AccountFooter() {
         role="button"
         tabIndex={0}
         title={user ? "账户" : "登录"}
-        onClick={() => (user ? setAccountOpen(true) : setLoginOpen(true))}
+        onClick={() => (user ? setAccountOpen(true) : openLoginModal())}
         onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") (user ? setAccountOpen(true) : setLoginOpen(true));
+          if (e.key === "Enter" || e.key === " ") (user ? setAccountOpen(true) : openLoginModal());
         }}
       >
         <span>我</span>
@@ -49,9 +51,9 @@ export function AccountFooter() {
         role="button"
         tabIndex={0}
         title={user ? "账户" : "登录"}
-        onClick={() => (user ? setAccountOpen(true) : setLoginOpen(true))}
+        onClick={() => (user ? setAccountOpen(true) : openLoginModal())}
         onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") (user ? setAccountOpen(true) : setLoginOpen(true));
+          if (e.key === "Enter" || e.key === " ") (user ? setAccountOpen(true) : openLoginModal());
         }}
       >
         <div className="accountName">
@@ -90,13 +92,13 @@ export function AccountFooter() {
         设置
       </button>
     </div>
-    <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} />
+    <LoginModal open={loginOpen} onClose={() => closeLoginModal()} />
     <AccountModal
       open={accountOpen}
       onClose={() => setAccountOpen(false)}
       onOpenLogin={() => {
         setAccountOpen(false);
-        setLoginOpen(true);
+        openLoginModal();
       }}
     />
     </>

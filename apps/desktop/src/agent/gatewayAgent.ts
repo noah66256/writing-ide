@@ -12,6 +12,18 @@ function authHeader(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+function requireLoginForLlm(args?: { why?: string }) {
+  const token = String(useAuthStore.getState().accessToken ?? "").trim();
+  if (token) return { ok: true as const };
+  try {
+    useAuthStore.getState().openLoginModal?.();
+    useAuthStore.setState({ error: args?.why ? `请先登录再使用：${args.why}` : "请先登录再使用 AI 功能" });
+  } catch {
+    // ignore
+  }
+  return { ok: false as const };
+}
+
 type GatewayRunController = {
   cancel: () => void;
 };
@@ -1770,6 +1782,17 @@ export function startGatewayRun(args: {
       const url = args.gatewayUrl ? `${args.gatewayUrl}/api/agent/run/stream` : "/api/agent/run/stream";
 
       setActivity("正在请求模型…", { resetTimer: true });
+
+      // 前端硬门禁：未登录直接提示并弹窗（避免“卡住/没反应”的错觉）
+      if (!requireLoginForLlm({ why: "未登录无法使用基于 LLM 的功能" }).ok) {
+        const a = addAssistant("", false, false);
+        patchAssistant(a, { hidden: false });
+        appendAssistantDelta(a, "\n\n[需要登录] 未登录无法使用 AI 功能，请先登录后再试。");
+        finishAssistant(a);
+        setRunning(false);
+        setActivity(null);
+        return;
+      }
       // toolSidecar：用于“工具逐步迁回 Gateway”时携带必要的本地只读上下文（不注入模型 messages，避免 token 爆炸）
       const toolSidecar = await (async () => {
         const proj = useProjectStore.getState();
@@ -1838,6 +1861,40 @@ export function startGatewayRun(args: {
       log("info", "gateway.agent.response", { status: res.status });
       if (!res.ok || !res.body) {
         const text = await res.text().catch(() => "");
+        let parsed: any = null;
+        try {
+          parsed = text ? JSON.parse(text) : null;
+        } catch {
+          parsed = null;
+        }
+        const code = parsed?.error ? String(parsed.error) : "";
+        if (res.status === 401 || code === "UNAUTHORIZED") {
+          try {
+            useAuthStore.getState().logout?.();
+            useAuthStore.getState().openLoginModal?.();
+            useAuthStore.setState({ error: "请先登录再使用 AI 功能" });
+          } catch {
+            // ignore
+          }
+          const a = addAssistant("", false, false);
+          patchAssistant(a, { hidden: false });
+          appendAssistantDelta(a, "\n\n[需要登录] 请先登录再使用 AI 功能。");
+          finishAssistant(a);
+          setRunning(false);
+          setActivity(null);
+          return;
+        }
+        if (res.status === 402 || code === "INSUFFICIENT_POINTS") {
+          const bal = Number(parsed?.pointsBalance);
+          const a = addAssistant("", false, false);
+          patchAssistant(a, { hidden: false });
+          appendAssistantDelta(a, `\n\n[积分不足] 当前积分余额：${Number.isFinite(bal) ? Math.max(0, Math.floor(bal)) : "未知"}。请先充值积分后再使用 AI 功能。`);
+          finishAssistant(a);
+          setRunning(false);
+          setActivity(null);
+          return;
+        }
+
         const a = addAssistant("", false, false);
         patchAssistant(a, { hidden: false });
         appendAssistantDelta(a, `\n\n[Gateway 错误] ${text || `HTTP_${res.status}`}`);

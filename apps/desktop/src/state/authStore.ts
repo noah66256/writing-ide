@@ -18,9 +18,12 @@ type AuthState = {
   user: AuthUser | null;
   busy: boolean;
   error: string;
+  loginModalOpen: boolean;
 
   setAccessToken: (token: string) => void;
   logout: () => void;
+  openLoginModal: () => void;
+  closeLoginModal: () => void;
 
   init: () => Promise<void>;
   refreshMe: () => Promise<void>;
@@ -77,9 +80,12 @@ export const useAuthStore = create<AuthState>()(
       user: null,
       busy: false,
       error: "",
+      loginModalOpen: false,
 
       setAccessToken: (token) => set({ accessToken: String(token ?? "").trim() }),
       logout: () => set({ accessToken: "", user: null, error: "" }),
+      openLoginModal: () => set({ loginModalOpen: true }),
+      closeLoginModal: () => set({ loginModalOpen: false }),
 
       init: async () => {
         const token = String(get().accessToken ?? "").trim();

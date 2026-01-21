@@ -1601,7 +1601,15 @@ async function fetchEmbedding(args: { model?: string; input: string }): Promise<
   const gatewayUrl = getGatewayUrl();
   const url = gatewayUrl ? `${gatewayUrl}/api/llm/embeddings` : "/api/llm/embeddings";
   const auth = authHeader();
-  if (!auth.Authorization) return { ok: false, error: "AUTH_REQUIRED" };
+  if (!auth.Authorization) {
+    try {
+      useAuthStore.getState().openLoginModal?.();
+      useAuthStore.setState({ error: "请先登录再使用 AI/知识库向量能力" });
+    } catch {
+      // ignore
+    }
+    return { ok: false, error: "AUTH_REQUIRED" };
+  }
   try {
     const body: any = { input: args.input };
     if (args.model) body.model = args.model;
@@ -1612,6 +1620,16 @@ async function fetchEmbedding(args: { model?: string; input: string }): Promise<
     });
     const json = await res.json().catch(() => null);
     if (!res.ok) {
+      const code = json?.error ? String(json.error) : "";
+      if (res.status === 401 || code === "UNAUTHORIZED") {
+        try {
+          useAuthStore.getState().logout?.();
+          useAuthStore.getState().openLoginModal?.();
+          useAuthStore.setState({ error: "请先登录再使用 AI/知识库向量能力" });
+        } catch {
+          // ignore
+        }
+      }
       const detail = json?.detail ? JSON.stringify(json.detail).slice(0, 300) : JSON.stringify(json).slice(0, 300);
       return { ok: false, error: `EMBEDDINGS_HTTP_${res.status}:${detail}` };
     }
@@ -1630,7 +1648,15 @@ async function fetchEmbeddingsBatch(args: {
   const gatewayUrl = getGatewayUrl();
   const url = gatewayUrl ? `${gatewayUrl}/api/llm/embeddings` : "/api/llm/embeddings";
   const auth = authHeader();
-  if (!auth.Authorization) return { ok: false, error: "AUTH_REQUIRED" };
+  if (!auth.Authorization) {
+    try {
+      useAuthStore.getState().openLoginModal?.();
+      useAuthStore.setState({ error: "请先登录再使用 AI/知识库向量能力" });
+    } catch {
+      // ignore
+    }
+    return { ok: false, error: "AUTH_REQUIRED" };
+  }
   const inputs = Array.isArray(args.inputs) ? args.inputs.map((s) => String(s ?? "")) : [];
   if (!inputs.length) return { ok: false, error: "EMBEDDINGS_EMPTY_INPUTS" };
   try {
@@ -1643,6 +1669,16 @@ async function fetchEmbeddingsBatch(args: {
     });
     const json = await res.json().catch(() => null);
     if (!res.ok) {
+      const code = json?.error ? String(json.error) : "";
+      if (res.status === 401 || code === "UNAUTHORIZED") {
+        try {
+          useAuthStore.getState().logout?.();
+          useAuthStore.getState().openLoginModal?.();
+          useAuthStore.setState({ error: "请先登录再使用 AI/知识库向量能力" });
+        } catch {
+          // ignore
+        }
+      }
       const detail = json?.detail ? JSON.stringify(json.detail).slice(0, 300) : JSON.stringify(json).slice(0, 300);
       return { ok: false, error: `EMBEDDINGS_HTTP_${res.status}:${detail}` };
     }
