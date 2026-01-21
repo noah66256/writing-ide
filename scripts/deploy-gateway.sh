@@ -62,6 +62,9 @@ echo "[remote] before=\$(git rev-parse --short HEAD)"
 git pull --rebase origin ${BRANCH}
 echo "[remote] after=\$(git rev-parse --short HEAD)"
 
+echo "[remote] npm install"
+npm install --no-audit --no-fund
+
 npm -w @writing-ide/gateway run build
 
 pm2 restart ${PM2_APP} --update-env
