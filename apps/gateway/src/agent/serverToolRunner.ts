@@ -370,6 +370,7 @@ export async function executeLintStyleOnGateway(args: {
   fastify: FastifyInstance;
   call: any;
   styleLinterLibraries: any[];
+  authorization?: string | null;
 }) {
   const call = args.call;
   const text = typeof (call?.args as any)?.text === "string" ? String((call.args as any).text) : "";
@@ -394,7 +395,10 @@ export async function executeLintStyleOnGateway(args: {
   const injected = await args.fastify.inject({
     method: "POST",
     url: "/api/kb/dev/lint_style",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(args.authorization ? { Authorization: String(args.authorization) } : {}),
+    },
     payload: {
       ...(modelArg ? { model: modelArg } : {}),
       maxIssues,
@@ -449,12 +453,20 @@ export async function executeServerToolOnGateway(args: {
   call: any;
   toolSidecar: ToolSidecar | null;
   styleLinterLibraries: any[];
+  authorization?: string | null;
 }) {
   const name = String(args.call?.name ?? "").trim();
   if (name === "time.now") return executeTimeNowOnGateway();
   if (name === "web.search") return executeWebSearchOnGateway({ call: args.call });
   if (name === "web.fetch") return executeWebFetchOnGateway({ call: args.call });
-  if (name === "lint.style") return executeLintStyleOnGateway({ fastify: args.fastify, call: args.call, styleLinterLibraries: args.styleLinterLibraries });
+  if (name === "lint.style") {
+    return executeLintStyleOnGateway({
+      fastify: args.fastify,
+      call: args.call,
+      styleLinterLibraries: args.styleLinterLibraries,
+      authorization: args.authorization ?? null,
+    });
+  }
   if (name === "project.listFiles") return executeProjectListFilesOnGateway({ toolSidecar: args.toolSidecar });
   if (name === "project.docRules.get") return executeProjectDocRulesGetOnGateway({ toolSidecar: args.toolSidecar });
   return { ok: false as const, error: "SERVER_TOOL_NOT_IMPLEMENTED" };

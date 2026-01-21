@@ -3213,7 +3213,13 @@ fastify.post(
                 });
                 writeEvent("tool.call", { toolCallId, name: autoCall.name, args: autoCall.args, executedBy: "gateway" });
 
-                const ret = await executeServerToolOnGateway({ fastify, call: autoCall, toolSidecar, styleLinterLibraries });
+                const ret = await executeServerToolOnGateway({
+                  fastify,
+                  call: autoCall,
+                  toolSidecar,
+                  styleLinterLibraries,
+                  authorization: String((request as any)?.headers?.authorization ?? ""),
+                });
                 const payload: ToolResultPayload = ret.ok
                   ? {
                       toolCallId,
@@ -4251,7 +4257,13 @@ fastify.post(
             detail: { tool: call.name, executedBy, textLen: String((call?.args as any)?.text ?? "").length }
           });
 
-          const ret = await executeServerToolOnGateway({ fastify, call, toolSidecar, styleLinterLibraries });
+          const ret = await executeServerToolOnGateway({
+            fastify,
+            call,
+            toolSidecar,
+            styleLinterLibraries,
+            authorization: String((request as any)?.headers?.authorization ?? ""),
+          });
 
           payload = ret.ok
             ? {
@@ -4313,34 +4325,50 @@ fastify.post(
           jwtUser.role !== "admin"
         ) {
           try {
-            const usage = (payload.output as any)?.usage;
-            const modelUsed = String((payload.output as any)?.modelUsed ?? "").trim();
-            if (
-              usage &&
-              typeof usage === "object" &&
-              Number.isFinite((usage as any).promptTokens as any) &&
-              Number.isFinite((usage as any).completionTokens as any) &&
-              modelUsed
-            ) {
-              const charged = await chargeUserForLlmUsage({
-                userId: jwtUser.id,
-                modelId: modelUsed,
-                usage,
-                source: "tool.lint.style",
-                metaExtra: { runId, toolCallId, tool: payload.name, executedBy }
-              });
+            // 若端点已返回 billing（Desktop 直调也需要扣费），此处不重复扣费，仅发 SSE
+            const billed = (payload.output as any)?.billing ?? null;
+            if (billed && typeof billed === "object" && (billed as any).ok && Number.isFinite((billed as any).chargedPoints as any)) {
               writePolicyDecision({
                 turn,
                 policy: "BillingPolicy",
-                decision: charged.ok ? "charged" : "charge_failed",
-                reasonCodes: charged.ok ? ["tool_billing_charged", "tool:lint.style"] : ["tool_billing_failed", "tool:lint.style"],
-                detail: charged.ok ? charged : { ...charged, tool: payload.name },
+                decision: "charged",
+                reasonCodes: ["tool_billing_charged", "tool:lint.style", "billed_by_endpoint"],
+                detail: billed,
               });
-              if (charged.ok) {
-                if (typeof charged.newBalance === "number" && Number.isFinite(charged.newBalance)) userPointsBalance = Math.max(0, Math.floor(charged.newBalance));
-                writeEvent("billing.charge", { ...charged, source: "tool.lint.style", runId, turn, toolCallId });
-              } else {
-                writeEvent("billing.charge", { ...charged, ok: false, source: "tool.lint.style", runId, turn, toolCallId });
+              const nb = Number.isFinite((billed as any).newBalance as any) ? Math.floor(Number((billed as any).newBalance)) : null;
+              if (typeof nb === "number" && Number.isFinite(nb)) userPointsBalance = Math.max(0, nb);
+              writeEvent("billing.charge", { ...(billed as any), source: "tool.lint.style", runId, turn, toolCallId });
+            } else {
+              // 兜底：按 usage 计费
+              const usage = (payload.output as any)?.usage;
+              const modelUsed = String((payload.output as any)?.modelUsed ?? "").trim();
+              if (
+                usage &&
+                typeof usage === "object" &&
+                Number.isFinite((usage as any).promptTokens as any) &&
+                Number.isFinite((usage as any).completionTokens as any) &&
+                modelUsed
+              ) {
+                const charged = await chargeUserForLlmUsage({
+                  userId: jwtUser.id,
+                  modelId: modelUsed,
+                  usage,
+                  source: "tool.lint.style",
+                  metaExtra: { runId, toolCallId, tool: payload.name, executedBy }
+                });
+                writePolicyDecision({
+                  turn,
+                  policy: "BillingPolicy",
+                  decision: charged.ok ? "charged" : "charge_failed",
+                  reasonCodes: charged.ok ? ["tool_billing_charged", "tool:lint.style"] : ["tool_billing_failed", "tool:lint.style"],
+                  detail: charged.ok ? charged : { ...charged, tool: payload.name },
+                });
+                if (charged.ok) {
+                  if (typeof charged.newBalance === "number" && Number.isFinite(charged.newBalance)) userPointsBalance = Math.max(0, Math.floor(charged.newBalance));
+                  writeEvent("billing.charge", { ...charged, source: "tool.lint.style", runId, turn, toolCallId });
+                } else {
+                  writeEvent("billing.charge", { ...charged, ok: false, source: "tool.lint.style", runId, turn, toolCallId });
+                }
               }
             }
           } catch {
@@ -6868,7 +6896,11 @@ fastify.post(
  * - 设计目标：少依赖“硬约束 prompt”，尽量让数据（率/分布/n-gram）驱动修正。
  * - 输出：结构化 issues + rewritePrompt（给工作模型如 deepseek 用）
  */
-fastify.post("/api/kb/dev/lint_style", async (request, reply) => {
+fastify.post(
+  "/api/kb/dev/lint_style",
+  { preHandler: [(fastify as any).authenticate, requirePositivePointsForLlm] },
+  async (request: any, reply) => {
+  const jwtUser = await tryGetJwtUser(request as any);
   const ngramSchema = z.object({
     n: z.number().int().min(1).max(8).optional(),
     text: z.string().min(1).max(120),
@@ -7112,7 +7144,31 @@ fastify.post("/api/kb/dev/lint_style", async (request, reply) => {
 
   try {
     const out = outSchema.parse(parsed);
-    return reply.send({ ok: true, modelUsed: model, timeoutMs, ...(usage ? { usage } : {}), ...out });
+
+    // 计费（按 usage）：仅对非 admin。若上游不返回 usage，则不扣（保持和现有 LLM 计费一致）。
+    let billing: any = null;
+    try {
+      if (
+        jwtUser?.id &&
+        jwtUser.role !== "admin" &&
+        usage &&
+        typeof usage === "object" &&
+        Number.isFinite((usage as any).promptTokens as any) &&
+        Number.isFinite((usage as any).completionTokens as any)
+      ) {
+        billing = await chargeUserForLlmUsage({
+          userId: jwtUser.id,
+          modelId: model,
+          usage,
+          source: "kb.lint_style",
+          metaExtra: { timeoutMs, maxIssues },
+        });
+      }
+    } catch {
+      // ignore
+    }
+
+    return reply.send({ ok: true, modelUsed: model, timeoutMs, ...(usage ? { usage } : {}), ...(billing ? { billing } : {}), ...out });
   } catch (e: any) {
     return reply.code(502).send({
       ok: false,

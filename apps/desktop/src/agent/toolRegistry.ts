@@ -1,7 +1,25 @@
 import { useProjectStore } from "../state/projectStore";
 import { useRunStore, type Mode, type ToolApplyPolicy, type ToolRiskLevel } from "../state/runStore";
 import { useKbStore } from "../state/kbStore";
+import { useAuthStore } from "../state/authStore";
 import { getGatewayBaseUrl } from "./gatewayUrl";
+
+function authHeader(): Record<string, string> {
+  const token = String(useAuthStore.getState().accessToken ?? "").trim();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function requireLoginForTool(why: string) {
+  const token = String(useAuthStore.getState().accessToken ?? "").trim();
+  if (token) return { ok: true as const };
+  try {
+    useAuthStore.getState().openLoginModal?.();
+    useAuthStore.setState({ error: `请先登录再使用：${why}` });
+  } catch {
+    // ignore
+  }
+  return { ok: false as const };
+}
 
 export type ToolArgSpec = {
   name: string;
@@ -786,6 +804,7 @@ const tools: ToolDefinition[] = [
       const textArg = typeof args.text === "string" ? String(args.text) : "";
       const pathArg = typeof args.path === "string" ? String(args.path) : "";
       if (!textArg && !pathArg) return { ok: false, error: "MISSING_TEXT_OR_PATH" };
+      if (!requireLoginForTool("风格 Linter（lint.style）").ok) return { ok: false, error: "AUTH_REQUIRED" };
 
       const draftText = await (async () => {
         if (textArg) return textArg;
@@ -819,7 +838,7 @@ const tools: ToolDefinition[] = [
       try {
         const res = await fetch(url, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...authHeader() },
           body: JSON.stringify({
             model: model || undefined,
             maxIssues,
