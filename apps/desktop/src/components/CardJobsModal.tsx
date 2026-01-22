@@ -267,6 +267,37 @@ export function CardJobsModal() {
   const viewLib = useMemo(() => libraries.find((x) => x.id === viewLibId) ?? null, [libraries, viewLibId]);
   const isStyleLib = (viewLib as any)?.purpose === "style";
 
+  const humanizeKbErr = (err: string | null | undefined) => {
+    const e = String(err ?? "").trim();
+    if (!e) return "";
+    if (e === "LIBRARY_IN_TRASH") return "该库在回收站：请先到「回收站」恢复后再进行库体检/生成指纹。";
+    if (e === "LIBRARY_NOT_FOUND") return "该库不存在（可能已删除/切换 KB 目录/切换账号）。请刷新库列表后重试。";
+    if (e === "LIBRARY_ID_REQUIRED") return "未选择库：请先展开一个库再操作。";
+    if (e === "NO_DOCS_IN_LIBRARY") return "该库没有可用于体检的文档：先导入语料并完成抽卡/切分。";
+    return e;
+  };
+
+  // 兜底：若正在查看的库已被删除/进入回收站（不在当前库列表），自动收起，避免继续使用旧 id 导致“library not found”
+  useEffect(() => {
+    if (!open) return;
+    if (tab !== "libraries") return;
+    if (!viewLibId) return;
+    const exists = libraries.some((l) => l.id === viewLibId);
+    if (exists) return;
+    setViewLibId(null);
+    setViewTab("health");
+    setFp(null);
+    setFpErr(null);
+    setFpCompare(null);
+    setAnchors([]);
+    setAnchorsErr(null);
+    setAnchorsLoading(false);
+    setDefaultClusterId(null);
+    setClusterLabels(null);
+    setAnchorPickerOpen(false);
+    openKbManager("libraries", "当前查看的库已不存在或已进入回收站，已自动收起「库体检」。");
+  }, [open, tab, viewLibId, libraries, openKbManager]);
+
   const fpSegments = useMemo(() => {
     const list = Array.isArray((fp as any)?.perSegment) ? ((fp as any).perSegment as any[]) : [];
     return list.filter(Boolean);
@@ -854,6 +885,22 @@ export function CardJobsModal() {
                                 const r = await deleteLibraryToTrash(l.id);
                                 if (!r.ok) window.alert(`删除失败：${r.error ?? "unknown"}`);
                                 await refreshLibraries().catch(() => void 0);
+                                // 若正在查看该库，自动收起，避免继续“库体检/指纹”报错
+                                setViewLibId((prev) => {
+                                  if (prev && prev === l.id) {
+                                    setFp(null);
+                                    setFpErr(null);
+                                    setFpCompare(null);
+                                    setAnchors([]);
+                                    setAnchorsErr(null);
+                                    setDefaultClusterId(null);
+                                    setClusterLabels(null);
+                                    setAnchorPickerOpen(false);
+                                    openKbManager("libraries", `已删除「${l.name}」到回收站（可恢复）。`);
+                                    return null;
+                                  }
+                                  return prev;
+                                });
                               })();
                             }}
                           >
@@ -932,9 +979,29 @@ export function CardJobsModal() {
                               setFpLoading(true);
                               setFpErr(null);
                               setFpCompare(null);
+                              await refreshLibraries().catch(() => void 0);
+                              const latestLibs = useKbStore.getState().libraries ?? [];
+                              const exists = latestLibs.some((x: any) => String(x?.id ?? "").trim() === String(viewLibId ?? "").trim());
+                              if (!exists) {
+                                setFp(null);
+                                setFpErr(null);
+                                setFpCompare(null);
+                                setFpLoading(false);
+                                setViewLibId(null);
+                                openKbManager("libraries", "该库已不存在或已进入回收站，无法生成指纹：请先恢复/重新选择库。");
+                                return;
+                              }
+
                               const r = await computeLibraryFingerprint({ libraryId: viewLibId, useLlm: true });
                               if (!r.ok) {
-                                setFpErr(r.error ?? "COMPUTE_FAILED");
+                                const msg = humanizeKbErr(r.error ?? "COMPUTE_FAILED");
+                                // 若库已不可用，自动收起并把提示放到 notice
+                                if (r.error === "LIBRARY_IN_TRASH" || r.error === "LIBRARY_NOT_FOUND") {
+                                  setViewLibId(null);
+                                  openKbManager("libraries", msg || "该库已不可用：请先恢复/重新选择库。");
+                                } else {
+                                  setFpErr(msg || "COMPUTE_FAILED");
+                                }
                               } else {
                                 setFp(r.snapshot ?? null);
                               }

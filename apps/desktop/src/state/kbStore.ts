@@ -535,6 +535,13 @@ function normalizeLibraryPurpose(purpose: any): "material" | "style" | "product"
   return "material";
 }
 
+function libraryMissingError(db: KbDb, libId: string) {
+  const id = String(libId ?? "").trim();
+  if (!id) return "LIBRARY_NOT_FOUND";
+  const inTrash = Array.isArray((db as any)?.trash) && (db.trash ?? []).some((x: any) => String(x?.library?.id ?? "").trim() === id);
+  return inTrash ? "LIBRARY_IN_TRASH" : "LIBRARY_NOT_FOUND";
+}
+
 function dbRelPath(ownerKey: string) {
   const key = sanitizeOwnerKey(ownerKey);
   return `writing-ide-kb/owners/${key}/kb.v1.json`;
@@ -3487,7 +3494,7 @@ export const useKbStore = create<KbState>()(
         try {
           const db = await loadDb({ baseDir, ownerKey });
           const lib = db.libraries.find((l) => l.id === libId);
-          if (!lib) return { ok: false, anchors: [], error: "LIBRARY_NOT_FOUND" };
+          if (!lib) return { ok: false, anchors: [], error: libraryMissingError(db, libId) };
           // 仅风格库生效；非风格库返回空（避免 UI 误用导致报错）
           if (normalizeLibraryPurpose((lib as any)?.purpose) !== "style") return { ok: true, anchors: [] };
           const raw = (db.libraryPrefs as any)?.[libId]?.style?.anchorsV1;
@@ -3509,7 +3516,7 @@ export const useKbStore = create<KbState>()(
         try {
           const db = await loadDb({ baseDir, ownerKey });
           const lib = db.libraries.find((l) => l.id === libId);
-          if (!lib) return { ok: false, error: "LIBRARY_NOT_FOUND" };
+          if (!lib) return { ok: false, error: libraryMissingError(db, libId) };
           if (normalizeLibraryPurpose((lib as any)?.purpose) !== "style") return { ok: false, error: "NOT_STYLE_LIBRARY" };
 
           const docById = new Map(db.sourceDocs.map((d) => [d.id, d]));
@@ -3583,7 +3590,7 @@ export const useKbStore = create<KbState>()(
         try {
           const db = await loadDb({ baseDir, ownerKey });
           const lib = db.libraries.find((l) => l.id === libId);
-          if (!lib) return { ok: false, error: "LIBRARY_NOT_FOUND" };
+          if (!lib) return { ok: false, error: libraryMissingError(db, libId) };
           if (normalizeLibraryPurpose((lib as any)?.purpose) !== "style") return { ok: false, error: "NOT_STYLE_LIBRARY" };
           const prevPrefs = ((db.libraryPrefs as any)?.[libId] ?? {}) as KbLibraryPrefsV1;
           const nextPrefs: KbLibraryPrefsV1 = {
@@ -3612,7 +3619,7 @@ export const useKbStore = create<KbState>()(
         try {
           const db = await loadDb({ baseDir, ownerKey });
           const lib = db.libraries.find((l) => l.id === libId);
-          if (!lib) return { ok: false, anchors: [], error: "LIBRARY_NOT_FOUND" };
+          if (!lib) return { ok: false, anchors: [], error: libraryMissingError(db, libId) };
           if (normalizeLibraryPurpose((lib as any)?.purpose) !== "style") return { ok: true, anchors: [] };
           const style = (db.libraryPrefs as any)?.[libId]?.style ?? {};
           const rawAnchors = style?.anchorsV1;
@@ -3641,7 +3648,7 @@ export const useKbStore = create<KbState>()(
         try {
           const db = await loadDb({ baseDir, ownerKey });
           const lib = db.libraries.find((l) => l.id === libId);
-          if (!lib) return { ok: false, error: "LIBRARY_NOT_FOUND" };
+          if (!lib) return { ok: false, error: libraryMissingError(db, libId) };
           if (normalizeLibraryPurpose((lib as any)?.purpose) !== "style") return { ok: false, error: "NOT_STYLE_LIBRARY" };
 
           const prevPrefs = ((db.libraryPrefs as any)?.[libId] ?? {}) as KbLibraryPrefsV1;
@@ -3682,7 +3689,7 @@ export const useKbStore = create<KbState>()(
         try {
           const db = await loadDb({ baseDir, ownerKey });
           const lib = db.libraries.find((l) => l.id === libId);
-          if (!lib) return { ok: false, error: "LIBRARY_NOT_FOUND" };
+          if (!lib) return { ok: false, error: libraryMissingError(db, libId) };
           if (normalizeLibraryPurpose((lib as any)?.purpose) !== "style") return { ok: false, error: "NOT_STYLE_LIBRARY" };
 
           const prevPrefs = ((db.libraryPrefs as any)?.[libId] ?? {}) as KbLibraryPrefsV1;
@@ -3770,7 +3777,7 @@ export const useKbStore = create<KbState>()(
         try {
           const db = await loadDb({ baseDir, ownerKey });
           const lib = db.libraries.find((l) => l.id === libId);
-          if (!lib) return { ok: false, error: "LIBRARY_NOT_FOUND" };
+          if (!lib) return { ok: false, error: libraryMissingError(db, libId) };
 
           const docs = db.sourceDocs.filter((d) => d.libraryId === libId && !isPlaybookDoc(d));
           if (!docs.length) return { ok: false, error: "NO_DOCS_IN_LIBRARY" };
@@ -4842,7 +4849,7 @@ export const useKbStore = create<KbState>()(
         try {
           const db = await loadDb({ baseDir, ownerKey });
           const lib = db.libraries.find((l) => l.id === libId);
-          if (!lib) return { ok: false, cards: [], error: "LIBRARY_NOT_FOUND" };
+          if (!lib) return { ok: false, cards: [], error: libraryMissingError(db, libId) };
 
           const pack = getFacetPack(lib.facetPackId ?? "speech_marketing_v1");
           const facetOrder = new Map(pack.facets.map((f, i) => [f.id, i]));
