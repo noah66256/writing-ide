@@ -4239,18 +4239,28 @@ fastify.post(
           // 工具门禁：
           // - lint.style：强模型工具，0 积分禁止执行（避免“0 积分仍可跑强模型”）
           // - web.search/web.fetch：按次数扣费（博查），余额不足时直接拒绝执行（避免触发外部付费 API）
+          const lintBillRaw = process.env.LINT_STYLE_BILL_POINTS_PER_CALL ?? process.env.LINT_STYLE_BILL_POINTS ?? "50";
+          const lintBillPoints = (() => {
+            const n = Number(String(lintBillRaw ?? "").trim());
+            if (!Number.isFinite(n)) return 50;
+            return Math.max(0, Math.min(50_000, Math.floor(n)));
+          })();
           if (
             String(call.name ?? "") === "lint.style" &&
             jwtUser?.id &&
             jwtUser.role !== "admin" &&
             userPointsBalance !== null &&
-            userPointsBalance <= 0
+            (lintBillPoints > 0 ? userPointsBalance < lintBillPoints : userPointsBalance <= 0)
           ) {
             payload = {
               toolCallId,
               name: String(call.name ?? ""),
               ok: false,
-              output: { ok: false, error: "INSUFFICIENT_POINTS", detail: { pointsBalance: userPointsBalance } },
+              output: {
+                ok: false,
+                error: "INSUFFICIENT_POINTS",
+                detail: { pointsBalance: userPointsBalance, needPoints: lintBillPoints > 0 ? lintBillPoints : 1 },
+              },
               meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
             };
           } else if (
@@ -4428,7 +4438,32 @@ fastify.post(
           }
         }
 
-        // 按产品约定：纯工具不扣费（lint.style 等 tool 不按 usage 计费）。
+        // 计费（lint.style）：由 /api/kb/dev/lint_style 内部扣费并回传 billing（避免“usage 不可预估导致扣费失败”问题）。
+        // 这里负责把扣费结果写进 SSE 事件流，便于前端/诊断可见，并同步 run 内的 pointsBalance 状态。
+        if (executedBy === "gateway" && payload.ok && payload.name === "lint.style" && jwtUser?.id && jwtUser.role !== "admin") {
+          try {
+            const billing = (payload.output as any)?.billing ?? null;
+            if (billing && typeof billing === "object") {
+              const ok = Boolean((billing as any).ok);
+              writePolicyDecision({
+                turn,
+                policy: "BillingPolicy",
+                decision: ok ? "charged" : "charge_failed",
+                reasonCodes: ok ? ["tool_billing_charged", "tool:lint.style"] : ["tool_billing_failed", "tool:lint.style"],
+                detail: billing,
+              });
+              if (ok) {
+                const nb = Number((billing as any).newBalance);
+                if (Number.isFinite(nb)) userPointsBalance = Math.max(0, Math.floor(nb));
+                writeEvent("billing.charge", { ...(billing as any), source: "tool.lint.style", runId, turn, toolCallId });
+              } else {
+                writeEvent("billing.charge", { ...(billing as any), ok: false, source: "tool.lint.style", runId, turn, toolCallId });
+              }
+            }
+          } catch {
+            // ignore
+          }
+        }
 
         if (
           payload.ok &&
@@ -7007,7 +7042,9 @@ fastify.post(
  */
 fastify.post(
   "/api/kb/dev/lint_style",
-  // 纯工具：不扣费；但仍要求登录 + 有积分（避免无限滥用）
+  // 工具：lint.style 会调用上游模型，应计费（否则等于白嫖强模型）。
+  // 计费策略（MVP）：按“每次调用固定扣积分”扣费（避免无法预估 usage 导致的余额不足/免费调用问题）。
+  // - 可通过 env 覆盖：LINT_STYLE_BILL_POINTS_PER_CALL
   { preHandler: [(fastify as any).authenticate, requirePositivePointsForLlm] },
   async (request: any, reply) => {
   const ngramSchema = z.object({
@@ -7053,6 +7090,32 @@ fastify.post(
     libraries: z.array(libSchema).min(1).max(6),
   });
   const body = bodySchema.parse((request as any).body);
+
+  const billPointsPerCallRaw =
+    process.env.LINT_STYLE_BILL_POINTS_PER_CALL ?? process.env.LINT_STYLE_BILL_POINTS ?? "50";
+  const billPointsPerCall = (() => {
+    const n = Number(String(billPointsPerCallRaw ?? "").trim());
+    if (!Number.isFinite(n)) return 50;
+    return Math.max(0, Math.min(50_000, Math.floor(n)));
+  })();
+
+  // 余额前置检查：避免“先调用上游模型，事后发现扣不了费”的免费调用漏洞
+  if (billPointsPerCall > 0 && request.user?.role !== "admin") {
+    const userId = typeof request.user?.sub === "string" ? String(request.user.sub).trim() : "";
+    if (!userId) return reply.code(401).send({ ok: false, error: "UNAUTHORIZED" });
+    const db = await loadDb();
+    const u = db.users.find((x) => x.id === userId);
+    const bal = Math.max(0, Math.floor(Number(u?.pointsBalance) || 0));
+    if (!u || bal < billPointsPerCall) {
+      return reply.code(402).send({
+        ok: false,
+        error: "INSUFFICIENT_POINTS",
+        pointsBalance: bal,
+        needPoints: billPointsPerCall,
+        hint: `积分不足，无法执行 lint.style（需要 ${billPointsPerCall} 积分/次）。请先充值后再试。`,
+      });
+    }
+  }
 
   const env = await getLinterEnv();
   if (!env.ok) {
@@ -7254,7 +7317,41 @@ fastify.post(
   try {
     const out = outSchema.parse(parsed);
 
-    return reply.send({ ok: true, modelUsed: model, timeoutMs, ...(usage ? { usage } : {}), ...out });
+    // 计费：按“每次调用固定扣积分”
+    let billing: any = null;
+    if (billPointsPerCall > 0 && request.user?.role !== "admin") {
+      try {
+        const userId = typeof request.user?.sub === "string" ? String(request.user.sub).trim() : "";
+        if (userId) {
+          let txId = "";
+          let newBalance = 0;
+          await updateDb((db: any) => {
+            const { user, tx } = adjustUserPoints({
+              db,
+              userId,
+              delta: -billPointsPerCall,
+              type: "consume",
+              reason: "tool.lint.style",
+            });
+            txId = tx.id;
+            newBalance = user.pointsBalance ?? 0;
+          });
+          billing = { ok: true, chargedPoints: billPointsPerCall, costPoints: billPointsPerCall, txId, newBalance };
+        }
+      } catch (e: any) {
+        const msg = e?.message ? String(e.message) : String(e);
+        billing = { ok: false, reason: msg || "CHARGE_FAILED", chargedPoints: 0, costPoints: billPointsPerCall };
+      }
+    }
+
+    return reply.send({
+      ok: true,
+      modelUsed: model,
+      timeoutMs,
+      ...(usage ? { usage } : {}),
+      ...(billing ? { billing } : {}),
+      ...out,
+    });
   } catch (e: any) {
     return reply.code(502).send({
       ok: false,

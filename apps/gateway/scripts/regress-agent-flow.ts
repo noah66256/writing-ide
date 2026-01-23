@@ -295,11 +295,8 @@ async function main() {
     assert.ok(gw.includes("styleLinterLibraries"), "Gateway 未读取 toolSidecar.styleLinterLibraries（server-side lint.style 无法落地）");
     assert.ok(gw.includes("completionOnceViaProvider"), "Gateway 未使用 completionOnceViaProvider（ProviderAdapter one-shot 可能回退）");
     assert.ok(!gw.includes("chatCompletionOnce("), "Gateway 仍直接调用 chatCompletionOnce（ProviderAdapter 统一回退）");
-    // 按当前产品约定：纯工具不按 usage 扣费（lint.style 等 tool 不计费）；避免未来重构时误把“工具不扣费”逻辑删掉。
-    assert.ok(
-      gw.includes("纯工具不扣费") && gw.includes("lint.style"),
-      "Gateway 缺少“纯工具不扣费（lint.style 等 tool 不按 usage 计费）”约定（计费策略可能回退）",
-    );
+    // lint.style：调用上游模型的 server-side 工具，必须计费（否则白嫖强模型）。
+    assert.ok(gw.includes("source: \"tool.lint.style\"") || gw.includes("tool.lint.style"), "Gateway 未对 lint.style 扣费入账（工具计费回退）");
     assert.ok(gw.includes("projectFiles"), "Gateway 未接收 toolSidecar.projectFiles（server-side project.listFiles 无法落地）");
     assert.ok(gw.includes("docRules"), "Gateway 未接收 toolSidecar.docRules（server-side project.docRules.get 无法落地）");
     assert.ok(gw.includes("/api/admin/audit/runs"), "Gateway 未暴露审计查询接口 /api/admin/audit/runs（审计落库回退）");
