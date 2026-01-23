@@ -125,6 +125,23 @@ async function main() {
     assert.equal(batch.violation, "LINT_AND_WRITE_SAME_TURN");
   }
   {
+    // lintMode=hint（或用户/系统关闭 lint gate）时：lint.style 只是提示，不应阻止写入
+    const mode = "agent" as const;
+    const userPrompt = "按风格库仿写一段";
+    const intent = detectRunIntent({ mode, userPrompt });
+    const active = activateSkills({ mode, userPrompt, kbSelected: [{ id: "style-1", purpose: "style" }], intent });
+    const gates0 = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }], activeSkillIds: active.map((s) => s.id) });
+    const gates = { ...gates0, lintGateEnabled: false }; // 模拟 Gateway 的 STYLE_LINT_MODE=hint
+    const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
+    state.hasStyleKbSearch = true;
+    const toolCalls: ParsedToolCall[] = [
+      { name: "lint.style", args: { text: "x" } },
+      { name: "doc.write", args: { path: "a.md", content: "y" } },
+    ];
+    const batch = analyzeStyleWorkflowBatch({ mode, intent, gates, state, lintMaxRework: 2, toolCalls });
+    assert.equal(batch.violation, null);
+  }
+  {
     const mode = "agent" as const;
     const userPrompt = "按风格库仿写一段";
     const intent = detectRunIntent({ mode, userPrompt });
@@ -278,7 +295,11 @@ async function main() {
     assert.ok(gw.includes("styleLinterLibraries"), "Gateway 未读取 toolSidecar.styleLinterLibraries（server-side lint.style 无法落地）");
     assert.ok(gw.includes("completionOnceViaProvider"), "Gateway 未使用 completionOnceViaProvider（ProviderAdapter one-shot 可能回退）");
     assert.ok(!gw.includes("chatCompletionOnce("), "Gateway 仍直接调用 chatCompletionOnce（ProviderAdapter 统一回退）");
-    assert.ok(gw.includes("source: \"tool.lint.style\""), "Gateway 未对 server-side lint.style 计费入账（工具计费地基回退）");
+    // 按当前产品约定：纯工具不按 usage 扣费（lint.style 等 tool 不计费）；避免未来重构时误把“工具不扣费”逻辑删掉。
+    assert.ok(
+      gw.includes("纯工具不扣费") && gw.includes("lint.style"),
+      "Gateway 缺少“纯工具不扣费（lint.style 等 tool 不按 usage 计费）”约定（计费策略可能回退）",
+    );
     assert.ok(gw.includes("projectFiles"), "Gateway 未接收 toolSidecar.projectFiles（server-side project.listFiles 无法落地）");
     assert.ok(gw.includes("docRules"), "Gateway 未接收 toolSidecar.docRules（server-side project.docRules.get 无法落地）");
     assert.ok(gw.includes("/api/admin/audit/runs"), "Gateway 未暴露审计查询接口 /api/admin/audit/runs（审计落库回退）");

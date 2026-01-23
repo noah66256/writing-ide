@@ -526,9 +526,12 @@ export function analyzeStyleWorkflowBatch(args: {
   const needStyleLint = enforceLint && !args.state.styleLintPassed;
 
   let violation: string | null = null;
+  // 关键约束：
+  // - kb.search 的 tool_result 必须先回传给模型后，后续写入/对齐才可能“真正用上样例”，因此仍禁止与 write/lint 同回合混用
+  // - lint.style 在 lintMode=hint 时只是“提示”，不应作为硬闸门阻止写入；因此仅当 enforceLint=true（gate 模式）才禁止 lint+write 同回合
   if (batchHasKb && batchHasLint) violation = "KB_AND_LINT_SAME_TURN";
   else if (batchHasKb && batchHasWrite) violation = "KB_AND_WRITE_SAME_TURN";
-  else if (batchHasLint && batchHasWrite) violation = "LINT_AND_WRITE_SAME_TURN";
+  else if (batchHasLint && batchHasWrite && enforceLint) violation = "LINT_AND_WRITE_SAME_TURN";
   else if (batchHasLint && needStyleKb) violation = "LINT_BEFORE_KB";
   else if (batchHasWrite && needStyleKb) violation = "WRITE_BEFORE_KB";
   else if (batchHasWrite && needStyleLint) violation = lintExhausted ? "WRITE_BLOCKED_LINT_EXHAUSTED" : "WRITE_BEFORE_LINT_PASS";
