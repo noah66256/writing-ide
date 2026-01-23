@@ -35,33 +35,52 @@ export function ModelIdMultiPicker({ options, selectedIds, lockedIds, onChange, 
   const toggle = (id: string) => {
     if (!id) return;
     if (locked.has(id)) return;
-    const next = new Set(selectedIds);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    onChange(Array.from(next));
+    // 重要：这里用数组维护“选择顺序”（用于 stage 的备用模型优先级）。
+    // - 选中：追加到末尾
+    // - 取消：删除该项
+    const idx = selectedIds.indexOf(id);
+    if (idx >= 0) onChange(selectedIds.filter((x) => x !== id));
+    else onChange([...selectedIds, id]);
   };
 
   const selectAllFiltered = () => {
-    const next = new Set(selectedIds);
+    const next = selectedIds.slice();
+    const set = new Set(next);
     for (const o of filtered) {
       if (o.disabled) continue;
-      next.add(o.id);
+      if (!o.id) continue;
+      if (set.has(o.id)) continue;
+      set.add(o.id);
+      next.push(o.id);
     }
-    onChange(Array.from(next));
+    onChange(next);
   };
 
   const clearAll = () => {
-    const next = new Set<string>();
-    for (const id of selectedIds) if (locked.has(id)) next.add(id);
-    onChange(Array.from(next));
+    // 保留 locked（顺序保持不变）
+    onChange(selectedIds.filter((id) => locked.has(id)));
   };
 
   const removeOne = (id: string) => {
     if (!id) return;
     if (locked.has(id)) return;
-    const next = new Set(selectedIds);
-    next.delete(id);
-    onChange(Array.from(next));
+    onChange(selectedIds.filter((x) => x !== id));
+  };
+
+  const moveOne = (id: string, dir: -1 | 1) => {
+    if (!id) return;
+    if (locked.has(id)) return;
+    const idx = selectedIds.indexOf(id);
+    if (idx < 0) return;
+    const nextIdx = idx + dir;
+    if (nextIdx < 0 || nextIdx >= selectedIds.length) return;
+    // 不允许跨过 locked（默认）项
+    if (locked.has(selectedIds[nextIdx]!)) return;
+    const next = selectedIds.slice();
+    const tmp = next[idx]!;
+    next[idx] = next[nextIdx]!;
+    next[nextIdx] = tmp;
+    onChange(next);
   };
 
   const selectedOptions = useMemo(() => {
@@ -94,6 +113,26 @@ export function ModelIdMultiPicker({ options, selectedIds, lockedIds, onChange, 
               return (
                 <span key={o.id} className="tag tagBlue" title={o.subLabel || o.label}>
                   {o.label}
+                  <button
+                    className="multiPickTagX"
+                    type="button"
+                    disabled={isLocked}
+                    onClick={() => moveOne(o.id, -1)}
+                    title={isLocked ? "默认模型锁定" : "上移（提高优先级）"}
+                    style={{ marginLeft: 4 }}
+                  >
+                    ↑
+                  </button>
+                  <button
+                    className="multiPickTagX"
+                    type="button"
+                    disabled={isLocked}
+                    onClick={() => moveOne(o.id, 1)}
+                    title={isLocked ? "默认模型锁定" : "下移（降低优先级）"}
+                    style={{ marginLeft: 2 }}
+                  >
+                    ↓
+                  </button>
                   <button
                     className="multiPickTagX"
                     type="button"

@@ -817,34 +817,115 @@ fastify.post(
   writeEvent("run.start", { runId, model });
 
   let lastUsage: LlmTokenUsage | null = null;
+  let hadUpstreamError = false;
 
   try {
-    const iter = streamChatCompletionViaProvider({
-      baseUrl,
-      endpoint,
-      apiKey,
-      model,
-      messages,
-      temperature,
-      maxTokens: stageMaxTokens ?? null,
-      includeUsage: true,
-      signal: abort.signal,
-    });
-
-    for await (const ev of iter) {
-      if (ev.type === "delta") writeEvent("assistant.delta", { delta: ev.delta });
-      else if (ev.type === "usage") lastUsage = ev.usage as any;
-      else if (ev.type === "done") writeEvent("assistant.done", {});
-      else if (ev.type === "error") writeEvent("error", { error: ev.error });
+    // 支持“上游空响应（0 delta）”：按 stage.modelIds 的顺序切备用模型重试（最多 2 次）。
+    // 注意：仅对 UPSTREAM_EMPTY_CONTENT 触发；其它错误不做自动切换。
+    let stageAllowedIds: string[] = [];
+    let stageDefaultId: string | null = null;
+    try {
+      const stages = await aiConfig.listStages();
+      const st = (stages as any[]).find((s: any) => s.stage === "llm.chat") || null;
+      stageAllowedIds = Array.isArray(st?.modelIds) ? (st.modelIds as string[]).filter(Boolean) : [];
+      stageDefaultId = typeof st?.modelId === "string" ? String(st.modelId) : null;
+    } catch {
+      // ignore
     }
 
-    if (jwtUser?.id && lastUsage && jwtUser.role !== "admin") {
+    const requestedIdRaw = body.model ? String(body.model).trim() : "";
+    const requestedId =
+      requestedIdRaw && stageAllowedIds.length ? (stageAllowedIds.includes(requestedIdRaw) ? requestedIdRaw : "") : requestedIdRaw;
+    const pickedId =
+      requestedId || stageDefaultId || (stageAllowedIds.length ? stageAllowedIds[0] : "") || env.defaultModel || "";
+
+    const candidates = (() => {
+      const out: string[] = [];
+      const seen = new Set<string>();
+      const push = (id: string) => {
+        const v = String(id || "").trim();
+        if (!v || seen.has(v)) return;
+        seen.add(v);
+        out.push(v);
+      };
+      if (pickedId) push(pickedId);
+      for (const id of stageAllowedIds) push(id);
+      return out;
+    })();
+
+    const MAX_EMPTY_RETRY = 2;
+    let attempt = 0;
+    let modelIdUsed = pickedId || env.defaultModel || model;
+    let runtimeModel = model;
+    let runtimeBase = baseUrl;
+    let runtimeKey = apiKey;
+    let runtimeEndpoint = endpoint;
+
+    while (true) {
+      // 切换到候选模型（如果是 ai-config modelId）
+      const curId = candidates[attempt] || modelIdUsed;
+      if (curId) {
+        try {
+          const m = await aiConfig.resolveModel(curId);
+          runtimeModel = m.model;
+          runtimeBase = m.baseURL;
+          runtimeKey = m.apiKey;
+          runtimeEndpoint = m.endpoint || runtimeEndpoint;
+          modelIdUsed = m.modelId;
+        } catch {
+          // ignore：若 resolveModel 失败则沿用 env（让请求仍可跑）
+          modelIdUsed = curId;
+        }
+      }
+
+      lastUsage = null;
+      hadUpstreamError = false;
+      let lastErr: string | null = null;
+
+      const iter = streamChatCompletionViaProvider({
+        baseUrl: runtimeBase,
+        endpoint: runtimeEndpoint,
+        apiKey: runtimeKey,
+        model: runtimeModel,
+        messages,
+        temperature,
+        maxTokens: stageMaxTokens ?? null,
+        includeUsage: true,
+        signal: abort.signal,
+      });
+
+      for await (const ev of iter) {
+        if (ev.type === "delta") writeEvent("assistant.delta", { delta: ev.delta });
+        else if (ev.type === "usage") lastUsage = ev.usage as any;
+        else if (ev.type === "done") writeEvent("assistant.done", {});
+        else if (ev.type === "error") {
+          hadUpstreamError = true;
+          lastErr = String(ev.error ?? "UPSTREAM_ERROR");
+          writeEvent("error", { error: lastErr });
+          break;
+        }
+      }
+
+      // 空响应：切备用模型（最多 2 次）
+      if (hadUpstreamError && String(lastErr || "").trim() === "UPSTREAM_EMPTY_CONTENT") {
+        if (attempt < MAX_EMPTY_RETRY && attempt + 1 < candidates.length) {
+          attempt += 1;
+          continue;
+        }
+      }
+
+      // 成功或不可重试错误：退出循环
+      break;
+    }
+
+    // 仅在“无上游错误且有 usage”时计费（避免空响应/错误也扣费）
+    if (!hadUpstreamError && jwtUser?.id && lastUsage && jwtUser.role !== "admin") {
       const charged = await chargeUserForLlmUsage({
         userId: jwtUser.id,
-        modelId: model,
+        modelId: modelIdUsed || model,
         usage: lastUsage,
         source: "llm.chat",
-        metaExtra: { runId, endpoint },
+        metaExtra: { runId, endpoint: runtimeEndpoint },
       });
       if (charged.ok) audit.chargedPoints = (audit.chargedPoints ?? 0) + Number(charged.chargedPoints ?? 0);
       if (charged.ok) {
@@ -853,7 +934,7 @@ fastify.post(
         writeEvent("billing.charge", { ...charged, ok: false, source: "llm.chat", runId });
       }
     }
-    audit.usage = lastUsage as any;
+    audit.usage = (!hadUpstreamError ? (lastUsage as any) : null) as any;
   } catch (e: any) {
     const msg = e?.message ? String(e.message) : String(e);
     writeEvent("error", { error: msg });
@@ -2099,11 +2180,28 @@ fastify.post(
   const pickedId =
     requestedId || stageDefaultId || (stageAllowedIds?.length ? stageAllowedIds[0] : "") || env.defaultModel || "";
 
+  // stage.modelIds 现在语义为“候选模型（按优先级）”：第 1 位=默认；第 2 位起=备用。
+  // 仅当上游报 UPSTREAM_EMPTY_CONTENT 时才自动切换备用模型重试（最多 2 次），避免重试风暴与误扣费。
+  const candidates = (() => {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    const push = (id: string) => {
+      const v = String(id || "").trim();
+      if (!v || seen.has(v)) return;
+      seen.add(v);
+      out.push(v);
+    };
+    if (pickedId) push(pickedId);
+    for (const id of stageAllowedIds ?? []) push(id);
+    return out;
+  })();
+
   let model = pickedId || env.defaultModel;
   let baseUrl = env.baseUrl;
   let apiKey = env.apiKey;
   let endpoint = "/v1/chat/completions";
   let toolResultFormat: "xml" | "text" = "xml";
+  let modelIdUsed: string = pickedId || "";
   if (pickedId) {
     try {
       const m = await aiConfig.resolveModel(pickedId);
@@ -2112,8 +2210,10 @@ fastify.post(
       apiKey = m.apiKey;
       endpoint = m.endpoint || endpoint;
       toolResultFormat = m.toolResultFormat;
+      modelIdUsed = m.modelId;
     } catch {
       // ignore
+      modelIdUsed = pickedId;
     }
   }
 
@@ -2874,53 +2974,114 @@ fastify.post(
       // 这里做一个短 holdback：在前 N 字符内先观察是否出现 tool_calls，再决定是否开始流式输出文本。
       const HOLD_DECIDE_CHARS = 280;
 
-      const iter = streamChatCompletionViaProvider({
-        baseUrl,
-        endpoint,
-        apiKey,
-        model,
-        messages,
-        temperature,
-        maxTokens: stageMaxTokens ?? null,
-        includeUsage: true,
-        signal: abort.signal,
-      });
+      // 空响应自动切备用模型：最多 2 次
+      const MAX_EMPTY_RETRY = 2;
+      let attempt = 0;
+      let lastErr: string | null = null;
 
-      for await (const ev of iter) {
-        if (ev.type === "delta") {
-          assistantText += ev.delta;
-          const prevDecided = decided;
-          if (decided === "unknown") {
-            const t = assistantText.trimStart();
-            // 只要在 holdback 窗口内出现 tool_calls/tool_call，就直接视为 tool（即便前面有少量废话前缀）
-            if (t.includes("<tool_calls") || t.includes("<tool_call")) decided = "tool";
-            // 未见 tool_calls：只有当累计到一定长度后才判为 text（避免过早开始 streaming）
-            else if (t.length >= HOLD_DECIDE_CHARS && t.length > 0 && !t.startsWith("<")) decided = "text";
-            else if (
-              t.length >= HOLD_DECIDE_CHARS &&
-              t.startsWith("<") &&
-              !t.startsWith("<tool_calls") &&
-              !t.startsWith("<tool_call") &&
-              !t.startsWith("<|")
-            )
-              decided = "text";
+      while (true) {
+        // 选当前候选模型
+        const pick = candidates[attempt] || modelIdUsed || pickedId || "";
+        if (pick) {
+          try {
+            const m = await aiConfig.resolveModel(pick);
+            model = m.model;
+            baseUrl = m.baseURL;
+            apiKey = m.apiKey;
+            endpoint = m.endpoint || endpoint;
+            toolResultFormat = m.toolResultFormat;
+            modelIdUsed = m.modelId;
+          } catch {
+            // ignore：仍用 env/baseUrl
+            modelIdUsed = pick;
           }
-          // 一旦判断为 text，需要把此前积累但未发出的内容补发，否则会出现“输出中断/缺头”
-          if (decided === "text") {
-            if (prevDecided !== "text") {
-              writeEvent("assistant.delta", { delta: assistantText.slice(flushed), turn });
-              flushed = assistantText.length;
-            } else {
-              writeEvent("assistant.delta", { delta: ev.delta, turn });
-              flushed = assistantText.length;
+        }
+
+        assistantText = "";
+        decided = "unknown";
+        flushed = 0;
+        lastUsage = null;
+        lastErr = null;
+
+        const iter = streamChatCompletionViaProvider({
+          baseUrl,
+          endpoint,
+          apiKey,
+          model,
+          messages,
+          temperature,
+          maxTokens: stageMaxTokens ?? null,
+          includeUsage: true,
+          signal: abort.signal,
+        });
+
+        for await (const ev of iter) {
+          if (ev.type === "delta") {
+            assistantText += ev.delta;
+            const prevDecided = decided;
+            if (decided === "unknown") {
+              const t = assistantText.trimStart();
+              // 只要在 holdback 窗口内出现 tool_calls/tool_call，就直接视为 tool（即便前面有少量废话前缀）
+              if (t.includes("<tool_calls") || t.includes("<tool_call")) decided = "tool";
+              // 未见 tool_calls：只有当累计到一定长度后才判为 text（避免过早开始 streaming）
+              else if (t.length >= HOLD_DECIDE_CHARS && t.length > 0 && !t.startsWith("<")) decided = "text";
+              else if (
+                t.length >= HOLD_DECIDE_CHARS &&
+                t.startsWith("<") &&
+                !t.startsWith("<tool_calls") &&
+                !t.startsWith("<tool_call") &&
+                !t.startsWith("<|")
+              )
+                decided = "text";
+            }
+            // 一旦判断为 text，需要把此前积累但未发出的内容补发，否则会出现“输出中断/缺头”
+            if (decided === "text") {
+              if (prevDecided !== "text") {
+                writeEvent("assistant.delta", { delta: assistantText.slice(flushed), turn });
+                flushed = assistantText.length;
+              } else {
+                writeEvent("assistant.delta", { delta: ev.delta, turn });
+                flushed = assistantText.length;
+              }
             }
           }
+          if (ev.type === "usage") {
+            lastUsage = ev.usage as any;
+          }
+          if (ev.type === "error") {
+            lastErr = String((ev as any)?.error ?? "UPSTREAM_ERROR");
+            break;
+          }
+          if (ev.type === "done") break;
         }
-        if (ev.type === "usage") {
-          lastUsage = ev.usage as any;
+
+        // 空响应：自动切换备用模型重试
+        if (String(lastErr || "").trim() === "UPSTREAM_EMPTY_CONTENT") {
+          if (attempt < MAX_EMPTY_RETRY && attempt + 1 < candidates.length) {
+            writePolicyDecision({
+              turn,
+              policy: "UpstreamRetryPolicy",
+              decision: "retry",
+              reasonCodes: ["upstream_empty_content", `attempt:${attempt + 1}`],
+              detail: { error: "UPSTREAM_EMPTY_CONTENT", fromModelId: candidates[attempt] || null, toModelId: candidates[attempt + 1] || null },
+            });
+            writeRunNotice({
+              turn,
+              kind: "info",
+              title: "上游空响应：自动切换备用模型重试",
+              message: `检测到上游返回空内容（UPSTREAM_EMPTY_CONTENT），系统将自动切换备用模型重试一次（第${attempt + 1}次重试）。`,
+              policy: "UpstreamRetryPolicy",
+              reasonCodes: ["upstream_empty_content"],
+              detail: { attempt: attempt + 1, from: candidates[attempt] || null, to: candidates[attempt + 1] || null },
+            });
+            attempt += 1;
+            continue;
+          }
         }
-        if (ev.type === "error") {
-          const errText = String((ev as any)?.error ?? "UPSTREAM_ERROR");
+
+        // 其它错误：按原逻辑终止（并且不计费）
+        if (lastErr) {
+          const errText = String(lastErr || "UPSTREAM_ERROR");
           // 1) 事件日志/审计：保留 error 事件
           writeEvent("error", { error: errText });
           // 2) UX：确保用户能看到可读错误（否则会被 AutoRetry 误判为 empty_output）
@@ -2931,7 +3092,8 @@ fastify.post(
           agentRunWaiters.delete(runId);
           return;
         }
-        if (ev.type === "done") break;
+
+        break;
       }
 
       if (lastUsage) {
@@ -2944,7 +3106,7 @@ fastify.post(
       if (jwtUser?.id && lastUsage && jwtUser.role !== "admin") {
         const charged = await chargeUserForLlmUsage({
           userId: jwtUser.id,
-          modelId: model,
+          modelId: modelIdUsed || model,
           usage: lastUsage,
           source: billingSource,
           metaExtra: { runId, mode, endpoint, stageKey: stageKeyForRun, activeSkillIds },
@@ -3692,19 +3854,17 @@ fastify.post(
           const normalizeKbCall = (c: any) => {
             if (!c || String(c?.name ?? "") !== "kb.search") return c;
             const args = { ...(c.args ?? {}) } as Record<string, string>;
-            const kind0 = String(args.kind ?? "card").trim().toLowerCase();
-            const kind = kind0 === "card" || kind0 === "paragraph" || kind0 === "outline" ? kind0 : "card";
-            args.kind = kind;
+            // 关键：style_need_kb 阶段只允许“样例/模板”检索（card），避免模型把原文段落当样例导致贴原文。
+            // 若确实需要证据段：应在后续阶段再用 kind=paragraph/outline + 小范围 anchor 过滤。
+            args.kind = "card";
 
             // 强制限制到“已绑定风格库”，避免模型把 @{} 文件名/幻觉 id 塞进 libraryIds 导致误判与污染。
             if (styleLibIds.length) args.libraryIds = styleLibIdsJson;
 
-            // 同时绑定了非风格库时：补默认 cardTypes，避免素材库污染（对齐 tool docs + system prompt 建议）
-            if (kind === "card" && effectiveGates.hasNonStyleLibraries) {
-              const ctRaw = String((args as any).cardTypes ?? "").trim();
-              const looksEmpty = !ctRaw || ctRaw === "[]" || ctRaw.toLowerCase() === "null" || ctRaw.toLowerCase() === "undefined";
-              if (looksEmpty) (args as any).cardTypes = JSON.stringify(["hook", "one_liner", "ending", "outline", "thesis"]);
-            }
+            // 补默认 cardTypes：优先拉“可抄模板/金句形状/结构骨架”，减少“段落贴原文”风险。
+            const ctRaw = String((args as any).cardTypes ?? "").trim();
+            const looksEmpty = !ctRaw || ctRaw === "[]" || ctRaw.toLowerCase() === "null" || ctRaw.toLowerCase() === "undefined";
+            if (looksEmpty) (args as any).cardTypes = JSON.stringify(["hook", "one_liner", "ending", "outline", "thesis"]);
 
             return { ...c, args };
           };
@@ -7227,13 +7387,30 @@ fastify.post(
 
   // 运行时：按 stage=lint.style 绑定的模型执行（并按该模型单价计费）
   const st = await aiConfig.resolveStage("lint.style");
-  const stageModelId = st.modelId;
   let model = st.model;
   let baseUrl = st.baseURL;
   let endpoint = st.endpoint || "/v1/chat/completions";
   let apiKey = st.apiKey;
   const stageMaxTokens = st.maxTokens ?? null;
   const temperature = st.temperature ?? 0.2;
+
+  // 备用模型（按优先级）：来自 B 端 stage.modelIds（第 1 位默认模型；第 2 位起备用）
+  // - 目的：某些模型可能偶发“非 JSON/不遵守 schema/超时/空输出”，允许在同一次 lint.style 调用内自动切换备用模型。
+  // - 计费：仅对最终成功且通过 schema 校验的那次 attempt 扣费（按实际使用的 modelId）。
+  const candidateModelIds = await (async () => {
+    try {
+      const stages = await aiConfig.listStages();
+      const s = Array.isArray(stages) ? stages.find((x: any) => String(x?.stage ?? "") === "lint.style") : null;
+      const ids = Array.isArray((s as any)?.modelIds) ? (((s as any).modelIds as any[]).map((x) => String(x ?? "").trim()).filter(Boolean) as string[]) : [];
+      const primary = String((s as any)?.modelId ?? st.modelId ?? "").trim();
+      const all = [primary, ...ids].filter(Boolean);
+      const uniq: string[] = [];
+      for (const x of all) if (!uniq.includes(x)) uniq.push(x);
+      return uniq.slice(0, 12);
+    } catch {
+      return [String(st.modelId ?? "").trim()].filter(Boolean);
+    }
+  })();
 
   // 可选：管理员调试时允许传 model 覆盖（否则容易引发“按 stage 扣费但实际用别的模型”的错觉）
   if (body.model && request.user?.role === "admin") {
@@ -7321,7 +7498,6 @@ fastify.post(
     2
   );
 
-  const abort = new AbortController();
   // 上游超时兜底：避免整条链路卡死。
   // - 默认：跟随 linter stage 的 timeoutMs（默认 60s）
   // - 若显式配置 LLM_LINTER_UPSTREAM_TIMEOUT_MS，则使用该值（但不超过 timeoutMs）
@@ -7330,37 +7506,30 @@ fastify.post(
     Number.isFinite(upstreamTimeoutMsCfg) && upstreamTimeoutMsCfg > 0
       ? Math.max(10_000, Math.min(timeoutMs, Math.floor(upstreamTimeoutMsCfg)))
       : Math.max(10_000, Math.floor(timeoutMs));
-  const timer = setTimeout(() => abort.abort(), upstreamTimeoutMs);
-  const ret = await completionOnceViaProvider({
-    baseUrl,
-    endpoint,
-    apiKey,
-    model,
-    messages: [
-      { role: "system", content: sys },
-      { role: "user", content: user },
-    ],
-    temperature,
-    maxTokens: stageMaxTokens,
-    signal: abort.signal,
-  });
-  clearTimeout(timer);
-
-  if (!ret?.ok) {
-    const errText = String((ret as any)?.error ?? "");
-    const isTimeout = /aborted|AbortError|timeout/i.test(errText);
-    return reply
-      .code(isTimeout ? 504 : 502)
-      .send({
-        ok: false,
-        error: isTimeout ? "LINT_UPSTREAM_TIMEOUT" : "LINT_UPSTREAM_FAILED",
-        hint: "lint.style 上游模型调用失败/超时。请在 B 端将 stage=lint.style 切换到稳定模型后重试。",
-        detail: { model, upstreamTimeoutMs, timeoutMs, message: errText || "upstream error" },
+  const sanitizeLintParsed = (parsed: any) => {
+    const p: any = parsed && typeof parsed === "object" ? parsed : {};
+    // issues：截断数量（上游有时会输出过多/过长证据，严格 schema 会误杀）
+    if (Array.isArray(p.issues)) {
+      p.issues = p.issues.slice(0, Math.max(3, Math.min(24, maxIssues))).map((it: any, idx: number) => {
+        const x: any = it && typeof it === "object" ? it : {};
+        const ev: any = x.evidence && typeof x.evidence === "object" ? x.evidence : {};
+        const clampArr = (v: any) => (Array.isArray(v) ? v.map((s: any) => String(s ?? "").trim()).filter(Boolean).slice(0, 6) : undefined);
+        return {
+          id: typeof x.id === "string" && x.id.trim() ? x.id.trim() : `issue_${idx + 1}`,
+          title: typeof x.title === "string" ? x.title.trim() : "",
+          severity: String(x.severity ?? "").toLowerCase(),
+          metric: x.metric,
+          evidence: {
+            ...(clampArr(ev.draft) ? { draft: clampArr(ev.draft) } : {}),
+            ...(clampArr(ev.reference) ? { reference: clampArr(ev.reference) } : {}),
+          },
+          fix: typeof x.fix === "string" ? x.fix.trim() : "",
+        };
       });
-  }
+    }
+    return p;
+  };
 
-  const usage = (ret as any)?.usage ?? null;
-  const raw = String((ret as any).content ?? "").trim();
   const tryParse = (s: string) => {
     try {
       return JSON.parse(s);
@@ -7368,93 +7537,163 @@ fastify.post(
       return null;
     }
   };
-  let parsed: any = tryParse(raw);
-  if (!parsed) {
-    const m = raw.match(/\{[\s\S]*\}/);
-    if (m?.[0]) parsed = tryParse(m[0]);
-  }
-  if (!parsed || typeof parsed !== "object") {
-    return reply.code(502).send({
-      ok: false,
-      error: "INVALID_LINTER_OUTPUT",
-      hint: "lint.style 模型未返回合法 JSON。请在 B 端更换 lint.style 模型（并确保严格输出 JSON）后重试。",
-      detail: { model, timeoutMs, raw: raw.slice(0, 2000) },
-    });
-  }
 
-  const outSchema = z.object({
-    similarityScore: z.number().min(0).max(100),
-    summary: z.string().min(1),
-    issues: z
-      .array(
-        z.object({
-          id: z.string().min(1),
-          title: z.string().min(1),
-          severity: z.enum(["high", "medium", "low"]),
-          metric: z
-            .object({
-              name: z.string().min(1),
-              draft: z.number().nullable().optional(),
-              baseline: z.number().nullable().optional(),
-              unit: z.string().nullable().optional(),
-            })
-            .nullable()
-            .optional(),
-          evidence: z
-            .object({
-              draft: z.array(z.string().min(1)).max(6).optional(),
-              reference: z.array(z.string().min(1)).max(6).optional(),
-            })
-            .optional(),
-          fix: z.string().min(1),
-        })
-      )
-      .max(24),
-    rewritePrompt: z.string().min(1),
-  });
+  let lastErr: any = null;
+  let ret: any = null;
+  let usedModelId = String(st.modelId ?? "").trim();
+  let usedModelName = model;
 
-  try {
-    const out = outSchema.parse(parsed);
-
-    // 计费：按 usage（对齐 stage=lint.style 绑定的模型单价），仅非 admin
-    let billing: any = null;
-    try {
-      const userId = typeof request.user?.sub === "string" ? String(request.user.sub).trim() : "";
-      const isAdmin = request.user?.role === "admin";
-      if (!isAdmin && userId) {
-        if (usage && typeof usage === "object") {
-          billing = await chargeUserForLlmUsage({
-            userId,
-            modelId: stageModelId,
-            usage,
-            source: "tool.lint.style",
-            metaExtra: { stage: "lint.style" },
-          });
-        } else {
-          billing = { ok: false, reason: "USAGE_NOT_RETURNED" };
+  const MAX_FALLBACK = 2; // 最多切换 2 次（主 + 2 备）
+  for (let attempt = 0; attempt < Math.min(candidateModelIds.length, 1 + MAX_FALLBACK); attempt += 1) {
+    const mid = candidateModelIds[attempt] ? String(candidateModelIds[attempt]).trim() : "";
+    if (mid && request.user?.role !== "admin") {
+      try {
+        const m = await aiConfig.resolveModel(mid);
+        const ep = String(m.endpoint || "").trim();
+        if (ep && (/chat\/completions/i.test(ep) || isGeminiLikeEndpoint(ep))) {
+          usedModelId = m.modelId;
+          usedModelName = m.model;
+          baseUrl = m.baseURL;
+          apiKey = m.apiKey;
+          endpoint = ep;
+          model = m.model;
         }
+      } catch {
+        // ignore bad candidate
       }
-    } catch (e: any) {
-      const msg = e?.message ? String(e.message) : String(e);
-      billing = { ok: false, reason: msg || "CHARGE_FAILED" };
     }
 
-    return reply.send({
-      ok: true,
-      modelUsed: model,
-      timeoutMs,
-      ...(usage ? { usage } : {}),
-      ...(billing ? { billing } : {}),
-      ...out,
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), upstreamTimeoutMs);
+    try {
+      ret = await completionOnceViaProvider({
+        baseUrl,
+        endpoint,
+        apiKey,
+        model,
+        messages: [
+          { role: "system", content: sys },
+          { role: "user", content: user },
+        ],
+        temperature,
+        maxTokens: stageMaxTokens,
+        signal: abort.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!ret?.ok) {
+      lastErr = ret;
+      continue;
+    }
+
+    const raw = String((ret as any).content ?? "").trim();
+    let parsed: any = tryParse(raw);
+    if (!parsed) {
+      const m = raw.match(/\{[\s\S]*\}/);
+      if (m?.[0]) parsed = tryParse(m[0]);
+    }
+    parsed = sanitizeLintParsed(parsed);
+
+    if (!parsed || typeof parsed !== "object") {
+      lastErr = { ok: false, error: "INVALID_LINTER_OUTPUT", detail: { model: usedModelName, raw: raw.slice(0, 2000) } };
+      continue;
+    }
+
+    const outSchema = z.object({
+      similarityScore: z.number().min(0).max(100),
+      summary: z.string().min(1),
+      issues: z
+        .array(
+          z.object({
+            id: z.string().min(1),
+            title: z.string().min(1),
+            severity: z.enum(["high", "medium", "low"]),
+            metric: z
+              .object({
+                name: z.string().min(1),
+                draft: z.number().nullable().optional(),
+                baseline: z.number().nullable().optional(),
+                unit: z.string().nullable().optional(),
+              })
+              .nullable()
+              .optional(),
+            evidence: z
+              .object({
+                draft: z.array(z.string().min(1)).max(6).optional(),
+                reference: z.array(z.string().min(1)).max(6).optional(),
+              })
+              .optional(),
+            fix: z.string().min(1),
+          }),
+        )
+        .max(24),
+      rewritePrompt: z.string().min(1),
     });
-  } catch (e: any) {
-    return reply.code(502).send({
-      ok: false,
-      error: "INVALID_LINTER_OUTPUT_SCHEMA",
-      hint: "lint.style 模型输出 JSON 字段不符合约定。请在 B 端更换 lint.style 模型后重试。",
-      detail: { model, timeoutMs, message: String(e?.message ?? e), raw: raw.slice(0, 2000) },
-    });
+
+    try {
+      const out = outSchema.parse(parsed);
+
+      // 计费：按 usage（对齐 stage=lint.style 绑定的模型单价），仅非 admin
+      let billing: any = null;
+      try {
+        const usage = (ret as any)?.usage ?? null;
+        const userId = typeof request.user?.sub === "string" ? String(request.user.sub).trim() : "";
+        const isAdmin = request.user?.role === "admin";
+        if (!isAdmin && userId) {
+          if (usage && typeof usage === "object") {
+            billing = await chargeUserForLlmUsage({
+              userId,
+              modelId: usedModelId,
+              usage,
+              source: "tool.lint.style",
+              metaExtra: { stage: "lint.style" },
+            });
+          } else {
+            billing = { ok: false, reason: "USAGE_NOT_RETURNED" };
+          }
+        }
+      } catch (e: any) {
+        const msg = e?.message ? String(e.message) : String(e);
+        billing = { ok: false, reason: msg || "CHARGE_FAILED" };
+      }
+
+      return reply.send({
+        ok: true,
+        modelUsed: usedModelName,
+        timeoutMs,
+        ...(((ret as any)?.usage ?? null) ? { usage: (ret as any).usage } : {}),
+        ...(billing ? { billing } : {}),
+        ...out,
+      });
+    } catch (e: any) {
+      // schema 不合规：尝试切换到下一个候选模型（若有）
+      lastErr = { ok: false, error: "INVALID_LINTER_OUTPUT_SCHEMA", detail: { model: usedModelName, message: String(e?.message ?? e), raw: raw.slice(0, 2000) } };
+      continue;
+    }
   }
+
+  if (!ret?.ok) {
+    const errText = String((ret as any)?.error ?? (lastErr as any)?.error ?? "");
+    const isTimeout = /aborted|AbortError|timeout/i.test(errText);
+    return reply
+      .code(isTimeout ? 504 : 502)
+      .send({
+        ok: false,
+        error: isTimeout ? "LINT_UPSTREAM_TIMEOUT" : "LINT_UPSTREAM_FAILED",
+        hint: "lint.style 上游模型调用失败/超时。请在 B 端将 stage=lint.style 切换到稳定模型后重试。",
+        detail: { model: usedModelName, upstreamTimeoutMs, timeoutMs, message: errText || "upstream error" },
+      });
+  }
+
+  // 兜底：不应走到这里（for-loop 内已 return 成功/continue 失败），但保留一个明确错误便于诊断。
+  return reply.code(502).send({
+    ok: false,
+    error: (lastErr as any)?.error ?? "INVALID_LINTER_OUTPUT_SCHEMA",
+    hint: "lint.style 模型输出不稳定或不符合 JSON 约定。请在 B 端为 stage=lint.style 配置备用模型后重试。",
+    detail: (lastErr as any)?.detail ?? null,
+  });
 });
 
 await fastify.listen({ port: PORT, host: "0.0.0.0" });

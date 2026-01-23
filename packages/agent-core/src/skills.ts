@@ -153,7 +153,12 @@ export const STYLE_IMITATE_SKILL: SkillManifest = {
       "0) 若 Context Pack 提供 KB_STYLE_CLUSTERS(JSON)（写法候选/子簇）或 STYLE_SELECTOR(JSON)：请在输出开头用 1–2 句说明“本次默认采用的写法”（selectedClusterId/label），并列出另外 1–2 个备选写法（带 clusterId/label + 1 句代表证据 + 2~3 个关键数字口径）。不要停下来等用户确认：默认按推荐/已选写法继续写作；用户可随时改口切换。\n" +
       "1) 若 Main Doc 尚未写入 styleContractV1（或用户改口要求切写法），再调用 run.mainDoc.update 写入/更新 mainDoc.styleContractV1（短 JSON：{v,libraryId,selectedCluster{id,label},anchors,evidence,softRanges,facetPlan,updatedAt}）。若 Main Doc 已有且用户未要求变更，则不要重复写入。\n" +
       "2) 若提供 STYLE_SELECTOR(JSON)：必须把 selectedFacetIds/selectedFacets 当作本次要执行的“维度卡子集”（只执行这些卡，不要自行扩展到 21 张）。若同时提供 STYLE_FACETS_SELECTED(Markdown)，优先按其卡片内容执行；并对每张入选 facet 结合 kbQueries（或 facetId+话题）用 kb.search 拉样例/证据再落笔。\n" +
-      "3) 写作时必须先 kb.search（只搜风格库）拉样例/模板；lint.style 用于“提示/审计/问题清单”，不要把分数当成唯一门禁：若 lint 不通过也不要卡死，请列出问题点并继续推进（或按用户要求回炉改写）。\n" +
+      "3) 写作时必须先 kb.search（只搜风格库）拉样例/模板：优先 kind=card（hook/one_liner/outline/thesis/ending 等），不要一上来就用 kind=paragraph 大范围捞原文段落当样例。\n" +
+      "4) 反贴原文要求（必须遵守）：\n" +
+      "- 不要复制原文的句子/段落；任何明显的逐句改写/近似复述都视为失败。\n" +
+      "- 在“不新增事实”的前提下，必须做结构与表达的再创作：重排段落、改句式、换衔接、换比喻/类比、把数字堆砌改成叙事化解释。\n" +
+      "- 如需引用原文中的专有名词/关键结论：只保留“必要短语”，不要出现长串连续复用。\n" +
+      "5) lint.style 用于“提示/审计/问题清单”：未通过时必须按 rewritePrompt 回炉改写并复检；不要把分数当成唯一门禁导致卡死。\n" +
       "工具调用仍按 XML 协议输出。",
     context: "ACTIVE_SKILLS: style_imitate（原因见 reasonCodes；UI 需可见）",
   },

@@ -421,10 +421,12 @@ export function createAiConfigService(args: {
     for (const d of defs) {
       if (stageMap.has(d.key)) continue;
       const m = byId.get(normalizeModelId(d.defaultModel)) || null;
+      const allowMulti = d.key !== "embedding";
       const s: AiStageConfig = {
         stage: d.key,
         modelId: m ? m.id : null,
-        modelIds: d.key === "llm.chat" || d.key === "agent.run" ? (m ? [m.id] : null) : null,
+        // 候选模型列表（按优先级）：非 embedding stage 默认允许配置，用于“备用模型/fallback”。
+        modelIds: allowMulti ? (m ? [m.id] : null) : null,
         temperature: d.defaultTemperature,
         maxTokens: d.defaultMaxTokens,
         isEnabled: true,
@@ -956,7 +958,7 @@ export function createAiConfigService(args: {
       const stageModelIds =
         Array.isArray((s as any)?.modelIds) && ((s as any).modelIds as any[]).length
           ? (((s as any).modelIds as any[]).map((x) => String(x)).filter(Boolean) as string[])
-          : d.key === "llm.chat" || d.key === "agent.run"
+          : d.key !== "embedding"
             ? m
               ? [m.id]
               : modelId
@@ -996,7 +998,7 @@ export function createAiConfigService(args: {
         if (!m || !m.isEnabled) throw new Error(`model_not_available:${modelId}`);
       }
 
-       const allowMulti = stage === "llm.chat" || stage === "agent.run";
+      const allowMulti = stage !== "embedding";
       const nextModelIdsRaw =
         c.modelIds !== undefined
           ? Array.isArray(c.modelIds)

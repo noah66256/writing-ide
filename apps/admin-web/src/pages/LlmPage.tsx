@@ -35,12 +35,11 @@ function endpointLabel(endpoint: string) {
   return e || "-";
 }
 
-function sortIdsByOrder(ids: string[], ordered: { id: string }[]) {
-  const order = new Map<string, number>(ordered.map((x, i) => [x.id, i]));
-  return ids
-    .filter(Boolean)
-    .slice()
-    .sort((a, b) => (order.get(a) ?? 99999) - (order.get(b) ?? 99999) || a.localeCompare(b));
+function ensureFront(arr: string[], id: string | null) {
+  const v = id ? String(id).trim() : "";
+  if (!v) return arr.filter(Boolean);
+  const rest = arr.filter((x) => x && x !== v);
+  return [v, ...rest];
 }
 
 const ENDPOINT_LAST_KEY = "writing-ide.admin.endpointLast.v1";
@@ -850,12 +849,15 @@ export function LlmPage() {
           </thead>
           <tbody>
             {stages.map((s) => {
-              const allowMulti = s.stage === "llm.chat" || s.stage === "agent.run" || s.stage === "agent.context_summary";
-              const stageEndpointWant = allowMulti ? "Chat" : null;
+              // 候选模型（备用模型）配置：除 embedding 外，其它 stage 都允许配置 modelIds（按优先级）。
+              const allowMulti = s.stage !== "embedding";
+              const stageEndpointWant = s.stage === "embedding" ? "Embeddings" : "Chat";
               const selectableModels = modelOptions.filter((m) => {
                 if (!m.isEnabled) return false;
-                if (stageEndpointWant === "Chat") return endpointLabel(m.endpoint) !== "Embeddings";
-                return true;
+                const kind = endpointLabel(m.endpoint);
+                if (stageEndpointWant === "Embeddings") return kind === "Embeddings";
+                // Chat/Gemini 统一走“非 Embeddings”
+                return kind !== "Embeddings";
               });
               const allowlistEnabled = Array.isArray(s.modelIds);
               const allowlistIds = allowlistEnabled ? (s.modelIds as string[]) : [];
@@ -865,7 +867,8 @@ export function LlmPage() {
                 const map = new Map(selectableModels.map((m) => [m.id, m.model] as const));
                 const names = allowlistIds.map((id) => map.get(id) || id).slice(0, 3);
                 const more = allowlistIds.length > 3 ? ` +${allowlistIds.length - 3}` : "";
-                return { kind: "picked" as const, text: `${names.join(" / ")}${more}` };
+                const hint = allowlistIds.length >= 2 ? "（第2起=备用）" : "";
+                return { kind: "picked" as const, text: `${names.join(" / ")}${more}${hint}` };
               })();
 
               return (
@@ -889,14 +892,10 @@ export function LlmPage() {
                             prev.map((x) => {
                               if (x.stage !== s.stage) return x;
                               const limitEnabled = Array.isArray(x.modelIds);
-                              let nextModelIds = x.modelIds;
-                              if (limitEnabled) {
-                                const set = new Set<string>(Array.isArray(nextModelIds) ? nextModelIds : []);
-                                if (v) set.add(v);
-                                const arr = sortIdsByOrder(Array.from(set), selectableModels).slice(0, 60);
-                                nextModelIds = arr;
-                              }
-                              return { ...x, modelId: v, modelIds: (nextModelIds as any) ?? null };
+                              if (!limitEnabled) return { ...x, modelId: v };
+                              const cur = Array.isArray(x.modelIds) ? (x.modelIds as string[]) : [];
+                              const nextIds = ensureFront(cur, v).slice(0, 60);
+                              return { ...x, modelId: v, modelIds: nextIds };
                             }),
                           );
                         }}
@@ -912,7 +911,8 @@ export function LlmPage() {
 
                       <div className="multiPickRow">
                         <div className="muted" style={{ fontSize: 12 }}>
-                          可选模型：{allowlistPreview.text}
+                          候选模型（按优先级）：{allowlistPreview.text}
+                          {allowlistEnabled ? <span>（支持 ↑/↓ 调整；默认模型固定在第1位）</span> : null}
                         </div>
                         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                           <button className="btn" type="button" onClick={() => setStagePickerOpen(s.stage)}>
@@ -1121,12 +1121,12 @@ export function LlmPage() {
             {(() => {
               const s0 = stages.find((x) => x.stage === stagePickerOpen) || null;
               if (!s0) return null;
-              const allowMulti = s0.stage === "llm.chat" || s0.stage === "agent.run" || s0.stage === "agent.context_summary";
-              const stageEndpointWant = allowMulti ? "Chat" : null;
+              const stageEndpointWant = s0.stage === "embedding" ? "Embeddings" : "Chat";
               const selectableModels = modelOptions.filter((m) => {
                 if (!m.isEnabled) return false;
-                if (stageEndpointWant === "Chat") return endpointLabel(m.endpoint) !== "Embeddings";
-                return true;
+                const kind = endpointLabel(m.endpoint);
+                if (stageEndpointWant === "Embeddings") return kind === "Embeddings";
+                return kind !== "Embeddings";
               });
               const allowlistEnabled = Array.isArray(s0.modelIds);
               const allowlistIds = allowlistEnabled ? (s0.modelIds as string[]) : [];
@@ -1172,11 +1172,9 @@ export function LlmPage() {
                           prev.map((x) => {
                             if (x.stage !== s0.stage) return x;
                             if (!on) return { ...x, modelIds: null };
-                            const cur = Array.isArray(x.modelIds) ? x.modelIds : [];
-                            const set = new Set<string>(cur);
-                            if (x.modelId) set.add(x.modelId);
-                            const arr = sortIdsByOrder(Array.from(set), selectableModels).slice(0, 60);
-                            return { ...x, modelIds: arr };
+                            const cur = Array.isArray(x.modelIds) ? (x.modelIds as string[]) : [];
+                            const arr = ensureFront(cur, x.modelId).slice(0, 60);
+                            return { ...x, modelIds: arr.length ? arr : x.modelId ? [x.modelId] : [] };
                           }),
                         );
                       }}
@@ -1193,16 +1191,14 @@ export function LlmPage() {
                   <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
                     <ModelIdMultiPicker
                       options={pickerOptions}
-                      selectedIds={allowlistEnabled ? sortIdsByOrder(allowlistIds, selectableModels).slice(0, 60) : []}
+                      selectedIds={allowlistEnabled ? ensureFront(allowlistIds.slice(0, 60), s0.modelId) : []}
                       lockedIds={locked}
                       onChange={(nextIds) => {
                         setStages((prev) =>
                           prev.map((x) => {
                             if (x.stage !== s0.stage) return x;
                             if (!Array.isArray(x.modelIds)) return x;
-                            const set = new Set<string>(nextIds);
-                            if (x.modelId) set.add(x.modelId);
-                            const arr = sortIdsByOrder(Array.from(set), selectableModels).slice(0, 60);
+                            const arr = ensureFront(nextIds, x.modelId).slice(0, 60);
                             return { ...x, modelIds: arr };
                           }),
                         );

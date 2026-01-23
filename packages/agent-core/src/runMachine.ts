@@ -396,12 +396,23 @@ export function isStyleExampleKbSearch(args: {
   const kind = String((a as any)?.kind ?? "card").trim().toLowerCase();
   if (kind !== "paragraph" && kind !== "outline" && kind !== "card") return false;
 
-  // 风格/手法样例：允许用 card，也允许 paragraph/outline
+  // 风格/手法样例：
+  // - 强推荐用 card（可抄“模板/金句形状/结构骨架”），避免直接把“原文段落”当样例导致贴原文风险。
+  // - paragraph/outline 仅作为“证据段/定位段”使用：必须是“窄范围检索”（anchorParagraphIndexMax / anchorFromEndMax 足够小）。
   if (kind === "card") {
     const cardTypes = normalizeIdList((a as any)?.cardTypes);
     // 同时绑定了非风格库时：必须显式限制 cardTypes，避免“样例被素材库污染”。
     // 仅绑定风格库时：允许省略（减少强闭环误伤/不必要重试）。
     if (!cardTypes.length && args.hasNonStyleLibraries) return false;
+  } else {
+    const anchorParagraphIndexMaxRaw = Number((a as any)?.anchorParagraphIndexMax);
+    const anchorFromEndMaxRaw = Number((a as any)?.anchorFromEndMax);
+    const anchorParagraphIndexMax = Number.isFinite(anchorParagraphIndexMaxRaw) ? Math.floor(anchorParagraphIndexMaxRaw) : null;
+    const anchorFromEndMax = Number.isFinite(anchorFromEndMaxRaw) ? Math.floor(anchorFromEndMaxRaw) : null;
+    const okAnchor =
+      (anchorParagraphIndexMax !== null && anchorParagraphIndexMax >= 0 && anchorParagraphIndexMax <= 6) ||
+      (anchorFromEndMax !== null && anchorFromEndMax >= 0 && anchorFromEndMax <= 6);
+    if (!okAnchor) return false;
   }
 
   const libs = normalizeIdList((a as any)?.libraryIds);

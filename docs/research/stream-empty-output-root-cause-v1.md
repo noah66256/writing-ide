@@ -73,7 +73,47 @@
 - 仅当 **流结束且无任何 delta** 时触发一次非流式请求；
 - 避免影响正常流式与性能。
 
+### C. 0 delta（UPSTREAM_EMPTY_CONTENT）自动切换备用模型（最多 2 次）
+> 目的：这类问题在真实环境中会“出现很多次”，且往往 **有 usage 但无正文**。如果不做收敛，会出现“空输出 + 自动重试 + 误扣费”的黑洞体验。
+
+- **触发条件（严格）**
+  - 上游返回错误码/错误文本为 `UPSTREAM_EMPTY_CONTENT`（我们在 provider 适配层统一产出的错误）
+  - 且当前 stage 配置了候选模型列表（`stage.modelIds`）
+- **执行策略**
+  - 同一个 turn 内重试：按 `stage.modelIds` 的顺序依次切换到下一候选模型
+  - **最多 2 次重试**（即最多 3 次总尝试：主模型 + 2 个备用）
+  - 失败尝试 **不计费**（即便上游返回了 usage，也视为无效输出，不入账）
+- **配置约定（B 端 / Admin Web）**
+  - `stage.modelId`：默认模型（第 1 位）
+  - `stage.modelIds`：候选模型（按优先级排序；第 2 位起视为备用模型）
+  - UI 应支持调整顺序（↑/↓），默认模型锁定在第 1 位
+- **可观测性**
+  - Gateway 会记录 `policy.decision`：`UpstreamRetryPolicy`（from/to/attempt）
+  - 并输出 `run.notice`（info）提示已自动切换备用模型重试
+
 ## 验证建议
-1) 使用已复现的诊断样本，确认不再出现 `empty_output`。
-2) 观察 `openaiCompat.diag` 中 0 delta 的比例是否下降。
+1) **B 端配置候选模型**
+   - 打开 Admin Web → AI 配置 → 环节（stage）路由配置
+   - 在 `agent.run`（以及相关 skill stage，例如 `agent.skill.style_imitate`）里：
+     - 设置默认模型 `modelId`
+     - 打开“限制可选模型（allowlist）”，并在“编辑…”里按顺序选择候选模型（第 2 个起作为备用）
+     - 用 ↑/↓ 调整顺序，保证备用模型优先级符合预期
+
+2) **复现空响应并确认能自愈**
+   - 触发一次历史上容易出现空响应的场景（例如 tool_result 后续写、或你们代理侧不稳定时段）
+   - 期望行为：
+     - UI 不再出现“空白结束 + AutoRetry 无限转”
+     - 日志中出现：
+       - `policy.decision`：`policy=UpstreamRetryPolicy decision=retry reasonCodes` 包含 `upstream_empty_content`
+       - `run.notice`：标题为“上游空响应：自动切换备用模型重试”
+
+3) **确认计费不会误扣**
+   - 对触发过 `UPSTREAM_EMPTY_CONTENT` 的那次 run：
+     - 不应出现“失败 attempt 的 billing.charge”
+     - 只应对最终成功的那次模型调用计费（若最终仍失败，则不计费）
+
+4) **保底：仍失败时要有可读报错**
+   - 如果候选模型全部失败，UI 最终应看到：
+     - `[上游模型错误] UPSTREAM_EMPTY_CONTENT`（或其它上游错误文本）
+   - 并且 run 以 `reason=upstream_error` 结束（便于定位）
 
