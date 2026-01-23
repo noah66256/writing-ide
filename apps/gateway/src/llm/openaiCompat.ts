@@ -406,6 +406,10 @@ export async function* streamChatCompletions(args: {
       yield { type: "done" };
       return;
     }
+    // 关键：如果流式 0 delta，且非流式兜底也拿不到内容，必须视为上游错误。
+    // 否则 Gateway 会把它当成“模型输出为空”进入 AutoRetry，并且因为 usage 可能已上报而继续计费，造成“空输出还扣费”的黑洞体验。
+    yield { type: "error", error: "UPSTREAM_EMPTY_CONTENT" };
+    return;
   }
 
   if (sawFinishReason || diag.sawDone) {
