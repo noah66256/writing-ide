@@ -674,38 +674,12 @@ async function interactiveUpdateFlow(args) {
     return { ok: false, error: "DOWNLOAD_FAILED", detail: dl.error };
   }
 
-  // 安装前：检查是否有其它实例还在跑（避免新旧并行/占用文件）
-  const exeName = path.basename(process.execPath);
-  const countRet = await countRunningProcessesByImageNameWin(exeName);
-  if (!countRet.ok) {
-    await dialog.showMessageBox(mainWindow ?? undefined, {
-      type: "warning",
-      title: "更新提示",
-      message: "无法确认是否存在其它正在运行的进程。为避免安装失败，请先关闭其它写作IDE窗口后再试。",
-    });
-    return { ok: false, error: "PROCESS_CHECK_FAILED" };
-  }
-  if ((countRet.count ?? 0) > 1) {
-    await dialog.showMessageBox(mainWindow ?? undefined, {
-      type: "warning",
-      title: "请先关闭其它实例",
-      message: "检测到还有其它写作IDE进程在运行。\n请先关闭后再安装更新（避免新旧同时运行导致安装失败）。",
-    });
-    return { ok: false, error: "OTHER_INSTANCE_RUNNING", count: countRet.count };
-  }
-
-  const confirmInstall = await dialog.showMessageBox(mainWindow ?? undefined, {
-    type: "info",
-    title: "准备安装更新",
-    message: "将启动安装程序。安装过程中应用会自动退出。",
-    buttons: ["开始安装", "取消"],
-    defaultId: 0,
-    cancelId: 1,
-  });
-  if (confirmInstall.response !== 0) return { ok: true, cancelled: true };
-
   try {
-    const child = spawn(target, [], { detached: true, stdio: "ignore" });
+    // 关键修复（Windows）：不要在本进程还在运行时直接启动 NSIS installer，
+    // 否则安装器会提示“写作IDE正在运行，无法安装”，用户还可能被安装器抢焦点导致难以切回关闭。
+    // 这里用 cmd 作为“外部引导器”：先延迟 1~2 秒，再 start 安装器；本进程立刻退出释放文件占用。
+    const cmd = `ping -n 2 127.0.0.1 >nul & start "" "${target}"`;
+    const child = spawn("cmd.exe", ["/d", "/s", "/c", cmd], { detached: true, stdio: "ignore", windowsHide: true });
     child.unref();
   } catch (e) {
     await dialog.showMessageBox(mainWindow ?? undefined, {
@@ -716,9 +690,35 @@ async function interactiveUpdateFlow(args) {
     return { ok: false, error: "INSTALLER_LAUNCH_FAILED" };
   }
 
-  // 退出当前进程，让安装器替换文件
+  // 下载完成：通知渲染层（用于 UI 清理进度条/提示）
   try {
-    setTimeout(() => app.quit(), 300);
+    mainWindow?.webContents?.send("update.event", { type: "download.done", version: info.latestVersion, target });
+    mainWindow?.webContents?.send("update.event", { type: "install.start", version: info.latestVersion, target });
+  } catch {
+    // ignore
+  }
+
+  // 退出当前进程，让安装器替换文件（并设置一个硬退出兜底，避免“卡住导致安装器仍认为在运行”）
+  try {
+    try {
+      mainWindow?.hide?.();
+    } catch {
+      // ignore
+    }
+    setTimeout(() => {
+      try {
+        app.quit();
+      } catch {
+        // ignore
+      }
+    }, 50);
+    setTimeout(() => {
+      try {
+        app.exit(0);
+      } catch {
+        // ignore
+      }
+    }, 1500);
   } catch {
     // ignore
   }
