@@ -56,7 +56,7 @@ type ProjectState = {
   loadProjectFromDisk: (rootDir: string) => Promise<void>;
   refreshFromDisk: (reason?: string) => Promise<void>;
   mkdir: (dirPath: string) => Promise<void>;
-  renamePath: (fromPath: string, toPath: string) => Promise<void>;
+  renamePath: (fromPath: string, toPath: string) => Promise<{ ok: boolean; error?: string; detail?: string }>;
 
   commitSnapshot: (label?: string) => SavedSnapshot;
   deleteSnapshot: (snapshotId: string) => void;
@@ -92,12 +92,54 @@ const saveTimers = new Map<string, number>();
 let refreshInFlight: Promise<void> | null = null;
 let refreshQueuedReason: string | null = null;
 
+const SUPPORTED_TEXT_EXT = new Set([".md", ".mdx", ".txt"]);
+
 function normalizeRel(p: string) {
   let s = String(p ?? "").trim().replaceAll("\\", "/");
   s = s.replace(/\/+/g, "/");
   s = s.replace(/^\.\//, "");
   s = s.replace(/\/+$/g, "");
   return s;
+}
+
+function relBasename(p: string) {
+  const s = String(p ?? "");
+  const i = s.lastIndexOf("/");
+  return i >= 0 ? s.slice(i + 1) : s;
+}
+
+function relDirname(p: string) {
+  const s = String(p ?? "");
+  const i = s.lastIndexOf("/");
+  return i >= 0 ? s.slice(0, i) : "";
+}
+
+function relJoin(dir: string, name: string) {
+  const d = String(dir ?? "").replace(/\/+$/g, "");
+  const n = String(name ?? "").replace(/^\/+/g, "");
+  if (!d) return n;
+  if (!n) return d;
+  return `${d}/${n}`;
+}
+
+function extnameLower(p: string) {
+  const b = relBasename(p);
+  const m = b.match(/\.[^./]+$/);
+  return (m?.[0] ?? "").toLowerCase();
+}
+
+function hasExtInBaseName(p: string) {
+  const b = relBasename(p);
+  return /\.[^./]+$/.test(b);
+}
+
+function mapRecordKeys<T>(rec: Record<string, T>, mapKey: (k: string) => string) {
+  const out: Record<string, T> = {};
+  for (const [k, v] of Object.entries(rec ?? {})) {
+    const nk = mapKey(String(k));
+    out[nk] = v;
+  }
+  return out;
 }
 
 export const useProjectStore = create<ProjectState>((set, get) => ({
@@ -462,41 +504,89 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   renamePath: async (fromPath, toPath) => {
     const api = window.desktop?.fs;
     const rootDir = get().rootDir;
-    if (!api || !rootDir) return;
+    if (!api || !rootDir) return { ok: false, error: "FS_NOT_READY" };
     const fromRel = normalizeRel(fromPath);
-    const toRel = normalizeRel(toPath);
-    if (!fromRel || !toRel) return;
-    const snap = get().snapshot();
+    const toRel0 = normalizeRel(toPath);
+    if (!fromRel || !toRel0) return { ok: false, error: "INVALID_PATH" };
+    if (fromRel === toRel0) return { ok: true };
 
     const st0 = get();
     const isFile = !!st0.files.find((f) => f.path === fromRel);
+    const isDir = st0.dirs.includes(fromRel);
+    if (!isFile && !isDir) return { ok: false, error: "PATH_NOT_FOUND" };
+
     const prefix = `${fromRel}/`;
+    let toRel = toRel0;
+
+    // 文件：如果用户没写后缀，自动继承原后缀（否则刷新后会“看起来像丢了”，因为 Explorer 只展示 .md/.mdx/.txt）
+    if (isFile) {
+      const fromExt = extnameLower(fromRel);
+      if (fromExt && !hasExtInBaseName(toRel)) {
+        const base = relBasename(toRel);
+        toRel = relJoin(relDirname(toRel), `${base}${fromExt}`);
+      }
+      if (toRel === fromRel) return { ok: true };
+      const ext = extnameLower(toRel);
+      if (ext && !SUPPORTED_TEXT_EXT.has(ext)) return { ok: false, error: "UNSUPPORTED_EXT", detail: ext };
+    }
 
     // 禁止把目录移动到自身或子目录
     if (!isFile) {
       if (toRel === fromRel || toRel.startsWith(prefix)) {
         useRunStore.getState().log("warn", "rename.blocked", { from: fromRel, to: toRel, reason: "into_self" });
-        return;
+        return { ok: false, error: "INTO_SELF" };
       }
     }
 
     // 简单冲突检测（避免覆盖/合并导致不可控）
-    const hasFileAt = (p: string) => !!get().files.find((f) => f.path === p);
-    const hasDirAt = (p: string) => (p ? get().dirs.includes(p) : false);
+    const hasFileAt = (p: string) => !!st0.files.find((f) => f.path === p);
+    const hasDirAt = (p: string) => (p ? st0.dirs.includes(p) : false);
     if (isFile) {
-      if (hasFileAt(toRel)) {
+      if (hasFileAt(toRel) || hasDirAt(toRel)) {
         useRunStore.getState().log("warn", "rename.blocked", { from: fromRel, to: toRel, reason: "dest_exists" });
-        return;
+        return { ok: false, error: "DEST_EXISTS" };
       }
     } else {
       const destPrefix = `${toRel}/`;
-      const collides =
-        hasDirAt(toRel) ||
-        get().files.some((f) => f.path === toRel || f.path.startsWith(destPrefix));
+      const collides = hasDirAt(toRel) || st0.files.some((f) => f.path === toRel || f.path.startsWith(destPrefix));
       if (collides) {
         useRunStore.getState().log("warn", "rename.blocked", { from: fromRel, to: toRel, reason: "dest_exists" });
-        return;
+        return { ok: false, error: "DEST_EXISTS" };
       }
+    }
+
+    // 影响范围内：先清理自动保存定时器；再把 dirty 文件写盘。任何写盘失败都直接终止（避免“以为改名了但内容丢了”）。
+    const affectedFiles = isFile ? st0.files.filter((f) => f.path === fromRel) : st0.files.filter((f) => f.path.startsWith(prefix));
+    for (const f of affectedFiles) {
+      const t = saveTimers.get(f.path);
+      if (t) window.clearTimeout(t);
+      saveTimers.delete(f.path);
+    }
+    const failedSaves: string[] = [];
+    for (const f of affectedFiles) {
+      if (!f.dirty) continue;
+      try {
+        const r = await api.writeFile(rootDir, f.path, f.content);
+        if (!r?.ok) failedSaves.push(f.path);
+      } catch {
+        failedSaves.push(f.path);
+      }
+    }
+    if (failedSaves.length) {
+      useRunStore.getState().log("error", "rename.save_dirty_failed", { from: fromRel, to: toRel, failed: failedSaves });
+      return { ok: false, error: "SAVE_DIRTY_FAILED", detail: failedSaves.slice(0, 8).join(", ") };
+    }
+
+    // 先改磁盘，再更新内存映射（避免磁盘失败时 UI 先变导致“错觉丢文件/不生效”）
+    let rr: any = null;
+    try {
+      rr = await api.renamePath(rootDir, fromRel, toRel);
+    } catch (e: any) {
+      rr = { ok: false, error: "RENAME_FAILED", detail: String(e?.message ?? e) };
+    }
+    if (!rr?.ok) {
+      useRunStore.getState().log("error", "rename.failed", { from: fromRel, to: toRel, error: rr?.error, detail: rr?.detail });
+      return { ok: false, error: String(rr?.error ?? "RENAME_FAILED"), detail: rr?.detail ? String(rr.detail) : undefined };
     }
 
     const mapPath = (p: string) => {
@@ -506,48 +596,29 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       return p;
     };
 
-    // 移动前：把影响范围内 dirty 文件先写盘（避免 rename/move 后丢内容）
-    const affectedFiles = isFile
-      ? get().files.filter((f) => f.path === fromRel)
-      : get().files.filter((f) => f.path.startsWith(prefix));
-
-    for (const f of affectedFiles) {
-      if (!f.dirty) continue;
-      const t = saveTimers.get(f.path);
-      if (t) window.clearTimeout(t);
-      saveTimers.delete(f.path);
-      try {
-        await api.writeFile(rootDir, f.path, f.content);
-      } catch {
-        // ignore
-      }
-    }
-
-    // 先在内存里完成路径映射（保证 tab/active 不丢）
     set((s) => ({
       dirs: s.dirs.map((d) => mapPath(d)),
-      files: s.files.map((f) =>
-        isFile
-          ? f.path === fromRel
-            ? { ...f, path: toRel, dirty: false }
-            : f
-          : f.path.startsWith(prefix)
-            ? { ...f, path: toRel + f.path.slice(fromRel.length), dirty: false }
-            : f,
-      ),
+      files: s.files.map((f) => {
+        if (isFile) {
+          if (f.path !== fromRel) return f;
+          return { ...f, path: toRel, dirty: false };
+        }
+        if (!f.path.startsWith(prefix)) return f;
+        return { ...f, path: toRel + f.path.slice(fromRel.length), dirty: false };
+      }),
       openPaths: s.openPaths.map(mapPath),
       activePath: mapPath(s.activePath),
       previewPath: s.previewPath ? mapPath(s.previewPath) : s.previewPath,
+      docOpUndoByPath: mapRecordKeys(s.docOpUndoByPath, mapPath),
+      docOpRedoByPath: mapRecordKeys(s.docOpRedoByPath, mapPath),
     }));
 
     try {
-      await api.renamePath(rootDir, fromRel, toRel);
       await get().refreshFromDisk("rename");
-    } catch (e: any) {
-      // 失败：回滚
-      get().restore(snap as any);
-      useRunStore.getState().log("error", "rename.failed", { from: fromRel, to: toRel, message: String(e?.message ?? e) });
+    } catch {
+      // ignore refresh failures; disk rename already succeeded
     }
+    return { ok: true };
   },
 
   commitSnapshot: (label) => {

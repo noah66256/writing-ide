@@ -923,9 +923,32 @@ function registerIpc() {
     if (!root) return { ok: false, error: "MISSING_ROOT" };
     const from = toFsPath(root, fromRel);
     const to = toFsPath(root, toRel);
-    await fsp.mkdir(path.dirname(to), { recursive: true });
-    await fsp.rename(from, to);
-    return { ok: true };
+    try {
+      await fsp.mkdir(path.dirname(to), { recursive: true });
+
+      // Windows：仅大小写变化的改名在某些场景会异常或不生效，走两步改名兜底（from -> tmp -> to）
+      if (process.platform === "win32") {
+        const fromLower = String(from).toLowerCase();
+        const toLower = String(to).toLowerCase();
+        if (fromLower === toLower && String(from) !== String(to)) {
+          const tmp = `${to}.__tmp__${Date.now()}_${Math.random().toString(16).slice(2)}`;
+          await fsp.rename(from, tmp);
+          await fsp.rename(tmp, to);
+          return { ok: true };
+        }
+      }
+
+      await fsp.rename(from, to);
+      return { ok: true };
+    } catch (e) {
+      const code = String(e?.code ?? "");
+      const msg = String(e?.message ?? e);
+      if (code === "ENOENT") return { ok: false, error: "SOURCE_NOT_FOUND", detail: msg };
+      if (code === "EEXIST") return { ok: false, error: "DEST_EXISTS", detail: msg };
+      if (code === "ENOTEMPTY") return { ok: false, error: "DEST_NOT_EMPTY", detail: msg };
+      if (code === "EPERM" || code === "EACCES") return { ok: false, error: "NO_PERMISSION", detail: msg };
+      return { ok: false, error: "RENAME_FAILED", detail: msg };
+    }
   });
 
   ipcMain.handle("project.watchStart", async (_event, rootDir) => startWatch(rootDir));

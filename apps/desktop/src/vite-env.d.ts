@@ -36,7 +36,11 @@ declare global {
         deleteFile: (rootDir: string, relPath: string) => Promise<{ ok: boolean; error?: string }>;
         deletePath: (rootDir: string, relPath: string) => Promise<{ ok: boolean; error?: string; detail?: string }>;
         mkdir: (rootDir: string, relDir: string) => Promise<{ ok: boolean; error?: string }>;
-        renamePath: (rootDir: string, fromRel: string, toRel: string) => Promise<{ ok: boolean; error?: string }>;
+        renamePath: (
+          rootDir: string,
+          fromRel: string,
+          toRel: string,
+        ) => Promise<{ ok: boolean; error?: string; detail?: string }>;
         watchStart: (rootDir: string) => Promise<{ ok: boolean; error?: string; detail?: string }>;
         watchStop: () => Promise<{ ok: boolean; error?: string }>;
         onFsEvent?: (handler: (payload: any) => void) => () => void;

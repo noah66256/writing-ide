@@ -429,7 +429,21 @@ export function Explorer() {
         const name = String(v ?? "").trim();
         if (!name) return;
         const to = joinPath(parent, name);
-        await useProjectStore.getState().renamePath(targetPath, to);
+        const r = await useProjectStore.getState().renamePath(targetPath, to);
+        if (!r.ok) {
+          const e = String(r.error ?? "RENAME_FAILED");
+          const msg =
+            e === "DEST_EXISTS"
+              ? "重命名失败：目标已存在（为避免覆盖，已阻止该操作）。"
+              : e === "SAVE_DIRTY_FAILED"
+                ? `重命名失败：保存未保存内容失败，请先手动保存后再试。\n${r.detail ? `\n失败文件：${r.detail}` : ""}`
+                : e === "UNSUPPORTED_EXT"
+                  ? `重命名失败：不支持的文件后缀 ${r.detail ?? ""}（当前只展示 .md/.mdx/.txt）。`
+                  : e === "INTO_SELF"
+                    ? "重命名失败：不能把文件夹移动到自身或子目录。"
+                    : `重命名失败：${e}${r.detail ? `\n${r.detail}` : ""}`;
+          window.alert(msg);
+        }
       },
     });
   };
@@ -444,7 +458,21 @@ export function Explorer() {
       onConfirm: async (v) => {
         const to = String(v ?? "").trim().replaceAll("\\", "/");
         if (!to) return;
-        await useProjectStore.getState().renamePath(targetPath, to);
+        const r = await useProjectStore.getState().renamePath(targetPath, to);
+        if (!r.ok) {
+          const e = String(r.error ?? "RENAME_FAILED");
+          const msg =
+            e === "DEST_EXISTS"
+              ? "移动失败：目标已存在（为避免覆盖，已阻止该操作）。"
+              : e === "SAVE_DIRTY_FAILED"
+                ? `移动失败：保存未保存内容失败，请先手动保存后再试。\n${r.detail ? `\n失败文件：${r.detail}` : ""}`
+                : e === "UNSUPPORTED_EXT"
+                  ? `移动失败：不支持的文件后缀 ${r.detail ?? ""}（当前只展示 .md/.mdx/.txt）。`
+                  : e === "INTO_SELF"
+                    ? "移动失败：不能把文件夹移动到自身或子目录。"
+                    : `移动失败：${e}${r.detail ? `\n${r.detail}` : ""}`;
+          window.alert(msg);
+        }
       },
     });
   };
@@ -494,7 +522,12 @@ export function Explorer() {
         for (const p of items) {
           const dest = targetDir ? joinPath(targetDir, basename(p)) : basename(p);
           if (!dest || dest === p) continue;
-          await s.renamePath(p, dest);
+          const r = await s.renamePath(p, dest);
+          if (!r.ok) {
+            const e = String(r.error ?? "RENAME_FAILED");
+            window.alert(`批量移动失败：${p} → ${dest}\n原因：${e}${r.detail ? `\n${r.detail}` : ""}`);
+            break;
+          }
         }
         clearSelection();
       },
@@ -589,7 +622,10 @@ export function Explorer() {
                 const existsFile = !!s.files.find((f) => f.path === dest);
                 const existsDir = dest && s.dirs.includes(dest);
                 if (existsFile || existsDir) return;
-                void s.renamePath(src, dest);
+                void (async () => {
+                  const r = await s.renamePath(src, dest);
+                  if (!r.ok) window.alert(`移动失败：${src} → ${dest}\n原因：${r.error ?? "RENAME_FAILED"}`);
+                })();
                 setDragOver(null);
               }}
               onContextMenu={(e) => {
@@ -759,7 +795,10 @@ export function Explorer() {
             const existsFile = !!s.files.find((f) => f.path === dest);
             const existsDir = dest && s.dirs.includes(dest);
             if (existsFile || existsDir) return;
-            void s.renamePath(src, dest);
+                void (async () => {
+                  const r = await s.renamePath(src, dest);
+                  if (!r.ok) window.alert(`移动失败：${src} → ${dest}\n原因：${r.error ?? "RENAME_FAILED"}`);
+                })();
             setDragOver(null);
           }}
         >

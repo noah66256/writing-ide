@@ -1442,7 +1442,8 @@ const tools: ToolDefinition[] = [
       })();
 
       const snap = useProjectStore.getState().snapshot();
-      await useProjectStore.getState().renamePath(fromPath, toPath);
+      const r = await useProjectStore.getState().renamePath(fromPath, toPath);
+      if (!r.ok) return { ok: false, error: r.error ?? "RENAME_FAILED", detail: r.detail };
       const undo = () => useProjectStore.getState().restore(snap);
       return {
         ok: true,
