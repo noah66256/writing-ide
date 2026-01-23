@@ -2295,15 +2295,25 @@ fastify.post(
 
   const lintPassScore = Number(process.env.STYLE_LINT_PASS_SCORE ?? 80);
   const lintMaxRework = Number(process.env.STYLE_LINT_MAX_REWORK ?? 2);
-  // lint 门禁策略（对齐 kb-manager-v2-spec.md 的“弱化门禁”）：默认 hint，不因风格分数卡死。
+  // lint 门禁策略：
   // - hint：不把 lint 当硬闸门（不强制通过，不触发 style_lint_exhausted）；仍允许模型/用户按需调用 lint.style 获取问题清单与 rewritePrompt
-  // - gate：沿用旧逻辑（lint 需通过，否则回炉/耗尽终止）
+  // - gate：硬闸门（必须通过，否则回炉；回炉耗尽终止）
+  // - safe：强制 lint 但“不会卡死”：必须跑 lint.style；未通过会回炉；耗尽则降级放行（用最高分版本继续写入/结束），避免死循环
   const lintModeRaw = String(process.env.STYLE_LINT_MODE ?? "hint").trim().toLowerCase();
-  const lintMode: "hint" | "gate" = lintModeRaw === "gate" || lintModeRaw === "hard" ? "gate" : "hint";
+  const lintModeEnv: "hint" | "safe" | "gate" =
+    lintModeRaw === "gate" || lintModeRaw === "hard"
+      ? "gate"
+      : lintModeRaw === "safe" || lintModeRaw === "soft" || lintModeRaw === "soft_gate"
+        ? "safe"
+        : "hint";
 
   // 注意：用户“跳过 linter”只应跳过风格校验，不应跳过“先 kb.search 拉样例”
   const gates = deriveStyleGate({ mode, kbSelected: kbSelectedList as any, intent, activeSkillIds });
-  const effectiveGates = { ...gates, lintGateEnabled: gates.lintGateEnabled && lintMode === "gate" };
+  // 默认行为（满足你“必须 lint 但不死锁”诉求）：
+  // - 当绑定风格库且进入 style_imitate 闭环时：即使 env 仍为 hint，也默认提升为 safe（强制跑 lint.style，但失败可降级放行）。
+  // - 用户显式“跳过 linter”会让 gates.lintGateEnabled=false，从而仍保持 hint。
+  const lintMode: "hint" | "safe" | "gate" = lintModeEnv === "hint" && gates.lintGateEnabled ? "safe" : lintModeEnv;
+  const effectiveGates = { ...gates, lintGateEnabled: gates.lintGateEnabled && (lintMode === "gate" || lintMode === "safe") };
   const styleLibIds = gates.styleLibIds;
 
   const keepBestOnLintExhausted =
@@ -3718,6 +3728,49 @@ fastify.post(
 
         if (batch.shouldEnforce && batch.violation) {
           const violation = batch.violation;
+          // 自动拆批（防卡死/防乱写）：
+          // 当模型把“关键动作”混在同一回合时，不要求模型重试，而是由系统拆成“先做前置动作”：
+          // - kb.search + (lint/write) 混用：本轮只执行 kb.search（+ run.*），丢弃其它，下一回合模型拿到 tool_result 再继续
+          // - lint.style + write 混用（lint gate 模式）：本轮只执行 lint.style（+ run.*），丢弃 write，避免无视 lint 直接写入
+          if (violation === "KB_AND_LINT_SAME_TURN" || violation === "KB_AND_WRITE_SAME_TURN" || violation === "LINT_AND_WRITE_SAME_TURN") {
+            const before = toolCalls.slice();
+            const isRunTool = (name: string) => String(name ?? "").startsWith("run.");
+            const isKb = (name: string) => String(name ?? "") === "kb.search";
+            const isLint = (name: string) => String(name ?? "") === "lint.style";
+            const keep = (c: any) => {
+              const n = String(c?.name ?? "");
+              if (!n) return false;
+              if (isRunTool(n)) return true;
+              if (violation === "LINT_AND_WRITE_SAME_TURN") return isLint(n);
+              // kb.* 与其它混用：优先只保留 kb.search
+              return isKb(n);
+            };
+            const after = before.filter(keep);
+            if (after.length && after.length < before.length) {
+              toolCalls.splice(0, toolCalls.length, ...after);
+              const batch2 = analyzeStyleWorkflowBatch({ mode, intent, gates: effectiveGates as any, state: runState, lintMaxRework, toolCalls });
+              if (!batch2.violation) {
+                batch = batch2;
+                writePolicyDecision({
+                  turn,
+                  policy: "StyleGatePolicy",
+                  decision: "auto_split",
+                  reasonCodes: ["style_workflow_auto_split", `violation:${String(violation ?? "")}`],
+                  detail: {
+                    violation,
+                    kept: after.map((c: any) => String(c?.name ?? "")).filter(Boolean),
+                    dropped: before
+                      .filter((c: any) => !after.includes(c))
+                      .map((c: any) => String(c?.name ?? ""))
+                      .filter(Boolean),
+                  },
+                });
+              } else {
+                // 拆批后仍违规：回退保持原始 toolCalls，继续走原有拦截逻辑
+                toolCalls.splice(0, toolCalls.length, ...before);
+              }
+            }
+          }
           if (runState.workflowRetryBudget > 0) {
             writePolicyDecision({
               turn,
@@ -4645,8 +4698,15 @@ fastify.post(
             const fc = Math.max(0, Math.floor(Number(runState.styleLintFailCount) || 0));
             runState.lintReworkBudget = fc > 0 ? Math.max(0, Math.floor(lintMaxRework) - fc + 1) : Math.max(0, Math.floor(lintMaxRework));
           } else {
-            // 工具本身失败：视为未通过闸门（不计入回炉次数，让模型决定重试或提示用户跳过）
+            // 工具本身失败：视为未通过闸门。
+            // - gate：不计入回炉次数，让模型决定重试或提示用户跳过
+            // - safe：计入 failCount，用于在上游不稳定时快速降级放行（避免卡死）
             runState.styleLintPassed = false;
+            if (lintMode === "safe") {
+              runState.styleLintFailCount += 1;
+              const fc = Math.max(0, Math.floor(Number(runState.styleLintFailCount) || 0));
+              runState.lintReworkBudget = fc > 0 ? Math.max(0, Math.floor(lintMaxRework) - fc + 1) : Math.max(0, Math.floor(lintMaxRework));
+            }
           }
         }
 
@@ -4663,7 +4723,7 @@ fastify.post(
         const toolResultText = `[tool_result name="${String(call.name ?? "")}"]\n${toolResultJson}\n[/tool_result]`;
         messages.push(...buildInjectedToolResultMessages({ toolResultFormat, toolResultXml, toolResultText }));
 
-        // 风格 Linter 终稿闸门：仅在 lintMode=gate 时启用。hint 模式下仅作为提示，不做回炉/不做耗尽终止。
+        // 风格 Linter 终稿闸门：在 lintMode=gate/safe 时启用。hint 模式下仅作为提示，不做回炉/不做耗尽终止。
         if (effectiveGates.lintGateEnabled && String(call.name ?? "") === "lint.style") {
           const scoreText =
             runState.lastStyleLint?.score !== null && runState.lastStyleLint?.score !== undefined ? String(runState.lastStyleLint.score) : "null";
@@ -4692,8 +4752,39 @@ fastify.post(
               continue;
             }
 
-            // 超过回炉上限：终止并提示用户
+            // 超过回炉上限：
+            // - gate：终止并提示用户（保留最高分可直接输出文本）
+            // - safe：降级放行（用最高分版本继续推进写入/结束），避免卡死
             if (keepBestOnLintExhausted && runState.bestStyleDraft?.text) {
+              if (lintMode === "safe") {
+                runState.lintGateDegraded = true;
+                runState.styleLintPassed = true; // 放行写入阶段（本次 lint 已执行，但未达阈值）
+                writePolicyDecision({
+                  turn,
+                  policy: "LintPolicy",
+                  decision: "degrade_keep_best",
+                  reasonCodes: ["style_lint_exhausted", "lint_degraded", "lint_keep_best"],
+                  detail: { bestScore: runState.bestStyleDraft.score, lintMode },
+                });
+                writeRunNotice({
+                  turn,
+                  kind: "warn",
+                  title: "风格对齐回炉上限：已降级放行（safe）",
+                  message: `风格对齐达到回炉上限（score_best=${runState.bestStyleDraft.score}），已进入 safe 降级：允许继续写入，但要求使用“最高分版本”作为终稿，避免乱写。`,
+                  policy: "LintPolicy",
+                  reasonCodes: ["style_lint_exhausted", "lint_degraded", "lint_keep_best"],
+                  detail: { bestScore: runState.bestStyleDraft.score, lintMode },
+                });
+                messages.push({
+                  role: "system",
+                  content:
+                    "【Style Lint safe】风格对齐回炉次数已耗尽，但为了避免流程卡死，系统已降级放行写入。\n" +
+                    "- 你必须使用下方 BEST_DRAFT 作为终稿（不要再重新生成/不要新增事实）。\n" +
+                    "- 下一轮进入写入阶段（doc.write/doc.applyEdits/doc.splitToDir...）时，直接把 BEST_DRAFT 写入。\n\n" +
+                    `BEST_DRAFT(score=${runState.bestStyleDraft.score}):\n` +
+                    runState.bestStyleDraft.text,
+                });
+              } else {
               writePolicyDecision({
                 turn,
                 policy: "LintPolicy",
@@ -4723,6 +4814,39 @@ fastify.post(
               reply.raw.end();
               agentRunWaiters.delete(runId);
               return;
+              }
+            }
+
+            if (lintMode === "safe") {
+              // 无 best draft：也降级放行（用“本次 lint 的候选稿”继续写入），避免卡死
+              runState.lintGateDegraded = true;
+              runState.styleLintPassed = true;
+              writePolicyDecision({
+                turn,
+                policy: "LintPolicy",
+                decision: "degrade_no_best",
+                reasonCodes: ["style_lint_exhausted", "lint_degraded"],
+                detail: { lintMode },
+              });
+              writeRunNotice({
+                turn,
+                kind: "warn",
+                title: "风格对齐回炉上限：已降级放行（safe）",
+                message:
+                  "风格对齐回炉次数已耗尽，但无法找到“最高分候选稿”。系统已进入 safe 降级：允许继续写入，但请使用你上一版候选稿作为终稿（不要重起炉灶）。",
+                policy: "LintPolicy",
+                reasonCodes: ["style_lint_exhausted", "lint_degraded"],
+                detail: { lintMode },
+              });
+              messages.push({
+                role: "system",
+                content:
+                  "【Style Lint safe】风格对齐回炉次数已耗尽，系统已降级放行写入。\n" +
+                  "- 请使用“刚刚 lint.style 的候选稿（arg text）”作为终稿继续写入。\n" +
+                  "- 不要重新生成，不要新增事实。\n",
+              });
+              // safe：不终止，继续执行后续工具/下一回合
+              continue;
             }
 
             writePolicyDecision({
@@ -4767,6 +4891,23 @@ fastify.post(
               policy: "LintPolicy",
               reasonCodes: ["style_lint_passed"],
               detail: { score: scoreText, highIssues: hi },
+            });
+          }
+
+          // lint 工具失败：给出明确提示（safe 会随着 failCount 递增，最终降级放行；gate 则等待用户/模型处理）
+          if (!payload.ok) {
+            writeRunNotice({
+              turn,
+              kind: "warn",
+              title: "风格对齐工具失败",
+              message:
+                "lint.style 调用失败（可能是网络/上游模型/超时）。\n" +
+                (lintMode === "safe"
+                  ? "当前为 safe 模式：系统会允许有限次重试；若持续失败将自动降级放行，避免卡死。"
+                  : "当前为 gate 模式：需要你重试或回复“跳过linter”放弃风格闸门。"),
+              policy: "LintPolicy",
+              reasonCodes: ["lint_tool_failed"],
+              detail: { lintMode },
             });
           }
         }
