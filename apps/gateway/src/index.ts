@@ -4237,20 +4237,14 @@ fastify.post(
         let payload: ToolResultPayload;
         if (executedBy === "gateway") {
           // 工具门禁：
-          // - lint.style：强模型工具，0 积分禁止执行（避免“0 积分仍可跑强模型”）
+          // - lint.style：LLM 工具，0 积分禁止执行（避免“0 积分仍可跑强模型/免费调用”）
           // - web.search/web.fetch：按次数扣费（博查），余额不足时直接拒绝执行（避免触发外部付费 API）
-          const lintBillRaw = process.env.LINT_STYLE_BILL_POINTS_PER_CALL ?? process.env.LINT_STYLE_BILL_POINTS ?? "50";
-          const lintBillPoints = (() => {
-            const n = Number(String(lintBillRaw ?? "").trim());
-            if (!Number.isFinite(n)) return 50;
-            return Math.max(0, Math.min(50_000, Math.floor(n)));
-          })();
           if (
             String(call.name ?? "") === "lint.style" &&
             jwtUser?.id &&
             jwtUser.role !== "admin" &&
             userPointsBalance !== null &&
-            (lintBillPoints > 0 ? userPointsBalance < lintBillPoints : userPointsBalance <= 0)
+            userPointsBalance <= 0
           ) {
             payload = {
               toolCallId,
@@ -4259,7 +4253,7 @@ fastify.post(
               output: {
                 ok: false,
                 error: "INSUFFICIENT_POINTS",
-                detail: { pointsBalance: userPointsBalance, needPoints: lintBillPoints > 0 ? lintBillPoints : 1 },
+                detail: { pointsBalance: userPointsBalance },
               },
               meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
             };
@@ -7042,9 +7036,8 @@ fastify.post(
  */
 fastify.post(
   "/api/kb/dev/lint_style",
-  // 工具：lint.style 会调用上游模型，应计费（否则等于白嫖强模型）。
-  // 计费策略（MVP）：按“每次调用固定扣积分”扣费（避免无法预估 usage 导致的余额不足/免费调用问题）。
-  // - 可通过 env 覆盖：LINT_STYLE_BILL_POINTS_PER_CALL
+  // 工具：lint.style 会调用上游模型，应计费（按 stage=lint.style 绑定模型的单价 + usage 扣积分）。
+  // 说明：余额预估拦截暂不做；扣费在拿到 usage 后执行，失败则记入审计（不会影响本次 tool 输出）。
   { preHandler: [(fastify as any).authenticate, requirePositivePointsForLlm] },
   async (request: any, reply) => {
   const ngramSchema = z.object({
@@ -7091,54 +7084,18 @@ fastify.post(
   });
   const body = bodySchema.parse((request as any).body);
 
-  const billPointsPerCallRaw =
-    process.env.LINT_STYLE_BILL_POINTS_PER_CALL ?? process.env.LINT_STYLE_BILL_POINTS ?? "50";
-  const billPointsPerCall = (() => {
-    const n = Number(String(billPointsPerCallRaw ?? "").trim());
-    if (!Number.isFinite(n)) return 50;
-    return Math.max(0, Math.min(50_000, Math.floor(n)));
-  })();
+  // 运行时：按 stage=lint.style 绑定的模型执行（并按该模型单价计费）
+  const st = await aiConfig.resolveStage("lint.style");
+  const stageModelId = st.modelId;
+  let model = st.model;
+  let baseUrl = st.baseURL;
+  let endpoint = st.endpoint || "/v1/chat/completions";
+  let apiKey = st.apiKey;
+  const stageMaxTokens = st.maxTokens ?? null;
+  const temperature = st.temperature ?? 0.2;
 
-  // 余额前置检查：避免“先调用上游模型，事后发现扣不了费”的免费调用漏洞
-  if (billPointsPerCall > 0 && request.user?.role !== "admin") {
-    const userId = typeof request.user?.sub === "string" ? String(request.user.sub).trim() : "";
-    if (!userId) return reply.code(401).send({ ok: false, error: "UNAUTHORIZED" });
-    const db = await loadDb();
-    const u = db.users.find((x) => x.id === userId);
-    const bal = Math.max(0, Math.floor(Number(u?.pointsBalance) || 0));
-    if (!u || bal < billPointsPerCall) {
-      return reply.code(402).send({
-        ok: false,
-        error: "INSUFFICIENT_POINTS",
-        pointsBalance: bal,
-        needPoints: billPointsPerCall,
-        hint: `积分不足，无法执行 lint.style（需要 ${billPointsPerCall} 积分/次）。请先充值后再试。`,
-      });
-    }
-  }
-
-  const env = await getLinterEnv();
-  if (!env.ok) {
-    return reply.code(500).send({
-      error: "LINTER_NOT_CONFIGURED",
-      hint:
-        "lint.style 默认复用抽卡配置（LLM_CARD_MODEL/LLM_CARD_API_KEY/LLM_CARD_BASE_URL）；如需单独覆盖再配置 LLM_LINTER_*；也可回退到默认 LLM_*。",
-    });
-  }
-
-  let stageMaxTokens: number | undefined = undefined;
-  try {
-    const st = await aiConfig.resolveStage("lint.style");
-    if (typeof st.maxTokens === "number") stageMaxTokens = st.maxTokens;
-  } catch {
-    // ignore
-  }
-
-  let model = body.model ?? env.defaultModel;
-  let baseUrl = env.baseUrl;
-  let endpoint = (env as any).endpoint || "/v1/chat/completions";
-  let apiKey = env.apiKey;
-  if (body.model) {
+  // 可选：管理员调试时允许传 model 覆盖（否则容易引发“按 stage 扣费但实际用别的模型”的错觉）
+  if (body.model && request.user?.role === "admin") {
     try {
       const m = await aiConfig.resolveModel(body.model);
       const ep = String(m.endpoint || "").trim();
@@ -7153,7 +7110,8 @@ fastify.post(
     }
   }
   const maxIssues = Number.isFinite(body.maxIssues as any) ? Number(body.maxIssues) : 10;
-  const timeoutMs = env.timeoutMs;
+  const env = await getLinterEnv();
+  const timeoutMs = env.ok ? env.timeoutMs : 60_000;
 
   // 不再提供本地 heuristic 降级输出：lint.style 必须依赖上游模型返回结构化 JSON；
   // 上游失败/输出不合法时返回错误，便于在 B 端更换/调整 lint.style 的模型后重试。
@@ -7241,8 +7199,8 @@ fastify.post(
       { role: "system", content: sys },
       { role: "user", content: user },
     ],
-    temperature: 0.2,
-    maxTokens: stageMaxTokens ?? null,
+    temperature,
+    maxTokens: stageMaxTokens,
     signal: abort.signal,
   });
   clearTimeout(timer);
@@ -7317,31 +7275,27 @@ fastify.post(
   try {
     const out = outSchema.parse(parsed);
 
-    // 计费：按“每次调用固定扣积分”
+    // 计费：按 usage（对齐 stage=lint.style 绑定的模型单价），仅非 admin
     let billing: any = null;
-    if (billPointsPerCall > 0 && request.user?.role !== "admin") {
-      try {
-        const userId = typeof request.user?.sub === "string" ? String(request.user.sub).trim() : "";
-        if (userId) {
-          let txId = "";
-          let newBalance = 0;
-          await updateDb((db: any) => {
-            const { user, tx } = adjustUserPoints({
-              db,
-              userId,
-              delta: -billPointsPerCall,
-              type: "consume",
-              reason: "tool.lint.style",
-            });
-            txId = tx.id;
-            newBalance = user.pointsBalance ?? 0;
+    try {
+      const userId = typeof request.user?.sub === "string" ? String(request.user.sub).trim() : "";
+      const isAdmin = request.user?.role === "admin";
+      if (!isAdmin && userId) {
+        if (usage && typeof usage === "object") {
+          billing = await chargeUserForLlmUsage({
+            userId,
+            modelId: stageModelId,
+            usage,
+            source: "tool.lint.style",
+            metaExtra: { stage: "lint.style" },
           });
-          billing = { ok: true, chargedPoints: billPointsPerCall, costPoints: billPointsPerCall, txId, newBalance };
+        } else {
+          billing = { ok: false, reason: "USAGE_NOT_RETURNED" };
         }
-      } catch (e: any) {
-        const msg = e?.message ? String(e.message) : String(e);
-        billing = { ok: false, reason: msg || "CHARGE_FAILED", chargedPoints: 0, costPoints: billPointsPerCall };
       }
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : String(e);
+      billing = { ok: false, reason: msg || "CHARGE_FAILED" };
     }
 
     return reply.send({
