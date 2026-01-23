@@ -1167,7 +1167,9 @@ const tools: ToolDefinition[] = [
       if (patch.note !== undefined) nextPatch.note = String(patch.note ?? "");
 
       const { undo } = s.updateTodo(foundId, nextPatch);
-      const todoList = s.todoList;
+      // 注意：Zustand 的 getState() 返回的是“快照”，上面的 updateTodo 会通过 set 更新 store；
+      // 这里必须重新读取一次最新 state，否则返回值可能还是更新前的 todoList，导致 UI 误判“没更新/没跑到”。
+      const todoList = useRunStore.getState().todoList;
       return { ok: true, output: { ok: true, todoList }, undoable: true, undo };
     },
   },
@@ -1322,7 +1324,8 @@ const tools: ToolDefinition[] = [
       if ((args as any).note !== undefined) nextPatch.note = String((args as any).note ?? "");
 
       const { undo } = s.updateTodo(foundId, nextPatch);
-      const todoList = s.todoList;
+      // 同 run.updateTodo：返回最新 todoList（避免返回更新前快照）
+      const todoList = useRunStore.getState().todoList;
       return { ok: true, output: { ok: true, todoList }, undoable: true, undo };
     },
   },

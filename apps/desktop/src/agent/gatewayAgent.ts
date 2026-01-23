@@ -25,7 +25,8 @@ function requireLoginForLlm(args?: { why?: string }) {
 }
 
 type GatewayRunController = {
-  cancel: () => void;
+  cancel: (reason?: string) => void;
+  done: Promise<void>;
 };
 
 type ChatRole = "system" | "user" | "assistant";
@@ -1532,11 +1533,63 @@ export function startGatewayRun(args: {
   if (wantsKeepBestOnLintFail) updateMainDoc({ styleLintFailPolicy: "keep_best" });
 
   const abort = new AbortController();
+  let cancelReason: string | null = null;
+  let ended = false;
+  let resolveDone: (() => void) | null = null;
+  const done = new Promise<void>((resolve) => {
+    resolveDone = resolve;
+  });
+  const resolveDoneOnce = () => {
+    if (resolveDone) {
+      const r = resolveDone;
+      resolveDone = null;
+      r();
+    }
+  };
   let currentAssistantId: string | null = null;
+  // Watchdog：用于定位“流式卡住但没报错”的情况（例如网络/代理导致 SSE 读不到数据也不抛异常）
+  let lastProgressAt = Date.now();
+  let stalledLogged = false;
+  let watchdogId: number | null = null;
+  const bumpProgress = () => {
+    lastProgressAt = Date.now();
+    stalledLogged = false;
+  };
+  const clearWatchdog = () => {
+    if (watchdogId !== null) {
+      try {
+        window.clearInterval(watchdogId);
+      } catch {
+        // ignore
+      }
+      watchdogId = null;
+    }
+  };
+  try {
+    watchdogId = window.setInterval(() => {
+      try {
+        if (ended) return;
+        if (abort.signal.aborted) return;
+        if (!useRunStore.getState().isRunning) return;
+        const ms = Date.now() - lastProgressAt;
+        if (ms < 120_000) return;
+        if (stalledLogged) return;
+        stalledLogged = true;
+        log("warn", "gateway.run.stalled", { idleMs: ms, cancelReason });
+        // 只提示状态，不自动终止；避免误杀“确实很慢”的长任务
+        setActivity(`连接可能中断…（已 ${Math.floor(ms / 1000)}s 无新事件，可尝试停止/重试）`, { resetTimer: false });
+      } catch {
+        // ignore
+      }
+    }, 2000);
+  } catch {
+    // ignore
+  }
 
   (async () => {
     log("info", "gateway.run.start", { gatewayUrl: args.gatewayUrl, model: args.model, mode: args.mode });
     try {
+      bumpProgress();
       let promptForGateway = String(args.prompt ?? "");
       const promptRefs = parseRefsFromPrompt(args.prompt);
       // refs：以“常驻 ctxRefs”为主；本轮 prompt 里的 @{} 作为增量补充
@@ -1569,6 +1622,7 @@ export function startGatewayRun(args: {
       }
       const referencesText = await buildReferencesTextFromRefs(effectiveRefs).catch(() => "");
       setActivity("正在构建上下文…");
+      bumpProgress();
       // 尽量确保 doc.rules 与 activePath 已加载，避免“上下文不对”（空规则/空正文）
       const proj = useProjectStore.getState();
       const docRulesPath = proj.getFileByPath("doc.rules.md")?.path;
@@ -1782,6 +1836,7 @@ export function startGatewayRun(args: {
       const url = args.gatewayUrl ? `${args.gatewayUrl}/api/agent/run/stream` : "/api/agent/run/stream";
 
       setActivity("正在请求模型…", { resetTimer: true });
+      bumpProgress();
 
       // 前端硬门禁：未登录直接提示并弹窗（避免“卡住/没反应”的错觉）
       if (!requireLoginForLlm({ why: "未登录无法使用基于 LLM 的功能" }).ok) {
@@ -1859,6 +1914,7 @@ export function startGatewayRun(args: {
       });
 
       log("info", "gateway.agent.response", { status: res.status });
+      bumpProgress();
       if (!res.ok || !res.body) {
         const text = await res.text().catch(() => "");
         let parsed: any = null;
@@ -1938,6 +1994,7 @@ export function startGatewayRun(args: {
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
+        bumpProgress();
         buffer += decoder.decode(value, { stream: true });
 
         let idx = buffer.indexOf("\n\n");
@@ -1950,6 +2007,7 @@ export function startGatewayRun(args: {
             idx = buffer.indexOf("\n\n");
             continue;
           }
+          bumpProgress();
 
           if (evt.event === "run.start") {
             try {
@@ -2204,7 +2262,15 @@ export function startGatewayRun(args: {
         /BodyStreamBuffer was aborted/i.test(msg) ||
         /\baborted\b/i.test(msg);
       if (aborted) {
-        log("info", "gateway.run.aborted", { message: msg });
+        const signalReason = (() => {
+          try {
+            const r = (abort.signal as any)?.reason;
+            return r === undefined ? null : r;
+          } catch {
+            return null;
+          }
+        })();
+        log("info", "gateway.run.aborted", { message: msg, cancelReason, signalReason });
         setRunning(false);
         setActivity(null);
         if (currentAssistantId) {
@@ -2221,13 +2287,26 @@ export function startGatewayRun(args: {
       finishAssistant(a);
       setRunning(false);
       setActivity(null);
+    } finally {
+      ended = true;
+      clearWatchdog();
+      resolveDoneOnce();
     }
   })();
 
   return {
-    cancel: () => {
-      log("warn", "gateway.run.cancel");
-      abort.abort();
+    done,
+    cancel: (reason?: string) => {
+      if (ended) return;
+      const r = String(reason ?? "unknown").trim() || "unknown";
+      cancelReason = r;
+      log("warn", "gateway.run.cancel", { reason: r });
+      try {
+        // Node/Electron supports abort(reason) in modern runtimes; ignore if not.
+        (abort as any).abort(r);
+      } catch {
+        abort.abort();
+      }
       setRunning(false);
       setActivity(null);
       if (currentAssistantId) {

@@ -14,7 +14,7 @@ import { ModelPickerModal, type ModelPickerItem } from "./ModelPickerModal";
 import { getGatewayBaseUrl } from "../agent/gatewayUrl";
 import { useAuthStore } from "../state/authStore";
 
-type RunController = { cancel: () => void };
+type RunController = { cancel: (reason?: string) => void; done: Promise<void> };
 
 type LlmSelectorDto = {
   ok: boolean;
@@ -162,8 +162,40 @@ export function AgentPane() {
   }, [isRunning, activity?.text, activity?.startedAt]);
 
   // 统一处理：关闭遮罩类 overlay，并把焦点还给输入框
-  const focusComposerSoon = () => {
-    requestAnimationFrame(() => composerRef.current?.focus());
+  const focusComposerSoon = (opts?: { reason?: string }) => {
+    const tryFocus = () => {
+      try {
+        composerRef.current?.focus();
+      } catch {
+        // ignore
+      }
+    };
+    // 经验：删除对话/关闭遮罩时会触发多次重渲染，单次 raf 容易被抢焦点
+    requestAnimationFrame(() => {
+      tryFocus();
+      requestAnimationFrame(() => tryFocus());
+      window.setTimeout(() => tryFocus(), 0);
+      window.setTimeout(() => tryFocus(), 50);
+      window.setTimeout(() => tryFocus(), 120);
+    });
+
+    // 仅在显式传入 reason 时写日志（用于定位“谁在抢焦点/遮罩残留”）
+    if (opts?.reason) {
+      try {
+        const el = document.activeElement as HTMLElement | null;
+        const ae = el
+          ? {
+              tag: String(el.tagName ?? ""),
+              id: String((el as any).id ?? ""),
+              ariaLabel: String(el.getAttribute?.("aria-label") ?? ""),
+              className: String((el as any).className ?? "").slice(0, 120),
+            }
+          : null;
+        useRunStore.getState().log("info", "ui.focusComposerSoon", { reason: opts.reason, activeElement: ae });
+      } catch {
+        // ignore
+      }
+    }
   };
 
   const closeAllOverlays = (opts?: { keepHistoryOpen?: boolean }) => {
@@ -378,7 +410,11 @@ export function AgentPane() {
   const startTurn = (text: string) => {
     if (isRunning) return;
     if (!text) return;
-    controllerRef.current?.cancel();
+    // 即使 UI 已显示非 running，也要清掉上一轮残留 controller（否则下一轮会触发“假 cancel/aborted”日志）
+    if (controllerRef.current) {
+      controllerRef.current.cancel("start_new_turn");
+      controllerRef.current = null;
+    }
     if (!model) {
       useRunStore.getState().addAssistant("（未选择模型：请先启动 Gateway 并选择一个模型）");
       return;
@@ -400,7 +436,11 @@ export function AgentPane() {
     };
     useRunStore.getState().addUser(text, baseline as any);
 
-    controllerRef.current = startGatewayRun({ gatewayUrl, mode, model, prompt: text });
+    const c = startGatewayRun({ gatewayUrl, mode, model, prompt: text });
+    controllerRef.current = c;
+    void c.done.finally(() => {
+      if (controllerRef.current === c) controllerRef.current = null;
+    });
   };
 
   const onSend = () => {
@@ -411,8 +451,10 @@ export function AgentPane() {
   };
 
   const onStop = () => {
-    controllerRef.current?.cancel();
-    controllerRef.current = null;
+    if (controllerRef.current) {
+      controllerRef.current.cancel("stop_button");
+      controllerRef.current = null;
+    }
   };
 
   function truncateStr(s: string, max = 8000) {
@@ -464,6 +506,10 @@ export function AgentPane() {
     if (isRunning) return;
     // 防止“新对话后遮罩残留挡住输入框”
     closeAllOverlays();
+    if (controllerRef.current) {
+      controllerRef.current.cancel("new_conversation");
+      controllerRef.current = null;
+    }
     // 归档当前对话到历史（若为空则直接清空）
     const hasAny =
       (useRunStore.getState().steps ?? []).length > 0 ||
@@ -474,7 +520,9 @@ export function AgentPane() {
     useRunStore.getState().resetRun();
     // 新对话：清掉 pinned（否则按钮可能“看起来可点但无效”）
     setPinnedUserId(null);
-    focusComposerSoon();
+    setInput("");
+    composerRef.current?.setValue("");
+    focusComposerSoon({ reason: "new_conversation" });
   };
 
   const onDeleteCurrent = () => {
@@ -483,10 +531,26 @@ export function AgentPane() {
     if (!hasAny) return;
     const ok = window.confirm("删除当前对话？（仅清空右侧对话记录，不影响项目文件）");
     if (!ok) return;
+    try {
+      useRunStore.getState().log("info", "ui.delete_current", {
+        phase: "before_reset",
+        overlays: { historyOpen, refPickerOpen, modelPickerOpen, submitFromHistory: Boolean(submitFromHistory) },
+      });
+    } catch {
+      // ignore
+    }
     closeAllOverlays();
+    if (controllerRef.current) {
+      controllerRef.current.cancel("delete_conversation");
+      controllerRef.current = null;
+    }
     useRunStore.getState().resetRun();
+    // 立即清空草稿，避免 resetRun 后 draftSnapshot 被 effect “短暂恢复”引发焦点/输入抖动
+    setDraftSnapshot(null);
     setPinnedUserId(null);
-    focusComposerSoon();
+    setInput("");
+    composerRef.current?.setValue("");
+    focusComposerSoon({ reason: "delete_conversation" });
   };
 
   const onCopyDiagnostics = async () => {
@@ -609,8 +673,10 @@ export function AgentPane() {
     setEditingId(null);
     setEditingText("");
 
-    controllerRef.current?.cancel();
-    controllerRef.current = null;
+    if (controllerRef.current) {
+      controllerRef.current.cancel("submit_history");
+      controllerRef.current = null;
+    }
 
     const all = useRunStore.getState().steps;
     const step = all.find((s) => s.id === stepId);
@@ -639,8 +705,23 @@ export function AgentPane() {
     }
 
     // 继续运行（从该条消息的内容开始）
-    controllerRef.current = startGatewayRun({ gatewayUrl, mode, model, prompt: text });
+    const c = startGatewayRun({ gatewayUrl, mode, model, prompt: text });
+    controllerRef.current = c;
+    void c.done.finally(() => {
+      if (controllerRef.current === c) controllerRef.current = null;
+    });
   };
+
+  // 组件卸载时：明确标记来源，避免日志里看起来像“用户没点停止但 cancel 了”
+  useEffect(() => {
+    return () => {
+      if (controllerRef.current) {
+        controllerRef.current.cancel("unmount");
+        controllerRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 点击空白处取消“选定历史框”（回到显示态）
   useEffect(() => {
@@ -745,7 +826,7 @@ export function AgentPane() {
               <IconClock />
               {conversations.length ? <span className="iconBadge">{Math.min(99, conversations.length)}</span> : null}
             </button>
-            <button className="iconBtn" type="button" onClick={onCopyDiagnostics} disabled={isRunning} title="复制诊断" aria-label="复制诊断">
+            <button className="iconBtn" type="button" onClick={onCopyDiagnostics} title="复制诊断" aria-label="复制诊断">
               <IconCopy />
             </button>
             <button
