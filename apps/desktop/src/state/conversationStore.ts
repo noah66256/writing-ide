@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
 import type { MainDoc, TodoItem, Step, LogEntry, Mode, ToolBlockStep, CtxRefItem } from "./runStore";
 
 export type SerializableToolStep = Omit<ToolBlockStep, "apply" | "undo"> & {
@@ -56,6 +56,39 @@ let diskHydrated = false;
 let persistTimer: any = null;
 let pendingPayload: any = null;
 
+function hasDiskHistoryApi() {
+  try {
+    return Boolean(window.desktop?.history?.saveConversations && window.desktop?.history?.loadConversations);
+  } catch {
+    return false;
+  }
+}
+
+// localStorage 可能因为配额/隐私模式/禁用等原因直接抛异常；必须吞掉，避免渲染链路被打断。
+const safeLocalStorage = {
+  getItem(name: string) {
+    try {
+      return window.localStorage.getItem(name);
+    } catch {
+      return null;
+    }
+  },
+  setItem(name: string, value: string) {
+    try {
+      window.localStorage.setItem(name, value);
+    } catch {
+      // ignore (QuotaExceededError etc.)
+    }
+  },
+  removeItem(name: string) {
+    try {
+      window.localStorage.removeItem(name);
+    } catch {
+      // ignore
+    }
+  },
+};
+
 function capConversations(list: Conversation[]) {
   const arr = Array.isArray(list) ? list : [];
   // cap：避免文件与 localStorage 爆炸（仅保留最近 20 条）
@@ -100,7 +133,7 @@ export const useConversationStore = create<ConversationState>()(
           const list = Array.isArray((res as any)?.conversations) ? ((res as any).conversations as any[]) : [];
           const diskDraft = ((res as any)?.draftSnapshot ?? null) as any;
 
-          // localStorage 优先：但允许“分别补齐”缺失项（例如本地有 conversations，但没有 draft）
+          // 磁盘优先：localStorage 只作为极弱兜底（避免 QuotaExceededError 把渲染打崩）
           const curConvs = get().conversations ?? [];
           const curDraft = get().draftSnapshot ?? null;
 
@@ -113,6 +146,16 @@ export const useConversationStore = create<ConversationState>()(
           const finalDraft = (patch.draftSnapshot ?? curDraft) as any;
           // 把“最终态”同步回磁盘，保证 dev/packaged/迁移都能恢复
           schedulePersistToDisk({ conversations: finalConvs, draftSnapshot: finalDraft });
+
+          // 并把 localStorage 写回一个“很小的占位”，清掉旧的大对象（避免下一次 setItem 直接 quota 崩溃）
+          try {
+            safeLocalStorage.setItem(
+              "writing-ide.conversations.v1",
+              JSON.stringify({ state: { conversations: [], draftSnapshot: null }, version: 1 }),
+            );
+          } catch {
+            // ignore
+          }
         } catch {
           // ignore
         }
@@ -168,7 +211,18 @@ export const useConversationStore = create<ConversationState>()(
           return { conversations: [], draftSnapshot: null };
         }),
     }),
-    { name: "writing-ide.conversations.v1" },
+    {
+      name: "writing-ide.conversations.v1",
+      // 关键：历史对话与草稿快照都落盘到 userData（history.saveConversations）。
+      // localStorage 只存“极小占位”用于兜底（否则会因 5MB 配额触发 QuotaExceededError，导致渲染崩溃）。
+      storage: createJSONStorage(() => safeLocalStorage as any),
+      partialize: (_s) => {
+        // Electron 环境：禁用 localStorage 持久化大对象
+        if (hasDiskHistoryApi()) return { conversations: [], draftSnapshot: null };
+        // 非 Electron 环境：也不要存大对象，保守兜底
+        return { conversations: [], draftSnapshot: null };
+      },
+    },
   ),
 );
 
