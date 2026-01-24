@@ -81,6 +81,19 @@ async function main() {
     assert.equal(batch.violation, "WRITE_BEFORE_KB");
   }
   {
+    // V2：copy gate 默认启用：KB 已完成但未通过 lint.copy 时，不允许直接写入
+    const mode = "agent" as const;
+    const userPrompt = "按风格库仿写一段，并写入 a.md";
+    const intent = detectRunIntent({ mode, userPrompt });
+    const active = activateSkills({ mode, userPrompt, kbSelected: [{ id: "style-1", purpose: "style" }], intent });
+    const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }], activeSkillIds: active.map((s) => s.id) });
+    const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
+    state.hasStyleKbSearch = true;
+    const toolCalls: ParsedToolCall[] = [{ name: "doc.write", args: { path: "a.md", content: "x" } }];
+    const batch = analyzeStyleWorkflowBatch({ mode, intent, gates, state, lintMaxRework: 2, toolCalls });
+    assert.equal(batch.violation, "WRITE_BEFORE_COPY_PASS");
+  }
+  {
     const mode = "agent" as const;
     const userPrompt = "按风格库仿写一段（跳过linter）";
     const intent = detectRunIntent({ mode, userPrompt });
@@ -131,7 +144,7 @@ async function main() {
     const intent = detectRunIntent({ mode, userPrompt });
     const active = activateSkills({ mode, userPrompt, kbSelected: [{ id: "style-1", purpose: "style" }], intent });
     const gates0 = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }], activeSkillIds: active.map((s) => s.id) });
-    const gates = { ...gates0, lintGateEnabled: false }; // 模拟 Gateway 的 STYLE_LINT_MODE=hint
+    const gates = { ...gates0, lintGateEnabled: false, copyGateEnabled: false }; // 模拟 Gateway 的 STYLE_LINT_MODE=hint（关闭所有 lint 闸门）
     const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
     state.hasStyleKbSearch = true;
     const toolCalls: ParsedToolCall[] = [
@@ -149,6 +162,7 @@ async function main() {
     const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }], activeSkillIds: active.map((s) => s.id) });
     const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
     state.hasStyleKbSearch = true;
+    state.copyLintPassed = true;
     state.styleLintPassed = false;
     state.styleLintFailCount = 3;
     const toolCalls: ParsedToolCall[] = [{ name: "doc.write", args: { path: "a.md", content: "y" } }];

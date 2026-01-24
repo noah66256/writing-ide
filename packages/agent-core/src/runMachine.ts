@@ -29,6 +29,7 @@ export type StyleGateDerived = {
 export type RunGates = StyleGateDerived & {
   styleGateEnabled: boolean; // activeSkillIds includes "style_imitate"（通常等价于 hasStyleLibrary && isWritingTask）
   lintGateEnabled: boolean; // styleGateEnabled && !skipLint
+  copyGateEnabled: boolean; // lintGateEnabled（V2：anti-regurgitation 阶段闸门；与 lint 总开关同进退）
 };
 
 export type StyleLintParsed = {
@@ -64,6 +65,11 @@ export type RunState = {
   lintGateDegraded: boolean;
   bestStyleDraft: null | { score: number; highIssues: number; text: string };
   lastStyleLint: null | StyleLintParsed;
+  // copy lint（gate）：用于“防贴原文”阶段闸门
+  copyLintPassed: boolean;
+  copyLintFailCount: number;
+  copyGateDegraded: boolean;
+  lastCopyLint: null | { riskLevel: "low" | "medium" | "high"; maxOverlapChars: number; maxChar5gramJaccard: number };
   // copy lint（观测阶段）：用于记录“可能贴原文”的风险指标（不做 gate）
   copyLintObservedCount: number;
   lastCopyRisk: null | { riskLevel: "low" | "medium" | "high"; maxOverlapChars: number; maxChar5gramJaccard: number };
@@ -99,6 +105,10 @@ export function createInitialRunState(args?: { protocolRetryBudget?: number; wor
     lintGateDegraded: false,
     bestStyleDraft: null,
     lastStyleLint: null,
+    copyLintPassed: false,
+    copyLintFailCount: 0,
+    copyGateDegraded: false,
+    lastCopyLint: null,
     copyLintObservedCount: 0,
     lastCopyRisk: null,
     protocolRetryBudget: Number.isFinite(args?.protocolRetryBudget as any) ? Math.max(0, Math.floor(Number(args?.protocolRetryBudget))) : 2,
@@ -286,6 +296,7 @@ export function deriveStyleGate(args: {
   const styleSkillActive = skillIds ? new Set(skillIds).has("style_imitate") : false;
   const styleGateEnabled = hasStyleLibrary && (skillIds ? styleSkillActive : args.intent.isWritingTask);
   const lintGateEnabled = styleGateEnabled && !args.intent.skipLint;
+  const copyGateEnabled = lintGateEnabled;
   return {
     hasStyleLibrary,
     hasNonStyleLibraries,
@@ -294,6 +305,7 @@ export function deriveStyleGate(args: {
     styleLibIdSet: new Set(styleLibIds),
     styleGateEnabled,
     lintGateEnabled,
+    copyGateEnabled,
   };
 }
 
@@ -448,6 +460,7 @@ export type AutoRetryAnalysis = {
   needTodo: boolean;
   needWrite: boolean;
   needKb: boolean;
+  needCopy: boolean;
   needLint: boolean;
   needLength: boolean;
   needFinalText: boolean;
@@ -477,6 +490,7 @@ export function analyzeAutoRetryText(args: {
   const needTodo = todoPolicy === "required" && !args.state.hasTodoList && !args.intent.wantsOkOnly;
   const needWrite = args.intent.wantsWrite && !args.state.hasWriteOps && !isClarify;
   const needKb = args.gates.styleGateEnabled && !args.state.hasStyleKbSearch && !isClarify;
+  const needCopy = args.gates.copyGateEnabled && !args.state.copyLintPassed && !isClarify;
   const needLint =
     args.gates.lintGateEnabled && !args.state.styleLintPassed && args.state.styleLintFailCount <= args.lintMaxRework && !isClarify;
   const target = Number.isFinite(Number(args.targetChars as any)) ? Math.max(0, Number(args.targetChars)) : 0;
@@ -489,7 +503,7 @@ export function analyzeAutoRetryText(args: {
     args.intent.isWritingTask &&
     // 只做“明显偏离”提醒（避免卡在细微误差）
     (t.length < target * 0.72 || t.length > target * 1.35);
-  const needFinalText = isEmpty && !needTodo && !needWrite && !needKb && !needLint;
+  const needFinalText = isEmpty && !needTodo && !needWrite && !needKb && !needCopy && !needLint;
 
   const reasons: string[] = [];
   if (isFIMLeak) reasons.push("模型输出异常(FIM token)");
@@ -497,12 +511,13 @@ export function analyzeAutoRetryText(args: {
   if (needFinalText) reasons.push("缺少最终回复");
   if (needTodo) reasons.push("Todo 未设置");
   if (needKb) reasons.push("风格样例未检索");
+  if (needCopy) reasons.push("未进行防贴原文检查(lint.copy)");
   if (needLint) reasons.push("未进行风格对齐(lint.style)");
   if (needLength) reasons.push("字数与目标偏离较大");
   if (needWrite) reasons.push("写入未执行");
 
-  const shouldRetry = isFIMLeak || isEmpty || needTodo || needWrite || needKb || needLint || needLength;
-  return { shouldRetry, isEmpty, isFIMLeak, isClarify, needTodo, needWrite, needKb, needLint, needLength, needFinalText, reasons };
+  const shouldRetry = isFIMLeak || isEmpty || needTodo || needWrite || needKb || needCopy || needLint || needLength;
+  return { shouldRetry, isEmpty, isFIMLeak, isClarify, needTodo, needWrite, needKb, needCopy, needLint, needLength, needFinalText, reasons };
 }
 
 export type StyleWorkflowBatchAnalysis = {
@@ -510,9 +525,13 @@ export type StyleWorkflowBatchAnalysis = {
   violation: string | null;
   batchHasWrite: boolean;
   batchHasKb: boolean;
+  batchHasCopyLint: boolean;
   batchHasLint: boolean;
   batchHasStyleKb: boolean;
   needStyleKb: boolean;
+  enforceCopy: boolean;
+  copyExhausted: boolean;
+  needCopyLint: boolean;
   enforceLint: boolean;
   lintExhausted: boolean;
   needStyleLint: boolean;
@@ -529,13 +548,17 @@ export function analyzeStyleWorkflowBatch(args: {
   const toolCalls = Array.isArray(args.toolCalls) ? args.toolCalls : [];
   const batchHasWrite = toolCalls.some((c: any) => isContentWriteTool(String(c?.name ?? "")));
   const batchHasKb = toolCalls.some((c: any) => String(c?.name ?? "") === "kb.search");
+  const batchHasCopyLint = toolCalls.some((c: any) => String(c?.name ?? "") === "lint.copy");
   const batchHasLint = toolCalls.some((c: any) => String(c?.name ?? "") === "lint.style");
   const batchHasStyleKb = toolCalls.some((c: any) =>
     isStyleExampleKbSearch({ call: c, styleLibIdSet: args.gates.styleLibIdSet, hasNonStyleLibraries: args.gates.hasNonStyleLibraries }),
   );
 
-  const shouldEnforce = args.intent.isWritingTask || batchHasWrite || batchHasLint;
+  const shouldEnforce = args.intent.isWritingTask || batchHasWrite || batchHasLint || batchHasCopyLint;
   const needStyleKb = !args.state.hasStyleKbSearch;
+  const enforceCopy = args.gates.copyGateEnabled === true;
+  const copyExhausted = enforceCopy && !args.state.copyLintPassed && args.state.copyLintFailCount > args.lintMaxRework;
+  const needCopyLint = enforceCopy && !args.state.copyLintPassed;
   // 是否“强制要求 lint”：由 gates.lintGateEnabled 统一控制（Gateway 可根据产品策略选择 hint/gate）
   const enforceLint = args.gates.lintGateEnabled === true;
   const lintExhausted = enforceLint && !args.state.styleLintPassed && args.state.styleLintFailCount > args.lintMaxRework;
@@ -545,15 +568,36 @@ export function analyzeStyleWorkflowBatch(args: {
   // 关键约束：
   // - kb.search 的 tool_result 必须先回传给模型后，后续写入/对齐才可能“真正用上样例”，因此仍禁止与 write/lint 同回合混用
   // - lint.style 在 lintMode=hint 时只是“提示”，不应作为硬闸门阻止写入；因此仅当 enforceLint=true（gate 模式）才禁止 lint+write 同回合
-  if (batchHasKb && batchHasLint) violation = "KB_AND_LINT_SAME_TURN";
+  if (batchHasKb && batchHasCopyLint) violation = "KB_AND_COPY_SAME_TURN";
+  else if (batchHasKb && batchHasLint) violation = "KB_AND_LINT_SAME_TURN";
   else if (batchHasKb && batchHasWrite) violation = "KB_AND_WRITE_SAME_TURN";
+  else if (batchHasCopyLint && batchHasLint) violation = "COPY_AND_LINT_SAME_TURN";
+  else if (batchHasCopyLint && batchHasWrite) violation = "COPY_AND_WRITE_SAME_TURN";
   else if (batchHasLint && batchHasWrite && enforceLint) violation = "LINT_AND_WRITE_SAME_TURN";
+  else if (batchHasCopyLint && needStyleKb) violation = "COPY_BEFORE_KB";
   else if (batchHasLint && needStyleKb) violation = "LINT_BEFORE_KB";
   else if (batchHasWrite && needStyleKb) violation = "WRITE_BEFORE_KB";
+  else if (batchHasLint && needCopyLint) violation = copyExhausted ? "LINT_BLOCKED_COPY_EXHAUSTED" : "LINT_BEFORE_COPY_PASS";
+  else if (batchHasWrite && needCopyLint) violation = copyExhausted ? "WRITE_BLOCKED_COPY_EXHAUSTED" : "WRITE_BEFORE_COPY_PASS";
   else if (batchHasWrite && needStyleLint) violation = lintExhausted ? "WRITE_BLOCKED_LINT_EXHAUSTED" : "WRITE_BEFORE_LINT_PASS";
   else if (batchHasKb && needStyleKb && !batchHasStyleKb) violation = "KB_NOT_STYLE_EXAMPLES";
 
-  return { shouldEnforce, violation, batchHasWrite, batchHasKb, batchHasLint, batchHasStyleKb, needStyleKb, enforceLint, lintExhausted, needStyleLint };
+  return {
+    shouldEnforce,
+    violation,
+    batchHasWrite,
+    batchHasKb,
+    batchHasCopyLint,
+    batchHasLint,
+    batchHasStyleKb,
+    needStyleKb,
+    enforceCopy,
+    copyExhausted,
+    needCopyLint,
+    enforceLint,
+    lintExhausted,
+    needStyleLint,
+  };
 }
 
 export function isProposalWaitingMeta(meta: any): boolean {

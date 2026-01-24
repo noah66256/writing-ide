@@ -2395,6 +2395,7 @@ fastify.post(
 
   const lintPassScore = Number(process.env.STYLE_LINT_PASS_SCORE ?? 80);
   const lintMaxRework = Number(process.env.STYLE_LINT_MAX_REWORK ?? 2);
+  const copyMaxRework = Number(process.env.STYLE_COPY_LINT_MAX_REWORK ?? 2);
   // lint 门禁策略：
   // - hint：不把 lint 当硬闸门（不强制通过，不触发 style_lint_exhausted）；仍允许模型/用户按需调用 lint.style 获取问题清单与 rewritePrompt
   // - gate：硬闸门（必须通过，否则回炉；回炉耗尽终止）
@@ -2413,7 +2414,12 @@ fastify.post(
   // - 当绑定风格库且进入 style_imitate 闭环时：即使 env 仍为 hint，也默认提升为 safe（强制跑 lint.style，但失败可降级放行）。
   // - 用户显式“跳过 linter”会让 gates.lintGateEnabled=false，从而仍保持 hint。
   const lintMode: "hint" | "safe" | "gate" = lintModeEnv === "hint" && gates.lintGateEnabled ? "safe" : lintModeEnv;
-  const effectiveGates = { ...gates, lintGateEnabled: gates.lintGateEnabled && (lintMode === "gate" || lintMode === "safe") };
+  const effectiveGates = {
+    ...gates,
+    // lint/copy gate：仅在 safe/gate 下启用；hint 下只提示不做硬门禁
+    lintGateEnabled: gates.lintGateEnabled && (lintMode === "gate" || lintMode === "safe"),
+    copyGateEnabled: gates.copyGateEnabled && (lintMode === "gate" || lintMode === "safe"),
+  };
   const styleLibIds = gates.styleLibIds;
 
   const keepBestOnLintExhausted =
@@ -2500,6 +2506,10 @@ fastify.post(
     styleLintPassed: runState.styleLintPassed,
     styleLintFailCount: runState.styleLintFailCount,
     lintGateDegraded: runState.lintGateDegraded,
+    copyLintPassed: runState.copyLintPassed,
+    copyLintFailCount: runState.copyLintFailCount,
+    copyGateDegraded: runState.copyGateDegraded,
+    lastCopyLint: runState.lastCopyLint ?? null,
     copyLintObservedCount: (runState as any).copyLintObservedCount ?? 0,
     lastCopyRisk: (runState as any).lastCopyRisk ?? null,
     lintMode,
@@ -2766,8 +2776,9 @@ fastify.post(
     | "none"
     | "web_need_search"
     | "web_need_fetch"
-    | "style_need_kb"
-    | "style_need_lint"
+    | "style_need_templates"
+    | "style_need_copy"
+    | "style_need_style"
     | "style_can_write";
 
   const ALWAYS_ALLOW_TOOL_NAMES = new Set<string>([
@@ -2870,33 +2881,50 @@ fastify.post(
       }
     }
 
-    // 3) StyleImitateSkill（状态级：need_kb / need_lint / can_write）
+    // 3) StyleImitateSkill（V2：templates -> copy -> style -> write）
     if (effectiveGates.styleGateEnabled) {
       if (!runState.hasStyleKbSearch) {
-        phase = "style_need_kb";
-        // 禁止 lint.style & 写入类 doc.*，避免 “LINT_BEFORE_KB / WRITE_BEFORE_KB”
+        phase = "style_need_templates";
+        // 禁止 lint.copy / lint.style & 写入类 doc.*，避免 “LINT_BEFORE_KB / WRITE_BEFORE_KB”
+        allowed.delete("lint.copy");
         allowed.delete("lint.style");
         for (const name of Array.from(allowed)) {
           if (isContentWriteTool(name)) allowed.delete(name);
         }
         hint =
-          "【Skill: style_imitate】当前阶段：need_kb_examples。\n" +
-          "- 本回合禁止调用 lint.style 与任何“正文写入类” doc.*（doc.write/doc.applyEdits/doc.replaceSelection/doc.restoreSnapshot/doc.splitToDir/...）。\n" +
+          "【Skill: style_imitate】当前阶段：need_templates。\n" +
+          "- 本回合禁止调用 lint.copy / lint.style 与任何“正文写入类” doc.*（doc.write/doc.applyEdits/doc.replaceSelection/doc.restoreSnapshot/doc.splitToDir/...）。\n" +
           "- 允许文件/目录操作（doc.deletePath/doc.renamePath/doc.mkdir），但高风险操作仍应走 proposal-first。\n" +
-          "- 请先调用 kb.search（只搜风格库）拉样例；或仅更新 todo/mainDoc。";
-        reasonCodes.push("phase:style_need_kb");
-      } else if (effectiveGates.lintGateEnabled && !runState.styleLintPassed && runState.styleLintFailCount <= lintMaxRework) {
-        phase = "style_need_lint";
-        // 禁止写入类 doc.*，避免 “WRITE_BEFORE_LINT_PASS”
+          "- 请先调用 kb.search（只搜风格库）拉模板/规则卡（建议 kind=card + cardTypes）。\n" +
+          "- 或仅更新 todo/mainDoc。";
+        reasonCodes.push("phase:style_need_templates");
+      } else if (effectiveGates.copyGateEnabled && !runState.copyLintPassed && runState.copyLintFailCount <= copyMaxRework) {
+        phase = "style_need_copy";
+        // 禁止 kb.search / lint.style / 写入类 doc.*：先做 anti-copy 闸门
+        allowed.delete("kb.search");
+        allowed.delete("lint.style");
         for (const name of Array.from(allowed)) {
           if (isContentWriteTool(name)) allowed.delete(name);
         }
         hint =
-          "【Skill: style_imitate】当前阶段：need_lint。\n" +
+          "【Skill: style_imitate】当前阶段：need_copy。\n" +
+          "- 本回合禁止调用 kb.search、lint.style 与任何“正文写入类” doc.*。\n" +
+          "- 请先产出候选稿（纯文本；不要写入），再调用 lint.copy(text=候选稿) 做“防贴原文”检查；未通过则按提示回炉后再次 lint.copy。";
+        reasonCodes.push("phase:style_need_copy");
+      } else if (effectiveGates.lintGateEnabled && !runState.styleLintPassed && runState.styleLintFailCount <= lintMaxRework) {
+        phase = "style_need_style";
+        // 禁止写入类 doc.*，避免 “WRITE_BEFORE_LINT_PASS”
+        allowed.delete("kb.search");
+        allowed.delete("lint.copy");
+        for (const name of Array.from(allowed)) {
+          if (isContentWriteTool(name)) allowed.delete(name);
+        }
+        hint =
+          "【Skill: style_imitate】当前阶段：need_style。\n" +
           "- 本回合禁止调用任何“正文写入类” doc.*（doc.write/doc.applyEdits/doc.replaceSelection/doc.restoreSnapshot/doc.splitToDir/...）。\n" +
           "- 允许文件/目录操作（doc.deletePath/doc.renamePath/doc.mkdir），但高风险操作仍应走 proposal-first。\n" +
           "- 你可以输出候选稿（纯文本），然后调用 lint.style(text=候选稿) 做终稿闸门。";
-        reasonCodes.push("phase:style_need_lint");
+        reasonCodes.push("phase:style_need_style");
       } else {
         phase = "style_can_write";
         hint =
@@ -3850,13 +3878,13 @@ fastify.post(
         // 容错：部分模型会把 kb.search 的 libraryIds/kind 填错（例如把文件名塞进 libraryIds，或 kind 写成非约定值），
         // 结果被判为 “KB_NOT_STYLE_EXAMPLES” 并反复重试，导致 todo/kb/write 全卡死。
         // 当且仅当本轮触发该违规时：自动把 kb.search 纠偏为“只搜已绑定的风格库 + 合法 kind”，从而继续推进闭环。
-        if (batch.shouldEnforce && batch.violation === "KB_NOT_STYLE_EXAMPLES" && toolCapsPhase === "style_need_kb") {
+        if (batch.shouldEnforce && batch.violation === "KB_NOT_STYLE_EXAMPLES" && toolCapsPhase === "style_need_templates") {
           const before = toolCalls.slice();
           const styleLibIdsJson = styleLibIds.length ? JSON.stringify(styleLibIds) : "[]";
           const normalizeKbCall = (c: any) => {
             if (!c || String(c?.name ?? "") !== "kb.search") return c;
             const args = { ...(c.args ?? {}) } as Record<string, string>;
-            // 关键：style_need_kb 阶段只允许“样例/模板”检索（card），避免模型把原文段落当样例导致贴原文。
+            // 关键：style_need_templates 阶段只允许“样例/模板”检索（card），避免模型把原文段落当样例导致贴原文。
             // 若确实需要证据段：应在后续阶段再用 kind=paragraph/outline + 小范围 anchor 过滤。
             args.kind = "card";
 
@@ -3894,16 +3922,26 @@ fastify.post(
           // 当模型把“关键动作”混在同一回合时，不要求模型重试，而是由系统拆成“先做前置动作”：
           // - kb.search + (lint/write) 混用：本轮只执行 kb.search（+ run.*），丢弃其它，下一回合模型拿到 tool_result 再继续
           // - lint.style + write 混用（lint gate 模式）：本轮只执行 lint.style（+ run.*），丢弃 write，避免无视 lint 直接写入
-          if (violation === "KB_AND_LINT_SAME_TURN" || violation === "KB_AND_WRITE_SAME_TURN" || violation === "LINT_AND_WRITE_SAME_TURN") {
+          if (
+            violation === "KB_AND_LINT_SAME_TURN" ||
+            violation === "KB_AND_COPY_SAME_TURN" ||
+            violation === "KB_AND_WRITE_SAME_TURN" ||
+            violation === "COPY_AND_LINT_SAME_TURN" ||
+            violation === "COPY_AND_WRITE_SAME_TURN" ||
+            violation === "LINT_AND_WRITE_SAME_TURN"
+          ) {
             const before = toolCalls.slice();
             const isRunTool = (name: string) => String(name ?? "").startsWith("run.");
             const isKb = (name: string) => String(name ?? "") === "kb.search";
-            const isLint = (name: string) => String(name ?? "") === "lint.style";
+            const isCopyLint = (name: string) => String(name ?? "") === "lint.copy";
+            const isStyleLint = (name: string) => String(name ?? "") === "lint.style";
             const keep = (c: any) => {
               const n = String(c?.name ?? "");
               if (!n) return false;
               if (isRunTool(n)) return true;
-              if (violation === "LINT_AND_WRITE_SAME_TURN") return isLint(n);
+              if (violation === "LINT_AND_WRITE_SAME_TURN") return isStyleLint(n);
+              if (violation === "COPY_AND_WRITE_SAME_TURN") return isCopyLint(n);
+              if (violation === "COPY_AND_LINT_SAME_TURN") return isCopyLint(n); // 先 copy，再 style
               // kb.* 与其它混用：优先只保留 kb.search
               return isKb(n);
             };
@@ -3947,9 +3985,9 @@ fastify.post(
               kind: "warn",
               title: "风格闭环约束：自动重试",
               message:
-                "风格库写作任务已启用“闭环约束”：先 kb.search 拉风格样例 → 再写作/写入（lint.style 视策略而定）。\n" +
+                "风格库写作任务已启用“闭环约束”：先 kb.search 拉模板/样例 → 再 lint.copy（防贴） → 再 lint.style（对齐） → 再写入。\n" +
                 `本轮工具调用不满足前置条件（${violation}），系统将自动重试一次。\n` +
-                "要求：把 kb.search / lint.style / 写入操作拆到不同回合（每回合只做一类关键动作）。",
+                "要求：把 kb.search / lint.copy / lint.style / 写入操作拆到不同回合（每回合只做一类关键动作）。",
               policy: "StyleGatePolicy",
               reasonCodes: ["style_workflow_violation", `violation:${String(violation ?? "")}`],
               detail: { violation, budget: "workflow", budgetBefore: runState.workflowRetryBudget + 1, budgetAfter: runState.workflowRetryBudget },
@@ -3960,12 +3998,15 @@ fastify.post(
               role: "system",
               content:
                 "你上一轮的 tool_calls 违反了“风格库写作强闭环”约束，请立刻重试并按下面顺序推进：\n" +
-                "A) kb.search（手法/模板）：只搜风格库（purpose=style），优先 kind=card + cardTypes 先拉 6–12 条“可抄模板/金句形状/结构骨架”；如需证据段再用 kind=paragraph/outline + anchorParagraphIndexMax/anchorFromEndMax。 本轮不要调用 lint.style 或任何写入类工具。\n" +
-                (batch.enforceLint
-                  ? `B) lint.style（终稿闸门）：基于样例与指纹对照候选稿，输出 issues + rewritePrompt；必须通过闸门（score>=${lintPassScore} 且无 high issue）。未通过则按 rewritePrompt 回炉改写并再次 lint.style（最多回炉 ${lintMaxRework} 次）。本轮不要调用 kb.search 或任何写入类工具。\n`
+                "A) kb.search（手法/模板）：只搜风格库（purpose=style），优先 kind=card + cardTypes 先拉 6–12 条“可抄模板/金句形状/结构骨架”；如需证据段再用 kind=paragraph/outline + anchorParagraphIndexMax/anchorFromEndMax。 本轮不要调用 lint.copy/lint.style 或任何写入类工具。\n" +
+                (batch.enforceCopy
+                  ? "B) lint.copy（防贴原文）：对候选稿做确定性重合检测；未通过就按 topOverlaps 指示回炉改写降重，再次 lint.copy（最多回炉若干次；safe 模式会降级放行但会记录审计）。本轮不要调用 kb.search 或任何写入类工具。\n"
                   : "") +
                 (batch.enforceLint
-                  ? "C) 写入：只有 lint.style 通过闸门后，才允许写入/输出终稿（doc.write/doc.applyEdits 等）。\n"
+                  ? `C) lint.style（终稿闸门）：基于样例与指纹对照候选稿，输出 issues + rewritePrompt；必须通过闸门（score>=${lintPassScore} 且无 high issue）。未通过则按 rewritePrompt 回炉改写并再次 lint.style（最多回炉 ${lintMaxRework} 次）。本轮不要调用 kb.search 或任何写入类工具。\n`
+                  : "") +
+                (batch.enforceLint
+                  ? "D) 写入：只有 lint.style 通过闸门后，才允许写入/输出终稿（doc.write/doc.applyEdits 等）。\n"
                   : "C) 写入：在拿到 kb.search 的 tool_result 后，再写入/输出终稿（doc.write/doc.applyEdits 等）。\n") +
                 (gates.hasNonStyleLibraries
                   ? `提示：当前同时绑定了非风格库，因此 kb.search 必须显式传 libraryIds（仅限风格库）：${JSON.stringify(styleLibIds)}。\n`
@@ -4370,6 +4411,43 @@ fastify.post(
           reply.raw.end();
           agentRunWaiters.delete(runId);
           return;
+        }
+
+        // WriteCoercionPolicy（仅 safe 降级）：如果风格闸门已降级放行且已有 BEST_DRAFT，则强制写入 BEST_DRAFT，
+        // 避免模型在“已允许写入”后又重起炉灶，导致最终落盘内容反而更偏离风格库。
+        if (
+          effectiveGates.lintGateEnabled &&
+          runState.lintGateDegraded &&
+          runState.bestStyleDraft?.text &&
+          String(call?.name ?? "") === "doc.write"
+        ) {
+          const raw = (call?.args ?? {}) as any;
+          const content = typeof raw?.content === "string" ? String(raw.content) : "";
+          const best = String(runState.bestStyleDraft.text ?? "");
+          if (content.trim() && best.trim() && content.trim() !== best.trim()) {
+            (call as any).args = { ...raw, content: best };
+            writePolicyDecision({
+              turn,
+              policy: "LintPolicy",
+              decision: "coerce_write_best_draft",
+              reasonCodes: ["lint_degraded", "force_best_draft_on_write"],
+              detail: {
+                tool: "doc.write",
+                bestScore: runState.bestStyleDraft.score,
+                fromLen: content.length,
+                toLen: best.length,
+              },
+            });
+            writeRunNotice({
+              turn,
+              kind: "info",
+              title: "safe 降级：写入内容已强制使用最高分版本",
+              message: `已进入 safe 降级放行：为避免最终落盘偏离风格库，doc.write 内容已替换为 BEST_DRAFT（score_best=${runState.bestStyleDraft.score}）。`,
+              policy: "LintPolicy",
+              reasonCodes: ["lint_degraded", "force_best_draft_on_write"],
+              detail: { bestScore: runState.bestStyleDraft.score },
+            });
+          }
         }
 
         // WebSearchQueryNormalizationPolicy：用 time.now 的当前年份纠正 web.search.query 里的“年份漂移”
@@ -4839,6 +4917,49 @@ fastify.post(
             });
           }
         }
+        if (String(call.name ?? "") === "lint.copy") {
+          // gate：记录“防贴原文”结果（确定性工具，优先从 payload.output 读取）
+          const out: any = payload.output && typeof payload.output === "object" ? payload.output : {};
+          const riskLevelRaw = String(out?.riskLevel ?? "").trim().toLowerCase();
+          const riskLevel: "low" | "medium" | "high" =
+            riskLevelRaw === "high" ? "high" : riskLevelRaw === "medium" ? "medium" : "low";
+          const maxOverlapCharsRaw = Number(out?.maxOverlapChars ?? NaN);
+          const maxChar5gramJaccardRaw = Number(out?.maxChar5gramJaccard ?? NaN);
+          const passed = payload.ok === true && Boolean(out?.passed) && riskLevel === "low";
+
+          runState.copyLintPassed = passed;
+          if (payload.ok) {
+            // 仅在输出看起来合法时记录 lastCopyLint
+            if (Number.isFinite(maxOverlapCharsRaw) && Number.isFinite(maxChar5gramJaccardRaw)) {
+              runState.lastCopyLint = {
+                riskLevel,
+                maxOverlapChars: Math.max(0, Math.floor(maxOverlapCharsRaw)),
+                maxChar5gramJaccard: Math.max(0, Math.min(1, Number(maxChar5gramJaccardRaw))),
+              };
+            }
+            if (!passed) runState.copyLintFailCount += 1;
+          } else {
+            // 工具失败：视为未通过闸门；safe 下计入 failCount 以便快速降级放行（避免卡死）
+            runState.copyLintPassed = false;
+            if (lintMode === "safe") runState.copyLintFailCount += 1;
+          }
+
+          writePolicyDecision({
+            turn,
+            policy: "CopyLintPolicy",
+            decision: passed ? "gate_pass" : payload.ok ? "gate_fail" : "tool_failed",
+            reasonCodes: passed ? ["copy_lint_passed"] : payload.ok ? ["copy_lint_failed"] : ["copy_lint_tool_failed"],
+            detail: {
+              riskLevel,
+              maxOverlapChars: Number.isFinite(maxOverlapCharsRaw) ? Math.max(0, Math.floor(maxOverlapCharsRaw)) : null,
+              maxChar5gramJaccard: Number.isFinite(maxChar5gramJaccardRaw) ? Number(maxChar5gramJaccardRaw) : null,
+              failCount: runState.copyLintFailCount,
+              copyMaxRework,
+              sources: out?.sources ?? null,
+              topOverlaps: Array.isArray(out?.topOverlaps) ? out.topOverlaps.slice(0, 3) : [],
+            },
+          });
+        }
         if (String(call.name ?? "") === "lint.style") {
           // 观测（不 gate）：记录“贴原文风险”指标（由 Desktop 在 lint.style 工具内计算 copyRisk 并回传）
           try {
@@ -4921,6 +5042,118 @@ fastify.post(
         const toolResultText = `[tool_result name="${String(call.name ?? "")}"]\n${toolResultJson}\n[/tool_result]`;
         messages.push(...buildInjectedToolResultMessages({ toolResultFormat, toolResultXml, toolResultText }));
 
+        // Copy Linter 闸门（V2 anti-regurgitation）：在 copyGateEnabled 且 lintMode=gate/safe 时启用。
+        if (effectiveGates.copyGateEnabled && String(call.name ?? "") === "lint.copy") {
+          const riskLevel = String(runState.lastCopyLint?.riskLevel ?? "").trim().toLowerCase() || "unknown";
+          const maxOverlap = Number.isFinite(Number(runState.lastCopyLint?.maxOverlapChars ?? NaN)) ? Number(runState.lastCopyLint?.maxOverlapChars ?? 0) : null;
+          const j = Number.isFinite(Number(runState.lastCopyLint?.maxChar5gramJaccard ?? NaN)) ? Number(runState.lastCopyLint?.maxChar5gramJaccard ?? 0) : null;
+
+          if (payload.ok && !runState.copyLintPassed) {
+            // 未通过：自动回炉
+            if (runState.copyLintFailCount <= copyMaxRework) {
+              writeRunNotice({
+                turn,
+                kind: "warn",
+                title: `防贴原文未通过：自动回炉（${runState.copyLintFailCount}/${copyMaxRework}）`,
+                message: `防贴原文未通过（risk=${riskLevel}${maxOverlap !== null ? `，maxOverlap=${maxOverlap}` : ""}${j !== null ? `，j=${j}` : ""}）。正在自动回炉（${runState.copyLintFailCount}/${copyMaxRework}）…`,
+                policy: "CopyLintPolicy",
+                reasonCodes: ["copy_lint_failed_rework"],
+                detail: { riskLevel, maxOverlapChars: maxOverlap, maxChar5gramJaccard: j, failCount: runState.copyLintFailCount, copyMaxRework },
+              });
+              messages.push({
+                role: "system",
+                content:
+                  "你刚刚的 lint.copy 未通过防贴原文闸门。你必须立刻回炉改写“上一版候选稿”，把明显重合的片段改掉（不要新增事实/事件/数字）。\n" +
+                  "- 下一条消息必须且只能输出 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
+                  "- 本轮只调用 lint.copy（不要 kb.search；不要 lint.style；不要任何写入类工具）。\n" +
+                  "- lint.copy 的 arg text 填你回炉后的新稿全文。\n" +
+                  "- 提示：优先改写 tool_result.topOverlaps 中的 snippet，对句式/结构做替换，不要逐字替换同义词。",
+              });
+              continue;
+            }
+
+            // 超过回炉上限：
+            // - safe：降级放行（允许继续推进 lint.style/写入），但记录审计并强提示不要贴原文
+            if (lintMode === "safe") {
+              runState.copyGateDegraded = true;
+              runState.copyLintPassed = true;
+              writePolicyDecision({
+                turn,
+                policy: "CopyLintPolicy",
+                decision: "degrade",
+                reasonCodes: ["copy_lint_exhausted", "copy_lint_degraded"],
+                detail: { riskLevel, maxOverlapChars: maxOverlap, maxChar5gramJaccard: j, lintMode },
+              });
+              writeRunNotice({
+                turn,
+                kind: "warn",
+                title: "防贴原文回炉上限：已降级放行（safe）",
+                message: `防贴原文达到回炉上限（risk=${riskLevel}${maxOverlap !== null ? `，maxOverlap=${maxOverlap}` : ""}），已进入 safe 降级：允许继续推进，但请在后续改写中优先消除重合片段。`,
+                policy: "CopyLintPolicy",
+                reasonCodes: ["copy_lint_exhausted", "copy_lint_degraded"],
+                detail: { riskLevel, maxOverlapChars: maxOverlap, maxChar5gramJaccard: j, lintMode },
+              });
+              messages.push({
+                role: "system",
+                content:
+                  "【Copy Lint safe】防贴原文回炉次数已耗尽，系统已降级放行继续推进。\n" +
+                  "- 请在后续改写/对齐中优先消除 tool_result.topOverlaps 中提示的重合片段。\n" +
+                  "- 不要新增事实/事件/数字。\n",
+              });
+              continue;
+            }
+
+            writePolicyDecision({
+              turn,
+              policy: "CopyLintPolicy",
+              decision: "end_exhausted",
+              reasonCodes: ["copy_lint_exhausted"],
+              detail: { failCount: runState.copyLintFailCount, copyMaxRework, riskLevel, maxOverlapChars: maxOverlap, maxChar5gramJaccard: j },
+            });
+            writeRunNotice({
+              turn,
+              kind: "warn",
+              title: "防贴原文：回炉次数耗尽",
+              message:
+                `防贴原文已连续 ${runState.copyLintFailCount} 次未通过，已达到最大回炉次数（${copyMaxRework}）。\n` +
+                "- 建议：优先改写重合片段（tool_result.topOverlaps），再重试。\n",
+              policy: "CopyLintPolicy",
+              reasonCodes: ["copy_lint_exhausted"],
+              detail: { failCount: runState.copyLintFailCount, copyMaxRework, riskLevel, maxOverlapChars: maxOverlap, maxChar5gramJaccard: j },
+            });
+            writeEvent("run.end", { runId, reason: "copy_lint_exhausted", reasonCodes: ["copy_lint_exhausted"], turn });
+            writeEvent("assistant.done", { reason: "copy_lint_exhausted", turn });
+            reply.raw.end();
+            agentRunWaiters.delete(runId);
+            return;
+          }
+
+          if (payload.ok && runState.copyLintPassed) {
+            writeRunNotice({
+              turn,
+              kind: "info",
+              title: `防贴原文通过（risk=${riskLevel}${maxOverlap !== null ? `，maxOverlap=${maxOverlap}` : ""}）`,
+              message: `防贴原文通过（risk=${riskLevel}${maxOverlap !== null ? `，maxOverlap=${maxOverlap}` : ""}）。`,
+              policy: "CopyLintPolicy",
+              reasonCodes: ["copy_lint_passed"],
+              detail: { riskLevel, maxOverlapChars: maxOverlap, maxChar5gramJaccard: j },
+            });
+          }
+
+          // lint.copy 工具失败：给出明确提示（safe 会随着 failCount 递增，最终降级放行；gate 则等待用户/模型处理）
+          if (!payload.ok) {
+            writeRunNotice({
+              turn,
+              kind: "warn",
+              title: "防贴原文工具失败",
+              message: "lint.copy 工具执行失败。本轮已视为未通过；请检查候选稿 text/path 是否为空，或稍后重试。",
+              policy: "CopyLintPolicy",
+              reasonCodes: ["copy_lint_tool_failed"],
+              detail: { error: String((payload as any)?.error ?? "") },
+            });
+          }
+        }
+
         // 风格 Linter 终稿闸门：在 lintMode=gate/safe 时启用。hint 模式下仅作为提示，不做回炉/不做耗尽终止。
         if (effectiveGates.lintGateEnabled && String(call.name ?? "") === "lint.style") {
           const scoreText =
@@ -4952,37 +5185,40 @@ fastify.post(
 
             // 超过回炉上限：
             // - gate：终止并提示用户（保留最高分可直接输出文本）
-            // - safe：降级放行（用最高分版本继续推进写入/结束），避免卡死
+            // - safe：降级放行（默认用最高分版本继续推进写入/结束），避免卡死且避免“最后一版更差导致不像”
+            if (lintMode === "safe" && runState.bestStyleDraft?.text) {
+              runState.lintGateDegraded = true;
+              runState.styleLintPassed = true; // 放行写入阶段（本次 lint 已执行，但未达阈值）
+              writePolicyDecision({
+                turn,
+                policy: "LintPolicy",
+                decision: "degrade_keep_best",
+                reasonCodes: ["style_lint_exhausted", "lint_degraded", keepBestOnLintExhausted ? "lint_keep_best" : "lint_keep_best_default"],
+                detail: { bestScore: runState.bestStyleDraft.score, lintMode },
+              });
+              writeRunNotice({
+                turn,
+                kind: "warn",
+                title: "风格对齐回炉上限：已降级放行（safe）",
+                message: `风格对齐达到回炉上限（score_best=${runState.bestStyleDraft.score}），已进入 safe 降级：允许继续写入，但要求使用“最高分版本”作为终稿，避免乱写。`,
+                policy: "LintPolicy",
+                reasonCodes: ["style_lint_exhausted", "lint_degraded", keepBestOnLintExhausted ? "lint_keep_best" : "lint_keep_best_default"],
+                detail: { bestScore: runState.bestStyleDraft.score, lintMode },
+              });
+              messages.push({
+                role: "system",
+                content:
+                  "【Style Lint safe】风格对齐回炉次数已耗尽，但为了避免流程卡死，系统已降级放行写入。\n" +
+                  "- 你必须使用下方 BEST_DRAFT 作为终稿（不要再重新生成/不要新增事实）。\n" +
+                  "- 下一轮进入写入阶段（doc.write/doc.applyEdits/doc.splitToDir...）时，直接把 BEST_DRAFT 写入。\n\n" +
+                  `BEST_DRAFT(score=${runState.bestStyleDraft.score}):\n` +
+                  runState.bestStyleDraft.text,
+              });
+              continue;
+            }
+
+            // gate：只有用户/策略明确要求“保留最高分”时才输出最高分版本（否则按 exhausted 终止）
             if (keepBestOnLintExhausted && runState.bestStyleDraft?.text) {
-              if (lintMode === "safe") {
-                runState.lintGateDegraded = true;
-                runState.styleLintPassed = true; // 放行写入阶段（本次 lint 已执行，但未达阈值）
-                writePolicyDecision({
-                  turn,
-                  policy: "LintPolicy",
-                  decision: "degrade_keep_best",
-                  reasonCodes: ["style_lint_exhausted", "lint_degraded", "lint_keep_best"],
-                  detail: { bestScore: runState.bestStyleDraft.score, lintMode },
-                });
-                writeRunNotice({
-                  turn,
-                  kind: "warn",
-                  title: "风格对齐回炉上限：已降级放行（safe）",
-                  message: `风格对齐达到回炉上限（score_best=${runState.bestStyleDraft.score}），已进入 safe 降级：允许继续写入，但要求使用“最高分版本”作为终稿，避免乱写。`,
-                  policy: "LintPolicy",
-                  reasonCodes: ["style_lint_exhausted", "lint_degraded", "lint_keep_best"],
-                  detail: { bestScore: runState.bestStyleDraft.score, lintMode },
-                });
-                messages.push({
-                  role: "system",
-                  content:
-                    "【Style Lint safe】风格对齐回炉次数已耗尽，但为了避免流程卡死，系统已降级放行写入。\n" +
-                    "- 你必须使用下方 BEST_DRAFT 作为终稿（不要再重新生成/不要新增事实）。\n" +
-                    "- 下一轮进入写入阶段（doc.write/doc.applyEdits/doc.splitToDir...）时，直接把 BEST_DRAFT 写入。\n\n" +
-                    `BEST_DRAFT(score=${runState.bestStyleDraft.score}):\n` +
-                    runState.bestStyleDraft.text,
-                });
-              } else {
               writePolicyDecision({
                 turn,
                 policy: "LintPolicy",
@@ -5012,7 +5248,6 @@ fastify.post(
               reply.raw.end();
               agentRunWaiters.delete(runId);
               return;
-              }
             }
 
             if (lintMode === "safe") {

@@ -145,6 +145,34 @@ export const TOOL_LIST: ToolMeta[] = [
     },
   },
   {
+    name: "lint.copy",
+    description:
+      "Copy Linter（防贴原文/防复用）：对候选稿（text 或 path 指向的文本）做确定性重合检测。\n" +
+      "设计目标：用于仿写/改写链路中的“anti-regurgitation”阶段闸门，优先拦截明显连续重合与高相似 n-gram。\n" +
+      "【推荐工作流】（风格库已绑定且任务为写作类）：\n" +
+      "1) 先 kb.search(kind=card, cardTypes=[hook,one_liner,ending,outline,thesis]) 拉模板\n" +
+      "2) 产出一版候选稿（不要立刻写入文件）\n" +
+      "3) lint.copy(text=候选稿) → 若风险偏高则改写降重 → 再 lint.style → 最后写入\n",
+    args: [
+      { name: "text", required: false, desc: "要检查的候选稿文本（text/path 二选一必填）", type: "string" },
+      { name: "path", required: false, desc: "要检查的文件路径（text/path 二选一必填；会优先读取提案态内容）", type: "string" },
+      { name: "libraryIds", required: false, desc: "可选：风格库 ID 数组；不传则默认使用右侧已绑定的风格库（purpose=style）作为对照样例池", type: "json", jsonType: "array" },
+      { name: "maxSources", required: false, desc: "可选：最多使用多少条对照源（默认 14；包含编辑器选区 + 少量风格样例）", type: "number" },
+    ],
+    modes: ["plan", "agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string" },
+        path: { type: "string" },
+        libraryIds: { type: "json", jsonType: "array" },
+        maxSources: { type: "number" },
+      },
+      oneOfRequired: [{ required: ["text"] }, { required: ["path"] }],
+      additionalProperties: true,
+    },
+  },
+  {
     name: "lint.style",
     description:
       "风格 Linter（强烈建议用于仿写/改写/润色终稿）。\n" +

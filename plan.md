@@ -16,6 +16,8 @@
 - [Capabilities Registry v0.1（spec：工具/Skills 配置与热生效）](docs/specs/capabilities-registry-v0.1.md)
 - [Context Pack 改动方案 v0.1（spec）](docs/specs/context-pack-improvements-v0.1.md)
 - [仿写（style_imitate）长期方案：更像原文，但更不贴原文（spec v0.1）](docs/specs/style-imitate-longterm-roadmap-v0.1.md)
+- [仿写（style_imitate）V2 Clean：状态机前置 + 模板/规则驱动（spec v0.1）](docs/specs/style-imitate-v2-clean.md)
+- [仿写（style_imitate）V2 开工前整理：现有 UI 与接口清单（spec v0.1）](docs/specs/style-imitate-v2-ui-api-inventory-v0.1.md)
 - [对话滚动摘要 v0.1（spec：Chat 带历史 + 自动 3–5 轮压缩 + 独立可配 LLM stage）](docs/specs/dialogue-rolling-summary-v0.1.md)
 - [Desktop 编辑器设计调研 v1（research：写作 IDE 中间编辑器）](docs/research/editor-design-v1.md)
 - [Clipboard 导出 v0.1（spec：复制到小红书/公众号/知乎/飞书 + 不影响 Agent）](docs/specs/clipboard-export-v0.1.md)

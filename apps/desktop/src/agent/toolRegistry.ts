@@ -953,6 +953,98 @@ const tools: ToolDefinition[] = [
   },
 
   {
+    name: "lint.copy",
+    description:
+      "Copy Linter：确定性检测“贴原文/复用风险”。用于仿写/改写闭环中的 anti-regurgitation 阶段闸门（本地计算，不调用上游模型）。",
+    args: [
+      { name: "text", required: false, desc: "要检查的候选稿文本（text/path 二选一必填）" },
+      { name: "path", required: false, desc: "要检查的文件路径（text/path 二选一必填；会优先读取提案态内容）" },
+      { name: "libraryIds", required: false, desc: "可选：风格库 ID 数组；不传则默认使用右侧已绑定的风格库（purpose=style）" },
+      { name: "maxSources", required: false, desc: "可选：最多使用多少条对照源（默认 14；包含编辑器选区 + 少量风格样例）" },
+    ],
+    riskLevel: "low",
+    applyPolicy: "proposal",
+    reversible: false,
+    run: async (args) => {
+      const textArg = typeof args.text === "string" ? String(args.text) : "";
+      const pathArg = typeof args.path === "string" ? String(args.path) : "";
+      if (!textArg && !pathArg) return { ok: false, error: "MISSING_TEXT_OR_PATH" };
+
+      const draftText = await (async () => {
+        if (textArg) return textArg;
+        const p0 = normalizeRelPath(pathArg);
+        if (!p0) return "";
+        const proj = useProjectStore.getState();
+        const file = proj.getFileByPath(p0);
+        const disk = file ? await proj.ensureLoaded(file.path).catch(() => file.content ?? "") : "";
+        const virt = getVirtualFileContentFromPendingProposals({ path: p0, baseExists: Boolean(file), baseContent: disk ?? "" });
+        if (virt && virt.exists) return virt.content;
+        return disk ?? "";
+      })();
+      if (!draftText.trim()) return { ok: false, error: "EMPTY_DRAFT" };
+
+      // 选择风格库（优先 purpose=style；用于取少量样例作为对照源）
+      const explicitLibs = Array.isArray(args.libraryIds) ? (args.libraryIds as any[]).map((x) => String(x ?? "").trim()).filter(Boolean) : [];
+      const sidecar = await buildStyleLinterLibrariesSidecar({ libraryIds: explicitLibs, maxLibraries: 6 }).catch(() => ({ ok: false } as any));
+      if (!sidecar?.ok) return { ok: false, error: "NO_LIBRARY_SELECTED" };
+      const libraryIds = sidecar.libraryIds ?? [];
+
+      const librariesPayload: any[] = Array.isArray(sidecar.libraries) ? sidecar.libraries : [];
+      const styleSamples = librariesPayload.flatMap((l: any) => (Array.isArray(l?.samples) ? l.samples : [])).slice(0, 24);
+
+      const selectionText = (() => {
+        const proj = useProjectStore.getState();
+        const ed = proj.editorRef;
+        const model = ed?.getModel?.();
+        const sel = ed?.getSelection?.();
+        if (!ed || !model || !sel) return "";
+        const t = String(model.getValueInRange(sel) ?? "");
+        return t.trim() ? t : "";
+      })();
+
+      const maxSources = typeof args.maxSources === "number" ? Math.max(4, Math.min(24, Math.floor(args.maxSources))) : 14;
+      // anchors（优先）：来自 Main Doc 的 styleContractV1（可追溯的小引用，<=200字），比“段落样例池”更贴近 V2 的证据位定义
+      const anchorSamples = (() => {
+        const main: any = useRunStore.getState().mainDoc ?? {};
+        const contract: any = main?.styleContractV1 ?? null;
+        const anchors = Array.isArray(contract?.anchors) ? contract.anchors : [];
+        const quotes = anchors
+          .map((a: any) => String(a?.quote ?? "").trim())
+          .filter(Boolean)
+          .map((q: string) => (q.length > 200 ? q.slice(0, 200) : q));
+        const uniq: string[] = [];
+        for (const q of quotes) if (!uniq.includes(q)) uniq.push(q);
+        return uniq.slice(0, 8).map((text) => ({ text }));
+      })();
+
+      // computeCopyRiskObserve 内部会控量 sources；这里通过裁剪样例进一步避免计算成本膨胀
+      const combinedSamples = [...anchorSamples, ...styleSamples].slice(0, 24);
+      const samplesForCopy = Array.isArray(combinedSamples) ? combinedSamples.slice(0, Math.max(0, Math.min(24, maxSources))) : [];
+
+      const copyRisk = computeCopyRiskObserve({ draftText, styleSamples: samplesForCopy, selectionText });
+      const riskLevel = String((copyRisk as any)?.riskLevel ?? "").trim().toLowerCase();
+      const passed = riskLevel === "low";
+
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          mode: "gate",
+          v: 1,
+          passed,
+          riskLevel: passed ? "low" : (riskLevel === "high" ? "high" : "medium"),
+          maxOverlapChars: (copyRisk as any)?.maxOverlapChars ?? 0,
+          maxChar5gramJaccard: (copyRisk as any)?.maxChar5gramJaccard ?? 0,
+          sources: (copyRisk as any)?.sources ?? null,
+          topOverlaps: Array.isArray((copyRisk as any)?.topOverlaps) ? (copyRisk as any)?.topOverlaps : [],
+          libraryIds,
+        },
+        undoable: false,
+      };
+    },
+  },
+
+  {
     name: "lint.style",
     description:
       "风格 Linter：对照已绑定的风格库（purpose=style）的统计指纹/口癖/样例，找出候选稿“不像点”，并给出 rewritePrompt。",
