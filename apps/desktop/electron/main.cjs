@@ -648,7 +648,19 @@ async function interactiveUpdateFlow(args) {
   });
   if (choice.response !== 0) return { ok: true, updateAvailable: true, cancelled: true };
 
-  const fileName = path.basename(new URL(info.nsisUrl).pathname || "");
+  // 注意：nsisUrl 通常是 percent-encoded（例如 写作IDE -> %E5%86%99...）
+  // - 如果直接用 URL.pathname 做 basename，会得到包含 '%' 的文件名
+  // - 而 cmd.exe 会把 '%' 当环境变量展开，导致 start 时路径被破坏 -> “下载了但安装器没弹出”
+  // 因此：这里对 pathname 做 decodeURIComponent，并在拼 cmd 字符串时把 % 转义为 %%
+  const nsisUrlObj = new URL(info.nsisUrl);
+  const decodedPathname = (() => {
+    try {
+      return decodeURIComponent(String(nsisUrlObj.pathname ?? ""));
+    } catch {
+      return String(nsisUrlObj.pathname ?? "");
+    }
+  })();
+  const fileName = path.basename(decodedPathname || "");
   const safeName = fileName || `写作IDE Setup ${info.latestVersion}.exe`;
   const target = path.join(app.getPath("userData"), "updates", safeName);
 
@@ -678,7 +690,8 @@ async function interactiveUpdateFlow(args) {
     // 关键修复（Windows）：不要在本进程还在运行时直接启动 NSIS installer，
     // 否则安装器会提示“写作IDE正在运行，无法安装”，用户还可能被安装器抢焦点导致难以切回关闭。
     // 这里用 cmd 作为“外部引导器”：先延迟 1~2 秒，再 start 安装器；本进程立刻退出释放文件占用。
-    const cmd = `ping -n 2 127.0.0.1 >nul & start "" "${target}"`;
+    const targetForCmd = String(target).replaceAll("%", "%%");
+    const cmd = `ping -n 2 127.0.0.1 >nul & start "" "${targetForCmd}"`;
     const child = spawn("cmd.exe", ["/d", "/s", "/c", cmd], { detached: true, stdio: "ignore", windowsHide: true });
     child.unref();
   } catch (e) {
