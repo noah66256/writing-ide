@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, shell, ipcMain, dialog, clipboard, protocol, s
 const path = require("path");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
+const crypto = require("node:crypto");
 const http = require("node:http");
 const https = require("node:https");
 const { spawn, exec } = require("node:child_process");
@@ -537,6 +538,34 @@ async function downloadToFile(url, targetPath, onProgress) {
   });
 }
 
+async function sha256File(p) {
+  return await new Promise((resolve) => {
+    const h = crypto.createHash("sha256");
+    const s = fs.createReadStream(p);
+    s.on("error", () => resolve({ ok: false, error: "READ_FAILED" }));
+    s.on("data", (b) => h.update(b));
+    s.on("end", () => resolve({ ok: true, sha256: h.digest("hex") }));
+  });
+}
+
+function sanitizeFileName(name, fallback) {
+  const raw = String(name ?? "").trim() || String(fallback ?? "").trim() || "installer.exe";
+  // Windows: avoid reserved characters. Also remove trailing dots/spaces.
+  const cleaned = raw
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "_")
+    .replace(/\s+$/g, "")
+    .replace(/\.+$/g, "")
+    .trim();
+  // Extremely defensive: keep length reasonable.
+  const short = cleaned.length > 160 ? cleaned.slice(0, 160) : cleaned;
+  return short || "installer.exe";
+}
+
+function escapeForPsSingleQuoted(s) {
+  // PowerShell single-quoted string: '' escapes a single quote.
+  return String(s ?? "").replaceAll("'", "''");
+}
+
 async function countRunningProcessesByImageNameWin(imageName) {
   const exeName = String(imageName ?? "").trim();
   if (!exeName) return { ok: false, error: "MISSING_EXE_NAME" };
@@ -568,6 +597,7 @@ async function checkForUpdates(args) {
   const latestVersion = String(j.version ?? "").trim();
   const notes = String(j.notes ?? "").trim();
   const nsisUrl = String(j?.windows?.nsisUrl ?? "").trim();
+  const sha256 = String(j?.windows?.sha256 ?? "").trim().toLowerCase();
 
   if (!latestVersion) return { ok: false, error: "LATEST_VERSION_MISSING", latestUrl, currentVersion };
 
@@ -579,6 +609,7 @@ async function checkForUpdates(args) {
     notes,
     updateAvailable: newer,
     nsisUrl,
+    sha256,
     baseUrl,
     latestUrl,
   };
@@ -651,7 +682,7 @@ async function interactiveUpdateFlow(args) {
   // 注意：nsisUrl 通常是 percent-encoded（例如 写作IDE -> %E5%86%99...）
   // - 如果直接用 URL.pathname 做 basename，会得到包含 '%' 的文件名
   // - 而 cmd.exe 会把 '%' 当环境变量展开，导致 start 时路径被破坏 -> “下载了但安装器没弹出”
-  // 因此：这里对 pathname 做 decodeURIComponent，并在拼 cmd 字符串时把 % 转义为 %%
+  // 因此：这里对 pathname 做 decodeURIComponent，并在后续启动逻辑里避免使用 cmd.exe（改用 PowerShell Start-Process）
   const nsisUrlObj = new URL(info.nsisUrl);
   const decodedPathname = (() => {
     try {
@@ -661,52 +692,111 @@ async function interactiveUpdateFlow(args) {
     }
   })();
   const fileName = path.basename(decodedPathname || "");
-  const safeName = fileName || `写作IDE Setup ${info.latestVersion}.exe`;
-  const target = path.join(app.getPath("userData"), "updates", safeName);
+  const safeName = sanitizeFileName(fileName, `writing-ide-setup-${info.latestVersion}.exe`);
+  const cachePath = path.join(app.getPath("userData"), "updates", safeName);
+  // Launch from a temp dir to avoid cmd/unicode/path edge cases (userData may contain Chinese appName).
+  const launchPath = path.join(app.getPath("temp"), "writing-ide-updates", safeName);
 
   try {
-    mainWindow?.webContents?.send("update.event", { type: "download.start", version: info.latestVersion, target });
+    mainWindow?.webContents?.send("update.event", { type: "download.start", version: info.latestVersion, target: cachePath });
   } catch {
     // ignore
   }
 
-  const dl = await downloadToFile(info.nsisUrl, target, ({ transferred, total }) => {
+  // ======== 1) Reuse existing download if sha256 matches ========
+  const expectedSha = String(info.sha256 ?? "").trim().toLowerCase();
+  const hasExpectedSha = Boolean(expectedSha && /^[a-f0-9]{64}$/.test(expectedSha));
+  const cacheExists = await fsp
+    .access(cachePath)
+    .then(() => true)
+    .catch(() => false);
+  let needDownload = true;
+  if (cacheExists && hasExpectedSha) {
+    const h = await sha256File(cachePath);
+    if (h.ok && String(h.sha256).toLowerCase() === expectedSha) needDownload = false;
+  }
+
+  if (needDownload) {
+    const dl = await downloadToFile(info.nsisUrl, cachePath, ({ transferred, total }) => {
+      try {
+        mainWindow?.webContents?.send("update.event", { type: "download.progress", transferred, total });
+      } catch {
+        // ignore
+      }
+    });
+    if (!dl.ok) {
+      await dialog.showMessageBox(mainWindow ?? undefined, {
+        type: "error",
+        title: "下载失败",
+        message: `下载更新失败：${dl.error || "unknown"}`,
+      });
+      return { ok: false, error: "DOWNLOAD_FAILED", detail: dl.error };
+    }
+  }
+
+  // ======== 2) Verify sha256 (if provided) ========
+  if (hasExpectedSha) {
+    const h = await sha256File(cachePath);
+    if (!h.ok || String(h.sha256).toLowerCase() !== expectedSha) {
+      try {
+        await fsp.unlink(cachePath);
+      } catch {
+        // ignore
+      }
+      await dialog.showMessageBox(mainWindow ?? undefined, {
+        type: "error",
+        title: "校验失败",
+        message: "安装包校验失败（sha256 不匹配），已删除文件。请重试更新。",
+        detail: `expected: ${expectedSha}\nactual: ${h.ok ? String(h.sha256) : "unknown"}`,
+      });
+      return { ok: false, error: "SHA256_MISMATCH" };
+    }
+  }
+
+  // Copy to temp launch path (avoid cmd/unicode pitfalls)
+  try {
+    await fsp.mkdir(path.dirname(launchPath), { recursive: true });
+    await fsp.copyFile(cachePath, launchPath);
+  } catch {
+    // Fallback: if copy fails, try launching from cachePath anyway.
     try {
-      mainWindow?.webContents?.send("update.event", { type: "download.progress", transferred, total });
+      await fsp.mkdir(path.dirname(launchPath), { recursive: true });
     } catch {
       // ignore
     }
-  });
-  if (!dl.ok) {
-    await dialog.showMessageBox(mainWindow ?? undefined, {
-      type: "error",
-      title: "下载失败",
-      message: `下载更新失败：${dl.error || "unknown"}`,
-    });
-    return { ok: false, error: "DOWNLOAD_FAILED", detail: dl.error };
   }
+  const finalLaunchPath = (await fsp
+    .access(launchPath)
+    .then(() => true)
+    .catch(() => false))
+    ? launchPath
+    : cachePath;
 
   try {
-    // 关键修复（Windows）：不要在本进程还在运行时直接启动 NSIS installer，
-    // 否则安装器会提示“写作IDE正在运行，无法安装”，用户还可能被安装器抢焦点导致难以切回关闭。
-    // 这里用 cmd 作为“外部引导器”：先延迟 1~2 秒，再 start 安装器；本进程立刻退出释放文件占用。
-    const targetForCmd = String(target).replaceAll("%", "%%");
-    const cmd = `ping -n 2 127.0.0.1 >nul & start "" "${targetForCmd}"`;
-    const child = spawn("cmd.exe", ["/d", "/s", "/c", cmd], { detached: true, stdio: "ignore", windowsHide: true });
+    // Windows：不再用 cmd.exe（易受编码/特殊字符影响，且会弹黑窗）。
+    // 用 PowerShell 隐藏窗口 + Start-Sleep + Start-Process：更稳、对 Unicode 路径友好。
+    const p = escapeForPsSingleQuoted(finalLaunchPath);
+    const ps = `Start-Sleep -Seconds 1; Start-Process -FilePath '${p}'`;
+    const child = spawn("powershell.exe", ["-NoProfile", "-WindowStyle", "Hidden", "-Command", ps], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
     child.unref();
   } catch (e) {
     await dialog.showMessageBox(mainWindow ?? undefined, {
       type: "error",
       title: "启动安装失败",
       message: `无法启动安装程序：${String(e?.message ?? e)}`,
+      detail: `installer: ${finalLaunchPath}`,
     });
     return { ok: false, error: "INSTALLER_LAUNCH_FAILED" };
   }
 
   // 下载完成：通知渲染层（用于 UI 清理进度条/提示）
   try {
-    mainWindow?.webContents?.send("update.event", { type: "download.done", version: info.latestVersion, target });
-    mainWindow?.webContents?.send("update.event", { type: "install.start", version: info.latestVersion, target });
+    mainWindow?.webContents?.send("update.event", { type: "download.done", version: info.latestVersion, target: cachePath });
+    mainWindow?.webContents?.send("update.event", { type: "install.start", version: info.latestVersion, target: finalLaunchPath });
   } catch {
     // ignore
   }
@@ -735,7 +825,7 @@ async function interactiveUpdateFlow(args) {
   } catch {
     // ignore
   }
-  return { ok: true, installing: true, target };
+  return { ok: true, installing: true, cachePath, launchPath: finalLaunchPath, reusedDownload: !needDownload };
 }
 
 function registerIpc() {
