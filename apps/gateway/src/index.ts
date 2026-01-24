@@ -2500,6 +2500,8 @@ fastify.post(
     styleLintPassed: runState.styleLintPassed,
     styleLintFailCount: runState.styleLintFailCount,
     lintGateDegraded: runState.lintGateDegraded,
+    copyLintObservedCount: (runState as any).copyLintObservedCount ?? 0,
+    lastCopyRisk: (runState as any).lastCopyRisk ?? null,
     lintMode,
     targetChars,
     webGate: { ...webGate },
@@ -4838,6 +4840,42 @@ fastify.post(
           }
         }
         if (String(call.name ?? "") === "lint.style") {
+          // 观测（不 gate）：记录“贴原文风险”指标（由 Desktop 在 lint.style 工具内计算 copyRisk 并回传）
+          try {
+            const cr = (payload.output as any)?.copyRisk ?? null;
+            const riskLevel = cr && typeof cr === "object" ? String((cr as any).riskLevel ?? "").trim().toLowerCase() : "";
+            const maxOverlapChars = cr && typeof cr === "object" ? Number((cr as any).maxOverlapChars ?? NaN) : NaN;
+            const maxChar5gramJaccard = cr && typeof cr === "object" ? Number((cr as any).maxChar5gramJaccard ?? NaN) : NaN;
+            const okRisk =
+              (riskLevel === "low" || riskLevel === "medium" || riskLevel === "high") &&
+              Number.isFinite(maxOverlapChars) &&
+              Number.isFinite(maxChar5gramJaccard);
+            if (okRisk) {
+              (runState as any).copyLintObservedCount = ((runState as any).copyLintObservedCount ?? 0) + 1;
+              (runState as any).lastCopyRisk = {
+                riskLevel,
+                maxOverlapChars: Math.max(0, Math.floor(maxOverlapChars)),
+                maxChar5gramJaccard: Math.max(0, Math.min(1, Number(maxChar5gramJaccard))),
+              };
+              writePolicyDecision({
+                turn,
+                policy: "CopyLintPolicy",
+                decision: "observe",
+                reasonCodes: ["copy_lint_observed"],
+                detail: {
+                  riskLevel,
+                  maxOverlapChars: Math.max(0, Math.floor(maxOverlapChars)),
+                  maxChar5gramJaccard: Number(maxChar5gramJaccard),
+                  sources: (cr as any)?.sources ?? null,
+                  topOverlaps: Array.isArray((cr as any)?.topOverlaps) ? (cr as any).topOverlaps.slice(0, 3) : [],
+                  note: "observe_only_no_gate",
+                },
+              });
+            }
+          } catch {
+            // ignore
+          }
+
           if (payload.ok) {
             const parsedLint = parseStyleLintResult(payload.output);
             const candText = typeof (call?.args as any)?.text === "string" ? String((call.args as any).text) : "";

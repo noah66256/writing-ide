@@ -64,6 +64,9 @@ export type RunState = {
   lintGateDegraded: boolean;
   bestStyleDraft: null | { score: number; highIssues: number; text: string };
   lastStyleLint: null | StyleLintParsed;
+  // copy lint（观测阶段）：用于记录“可能贴原文”的风险指标（不做 gate）
+  copyLintObservedCount: number;
+  lastCopyRisk: null | { riskLevel: "low" | "medium" | "high"; maxOverlapChars: number; maxChar5gramJaccard: number };
   // 预算拆分：避免一个 budget 同时承担“协议修复/完成性重试/风格门禁”等多重语义
   protocolRetryBudget: number;
   workflowRetryBudget: number;
@@ -96,6 +99,8 @@ export function createInitialRunState(args?: { protocolRetryBudget?: number; wor
     lintGateDegraded: false,
     bestStyleDraft: null,
     lastStyleLint: null,
+    copyLintObservedCount: 0,
+    lastCopyRisk: null,
     protocolRetryBudget: Number.isFinite(args?.protocolRetryBudget as any) ? Math.max(0, Math.floor(Number(args?.protocolRetryBudget))) : 2,
     workflowRetryBudget: Number.isFinite(args?.workflowRetryBudget as any) ? Math.max(0, Math.floor(Number(args?.workflowRetryBudget))) : 3,
     lintReworkBudget: Number.isFinite(args?.lintReworkBudget as any) ? Math.max(0, Math.floor(Number(args?.lintReworkBudget))) : 2,

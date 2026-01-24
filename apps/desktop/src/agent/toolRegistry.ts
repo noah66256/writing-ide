@@ -65,6 +65,172 @@ function normalizeTextForStats(text: string) {
   return String(text ?? "").replaceAll("\r\n", "\n").replaceAll("\r", "\n");
 }
 
+type CopyRiskLevel = "low" | "medium" | "high";
+type CopyRiskObserveV1 = {
+  mode: "observe";
+  v: 1;
+  riskLevel: CopyRiskLevel;
+  // 整体相似度（字符 5-gram）
+  maxChar5gramJaccard: number;
+  // “连续复用”的近似最大长度（seeded match；更接近 LCS/最长公共子串的工程近似）
+  maxOverlapChars: number;
+  sources: { total: number; selectionIncluded: boolean; styleSampleCount: number };
+  topOverlaps: Array<{ source: string; overlapChars: number; snippet: string }>;
+};
+
+function normalizeTextForCopyCheck(text: string) {
+  // 观测阶段：只做轻量归一（不做同义词扩展，避免误伤扩大）
+  return String(text ?? "")
+    .replaceAll("\r\n", "\n")
+    .replaceAll("\r", "\n")
+    .replace(/\s+/g, "")
+    .trim();
+}
+
+function charNgramSet(text: string, n: number, maxNgrams: number) {
+  const t = String(text ?? "");
+  const out = new Set<string>();
+  if (n <= 0) return out;
+  for (let i = 0; i + n <= t.length; i += 1) {
+    out.add(t.slice(i, i + n));
+    if (out.size >= maxNgrams) break;
+  }
+  return out;
+}
+
+function charNgramJaccard(a: string, b: string, n: number) {
+  const A = normalizeTextForCopyCheck(a);
+  const B = normalizeTextForCopyCheck(b);
+  if (A.length < n || B.length < n) return 0;
+  // 控制上限：避免长文 set 爆炸（观测优先稳定）
+  const maxNgrams = 12_000;
+  const SA = charNgramSet(A, n, maxNgrams);
+  const SB = charNgramSet(B, n, maxNgrams);
+  if (!SA.size || !SB.size) return 0;
+  const [small, big] = SA.size <= SB.size ? [SA, SB] : [SB, SA];
+  let inter = 0;
+  for (const x of small) if (big.has(x)) inter += 1;
+  const union = SA.size + SB.size - inter;
+  return union > 0 ? inter / union : 0;
+}
+
+function seededMaxOverlap(args: { a: string; b: string; seedLen: number; maxSeeds: number; maxPositionsPerSeed: number }) {
+  const A = normalizeTextForCopyCheck(args.a);
+  const B = normalizeTextForCopyCheck(args.b);
+  const seedLen = Math.max(6, Math.min(32, Math.floor(args.seedLen)));
+  if (A.length < seedLen || B.length < seedLen) return { maxLen: 0, snippet: "" };
+
+  const seedMap = new Map<string, number[]>();
+  for (let i = 0; i + seedLen <= A.length; i += 1) {
+    if (seedMap.size >= args.maxSeeds) break;
+    const seed = A.slice(i, i + seedLen);
+    const list = seedMap.get(seed);
+    if (!list) seedMap.set(seed, [i]);
+    else if (list.length < args.maxPositionsPerSeed) list.push(i);
+  }
+  if (!seedMap.size) return { maxLen: 0, snippet: "" };
+
+  let bestLen = 0;
+  let bestSnippet = "";
+
+  for (let j = 0; j + seedLen <= B.length; j += 1) {
+    const seed = B.slice(j, j + seedLen);
+    const candPositions = seedMap.get(seed);
+    if (!candPositions) continue;
+
+    for (const i0 of candPositions) {
+      let aL = i0;
+      let bL = j;
+      let aR = i0 + seedLen;
+      let bR = j + seedLen;
+
+      while (aL > 0 && bL > 0 && A.charCodeAt(aL - 1) === B.charCodeAt(bL - 1)) {
+        aL -= 1;
+        bL -= 1;
+      }
+      while (aR < A.length && bR < B.length && A.charCodeAt(aR) === B.charCodeAt(bR)) {
+        aR += 1;
+        bR += 1;
+      }
+      const len = aR - aL;
+      if (len > bestLen) {
+        bestLen = len;
+        bestSnippet = A.slice(aL, aR);
+        if (bestSnippet.length > 120) bestSnippet = bestSnippet.slice(0, 120) + "…";
+      }
+    }
+  }
+
+  return { maxLen: bestLen, snippet: bestSnippet };
+}
+
+function computeCopyRiskObserve(args: { draftText: string; styleSamples: Array<{ text: string }>; selectionText?: string }) {
+  const draftText = String(args.draftText ?? "");
+  const sources: Array<{ id: string; text: string }> = [];
+
+  const selectionText = typeof args.selectionText === "string" ? args.selectionText : "";
+  const selectionNorm = selectionText.trim();
+  if (selectionNorm) sources.push({ id: "editor_selection", text: selectionNorm.slice(0, 6000) });
+
+  const styleSamples = Array.isArray(args.styleSamples) ? args.styleSamples : [];
+  for (const s of styleSamples) {
+    const t = String((s as any)?.text ?? "").trim();
+    if (!t) continue;
+    sources.push({ id: "style_sample", text: t.slice(0, 1200) });
+    if (sources.length >= 14) break; // 控量：观测期不追求覆盖所有样例
+  }
+
+  const total = sources.length;
+  if (!total) {
+    return {
+      mode: "observe",
+      v: 1,
+      riskLevel: "low",
+      maxChar5gramJaccard: 0,
+      maxOverlapChars: 0,
+      sources: { total: 0, selectionIncluded: false, styleSampleCount: 0 },
+      topOverlaps: [],
+    } satisfies CopyRiskObserveV1;
+  }
+
+  let maxJ = 0;
+  let maxOverlap = 0;
+  const overlaps: Array<{ source: string; overlapChars: number; snippet: string; j: number }> = [];
+
+  for (const src of sources) {
+    const j = charNgramJaccard(draftText, src.text, 5);
+    if (j > maxJ) maxJ = j;
+    const ov = seededMaxOverlap({ a: draftText, b: src.text, seedLen: 12, maxSeeds: 8000, maxPositionsPerSeed: 2 });
+    if (ov.maxLen > maxOverlap) maxOverlap = ov.maxLen;
+    if (ov.maxLen >= 24) overlaps.push({ source: src.id, overlapChars: ov.maxLen, snippet: ov.snippet, j });
+  }
+
+  overlaps.sort((a, b) => b.overlapChars - a.overlapChars || b.j - a.j);
+  const topOverlaps = overlaps.slice(0, 3).map((x) => ({
+    source: x.source,
+    overlapChars: x.overlapChars,
+    snippet: x.snippet,
+  }));
+
+  // 观测阶段：riskLevel 仅用于标注与统计，不做 gate
+  const riskLevel: CopyRiskLevel =
+    maxOverlap >= 60 ? "high" : maxOverlap >= 40 || maxJ >= 0.18 ? "medium" : "low";
+
+  return {
+    mode: "observe",
+    v: 1,
+    riskLevel,
+    maxChar5gramJaccard: Number(maxJ.toFixed(4)),
+    maxOverlapChars: Math.floor(maxOverlap),
+    sources: {
+      total,
+      selectionIncluded: Boolean(selectionNorm),
+      styleSampleCount: sources.filter((s) => s.id === "style_sample").length,
+    },
+    topOverlaps,
+  } satisfies CopyRiskObserveV1;
+}
+
 function splitSentences(text: string) {
   const t = normalizeTextForStats(text);
   const parts = t
@@ -831,6 +997,17 @@ const tools: ToolDefinition[] = [
 
       const draftFp = computeDraftStats(draftText);
       const librariesPayload: any[] = Array.isArray(sidecar.libraries) ? sidecar.libraries : [];
+      const styleSamples = librariesPayload.flatMap((l: any) => (Array.isArray(l?.samples) ? l.samples : [])).slice(0, 24);
+      const selectionText = (() => {
+        const proj = useProjectStore.getState();
+        const ed = proj.editorRef;
+        const model = ed?.getModel?.();
+        const sel = ed?.getSelection?.();
+        if (!ed || !model || !sel) return "";
+        const t = String(model.getValueInRange(sel) ?? "");
+        return t.trim() ? t : "";
+      })();
+      const copyRisk = computeCopyRiskObserve({ draftText, styleSamples, selectionText });
 
       const model = typeof args.model === "string" ? String(args.model).trim() : "";
       const maxIssues = typeof args.maxIssues === "number" ? Math.max(3, Math.min(24, Math.floor(args.maxIssues))) : 10;
@@ -851,9 +1028,9 @@ const tools: ToolDefinition[] = [
           const msg = json?.error ? String(json.error) : `HTTP_${res.status}`;
           const hint = json?.hint ? String(json.hint) : "";
           const detail = json?.message ? String(json.message) : json?.detail ? String(json.detail) : "";
-          return { ok: false, error: hint ? `${msg}: ${hint}` : msg, output: { ok: false, msg, hint, detail } };
+          return { ok: false, error: hint ? `${msg}: ${hint}` : msg, output: { ok: false, msg, hint, detail, copyRisk } };
         }
-        return { ok: true, output: { ok: true, ...(json ?? {}), libraryIds }, undoable: false };
+        return { ok: true, output: { ok: true, ...(json ?? {}), libraryIds, copyRisk }, undoable: false };
       } catch (e: any) {
         const msg = e?.message ? String(e.message) : String(e);
         return { ok: false, error: `LINTER_FETCH_FAILED:${msg}` };
