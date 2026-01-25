@@ -41,6 +41,22 @@ export type StyleLintParsed = {
   usedHeuristic: boolean;
 };
 
+export type CopyOverlapV1 = { source: string; overlapChars: number; snippet: string };
+export type CopyRiskLevelV1 = "low" | "medium" | "high";
+export type CopyLintMetaV1 = {
+  riskLevel: CopyRiskLevelV1;
+  maxOverlapChars: number;
+  maxChar5gramJaccard: number;
+  topOverlaps?: CopyOverlapV1[];
+  sources?: { total: number; selectionIncluded: boolean; styleSampleCount: number } | null;
+};
+export type DraftCandidateV1 = {
+  text: string;
+  styleScore: number;
+  highIssues: number;
+  copy: CopyLintMetaV1 | null;
+};
+
 export type RunState = {
   hasTodoList: boolean;
   hasWriteOps: boolean;
@@ -60,19 +76,54 @@ export type RunState = {
   hasStyleKbSearch: boolean; // 风格库样例检索是否已完成（以“已尝试检索”为准；0 命中也算完成，避免卡死）
   hasStyleKbHit: boolean; // 风格库样例检索是否曾命中（groups>0）；用于避免“后续某次 0 命中”误触发降级提示
   styleKbDegraded: boolean; // 风格样例检索 0 命中降级（仅警告，不再卡死）
+  // V2：draft 阶段是否已产出“候选正文”（纯文本，不是 tool_calls）
+  // 说明：用于让闭环严格走 templates -> draft -> copy -> style -> write
+  hasDraftText: boolean;
+  // V2：templates 阶段最近一次“风格样例检索（card+cardTypes）”摘要（用于审计/回归）
+  lastStyleKbSearch:
+    | null
+    | {
+        kind: "card";
+        query: string;
+        cardTypes: string[];
+        libraryIds: string[];
+        groups: number;
+        hits: number;
+        // V2：templates 命中清单（用于复盘“本轮到底取了哪些模板/规则卡”）
+        topArtifacts?: Array<{ id: string; title: string; cardType: string }>;
+      };
   styleLintPassed: boolean;
   styleLintFailCount: number;
   lintGateDegraded: boolean;
   bestStyleDraft: null | { score: number; highIssues: number; text: string };
+  // V2：bestDraft（多目标）：在候选集中做“styleScore+copyRisk”选择，write 阶段强制使用它
+  draftCandidatesV1: DraftCandidateV1[];
+  bestDraft: DraftCandidateV1 | null;
   lastStyleLint: null | StyleLintParsed;
   // copy lint（gate）：用于“防贴原文”阶段闸门
   copyLintPassed: boolean;
   copyLintFailCount: number;
   copyGateDegraded: boolean;
-  lastCopyLint: null | { riskLevel: "low" | "medium" | "high"; maxOverlapChars: number; maxChar5gramJaccard: number };
+  lastCopyLint:
+    | null
+    | {
+        riskLevel: CopyRiskLevelV1;
+        maxOverlapChars: number;
+        maxChar5gramJaccard: number;
+        topOverlaps?: CopyOverlapV1[];
+        sources?: { total: number; selectionIncluded: boolean; styleSampleCount: number } | null;
+      };
   // copy lint（观测阶段）：用于记录“可能贴原文”的风险指标（不做 gate）
   copyLintObservedCount: number;
-  lastCopyRisk: null | { riskLevel: "low" | "medium" | "high"; maxOverlapChars: number; maxChar5gramJaccard: number };
+  lastCopyRisk:
+    | null
+    | {
+        riskLevel: CopyRiskLevelV1;
+        maxOverlapChars: number;
+        maxChar5gramJaccard: number;
+        topOverlaps?: CopyOverlapV1[];
+        sources?: { total: number; selectionIncluded: boolean; styleSampleCount: number } | null;
+      };
   // 预算拆分：避免一个 budget 同时承担“协议修复/完成性重试/风格门禁”等多重语义
   protocolRetryBudget: number;
   workflowRetryBudget: number;
@@ -100,10 +151,14 @@ export function createInitialRunState(args?: { protocolRetryBudget?: number; wor
     hasStyleKbSearch: false,
     hasStyleKbHit: false,
     styleKbDegraded: false,
+    hasDraftText: false,
+    lastStyleKbSearch: null,
     styleLintPassed: false,
     styleLintFailCount: 0,
     lintGateDegraded: false,
     bestStyleDraft: null,
+    draftCandidatesV1: [],
+    bestDraft: null,
     lastStyleLint: null,
     copyLintPassed: false,
     copyLintFailCount: 0,
@@ -411,26 +466,12 @@ export function isStyleExampleKbSearch(args: {
   if (!call || String(call?.name ?? "") !== "kb.search") return false;
   const a = call?.args ?? {};
   const kind = String((a as any)?.kind ?? "card").trim().toLowerCase();
-  if (kind !== "paragraph" && kind !== "outline" && kind !== "card") return false;
+  // V2：templates 阶段只认 “模板/规则卡”（card），不把原文段落当“样例”喂给模型
+  if (kind !== "card") return false;
 
-  // 风格/手法样例：
-  // - 强推荐用 card（可抄“模板/金句形状/结构骨架”），避免直接把“原文段落”当样例导致贴原文风险。
-  // - paragraph/outline 仅作为“证据段/定位段”使用：必须是“窄范围检索”（anchorParagraphIndexMax / anchorFromEndMax 足够小）。
-  if (kind === "card") {
-    const cardTypes = normalizeIdList((a as any)?.cardTypes);
-    // 同时绑定了非风格库时：必须显式限制 cardTypes，避免“样例被素材库污染”。
-    // 仅绑定风格库时：允许省略（减少强闭环误伤/不必要重试）。
-    if (!cardTypes.length && args.hasNonStyleLibraries) return false;
-  } else {
-    const anchorParagraphIndexMaxRaw = Number((a as any)?.anchorParagraphIndexMax);
-    const anchorFromEndMaxRaw = Number((a as any)?.anchorFromEndMax);
-    const anchorParagraphIndexMax = Number.isFinite(anchorParagraphIndexMaxRaw) ? Math.floor(anchorParagraphIndexMaxRaw) : null;
-    const anchorFromEndMax = Number.isFinite(anchorFromEndMaxRaw) ? Math.floor(anchorFromEndMaxRaw) : null;
-    const okAnchor =
-      (anchorParagraphIndexMax !== null && anchorParagraphIndexMax >= 0 && anchorParagraphIndexMax <= 6) ||
-      (anchorFromEndMax !== null && anchorFromEndMax >= 0 && anchorFromEndMax <= 6);
-    if (!okAnchor) return false;
-  }
+  const cardTypes = normalizeIdList((a as any)?.cardTypes);
+  // V2：必须显式限制 cardTypes，确保拿到的是“模板/规则卡”，避免误把其它卡当风格样例
+  if (!cardTypes.length) return false;
 
   const libs = normalizeIdList((a as any)?.libraryIds);
   // 同时绑定了非风格库时：要求显式限制到风格库，避免“样例被素材库污染”
@@ -460,6 +501,7 @@ export type AutoRetryAnalysis = {
   needTodo: boolean;
   needWrite: boolean;
   needKb: boolean;
+  needDraft: boolean;
   needCopy: boolean;
   needLint: boolean;
   needLength: boolean;
@@ -490,6 +532,17 @@ export function analyzeAutoRetryText(args: {
   const needTodo = todoPolicy === "required" && !args.state.hasTodoList && !args.intent.wantsOkOnly;
   const needWrite = args.intent.wantsWrite && !args.state.hasWriteOps && !isClarify;
   const needKb = args.gates.styleGateEnabled && !args.state.hasStyleKbSearch && !isClarify;
+  // V2：在 copy/style 闸门前，必须先产出一版“候选正文”（纯文本）
+  // - 仅在 styleGate+copyGate 启用时强制（用户跳过 linter/hint 模式不强制）
+  // - 仅当 KB 已完成后才开始要求（避免与 templates 阶段冲突）
+  const needDraft =
+    args.gates.styleGateEnabled &&
+    args.gates.copyGateEnabled &&
+    args.state.hasStyleKbSearch &&
+    !args.state.hasDraftText &&
+    args.intent.isWritingTask &&
+    !args.intent.wantsOkOnly &&
+    !isClarify;
   const needCopy = args.gates.copyGateEnabled && !args.state.copyLintPassed && !isClarify;
   const needLint =
     args.gates.lintGateEnabled && !args.state.styleLintPassed && args.state.styleLintFailCount <= args.lintMaxRework && !isClarify;
@@ -511,13 +564,28 @@ export function analyzeAutoRetryText(args: {
   if (needFinalText) reasons.push("缺少最终回复");
   if (needTodo) reasons.push("Todo 未设置");
   if (needKb) reasons.push("风格样例未检索");
+  if (needDraft) reasons.push("未产出候选正文（draft）");
   if (needCopy) reasons.push("未进行防贴原文检查(lint.copy)");
   if (needLint) reasons.push("未进行风格对齐(lint.style)");
   if (needLength) reasons.push("字数与目标偏离较大");
   if (needWrite) reasons.push("写入未执行");
 
-  const shouldRetry = isFIMLeak || isEmpty || needTodo || needWrite || needKb || needCopy || needLint || needLength;
-  return { shouldRetry, isEmpty, isFIMLeak, isClarify, needTodo, needWrite, needKb, needCopy, needLint, needLength, needFinalText, reasons };
+  const shouldRetry = isFIMLeak || isEmpty || needTodo || needWrite || needKb || needDraft || needCopy || needLint || needLength;
+  return {
+    shouldRetry,
+    isEmpty,
+    isFIMLeak,
+    isClarify,
+    needTodo,
+    needWrite,
+    needKb,
+    needDraft,
+    needCopy,
+    needLint,
+    needLength,
+    needFinalText,
+    reasons,
+  };
 }
 
 export type StyleWorkflowBatchAnalysis = {
@@ -529,6 +597,7 @@ export type StyleWorkflowBatchAnalysis = {
   batchHasLint: boolean;
   batchHasStyleKb: boolean;
   needStyleKb: boolean;
+  needDraftText: boolean;
   enforceCopy: boolean;
   copyExhausted: boolean;
   needCopyLint: boolean;
@@ -556,6 +625,12 @@ export function analyzeStyleWorkflowBatch(args: {
 
   const shouldEnforce = args.intent.isWritingTask || batchHasWrite || batchHasLint || batchHasCopyLint;
   const needStyleKb = !args.state.hasStyleKbSearch;
+  const needDraftText =
+    args.gates.styleGateEnabled &&
+    args.gates.copyGateEnabled &&
+    args.state.hasStyleKbSearch &&
+    !args.state.hasDraftText &&
+    args.intent.isWritingTask;
   const enforceCopy = args.gates.copyGateEnabled === true;
   const copyExhausted = enforceCopy && !args.state.copyLintPassed && args.state.copyLintFailCount > args.lintMaxRework;
   const needCopyLint = enforceCopy && !args.state.copyLintPassed;
@@ -577,6 +652,9 @@ export function analyzeStyleWorkflowBatch(args: {
   else if (batchHasCopyLint && needStyleKb) violation = "COPY_BEFORE_KB";
   else if (batchHasLint && needStyleKb) violation = "LINT_BEFORE_KB";
   else if (batchHasWrite && needStyleKb) violation = "WRITE_BEFORE_KB";
+  else if (batchHasCopyLint && needDraftText) violation = "COPY_BEFORE_DRAFT";
+  else if (batchHasLint && needDraftText) violation = "LINT_BEFORE_DRAFT";
+  else if (batchHasWrite && needDraftText) violation = "WRITE_BEFORE_DRAFT";
   else if (batchHasLint && needCopyLint) violation = copyExhausted ? "LINT_BLOCKED_COPY_EXHAUSTED" : "LINT_BEFORE_COPY_PASS";
   else if (batchHasWrite && needCopyLint) violation = copyExhausted ? "WRITE_BLOCKED_COPY_EXHAUSTED" : "WRITE_BEFORE_COPY_PASS";
   else if (batchHasWrite && needStyleLint) violation = lintExhausted ? "WRITE_BLOCKED_LINT_EXHAUSTED" : "WRITE_BEFORE_LINT_PASS";
@@ -591,6 +669,7 @@ export function analyzeStyleWorkflowBatch(args: {
     batchHasLint,
     batchHasStyleKb,
     needStyleKb,
+    needDraftText,
     enforceCopy,
     copyExhausted,
     needCopyLint,

@@ -108,6 +108,8 @@ export function CardJobsModal() {
   const getLibraryStyleConfig = useKbStore((s) => s.getLibraryStyleConfig);
   const setLibraryStyleClusterLabel = useKbStore((s) => s.setLibraryStyleClusterLabel);
   const setLibraryStyleDefaultCluster = useKbStore((s) => s.setLibraryStyleDefaultCluster);
+  const setLibraryStyleClusterRules = useKbStore((s) => (s as any).setLibraryStyleClusterRules);
+  const generateLibraryClusterRulesV1 = useKbStore((s) => (s as any).generateLibraryClusterRulesV1);
 
   type PromptState = {
     title: string;
@@ -122,6 +124,20 @@ export function CardJobsModal() {
   const ask = (p: Omit<PromptState, "value"> & { value?: string }) => setPrompt({ ...p, value: p.value ?? "" });
   // 需要在 Esc handler useEffect 之前声明，避免 TDZ（Cannot access before initialization）
   const [anchorPickerOpen, setAnchorPickerOpen] = useState(false);
+  const [rulesEditor, setRulesEditor] = useState<null | { clusterId: string; title: string; value: string }>(null);
+  const [rulesEditorErr, setRulesEditorErr] = useState<string | null>(null);
+  const [rulesEvidenceSource, setRulesEvidenceSource] = useState<"cluster_evidence" | "cluster_anchors">("cluster_evidence");
+  const [rulesEvidenceTarget, setRulesEvidenceTarget] = useState<
+    | "values.principles"
+    | "values.priorities"
+    | "values.moralAccounting"
+    | "values.tabooFrames"
+    | "values.epistemicNorms"
+    | "values.templates"
+    | "analysisLenses"
+  >("values.principles");
+  const [rulesEvidenceIndex, setRulesEvidenceIndex] = useState<string>("0");
+  const [rulesEvidenceFilter, setRulesEvidenceFilter] = useState<string>("");
 
   // Esc 关闭（避免 modalMask 挡住输入框）
   useEffect(() => {
@@ -135,6 +151,13 @@ export function CardJobsModal() {
         setAnchorPickerNotice(null);
         return;
       }
+      // 其次关内层 rules editor
+      if (rulesEditor) {
+        e.preventDefault();
+        setRulesEditor(null);
+        setRulesEditorErr(null);
+        return;
+      }
       // 优先关内层 prompt，其次关整个 KB 管理
       if (prompt) {
         e.preventDefault();
@@ -146,7 +169,7 @@ export function CardJobsModal() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [open, anchorPickerOpen, prompt, close]);
+  }, [open, anchorPickerOpen, rulesEditor, prompt, close]);
 
   // 进度/耗时估算：每秒刷新一次
   const [tick, setTick] = useState(0);
@@ -258,11 +281,14 @@ export function CardJobsModal() {
   const [anchors, setAnchors] = useState<KbTextSpanRefV1[]>([]);
   const [defaultClusterId, setDefaultClusterId] = useState<string | null>(null);
   const [clusterLabels, setClusterLabels] = useState<Record<string, string> | null>(null);
+  const [clusterRules, setClusterRules] = useState<Record<string, any> | null>(null);
   const [anchorPickerAdvanced, setAnchorPickerAdvanced] = useState(false);
   const [anchorPickerNotice, setAnchorPickerNotice] = useState<string | null>(null);
   const [anchorPickerSelected, setAnchorPickerSelected] = useState<Record<string, boolean>>({});
   const [anchorPickerClusterId, setAnchorPickerClusterId] = useState<string | null>(null);
   const [segmentFilter, setSegmentFilter] = useState<string>("");
+  const [rulesGenLoading, setRulesGenLoading] = useState(false);
+  const [rulesGenErr, setRulesGenErr] = useState<string | null>(null);
 
   const viewLib = useMemo(() => libraries.find((x) => x.id === viewLibId) ?? null, [libraries, viewLibId]);
   const isStyleLib = (viewLib as any)?.purpose === "style";
@@ -586,7 +612,12 @@ export function CardJobsModal() {
       setAnchorsLoading(false);
       setDefaultClusterId(null);
       setClusterLabels(null);
+      setClusterRules(null);
       setAnchorPickerOpen(false);
+      setRulesEditor(null);
+      setRulesEditorErr(null);
+      setRulesGenLoading(false);
+      setRulesGenErr(null);
       return;
     }
     void (async () => {
@@ -598,14 +629,169 @@ export function CardJobsModal() {
         setAnchors([]);
         setDefaultClusterId(null);
         setClusterLabels(null);
+        setClusterRules(null);
+        setRulesGenErr(null);
       } else {
         setAnchors(Array.isArray(r.anchors) ? r.anchors : []);
         setDefaultClusterId(r.defaultClusterId ? String(r.defaultClusterId) : null);
         setClusterLabels(r.clusterLabelsV1 && typeof r.clusterLabelsV1 === "object" ? (r.clusterLabelsV1 as any) : null);
+        setClusterRules(r.clusterRulesV1 && typeof r.clusterRulesV1 === "object" ? (r.clusterRulesV1 as any) : null);
+        setRulesGenErr(null);
       }
       setAnchorsLoading(false);
     })();
   }, [open, tab, viewLibId, viewTab, isStyleLib, getLibraryStyleConfig]);
+
+  const openRulesEditor = (clusterId: string, label: string) => {
+    const cid = String(clusterId ?? "").trim();
+    if (!cid) return;
+    const existing = clusterRules && typeof clusterRules === "object" ? (clusterRules as any)[cid] : undefined;
+    const initial = (() => {
+      if (existing !== undefined) {
+        try {
+          return JSON.stringify(existing, null, 2);
+        } catch {
+          return String(existing ?? "");
+        }
+      }
+      const tpl = {
+        v: 1,
+        updatedAt: new Date().toISOString(),
+        values: {
+          scope: "author",
+          principles: [{ text: "", evidence: [] }],
+          priorities: [],
+          moralAccounting: [],
+          tabooFrames: [],
+          epistemicNorms: [],
+          templates: [],
+          checks: [],
+        },
+        analysisLenses: [],
+      };
+      return JSON.stringify(tpl, null, 2);
+    })();
+    setRulesEditorErr(null);
+    setRulesEvidenceSource("cluster_evidence");
+    setRulesEvidenceTarget("values.principles");
+    setRulesEvidenceIndex("0");
+    setRulesEvidenceFilter("");
+    setRulesEditor({ clusterId: cid, title: `规则卡（${label || cid}）`, value: initial });
+  };
+
+  const rulesEvidenceCandidates = useMemo(() => {
+    if (!rulesEditor) return [];
+    const cid = String(rulesEditor.clusterId ?? "").trim();
+    if (!cid) return [];
+    const q = String(rulesEvidenceFilter ?? "").trim();
+
+    const fromClusterEvidence = (() => {
+      const c = fpClusters.find((x: any) => String(x?.id ?? "").trim() === cid);
+      const list = Array.isArray((c as any)?.evidence) ? ((c as any).evidence as KbTextSpanRefV1[]) : [];
+      return list.filter(Boolean);
+    })();
+
+    const fromClusterAnchors = (() => {
+      const list = anchors.filter((a) => {
+        const seg = fpSegmentById.get(String((a as any)?.segmentId ?? "").trim());
+        return String((seg as any)?.clusterId ?? "").trim() === cid;
+      });
+      return list.filter(Boolean);
+    })();
+
+    const list = (rulesEvidenceSource === "cluster_anchors" ? fromClusterAnchors : fromClusterEvidence).slice();
+    const filtered = q ? list.filter((x) => String((x as any)?.quote ?? "").includes(q)) : list;
+
+    // 去重：按 segmentId
+    const uniq: KbTextSpanRefV1[] = [];
+    const seen = new Set<string>();
+    for (const r of filtered) {
+      const id = String((r as any)?.segmentId ?? "").trim();
+      if (!id) continue;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      uniq.push(r);
+    }
+    return uniq.slice(0, 12);
+  }, [rulesEditor, rulesEvidenceSource, rulesEvidenceFilter, fpClusters, anchors, fpSegmentById]);
+
+  const appendEvidenceToRules = (ref: KbTextSpanRefV1) => {
+    const target = rulesEvidenceTarget;
+    const idx = (() => {
+      const n = Number(String(rulesEvidenceIndex ?? "").trim());
+      if (!Number.isFinite(n)) return 0;
+      return Math.max(0, Math.min(99, Math.floor(n)));
+    })();
+    const normRef = (ref ?? null) as any;
+    if (!normRef || typeof normRef !== "object") return;
+    const segId = String(normRef.segmentId ?? "").trim();
+    if (!segId) return;
+
+    setRulesEditor((prev) => {
+      if (!prev) return prev;
+      let parsed: any = null;
+      try {
+        parsed = JSON.parse(String(prev.value ?? "").trim() || "null");
+      } catch (e: any) {
+        setRulesEditorErr(`JSON 解析失败：${String(e?.message ?? e)}`);
+        return prev;
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        setRulesEditorErr("规则卡必须是 JSON object（不能是数组/字符串）。");
+        return prev;
+      }
+
+      const ensureObj = (x: any) => (x && typeof x === "object" && !Array.isArray(x) ? x : {});
+      const ensureArr = (o: any, k: string) => {
+        if (!o || typeof o !== "object" || Array.isArray(o)) return [];
+        if (!Array.isArray(o[k])) o[k] = [];
+        return o[k] as any[];
+      };
+      const ensureTextEvidenceItem = (raw: any) => {
+        if (typeof raw === "string") return { text: raw, evidence: [] as any[] };
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { text: String(raw ?? ""), evidence: [] as any[] };
+        const o = raw as any;
+        if (typeof o.text !== "string") o.text = String(o.text ?? "");
+        if (!Array.isArray(o.evidence)) o.evidence = [];
+        return o;
+      };
+      const ensureLensItem = (raw: any) => {
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+          return { label: String(raw ?? ""), whenToUse: "", questions: [], templates: [], evidence: [], checks: [] as any[] };
+        }
+        const o = raw as any;
+        if (typeof o.label !== "string") o.label = String(o.label ?? "");
+        if (typeof o.whenToUse !== "string") o.whenToUse = String(o.whenToUse ?? "");
+        if (!Array.isArray(o.questions)) o.questions = [];
+        if (!Array.isArray(o.templates)) o.templates = [];
+        if (!Array.isArray(o.evidence)) o.evidence = [];
+        if (!Array.isArray(o.checks)) o.checks = [];
+        return o;
+      };
+
+      const pushRef = (arr: any[]) => {
+        const exists = arr.some((x) => String(x?.segmentId ?? "").trim() === segId);
+        if (!exists) arr.push(normRef);
+      };
+
+      if (target.startsWith("values.")) {
+        const key = target.replace(/^values\./, "");
+        parsed.values = ensureObj(parsed.values);
+        const arr = ensureArr(parsed.values, key);
+        while (arr.length <= idx) arr.push({ text: "", evidence: [] });
+        arr[idx] = ensureTextEvidenceItem(arr[idx]);
+        pushRef((arr[idx] as any).evidence);
+      } else if (target === "analysisLenses") {
+        if (!Array.isArray(parsed.analysisLenses)) parsed.analysisLenses = [];
+        while (parsed.analysisLenses.length <= idx) parsed.analysisLenses.push({ label: "", whenToUse: "", questions: [], templates: [], evidence: [], checks: [] });
+        parsed.analysisLenses[idx] = ensureLensItem(parsed.analysisLenses[idx]);
+        pushRef((parsed.analysisLenses[idx] as any).evidence);
+      }
+
+      setRulesEditorErr(null);
+      return { ...prev, value: JSON.stringify(parsed, null, 2) };
+    });
+  };
 
   if (!open) return null;
 
@@ -1214,6 +1400,38 @@ export function CardJobsModal() {
                                               改名
                                             </button>
                                             <button
+                                              className="btn btnIcon"
+                                              type="button"
+                                              disabled={anchorsLoading}
+                                              title="编辑该写法簇的 V2 规则卡（values / analysis lenses 等），写作时会注入 styleContractV1"
+                                              onClick={() => openRulesEditor(cid, label)}
+                                            >
+                                              规则卡
+                                            </button>
+                                            <button
+                                              className="btn btnIcon"
+                                              type="button"
+                                              disabled={anchorsLoading || rulesGenLoading}
+                                              title="自动生成该簇规则卡（values/lens/templates），并绑定证据（来自本簇 anchors/代表样例）"
+                                              onClick={() => {
+                                                if (!viewLibId) return;
+                                                void (async () => {
+                                                  setRulesGenLoading(true);
+                                                  setRulesGenErr(null);
+                                                  const r = await generateLibraryClusterRulesV1({ libraryId: viewLibId, clusterId: cid });
+                                                  if (!r?.ok) {
+                                                    setRulesGenErr(r?.error ?? "GENERATE_FAILED");
+                                                  } else {
+                                                    const cfg = await getLibraryStyleConfig(viewLibId);
+                                                    if (cfg?.ok) setClusterRules(cfg.clusterRulesV1 && typeof cfg.clusterRulesV1 === "object" ? (cfg.clusterRulesV1 as any) : null);
+                                                  }
+                                                  setRulesGenLoading(false);
+                                                })();
+                                              }}
+                                            >
+                                              {rulesGenLoading ? "生成中…" : "自动生成"}
+                                            </button>
+                                            <button
                                               className={`btn btnIcon ${isDefault ? "btnPrimary" : ""}`}
                                               type="button"
                                               disabled={anchorsLoading}
@@ -1246,6 +1464,11 @@ export function CardJobsModal() {
                                                 - {String(e?.quote ?? "").trim()}
                                               </div>
                                             ))}
+                                          </div>
+                                        ) : null}
+                                        {rulesGenErr ? (
+                                          <div style={{ marginTop: 8, fontSize: 12, color: "rgba(220, 38, 38, 0.95)", whiteSpace: "pre-wrap" }}>
+                                            规则卡生成失败：{rulesGenErr}
                                           </div>
                                         ) : null}
                                       </div>
@@ -2045,6 +2268,190 @@ export function CardJobsModal() {
               >
                 {prompt.confirmText ?? "确定"}
               </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {rulesEditor ? (
+        <div
+          className="modalMask"
+          role="dialog"
+          aria-modal="true"
+          style={{ zIndex: 100001 }}
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) {
+              setRulesEditor(null);
+              setRulesEditorErr(null);
+            }
+          }}
+        >
+          <div className="modal" onMouseDown={(e) => e.stopPropagation()} style={{ width: "min(860px, calc(100vw - 24px))" }}>
+            <div className="modalTitle">{rulesEditor.title}</div>
+            <div className="modalDesc" style={{ whiteSpace: "pre-wrap" }}>
+              - 这是“仅对该库生效”的写法簇规则卡（建议放 values / analysisLenses / must/avoid/templates/checks 等）。{"\n"}
+              - 写作时会随 `mainDoc.styleContractV1` 注入，影响模型“站队/归因/战场”。{"\n"}
+              - 当前先做最小闭环：手动编辑保存；后续再补“从 anchors/segments 自动抽取”。
+            </div>
+            <textarea
+              className="modalInput"
+              style={{ height: "min(52vh, 520px)", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace" }}
+              value={rulesEditor.value}
+              onChange={(e) => setRulesEditor((p) => (p ? { ...p, value: e.target.value } : p))}
+            />
+
+            <div style={{ marginTop: 10, border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel)", padding: 10, display: "grid", gap: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                <div style={{ fontWeight: 900 }}>证据绑定（anchors/segments）</div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                  <select className="btn" value={rulesEvidenceSource} onChange={(e) => setRulesEvidenceSource(e.target.value as any)} title="证据来源：来自体检簇证据，或来自你采纳的 anchors">
+                    <option value="cluster_evidence">本簇证据（体检代表样例）</option>
+                    <option value="cluster_anchors">本簇 anchors（已采纳）</option>
+                  </select>
+                  <select className="btn" value={rulesEvidenceTarget} onChange={(e) => setRulesEvidenceTarget(e.target.value as any)} title="把证据写到哪个维度下">
+                    <option value="values.principles">values.principles[i].evidence</option>
+                    <option value="values.priorities">values.priorities[i].evidence</option>
+                    <option value="values.moralAccounting">values.moralAccounting[i].evidence</option>
+                    <option value="values.tabooFrames">values.tabooFrames[i].evidence</option>
+                    <option value="values.epistemicNorms">values.epistemicNorms[i].evidence</option>
+                    <option value="values.templates">values.templates[i].evidence</option>
+                    <option value="analysisLenses">analysisLenses[i].evidence</option>
+                  </select>
+                  <input
+                    className="modalInput"
+                    style={{ width: 90, height: 34 }}
+                    value={rulesEvidenceIndex}
+                    onChange={(e) => setRulesEvidenceIndex(e.target.value)}
+                    placeholder="i=0"
+                    title="写入第几个条目（0-based）"
+                  />
+                  <input
+                    className="modalInput"
+                    style={{ width: 160, height: 34 }}
+                    value={rulesEvidenceFilter}
+                    onChange={(e) => setRulesEvidenceFilter(e.target.value)}
+                    placeholder="过滤（命中 quote）"
+                    title="按 quote 过滤候选证据"
+                  />
+                </div>
+              </div>
+
+              {rulesEvidenceCandidates.length === 0 ? (
+                <div className="explorerHint">
+                  没有可用证据。提示：先在「库体检」里生成声音指纹（数字版），或先采纳 anchors；并确保当前簇有代表样例。
+                </div>
+              ) : (
+                <div style={{ display: "grid", gap: 8, maxHeight: 220, overflow: "auto" }}>
+                  {rulesEvidenceCandidates.map((r) => {
+                    const segId = String((r as any)?.segmentId ?? "").trim();
+                    const docId = String((r as any)?.sourceDocId ?? "").trim();
+                    const quote = String((r as any)?.quote ?? "").trim();
+                    return (
+                      <div key={segId} style={{ border: "1px dashed var(--border)", borderRadius: 10, padding: 8, display: "grid", gap: 6 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                            {segId ? <span className="ctxPill">{segId}</span> : null}
+                            {docId ? <span className="ctxPill" title="sourceDocId">{docId}</span> : null}
+                          </div>
+                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                            <button className="btn btnIcon" type="button" onClick={() => appendEvidenceToRules(r)} title="将该证据追加到目标路径的 evidence[]">
+                              添加到 evidence
+                            </button>
+                            <button
+                              className="btn btnIcon"
+                              type="button"
+                              onClick={() => {
+                                const txt = JSON.stringify(r, null, 2);
+                                const cb = (navigator as any)?.clipboard;
+                                if (cb?.writeText) {
+                                  void cb.writeText(txt);
+                                  return;
+                                }
+                                window.prompt("复制证据 JSON：", txt);
+                              }}
+                              title="复制该证据对象 JSON（可手工粘贴到任意位置）"
+                            >
+                              复制 JSON
+                            </button>
+                          </div>
+                        </div>
+                        <div style={{ color: "var(--muted)", fontSize: 12, whiteSpace: "pre-wrap" }}>{quote || "（空 quote）"}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {rulesEditorErr ? (
+              <div style={{ marginTop: 8, fontSize: 12, color: "rgba(220, 38, 38, 0.95)", whiteSpace: "pre-wrap" }}>{rulesEditorErr}</div>
+            ) : null}
+            <div className="modalBtns" style={{ marginTop: 12, justifyContent: "space-between" }}>
+              <button
+                className="btn btnDanger"
+                type="button"
+                onClick={() => {
+                  if (!viewLibId) return;
+                  const cid = String(rulesEditor.clusterId ?? "").trim();
+                  if (!cid) return;
+                  const ok = window.confirm(`清空该簇规则卡？\n\nclusterId=${cid}\n\n（仅删除本库 prefs，不影响体检快照）`);
+                  if (!ok) return;
+                  void (async () => {
+                    setRulesEditorErr(null);
+                    const r = await setLibraryStyleClusterRules({ libraryId: viewLibId, clusterId: cid, rules: null });
+                    if (!r?.ok) {
+                      setRulesEditorErr(r?.error ?? "SAVE_FAILED");
+                      return;
+                    }
+                    setClusterRules((prev) => {
+                      const next = { ...(prev ?? {}) } as any;
+                      delete next[cid];
+                      return next;
+                    });
+                    setRulesEditor(null);
+                  })();
+                }}
+              >
+                清空
+              </button>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="btn" type="button" onClick={() => (setRulesEditor(null), setRulesEditorErr(null))}>
+                  取消
+                </button>
+                <button
+                  className="btn btnPrimary"
+                  type="button"
+                  onClick={() => {
+                    if (!viewLibId) return;
+                    const cid = String(rulesEditor.clusterId ?? "").trim();
+                    if (!cid) return;
+                    let parsed: any = null;
+                    try {
+                      parsed = JSON.parse(String(rulesEditor.value ?? "").trim() || "null");
+                    } catch (e: any) {
+                      setRulesEditorErr(`JSON 解析失败：${String(e?.message ?? e)}`);
+                      return;
+                    }
+                    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+                      setRulesEditorErr("规则卡必须是 JSON object（不能是数组/字符串）。");
+                      return;
+                    }
+                    parsed.updatedAt = new Date().toISOString();
+                    void (async () => {
+                      setRulesEditorErr(null);
+                      const r = await setLibraryStyleClusterRules({ libraryId: viewLibId, clusterId: cid, rules: parsed });
+                      if (!r?.ok) {
+                        setRulesEditorErr(r?.error ?? "SAVE_FAILED");
+                        return;
+                      }
+                      setClusterRules((prev) => ({ ...(prev ?? {}), [cid]: parsed }));
+                      setRulesEditor(null);
+                    })();
+                  }}
+                >
+                  保存
+                </button>
+              </div>
             </div>
           </div>
         </div>

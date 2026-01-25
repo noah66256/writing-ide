@@ -91,7 +91,7 @@ async function main() {
     state.hasStyleKbSearch = true;
     const toolCalls: ParsedToolCall[] = [{ name: "doc.write", args: { path: "a.md", content: "x" } }];
     const batch = analyzeStyleWorkflowBatch({ mode, intent, gates, state, lintMaxRework: 2, toolCalls });
-    assert.equal(batch.violation, "WRITE_BEFORE_COPY_PASS");
+    assert.equal(batch.violation, "WRITE_BEFORE_DRAFT");
   }
   {
     const mode = "agent" as const;
@@ -162,6 +162,7 @@ async function main() {
     const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }], activeSkillIds: active.map((s) => s.id) });
     const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
     state.hasStyleKbSearch = true;
+    state.hasDraftText = true;
     state.copyLintPassed = true;
     state.styleLintPassed = false;
     state.styleLintFailCount = 3;
@@ -270,7 +271,7 @@ async function main() {
     const call: ParsedToolCall = { name: "kb.search", args: { kind: "card", query: "开场", libraryIds: "[\"style-1\"]" } };
     assert.equal(
       isStyleExampleKbSearch({ call, styleLibIdSet: new Set(["style-1"]), hasNonStyleLibraries: false }),
-      true,
+      false, // V2：templates 阶段必须显式 cardTypes
     );
     // 同时绑定非风格库：cardTypes 缺失 => 不算“风格样例检索”（避免污染）
     assert.equal(

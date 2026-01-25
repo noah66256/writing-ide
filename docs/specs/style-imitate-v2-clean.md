@@ -268,3 +268,14 @@ V2 的 bestDraft 不应只看 style 分数。最低要求是多目标：
 - **P2**：模板/规则卡（sentence/paragraph templates 或 rules.templates）成为 templates 阶段主输入
 - **P3**：values + analysisLens 两个维度进入 cluster rules/styleContract，并与 anchors 绑定证据
 
+---
+
+### 10. 可选项（后续迭代；不影响闭环正确性）
+
+以下属于“体验/可观测性/可调参”增强，先不挡本轮收尾：
+
+- **Runs/Logs 展示增强**：把 `topArtifacts / topOverlaps / bestDraft` 做成更易读的 UI（折叠、复制、定位到对应 Tool Block）。
+- **可配置化**：bestDraft 的排序阈值（例如 styleScore 近似阈值=3、过滤 high 的策略）做成 env 或后台配置。
+- **可视化复盘**：提供“一键导出本次 run 的审计摘要”（JSON/Markdown）便于分享与回归。
+- **对齐建议更可操作**：在 copy 未通过时，UI 直接把 `topOverlaps.snippet` 高亮展示，提示优先改哪些句式/结构而不是同义词替换。
+

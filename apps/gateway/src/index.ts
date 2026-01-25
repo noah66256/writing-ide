@@ -2503,9 +2503,28 @@ fastify.post(
     hasStyleKbSearch: runState.hasStyleKbSearch,
     hasStyleKbHit: (runState as any).hasStyleKbHit === true,
     styleKbDegraded: runState.styleKbDegraded,
+    hasDraftText: (runState as any).hasDraftText === true,
+    lastStyleKbSearch: runState.lastStyleKbSearch ?? null,
     styleLintPassed: runState.styleLintPassed,
     styleLintFailCount: runState.styleLintFailCount,
     lintGateDegraded: runState.lintGateDegraded,
+    bestStyleDraft: runState.bestStyleDraft
+      ? { score: runState.bestStyleDraft.score, highIssues: runState.bestStyleDraft.highIssues, chars: runState.bestStyleDraft.text.length }
+      : null,
+    bestDraft: runState.bestDraft
+      ? {
+          styleScore: runState.bestDraft.styleScore,
+          highIssues: runState.bestDraft.highIssues,
+          chars: runState.bestDraft.text.length,
+          copy: runState.bestDraft.copy
+            ? {
+                riskLevel: runState.bestDraft.copy.riskLevel,
+                maxOverlapChars: runState.bestDraft.copy.maxOverlapChars,
+                maxChar5gramJaccard: runState.bestDraft.copy.maxChar5gramJaccard,
+              }
+            : null,
+        }
+      : null,
     copyLintPassed: runState.copyLintPassed,
     copyLintFailCount: runState.copyLintFailCount,
     copyGateDegraded: runState.copyGateDegraded,
@@ -2777,6 +2796,7 @@ fastify.post(
     | "web_need_search"
     | "web_need_fetch"
     | "style_need_templates"
+    | "style_need_draft"
     | "style_need_copy"
     | "style_need_style"
     | "style_can_write";
@@ -2895,9 +2915,25 @@ fastify.post(
           "【Skill: style_imitate】当前阶段：need_templates。\n" +
           "- 本回合禁止调用 lint.copy / lint.style 与任何“正文写入类” doc.*（doc.write/doc.applyEdits/doc.replaceSelection/doc.restoreSnapshot/doc.splitToDir/...）。\n" +
           "- 允许文件/目录操作（doc.deletePath/doc.renamePath/doc.mkdir），但高风险操作仍应走 proposal-first。\n" +
-          "- 请先调用 kb.search（只搜风格库）拉模板/规则卡（建议 kind=card + cardTypes）。\n" +
+          "- 请先调用 kb.search（只搜风格库）拉模板/规则卡（必须 kind=card + 显式 cardTypes）。\n" +
+          "  - 推荐 cardTypes：cluster_rules_v1 / playbook_facet / style_profile / final_polish_checklist（兜底再加 hook/outline/thesis/ending/one_liner）。\n" +
           "- 或仅更新 todo/mainDoc。";
         reasonCodes.push("phase:style_need_templates");
+      } else if (effectiveGates.copyGateEnabled && !(runState as any).hasDraftText) {
+        phase = "style_need_draft";
+        // 禁止 kb.search / lint.copy / lint.style / 写入类 doc.*：先产候选正文（纯文本）
+        allowed.delete("kb.search");
+        allowed.delete("lint.copy");
+        allowed.delete("lint.style");
+        for (const name of Array.from(allowed)) {
+          if (isContentWriteTool(name)) allowed.delete(name);
+        }
+        hint =
+          "【Skill: style_imitate】当前阶段：need_draft。\n" +
+          "- 本回合禁止调用 kb.search、lint.copy、lint.style 与任何“正文写入类” doc.*。\n" +
+          "- 请先输出一版候选正文（纯文本；不要写入）。\n" +
+          "- 下一回合再调用 lint.copy(text=候选正文) 进入“不贴原文”闸门。";
+        reasonCodes.push("phase:style_need_draft");
       } else if (effectiveGates.copyGateEnabled && !runState.copyLintPassed && runState.copyLintFailCount <= copyMaxRework) {
         phase = "style_need_copy";
         // 禁止 kb.search / lint.style / 写入类 doc.*：先做 anti-copy 闸门
@@ -3522,6 +3558,27 @@ fastify.post(
                 ? "已生成写入提案，请在工具卡片点击 Keep 完成写入。"
                 : "已完成写入，请查看生成的文件。";
           }
+
+          // V2：draft 阶段观测（在 copy/style 闸门前，必须先产出一版候选正文）
+          if (
+            effectiveGates.styleGateEnabled &&
+            effectiveGates.copyGateEnabled &&
+            runState.hasStyleKbSearch &&
+            !(runState as any).hasDraftText
+          ) {
+            const t0 = assistantText.trim();
+            if (t0 && !isToolCallMessage(t0) && looksLikeDraftText(t0)) {
+              (runState as any).hasDraftText = true;
+              writePolicyDecision({
+                turn,
+                policy: "StyleGatePolicy",
+                decision: "draft_observed",
+                reasonCodes: ["draft:observed"],
+                detail: { chars: t0.length },
+              });
+            }
+          }
+
           const analysis = analyzeAutoRetryText({
             assistantText,
             intent,
@@ -3535,6 +3592,7 @@ fastify.post(
           const needTodo = analysis.needTodo;
           const needWrite = analysis.needWrite;
           const needKb = analysis.needKb;
+          const needDraft = analysis.needDraft;
           const needLint = analysis.needLint;
           const needLength = analysis.needLength;
 
@@ -3545,6 +3603,7 @@ fastify.post(
             if (needFinalText) reasonCodes.push("need_final_text");
             if (needTodo) reasonCodes.push("need_todo");
             if (needKb) reasonCodes.push("need_style_kb");
+            if (needDraft) reasonCodes.push("need_draft");
             if (needLint) reasonCodes.push("need_style_lint");
             if (needLength) reasonCodes.push("need_length");
             if (needWrite) reasonCodes.push("need_write");
@@ -3572,6 +3631,8 @@ fastify.post(
                   ? "要求：直接输出最终回复（Markdown），不要再调用工具。"
                   : needTodo
                     ? "要求：先设置 todo（run.setTodoList / run.todo.upsertMany），再继续推进。"
+                    : needDraft
+                      ? "要求：先输出一版候选正文（纯文本），不要调用任何工具/不要输出 XML。"
                     : needLength
                       ? `要求：把正文长度调整到目标字数附近（目标≈${targetChars}字）。`
                       : "要求：不要覆盖既有 todo；需要调整用 run.todo.*。") +
@@ -3598,6 +3659,10 @@ fastify.post(
                     "- 你现在必须直接输出对用户的最终回复（Markdown 纯文本，至少 1 个可见字符）。\n" +
                     "- 不要调用任何工具；不要输出 <tool_calls>/<tool_call>；不要输出 XML。\n" +
                     (intent.wantsOkOnly ? "- 用户只要求连通性确认：请直接回复 `OK`。\n" : "")
+                  : needDraft
+                    ? "你上一条尚未产出候选正文（draft）。\n" +
+                      "- 你现在必须先输出一版候选正文（Markdown 纯文本）。\n" +
+                      "- 不要调用任何工具；不要输出 <tool_calls>/<tool_call>；不要输出 XML。\n"
                   : needLength
                     ? `你上一条输出的正文长度与目标字数偏离较大。\n` +
                       `- 目标：≈${targetChars}字；当前：≈${assistantText.trim().length}字。\n` +
@@ -3891,10 +3956,22 @@ fastify.post(
             // 强制限制到“已绑定风格库”，避免模型把 @{} 文件名/幻觉 id 塞进 libraryIds 导致误判与污染。
             if (styleLibIds.length) args.libraryIds = styleLibIdsJson;
 
-            // 补默认 cardTypes：优先拉“可抄模板/金句形状/结构骨架”，减少“段落贴原文”风险。
+            // 补默认 cardTypes（P2）：优先拉“规则卡/模板卡”（playbook/cluster_rules），必要时再兜底 doc_v2 卡。
             const ctRaw = String((args as any).cardTypes ?? "").trim();
             const looksEmpty = !ctRaw || ctRaw === "[]" || ctRaw.toLowerCase() === "null" || ctRaw.toLowerCase() === "undefined";
-            if (looksEmpty) (args as any).cardTypes = JSON.stringify(["hook", "one_liner", "ending", "outline", "thesis"]);
+            if (looksEmpty)
+              (args as any).cardTypes = JSON.stringify([
+                "cluster_rules_v1",
+                "playbook_facet",
+                "style_profile",
+                "final_polish_checklist",
+                // fallback：doc_v2（仍属于卡片，但更贴近原文；放在最后兜底）
+                "hook",
+                "one_liner",
+                "ending",
+                "outline",
+                "thesis",
+              ]);
 
             return { ...c, args };
           };
@@ -3985,9 +4062,9 @@ fastify.post(
               kind: "warn",
               title: "风格闭环约束：自动重试",
               message:
-                "风格库写作任务已启用“闭环约束”：先 kb.search 拉模板/样例 → 再 lint.copy（防贴） → 再 lint.style（对齐） → 再写入。\n" +
+                "风格库写作任务已启用“闭环约束”：先 kb.search 拉模板/规则卡 → 再输出候选正文（draft）→ 再 lint.copy（防贴）→ 再 lint.style（对齐）→ 再写入。\n" +
                 `本轮工具调用不满足前置条件（${violation}），系统将自动重试一次。\n` +
-                "要求：把 kb.search / lint.copy / lint.style / 写入操作拆到不同回合（每回合只做一类关键动作）。",
+                "要求：把 kb.search / 候选正文(draft) / lint.copy / lint.style / 写入拆到不同回合（每回合只做一类关键动作）。",
               policy: "StyleGatePolicy",
               reasonCodes: ["style_workflow_violation", `violation:${String(violation ?? "")}`],
               detail: { violation, budget: "workflow", budgetBefore: runState.workflowRetryBudget + 1, budgetAfter: runState.workflowRetryBudget },
@@ -3998,20 +4075,21 @@ fastify.post(
               role: "system",
               content:
                 "你上一轮的 tool_calls 违反了“风格库写作强闭环”约束，请立刻重试并按下面顺序推进：\n" +
-                "A) kb.search（手法/模板）：只搜风格库（purpose=style），优先 kind=card + cardTypes 先拉 6–12 条“可抄模板/金句形状/结构骨架”；如需证据段再用 kind=paragraph/outline + anchorParagraphIndexMax/anchorFromEndMax。 本轮不要调用 lint.copy/lint.style 或任何写入类工具。\n" +
+                "A) kb.search（手法/模板）：只搜风格库（purpose=style），必须 kind=card + cardTypes 先拉 6–12 条“可抄模板/金句形状/结构骨架”。本轮不要调用 lint.copy/lint.style 或任何写入类工具。\n" +
+                "B) draft（候选正文）：直接输出一版候选正文（Markdown 纯文本）。本轮不要调用任何工具、不要输出 <tool_calls>。\n" +
                 (batch.enforceCopy
-                  ? "B) lint.copy（防贴原文）：对候选稿做确定性重合检测；未通过就按 topOverlaps 指示回炉改写降重，再次 lint.copy（最多回炉若干次；safe 模式会降级放行但会记录审计）。本轮不要调用 kb.search 或任何写入类工具。\n"
+                  ? "C) lint.copy（防贴原文）：对候选稿做确定性重合检测；未通过就按 topOverlaps 指示回炉改写降重，再次 lint.copy（最多回炉若干次；safe 模式会降级放行但会记录审计）。本轮不要调用 kb.search 或任何写入类工具。\n"
                   : "") +
                 (batch.enforceLint
-                  ? `C) lint.style（终稿闸门）：基于样例与指纹对照候选稿，输出 issues + rewritePrompt；必须通过闸门（score>=${lintPassScore} 且无 high issue）。未通过则按 rewritePrompt 回炉改写并再次 lint.style（最多回炉 ${lintMaxRework} 次）。本轮不要调用 kb.search 或任何写入类工具。\n`
+                  ? `D) lint.style（终稿闸门）：基于样例与指纹对照候选稿，输出 issues + rewritePrompt；必须通过闸门（score>=${lintPassScore} 且无 high issue）。未通过则按 rewritePrompt 回炉改写并再次 lint.style（最多回炉 ${lintMaxRework} 次）。本轮不要调用 kb.search 或任何写入类工具。\n`
                   : "") +
                 (batch.enforceLint
-                  ? "D) 写入：只有 lint.style 通过闸门后，才允许写入/输出终稿（doc.write/doc.applyEdits 等）。\n"
-                  : "C) 写入：在拿到 kb.search 的 tool_result 后，再写入/输出终稿（doc.write/doc.applyEdits 等）。\n") +
+                  ? "E) 写入：只有 lint.style 通过闸门后，才允许写入/输出终稿（doc.write/doc.applyEdits 等）。\n"
+                  : "D) 写入：在拿到 kb.search 的 tool_result 后，再写入/输出终稿（doc.write/doc.applyEdits 等）。\n") +
                 (gates.hasNonStyleLibraries
                   ? `提示：当前同时绑定了非风格库，因此 kb.search 必须显式传 libraryIds（仅限风格库）：${JSON.stringify(styleLibIds)}。\n`
                   : "") +
-                "注意：手法/模板检索优先 kind=card；若同时绑定了非风格库则必须带 cardTypes 并显式限制到风格库。如需原文证据段再用 kind=paragraph/outline，并建议用 anchorParagraphIndexMax/anchorFromEndMax 做位置过滤。"
+                "注意：templates 阶段只认 kind=card + cardTypes；不把原文段落当样例喂给模型（避免贴原文）。"
             });
             continue;
           }
@@ -4413,40 +4491,56 @@ fastify.post(
           return;
         }
 
-        // WriteCoercionPolicy（仅 safe 降级）：如果风格闸门已降级放行且已有 BEST_DRAFT，则强制写入 BEST_DRAFT，
-        // 避免模型在“已允许写入”后又重起炉灶，导致最终落盘内容反而更偏离风格库。
-        if (
-          effectiveGates.lintGateEnabled &&
-          runState.lintGateDegraded &&
-          runState.bestStyleDraft?.text &&
-          String(call?.name ?? "") === "doc.write"
-        ) {
+        // WriteCoercionPolicy（V2）：进入 write 阶段后，强制写入 bestDraft（多目标最优），
+        // 避免模型“最后一版更差但被写入”。safe 降级同样强制使用 bestDraft。
+        if (effectiveGates.lintGateEnabled && String(call?.name ?? "") === "doc.write" && (runState.styleLintPassed || runState.lintGateDegraded)) {
           const raw = (call?.args ?? {}) as any;
           const content = typeof raw?.content === "string" ? String(raw.content) : "";
-          const best = String(runState.bestStyleDraft.text ?? "");
+          const bestText =
+            (runState as any)?.bestDraft?.text ||
+            (runState.lintGateDegraded ? (runState as any)?.bestStyleDraft?.text : "") ||
+            "";
+          const best = String(bestText ?? "");
           if (content.trim() && best.trim() && content.trim() !== best.trim()) {
             (call as any).args = { ...raw, content: best };
+            const bestMeta: any = runState.bestDraft
+              ? {
+                  styleScore: runState.bestDraft.styleScore,
+                  highIssues: runState.bestDraft.highIssues,
+                  copy: runState.bestDraft.copy
+                    ? {
+                        riskLevel: runState.bestDraft.copy.riskLevel,
+                        maxOverlapChars: runState.bestDraft.copy.maxOverlapChars,
+                        maxChar5gramJaccard: runState.bestDraft.copy.maxChar5gramJaccard,
+                      }
+                    : null,
+                }
+              : runState.bestStyleDraft
+                ? { styleScore: runState.bestStyleDraft.score, highIssues: runState.bestStyleDraft.highIssues, copy: null }
+                : null;
             writePolicyDecision({
               turn,
               policy: "LintPolicy",
               decision: "coerce_write_best_draft",
-              reasonCodes: ["lint_degraded", "force_best_draft_on_write"],
+              reasonCodes: [runState.lintGateDegraded ? "lint_degraded" : "lint_passed", "force_best_draft_on_write"],
               detail: {
                 tool: "doc.write",
-                bestScore: runState.bestStyleDraft.score,
                 fromLen: content.length,
                 toLen: best.length,
+                best: bestMeta,
               },
             });
-            writeRunNotice({
-              turn,
-              kind: "info",
-              title: "safe 降级：写入内容已强制使用最高分版本",
-              message: `已进入 safe 降级放行：为避免最终落盘偏离风格库，doc.write 内容已替换为 BEST_DRAFT（score_best=${runState.bestStyleDraft.score}）。`,
-              policy: "LintPolicy",
-              reasonCodes: ["lint_degraded", "force_best_draft_on_write"],
-              detail: { bestScore: runState.bestStyleDraft.score },
-            });
+            if (runState.lintGateDegraded) {
+              writeRunNotice({
+                turn,
+                kind: "info",
+                title: "safe 降级：写入内容已强制使用 bestDraft",
+                message: `已进入 safe 降级放行：为避免最终落盘偏离风格库，doc.write 内容已替换为 BEST_DRAFT（styleScore_best=${bestMeta?.styleScore ?? "?"}）。`,
+                policy: "LintPolicy",
+                reasonCodes: ["lint_degraded", "force_best_draft_on_write"],
+                detail: { best: bestMeta },
+              });
+            }
           }
         }
 
@@ -4888,12 +4982,71 @@ fastify.post(
           isStyleExampleKbSearch({ call: call as any, styleLibIdSet: gates.styleLibIdSet, hasNonStyleLibraries: gates.hasNonStyleLibraries })
         ) {
           const groups = Array.isArray((payload.output as any)?.groups) ? (payload.output as any).groups : [];
+          const hits = (() => {
+            let n = 0;
+            for (const gg of groups as any[]) {
+              const arr = Array.isArray((gg as any)?.hits)
+                ? (gg as any).hits
+                : Array.isArray((gg as any)?.items)
+                  ? (gg as any).items
+                  : [];
+              n += Array.isArray(arr) ? arr.length : 0;
+            }
+            return n;
+          })();
+          const topArtifacts = (() => {
+            // 仅用于“templates 命中清单”审计：控量、去重、只存 id/title/cardType，避免 token 爆炸
+            const seen = new Set<string>();
+            const out: Array<{ id: string; title: string; cardType: string }> = [];
+            for (const gg of groups as any[]) {
+              const arr = Array.isArray(gg?.hits) ? gg.hits : Array.isArray(gg?.items) ? gg.items : [];
+              for (const h of arr as any[]) {
+                const art = h?.artifact && typeof h.artifact === "object" ? h.artifact : null;
+                const id = art ? String(art.id ?? "").trim() : "";
+                if (!id || seen.has(id)) continue;
+                seen.add(id);
+                const title = art ? String(art.title ?? "").trim() : "";
+                const cardType = art ? String(art.cardType ?? "").trim() : "";
+                out.push({ id, title: title.slice(0, 120), cardType: cardType.slice(0, 64) });
+                if (out.length >= 12) return out;
+              }
+            }
+            return out;
+          })();
+          const normalizeIdList = (v: any): string[] => {
+            if (Array.isArray(v)) return v.map((x: any) => String(x ?? "").trim()).filter(Boolean);
+            const s = String(v ?? "").trim();
+            if (!s) return [];
+            if (s.startsWith("[") && s.endsWith("]")) {
+              try {
+                const j = JSON.parse(s);
+                if (Array.isArray(j)) return j.map((x: any) => String(x ?? "").trim()).filter(Boolean);
+              } catch {
+                // ignore
+              }
+            }
+            if (s.includes(",")) return s.split(",").map((x) => x.trim()).filter(Boolean);
+            return [s];
+          };
+          const a = (call as any)?.args ?? {};
+          const query = String((a as any)?.query ?? "").trim();
+          const cardTypes = normalizeIdList((a as any)?.cardTypes);
+          const libraryIds = normalizeIdList((a as any)?.libraryIds);
           const hadHitBefore = (runState as any).hasStyleKbHit === true;
           // 关键修正：把“做过检索”与“有命中”解耦。0 命中也算完成（进入降级），避免风格闭环卡死。
           runState.hasStyleKbSearch = true;
-          if (groups.length > 0) (runState as any).hasStyleKbHit = true;
+          runState.lastStyleKbSearch = {
+            kind: "card",
+            query,
+            cardTypes: cardTypes.slice(0, 12),
+            libraryIds: libraryIds.slice(0, 8),
+            groups: groups.length,
+            hits,
+            topArtifacts,
+          };
+          if (hits > 0) (runState as any).hasStyleKbHit = true;
           // 关键修正：如果本轮已命中过风格样例（例如 paragraph 已有命中），后续某次（例如 kind=outline）0 命中不应再触发“降级”提示（避免误报噪音）。
-          if (groups.length === 0 && !runState.styleKbDegraded && !hadHitBefore) {
+          if (hits === 0 && !runState.styleKbDegraded && !hadHitBefore) {
             runState.styleKbDegraded = true;
             writePolicyDecision({
               turn,
@@ -4926,6 +5079,27 @@ fastify.post(
           const maxOverlapCharsRaw = Number(out?.maxOverlapChars ?? NaN);
           const maxChar5gramJaccardRaw = Number(out?.maxChar5gramJaccard ?? NaN);
           const passed = payload.ok === true && Boolean(out?.passed) && riskLevel === "low";
+          const topOverlaps = (() => {
+            const arr = Array.isArray(out?.topOverlaps) ? out.topOverlaps : [];
+            const outList: Array<{ source: string; overlapChars: number; snippet: string }> = [];
+            for (const x of arr as any[]) {
+              const source = String(x?.source ?? "").trim();
+              const overlapChars = Number(x?.overlapChars ?? NaN);
+              const snippet = String(x?.snippet ?? "").trim();
+              if (!source || !Number.isFinite(overlapChars) || overlapChars <= 0 || !snippet) continue;
+              outList.push({ source: source.slice(0, 64), overlapChars: Math.max(0, Math.floor(overlapChars)), snippet: snippet.slice(0, 140) });
+              if (outList.length >= 3) break;
+            }
+            return outList;
+          })();
+          const sources =
+            out?.sources && typeof out.sources === "object"
+              ? {
+                  total: Number((out.sources as any)?.total ?? 0) || 0,
+                  selectionIncluded: Boolean((out.sources as any)?.selectionIncluded),
+                  styleSampleCount: Number((out.sources as any)?.styleSampleCount ?? 0) || 0,
+                }
+              : null;
 
           runState.copyLintPassed = passed;
           if (payload.ok) {
@@ -4935,6 +5109,8 @@ fastify.post(
                 riskLevel,
                 maxOverlapChars: Math.max(0, Math.floor(maxOverlapCharsRaw)),
                 maxChar5gramJaccard: Math.max(0, Math.min(1, Number(maxChar5gramJaccardRaw))),
+                topOverlaps,
+                sources,
               };
             }
             if (!passed) runState.copyLintFailCount += 1;
@@ -4977,6 +5153,8 @@ fastify.post(
                 riskLevel,
                 maxOverlapChars: Math.max(0, Math.floor(maxOverlapChars)),
                 maxChar5gramJaccard: Math.max(0, Math.min(1, Number(maxChar5gramJaccard))),
+                sources: (cr as any)?.sources ?? null,
+                topOverlaps: Array.isArray((cr as any)?.topOverlaps) ? (cr as any).topOverlaps.slice(0, 3) : [],
               };
               writePolicyDecision({
                 turn,
@@ -5003,6 +5181,113 @@ fastify.post(
             if (candText.trim() && parsedLint.score !== null && Number.isFinite(parsedLint.score)) {
               if (!runState.bestStyleDraft || parsedLint.score > runState.bestStyleDraft.score) {
                 runState.bestStyleDraft = { score: parsedLint.score, highIssues: parsedLint.highIssues, text: candText };
+              }
+            }
+
+            // V2：bestDraft（多目标）：把 copyRisk 一起纳入选择，并在 write 阶段强制使用它。
+            if (candText.trim() && parsedLint.score !== null && Number.isFinite(parsedLint.score)) {
+              const copyMeta = (() => {
+                const c: any = runState.lastCopyLint ?? null; // lint.copy（gate）优先
+                if (c && (c.riskLevel === "low" || c.riskLevel === "medium" || c.riskLevel === "high")) {
+                  return {
+                    riskLevel: c.riskLevel,
+                    maxOverlapChars: Number(c.maxOverlapChars ?? 0) || 0,
+                    maxChar5gramJaccard: Number(c.maxChar5gramJaccard ?? 0) || 0,
+                    topOverlaps: Array.isArray(c.topOverlaps) ? c.topOverlaps.slice(0, 3) : [],
+                    sources: c.sources ?? null,
+                  };
+                }
+                // 兜底：来自 lint.style 的 copyRisk 观测（不做 gate，但用于 bestDraft 缺省排序）
+                const cr: any = (payload.output as any)?.copyRisk ?? null;
+                if (cr && typeof cr === "object") {
+                  const rl = String(cr.riskLevel ?? "").trim().toLowerCase();
+                  if (rl === "low" || rl === "medium" || rl === "high") {
+                    return {
+                      riskLevel: rl,
+                      maxOverlapChars: Number(cr.maxOverlapChars ?? 0) || 0,
+                      maxChar5gramJaccard: Number(cr.maxChar5gramJaccard ?? 0) || 0,
+                      topOverlaps: Array.isArray(cr.topOverlaps) ? cr.topOverlaps.slice(0, 3) : [],
+                      sources: cr.sources ?? null,
+                    };
+                  }
+                }
+                return null;
+              })();
+
+              const cand = {
+                text: candText,
+                styleScore: Number(parsedLint.score),
+                highIssues: Number(parsedLint.highIssues ?? 0) || 0,
+                copy: copyMeta,
+              };
+
+              // 更新候选集：控量、去重（按 trim 文本），只保留 styleScore 前 8 个
+              const list = Array.isArray(runState.draftCandidatesV1) ? runState.draftCandidatesV1 : [];
+              const key = candText.trim();
+              const idx = key ? list.findIndex((x: any) => String(x?.text ?? "").trim() === key) : -1;
+              if (idx >= 0) list[idx] = cand as any;
+              else list.push(cand as any);
+              list.sort((a: any, b: any) => Number(b?.styleScore ?? -Infinity) - Number(a?.styleScore ?? -Infinity));
+              runState.draftCandidatesV1 = list.slice(0, 8) as any;
+
+              const riskRank = (rl: any) => (rl === "low" ? 0 : rl === "high" ? 2 : 1);
+              const allowHigh = lintMode === "safe" && runState.copyGateDegraded;
+              const eligible = runState.draftCandidatesV1.filter((x: any) => {
+                const rl = x?.copy?.riskLevel ?? "medium";
+                if (allowHigh) return true;
+                return rl !== "high";
+              });
+              const pool = eligible.length ? eligible : runState.draftCandidatesV1;
+              if (pool.length) {
+                const bestStyle = Math.max(...pool.map((x: any) => Number(x?.styleScore ?? -Infinity)));
+                const near = pool.filter((x: any) => Number(x?.styleScore ?? -Infinity) >= bestStyle - 3);
+                near.sort((a: any, b: any) => {
+                  const ar = riskRank(a?.copy?.riskLevel ?? "medium");
+                  const br = riskRank(b?.copy?.riskLevel ?? "medium");
+                  if (ar !== br) return ar - br;
+                  const ao = Number(a?.copy?.maxOverlapChars ?? 1e9);
+                  const bo = Number(b?.copy?.maxOverlapChars ?? 1e9);
+                  if (ao !== bo) return ao - bo;
+                  const aj = Number(a?.copy?.maxChar5gramJaccard ?? 1);
+                  const bj = Number(b?.copy?.maxChar5gramJaccard ?? 1);
+                  if (aj !== bj) return aj - bj;
+                  return Number(b?.styleScore ?? -Infinity) - Number(a?.styleScore ?? -Infinity);
+                });
+
+                const nextBest = near[0] as any;
+                const prevBest = runState.bestDraft as any;
+                runState.bestDraft = nextBest ?? null;
+                const changed = (() => {
+                  if (!nextBest && !prevBest) return false;
+                  if (!nextBest || !prevBest) return true;
+                  return String(nextBest.text ?? "").trim() !== String(prevBest.text ?? "").trim();
+                })();
+                if (changed && nextBest) {
+                  writePolicyDecision({
+                    turn,
+                    policy: "LintPolicy",
+                    decision: "best_draft_updated",
+                    reasonCodes: ["best_draft_multiobjective_v1"],
+                    detail: {
+                      best: {
+                        styleScore: nextBest.styleScore,
+                        highIssues: nextBest.highIssues,
+                        copy: nextBest.copy
+                          ? {
+                              riskLevel: nextBest.copy.riskLevel,
+                              maxOverlapChars: nextBest.copy.maxOverlapChars,
+                              maxChar5gramJaccard: nextBest.copy.maxChar5gramJaccard,
+                            }
+                          : null,
+                      },
+                      candidates: runState.draftCandidatesV1.map((x: any) => ({
+                        styleScore: x.styleScore,
+                        highIssues: x.highIssues,
+                        copyRiskLevel: x?.copy?.riskLevel ?? null,
+                      })),
+                    },
+                  });
+                }
               }
             }
 
@@ -5186,63 +5471,90 @@ fastify.post(
             // 超过回炉上限：
             // - gate：终止并提示用户（保留最高分可直接输出文本）
             // - safe：降级放行（默认用最高分版本继续推进写入/结束），避免卡死且避免“最后一版更差导致不像”
-            if (lintMode === "safe" && runState.bestStyleDraft?.text) {
+            const bestForWrite: any =
+              runState.bestDraft && String(runState.bestDraft.text ?? "").trim()
+                ? runState.bestDraft
+                : runState.bestStyleDraft && String(runState.bestStyleDraft.text ?? "").trim()
+                  ? { text: runState.bestStyleDraft.text, styleScore: runState.bestStyleDraft.score, highIssues: runState.bestStyleDraft.highIssues, copy: null }
+                  : null;
+
+            if (lintMode === "safe" && bestForWrite?.text) {
               runState.lintGateDegraded = true;
               runState.styleLintPassed = true; // 放行写入阶段（本次 lint 已执行，但未达阈值）
+              // 确保后续 write coercion 有 bestDraft 可用（safe 降级仍强制写 bestDraft）
+              if (!runState.bestDraft && bestForWrite?.text) runState.bestDraft = bestForWrite;
               writePolicyDecision({
                 turn,
                 policy: "LintPolicy",
                 decision: "degrade_keep_best",
                 reasonCodes: ["style_lint_exhausted", "lint_degraded", keepBestOnLintExhausted ? "lint_keep_best" : "lint_keep_best_default"],
-                detail: { bestScore: runState.bestStyleDraft.score, lintMode },
+                detail: {
+                  best: {
+                    styleScore: bestForWrite?.styleScore ?? null,
+                    highIssues: bestForWrite?.highIssues ?? null,
+                    copy: bestForWrite?.copy
+                      ? {
+                          riskLevel: bestForWrite.copy.riskLevel,
+                          maxOverlapChars: bestForWrite.copy.maxOverlapChars,
+                          maxChar5gramJaccard: bestForWrite.copy.maxChar5gramJaccard,
+                        }
+                      : null,
+                  },
+                  lintMode,
+                },
               });
               writeRunNotice({
                 turn,
                 kind: "warn",
                 title: "风格对齐回炉上限：已降级放行（safe）",
-                message: `风格对齐达到回炉上限（score_best=${runState.bestStyleDraft.score}），已进入 safe 降级：允许继续写入，但要求使用“最高分版本”作为终稿，避免乱写。`,
+                message:
+                  `风格对齐达到回炉上限（styleScore_best=${bestForWrite?.styleScore ?? "?"}` +
+                  `${bestForWrite?.copy?.riskLevel ? `，copyRisk=${bestForWrite.copy.riskLevel}` : ""}` +
+                  "），已进入 safe 降级：允许继续写入，但要求使用 bestDraft 作为终稿，避免最后一版更差反而落盘。",
                 policy: "LintPolicy",
                 reasonCodes: ["style_lint_exhausted", "lint_degraded", keepBestOnLintExhausted ? "lint_keep_best" : "lint_keep_best_default"],
-                detail: { bestScore: runState.bestStyleDraft.score, lintMode },
+                detail: { best: bestForWrite ? { styleScore: bestForWrite.styleScore, copyRiskLevel: bestForWrite?.copy?.riskLevel ?? null } : null, lintMode },
               });
               messages.push({
                 role: "system",
                 content:
                   "【Style Lint safe】风格对齐回炉次数已耗尽，但为了避免流程卡死，系统已降级放行写入。\n" +
-                  "- 你必须使用下方 BEST_DRAFT 作为终稿（不要再重新生成/不要新增事实）。\n" +
+                  "- 你必须使用下方 BEST_DRAFT（bestDraft，多目标最优）作为终稿（不要再重新生成/不要新增事实）。\n" +
                   "- 下一轮进入写入阶段（doc.write/doc.applyEdits/doc.splitToDir...）时，直接把 BEST_DRAFT 写入。\n\n" +
-                  `BEST_DRAFT(score=${runState.bestStyleDraft.score}):\n` +
-                  runState.bestStyleDraft.text,
+                  `BEST_DRAFT(styleScore=${bestForWrite?.styleScore ?? "?"}${bestForWrite?.copy?.riskLevel ? `, copyRisk=${bestForWrite.copy.riskLevel}` : ""}):\n` +
+                  String(bestForWrite.text ?? ""),
               });
               continue;
             }
 
             // gate：只有用户/策略明确要求“保留最高分”时才输出最高分版本（否则按 exhausted 终止）
-            if (keepBestOnLintExhausted && runState.bestStyleDraft?.text) {
+            if (keepBestOnLintExhausted && (runState.bestDraft?.text || runState.bestStyleDraft?.text)) {
+              const outText = String((runState.bestDraft?.text ?? runState.bestStyleDraft?.text) ?? "");
+              const outScore = runState.bestDraft?.styleScore ?? runState.bestStyleDraft?.score ?? null;
               writePolicyDecision({
                 turn,
                 policy: "LintPolicy",
                 decision: "end_keep_best",
                 reasonCodes: ["style_lint_exhausted", "lint_keep_best"],
-                detail: { bestScore: runState.bestStyleDraft.score }
+                detail: { bestScore: outScore }
               });
               writeRunNotice({
                 turn,
                 kind: "warn",
                 title: "风格对齐回炉上限：输出最高分版本",
-                message: `风格对齐达到回炉上限，已按“保留最高分”策略输出最高分版本（score=${runState.bestStyleDraft.score}）。`,
+                message: `风格对齐达到回炉上限，已按“保留最高分”策略输出最高分版本（score=${outScore ?? "?"}）。`,
                 policy: "LintPolicy",
                 reasonCodes: ["style_lint_exhausted", "lint_keep_best"],
-                detail: { bestScore: runState.bestStyleDraft.score },
+                detail: { bestScore: outScore },
               });
-              writeEvent("assistant.delta", { delta: runState.bestStyleDraft.text });
+              writeEvent("assistant.delta", { delta: outText });
               writeEvent("run.end", {
                 runId,
                 reason: "text",
                 reasonCodes: ["text", "lint_keep_best"],
                 turn,
                 lint: "keep_best",
-                bestScore: runState.bestStyleDraft.score
+                bestScore: outScore
               });
               writeEvent("assistant.done", { reason: "text", turn });
               reply.raw.end();
@@ -7416,6 +7728,320 @@ fastify.post(
     ...(billing ? { billing } : {})
   });
 });
+
+/**
+ * KB 生成“写法簇规则卡”（V2 / P3）：输入每个 cluster 的证据段（segmentId + quote），输出可执行 rules（values + analysisLenses + templates）。
+ * - 产物由 Desktop 负责落库到 libraryPrefs.style.clusterRulesV1，并可落到 playbook 虚拟文档下（便于 templates 阶段 kb.search）。
+ * - 证据绑定：模型只能用传入的 segmentId 作为 evidenceSegmentIds，不允许臆造。
+ */
+fastify.post(
+  "/api/kb/dev/build_cluster_rules",
+  { preHandler: [(fastify as any).authenticate, requirePositivePointsForLlm] },
+  async (request: any, reply) => {
+    const jwtUser = await tryGetJwtUser(request as any);
+
+    const bodySchema = z.object({
+      model: z.string().optional(),
+      libraryName: z.string().optional(),
+      clusters: z
+        .array(
+          z.object({
+            clusterId: z.string().min(1),
+            label: z.string().optional(),
+            evidence: z
+              .array(
+                z.object({
+                  segmentId: z.string().min(1),
+                  quote: z.string().min(1).max(240),
+                }),
+              )
+              .min(2)
+              .max(12),
+          }),
+        )
+        .min(1)
+        .max(3),
+    });
+    const body = bodySchema.parse((request as any).body);
+
+    const playbookEnv = await getPlaybookEnv();
+    const playbookBaseUrl = playbookEnv.baseUrl;
+    const playbookEndpoint = (playbookEnv as any).endpoint || "/v1/chat/completions";
+    const playbookApiKey = playbookEnv.apiKey;
+    const playbookModelDefault = playbookEnv.defaultModel;
+
+    if (!playbookEnv.ok) {
+      return reply.code(500).send({
+        error: "LLM_NOT_CONFIGURED",
+        hint: "请配置 LLM_BASE_URL/LLM_MODEL/LLM_API_KEY；可在 B 端把 stage=rag.ingest.build_cluster_rules 指向更稳的模型。",
+      });
+    }
+
+    let stageMaxTokens: number | undefined = undefined;
+    try {
+      const st = await aiConfig.resolveStage("rag.ingest.build_cluster_rules");
+      if (typeof st.maxTokens === "number") stageMaxTokens = st.maxTokens;
+    } catch {
+      // ignore
+    }
+
+    let model = body.model ?? playbookModelDefault;
+    let baseUrl = playbookBaseUrl;
+    let endpoint = playbookEndpoint;
+    let apiKey = playbookApiKey;
+    if (body.model) {
+      try {
+        const m = await aiConfig.resolveModel(body.model);
+        const ep = String(m.endpoint || "").trim();
+        if (ep && (/chat\/completions/i.test(ep) || isGeminiLikeEndpoint(ep))) {
+          model = m.model;
+          baseUrl = m.baseURL;
+          apiKey = m.apiKey;
+          endpoint = ep;
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 3);
+    const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
+    const timeoutMsCfg = Number(String(process.env.LLM_PLAYBOOK_TIMEOUT_MS ?? "").trim());
+    const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 60_000;
+
+    const libName = String(body.libraryName ?? "").trim();
+    const clusters = body.clusters.slice(0, 3);
+
+    const sys = [
+      "你是写作 IDE 的「写法簇规则卡生成器」（V2）。",
+      "你会收到每个写法簇（cluster）的若干条证据段（segmentId + quote）。",
+      "",
+      "任务：为每个 cluster 生成一张可执行的规则卡 rules，包含：",
+      "1) values：作者/叙述者的价值取向与责任归属框架（用于‘像本人怎么判断’）",
+      "2) analysisLenses：作者常用的分析视角/战场选择（用于‘像本人怎么分析’）",
+      "3) templates：必须以‘槽位化模板’形式给出（而不是复述长段文字）",
+      "",
+      "证据绑定强约束：",
+      "- rules 里任何需要 evidence 的地方，只能用 evidenceSegmentIds 引用输入中出现过的 segmentId。",
+      "- 每条 values.* 与 analysisLenses 至少给 1 个 evidenceSegmentIds（1~3 个）。",
+      "- 不要臆造 segmentId；不要编造不存在的证据。",
+      "",
+      "输出要求：必须且只能输出一个 JSON 对象（不要代码块，不要多余文字）。",
+      "JSON 结构：",
+      "{",
+      '  "clusters": [',
+      '    {',
+      '      "clusterId": string,',
+      '      "rules": {',
+      '        "v": 1,',
+      '        "updatedAt": string(ISO),',
+      '        "values": {',
+      '          "scope": "author"|"narrator"|"character",',
+      '          "principles": [ { "text": string, "evidenceSegmentIds": string[] } ],',
+      '          "priorities": [ { "text": string, "evidenceSegmentIds": string[] } ],',
+      '          "moralAccounting": [ { "text": string, "evidenceSegmentIds": string[] } ],',
+      '          "tabooFrames": [ { "text": string, "evidenceSegmentIds": string[] } ],',
+      '          "epistemicNorms": [ { "text": string, "evidenceSegmentIds": string[] } ],',
+      '          "templates": [ { "text": string, "evidenceSegmentIds": string[] } ]',
+      "        },",
+      '        "analysisLenses": [',
+      '          {',
+      '            "label": string,',
+      '            "whenToUse": string,',
+      '            "questions": string[],',
+      '            "templates": string[],',
+      '            "evidenceSegmentIds": string[],',
+      '            "checks": string[]',
+      "          }",
+      "        ]",
+      "      }",
+      "    }",
+      "  ]",
+      "}",
+      "",
+      "约束：",
+      "- values 各数组条目数量建议 2~5（少而硬）。analysisLenses 建议 2~4。",
+      "- templates 必须是槽位模板（例如“开头：一句冲突→一句结论→一句战场坐标”），不要长段抄写。",
+    ].join("\n");
+
+    const user = [
+      "输入如下（每个 cluster 的证据段）：",
+      JSON.stringify(
+        {
+          libraryName: libName || undefined,
+          clusters: clusters.map((c) => ({
+            clusterId: c.clusterId,
+            label: c.label ?? "",
+            evidence: c.evidence.map((e) => ({ segmentId: e.segmentId, quote: e.quote })),
+          })),
+        },
+        null,
+        2,
+      ),
+    ].join("\n");
+
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    let lastStatus: number | undefined = undefined;
+    let lastDetail: string | undefined = undefined;
+
+    let ret: any = null;
+    for (let attempt = 0; attempt <= retryMax; attempt += 1) {
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(), timeoutMs);
+      ret = await completionOnceViaProvider({
+        baseUrl,
+        endpoint,
+        apiKey,
+        model,
+        messages: [
+          { role: "system", content: sys },
+          { role: "user", content: user },
+        ],
+        temperature: 0.2,
+        maxTokens: stageMaxTokens ?? null,
+        signal: abort.signal,
+      });
+      clearTimeout(timer);
+      if (ret.ok) break;
+
+      lastStatus = ret.status;
+      lastDetail = ret.error;
+      const errText = String(ret.error ?? "");
+      const isTimeout = /aborted|AbortError|timeout/i.test(errText);
+      const is429 = ret.status === 429 || errText.includes("Too Many Requests") || errText.includes("负载已饱和");
+      if (isTimeout) break;
+      if (!is429 || attempt >= retryMax) break;
+      const jitter = Math.floor(Math.random() * 200);
+      const wait = retryBaseMs * Math.pow(2, attempt) + jitter;
+      await sleep(wait);
+    }
+
+    const fallback = () => {
+      const mk = (c: any) => {
+        const e0 = Array.isArray(c?.evidence) && c.evidence.length ? c.evidence[0] : null;
+        const sid = e0?.segmentId ? String(e0.segmentId) : "";
+        const ev = sid ? [sid] : [];
+        return {
+          clusterId: String(c?.clusterId ?? "").trim() || "cluster_0",
+          rules: {
+            v: 1,
+            updatedAt: new Date().toISOString(),
+            values: {
+              scope: "author",
+              principles: [{ text: "（占位）价值观原则：待生成", evidenceSegmentIds: ev }],
+              priorities: [],
+              moralAccounting: [],
+              tabooFrames: [],
+              epistemicNorms: [],
+              templates: [],
+            },
+            analysisLenses: [
+              {
+                label: "（占位）分析视角：待生成",
+                whenToUse: "（占位）",
+                questions: [],
+                templates: [],
+                evidenceSegmentIds: ev,
+                checks: [],
+              },
+            ],
+          },
+        };
+      };
+      return { ok: true, clusters: clusters.map(mk), upstream: { ok: false, status: lastStatus ?? null, error: String(lastDetail ?? "") } };
+    };
+
+    if (!ret?.ok) {
+      return reply.send(fallback());
+    }
+
+    const raw = String(ret.content ?? "").trim();
+    const tryParse = (s: string) => {
+      try {
+        return JSON.parse(s);
+      } catch {
+        return null;
+      }
+    };
+    let parsed: any = tryParse(raw);
+    if (!parsed) {
+      const m = raw.match(/\{[\s\S]*\}/);
+      if (m?.[0]) parsed = tryParse(m[0]);
+    }
+    if (!parsed || typeof parsed !== "object") {
+      return reply.send(fallback());
+    }
+
+    const evIds = z.array(z.string().min(1)).min(1).max(3);
+    const valueItem = z.object({ text: z.string().min(1).max(240), evidenceSegmentIds: evIds });
+    const lens = z.object({
+      label: z.string().min(1).max(80),
+      whenToUse: z.string().min(1).max(240),
+      questions: z.array(z.string().min(1).max(120)).max(8),
+      templates: z.array(z.string().min(1).max(200)).max(8),
+      evidenceSegmentIds: evIds,
+      checks: z.array(z.string().min(1).max(120)).max(8),
+    });
+    const rulesSchema = z.object({
+      v: z.literal(1),
+      updatedAt: z.string().min(8),
+      values: z.object({
+        scope: z.enum(["author", "narrator", "character"]).default("author"),
+        principles: z.array(valueItem).max(8).default([]),
+        priorities: z.array(valueItem).max(8).default([]),
+        moralAccounting: z.array(valueItem).max(8).default([]),
+        tabooFrames: z.array(valueItem).max(8).default([]),
+        epistemicNorms: z.array(valueItem).max(8).default([]),
+        templates: z.array(valueItem).max(8).default([]),
+      }),
+      analysisLenses: z.array(lens).max(6).default([]),
+    });
+    const outSchema = z.object({
+      clusters: z
+        .array(
+          z.object({
+            clusterId: z.string().min(1),
+            rules: rulesSchema,
+          }),
+        )
+        .min(1)
+        .max(3),
+    });
+
+    let out: any = null;
+    try {
+      out = outSchema.parse(parsed);
+    } catch {
+      return reply.send(fallback());
+    }
+
+    // 计费（按 usage）：仅对非 admin
+    let billing: any = null;
+    try {
+      const usage = (ret as any)?.usage ?? null;
+      if (
+        jwtUser?.id &&
+        jwtUser.role !== "admin" &&
+        usage &&
+        typeof usage === "object" &&
+        Number.isFinite((usage as any).promptTokens as any) &&
+        Number.isFinite((usage as any).completionTokens as any)
+      ) {
+        billing = await chargeUserForLlmUsage({
+          userId: jwtUser.id,
+          modelId: model,
+          usage,
+          source: "kb.build_cluster_rules",
+          metaExtra: { clusters: out.clusters.length },
+        });
+      }
+    } catch {
+      // ignore
+    }
+
+    return reply.send({ ok: true, clusters: out.clusters, ...(billing ? { billing } : {}) });
+  },
+);
 
 /**
  * KB 库体检：体裁/声音开集分类（开发期）。

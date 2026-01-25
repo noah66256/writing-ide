@@ -40,6 +40,10 @@ export type KbLibraryStylePrefsV1 = {
   defaultClusterId?: string;
   // M2：子簇改名（仅本库生效）
   clusterLabelsV1?: Record<string, string>;
+  // V2：子簇规则卡（仅本库生效；用于写作期注入 styleContractV1）
+  // - key: clusterId（例如 cluster_0/cluster_1/cluster_2）
+  // - value: 规则卡 JSON（建议包含 values / analysisLenses 等；由 UI/工具写入）
+  clusterRulesV1?: Record<string, any>;
   // M1：用户采纳的黄金样本（段级）
   anchorsV1?: KbTextSpanRefV1[];
 };
@@ -337,10 +341,18 @@ type KbState = {
     anchors: KbTextSpanRefV1[];
     defaultClusterId?: string;
     clusterLabelsV1?: Record<string, string>;
+    clusterRulesV1?: Record<string, any>;
     error?: string;
   }>;
   setLibraryStyleClusterLabel: (args: { libraryId: string; clusterId: string; label: string }) => Promise<{ ok: boolean; error?: string }>;
   setLibraryStyleDefaultCluster: (args: { libraryId: string; clusterId: string | null }) => Promise<{ ok: boolean; error?: string }>;
+  setLibraryStyleClusterRules: (args: { libraryId: string; clusterId: string; rules: any }) => Promise<{ ok: boolean; error?: string }>;
+  // V2/P3：自动生成写法簇规则卡（values/lens/templates），并保存到 prefs（可选：写入 playbook 虚拟文档便于 kb.search）
+  generateLibraryClusterRulesV1: (args: { libraryId: string; clusterId?: string | null; model?: string }) => Promise<{
+    ok: boolean;
+    updated?: number;
+    error?: string;
+  }>;
   // 供 Agent 的 Context Pack 注入：读取库级“仿写手册”（StyleProfile + 维度手册）
   getPlaybookTextForLibraries: (libraryIds: string[]) => Promise<string>;
   // Selector v1：读取 playbook_facet 维度卡（按 facetIds）供 Context Pack 注入（避免模型看不见/不执行）
@@ -1459,6 +1471,65 @@ async function postBuildLibraryPlaybook(args: {
     if (!json?.ok) return { ok: false, error: "INVALID_RESPONSE" };
     if (!json?.styleProfile || !Array.isArray(json?.playbookFacets)) return { ok: false, error: "INVALID_RESPONSE" };
     return { ok: true, styleProfile: json.styleProfile, playbookFacets: json.playbookFacets };
+  } catch (e: any) {
+    const baseHint = base ? `gateway=${base}` : "gateway=同源(/api)";
+    const msg = String(e?.message ?? e);
+    const cause = e?.cause ? String(e.cause?.message ?? e.cause) : "";
+    const msgLower = msg.toLowerCase();
+    const hint =
+      msgLower === "fetch failed" || msgLower.includes("failed to fetch")
+        ? "提示：这通常是网路/代理/证书/服务不可达导致。请确认 Gateway 可访问；若你在 dev 模式，确认本地 gateway 正在运行；若你连接远端，确认 VITE_GATEWAY_URL 正确。"
+        : "";
+    return { ok: false, error: `${msg}${cause ? `\nCAUSE: ${cause}` : ""}\n(${baseHint}, url=${url})${hint ? `\n${hint}` : ""}` };
+  }
+}
+
+async function postBuildClusterRules(args: {
+  model?: string;
+  libraryName?: string;
+  clusters: Array<{ clusterId: string; label?: string; evidence: Array<{ segmentId: string; quote: string }> }>;
+  signal?: AbortSignal;
+}): Promise<
+  | { ok: true; clusters: Array<{ clusterId: string; rules: any }>; upstream?: any }
+  | { ok: false; error: string }
+> {
+  const base = gatewayBaseUrl();
+  const url = base ? `${base}/api/kb/dev/build_cluster_rules` : "/api/kb/dev/build_cluster_rules";
+  if (!ensureLoginForKbLlm("生成写法簇规则卡（values/lens）")) return { ok: false, error: "AUTH_REQUIRED" };
+  const auth = authHeader();
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...auth },
+      signal: args.signal,
+      body: JSON.stringify({
+        model: args.model,
+        libraryName: args.libraryName,
+        clusters: (args.clusters ?? []).slice(0, 3),
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      let msg = text || `HTTP_${res.status}`;
+      try {
+        const j = JSON.parse(text);
+        if (typeof j?.message === "string") msg = j.message;
+        else if (typeof j?.error?.message === "string") msg = j.error.message;
+        else if (typeof j?.error === "string") {
+          const hint = typeof j?.hint === "string" ? String(j.hint) : "";
+          const detail = typeof j?.detail === "string" ? String(j.detail) : "";
+          msg = hint ? `${j.error}: ${hint}` : String(j.error);
+          if (detail && detail !== hint) msg += `\n${detail}`;
+        }
+      } catch {
+        // ignore
+      }
+      const baseHint = base ? `gateway=${base}` : "gateway=同源(/api)";
+      return { ok: false, error: `${msg}\n(${baseHint}, url=${url}, status=${res.status})` };
+    }
+    const json = await res.json().catch(() => null);
+    if (!json?.ok || !Array.isArray(json?.clusters)) return { ok: false, error: "INVALID_RESPONSE" };
+    return { ok: true, clusters: json.clusters, upstream: json.upstream ?? undefined };
   } catch (e: any) {
     const baseHint = base ? `gateway=${base}` : "gateway=同源(/api)";
     const msg = String(e?.message ?? e);
@@ -3629,7 +3700,11 @@ export const useKbStore = create<KbState>()(
             style?.clusterLabelsV1 && typeof style.clusterLabelsV1 === "object" && !Array.isArray(style.clusterLabelsV1)
               ? (style.clusterLabelsV1 as any)
               : undefined;
-          return { ok: true, anchors, defaultClusterId, clusterLabelsV1 };
+          const clusterRulesV1 =
+            style?.clusterRulesV1 && typeof style.clusterRulesV1 === "object" && !Array.isArray(style.clusterRulesV1)
+              ? (style.clusterRulesV1 as any)
+              : undefined;
+          return { ok: true, anchors, defaultClusterId, clusterLabelsV1, clusterRulesV1 };
         } catch (e: any) {
           return { ok: false, anchors: [], error: String(e?.message ?? e) };
         }
@@ -3705,6 +3780,313 @@ export const useKbStore = create<KbState>()(
           db.libraryPrefs = { ...(db.libraryPrefs ?? {}), [libId]: nextPrefs };
           await saveDb({ baseDir, ownerKey, db });
           return { ok: true };
+        } catch (e: any) {
+          return { ok: false, error: String(e?.message ?? e) };
+        }
+      },
+
+      setLibraryStyleClusterRules: async (args) => {
+        const ok = await get().ensureReady();
+        if (!ok) return { ok: false, error: "KB_DIR_NOT_SET" };
+        const baseDir = get().baseDir!;
+        const ownerKey = get().ownerKey;
+        const libId = String(args?.libraryId ?? "").trim();
+        const clusterId = String(args?.clusterId ?? "").trim();
+        const rules = (args as any)?.rules;
+        if (!libId) return { ok: false, error: "LIBRARY_ID_REQUIRED" };
+        if (!clusterId) return { ok: false, error: "CLUSTER_ID_REQUIRED" };
+        try {
+          const db = await loadDb({ baseDir, ownerKey });
+          const lib = db.libraries.find((l) => l.id === libId);
+          if (!lib) return { ok: false, error: libraryMissingError(db, libId) };
+          if (normalizeLibraryPurpose((lib as any)?.purpose) !== "style") return { ok: false, error: "NOT_STYLE_LIBRARY" };
+
+          const prevPrefs = ((db.libraryPrefs as any)?.[libId] ?? {}) as KbLibraryPrefsV1;
+          const prevStyle = (prevPrefs.style ?? {}) as KbLibraryStylePrefsV1;
+          const prevRules =
+            prevStyle.clusterRulesV1 && typeof prevStyle.clusterRulesV1 === "object" && !Array.isArray(prevStyle.clusterRulesV1)
+              ? { ...(prevStyle.clusterRulesV1 as any) }
+              : ({} as Record<string, any>);
+
+          // 允许 clear：传 null / 空对象 / 空字符串 => delete
+          const shouldDelete =
+            rules === null ||
+            rules === undefined ||
+            (typeof rules === "string" && !String(rules).trim()) ||
+            (typeof rules === "object" && rules && !Array.isArray(rules) && Object.keys(rules).length === 0);
+          if (shouldDelete) delete prevRules[clusterId];
+          else prevRules[clusterId] = rules;
+
+          const nextPrefs: KbLibraryPrefsV1 = {
+            ...prevPrefs,
+            style: {
+              ...prevStyle,
+              updatedAt: nowIso(),
+              clusterRulesV1: prevRules,
+            },
+          };
+          db.libraryPrefs = { ...(db.libraryPrefs ?? {}), [libId]: nextPrefs };
+          await saveDb({ baseDir, ownerKey, db });
+          return { ok: true };
+        } catch (e: any) {
+          return { ok: false, error: String(e?.message ?? e) };
+        }
+      },
+
+      generateLibraryClusterRulesV1: async (args) => {
+        const ok = await get().ensureReady();
+        if (!ok) return { ok: false, error: "KB_DIR_NOT_SET" };
+        const baseDir = get().baseDir!;
+        const ownerKey = get().ownerKey;
+        const libId = String(args?.libraryId ?? "").trim();
+        const onlyClusterId = String(args?.clusterId ?? "").trim() || null;
+        if (!libId) return { ok: false, error: "LIBRARY_ID_REQUIRED" };
+        try {
+          const db = await loadDb({ baseDir, ownerKey });
+          const lib = db.libraries.find((l) => l.id === libId);
+          if (!lib) return { ok: false, error: libraryMissingError(db, libId) };
+          if (normalizeLibraryPurpose((lib as any)?.purpose) !== "style") return { ok: false, error: "NOT_STYLE_LIBRARY" };
+
+          // 需要指纹快照：用于拿 clustersV1 + perSegment.clusterId（证据位绑定）
+          const fpRet = await get().getLatestLibraryFingerprint(libId);
+          const fp = fpRet.ok ? (fpRet.snapshot as any) : null;
+          const clusters = Array.isArray(fp?.clustersV1) ? (fp.clustersV1 as any[]) : [];
+          const perSeg = Array.isArray(fp?.perSegment) ? (fp.perSegment as any[]) : [];
+          if (!clusters.length || !perSeg.length) {
+            return { ok: false, error: "NO_FINGERPRINT_CLUSTERS（请先生成：声音指纹（数字版））" };
+          }
+
+          const clusterBySegId = new Map<string, string>();
+          for (const s of perSeg) {
+            const sid = String((s as any)?.segmentId ?? "").trim();
+            const cid = String((s as any)?.clusterId ?? "").trim();
+            if (sid && cid) clusterBySegId.set(sid, cid);
+          }
+
+          const stylePrefs = ((db.libraryPrefs as any)?.[libId]?.style ?? {}) as KbLibraryStylePrefsV1;
+          const anchorsInPrefs = Array.isArray(stylePrefs?.anchorsV1) ? (stylePrefs.anchorsV1 as KbTextSpanRefV1[]) : [];
+          const clusterRulesPrev =
+            stylePrefs?.clusterRulesV1 && typeof stylePrefs.clusterRulesV1 === "object" && !Array.isArray(stylePrefs.clusterRulesV1)
+              ? ({ ...(stylePrefs.clusterRulesV1 as any) } as Record<string, any>)
+              : ({} as Record<string, any>);
+
+          const pickPoolForCluster = (cid: string) => {
+            const pool: Array<KbTextSpanRefV1> = [];
+            const seen = new Set<string>();
+            const push = (r: KbTextSpanRefV1) => {
+              const sid = String((r as any)?.segmentId ?? "").trim();
+              if (!sid) return;
+              if (seen.has(sid)) return;
+              seen.add(sid);
+              pool.push(r);
+            };
+            // 1) anchors（优先：更像“可追溯黄金样本”）
+            for (const a of anchorsInPrefs) {
+              const sid = String((a as any)?.segmentId ?? "").trim();
+              if (!sid) continue;
+              if (clusterBySegId.get(sid) !== cid) continue;
+              push(a);
+              if (pool.length >= 6) break;
+            }
+            // 2) cluster evidence（体检代表样例）
+            const c = clusters.find((x) => String((x as any)?.id ?? "").trim() === cid);
+            const ev = Array.isArray((c as any)?.evidence) ? ((c as any).evidence as any[]) : [];
+            for (const e of ev) {
+              if (!e || typeof e !== "object") continue;
+              // clustersV1.evidence 理论上也是 KbTextSpanRefV1[]
+              const r = e as KbTextSpanRefV1;
+              push(r);
+              if (pool.length >= 10) break;
+            }
+            return pool.slice(0, 10);
+          };
+
+          const targets = clusters
+            .map((c) => ({
+              clusterId: String((c as any)?.id ?? "").trim(),
+              label: String((c as any)?.label ?? "").trim(),
+            }))
+            .filter((x) => x.clusterId)
+            .filter((x) => (onlyClusterId ? x.clusterId === onlyClusterId : true))
+            .slice(0, 3);
+          if (!targets.length) return { ok: false, error: "CLUSTER_NOT_FOUND" };
+
+          const payloadClusters = targets
+            .map((t) => {
+              const pool = pickPoolForCluster(t.clusterId);
+              const evidence = pool
+                .map((r) => ({
+                  segmentId: String((r as any)?.segmentId ?? "").trim(),
+                  quote: String((r as any)?.quote ?? "").trim().slice(0, 240),
+                }))
+                .filter((x) => x.segmentId && x.quote);
+              return { clusterId: t.clusterId, label: t.label, evidence };
+            })
+            .filter((c) => c.evidence.length >= 2);
+          if (!payloadClusters.length) return { ok: false, error: "NOT_ENOUGH_EVIDENCE（请先采纳 anchors 或确保该簇有代表样例）" };
+
+          const libName = String((lib as any)?.name ?? libId).trim() || libId;
+          const ret = await postBuildClusterRules({ model: args?.model, libraryName: libName, clusters: payloadClusters });
+          if (!ret.ok) return { ok: false, error: ret.error };
+
+          // segmentId -> KbTextSpanRefV1（来自 pool）
+          const refBySegId = new Map<string, KbTextSpanRefV1>();
+          for (const t of targets) {
+            for (const r of pickPoolForCluster(t.clusterId)) {
+              const sid = String((r as any)?.segmentId ?? "").trim();
+              if (sid && !refBySegId.has(sid)) refBySegId.set(sid, r);
+            }
+          }
+
+          const mapEvidence = (ids: any[]) => {
+            const out: KbTextSpanRefV1[] = [];
+            const seen = new Set<string>();
+            for (const raw of Array.isArray(ids) ? ids : []) {
+              const sid = String(raw ?? "").trim();
+              if (!sid || seen.has(sid)) continue;
+              const ref = refBySegId.get(sid);
+              if (!ref) continue;
+              out.push(ref);
+              seen.add(sid);
+              if (out.length >= 6) break;
+            }
+            return out;
+          };
+
+          let updated = 0;
+          for (const c of ret.clusters as any[]) {
+            const cid = String(c?.clusterId ?? "").trim();
+            const rules = c?.rules ?? null;
+            if (!cid || !rules || typeof rules !== "object" || Array.isArray(rules)) continue;
+            const next = { ...rules, updatedAt: nowIso() } as any;
+            const v = next.values ?? {};
+            const mapValueList = (k: string) => {
+              const arr = Array.isArray(v?.[k]) ? v[k] : [];
+              v[k] = arr
+                .map((it: any) => ({
+                  text: String(it?.text ?? "").trim(),
+                  evidence: mapEvidence(it?.evidenceSegmentIds),
+                }))
+                .filter((it: any) => it.text);
+            };
+            mapValueList("principles");
+            mapValueList("priorities");
+            mapValueList("moralAccounting");
+            mapValueList("tabooFrames");
+            mapValueList("epistemicNorms");
+            mapValueList("templates");
+            next.values = { ...(v as any), scope: String(v?.scope ?? "author") || "author" };
+
+            const lenses = Array.isArray(next.analysisLenses) ? next.analysisLenses : [];
+            next.analysisLenses = lenses
+              .map((l: any) => ({
+                label: String(l?.label ?? "").trim(),
+                whenToUse: String(l?.whenToUse ?? "").trim(),
+                questions: Array.isArray(l?.questions) ? l.questions.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [],
+                templates: Array.isArray(l?.templates) ? l.templates.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [],
+                checks: Array.isArray(l?.checks) ? l.checks.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [],
+                evidence: mapEvidence(l?.evidenceSegmentIds),
+              }))
+              .filter((l: any) => l.label);
+
+            clusterRulesPrev[cid] = next;
+            updated += 1;
+          }
+
+          const prevPrefs = ((db.libraryPrefs as any)?.[libId] ?? {}) as KbLibraryPrefsV1;
+          const prevStyle = (prevPrefs.style ?? {}) as KbLibraryStylePrefsV1;
+          const nextPrefs: KbLibraryPrefsV1 = {
+            ...prevPrefs,
+            style: {
+              ...prevStyle,
+              updatedAt: nowIso(),
+              clusterRulesV1: clusterRulesPrev,
+            },
+          };
+          db.libraryPrefs = { ...(db.libraryPrefs ?? {}), [libId]: nextPrefs };
+
+          // 同步落到 playbook 虚拟文档下：cardType=cluster_rules_v1（便于 templates 阶段 kb.search）
+          const playbookRel = `__kb_playbook__/library/${libId}.md`;
+          const existingPlaybookDoc = db.sourceDocs.find((d) => d.libraryId === libId && d.importedFrom?.kind === "project" && (d.importedFrom as any).relPath === playbookRel);
+          const playbookDocId = existingPlaybookDoc?.id ?? makeId("kb_doc_playbook");
+          const now = nowIso();
+          const playbookDoc: KbSourceDoc = {
+            id: playbookDocId,
+            libraryId: libId,
+            title: existingPlaybookDoc?.title ?? `【仿写手册】${lib.name}`,
+            format: "md",
+            importedFrom: { kind: "project", relPath: playbookRel, entryIndex: 0 },
+            contentHash: existingPlaybookDoc?.contentHash ?? fnv1a32Hex(`${libId}:${now}`),
+            createdAt: existingPlaybookDoc?.createdAt ?? now,
+            updatedAt: now,
+          };
+
+          // 删除旧 cluster_rules_v1（避免重复堆积）
+          db.artifacts = db.artifacts.filter((a) => !(a.sourceDocId === playbookDocId && a.kind === "card" && String(a.cardType ?? "") === "cluster_rules_v1"));
+
+          const renderSpanEvidence = (ev: any[]) => {
+            const list = Array.isArray(ev) ? ev : [];
+            if (!list.length) return "";
+            return (
+              `\n\n---\n\n#### 证据（segments/anchors，可追溯）\n` +
+              list
+                .slice(0, 16)
+                .map((e: any) => {
+                  const sid = String(e?.segmentId ?? "").trim();
+                  const quote = String(e?.quote ?? "").trim();
+                  const doc = String(e?.sourceDocId ?? "").trim();
+                  return `- ${sid || "seg"}${doc ? ` · ${doc}` : ""}${quote ? `：${quote}` : ""}`;
+                })
+                .join("\n")
+            );
+          };
+
+          const byId = new Map(targets.map((t) => [t.clusterId, t]));
+          for (const [cid, rule] of Object.entries(clusterRulesPrev)) {
+            if (onlyClusterId && cid !== onlyClusterId) continue;
+            const meta = byId.get(cid);
+            const title = `【写法簇规则】${meta?.label || cid}`;
+            const values = (rule as any)?.values ?? {};
+            const lenses = Array.isArray((rule as any)?.analysisLenses) ? (rule as any).analysisLenses : [];
+            const evAll: any[] = [];
+            const takeEv = (arr: any[]) => {
+              for (const it of Array.isArray(arr) ? arr : []) {
+                for (const e of Array.isArray(it?.evidence) ? it.evidence : []) evAll.push(e);
+              }
+            };
+            takeEv(values?.principles);
+            takeEv(values?.priorities);
+            takeEv(values?.moralAccounting);
+            takeEv(values?.tabooFrames);
+            takeEv(values?.epistemicNorms);
+            takeEv(values?.templates);
+            for (const l of lenses) for (const e of Array.isArray((l as any)?.evidence) ? (l as any).evidence : []) evAll.push(e);
+            const content =
+              `### 写法簇规则（${meta?.label || cid}）\n\n` +
+              `- clusterId: ${cid}\n` +
+              `- values.scope: ${String(values?.scope ?? "author")}\n` +
+              `- values.principles: ${Array.isArray(values?.principles) ? values.principles.length : 0}\n` +
+              `- analysisLenses: ${lenses.length}\n\n` +
+              "```json\n" +
+              JSON.stringify(rule, null, 2) +
+              "\n```\n" +
+              renderSpanEvidence(evAll);
+            db.artifacts.push({
+              id: makeId("kb_card"),
+              sourceDocId: playbookDocId,
+              kind: "card",
+              title,
+              cardType: "cluster_rules_v1",
+              content,
+              facetIds: undefined,
+              anchor: { paragraphIndex: 0 },
+            });
+          }
+
+          db.sourceDocs = [...db.sourceDocs.filter((d) => d.id !== playbookDocId), playbookDoc];
+          await saveDb({ baseDir, ownerKey, db });
+          await get().refreshLibraries().catch(() => void 0);
+          return { ok: true, updated };
         } catch (e: any) {
           return { ok: false, error: String(e?.message ?? e) };
         }

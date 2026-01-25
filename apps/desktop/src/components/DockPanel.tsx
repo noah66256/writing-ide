@@ -83,6 +83,45 @@ export function DockPanel() {
     if (mainDoc.topic) lines.push(`- **选题**：${String(mainDoc.topic)}`);
     if (mainDoc.angle) lines.push(`- **角度**：${String(mainDoc.angle)}`);
     if (mainDoc.title) lines.push(`- **标题**：${String(mainDoc.title)}`);
+
+    // V2：为验收/审计展示 styleContractV1（只展示摘要，避免把整份规则卡塞满）
+    const sc = (mainDoc as any)?.styleContractV1;
+    if (sc && typeof sc === "object" && !Array.isArray(sc)) {
+      const libName = String((sc as any)?.libraryName ?? "").trim();
+      const libId = String((sc as any)?.libraryId ?? "").trim();
+      const cid = String((sc as any)?.selectedCluster?.id ?? "").trim();
+      const clabel = String((sc as any)?.selectedCluster?.label ?? "").trim();
+      const values = (sc as any)?.values ?? (sc as any)?.clusterRulesV1?.values ?? null;
+      const lenses = (sc as any)?.analysisLenses ?? (sc as any)?.clusterRulesV1?.analysisLenses ?? null;
+      const countEvidenceInItems = (arr: any[]) =>
+        (Array.isArray(arr) ? arr : []).reduce((sum, it) => sum + (Array.isArray((it as any)?.evidence) ? (it as any).evidence.length : 0), 0);
+
+      lines.push(`\n---\n\n### Style Contract（摘要）`);
+      if (libName || libId) lines.push(`- **风格库**：${libName || libId}${libName && libId ? `（${libId}）` : ""}`);
+      if (cid) lines.push(`- **写法簇**：${cid}${clabel ? ` · ${clabel}` : ""}`);
+      if (values && typeof values === "object" && !Array.isArray(values)) {
+        const v = values as any;
+        const nPrinciples = Array.isArray(v.principles) ? v.principles.length : 0;
+        const nPriorities = Array.isArray(v.priorities) ? v.priorities.length : 0;
+        const nMoral = Array.isArray(v.moralAccounting) ? v.moralAccounting.length : 0;
+        const nTaboo = Array.isArray(v.tabooFrames) ? v.tabooFrames.length : 0;
+        const nEpi = Array.isArray(v.epistemicNorms) ? v.epistemicNorms.length : 0;
+        const nTpl = Array.isArray(v.templates) ? v.templates.length : 0;
+        const ev =
+          countEvidenceInItems(v.principles) +
+          countEvidenceInItems(v.priorities) +
+          countEvidenceInItems(v.moralAccounting) +
+          countEvidenceInItems(v.tabooFrames) +
+          countEvidenceInItems(v.epistemicNorms) +
+          countEvidenceInItems(v.templates);
+        lines.push(`- **Values**：principles=${nPrinciples} priorities=${nPriorities} moral=${nMoral} taboo=${nTaboo} epistemic=${nEpi} templates=${nTpl} · evidence=${ev}`);
+      }
+      if (Array.isArray(lenses)) {
+        const ev = countEvidenceInItems(lenses);
+        lines.push(`- **Analysis Lenses**：${lenses.length} · evidence=${ev}`);
+      }
+    }
+
     if (mainDoc.outline) lines.push(`\n---\n\n### 当前大纲（摘要）\n\n${String(mainDoc.outline)}`);
     return lines.join("\n");
   }, [mainDoc]);

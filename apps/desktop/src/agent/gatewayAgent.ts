@@ -1682,6 +1682,10 @@ export function startGatewayRun(args: {
             const clusters = Array.isArray(snapshot?.clustersV1) ? snapshot.clustersV1 : [];
             const cfg = await useKbStore.getState().getLibraryStyleConfig(libId).catch(() => ({ ok: false, anchors: [] } as any));
             const defaultClusterId = cfg?.ok ? String((cfg as any).defaultClusterId ?? "").trim() : "";
+            const rulesByCluster =
+              cfg?.ok && (cfg as any)?.clusterRulesV1 && typeof (cfg as any).clusterRulesV1 === "object"
+                ? ((cfg as any).clusterRulesV1 as any)
+                : null;
 
             if (clusters.length) {
               const prompt = String(args.prompt ?? "").trim();
@@ -1734,6 +1738,15 @@ export function startGatewayRun(args: {
                     promptForGateway = `继续（已选 ${pickedId}）`;
                   }
                 }
+                const pickedRules = (() => {
+                  if (!pickedId || !rulesByCluster) return null;
+                  try {
+                    const r = (rulesByCluster as any)[pickedId];
+                    return r && typeof r === "object" && !Array.isArray(r) ? r : null;
+                  } catch {
+                    return null;
+                  }
+                })();
                 updateMainDoc({
                   styleContractV1: {
                     v: 1,
@@ -1744,6 +1757,10 @@ export function startGatewayRun(args: {
                       id: String(picked?.id ?? "").trim(),
                       label: String(picked?.label ?? "").trim(),
                     },
+                    // V2：写法簇规则卡（values / analysisLenses / templates / checks 等；来自本库 prefs）
+                    clusterRulesV1: pickedRules,
+                    values: pickedRules?.values ?? null,
+                    analysisLenses: pickedRules?.analysisLenses ?? null,
                     anchors: Array.isArray(picked?.anchors) ? picked.anchors.slice(0, 8) : [],
                     evidence: Array.isArray(picked?.evidence) ? picked.evidence.slice(0, 5) : [],
                     softRanges: picked?.softRanges ?? {},
