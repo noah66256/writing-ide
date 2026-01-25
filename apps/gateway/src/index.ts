@@ -3266,6 +3266,43 @@ fastify.post(
             continue;
           }
 
+          // 兜底：如果 run 已经“实质完成”（至少完成写入，且 todo 全部 done/cancelled），
+          // 不要因为最后一条输出的协议瑕疵把整次 run 以 protocol_error 结束（用户会误以为失败）。
+          const doneEnoughToIgnoreProtocolError = (() => {
+            if (!runState.hasWriteApplied) return false;
+            const todoListRaw = (runState as any).todoList;
+            const todoList = Array.isArray(todoListRaw) ? (todoListRaw as any[]) : [];
+            if (!todoList.length) return false;
+            const isDone = (s: string) => ["done", "completed", "cancelled", "canceled", "skipped"].includes(s);
+            const hasOpen = todoList.some((t: any) => {
+              const st = String(t?.status ?? "").trim().toLowerCase();
+              return st ? !isDone(st) : true;
+            });
+            return !hasOpen;
+          })();
+          if (doneEnoughToIgnoreProtocolError) {
+            writePolicyDecision({
+              turn,
+              policy: "ProtocolPolicy",
+              decision: "end_ignore_protocol_error",
+              reasonCodes: ["protocol_error_ignored", "done"],
+              detail: { hint: "tool_calls/tool_call 消息必须 XML 独占", budget: "protocol" },
+            });
+            writeRunNotice({
+              turn,
+              kind: "warn",
+              title: "已完成：忽略末尾协议错误",
+              message: "检测到 run 已完成（写入已执行、todo 已完成），但模型末尾输出的工具 XML 不合规。已忽略并正常结束本次 run。",
+              policy: "ProtocolPolicy",
+              reasonCodes: ["protocol_error_ignored"],
+            });
+            writeEvent("run.end", { runId, reason: "text", reasonCodes: ["text", "protocol_error_ignored"], turn });
+            writeEvent("assistant.done", { reason: "text", turn });
+            reply.raw.end();
+            agentRunWaiters.delete(runId);
+            return;
+          }
+
           writePolicyDecision({
             turn,
             policy: "ProtocolPolicy",
@@ -3330,6 +3367,41 @@ fastify.post(
                 "你上一条输出看起来像工具调用，但 XML 解析失败。请立刻重新输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。"
             });
             continue;
+          }
+
+          // 同上：如果 run 已完成（写入已执行、todo 已完成），不要因为末尾坏 XML 把 run 判为失败。
+          const doneEnoughToIgnoreProtocolError = (() => {
+            if (!runState.hasWriteApplied) return false;
+            const todoListRaw = (runState as any).todoList;
+            const todoList = Array.isArray(todoListRaw) ? (todoListRaw as any[]) : [];
+            if (!todoList.length) return false;
+            const isDone = (s: string) => ["done", "completed", "cancelled", "canceled", "skipped"].includes(s);
+            const hasOpen = todoList.some((t: any) => {
+              const st = String(t?.status ?? "").trim().toLowerCase();
+              return st ? !isDone(st) : true;
+            });
+            return !hasOpen;
+          })();
+          if (doneEnoughToIgnoreProtocolError) {
+            writePolicyDecision({
+              turn,
+              policy: "ProtocolPolicy",
+              decision: "end_ignore_protocol_error",
+              reasonCodes: ["protocol_error_ignored", "done"],
+            });
+            writeRunNotice({
+              turn,
+              kind: "warn",
+              title: "已完成：忽略末尾协议错误",
+              message: "检测到 run 已完成（写入已执行、todo 已完成），但模型末尾输出的工具 XML 解析失败。已忽略并正常结束本次 run。",
+              policy: "ProtocolPolicy",
+              reasonCodes: ["protocol_error_ignored"],
+            });
+            writeEvent("run.end", { runId, reason: "text", reasonCodes: ["text", "protocol_error_ignored"], turn });
+            writeEvent("assistant.done", { reason: "text", turn });
+            reply.raw.end();
+            agentRunWaiters.delete(runId);
+            return;
           }
 
           writePolicyDecision({
