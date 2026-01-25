@@ -287,8 +287,9 @@ export function CardJobsModal() {
   const [anchorPickerSelected, setAnchorPickerSelected] = useState<Record<string, boolean>>({});
   const [anchorPickerClusterId, setAnchorPickerClusterId] = useState<string | null>(null);
   const [segmentFilter, setSegmentFilter] = useState<string>("");
-  const [rulesGenLoading, setRulesGenLoading] = useState(false);
-  const [rulesGenErr, setRulesGenErr] = useState<string | null>(null);
+  // rules auto-generate：按 cluster 记录状态，避免“点一个全都显示生成中”的 UI 误导
+  const [rulesGenLoadingByCluster, setRulesGenLoadingByCluster] = useState<Record<string, boolean>>({});
+  const [rulesGenErrByCluster, setRulesGenErrByCluster] = useState<Record<string, string>>({});
 
   const viewLib = useMemo(() => libraries.find((x) => x.id === viewLibId) ?? null, [libraries, viewLibId]);
   const isStyleLib = (viewLib as any)?.purpose === "style";
@@ -616,8 +617,8 @@ export function CardJobsModal() {
       setAnchorPickerOpen(false);
       setRulesEditor(null);
       setRulesEditorErr(null);
-      setRulesGenLoading(false);
-      setRulesGenErr(null);
+      setRulesGenLoadingByCluster({});
+      setRulesGenErrByCluster({});
       return;
     }
     void (async () => {
@@ -630,13 +631,13 @@ export function CardJobsModal() {
         setDefaultClusterId(null);
         setClusterLabels(null);
         setClusterRules(null);
-        setRulesGenErr(null);
+        setRulesGenErrByCluster({});
       } else {
         setAnchors(Array.isArray(r.anchors) ? r.anchors : []);
         setDefaultClusterId(r.defaultClusterId ? String(r.defaultClusterId) : null);
         setClusterLabels(r.clusterLabelsV1 && typeof r.clusterLabelsV1 === "object" ? (r.clusterLabelsV1 as any) : null);
         setClusterRules(r.clusterRulesV1 && typeof r.clusterRulesV1 === "object" ? (r.clusterRulesV1 as any) : null);
-        setRulesGenErr(null);
+        setRulesGenErrByCluster({});
       }
       setAnchorsLoading(false);
     })();
@@ -1345,6 +1346,14 @@ export function CardJobsModal() {
                                     const sr = (c?.softRanges ?? {}) as any;
                                     const fmtRange = (r: any) => (Array.isArray(r) && r.length === 2 ? `${r[0]}~${r[1]}` : "-");
                                     const evidence = Array.isArray(c?.evidence) ? c.evidence.slice(0, 4) : [];
+                                    const gen = clusterRules && typeof clusterRules === "object" ? (clusterRules as any)[cid] : null;
+                                    const genUpdatedAt = (() => {
+                                      const t = gen && typeof gen === "object" ? String((gen as any)?.updatedAt ?? "").trim() : "";
+                                      return t ? t.slice(0, 19).replace("T", " ") : "";
+                                    })();
+                                    const isGenLoading = Boolean((rulesGenLoadingByCluster as any)?.[cid]);
+                                    const genErr = String((rulesGenErrByCluster as any)?.[cid] ?? "").trim();
+                                    const anyGenLoading = Object.values(rulesGenLoadingByCluster ?? {}).some(Boolean);
 
                                     return (
                                       <div key={cid} style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel)", padding: 10 }}>
@@ -1359,6 +1368,9 @@ export function CardJobsModal() {
                                                 覆盖 {docCovCount}/{Number(fp?.corpus?.docs ?? 0) || 0} 篇 · {Math.round(docCovRate * 100)}%
                                               </span>
                                               {anchorN ? <span className="ctxPill">anchors：{anchorN}</span> : null}
+                                              <span className="ctxPill" title="该簇规则卡（clusterRulesV1）是否已生成">
+                                                {gen ? `规则卡：已生成${genUpdatedAt ? `（${genUpdatedAt}）` : ""}` : "规则卡：未生成"}
+                                              </span>
                                             </div>
                                             <div style={{ marginTop: 6, fontSize: 14, fontWeight: 900, color: "var(--text)" }}>{label}</div>
                                             <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -1411,25 +1423,29 @@ export function CardJobsModal() {
                                             <button
                                               className="btn btnIcon"
                                               type="button"
-                                              disabled={anchorsLoading || rulesGenLoading}
+                                              disabled={anchorsLoading || isGenLoading}
                                               title="自动生成该簇规则卡（values/lens/templates），并绑定证据（来自本簇 anchors/代表样例）"
                                               onClick={() => {
                                                 if (!viewLibId) return;
                                                 void (async () => {
-                                                  setRulesGenLoading(true);
-                                                  setRulesGenErr(null);
+                                                  setRulesGenLoadingByCluster((prev) => ({ ...(prev ?? {}), [cid]: true }));
+                                                  setRulesGenErrByCluster((prev) => {
+                                                    const next = { ...(prev ?? {}) };
+                                                    delete (next as any)[cid];
+                                                    return next;
+                                                  });
                                                   const r = await generateLibraryClusterRulesV1({ libraryId: viewLibId, clusterId: cid });
                                                   if (!r?.ok) {
-                                                    setRulesGenErr(r?.error ?? "GENERATE_FAILED");
+                                                    setRulesGenErrByCluster((prev) => ({ ...(prev ?? {}), [cid]: r?.error ?? "GENERATE_FAILED" }));
                                                   } else {
                                                     const cfg = await getLibraryStyleConfig(viewLibId);
                                                     if (cfg?.ok) setClusterRules(cfg.clusterRulesV1 && typeof cfg.clusterRulesV1 === "object" ? (cfg.clusterRulesV1 as any) : null);
                                                   }
-                                                  setRulesGenLoading(false);
+                                                  setRulesGenLoadingByCluster((prev) => ({ ...(prev ?? {}), [cid]: false }));
                                                 })();
                                               }}
                                             >
-                                              {rulesGenLoading ? "生成中…" : "自动生成"}
+                                              {isGenLoading ? "生成中…" : anyGenLoading ? "等待…" : "自动生成"}
                                             </button>
                                             <button
                                               className={`btn btnIcon ${isDefault ? "btnPrimary" : ""}`}
@@ -1466,9 +1482,9 @@ export function CardJobsModal() {
                                             ))}
                                           </div>
                                         ) : null}
-                                        {rulesGenErr ? (
+                                        {genErr ? (
                                           <div style={{ marginTop: 8, fontSize: 12, color: "rgba(220, 38, 38, 0.95)", whiteSpace: "pre-wrap" }}>
-                                            规则卡生成失败：{rulesGenErr}
+                                            规则卡生成失败：{genErr}
                                           </div>
                                         ) : null}
                                       </div>
