@@ -23,6 +23,7 @@
 - [Clipboard 导出 v0.1（spec：复制到小红书/公众号/知乎/飞书 + 不影响 Agent）](docs/specs/clipboard-export-v0.1.md)
 - [富文本/Markdown 编辑器高口碑功能池调研 v1（research）](docs/research/richtext-editor-feature-pool-v1.md)
 - [Todo 工具大搜（研究 v1）](docs/research/todo-tools-v1.md)
+- [Tool Calls Repair（小模型协议修复器 v1）](docs/research/tool-call-repair-v1.md)
 - [Run Todo v0.2（spec）](docs/specs/run-todo-v0.2.md)
 - [Desktop 打包与发布（Windows/macOS）](docs/release/desktop-packaging.md)
 - [Desktop 自动更新：方案调研 v1（research）](docs/research/desktop-auto-update-options-v1.md)

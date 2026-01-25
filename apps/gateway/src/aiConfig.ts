@@ -188,6 +188,10 @@ export function getDefaultStageDefinitionsFromEnv(): AiStageDefinition[] {
     .filter(Boolean);
   const embedModel = embedModels[0] || "text-embedding-3-large";
   const cardModel = String(process.env.LLM_CARD_MODEL ?? "").trim() || llmModel;
+  const toolRepairModel =
+    String(process.env.LLM_TOOL_REPAIR_MODEL ?? "").trim() ||
+    String(process.env.LLM_CARD_MODEL ?? "").trim() ||
+    llmModel;
   const linterModel =
     String(process.env.LLM_LINTER_MODEL ?? "").trim() ||
     String(process.env.LLM_CARD_MODEL ?? "").trim() ||
@@ -238,6 +242,17 @@ export function getDefaultStageDefinitionsFromEnv(): AiStageDefinition[] {
       defaultModel: llmModel,
       defaultTemperature: 0.7,
       defaultMaxTokens: 8000,
+      defaultEndpoint: "/v1/chat/completions",
+    },
+    {
+      key: "agent.tool_call_repair",
+      name: "Agent Tool Call Repair（工具 XML/参数 修复器）",
+      description:
+        "当模型输出的 <tool_calls> XML 解析失败、或工具参数未通过 schema 校验时，用一个“小模型”把输出修成严格可解析的工具调用。\n" +
+        "注意：它只是“格式/参数修复器”，不是决策器；最终仍会经过工具白名单与 schema 校验，不通过则丢弃并回退到让主模型重试。",
+      defaultModel: toolRepairModel,
+      defaultTemperature: 0,
+      defaultMaxTokens: 1200,
       defaultEndpoint: "/v1/chat/completions",
     },
     {
@@ -367,11 +382,16 @@ export function createAiConfigService(args: {
       normalizeBaseURL(String(process.env.LLM_LINTER_BASE_URL ?? "")) || envCardBase || envBase;
     const envLinterKey =
       normalizeApiKeyInput(String(process.env.LLM_LINTER_API_KEY ?? "")) || envCardKey || envKey;
+    const envToolRepairBase =
+      normalizeBaseURL(String(process.env.LLM_TOOL_REPAIR_BASE_URL ?? "")) || envBase;
+    const envToolRepairKey =
+      normalizeApiKeyInput(String(process.env.LLM_TOOL_REPAIR_API_KEY ?? "")) || envKey;
 
     const pickCredsForStage = (stageKey: string) => {
       if (stageKey === "embedding") return { baseURL: envEmbedBase || envBase, apiKey: envEmbedKey || envKey };
       if (stageKey.startsWith("rag.ingest.")) return { baseURL: envCardBase || envBase, apiKey: envCardKey || envKey };
       if (stageKey === "lint.style") return { baseURL: envLinterBase || envBase, apiKey: envLinterKey || envKey };
+      if (stageKey === "agent.tool_call_repair") return { baseURL: envToolRepairBase || envBase, apiKey: envToolRepairKey || envKey };
       return { baseURL: envBase, apiKey: envKey };
     };
 

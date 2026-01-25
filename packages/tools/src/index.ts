@@ -228,13 +228,33 @@ export const TOOL_LIST: ToolMeta[] = [
   },
   {
     name: "run.updateTodo",
-    description: "更新某一条 Todo 的状态/备注（用于记录进度）。",
+    description:
+      "更新某一条 Todo 的状态/备注（用于记录进度；legacy）。\n" +
+      "- 推荐优先用 run.todo.update（扁平参数版，LLM 更不容易漏 patch）。\n" +
+      "- 本工具兼容两种入参：\n" +
+      "  A) patch(JSON)：{ status?, note?, text? }\n" +
+      "  B) 顶层字段：status/note/text（Gateway 会自动封装成 patch）",
     args: [
       { name: "id", required: false, desc: "Todo ID（来自 run.setTodoList 的返回）。若当前仅有 1 条 todo，可省略。", type: "string" },
-      { name: "patch", required: true, desc: "JSON 对象：{ status?, note?, text? }", type: "json", jsonType: "object" },
+      { name: "patch", required: false, desc: "JSON 对象：{ status?, note?, text? }（推荐写法）", type: "json", jsonType: "object" },
+      { name: "status", required: false, desc: '可选：状态（"todo"|"in_progress"|"done"|"blocked"|"skipped"）', type: "string" },
+      { name: "note", required: false, desc: "可选：备注/阻塞原因", type: "string" },
+      { name: "text", required: false, desc: "可选：更新文本", type: "string" },
     ],
     modes: ["plan", "agent"],
-    inputSchema: { type: "object", properties: { id: { type: "string" }, patch: { type: "json", jsonType: "object" } }, required: ["patch"], additionalProperties: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string" },
+        patch: { type: "json", jsonType: "object" },
+        status: { type: "string" },
+        note: { type: "string" },
+        text: { type: "string" },
+      },
+      // patch 或任意一个扁平字段必须存在（避免空调用浪费协议重试预算）
+      oneOfRequired: [{ required: ["patch"] }, { required: ["status"] }, { required: ["note"] }, { required: ["text"] }],
+      additionalProperties: true,
+    },
   },
   {
     name: "run.todo.upsertMany",

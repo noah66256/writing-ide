@@ -1338,7 +1338,7 @@ const tools: ToolDefinition[] = [
   {
     name: "run.setTodoList",
     description:
-      "设置本次 Run 的 Todo List（用于进度追踪与防跑偏）。建议在澄清后立刻调用一次，并在执行过程中用 run.updateTodo 更新状态。",
+      "设置本次 Run 的 Todo List（用于进度追踪与防跑偏）。建议在澄清后立刻调用一次，并在执行过程中用 run.todo.update（推荐）或 run.updateTodo 更新状态。",
     args: [{ name: "items", required: true, desc: 'JSON 数组：TodoItem[]（{ id?, text, status?, note? }）' }],
     riskLevel: "low",
     applyPolicy: "auto_apply",
