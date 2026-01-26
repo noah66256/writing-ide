@@ -137,8 +137,10 @@ const server = http.createServer((req, res) => {
   const rawUrl = String(req.url || "/");
   const url = new URL(rawUrl, `http://${req.headers.host || "localhost"}`);
 
-  // 反代 /api 到 Gateway（同源消除跨端口/跨域问题）
-  if (url.pathname.startsWith("/api/")) {
+  // 反代到 Gateway（同源消除跨端口/跨域问题）
+  // - /api/*：Admin API（登录/配置/审计等）
+  // - /help/*：对外分享的“使用说明视频”等静态/流式内容（Gateway 负责 Range）
+  if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/help/")) {
     return proxyToGateway(req, res, url);
   }
 
