@@ -368,10 +368,21 @@ export function looksLikeClarifyQuestions(text: string) {
   const t = String(text ?? "").trim();
   if (!t) return false;
   if (t.length > 2000) return false;
-  return (
-    /[?？]/.test(t) ||
-    /(请问|是否|能否|方便|要不要|需要你|请确认|确认一下|需要确认|待确认|请选择|请选|你选|你更偏好|更偏好|偏好哪|更偏向|选哪个|选哪种|用哪个)/.test(t)
-  );
+  // 关键：避免把“叙述性反问/自问自答”（常见于口播文案）误判为“需要用户确认”。
+  // 我们只在“明显指向用户的询问/确认/选择”场景下返回 true。
+  const directAsk =
+    /(请问|是否|能否|方便|要不要|需要你|请确认|确认一下|需要确认|待确认|请选择|请选|你选|您选|你更偏好|更偏好|偏好哪|更偏向|选哪个|选哪种|用哪个)/.test(
+      t,
+    );
+  if (directAsk) return true;
+
+  // 仅有问号：只有在“短句 + 指向你/您 + 以问号结尾”时才视为澄清（避免口播里的“你说对不对？”之类）。
+  const hasQ = /[?？]/.test(t);
+  if (!hasQ) return false;
+  const endsQ = /[?？]\s*$/.test(t);
+  const hasYou = /(你|您)/.test(t);
+  const isShort = t.length <= 120;
+  return Boolean(endsQ && hasYou && isShort);
 }
 
 export function looksLikeFIMLeak(text: string) {

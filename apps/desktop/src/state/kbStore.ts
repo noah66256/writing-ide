@@ -307,7 +307,10 @@ type KbState = {
     skippedSample?: Array<{ path: string; reason: string }>;
     errors?: Array<{ path: string; error: string }>;
   }>;
-  importUrls: (urls: string[], opts?: { timeoutMs?: number; maxChars?: number }) => Promise<{
+  importUrls: (
+    urls: string[],
+    opts?: { timeoutMs?: number; maxChars?: number; split?: "auto" | "single" | "md_headings" | "dash" },
+  ) => Promise<{
     imported: number;
     skipped: number;
     docIds: string[];
@@ -446,12 +449,86 @@ function fnv1a32Hex(input: string) {
   return hash.toString(16).padStart(8, "0");
 }
 
+async function sha256Hex(input: string): Promise<string | null> {
+  try {
+    const anyCrypto = globalThis as any;
+    const subtle = anyCrypto?.crypto?.subtle;
+    if (!subtle || typeof subtle.digest !== "function") return null;
+    const enc = new TextEncoder();
+    const data = enc.encode(String(input ?? ""));
+    const buf = await subtle.digest("SHA-256", data);
+    const bytes = new Uint8Array(buf);
+    let out = "";
+    for (const b of bytes) out += b.toString(16).padStart(2, "0");
+    return out;
+  } catch {
+    return null;
+  }
+}
+
 function normalizeText(input: string) {
   return String(input ?? "")
     .replace(/^\uFEFF/, "")
     .replaceAll("\r\n", "\n")
     .replaceAll("\r", "\n")
     .trim();
+}
+
+function canonicalizeUrlForDedup(input: string): string {
+  const raw = String(input ?? "").trim();
+  if (!raw) return "";
+  try {
+    const u = new URL(raw);
+    u.hash = "";
+
+    // normalize host/protocol
+    u.protocol = u.protocol.toLowerCase();
+    u.hostname = u.hostname.toLowerCase();
+
+    // drop default ports
+    if ((u.protocol === "http:" && u.port === "80") || (u.protocol === "https:" && u.port === "443")) u.port = "";
+
+    // normalize pathname (trim trailing slash for non-root)
+    if (u.pathname.length > 1 && u.pathname.endsWith("/")) u.pathname = u.pathname.replace(/\/+$/, "");
+
+    // strip common tracking params + sort
+    const drop = new Set([
+      "utm_source",
+      "utm_medium",
+      "utm_campaign",
+      "utm_term",
+      "utm_content",
+      "utm_id",
+      "gclid",
+      "fbclid",
+      "igshid",
+      "spm",
+      "scid",
+      "mc_cid",
+      "mc_eid",
+      "_hsenc",
+      "_hsmi",
+      "mkt_tok",
+      "ref",
+      "ref_src",
+      "source",
+    ]);
+    const kept: Array<[string, string]> = [];
+    for (const [k, v] of u.searchParams.entries()) {
+      const key = String(k ?? "").trim();
+      if (!key) continue;
+      if (drop.has(key.toLowerCase())) continue;
+      kept.push([key, String(v ?? "")]);
+    }
+    kept.sort((a, b) => (a[0] === b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0])));
+    u.search = "";
+    for (const [k, v] of kept) u.searchParams.append(k, v);
+
+    return u.toString();
+  } catch {
+    // not a valid URL -> keep original (best-effort)
+    return raw;
+  }
 }
 
 function normalizeFacetPackId(input?: string | null) {
@@ -520,6 +597,36 @@ function splitIntoEntries(args: { text: string }): KbEntry[] {
     if (out.length >= 2) return out;
   }
 
+  // Strategy C: --- 分隔（避免把 YAML frontmatter 当分隔）
+  const isSep = (s: string) => /^\s*---\s*$/.test(s);
+  let start = 0;
+  if (lines[0] && isSep(lines[0])) {
+    // YAML frontmatter: --- ... ---
+    for (let i = 1; i < lines.length; i += 1) {
+      if (isSep(lines[i] ?? "")) {
+        start = i + 1;
+        break;
+      }
+    }
+  }
+  const sepIdxs: number[] = [];
+  for (let i = start; i < lines.length; i += 1) if (isSep(lines[i] ?? "")) sepIdxs.push(i);
+  if (sepIdxs.length >= 1) {
+    const out: KbEntry[] = [];
+    let from = start;
+    const cuts = [...sepIdxs, lines.length];
+    for (const cut of cuts) {
+      const chunk = normalizeText(lines.slice(from, cut).join("\n"));
+      from = cut + 1;
+      if (!chunk) continue;
+      // title: first heading or first line
+      const m = chunk.match(/^#{1,3}\s+(.+)$/m);
+      const title = m?.[1] ? String(m[1]).trim().slice(0, 80) : String(chunk.split("\n").find((x) => x.trim()) ?? "").trim().slice(0, 80);
+      out.push({ entryIndex: out.length, ...(title ? { title } : {}), text: chunk });
+    }
+    if (out.length >= 2) return out;
+  }
+
   return [{ entryIndex: 0, text: raw }];
 }
 
@@ -561,7 +668,11 @@ function sameImportedFrom(a: ImportedFrom, b: ImportedFrom): boolean {
   if (ai !== bi) return false;
   if (a.kind === "project") return String((a as any).relPath ?? "") === String((b as any).relPath ?? "");
   if (a.kind === "file") return String((a as any).absPath ?? "") === String((b as any).absPath ?? "");
-  if (a.kind === "url") return String((a as any).url ?? "") === String((b as any).url ?? "");
+  if (a.kind === "url") {
+    const au = canonicalizeUrlForDedup(String((a as any).url ?? ""));
+    const bu = canonicalizeUrlForDedup(String((b as any).url ?? ""));
+    return au && bu ? au === bu : String((a as any).url ?? "") === String((b as any).url ?? "");
+  }
   return false;
 }
 
@@ -3097,41 +3208,55 @@ export const useKbStore = create<KbState>()(
             return { imported: 0, skipped: 0, docIds: [] };
           }
 
-          const unique = Array.from(new Set((urls ?? []).map((u) => String(u ?? "").trim()).filter(Boolean)));
-          for (const u0 of unique) {
-            const url = String(u0 ?? "").trim();
-            if (!/^https?:\/\//i.test(url)) {
-              bumpSkip("invalid_url", url);
+          const uniqueRaw = Array.from(new Set((urls ?? []).map((u) => String(u ?? "").trim()).filter(Boolean)));
+          const canonMap = new Map<string, string>(); // canonical -> raw(first)
+          for (const raw of uniqueRaw) {
+            if (!/^https?:\/\//i.test(raw)) {
+              bumpSkip("invalid_url", raw);
               continue;
             }
+            const canon = canonicalizeUrlForDedup(raw);
+            if (!canon) {
+              bumpSkip("invalid_url", raw);
+              continue;
+            }
+            if (!canonMap.has(canon)) canonMap.set(canon, raw);
+          }
 
+          for (const [canonUrl, rawUrl] of canonMap.entries()) {
             const fetched = await postFetchUrlForIngest({
-              url,
+              url: rawUrl,
               format: "text",
               timeoutMs: typeof opts?.timeoutMs === "number" ? opts!.timeoutMs : undefined,
               maxChars: typeof opts?.maxChars === "number" ? opts!.maxChars : undefined,
             });
             if (!fetched.ok) {
               const err = String(fetched.error ?? "FETCH_FAILED");
-              errors.push({ url, error: err });
-              bumpSkip("fetch_failed", url);
+              errors.push({ url: canonUrl, error: err });
+              bumpSkip("fetch_failed", canonUrl);
               continue;
             }
 
             const text = normalizeText(String((fetched as any).extractedText ?? (fetched as any).extractedMarkdown ?? ""));
             if (!text) {
-              bumpSkip("empty_fetch", url);
+              bumpSkip("empty_fetch", canonUrl);
               continue;
             }
 
-            const entries = splitIntoEntries({ text });
+            const split = String((opts as any)?.split ?? "auto").trim();
+            const entries =
+              split === "single"
+                ? [{ entryIndex: 0, text }]
+                : // auto / md_headings / dash（策略内部会自行判断是否可分割）
+                  splitIntoEntries({ text });
             if (!entries.length) {
-              bumpSkip("no_entries", url);
+              bumpSkip("no_entries", canonUrl);
               continue;
             }
 
             const titleHint = String((fetched as any).title ?? "").trim() || undefined;
-            const finalUrl = String((fetched as any).finalUrl ?? "").trim() || url;
+            const finalUrlRaw = String((fetched as any).finalUrl ?? "").trim() || canonUrl;
+            const finalUrl = canonicalizeUrlForDedup(finalUrlRaw) || finalUrlRaw;
             const fetchedAt = String((fetched as any).fetchedAt ?? "").trim() || undefined;
             const baseHash = String((fetched as any).contentHash ?? "").trim();
 
@@ -3139,12 +3264,21 @@ export const useKbStore = create<KbState>()(
               const entryIndex = Number.isFinite(entry.entryIndex) ? entry.entryIndex : 0;
               const entryText = normalizeText(entry.text);
               if (!entryText) {
-                bumpSkip("empty_entry", `${url}#${entryIndex}`);
+                bumpSkip("empty_entry", `${canonUrl}#${entryIndex}`);
                 continue;
               }
-              // v0.1：单 entry 时复用网关 sha256(contentHash)；多 entry 暂用 fnv1a32（避免引入 sha256 计算依赖）
-              const contentHash = entries.length === 1 && baseHash ? baseHash : fnv1a32Hex(entryText);
-              const importedFrom: ImportedFrom = { kind: "url", url, finalUrl, ...(fetchedAt ? { fetchedAt } : {}), entryIndex };
+              // URL hash：优先复用网关 sha256（单 entry）；多 entry 则对每个 entryText 计算 sha256（若 crypto 不可用再回退 fnv1a32）
+              const contentHash =
+                entries.length === 1 && baseHash
+                  ? baseHash
+                  : (await sha256Hex(entryText)) ?? fnv1a32Hex(entryText);
+              const importedFrom: ImportedFrom = {
+                kind: "url",
+                url: canonUrl,
+                finalUrl,
+                ...(fetchedAt ? { fetchedAt } : {}),
+                entryIndex,
+              };
 
               const ret = await ingestEntryToDb({
                 baseDir,
@@ -3159,7 +3293,7 @@ export const useKbStore = create<KbState>()(
                 entryTitle: String(entry.title ?? "").trim() || undefined,
               });
               if (!ret.imported) {
-                bumpSkip(ret.skippedReason ?? "duplicate_same_hash", `${url}#${entryIndex}`);
+                bumpSkip(ret.skippedReason ?? "duplicate_same_hash", `${canonUrl}#${entryIndex}`);
                 addDocId(ret.docId);
                 continue;
               }

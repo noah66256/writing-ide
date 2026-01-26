@@ -39,6 +39,7 @@ export function CardJobsModal() {
   const open = useKbStore((s) => s.kbManagerOpen);
   const tab = useKbStore((s) => s.kbManagerTab);
   const notice = useKbStore((s) => s.kbManagerNotice);
+  const isLoading = useKbStore((s) => s.isLoading);
   const status = useKbStore((s) => s.cardJobStatus);
   const jobs = useKbStore((s) => s.cardJobs);
   const playbookJobs = useKbStore((s) => s.playbookJobs);
@@ -62,6 +63,8 @@ export function CardJobsModal() {
   const setLibraryPurpose = useKbStore((s) => s.setLibraryPurpose);
   const setLibraryFacetPack = useKbStore((s) => s.setLibraryFacetPack);
   const enqueuePlaybookJob = useKbStore((s) => s.enqueuePlaybookJob);
+  const enqueueCardJobs = useKbStore((s) => s.enqueueCardJobs);
+  const importUrls = useKbStore((s) => s.importUrls);
   const deleteLibraryToTrash = useKbStore((s) => s.deleteLibraryToTrash);
   const restoreLibraryFromTrash = useKbStore((s) => s.restoreLibraryFromTrash);
   const purgeLibrary = useKbStore((s) => s.purgeLibrary);
@@ -933,6 +936,51 @@ export function CardJobsModal() {
               </button>
               <button className="btn btnIcon" type="button" onClick={() => void refreshLibraries()}>
                 刷新
+              </button>
+              <button
+                className="btn btnIcon"
+                type="button"
+                disabled={!currentLibraryId || isLoading}
+                title={!currentLibraryId ? "请先设为当前库，再导入 URL" : "导入网页正文到本地 KB（每行一个 URL）"}
+                onClick={() => {
+                  void (async () => {
+                    if (!currentLibraryId) {
+                      void uiAlert({ title: "提示", message: "请先选择一个库并设为“当前库”，再导入 URL。" });
+                      return;
+                    }
+                    const v = await uiPrompt({
+                      title: "导入 URL",
+                      message: "每行一个 URL（仅支持 http/https）。导入后会入队到“抽卡任务”（不自动开始）。",
+                      placeholder: "https://example.com/article\nhttps://example.com/another",
+                      confirmText: "开始导入",
+                      multiline: true,
+                    });
+                    if (!v) return;
+                    const list = String(v)
+                      .split(/\r?\n/g)
+                      .map((s) => String(s ?? "").trim())
+                      .filter(Boolean);
+                    if (!list.length) return;
+
+                    const ret = await importUrls(list);
+                    const docIds = ret.docIds ?? [];
+                    const errorCount = Array.isArray(ret.errors) ? ret.errors.length : 0;
+                    const msg =
+                      `导入完成：新增/更新 ${ret.imported} 条，跳过 ${ret.skipped} 条` +
+                      (errorCount ? `，失败 ${errorCount} 条` : "") +
+                      (docIds.length ? `。\n\n已生成文档：${docIds.length} 条（将入队抽卡任务）` : "。");
+
+                    if (docIds.length) {
+                      await enqueueCardJobs(docIds, { open: true, autoStart: false });
+                      openKbManager("jobs", msg);
+                    } else {
+                      openKbManager("libraries", msg);
+                    }
+                    void uiAlert({ title: "导入结果", message: msg });
+                  })();
+                }}
+              >
+                导入 URL
               </button>
               <span className="ctxPill">当前库：{currentLibraryId ? currentLibraryId : "（未选择）"}</span>
             </div>

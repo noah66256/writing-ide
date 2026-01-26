@@ -5760,10 +5760,13 @@ fastify.post(
               (note ? `- 备注：${note.slice(0, 200)}\n` : ""),
           });
 
+          const hasErrors = execReport.errors.length > 0;
+          const reasonCodes = hasErrors ? (["done", "done_with_errors"] as const) : (["done"] as const);
+
           writeEvent("run.end", {
             runId,
             reason: "done",
-            reasonCodes: ["done"],
+            reasonCodes: [...reasonCodes],
             turn,
             report: {
               ms,

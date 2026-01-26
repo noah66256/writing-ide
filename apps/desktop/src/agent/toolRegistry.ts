@@ -958,9 +958,15 @@ const tools: ToolDefinition[] = [
       "从本地知识库按定位精确取一段原文证据（用于引用/脚注/审计）。通常先 kb.search 拿到候选，再用 kb.cite 拉取命中条目的原文段（避免 kb.search 返回全文导致 token 爆炸）。",
     args: [
       { name: "sourceDocId", required: true, desc: "源文档 ID（kb_doc_*）" },
-      { name: "artifactId", required: false, desc: "可选：artifact id（优先；从 kb.search 命中里取）" },
-      { name: "paragraphIndex", required: false, desc: "可选：段落索引（仅对 paragraph 有效）" },
-      { name: "headingPath", required: false, desc: '可选：标题路径（数组或 "A > B" 字符串；将返回该标题下第一段）' },
+      {
+        name: "anchor",
+        required: false,
+        desc: '可选：定位锚点（推荐）：{kind:"artifactId",artifactId} | {kind:"paragraph",paragraphIndex} | {kind:"headingPath",headingPath}。与文档开工 spec 对齐。',
+      },
+      // 兼容旧入参（v0.1 已上车的扁平参数）
+      { name: "artifactId", required: false, desc: "兼容：artifact id（优先；从 kb.search 命中里取）" },
+      { name: "paragraphIndex", required: false, desc: "兼容：段落索引（仅对 paragraph 有效）" },
+      { name: "headingPath", required: false, desc: '兼容：标题路径（数组或 "A > B" 字符串；将返回该标题下第一段）' },
       { name: "maxChars", required: false, desc: "可选：返回内容最大字符数（默认 1000，最大 4000）" },
       { name: "quoteMaxChars", required: false, desc: "可选：quote 预览最大字符数（默认 200）" },
     ],
@@ -970,11 +976,21 @@ const tools: ToolDefinition[] = [
     run: async (args) => {
       const sourceDocId = String((args as any).sourceDocId ?? "").trim();
       if (!sourceDocId) return { ok: false, error: "DOC_ID_REQUIRED" };
-      const artifactId = String((args as any).artifactId ?? "").trim() || undefined;
-      const paragraphIndexRaw = (args as any).paragraphIndex;
+
+      const anchorRaw = (args as any).anchor;
+      const anchorKind = String(anchorRaw?.kind ?? "").trim();
+      const anchorArtifactId =
+        anchorKind === "artifactId" ? String(anchorRaw?.artifactId ?? "").trim() : anchorKind === "artifact" ? String(anchorRaw?.id ?? "").trim() : "";
+      const anchorParagraphIndexRaw = anchorKind === "paragraph" ? anchorRaw?.paragraphIndex : anchorRaw?.index;
+      const anchorHeadingPath = anchorKind === "headingPath" ? anchorRaw?.headingPath : anchorRaw?.path;
+
+      const artifactId =
+        (anchorArtifactId ? anchorArtifactId : String((args as any).artifactId ?? "").trim()) || undefined;
+      const paragraphIndexRaw = anchorArtifactId ? undefined : anchorParagraphIndexRaw ?? (args as any).paragraphIndex;
       const paragraphIndexNum = Number(paragraphIndexRaw);
       const paragraphIndex = Number.isFinite(paragraphIndexNum) ? Math.max(0, Math.floor(paragraphIndexNum)) : undefined;
-      const headingPath = (args as any).headingPath;
+      const headingPath = anchorHeadingPath ?? (args as any).headingPath;
+
       const maxCharsRaw = (args as any).maxChars;
       const quoteMaxCharsRaw = (args as any).quoteMaxChars;
       const maxCharsNum = Number(maxCharsRaw);
@@ -2341,14 +2357,27 @@ const tools: ToolDefinition[] = [
       };
       const normalized: One[] = [];
       for (const e of edits) {
-        const sl = Number(e?.startLineNumber);
-        const sc = Number(e?.startColumn);
-        const el = Number(e?.endLineNumber);
-        const ec = Number(e?.endColumn);
+        const sl0 = Number(e?.startLineNumber);
+        const sc0 = Number(e?.startColumn);
+        const el0 = Number(e?.endLineNumber);
+        const ec0 = Number(e?.endColumn);
         const text = String(e?.text ?? "");
-        if (![sl, sc, el, ec].every((n) => Number.isFinite(n) && n > 0)) {
-          return { ok: false, error: "INVALID_RANGE" };
+        // Monaco range 是 1-based。部分模型会给 0-based（尤其 column=0）。
+        // 为了减少无意义失败：允许 0，并把 0 纠正为 1（其余数字取 floor）。
+        if (![sl0, sc0, el0, ec0].every((n) => Number.isFinite(n) && n >= 0)) {
+          return {
+            ok: false,
+            error: "INVALID_RANGE",
+            detail: {
+              hint: "Monaco range 必须是 1-based（line/column 从 1 开始）。",
+              got: { startLineNumber: sl0, startColumn: sc0, endLineNumber: el0, endColumn: ec0 },
+            },
+          };
         }
+        const sl = Math.max(1, Math.floor(sl0 || 1));
+        const sc = Math.max(1, Math.floor(sc0 || 1));
+        const el = Math.max(1, Math.floor(el0 || 1));
+        const ec = Math.max(1, Math.floor(ec0 || 1));
         normalized.push({ startLineNumber: sl, startColumn: sc, endLineNumber: el, endColumn: ec, text });
       }
 
