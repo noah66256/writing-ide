@@ -60,6 +60,40 @@ function parseSseToolArgs(rawArgs: Record<string, string>) {
   return out;
 }
 
+function oneLine(s: unknown, max = 48) {
+  const t = String(s ?? "").replace(/\s+/g, " ").trim();
+  if (!t) return "";
+  return t.length <= max ? t : t.slice(0, max) + "…";
+}
+
+function humanizeToolActivity(name: string, args: Record<string, unknown>) {
+  const tool = String(name ?? "");
+  if (!tool) return "正在执行工具…";
+  if (tool === "time.now") return "正在读取时间…";
+  if (tool === "run.setTodoList" || tool.startsWith("run.todo.")) return "正在更新 To-dos…";
+  if (tool === "run.done") return "正在结束本次运行…";
+  if (tool === "kb.search") return "正在检索知识库…";
+  if (tool === "doc.read") return "正在读取文件…";
+  if (tool === "doc.write" || tool === "doc.previewDiff" || tool === "doc.splitToDir") return "正在写入文件…";
+  if (tool === "web.search") {
+    const q = oneLine((args as any)?.query ?? (args as any)?.q ?? (args as any)?.keyword, 36);
+    return q ? `正在全网搜索：${q}` : "正在全网搜索…";
+  }
+  if (tool === "web.fetch") {
+    const url = String((args as any)?.url ?? "");
+    if (!url) return "正在抓取网页正文…";
+    try {
+      const u = new URL(url);
+      return `正在抓取网页正文：${u.hostname}`;
+    } catch {
+      return "正在抓取网页正文…";
+    }
+  }
+  if (tool === "lint.style") return "正在做风格校验…";
+  if (tool === "lint.copy") return "正在做抄袭/复述风险检查…";
+  return `正在执行：${tool}…`;
+}
+
 function parseSseBlock(block: string): SseEvent | null {
   // Very small SSE parser: expects lines like "event: xxx" and "data: {...}"
   const lines = block
@@ -2135,9 +2169,10 @@ export function startGatewayRun(args: {
             const name = String(payload?.name ?? "");
             const rawArgs = (payload?.args ?? {}) as Record<string, string>;
             const executedBy = String(payload?.executedBy ?? "desktop");
+            const parsedArgsPreview = parseSseToolArgs(rawArgs);
 
             log("info", "tool.call", { toolCallId, name });
-            setActivity(executedBy === "gateway" ? `正在等待 Gateway 执行工具：${name}…` : `正在执行工具：${name}…`, { resetTimer: true });
+            setActivity(humanizeToolActivity(name, parsedArgsPreview), { resetTimer: true });
 
             // 兼容：旧实现里 Gateway 可能不会在每次模型调用结束都发 assistant.done（现在 tool_calls 分支也会发）。
             // 如果此时不手动结束当前 assistant 气泡，后续新的 assistant.delta 会继续追加到“上面那条气泡”，
@@ -2150,7 +2185,7 @@ export function startGatewayRun(args: {
             // Gateway 执行：Desktop 只创建占位 ToolBlock（running），等待 tool.result 回填，不执行本地工具也不回传 tool_result。
             if (executedBy === "gateway") {
               const def = getTool(name);
-              const parsedArgs = parseSseToolArgs(rawArgs);
+              const parsedArgs = parsedArgsPreview;
               const stepId = addTool({
                 toolName: name,
                 status: "running",

@@ -4,6 +4,11 @@ contextBridge.exposeInMainWorld("desktop", {
   ping() {
     return "pong";
   },
+  window: {
+    focusMain() {
+      return ipcRenderer.invoke("window.focusMain");
+    },
+  },
   onMenuAction(handler) {
     if (typeof handler !== "function") return () => {};
     const listener = (_event, payload) => handler(payload);

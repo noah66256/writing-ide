@@ -554,8 +554,8 @@ export function analyzeAutoRetryText(args: {
     target >= 200 &&
     looksDraft &&
     args.intent.isWritingTask &&
-    // 只做“明显偏离”提醒（避免卡在细微误差）
-    (t.length < target * 0.72 || t.length > target * 1.35);
+    // 与提示文案保持一致：目标字数允许上下浮动约 ±20%
+    (t.length < target * 0.8 || t.length > target * 1.2);
   const needFinalText = isEmpty && !needTodo && !needWrite && !needKb && !needCopy && !needLint;
 
   const reasons: string[] = [];

@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useProjectStore, type ProjectFile } from "../state/projectStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
 import { useKbStore } from "../state/kbStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useRunStore } from "../state/runStore";
+import { useDialogStore } from "../state/dialogStore";
 import { useUiStore } from "../state/uiStore";
 import { IconFilePlus, IconFolderOpen, IconFolderPlus, IconImport, IconMove, IconRefresh, IconTrash, IconX } from "./Icons";
 
@@ -147,7 +148,38 @@ export function Explorer() {
   const [ctx, setCtx] = useState<CtxMenu | null>(null);
   const [prompt, setPrompt] = useState<PromptState | null>(null);
   const promptInputRef = useRef<HTMLInputElement | null>(null);
+  const promptModalRef = useRef<HTMLDivElement | null>(null);
   const ctxMenuRef = useRef<HTMLDivElement | null>(null);
+  const promptSessionRef = useRef<number>(0);
+  const promptFocusAttemptRef = useRef<number>(0);
+  const promptKeyLogRef = useRef<number>(0);
+  const promptPtrLogRef = useRef<number>(0);
+
+  const uiAlert = useDialogStore((s) => s.openAlert);
+  const uiConfirm = useDialogStore((s) => s.openConfirm);
+
+  const describeEl = (el: EventTarget | null) => {
+    const node = el as HTMLElement | null;
+    if (!node || typeof (node as any).tagName !== "string") return null;
+    const tag = String((node as any).tagName ?? "");
+    const id = String((node as any).id ?? "");
+    const ariaLabel = String(node.getAttribute?.("aria-label") ?? "");
+    const className = String((node as any).className ?? "").slice(0, 140);
+    const role = String(node.getAttribute?.("role") ?? "");
+    const name = String(node.getAttribute?.("name") ?? "");
+    const type = String((node as any).type ?? "");
+    return { tag, id, ariaLabel, className, role, name, type };
+  };
+
+  const safeRect = (el: HTMLElement | null) => {
+    try {
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+    } catch {
+      return null;
+    }
+  };
 
   const isDirOpen = (p: string) => (p ? !!expanded[p] : true);
 
@@ -244,11 +276,183 @@ export function Explorer() {
     return () => window.removeEventListener("mousedown", onDown);
   }, [ctx]);
 
+  const focusPromptSoon = (opts?: { reason?: string }) => {
+    const tryFocus = () => {
+      try {
+        const input = promptInputRef.current;
+        const modal = promptModalRef.current;
+        const before = describeEl(document.activeElement);
+        const docHasFocus = typeof document.hasFocus === "function" ? document.hasFocus() : null;
+        const inputRect = safeRect(input);
+        const modalRect = safeRect(modal);
+
+        // 关键：如果窗口没拿到系统焦点（docHasFocus=false），即使 activeElement=INPUT 也打不了字。
+        // 典型场景：刚关闭 confirm/alert 等原生对话框后，焦点没自动回到 BrowserWindow。
+        if (docHasFocus === false) {
+          try {
+            void window.desktop?.window?.focusMain?.();
+          } catch {
+            // ignore
+          }
+          try {
+            window.focus();
+          } catch {
+            // ignore
+          }
+        }
+
+        input?.focus();
+        input?.select?.();
+
+        const after = describeEl(document.activeElement);
+        const focused = Boolean(input && document.activeElement === input);
+
+        // 限流：避免每次 focusin/重试刷屏
+        const attempt = (promptFocusAttemptRef.current += 1);
+        if (attempt <= 14) {
+          useRunStore.getState().log("info", "ui.explorerPrompt.focusAttempt", {
+            session: promptSessionRef.current,
+            reason: opts?.reason ?? "",
+            attempt,
+            focused,
+            docHasFocus,
+            activeBefore: before,
+            activeAfter: after,
+            input: {
+              exists: Boolean(input),
+              connected: Boolean((input as any)?.isConnected),
+              disabled: Boolean((input as any)?.disabled),
+              readOnly: Boolean((input as any)?.readOnly),
+              tabIndex: typeof (input as any)?.tabIndex === "number" ? (input as any).tabIndex : null,
+              rect: inputRect,
+            },
+            modal: {
+              exists: Boolean(modal),
+              connected: Boolean((modal as any)?.isConnected),
+              rect: modalRect,
+            },
+          });
+        } else if (attempt === 15) {
+          useRunStore.getState().log("info", "ui.explorerPrompt.focusAttempt_suppressed", { session: promptSessionRef.current });
+        }
+      } catch {
+        // ignore
+      }
+    };
+    // 经验：有些操作（例如删除/刷新/编辑器更新）会在 prompt 打开后“抢回焦点”
+    // 因此这里做多次尝试：rAF + setTimeout
+    requestAnimationFrame(() => {
+      tryFocus();
+      requestAnimationFrame(() => tryFocus());
+      window.setTimeout(() => tryFocus(), 0);
+      window.setTimeout(() => tryFocus(), 50);
+      window.setTimeout(() => tryFocus(), 120);
+    });
+
+    // 保留一个“起点快照”（但真正判断以 focusAttempt 的 activeAfter 为准）
+    if (opts?.reason) {
+      try {
+        useRunStore.getState().log("info", "ui.explorerPrompt.focusSoon", {
+          session: promptSessionRef.current,
+          reason: opts.reason,
+          activeElement: describeEl(document.activeElement),
+        });
+      } catch {
+        // ignore
+      }
+    }
+  };
+
+  // 关键：prompt 打开后立刻可输入（并防止被其它区域抢焦点）
+  useLayoutEffect(() => {
+    if (!prompt) return;
+    promptSessionRef.current = Date.now();
+    promptFocusAttemptRef.current = 0;
+    promptKeyLogRef.current = 0;
+    promptPtrLogRef.current = 0;
+    focusPromptSoon({ reason: "prompt_open" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prompt?.title]);
+
+  // Focus trap：prompt 打开期间，若焦点跑出 modal，则拉回输入框
   useEffect(() => {
     if (!prompt) return;
-    const t = window.setTimeout(() => promptInputRef.current?.focus(), 0);
-    return () => window.clearTimeout(t);
-  }, [prompt]);
+    const onFocusIn = (e: FocusEvent) => {
+      const modal = promptModalRef.current;
+      const target = e.target as Node | null;
+      if (modal && target && modal.contains(target)) return;
+      focusPromptSoon({ reason: "focus_escaped_modal" });
+    };
+    document.addEventListener("focusin", onFocusIn);
+    return () => document.removeEventListener("focusin", onFocusIn);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prompt?.title]);
+
+  // 诊断：prompt 打开期间记录“用户确实在打字/点击，但焦点不在输入框”的原因
+  useEffect(() => {
+    if (!prompt) return;
+    const onKeyDownCapture = (e: KeyboardEvent) => {
+      const input = promptInputRef.current;
+      const modal = promptModalRef.current;
+      const target = e.target as Node | null;
+      const inModal = Boolean(modal && target && modal.contains(target));
+      const focused = Boolean(input && document.activeElement === input);
+      const isTextKey = e.key.length === 1 || e.key === "Backspace" || e.key === "Delete";
+      if (!isTextKey) return;
+
+      // 只在“异常态”记录，避免每个字符都刷屏
+      if (!focused) {
+        const n = (promptKeyLogRef.current += 1);
+        if (n <= 18) {
+          useRunStore.getState().log("warn", "ui.explorerPrompt.keydown_not_focused", {
+            session: promptSessionRef.current,
+            key: e.key,
+            defaultPrevented: e.defaultPrevented,
+            inModal,
+            eventTarget: describeEl(e.target),
+            activeElement: describeEl(document.activeElement),
+          });
+        } else if (n === 19) {
+          useRunStore.getState().log("info", "ui.explorerPrompt.keydown_suppressed", { session: promptSessionRef.current });
+        }
+      } else if (e.defaultPrevented) {
+        // 极少见：输入框聚焦但按键被 preventDefault
+        useRunStore.getState().log("warn", "ui.explorerPrompt.keydown_prevented_while_focused", {
+          session: promptSessionRef.current,
+          key: e.key,
+          inModal,
+          eventTarget: describeEl(e.target),
+          activeElement: describeEl(document.activeElement),
+        });
+      }
+    };
+
+    const onPointerDownCapture = (e: PointerEvent) => {
+      const modal = promptModalRef.current;
+      const target = e.target as Node | null;
+      const inModal = Boolean(modal && target && modal.contains(target));
+      if (inModal) return;
+      const n = (promptPtrLogRef.current += 1);
+      if (n <= 12) {
+        useRunStore.getState().log("info", "ui.explorerPrompt.pointerdown_outside_modal", {
+          session: promptSessionRef.current,
+          button: (e as any).button ?? null,
+          eventTarget: describeEl(e.target),
+          activeElement: describeEl(document.activeElement),
+        });
+      } else if (n === 13) {
+        useRunStore.getState().log("info", "ui.explorerPrompt.pointerdown_suppressed", { session: promptSessionRef.current });
+      }
+    };
+
+    document.addEventListener("keydown", onKeyDownCapture, true);
+    document.addEventListener("pointerdown", onPointerDownCapture, true);
+    return () => {
+      document.removeEventListener("keydown", onKeyDownCapture, true);
+      document.removeEventListener("pointerdown", onPointerDownCapture, true);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prompt?.title]);
 
   const openProject = async () => {
     const api = window.desktop?.fs;
@@ -312,14 +516,14 @@ export function Explorer() {
 
       if (!list.length) {
         run.log("warn", "kb.import.no_text_files", { expandedCount: out.size, norm });
-        window.alert("未找到可导入的文本文件（仅支持 .md/.mdx/.txt）。");
+        void uiAlert({ title: "提示", message: "未找到可导入的文本文件（仅支持 .md/.mdx/.txt）。" });
         return;
       }
       if (!kb.baseDir) {
         run.log("warn", "kb.import.no_base_dir", { listCount: list.length });
         // 引导用户先选择 KB 目录
         useLayoutStore.getState().openSection("kb");
-        window.alert("请先在左侧 KB 面板选择 KB 目录，然后再导入。");
+        void uiAlert({ title: "提示", message: "请先在左侧 KB 面板选择 KB 目录，然后再导入。" });
         return;
       }
       if (!kb.currentLibraryId) {
@@ -333,7 +537,7 @@ export function Explorer() {
           "libraries",
           `请先选择一个库（强制）。已暂存待导入 ${list.length} 个文件，选库后会自动继续导入并加入抽卡队列（不会自动开始，需在“抽卡任务”里点 ▶）。`,
         );
-        window.alert("请先在“库管理”里选择一个库；选择后会自动继续导入并入队，需手动点 ▶ 开始抽卡。");
+        void uiAlert({ title: "提示", message: "请先在“库管理”里选择一个库；选择后会自动继续导入并入队，需手动点 ▶ 开始抽卡。" });
         return;
       }
 
@@ -369,7 +573,7 @@ export function Explorer() {
             (reasonText ? `（${reasonText}）` : "（可能是文件为空/读取失败/被判定为重复）") +
             "。请打开底部 DockPanel → Logs 查看详情。";
           kb.openKbManager("libraries", msg);
-          window.alert(msg);
+          void uiAlert({ title: "提示", message: msg });
           return;
         }
 
@@ -378,11 +582,11 @@ export function Explorer() {
         run.log("info", "kb.import.enqueue_jobs", { docIdCount: ret.docIds.length });
       })().catch((e: any) => {
         run.log("error", "kb.import.async_failed", { error: String(e?.message ?? e) });
-        window.alert(`导入失败：${String(e?.message ?? e)}`);
+        void uiAlert({ title: "导入失败", message: String(e?.message ?? e) });
       });
     } catch (e: any) {
       run.log("error", "kb.import.click_failed", { error: String(e?.message ?? e) });
-      window.alert(`导入触发异常：${String(e?.message ?? e)}`);
+      void uiAlert({ title: "导入触发异常", message: String(e?.message ?? e) });
     }
   };
 
@@ -442,7 +646,7 @@ export function Explorer() {
                   : e === "INTO_SELF"
                     ? "重命名失败：不能把文件夹移动到自身或子目录。"
                     : `重命名失败：${e}${r.detail ? `\n${r.detail}` : ""}`;
-          window.alert(msg);
+          void uiAlert({ title: "重命名失败", message: msg });
         }
       },
     });
@@ -471,22 +675,38 @@ export function Explorer() {
                   : e === "INTO_SELF"
                     ? "移动失败：不能把文件夹移动到自身或子目录。"
                     : `移动失败：${e}${r.detail ? `\n${r.detail}` : ""}`;
-          window.alert(msg);
+          void uiAlert({ title: "移动失败", message: msg });
         }
       },
     });
   };
 
   const actionDeleteFile = (targetPath: string) => {
-    const ok = window.confirm(`确认删除文件？\n\n${targetPath}\n\n（此操作会删除磁盘文件）`);
-    if (!ok) return;
-    void useProjectStore.getState().deletePath(targetPath);
+    void (async () => {
+      const ok = await uiConfirm({
+        title: "确认删除文件？",
+        message: `${targetPath}\n\n（此操作会删除磁盘文件）`,
+        confirmText: "删除",
+        cancelText: "取消",
+        danger: true,
+      });
+      if (!ok) return;
+      await useProjectStore.getState().deletePath(targetPath);
+    })();
   };
 
   const actionDeleteDir = (dirPath: string) => {
-    const ok = window.confirm(`确认删除文件夹？\n\n${dirPath}/\n\n（此操作会递归删除磁盘目录及其文件）`);
-    if (!ok) return;
-    void useProjectStore.getState().deletePath(dirPath);
+    void (async () => {
+      const ok = await uiConfirm({
+        title: "确认删除文件夹？",
+        message: `${dirPath}/\n\n（此操作会递归删除磁盘目录及其文件）`,
+        confirmText: "删除",
+        cancelText: "取消",
+        danger: true,
+      });
+      if (!ok) return;
+      await useProjectStore.getState().deletePath(dirPath);
+    })();
   };
 
   const normalizeSelection = (paths: string[]) => {
@@ -516,7 +736,7 @@ export function Explorer() {
         const targetDir = String(v ?? "").trim().replaceAll("\\", "/").replace(/\/+$/g, "");
         const s = useProjectStore.getState();
         if (targetDir && !s.dirs.includes(targetDir)) {
-          window.alert("目标目录不存在：请先创建该文件夹。");
+          void uiAlert({ title: "提示", message: "目标目录不存在：请先创建该文件夹。" });
           return;
         }
         for (const p of items) {
@@ -525,7 +745,7 @@ export function Explorer() {
           const r = await s.renamePath(p, dest);
           if (!r.ok) {
             const e = String(r.error ?? "RENAME_FAILED");
-            window.alert(`批量移动失败：${p} → ${dest}\n原因：${e}${r.detail ? `\n${r.detail}` : ""}`);
+            void uiAlert({ title: "批量移动失败", message: `批量移动失败：${p} → ${dest}\n原因：${e}${r.detail ? `\n${r.detail}` : ""}` });
             break;
           }
         }
@@ -539,9 +759,15 @@ export function Explorer() {
     if (!items.length) return;
     const shown = items.slice(0, 8);
     const more = items.length > shown.length ? `\n…以及另外 ${items.length - shown.length} 项` : "";
-    const ok = window.confirm(`确认删除所选 ${items.length} 项？\n\n${shown.join("\n")}${more}\n\n（此操作会删除磁盘文件/目录）`);
-    if (!ok) return;
     void (async () => {
+      const ok = await uiConfirm({
+        title: `确认删除所选 ${items.length} 项？`,
+        message: `${shown.join("\n")}${more}\n\n（此操作会删除磁盘文件/目录）`,
+        confirmText: "删除",
+        cancelText: "取消",
+        danger: true,
+      });
+      if (!ok) return;
       const s = useProjectStore.getState();
       for (const p of items) await s.deletePath(p);
       clearSelection();
@@ -624,7 +850,7 @@ export function Explorer() {
                 if (existsFile || existsDir) return;
                 void (async () => {
                   const r = await s.renamePath(src, dest);
-                  if (!r.ok) window.alert(`移动失败：${src} → ${dest}\n原因：${r.error ?? "RENAME_FAILED"}`);
+                  if (!r.ok) void uiAlert({ title: "移动失败", message: `移动失败：${src} → ${dest}\n原因：${r.error ?? "RENAME_FAILED"}` });
                 })();
                 setDragOver(null);
               }}
@@ -797,7 +1023,7 @@ export function Explorer() {
             if (existsFile || existsDir) return;
                 void (async () => {
                   const r = await s.renamePath(src, dest);
-                  if (!r.ok) window.alert(`移动失败：${src} → ${dest}\n原因：${r.error ?? "RENAME_FAILED"}`);
+                  if (!r.ok) void uiAlert({ title: "移动失败", message: `移动失败：${src} → ${dest}\n原因：${r.error ?? "RENAME_FAILED"}` });
                 })();
             setDragOver(null);
           }}
@@ -919,7 +1145,7 @@ export function Explorer() {
 
       {prompt ? (
         <div className="modalMask" role="dialog" aria-modal="true">
-          <div className="modal">
+          <div ref={promptModalRef} className="modal">
             <div className="modalTitle">{prompt.title}</div>
             {prompt.desc ? <div className="modalDesc">{prompt.desc}</div> : null}
             <input

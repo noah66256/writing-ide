@@ -83,7 +83,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "url", required: true, desc: "目标网页 URL", type: "string" },
       { name: "format", required: false, desc: '返回格式："markdown"|"text"（默认 markdown）', type: "string" },
       { name: "timeoutMs", required: false, desc: "超时毫秒（默认 10000）", type: "number" },
-      { name: "maxChars", required: false, desc: "最大返回字符数（默认 20000，用于截断保护）", type: "number" },
+      { name: "maxChars", required: false, desc: "最大返回字符数（默认 12000，用于截断保护）", type: "number" },
     ],
     modes: ["chat", "plan", "agent"],
     inputSchema: {
@@ -311,6 +311,22 @@ export const TOOL_LIST: ToolMeta[] = [
     args: [],
     modes: ["plan", "agent"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "run.done",
+    description:
+      "显式结束本次 Run（让系统立刻停机，而不是继续多跑一轮）。\n" +
+      "【何时用】\n" +
+      "- 你确认任务已完成，且不需要再调用任何工具\n" +
+      "- 尤其是：已完成写入（doc.write/doc.applyEdits/doc.splitToDir 等）并且 To-do 已清空/全部 done\n" +
+      "【注意】调用 run.done 后，系统会生成一份“执行报告”并终止本次 run。",
+    args: [{ name: "note", required: false, desc: "可选：完成口径/选取策略的简短备注（<=200字）", type: "string" }],
+    modes: ["plan", "agent"],
+    inputSchema: {
+      type: "object",
+      properties: { note: { type: "string" } },
+      additionalProperties: true,
+    },
   },
   {
     name: "project.listFiles",

@@ -80,6 +80,24 @@ function safeJson(x: unknown) {
   }
 }
 
+function openFileFromToolBlock(args: { path: string; pinned?: boolean }) {
+  const p = String(args.path ?? "").trim().replaceAll("\\", "/");
+  if (!p) return;
+  const proj = useProjectStore.getState();
+  const exists = Boolean(proj.getFileByPath(p));
+  if (!exists) return;
+  if (args.pinned) proj.openFilePinned(p);
+  else proj.openFilePreview(p);
+  // focus editor after state updates
+  requestAnimationFrame(() => {
+    try {
+      useProjectStore.getState().editorRef?.focus?.();
+    } catch {
+      // ignore
+    }
+  });
+}
+
 function buildDraft(candidate: TopicCandidate) {
   const title = candidate.titles[0] ?? candidate.topic;
   return `---\n` +
@@ -223,14 +241,33 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
           </div>
         ) : (
           <div style={{ display: "grid", gap: 10 }}>
-            <div>
-              <div style={{ color: "var(--muted)", fontSize: 12 }}>input</div>
-              <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(step.input)}</pre>
-            </div>
+            {expanded ? (
+              <div>
+                <div style={{ color: "var(--muted)", fontSize: 12 }}>input</div>
+                <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{safeJson(step.input)}</pre>
+              </div>
+            ) : null}
             {diffInfo && (
               <div style={{ display: "grid", gap: 8 }}>
                 <div className="diffFileHeader">
-                  <div className="diffFileLeft" title={diffInfo.path ?? ""}>
+                  <div
+                    className="diffFileLeft diffFileLeftClickable"
+                    title={diffInfo.path ? `打开：${diffInfo.path}` : ""}
+                    role={diffInfo.path ? "button" : undefined}
+                    tabIndex={diffInfo.path ? 0 : undefined}
+                    onClick={(e) => {
+                      const p = diffInfo.path;
+                      if (!p) return;
+                      openFileFromToolBlock({ path: p, pinned: Boolean((e as any)?.metaKey || (e as any)?.ctrlKey) });
+                    }}
+                    onKeyDown={(e) => {
+                      if (!diffInfo.path) return;
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        openFileFromToolBlock({ path: diffInfo.path, pinned: Boolean((e as any)?.metaKey || (e as any)?.ctrlKey) });
+                      }
+                    }}
+                  >
                     <span className="diffFileKind">{fileKindLabel(diffInfo.path)}</span>
                     <span className="diffFilePath">{diffInfo.path ?? "（未知文件）"}</span>
                     <span className={statusBadgeClass(diffStatus(step))}>{statusBadgeText(diffStatus(step))}</span>
@@ -276,7 +313,9 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
                       </div>
                     ))}
                   {!expanded && diffInfo.diff.split("\n").length > 40 && (
-                    <div className="diffLine diffCtx">…（展开可看全部）</div>
+                    <button className="diffLine diffCtx diffMoreBtn" type="button" onClick={() => setExpanded(true)}>
+                      …（点击看更多）
+                    </button>
                   )}
                 </div>
               </div>

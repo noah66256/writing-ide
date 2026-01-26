@@ -6,6 +6,7 @@ import { KbPane } from "./components/KbPane";
 import { MaterialsPane } from "./components/MaterialsPane";
 import { AccountFooter } from "./components/AccountFooter";
 import { CardJobsModal } from "./components/CardJobsModal";
+import { DialogHost } from "./components/DialogHost";
 import { useEffect, useRef, type ReactNode } from "react";
 import { useLayoutStore } from "./state/layoutStore";
 import { useUiStore, type DockTabKey } from "./state/uiStore";
@@ -53,6 +54,8 @@ export default function App() {
         startLeft: number;
         startRight: number;
         startDock: number;
+        pointerId: number;
+        el: HTMLElement;
       }
   >(null);
 
@@ -139,17 +142,37 @@ export default function App() {
     };
 
     const onUp = () => {
-      if (!dragRef.current) return;
+      const d = dragRef.current;
+      if (!d) return;
       dragRef.current = null;
+      try {
+        d.el?.releasePointerCapture?.(d.pointerId);
+      } catch {
+        // ignore
+      }
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
     };
 
+    const onVisibility = () => {
+      // 极端情况：窗口失焦/切后台时 pointerup/pointercancel 可能丢失，导致 capture 残留挡住交互
+      if (document.hidden) onUp();
+    };
+
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    // 当 capture 被系统/浏览器强制释放时（不一定触发 up/cancel），仍需清理状态
+    window.addEventListener("lostpointercapture", onUp as any);
+    window.addEventListener("blur", onUp);
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      window.removeEventListener("lostpointercapture", onUp as any);
+      window.removeEventListener("blur", onUp);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [
     gutter,
@@ -278,6 +301,8 @@ export default function App() {
       startLeft: leftWidth,
       startRight: rightWidth,
       startDock: dockHeight,
+      pointerId: e.pointerId,
+      el: target,
     };
     document.body.style.cursor = kind === "dock" ? "row-resize" : "col-resize";
     document.body.style.userSelect = "none";
@@ -331,6 +356,7 @@ export default function App() {
         </aside>
       </div>
       <CardJobsModal />
+      <DialogHost />
     </>
   );
 }

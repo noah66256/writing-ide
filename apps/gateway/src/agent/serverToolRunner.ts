@@ -23,7 +23,9 @@ function parseCsv(v: any) {
 
 function getServerToolAllowlist(): Set<string> {
   const cfg = String(process.env.GATEWAY_SERVER_TOOL_ALLOWLIST ?? "").trim();
-  const list = cfg ? parseCsv(cfg) : ["lint.style", "project.listFiles", "project.docRules.get", "web.search", "web.fetch", "time.now"];
+  const list = cfg
+    ? parseCsv(cfg)
+    : ["lint.style", "project.listFiles", "project.docRules.get", "web.search", "web.fetch", "time.now", "run.done"];
   return new Set(list.map((x) => String(x ?? "").trim()).filter(Boolean));
 }
 
@@ -60,6 +62,8 @@ export function decideServerToolExecution(args: {
   if (name === "web.fetch") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "web_fetch_server_side"] };
   // time.*：完全 server-side（只读时间）；不依赖 Desktop sidecar
   if (name === "time.now") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "time_now_server_side"] };
+  // run.*：系统编排类工具（无副作用，但会影响 run 生命周期），应 server-side 执行
+  if (name === "run.done") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "run_done_server_side"] };
 
   // 逐步迁回：先落地 lint.style(text=...)（只读；需要 Desktop sidecar 提供指纹/样例）。
   if (name === "lint.style") {
@@ -302,7 +306,8 @@ export async function executeWebFetchOnGateway(args: { call: any }) {
   const formatRaw = String((call?.args as any)?.format ?? "markdown").trim().toLowerCase();
   const format: "markdown" | "text" = formatRaw === "text" ? "text" : "markdown";
   const timeoutMs = clampInt((call?.args as any)?.timeoutMs, 1000, 120_000, 10_000);
-  const maxChars = clampInt((call?.args as any)?.maxChars, 1000, 200_000, 20_000);
+  // 默认截断更保守：避免一次抓取把大量噪声 HTML 文本塞进上下文导致模型报错/超时
+  const maxChars = clampInt((call?.args as any)?.maxChars, 1000, 200_000, 12_000);
 
   try {
     const res = await fetchWithTimeout(url, {
@@ -456,6 +461,7 @@ export async function executeServerToolOnGateway(args: {
   authorization?: string | null;
 }) {
   const name = String(args.call?.name ?? "").trim();
+  if (name === "run.done") return { ok: true as const, output: { ok: true } };
   if (name === "time.now") return executeTimeNowOnGateway();
   if (name === "web.search") return executeWebSearchOnGateway({ call: args.call });
   if (name === "web.fetch") return executeWebFetchOnGateway({ call: args.call });

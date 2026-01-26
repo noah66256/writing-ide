@@ -4,6 +4,9 @@ declare global {
   interface Window {
     desktop?: {
       ping: () => string;
+      window?: {
+        focusMain: () => Promise<{ ok: boolean; error?: string }>;
+      };
       onMenuAction?: (handler: (payload: any) => void) => () => void;
       app?: {
         getVersion: () => Promise<{ ok: boolean; version?: string; error?: string }>;

@@ -446,6 +446,108 @@
   margin-bottom: 8px;
 }
 
+.multiPickRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.multiPick {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.multiPickTop {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.multiPickBtns {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.multiPickSelected {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.multiPickTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.multiPickTagX {
+  margin-left: 6px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font-weight: 900;
+  color: inherit;
+  opacity: 0.7;
+}
+.multiPickTagX:disabled {
+  cursor: not-allowed;
+  opacity: 0.3;
+}
+
+.multiPickList {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  overflow: auto;
+  min-height: 0;
+  max-height: 56vh;
+}
+
+.multiPickItem {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #f1f5f9;
+  cursor: pointer;
+  user-select: none;
+}
+.multiPickItem:hover {
+  background: #f8fafc;
+}
+.multiPickItemDisabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.multiPickItemMain {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.multiPickItemTitle {
+  font-weight: 900;
+  color: #0f172a;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.multiPickItemTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .txList {
   overflow: auto;
   padding-right: 4px;

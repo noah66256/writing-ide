@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useKbStore, type KbCardJob, type KbLibraryFingerprintSnapshot, type KbTextSpanRefV1 } from "../state/kbStore";
 import { useRunStore } from "../state/runStore";
+import { useDialogStore } from "../state/dialogStore";
 import { FACET_PACKS, facetPackLabel, getFacetPack } from "../kb/facets";
 import { RichText } from "./RichText";
 
@@ -66,6 +67,10 @@ export function CardJobsModal() {
   const purgeLibrary = useKbStore((s) => s.purgeLibrary);
   const emptyTrash = useKbStore((s) => s.emptyTrash);
   const openKbManager = useKbStore((s) => s.openKbManager);
+
+  const uiAlert = useDialogStore((s) => s.openAlert);
+  const uiConfirm = useDialogStore((s) => s.openConfirm);
+  const uiPrompt = useDialogStore((s) => s.openPrompt);
 
   const attached = useRunStore((s) => s.kbAttachedLibraryIds);
   const toggleAttachSmart = async (id: string) => {
@@ -854,8 +859,24 @@ export function CardJobsModal() {
               // ignore
             }
           }}
-          onPointerCancel={() => {
+          onPointerCancel={(e) => {
+            const d = dragRef.current;
             dragRef.current = null;
+            try {
+              // 某些情况下（切后台/窗口失焦）只会触发 cancel，不会触发 up
+              (e.currentTarget as any)?.releasePointerCapture?.(d?.pointerId ?? e.pointerId);
+            } catch {
+              // ignore
+            }
+          }}
+          onLostPointerCapture={(e) => {
+            const d = dragRef.current;
+            dragRef.current = null;
+            try {
+              (e.currentTarget as any)?.releasePointerCapture?.(d?.pointerId ?? e.pointerId);
+            } catch {
+              // ignore
+            }
           }}
         >
           <div className="modalTitle" style={{ marginBottom: 0 }}>
@@ -902,7 +923,7 @@ export function CardJobsModal() {
                     confirmText: "创建",
                     onConfirm: async (v) => {
                       const r = await createLibrary(v);
-                      if (!r.ok) window.alert(`创建失败：${r.error ?? "unknown"}`);
+                      if (!r.ok) void uiAlert({ title: "创建失败", message: `创建失败：${r.error ?? "unknown"}` });
                       await refreshLibraries().catch(() => void 0);
                     },
                   });
@@ -994,7 +1015,7 @@ export function CardJobsModal() {
                               const next = String(e.target.value ?? "material") as any;
                               void (async () => {
                                 const r = await setLibraryPurpose(l.id, next);
-                                if (!r.ok) window.alert(`设置失败：${r.error ?? "unknown"}`);
+                                if (!r.ok) void uiAlert({ title: "设置失败", message: `设置失败：${r.error ?? "unknown"}` });
                                 await refreshLibraries().catch(() => void 0);
                               })();
                             }}
@@ -1054,7 +1075,7 @@ export function CardJobsModal() {
                                 confirmText: "保存",
                                 onConfirm: async (v) => {
                                   const r = await renameLibrary(l.id, v);
-                                  if (!r.ok) window.alert(`重命名失败：${r.error ?? "unknown"}`);
+                                  if (!r.ok) void uiAlert({ title: "重命名失败", message: `重命名失败：${r.error ?? "unknown"}` });
                                   await refreshLibraries().catch(() => void 0);
                                 },
                               });
@@ -1066,11 +1087,17 @@ export function CardJobsModal() {
                             className="btn btnDanger btnIcon"
                             type="button"
                             onClick={() => {
-                              const ok = window.confirm(`删除库「${l.name}」？\n\n将进入回收站，可恢复；也可在回收站彻底删除/清空。`);
-                              if (!ok) return;
                               void (async () => {
+                                const ok = await uiConfirm({
+                                  title: "确认删除库？",
+                                  message: `删除库「${l.name}」？\n\n将进入回收站，可恢复；也可在回收站彻底删除/清空。`,
+                                  confirmText: "删除",
+                                  cancelText: "取消",
+                                  danger: true,
+                                });
+                                if (!ok) return;
                                 const r = await deleteLibraryToTrash(l.id);
-                                if (!r.ok) window.alert(`删除失败：${r.error ?? "unknown"}`);
+                                if (!r.ok) void uiAlert({ title: "删除失败", message: `删除失败：${r.error ?? "unknown"}` });
                                 await refreshLibraries().catch(() => void 0);
                                 // 若正在查看该库，自动收起，避免继续“库体检/指纹”报错
                                 setViewLibId((prev) => {
@@ -1160,9 +1187,17 @@ export function CardJobsModal() {
                           type="button"
                           disabled={fpLoading}
                           onClick={() => {
-                            const ok = window.confirm("生成/更新该库的「声音指纹（数字版）」？\n\n- 会统计“率/分布/n-gram”，并尝试用 Gateway 做开集体裁识别\n- 产物只写入本地 KB，不会改动原文\n");
-                            if (!ok) return;
                             void (async () => {
+                              const ok = await uiConfirm({
+                                title: "确认生成声音指纹？",
+                                message:
+                                  "生成/更新该库的「声音指纹（数字版）」？\n\n" +
+                                  "- 会统计“率/分布/n-gram”，并尝试用 Gateway 做开集体裁识别\n" +
+                                  "- 产物只写入本地 KB，不会改动原文\n",
+                                confirmText: "生成",
+                                cancelText: "取消",
+                              });
+                              if (!ok) return;
                               setFpLoading(true);
                               setFpErr(null);
                               setFpCompare(null);
@@ -1204,17 +1239,21 @@ export function CardJobsModal() {
                           onClick={() => {
                             const lib = libraries.find((x) => x.id === viewLibId);
                             if (!lib) return;
-                            const ok = window.confirm(
-                              `为库「${lib.name}」入队生成风格手册（21+1）？\n\n` +
-                                "- 会读取该库已抽出的单篇要素卡（hook/thesis/ending/one_liner/outline）\n" +
-                                "- 并生成 1 张 Style Profile + 每个维度 1 张写法手册卡\n" +
-                                "- 产物会落到一个“【仿写手册】”虚拟文档下，可被右侧 Agent 直接使用\n\n" +
-                                "提示：生成手册是异步队列任务，需到「抽卡任务」Tab 点击 ▶ 执行。"
-                            );
-                            if (!ok) return;
                             void (async () => {
+                              const ok = await uiConfirm({
+                                title: "确认入队生成风格手册？",
+                                message:
+                                  `为库「${lib.name}」入队生成风格手册（21+1）？\n\n` +
+                                  "- 会读取该库已抽出的单篇要素卡（hook/thesis/ending/one_liner/outline）\n" +
+                                  "- 并生成 1 张 Style Profile + 每个维度 1 张写法手册卡\n" +
+                                  "- 产物会落到一个“【仿写手册】”虚拟文档下，可被右侧 Agent 直接使用\n\n" +
+                                  "提示：生成手册是异步队列任务，需到「抽卡任务」Tab 点击 ▶ 执行。",
+                                confirmText: "入队",
+                                cancelText: "取消",
+                              });
+                              if (!ok) return;
                               const r = await enqueuePlaybookJob(viewLibId, { open: true });
-                              if (!r.ok) window.alert(`入队失败：${r.error ?? "unknown"}`);
+                              if (!r.ok) void uiAlert({ title: "入队失败", message: `入队失败：${r.error ?? "unknown"}` });
                               else openKbManager("jobs", "已入队：风格手册。请点击 ▶ 开始执行。");
                             })();
                           }}
@@ -1884,12 +1923,22 @@ export function CardJobsModal() {
                 className="btn btnDanger btnIcon"
                 type="button"
                 onClick={() => {
-                  const ok = window.confirm("清空回收站？\n\n将永久删除回收站内所有库及其全部内容（文档/段落/卡片）。不可恢复。");
-                  if (!ok) return;
                   void (async () => {
+                    const ok = await uiConfirm({
+                      title: "确认清空回收站？",
+                      message: "清空回收站？\n\n将永久删除回收站内所有库及其全部内容（文档/段落/卡片）。不可恢复。",
+                      confirmText: "清空",
+                      cancelText: "取消",
+                      danger: true,
+                    });
+                    if (!ok) return;
                     const r = await emptyTrash();
-                    if (!r.ok) window.alert(`清空失败：${r.error ?? "unknown"}`);
-                    else window.alert(`已清空：删除库 ${r.removedLibraries} 个，文档 ${r.removedDocs} 篇，片段 ${r.removedArtifacts} 条。`);
+                    if (!r.ok) void uiAlert({ title: "清空失败", message: `清空失败：${r.error ?? "unknown"}` });
+                    else
+                      void uiAlert({
+                        title: "已清空",
+                        message: `已清空：删除库 ${r.removedLibraries} 个，文档 ${r.removedDocs} 篇，片段 ${r.removedArtifacts} 条。`,
+                      });
                   })();
                 }}
                 disabled={!trash.length}
@@ -1933,7 +1982,7 @@ export function CardJobsModal() {
                           onClick={() => {
                             void (async () => {
                               const r = await restoreLibraryFromTrash(l.id);
-                              if (!r.ok) window.alert(`恢复失败：${r.error ?? "unknown"}`);
+                              if (!r.ok) void uiAlert({ title: "恢复失败", message: `恢复失败：${r.error ?? "unknown"}` });
                               await refreshLibraries().catch(() => void 0);
                             })();
                           }}
@@ -1944,12 +1993,22 @@ export function CardJobsModal() {
                           className="btn btnDanger btnIcon"
                           type="button"
                           onClick={() => {
-                            const ok = window.confirm(`彻底删除库「${l.name}」？\n\n将永久删除该库及其全部内容（文档/段落/卡片）。不可恢复。`);
-                            if (!ok) return;
                             void (async () => {
+                              const ok = await uiConfirm({
+                                title: "确认彻底删除？",
+                                message: `彻底删除库「${l.name}」？\n\n将永久删除该库及其全部内容（文档/段落/卡片）。不可恢复。`,
+                                confirmText: "彻底删除",
+                                cancelText: "取消",
+                                danger: true,
+                              });
+                              if (!ok) return;
                               const r = await purgeLibrary(l.id);
-                              if (!r.ok) window.alert(`删除失败：${r.error ?? "unknown"}`);
-                              else window.alert(`已删除：文档 ${r.removedDocs} 篇，片段 ${r.removedArtifacts} 条。`);
+                              if (!r.ok) void uiAlert({ title: "删除失败", message: `删除失败：${r.error ?? "unknown"}` });
+                              else
+                                void uiAlert({
+                                  title: "已删除",
+                                  message: `已删除：文档 ${r.removedDocs} 篇，片段 ${r.removedArtifacts} 条。`,
+                                });
                             })();
                           }}
                         >
@@ -1991,16 +2050,20 @@ export function CardJobsModal() {
                   if (!lib) return;
                   const next = String(e.target.value ?? "").trim();
                   if (!next || next === lib.facetPackId) return;
-                  const ok = window.confirm(
-                    `切换当前库「${lib.name}」的处理集为「${facetPackLabel(next)}」？\n\n` +
-                      "- 第一轮抽卡将按新的处理集打维度标签（facetIds）\n" +
-                      "- 第二轮生成风格手册会沿用该处理集\n\n" +
-                      "提示：若该库已抽过卡，切换后可能需要重抽才能保持一致。",
-                  );
-                  if (!ok) return;
                   void (async () => {
+                    const ok = await uiConfirm({
+                      title: "确认切换处理集？",
+                      message:
+                        `切换当前库「${lib.name}」的处理集为「${facetPackLabel(next)}」？\n\n` +
+                        "- 第一轮抽卡将按新的处理集打维度标签（facetIds）\n" +
+                        "- 第二轮生成风格手册会沿用该处理集\n\n" +
+                        "提示：若该库已抽过卡，切换后可能需要重抽才能保持一致。",
+                      confirmText: "切换",
+                      cancelText: "取消",
+                    });
+                    if (!ok) return;
                     const r = await setLibraryFacetPack(lib.id, next);
-                    if (!r.ok) window.alert(`设置失败：${r.error ?? "unknown"}`);
+                    if (!r.ok) void uiAlert({ title: "设置失败", message: `设置失败：${r.error ?? "unknown"}` });
                     await refreshLibraries().catch(() => void 0);
                   })();
                 }}
@@ -2201,11 +2264,16 @@ export function CardJobsModal() {
                       "- 产物会落到一个“【仿写手册】”虚拟文档下，可被右侧 Agent 直接使用\n" +
                       "- 点击“确定”只会入队，不会自动开始；需要你点击 ▶ 执行\n\n" +
                       (pendingInLib > 0 ? `提示：该库还有 ${pendingInLib} 个抽卡任务未完成，生成的手册可能不完整。\n\n` : "");
-                    const ok = window.confirm(msg);
-                    if (!ok) return;
                     void (async () => {
+                      const ok = await uiConfirm({
+                        title: "确认入队生成风格手册？",
+                        message: msg,
+                        confirmText: "入队",
+                        cancelText: "取消",
+                      });
+                      if (!ok) return;
                       const r = await enqueuePlaybookJob(lib.id, { open: true });
-                      if (!r.ok) window.alert(`入队失败：${r.error ?? "unknown"}`);
+                      if (!r.ok) void uiAlert({ title: "入队失败", message: `入队失败：${r.error ?? "unknown"}` });
                     })();
                   }}
                 >
@@ -2383,7 +2451,23 @@ export function CardJobsModal() {
                                   void cb.writeText(txt);
                                   return;
                                 }
-                                window.prompt("复制证据 JSON：", txt);
+                                void (async () => {
+                                  const v = await uiPrompt({
+                                    title: "复制证据 JSON",
+                                    message: "提示：点击“复制”会写入剪贴板；也可以手动选中复制。",
+                                    defaultValue: txt,
+                                    multiline: true,
+                                    confirmText: "复制",
+                                    cancelText: "关闭",
+                                  });
+                                  if (v === null) return;
+                                  try {
+                                    await navigator.clipboard.writeText(v);
+                                  } catch {
+                                    const api = window.desktop?.clipboard;
+                                    await api?.writeText?.(v).catch(() => void 0);
+                                  }
+                                })();
                               }}
                               title="复制该证据对象 JSON（可手工粘贴到任意位置）"
                             >
@@ -2410,9 +2494,15 @@ export function CardJobsModal() {
                   if (!viewLibId) return;
                   const cid = String(rulesEditor.clusterId ?? "").trim();
                   if (!cid) return;
-                  const ok = window.confirm(`清空该簇规则卡？\n\nclusterId=${cid}\n\n（仅删除本库 prefs，不影响体检快照）`);
-                  if (!ok) return;
                   void (async () => {
+                    const ok = await uiConfirm({
+                      title: "确认清空该簇规则卡？",
+                      message: `清空该簇规则卡？\n\nclusterId=${cid}\n\n（仅删除本库 prefs，不影响体检快照）`,
+                      confirmText: "清空",
+                      cancelText: "取消",
+                      danger: true,
+                    });
+                    if (!ok) return;
                     setRulesEditorErr(null);
                     const r = await setLibraryStyleClusterRules({ libraryId: viewLibId, clusterId: cid, rules: null });
                     if (!r?.ok) {

@@ -953,6 +953,42 @@ const tools: ToolDefinition[] = [
   },
 
   {
+    name: "kb.cite",
+    description:
+      "从本地知识库按定位精确取一段原文证据（用于引用/脚注/审计）。通常先 kb.search 拿到候选，再用 kb.cite 拉取命中条目的原文段（避免 kb.search 返回全文导致 token 爆炸）。",
+    args: [
+      { name: "sourceDocId", required: true, desc: "源文档 ID（kb_doc_*）" },
+      { name: "artifactId", required: false, desc: "可选：artifact id（优先；从 kb.search 命中里取）" },
+      { name: "paragraphIndex", required: false, desc: "可选：段落索引（仅对 paragraph 有效）" },
+      { name: "headingPath", required: false, desc: '可选：标题路径（数组或 "A > B" 字符串；将返回该标题下第一段）' },
+      { name: "maxChars", required: false, desc: "可选：返回内容最大字符数（默认 1000，最大 4000）" },
+      { name: "quoteMaxChars", required: false, desc: "可选：quote 预览最大字符数（默认 200）" },
+    ],
+    riskLevel: "low",
+    applyPolicy: "proposal",
+    reversible: false,
+    run: async (args) => {
+      const sourceDocId = String((args as any).sourceDocId ?? "").trim();
+      if (!sourceDocId) return { ok: false, error: "DOC_ID_REQUIRED" };
+      const artifactId = String((args as any).artifactId ?? "").trim() || undefined;
+      const paragraphIndexRaw = (args as any).paragraphIndex;
+      const paragraphIndexNum = Number(paragraphIndexRaw);
+      const paragraphIndex = Number.isFinite(paragraphIndexNum) ? Math.max(0, Math.floor(paragraphIndexNum)) : undefined;
+      const headingPath = (args as any).headingPath;
+      const maxCharsRaw = (args as any).maxChars;
+      const quoteMaxCharsRaw = (args as any).quoteMaxChars;
+      const maxCharsNum = Number(maxCharsRaw);
+      const quoteMaxCharsNum = Number(quoteMaxCharsRaw);
+      const maxChars = Number.isFinite(maxCharsNum) ? Math.max(200, Math.min(4000, Math.floor(maxCharsNum))) : undefined;
+      const quoteMaxChars = Number.isFinite(quoteMaxCharsNum) ? Math.max(40, Math.min(400, Math.floor(quoteMaxCharsNum))) : undefined;
+
+      const ret = await useKbStore.getState().citeForAgent({ sourceDocId, artifactId, paragraphIndex, headingPath, maxChars, quoteMaxChars });
+      if (!ret.ok) return { ok: false, error: ret.error ?? "CITE_FAILED" };
+      return { ok: true, output: { ok: true, title: ret.title ?? null, ref: ret.ref ?? null, content: ret.content ?? "" }, undoable: false };
+    },
+  },
+
+  {
     name: "lint.copy",
     description:
       "Copy Linter：确定性检测“贴原文/复用风险”。用于仿写/改写闭环中的 anti-regurgitation 阶段闸门（本地计算，不调用上游模型）。",
@@ -1612,7 +1648,8 @@ const tools: ToolDefinition[] = [
       const prev = s.todoList ?? [];
       const next = prev.filter((t: any) => String(t?.id ?? "") !== id);
       const { undo } = s.setTodoList(next as any);
-      const todoList = s.todoList;
+      // 注意：Zustand 的 state 对象不是“可变引用”，不能从旧 state 读新值
+      const todoList = useRunStore.getState().todoList;
       return { ok: true, output: { ok: true, todoList }, undoable: true, undo };
     },
   },
@@ -1626,8 +1663,23 @@ const tools: ToolDefinition[] = [
     run: async () => {
       const s = useRunStore.getState();
       const { undo } = s.setTodoList([] as any);
-      const todoList = s.todoList;
+      // 注意：Zustand 的 state 对象不是“可变引用”，不能从旧 state 读新值
+      const todoList = useRunStore.getState().todoList;
       return { ok: true, output: { ok: true, todoList }, undoable: true, undo };
+    },
+  },
+  {
+    name: "run.done",
+    description:
+      "显式结束本次 Run（让系统立刻停机，而不是继续多跑一轮总结/补充）。\n" +
+      "注意：实际终止由 Gateway 执行；本地仅返回 ok 作为兼容（避免旧网关/本地执行分支报错）。",
+    args: [{ name: "note", required: false, desc: "可选：完成口径/选取策略的简短备注（<=200字）" }],
+    riskLevel: "low",
+    applyPolicy: "proposal",
+    reversible: false,
+    run: async (args) => {
+      const note = String((args as any)?.note ?? "").trim();
+      return { ok: true, output: { ok: true, note: note.slice(0, 200) }, undoable: false };
     },
   },
   {

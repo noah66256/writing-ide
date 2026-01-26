@@ -28,6 +28,7 @@ import { TOOL_LIST, validateToolCallArgs } from "@writing-ide/tools";
 import {
   decideServerToolExecution,
   executeServerToolOnGateway,
+  executeWebFetchOnGateway,
 } from "./agent/serverToolRunner.js";
 import { ensureRunAuditEnded, persistRunAudit, recordRunAuditEvent, sanitizeForAudit } from "./audit/runAudit.js";
 import {
@@ -67,6 +68,85 @@ function parseContextManifestFromContextPack(ctx?: string): any | null {
   }
 }
 
+function parseRecentDialogueFromContextPack(
+  ctx?: string,
+): Array<{ role: "user" | "assistant"; text: string }> | null {
+  const text = String(ctx ?? "");
+  if (!text) return null;
+  const m = text.match(/RECENT_DIALOGUE\(JSON\):\n([\s\S]*?)\n\n/);
+  const raw = m?.[1] ? String(m[1]).trim() : "";
+  if (!raw) return null;
+  try {
+    const j = JSON.parse(raw);
+    const a = Array.isArray(j) ? j : [];
+    const out: Array<{ role: "user" | "assistant"; text: string }> = [];
+    for (const it of a) {
+      const role0 = String((it as any)?.role ?? "").trim();
+      const text0 = String((it as any)?.text ?? "").trim();
+      if (!text0) continue;
+      if (role0 !== "user" && role0 !== "assistant") continue;
+      out.push({ role: role0 as any, text: text0 });
+    }
+    return out.length ? out.slice(-12) : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractLastAssistantQuestionFromRecentDialogue(
+  msgs: Array<{ role: "user" | "assistant"; text: string }> | null,
+): string | null {
+  const a = Array.isArray(msgs) ? msgs : [];
+  const last = [...a].reverse().find((m) => m && m.role === "assistant" && String(m.text ?? "").trim());
+  const t0 = last ? String(last.text ?? "").trim() : "";
+  if (!t0) return null;
+  // 取“最像需要用户选择/确认”的末尾一句（偏保守）
+  const lines = t0.split(/\r?\n/g).map((s) => s.trim()).filter(Boolean);
+  const hit = [...lines].reverse().find((s) => /(请选择|请确认|选(一|1)个|从.*选|选择.*话题|选题|话题\s*\d|主题\s*\d|选项\s*\d|方案\s*\d)/.test(s));
+  const picked = String(hit ?? lines.slice(-1)[0] ?? t0).trim();
+  if (!picked) return null;
+  const max = 240;
+  return picked.length > max ? picked.slice(0, max).trimEnd() + "…" : picked;
+}
+
+function buildRunTodoSummary(runTodo: any[] | null): {
+  summary: string | null;
+  hasWaiting: boolean;
+  done: number;
+  total: number;
+  waitingItems: Array<{ id: string; text: string }>;
+} {
+  const todo = Array.isArray(runTodo) ? runTodo : [];
+  if (!todo.length) return { summary: null, hasWaiting: false, done: 0, total: 0, waitingItems: [] };
+  const normStatus = (s: any) => String(s ?? "").trim().toLowerCase();
+  const done = todo.filter((t) => normStatus((t as any)?.status) === "done").length;
+  const total = todo.length;
+  const waitingItems: Array<{ id: string; text: string }> = [];
+  let hasWaiting = false;
+  for (const t of todo) {
+    const status = normStatus((t as any)?.status);
+    const note = String((t as any)?.note ?? "").trim();
+    const text0 = String((t as any)?.text ?? "").trim();
+    const id = String((t as any)?.id ?? "").trim();
+    const waiting =
+      status === "blocked" ||
+      /^blocked\b/i.test(note) ||
+      /(等待用户|等待你|待确认|等你确认|需要你确认|请确认|请选择|选(一|1)个|从.*选)/.test(note) ||
+      /(等待用户|待确认|请确认|请选择|选(一|1)个|从.*选)/.test(text0);
+    if (waiting) {
+      hasWaiting = true;
+      if (waitingItems.length < 4 && (text0 || note)) {
+        const s = (text0 || note).replace(/\s+/g, " ").trim();
+        if (s) waitingItems.push({ id, text: s.length > 120 ? s.slice(0, 120).trimEnd() + "…" : s });
+      }
+    }
+  }
+  const open = Math.max(0, total - done);
+  const hint = hasWaiting && waitingItems.length ? `；等待确认：${waitingItems.map((x) => x.text).join(" / ")}` : hasWaiting ? "；存在等待确认" : "";
+  const summary = `${total} 项：完成 ${done}，未完成 ${open}${hint}`;
+  return { summary, hasWaiting, done, total, waitingItems };
+}
+
 // 允许使用项目根目录的 .env（你可以用 env.example 复制出来），也支持 apps/gateway/.env 覆盖
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -79,6 +159,10 @@ const IS_DEV = process.env.NODE_ENV !== "production";
 const TOOL_CALL_REPAIR_ENABLED =
   String(process.env.TOOL_CALL_REPAIR_ENABLED ?? "").trim() === "1" ||
   String(process.env.TOOL_CALL_REPAIR_ENABLED ?? "").trim().toLowerCase() === "true";
+const CONTEXT_SELECTOR_ENABLED =
+  String(process.env.CONTEXT_SELECTOR_ENABLED ?? "").trim() === "1" ||
+  String(process.env.CONTEXT_SELECTOR_ENABLED ?? "").trim().toLowerCase() === "true";
+const CONTEXT_SELECTOR_MODE = String(process.env.CONTEXT_SELECTOR_MODE ?? "router_only").trim().toLowerCase();
 const ADMIN_EMAILS = String(process.env.ADMIN_EMAILS ?? "")
   .split(",")
   .map((s) => s.trim().toLowerCase())
@@ -1249,6 +1333,7 @@ fastify.post(
   const mainDocFromPack = parseMainDocFromContextPack(body.contextPack);
   const kbSelectedList = parseKbSelectedLibrariesFromContextPack(body.contextPack);
   const runTodoFromPack = parseRunTodoFromContextPack(body.contextPack);
+  const recentDialogueFromPack = parseRecentDialogueFromContextPack(body.contextPack);
   const contextManifestFromPack = parseContextManifestFromContextPack(body.contextPack);
   const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: (mainDocFromPack as any)?.runIntent, runTodo: runTodoFromPack });
 
@@ -1743,7 +1828,16 @@ fastify.post(
     // 弱 sticky：仅用于“续跑/确认/格式切换”这类承接上一个任务的短回复。
     // 重要：不能把“查一下/全网+GitHub 大搜/研究方案”误当成写作续跑，否则会把风格库/写作闭环抢跑进来。
     const looksLikeExplicitContinue = /^(继续|好|可以|行|没问题|确认|按这个来|就这样|ok|OK)\b/i.test(pTrim);
-    const looksLikeChoice = /^写法\s*[ABC]\b/i.test(pTrim) || /\bcluster[_-]\d+\b/i.test(pTrim);
+    // 选择式短回复（常见于“请从 1/2/3 里选一个/选话题/选方案”）
+    // 例如：话题3吧 / 主题二 / 选3 / 我选3 / 第3个 / 3号 / 3吧
+    const looksLikeChoice =
+      /^写法\s*[ABC]\b/i.test(pTrim) ||
+      /\bcluster[_-]\d+\b/i.test(pTrim) ||
+      /^(?:话题|主题|选项|方案|topic)\s*(?:\d{1,2}|[一二三四五六七八九十]{1,3})\s*(?:[号个条项])?\s*(?:吧|呢)?$/i.test(pTrim) ||
+      /^(?:我选|选|就|要)\s*(?:\d{1,2}|[一二三四五六七八九十]{1,3})\s*(?:[号个条项])?\s*(?:吧|呢)?$/.test(pTrim) ||
+      /^第?\s*(?:\d{1,2}|[一二三四五六七八九十]{1,3})\s*(?:个|条|项)\s*(?:吧|呢)?$/.test(pTrim) ||
+      /^(?:\d{1,2}|[一二三四五六七八九十]{1,3})\s*(?:号|#)\s*(?:吧|呢)?$/.test(pTrim) ||
+      /^(?:\d{1,2}|[一二三四五六七八九十]{1,3})\s*(?:吧|呢)$/.test(pTrim);
     const looksLikeFormatSwitch =
       pTrim.length <= 24 && /(视频脚本|脚本|文案|口播|小红书|公众号|B站|抖音|标题|大纲|提纲|终稿)/.test(pTrim);
     const looksLikeResearchOnly =
@@ -1927,6 +2021,15 @@ fastify.post(
     ok: boolean;
     error?: string;
     model?: string;
+    contextSelector?: {
+      attempted: boolean;
+      ok: boolean;
+      stageKey: string;
+      model?: string;
+      error?: string;
+      selectedIds?: string[];
+      applied?: Record<string, boolean>;
+    };
   } = {
     mode: intentRouterMode,
     stageKey: intentRouterStageKey,
@@ -2058,6 +2161,168 @@ fastify.post(
     try {
       const st = await aiConfig.resolveStage(intentRouterStageKey);
       intentRouterTrace.model = String(st.model ?? "");
+
+      // ======== Context Pack Selector（可选）：给 router 补齐“上一轮问句/todo 摘要”等提示 ========
+      // 注意：这里只给 router 提供极短的提示（summary/hint），不塞长对话/长正文，避免成本与噪音。
+      const todoSum = buildRunTodoSummary(runTodoFromPack as any);
+      const lastAssistantQuestion = extractLastAssistantQuestionFromRecentDialogue(recentDialogueFromPack);
+      const shortReply = String(userPrompt ?? "").trim().length <= 24;
+      const wantHints =
+        shortReply &&
+        Boolean(Array.isArray(runTodoFromPack) && runTodoFromPack.length > 0) &&
+        (todoSum.hasWaiting ||
+          /^(?:话题|主题|选项|方案|topic)\s*(?:\d{1,2}|[一二三四五六七八九十]{1,3})\b/i.test(String(userPrompt ?? "").trim()) ||
+          /^(?:我选|选|就|要)\s*(?:\d{1,2}|[一二三四五六七八九十]{1,3})\b/.test(String(userPrompt ?? "").trim()));
+
+      type SelectorCandidate = { id: string; kind: string; trusted: boolean; chars: number; cost: number; summary: string };
+      const selectorCandidates: SelectorCandidate[] = [];
+      if (todoSum.summary)
+        selectorCandidates.push({
+          id: "RUN_TODO_SUMMARY",
+          kind: "todo",
+          trusted: true,
+          chars: todoSum.summary.length,
+          cost: todoSum.summary.length,
+          summary: todoSum.summary,
+        });
+      if (lastAssistantQuestion)
+        selectorCandidates.push({
+          id: "LAST_ASSISTANT_QUESTION",
+          kind: "dialogue",
+          trusted: true,
+          chars: lastAssistantQuestion.length,
+          cost: lastAssistantQuestion.length,
+          summary: lastAssistantQuestion,
+        });
+      const recentTail = (() => {
+        const a = Array.isArray(recentDialogueFromPack) ? recentDialogueFromPack : [];
+        const tail = a
+          .slice(-4)
+          .map((m) => `${m.role === "assistant" ? "assistant" : "user"}: ${String(m.text ?? "").trim()}`)
+          .filter(Boolean);
+        const text = tail.join("\n");
+        const max = 380;
+        if (!text) return null;
+        return text.length > max ? text.slice(Math.max(0, text.length - max)).trimStart() : text;
+      })();
+      if (recentTail)
+        selectorCandidates.push({
+          id: "RECENT_DIALOGUE_TAIL",
+          kind: "dialogue",
+          trusted: true,
+          chars: recentTail.length,
+          cost: recentTail.length,
+          summary: recentTail,
+        });
+
+      const applyRouterHints = (selectedIds: string[] | null) => {
+        const sel = Array.isArray(selectedIds) ? selectedIds : [];
+        const applied: Record<string, boolean> = {};
+        const hints: any = {};
+        if (sel.includes("RUN_TODO_SUMMARY") && todoSum.summary) {
+          hints.runTodoSummary = todoSum.summary;
+          hints.hasWaitingTodo = todoSum.hasWaiting;
+          applied.RUN_TODO_SUMMARY = true;
+        }
+        if (sel.includes("LAST_ASSISTANT_QUESTION") && lastAssistantQuestion) {
+          hints.lastAssistantQuestion = lastAssistantQuestion;
+          applied.LAST_ASSISTANT_QUESTION = true;
+        }
+        if (sel.includes("RECENT_DIALOGUE_TAIL") && recentTail) {
+          hints.recentDialogueTail = recentTail;
+          applied.RECENT_DIALOGUE_TAIL = true;
+        }
+        return { hints: Object.keys(hints).length ? hints : null, applied };
+      };
+
+      let routerContextHints: any | null = null;
+      if (wantHints && CONTEXT_SELECTOR_ENABLED && (CONTEXT_SELECTOR_MODE === "all" || CONTEXT_SELECTOR_MODE === "router_only")) {
+        const trace = { attempted: true, ok: false, stageKey: "agent.context_selector" } as any;
+        (intentRouterTrace as any).contextSelector = trace;
+        const timeoutMsRaw2 = Number(String(process.env.CONTEXT_SELECTOR_TIMEOUT_MS ?? "2000").trim());
+        const timeoutMs2 = Number.isFinite(timeoutMsRaw2) && timeoutMsRaw2 > 0 ? Math.floor(timeoutMsRaw2) : 2000;
+        try {
+          const stSel = await aiConfig.resolveStage("agent.context_selector");
+          trace.model = String(stSel.model ?? "");
+          const controller2 = new AbortController();
+          const timer2 = setTimeout(() => controller2.abort(), timeoutMs2);
+          const selectorSchema = z
+            .object({
+              v: z.union([z.number(), z.string()]).optional(),
+              selectedIds: z.array(z.string()).optional(),
+              reasonCodes: z.any().optional(),
+              notes: z.any().optional(),
+            })
+            .passthrough();
+          const resSel = await completionOnceViaProvider({
+            baseUrl: stSel.baseURL,
+            endpoint: stSel.endpoint || "/v1/chat/completions",
+            apiKey: stSel.apiKey,
+            model: stSel.model,
+            temperature: typeof stSel.temperature === "number" ? stSel.temperature : 0,
+            maxTokens: typeof stSel.maxTokens === "number" ? stSel.maxTokens : 400,
+            signal: controller2.signal,
+            messages: [
+              {
+                role: "system",
+                content:
+                  "你是写作 IDE 的 Context Pack Selector。\n" +
+                  "你只输出一个 JSON 对象（不要 Markdown，不要代码块，不要解释）。\n" +
+                  "你需要从 candidates 中选择 selectedIds（按优先级）。selectedIds 必须是 candidates.id 的子集。\n" +
+                  "当用户输入很短（如“话题3吧/选3/继续”），优先选择能补齐语境的段落：RUN_TODO_SUMMARY / LAST_ASSISTANT_QUESTION。\n",
+              },
+              {
+                role: "user",
+                content: JSON.stringify({
+                  v: 1,
+                  stageKey: "agent.router",
+                  mode,
+                  userPrompt: String(userPrompt ?? "").slice(0, 400),
+                  mainDocRunIntent: String((mainDocFromPack as any)?.runIntent ?? ""),
+                  signals: {
+                    hasRunTodo: Array.isArray(runTodoFromPack) && runTodoFromPack.length > 0,
+                    hasWaitingTodo: todoSum.hasWaiting,
+                    shortReply,
+                  },
+                  candidates: selectorCandidates.slice(0, 6),
+                  budget: { maxChars: 800, mustInclude: [], caps: { RECENT_DIALOGUE_TAIL: 380 } },
+                }),
+              },
+            ],
+          });
+          clearTimeout(timer2);
+          if (!resSel.ok) throw new Error(String(resSel.error ?? "CONTEXT_SELECTOR_UPSTREAM_ERROR"));
+          const jsonText = extractJsonObject(resSel.content);
+          if (!jsonText) throw new Error("CONTEXT_SELECTOR_INVALID_JSON");
+          const parsed = selectorSchema.safeParse(JSON.parse(jsonText));
+          if (!parsed.success) throw new Error("CONTEXT_SELECTOR_SCHEMA_INVALID");
+          const idsRaw = Array.isArray((parsed.data as any).selectedIds) ? ((parsed.data as any).selectedIds as any[]) : [];
+          const ids = idsRaw.map((x) => String(x ?? "").trim()).filter(Boolean);
+          const allowed = new Set(selectorCandidates.map((c) => c.id));
+          const selected = ids.filter((x) => allowed.has(x)).slice(0, 6);
+          trace.selectedIds = selected;
+          const applied0 = applyRouterHints(selected);
+          trace.applied = applied0.applied;
+          routerContextHints = applied0.hints;
+          trace.ok = true;
+        } catch (e: any) {
+          trace.ok = false;
+          trace.error = String(e?.message ?? e);
+          // fallback：硬规则（极简）
+          const fallbackIds = ["RUN_TODO_SUMMARY", "LAST_ASSISTANT_QUESTION", "RECENT_DIALOGUE_TAIL"].filter((id) =>
+            selectorCandidates.some((c) => c.id === id),
+          );
+          trace.selectedIds = fallbackIds;
+          const applied0 = applyRouterHints(fallbackIds);
+          trace.applied = applied0.applied;
+          routerContextHints = applied0.hints;
+        }
+      } else if (wantHints) {
+        // fallback：不调用小模型，也补齐最关键的提示
+        const fallbackIds = ["RUN_TODO_SUMMARY", "LAST_ASSISTANT_QUESTION"].filter((id) => selectorCandidates.some((c) => c.id === id));
+        const applied0 = applyRouterHints(fallbackIds);
+        routerContextHints = applied0.hints;
+      }
       const controller = new AbortController();
       const timeoutMsRaw = Number(String(process.env.INTENT_ROUTER_TIMEOUT_MS ?? "15000").trim());
       const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? Math.floor(timeoutMsRaw) : 15_000;
@@ -2087,7 +2352,8 @@ fastify.post(
               '- clarify: { slot: "target"|"action"|"permission", question: string, options?: string[] }\n' +
               "约束：confidence 为 0~1 之间的小数。\n" +
               "提示：若用户在确认 IDE 可见性（例如“你能看到当前文件/选区吗”），通常应输出：routeId=visibility_contract, intentType=info, nextAction=respond_text, todoPolicy=skip, toolPolicy=deny。\n" +
-              "提示：如果你不确定用户要做什么，优先 routeId=unclear 且 nextAction=ask_clarify，并输出 clarify（只问一个 slot）。\n",
+              "提示：如果你不确定用户要做什么，优先 routeId=unclear 且 nextAction=ask_clarify，并输出 clarify（只问一个 slot）。\n" +
+              "提示：你可能会收到 contextHints（例如 runTodoSummary/lastAssistantQuestion）。当用户输入很短且明显是在回答上一轮“选择/确认问题”时，应倾向判为 task_execution（续跑工作流），避免误判为 unclear。\n",
           },
           {
             role: "user",
@@ -2096,6 +2362,7 @@ fastify.post(
               userPrompt,
               mainDocRunIntent: String((mainDocFromPack as any)?.runIntent ?? ""),
               hasRunTodo: Array.isArray(runTodoFromPack) && runTodoFromPack.length > 0,
+              ...(routerContextHints ? { contextHints: routerContextHints } : {}),
               ide: {
                 activePath: coerceNonEmptyString(ideSummaryFromSidecar?.activePath),
                 openPaths: typeof ideSummaryFromSidecar?.openPaths === "number" ? ideSummaryFromSidecar.openPaths : null,
@@ -2388,6 +2655,14 @@ fastify.post(
   };
 
   writeEvent("run.start", { runId, model, mode });
+  const runStartedAt = Date.now();
+  // 轻量执行报告（用于 run.done / 自动兜底结束；必须有上限，避免无限增长）
+  const execReport = {
+    writes: [] as Array<{ tool: string; path?: string; paths?: string[]; applied?: boolean; proposed?: boolean }>,
+    errors: [] as Array<{ tool: string; error: string }>,
+    toolCalls: 0,
+    toolResults: 0,
+  };
 
   const messages: OpenAiChatMessage[] = [
     { role: "system", content: buildAgentProtocolPrompt({ mode, allowedToolNames: baseAllowedToolNames as any }) },
@@ -2460,6 +2735,44 @@ fastify.post(
   const radarMinSearch = clampInt(process.env.WEB_RADAR_MIN_SEARCH ?? 3, 1, 8, 3);
   const radarMinFetch = clampInt(process.env.WEB_RADAR_MIN_FETCH ?? 5, 1, 12, 5);
   const radarMinTopics = clampInt(process.env.WEB_RADAR_MIN_TOPICS ?? 15, 8, 40, 15);
+  // 若用户明确只要“Top N / 前 N 篇/条”，则热点盘点不应强制 >=15 条，避免 WebRadarPolicy 死循环。
+  const radarMinTopicsByPrompt = (() => {
+    const parseTopN = (raw: string) => {
+      const t = String(raw ?? "");
+      const m =
+        t.match(/(?:top|前)\s*([0-9]{1,2}|[一二三四五六七八九十两]{1,3})\s*(?:篇|条|个)/i) ||
+        t.match(/([0-9]{1,2}|[一二三四五六七八九十两]{1,3})\s*(?:篇|条|个)\s*(?:分别|各|左右|上下|即可|就行|就好)/i);
+      const token = m?.[1] ? String(m[1]) : "";
+      if (!token) return null;
+      // 数字
+      if (/^\d{1,2}$/.test(token)) {
+        const n = Number(token);
+        return Number.isFinite(n) ? Math.floor(n) : null;
+      }
+      // 中文数字（覆盖常见 1-12）
+      const map: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+      const s = token.trim();
+      if (!s) return null;
+      if (s === "十") return 10;
+      // 十一/十二/十三...
+      if (s.startsWith("十") && s.length === 2) return 10 + (map[s[1]] ?? 0);
+      // 二十（不太会出现，但兜底）
+      if (s.length === 2 && map[s[0]] && s[1] === "十") return map[s[0]] * 10;
+      // 二十一
+      if (s.length === 3 && map[s[0]] && s[1] === "十") return map[s[0]] * 10 + (map[s[2]] ?? 0);
+      return map[s] ?? null;
+    };
+    const texts = [String(userPrompt ?? ""), String((mainDocFromPack as any)?.goal ?? "")];
+    for (const raw of texts) {
+      const n = parseTopN(raw);
+      if (!Number.isFinite(n as any)) continue;
+      const nn = Number(n);
+      if (nn <= 0 || nn > 10) continue;
+      return Math.max(1, Math.floor(nn));
+    }
+    return null as number | null;
+  })();
+  const radarMinTopicsEffective = radarMinTopicsByPrompt ? Math.max(3, radarMinTopicsByPrompt) : radarMinTopics;
 
   const webGate = {
     enabled: webGateBaseEnabled,
@@ -2472,7 +2785,7 @@ fastify.post(
     requiredUniqueSearchQueries: webRadarActive ? Math.min(radarMinSearch, 3) : 0,
     requiredUniqueFetchDomains: webRadarActive ? 3 : 0,
     // 输出广度：热点盘点默认 >=15 条
-    minTopics: webRadarActive ? radarMinTopics : 0,
+    minTopics: webRadarActive ? radarMinTopicsEffective : 0,
     radar: webRadarActive,
   };
 
@@ -2580,6 +2893,22 @@ fastify.post(
       state: stateSnapshot(),
     });
   };
+
+  // 观测：Context Pack Selector（给 Intent Router 的输入提示）
+  try {
+    const sel: any = (intentRouterTrace as any)?.contextSelector ?? null;
+    if (sel && typeof sel === "object" && sel.attempted) {
+      writePolicyDecision({
+        turn: 0,
+        policy: "ContextPackSelector",
+        decision: sel.ok ? "select" : "fallback",
+        reasonCodes: sel.ok ? ["context_selector_ok"] : ["context_selector_fallback"],
+        detail: sel,
+      });
+    }
+  } catch {
+    // ignore
+  }
 
   // ======== Policy-0：Intent Router（Phase 0：启发式） ========
   writePolicyDecision({
@@ -2983,7 +3312,7 @@ fastify.post(
 
 
   try {
-    for (let turn = 0; turn < maxTurns; turn += 1) {
+    turnLoop: for (let turn = 0; turn < maxTurns; turn += 1) {
       if (abort.signal.aborted) break;
 
       currentTurn = turn;
@@ -3488,6 +3817,15 @@ fastify.post(
                   reasonCodes: ["tool_call_repaired", "tool_xml_parse_failed"],
                   detail: { modelIdUsed: repaired.modelIdUsed, usage: repaired.usage ? { ...(repaired.usage as any) } : null },
                 });
+                writeRunNotice({
+                  turn,
+                  kind: "info",
+                  title: "ToolCallRepair：已自动修复工具调用",
+                  message: "检测到工具 XML 不可解析，已调用修复器自动修复为合法 <tool_calls>，并继续执行。",
+                  policy: "ToolCallRepairPolicy",
+                  reasonCodes: ["tool_call_repaired", "tool_xml_parse_failed"],
+                  detail: { modelIdUsed: repaired.modelIdUsed },
+                });
               }
             }
           }
@@ -3922,7 +4260,52 @@ fastify.post(
 
         // Web Radar（广度优先）：如果已完成联网证据门禁，但最终“盘点条数”明显不足，则自动继续一次补足。
         // 目的：防止模型拿到搜索结果后默认收敛到 2-3 条就直接成稿。
-        if (webGate.radar && webGate.minTopics > 0 && runState.workflowRetryBudget > 0) {
+        // 但：一旦已经发生写入类工具（doc.write/doc.splitToDir 等），说明已经进入“成稿/落盘”阶段，
+        // 不应再用 WebRadar 的“条数门槛”去要求补足（否则会把最终总结/文件清单误判为“话题盘点不足”）。
+        if (!runState.hasWriteOps && webGate.radar && webGate.minTopics > 0 && runState.workflowRetryBudget > 0) {
+          // 若本轮输出已经在“向用户确认/澄清”，则应立即暂停等待用户输入，而不是继续强制补足条数。
+          // 否则用户会看到“仍在运行中”，且确认输入会落在不一致的上下文里导致模型报错。
+          const hardClarify =
+            /(请确认|确认一下|需要确认|待确认|请选择|请选|你选|你更偏好|更偏好|偏好哪|更偏向|选哪个|选哪种|用哪个)/.test(assistantText) ||
+            /top\s*\d{1,2}/i.test(assistantText);
+          if (hardClarify) {
+            writePolicyDecision({
+              turn,
+              policy: "WebRadarPolicy",
+              decision: "clarify_waiting",
+              reasonCodes: ["clarify_waiting"],
+              detail: { minTopics: webGate.minTopics },
+            });
+            writeRunNotice({
+              turn,
+              kind: "info",
+              title: "等待用户确认",
+              message: "需要你确认/选择后才能继续。已暂停本次 run，等待你的回复。",
+              policy: "WebRadarPolicy",
+              reasonCodes: ["clarify_waiting"],
+              detail: { minTopics: webGate.minTopics },
+            });
+
+            // 结束前兜底 flush 一次（避免前端看起来“问了问题但没显示完整”）
+            if (assistantText.trim().length === 0) {
+              const fallback = intent.wantsOkOnly ? "OK" : "（需要你确认后才能继续）";
+              writeEvent("assistant.delta", { delta: fallback, turn });
+              assistantText = fallback;
+              flushed = assistantText.length;
+            }
+            if (flushed < assistantText.length) {
+              const remain = assistantText.slice(flushed);
+              if (remain) writeEvent("assistant.delta", { delta: remain, turn });
+              flushed = assistantText.length;
+            }
+            messages.push({ role: "assistant", content: assistantText });
+            writeEvent("run.end", { runId, reason: "clarify_waiting", reasonCodes: ["clarify_waiting"], turn });
+            writeEvent("assistant.done", { reason: "clarify_waiting", turn });
+            reply.raw.end();
+            agentRunWaiters.delete(runId);
+            return;
+          }
+
           const countTopicLikeItems = (text: string) => {
             const lines = String(text ?? "")
               .replace(/\r/g, "")
@@ -4785,6 +5168,102 @@ fastify.post(
         }
       }
 
+      // LengthGatePolicy：当任务包含“目标字数（例如 1200 字）”时，禁止把明显偏离字数的正文直接写入文件。
+      // 这让“字数约束”以写入产物为准（doc.write.content），避免先写入后才发现 need_length。
+      if (mode !== "chat" && Number.isFinite(Number(targetChars as any)) && Number(targetChars) >= 200 && intent.isWritingTask) {
+        const target = Math.floor(Number(targetChars));
+        const min = Math.floor(target * 0.8);
+        const max = Math.floor(target * 1.2);
+        const writes = toolCalls
+          .filter((c: any) => String(c?.name ?? "") === "doc.write")
+          .map((c: any) => {
+            const a = (c?.args ?? {}) as any;
+            const path = typeof a?.path === "string" ? String(a.path).trim() : "";
+            const content = typeof a?.content === "string" ? String(a.content) : "";
+            const len = content.trim().length;
+            const looksDraftLike =
+              looksLikeDraftText(content) ||
+              (content.trim().length >= 400 && /[。！？]/.test(content) && content.split(/\n{2,}/).filter(Boolean).length >= 3);
+            return { path, len, looksDraftLike };
+          })
+          .filter((x: any) => x.looksDraftLike);
+        const bad = writes.filter((w: any) => w.len < min || w.len > max);
+
+        if (bad.length) {
+          if (runState.workflowRetryBudget > 0) {
+            writePolicyDecision({
+              turn,
+              policy: "LengthGatePolicy",
+              decision: "retry",
+              reasonCodes: ["need_length", `target:${target}`],
+              detail: {
+                target,
+                range: { min, max },
+                bad: bad.slice(0, 6).map((b: any) => ({ path: b.path, len: b.len })),
+                budget: "workflow",
+                budgetBefore: runState.workflowRetryBudget,
+                budgetAfter: Math.max(0, runState.workflowRetryBudget - 1),
+              }
+            });
+            runState.workflowRetryBudget -= 1;
+            writeRunNotice({
+              turn,
+              kind: "info",
+              title: "LengthGate：写入前字数校验未通过，自动重试",
+              message:
+                `检测到 doc.write 的正文长度与目标字数偏离较大（目标≈${target}字；允许范围≈${min}~${max}字）。系统将自动继续一次。\n` +
+                `要求：把将要写入的正文扩写/删减到目标附近后，再调用 doc.write 写入。\n` +
+                `当前偏离文件：\n${bad
+                  .slice(0, 6)
+                  .map((b: any) => `- ${b.path || "(unknown)"}：≈${b.len}字`)
+                  .join("\n")}`,
+              policy: "LengthGatePolicy",
+              reasonCodes: ["need_length"],
+              detail: { target, min, max, bad: bad.slice(0, 6) },
+            });
+            writeEvent("assistant.done", { reason: "auto_retry_length_gate", turn });
+            messages.push({
+              role: "system",
+              content:
+                "你上一轮准备写入 doc.write 的正文长度与目标字数偏离较大。\n" +
+                `- 目标：≈${target}字；允许范围：≈${min}~${max}字。\n` +
+                "- 你现在必须重新输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
+                "- 要求：把 doc.write.content 扩写/删减到目标附近；再调用 doc.write 写入。\n" +
+                "- 注意：不要把 kb.search / lint.copy / lint.style 与 doc.write 混在同一回合（需要先拿到 tool_result 再写入）。\n"
+            });
+            continue turnLoop;
+          }
+
+          writePolicyDecision({
+            turn,
+            policy: "LengthGatePolicy",
+            decision: "block_end",
+            reasonCodes: ["need_length", "auto_retry_budget_exhausted"],
+            detail: {
+              target,
+              range: { min, max },
+              bad: bad.slice(0, 6).map((b: any) => ({ path: b.path, len: b.len })),
+            }
+          });
+          writeRunNotice({
+            turn,
+            kind: "warn",
+            title: "LengthGate：字数不达标，且达到自动重试上限",
+            message:
+              `doc.write 的正文长度与目标字数偏离较大（目标≈${target}字；允许范围≈${min}~${max}字），但已达到自动重试上限。\n` +
+              "请回复“继续”让我再尝试一次，或你也可以手动扩写后再点写入。",
+            policy: "LengthGatePolicy",
+            reasonCodes: ["need_length", "auto_retry_budget_exhausted"],
+            detail: { target, min, max },
+          });
+          writeEvent("run.end", { runId, reason: "need_length", reasonCodes: ["need_length", "auto_retry_budget_exhausted"], turn });
+          writeEvent("assistant.done", { reason: "need_length", turn });
+          reply.raw.end();
+          agentRunWaiters.delete(runId);
+          return;
+        }
+      }
+
       for (const call of toolCalls) {
         runState.hasAnyToolCall = true;
         if (!call?.name || !allowedToolNames.has(call.name)) {
@@ -4931,6 +5410,7 @@ fastify.post(
         });
         const executedBy = execDecision.executedBy;
         writeEvent("tool.call", { toolCallId, name: call.name, args: call.args, executedBy });
+        execReport.toolCalls += 1;
 
         let payload: ToolResultPayload;
         if (executedBy === "gateway") {
@@ -5072,6 +5552,12 @@ fastify.post(
           output: payload.output,
           meta: payload.meta ?? null
         });
+        execReport.toolResults += 1;
+        if (!payload.ok) {
+          const err = String((payload.output as any)?.error ?? (payload.output as any)?.message ?? "TOOL_FAILED");
+          execReport.errors.push({ tool: String(payload.name ?? ""), error: err });
+          if (execReport.errors.length > 20) execReport.errors = execReport.errors.slice(-20);
+        }
 
         // 计费（按次数）：web.search / web.fetch（博查）
         if (
@@ -5174,6 +5660,27 @@ fastify.post(
           runState.hasWriteOps = true;
           if (isProposalWaitingMeta(payload.meta)) runState.hasWriteProposed = true;
           else if (String((payload.meta as any)?.applyPolicy ?? "") === "auto_apply") runState.hasWriteApplied = true;
+
+          // 轻量抽取写入路径（用于 done 报告）
+          try {
+            const tool = String(payload.name ?? "");
+            const o: any = payload.output && typeof payload.output === "object" ? payload.output : {};
+            const item: any = { tool };
+            if (tool === "doc.write" && typeof o?.path === "string") item.path = String(o.path);
+            if (tool === "doc.applyEdits" && typeof o?.path === "string") item.path = String(o.path);
+            if (tool === "doc.replaceSelection" && typeof o?.path === "string") item.path = String(o.path);
+            if (tool === "doc.splitToDir") {
+              const files = Array.isArray(o?.files) ? o.files : [];
+              const paths = files.map((f: any) => String(f?.path ?? "").trim()).filter(Boolean).slice(0, 50);
+              if (paths.length) item.paths = paths;
+            }
+            item.proposed = isProposalWaitingMeta(payload.meta);
+            item.applied = String((payload.meta as any)?.applyPolicy ?? "") === "auto_apply";
+            execReport.writes.push(item);
+            if (execReport.writes.length > 50) execReport.writes = execReport.writes.slice(-50);
+          } catch {
+            // ignore
+          }
         }
         if (payload.ok && payload.name === "kb.search") runState.hasKbSearch = true;
         if (payload.ok && payload.name === "time.now") {
@@ -5221,6 +5728,80 @@ fastify.post(
             const has = cur.some((x) => String(x ?? "").trim().toLowerCase() === domain);
             if (!has) runState.webFetchUniqueDomains = [...cur, domain].slice(0, 12);
           }
+        }
+
+        // 显式 done：立刻结束 run（避免“完成后继续跑一轮总结/补充”导致超时）
+        if (payload.ok && String(payload.name ?? "") === "run.done") {
+          const note = String((call?.args as any)?.note ?? "").trim();
+          const todoList = Array.isArray((runState as any).todoList) ? ((runState as any).todoList as any[]) : [];
+          const doneCount = todoList.filter((t: any) => String(t?.status ?? "").trim().toLowerCase() === "done").length;
+          const blockedCount = todoList.filter((t: any) => String(t?.status ?? "").trim().toLowerCase() === "blocked").length;
+          const total = todoList.length;
+          const ms = Date.now() - runStartedAt;
+
+          const writePaths = (() => {
+            const out: string[] = [];
+            for (const w of execReport.writes) {
+              if (w.path) out.push(String(w.path));
+              if (Array.isArray(w.paths)) out.push(...w.paths.map((p) => String(p)));
+            }
+            return Array.from(new Set(out)).slice(0, 40);
+          })();
+
+          writeEvent("assistant.delta", {
+            delta:
+              `\n\n---\n\n[系统] 已完成（run.done）。\n` +
+              `- 用时：${Math.max(0, Math.floor(ms / 1000))}s\n` +
+              `- 写入：${writePaths.length ? writePaths.length + " 个路径" : "无"}\n` +
+              (writePaths.length ? writePaths.map((p) => `  - ${p}`).join("\n") + "\n" : "") +
+              `- To-do：${total}（done=${doneCount}${blockedCount ? `, blocked=${blockedCount}` : ""}）\n` +
+              `- 工具：tool.call=${execReport.toolCalls}, tool.result=${execReport.toolResults}\n` +
+              (execReport.errors.length ? `- 错误：${execReport.errors.length}（见 Logs）\n` : "") +
+              (note ? `- 备注：${note.slice(0, 200)}\n` : ""),
+          });
+
+          writeEvent("run.end", {
+            runId,
+            reason: "done",
+            reasonCodes: ["done"],
+            turn,
+            report: {
+              ms,
+              writePaths,
+              todo: { total, done: doneCount, blocked: blockedCount },
+              tools: { call: execReport.toolCalls, result: execReport.toolResults },
+              errors: execReport.errors.slice(0, 20),
+            },
+          });
+          writeEvent("assistant.done", { reason: "done", turn });
+          reply.raw.end();
+          agentRunWaiters.delete(runId);
+          return;
+        }
+
+        // 硬兜底：写入发生 + todo 被清空 => 直接结束（避免再拉模型跑一轮总结导致超时/模型错误）
+        if (payload.ok && String(payload.name ?? "") === "run.todo.clear" && runState.hasWriteOps && !runState.hasWriteProposed && mode !== "chat") {
+          const ms = Date.now() - runStartedAt;
+          const writePaths = (() => {
+            const out: string[] = [];
+            for (const w of execReport.writes) {
+              if (w.path) out.push(String(w.path));
+              if (Array.isArray(w.paths)) out.push(...w.paths.map((p) => String(p)));
+            }
+            return Array.from(new Set(out)).slice(0, 40);
+          })();
+          writeEvent("assistant.delta", {
+            delta:
+              `\n\n---\n\n[系统] 已完成（自动收尾：写入已发生且 To-do 已清空）。\n` +
+              `- 用时：${Math.max(0, Math.floor(ms / 1000))}s\n` +
+              `- 写入：${writePaths.length ? writePaths.length + " 个路径" : "无"}\n` +
+              (writePaths.length ? writePaths.map((p) => `  - ${p}`).join("\n") + "\n" : ""),
+          });
+          writeEvent("run.end", { runId, reason: "done", reasonCodes: ["done", "done_auto", "write_and_todo_clear"], turn });
+          writeEvent("assistant.done", { reason: "done", turn });
+          reply.raw.end();
+          agentRunWaiters.delete(runId);
+          return;
         }
 
         // 澄清等待：如果模型把某些 todo 标记为“等待用户确认/blocked”，则本轮应停止，等待用户回答（否则会出现“问你但仍继续跑”）。
@@ -7278,6 +7859,48 @@ fastify.post(
         matchReasons: r.matchReasons
       }))
     };
+  }
+);
+
+/**
+ * KB URL 抓取（开发期）：用于 Desktop “URL 导入入库”。
+ * - 复用 web.fetch 的抓取/抽取/白名单策略与 contentHash(sha256) 口径
+ * - 不落库：由 Desktop 本地 KB 负责写入/断点续传
+ */
+fastify.post(
+  "/api/kb/dev/fetch_url_for_ingest",
+  { preHandler: (fastify as any).authenticate },
+  async (request: any, reply) => {
+    const bodySchema = z.object({
+      url: z.string().min(1),
+      format: z.enum(["markdown", "text"]).optional(),
+      timeoutMs: z.number().int().min(1).max(120_000).optional(),
+      maxChars: z.number().int().min(1000).max(200_000).optional(),
+    });
+    const body = bodySchema.parse((request as any).body ?? {});
+
+    const call: any = {
+      name: "web.fetch",
+      args: {
+        url: body.url,
+        ...(body.format ? { format: body.format } : {}),
+        ...(typeof body.timeoutMs === "number" ? { timeoutMs: body.timeoutMs } : {}),
+        ...(typeof body.maxChars === "number" ? { maxChars: body.maxChars } : {}),
+      },
+    };
+
+    const ret = await executeWebFetchOnGateway({ call });
+    if (!ret.ok) {
+      const err = String((ret as any).error ?? "FETCH_FAILED");
+      const status =
+        err === "MISSING_URL" || err === "WEB_SEARCH_DISABLED" || err === "DOMAIN_NOT_ALLOWED" || err === "INVALID_URL"
+          ? 400
+          : err.startsWith("HTTP_")
+            ? 502
+            : 500;
+      return reply.code(status).send({ ok: false, error: err, detail: (ret as any).detail ?? null });
+    }
+    return { ok: true, ...(ret as any).output };
   }
 );
 

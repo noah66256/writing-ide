@@ -829,6 +829,31 @@ async function interactiveUpdateFlow(args) {
 }
 
 function registerIpc() {
+  ipcMain.handle("window.focusMain", async () => {
+    try {
+      if (!mainWindow) return { ok: false, error: "NO_MAIN_WINDOW" };
+      // show/focus 的顺序在 Windows 上更稳：先 show 再 focus
+      try {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+      } catch {
+        // ignore
+      }
+      try {
+        mainWindow.show();
+      } catch {
+        // ignore
+      }
+      try {
+        mainWindow.focus();
+      } catch {
+        // ignore
+      }
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
   ipcMain.handle("clipboard.writeText", async (_event, text) => {
     try {
       clipboard.writeText(String(text ?? ""));

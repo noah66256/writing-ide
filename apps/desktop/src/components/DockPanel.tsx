@@ -5,6 +5,7 @@ import { RichText } from "./RichText";
 import { useProjectStore } from "../state/projectStore";
 import { parseMarkdownHeadings, moveSectionByHeadingLine, shiftHeadingLevelsInSection } from "../utils/markdown";
 import { DiffEditor } from "@monaco-editor/react";
+import { useDialogStore } from "../state/dialogStore";
 
 export function DockPanel() {
   const tab = useUiStore((s) => s.dockTab);
@@ -32,6 +33,10 @@ export function DockPanel() {
 
   const [pickedSnapshotId, setPickedSnapshotId] = useState<string | null>(null);
   const [diffOpen, setDiffOpen] = useState(false);
+  const [logOpenById, setLogOpenById] = useState<Record<string, boolean>>({});
+
+  const uiPrompt = useDialogStore((s) => s.openPrompt);
+  const uiConfirm = useDialogStore((s) => s.openConfirm);
 
   const jumpToLine = (line: number) => {
     try {
@@ -133,6 +138,35 @@ export function DockPanel() {
     const doing = list.filter((t) => t.status === "in_progress").length;
     return { total: list.length, done, blocked, doing };
   }, [todoList]);
+
+  const toggleLogDetail = (id: string) => setLogOpenById((s) => ({ ...s, [id]: !s[id] }));
+
+  const summarizeLog = (msg: string, data: any) => {
+    const m = String(msg ?? "");
+    if (m === "context.pack.summary" && data && typeof data === "object") {
+      const mode = String(data?.mode ?? "");
+      const model = String(data?.model ?? "");
+      const activePath = String(data?.activePath ?? "");
+      const fileCount = Number(data?.fileCount ?? 0);
+      const hasSelection = Boolean(data?.hasSelection);
+      return `mode=${mode} model=${model}${activePath ? ` activePath=${activePath}` : ""} files=${Number.isFinite(fileCount) ? fileCount : 0} selection=${hasSelection ? "yes" : "no"}`;
+    }
+    if (m === "gateway.agent.response" && data && typeof data === "object") {
+      return `status=${String(data?.status ?? "")}`;
+    }
+    if (m === "gateway.run.start" && data && typeof data === "object") {
+      const mode = String(data?.mode ?? "");
+      const model = String(data?.model ?? "");
+      return `mode=${mode} model=${model}`;
+    }
+    if (m === "agent.run.start" && data && typeof data === "object") {
+      const runId = String(data?.runId ?? "");
+      const mode = String(data?.mode ?? "");
+      const model = String(data?.model ?? "");
+      return `${runId ? `runId=${runId} ` : ""}mode=${mode} model=${model}`.trim();
+    }
+    return "";
+  };
 
   return (
     <div style={{ height: "100%", display: "grid", gridTemplateRows: "auto 1fr" }}>
@@ -251,9 +285,18 @@ export function DockPanel() {
                   className="btn"
                   type="button"
                   onClick={() => {
-                    const label = window.prompt("快照名称（可选）", "");
-                    const rec = commitSnapshot(label ?? undefined);
-                    setPickedSnapshotId(rec.id);
+                    void (async () => {
+                      const label = await uiPrompt({
+                        title: "创建快照",
+                        message: "快照名称（可选）",
+                        defaultValue: "",
+                        confirmText: "创建",
+                        cancelText: "取消",
+                      });
+                      if (label === null) return;
+                      const rec = commitSnapshot(label.trim() ? label : undefined);
+                      setPickedSnapshotId(rec.id);
+                    })();
                   }}
                 >
                   创建快照
@@ -268,8 +311,17 @@ export function DockPanel() {
                   onClick={() => {
                     const rec = pickedSnapshotId ? getSnapshot(pickedSnapshotId) : null;
                     if (!rec) return;
-                    if (!window.confirm(`确认恢复快照：${rec.label}？（会写回磁盘）`)) return;
-                    restoreSnapshot(rec.snap);
+                    void (async () => {
+                      const ok = await uiConfirm({
+                        title: "确认恢复快照？",
+                        message: `确认恢复快照：${rec.label}？\n\n（会写回磁盘）`,
+                        confirmText: "恢复",
+                        cancelText: "取消",
+                        danger: true,
+                      });
+                      if (!ok) return;
+                      restoreSnapshot(rec.snap);
+                    })();
                   }}
                 >
                   恢复快照
@@ -396,18 +448,35 @@ export function DockPanel() {
                 {logs
                   .slice()
                   .reverse()
-                  .map((l) => (
-                    <div key={l.id} style={{ marginBottom: 8 }}>
-                      <div style={{ color: "var(--muted)" }}>
-                        [{new Date(l.ts).toLocaleTimeString()}] {l.level.toUpperCase()} {l.message}
+                  .map((l) => {
+                    const hasData = l.data !== undefined;
+                    const isOpen = Boolean(logOpenById[l.id]);
+                    const summary = hasData ? summarizeLog(l.message, l.data as any) : "";
+                    return (
+                      <div key={l.id} style={{ marginBottom: 10 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline" }}>
+                          <div style={{ color: "var(--muted)" }}>
+                            [{new Date(l.ts).toLocaleTimeString()}] {l.level.toUpperCase()} {l.message}
+                            {summary ? <span style={{ color: "var(--muted)" }}> · {summary}</span> : null}
+                          </div>
+                          {hasData ? (
+                            <button
+                              className="btn"
+                              type="button"
+                              onClick={() => toggleLogDetail(l.id)}
+                              style={{ padding: "2px 8px", fontSize: 11 }}
+                              title={isOpen ? "收起详情" : "展开详情（JSON）"}
+                            >
+                              {isOpen ? "收起" : "看更多"}
+                            </button>
+                          ) : null}
+                        </div>
+                        {hasData && isOpen ? (
+                          <pre style={{ margin: "6px 0 0", whiteSpace: "pre-wrap" }}>{JSON.stringify(l.data, null, 2)}</pre>
+                        ) : null}
                       </div>
-                      {l.data !== undefined && (
-                        <pre style={{ margin: "4px 0 0", whiteSpace: "pre-wrap" }}>
-                          {JSON.stringify(l.data, null, 2)}
-                        </pre>
-                      )}
-                    </div>
-                  ))}
+                    );
+                  })}
               </div>
             )}
           </div>
@@ -421,6 +490,7 @@ function TodoPanel(args: { todoList: TodoItem[]; stats: { total: number; done: n
   const { todoList, stats } = args;
   const [filter, setFilter] = useState<"open" | "all" | "blocked" | "done">("open");
   const [newText, setNewText] = useState("");
+  const uiPrompt = useDialogStore((s) => s.openPrompt);
 
   const filtered = useMemo(() => {
     const list = Array.isArray(todoList) ? todoList : [];
@@ -614,9 +684,17 @@ function TodoPanel(args: { todoList: TodoItem[]; stats: { total: number; done: n
                       type="button"
                       onClick={() => {
                         const cur = t.note ?? "";
-                        const next = window.prompt("备注/阻塞原因（可留空）", cur);
-                        if (next === null) return;
-                        updateOne(t.id, { note: next.trim() ? next : undefined });
+                        void (async () => {
+                          const next = await uiPrompt({
+                            title: "备注/阻塞原因（可留空）",
+                            defaultValue: cur,
+                            confirmText: "保存",
+                            cancelText: "取消",
+                            multiline: true,
+                          });
+                          if (next === null) return;
+                          updateOne(t.id, { note: next.trim() ? next : undefined });
+                        })();
                       }}
                     >
                       备注…

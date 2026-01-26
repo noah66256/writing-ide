@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { activateSkills, type ActiveSkill } from "@writing-ide/agent-core";
 import { startGatewayRun } from "../agent/gatewayAgent";
 import { useRunStore, type MainDoc } from "../state/runStore";
@@ -13,6 +13,7 @@ import { useConversationStore, type RunSnapshot, type SerializableStep } from ".
 import { ModelPickerModal, type ModelPickerItem } from "./ModelPickerModal";
 import { getGatewayBaseUrl } from "../agent/gatewayUrl";
 import { useAuthStore } from "../state/authStore";
+import { useDialogStore } from "../state/dialogStore";
 
 type RunController = { cancel: (reason?: string) => void; done: Promise<void> };
 
@@ -145,6 +146,9 @@ export function AgentPane() {
     }
   });
 
+  const uiConfirm = useDialogStore((s) => s.openConfirm);
+  const uiAlert = useDialogStore((s) => s.openAlert);
+
   useEffect(() => {
     try {
       window.localStorage.setItem("agent.hideToolSteps", hideToolSteps ? "1" : "0");
@@ -228,6 +232,14 @@ export function AgentPane() {
     const ss = String(r).padStart(2, "0");
     return `${mm}:${ss}`;
   };
+
+  const todoStatsInline = useMemo(() => {
+    const list = Array.isArray(todoList) ? todoList : [];
+    const done = list.filter((t) => t.status === "done").length;
+    const blocked = list.filter((t) => t.status === "blocked").length;
+    const doing = list.filter((t) => t.status === "in_progress").length;
+    return { total: list.length, done, blocked, doing };
+  }, [todoList]);
 
   // dev：留空 => 走 /api（Vite proxy）；packaged(file://)：默认回落到 DEFAULT_GATEWAY_URL
   const gatewayUrl = getGatewayBaseUrl();
@@ -408,11 +420,10 @@ export function AgentPane() {
     `（提示：后续接入真实 usage 后会用真实 token 计数替代）`;
 
   const startTurn = (text: string) => {
-    if (isRunning) return;
     if (!text) return;
-    // 即使 UI 已显示非 running，也要清掉上一轮残留 controller（否则下一轮会触发“假 cancel/aborted”日志）
+    // 允许“运行中发送”：先中断当前 run，再启动新一轮（human-in-the-loop / 用户确认用）
     if (controllerRef.current) {
-      controllerRef.current.cancel("start_new_turn");
+      controllerRef.current.cancel("start_new_turn_or_user_interrupt");
       controllerRef.current = null;
     }
     if (!model) {
@@ -529,28 +540,36 @@ export function AgentPane() {
     if (isRunning) return;
     const hasAny = (useRunStore.getState().steps ?? []).length > 0;
     if (!hasAny) return;
-    const ok = window.confirm("删除当前对话？（仅清空右侧对话记录，不影响项目文件）");
-    if (!ok) return;
-    try {
-      useRunStore.getState().log("info", "ui.delete_current", {
-        phase: "before_reset",
-        overlays: { historyOpen, refPickerOpen, modelPickerOpen, submitFromHistory: Boolean(submitFromHistory) },
+    void (async () => {
+      const ok = await uiConfirm({
+        title: "确认删除当前对话？",
+        message: "仅清空右侧对话记录，不影响项目文件。",
+        confirmText: "删除",
+        cancelText: "取消",
+        danger: true,
       });
-    } catch {
-      // ignore
-    }
-    closeAllOverlays();
-    if (controllerRef.current) {
-      controllerRef.current.cancel("delete_conversation");
-      controllerRef.current = null;
-    }
-    useRunStore.getState().resetRun();
-    // 立即清空草稿，避免 resetRun 后 draftSnapshot 被 effect “短暂恢复”引发焦点/输入抖动
-    setDraftSnapshot(null);
-    setPinnedUserId(null);
-    setInput("");
-    composerRef.current?.setValue("");
-    focusComposerSoon({ reason: "delete_conversation" });
+      if (!ok) return;
+      try {
+        useRunStore.getState().log("info", "ui.delete_current", {
+          phase: "before_reset",
+          overlays: { historyOpen, refPickerOpen, modelPickerOpen, submitFromHistory: Boolean(submitFromHistory) },
+        });
+      } catch {
+        // ignore
+      }
+      closeAllOverlays();
+      if (controllerRef.current) {
+        controllerRef.current.cancel("delete_conversation");
+        controllerRef.current = null;
+      }
+      useRunStore.getState().resetRun();
+      // 立即清空草稿，避免 resetRun 后 draftSnapshot 被 effect “短暂恢复”引发焦点/输入抖动
+      setDraftSnapshot(null);
+      setPinnedUserId(null);
+      setInput("");
+      composerRef.current?.setValue("");
+      focusComposerSoon({ reason: "delete_conversation" });
+    })();
   };
 
   const onCopyDiagnostics = async () => {
@@ -596,7 +615,7 @@ export function AgentPane() {
       setTimeout(() => setCopiedHint(null), 1600);
     } catch (e: any) {
       const msg = e?.message ? String(e.message) : String(e);
-      window.alert(`复制失败：${msg}\n\n提示：请确保窗口处于前台（聚焦），或稍后重试。`);
+      void uiAlert({ title: "复制失败", message: `复制失败：${msg}\n\n提示：请确保窗口处于前台（聚焦），或稍后重试。` });
     }
   };
 
@@ -658,6 +677,7 @@ export function AgentPane() {
   }, [mainDoc.goal, mainDoc.title, mainDoc.topic]);
 
   const userSteps = useMemo(() => steps.filter((s) => s.type === "user") as any[], [steps]);
+  const lastUserStepId = userSteps.length ? String(userSteps[userSteps.length - 1].id) : null;
 
   // 默认置顶：最后一条 user（最近一回合）
   useEffect(() => {
@@ -886,22 +906,26 @@ export function AgentPane() {
         {steps.map((step) => {
           if (step.type === "user") {
             const isEditing = editingId === step.id;
+            const showWorkflowHere =
+              Boolean(lastUserStepId) &&
+              String(step.id) === lastUserStepId &&
+              ((isRunning && activity?.text) || (todoList?.length ?? 0) > 0);
             return (
-              <div
-                key={step.id}
-                className="msgUser"
-                ref={(el) => {
-                  userNodeByIdRef.current[step.id] = el;
-                }}
-              >
+              <Fragment key={step.id}>
                 <div
-                  className={`composerBox historyBox ${isEditing ? "historyBoxActive" : "historyBoxIdle"}`}
-                  onClick={() => {
-                    if (isEditing) return;
-                    setEditingId(step.id);
-                    setEditingText(step.text);
+                  className="msgUser"
+                  ref={(el) => {
+                    userNodeByIdRef.current[step.id] = el;
                   }}
                 >
+                  <div
+                    className={`composerBox historyBox ${isEditing ? "historyBoxActive" : "historyBoxIdle"}`}
+                    onClick={() => {
+                      if (isEditing) return;
+                      setEditingId(step.id);
+                      setEditingText(step.text);
+                    }}
+                  >
                   {!isEditing && (
                     <div className="historyHeader">
                       <div className="msgUserMeta">
@@ -1107,8 +1131,49 @@ export function AgentPane() {
                       <RichText text={step.text} />
                     </div>
                   )}
+                  </div>
                 </div>
-              </div>
+
+                {showWorkflowHere ? (
+                  <div className="workflowCard">
+                    {isRunning && activity?.text ? (
+                      <div className="workflowStatusRow" title={activity.text}>
+                        <div className="workflowStatusText">{activity.text}</div>
+                        <div className="workflowStatusTime">已耗时 {formatElapsed(nowTick - activity.startedAt)}</div>
+                      </div>
+                    ) : null}
+
+                    {(todoList?.length ?? 0) > 0 ? (
+                      <div className="workflowTodoBox" role="group" aria-label="To-dos">
+                        <div className="workflowTodoHeader">
+                          <div className="workflowTodoTitle">
+                            To-dos {todoStatsInline.total}
+                            <span className="workflowTodoMeta">
+                              {todoStatsInline.done ? ` · ✓${todoStatsInline.done}` : ""}
+                              {todoStatsInline.doing ? ` · …${todoStatsInline.doing}` : ""}
+                              {todoStatsInline.blocked ? ` · !${todoStatsInline.blocked}` : ""}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="workflowTodoList">
+                          {(todoList ?? []).slice(0, 12).map((t) => {
+                            const status = String(t.status ?? "todo");
+                            const isDone = status === "done";
+                            const icon = isDone ? "✓" : status === "in_progress" ? "…" : status === "blocked" ? "!" : "○";
+                            return (
+                              <div key={t.id} className={`workflowTodoItem ${isDone ? "workflowTodoDone" : ""}`}>
+                                <span className={`workflowTodoIcon workflowTodoIcon_${status}`}>{icon}</span>
+                                <span className="workflowTodoText">{t.text}</span>
+                              </div>
+                            );
+                          })}
+                          {(todoList ?? []).length > 12 ? <div className="workflowTodoMore">…（更多 todo 请到 Dock/Runs 查看）</div> : null}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </Fragment>
             );
           }
           if (step.type === "assistant") {
@@ -1134,7 +1199,7 @@ export function AgentPane() {
                           setTimeout(() => setCopiedHint(null), 1200);
                         } catch (e: any) {
                           const msg = e?.message ? String(e.message) : String(e);
-                          window.alert(`复制失败：${msg}\n\n提示：请确保窗口处于前台（聚焦），或稍后重试。`);
+                          void uiAlert({ title: "复制失败", message: `复制失败：${msg}\n\n提示：请确保窗口处于前台（聚焦），或稍后重试。` });
                         }
                       };
                       void tryCopy();
@@ -1151,6 +1216,8 @@ export function AgentPane() {
               </div>
             );
           }
+          // 运行中：默认不把 ToolBlock（Keep/Undo/展开）刷屏出来；失败的工具步仍然展示，便于定位错误
+          if (isRunning && step.type === "tool" && step.status !== "failed") return null;
           if (hideToolSteps) return null;
           return <ToolBlock key={step.id} step={step} />;
         })}
@@ -1458,8 +1525,14 @@ export function AgentPane() {
                   );
                 })()}
                 {isRunning ? (
-                  <button className="sendBtn" type="button" aria-label="停止" title="停止" onClick={onStop}>
-                    <IconStop />
+                  <button
+                    className="sendBtn"
+                    type="button"
+                    aria-label={input.trim() ? "发送（将中断当前运行）" : "停止"}
+                    title={input.trim() ? "发送（将中断当前运行）" : "停止"}
+                    onClick={input.trim() ? onSend : onStop}
+                  >
+                    {input.trim() ? <IconSend /> : <IconStop />}
                   </button>
                 ) : (
                   <button className="sendBtn" type="button" aria-label="发送" title="发送" onClick={onSend} disabled={!input.trim()}>
@@ -1471,12 +1544,7 @@ export function AgentPane() {
           </div>
         </div>
 
-        {isRunning && activity?.text ? (
-          <div className="activityBar" title={activity.text}>
-            <div className="activityText">{activity.text}</div>
-            <div className="activityTime">已耗时 {formatElapsed(nowTick - activity.startedAt)}</div>
-          </div>
-        ) : null}
+        {/* activityBar 已移入消息流（workflowCard），避免底部重复占位 */}
 
         <div style={{ color: "var(--muted)", fontSize: 12 }}>
           快捷键：Enter 发送；Shift/Ctrl/⌘ + Enter 换行（Chat 模式不会调用写入类工具）。

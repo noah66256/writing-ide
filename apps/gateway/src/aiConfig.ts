@@ -192,6 +192,8 @@ export function getDefaultStageDefinitionsFromEnv(): AiStageDefinition[] {
     String(process.env.LLM_TOOL_REPAIR_MODEL ?? "").trim() ||
     String(process.env.LLM_CARD_MODEL ?? "").trim() ||
     llmModel;
+  const contextSelectorModel =
+    String(process.env.LLM_CONTEXT_SELECTOR_MODEL ?? "").trim() || toolRepairModel || llmModel;
   const linterModel =
     String(process.env.LLM_LINTER_MODEL ?? "").trim() ||
     String(process.env.LLM_CARD_MODEL ?? "").trim() ||
@@ -232,6 +234,16 @@ export function getDefaultStageDefinitionsFromEnv(): AiStageDefinition[] {
       description: "Intent Router（Phase 1：LLM Router stage）。只输出结构化路由决策 JSON；不调用工具；失败应回退到启发式路由。",
       defaultModel: llmModel,
       defaultTemperature: 0.2,
+      defaultMaxTokens: 600,
+      defaultEndpoint: "/v1/chat/completions",
+    },
+    {
+      key: "agent.context_selector",
+      name: "Agent Context Selector（上下文注入选择器）",
+      description:
+        "Context Pack Selector：用小模型在预算内挑选“本轮需要注入的上下文段落/提示”。只输出 JSON；不调用工具；失败应回退到固定策略。",
+      defaultModel: contextSelectorModel,
+      defaultTemperature: 0,
       defaultMaxTokens: 600,
       defaultEndpoint: "/v1/chat/completions",
     },
@@ -386,12 +398,17 @@ export function createAiConfigService(args: {
       normalizeBaseURL(String(process.env.LLM_TOOL_REPAIR_BASE_URL ?? "")) || envBase;
     const envToolRepairKey =
       normalizeApiKeyInput(String(process.env.LLM_TOOL_REPAIR_API_KEY ?? "")) || envKey;
+    const envContextSelectorBase =
+      normalizeBaseURL(String(process.env.LLM_CONTEXT_SELECTOR_BASE_URL ?? "")) || envToolRepairBase || envBase;
+    const envContextSelectorKey =
+      normalizeApiKeyInput(String(process.env.LLM_CONTEXT_SELECTOR_API_KEY ?? "")) || envToolRepairKey || envKey;
 
     const pickCredsForStage = (stageKey: string) => {
       if (stageKey === "embedding") return { baseURL: envEmbedBase || envBase, apiKey: envEmbedKey || envKey };
       if (stageKey.startsWith("rag.ingest.")) return { baseURL: envCardBase || envBase, apiKey: envCardKey || envKey };
       if (stageKey === "lint.style") return { baseURL: envLinterBase || envBase, apiKey: envLinterKey || envKey };
       if (stageKey === "agent.tool_call_repair") return { baseURL: envToolRepairBase || envBase, apiKey: envToolRepairKey || envKey };
+      if (stageKey === "agent.context_selector") return { baseURL: envContextSelectorBase || envBase, apiKey: envContextSelectorKey || envKey };
       return { baseURL: envBase, apiKey: envKey };
     };
 

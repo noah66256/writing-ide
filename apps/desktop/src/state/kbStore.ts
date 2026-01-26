@@ -6,6 +6,7 @@ import { useProjectStore } from "./projectStore";
 import { useLayoutStore } from "./layoutStore";
 import { useRunStore } from "./runStore";
 import { useAuthStore } from "./authStore";
+import { useDialogStore } from "./dialogStore";
 import { FACET_PACKS, getFacetPack } from "../kb/facets";
 
 function kbLog(level: "info" | "warn" | "error", message: string, data?: unknown) {
@@ -21,7 +22,8 @@ type KbArtifactKind = "outline" | "paragraph" | "card";
 
 export type ImportedFrom =
   | { kind: "project"; relPath: string; entryIndex?: number }
-  | { kind: "file"; absPath: string; entryIndex?: number };
+  | { kind: "file"; absPath: string; entryIndex?: number }
+  | { kind: "url"; url: string; finalUrl?: string; fetchedAt?: string; entryIndex?: number };
 
 export type KbTextSpanRefV1 = {
   v: 1;
@@ -305,6 +307,14 @@ type KbState = {
     skippedSample?: Array<{ path: string; reason: string }>;
     errors?: Array<{ path: string; error: string }>;
   }>;
+  importUrls: (urls: string[], opts?: { timeoutMs?: number; maxChars?: number }) => Promise<{
+    imported: number;
+    skipped: number;
+    docIds: string[];
+    skippedByReason?: Record<string, number>;
+    skippedSample?: Array<{ path: string; reason: string }>;
+    errors?: Array<{ url: string; error: string }>;
+  }>;
   extractCardsForDocs: (docIds: string[], opts?: { signal?: AbortSignal }) => Promise<{
     ok: boolean;
     extracted: number;
@@ -403,6 +413,16 @@ type KbState = {
     useVector?: boolean;
     embeddingModel?: string;
   }) => Promise<{ ok: boolean; groups?: KbSearchGroup[]; error?: string; debug?: any }>;
+
+  // 供 Agent 工具使用：按 sourceDoc/anchor 精确取证据段（用于引用/审计）
+  citeForAgent: (args: {
+    sourceDocId: string;
+    artifactId?: string;
+    paragraphIndex?: number;
+    headingPath?: string[] | string;
+    maxChars?: number;
+    quoteMaxChars?: number;
+  }) => Promise<{ ok: boolean; ref?: KbTextSpanRefV1; content?: string; title?: string; error?: string }>;
 };
 
 function nowIso() {
@@ -503,7 +523,7 @@ function splitIntoEntries(args: { text: string }): KbEntry[] {
   return [{ entryIndex: 0, text: raw }];
 }
 
-function guessTitle(args: { format: KbFormat; relPath?: string; absPath?: string; text: string }) {
+function guessTitle(args: { format: KbFormat; relPath?: string; absPath?: string; url?: string; text: string }) {
   const text = args.text;
   // Markdown: first heading
   if (args.format === "md" || args.format === "mdx") {
@@ -517,10 +537,105 @@ function guessTitle(args: { format: KbFormat; relPath?: string; absPath?: string
     .find((l) => l.length > 0);
   if (first) return first.slice(0, 80);
   // Fallback: filename
-  const p = args.relPath ?? args.absPath ?? "untitled";
+  const p = args.relPath ?? args.absPath ?? args.url ?? "untitled";
   const parts = p.replaceAll("\\", "/").split("/");
   const base = parts[parts.length - 1] ?? p;
   return base.slice(0, 80);
+}
+
+function normalizeEntryIndex(entryIndex: any): number {
+  const n = Number(entryIndex);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.floor(n);
+}
+
+function entryIndexFromImportedFrom(src: ImportedFrom): number {
+  return normalizeEntryIndex((src as any)?.entryIndex);
+}
+
+function sameImportedFrom(a: ImportedFrom, b: ImportedFrom): boolean {
+  if (!a || !b) return false;
+  if (a.kind !== b.kind) return false;
+  const ai = entryIndexFromImportedFrom(a);
+  const bi = entryIndexFromImportedFrom(b);
+  if (ai !== bi) return false;
+  if (a.kind === "project") return String((a as any).relPath ?? "") === String((b as any).relPath ?? "");
+  if (a.kind === "file") return String((a as any).absPath ?? "") === String((b as any).absPath ?? "");
+  if (a.kind === "url") return String((a as any).url ?? "") === String((b as any).url ?? "");
+  return false;
+}
+
+function guessTitleFromImportedFrom(args: { format: KbFormat; importedFrom: ImportedFrom; text: string }) {
+  const src = args.importedFrom;
+  return guessTitle({
+    format: args.format,
+    ...(src.kind === "project" ? { relPath: src.relPath } : {}),
+    ...(src.kind === "file" ? { absPath: src.absPath } : {}),
+    ...(src.kind === "url" ? { url: src.url } : {}),
+    text: args.text,
+  });
+}
+
+function findExistingSourceDocByImportedFrom(args: { db: KbDb; libId: string; importedFrom: ImportedFrom }): KbSourceDoc | undefined {
+  const libId = String(args.libId ?? "").trim();
+  if (!libId) return undefined;
+  const importedFrom = args.importedFrom;
+  return args.db.sourceDocs.find((d) => String(d.libraryId ?? "").trim() === libId && sameImportedFrom(d.importedFrom as any, importedFrom));
+}
+
+async function ingestEntryToDb(args: {
+  baseDir: string;
+  ownerKey: string;
+  db: KbDb;
+  libId: string;
+  format: KbFormat;
+  importedFrom: ImportedFrom;
+  entryText: string;
+  contentHash: string;
+  titleHint?: string;
+  entryTitle?: string;
+}): Promise<{ docId: string; imported: boolean; skippedReason?: string }> {
+  const baseDir = args.baseDir;
+  const ownerKey = args.ownerKey;
+  const db = args.db;
+  const libId = String(args.libId ?? "").trim();
+  const format = args.format;
+  const entryText = normalizeText(args.entryText);
+  const contentHash = String(args.contentHash ?? "").trim();
+
+  const existing = findExistingSourceDocByImportedFrom({ db, libId, importedFrom: args.importedFrom });
+  if (existing && String(existing.contentHash ?? "") === contentHash) {
+    return { docId: existing.id, imported: false, skippedReason: "duplicate_same_hash" };
+  }
+
+  const id = existing?.id ?? makeId("kb_doc");
+  const now = nowIso();
+  const title =
+    String(args.entryTitle ?? "").trim() ||
+    String(args.titleHint ?? "").trim() ||
+    guessTitleFromImportedFrom({ format, importedFrom: args.importedFrom, text: entryText });
+
+  const doc: KbSourceDoc = {
+    id,
+    libraryId: libId,
+    title,
+    format,
+    importedFrom: args.importedFrom,
+    contentHash,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  };
+
+  // upsert doc
+  db.sourceDocs = [...db.sourceDocs.filter((x) => x.id !== id), doc];
+  // rebuild artifacts for this doc
+  db.artifacts = db.artifacts.filter((a) => a.sourceDocId !== id);
+  db.artifacts.push(...buildArtifacts({ format, sourceDocId: id, text: entryText }));
+
+  // 断点续传：每条 entry 都落盘一次
+  await saveDb({ baseDir, ownerKey, db });
+
+  return { docId: id, imported: true };
 }
 
 function extToFormat(pathLike: string): KbFormat {
@@ -1484,6 +1599,54 @@ async function postBuildLibraryPlaybook(args: {
   }
 }
 
+async function postFetchUrlForIngest(args: {
+  url: string;
+  timeoutMs?: number;
+  maxChars?: number;
+  format?: "markdown" | "text";
+}): Promise<
+  | {
+      ok: true;
+      url: string;
+      finalUrl: string;
+      status: number;
+      contentType: string | null;
+      title: string | null;
+      extractedBy: "fallback" | "not_html";
+      fetchedAt: string;
+      contentHash: string;
+      extractedText?: string;
+      extractedMarkdown?: string;
+    }
+  | { ok: false; error: string }
+> {
+  const base = gatewayBaseUrl();
+  const endpoint = base ? `${base}/api/kb/dev/fetch_url_for_ingest` : "/api/kb/dev/fetch_url_for_ingest";
+  if (!ensureLoginForKbLlm("导入 URL")) return { ok: false, error: "AUTH_REQUIRED" };
+  const auth = authHeader();
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...auth },
+      body: JSON.stringify({
+        url: args.url,
+        format: args.format ?? "text",
+        timeoutMs: typeof args.timeoutMs === "number" ? args.timeoutMs : undefined,
+        maxChars: typeof args.maxChars === "number" ? args.maxChars : undefined,
+      }),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok) {
+      const msg = typeof json?.error === "string" ? String(json.error) : `HTTP_${res.status}`;
+      return { ok: false, error: msg };
+    }
+    if (!json?.ok) return { ok: false, error: "INVALID_RESPONSE" };
+    return json as any;
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+}
+
 async function postBuildClusterRules(args: {
   model?: string;
   libraryName?: string;
@@ -2238,7 +2401,7 @@ export const useKbStore = create<KbState>()(
                 a.kind === "card" &&
                 ["style_profile", "playbook_facet"].includes(String(a.cardType ?? "")),
             );
-            alreadyGenerated = hasCards || true;
+            alreadyGenerated = hasCards;
           }
         } catch {
           // ignore
@@ -2255,12 +2418,17 @@ export const useKbStore = create<KbState>()(
         // 已跑过：提示“取消 / 仍然重跑”
         const alreadyRun = alreadyGenerated || existing?.status === "success";
         if (alreadyRun) {
-          const yes = window.confirm(
-            `库「${libName}」已生成过风格手册（已存在）。\n\n` +
+          const yes = await useDialogStore.getState().openConfirm({
+            title: "确认重跑？",
+            message:
+              `库「${libName}」已生成过风格手册（已存在）。\n\n` +
               "是否仍然重跑并覆盖？\n\n" +
               "- 取消：不重跑\n" +
               "- 确认：仍然重跑（将入队，需点击 ▶ 开始）",
-          );
+            confirmText: "仍然重跑",
+            cancelText: "取消",
+            danger: true,
+          });
           if (!yes) {
             if (opts?.open) set({ kbManagerOpen: true, kbManagerTab: "jobs" });
             return { ok: true, enqueued: false };
@@ -2724,45 +2892,26 @@ export const useKbStore = create<KbState>()(
                 continue;
               }
               const contentHash = fnv1a32Hex(entryText);
-
-              const existing = db.sourceDocs.find(
-                (d) =>
-                  d.libraryId === libId &&
-                  d.importedFrom?.kind === "project" &&
-                  d.importedFrom.relPath === relPath &&
-                  (typeof (d.importedFrom as any).entryIndex === "number" ? (d.importedFrom as any).entryIndex : 0) === entryIndex,
-              );
-              if (existing && existing.contentHash === contentHash) {
-                bumpSkip("duplicate_same_hash", `${relPath}#${entryIndex}`);
+              const importedFrom: ImportedFrom = { kind: "project", relPath, entryIndex };
+              const ret = await ingestEntryToDb({
+                baseDir,
+                ownerKey,
+                db,
+                libId,
+                format,
+                importedFrom,
+                entryText,
+                contentHash,
+                entryTitle: String(entry.title ?? "").trim() || undefined,
+              });
+              if (!ret.imported) {
+                bumpSkip(ret.skippedReason ?? "duplicate_same_hash", `${relPath}#${entryIndex}`);
                 // 关键：重复也返回 docId，便于后续“入队抽卡/重新生成手册”等动作继续执行
-                addDocId(existing.id);
+                addDocId(ret.docId);
                 continue;
               }
-
-              const id = existing?.id ?? makeId("kb_doc");
-              const title = String(entry.title ?? "").trim() || guessTitle({ format, relPath, text: entryText });
-              const now = nowIso();
-              const doc: KbSourceDoc = {
-                id,
-                libraryId: libId,
-                title,
-                format,
-                importedFrom: { kind: "project", relPath, entryIndex },
-                contentHash,
-                createdAt: existing?.createdAt ?? now,
-                updatedAt: now,
-              };
-
-              // upsert doc
-              db.sourceDocs = [...db.sourceDocs.filter((x) => x.id !== id), doc];
-              // rebuild artifacts for this doc
-              db.artifacts = db.artifacts.filter((a) => a.sourceDocId !== id);
-              db.artifacts.push(...buildArtifacts({ format, sourceDocId: id, text: entryText }));
-
               imported += 1;
-              addDocId(id);
-              // 断点续传：每条 entry 都落盘一次
-              await saveDb({ baseDir, ownerKey, db });
+              addDocId(ret.docId);
             }
           }
 
@@ -2860,41 +3009,25 @@ export const useKbStore = create<KbState>()(
                 continue;
               }
               const contentHash = fnv1a32Hex(entryText);
-
-              const existing = db.sourceDocs.find(
-                (d) =>
-                  d.libraryId === libId &&
-                  d.importedFrom?.kind === "file" &&
-                  d.importedFrom.absPath === absPath &&
-                  (typeof (d.importedFrom as any).entryIndex === "number" ? (d.importedFrom as any).entryIndex : 0) === entryIndex,
-              );
-              if (existing && existing.contentHash === contentHash) {
-                bumpSkip("duplicate_same_hash", `${absPath}#${entryIndex}`);
-                addDocId(existing.id);
+              const importedFrom: ImportedFrom = { kind: "file", absPath, entryIndex };
+              const ret = await ingestEntryToDb({
+                baseDir,
+                ownerKey,
+                db,
+                libId,
+                format,
+                importedFrom,
+                entryText,
+                contentHash,
+                entryTitle: String(entry.title ?? "").trim() || undefined,
+              });
+              if (!ret.imported) {
+                bumpSkip(ret.skippedReason ?? "duplicate_same_hash", `${absPath}#${entryIndex}`);
+                addDocId(ret.docId);
                 continue;
               }
-
-              const id = existing?.id ?? makeId("kb_doc");
-              const title = String(entry.title ?? "").trim() || guessTitle({ format, absPath, text: entryText });
-              const now = nowIso();
-              const doc: KbSourceDoc = {
-                id,
-                libraryId: libId,
-                title,
-                format,
-                importedFrom: { kind: "file", absPath, entryIndex },
-                contentHash,
-                createdAt: existing?.createdAt ?? now,
-                updatedAt: now,
-              };
-
-              db.sourceDocs = [...db.sourceDocs.filter((x) => x.id !== id), doc];
-              db.artifacts = db.artifacts.filter((a) => a.sourceDocId !== id);
-              db.artifacts.push(...buildArtifacts({ format, sourceDocId: id, text: entryText }));
-
               imported += 1;
-              addDocId(id);
-              await saveDb({ baseDir, ownerKey, db });
+              addDocId(ret.docId);
             }
           }
 
@@ -2913,6 +3046,149 @@ export const useKbStore = create<KbState>()(
           await get().refreshLibraries().catch(() => void 0);
         } catch (e: any) {
           set({ error: String(e?.message ?? e) });
+        } finally {
+          set({ isLoading: false });
+        }
+
+        return { imported, skipped, docIds: importedDocIds, skippedByReason, skippedSample, errors };
+      },
+
+      importUrls: async (urls, opts) => {
+        const ok = await get().ensureReady();
+        if (!ok) return { imported: 0, skipped: 0, docIds: [] };
+        const libId = get().currentLibraryId;
+        if (!libId) {
+          get().openKbManager("libraries", "请先选择一个库，再导入语料。");
+          set({ error: "未选择库：请先在“库管理”里创建/选择一个库。" });
+          return { imported: 0, skipped: 0, docIds: [] };
+        }
+        const baseDir = get().baseDir!;
+        const ownerKey = get().ownerKey;
+
+        let imported = 0;
+        let skipped = 0;
+        const importedDocIds: string[] = [];
+        const docIdSet = new Set<string>();
+        const addDocId = (id: string) => {
+          const clean = String(id ?? "").trim();
+          if (!clean) return;
+          if (docIdSet.has(clean)) return;
+          docIdSet.add(clean);
+          importedDocIds.push(clean);
+        };
+        const skippedByReason: Record<string, number> = {};
+        const skippedSample: Array<{ path: string; reason: string }> = [];
+        const bumpSkip = (reason: string, path: string) => {
+          skipped += 1;
+          skippedByReason[reason] = (skippedByReason[reason] ?? 0) + 1;
+          if (skippedSample.length < 8) skippedSample.push({ path, reason });
+        };
+        const errors: Array<{ url: string; error: string }> = [];
+
+        set({ isLoading: true, error: null });
+        kbLog("info", "kb.import.url.start", { libId, urlsCount: Array.isArray(urls) ? urls.length : 0 });
+
+        try {
+          const db = await loadDb({ baseDir, ownerKey });
+          if (!db.libraries.some((l) => l.id === libId)) {
+            set({ currentLibraryId: null });
+            get().openKbManager("libraries", "当前库已不存在，请重新选择库后再导入。");
+            set({ error: "当前库不存在：请重新选择库后再导入。" });
+            return { imported: 0, skipped: 0, docIds: [] };
+          }
+
+          const unique = Array.from(new Set((urls ?? []).map((u) => String(u ?? "").trim()).filter(Boolean)));
+          for (const u0 of unique) {
+            const url = String(u0 ?? "").trim();
+            if (!/^https?:\/\//i.test(url)) {
+              bumpSkip("invalid_url", url);
+              continue;
+            }
+
+            const fetched = await postFetchUrlForIngest({
+              url,
+              format: "text",
+              timeoutMs: typeof opts?.timeoutMs === "number" ? opts!.timeoutMs : undefined,
+              maxChars: typeof opts?.maxChars === "number" ? opts!.maxChars : undefined,
+            });
+            if (!fetched.ok) {
+              const err = String(fetched.error ?? "FETCH_FAILED");
+              errors.push({ url, error: err });
+              bumpSkip("fetch_failed", url);
+              continue;
+            }
+
+            const text = normalizeText(String((fetched as any).extractedText ?? (fetched as any).extractedMarkdown ?? ""));
+            if (!text) {
+              bumpSkip("empty_fetch", url);
+              continue;
+            }
+
+            const entries = splitIntoEntries({ text });
+            if (!entries.length) {
+              bumpSkip("no_entries", url);
+              continue;
+            }
+
+            const titleHint = String((fetched as any).title ?? "").trim() || undefined;
+            const finalUrl = String((fetched as any).finalUrl ?? "").trim() || url;
+            const fetchedAt = String((fetched as any).fetchedAt ?? "").trim() || undefined;
+            const baseHash = String((fetched as any).contentHash ?? "").trim();
+
+            for (const entry of entries) {
+              const entryIndex = Number.isFinite(entry.entryIndex) ? entry.entryIndex : 0;
+              const entryText = normalizeText(entry.text);
+              if (!entryText) {
+                bumpSkip("empty_entry", `${url}#${entryIndex}`);
+                continue;
+              }
+              // v0.1：单 entry 时复用网关 sha256(contentHash)；多 entry 暂用 fnv1a32（避免引入 sha256 计算依赖）
+              const contentHash = entries.length === 1 && baseHash ? baseHash : fnv1a32Hex(entryText);
+              const importedFrom: ImportedFrom = { kind: "url", url, finalUrl, ...(fetchedAt ? { fetchedAt } : {}), entryIndex };
+
+              const ret = await ingestEntryToDb({
+                baseDir,
+                ownerKey,
+                db,
+                libId,
+                format: "md",
+                importedFrom,
+                entryText,
+                contentHash,
+                titleHint,
+                entryTitle: String(entry.title ?? "").trim() || undefined,
+              });
+              if (!ret.imported) {
+                bumpSkip(ret.skippedReason ?? "duplicate_same_hash", `${url}#${entryIndex}`);
+                addDocId(ret.docId);
+                continue;
+              }
+              imported += 1;
+              addDocId(ret.docId);
+            }
+          }
+
+          set({ lastImportAt: nowIso() });
+          if (errors.length) {
+            const shown = errors.slice(0, 3).map((e) => `${e.error} — ${e.url}`);
+            const more = errors.length > shown.length ? `（以及另外 ${errors.length - shown.length} 项）` : "";
+            set({
+              error: `部分 URL 导入失败：\n` + shown.join("\n") + (more ? `\n${more}` : ""),
+            });
+          }
+          await get().refreshLibraries().catch(() => void 0);
+          kbLog("info", "kb.import.url.done", {
+            imported,
+            skipped,
+            skippedByReason,
+            skippedSample,
+            errorCount: errors.length,
+            docIdCount: importedDocIds.length,
+            sample: importedDocIds.slice(0, 6),
+          });
+        } catch (e: any) {
+          set({ error: String(e?.message ?? e) });
+          kbLog("error", "kb.import.url.failed", { error: String(e?.message ?? e) });
         } finally {
           set({ isLoading: false });
         }
@@ -3314,8 +3590,78 @@ export const useKbStore = create<KbState>()(
           };
 
           const requestBatch = async (facetIds: string[], part: "full" | "facets", meta?: Record<string, any>) => {
-            kbLog("info", "kb.playbook.request.batch", { libId, part, facetCount: facetIds.length, ...(meta ?? {}) });
-            return await postBuildLibraryPlaybook({ facetIds, docs: docsPayload, mode, part, signal: opts?.signal });
+            const t0 = Date.now();
+            const facetCount = facetIds.length;
+            const metaSafe = meta ?? {};
+            const facetIdsPreview = facetIds.slice(0, 6);
+            kbLog("info", "kb.playbook.request.batch", {
+              libId,
+              part,
+              mode,
+              facetCount,
+              facetIdsPreview,
+              ...(metaSafe ?? {}),
+            });
+            const ret = await postBuildLibraryPlaybook({ facetIds, docs: docsPayload, mode, part, signal: opts?.signal });
+            const elapsedMs = Date.now() - t0;
+
+            if (ret.ok) {
+              kbLog("info", "kb.playbook.response.batch", {
+                libId,
+                part,
+                mode,
+                ok: true,
+                facetCount,
+                facetIdsPreview,
+                elapsedMs,
+                receivedFacets: Array.isArray((ret as any)?.playbookFacets) ? (ret as any).playbookFacets.length : undefined,
+                ...(metaSafe ?? {}),
+              });
+              return ret;
+            }
+
+            const err = String((ret as any)?.error ?? "");
+            const errorKind =
+              err.includes("AUTH_REQUIRED")
+                ? "AUTH_REQUIRED"
+                : /UPSTREAM_TIMEOUT/.test(err)
+                  ? "UPSTREAM_TIMEOUT"
+                  : /\bHTTP_504\b/.test(err) || /\bstatus=504\b/.test(err) || /\b504\b/.test(err)
+                    ? "GATEWAY_HTTP_504"
+                    : /fetch failed|failed to fetch/i.test(err)
+                      ? "FETCH_FAILED"
+                      : /INVALID_RESPONSE/.test(err)
+                        ? "INVALID_RESPONSE"
+                        : opts?.signal?.aborted
+                          ? "ABORTED"
+                          : "ERROR";
+
+            kbLog("error", "kb.playbook.response.batch", {
+              libId,
+              part,
+              mode,
+              ok: false,
+              facetCount,
+              facetIdsPreview,
+              elapsedMs,
+              errorKind,
+              error: err,
+              ...(metaSafe ?? {}),
+            });
+            if (isTimeoutErr(err)) {
+              kbLog("warn", "kb.playbook.timeout.batch", {
+                libId,
+                part,
+                mode,
+                facetCount,
+                facetIdsPreview,
+                elapsedMs,
+                errorKind,
+                error: err,
+                ...(metaSafe ?? {}),
+              });
+            }
+            return ret;
           };
 
           const ensureFacetsChunk = async (facetIds: string[]): Promise<{ ok: true } | { ok: false; error: string }> => {
@@ -3517,7 +3863,14 @@ export const useKbStore = create<KbState>()(
 
           // 写回：upsert playbook doc + 替换其卡片
           db.sourceDocs = [...db.sourceDocs.filter((d) => d.id !== playbookDocId), playbookDoc];
-          db.artifacts = db.artifacts.filter((a) => a.sourceDocId !== playbookDocId);
+          // 仅替换手册生成的卡，避免误删其它附加卡（例如 cluster_rules_v1）
+          const replacedTypes = new Set(["style_profile", "playbook_facet", "final_polish_checklist"]);
+          db.artifacts = db.artifacts.filter((a) => {
+            if (a.sourceDocId !== playbookDocId) return true;
+            if (a.kind !== "card") return false;
+            const t = String((a as any).cardType ?? "");
+            return !replacedTypes.has(t);
+          });
           db.artifacts.push(...newArts);
           await saveDb({ baseDir, ownerKey, db });
 
@@ -5143,6 +5496,97 @@ export const useKbStore = create<KbState>()(
 
           // kb.search 完成：把状态留给上层（gatewayAgent 会设置“等待模型继续/生成…”）
           return debugOut ? { ok: true, groups, debug: debugOut } : { ok: true, groups };
+        } catch (e: any) {
+          return { ok: false, error: String(e?.message ?? e) };
+        }
+      },
+
+      citeForAgent: async (args) => {
+        const ok = await get().ensureReady();
+        if (!ok) return { ok: false, error: "KB_DIR_NOT_SET" };
+        const baseDir = get().baseDir!;
+        const ownerKey = get().ownerKey;
+
+        const sourceDocId = String(args?.sourceDocId ?? "").trim();
+        if (!sourceDocId) return { ok: false, error: "DOC_ID_REQUIRED" };
+
+        const artifactId = String(args?.artifactId ?? "").trim();
+        const paragraphIndexRaw = (args as any)?.paragraphIndex;
+        const paragraphIndex = Number(paragraphIndexRaw);
+        const maxCharsRaw = Number((args as any)?.maxChars);
+        const quoteMaxCharsRaw = Number((args as any)?.quoteMaxChars);
+        const maxChars = Number.isFinite(maxCharsRaw) ? Math.max(200, Math.min(4000, Math.floor(maxCharsRaw))) : 1000;
+        const quoteMaxChars = Number.isFinite(quoteMaxCharsRaw) ? Math.max(40, Math.min(400, Math.floor(quoteMaxCharsRaw))) : 200;
+
+        const normalizeHeadingPath = (hp: any): string[] => {
+          if (Array.isArray(hp)) return hp.map((x) => String(x ?? "").trim()).filter(Boolean).slice(0, 16);
+          const s = String(hp ?? "").trim();
+          if (!s) return [];
+          // allow: "A > B > C"
+          if (s.includes(">")) return s.split(">").map((x) => x.trim()).filter(Boolean).slice(0, 16);
+          return [s].filter(Boolean).slice(0, 16);
+        };
+
+        const startsWith = (full: string[], prefix: string[]) => {
+          if (!prefix.length) return false;
+          if (full.length < prefix.length) return false;
+          for (let i = 0; i < prefix.length; i += 1) if (String(full[i] ?? "") !== String(prefix[i] ?? "")) return false;
+          return true;
+        };
+
+        try {
+          const db = await loadDb({ baseDir, ownerKey });
+          const doc = db.sourceDocs.find((d) => String(d.id ?? "").trim() === sourceDocId);
+          if (!doc) return { ok: false, error: "DOC_NOT_FOUND" };
+
+          let picked: KbArtifact | null = null;
+          if (artifactId) {
+            picked = db.artifacts.find((a) => String(a.id ?? "").trim() === artifactId && a.sourceDocId === doc.id) ?? null;
+          } else if (Number.isFinite(paragraphIndex) && paragraphIndex >= 0) {
+            const pi = Math.floor(paragraphIndex);
+            picked =
+              db.artifacts.find(
+                (a) => a.sourceDocId === doc.id && a.kind === "paragraph" && Number(a.anchor?.paragraphIndex) === pi,
+              ) ?? null;
+          } else {
+            const headingPath = normalizeHeadingPath((args as any)?.headingPath);
+            if (headingPath.length) {
+              const candidates = db.artifacts
+                .filter((a) => a.sourceDocId === doc.id && a.kind === "paragraph")
+                .filter((a) => {
+                  const hp = Array.isArray(a.anchor?.headingPath) ? a.anchor.headingPath : [];
+                  return startsWith(hp, headingPath);
+                })
+                .slice()
+                .sort((a, b) => (Number(a.anchor?.paragraphIndex ?? 0) || 0) - (Number(b.anchor?.paragraphIndex ?? 0) || 0));
+              picked = candidates[0] ?? null;
+            }
+          }
+
+          if (!picked) return { ok: false, error: "ANCHOR_NOT_FOUND" };
+
+          const raw = String(picked.content ?? "").trim();
+          if (!raw) return { ok: false, error: "EMPTY_CONTENT" };
+
+          const content = raw.length > maxChars ? raw.slice(0, maxChars) + "\n…(truncated)\n" : raw;
+          const quote = raw.replace(/\s+/g, " ").trim().slice(0, quoteMaxChars);
+
+          const pi = Number(picked.anchor?.paragraphIndex);
+          const paragraphIndexStart = Number.isFinite(pi) ? Math.max(0, Math.floor(pi)) : null;
+          const headingPath = Array.isArray(picked.anchor?.headingPath) ? picked.anchor.headingPath.map((x) => String(x ?? "").trim()).filter(Boolean) : undefined;
+
+          const ref: KbTextSpanRefV1 = {
+            v: 1,
+            libraryId: String(doc.libraryId ?? "").trim(),
+            sourceDocId: doc.id,
+            importedFrom: doc.importedFrom as any,
+            segmentId: String(picked.id ?? "").trim() || `${doc.id}:p:${paragraphIndexStart ?? 0}`,
+            paragraphIndexStart,
+            ...(headingPath && headingPath.length ? { headingPath } : {}),
+            quote: quote.slice(0, 200),
+          };
+
+          return { ok: true, ref, content, title: String(doc.title ?? "").trim() || undefined };
         } catch (e: any) {
           return { ok: false, error: String(e?.message ?? e) };
         }
