@@ -628,6 +628,118 @@ fastify.get("/downloads/desktop/stable/:file", async (request, reply) => {
   }
 });
 
+// ======== 使用说明视频（临时对外分享链接；下个版本再集成 Desktop） ========
+const TUTORIAL_VIDEO_PATH = (() => {
+  const raw = String(process.env.TUTORIAL_VIDEO_PATH ?? "").trim();
+  // 默认：项目根目录下的 1月26日.mp4（方便直接随 git 部署/或手动 scp 到项目目录）
+  return raw ? path.resolve(raw) : path.resolve(process.cwd(), "1月26日.mp4");
+})();
+const TUTORIAL_VIDEO_TITLE = String(process.env.TUTORIAL_VIDEO_TITLE ?? "").trim() || "写作IDE 使用说明";
+const TUTORIAL_VIDEO_CACHE_CONTROL = String(process.env.TUTORIAL_VIDEO_CACHE_CONTROL ?? "").trim() || "public, max-age=3600";
+
+function parseSingleRangeHeader(
+  rangeHeader: string,
+  size: number,
+): { start: number; end: number } | "unsatisfiable" | null {
+  const raw = String(rangeHeader ?? "").trim();
+  const m = /^bytes=(\d*)-(\d*)$/i.exec(raw);
+  if (!m) return null;
+  const a = m[1] ?? "";
+  const b = m[2] ?? "";
+  if (!a && !b) return null;
+
+  // bytes=-N（后 N 字节）
+  if (!a && b) {
+    const suffix = Number(b);
+    if (!Number.isFinite(suffix) || suffix <= 0) return "unsatisfiable";
+    const start = Math.max(0, size - Math.floor(suffix));
+    const end = size - 1;
+    return start <= end ? { start, end } : "unsatisfiable";
+  }
+
+  const start = Number(a);
+  if (!Number.isFinite(start) || start < 0) return "unsatisfiable";
+  if (start >= size) return "unsatisfiable";
+  const end0 = b ? Number(b) : size - 1;
+  if (!Number.isFinite(end0) || end0 < 0) return "unsatisfiable";
+  const end = Math.min(Math.floor(end0), size - 1);
+  if (start > end) return "unsatisfiable";
+  return { start: Math.floor(start), end };
+}
+
+fastify.get("/help/tutorial", async (_request, reply) => {
+  reply.header("Cache-Control", "no-store");
+  const html = `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${TUTORIAL_VIDEO_TITLE}</title>
+  <style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,"PingFang SC","Microsoft YaHei",sans-serif;max-width:960px;margin:24px auto;padding:0 16px}video{width:100%;max-height:70vh;background:#000;border-radius:8px}</style>
+</head>
+<body>
+  <h2>${TUTORIAL_VIDEO_TITLE}</h2>
+  <video controls preload="metadata" src="/help/tutorial.mp4"></video>
+  <p><a href="/help/tutorial.mp4">直接打开/下载 mp4</a></p>
+</body>
+</html>`;
+  return reply.type("text/html; charset=utf-8").send(html);
+});
+
+fastify.get("/help/tutorial.mp4", async (request, reply) => {
+  const p = TUTORIAL_VIDEO_PATH;
+  try {
+    const st = await fsp.stat(p);
+    if (!st.isFile()) return reply.code(404).send({ error: "NOT_FOUND" });
+
+    const size = st.size;
+    const name = path.basename(p) || "tutorial.mp4";
+    const encoded = encodeURIComponent(name).replace(/%20/g, "+");
+    const etag = `"${size}-${Math.floor(st.mtimeMs)}"`;
+
+    reply.header("Accept-Ranges", "bytes");
+    reply.header("Content-Type", "video/mp4");
+    reply.header("Content-Disposition", `inline; filename*=UTF-8''${encoded}`);
+    reply.header("Cache-Control", TUTORIAL_VIDEO_CACHE_CONTROL);
+    reply.header("ETag", etag);
+    reply.header("Last-Modified", st.mtime.toUTCString());
+
+    const method = String((request as any).method ?? "GET").toUpperCase();
+    const isHead = method === "HEAD";
+
+    const rangeHeader = String((request as any).headers?.range ?? "").trim();
+    if (!rangeHeader) {
+      reply.header("Content-Length", String(size));
+      if (isHead) return reply.code(200).send();
+      return reply.send(fs.createReadStream(p));
+    }
+
+    const r = parseSingleRangeHeader(rangeHeader, size);
+    if (r === "unsatisfiable") {
+      reply.header("Content-Range", `bytes */${size}`);
+      return reply.code(416).send();
+    }
+    if (!r) {
+      // 不支持的 Range 格式：按全量返回
+      reply.header("Content-Length", String(size));
+      if (isHead) return reply.code(200).send();
+      return reply.send(fs.createReadStream(p));
+    }
+
+    const { start, end } = r;
+    const chunkSize = end - start + 1;
+    reply.code(206);
+    reply.header("Content-Range", `bytes ${start}-${end}/${size}`);
+    reply.header("Content-Length", String(chunkSize));
+    if (isHead) return reply.send();
+    return reply.send(fs.createReadStream(p, { start, end }));
+  } catch (e: any) {
+    const code = String(e?.code ?? "");
+    if (code === "ENOENT") return reply.code(404).send({ error: "NOT_FOUND" });
+    return reply.code(500).send({ error: "READ_FAILED", detail: String(e?.message ?? e) });
+  }
+});
+
 // Desktop 模型选择器：按供应商分组 + stage（llm.chat/agent.run）多选下发
 fastify.get("/api/llm/selector", async () => {
   try {
