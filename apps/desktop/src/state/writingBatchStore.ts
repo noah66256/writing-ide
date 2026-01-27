@@ -52,12 +52,12 @@ type WritingBatchState = {
   runStartedAtMs: number | null;
   runElapsedMs: number;
 
-  createJobInteractive: (args?: { clipsPerLesson?: number; outputBaseDir?: string }) => Promise<{ ok: boolean; jobId?: string; error?: string }>;
+  createJobInteractive: (args?: { clipsPerLesson?: number; outputBaseDir?: string }) => Promise<{ ok: boolean; jobId?: string; error?: string; detail?: any }>;
   createJobFromDir: (args: {
     inputDir: string;
     clipsPerLesson?: number;
     outputBaseDir?: string;
-  }) => Promise<{ ok: boolean; jobId?: string; error?: string }>;
+  }) => Promise<{ ok: boolean; jobId?: string; error?: string; detail?: any }>;
   start: (jobId?: string) => Promise<void>;
   pause: () => void;
   resume: () => Promise<void>;
@@ -104,6 +104,47 @@ function joinRel(dir: string, name: string) {
   if (!d) return n;
   if (!n) return d;
   return `${d}/${n}`;
+}
+
+function extLower(p: string) {
+  const s = String(p ?? "").replaceAll("\\", "/");
+  const b = s.split("/").pop() ?? "";
+  const m = b.match(/\.[^./]+$/);
+  return (m?.[0] ?? "").toLowerCase();
+}
+
+function isTextRelPath(p: string) {
+  const ext = extLower(p);
+  return ext === ".md" || ext === ".mdx" || ext === ".txt";
+}
+
+function dirnameRel(p: string) {
+  const s = String(p ?? "").replaceAll("\\", "/").replace(/\/+/g, "/").replace(/\/+$/g, "");
+  const i = s.lastIndexOf("/");
+  return i >= 0 ? s.slice(0, i) : "";
+}
+
+function basenameAny(p: string) {
+  const s = String(p ?? "").replaceAll("\\", "/");
+  return s.split("/").filter(Boolean).pop() ?? "";
+}
+
+function looksLikeAbsPath(p: string) {
+  const s = String(p ?? "").trim();
+  if (!s) return false;
+  // Windows drive / UNC / POSIX
+  if (/^[a-zA-Z]:[\\/]/.test(s)) return true;
+  if (s.startsWith("\\\\")) return true;
+  if (s.startsWith("/")) return true;
+  return false;
+}
+
+function joinAbs(rootDir: string, rel: string) {
+  const root = String(rootDir ?? "").trim().replace(/[/\\]+$/g, "");
+  const r = String(rel ?? "").trim().replaceAll("\\", "/").replace(/^\/+/g, "");
+  if (!root) return r;
+  if (!r) return root;
+  return `${root}/${r}`;
 }
 
 function requireLoginForBatch(args?: { why?: string }) {
@@ -413,6 +454,10 @@ export const useWritingBatchStore = create<WritingBatchState>()(
       runStartedAtMs: null,
       runElapsedMs: 0,
 
+      // 默认行为（关键体验）：
+      // - 不弹系统“选目录”对话框
+      // - inputDir 缺省时：以“当前项目 rootDir”为根，只处理“当前活动文件（activePath）”
+      //   这样用户在打开一篇课件时，直接一句“批处理拆成 N 篇”即可跑起来。
       createJobInteractive: async (args) => {
         if (!requireLoginForBatch({ why: "批量生成短视频稿" }).ok) return { ok: false, error: "AUTH_REQUIRED" };
         const api = window.desktop?.fs;
@@ -430,19 +475,27 @@ export const useWritingBatchStore = create<WritingBatchState>()(
         })();
         if (!styleLibId) return { ok: false, error: "NO_STYLE_LIBRARY" };
 
-        const picked = await api.pickDirectory();
-        if (!picked?.ok || !picked.dir) {
-          if (picked?.canceled) return { ok: false, error: "CANCELLED" };
-          return { ok: false, error: String(picked?.error ?? "PICK_DIR_FAILED") };
+        const activeRel = String(proj.activePath ?? "").trim();
+        const activeOk = activeRel && isTextRelPath(activeRel) && proj.files.some((f) => f.path === activeRel);
+        if (!activeOk) {
+          return {
+            ok: false,
+            error: "NO_ACTIVE_TEXT_FILE",
+            detail: {
+              hint: "请先在编辑器中打开一个 .md/.mdx/.txt 文件（作为本次批处理输入），再启动批处理。",
+              activePath: activeRel,
+            },
+          };
         }
-        const inputDir = String(picked.dir ?? "").trim();
-        if (!inputDir) return { ok: false, error: "EMPTY_INPUT_DIR" };
-
-        const listed = await api.listFiles(inputDir);
-        if (!listed?.ok) return { ok: false, error: String(listed?.error ?? "LIST_FAILED") };
-        const files = Array.isArray(listed.files) ? listed.files.map((x) => String(x ?? "").trim()).filter(Boolean) : [];
-        const inputFiles = files.slice().sort();
-        if (!inputFiles.length) return { ok: false, error: "NO_TEXT_FILES" };
+        // 为避免“读到旧磁盘内容”：如果当前文件有未保存改动，先自动保存再跑批处理
+        try {
+          const f = proj.files.find((x) => x.path === activeRel);
+          if (f?.dirty) await proj.saveActiveNow?.();
+        } catch {
+          // ignore autosave failures; fallback to disk content
+        }
+        const inputDir = rootDir; // 关键：输入根固定为项目 rootDir（绝对路径）
+        const inputFiles = [activeRel]; // 关键：只处理当前活动文件
 
         const clipsPerLesson = typeof args?.clipsPerLesson === "number" ? Math.max(1, Math.min(12, Math.floor(args.clipsPerLesson))) : 5;
         const outputBase = ensureRelDir(String(args?.outputBaseDir ?? "exports"));
@@ -495,8 +548,10 @@ export const useWritingBatchStore = create<WritingBatchState>()(
         const rootDir = String(proj.rootDir ?? "").trim();
         if (!rootDir) return { ok: false, error: "NO_PROJECT" };
 
-        const inputDir = String(args?.inputDir ?? "").trim();
-        if (!inputDir) return { ok: false, error: "EMPTY_INPUT_DIR" };
+        const rawInput = String(args?.inputDir ?? "").trim();
+        if (!rawInput) return { ok: false, error: "EMPTY_INPUT_DIR" };
+        // 兼容：允许传项目内相对路径（例如 "drafts/course_14_split/" 或 "第14课...md"）
+        const inputAbs = looksLikeAbsPath(rawInput) ? rawInput : joinAbs(rootDir, rawInput);
 
         const styleLibId = (() => {
           const attached = useRunStore.getState().kbAttachedLibraryIds ?? [];
@@ -507,11 +562,77 @@ export const useWritingBatchStore = create<WritingBatchState>()(
         })();
         if (!styleLibId) return { ok: false, error: "NO_STYLE_LIBRARY" };
 
-        const listed = await api.listFiles(inputDir);
-        if (!listed?.ok) return { ok: false, error: String(listed?.error ?? "LIST_FAILED") };
+        // 若传入的是“单文件路径”，则只处理这一篇（而不是扫全目录）
+        if (isTextRelPath(rawInput) || isTextRelPath(inputAbs)) {
+          const fileAbs = inputAbs;
+          const fileName = basenameAny(fileAbs);
+          const dirAbs = fileAbs.slice(0, Math.max(0, fileAbs.length - fileName.length)).replace(/[/\\]+$/g, "");
+          if (!fileName || !dirAbs) return { ok: false, error: "INVALID_INPUT_PATH", detail: { input: rawInput } };
+          const readOne = await api.readFile(dirAbs, fileName);
+          if (!readOne?.ok) {
+            return { ok: false, error: "INPUT_FILE_NOT_FOUND", detail: { input: rawInput, resolved: fileAbs, hint: "请确认文件存在且为 .md/.mdx/.txt" } };
+          }
+
+          const clipsPerLesson = typeof args?.clipsPerLesson === "number" ? Math.max(1, Math.min(12, Math.floor(args.clipsPerLesson))) : 5;
+          const outputBase = ensureRelDir(String(args?.outputBaseDir ?? "exports"));
+          const jobId = `batch_${Date.now()}`;
+          const outputDir = joinRel(outputBase, jobId);
+          const job: WritingBatchJob = {
+            id: jobId,
+            createdAt: nowIso(),
+            updatedAt: nowIso(),
+            status: "pending",
+            inputDir: dirAbs,
+            inputFiles: [fileName],
+            outputDir,
+            clipsPerLesson,
+            styleLibraryId: styleLibId,
+            model: resolveDefaultDraftModel(),
+            progress: { fileIndex: 0, clipIndex: 0, done: 0, failed: 0 },
+            failures: [],
+          };
+          set((s) => ({ jobs: [job, ...s.jobs].slice(0, 30), activeJobId: jobId, error: null }));
+          await ensureDirOnDisk(rootDir, joinRel(outputDir, ".batch-meta"));
+          await writeTextFileToProject(
+            rootDir,
+            joinRel(outputDir, ".batch-meta/metadata.json"),
+            JSON.stringify(
+              {
+                v: 1,
+                createdAt: job.createdAt,
+                inputDir: job.inputDir,
+                inputFilesCount: job.inputFiles.length,
+                clipsPerLesson,
+                styleLibraryId: styleLibId,
+                model: job.model,
+                inputResolvedFrom: rawInput,
+              },
+              null,
+              2,
+            ) + "\n",
+          );
+          await writeJobCheckpoint({ rootDir, job });
+          return { ok: true, jobId };
+        }
+
+        const listed = await api.listFiles(inputAbs);
+        if (!listed?.ok) return { ok: false, error: String(listed?.error ?? "LIST_FAILED"), detail: { input: rawInput, resolved: inputAbs } };
         const files = Array.isArray(listed.files) ? listed.files.map((x) => String(x ?? "").trim()).filter(Boolean) : [];
         const inputFiles = files.slice().sort();
-        if (!inputFiles.length) return { ok: false, error: "NO_TEXT_FILES" };
+        if (!inputFiles.length) {
+          return {
+            ok: false,
+            error: "NO_TEXT_FILES",
+            detail: {
+              input: rawInput,
+              resolved: inputAbs,
+              hint:
+                "该目录下没有可处理的 .md/.mdx/.txt 文件。\n" +
+                "- 如果你传的是项目内相对路径：请确认路径相对项目根目录。\n" +
+                "- 如果你刚生成了 doc.previewDiff 提案：请先点 Keep 写入文件后再启动批处理。\n",
+            },
+          };
+        }
 
         const clipsPerLesson = typeof args?.clipsPerLesson === "number" ? Math.max(1, Math.min(12, Math.floor(args.clipsPerLesson))) : 5;
         const outputBase = ensureRelDir(String(args?.outputBaseDir ?? "exports"));
@@ -523,7 +644,7 @@ export const useWritingBatchStore = create<WritingBatchState>()(
           createdAt: nowIso(),
           updatedAt: nowIso(),
           status: "pending",
-          inputDir,
+          inputDir: inputAbs,
           inputFiles,
           outputDir,
           clipsPerLesson,
