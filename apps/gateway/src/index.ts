@@ -3371,6 +3371,12 @@ fastify.post(
         "writing.batch.pause",
         "writing.batch.resume",
         "writing.batch.cancel",
+        // 允许只读检索/进度维护（避免模型想查风格库时触发门禁重试）
+        "kb.search",
+        "run.setTodoList",
+        "run.todo.update",
+        "run.todo.upsertMany",
+        "run.mainDoc.update",
         "run.done",
         ...Array.from(ALWAYS_ALLOW_TOOL_NAMES),
       ]);
@@ -3380,7 +3386,7 @@ fastify.post(
         "- 你不得在单次对话里直接输出 N 篇完整正文；必须调用 writing.batch.start 启动后台批处理。\n" +
         "- 启动后建议：调用 writing.batch.status 获取 jobId/outputDir，然后调用 run.done 结束本次 run（批处理会在后台继续）。\n" +
         "- 需要控制：writing.batch.pause/resume/cancel。\n" +
-        "- 本回合除 writing.batch.* 与 run.* 进度工具外，不要调用其它工具；不要输出最终长文正文。";
+        "- 本回合除 writing.batch.*、kb.search 与 run.* 进度工具外，不要调用其它工具；不要输出最终长文正文。";
       reasonCodes.push("phase:batch_active");
       return { phase, allowed, hint, reasonCodes };
     }

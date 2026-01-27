@@ -2451,7 +2451,8 @@ const tools: ToolDefinition[] = [
       const inputDir = String((args as any).inputDir ?? "").trim();
       const clipsPerLesson0 = (args as any).clipsPerLesson;
       const clipsPerLesson = typeof clipsPerLesson0 === "number" ? clipsPerLesson0 : undefined;
-      const outputBaseDir = String((args as any).outputBaseDir ?? "exports").trim() || "exports";
+      const outputBaseDir0 = (args as any).outputBaseDir;
+      const outputBaseDir = typeof outputBaseDir0 === "string" ? outputBaseDir0.trim() : undefined;
 
       const created = inputDir
         ? await store.createJobFromDir({ inputDir, clipsPerLesson, outputBaseDir })

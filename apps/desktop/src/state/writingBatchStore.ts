@@ -498,7 +498,9 @@ export const useWritingBatchStore = create<WritingBatchState>()(
         const inputFiles = [activeRel]; // 关键：只处理当前活动文件
 
         const clipsPerLesson = typeof args?.clipsPerLesson === "number" ? Math.max(1, Math.min(12, Math.floor(args.clipsPerLesson))) : 5;
-        const outputBase = ensureRelDir(String(args?.outputBaseDir ?? "exports"));
+        // 默认输出：在“当前活动文件”同级目录生成单层 batch_xxx/（避免 exports/.../batch_xxx 过深）
+        const outputBaseDefault = ensureRelDir(dirnameRel(activeRel));
+        const outputBase = ensureRelDir(String(args?.outputBaseDir ?? outputBaseDefault));
 
         const jobId = `batch_${Date.now()}`;
         const outputDir = joinRel(outputBase, jobId);
@@ -574,7 +576,10 @@ export const useWritingBatchStore = create<WritingBatchState>()(
           }
 
           const clipsPerLesson = typeof args?.clipsPerLesson === "number" ? Math.max(1, Math.min(12, Math.floor(args.clipsPerLesson))) : 5;
-          const outputBase = ensureRelDir(String(args?.outputBaseDir ?? "exports"));
+          const activeRel = String(proj.activePath ?? "").trim();
+          const outputBaseDefault =
+            activeRel && isTextRelPath(activeRel) && proj.files.some((f) => f.path === activeRel) ? ensureRelDir(dirnameRel(activeRel)) : "exports";
+          const outputBase = ensureRelDir(String(args?.outputBaseDir ?? outputBaseDefault));
           const jobId = `batch_${Date.now()}`;
           const outputDir = joinRel(outputBase, jobId);
           const job: WritingBatchJob = {
@@ -635,7 +640,10 @@ export const useWritingBatchStore = create<WritingBatchState>()(
         }
 
         const clipsPerLesson = typeof args?.clipsPerLesson === "number" ? Math.max(1, Math.min(12, Math.floor(args.clipsPerLesson))) : 5;
-        const outputBase = ensureRelDir(String(args?.outputBaseDir ?? "exports"));
+        const activeRel = String(proj.activePath ?? "").trim();
+        const outputBaseDefault =
+          activeRel && isTextRelPath(activeRel) && proj.files.some((f) => f.path === activeRel) ? ensureRelDir(dirnameRel(activeRel)) : "exports";
+        const outputBase = ensureRelDir(String(args?.outputBaseDir ?? outputBaseDefault));
 
         const jobId = `batch_${Date.now()}`;
         const outputDir = joinRel(outputBase, jobId);

@@ -512,13 +512,13 @@ export const TOOL_LIST: ToolMeta[] = [
   {
     name: "writing.batch.start",
     description:
-      "启动批处理写作（长时间运行）：从一个输入文件夹批量生成多篇短视频口播稿，并写入项目输出目录（默认 exports/batch_xxx）。\n" +
+      "启动批处理写作（长时间运行）：从一个输入文件夹批量生成多篇短视频口播稿，并写入项目输出目录（默认：当前活动文件同级目录/batch_xxx；若无活动文件则 exports/batch_xxx）。\n" +
       "【适用】当用户要求“生成多篇（>=5）/按文件夹/50×5=250 篇”时。\n" +
       "【注意】该工具会在后台持续生成；调用后会立即返回 jobId/outputDir（不等待全部完成）。",
     args: [
       { name: "inputDir", required: false, desc: "输入目录（绝对路径；不传则弹出选择目录）", type: "string" },
       { name: "clipsPerLesson", required: false, desc: "每节课生成多少篇（默认 5，范围 1-12）", type: "number" },
-      { name: "outputBaseDir", required: false, desc: "输出根目录（相对项目；默认 exports）", type: "string" },
+      { name: "outputBaseDir", required: false, desc: "输出根目录（相对项目；默认：当前活动文件同级目录；若无活动文件则 exports）", type: "string" },
     ],
     modes: ["plan", "agent"],
     inputSchema: {
