@@ -1210,8 +1210,9 @@ function buildAgentProtocolPrompt(args: { mode: AgentMode; allowedToolNames?: Se
         `   - 重要：本次 Run 已有 todo 时，**不要重复 run.setTodoList 覆盖进度**；需要新增/调整 todo 时，优先用 run.todo.upsertMany / run.todo.update / run.todo.remove。\n` +
         `   - 若右侧已关联知识库，且 KB_SELECTED_LIBRARIES 中存在 purpose=style（风格库），并且任务是“写作/仿写/改写/润色”：todo 中必须包含“三段式”步骤：\n` +
         `     1) 先 kb.search（只搜风格库，优先 kind=card + cardTypes）拉 6–12 条“套路模板/金句形状/结构骨架”；必要时再补 kb.search(kind=paragraph, anchorParagraphIndexMax/anchorFromEndMax) 拉开头/结尾证据段；\n` +
-        `     2) 产出候选稿（先别急着写入文件）；\n` +
-        `     3) 调用 lint.style（强模型）对照库原文/指纹找“不像点”，按其 rewritePrompt 改成终稿后再写入/输出。\n` +
+        `     2) 产出候选稿（先别急着写入文件；若 todo 里有多篇稿件，本次 Run 只推进 1 篇：优先做第一个未完成项，避免一次 7 篇导致门禁阶段错乱）；\n` +
+        `     3) 调用 lint.copy（本地确定性）做“防贴原文”闸门；未通过则按 topOverlaps 只做局部改写后复检；\n` +
+        `     4) 调用 lint.style（强模型）对照库原文/指纹找“不像点”，按其 rewritePrompt 做局部改写后复检；通过后再写入/输出。\n` +
         `2) 执行（由你自主决定是否调用工具）：素材收集（@引用/读文件/KB 检索）→ 结构（先 outline）→ 初稿 → 改写润色 → 自检。\n` +
         `3) 进度记录：完成/推进每个关键步骤时，调用 run.todo.update（或兼容工具 run.updateTodo）；关键决策与约束调用 run.mainDoc.update。\n` +
         `输出约束：\n` +
@@ -4325,7 +4326,11 @@ fastify.post(
                       ? `要求：把正文长度调整到目标字数附近（目标≈${targetChars}字）。`
                       : "要求：不要覆盖既有 todo；需要调整用 run.todo.*。") +
                 (needKb ? "\n并且：若绑定风格库且是写作类，先 kb.search 拉样例。" : "") +
-                (needLint ? "\n并且：按需 lint.style 获取问题清单并回炉。" : ""),
+                (needLint
+                  ? effectiveGates.styleGateEnabled && effectiveGates.copyGateEnabled && !runState.copyLintPassed
+                    ? "\n并且：先 lint.copy 做“防贴原文”检查；未通过则按 topOverlaps 局部回炉后复检。"
+                    : "\n并且：按需 lint.style 获取问题清单并回炉。"
+                  : ""),
               policy: "AutoRetryPolicy",
               reasonCodes,
               detail: {
@@ -4365,7 +4370,9 @@ fastify.post(
                       ? "  - 若 KB_SELECTED_LIBRARIES 中存在 purpose=style（风格库）且任务为写作类：先调用 kb.search 拉风格样例（优先 kind=card；若同时绑定了非风格库则必须带 cardTypes 且只搜风格库）。必要时再补 paragraph 并用 anchorParagraphIndexMax/anchorFromEndMax 做位置过滤。\n"
                       : "") +
                     (needLint
-                      ? "  - 然后调用 lint.style 做终稿闸门；未通过则按 rewritePrompt 回炉改写并复检（最多 2 次）后再输出/写入。\n"
+                      ? effectiveGates.styleGateEnabled && effectiveGates.copyGateEnabled && !runState.copyLintPassed
+                        ? "  - 然后调用 lint.copy 做“防贴原文”闸门；未通过则按 topOverlaps 局部回炉改写并复检（最多 2 次）。通过后再进入 lint.style。\n"
+                        : "  - 然后调用 lint.style 做终稿闸门；未通过则按 rewritePrompt 局部回炉改写并复检（最多 2 次）后再输出/写入。\n"
                       : "") +
                     "  - 若用户要求写入/分割到文件夹：请调用 doc.splitToDir（或 doc.write 等）完成写入。\n" +
                     "  - 文件写入策略：默认新写不覆盖。若需要新文件且路径可能已存在，请在 doc.write/doc.previewDiff 里传 ifExists=\"rename\" 并给 suggestedName 起一个更合适的新文件名；若用户明确要求覆盖，则传 ifExists=\"overwrite\"。\n" +
