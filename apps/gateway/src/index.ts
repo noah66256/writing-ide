@@ -3342,7 +3342,8 @@ fastify.post(
 
   const computeToolCapsForTurn = (): { phase: SkillToolCapsPhase; allowed: Set<string>; hint: string; reasonCodes: string[] } => {
     // base allowlist（mode 级）
-    let allowed = new Set<string>(Array.from(baseAllowedToolNames as any as Set<string>));
+    const baseAllowed = new Set<string>(Array.from(baseAllowedToolNames as any as Set<string>));
+    let allowed = new Set<string>(Array.from(baseAllowed));
     const reasonCodes: string[] = [];
 
     // 1) toolCaps（manifest 级：allow/deny）
@@ -3378,8 +3379,9 @@ fastify.post(
           (webGate.requiredUniqueSearchQueries > 0 && runState.webSearchUniqueQueries.length < webGate.requiredUniqueSearchQueries));
       if (needSearch) {
         phase = "web_need_search";
+        // 关键：WebGate 必须能“加回” web.search；不能只在被裁剪过的 allowed 上继续 delete（否则会死锁）。
         const allowSet = new Set<string>(["web.search", ...Array.from(ALWAYS_ALLOW_TOOL_NAMES)]);
-        for (const name of Array.from(allowed)) if (!allowSet.has(name)) allowed.delete(name);
+        allowed = new Set<string>(Array.from(baseAllowed).filter((n) => allowSet.has(n)));
         const uniqHint =
           webGate.requiredUniqueSearchQueries > 0
             ? `（uniqueQueries >= ${webGate.requiredUniqueSearchQueries}；当前=${runState.webSearchUniqueQueries.length}）`
@@ -3401,8 +3403,9 @@ fastify.post(
       if (needFetch) {
         phase = "web_need_fetch";
         // 强制抓正文证据：进入 need_fetch 后不再允许继续 search，避免模型“只搜不抓”或转去 kb.search
+        // 同上：必须能“加回” web.fetch，避免被上游 toolCaps 裁剪后无法恢复。
         const allowSet = new Set<string>(["web.fetch", ...Array.from(ALWAYS_ALLOW_TOOL_NAMES)]);
-        for (const name of Array.from(allowed)) if (!allowSet.has(name)) allowed.delete(name);
+        allowed = new Set<string>(Array.from(baseAllowed).filter((n) => allowSet.has(n)));
         const uniqHint =
           webGate.requiredUniqueFetchDomains > 0
             ? `（uniqueDomains >= ${webGate.requiredUniqueFetchDomains}；当前=${runState.webFetchUniqueDomains.length}）`
