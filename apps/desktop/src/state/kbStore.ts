@@ -4827,6 +4827,18 @@ export const useKbStore = create<KbState>()(
             };
 
             let km = eligible.length >= 10 ? tryK(3) : null;
+            // 若 k=3 产生极小簇（例如只有 1 段），对“规则卡生成/采纳 anchors”价值很低且容易误导；
+            // 这里做一次确定性降级：任意簇样本 < 2 则退回 k=2。
+            if (km && km.centroids.length === 3) {
+              const counts = new Map<number, number>();
+              for (let i = 0; i < eligible.length; i += 1) {
+                const oldIdx = km.assign[i];
+                const newIdx = km.oldToNew.get(oldIdx) ?? 0;
+                counts.set(newIdx, (counts.get(newIdx) ?? 0) + 1);
+              }
+              const minSize = Math.min(counts.get(0) ?? 0, counts.get(1) ?? 0, counts.get(2) ?? 0);
+              if (minSize < 2) km = null;
+            }
             if (!km) km = tryK(2);
             if (!km) return empty;
             const kFinal = km.centroids.length as 2 | 3;

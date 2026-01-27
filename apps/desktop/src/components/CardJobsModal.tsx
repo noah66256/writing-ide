@@ -394,7 +394,48 @@ export function CardJobsModal() {
     const clusterId = String(opts?.clusterId ?? "").trim() || null;
     setAnchorPickerClusterId(clusterId);
     if (!fpSegments.length) {
-      setAnchorPickerNotice("没有样本段数据：先点「生成：声音指纹（数字版）」刷新。");
+      // 兼容旧快照：可能只有 clustersV1（含 evidence），但没有 perSegment 段列表
+      if (clusterId) {
+        const c = fpClusters.find((x: any) => String(x?.id ?? "").trim() === clusterId);
+        const ev = Array.isArray((c as any)?.evidence) ? ((c as any).evidence as KbTextSpanRefV1[]) : [];
+        const segs = ev
+          .map((a: any) => ({
+            segmentId: String(a?.segmentId ?? "").trim(),
+            sourceDocId: String(a?.sourceDocId ?? "").trim(),
+            paragraphIndexStart: typeof a?.paragraphIndexStart === "number" ? a.paragraphIndexStart : null,
+            quote: String(a?.quote ?? "").trim(),
+          }))
+          .filter((s: any) => s.segmentId && s.sourceDocId)
+          .slice(0, 5);
+        if (!segs.length) {
+          void uiAlert({
+            title: "无法采纳 anchors",
+            message: "当前指纹快照缺少段列表（perSegment），且该簇也没有可用的代表样例（evidence）。\n\n建议：点击「生成：声音指纹（数字版）」刷新后再试。",
+          });
+          return;
+        }
+        void (async () => {
+          if (!viewLibId) return;
+          setAnchorsLoading(true);
+          setAnchorsErr(null);
+          const r = await saveLibraryStyleAnchorsFromSegments({ libraryId: viewLibId, segments: segs as any });
+          if (!r.ok) setAnchorsErr(r.error ?? "SAVE_FAILED");
+          else {
+            setAnchors(Array.isArray(r.anchors) ? r.anchors : []);
+            void uiAlert({
+              title: "已采纳 anchors（代表样例兜底）",
+              message: `当前指纹快照缺少段列表（perSegment），已从「${clusterId}」代表样例中采纳 ${segs.length} 段作为 anchors。\n\n建议：重新生成声音指纹以获得完整段落列表（便于精细挑选）。`,
+            });
+          }
+          setAnchorsLoading(false);
+        })();
+        return;
+      }
+
+      void uiAlert({
+        title: "没有样本段数据",
+        message: "当前指纹快照缺少段列表（perSegment）。请先点「生成：声音指纹（数字版）」刷新后再采纳 anchors。",
+      });
       return;
     }
 
@@ -449,6 +490,9 @@ export function CardJobsModal() {
     setAnchorPickerAdvanced(selectedIds.length > 5);
     // 默认把筛选框填成簇 id（避免“我点了某簇采纳，但列表里看不出”）
     if (clusterId) setSegmentFilter(clusterId);
+    if (clusterId && selectedIds.length === 0) {
+      setAnchorPickerNotice("该簇没有可选样本段（可能样本过短/未分簇）。建议更新体检或改选其他簇。");
+    }
     setAnchorPickerOpen(true);
   };
 
@@ -1432,7 +1476,9 @@ export function CardJobsModal() {
                                     const anchorN = anchorClusterCounts.get(cid) ?? 0;
                                     const sr = (c?.softRanges ?? {}) as any;
                                     const fmtRange = (r: any) => (Array.isArray(r) && r.length === 2 ? `${r[0]}~${r[1]}` : "-");
-                                    const evidence = Array.isArray(c?.evidence) ? c.evidence.slice(0, 4) : [];
+                                    const evidenceAll = Array.isArray(c?.evidence) ? (c.evidence as any[]) : [];
+                                    const evidence = evidenceAll.slice(0, 4);
+                                    const evidenceN = evidenceAll.length;
                                     const gen = clusterRules && typeof clusterRules === "object" ? (clusterRules as any)[cid] : null;
                                     const genUpdatedAt = (() => {
                                       const t = gen && typeof gen === "object" ? String((gen as any)?.updatedAt ?? "").trim() : "";
@@ -1441,6 +1487,8 @@ export function CardJobsModal() {
                                     const isGenLoading = Boolean((rulesGenLoadingByCluster as any)?.[cid]);
                                     const genErr = String((rulesGenErrByCluster as any)?.[cid] ?? "").trim();
                                     const anyGenLoading = Object.values(rulesGenLoadingByCluster ?? {}).some(Boolean);
+                                    const isTinyCluster = docCovCount <= 1 || docCovRate < 0.05;
+                                    const canAutoGenerate = anchorN + evidenceN >= 2;
 
                                     return (
                                       <div key={cid} style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel)", padding: 10 }}>
@@ -1451,6 +1499,7 @@ export function CardJobsModal() {
                                               {isRec ? <span className="ctxPill">Recommended</span> : null}
                                               {isDefault ? <span className="ctxPill">默认写法</span> : null}
                                               {st ? <span className="ctxPill">稳定：{st === "high" ? "高" : st === "medium" ? "中" : "低"}</span> : null}
+                                              {isTinyCluster ? <span className="ctxPill" title="样本很少：建议不要设为默认；规则卡也可能无法自动生成">小簇</span> : null}
                                               <span className="ctxPill">
                                                 覆盖 {docCovCount}/{Number(fp?.corpus?.docs ?? 0) || 0} 篇 · {Math.round(docCovRate * 100)}%
                                               </span>
@@ -1510,8 +1559,12 @@ export function CardJobsModal() {
                                             <button
                                               className="btn btnIcon"
                                               type="button"
-                                              disabled={anchorsLoading || isGenLoading}
-                                              title="自动生成该簇规则卡（values/lens/templates），并绑定证据（来自本簇 anchors/代表样例）"
+                                              disabled={anchorsLoading || isGenLoading || !canAutoGenerate}
+                                              title={
+                                                canAutoGenerate
+                                                  ? "自动生成该簇规则卡（values/lens/templates），并绑定证据（来自本簇 anchors/代表样例）"
+                                                  : `样本不足：该簇当前证据=${evidenceN}，anchors=${anchorN}（至少需要 2 条才能生成规则卡）`
+                                              }
                                               onClick={() => {
                                                 if (!viewLibId) return;
                                                 void (async () => {
@@ -1543,17 +1596,32 @@ export function CardJobsModal() {
                                                 void (async () => {
                                                   setAnchorsLoading(true);
                                                   setAnchorsErr(null);
-                                                  const r = await setLibraryStyleDefaultCluster({ libraryId: viewLibId, clusterId: cid });
+                                                  const nextId = isDefault ? null : cid;
+                                                  const r = await setLibraryStyleDefaultCluster({ libraryId: viewLibId, clusterId: nextId });
                                                   if (!r.ok) setAnchorsErr(r.error ?? "SAVE_FAILED");
-                                                  else setDefaultClusterId(cid);
+                                                  else setDefaultClusterId(nextId);
                                                   setAnchorsLoading(false);
                                                 })();
                                               }}
-                                              title="设为默认写法（仅本库）"
+                                              title={isDefault ? "点击取消默认写法（仅本库）" : "设为默认写法（仅本库）"}
                                             >
-                                              {isDefault ? "默认" : "设为默认"}
+                                              {isDefault ? "默认（点击取消）" : "设为默认"}
                                             </button>
-                                            <button className="btn btnIcon" type="button" disabled={anchorsLoading} onClick={() => openAnchorPicker({ clusterId: cid })}>
+                                            <button
+                                              className="btn btnIcon"
+                                              type="button"
+                                              disabled={anchorsLoading || (!fpSegments.length && evidenceN === 0)}
+                                              title={
+                                                anchorsLoading
+                                                  ? "加载/保存中…"
+                                                  : fpSegments.length
+                                                    ? "采纳该簇推荐段落作为 anchors（黄金样本）"
+                                                    : evidenceN
+                                                      ? "该指纹快照缺少段列表（perSegment），将从代表样例中兜底采纳 anchors；建议重新生成声音指纹以便精细挑选"
+                                                      : "没有段列表（perSegment）且该簇无代表样例：请先生成声音指纹（数字版）"
+                                              }
+                                              onClick={() => openAnchorPicker({ clusterId: cid })}
+                                            >
                                               采纳 anchors（本簇）
                                             </button>
                                           </div>
@@ -1567,6 +1635,11 @@ export function CardJobsModal() {
                                                 - {String(e?.quote ?? "").trim()}
                                               </div>
                                             ))}
+                                          </div>
+                                        ) : null}
+                                        {!canAutoGenerate && !genErr ? (
+                                          <div style={{ marginTop: 8, fontSize: 12, color: "var(--muted)", whiteSpace: "pre-wrap" }}>
+                                            样本偏少：该簇当前证据={evidenceN}，anchors={anchorN}（至少需要 2 条）——建议先点「采纳 anchors（本簇）」或补更多同体裁样本后再生成规则卡。
                                           </div>
                                         ) : null}
                                         {genErr ? (

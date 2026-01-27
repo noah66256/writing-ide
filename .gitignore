@@ -29,6 +29,7 @@ deploy/
 
 # reference material (do not commit)
 _ref/
+*.mp4
 
 # gateway local data
 apps/gateway/data/

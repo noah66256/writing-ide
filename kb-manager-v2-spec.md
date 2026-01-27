@@ -68,6 +68,7 @@
 - **目标**：把库里“不同写法的大类”拆开，否则单一 baseline 会把方向带偏。
 - **默认**：k=3（容纳：原文口味大类 / 另一类口味 / 离群爽文或其他题材）。
 - **降级**：样本不足时 k=2 或不分簇（并提示“库混杂/样本不足”）。
+- **最小簇约束（实现口径）**：当 k=3 产生“极小簇”（例如某簇只有 1 段样本）时，会确定性降级到 k=2；因为 1 段样本既不利于选簇，也无法稳定生成规则卡（证据不足）。
 - **特征（确定性统计，轻量且稳定）**：avgSentenceLen、shortSentenceRate、questionRatePer100Sentences、exclaimRatePer100Sentences、particlePer1kChars、digitPer1kChars、firstPersonPer1kChars、secondPersonPer1kChars（默认固定，可扩展）。
 - **算法**：默认 k=3，使用轻量 k-means（固定随机种子）或层次聚类；输出每簇 stats 均值/方差 + 代表 segments。
 - **缓存/过期**：结果随 fingerprint 快照落盘（沿用本地 `kb.v1.json` 的 fingerprint 快照思路，每库保留最近 5 次）；当库内容变化（docCount/contentHash/updatedAt）时标记“体检过期”，用户点“更新体检”才重算。
@@ -109,6 +110,7 @@
   - `设为默认写法（仅本库）`
   - `采纳 anchors（默认 5 段）`（可展开调整；高级模式可到 8 段）
   - `展开细节`（显示完整指标、n-gram、离群段）
+- **规则卡生成门槛（实现口径）**：自动生成该簇规则卡时，要求“可用证据（anchors+代表样例）”至少 2 条；否则应禁用并提示“样本不足”，避免出现 `NOT_ENOUGH_EVIDENCE` 的困惑。
 - **三步闭环（写法选择→规则生成→可用）**：
   - Step 1：更新体检 → 生成 segments + clusters + 推荐 anchors
   - Step 2：用户设默认写法 + 采纳 anchors（可微调）

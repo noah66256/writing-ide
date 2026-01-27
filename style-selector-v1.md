@@ -45,7 +45,7 @@ Selector 是一个近似纯函数：
 优先级（从高到低）：
 1) **anchors 优先**：若某簇已采纳 anchors，则优先选 anchors 多的簇（更像原文）。
 2) **topicFit（词法命中）**：用 `mainDoc.goal + userPrompt` 对簇的 `label/queries/evidence.quote` 做命中打分，取最高分簇（同分用稳定性/覆盖率/段数打破）。
-3) **defaultClusterId**（仅本库）：若库设置了默认写法则优先。
+3) **defaultClusterId**（仅本库）：若库设置了默认写法则优先（但优先级低于 anchors 与 topicFit；并且默认可随时取消）。
 4) **兜底排序**：`stability` > `docCoverageRate` > `segmentCount`。
 
 > 说明：文档草案里提到的“向量兜底统计命中簇”在 v1 **未启用**（后续可增量）。
