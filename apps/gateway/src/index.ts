@@ -5040,6 +5040,8 @@ fastify.post(
         let assignedId = 0;
         const assignedIds: string[] = [];
         let repairedSetTodoList = 0;
+        let repairedTodoUpsertMany = 0;
+        let repairedKbSearchJson = 0;
         const wantsOverwriteByPrompt = (() => {
           const t = String(userPrompt ?? "");
           if (!t.trim()) return false;
@@ -5066,6 +5068,45 @@ fastify.post(
         toolCalls = toolCalls.map((c: any) => {
           const name = String(c?.name ?? "").trim();
           const rawArgs = (c?.args ?? {}) as Record<string, string>;
+
+          // 0) kb.search 容错：json 类型参数（libraryIds/cardTypes）经常被模型传成“裸字符串”导致 INVALID_JSON。
+          // 这里做确定性纠正：把单个字符串包装成 JSON 数组字符串（例如 ["kb_lib_xxx"]）。
+          if (name === "kb.search") {
+            const ensureJsonArrayString = (input: string) => {
+              const s = String(input ?? "").trim();
+              if (!s) return "";
+              try {
+                const j = JSON.parse(s);
+                if (Array.isArray(j)) return s;
+                if (typeof j === "string" && j.trim()) return JSON.stringify([j.trim()]);
+              } catch {
+                // fallthrough
+              }
+              if (s.includes(",")) return JSON.stringify(s.split(",").map((x) => x.trim()).filter(Boolean));
+              return JSON.stringify([s]);
+            };
+            const libRaw = String((rawArgs as any).libraryIds ?? "").trim();
+            const ctRaw = String((rawArgs as any).cardTypes ?? "").trim();
+            const nextArgs: any = { ...(c?.args ?? {}) };
+            let changed = false;
+            if (libRaw) {
+              const fixed = ensureJsonArrayString(libRaw);
+              if (fixed && fixed !== libRaw) {
+                nextArgs.libraryIds = fixed;
+                repairedKbSearchJson += 1;
+                changed = true;
+              }
+            }
+            if (ctRaw) {
+              const fixed = ensureJsonArrayString(ctRaw);
+              if (fixed && fixed !== ctRaw) {
+                nextArgs.cardTypes = fixed;
+                repairedKbSearchJson += 1;
+                changed = true;
+              }
+            }
+            if (changed) return { ...c, args: nextArgs };
+          }
 
           // 0) run.setTodoList 兜底：部分模型会漏传 items（必填），导致 todo 根本不出现。
           // - 若缺 items：自动生成一个“可追踪的默认 todo”（尤其 web_radar 的配额型流程）
@@ -5145,6 +5186,28 @@ fastify.post(
             }
           }
 
+          // 0.5) run.todo.upsertMany 兜底：部分模型会漏传 items（必填），导致 ToolArgValidationPolicy 直接 block_end（用户感知“空输出”）。
+          if (name === "run.todo.upsertMany") {
+            const itemsRaw = String((rawArgs as any).items ?? "").trim();
+            if (!itemsRaw) {
+              const pickAlt = (k: string) => String((rawArgs as any)[k] ?? "").trim();
+              const altRaw = pickAlt("todoList") || pickAlt("todos") || pickAlt("list") || pickAlt("value");
+              let itemsJson = altRaw;
+              if (itemsJson) {
+                try {
+                  const j = JSON.parse(itemsJson);
+                  if (!Array.isArray(j)) itemsJson = "";
+                } catch {
+                  itemsJson = "";
+                }
+              }
+              // 兜底：没有任何 items 时，把它变成 no-op（[]），避免整次 run 因 todo 工具失效而中断
+              if (!itemsJson) itemsJson = "[]";
+              repairedTodoUpsertMany += 1;
+              return { ...c, args: { ...(c?.args ?? {}), items: itemsJson } };
+            }
+          }
+
           const isTodoUpdate = name === "run.updateTodo" || name === "run.todo.update";
           if (!isTodoUpdate) return c;
           let next = c;
@@ -5200,6 +5263,30 @@ fastify.post(
 
           return next;
         });
+
+        if (repairedTodoUpsertMany > 0 || repairedKbSearchJson > 0) {
+          writePolicyDecision({
+            turn,
+            policy: "ToolArgNormalizationPolicy",
+            decision: "repaired",
+            reasonCodes: ["tool_args_repaired", "tool:kb.search_or_run.todo.upsertMany"],
+            detail: {
+              repairedTodoUpsertMany,
+              repairedKbSearchJson,
+              routeId: intentRoute.routeId ?? "",
+            },
+          });
+          writeRunNotice({
+            turn,
+            kind: "info",
+            title: "工具参数修复：自动纠正 JSON/缺参",
+            message:
+              "检测到部分工具参数不符合契约（例如 kb.search 的 JSON 参数、run.todo.upsertMany 漏传 items）。系统已自动修复以避免本轮中断。",
+            policy: "ToolArgNormalizationPolicy",
+            reasonCodes: ["tool_args_repaired", "tool:kb.search_or_run.todo.upsertMany"],
+            detail: { repairedTodoUpsertMany, repairedKbSearchJson },
+          });
+        }
 
         // doc.write / doc.previewDiff：默认 ifExists=rename，除非用户明确要求覆盖
         toolCalls = toolCalls.map((c: any) => {
@@ -5423,6 +5510,26 @@ fastify.post(
             });
             continue;
           }
+
+          // 兜底：预算耗尽时也要给用户一个“可见错误”（否则 UI 容易表现为“空输出/没问题”）
+          const errCode = String(bad?.error?.code ?? "");
+          const errField = String(bad?.error?.field ?? "");
+          const errMsg = String(bad?.error?.message ?? "INVALID_ARGS");
+          const fixHint =
+            bad.name === "kb.search" && errField === "libraryIds"
+              ? '示例：<arg name="libraryIds"><![CDATA[["kb_lib_xxx"]]]></arg>'
+              : bad.name === "run.todo.upsertMany" && errField === "items"
+                ? '示例：<arg name="items"><![CDATA[[{\"text\":\"…\",\"status\":\"todo\"}]]]]></arg>'
+                : "请确保所有 JSON 类型参数都是合法 JSON（数组/对象按工具契约要求）。";
+          writeEvent("assistant.delta", {
+            delta:
+              `\n\n[系统] 工具参数校验失败（已停止本轮执行）。\n` +
+              `- tool: ${String(bad.name)}\n` +
+              (errCode ? `- code: ${errCode}\n` : "") +
+              (errField ? `- field: ${errField}\n` : "") +
+              `- message: ${errMsg}\n` +
+              `- 修复提示：${fixHint}\n`,
+          });
 
           writePolicyDecision({
             turn,
