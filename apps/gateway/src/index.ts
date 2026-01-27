@@ -45,13 +45,11 @@ import {
   isWriteLikeTool,
   isContentWriteTool,
   looksLikeDraftText,
-  looksLikeHasCTA,
   pickSkillStageKeyForAgentRun,
   parseKbSelectedLibrariesFromContextPack,
   parseMainDocFromContextPack,
   parseRunTodoFromContextPack,
   parseStyleLintResult,
-  styleNeedsCta,
 } from "@writing-ide/agent-core";
 
 function parseContextManifestFromContextPack(ctx?: string): any | null {
@@ -4494,15 +4492,7 @@ fastify.post(
           if (remain) writeEvent("assistant.delta", { delta: remain, turn });
           flushed = assistantText.length;
         }
-        if (styleNeedsCta({ styleGateEnabled: gates.styleGateEnabled, skipCta: intent.skipCta, kbSelected: kbSelectedList as any })) {
-          const t0 = assistantText.trim();
-          if (looksLikeDraftText(t0) && !looksLikeHasCTA(t0)) {
-            const cta = "\n\n——\n\n家人们，点个赞、关注一下，评论区聊聊：你觉得日本这波是继续嘴硬，还是准备认怂？";
-            writeEvent("assistant.delta", { delta: cta, turn });
-            assistantText += cta;
-            flushed = assistantText.length;
-          }
-        }
+        // 禁用：自动补 CTA（曾误把测试文案追加到任意输出，造成内容污染）
         messages.push({ role: "assistant", content: assistantText });
         writeEvent("run.end", { runId, reason: "text", reasonCodes: ["text"], turn });
         writeEvent("assistant.done", { reason: "text", turn });
