@@ -80,7 +80,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          VER="$(node -e \"console.log(require('./apps/desktop/package.json').version)\")"
+          VER="$(node -p 'require(\"./apps/desktop/package.json\").version')"
           TAG="desktop-v${VER}"
           TITLE="Desktop v${VER}"
           echo "version=${VER}"
