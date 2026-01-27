@@ -566,6 +566,54 @@ function escapeForPsSingleQuoted(s) {
   return String(s ?? "").replaceAll("'", "''");
 }
 
+async function runPowershellForInstallerLaunchWin(exePath) {
+  const p = escapeForPsSingleQuoted(exePath);
+  // - PassThru：拿到 Process 对象，输出 PID 作为“已启动”的证据
+  // - ErrorActionPreference=Stop：确保失败会走 catch 并以非 0 退出码返回
+  const ps =
+    "$ErrorActionPreference='Stop';" +
+    ` $proc = Start-Process -FilePath '${p}' -PassThru;` +
+    " Write-Output $proc.Id;";
+  return await new Promise((resolve) => {
+    try {
+      const child = spawn("powershell.exe", ["-NoProfile", "-WindowStyle", "Hidden", "-Command", ps], {
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let out = "";
+      let err = "";
+      child.stdout.on("data", (b) => (out += String(b ?? "")));
+      child.stderr.on("data", (b) => (err += String(b ?? "")));
+      const timer = setTimeout(() => {
+        try {
+          child.kill();
+        } catch {
+          // ignore
+        }
+        resolve({ ok: false, error: "POWERSHELL_TIMEOUT", detail: err.slice(0, 2000) });
+      }, 6_000);
+      child.on("error", (e) => {
+        clearTimeout(timer);
+        resolve({ ok: false, error: "POWERSHELL_SPAWN_FAILED", detail: String(e?.message ?? e) });
+      });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        const stdout = String(out ?? "").trim();
+        const stderr = String(err ?? "").trim();
+        const pid = Number(stdout.split(/\s+/)[0] || "");
+        if (code === 0 && Number.isFinite(pid) && pid > 0) return resolve({ ok: true, pid });
+        return resolve({
+          ok: false,
+          error: "POWERSHELL_LAUNCH_FAILED",
+          detail: `code=${code}\nstdout=${stdout.slice(0, 400)}\nstderr=${stderr.slice(0, 2000)}`,
+        });
+      });
+    } catch (e) {
+      resolve({ ok: false, error: "POWERSHELL_EXCEPTION", detail: String(e?.message ?? e) });
+    }
+  });
+}
+
 async function countRunningProcessesByImageNameWin(imageName) {
   const exeName = String(imageName ?? "").trim();
   if (!exeName) return { ok: false, error: "MISSING_EXE_NAME" };
@@ -773,16 +821,34 @@ async function interactiveUpdateFlow(args) {
     : cachePath;
 
   try {
-    // Windows：不再用 cmd.exe（易受编码/特殊字符影响，且会弹黑窗）。
-    // 用 PowerShell 隐藏窗口 + Start-Sleep + Start-Process：更稳、对 Unicode 路径友好。
-    const p = escapeForPsSingleQuoted(finalLaunchPath);
-    const ps = `Start-Sleep -Seconds 1; Start-Process -FilePath '${p}'`;
-    const child = spawn("powershell.exe", ["-NoProfile", "-WindowStyle", "Hidden", "-Command", ps], {
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true,
+    // 关键：我们必须“确认安装器已启动”，再退出当前进程。
+    // 过去的实现是 detached fire-and-forget：如果 PowerShell/Start-Process 失败，用户会只看到“下载完就闪退”。
+    const launched = await runPowershellForInstallerLaunchWin(finalLaunchPath);
+    if (!launched.ok) {
+      // 兜底：尝试用 Electron shell 打开（有时 PowerShell 被策略禁用）
+      try {
+        shell.openPath(finalLaunchPath);
+      } catch {
+        // ignore
+      }
+      await dialog.showMessageBox(mainWindow ?? undefined, {
+        type: "error",
+        title: "启动安装失败",
+        message: `安装包已下载，但无法自动启动安装器。\n你可以手动运行：\n${finalLaunchPath}`,
+        detail: `${launched.error}\n${String(launched.detail ?? "")}`.slice(0, 1800),
+      });
+      return { ok: false, error: launched.error, detail: launched.detail, installer: finalLaunchPath };
+    }
+
+    // 给用户一个明确反馈，避免误以为“闪退”
+    await dialog.showMessageBox(mainWindow ?? undefined, {
+      type: "info",
+      title: "已启动安装程序",
+      message: "安装程序已启动，应用将退出以完成更新。",
+      detail: `installer: ${finalLaunchPath}\npid: ${launched.pid}`,
+      buttons: ["退出并继续安装"],
+      defaultId: 0,
     });
-    child.unref();
   } catch (e) {
     await dialog.showMessageBox(mainWindow ?? undefined, {
       type: "error",
