@@ -3262,6 +3262,70 @@ fastify.post(
     | "style_need_style"
     | "style_can_write";
 
+  type PhaseContractV1 = {
+    phase: SkillToolCapsPhase;
+    // 绝对工具名 allowlist（不含 ALWAYS_ALLOW_TOOL_NAMES；会自动合并）
+    allowTools: string[];
+    hint: string;
+    // AutoRetry：在该 phase 下，用契约替代“通用写作闭环”的 need_todo/need_kb/... 判定
+    autoRetry?: (args: {
+      assistantText: string;
+      runState: any;
+      toolCapsPhase: SkillToolCapsPhase;
+    }) => null | {
+      shouldRetry: boolean;
+      reasonCodes: string[];
+      reasons: string[];
+      systemMessage: string;
+    };
+  };
+
+  const PHASE_CONTRACTS_V1: Partial<Record<SkillToolCapsPhase, PhaseContractV1>> = {
+    batch_active: {
+      phase: "batch_active",
+      allowTools: [
+        "writing.batch.start",
+        "writing.batch.status",
+        "writing.batch.pause",
+        "writing.batch.resume",
+        "writing.batch.cancel",
+        // 允许只读检索/进度维护（避免模型想查风格库时触发门禁重试）
+        "kb.search",
+        "run.done",
+      ],
+      hint:
+        "【Skill: writing_batch】当前阶段：batch_active（硬路由，契约驱动）。\n" +
+        "- 你不得在单次对话里直接输出 N 篇完整正文；必须调用 writing.batch.start 启动后台批处理。\n" +
+        "- inputDir 缺失：直接调用 writing.batch.start（会用当前活动文件/项目推断，不要弹系统选目录）。\n" +
+        "- 启动后建议：调用 writing.batch.status 获取 jobId/outputDir，然后调用 run.done 结束本次 run（批处理会在后台继续）。\n" +
+        "- 需要控制：writing.batch.pause/resume/cancel。\n" +
+        "- 本回合除 writing.batch.* / kb.search / run.* 外不要调用其它工具；不要输出最终长文正文。\n" +
+        "- 注意：若要调用工具，本条消息必须且只能输出严格的 <tool_calls>...</tool_calls> XML（不要夹杂自然语言）。",
+      autoRetry: ({ assistantText, runState, toolCapsPhase }) => {
+        if (toolCapsPhase !== "batch_active") return null;
+        const hasBatchJob =
+          !!(runState as any).batchJobId ||
+          !!(runState as any).batchJobRunning ||
+          (typeof (runState as any).batchJobStatus === "string" && String((runState as any).batchJobStatus) !== "idle");
+        if (hasBatchJob) return { shouldRetry: false, reasonCodes: ["batch_started"], reasons: [], systemMessage: "" };
+
+        // 尚未启动批处理：此阶段只要求“启动/查询”，不要触发 need_todo/need_kb/need_lint/need_length/need_write 空转。
+        return {
+          shouldRetry: true,
+          reasonCodes: ["need_batch_start"],
+          reasons: ["批处理未启动（batch_active 阶段必须先 start/status）"],
+          systemMessage:
+            "你上一条没有按 batch_active 契约调用批处理工具。\n" +
+            "- 你现在必须只输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
+            "- 请选择其一：\n" +
+            "  A) 启动：调用 writing.batch.start（不传 inputDir，默认用当前活动文件）。\n" +
+            "  B) 查询：调用 writing.batch.status（若你认为已经启动过）。\n" +
+            "- 完成后：建议调用 run.done 结束本次 run（批处理会在后台继续）。\n",
+        };
+      },
+    },
+  };
+
   const ALWAYS_ALLOW_TOOL_NAMES = new Set<string>([
     "time.now",
     "run.mainDoc.get",
@@ -3365,28 +3429,10 @@ fastify.post(
     // 3) WritingBatchSkill（硬路由：强制走 writing.batch.*，避免单次 run 直接产出 N 篇导致中断）
     if (activeSkillIds.includes("writing_batch")) {
       phase = "batch_active";
-      const allowSet = new Set<string>([
-        "writing.batch.start",
-        "writing.batch.status",
-        "writing.batch.pause",
-        "writing.batch.resume",
-        "writing.batch.cancel",
-        // 允许只读检索/进度维护（避免模型想查风格库时触发门禁重试）
-        "kb.search",
-        "run.setTodoList",
-        "run.todo.update",
-        "run.todo.upsertMany",
-        "run.mainDoc.update",
-        "run.done",
-        ...Array.from(ALWAYS_ALLOW_TOOL_NAMES),
-      ]);
+      const contract = PHASE_CONTRACTS_V1.batch_active!;
+      const allowSet = new Set<string>([...contract.allowTools, ...Array.from(ALWAYS_ALLOW_TOOL_NAMES)]);
       for (const name of Array.from(allowed)) if (!allowSet.has(name)) allowed.delete(name);
-      hint =
-        "【Skill: writing_batch】当前阶段：batch_active（硬路由）。\n" +
-        "- 你不得在单次对话里直接输出 N 篇完整正文；必须调用 writing.batch.start 启动后台批处理。\n" +
-        "- 启动后建议：调用 writing.batch.status 获取 jobId/outputDir，然后调用 run.done 结束本次 run（批处理会在后台继续）。\n" +
-        "- 需要控制：writing.batch.pause/resume/cancel。\n" +
-        "- 本回合除 writing.batch.*、kb.search 与 run.* 进度工具外，不要调用其它工具；不要输出最终长文正文。";
+      hint = contract.hint;
       reasonCodes.push("phase:batch_active");
       return { phase, allowed, hint, reasonCodes };
     }
@@ -4306,15 +4352,55 @@ fastify.post(
             }
           }
 
-          const analysis = analyzeAutoRetryText({
-            assistantText,
-            intent,
-            gates: effectiveGates,
-            state: runState,
-            lintMaxRework,
-            targetChars,
-            todoPolicy: intentRoute.todoPolicy,
-          });
+        // phase contract：批处理（writing_batch）不走“通用写作闭环” AutoRetry（否则会被 need_todo/need_kb/need_lint/need_length/need_write 误伤并空转）
+        if (toolCapsPhase === "batch_active" && activeSkillIds.includes("writing_batch")) {
+          const contract = (PHASE_CONTRACTS_V1.batch_active as any) as PhaseContractV1;
+          const override = contract?.autoRetry?.({ assistantText, runState, toolCapsPhase }) ?? null;
+          if (override && override.shouldRetry) {
+            writePolicyDecision({
+              turn,
+              policy: "AutoRetryPolicy",
+              decision: "retry",
+              reasonCodes: override.reasonCodes,
+              detail: {
+                reasons: override.reasons,
+                budget: "workflow",
+                budgetBefore: runState.workflowRetryBudget,
+                budgetAfter: Math.max(0, runState.workflowRetryBudget - 1),
+              },
+            });
+            runState.workflowRetryBudget -= 1;
+            writeRunNotice({
+              turn,
+              kind: "info",
+              title: `AutoRetry：batch_active（未启动批处理）`,
+              message: `检测到本轮处于 batch_active，但尚未启动批处理。系统将自动继续一次。\n` + override.systemMessage,
+              policy: "AutoRetryPolicy",
+              reasonCodes: override.reasonCodes,
+              detail: {
+                reasons: override.reasons,
+                budget: "workflow",
+                budgetBefore: runState.workflowRetryBudget + 1,
+                budgetAfter: runState.workflowRetryBudget,
+              },
+            });
+            writeEvent("assistant.done", { reason: "auto_retry_incomplete", turn });
+            messages.push({ role: "assistant", content: assistantText });
+            messages.push({ role: "system", content: override.systemMessage });
+            continue;
+          }
+          // 已启动批处理：允许本轮直接结束/继续，不再触发通用闭环重试
+        }
+
+        const analysis = analyzeAutoRetryText({
+          assistantText,
+          intent,
+          gates: effectiveGates,
+          state: runState,
+          lintMaxRework,
+          targetChars,
+          todoPolicy: intentRoute.todoPolicy,
+        });
           const needFinalText = analysis.needFinalText;
           const needTodo = analysis.needTodo;
           const needWrite = analysis.needWrite;
@@ -5856,6 +5942,37 @@ fastify.post(
             item.applied = String((payload.meta as any)?.applyPolicy ?? "") === "auto_apply";
             execReport.writes.push(item);
             if (execReport.writes.length > 50) execReport.writes = execReport.writes.slice(-50);
+          } catch {
+            // ignore
+          }
+        }
+        // writing_batch：观测“是否已启动/是否在运行”，供 batch_active phase 的契约驱动 AutoRetry 使用
+        if (payload.ok && typeof payload.name === "string" && payload.name.startsWith("writing.batch.")) {
+          try {
+            const o: any = payload.output && typeof payload.output === "object" ? payload.output : {};
+            const jobId = typeof o?.jobId === "string" ? String(o.jobId).trim() : "";
+            const job = o?.job && typeof o.job === "object" ? o.job : null;
+            const outputDir = typeof job?.outputDir === "string" ? String(job.outputDir).trim() : "";
+            const status = typeof job?.status === "string" ? String(job.status).trim() : "";
+            if (jobId) (runState as any).batchJobId = jobId;
+            if (outputDir) (runState as any).batchOutputDir = outputDir;
+            if (status) (runState as any).batchJobStatus = status;
+            if (payload.name === "writing.batch.start" || payload.name === "writing.batch.resume") (runState as any).batchJobRunning = true;
+            if (payload.name === "writing.batch.pause") (runState as any).batchJobRunning = false;
+            if (payload.name === "writing.batch.cancel") (runState as any).batchJobRunning = false;
+            // status 工具返回 activeJob（可能更权威）
+            if (payload.name === "writing.batch.status") {
+              const activeJobId = typeof o?.activeJobId === "string" ? String(o.activeJobId).trim() : "";
+              const activeJob = o?.activeJob && typeof o.activeJob === "object" ? o.activeJob : null;
+              if (activeJobId) (runState as any).batchJobId = activeJobId;
+              const s2 = typeof o?.status === "string" ? String(o.status).trim() : "";
+              if (s2) (runState as any).batchJobStatus = s2;
+              const od2 = typeof activeJob?.outputDir === "string" ? String(activeJob.outputDir).trim() : "";
+              if (od2) (runState as any).batchOutputDir = od2;
+              const st2 = typeof activeJob?.status === "string" ? String(activeJob.status).trim() : "";
+              if (st2) (runState as any).batchJobStatus = st2;
+              (runState as any).batchJobRunning = s2 === "running" || st2 === "running";
+            }
           } catch {
             // ignore
           }
