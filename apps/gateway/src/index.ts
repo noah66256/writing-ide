@@ -2794,6 +2794,13 @@ fastify.post(
   const lintPassScore = Number(process.env.STYLE_LINT_PASS_SCORE ?? 80);
   const lintMaxRework = Number(process.env.STYLE_LINT_MAX_REWORK ?? 2);
   const copyMaxRework = Number(process.env.STYLE_COPY_LINT_MAX_REWORK ?? 2);
+  const copyLintModeRaw = String(process.env.STYLE_COPY_LINT_MODE ?? "observe").trim().toLowerCase();
+  const copyLintMode: "off" | "observe" | "gate" =
+    copyLintModeRaw === "gate" || copyLintModeRaw === "hard"
+      ? "gate"
+      : copyLintModeRaw === "off" || copyLintModeRaw === "0" || copyLintModeRaw === "false"
+        ? "off"
+        : "observe";
   // lint 门禁策略：
   // - hint：不把 lint 当硬闸门（不强制通过，不触发 style_lint_exhausted）；仍允许模型/用户按需调用 lint.style 获取问题清单与 rewritePrompt
   // - gate：硬闸门（必须通过，否则回炉；回炉耗尽终止）
@@ -2816,7 +2823,8 @@ fastify.post(
     ...gates,
     // lint/copy gate：仅在 safe/gate 下启用；hint 下只提示不做硬门禁
     lintGateEnabled: gates.lintGateEnabled && (lintMode === "gate" || lintMode === "safe"),
-    copyGateEnabled: gates.copyGateEnabled && (lintMode === "gate" || lintMode === "safe"),
+    // lint.copy 默认不应卡住写作链路：observe=不强制，gate=强制闸门
+    copyGateEnabled: gates.copyGateEnabled && (lintMode === "gate" || lintMode === "safe") && copyLintMode === "gate",
   };
   const styleLibIds = gates.styleLibIds;
 
@@ -5310,6 +5318,78 @@ fastify.post(
         }
       }
 
+      // WriteCoercionPolicy（V2）：在进入 LengthGatePolicy 前，先把 doc.write.content 预处理为“最终将写入的内容”，
+      // 避免出现：LengthGate 通过/重试后，又在执行阶段被强制换回短 bestDraft，导致“写入变短/不达标/风格更飘”。
+      if (effectiveGates.lintGateEnabled && (runState.styleLintPassed || runState.lintGateDegraded)) {
+        const targetForLenGate =
+          mode !== "chat" && Number.isFinite(Number(targetChars as any)) && Number(targetChars) >= 200 && intent.isWritingTask
+            ? Math.floor(Number(targetChars))
+            : null;
+        const minForLenGate = targetForLenGate ? Math.floor(targetForLenGate * 0.8) : null;
+        const maxForLenGate = targetForLenGate ? Math.floor(targetForLenGate * 1.2) : null;
+
+        for (const call of toolCalls) {
+          if (String(call?.name ?? "") !== "doc.write") continue;
+          const raw = (call?.args ?? {}) as any;
+          const content = typeof raw?.content === "string" ? String(raw.content) : "";
+          const bestText =
+            (runState as any)?.bestDraft?.text ||
+            (runState.lintGateDegraded ? (runState as any)?.bestStyleDraft?.text : "") ||
+            "";
+          const best = String(bestText ?? "");
+          if (!content.trim() || !best.trim() || content.trim() === best.trim()) continue;
+
+          // 如果存在“目标字数”且当前 content 已达标，但 bestDraft 明显不达标，则不要强制换回 bestDraft（否则永远卡在 need_length）。
+          if (targetForLenGate && minForLenGate && maxForLenGate) {
+            const bestLen = best.trim().length;
+            const contentLen = content.trim().length;
+            const bestIn = bestLen >= minForLenGate && bestLen <= maxForLenGate;
+            const contentIn = contentLen >= minForLenGate && contentLen <= maxForLenGate;
+            if (!bestIn && contentIn) continue;
+          }
+
+          (call as any).args = { ...raw, content: best };
+          const bestMeta: any = runState.bestDraft
+            ? {
+                styleScore: runState.bestDraft.styleScore,
+                highIssues: runState.bestDraft.highIssues,
+                copy: runState.bestDraft.copy
+                  ? {
+                      riskLevel: runState.bestDraft.copy.riskLevel,
+                      maxOverlapChars: runState.bestDraft.copy.maxOverlapChars,
+                      maxChar5gramJaccard: runState.bestDraft.copy.maxChar5gramJaccard,
+                    }
+                  : null,
+              }
+            : runState.bestStyleDraft
+              ? { styleScore: runState.bestStyleDraft.score, highIssues: runState.bestStyleDraft.highIssues, copy: null }
+              : null;
+          writePolicyDecision({
+            turn,
+            policy: "LintPolicy",
+            decision: "coerce_write_best_draft",
+            reasonCodes: [runState.lintGateDegraded ? "lint_degraded" : "lint_passed", "force_best_draft_on_write"],
+            detail: {
+              tool: "doc.write",
+              fromLen: content.length,
+              toLen: best.length,
+              best: bestMeta,
+            },
+          });
+          if (runState.lintGateDegraded) {
+            writeRunNotice({
+              turn,
+              kind: "info",
+              title: "safe 降级：写入内容已强制使用 bestDraft",
+              message: `已进入 safe 降级放行：为避免最终落盘偏离风格库，doc.write 内容已替换为 BEST_DRAFT（styleScore_best=${bestMeta?.styleScore ?? "?"}）。`,
+              policy: "LintPolicy",
+              reasonCodes: ["lint_degraded", "force_best_draft_on_write"],
+              detail: { best: bestMeta },
+            });
+          }
+        }
+      }
+
       // LengthGatePolicy：当任务包含“目标字数（例如 1200 字）”时，禁止把明显偏离字数的正文直接写入文件。
       // 这让“字数约束”以写入产物为准（doc.write.content），避免先写入后才发现 need_length。
       if (mode !== "chat" && Number.isFinite(Number(targetChars as any)) && Number(targetChars) >= 200 && intent.isWritingTask) {
@@ -5423,58 +5503,8 @@ fastify.post(
           return;
         }
 
-        // WriteCoercionPolicy（V2）：进入 write 阶段后，强制写入 bestDraft（多目标最优），
-        // 避免模型“最后一版更差但被写入”。safe 降级同样强制使用 bestDraft。
-        if (effectiveGates.lintGateEnabled && String(call?.name ?? "") === "doc.write" && (runState.styleLintPassed || runState.lintGateDegraded)) {
-          const raw = (call?.args ?? {}) as any;
-          const content = typeof raw?.content === "string" ? String(raw.content) : "";
-          const bestText =
-            (runState as any)?.bestDraft?.text ||
-            (runState.lintGateDegraded ? (runState as any)?.bestStyleDraft?.text : "") ||
-            "";
-          const best = String(bestText ?? "");
-          if (content.trim() && best.trim() && content.trim() !== best.trim()) {
-            (call as any).args = { ...raw, content: best };
-            const bestMeta: any = runState.bestDraft
-              ? {
-                  styleScore: runState.bestDraft.styleScore,
-                  highIssues: runState.bestDraft.highIssues,
-                  copy: runState.bestDraft.copy
-                    ? {
-                        riskLevel: runState.bestDraft.copy.riskLevel,
-                        maxOverlapChars: runState.bestDraft.copy.maxOverlapChars,
-                        maxChar5gramJaccard: runState.bestDraft.copy.maxChar5gramJaccard,
-                      }
-                    : null,
-                }
-              : runState.bestStyleDraft
-                ? { styleScore: runState.bestStyleDraft.score, highIssues: runState.bestStyleDraft.highIssues, copy: null }
-                : null;
-            writePolicyDecision({
-              turn,
-              policy: "LintPolicy",
-              decision: "coerce_write_best_draft",
-              reasonCodes: [runState.lintGateDegraded ? "lint_degraded" : "lint_passed", "force_best_draft_on_write"],
-              detail: {
-                tool: "doc.write",
-                fromLen: content.length,
-                toLen: best.length,
-                best: bestMeta,
-              },
-            });
-            if (runState.lintGateDegraded) {
-              writeRunNotice({
-                turn,
-                kind: "info",
-                title: "safe 降级：写入内容已强制使用 bestDraft",
-                message: `已进入 safe 降级放行：为避免最终落盘偏离风格库，doc.write 内容已替换为 BEST_DRAFT（styleScore_best=${bestMeta?.styleScore ?? "?"}）。`,
-                policy: "LintPolicy",
-                reasonCodes: ["lint_degraded", "force_best_draft_on_write"],
-                detail: { best: bestMeta },
-              });
-            }
-          }
-        }
+        // 注意：doc.write 的 bestDraft coercion 已在 LengthGatePolicy 之前执行，
+        // 避免“通过字数校验后又被换回短稿”的顺序冲突。
 
         // WebSearchQueryNormalizationPolicy：用 time.now 的当前年份纠正 web.search.query 里的“年份漂移”
         // - 仅在用户未明确要求查历史/旧年份，且 freshness 未显式指定年份/日期范围时生效
