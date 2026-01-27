@@ -14,7 +14,7 @@ on:
           - universal
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -75,15 +75,28 @@ jobs:
             exit 2
           fi
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: desktop-macos-${{ inputs.arch }}
-          path: |
-            apps/desktop/out/**/*.dmg
-            apps/desktop/out/**/*.zip
-            apps/desktop/out/**/builder-debug.yml
-            apps/desktop/out/**/latest*.yml
-          if-no-files-found: error
+      - name: Upload to GitHub Release (bypass artifacts quota)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VER="$(node -e \"console.log(require('./apps/desktop/package.json').version)\")"
+          TAG="desktop-v${VER}"
+          TITLE="Desktop v${VER}"
+          echo "version=${VER}"
+          echo "tag=${TAG}"
+          DMG_PATH="$(find apps/desktop/out -maxdepth 2 -name '*.dmg' -print | head -n 1 || true)"
+          ZIP_PATH="$(find apps/desktop/out -maxdepth 2 -name '*.zip' -print | head -n 1 || true)"
+          if [ -z \"${DMG_PATH:-}\" ]; then
+            echo \"DMG not found under apps/desktop/out\"
+            exit 3
+          fi
+          echo \"dmg=${DMG_PATH}\"
+          echo \"zip=${ZIP_PATH}\"
+          gh release view \"${TAG}\" >/dev/null 2>&1 || gh release create \"${TAG}\" -t \"${TITLE}\" -n \"\" --latest=false
+          gh release upload \"${TAG}\" \"${DMG_PATH}\" --clobber
+          if [ -n \"${ZIP_PATH:-}\" ]; then
+            gh release upload \"${TAG}\" \"${ZIP_PATH}\" --clobber
+          fi
 
 
