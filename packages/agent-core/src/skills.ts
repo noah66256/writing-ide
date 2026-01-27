@@ -212,7 +212,51 @@ export const WEB_TOPIC_RADAR_SKILL: SkillManifest = {
   ui: { badge: "WEB", color: "purple" },
 };
 
-export const SKILL_MANIFESTS_V1: SkillManifest[] = [WEB_TOPIC_RADAR_SKILL, STYLE_IMITATE_SKILL];
+export const WRITING_BATCH_SKILL: SkillManifest = {
+  id: "writing_batch",
+  name: "批量写作长跑",
+  description:
+    "当用户明确要批量生成（例如 >=5 篇、按文件夹、50×5=250 篇）时自动启用：强制走 writing.batch.* 工具启动后台队列，避免单次 Run 中断。",
+  priority: 130,
+  stageKey: "agent.skill.writing_batch",
+  autoEnable: true,
+  triggers: [
+    { when: "mode_in", args: { modes: ["plan", "agent"] } },
+    { when: "run_intent_in", args: { intents: ["writing", "rewrite", "polish"] } },
+    {
+      when: "text_regex",
+      args: {
+        // 仅在“明确批量/文件夹/多篇”时触发（避免误伤普通写作）
+        pattern:
+          "(?:批处理|批量|文件夹|目录|整包|一键生成|多篇|多条|长期运行|长时间运行|50\\s*节|250\\s*篇)|" +
+          "(?:\\b(?:[5-9]|[1-9]\\d+)\\b\\s*(?:篇|条|篇文章|条稿|条口播|篇口播))",
+      },
+    },
+  ],
+  promptFragments: {
+    system:
+      "当 skill=writing_batch 激活时（硬路由）：\n" +
+      "1) 你不得在单次对话里直接输出 N 篇完整正文；必须用 writing.batch.start 启动批处理。\n" +
+      "2) inputDir 若缺失：直接调用 writing.batch.start（会弹出选择文件夹）。\n" +
+      "3) 启动后：建议立刻调用 writing.batch.status 获取 jobId/outputDir，然后用 run.done 结束本次 run（批处理会在后台继续）。\n" +
+      "4) 需要控制：writing.batch.pause/resume/cancel。\n",
+    context: "ACTIVE_SKILLS: writing_batch（硬路由：批量任务走批处理工具）",
+  },
+  policies: ["SkillToolCapsPolicy"],
+  toolCaps: {
+    allowTools: [
+      "writing.batch.start",
+      "writing.batch.status",
+      "writing.batch.pause",
+      "writing.batch.resume",
+      "writing.batch.cancel",
+      "run.done",
+    ],
+  },
+  ui: { badge: "BATCH", color: "orange" },
+};
+
+export const SKILL_MANIFESTS_V1: SkillManifest[] = [WRITING_BATCH_SKILL, WEB_TOPIC_RADAR_SKILL, STYLE_IMITATE_SKILL];
 
 export function activateSkills(args: {
   mode: AgentMode;

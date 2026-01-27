@@ -36,6 +36,11 @@ declare global {
           relPath: string,
           content: string,
         ) => Promise<{ ok: boolean; error?: string }>;
+        appendFile: (
+          rootDir: string,
+          relPath: string,
+          content: string,
+        ) => Promise<{ ok: boolean; error?: string }>;
         deleteFile: (rootDir: string, relPath: string) => Promise<{ ok: boolean; error?: string }>;
         deletePath: (rootDir: string, relPath: string) => Promise<{ ok: boolean; error?: string; detail?: string }>;
         mkdir: (rootDir: string, relDir: string) => Promise<{ ok: boolean; error?: string }>;

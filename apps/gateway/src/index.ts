@@ -3247,6 +3247,7 @@ fastify.post(
     | "none"
     | "web_need_search"
     | "web_need_fetch"
+    | "batch_active"
     | "style_need_templates"
     | "style_need_draft"
     | "style_need_copy"
@@ -3353,7 +3354,30 @@ fastify.post(
       }
     }
 
-    // 3) StyleImitateSkill（V2：templates -> copy -> style -> write）
+    // 3) WritingBatchSkill（硬路由：强制走 writing.batch.*，避免单次 run 直接产出 N 篇导致中断）
+    if (activeSkillIds.includes("writing_batch")) {
+      phase = "batch_active";
+      const allowSet = new Set<string>([
+        "writing.batch.start",
+        "writing.batch.status",
+        "writing.batch.pause",
+        "writing.batch.resume",
+        "writing.batch.cancel",
+        "run.done",
+        ...Array.from(ALWAYS_ALLOW_TOOL_NAMES),
+      ]);
+      for (const name of Array.from(allowed)) if (!allowSet.has(name)) allowed.delete(name);
+      hint =
+        "【Skill: writing_batch】当前阶段：batch_active（硬路由）。\n" +
+        "- 你不得在单次对话里直接输出 N 篇完整正文；必须调用 writing.batch.start 启动后台批处理。\n" +
+        "- 启动后建议：调用 writing.batch.status 获取 jobId/outputDir，然后调用 run.done 结束本次 run（批处理会在后台继续）。\n" +
+        "- 需要控制：writing.batch.pause/resume/cancel。\n" +
+        "- 本回合除 writing.batch.* 与 run.* 进度工具外，不要调用其它工具；不要输出最终长文正文。";
+      reasonCodes.push("phase:batch_active");
+      return { phase, allowed, hint, reasonCodes };
+    }
+
+    // 4) StyleImitateSkill（V2：templates -> copy -> style -> write）
     if (effectiveGates.styleGateEnabled) {
       if (!runState.hasStyleKbSearch) {
         phase = "style_need_templates";

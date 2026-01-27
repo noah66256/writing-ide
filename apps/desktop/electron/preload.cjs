@@ -31,6 +31,9 @@ contextBridge.exposeInMainWorld("desktop", {
     writeFile(rootDir, relPath, content) {
       return ipcRenderer.invoke("doc.writeFile", rootDir, relPath, content);
     },
+    appendFile(rootDir, relPath, content) {
+      return ipcRenderer.invoke("doc.appendFile", rootDir, relPath, content);
+    },
     deleteFile(rootDir, relPath) {
       return ipcRenderer.invoke("doc.deleteFile", rootDir, relPath);
     },

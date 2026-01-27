@@ -509,6 +509,56 @@ export const TOOL_LIST: ToolMeta[] = [
       additionalProperties: true,
     },
   },
+  {
+    name: "writing.batch.start",
+    description:
+      "启动批处理写作（长时间运行）：从一个输入文件夹批量生成多篇短视频口播稿，并写入项目输出目录（默认 exports/batch_xxx）。\n" +
+      "【适用】当用户要求“生成多篇（>=5）/按文件夹/50×5=250 篇”时。\n" +
+      "【注意】该工具会在后台持续生成；调用后会立即返回 jobId/outputDir（不等待全部完成）。",
+    args: [
+      { name: "inputDir", required: false, desc: "输入目录（绝对路径；不传则弹出选择目录）", type: "string" },
+      { name: "clipsPerLesson", required: false, desc: "每节课生成多少篇（默认 5，范围 1-12）", type: "number" },
+      { name: "outputBaseDir", required: false, desc: "输出根目录（相对项目；默认 exports）", type: "string" },
+    ],
+    modes: ["plan", "agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        inputDir: { type: "string" },
+        clipsPerLesson: { type: "number" },
+        outputBaseDir: { type: "string" },
+      },
+      additionalProperties: true,
+    },
+  },
+  {
+    name: "writing.batch.status",
+    description: "查询当前批处理状态与进度（只读）。",
+    args: [],
+    modes: ["plan", "agent"],
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "writing.batch.pause",
+    description: "暂停当前批处理（后台停止推进，已生成内容保留）。",
+    args: [],
+    modes: ["plan", "agent"],
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "writing.batch.resume",
+    description: "继续当前批处理（从 checkpoint 继续推进）。",
+    args: [],
+    modes: ["plan", "agent"],
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "writing.batch.cancel",
+    description: "取消当前批处理（后台停止推进，已生成文件保留在输出目录）。",
+    args: [],
+    modes: ["plan", "agent"],
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
 ];
 
 export function getToolsForMode(mode: ToolMode) {

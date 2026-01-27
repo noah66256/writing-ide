@@ -1010,6 +1010,15 @@ function registerIpc() {
     return { ok: true };
   });
 
+  ipcMain.handle("doc.appendFile", async (_event, rootDir, relPath, content) => {
+    const root = String(rootDir ?? "");
+    if (!root) return { ok: false, error: "MISSING_ROOT" };
+    const file = toFsPath(root, relPath);
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.appendFile(file, String(content ?? ""), "utf-8");
+    return { ok: true };
+  });
+
   ipcMain.handle("doc.deleteFile", async (_event, rootDir, relPath) => {
     const root = String(rootDir ?? "");
     if (!root) return { ok: false, error: "MISSING_ROOT" };

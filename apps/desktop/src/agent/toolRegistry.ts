@@ -2,6 +2,7 @@ import { useProjectStore } from "../state/projectStore";
 import { useRunStore, type Mode, type ToolApplyPolicy, type ToolRiskLevel } from "../state/runStore";
 import { useKbStore } from "../state/kbStore";
 import { useAuthStore } from "../state/authStore";
+import { useWritingBatchStore } from "../state/writingBatchStore";
 import { getGatewayBaseUrl } from "./gatewayUrl";
 
 function authHeader(): Record<string, string> {
@@ -2428,6 +2429,90 @@ const tools: ToolDefinition[] = [
         apply,
         undoable: false,
       };
+    },
+  },
+  {
+    name: "writing.batch.start",
+    description:
+      "启动批处理写作（长时间运行）：从一个输入文件夹批量生成多篇短视频口播稿，并写入项目输出目录（默认 exports/batch_xxx）。\n" +
+      "注意：该工具会启动后台任务并立即返回 job 信息（不会等待全部生成完成）。",
+    args: [
+      { name: "inputDir", desc: "输入目录（绝对路径；不传则弹出选择目录）" },
+      { name: "clipsPerLesson", desc: "每节课生成多少篇（默认 5，范围 1-12）" },
+      { name: "outputBaseDir", desc: "输出根目录（相对项目；默认 exports）" },
+    ],
+    riskLevel: "high",
+    applyPolicy: "auto_apply",
+    reversible: false,
+    run: async (args) => {
+      if (!requireLoginForTool("批处理写作").ok) return { ok: false, error: "AUTH_REQUIRED" };
+
+      const store = useWritingBatchStore.getState();
+      const inputDir = String((args as any).inputDir ?? "").trim();
+      const clipsPerLesson0 = (args as any).clipsPerLesson;
+      const clipsPerLesson = typeof clipsPerLesson0 === "number" ? clipsPerLesson0 : undefined;
+      const outputBaseDir = String((args as any).outputBaseDir ?? "exports").trim() || "exports";
+
+      const created = inputDir
+        ? await store.createJobFromDir({ inputDir, clipsPerLesson, outputBaseDir })
+        : await store.createJobInteractive({ clipsPerLesson, outputBaseDir });
+      if (!created.ok || !created.jobId) return { ok: false, error: String(created.error ?? "CREATE_JOB_FAILED"), output: created };
+
+      // 关键：批处理是长时间运行，不能 await（否则 tool_call 会卡住整次 run）
+      void store.start(created.jobId);
+
+      const job = useWritingBatchStore.getState().jobs.find((j) => j.id === created.jobId) ?? null;
+      return { ok: true, output: { ok: true, jobId: created.jobId, job }, undoable: false };
+    },
+  },
+  {
+    name: "writing.batch.status",
+    description: "查询当前批处理状态与进度（只读）。",
+    args: [],
+    riskLevel: "low",
+    applyPolicy: "auto_apply",
+    reversible: true,
+    run: async () => {
+      const s = useWritingBatchStore.getState();
+      const active = s.activeJobId ? s.jobs.find((j) => j.id === s.activeJobId) ?? null : s.jobs[0] ?? null;
+      return { ok: true, output: { ok: true, status: s.status, error: s.error, activeJobId: s.activeJobId, activeJob: active }, undoable: false };
+    },
+  },
+  {
+    name: "writing.batch.pause",
+    description: "暂停当前批处理（后台停止推进）。",
+    args: [],
+    riskLevel: "low",
+    applyPolicy: "auto_apply",
+    reversible: true,
+    run: async () => {
+      useWritingBatchStore.getState().pause();
+      return { ok: true, output: { ok: true }, undoable: false };
+    },
+  },
+  {
+    name: "writing.batch.resume",
+    description: "继续当前批处理（从 checkpoint 继续推进）。",
+    args: [],
+    riskLevel: "low",
+    applyPolicy: "auto_apply",
+    reversible: true,
+    run: async () => {
+      // 关键：不能 await（长跑），只触发恢复即可
+      void useWritingBatchStore.getState().resume();
+      return { ok: true, output: { ok: true }, undoable: false };
+    },
+  },
+  {
+    name: "writing.batch.cancel",
+    description: "取消当前批处理（后台停止推进，已生成文件保留）。",
+    args: [],
+    riskLevel: "medium",
+    applyPolicy: "auto_apply",
+    reversible: true,
+    run: async () => {
+      useWritingBatchStore.getState().cancel();
+      return { ok: true, output: { ok: true }, undoable: false };
     },
   },
 ];
