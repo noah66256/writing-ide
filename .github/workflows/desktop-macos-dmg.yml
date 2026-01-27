@@ -80,23 +80,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          VER="$(node -p 'require(\"./apps/desktop/package.json\").version')"
+          VER="$(node -p "require('./apps/desktop/package.json').version")"
           TAG="desktop-v${VER}"
           TITLE="Desktop v${VER}"
           echo "version=${VER}"
           echo "tag=${TAG}"
           DMG_PATH="$(find apps/desktop/out -maxdepth 2 -name '*.dmg' -print | head -n 1 || true)"
           ZIP_PATH="$(find apps/desktop/out -maxdepth 2 -name '*.zip' -print | head -n 1 || true)"
-          if [ -z \"${DMG_PATH:-}\" ]; then
-            echo \"DMG not found under apps/desktop/out\"
+          if [ -z "${DMG_PATH:-}" ]; then
+            echo "DMG not found under apps/desktop/out"
             exit 3
           fi
-          echo \"dmg=${DMG_PATH}\"
-          echo \"zip=${ZIP_PATH}\"
-          gh release view \"${TAG}\" >/dev/null 2>&1 || gh release create \"${TAG}\" -t \"${TITLE}\" -n \"\" --latest=false
-          gh release upload \"${TAG}\" \"${DMG_PATH}\" --clobber
-          if [ -n \"${ZIP_PATH:-}\" ]; then
-            gh release upload \"${TAG}\" \"${ZIP_PATH}\" --clobber
+          echo "dmg=${DMG_PATH}"
+          echo "zip=${ZIP_PATH}"
+          gh release view "${TAG}" >/dev/null 2>&1 || gh release create "${TAG}" -t "${TITLE}" -n "" --latest=false
+          gh release upload "${TAG}" "${DMG_PATH}" --clobber
+          if [ -n "${ZIP_PATH:-}" ]; then
+            gh release upload "${TAG}" "${ZIP_PATH}" --clobber
           fi
 
 

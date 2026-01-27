@@ -474,6 +474,7 @@
 - **P1（写作增强）**
   - [ ] Outline：从 Markdown 标题树生成大纲，并与编辑器联动（点击定位）
   - [ ] Lint（style/platform/facts）Problems 面板展示与一键修复提案
+  - [ ] Web 导入兜底：`web.fetch`（博查）遇到 `HTTP_403/JS 渲染/空正文` 时，提供“浏览器渲染抓取”fallback（优先 Desktop/Electron 侧；allowlist + 短超时 + 正文抽取）
 - **P2（治理与审计）**
   - [ ] Gateway Tool Registry（Schema+XML）完善 + 工具执行迁回 Gateway（鉴权/审计/计费）
   - [ ] Run 审计：Run 列表、工具调用记录、费用 usage 归因
