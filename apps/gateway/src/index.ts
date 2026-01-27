@@ -1178,6 +1178,14 @@ function toolsPromptForAllowed(args: { mode: AgentMode; allowedToolNames?: Set<s
     .join("\n");
 }
 
+function clipForPrompt(raw: unknown, maxChars: number, suffix = "\n…（已截断）") {
+  const s = String(raw ?? "");
+  if (!s) return "";
+  const max = Number.isFinite(Number(maxChars)) ? Math.max(200, Math.min(8000, Math.floor(Number(maxChars)))) : 4000;
+  if (s.length <= max) return s;
+  return s.slice(0, max) + suffix;
+}
+
 function buildAgentProtocolPrompt(args: { mode: AgentMode; allowedToolNames?: Set<string> | null }) {
   const mode = args.mode;
   const modePolicy =
@@ -1193,6 +1201,7 @@ function buildAgentProtocolPrompt(args: { mode: AgentMode; allowedToolNames?: Se
         `- **确认再动手（必须）**：若你准备进行任何“主动行为”（读项目文件/KB 检索/改写或生成正文/写入文件/批量工具调用），必须先用 Markdown 向用户确认（最多 5 个高价值问题：平台画像/受众/目标/口吻人设/素材来源）；用户确认后再动手。\n` +
         `- **范围控制（必须）**：不要因为 activePath/openPaths/目录里看起来“相关”，就自行 doc.read；只有当用户任务明确需要，且用户已确认你可以读取时，才读。\n` +
         `- **上下文优先级（必须）**：优先使用 Context Pack 中的 REFERENCES（来自 @{} 引用，已提供正文）与已关联 KB（KB_SELECTED_LIBRARIES/KB_LIBRARY_PLAYBOOK/KB_STYLE_CLUSTERS）。不要默认把“光标文件”当上下文；当且仅当显式引用/用户确认后才读其它文件。找不到信息时再调用 project.listFiles 做兜底遍历。\n` +
+        `- **风格库优先（必须）**：当 KB_SELECTED_LIBRARIES 中存在 purpose=style（风格库）时，最终输出的口吻/节奏/结构以风格库为第一优先；若 DOC_RULES 与风格库冲突，以风格库为准（除非用户明确要求遵守 DOC_RULES）。\n` +
         `- **时间敏感联网（必须）**：当你要调用 web.search 时，先调用 time.now 获取当前日期/年份，再决定 query/freshness（避免在 2026 还搜索 2024）。\n` +
         `- **完成即停（必须）**：当你已经满足用户本轮目标（例如已回复 OK/已回答问题/已完成写入），立刻停止，不要追加新任务或开启下一段流程。\n\n` +
         `1) 产 Todo List（可追踪，默认需要）：在用户确认要你继续执行写作闭环后，你必须调用 run.setTodoList。\n` +
@@ -6333,6 +6342,8 @@ fastify.post(
           if (payload.ok && !runState.copyLintPassed) {
             // 未通过：自动回炉
             if (runState.copyLintFailCount <= copyMaxRework) {
+              const baseDraft = String((call?.args as any)?.text ?? "").trim();
+              const baseDraftClipped = baseDraft ? clipForPrompt(baseDraft, 4800) : "";
               writeRunNotice({
                 turn,
                 kind: "warn",
@@ -6346,10 +6357,12 @@ fastify.post(
                 role: "system",
                 content:
                   "你刚刚的 lint.copy 未通过防贴原文闸门。你必须立刻回炉改写“上一版候选稿”，把明显重合的片段改掉（不要新增事实/事件/数字）。\n" +
+                  "- 重要：请基于下方【上一版候选稿】做**局部修改**（优先改 tool_result.topOverlaps 命中的句式/段落），不要凭记忆整篇重写。\n" +
                   "- 下一条消息必须且只能输出 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
                   "- 本轮只调用 lint.copy（不要 kb.search；不要 lint.style；不要任何写入类工具）。\n" +
                   "- lint.copy 的 arg text 填你回炉后的新稿全文。\n" +
-                  "- 提示：优先改写 tool_result.topOverlaps 中的 snippet，对句式/结构做替换，不要逐字替换同义词。",
+                  "- 提示：优先改写 tool_result.topOverlaps 中的 snippet，对句式/结构做替换，不要逐字替换同义词。\n" +
+                  (baseDraftClipped ? `\n【上一版候选稿（请以此为唯一输入，不要凭记忆重写）】\n${baseDraftClipped}\n` : ""),
               });
               continue;
             }
@@ -6445,6 +6458,20 @@ fastify.post(
           if (payload.ok && !runState.styleLintPassed) {
             // 未通过：自动回炉
             if (runState.lintReworkBudget > 0) {
+              const baseDraft = String((call?.args as any)?.text ?? "").trim();
+              const baseDraftClipped = baseDraft ? clipForPrompt(baseDraft, 4800) : "";
+              const bestForRework: any =
+                runState.bestDraft && String(runState.bestDraft.text ?? "").trim()
+                  ? runState.bestDraft
+                  : runState.bestStyleDraft && String(runState.bestStyleDraft.text ?? "").trim()
+                    ? { text: runState.bestStyleDraft.text, styleScore: runState.bestStyleDraft.score, highIssues: runState.bestStyleDraft.highIssues, copy: null }
+                    : null;
+              const bestText = bestForRework?.text ? String(bestForRework.text).trim() : "";
+              const bestTextClipped = bestText ? clipForPrompt(bestText, 4800) : "";
+              const bestScoreNum = Number(bestForRework?.styleScore ?? bestForRework?.score ?? NaN);
+              const curScoreNum = Number(runState.lastStyleLint?.score ?? NaN);
+              const scoreDrop =
+                Number.isFinite(bestScoreNum) && Number.isFinite(curScoreNum) ? Math.max(0, bestScoreNum - curScoreNum) : 0;
               writeRunNotice({
                 turn,
                 kind: "warn",
@@ -6458,9 +6485,13 @@ fastify.post(
                 role: "system",
                 content:
                   "你刚刚的 lint.style 未通过终稿闸门。你必须立刻按 tool_result 里的 rewritePrompt 回炉改写“上一版候选稿”，然后再次调用 lint.style 复检。\n" +
+                  (scoreDrop >= 3 ? `- 重要：本轮候选稿的风格分数相比历史最佳下降明显（Δ≈${scoreDrop.toFixed(1)}）。请**优先以 BEST_DRAFT 为底稿**做局部修订，避免越改越飘。\n` : "") +
+                  "- 要求：只做**局部修改**（优先改 issues 命中的 3–5 个关键点），不要整篇重写；尽量保留原结构与关键表达。\n" +
                   "- 下一条消息必须且只能输出 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
                   "- 本轮只调用 lint.style（不要 kb.search；不要任何写入类工具）。\n" +
-                  "- lint.style 的 arg text 填你回炉后的新稿全文（不新增事实）。"
+                  "- lint.style 的 arg text 填你回炉后的新稿全文（不新增事实）。\n" +
+                  (bestTextClipped && bestTextClipped !== baseDraftClipped ? `\n【BEST_DRAFT（优先以此为底稿回炉）】\n${bestTextClipped}\n` : "") +
+                  (baseDraftClipped ? `\n【当前被 lint 的候选稿】\n${baseDraftClipped}\n` : ""),
               });
               continue;
             }
