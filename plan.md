@@ -25,6 +25,7 @@
 - [富文本/Markdown 编辑器高口碑功能池调研 v1（research）](docs/research/richtext-editor-feature-pool-v1.md)
 - [Todo 工具大搜（研究 v1）](docs/research/todo-tools-v1.md)
 - [Tool Calls Repair（小模型协议修复器 v1）](docs/research/tool-call-repair-v1.md)
+- [Todo Repair & ClarifyPolicy：从“模板兜底”到“可执行任务”（research v1）](docs/research/todo-repair-and-clarify-v1.md)
 - [Phase Contracts & Retry 范式（research v1）](docs/research/phase-contracts-and-retry-paradigm-v1.md)
 - [Human-in-the-loop：中断/等待/恢复（research v1）](docs/research/hitl-interrupt-clarify-waiting-v1.md)
 - [显式 run.done：终止协议与执行报告（research v1）](docs/research/explicit-run-done-and-execution-report-v1.md)

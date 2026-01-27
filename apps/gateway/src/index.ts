@@ -5098,11 +5098,43 @@ fastify.post(
                       { id: "t_output", text: "输出最终结果（Markdown）", status: "todo" },
                     ];
                   }
-                  // 其它任务执行：给一个通用最小闭环（不强行加入写入）
+                  // 其它任务：按 userPrompt 做“可执行兜底”，避免模板废话导致 ClarifyPolicy 误触发
+                  const p = String(userPrompt ?? "").trim();
+                  const isDeploy = /(部署|deploy|上线|发布|pm2|restart|重启|服务器|gateway)/i.test(p);
+                  const isBatch = /(批处理|批量|文件夹|目录|多篇|7\s*篇|50\s*节|250\s*篇|writing\.batch)/i.test(p);
+                  const isWrite =
+                    /(写|改写|润色|仿写|生成|口播|脚本|文章|大纲|标题|金句)/.test(p) ||
+                    (intent as any)?.isWritingTask === true;
+                  if (isDeploy) {
+                    return [
+                      { id: "t_git", text: "检查本地改动与分支（git status/diff）", status: "todo" },
+                      { id: "t_commit", text: "提交改动（git commit）", status: "todo" },
+                      { id: "t_deploy", text: "只部署 Gateway（scripts/deploy-gateway.sh）", status: "todo" },
+                      { id: "t_health", text: "健康检查（/api/health）", status: "todo" },
+                      { id: "t_logs", text: "检查服务器日志（pm2 logs writing-gateway）", status: "todo" },
+                    ];
+                  }
+                  if (isBatch) {
+                    return [
+                      { id: "t_batch_start", text: "启动批处理（writing.batch.start；不要在单次对话直接输出多篇正文）", status: "todo" },
+                      { id: "t_batch_status", text: "查询批处理状态与输出目录（writing.batch.status）", status: "todo" },
+                      { id: "t_done", text: "结束本次 run 并输出执行摘要（run.done）", status: "todo" },
+                    ];
+                  }
+                  if (isWrite) {
+                    return [
+                      { id: "t_ctx", text: "读取必要上下文（doc.read/@引用/kb.search）", status: "todo" },
+                      { id: "t_draft", text: "生成候选稿（先不写入）", status: "todo" },
+                      { id: "t_lint", text: "风格检查与回炉（lint.style）", status: "todo" },
+                      { id: "t_write", text: "写入或输出最终稿（doc.write/doc.applyEdits）", status: "todo" },
+                      { id: "t_done", text: "结束本次 run 并输出执行摘要（run.done）", status: "todo" },
+                    ];
+                  }
+                  // 通用：仍然可执行，但不把“澄清/确认”作为硬前置
                   return [
-                    { id: "t1", text: "澄清目标/约束（如需要）", status: "todo" },
-                    { id: "t2", text: "执行核心步骤", status: "todo" },
-                    { id: "t3", text: "输出最终结果（Markdown）", status: "todo" },
+                    { id: "t_plan", text: "提取目标与产出形态（默认输出 Markdown）", status: "todo" },
+                    { id: "t_exec", text: "执行关键步骤（必要时调用工具）", status: "todo" },
+                    { id: "t_done", text: "结束本次 run 并输出执行摘要（run.done）", status: "todo" },
                   ];
                 })();
                 itemsJson = JSON.stringify(items);
@@ -5191,7 +5223,8 @@ fastify.post(
             turn,
             kind: "info",
             title: "Todo 初始化参数修复：自动补全 items",
-            message: "检测到 run.setTodoList 漏传必填 items，系统已自动补全默认 todo，避免右侧不显示进度。",
+            message:
+              "检测到 run.setTodoList 漏传必填 items，系统已自动补全一组“可执行 todo”（非模板），避免右侧不显示进度；并且不会因此进入“需要你确认”的硬等待。",
             policy: "ToolArgNormalizationPolicy",
             reasonCodes: ["tool_args_repaired", "tool:run.setTodoList", "missing_required:items"],
             detail: { repairedSetTodoList, routeId: intentRoute.routeId ?? "", webGate },
@@ -6105,7 +6138,8 @@ fastify.post(
           return;
         }
 
-        // 澄清等待：如果模型把某些 todo 标记为“等待用户确认/blocked”，则本轮应停止，等待用户回答（否则会出现“问你但仍继续跑”）。
+        // 澄清等待（硬等待）：只在 todo 显式标记 blocked / note 明确声明 wait_user 时才停。
+        // 重要：不要因为 todo.text 里出现“澄清/确认”等字样就硬停（会被模板/兜底误触发）。
         if (
           mode !== "chat" &&
           !intent.forceProceed &&
@@ -6126,10 +6160,7 @@ fastify.post(
               const text = String(t?.text ?? "").trim();
               const note = String(t?.note ?? "").trim();
               if (status === "blocked") return true;
-              if (/^blocked\b/i.test(note)) return true;
-              // 既看 note 也看 text：模型常把“需确认/澄清”写在 todo.text 里
-              const hint = `${text}\n${note}`.trim();
-              if (/(等待用户|等待你|待确认|等你确认|需要你确认|请确认|需确认|需要确认|澄清|确认需求)/.test(hint)) return true;
+              if (/^(blocked|wait_user|need_user|clarify_waiting)\b/i.test(note)) return true;
               return false;
             })
             .slice(0, 5)
