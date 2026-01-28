@@ -9797,8 +9797,10 @@ fastify.post(
   const env = await getLinterEnv();
   const timeoutMs = env.ok ? env.timeoutMs : 60_000;
 
-  // 不再提供本地 heuristic 降级输出：lint.style 必须依赖上游模型返回结构化 JSON；
-  // 上游失败/输出不合法时返回错误，便于在 B 端更换/调整 lint.style 的模型后重试。
+  // 可靠性策略（v1.1）：
+  // - 上游偶发“不遵守 JSON / schema”会导致 lint.style 工具失败，从而让 style_gate 卡在 style_need_style（doc.write 被禁止）。
+  // - 为避免卡死：我们对输出做确定性纠偏；必要时用小模型做“结构修复”；仍失败则返回最小可用兜底结果（ok=true，score=0+high issue）。
+  // - 兜底结果会让闸门判为未通过，从而进入有限次回炉→safe 降级放行（避免死循环）。
 
   const sys = [
     "你是写作 IDE 的「风格 Linter（对齐检查器）」。",
@@ -9872,29 +9874,224 @@ fastify.post(
     Number.isFinite(upstreamTimeoutMsCfg) && upstreamTimeoutMsCfg > 0
       ? Math.max(10_000, Math.min(timeoutMs, Math.floor(upstreamTimeoutMsCfg)))
       : Math.max(10_000, Math.floor(timeoutMs));
-  const sanitizeLintParsed = (parsed: any) => {
-    const p: any = parsed && typeof parsed === "object" ? parsed : {};
-    // issues：截断数量（上游有时会输出过多/过长证据，严格 schema 会误杀）
-    if (Array.isArray(p.issues)) {
-      p.issues = p.issues.slice(0, Math.max(3, Math.min(24, maxIssues))).map((it: any, idx: number) => {
-        const x: any = it && typeof it === "object" ? it : {};
-        const ev: any = x.evidence && typeof x.evidence === "object" ? x.evidence : {};
-        const clampArr = (v: any) => (Array.isArray(v) ? v.map((s: any) => String(s ?? "").trim()).filter(Boolean).slice(0, 6) : undefined);
-        return {
-          id: typeof x.id === "string" && x.id.trim() ? x.id.trim() : `issue_${idx + 1}`,
-          title: typeof x.title === "string" ? x.title.trim() : "",
-          severity: String(x.severity ?? "").toLowerCase(),
-          metric: x.metric,
-          evidence: {
-            ...(clampArr(ev.draft) ? { draft: clampArr(ev.draft) } : {}),
-            ...(clampArr(ev.reference) ? { reference: clampArr(ev.reference) } : {}),
-          },
-          fix: typeof x.fix === "string" ? x.fix.trim() : "",
-        };
-      });
-    }
+  const draftText = String(body?.draft?.text ?? "").trim();
+  const repairEnabled =
+    String(process.env.LINT_STYLE_OUTPUT_REPAIR_ENABLED ?? "").trim() === "1" ||
+    String(process.env.LINT_STYLE_OUTPUT_REPAIR_ENABLED ?? "").trim().toLowerCase() === "true" ||
+    TOOL_CALL_REPAIR_ENABLED; // 默认跟随 tool-call repair（服务器已部署小模型）
+
+  const nonEmptyStr = (v: any, fallback: string) => {
+    const s = typeof v === "string" ? v.trim() : "";
+    return s ? s : fallback;
+  };
+  const clampNum = (v: any, min: number, max: number, fallback: number) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(min, Math.min(max, n));
+  };
+  const toNumOrNull = (v: any) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const normalizeSeverity = (v: any): "high" | "medium" | "low" => {
+    const s = String(v ?? "").trim().toLowerCase();
+    if (s === "high" || s === "h" || s === "严重" || s === "高" || s === "critical") return "high";
+    if (s === "medium" || s === "m" || s === "中" || s === "一般") return "medium";
+    if (s === "low" || s === "l" || s === "轻微" || s === "低") return "low";
+    return "medium";
+  };
+  const clampArr = (v: any) =>
+    Array.isArray(v) ? v.map((s: any) => String(s ?? "").trim()).filter(Boolean).slice(0, 6) : null;
+  const pickDraftSnippet = (text: string) => {
+    const t = String(text ?? "")
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "\n")
+      .trim();
+    if (!t) return "";
+    const firstLine = t.split("\n").map((x) => x.trim()).find(Boolean) || "";
+    if (firstLine) return firstLine.length > 120 ? firstLine.slice(0, 120) : firstLine;
+    return t.length > 120 ? t.slice(0, 120) : t;
+  };
+  const fallbackRewritePrompt = () =>
+    [
+      "请在不新增事实/事件/数字的前提下，把下面的候选稿按风格库口吻做**局部改写**：",
+      "- 优先调整句长与节奏（更口语、更短句、更有转折）",
+      "- 适度引入风格库常见表达方式，但避免逐句照搬原文",
+      "- 保留原结构与信息点，不要重起炉灶",
+      "",
+      "输出改写后的全文（不要解释）。",
+    ].join("\n");
+
+  const sanitizeLintParsed = (parsed: any, opts?: { forceHighOnFallback?: boolean }) => {
+    const p: any = parsed && typeof parsed === "object" ? { ...parsed } : {};
+    const maxIssuesClamped = Math.max(3, Math.min(24, maxIssues));
+
+    // 顶层字段兜底：避免 schema 因缺字段直接失败
+    p.similarityScore = clampNum(p.similarityScore, 0, 100, 0);
+    p.summary = nonEmptyStr(p.summary, "风格对齐检查：上游输出不稳定，已生成兜底结果（建议重试或切换 lint.style 模型）。");
+    p.rewritePrompt = nonEmptyStr(p.rewritePrompt, fallbackRewritePrompt());
+
+    // issues：截断数量 + 字段纠偏（上游有时会输出过多/过长证据，或把字段漏掉/写错类型）
+    const rawIssues = Array.isArray(p.issues) ? p.issues : [];
+    p.issues = rawIssues.slice(0, maxIssuesClamped).map((it: any, idx: number) => {
+      const x: any = it && typeof it === "object" ? it : {};
+      const ev: any = x.evidence && typeof x.evidence === "object" ? x.evidence : null;
+      const metricRaw: any = x.metric && typeof x.metric === "object" ? x.metric : null;
+      const metric =
+        metricRaw && typeof metricRaw.name === "string" && metricRaw.name.trim()
+          ? {
+              name: String(metricRaw.name).trim(),
+              ...(metricRaw.draft !== undefined ? { draft: toNumOrNull(metricRaw.draft) } : {}),
+              ...(metricRaw.baseline !== undefined ? { baseline: toNumOrNull(metricRaw.baseline) } : {}),
+              ...(metricRaw.unit !== undefined ? { unit: metricRaw.unit === null ? null : String(metricRaw.unit ?? "").trim() || null } : {}),
+            }
+          : null;
+
+      const draft = ev ? clampArr(ev.draft) : null;
+      const reference = ev ? clampArr(ev.reference) : null;
+      const evidence: any = {};
+      if (draft && draft.length) evidence.draft = draft;
+      if (reference && reference.length) evidence.reference = reference;
+      const hasEvidence = Object.keys(evidence).length > 0;
+
+      const title = nonEmptyStr(x.title, `风格差异点 #${idx + 1}`);
+      const fix = nonEmptyStr(x.fix, "按风格库口吻/节奏对该处表达做局部改写（不新增事实/事件/数字）。");
+      const sev = normalizeSeverity(x.severity);
+      const severity = opts?.forceHighOnFallback ? "high" : sev;
+
+      return {
+        id: nonEmptyStr(x.id, `issue_${idx + 1}`),
+        title,
+        severity,
+        ...(metric ? { metric } : { metric: null }),
+        ...(hasEvidence ? { evidence } : {}),
+        fix,
+      };
+    });
+
     return p;
   };
+
+  const buildFallbackOut = (args: { reason: string; detail?: any }) => {
+    const snippet = pickDraftSnippet(draftText);
+    return {
+      ok: true,
+      degraded: true,
+      degradedReason: String(args.reason ?? "UNKNOWN"),
+      degradedDetail: args.detail ?? null,
+      similarityScore: 0,
+      summary: "lint.style 上游输出不稳定/不可解析，已降级为最小可用结果（建议稍后重试或在 B 端切换 lint.style 模型）。",
+      issues: [
+        {
+          id: "lint_style_unstable",
+          title: "风格对齐检查输出不稳定/不符合 schema",
+          severity: "high" as const,
+          metric: null,
+          fix:
+            "请按风格库口吻/节奏对全文做局部改写后重试 lint.style；若反复出现，请在 B 端将 stage=lint.style 切换到更稳定模型。",
+        },
+      ],
+      rewritePrompt:
+        fallbackRewritePrompt() + (snippet ? `\n\n【候选稿开头片段】\n${snippet}\n` : ""),
+      repair: {
+        used: false,
+        mode: "fallback",
+        reason: String(args.reason ?? "UNKNOWN"),
+      },
+    };
+  };
+
+  async function tryRepairLintStyleJson(args: {
+    raw: string;
+    reason: "json_parse_failed" | "schema_failed";
+    schemaError?: string;
+  }): Promise<{ ok: true; parsed: any; repairMeta: any } | { ok: false; error: string }> {
+    if (!repairEnabled) return { ok: false, error: "disabled" };
+    try {
+      const stage = await aiConfig.resolveStage("agent.tool_call_repair");
+      const baseUrl = stage.baseURL;
+      const endpoint = stage.endpoint || "/v1/chat/completions";
+      const apiKey = stage.apiKey;
+      const model = stage.model;
+      const modelIdUsed = stage.modelId ?? null;
+      if (!baseUrl || !model) return { ok: false, error: "stage_not_configured" };
+
+      const maxIn = 8000;
+      const sys =
+        "你是写作 IDE 的「lint.style 输出 JSON 修复器」。你的任务：把原始输出修正为严格 JSON 对象，并满足固定 schema。\n" +
+        "严格规则（必须遵守）：\n" +
+        "- 你只能做“格式/字段修复/缺省兜底”，不得新增任何事实/事件/数字。\n" +
+        "- 你必须且只能输出一个 JSON 对象（不要代码块/不要多余文字）。\n" +
+        '- 字段必须齐全：similarityScore(number 0~100), summary(string), issues(array), rewritePrompt(string)。\n' +
+        '- issues 每项必须包含：id(string), title(string), severity("high"|"medium"|"low"), fix(string)。metric/evidence 可选。\n' +
+        "- 如果无法从原文恢复：输出一个最小合法对象（similarityScore=0，issues 含 1 条 high，rewritePrompt 给出可执行的局部改写指令）。\n";
+
+      const libsBrief = (body.libraries ?? []).slice(0, 3).map((l: any) => ({
+        id: l.id ?? "",
+        name: l.name ?? "",
+        topNgrams: Array.isArray(l.topNgrams) ? l.topNgrams.slice(0, 8).map((x: any) => String(x?.text ?? "").trim()).filter(Boolean) : [],
+        samples: Array.isArray(l.samples) ? l.samples.slice(0, 2).map((s: any) => String(s?.text ?? "").replace(/\s+/g, " ").trim()).filter(Boolean) : [],
+      }));
+
+      const user =
+        `原因：${args.reason}\n` +
+        (args.schemaError ? `schemaError：${String(args.schemaError).slice(0, 600)}\n` : "") +
+        `draftSnippet：${pickDraftSnippet(draftText)}\n` +
+        `styleLibBrief(JSON)：${JSON.stringify(libsBrief)}\n` +
+        `原始输出（截断到 ${maxIn} chars）：\n` +
+        String(args.raw ?? "").slice(0, maxIn);
+
+      const ret = await completionOnceViaProvider({
+        baseUrl,
+        endpoint,
+        apiKey,
+        model,
+        temperature: 0,
+        maxTokens: 1400,
+        messages: [
+          { role: "system", content: sys },
+          { role: "user", content: user },
+        ],
+      });
+      if (!ret.ok) return { ok: false, error: `llm_failed:${String((ret as any).error ?? "")}` };
+
+      const outRaw = String((ret as any).content ?? "").trim();
+      const tryParseLocal = (s: string) => {
+        try {
+          return JSON.parse(s);
+        } catch {
+          return null;
+        }
+      };
+      let parsed: any = tryParseLocal(outRaw);
+      if (!parsed) {
+        const m = outRaw.match(/\{[\s\S]*\}/);
+        if (m?.[0]) parsed = tryParseLocal(m[0]);
+      }
+      if (!parsed || typeof parsed !== "object") return { ok: false, error: "repair_not_json" };
+      try {
+        (request as any)?.log?.info?.(
+          {
+            event: "lint_style_output_repair",
+            reason: args.reason,
+            modelUsed: usedModelName,
+            repairModel: stage.model,
+            repairModelId: modelIdUsed,
+          },
+          "lint.style output repaired",
+        );
+      } catch {
+        // ignore log failure
+      }
+      return {
+        ok: true,
+        parsed,
+        repairMeta: { used: true, mode: "model", model: stage.model, modelIdUsed, reason: args.reason },
+      };
+    } catch (e: any) {
+      return { ok: false, error: String(e?.message ?? e ?? "repair_failed") };
+    }
+  }
 
   const tryParse = (s: string) => {
     try {
@@ -9959,6 +10156,11 @@ fastify.post(
     if (!parsed) {
       const m = raw.match(/\{[\s\S]*\}/);
       if (m?.[0]) parsed = tryParse(m[0]);
+    }
+    if (!parsed) {
+      const repaired = await tryRepairLintStyleJson({ raw, reason: "json_parse_failed" });
+      if (repaired.ok) parsed = repaired.parsed;
+      // repair 失败：继续走 sanitize -> schema（会走兜底字段），尽量不要直接 tool failed
     }
     parsed = sanitizeLintParsed(parsed);
 
@@ -10034,32 +10236,101 @@ fastify.post(
         ...out,
       });
     } catch (e: any) {
-      // schema 不合规：尝试切换到下一个候选模型（若有）
-      lastErr = { ok: false, error: "INVALID_LINTER_OUTPUT_SCHEMA", detail: { model: usedModelName, message: String(e?.message ?? e), raw: raw.slice(0, 2000) } };
+      // schema 不合规：优先尝试“输出修复器”（小模型）；仍失败再切换备用模型
+      const schemaErr = String(e?.message ?? e);
+      const repaired = await tryRepairLintStyleJson({ raw, reason: "schema_failed", schemaError: schemaErr });
+      if (repaired.ok) {
+        const parsed2 = sanitizeLintParsed(repaired.parsed);
+        try {
+          const out2 = outSchema.parse(parsed2);
+          // 计费：仍按原始 lint.style 调用的 usage（repair 不额外计费）
+          let billing: any = null;
+          try {
+            const usage = (ret as any)?.usage ?? null;
+            const userId = typeof request.user?.sub === "string" ? String(request.user.sub).trim() : "";
+            const isAdmin = request.user?.role === "admin";
+            if (!isAdmin && userId) {
+              if (usage && typeof usage === "object") {
+                billing = await chargeUserForLlmUsage({
+                  userId,
+                  modelId: usedModelId,
+                  usage,
+                  source: "tool.lint.style",
+                  metaExtra: { stage: "lint.style", repaired: true, repairMode: "model" },
+                });
+              } else {
+                billing = { ok: false, reason: "USAGE_NOT_RETURNED" };
+              }
+            }
+          } catch (e2: any) {
+            const msg = e2?.message ? String(e2.message) : String(e2);
+            billing = { ok: false, reason: msg || "CHARGE_FAILED" };
+          }
+          return reply.send({
+            ok: true,
+            modelUsed: usedModelName,
+            timeoutMs,
+            ...(((ret as any)?.usage ?? null) ? { usage: (ret as any).usage } : {}),
+            ...(billing ? { billing } : {}),
+            ...out2,
+            repair: repaired.repairMeta,
+          });
+        } catch (e3: any) {
+          // repair 也未能通过 schema：继续尝试下一个候选模型
+        }
+      }
+
+      lastErr = {
+        ok: false,
+        error: "INVALID_LINTER_OUTPUT_SCHEMA",
+        detail: { model: usedModelName, message: schemaErr, raw: raw.slice(0, 2000) },
+      };
       continue;
     }
   }
 
+  // 兜底：避免 lint.style 工具失败导致 style_gate 卡死。
+  // - 返回 ok=true 的最小合法对象，让闸门按“未通过”进入回炉/降级路径（safe 模式下不会死循环）。
   if (!ret?.ok) {
     const errText = String((ret as any)?.error ?? (lastErr as any)?.error ?? "");
     const isTimeout = /aborted|AbortError|timeout/i.test(errText);
-    return reply
-      .code(isTimeout ? 504 : 502)
-      .send({
-        ok: false,
-        error: isTimeout ? "LINT_UPSTREAM_TIMEOUT" : "LINT_UPSTREAM_FAILED",
-        hint: "lint.style 上游模型调用失败/超时。请在 B 端将 stage=lint.style 切换到稳定模型后重试。",
+    const out = buildFallbackOut({
+        reason: isTimeout ? "LINT_UPSTREAM_TIMEOUT" : "LINT_UPSTREAM_FAILED",
         detail: { model: usedModelName, upstreamTimeoutMs, timeoutMs, message: errText || "upstream error" },
       });
+    try {
+      (request as any)?.log?.warn?.(
+        {
+          event: "lint_style_degraded",
+          reason: out.degradedReason,
+          modelUsed: usedModelName,
+          upstream: { isTimeout, message: String(errText || "").slice(0, 240) },
+        },
+        "lint.style degraded",
+      );
+    } catch {
+      // ignore log failure
+    }
+    return reply.send(out);
   }
 
-  // 兜底：不应走到这里（for-loop 内已 return 成功/continue 失败），但保留一个明确错误便于诊断。
-  return reply.code(502).send({
-    ok: false,
-    error: (lastErr as any)?.error ?? "INVALID_LINTER_OUTPUT_SCHEMA",
-    hint: "lint.style 模型输出不稳定或不符合 JSON 约定。请在 B 端为 stage=lint.style 配置备用模型后重试。",
-    detail: (lastErr as any)?.detail ?? null,
-  });
+  const out = buildFallbackOut({
+      reason: String((lastErr as any)?.error ?? "INVALID_LINTER_OUTPUT_SCHEMA"),
+      detail: (lastErr as any)?.detail ?? null,
+    });
+  try {
+    (request as any)?.log?.warn?.(
+      {
+        event: "lint_style_degraded",
+        reason: out.degradedReason,
+        modelUsed: usedModelName,
+      },
+      "lint.style degraded",
+    );
+  } catch {
+    // ignore log failure
+  }
+  return reply.send(out);
 });
 
 await fastify.listen({ port: PORT, host: "0.0.0.0" });
