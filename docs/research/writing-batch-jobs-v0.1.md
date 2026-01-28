@@ -76,7 +76,13 @@
 
 ## v0.1 在本仓库的落地
 - Desktop 新增批处理 store：`apps/desktop/src/state/writingBatchStore.ts`
-- Runs 面板增加入口：`apps/desktop/src/components/WritingBatchJobsPanel.tsx`（先选文件夹开跑）
+- 批处理工具入口（Desktop Tool）：`apps/desktop/src/agent/toolRegistry.ts`
+  - `writing.batch.start/status/pause/resume/cancel`
+  - 支持参数：`filesConcurrency`（A 路由：不同输入文件并行；同一文件内 clips 串行）
+
+### 并行路由（A 方案，求稳版）
+我们已经把“可并行/不可并行”的边界显式化，并在 Desktop 侧实现了文件级 worker pool、写入互斥锁与 429/503 退避重试，详见：
+- `docs/research/writing-batch-parallel-router-v0.1.md`
 
 ## v0.2（面向 250 篇稳定跑完）的增强点
 > 目标：真正做到“拖一个文件夹 → 50 节课 → 每课 5 篇 → 250 篇落盘”，并且可中断/可续跑/不重复生成。

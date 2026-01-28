@@ -53,7 +53,33 @@ npm run dist:desktop:win:all
 
 产物输出：`apps/desktop/out/`
 
-### 2.3 常见坑（已沉淀）
+### 2.3 推送自动更新（Windows 安装版）
+> v0.1 仅支持 **Windows NSIS 安装包**的自动更新（portable 与 macOS 不走自动安装）。
+
+步骤：
+1) 先构建安装包（产出 NSIS exe）：
+
+```bash
+npm run dist:desktop:win
+```
+
+2) 推送到服务器更新源目录，并生成/上传 `latest.json`：
+
+```bash
+python scripts/push-desktop-update.py \
+  --ssh writing \
+  --remote-dir /opt/writing-ide/desktop-updates/stable \
+  --gateway-base http://120.26.6.147:8000 \
+  --installer "apps/desktop/out/写作IDE Setup x.y.z.exe" \
+  --version x.y.z \
+  --notes "更新说明…"
+```
+
+说明：
+- Gateway 会通过 `/downloads/desktop/stable/latest.json` 与 `/downloads/desktop/stable/:file` 暴露更新源（见 `docs/specs/desktop-auto-update-v0.1.md`）。
+- 服务器侧需要确保 `DESKTOP_UPDATES_DIR` 指向上述目录的父目录（例如 `/opt/writing-ide/desktop-updates`），或使用默认 `<gateway_workdir>/desktop-updates`。
+
+### 2.4 常见坑（已沉淀）
 
 见 `debug.md`：
 - monorepo 下 electron 版本必须固定（否则 electron-builder 报 “Cannot compute electron version…”）

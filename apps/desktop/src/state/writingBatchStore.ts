@@ -33,6 +33,8 @@ export type WritingBatchJob = {
   outputDir: string;
   /** 每节课拆成多少篇（默认 5） */
   clipsPerLesson: number;
+  /** 文件级并行度（A 路由：不同输入文件可并行；同一文件内 clips 串行） */
+  filesConcurrency: number;
   /** 绑定风格库（purpose=style） */
   styleLibraryId: string;
   /** 批处理固定使用的工作模型（避免中途切换导致风格不一致） */
@@ -52,11 +54,16 @@ type WritingBatchState = {
   runStartedAtMs: number | null;
   runElapsedMs: number;
 
-  createJobInteractive: (args?: { clipsPerLesson?: number; outputBaseDir?: string }) => Promise<{ ok: boolean; jobId?: string; error?: string; detail?: any }>;
+  createJobInteractive: (args?: {
+    clipsPerLesson?: number;
+    outputBaseDir?: string;
+    filesConcurrency?: number;
+  }) => Promise<{ ok: boolean; jobId?: string; error?: string; detail?: any }>;
   createJobFromDir: (args: {
     inputDir: string;
     clipsPerLesson?: number;
     outputBaseDir?: string;
+    filesConcurrency?: number;
   }) => Promise<{ ok: boolean; jobId?: string; error?: string; detail?: any }>;
   start: (jobId?: string) => Promise<void>;
   pause: () => void;
@@ -75,6 +82,12 @@ function nowIso() {
 
 function pad2(n: number) {
   return String(Math.max(0, Math.floor(n))).padStart(2, "0");
+}
+
+function clampInt(v: any, min: number, max: number, fallback: number) {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(n)));
 }
 
 function sanitizeFileName(name: string) {
@@ -216,6 +229,72 @@ async function appendTextFileToProject(rootDir: string, relPath: string, content
   return { ok: true as const };
 }
 
+// 并发写入互斥锁（同一进程内）：避免并行 worker 交错写坏 .jsonl / job.json
+const lockTails = new Map<string, Promise<void>>();
+async function withLock<T>(key: string, fn: () => Promise<T>) {
+  const prev = lockTails.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  lockTails.set(key, prev.then(() => gate));
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
+function isRetryableLlmError(err: string) {
+  const e = String(err ?? "");
+  return (
+    e.includes("HTTP_429") ||
+    e.includes("HTTP_502") ||
+    e.includes("HTTP_503") ||
+    e.includes("HTTP_504") ||
+    e.includes("Too Many Requests") ||
+    e.includes("429") ||
+    e.includes("503") ||
+    e.includes("502") ||
+    e.includes("504")
+  );
+}
+
+async function sleepMs(ms: number, signal?: AbortSignal) {
+  if (ms <= 0) return;
+  await new Promise<void>((resolve, reject) => {
+    const t = setTimeout(resolve, ms);
+    const onAbort = () => {
+      clearTimeout(t);
+      reject(new Error("ABORTED"));
+    };
+    if (signal) {
+      if (signal.aborted) return onAbort();
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  }).catch(() => {
+    // swallow (abort)
+  });
+}
+
+async function callLlmTextWithRetry(args: { model: string; system: string; user: string; abort: AbortController; maxAttempts?: number }) {
+  const maxAttempts = clampInt(args.maxAttempts ?? 4, 1, 8, 4);
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    if (args.abort.signal.aborted) return { ok: false as const, error: "ABORTED" };
+    // eslint-disable-next-line no-await-in-loop
+    const r = await callLlmTextOnce({ model: args.model, system: args.system, user: args.user, abort: args.abort });
+    if (r.ok) return r;
+    const retryable = isRetryableLlmError(r.error);
+    if (!retryable || attempt >= maxAttempts - 1) return r;
+    const base = 800 * 2 ** attempt;
+    const jitter = Math.floor(Math.random() * 250);
+    // eslint-disable-next-line no-await-in-loop
+    await sleepMs(base + jitter, args.abort.signal);
+  }
+  return { ok: false as const, error: "RETRY_EXHAUSTED" };
+}
+
 async function fileExistsInProject(rootDir: string, relPath: string) {
   const api = window.desktop?.fs;
   if (!api) return false;
@@ -346,6 +425,7 @@ async function writeJobCheckpoint(args: { rootDir: string; job: WritingBatchJob 
     inputFilesCount: args.job.inputFiles.length,
     outputDir: args.job.outputDir,
     clipsPerLesson: args.job.clipsPerLesson,
+    filesConcurrency: args.job.filesConcurrency,
     styleLibraryId: args.job.styleLibraryId,
     model: args.job.model,
     progress: args.job.progress,
@@ -354,40 +434,229 @@ async function writeJobCheckpoint(args: { rootDir: string; job: WritingBatchJob 
   return await writeTextFileToProject(args.rootDir, p, JSON.stringify(payload, null, 2) + "\n");
 }
 
+function clipChars(s: string, maxChars: number) {
+  const t = String(s ?? "");
+  if (t.length <= maxChars) return t;
+  return t.slice(0, Math.max(0, maxChars));
+}
+
+function stripFrontmatter(md: string) {
+  const s = String(md ?? "");
+  if (!s.startsWith("---")) return s;
+  const i = s.indexOf("\n---");
+  if (i < 0) return s;
+  const j = s.indexOf("\n", i + 4);
+  return j >= 0 ? s.slice(j + 1) : "";
+}
+
+function pickFirstContentLine(md: string) {
+  const s = stripFrontmatter(md);
+  const lines = s.split(/\r?\n/).map((x) => x.trim());
+  for (const line of lines.slice(0, 80)) {
+    if (!line) continue;
+    if (/^#{1,6}\s+/.test(line)) continue;
+    if (line === "---") continue;
+    return line.slice(0, 80);
+  }
+  return "";
+}
+
+function pickLastPunchLine(md: string) {
+  const s = stripFrontmatter(md);
+  const lines = s
+    .split(/\r?\n/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  for (let k = lines.length - 1; k >= 0; k -= 1) {
+    const line = lines[k]!;
+    if (line.length < 6) continue;
+    if (line.length > 80) continue;
+    if (/^[-*]\s+/.test(line)) continue;
+    return line.slice(0, 80);
+  }
+  return "";
+}
+
+function pushUniqCapped(list: string[], v: string, cap: number) {
+  const s = String(v ?? "").trim();
+  if (!s) return;
+  if (list.includes(s)) return;
+  list.push(s);
+  while (list.length > cap) list.shift();
+}
+
+async function kbSearchCardSnippets(args: { libraryId: string; query: string; cardTypes: string[] }) {
+  try {
+    const r = await executeToolCall({
+      toolName: "kb.search",
+      mode: "agent",
+      rawArgs: {
+        query: args.query,
+        kind: "card",
+        libraryIds: JSON.stringify([args.libraryId]),
+        cardTypes: JSON.stringify(args.cardTypes),
+        perDocTopN: "1",
+        topDocs: "10",
+        debug: "false",
+        useVector: "false",
+      },
+    });
+    if (!(r.result as any)?.ok) return "- （检索失败）";
+    const out: any = (r.result as any)?.output ?? null;
+    const groups = Array.isArray(out?.groups) ? out.groups : [];
+    const lines: string[] = [];
+    for (const g of groups) {
+      const docTitle = String(g?.sourceDoc?.title ?? g?.sourceDoc?.name ?? "").trim();
+      const hits = Array.isArray(g?.hits) ? g.hits : [];
+      for (const h of hits) {
+        const ct = String(h?.artifact?.cardType ?? "").trim();
+        const snip = String(h?.snippet ?? "").replace(/\s+/g, " ").trim();
+        if (!snip) continue;
+        const head = docTitle ? `【${docTitle}】` : "";
+        lines.push(`- ${head}${ct ? `(${ct}) ` : ""}${clipChars(snip, 160)}`);
+        if (lines.length >= 10) break;
+      }
+      if (lines.length >= 10) break;
+    }
+    return lines.length ? lines.join("\n") : "- （无命中）";
+  } catch {
+    return "- （检索失败）";
+  }
+}
+
+function replaceLastPlaceholder(text: string, placeholder: string, replacement: string) {
+  const t = String(text ?? "");
+  const p = String(placeholder ?? "");
+  const r = String(replacement ?? "").trim();
+  if (!t.trim()) return r;
+  if (!p) return t;
+  const idx = t.lastIndexOf(p);
+  if (idx < 0) {
+    return t.trimEnd() + "\n\n" + r + "\n";
+  }
+  return t.slice(0, idx) + r + t.slice(idx + p.length);
+}
+
 async function runOneClip(args: {
   model: string;
   styleLibraryId: string;
   lessonTitle: string;
   lessonText: string;
   clipIndex: number;
+  totalClips?: number;
   clipTitle: string;
   abort: AbortController;
+  avoidOpenings?: string[];
+  avoidOneLiners?: string[];
 }) {
   const kb = useKbStore.getState();
   const playbook = await kb.getPlaybookTextForLibraries([args.styleLibraryId]).catch(() => "");
   const styleCtx = String(playbook ?? "").slice(0, 14_000);
   const lesson = String(args.lessonText ?? "").slice(0, 18_000);
 
+  // 每篇独立检索（不共享）：开头/结尾/金句/结构
+  const hookHint = (() => {
+    const types = ["反直觉断言", "尖锐提问", "反差对照", "一句话宣判", "场景切入"];
+    return types[Math.max(0, args.clipIndex) % types.length]!;
+  })();
+  const [hookCards, endingCards, oneLinerCards, outlineCards] = await Promise.all([
+    kbSearchCardSnippets({
+      libraryId: args.styleLibraryId,
+      query: `${args.lessonTitle}｜${args.clipTitle} 开头 钩子 ${hookHint} 断言 反直觉`,
+      cardTypes: ["hook"],
+    }),
+    kbSearchCardSnippets({
+      libraryId: args.styleLibraryId,
+      query: `${args.lessonTitle}｜${args.clipTitle} 结尾 收束 落点 行动 建议`,
+      cardTypes: ["ending"],
+    }),
+    kbSearchCardSnippets({
+      libraryId: args.styleLibraryId,
+      query: `${args.lessonTitle}｜${args.clipTitle} 金句 一句话 断言 反常识`,
+      cardTypes: ["one_liner"],
+    }),
+    kbSearchCardSnippets({
+      libraryId: args.styleLibraryId,
+      query: `${args.lessonTitle}｜${args.clipTitle} 结构 骨架 三段论 论证 推进`,
+      cardTypes: ["outline", "thesis"],
+    }),
+  ]);
+
   const sys =
     "你是写作 IDE 的批处理生成器。\n" +
     "你将严格按风格库口吻输出短视频口播稿。\n" +
     "硬约束：不要新增事实/数据；只基于输入课程内容重组表达。\n" +
+    "风格要求：允许借鉴“模板/句式形状”，但禁止复述风格库原句。\n" +
     "输出必须是 Markdown 纯文本（不要 JSON）。\n";
 
+  const avoidBlock = (() => {
+    const opens = Array.isArray(args.avoidOpenings) ? args.avoidOpenings : [];
+    const ones = Array.isArray(args.avoidOneLiners) ? args.avoidOneLiners : [];
+    if (!opens.length && !ones.length) return "";
+    return (
+      `【本节课已用过的开头/金句（必须避开，不能同义替换）】\n` +
+      (opens.length ? `开头：\n${opens.slice(0, 8).map((x) => `- ${x}`).join("\n")}\n` : "") +
+      (ones.length ? `金句：\n${ones.slice(0, 8).map((x) => `- ${x}`).join("\n")}\n` : "") +
+      "\n"
+    );
+  })();
+
+  const total = typeof args.totalClips === "number" ? Math.max(1, Math.floor(args.totalClips)) : 5;
   const user =
     `【风格库手册（节选）】\n${styleCtx}\n\n` +
+    `【风格库检索：开头钩子（hook）】\n${hookCards}\n\n` +
+    `【风格库检索：结尾收束（ending）】\n${endingCards}\n\n` +
+    `【风格库检索：金句形状（one_liner）】\n${oneLinerCards}\n\n` +
+    `【风格库检索：结构骨架（outline/thesis）】\n${outlineCards}\n\n` +
+    avoidBlock +
     `【课程内容】\n${lesson}\n\n` +
-    `请生成第 ${args.clipIndex + 1} 篇（共 5 篇）短视频口播稿。\n` +
+    `请生成第 ${args.clipIndex + 1} 篇（共 ${total} 篇）短视频口播稿。\n` +
     `- 本篇标题：${args.clipTitle}\n` +
     `- 目标：短、狠、节奏快，有“法官宣判”感（按风格库）\n` +
     `- 结构：开场钩子→反直觉断言→3段论证→收尾一句金句\n` +
     `- 长度：约 900~1300 字\n` +
+    `- 输出要求：最后一行必须是“【金句】”（占位符），不要自己写金句；其余正文照常写。\n` +
     `只输出正文 Markdown，不要解释。\n`;
 
-  const draftRet = await callLlmTextOnce({ model: args.model, system: sys, user, abort: args.abort });
+  const draftRet = await callLlmTextWithRetry({ model: args.model, system: sys, user, abort: args.abort });
   if (!draftRet.ok) return { ok: false as const, error: draftRet.error };
   let bestText = String(draftRet.text ?? "").trim();
   if (!bestText) return { ok: false as const, error: "EMPTY_DRAFT" };
+
+  // 0) 金句二段式：先出候选稿，再根据 one_liner “形状卡”生成金句并填回占位符
+  {
+    const oneSys =
+      "你是写作 IDE 的金句生成器。\n" +
+      "任务：参考风格库的金句“形状”，为本篇候选稿生成更像风格库、但不贴原句的金句。\n" +
+      "输出必须是严格 JSON：{ \"candidates\": string[] }，不要代码块。\n";
+    const oneUser =
+      `【金句形状卡（one_liner）】\n${oneLinerCards}\n\n` +
+      (Array.isArray(args.avoidOneLiners) && args.avoidOneLiners.length
+        ? `【本节课已用过的金句（必须避开，不能同义替换）】\n${args.avoidOneLiners.slice(0, 8).map((x) => `- ${x}`).join("\n")}\n\n`
+        : "") +
+      `【本篇候选稿（节选）】\n${clipChars(bestText, 9000)}\n\n` +
+      `请生成 10 条“收尾金句”候选（每条 12~28 字；短、硬、带断言/反常识；不要新增事实/数据）。\n`;
+    const rr = await callLlmTextWithRetry({ model: args.model, system: oneSys, user: oneUser, abort: args.abort });
+    if (rr.ok) {
+      const parsed = jsonParseLoose<any>(rr.text);
+      const cands = parsed.ok && Array.isArray((parsed.value as any)?.candidates) ? (parsed.value as any).candidates : [];
+      const cleaned = (cands as any[])
+        .map((x) => String(x ?? "").trim())
+        .filter(Boolean)
+        .map((x) => x.replace(/\s+/g, " "))
+        .slice(0, 10);
+      const avoid = new Set((Array.isArray(args.avoidOneLiners) ? args.avoidOneLiners : []).map((x) => String(x ?? "").trim()).filter(Boolean));
+      const picked = cleaned.find((x) => !avoid.has(x)) ?? cleaned[0] ?? "";
+      if (picked) bestText = replaceLastPlaceholder(bestText, "【金句】", picked).trim();
+      // 如果模型没按要求给占位符：兜底追加
+      if (!picked && !bestText.includes("【金句】")) {
+        bestText = bestText.trimEnd() + "\n\n" + "【金句】" + "\n";
+      }
+      if (picked && bestText.includes("【金句】")) {
+        bestText = bestText.replace(/【金句】/g, picked);
+      }
+    }
+  }
 
   // 1) lint.copy（最多 2 次回炉）
   for (let k = 0; k < 2; k += 1) {
@@ -407,7 +676,7 @@ async function runOneClip(args: {
       `你必须在不改变核心观点的前提下局部改写，重点处理这些重合片段：\n${overlapHint}\n\n` +
       `【上一版候选稿】\n${bestText.slice(0, 8000)}\n\n` +
       `要求：只改动必要句子；保留风格节奏；输出修订后的全文。\n`;
-    const rr = await callLlmTextOnce({ model: args.model, system: sys, user: reworkUser, abort: args.abort });
+    const rr = await callLlmTextWithRetry({ model: args.model, system: sys, user: reworkUser, abort: args.abort });
     if (!rr.ok) break;
     const next = String(rr.text ?? "").trim();
     if (next) bestText = next;
@@ -434,7 +703,7 @@ async function runOneClip(args: {
       `---\n${rewritePrompt}\n---\n\n` +
       `【上一版候选稿】\n${bestText.slice(0, 8000)}\n\n` +
       `输出修订后的全文（Markdown 纯文本）。\n`;
-    const rr = await callLlmTextOnce({ model: args.model, system: sys, user: reworkUser, abort: args.abort });
+    const rr = await callLlmTextWithRetry({ model: args.model, system: sys, user: reworkUser, abort: args.abort });
     if (!rr.ok) break;
     const next = String(rr.text ?? "").trim();
     if (next) bestText = next;
@@ -498,6 +767,7 @@ export const useWritingBatchStore = create<WritingBatchState>()(
         const inputFiles = [activeRel]; // 关键：只处理当前活动文件
 
         const clipsPerLesson = typeof args?.clipsPerLesson === "number" ? Math.max(1, Math.min(12, Math.floor(args.clipsPerLesson))) : 5;
+        const filesConcurrency = clampInt(args?.filesConcurrency ?? 2, 1, 4, 2);
         // 默认输出：在“当前活动文件”同级目录生成单层 batch_xxx/（避免 exports/.../batch_xxx 过深）
         const outputBaseDefault = ensureRelDir(dirnameRel(activeRel));
         const outputBase = ensureRelDir(String(args?.outputBaseDir ?? outputBaseDefault));
@@ -513,6 +783,7 @@ export const useWritingBatchStore = create<WritingBatchState>()(
           inputFiles,
           outputDir,
           clipsPerLesson,
+          filesConcurrency,
           styleLibraryId: styleLibId,
           model: resolveDefaultDraftModel(),
           progress: { fileIndex: 0, clipIndex: 0, done: 0, failed: 0 },
@@ -532,6 +803,7 @@ export const useWritingBatchStore = create<WritingBatchState>()(
               inputDir,
               inputFilesCount: inputFiles.length,
               clipsPerLesson,
+              filesConcurrency,
               styleLibraryId: styleLibId,
             },
             null,
@@ -576,6 +848,7 @@ export const useWritingBatchStore = create<WritingBatchState>()(
           }
 
           const clipsPerLesson = typeof args?.clipsPerLesson === "number" ? Math.max(1, Math.min(12, Math.floor(args.clipsPerLesson))) : 5;
+          const filesConcurrency = clampInt(args?.filesConcurrency ?? 2, 1, 4, 2);
           const activeRel = String(proj.activePath ?? "").trim();
           const outputBaseDefault =
             activeRel && isTextRelPath(activeRel) && proj.files.some((f) => f.path === activeRel) ? ensureRelDir(dirnameRel(activeRel)) : "exports";
@@ -591,6 +864,7 @@ export const useWritingBatchStore = create<WritingBatchState>()(
             inputFiles: [fileName],
             outputDir,
             clipsPerLesson,
+            filesConcurrency,
             styleLibraryId: styleLibId,
             model: resolveDefaultDraftModel(),
             progress: { fileIndex: 0, clipIndex: 0, done: 0, failed: 0 },
@@ -608,6 +882,7 @@ export const useWritingBatchStore = create<WritingBatchState>()(
                 inputDir: job.inputDir,
                 inputFilesCount: job.inputFiles.length,
                 clipsPerLesson,
+                filesConcurrency,
                 styleLibraryId: styleLibId,
                 model: job.model,
                 inputResolvedFrom: rawInput,
@@ -640,6 +915,7 @@ export const useWritingBatchStore = create<WritingBatchState>()(
         }
 
         const clipsPerLesson = typeof args?.clipsPerLesson === "number" ? Math.max(1, Math.min(12, Math.floor(args.clipsPerLesson))) : 5;
+        const filesConcurrency = clampInt(args?.filesConcurrency ?? 2, 1, 4, 2);
         const activeRel = String(proj.activePath ?? "").trim();
         const outputBaseDefault =
           activeRel && isTextRelPath(activeRel) && proj.files.some((f) => f.path === activeRel) ? ensureRelDir(dirnameRel(activeRel)) : "exports";
@@ -656,6 +932,7 @@ export const useWritingBatchStore = create<WritingBatchState>()(
           inputFiles,
           outputDir,
           clipsPerLesson,
+          filesConcurrency,
           styleLibraryId: styleLibId,
           model: resolveDefaultDraftModel(),
           progress: { fileIndex: 0, clipIndex: 0, done: 0, failed: 0 },
@@ -674,6 +951,7 @@ export const useWritingBatchStore = create<WritingBatchState>()(
               inputDir,
               inputFilesCount: inputFiles.length,
               clipsPerLesson,
+              filesConcurrency,
               styleLibraryId: styleLibId,
               model: job.model,
             },
@@ -710,36 +988,60 @@ export const useWritingBatchStore = create<WritingBatchState>()(
             await writeJobCheckpoint({ rootDir, job: { ...job, status: "running", updatedAt: nowIso() } });
 
             const model = String(job.model ?? "").trim() || resolveDefaultDraftModel();
+            const filesConcurrency = clampInt(job.filesConcurrency ?? 2, 1, 4, 2);
+            const totalFiles = job.inputFiles.length;
+            const progressPath = joinRel(job.outputDir, ".batch-meta/progress.jsonl");
+            const failuresPath = joinRel(job.outputDir, ".batch-meta/failures.jsonl");
+            const checkpointKey = `job_checkpoint:${job.id}`;
 
-            for (let fi = job.progress.fileIndex; fi < job.inputFiles.length; fi += 1) {
-              if (abort?.signal.aborted) break;
+            const writeCheckpointLocked = async () => {
+              const nextJob = get().jobs.find((j) => j.id === id);
+              if (!nextJob) return;
+              await withLock(checkpointKey, async () => {
+                await writeJobCheckpoint({ rootDir, job: nextJob });
+              });
+            };
+
+            const appendProgressLocked = async (line: any) => {
+              await withLock(`append:${progressPath}`, async () => {
+                await appendTextFileToProject(rootDir, progressPath, JSON.stringify(line) + "\n");
+              });
+            };
+
+            const appendFailureLocked = async (line: any) => {
+              await withLock(`append:${failuresPath}`, async () => {
+                await appendTextFileToProject(rootDir, failuresPath, JSON.stringify(line) + "\n");
+              });
+            };
+
+            const processOneFile = async (fi: number) => {
+              if (abort?.signal.aborted) return;
               const fileRel = job.inputFiles[fi];
 
-              // 读取课程内容
-              // eslint-disable-next-line no-await-in-loop
               const rf = await readTextFileFromDir(job.inputDir, fileRel);
               if (!rf.ok) {
+                await appendFailureLocked({ at: nowIso(), file: fileRel, clipIndex: -1, ok: false, error: rf.error });
                 set((s) => ({
                   jobs: s.jobs.map((j) => {
                     if (j.id !== id) return j;
                     const failures = [{ at: nowIso(), file: fileRel, clipIndex: -1, error: rf.error }, ...j.failures].slice(0, 200);
                     return {
                       ...j,
-                      status: j.status,
                       updatedAt: nowIso(),
-                      progress: { ...j.progress, fileIndex: fi, clipIndex: 0, failed: j.progress.failed + 1, lastError: rf.error },
+                      progress: { ...j.progress, fileIndex: Math.max(j.progress.fileIndex, fi), clipIndex: 0, failed: j.progress.failed + 1, lastError: rf.error },
                       failures,
                     };
                   }),
                 }));
-                continue;
+                await writeCheckpointLocked();
+                return;
               }
 
               const lessonText = rf.content;
-              const lessonTitle = extractFirstHeading(lessonText) || sanitizeFileName(fileRel.split("/").pop() || fileRel) || `第${fi + 1}课`;
+              const lessonTitle = extractFirstHeading(lessonText) || sanitizeFileName(basenameAny(fileRel) || fileRel) || `第${fi + 1}课`;
 
-              // 每节课先生成 5 个标题（一次调用）
-              const planKey = sanitizeFileName(lessonTitle) || `lesson_${fi + 1}`;
+              // 每节课先生成 N 个标题（一次调用）；planKey 必须“文件级唯一”，避免不同文件同名覆盖
+              const planKey = `${pad2(fi + 1)}_${sanitizeFileName(lessonTitle) || `lesson_${fi + 1}`}`;
               const planPath = joinRel(job.outputDir, `.batch-meta/plans/${planKey}.json`);
               let planTitles: string[] = [];
               {
@@ -764,14 +1066,12 @@ export const useWritingBatchStore = create<WritingBatchState>()(
                     `课程标题：${lessonTitle}\n` +
                     `要求：生成 ${job.clipsPerLesson} 个短视频标题（每个标题 10~20 字，风格库口吻：硬核、断言、反常识）。\n` +
                     `课程内容：\n${String(lessonText ?? "").slice(0, 12_000)}\n`;
-                  // eslint-disable-next-line no-await-in-loop
-                  const rr = await callLlmTextOnce({ model, system: sys, user, abort: abort! });
+                  const rr = await callLlmTextWithRetry({ model, system: sys, user, abort: abort! });
                   const parsed = rr.ok ? jsonParseLoose<any>(rr.text) : { ok: false as const, error: rr.error };
                   planTitles = parsed.ok && Array.isArray((parsed.value as any)?.titles)
                     ? (parsed.value as any).titles.map((x: any) => String(x ?? "").trim()).filter(Boolean).slice(0, job.clipsPerLesson)
                     : [];
                   if (!planTitles.length) {
-                    // 兜底：用通用标题
                     planTitles = Array.from({ length: job.clipsPerLesson }).map((_, i) => `${lessonTitle}（第${i + 1}条）`);
                   }
                   await ensureDirOnDisk(rootDir, joinRel(job.outputDir, ".batch-meta/plans"));
@@ -779,54 +1079,56 @@ export const useWritingBatchStore = create<WritingBatchState>()(
                 }
               }
 
-              // 输出目录：每节课一个子目录
               const lessonDirName = `${pad2(fi + 1)}_${sanitizeFileName(lessonTitle) || `lesson_${fi + 1}`}`;
               const lessonOutDir = joinRel(job.outputDir, lessonDirName);
-              // eslint-disable-next-line no-await-in-loop
               await ensureDirOnDisk(rootDir, lessonOutDir);
-              const usedNames = new Set<string>();
 
-              // 逐条生成
-              for (let ci = fi === job.progress.fileIndex ? job.progress.clipIndex : 0; ci < job.clipsPerLesson; ci += 1) {
+              const usedNames = new Set<string>();
+              const usedOpenings: string[] = [];
+              const usedOneLiners: string[] = [];
+
+              for (let ci = 0; ci < job.clipsPerLesson; ci += 1) {
                 if (abort?.signal.aborted) break;
                 const clipTitle = planTitles[ci] || `${lessonTitle}（第${ci + 1}条）`;
 
                 const outFile = uniqueMdName(`${pad2(ci + 1)}_${clipTitle}`, usedNames);
                 const outPath = joinRel(lessonOutDir, outFile);
 
-                // 若已存在输出文件：跳过（支持断点续跑/二次运行不重复消耗）
-                // eslint-disable-next-line no-await-in-loop
                 const exists = await fileExistsInProject(rootDir, outPath);
                 if (exists) {
-                  // eslint-disable-next-line no-await-in-loop
-                  await appendTextFileToProject(
-                    rootDir,
-                    joinRel(job.outputDir, ".batch-meta/progress.jsonl"),
-                    JSON.stringify({ at: nowIso(), file: fileRel, clipIndex: ci, outPath, ok: true, skipped: true }) + "\n",
-                  );
+                  try {
+                    const r = await window.desktop!.fs!.readFile(rootDir, outPath);
+                    const prev = String(r?.content ?? "");
+                    pushUniqCapped(usedOpenings, pickFirstContentLine(prev), 8);
+                    pushUniqCapped(usedOneLiners, pickLastPunchLine(prev), 8);
+                  } catch {
+                    // ignore
+                  }
+                  await appendProgressLocked({ at: nowIso(), file: fileRel, clipIndex: ci, outPath, ok: true, skipped: true });
                   set((s) => ({
                     jobs: s.jobs.map((j) =>
                       j.id === id
-                        ? { ...j, updatedAt: nowIso(), progress: { ...j.progress, fileIndex: fi, clipIndex: ci + 1, done: j.progress.done + 1 } }
+                        ? { ...j, updatedAt: nowIso(), progress: { ...j.progress, fileIndex: Math.max(j.progress.fileIndex, fi), clipIndex: ci + 1, done: j.progress.done + 1 } }
                         : j,
                     ),
                   }));
-                  const nextJob = get().jobs.find((j) => j.id === id);
-                  if (nextJob) await writeJobCheckpoint({ rootDir, job: nextJob });
+                  await writeCheckpointLocked();
                   // eslint-disable-next-line no-await-in-loop
                   await new Promise((r) => setTimeout(r, 10));
                   continue;
                 }
 
-                // eslint-disable-next-line no-await-in-loop
                 const gen = await runOneClip({
                   model,
                   styleLibraryId: job.styleLibraryId,
                   lessonTitle,
                   lessonText,
                   clipIndex: ci,
+                  totalClips: job.clipsPerLesson,
                   clipTitle,
                   abort: abort!,
+                  avoidOpenings: usedOpenings,
+                  avoidOneLiners: usedOneLiners,
                 });
                 const ok = gen.ok;
                 const outText = ok ? String((gen as any).text ?? "").trim() : "";
@@ -834,6 +1136,8 @@ export const useWritingBatchStore = create<WritingBatchState>()(
                 const err = ok ? "" : String((gen as any).error ?? "GEN_FAILED");
 
                 if (ok && outText) {
+                  pushUniqCapped(usedOpenings, pickFirstContentLine(outText), 8);
+                  pushUniqCapped(usedOneLiners, pickLastPunchLine(outText), 8);
                   const meta =
                     `---\n` +
                     `title: ${clipTitle}\n` +
@@ -843,24 +1147,12 @@ export const useWritingBatchStore = create<WritingBatchState>()(
                     `batch_job_id: ${job.id}\n` +
                     `batch_item: ${fi + 1}.${ci + 1}\n` +
                     `---\n\n`;
-                  // eslint-disable-next-line no-await-in-loop
                   await writeTextFileToProject(rootDir, outPath, meta + outText.trimEnd() + "\n");
-                  // eslint-disable-next-line no-await-in-loop
-                  await appendTextFileToProject(
-                    rootDir,
-                    joinRel(job.outputDir, ".batch-meta/progress.jsonl"),
-                    JSON.stringify({ at: nowIso(), file: fileRel, clipIndex: ci, outPath, ok: true, score }) + "\n",
-                  );
+                  await appendProgressLocked({ at: nowIso(), file: fileRel, clipIndex: ci, outPath, ok: true, score });
                 } else {
-                  // eslint-disable-next-line no-await-in-loop
-                  await appendTextFileToProject(
-                    rootDir,
-                    joinRel(job.outputDir, ".batch-meta/failures.jsonl"),
-                    JSON.stringify({ at: nowIso(), file: fileRel, clipIndex: ci, ok: false, error: err }) + "\n",
-                  );
+                  await appendFailureLocked({ at: nowIso(), file: fileRel, clipIndex: ci, ok: false, error: err });
                 }
 
-                // 更新状态
                 set((s) => ({
                   jobs: s.jobs.map((j) => {
                     if (j.id !== id) return j;
@@ -869,7 +1161,7 @@ export const useWritingBatchStore = create<WritingBatchState>()(
                       ...j,
                       updatedAt: nowIso(),
                       progress: {
-                        fileIndex: fi,
+                        fileIndex: Math.max(j.progress.fileIndex, fi),
                         clipIndex: ci + 1,
                         done: j.progress.done + (ok ? 1 : 0),
                         failed: j.progress.failed + (ok ? 0 : 1),
@@ -879,21 +1171,36 @@ export const useWritingBatchStore = create<WritingBatchState>()(
                     };
                   }),
                 }));
-                const nextJob = get().jobs.find((j) => j.id === id);
-                if (nextJob) await writeJobCheckpoint({ rootDir, job: nextJob });
+                await writeCheckpointLocked();
 
-                // 让 UI 有机会刷新（避免长任务“像卡死”）
                 // eslint-disable-next-line no-await-in-loop
                 await new Promise((r) => setTimeout(r, 20));
               }
 
-              // 下一节课：clipIndex 归零
+              // 完成一个文件：fileIndex 单调递增（用于 UI 展示，不用于恢复游标）
               set((s) => ({
-                jobs: s.jobs.map((j) => (j.id === id ? { ...j, updatedAt: nowIso(), progress: { ...j.progress, fileIndex: fi + 1, clipIndex: 0 } } : j)),
+                jobs: s.jobs.map((j) =>
+                  j.id === id
+                    ? { ...j, updatedAt: nowIso(), progress: { ...j.progress, fileIndex: Math.max(j.progress.fileIndex, fi + 1), clipIndex: 0 } }
+                    : j,
+                ),
               }));
-              const nextJob = get().jobs.find((j) => j.id === id);
-              if (nextJob) await writeJobCheckpoint({ rootDir, job: nextJob });
-            }
+              await writeCheckpointLocked();
+            };
+
+            let nextFi = 0;
+            const workers = Array.from({ length: Math.min(filesConcurrency, Math.max(1, totalFiles)) }).map(async () => {
+              while (true) {
+                if (abort?.signal.aborted) break;
+                const fi = nextFi;
+                nextFi += 1;
+                if (fi >= totalFiles) break;
+                // eslint-disable-next-line no-await-in-loop
+                await processOneFile(fi);
+              }
+            });
+
+            await Promise.all(workers);
 
             const endedByAbort = abort?.signal.aborted;
             const status = abortReason === "pause" ? "paused" : abortReason === "cancel" ? "cancelled" : "done";

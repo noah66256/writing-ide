@@ -2440,6 +2440,7 @@ const tools: ToolDefinition[] = [
       { name: "inputDir", desc: "输入目录（绝对路径；不传则弹出选择目录）" },
       { name: "clipsPerLesson", desc: "每节课生成多少篇（默认 5，范围 1-12）" },
       { name: "outputBaseDir", desc: "输出根目录（相对项目；默认 exports）" },
+      { name: "filesConcurrency", desc: "文件级并行度（A 路由：不同输入文件并行；同一文件内 clips 串行；默认 2，范围 1-4）" },
     ],
     riskLevel: "high",
     applyPolicy: "auto_apply",
@@ -2453,10 +2454,12 @@ const tools: ToolDefinition[] = [
       const clipsPerLesson = typeof clipsPerLesson0 === "number" ? clipsPerLesson0 : undefined;
       const outputBaseDir0 = (args as any).outputBaseDir;
       const outputBaseDir = typeof outputBaseDir0 === "string" ? outputBaseDir0.trim() : undefined;
+      const filesConcurrency0 = (args as any).filesConcurrency;
+      const filesConcurrency = typeof filesConcurrency0 === "number" ? filesConcurrency0 : undefined;
 
       const created = inputDir
-        ? await store.createJobFromDir({ inputDir, clipsPerLesson, outputBaseDir })
-        : await store.createJobInteractive({ clipsPerLesson, outputBaseDir });
+        ? await store.createJobFromDir({ inputDir, clipsPerLesson, outputBaseDir, filesConcurrency })
+        : await store.createJobInteractive({ clipsPerLesson, outputBaseDir, filesConcurrency });
       if (!created.ok || !created.jobId) return { ok: false, error: String(created.error ?? "CREATE_JOB_FAILED"), output: created };
 
       // 关键：批处理是长时间运行，不能 await（否则 tool_call 会卡住整次 run）
