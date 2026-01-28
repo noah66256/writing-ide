@@ -5044,6 +5044,39 @@ fastify.post(
         let repairedKbSearchJson = 0;
         let repairedTodoUpdateId = 0;
         const repairedTodoUpdateIdDetail: Array<{ from: string; to: string; by: string }> = [];
+        const normalizeMaybeQuotedString = (raw: string) => {
+          const s0 = String(raw ?? "").trim();
+          if (!s0) return "";
+          // 常见坏参：XML 里把 id 写成 JSON 字符串（例如 "10" / "t2"），导致后续按字面匹配失败
+          const tryJson = (s: string) => {
+            try {
+              const j = JSON.parse(s);
+              return typeof j === "string" ? String(j).trim() : "";
+            } catch {
+              return "";
+            }
+          };
+          if ((s0.startsWith('"') && s0.endsWith('"')) || (s0.startsWith("'") && s0.endsWith("'"))) {
+            const j = tryJson(s0);
+            if (j) return j;
+            // JSON.parse 失败时的兜底：去掉一层引号
+            const inner = s0.slice(1, -1).trim();
+            if (inner) return inner;
+          }
+          return s0;
+        };
+        const wantsNoConfirmByPrompt = (() => {
+          const t = String(userPrompt ?? "").trim();
+          if (!t) return false;
+          return /(不用确认|无需确认|别等我确认|不需要确认|直接继续|直接跑|不用等我|别等我)/.test(t);
+        })();
+        const shouldAutoBlockConfirmationTodo = (text: string) => {
+          const t = String(text ?? "").trim();
+          if (!t) return false;
+          if (wantsNoConfirmByPrompt) return false;
+          // 只对“明确写了用户确认”的条目自动硬等待，避免误伤普通 todo
+          return /用户确认/.test(t);
+        };
         const wantsOverwriteByPrompt = (() => {
           const t = String(userPrompt ?? "");
           if (!t.trim()) return false;
@@ -5073,7 +5106,7 @@ fastify.post(
             .replace(/\s+/g, " ")
             .toLowerCase();
         const tryResolveTodoId = (rawId: string) => {
-          const s = String(rawId ?? "").trim();
+          const s = normalizeMaybeQuotedString(rawId);
           if (!s) return "";
           const cands: string[] = [];
           const push = (x: string) => {
@@ -5232,6 +5265,32 @@ fastify.post(
               repairedSetTodoList += 1;
               return { ...c, args: { ...(c?.args ?? {}), items: itemsJson } };
             }
+            // 额外：对“需要用户确认”的 todo 条目做硬等待标记（status=blocked + note=wait_user:...）
+            // 目的：避免 AutoRetry 继续跑、用户以为在等确认但系统还在执行。
+            try {
+              const j = JSON.parse(itemsRaw);
+              if (Array.isArray(j)) {
+                let changed = false;
+                const nextItems = j.map((it: any) => {
+                  if (!it || typeof it !== "object") return it;
+                  const text = String(it?.text ?? "").trim();
+                  const status = String(it?.status ?? "").trim().toLowerCase();
+                  const note = String(it?.note ?? "").trim();
+                  // 已完成/已跳过/已 blocked 的不再处理
+                  if (status === "done" || status === "completed" || status === "skipped" || status === "blocked") return it;
+                  if (!shouldAutoBlockConfirmationTodo(text)) return it;
+                  changed = true;
+                  const next: any = { ...it, status: "blocked" };
+                  if (!note || !/^wait_user:/i.test(note)) next.note = "wait_user: 请先确认后继续";
+                  return next;
+                });
+                if (changed) {
+                  return { ...c, args: { ...(c?.args ?? {}), items: JSON.stringify(nextItems) } };
+                }
+              }
+            } catch {
+              // ignore parse failure
+            }
           }
 
           // 0.5) run.todo.upsertMany 兜底：部分模型会漏传 items（必填），导致 ToolArgValidationPolicy 直接 block_end（用户感知“空输出”）。
@@ -5300,7 +5359,7 @@ fastify.post(
           // 2) id 纠偏：模型常传错 todo.id（导致 Desktop 报 TODO_NOT_FOUND）。
           // - 仅在 runState 已知 todoList 时进行：把“看起来像 id 但不命中”的值纠偏到一个真实 id；
           // - 若无法纠偏：删除该 id，让后续 “顺序分配” 生效（优先未完成项），避免 UI 大量刷红 failed。
-          const idRaw0 = String((next.args as any)?.id ?? "").trim();
+          const idRaw0 = normalizeMaybeQuotedString(String((next.args as any)?.id ?? "").trim());
           const hasIdPool = Array.isArray(idPool) && idPool.length > 0;
           if (idRaw0 && hasIdPool && !idSet.has(idRaw0)) {
             const fixed = tryResolveTodoId(idRaw0);
