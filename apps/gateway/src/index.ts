@@ -5042,6 +5042,8 @@ fastify.post(
         let repairedSetTodoList = 0;
         let repairedTodoUpsertMany = 0;
         let repairedKbSearchJson = 0;
+        let repairedTodoUpdateId = 0;
+        const repairedTodoUpdateIdDetail: Array<{ from: string; to: string; by: string }> = [];
         const wantsOverwriteByPrompt = (() => {
           const t = String(userPrompt ?? "");
           if (!t.trim()) return false;
@@ -5064,6 +5066,52 @@ fastify.post(
         // 没有 pending 时，回退用全部 id（至少让 updateTodo 不再 MISSING_ID）
         const allIds = todoList.map((t: any) => String(t?.id ?? "").trim()).filter(Boolean);
         const idPool = pendingIds.length ? pendingIds : allIds;
+        const idSet = new Set<string>(allIds);
+        const normalizeTextKey = (t: string) =>
+          String(t ?? "")
+            .trim()
+            .replace(/\s+/g, " ")
+            .toLowerCase();
+        const tryResolveTodoId = (rawId: string) => {
+          const s = String(rawId ?? "").trim();
+          if (!s) return "";
+          const cands: string[] = [];
+          const push = (x: string) => {
+            const v = String(x ?? "").trim();
+            if (v && !cands.includes(v)) cands.push(v);
+          };
+          push(s);
+          push(s.replaceAll("-", "_"));
+          push(s.replaceAll(" ", "_"));
+          // 常见误写：t1 / 1 / t-1 / t_1
+          const m1 = s.match(/^t(\d+)$/i);
+          if (m1?.[1]) {
+            push(`t_${m1[1]}`);
+            push(`t-${m1[1]}`);
+            push(`t${m1[1]}`);
+          }
+          const m2 = s.match(/^(\d+)$/);
+          if (m2?.[1]) {
+            push(`t_${m2[1]}`);
+            push(`t-${m2[1]}`);
+            push(`t${m2[1]}`);
+          }
+          for (const cand of cands) {
+            if (idSet.has(cand)) return cand;
+          }
+          return "";
+        };
+        const tryResolveTodoIdByText = (rawText: string) => {
+          const key = normalizeTextKey(rawText);
+          if (!key || key.length < 6) return "";
+          const hits = todoList
+            .map((t: any) => ({ id: String(t?.id ?? "").trim(), key: normalizeTextKey(String(t?.text ?? "")) }))
+            .filter((x) => x.id && x.key)
+            .filter((x) => x.key === key || x.key.includes(key) || key.includes(x.key))
+            .map((x) => x.id);
+          const uniq = Array.from(new Set(hits));
+          return uniq.length === 1 ? uniq[0] : "";
+        };
         let idCursor = 0;
         toolCalls = toolCalls.map((c: any) => {
           const name = String(c?.name ?? "").trim();
@@ -5249,7 +5297,29 @@ fastify.post(
             }
           }
 
-          // 2) id 兜底：当 todoList>1 且模型未传 id，自动按顺序分配（避免 Desktop 报 MISSING_ID）
+          // 2) id 纠偏：模型常传错 todo.id（导致 Desktop 报 TODO_NOT_FOUND）。
+          // - 仅在 runState 已知 todoList 时进行：把“看起来像 id 但不命中”的值纠偏到一个真实 id；
+          // - 若无法纠偏：删除该 id，让后续 “顺序分配” 生效（优先未完成项），避免 UI 大量刷红 failed。
+          const idRaw0 = String((next.args as any)?.id ?? "").trim();
+          const hasIdPool = Array.isArray(idPool) && idPool.length > 0;
+          if (idRaw0 && hasIdPool && !idSet.has(idRaw0)) {
+            const fixed = tryResolveTodoId(idRaw0);
+            const byText = !fixed ? tryResolveTodoIdByText(String((next.args as any)?.text ?? "")) : "";
+            const picked = fixed || byText;
+            if (picked) {
+              repairedTodoUpdateId += 1;
+              repairedTodoUpdateIdDetail.push({ from: idRaw0.slice(0, 64), to: picked.slice(0, 64), by: fixed ? "id_normalize" : "text_match" });
+              next = { ...next, args: { ...(next.args ?? {}), id: picked } };
+            } else {
+              const out: any = { ...(next.args ?? {}) };
+              delete out.id;
+              repairedTodoUpdateId += 1;
+              repairedTodoUpdateIdDetail.push({ from: idRaw0.slice(0, 64), to: "", by: "drop_invalid_id" });
+              next = { ...next, args: out };
+            }
+          }
+
+          // 3) id 兜底：当 todoList>1 且模型未传 id，自动按顺序分配（避免 Desktop 报 MISSING_ID）
           const idRaw = String((next.args as any)?.id ?? "").trim();
           if (!idRaw && idPool.length > 1) {
             const picked = idPool[Math.min(idCursor, idPool.length - 1)];
@@ -5264,15 +5334,17 @@ fastify.post(
           return next;
         });
 
-        if (repairedTodoUpsertMany > 0 || repairedKbSearchJson > 0) {
+        if (repairedTodoUpsertMany > 0 || repairedKbSearchJson > 0 || repairedTodoUpdateId > 0) {
           writePolicyDecision({
             turn,
             policy: "ToolArgNormalizationPolicy",
             decision: "repaired",
-            reasonCodes: ["tool_args_repaired", "tool:kb.search_or_run.todo.upsertMany"],
+            reasonCodes: ["tool_args_repaired", "tool:kb.search_or_run.todo.update_or_upsertMany"],
             detail: {
               repairedTodoUpsertMany,
               repairedKbSearchJson,
+              repairedTodoUpdateId,
+              repairedTodoUpdateIdDetail: repairedTodoUpdateIdDetail.slice(0, 6),
               routeId: intentRoute.routeId ?? "",
             },
           });
@@ -5281,10 +5353,10 @@ fastify.post(
             kind: "info",
             title: "工具参数修复：自动纠正 JSON/缺参",
             message:
-              "检测到部分工具参数不符合契约（例如 kb.search 的 JSON 参数、run.todo.upsertMany 漏传 items）。系统已自动修复以避免本轮中断。",
+              "检测到部分工具参数不符合契约（例如 kb.search 的 JSON 参数、run.todo.upsertMany 漏传 items、run.todo.update 传错 todo.id）。系统已自动修复以避免本轮中断/进度刷红。",
             policy: "ToolArgNormalizationPolicy",
-            reasonCodes: ["tool_args_repaired", "tool:kb.search_or_run.todo.upsertMany"],
-            detail: { repairedTodoUpsertMany, repairedKbSearchJson },
+            reasonCodes: ["tool_args_repaired", "tool:kb.search_or_run.todo.update_or_upsertMany"],
+            detail: { repairedTodoUpsertMany, repairedKbSearchJson, repairedTodoUpdateId },
           });
         }
 
