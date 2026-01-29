@@ -4866,7 +4866,12 @@ fastify.post(
         .map((c: any) => String(c.name ?? ""))
         .filter(Boolean);
       if (capDeniedTools.length) {
-        if (runState.workflowRetryBudget > 0) {
+        const useWorkflowBudget = runState.workflowRetryBudget > 0;
+        const useProtocolBudget = !useWorkflowBudget && runState.protocolRetryBudget > 0;
+        if (useWorkflowBudget || useProtocolBudget) {
+          const budgetKind = useWorkflowBudget ? "workflow" : "protocol";
+          const budgetBefore = useWorkflowBudget ? runState.workflowRetryBudget : runState.protocolRetryBudget;
+          const budgetAfter = Math.max(0, budgetBefore - 1);
           writePolicyDecision({
             turn,
             policy: "SkillToolCapsPolicy",
@@ -4875,12 +4880,13 @@ fastify.post(
             detail: {
               phase: toolCapsPhase,
               denied: capDeniedTools.slice(0, 12),
-              budget: "workflow",
-              budgetBefore: runState.workflowRetryBudget,
-              budgetAfter: Math.max(0, runState.workflowRetryBudget - 1),
+              budget: budgetKind,
+              budgetBefore,
+              budgetAfter,
             },
           });
-          runState.workflowRetryBudget -= 1;
+          if (useWorkflowBudget) runState.workflowRetryBudget -= 1;
+          else runState.protocolRetryBudget -= 1;
           writeRunNotice({
             turn,
             kind: "warn",
@@ -4893,9 +4899,9 @@ fastify.post(
             detail: {
               phase: toolCapsPhase,
               denied: capDeniedTools.slice(0, 12),
-              budget: "workflow",
-              budgetBefore: runState.workflowRetryBudget + 1,
-              budgetAfter: runState.workflowRetryBudget,
+              budget: budgetKind,
+              budgetBefore,
+              budgetAfter,
             },
           });
           writeEvent("assistant.done", { reason: "auto_retry_tool_caps", turn });

@@ -553,7 +553,7 @@ export function analyzeAutoRetryText(args: {
 
   const todoPolicy: "skip" | "optional" | "required" = args.todoPolicy ?? "required";
   const needTodo = todoPolicy === "required" && !args.state.hasTodoList && !args.intent.wantsOkOnly;
-  const needWrite = args.intent.wantsWrite && !args.state.hasWriteOps && !isClarify;
+  let needWrite = args.intent.wantsWrite && !args.state.hasWriteOps && !isClarify;
   const needKb = args.gates.styleGateEnabled && !args.state.hasStyleKbSearch && !isClarify;
   // V2.1：在 lint/write 之前，必须先产出一版“候选正文”（纯文本），并在初稿后做二次 KB 检索补金句/收束。
   // - 不应依赖 copyGateEnabled：即便 STYLE_COPY_LINT_MODE=observe（不强制 lint.copy），也要走“templates -> draft -> post_draft_kb”保证质量。
@@ -576,12 +576,12 @@ export function analyzeAutoRetryText(args: {
     !args.intent.wantsOkOnly &&
     !isClarify;
   const needCopy = args.gates.copyGateEnabled && !args.state.copyLintPassed && !isClarify;
-  const needLint =
+  let needLint =
     args.gates.lintGateEnabled && !args.state.styleLintPassed && args.state.styleLintFailCount <= args.lintMaxRework && !isClarify;
   const target = Number.isFinite(Number(args.targetChars as any)) ? Math.max(0, Number(args.targetChars)) : 0;
   const looksDraft =
     looksLikeDraftText(t) || (t.length >= 400 && /[。！？]/.test(t) && t.split(/\n{2,}/).filter(Boolean).length >= 3);
-  const needLength =
+  let needLength =
     !isClarify &&
     target >= 200 &&
     looksDraft &&
@@ -589,6 +589,24 @@ export function analyzeAutoRetryText(args: {
     // 与提示文案保持一致：目标字数允许上下浮动约 ±20%
     (t.length < target * 0.8 || t.length > target * 1.2);
   const needFinalText = isEmpty && !needTodo && !needWrite && !needKb && !needCopy && !needLint;
+
+  // 顺序约束（关键）：避免在“尚未完成上游步骤”时，同时提示 lint/长度/写入，导致模型误调用被阶段门禁禁止的工具。
+  // 目标顺序：kb(templates) -> draft -> post_draft_kb -> (copy) -> lint.style -> length -> write
+  if (needKb || needDraft || needPostDraftKbSearch || needCopy) {
+    // 上游步骤未完成：先别要求 lint/长度/写入，避免“在 style_need_punchline 里去 lint.style / doc.write”之类误伤
+    needLint = false;
+    needLength = false;
+    needWrite = false;
+  }
+  if (needLint) {
+    // lint 还没过：先别要求长度/写入（长度可在 lint 通过后再微调；写入必须在 lint 后）
+    needLength = false;
+    needWrite = false;
+  }
+  if (needLength) {
+    // 长度不达标：先别要求写入
+    needWrite = false;
+  }
 
   const reasons: string[] = [];
   if (isFIMLeak) reasons.push("模型输出异常(FIM token)");
