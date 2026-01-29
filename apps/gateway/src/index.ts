@@ -3291,6 +3291,8 @@ fastify.post(
         "writing.batch.pause",
         "writing.batch.resume",
         "writing.batch.cancel",
+        // 只读：允许列出文件（便于选择/确认 inputDir），避免模型误调被门禁拒绝导致空转重试
+        "project.listFiles",
         // 允许只读检索/进度维护（避免模型想查风格库时触发门禁重试）
         "kb.search",
         "run.done",
@@ -3699,24 +3701,30 @@ fastify.post(
           if (ev.type === "done") break;
         }
 
-        // 空响应：自动切换备用模型重试
+        // 空响应：优先切换备用模型；若没有备用模型则同模型重试（最多 2 次），避免直接报错影响用户体验。
         if (String(lastErr || "").trim() === "UPSTREAM_EMPTY_CONTENT") {
-          if (attempt < MAX_EMPTY_RETRY && attempt + 1 < candidates.length) {
+          if (attempt < MAX_EMPTY_RETRY) {
+            const fromModelId = candidates[attempt] || modelIdUsed || pickedId || null;
+            const toModelId = attempt + 1 < candidates.length ? candidates[attempt + 1] : fromModelId;
+            const willSwitch = Boolean(toModelId && fromModelId && toModelId !== fromModelId);
+            const strategy = willSwitch ? "switch_model" : "retry_same_model";
             writePolicyDecision({
               turn,
               policy: "UpstreamRetryPolicy",
               decision: "retry",
-              reasonCodes: ["upstream_empty_content", `attempt:${attempt + 1}`],
-              detail: { error: "UPSTREAM_EMPTY_CONTENT", fromModelId: candidates[attempt] || null, toModelId: candidates[attempt + 1] || null },
+              reasonCodes: ["upstream_empty_content", `attempt:${attempt + 1}`, strategy],
+              detail: { error: "UPSTREAM_EMPTY_CONTENT", fromModelId, toModelId, willSwitch },
             });
             writeRunNotice({
               turn,
               kind: "info",
-              title: "上游空响应：自动切换备用模型重试",
-              message: `检测到上游返回空内容（UPSTREAM_EMPTY_CONTENT），系统将自动切换备用模型重试一次（第${attempt + 1}次重试）。`,
+              title: willSwitch ? "上游空响应：自动切换备用模型重试" : "上游空响应：同模型重试",
+              message: willSwitch
+                ? `检测到上游返回空内容（UPSTREAM_EMPTY_CONTENT），系统将自动切换备用模型重试一次（第${attempt + 1}次重试）。`
+                : `检测到上游返回空内容（UPSTREAM_EMPTY_CONTENT），当前 stage 未配置备用模型，系统将对同一模型重试一次（第${attempt + 1}次重试）。`,
               policy: "UpstreamRetryPolicy",
-              reasonCodes: ["upstream_empty_content"],
-              detail: { attempt: attempt + 1, from: candidates[attempt] || null, to: candidates[attempt + 1] || null },
+              reasonCodes: ["upstream_empty_content", strategy],
+              detail: { attempt: attempt + 1, from: fromModelId, to: toModelId, willSwitch },
             });
             attempt += 1;
             continue;
