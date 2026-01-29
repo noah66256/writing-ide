@@ -543,7 +543,7 @@ export function AgentPane() {
     void (async () => {
       const ok = await uiConfirm({
         title: "确认删除当前对话？",
-        message: "仅清空右侧对话记录，不影响项目文件。",
+        message: "仅清空右侧对话记录（步骤/工具卡片）。会保留 Main Doc 与 Todo，不影响项目文件。",
         confirmText: "删除",
         cancelText: "取消",
         danger: true,
@@ -562,9 +562,7 @@ export function AgentPane() {
         controllerRef.current.cancel("delete_conversation");
         controllerRef.current = null;
       }
-      useRunStore.getState().resetRun();
-      // 立即清空草稿，避免 resetRun 后 draftSnapshot 被 effect “短暂恢复”引发焦点/输入抖动
-      setDraftSnapshot(null);
+      useRunStore.getState().clearConversationSteps();
       setPinnedUserId(null);
       setInput("");
       composerRef.current?.setValue("");

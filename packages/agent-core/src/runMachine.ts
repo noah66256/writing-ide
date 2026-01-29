@@ -555,12 +555,13 @@ export function analyzeAutoRetryText(args: {
   const needTodo = todoPolicy === "required" && !args.state.hasTodoList && !args.intent.wantsOkOnly;
   const needWrite = args.intent.wantsWrite && !args.state.hasWriteOps && !isClarify;
   const needKb = args.gates.styleGateEnabled && !args.state.hasStyleKbSearch && !isClarify;
-  // V2：在 copy/style 闸门前，必须先产出一版“候选正文”（纯文本）
-  // - 仅在 styleGate+copyGate 启用时强制（用户跳过 linter/hint 模式不强制）
+  // V2.1：在 lint/write 之前，必须先产出一版“候选正文”（纯文本），并在初稿后做二次 KB 检索补金句/收束。
+  // - 不应依赖 copyGateEnabled：即便 STYLE_COPY_LINT_MODE=observe（不强制 lint.copy），也要走“templates -> draft -> post_draft_kb”保证质量。
+  // - 但应依赖 lintGateEnabled：当用户显式“跳过 linter”或系统处于 hint 模式时，不强制走 draft/post_draft_kb 闭环，避免误伤“快速写入/只要结果”场景。
   // - 仅当 KB 已完成后才开始要求（避免与 templates 阶段冲突）
   const needDraft =
     args.gates.styleGateEnabled &&
-    args.gates.copyGateEnabled &&
+    args.gates.lintGateEnabled &&
     args.state.hasStyleKbSearch &&
     !args.state.hasDraftText &&
     args.intent.isWritingTask &&
@@ -568,11 +569,9 @@ export function analyzeAutoRetryText(args: {
     !isClarify;
   const needPostDraftKbSearch =
     args.gates.styleGateEnabled &&
-    args.gates.copyGateEnabled &&
+    args.gates.lintGateEnabled &&
     args.state.hasDraftText &&
     !args.state.hasPostDraftStyleKbSearch &&
-    !args.state.copyLintPassed &&
-    args.state.lastCopyLint === null &&
     args.intent.isWritingTask &&
     !args.intent.wantsOkOnly &&
     !isClarify;
@@ -663,7 +662,7 @@ export function analyzeStyleWorkflowBatch(args: {
   const needStyleKb = !args.state.hasStyleKbSearch;
   const needDraftText =
     args.gates.styleGateEnabled &&
-    args.gates.copyGateEnabled &&
+    args.gates.lintGateEnabled &&
     args.state.hasStyleKbSearch &&
     !args.state.hasDraftText &&
     args.intent.isWritingTask;

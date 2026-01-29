@@ -3254,6 +3254,7 @@ fastify.post(
 
   type SkillToolCapsPhase =
     | "none"
+    | "todo_required"
     | "web_need_search"
     | "web_need_fetch"
     | "batch_active"
@@ -3283,6 +3284,29 @@ fastify.post(
   };
 
   const PHASE_CONTRACTS_V1: Partial<Record<SkillToolCapsPhase, PhaseContractV1>> = {
+    todo_required: {
+      phase: "todo_required",
+      allowTools: ["run.setTodoList", "run.todo.upsertMany", "run.mainDoc.update", "run.mainDoc.get"],
+      hint:
+        "【Todo Gate】当前阶段：todo_required（先立计划，再行动）。\n" +
+        "- 你必须先设置 Todo（run.setTodoList 或 run.todo.upsertMany；建议 5–12 条，含“等待确认/blocked”项）。\n" +
+        "- 本回合不要调用 kb.search / lint.* / doc.* / project.* 等其它工具；不要输出最终正文。\n" +
+        "- 注意：若要调用工具，本条消息必须且只能输出严格的 <tool_calls>...</tool_calls> XML（不要夹杂自然语言）。",
+      autoRetry: ({ runState, toolCapsPhase }) => {
+        if (toolCapsPhase !== "todo_required") return null;
+        const hasTodo = Boolean((runState as any)?.hasTodoList);
+        if (hasTodo) return { shouldRetry: false, reasonCodes: ["todo_set"], reasons: [], systemMessage: "" };
+        return {
+          shouldRetry: true,
+          reasonCodes: ["need_todo"],
+          reasons: ["Todo 未设置"],
+          systemMessage:
+            "你还没有设置 Todo。请立刻调用 run.setTodoList（或 run.todo.upsertMany）写入可执行 Todo，再继续下一步。\n" +
+            "- 建议：先写 5–12 条，包含：检索模板 → 产候选稿 → 二次检索金句/收束 → lint.style → 写入。\n" +
+            "- 本条消息必须是纯 <tool_calls> XML（不要夹杂自然语言）。",
+        };
+      },
+    },
     batch_active: {
       phase: "batch_active",
       allowTools: [
@@ -3375,7 +3399,25 @@ fastify.post(
     let phase: SkillToolCapsPhase = "none";
     let hint = "";
 
-    // 2) WebGate（强制联网证据：need_search / need_fetch）
+    // 2) TodoGate（先立计划，再行动）：避免“没 todo 也能乱跑工具 → AutoRetry 空转烧钱”
+    // 说明：仅对 todoPolicy=required 且当前无 todo 的场景启用；批处理(writing_batch)除外（批处理走 writing.batch.* 队列）
+    if (
+      mode !== "chat" &&
+      String(intentRoute.todoPolicy ?? "required") === "required" &&
+      !intent.wantsOkOnly &&
+      runState.hasTodoList !== true &&
+      !activeSkillIds.includes("writing_batch")
+    ) {
+      phase = "todo_required";
+      const contract = PHASE_CONTRACTS_V1.todo_required!;
+      const allowSet = new Set<string>([...contract.allowTools, ...Array.from(ALWAYS_ALLOW_TOOL_NAMES)]);
+      for (const name of Array.from(allowed)) if (!allowSet.has(name)) allowed.delete(name);
+      hint = contract.hint;
+      reasonCodes.push("phase:todo_required");
+      return { phase, allowed, hint, reasonCodes };
+    }
+
+    // 3) WebGate（强制联网证据：need_search / need_fetch）
     if (webGate.enabled) {
       const needSearch =
         webGate.needsSearch &&
@@ -3433,7 +3475,7 @@ fastify.post(
       }
     }
 
-    // 3) WritingBatchSkill（硬路由：强制走 writing.batch.*，避免单次 run 直接产出 N 篇导致中断）
+    // 4) WritingBatchSkill（硬路由：强制走 writing.batch.*，避免单次 run 直接产出 N 篇导致中断）
     // 小规模降级（B 方案）：如果 todo 中待写篇数 <= 6，则跳过 batch_active，回退到普通 style_imitate 流程
     if (activeSkillIds.includes("writing_batch")) {
       const todoItems = Array.isArray(runTodoFromPack) ? runTodoFromPack : [];
@@ -3460,7 +3502,7 @@ fastify.post(
       }
     }
 
-    // 4) StyleImitateSkill（V2.1：templates -> draft -> post_draft_kb -> copy -> style -> write）
+    // 5) StyleImitateSkill（V2.1：templates -> draft -> post_draft_kb -> (copy opt) -> style -> write）
     if (effectiveGates.styleGateEnabled) {
       if (!runState.hasStyleKbSearch) {
         phase = "style_need_templates";
@@ -3478,7 +3520,7 @@ fastify.post(
           "  - 推荐 cardTypes：cluster_rules_v1 / playbook_facet / style_profile / final_polish_checklist（兜底再加 hook/outline/thesis/ending；金句 one_liner 建议在“初稿后”二次检索）。\n" +
           "- 或仅更新 todo/mainDoc。";
         reasonCodes.push("phase:style_need_templates");
-      } else if (effectiveGates.copyGateEnabled && !runState.hasDraftText) {
+      } else if (effectiveGates.lintGateEnabled && intent.isWritingTask && !intent.wantsOkOnly && !runState.hasDraftText) {
         phase = "style_need_draft";
         // 禁止 kb.search / lint.copy / lint.style / 写入类 doc.*：先产候选正文（纯文本）
         allowed.delete("kb.search");
@@ -3494,11 +3536,11 @@ fastify.post(
           "- 下一回合会进入“初稿后二次检索（补金句/收束）”，再进入 lint.copy。";
         reasonCodes.push("phase:style_need_draft");
       } else if (
-        effectiveGates.copyGateEnabled &&
+        effectiveGates.lintGateEnabled &&
+        intent.isWritingTask &&
+        !intent.wantsOkOnly &&
         runState.hasDraftText &&
-        !runState.hasPostDraftStyleKbSearch &&
-        !runState.copyLintPassed &&
-        runState.lastCopyLint === null
+        !runState.hasPostDraftStyleKbSearch
       ) {
         phase = "style_need_punchline";
         // 初稿后：允许 kb.search（补金句/收束），但禁止 lint 与写入
@@ -4382,10 +4424,12 @@ fastify.post(
                 : "已完成写入，请查看生成的文件。";
           }
 
-          // V2：draft 阶段观测（在 copy/style 闸门前，必须先产出一版候选正文）
+          // V2.1：draft 阶段观测（templates 之后必须先产出一版候选正文；不依赖 copyGateEnabled）
           if (
             effectiveGates.styleGateEnabled &&
-            effectiveGates.copyGateEnabled &&
+            effectiveGates.lintGateEnabled &&
+            intent.isWritingTask &&
+            !intent.wantsOkOnly &&
             runState.hasStyleKbSearch &&
             !runState.hasDraftText
           ) {
@@ -4402,65 +4446,72 @@ fastify.post(
             }
           }
 
-        // phase contract：批处理（writing_batch）不走“通用写作闭环” AutoRetry（否则会被 need_todo/need_kb/need_lint/need_length/need_write 误伤并空转）
-        if (toolCapsPhase === "batch_active" && activeSkillIds.includes("writing_batch")) {
-          const contract = (PHASE_CONTRACTS_V1.batch_active as any) as PhaseContractV1;
-          const override = contract?.autoRetry?.({ assistantText, runState, toolCapsPhase }) ?? null;
-          if (override && override.shouldRetry) {
-            writePolicyDecision({
-              turn,
-              policy: "AutoRetryPolicy",
-              decision: "retry",
-              reasonCodes: override.reasonCodes,
-              detail: {
-                reasons: override.reasons,
-                budget: "workflow",
-                budgetBefore: runState.workflowRetryBudget,
-                budgetAfter: Math.max(0, runState.workflowRetryBudget - 1),
-              },
-            });
-            runState.workflowRetryBudget -= 1;
-            writeRunNotice({
-              turn,
-              kind: "info",
-              title: `AutoRetry：batch_active（未启动批处理）`,
-              message: `检测到本轮处于 batch_active，但尚未启动批处理。系统将自动继续一次。\n` + override.systemMessage,
-              policy: "AutoRetryPolicy",
-              reasonCodes: override.reasonCodes,
-              detail: {
-                reasons: override.reasons,
-                budget: "workflow",
-                budgetBefore: runState.workflowRetryBudget + 1,
-                budgetAfter: runState.workflowRetryBudget,
-              },
-            });
-            writeEvent("assistant.done", { reason: "auto_retry_incomplete", turn });
-            messages.push({ role: "assistant", content: assistantText });
-            messages.push({ role: "system", content: override.systemMessage });
-            continue;
+        // phase contract：某些阶段（例如 batch_active / todo_required）不应走“通用写作闭环” AutoRetry，
+        // 否则会被 need_todo/need_kb/need_lint/need_length/need_write 误伤并空转。
+        let suppressGenericAutoRetry = false;
+        const phaseContract = (PHASE_CONTRACTS_V1 as any)[toolCapsPhase] as PhaseContractV1 | undefined;
+        if (phaseContract?.autoRetry) {
+          const override = phaseContract.autoRetry({ assistantText, runState, toolCapsPhase }) ?? null;
+          if (override) {
+            if (override.shouldRetry) {
+              writePolicyDecision({
+                turn,
+                policy: "AutoRetryPolicy",
+                decision: "retry",
+                reasonCodes: override.reasonCodes,
+                detail: {
+                  reasons: override.reasons,
+                  budget: "workflow",
+                  budgetBefore: runState.workflowRetryBudget,
+                  budgetAfter: Math.max(0, runState.workflowRetryBudget - 1),
+                },
+              });
+              runState.workflowRetryBudget -= 1;
+              writeRunNotice({
+                turn,
+                kind: "info",
+                title: `AutoRetry：${toolCapsPhase}`,
+                message: `检测到本轮处于 ${toolCapsPhase}，但尚未满足该阶段前置条件。系统将自动继续一次。\n` + override.systemMessage,
+                policy: "AutoRetryPolicy",
+                reasonCodes: override.reasonCodes,
+                detail: {
+                  reasons: override.reasons,
+                  budget: "workflow",
+                  budgetBefore: runState.workflowRetryBudget + 1,
+                  budgetAfter: runState.workflowRetryBudget,
+                },
+              });
+              writeEvent("assistant.done", { reason: "auto_retry_incomplete", turn });
+              messages.push({ role: "assistant", content: assistantText });
+              messages.push({ role: "system", content: override.systemMessage });
+              continue;
+            }
+            // phase contract 已判定“阶段满足”：本轮不再触发通用闭环重试（避免误伤空转）
+            suppressGenericAutoRetry = true;
           }
-          // 已启动批处理：允许本轮直接结束/继续，不再触发通用闭环重试
         }
 
-        const analysis = analyzeAutoRetryText({
-          assistantText,
-          intent,
-          gates: effectiveGates,
-          state: runState,
-          lintMaxRework,
-          targetChars,
-          todoPolicy: intentRoute.todoPolicy,
-        });
-          const needFinalText = analysis.needFinalText;
-          const needTodo = analysis.needTodo;
-          const needWrite = analysis.needWrite;
-          const needKb = analysis.needKb;
-          const needDraft = analysis.needDraft;
-          const needPostDraftKbSearch = analysis.needPostDraftKbSearch;
-          const needLint = analysis.needLint;
-          const needLength = analysis.needLength;
+        const analysis = suppressGenericAutoRetry
+          ? null
+          : analyzeAutoRetryText({
+              assistantText,
+              intent,
+              gates: effectiveGates,
+              state: runState,
+              lintMaxRework,
+              targetChars,
+              todoPolicy: intentRoute.todoPolicy,
+            });
+          const needFinalText = analysis ? analysis.needFinalText : false;
+          const needTodo = analysis ? analysis.needTodo : false;
+          const needWrite = analysis ? analysis.needWrite : false;
+          const needKb = analysis ? analysis.needKb : false;
+          const needDraft = analysis ? analysis.needDraft : false;
+          const needPostDraftKbSearch = analysis ? analysis.needPostDraftKbSearch : false;
+          const needLint = analysis ? analysis.needLint : false;
+          const needLength = analysis ? analysis.needLength : false;
 
-          if (analysis.shouldRetry) {
+          if (analysis && analysis.shouldRetry) {
             const reasonCodes: string[] = [];
             if (analysis.isFIMLeak) reasonCodes.push("fim_leak");
             if (analysis.isEmpty) reasonCodes.push("empty_output");
@@ -5016,7 +5067,7 @@ fastify.post(
               kind: "warn",
               title: "风格闭环约束：自动重试",
               message:
-                "风格库写作任务已启用“闭环约束”：先 kb.search 拉模板/规则卡 → 再输出候选正文（draft）→ 再 lint.copy（防贴）→ 再 lint.style（对齐）→ 再写入。\n" +
+                "风格库写作任务已启用“闭环约束”：先 kb.search（模板/规则）→ 再输出候选正文（draft）→ 初稿后二次 kb.search（补金句/收束）→（可选）lint.copy（防贴）→ lint.style（对齐）→ 写入。\n" +
                 `本轮工具调用不满足前置条件（${violation}），系统将自动重试一次。\n` +
                 "要求：把 kb.search / 候选正文(draft) / lint.copy / lint.style / 写入拆到不同回合（每回合只做一类关键动作）。",
               policy: "StyleGatePolicy",
@@ -5031,15 +5082,16 @@ fastify.post(
                 "你上一轮的 tool_calls 违反了“风格库写作强闭环”约束，请立刻重试并按下面顺序推进：\n" +
                 "A) kb.search（手法/模板）：只搜风格库（purpose=style），必须 kind=card + cardTypes 先拉 6–12 条“可抄模板/金句形状/结构骨架”。本轮不要调用 lint.copy/lint.style 或任何写入类工具。\n" +
                 "B) draft（候选正文）：直接输出一版候选正文（Markdown 纯文本）。本轮不要调用任何工具、不要输出 <tool_calls>。\n" +
+                "C) kb.search（初稿后二次检索：补金句/收束）：必须 kind=card + cardTypes=[one_liner, ending]（必要时再加 hook/outline）。本轮不要调用 lint.copy/lint.style 或任何写入类工具。\n" +
                 (batch.enforceCopy
-                  ? "C) lint.copy（防贴原文）：对候选稿做确定性重合检测；未通过就按 topOverlaps 指示回炉改写降重，再次 lint.copy（最多回炉若干次；safe 模式会降级放行但会记录审计）。本轮不要调用 kb.search 或任何写入类工具。\n"
+                  ? "D) lint.copy（防贴原文）：对候选稿做确定性重合检测；未通过就按 topOverlaps 指示回炉改写降重，再次 lint.copy（最多回炉若干次；safe 模式会降级放行但会记录审计）。本轮不要调用 kb.search 或任何写入类工具。\n"
                   : "") +
                 (batch.enforceLint
-                  ? `D) lint.style（终稿闸门）：基于样例与指纹对照候选稿，输出 issues + rewritePrompt；必须通过闸门（score>=${lintPassScore} 且无 high issue）。未通过则按 rewritePrompt 回炉改写并再次 lint.style（最多回炉 ${lintMaxRework} 次）。本轮不要调用 kb.search 或任何写入类工具。\n`
+                  ? `E) lint.style（终稿闸门）：基于样例与指纹对照候选稿，输出 issues + rewritePrompt；必须通过闸门（score>=${lintPassScore} 且无 high issue）。未通过则按 rewritePrompt 回炉改写并再次 lint.style（最多回炉 ${lintMaxRework} 次）。本轮不要调用 kb.search 或任何写入类工具。\n`
                   : "") +
                 (batch.enforceLint
-                  ? "E) 写入：只有 lint.style 通过闸门后，才允许写入/输出终稿（doc.write/doc.applyEdits 等）。\n"
-                  : "D) 写入：在拿到 kb.search 的 tool_result 后，再写入/输出终稿（doc.write/doc.applyEdits 等）。\n") +
+                  ? "F) 写入：只有 lint.style 通过闸门后，才允许写入/输出终稿（doc.write/doc.applyEdits 等）。\n"
+                  : "E) 写入：在拿到 kb.search 的 tool_result 后，再写入/输出终稿（doc.write/doc.applyEdits 等）。\n") +
                 (gates.hasNonStyleLibraries
                   ? `提示：当前同时绑定了非风格库，因此 kb.search 必须显式传 libraryIds（仅限风格库）：${JSON.stringify(styleLibIds)}。\n`
                   : "") +

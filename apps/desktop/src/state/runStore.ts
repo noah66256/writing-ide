@@ -133,6 +133,8 @@ type RunState = {
   setDialogueSummary: (mode: Mode, summary: string, cursorTurns: number) => void;
   setMainDoc: (mainDoc: MainDoc) => void;
   resetRun: () => void;
+  /** 仅清空对话步骤/日志（保留 MainDoc/Todo/Refs/绑定库），用于“清空当前对话但不丢计划” */
+  clearConversationSteps: () => void;
   // 会话/历史：加载一段历史快照到当前 Run（用于“对话历史/切换”）
   loadSnapshot: (snap: {
     mode: Mode;
@@ -286,6 +288,16 @@ export const useRunStore = create<RunState>()(
       mainDoc: { goal: "" },
       todoList: [],
       ctxRefs: [],
+      dialogueSummaryByMode: { plan: "", agent: "", chat: "" },
+      dialogueSummaryTurnCursorByMode: { plan: 0, agent: 0, chat: 0 },
+    }),
+  clearConversationSteps: () =>
+    set({
+      steps: [],
+      logs: [],
+      isRunning: false,
+      activity: null,
+      // 对话清空后摘要无意义：一并清掉，避免旧摘要被注入 Context Pack 造成跑偏
       dialogueSummaryByMode: { plan: "", agent: "", chat: "" },
       dialogueSummaryTurnCursorByMode: { plan: 0, agent: 0, chat: 0 },
     }),
