@@ -3430,14 +3430,30 @@ fastify.post(
     }
 
     // 3) WritingBatchSkill（硬路由：强制走 writing.batch.*，避免单次 run 直接产出 N 篇导致中断）
+    // 小规模降级（B 方案）：如果 todo 中待写篇数 <= 6，则跳过 batch_active，回退到普通 style_imitate 流程
     if (activeSkillIds.includes("writing_batch")) {
-      phase = "batch_active";
-      const contract = PHASE_CONTRACTS_V1.batch_active!;
-      const allowSet = new Set<string>([...contract.allowTools, ...Array.from(ALWAYS_ALLOW_TOOL_NAMES)]);
-      for (const name of Array.from(allowed)) if (!allowSet.has(name)) allowed.delete(name);
-      hint = contract.hint;
-      reasonCodes.push("phase:batch_active");
-      return { phase, allowed, hint, reasonCodes };
+      const todoItems = Array.isArray(runTodoFromPack) ? runTodoFromPack : [];
+      const pendingCount = todoItems.filter((t: any) => {
+        const status = String((t as any)?.status ?? "").trim().toLowerCase();
+        return status !== "done" && status !== "cancelled";
+      }).length;
+      const SMALL_BATCH_THRESHOLD = 6;
+      const isSmallBatch = pendingCount > 0 && pendingCount <= SMALL_BATCH_THRESHOLD;
+
+      if (isSmallBatch) {
+        // 小规模场景：跳过 batch_active，让 style_imitate 接管（如果存在）
+        reasonCodes.push("phase:batch_small_downgrade", `pending_count:${pendingCount}`);
+        // 不 return，继续往下走 style_imitate 逻辑
+      } else {
+        // 大规模场景：强制 batch_active
+        phase = "batch_active";
+        const contract = PHASE_CONTRACTS_V1.batch_active!;
+        const allowSet = new Set<string>([...contract.allowTools, ...Array.from(ALWAYS_ALLOW_TOOL_NAMES)]);
+        for (const name of Array.from(allowed)) if (!allowSet.has(name)) allowed.delete(name);
+        hint = contract.hint;
+        reasonCodes.push("phase:batch_active");
+        return { phase, allowed, hint, reasonCodes };
+      }
     }
 
     // 4) StyleImitateSkill（V2：templates -> copy -> style -> write）
