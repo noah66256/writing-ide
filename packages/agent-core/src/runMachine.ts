@@ -37,6 +37,9 @@ export type StyleLintParsed = {
   highIssues: number;
   summary: string;
   rewritePrompt: string;
+  expectedDimensions: string[];
+  coveredDimensions: string[];
+  missingDimensions: string[];
   modelUsed: string;
   usedHeuristic: boolean;
 };
@@ -79,6 +82,9 @@ export type RunState = {
   // V2：draft 阶段是否已产出“候选正文”（纯文本，不是 tool_calls）
   // 说明：用于让闭环严格走 templates -> draft -> copy -> style -> write
   hasDraftText: boolean;
+  // V2.1：初稿后“二次检索”（金句/收束等）是否已完成
+  // - 目的：对齐批处理的“两段式检索”：先定结构/开头/结尾，再出初稿，再补金句/收束
+  hasPostDraftStyleKbSearch: boolean;
   // V2：templates 阶段最近一次“风格样例检索（card+cardTypes）”摘要（用于审计/回归）
   lastStyleKbSearch:
     | null
@@ -152,6 +158,7 @@ export function createInitialRunState(args?: { protocolRetryBudget?: number; wor
     hasStyleKbHit: false,
     styleKbDegraded: false,
     hasDraftText: false,
+    hasPostDraftStyleKbSearch: false,
     lastStyleKbSearch: null,
     styleLintPassed: false,
     styleLintFailCount: 0,
@@ -501,7 +508,11 @@ export function parseStyleLintResult(output: any): StyleLintParsed {
   const highIssues = issues.filter((x: any) => String(x?.severity ?? "").toLowerCase() === "high").length;
   const summary = String(o?.summary ?? "").trim();
   const rewritePrompt = String(o?.rewritePrompt ?? "").trim();
-  return { score, highIssues, summary, rewritePrompt, modelUsed, usedHeuristic };
+  const normIds = (v: any) => (Array.isArray(v) ? v.map((x: any) => String(x ?? "").trim()).filter(Boolean).slice(0, 16) : []);
+  const expectedDimensions = normIds(o?.expectedDimensions);
+  const coveredDimensions = normIds(o?.coveredDimensions);
+  const missingDimensions = normIds(o?.missingDimensions);
+  return { score, highIssues, summary, rewritePrompt, expectedDimensions, coveredDimensions, missingDimensions, modelUsed, usedHeuristic };
 }
 
 export type AutoRetryAnalysis = {
@@ -513,6 +524,7 @@ export type AutoRetryAnalysis = {
   needWrite: boolean;
   needKb: boolean;
   needDraft: boolean;
+  needPostDraftKbSearch: boolean;
   needCopy: boolean;
   needLint: boolean;
   needLength: boolean;
@@ -554,6 +566,16 @@ export function analyzeAutoRetryText(args: {
     args.intent.isWritingTask &&
     !args.intent.wantsOkOnly &&
     !isClarify;
+  const needPostDraftKbSearch =
+    args.gates.styleGateEnabled &&
+    args.gates.copyGateEnabled &&
+    args.state.hasDraftText &&
+    !args.state.hasPostDraftStyleKbSearch &&
+    !args.state.copyLintPassed &&
+    args.state.lastCopyLint === null &&
+    args.intent.isWritingTask &&
+    !args.intent.wantsOkOnly &&
+    !isClarify;
   const needCopy = args.gates.copyGateEnabled && !args.state.copyLintPassed && !isClarify;
   const needLint =
     args.gates.lintGateEnabled && !args.state.styleLintPassed && args.state.styleLintFailCount <= args.lintMaxRework && !isClarify;
@@ -576,12 +598,14 @@ export function analyzeAutoRetryText(args: {
   if (needTodo) reasons.push("Todo 未设置");
   if (needKb) reasons.push("风格样例未检索");
   if (needDraft) reasons.push("未产出候选正文（draft）");
+  if (needPostDraftKbSearch) reasons.push("未进行初稿后二次检索（补金句/收束）");
   if (needCopy) reasons.push("未进行防贴原文检查(lint.copy)");
   if (needLint) reasons.push("未进行风格对齐(lint.style)");
   if (needLength) reasons.push("字数与目标偏离较大");
   if (needWrite) reasons.push("写入未执行");
 
-  const shouldRetry = isFIMLeak || isEmpty || needTodo || needWrite || needKb || needDraft || needCopy || needLint || needLength;
+  const shouldRetry =
+    isFIMLeak || isEmpty || needTodo || needWrite || needKb || needDraft || needPostDraftKbSearch || needCopy || needLint || needLength;
   return {
     shouldRetry,
     isEmpty,
@@ -591,6 +615,7 @@ export function analyzeAutoRetryText(args: {
     needWrite,
     needKb,
     needDraft,
+    needPostDraftKbSearch,
     needCopy,
     needLint,
     needLength,

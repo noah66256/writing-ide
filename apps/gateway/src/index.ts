@@ -2947,7 +2947,8 @@ fastify.post(
     hasStyleKbSearch: runState.hasStyleKbSearch,
     hasStyleKbHit: (runState as any).hasStyleKbHit === true,
     styleKbDegraded: runState.styleKbDegraded,
-    hasDraftText: (runState as any).hasDraftText === true,
+    hasDraftText: runState.hasDraftText === true,
+    hasPostDraftStyleKbSearch: runState.hasPostDraftStyleKbSearch === true,
     lastStyleKbSearch: runState.lastStyleKbSearch ?? null,
     styleLintPassed: runState.styleLintPassed,
     styleLintFailCount: runState.styleLintFailCount,
@@ -3258,6 +3259,7 @@ fastify.post(
     | "batch_active"
     | "style_need_templates"
     | "style_need_draft"
+    | "style_need_punchline"
     | "style_need_copy"
     | "style_need_style"
     | "style_can_write";
@@ -3456,7 +3458,7 @@ fastify.post(
       }
     }
 
-    // 4) StyleImitateSkill（V2：templates -> copy -> style -> write）
+    // 4) StyleImitateSkill（V2.1：templates -> draft -> post_draft_kb -> copy -> style -> write）
     if (effectiveGates.styleGateEnabled) {
       if (!runState.hasStyleKbSearch) {
         phase = "style_need_templates";
@@ -3471,10 +3473,10 @@ fastify.post(
           "- 本回合禁止调用 lint.copy / lint.style 与任何“正文写入类” doc.*（doc.write/doc.applyEdits/doc.replaceSelection/doc.restoreSnapshot/doc.splitToDir/...）。\n" +
           "- 允许文件/目录操作（doc.deletePath/doc.renamePath/doc.mkdir），但高风险操作仍应走 proposal-first。\n" +
           "- 请先调用 kb.search（只搜风格库）拉模板/规则卡（必须 kind=card + 显式 cardTypes）。\n" +
-          "  - 推荐 cardTypes：cluster_rules_v1 / playbook_facet / style_profile / final_polish_checklist（兜底再加 hook/outline/thesis/ending/one_liner）。\n" +
+          "  - 推荐 cardTypes：cluster_rules_v1 / playbook_facet / style_profile / final_polish_checklist（兜底再加 hook/outline/thesis/ending；金句 one_liner 建议在“初稿后”二次检索）。\n" +
           "- 或仅更新 todo/mainDoc。";
         reasonCodes.push("phase:style_need_templates");
-      } else if (effectiveGates.copyGateEnabled && !(runState as any).hasDraftText) {
+      } else if (effectiveGates.copyGateEnabled && !runState.hasDraftText) {
         phase = "style_need_draft";
         // 禁止 kb.search / lint.copy / lint.style / 写入类 doc.*：先产候选正文（纯文本）
         allowed.delete("kb.search");
@@ -3487,8 +3489,28 @@ fastify.post(
           "【Skill: style_imitate】当前阶段：need_draft。\n" +
           "- 本回合禁止调用 kb.search、lint.copy、lint.style 与任何“正文写入类” doc.*。\n" +
           "- 请先输出一版候选正文（纯文本；不要写入）。\n" +
-          "- 下一回合再调用 lint.copy(text=候选正文) 进入“不贴原文”闸门。";
+          "- 下一回合会进入“初稿后二次检索（补金句/收束）”，再进入 lint.copy。";
         reasonCodes.push("phase:style_need_draft");
+      } else if (
+        effectiveGates.copyGateEnabled &&
+        runState.hasDraftText &&
+        !runState.hasPostDraftStyleKbSearch &&
+        !runState.copyLintPassed &&
+        runState.lastCopyLint === null
+      ) {
+        phase = "style_need_punchline";
+        // 初稿后：允许 kb.search（补金句/收束），但禁止 lint 与写入
+        allowed.delete("lint.copy");
+        allowed.delete("lint.style");
+        for (const name of Array.from(allowed)) {
+          if (isContentWriteTool(name)) allowed.delete(name);
+        }
+        hint =
+          "【Skill: style_imitate】当前阶段：need_punchline（初稿后二次检索）。\n" +
+          "- 你已经产出初稿。现在必须再调用 kb.search（只搜风格库）补齐“金句/收束”模板（必须 kind=card + 显式 cardTypes）。\n" +
+          "  - 推荐 cardTypes：one_liner / ending（必要时再加 hook/outline）。\n" +
+          "- 注意：不要把 kb.search 与 lint.copy 放在同一回合；先检索，再进入 lint.copy。\n";
+        reasonCodes.push("phase:style_need_punchline");
       } else if (effectiveGates.copyGateEnabled && !runState.copyLintPassed && runState.copyLintFailCount <= copyMaxRework) {
         phase = "style_need_copy";
         // 禁止 kb.search / lint.style / 写入类 doc.*：先做 anti-copy 闸门
@@ -3500,7 +3522,8 @@ fastify.post(
         hint =
           "【Skill: style_imitate】当前阶段：need_copy。\n" +
           "- 本回合禁止调用 kb.search、lint.style 与任何“正文写入类” doc.*。\n" +
-          "- 请先产出候选稿（纯文本；不要写入），再调用 lint.copy(text=候选稿) 做“防贴原文”检查；未通过则按提示回炉后再次 lint.copy。";
+          "- 请调用 lint.copy(text=候选稿) 做“防贴原文”检查；若上一回合刚做过“初稿后二次检索”，请把补强后的新稿全文放进 lint.copy。\n" +
+          "- 未通过则按提示回炉后再次 lint.copy。";
         reasonCodes.push("phase:style_need_copy");
       } else if (effectiveGates.lintGateEnabled && !runState.styleLintPassed && runState.styleLintFailCount <= lintMaxRework) {
         phase = "style_need_style";
@@ -4356,11 +4379,11 @@ fastify.post(
             effectiveGates.styleGateEnabled &&
             effectiveGates.copyGateEnabled &&
             runState.hasStyleKbSearch &&
-            !(runState as any).hasDraftText
+            !runState.hasDraftText
           ) {
             const t0 = assistantText.trim();
             if (t0 && !isToolCallMessage(t0) && looksLikeDraftText(t0)) {
-              (runState as any).hasDraftText = true;
+              runState.hasDraftText = true;
               writePolicyDecision({
                 turn,
                 policy: "StyleGatePolicy",
@@ -4425,6 +4448,7 @@ fastify.post(
           const needWrite = analysis.needWrite;
           const needKb = analysis.needKb;
           const needDraft = analysis.needDraft;
+          const needPostDraftKbSearch = analysis.needPostDraftKbSearch;
           const needLint = analysis.needLint;
           const needLength = analysis.needLength;
 
@@ -4436,6 +4460,7 @@ fastify.post(
             if (needTodo) reasonCodes.push("need_todo");
             if (needKb) reasonCodes.push("need_style_kb");
             if (needDraft) reasonCodes.push("need_draft");
+            if (needPostDraftKbSearch) reasonCodes.push("need_post_draft_kb");
             if (needLint) reasonCodes.push("need_style_lint");
             if (needLength) reasonCodes.push("need_length");
             if (needWrite) reasonCodes.push("need_write");
@@ -4465,10 +4490,13 @@ fastify.post(
                     ? "要求：先设置 todo（run.setTodoList / run.todo.upsertMany），再继续推进。"
                     : needDraft
                       ? "要求：先输出一版候选正文（纯文本），不要调用任何工具/不要输出 XML。"
+                      : needPostDraftKbSearch
+                        ? "要求：你已产出初稿，请先调用 kb.search（只搜风格库）做“初稿后二次检索”（cardTypes 推荐 one_liner/ending；kind=card+显式 cardTypes），再继续推进。"
                     : needLength
                       ? `要求：把正文长度调整到目标字数附近（目标≈${targetChars}字）。`
                       : "要求：不要覆盖既有 todo；需要调整用 run.todo.*。") +
                 (needKb ? "\n并且：若绑定风格库且是写作类，先 kb.search 拉样例。" : "") +
+                (needPostDraftKbSearch ? "\n并且：不要把 kb.search 与 lint.copy/lint.style 混在同一回合；先检索拿到 tool_result，再进入 lint。" : "") +
                 (needLint
                   ? effectiveGates.styleGateEnabled && effectiveGates.copyGateEnabled && !runState.copyLintPassed
                     ? "\n并且：先 lint.copy 做“防贴原文”检查；未通过则按 topOverlaps 局部回炉后复检。"
@@ -6511,10 +6539,11 @@ fastify.post(
           const cardTypes = normalizeIdList((a as any)?.cardTypes);
           const libraryIds = normalizeIdList((a as any)?.libraryIds);
           const hadHitBefore = (runState as any).hasStyleKbHit === true;
+          const isPostDraft = runState.hasDraftText === true;
           // 关键修正：把“做过检索”与“有命中”解耦。0 命中也算完成（进入降级），避免风格闭环卡死。
           runState.hasStyleKbSearch = true;
-          runState.lastStyleKbSearch = {
-            kind: "card",
+          const kbSummary = {
+            kind: "card" as const,
             query,
             cardTypes: cardTypes.slice(0, 12),
             libraryIds: libraryIds.slice(0, 8),
@@ -6522,6 +6551,12 @@ fastify.post(
             hits,
             topArtifacts,
           };
+          if (isPostDraft) {
+            runState.hasPostDraftStyleKbSearch = true;
+            (runState as any).lastPostDraftStyleKbSearch = kbSummary;
+          } else {
+            runState.lastStyleKbSearch = kbSummary;
+          }
           if (hits > 0) (runState as any).hasStyleKbHit = true;
           // 关键修正：如果本轮已命中过风格样例（例如 paragraph 已有命中），后续某次（例如 kind=outline）0 命中不应再触发“降级”提示（避免误报噪音）。
           if (hits === 0 && !runState.styleKbDegraded && !hadHitBefore) {
@@ -6958,6 +6993,9 @@ fastify.post(
                 content:
                   "你刚刚的 lint.style 未通过终稿闸门。你必须立刻按 tool_result 里的 rewritePrompt 回炉改写“上一版候选稿”，然后再次调用 lint.style 复检。\n" +
                   (scoreDrop >= 3 ? `- 重要：本轮候选稿的风格分数相比历史最佳下降明显（Δ≈${scoreDrop.toFixed(1)}）。请**优先以 BEST_DRAFT 为底稿**做局部修订，避免越改越飘。\n` : "") +
+                  (runState.lastStyleLint?.missingDimensions && runState.lastStyleLint.missingDimensions.length
+                    ? `- MUST 维度缺失：${runState.lastStyleLint.missingDimensions.slice(0, 10).join("、")}（回炉必须补齐）。\n`
+                    : "") +
                   "- 要求：只做**局部修改**（优先改 issues 命中的 3–5 个关键点），不要整篇重写；尽量保留原结构与关键表达。\n" +
                   "- 下一条消息必须且只能输出 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
                   "- 本轮只调用 lint.style（不要 kb.search；不要任何写入类工具）。\n" +
@@ -9816,6 +9854,26 @@ fastify.post(
   const bodySchema = z.object({
     model: z.string().optional(),
     maxIssues: z.number().int().min(3).max(24).optional(),
+    // P1：维度覆盖/缺失（可选，由 Desktop 计算后随 lint.style 一起带来）
+    expect: z
+      .object({
+        v: z.number().int().min(1).max(3).optional(),
+        libraryId: z.string().optional(),
+        selectedClusterId: z.string().optional(),
+        mustFacetIds: z.array(z.string().min(1)).max(16).optional(),
+        softRanges: z.record(z.string(), z.any()).optional(),
+        facetCards: z
+          .array(
+            z.object({
+              facetId: z.string().min(1),
+              title: z.string().optional(),
+              content: z.string().min(1).max(5000),
+            }),
+          )
+          .max(16)
+          .optional(),
+      })
+      .optional(),
     draft: z.object({
       text: z.string().min(1),
       chars: z.number().int().min(0).optional(),
@@ -9883,11 +9941,13 @@ fastify.post(
     "你会收到：",
     "1) draft：候选稿（以及它的确定性统计 draft.stats：每100句/每1000字等）。",
     "2) libraries：风格库的“确定性统计指纹”（libraries[*].stats）、高频口癖 Top（topNgrams，带 per1kChars）、以及少量原文样例（samples）。",
+    "3) expect（可选）：本轮必须执行的“维度子集”（mustFacetIds）与维度卡（facetCards），以及目标统计指纹（softRanges）。",
     "",
     "任务：",
     "- 逐条指出 draft 跟风格库“不像”的地方（不是泛泛而谈，必须可执行）。",
     "- 尽量用“数据差异”来支撑（例如：第一人称密度/问句率/短句率/语气词密度明显偏低）。",
     "- 证据：每条 issue 至少给 1 条 draft 里的原句片段（quote）；尽量再给 1 条风格库证据（可引用 topNgrams 或 samples 里的原句）。",
+    "- 若提供 expect.mustFacetIds：你必须输出维度覆盖报告（expected/covered/missing），并在 rewritePrompt 里明确补齐 missing 的维度（每个 missing 至少给 1 条可执行改法）。",
     "- 最后生成一段 rewritePrompt：给工作模型（如 deepseek）使用，要求它在“不新增事实”的前提下，把 draft 改到更像风格库。",
     "",
     "硬约束：",
@@ -9899,6 +9959,9 @@ fastify.post(
     "{",
     '  "similarityScore": number(0~100),',
     '  "summary": string,',
+    '  "expectedDimensions": string[] (可选：facetId 列表),',
+    '  "coveredDimensions": string[] (可选：facetId 列表),',
+    '  "missingDimensions": string[] (可选：facetId 列表),',
     '  "issues": [',
     "    {",
     '      "id": string,',
@@ -9912,7 +9975,7 @@ fastify.post(
     '  "rewritePrompt": string',
     "}",
     "",
-    `限制：issues 最多 ${Math.max(3, Math.min(24, maxIssues))} 条；rewritePrompt 要短、硬、可执行（建议分条）。`,
+    `限制：issues 最多 ${Math.max(3, Math.min(24, maxIssues))} 条；rewritePrompt 要短、硬、可执行（建议分条）。维度数组（expected/covered/missing）最多各 16 项。`,
   ].join("\n");
 
   const user = JSON.stringify(
@@ -9923,6 +9986,7 @@ fastify.post(
         sentences: body.draft.sentences ?? null,
         stats: body.draft.stats ?? null,
       },
+      expect: body.expect ?? null,
       libraries: (body.libraries ?? []).map((l) => ({
         id: l.id ?? "",
         name: l.name ?? "",
@@ -10006,6 +10070,46 @@ fastify.post(
     p.summary = nonEmptyStr(p.summary, "风格对齐检查：上游输出不稳定，已生成兜底结果（建议重试或切换 lint.style 模型）。");
     p.rewritePrompt = nonEmptyStr(p.rewritePrompt, fallbackRewritePrompt());
 
+    // P1：维度覆盖/缺失（可选，但若上游没返回，我们会尽量用 expect.mustFacetIds 补齐 expected）
+    const clampIdArr = (v: any, max: number) =>
+      Array.isArray(v) ? v.map((s: any) => String(s ?? "").trim()).filter(Boolean).slice(0, max) : null;
+    const expectMust = Array.isArray(body?.expect?.mustFacetIds) ? body.expect!.mustFacetIds.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
+
+    const expectedIn = clampIdArr((p as any).expectedDimensions, 16);
+    const coveredIn = clampIdArr((p as any).coveredDimensions, 16);
+    const missingIn = clampIdArr((p as any).missingDimensions, 16);
+
+    const expected = (expectedIn && expectedIn.length ? expectedIn : expectMust).slice(0, 16);
+    const covered = coveredIn && coveredIn.length ? coveredIn : null;
+    const missing = missingIn && missingIn.length ? missingIn : null;
+
+    if (expected.length) (p as any).expectedDimensions = expected;
+    else delete (p as any).expectedDimensions;
+
+    if (covered && expected.length) {
+      const dedup: string[] = [];
+      for (const x of covered) if (expected.includes(x) && !dedup.includes(x)) dedup.push(x);
+      (p as any).coveredDimensions = dedup.slice(0, 16);
+    } else if (covered) {
+      (p as any).coveredDimensions = Array.from(new Set(covered)).slice(0, 16);
+    } else {
+      delete (p as any).coveredDimensions;
+    }
+
+    if (missing && expected.length) {
+      const dedup: string[] = [];
+      for (const x of missing) if (expected.includes(x) && !dedup.includes(x)) dedup.push(x);
+      (p as any).missingDimensions = dedup.slice(0, 16);
+    } else if (!missing && expected.length && !(p as any).coveredDimensions) {
+      // 上游未返回覆盖信息：保守处理为“全部视为缺失”，让 rewritePrompt 强制补齐 MUST
+      (p as any).coveredDimensions = [];
+      (p as any).missingDimensions = expected.slice(0, 16);
+    } else if (missing) {
+      (p as any).missingDimensions = Array.from(new Set(missing)).slice(0, 16);
+    } else {
+      delete (p as any).missingDimensions;
+    }
+
     // issues：截断数量 + 字段纠偏（上游有时会输出过多/过长证据，或把字段漏掉/写错类型）
     const rawIssues = Array.isArray(p.issues) ? p.issues : [];
     p.issues = rawIssues.slice(0, maxIssuesClamped).map((it: any, idx: number) => {
@@ -10049,11 +10153,13 @@ fastify.post(
 
   const buildFallbackOut = (args: { reason: string; detail?: any }) => {
     const snippet = pickDraftSnippet(draftText);
+    const expectMust = Array.isArray(body?.expect?.mustFacetIds) ? body.expect!.mustFacetIds.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
     return {
       ok: true,
       degraded: true,
       degradedReason: String(args.reason ?? "UNKNOWN"),
       degradedDetail: args.detail ?? null,
+      ...(expectMust.length ? { expectedDimensions: expectMust.slice(0, 16), coveredDimensions: [], missingDimensions: expectMust.slice(0, 16) } : {}),
       similarityScore: 0,
       summary: "lint.style 上游输出不稳定/不可解析，已降级为最小可用结果（建议稍后重试或在 B 端切换 lint.style 模型）。",
       issues: [
@@ -10098,6 +10204,7 @@ fastify.post(
         "- 你只能做“格式/字段修复/缺省兜底”，不得新增任何事实/事件/数字。\n" +
         "- 你必须且只能输出一个 JSON 对象（不要代码块/不要多余文字）。\n" +
         '- 字段必须齐全：similarityScore(number 0~100), summary(string), issues(array), rewritePrompt(string)。\n' +
+        '- 可选字段：expectedDimensions(string[]), coveredDimensions(string[]), missingDimensions(string[])；若原始输出已包含请尽量保留/修复为数组。\n' +
         '- issues 每项必须包含：id(string), title(string), severity("high"|"medium"|"low"), fix(string)。metric/evidence 可选。\n' +
         "- 如果无法从原文恢复：输出一个最小合法对象（similarityScore=0，issues 含 1 条 high，rewritePrompt 给出可执行的局部改写指令）。\n";
 
@@ -10247,6 +10354,9 @@ fastify.post(
     const outSchema = z.object({
       similarityScore: z.number().min(0).max(100),
       summary: z.string().min(1),
+      expectedDimensions: z.array(z.string().min(1)).max(16).optional(),
+      coveredDimensions: z.array(z.string().min(1)).max(16).optional(),
+      missingDimensions: z.array(z.string().min(1)).max(16).optional(),
       issues: z
         .array(
           z.object({

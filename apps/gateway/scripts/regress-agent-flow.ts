@@ -255,10 +255,42 @@ async function main() {
   }
   ok("autoRetry.analyzeAutoRetryText");
 
+  // ======== 3.0.1) AutoRetry：初稿后二次检索（补金句/收束） ========
+  {
+    const mode = "agent" as const;
+    const userPrompt = "按风格库仿写一段";
+    const intent = detectRunIntent({ mode, userPrompt });
+    const active = activateSkills({ mode, userPrompt, kbSelected: [{ id: "style-1", purpose: "style" }], intent });
+    const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }], activeSkillIds: active.map((s) => s.id) });
+    const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
+    state.hasTodoList = true;
+    state.hasStyleKbSearch = true;
+    state.hasDraftText = true;
+    state.hasPostDraftStyleKbSearch = false;
+    state.copyLintPassed = false;
+    state.lastCopyLint = null;
+    const a = analyzeAutoRetryText({ assistantText: "继续", intent, gates, state, lintMaxRework: 2, targetChars: 1200 });
+    assert.equal(a.needPostDraftKbSearch, true);
+    assert.equal(a.shouldRetry, true);
+  }
+  ok("autoRetry.postDraftKbSearch");
+
   // ======== 3.1) Lint parse / proposal meta ========
   {
-    const parsed = parseStyleLintResult({ similarityScore: 12, issues: [{ severity: "high" }], rewritePrompt: "x", summary: "y", modelUsed: "local_heuristic(gpt-5)" });
+    const parsed = parseStyleLintResult({
+      similarityScore: 12,
+      issues: [{ severity: "high" }],
+      rewritePrompt: "x",
+      summary: "y",
+      expectedDimensions: ["logic_framework", "voice_rhythm"],
+      coveredDimensions: ["voice_rhythm"],
+      missingDimensions: ["logic_framework"],
+      modelUsed: "local_heuristic(gpt-5)",
+    });
     assert.equal(parsed.usedHeuristic, true);
+    assert.equal(parsed.expectedDimensions.length, 2);
+    assert.equal(parsed.coveredDimensions.length, 1);
+    assert.equal(parsed.missingDimensions.length, 1);
   }
   {
     assert.equal(isProposalWaitingMeta({ applyPolicy: "proposal", hasApply: true }), true);
@@ -334,6 +366,7 @@ async function main() {
     assert.ok(desk.includes("ACTIVE_SKILLS(JSON)"), "Desktop 未注入 ACTIVE_SKILLS(JSON)（Skills 可见性回退）");
     assert.ok(desk.includes("KB_STYLE_CLUSTERS(JSON)"), "Desktop 未注入 KB_STYLE_CLUSTERS(JSON)（M3 写法候选回退）");
     assert.ok(desk.includes("STYLE_SELECTOR(JSON)"), "Desktop 未注入 STYLE_SELECTOR(JSON)（Selector v1 回退）");
+    assert.ok(desk.includes("STYLE_DIMENSIONS"), "Desktop 未注入 STYLE_DIMENSIONS（维度结构化注入回退）");
     assert.ok(desk.includes("styleContractV1"), "Desktop 未落地 styleContractV1（M3 主文档风格契约回退）");
   }
   {

@@ -1157,6 +1157,57 @@ const tools: ToolDefinition[] = [
       const model = typeof args.model === "string" ? String(args.model).trim() : "";
       const maxIssues = typeof args.maxIssues === "number" ? Math.max(3, Math.min(24, Math.floor(args.maxIssues))) : 10;
 
+      // P1：把“本轮要求执行的维度（MUST/SHOULD）”随 lint.style 一起带给后端 linter，
+      // 让它能输出 missingDimensions / 覆盖情况，而不是只有总分。
+      const expect = await (async () => {
+        const run = useRunStore.getState();
+        const main: any = run.mainDoc ?? {};
+        const sc: any = main?.styleContractV1 ?? null;
+        if (!sc || typeof sc !== "object" || Array.isArray(sc)) return null;
+
+        const scLibId = String(sc?.libraryId ?? "").trim();
+        const libId = libraryIds.length ? String(libraryIds[0] ?? "").trim() : "";
+        if (!libId) return null;
+        if (scLibId && scLibId !== libId) return null; // 仅当 styleContract 对应当前 linter 库时才注入
+
+        const selectedClusterId = String(sc?.selectedCluster?.id ?? "").trim();
+        const facetPlan = Array.isArray(sc?.facetPlan) ? (sc.facetPlan as any[]) : [];
+        const mustFacetIds = facetPlan
+          .map((f: any) => String(f?.facetId ?? "").trim())
+          .filter(Boolean)
+          .slice(0, 10);
+
+        const softRanges = (() => {
+          const s = sc?.softRanges;
+          if (!s || typeof s !== "object" || Array.isArray(s)) return null;
+          return Object.keys(s).length ? s : null;
+        })();
+
+        const facetCards = await (async () => {
+          if (!mustFacetIds.length) return [];
+          const ret = await useKbStore
+            .getState()
+            .getPlaybookFacetCardsForLibrary({ libraryId: libId, facetIds: mustFacetIds, maxCharsPerCard: 900, maxTotalChars: 4500 })
+            .catch(() => ({ ok: false, cards: [] } as any));
+          const cards = ret?.ok && Array.isArray(ret.cards) ? ret.cards : [];
+          return cards.slice(0, 10).map((c: any) => ({
+            facetId: String(c?.facetId ?? "").trim(),
+            title: String(c?.title ?? "").trim(),
+            content: String(c?.content ?? "").trim(),
+          }));
+        })();
+
+        if (!mustFacetIds.length && !softRanges) return null;
+        return {
+          v: 1,
+          libraryId: libId,
+          ...(selectedClusterId ? { selectedClusterId } : {}),
+          mustFacetIds,
+          softRanges,
+          ...(facetCards.length ? { facetCards } : {}),
+        };
+      })();
+
       try {
         const res = await fetch(url, {
           method: "POST",
@@ -1166,6 +1217,7 @@ const tools: ToolDefinition[] = [
             maxIssues,
             draft: { text: draftText, chars: draftFp.chars, sentences: draftFp.sentences, stats: draftFp.stats },
             libraries: librariesPayload,
+            ...(expect ? { expect } : {}),
           }),
         });
         const json = await res.json().catch(() => null);
