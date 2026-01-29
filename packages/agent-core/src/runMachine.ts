@@ -227,7 +227,11 @@ export function detectRunIntent(args: {
   mode: AgentMode;
   userPrompt: string;
   mainDocRunIntent?: unknown;
+  /** 可选：完整 Main Doc（用于读取 goal/workflowV1 等续跑契约；保持向后兼容） */
+  mainDoc?: unknown;
   runTodo?: any[];
+  /** 可选：最近对话（用于“无 RUN_TODO 的续跑/编号回答”意图继承；保持向后兼容） */
+  recentDialogue?: Array<{ role?: string; text?: string }>;
 }): RunIntent {
   const { mode } = args;
   const userPrompt = String(args.userPrompt ?? "");
@@ -302,7 +306,7 @@ export function detectRunIntent(args: {
 
   // 关键增强：当用户在回答“澄清问题/等待确认”的续跑对话时，userPrompt 往往非常短（例如“继续/视频脚本/按这个来”），
   // 仅靠正则会误判为非写作任务，导致 style_imitate/写作闭环不激活。
-  // 这里在 mainDocIntent=auto 且当前未判为写作任务时，参考 RUN_TODO 来判断是否应继承“写作闭环”意图。
+  // 这里在 mainDocIntent=auto 且当前未判为写作任务时，参考 RUN_TODO / MainDoc.workflowV1 / 最近对话 来判断是否应继承“写作闭环”意图。
   if (!mainDocIntent && !isWritingTaskFinal) {
     const todoRaw = Array.isArray(args.runTodo) ? args.runTodo : [];
     const todo = todoRaw.slice(0, 50);
@@ -315,7 +319,25 @@ export function detectRunIntent(args: {
     const looksLikeResearchOnly =
       /(查(一下)?|查询|搜索|检索|全网|上网|联网|web\.search|web\.fetch|github|资料|来源|链接|引用|证据|大搜|调研|研究)/i.test(promptTrim) &&
       !/(写|仿写|改写|润色|续写|扩写|脚本|文案|终稿|写入)/.test(promptTrim);
-    const shortFollowUpLike = (looksLikeExplicitContinue || looksLikeFormatSwitch) && promptTrim.length <= 60 && !looksLikeResearchOnly;
+    const looksLikeChoice =
+      /^写法\s*[ABC]\b/i.test(promptTrim) ||
+      /\bcluster[_-]\d+\b/i.test(promptTrim) ||
+      /^(?:话题|主题|选项|方案|topic)\s*(?:\d{1,2}|[一二三四五六七八九十]{1,3})\s*(?:[号个条项])?\s*(?:吧|呢)?$/i.test(promptTrim) ||
+      /^(?:我选|选|就|要)\s*(?:\d{1,2}|[一二三四五六七八九十]{1,3})\s*(?:[号个条项])?\s*(?:吧|呢)?$/.test(promptTrim) ||
+      /^第?\s*(?:\d{1,2}|[一二三四五六七八九十]{1,3})\s*(?:个|条|项)\s*(?:吧|呢)?$/.test(promptTrim) ||
+      /^(?:\d{1,2}|[一二三四五六七八九十]{1,3})\s*(?:号|#)\s*(?:吧|呢)?$/.test(promptTrim) ||
+      /^(?:\d{1,2}|[一二三四五六七八九十]{1,3})\s*(?:吧|呢)$/.test(promptTrim);
+    // 编号回答：典型“1...；2...；3...”用于回复上一轮澄清/确认问题
+    const looksLikeNumberedAnswers = (() => {
+      if (promptTrim.length > 160) return false;
+      // e.g. "1按建议来；2OK；3可以" / "1. A\n2. B"
+      const hits = promptTrim.match(/(?:^|[;；\n\r\t ]+)\d{1,2}(?=[^\d\s])/g) ?? [];
+      return hits.length >= 2;
+    })();
+    const shortFollowUpLike =
+      (looksLikeExplicitContinue || looksLikeFormatSwitch || looksLikeChoice || looksLikeNumberedAnswers) &&
+      promptTrim.length <= 160 &&
+      !looksLikeResearchOnly;
     const hasWaiting = todo.some((t: any) => {
       const status = String(t?.status ?? "").trim().toLowerCase();
       const note = String(t?.note ?? "").trim();
@@ -329,7 +351,35 @@ export function detectRunIntent(args: {
       ((/(分析|排查|报错|bug|为什么|怎么修|怎么解决|白屏|崩溃|日志|报错栈)/.test(promptTrim) &&
         !/(写|仿写|改写|润色|脚本|文案|终稿|写入)/.test(promptTrim)) ||
         looksLikeResearchOnly);
+
+    // 续跑证据 A：MainDoc.workflowV1（通用工作流契约）
+    const mainDoc = args.mainDoc && typeof args.mainDoc === "object" ? (args.mainDoc as any) : null;
+    const wf = mainDoc && (mainDoc as any).workflowV1 && typeof (mainDoc as any).workflowV1 === "object" ? (mainDoc as any).workflowV1 : null;
+    const wfStatus = wf ? String((wf as any).status ?? "").trim().toLowerCase() : "";
+    const wfIntentHint = wf ? String((wf as any).intentHint ?? (wf as any).stickyIntent ?? "").trim().toLowerCase() : "";
+    const wfKind = wf ? String((wf as any).kind ?? "").trim().toLowerCase() : "";
+    const wfWaiting = wfStatus === "waiting_user" || wfStatus === "waiting" || wfStatus === "clarify_waiting";
+    const wfLooksWriting = ["writing", "rewrite", "polish"].includes(wfIntentHint) || /(style|imitate|writing|rewrite|polish)/.test(wfKind);
+    const wfEvidence = wfWaiting && wfLooksWriting;
+
+    // 续跑证据 B：最近对话（上一轮 assistant 明显在问“请选择/请确认”，且语境是写作/仿写）
+    const recent = Array.isArray(args.recentDialogue) ? args.recentDialogue : [];
+    const lastAssistant = [...recent].reverse().find((m: any) => String(m?.role ?? "") === "assistant" && String(m?.text ?? "").trim());
+    const lastAssistantText = lastAssistant ? String((lastAssistant as any).text ?? "").trim() : "";
+    const lastAssistantAsking =
+      looksLikeClarifyQuestions(lastAssistantText) || /(请选择|请确认|选(一|1)个|从.*选|你选|您选|选哪个|选哪种)/.test(lastAssistantText);
+    const lastAssistantLooksWriting =
+      /(写|仿写|改写|润色|续写|扩写|文案|脚本|稿|文章|终稿|风格|开头|结尾|金句|收束)/.test(lastAssistantText);
+    const dialogueEvidence = lastAssistantAsking && lastAssistantLooksWriting;
+
+    const hasContinuationEvidence = wfEvidence || dialogueEvidence;
+
+    // 1) RUN_TODO 续跑（原逻辑）：todo 明确属于写作闭环
     if (!looksNonWriting && !looksLikeFileOpsTask && todoLooksWriting && (hasWaiting || shortFollowUpLike)) {
+      isWritingTaskFinal = true;
+    }
+    // 2) 无 RUN_TODO 的续跑（新逻辑）：靠 workflowV1 或 recent dialogue 保持写作闭环连续性
+    if (!isWritingTaskFinal && !looksNonWriting && !looksLikeFileOpsTask && shortFollowUpLike && hasContinuationEvidence) {
       isWritingTaskFinal = true;
     }
   }

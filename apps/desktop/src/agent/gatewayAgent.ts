@@ -887,6 +887,21 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
     return ids.map((id: string) => map.get(id) ?? { id, name: id });
   })();
 
+  // recentDialogue（仅用于本地意图/skills 的“续跑判定”，不注入模型 messages）
+  const recentDialogueForIntent = (() => {
+    const turnsAll = buildDialogueTurnsFromSteps(useRunStore.getState().steps ?? []);
+    const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
+    const tail = completeTurns.slice(-3);
+    const out: Array<{ role: "user" | "assistant"; text: string }> = [];
+    for (const t of tail) {
+      const u = String((t as any).user ?? "").trim();
+      const a = String((t as any).assistant ?? "").trim();
+      if (u) out.push({ role: "user", text: u });
+      if (a) out.push({ role: "assistant", text: a });
+    }
+    return out.length ? out : undefined;
+  })();
+
   const activeSkillsRaw = activateSkills({
     mode: useRunStore.getState().mode as any,
     userPrompt,
@@ -897,7 +912,9 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
       mode: useRunStore.getState().mode as any,
       userPrompt,
       mainDocRunIntent: (mainDoc as any)?.runIntent,
+      mainDoc: mainDoc as any,
       runTodo: runTodoForPack,
+      recentDialogue: recentDialogueForIntent as any,
     }),
   });
   const idSetRaw = new Set((activeSkillsRaw ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean));

@@ -26,6 +26,10 @@ export type MainDoc = {
   // M3：风格契约（由“写法候选/anchors/默认写法”生成；跨回合注入，作为仿写的硬约束地基）
   // 说明：保持短小可验证，不要塞长原文。
   styleContractV1?: any;
+  // Workflow Contract（v0.1）：跨回合“续跑/等待确认/恢复”的通用契约。
+  // 说明：用于修复短回复（OK/继续/选3/1..2..3..）导致的意图掉线；优先让 Router/skills 依据该字段保持工作流连续性。
+  // 形态示例（建议，不强约束）：{ v:1, kind:"style_imitate", status:"waiting_user"|"running"|"done", waiting:{question,options?}, intentHint:"writing", updatedAt }
+  workflowV1?: any;
 };
 
 export type TodoStatus = "todo" | "in_progress" | "done" | "blocked" | "skipped";

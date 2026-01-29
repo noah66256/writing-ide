@@ -1215,6 +1215,7 @@ function buildAgentProtocolPrompt(args: { mode: AgentMode; allowedToolNames?: Se
         `     4) 调用 lint.style（强模型）对照库原文/指纹找“不像点”，按其 rewritePrompt 做局部改写后复检；通过后再写入/输出。\n` +
         `2) 执行（由你自主决定是否调用工具）：素材收集（@引用/读文件/KB 检索）→ 结构（先 outline）→ 初稿 → 改写润色 → 自检。\n` +
         `3) 进度记录：完成/推进每个关键步骤时，调用 run.todo.update（或兼容工具 run.updateTodo）；关键决策与约束调用 run.mainDoc.update。\n` +
+        `4) 续跑契约（workflowV1）：当你要向用户提出“请选择/请确认/你选哪个”等需要用户回复的问题，并准备结束本轮 run 等待用户时，先调用 run.mainDoc.update 写入 mainDoc.workflowV1（例如：{v:1,kind,status:"waiting_user",waiting:{question,options},intentHint,updatedAt}）。当用户回复后继续推进时，把 workflowV1 更新为 running/done（避免短回复导致写作闭环/skills 掉线）。\n` +
         `输出约束：\n` +
         `- 给用户看的文字输出必须是 Markdown（富文本），不要输出 JSON。\n` +
         `- 不要输出思维链/自言自语（例如“我将…”“下一步我会…”）；只输出对用户有用的内容（澄清问题 / 结果 / 简短步骤摘要）。\n` +
@@ -1455,7 +1456,14 @@ fastify.post(
   const runTodoFromPack = parseRunTodoFromContextPack(body.contextPack);
   const recentDialogueFromPack = parseRecentDialogueFromContextPack(body.contextPack);
   const contextManifestFromPack = parseContextManifestFromContextPack(body.contextPack);
-  const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: (mainDocFromPack as any)?.runIntent, runTodo: runTodoFromPack });
+  const intent = detectRunIntent({
+    mode,
+    userPrompt,
+    mainDocRunIntent: (mainDocFromPack as any)?.runIntent,
+    mainDoc: mainDocFromPack as any,
+    runTodo: runTodoFromPack,
+    recentDialogue: (recentDialogueFromPack as any) ?? undefined,
+  });
 
   type IntentType = "task_execution" | "discussion" | "debug" | "info" | "unclear";
   type NextAction = "respond_text" | "ask_clarify" | "enter_workflow";

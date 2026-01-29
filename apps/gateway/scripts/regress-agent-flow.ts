@@ -212,6 +212,27 @@ async function main() {
     assert.equal(skills.some((s) => s.id === "style_imitate"), true);
   }
   {
+    // 关键回归：RUN_TODO 为空时，用户用“编号回答/短回复”回复上一轮澄清（recent dialogue 里有“请确认/请选择”且语境是写作），也应判为写作续跑并激活 style_imitate。
+    const mode = "agent" as const;
+    const userPrompt = "1按建议来；2OK；3可以";
+    const recentDialogue = [
+      {
+        role: "assistant",
+        text: "我将按绑定风格库仿写 5 篇情感挽回稿（每篇 1200 字左右，各生成一个 md 文件）。请确认：1按建议来；2OK；3可以",
+      },
+    ];
+    const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: "auto", runTodo: [], recentDialogue });
+    assert.equal(intent.isWritingTask, true);
+    const skills = activateSkills({
+      mode,
+      userPrompt,
+      mainDocRunIntent: "auto",
+      kbSelected: [{ id: "style-1", purpose: "style" }],
+      intent,
+    });
+    assert.equal(skills.some((s) => s.id === "style_imitate"), true);
+  }
+  {
     // 关键回归：存在旧 RUN_TODO（写作闭环）时，用户发起“全网/GitHub 调研/查资料”不应被误判为写作续跑（否则会触发 style_imitate 抢跑污染检索）。
     const mode = "agent" as const;
     const userPrompt = "查一查全网和github，看看这种问题怎么解决";
