@@ -989,6 +989,9 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
     );
   })();
 
+  let styleSelectorPayload: any = null;
+  let styleSelectorSelectedFacets: SelectedFacetV1[] = [];
+  let styleSelectorSelectedFacetIds: string[] = [];
   const styleSelectorSection = await (async () => {
     // Selector v1：为“自动选簇/选卡”提供结构化输出，保证换生成模型也稳定可用
     if (!allowInjectStyleContext) return "";
@@ -1092,7 +1095,75 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
       },
     };
 
+    styleSelectorPayload = payload;
+    styleSelectorSelectedFacets = selectedFacets.slice(0, 12);
+    styleSelectorSelectedFacetIds = selectedFacetIds.slice(0, 12);
     return `STYLE_SELECTOR(JSON):\n${JSON.stringify(payload, null, 2)}\n\n` + facetCardsSection;
+  })();
+
+  const styleDimensionsSection = (() => {
+    if (!allowInjectStyleContext) return "";
+    const contract: any = (mainDoc as any)?.styleContractV1 ?? null;
+    const libId = String(styleSelectorPayload?.libraryId ?? contract?.libraryId ?? "").trim();
+    if (!libId) return "";
+    const libName = String(styleSelectorPayload?.libraryName ?? contract?.libraryName ?? libId).trim();
+    const selectedClusterId = String(styleSelectorPayload?.selectedClusterId ?? contract?.selectedCluster?.id ?? "").trim();
+    const facetPlan = Array.isArray(contract?.facetPlan) ? contract.facetPlan : [];
+    const planFacetIds = facetPlan
+      .map((f: any) => String(f?.facetId ?? "").trim())
+      .filter(Boolean);
+    const mustFacetIdsRaw = styleSelectorSelectedFacetIds.length ? styleSelectorSelectedFacetIds : planFacetIds;
+    const uniq = (arr: string[]) => {
+      const out: string[] = [];
+      for (const x of arr) if (x && !out.includes(x)) out.push(x);
+      return out;
+    };
+    const mustFacetIds = uniq(mustFacetIdsRaw).slice(0, 10);
+    const mustFacets =
+      styleSelectorSelectedFacets.length
+        ? styleSelectorSelectedFacets.slice(0, 10).map((f) => ({
+            facetId: f.facetId,
+            label: f.label,
+            why: f.why,
+            kbQueries: f.kbQueries,
+          }))
+        : facetPlan
+            .map((f: any) => ({
+              facetId: String(f?.facetId ?? "").trim(),
+              label: String(f?.label ?? f?.title ?? "").trim(),
+              why: String(f?.why ?? "").trim(),
+              kbQueries: Array.isArray(f?.kbQueries) ? f.kbQueries.map((q: any) => String(q ?? "").trim()).filter(Boolean) : [],
+            }))
+            .filter((f: any) => Boolean((f as any).facetId))
+            .slice(0, 10);
+    const shouldFacetIds = planFacetIds.filter((id) => !mustFacetIds.includes(id)).slice(0, 8);
+    const softRanges = (() => {
+      const s = contract?.softRanges;
+      if (!s || typeof s !== "object" || Array.isArray(s)) return null;
+      return Object.keys(s).length ? s : null;
+    })();
+    if (!mustFacetIds.length && !softRanges) return "";
+    const payload = {
+      v: 1,
+      libraryId: libId,
+      libraryName: libName,
+      selectedClusterId: selectedClusterId || null,
+      mustApply: {
+        facetIds: mustFacetIds,
+        facets: mustFacets,
+      },
+      shouldApply: {
+        facetIds: shouldFacetIds,
+        softRanges,
+      },
+      mayApply: {
+        cardTypesHint: ["hook", "one_liner", "outline", "thesis", "ending"],
+      },
+    };
+    return (
+      `STYLE_DIMENSIONS(JSON):\n${JSON.stringify(payload, null, 2)}\n\n` +
+      "提示：以上为结构化维度约束。MUST 必须覆盖；SHOULD 尽量贴合统计指纹；MAY 作为备选素材。\n\n"
+    );
   })();
 
   // Pending proposals：用于“proposal-first 不落盘”但仍可继续下一步（避免下一轮说‘没有初稿’）
@@ -1210,6 +1281,7 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
   if (playbookSection) pushSeg({ name: "KB_LIBRARY_PLAYBOOK", content: playbookSection, priority: "p2", trusted: false, source: "desktop" });
   if (styleClustersSection) pushSeg({ name: "KB_STYLE_CLUSTERS", content: styleClustersSection, priority: "p2", trusted: false, source: "desktop" });
   if (styleSelectorSection) pushSeg({ name: "STYLE_SELECTOR", content: styleSelectorSection, priority: "p2", trusted: false, source: "desktop" });
+  if (styleDimensionsSection) pushSeg({ name: "STYLE_DIMENSIONS", content: styleDimensionsSection, priority: "p2", trusted: false, source: "desktop" });
 
   // p2: 提案态提示（可信）
   if (pendingSection) pushSeg({ name: "PENDING_FILE_PROPOSALS", content: pendingSection, priority: "p2", trusted: true, source: "desktop" });
