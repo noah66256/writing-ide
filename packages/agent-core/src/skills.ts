@@ -256,24 +256,52 @@ export const WRITING_BATCH_SKILL: SkillManifest = {
     context: "ACTIVE_SKILLS: writing_batch（硬路由：批量任务走批处理工具）",
   },
   policies: ["SkillToolCapsPolicy"],
-  toolCaps: {
-    allowTools: [
-      "writing.batch.start",
-      "writing.batch.status",
-      "writing.batch.pause",
-      "writing.batch.resume",
-      "writing.batch.cancel",
-      // 只读：允许模型在 batch_active 里确认有哪些文件（避免误触发不允许工具导致空转重试）
-      "project.listFiles",
-      // 允许批处理启动前/中查阅风格库（避免与 style_imitate 冲突时 kb.search 被误禁）
-      "kb.search",
-      "run.done",
-    ],
-  },
   ui: { badge: "BATCH", color: "orange" },
 };
 
-export const SKILL_MANIFESTS_V1: SkillManifest[] = [WRITING_BATCH_SKILL, WEB_TOPIC_RADAR_SKILL, STYLE_IMITATE_SKILL];
+export const WRITING_MULTI_SKILL: SkillManifest = {
+  id: "writing_multi",
+  name: "小规模多篇写作（逐篇闭环）",
+  description:
+    "当用户要小规模多篇（2–9 篇/条）时启用：要求逐篇独立生成与落盘，禁止“先合并再 splitToDir”造成同质化与门禁误伤。",
+  priority: 120,
+  stageKey: "agent.skill.writing_multi",
+  autoEnable: true,
+  triggers: [
+    { when: "mode_in", args: { modes: ["plan", "agent"] } },
+    { when: "run_intent_in", args: { intents: ["writing", "rewrite", "polish"] } },
+    {
+      when: "text_regex",
+      args: {
+        // 触发信号：2–9 篇/条/个；或“多篇/几篇/若干” + “每篇/每条/分别/各写”等分配语义
+        // 注意：>=10 交给 writing_batch（后台队列）
+        pattern:
+          "(?:\\b[2-9]\\b\\s*(?:篇|条|个)(?:\\s*(?:文章|文案|口播|脚本|稿))?)|" +
+          "(?:(?:两|二|三|四|五|六|七|八|九)\\s*(?:篇|条|个)(?:\\s*(?:文章|文案|口播|脚本|稿))?)|" +
+          "(?:(?:多篇|几篇|若干篇|多条|几条|若干条)[\\s\\S]{0,24}(?:每篇|每条|分别|各写|各自|逐篇|逐条))|" +
+          "(?:(?:每篇|每条)[\\s\\S]{0,16}\\d{2,5}(?:\\s*字)?)",
+      },
+    },
+  ],
+  promptFragments: {
+    system:
+      "当 skill=writing_multi 激活时（小规模多篇，逐篇闭环）：\n" +
+      "1) 目标：在一次 Run 内，按“逐篇独立闭环”生成并写入多篇（2–9）。每篇必须有自己的开头/结构/收束与金句，不要批量同质化。\n" +
+      "2) 禁止：不要把多篇正文合并成一个大文档再调用 doc.splitToDir；不要先产出 N 篇完整正文再一次性写入。\n" +
+      "3) 允许：逐篇循环执行：写前 kb.search（结构/开头/结尾模板）→ 产初稿 → 初稿后二次 kb.search（one_liner/ending）→（若开启）lint.copy →（若开启）lint.style → doc.write 单篇落盘。\n" +
+      "4) 写入建议：每篇用一个新文件（doc.write ifExists=rename），默认写入到同一输出目录；文件名建议包含序号与标题。\n" +
+      "工具调用仍按 XML 协议输出。",
+    context: "ACTIVE_SKILLS: writing_multi（小规模多篇：逐篇闭环，禁止 splitToDir）",
+  },
+  policies: ["SkillToolCapsPolicy"],
+  toolCaps: {
+    // 关键：禁用“合并后再分割”的捷径（这会导致同质化、并且在门禁阶段经常触发 denied）
+    denyTools: ["doc.splitToDir"],
+  },
+  ui: { badge: "MULTI", color: "teal" },
+};
+
+export const SKILL_MANIFESTS_V1: SkillManifest[] = [WRITING_BATCH_SKILL, WRITING_MULTI_SKILL, WEB_TOPIC_RADAR_SKILL, STYLE_IMITATE_SKILL];
 
 export function activateSkills(args: {
   mode: AgentMode;

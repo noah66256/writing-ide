@@ -2062,9 +2062,11 @@ fastify.post(
   const webRadarActive =
     webRadarByText || (rawActiveSkillIds.includes("web_topic_radar") && String((intentRoute as any)?.routeId ?? "") === "web_radar");
   // 额外门禁（范式）：当路由判定为“只读/不允许工具”（discussion/debug/analysis_readonly/project_search/web_radar 等）时，
-  // 不应让 style_imitate 作为 ActiveSkill 介入（否则会把“风格库”变成默认首要权重，干扰纯检索/分析/排查）。
-  const suppressStyleByToolPolicy = String((intentRoute as any)?.toolPolicy ?? "").trim() !== "allow_tools";
-  const suppressStyle = webRadarActive || suppressStyleByToolPolicy;
+  // 不应让写作类 skills 介入（否则会把“风格库/批处理/多篇写作”变成默认首要权重，干扰纯检索/分析/排查）。
+  const suppressSkillsByToolPolicy = String((intentRoute as any)?.toolPolicy ?? "").trim() !== "allow_tools";
+  const suppressStyle = webRadarActive || suppressSkillsByToolPolicy;
+  const suppressMulti = suppressSkillsByToolPolicy;
+  const suppressBatch = suppressSkillsByToolPolicy;
   const suppressedSkillIds: string[] = [];
   const routeId0 = String((intentRoute as any)?.routeId ?? "").trim();
   // project_search 路由：不应启用 web_topic_radar（避免把“项目内查 github actions”误导到 web.search/web.fetch）
@@ -2075,9 +2077,77 @@ fastify.post(
     if (rawActiveSkillIds.includes("web_topic_radar")) suppressedSkillIds.push("web_topic_radar");
     activeSkills = activeSkills.filter((s: any) => String(s?.id ?? "").trim() !== "web_topic_radar");
   }
+  if (suppressBatch) {
+    if (rawActiveSkillIds.includes("writing_batch")) suppressedSkillIds.push("writing_batch");
+    activeSkills = activeSkills.filter((s: any) => String(s?.id ?? "").trim() !== "writing_batch");
+  }
+  if (suppressMulti) {
+    if (rawActiveSkillIds.includes("writing_multi")) suppressedSkillIds.push("writing_multi");
+    activeSkills = activeSkills.filter((s: any) => String(s?.id ?? "").trim() !== "writing_multi");
+  }
   if (suppressStyle) {
     if (rawActiveSkillIds.includes("style_imitate")) suppressedSkillIds.push("style_imitate");
     activeSkills = activeSkills.filter((s: any) => String(s?.id ?? "").trim() !== "style_imitate");
+  }
+
+  // 小规模降级：当用户只是要少量（<=6）“批量/多篇”时，不应启用 writing_batch（避免被硬路由到 writing.batch.start）
+  // - 优先依据 RUN_TODO（批处理续跑场景）
+  // - 若 RUN_TODO 为空，则尝试从 prompt/mainDoc.goal 推断篇数（例如 “批量写5篇/写3条口播”）
+  {
+    const SMALL_BATCH_THRESHOLD = 6;
+    const todoItems = Array.isArray(runTodoFromPack) ? runTodoFromPack : [];
+    const pendingCount = todoItems.filter((t: any) => {
+      const status = String((t as any)?.status ?? "").trim().toLowerCase();
+      return status !== "done" && status !== "cancelled";
+    }).length;
+
+    const parseCnInt = (token: string): number | null => {
+      const s = String(token ?? "").trim();
+      if (!s) return null;
+      if (/^\d{1,2}$/.test(s)) {
+        const n = Number(s);
+        return Number.isFinite(n) ? Math.floor(n) : null;
+      }
+      const map: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+      if (s === "十") return 10;
+      if (s.startsWith("十") && s.length === 2) return 10 + (map[s[1]] ?? 0);
+      if (s.length === 2 && map[s[0]] && s[1] === "十") return map[s[0]] * 10;
+      if (s.length === 3 && map[s[0]] && s[1] === "十") return map[s[0]] * 10 + (map[s[2]] ?? 0);
+      return map[s] ?? null;
+    };
+
+    const inferCountFromText = (raw: string): number | null => {
+      const t = String(raw ?? "");
+      if (!t.trim()) return null;
+      const m =
+        t.match(/(?:top|前)\s*([0-9]{1,2}|[一二三四五六七八九十两]{1,3})\s*(?:篇|条|个)/i) ||
+        t.match(/([0-9]{1,2}|[一二三四五六七八九十两]{1,3})\s*(?:篇|条|个)(?:\s*(?:文章|文案|口播|脚本|稿))?/);
+      const token = m?.[1] ? String(m[1]) : "";
+      if (!token) return null;
+      return parseCnInt(token);
+    };
+
+    const requestedCount = (() => {
+      const texts = [String(userPrompt ?? ""), String((mainDocFromPack as any)?.goal ?? "")];
+      for (const raw of texts) {
+        const n = inferCountFromText(raw);
+        if (!Number.isFinite(n as any)) continue;
+        const nn = Number(n);
+        if (nn <= 0) continue;
+        return Math.floor(nn);
+      }
+      return null as number | null;
+    })();
+
+    const wantsSmallBatch =
+      (pendingCount > 0 && pendingCount <= SMALL_BATCH_THRESHOLD) ||
+      (pendingCount === 0 && requestedCount !== null && requestedCount > 0 && requestedCount <= SMALL_BATCH_THRESHOLD);
+
+    if (wantsSmallBatch && rawActiveSkillIds.includes("writing_batch")) {
+      // 只做一次性抑制：确保 skillsSystemPrompt 不再包含 writing_batch 的“硬路由”提示
+      if (!suppressedSkillIds.includes("writing_batch")) suppressedSkillIds.push("writing_batch");
+      activeSkills = activeSkills.filter((s: any) => String(s?.id ?? "").trim() !== "writing_batch");
+    }
   }
 
   const activeSkillIds = (activeSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
@@ -2836,10 +2906,19 @@ fastify.post(
     const texts = [String(userPrompt ?? ""), String((mainDocFromPack as any)?.goal ?? "")];
     for (const raw of texts) {
       const t = String(raw ?? "");
-      const m = t.match(/(\d{2,5})\s*字/);
-      if (!m?.[1]) continue;
-      const n = Number(m[1]);
-      if (Number.isFinite(n) && n > 0) return Math.floor(n);
+      // A) 显式 “1200字/1500字” 等
+      const m1 = t.match(/(\d{2,5})\s*字/);
+      if (m1?.[1]) {
+        const n = Number(m1[1]);
+        if (Number.isFinite(n) && n > 0) return Math.floor(n);
+      }
+      // B) 兼容口语： “每篇1200/每条1200”（可省略“字”）
+      // - 仅在出现“每篇/每条/每个”时生效，避免把“50节/250篇”等批量规模数字误当作字数目标
+      const m2 = t.match(/每(?:篇|条|个)[^\d]{0,8}(\d{2,5})(?:\s*字)?/);
+      if (m2?.[1]) {
+        const n = Number(m2[1]);
+        if (Number.isFinite(n) && n > 0) return Math.floor(n);
+      }
     }
     return null;
   })();
@@ -2917,14 +2996,111 @@ fastify.post(
     radar: webRadarActive,
   };
 
+  // ======== writing_multi（小规模多篇）：在一次 Run 内逐篇闭环写入（禁止 splitToDir） ========
+  const multiWritePlan = (() => {
+    const enabledBySkill = activeSkillIds.includes("writing_multi");
+    if (!enabledBySkill) return { enabled: false as const, expected: 0, outputDir: "" };
+    // writing_batch 场景应走后台队列；这里仅处理 2–9 的小规模多篇
+    if (activeSkillIds.includes("writing_batch")) return { enabled: false as const, expected: 0, outputDir: "" };
+
+    const parseCnInt = (token: string): number | null => {
+      const s = String(token ?? "").trim();
+      if (!s) return null;
+      if (/^\d{1,2}$/.test(s)) {
+        const n = Number(s);
+        return Number.isFinite(n) ? Math.floor(n) : null;
+      }
+      const map: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+      if (s === "十") return 10;
+      if (s.startsWith("十") && s.length === 2) return 10 + (map[s[1]] ?? 0);
+      if (s.length === 2 && map[s[0]] && s[1] === "十") return map[s[0]] * 10;
+      if (s.length === 3 && map[s[0]] && s[1] === "十") return map[s[0]] * 10 + (map[s[2]] ?? 0);
+      return map[s] ?? null;
+    };
+
+    const inferCountFromText = (raw: string): number | null => {
+      const t = String(raw ?? "");
+      if (!t.trim()) return null;
+      const m =
+        t.match(/(?:top|前)\s*([0-9]{1,2}|[一二三四五六七八九十两]{1,3})\s*(?:篇|条|个)/i) ||
+        t.match(/([0-9]{1,2}|[一二三四五六七八九十两]{1,3})\s*(?:篇|条|个)(?:\s*(?:文章|文案|口播|脚本|稿))?/);
+      const token = m?.[1] ? String(m[1]) : "";
+      if (!token) return null;
+      return parseCnInt(token);
+    };
+
+    const explicitCount = (() => {
+      const texts = [String(userPrompt ?? ""), String((mainDocFromPack as any)?.goal ?? "")];
+      for (const raw of texts) {
+        const n = inferCountFromText(raw);
+        if (!Number.isFinite(n as any)) continue;
+        const nn = Number(n);
+        // writing_multi 只处理 2–9；>=10 交给 writing_batch
+        if (nn >= 2 && nn <= 9) return Math.floor(nn);
+      }
+      return null as number | null;
+    })();
+
+    // 未显式给出篇数：若 prompt 强烈暗示“多篇且逐篇分配”，默认 5（与写作批处理默认 clipsCount 对齐）
+    const ambiguousMulti =
+      /(多篇|几篇|若干篇|多条|几条|若干条)/.test(String(userPrompt ?? "")) &&
+      /(每篇|每条|分别|各写|各自|逐篇|逐条)/.test(String(userPrompt ?? ""));
+    const expected = explicitCount ?? (ambiguousMulti ? 5 : null);
+    const safeExpected = expected && Number.isFinite(Number(expected)) ? Math.floor(Number(expected)) : 0;
+    if (!(safeExpected >= 2 && safeExpected <= 9)) return { enabled: false as const, expected: 0, outputDir: "" };
+
+    const outputDir = `exports/multi_${String(runId).slice(0, 8)}`;
+    return { enabled: true as const, expected: safeExpected, outputDir };
+  })();
+
+  const workflowRetryBudgetEffective = (() => {
+    // 说明：workflowRetryBudget 会在 AutoRetryPolicy（纯文本阶段推进）与 LengthGatePolicy 等场景消耗。
+    // 多篇逐篇闭环需要更多回合（每篇至少经历：draft->post_draft_kb），因此按 expected 放大预算。
+    const base = 3;
+    if (!multiWritePlan.enabled) return base;
+    const per = 4; // 经验：每篇预留 3-4 次（含 draft 推进、字数门禁、偶发门禁修复）
+    return Math.min(120, Math.max(base, base + multiWritePlan.expected * per + 8));
+  })();
+
   // Run 内部状态（显式 State；由 policy 函数分析与更新）
   // 预算拆分：避免一个 budget 同时承担“协议修复/完成性重试/风格门禁”等语义
-  const runState = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: lintMaxRework });
+  const runState = createInitialRunState({
+    protocolRetryBudget: 2,
+    workflowRetryBudget: workflowRetryBudgetEffective,
+    lintReworkBudget: lintMaxRework
+  });
   // 关键：续跑时 Context Pack 可能已包含 RUN_TODO（但本次 run 未必会再次 run.setTodoList），
   // 不应因此触发 AutoRetryPolicy 的 need_todo 误判。
   if (Array.isArray(runTodoFromPack) && runTodoFromPack.length) {
     runState.hasTodoList = true;
     (runState as any).todoList = runTodoFromPack;
+  }
+  // writing_multi：运行态（供门禁/可观测/逐篇重置）
+  if (multiWritePlan.enabled) {
+    (runState as any).multiWrite = {
+      enabled: true,
+      expected: multiWritePlan.expected,
+      done: 0,
+      outputDir: multiWritePlan.outputDir,
+      writtenPaths: [] as string[],
+    };
+    try {
+      const insertAt = Math.max(0, messages.length - 1);
+      messages.splice(insertAt, 0, {
+        role: "system",
+        content:
+          "【writing_multi】检测到小规模多篇写作任务（逐篇闭环）。\n" +
+          `- 目标篇数：${multiWritePlan.expected}（2–9）\n` +
+          `- 输出目录：${multiWritePlan.outputDir}/（建议每篇一个新文件：${multiWritePlan.outputDir}/01_标题.md ...）\n` +
+          "- 关键约束：逐篇执行“写前 kb.search → 初稿 → 初稿后二次 kb.search(one_liner/ending) →（可选）lint.copy → lint.style → doc.write 落盘”。\n" +
+          "- 禁止：不要把多篇正文合并成一个大文档再 splitToDir；不要一次性写入多篇。\n" +
+          "- 完成全部写入后再调用 run.done。\n",
+      } as any);
+    } catch {
+      // ignore
+    }
+  } else {
+    (runState as any).multiWrite = { enabled: false };
   }
 
   const stateSnapshot = () => ({
@@ -2976,6 +3152,16 @@ fastify.post(
     lastCopyLint: runState.lastCopyLint ?? null,
     copyLintObservedCount: (runState as any).copyLintObservedCount ?? 0,
     lastCopyRisk: (runState as any).lastCopyRisk ?? null,
+    multiWrite:
+      (runState as any).multiWrite && typeof (runState as any).multiWrite === "object"
+        ? {
+            enabled: Boolean((runState as any).multiWrite.enabled),
+            expected: Number((runState as any).multiWrite.expected ?? 0) || 0,
+            done: Number((runState as any).multiWrite.done ?? 0) || 0,
+            outputDir: String((runState as any).multiWrite.outputDir ?? ""),
+            writtenPaths: Array.isArray((runState as any).multiWrite.writtenPaths) ? (runState as any).multiWrite.writtenPaths.slice(0, 8) : [],
+          }
+        : null,
     lintMode,
     targetChars,
     webGate: { ...webGate },
@@ -3597,10 +3783,33 @@ fastify.post(
       }
     }
 
+    // writing_multi：附加可观测（避免“看不懂为什么一直在继续写下一篇”）
+    try {
+      const mw: any = (runState as any).multiWrite ?? null;
+      const enabled = Boolean(mw && typeof mw === "object" && mw.enabled);
+      const expected = Number(mw?.expected ?? 0);
+      const done = Number(mw?.done ?? 0);
+      if (enabled && Number.isFinite(expected) && expected >= 2 && expected <= 9) {
+        reasonCodes.push(`multi:${Math.max(0, Math.floor(done || 0))}/${expected}`);
+      }
+    } catch {
+      // ignore
+    }
+
     return { phase, allowed, hint, reasonCodes };
   };
 
-  const maxTurns = mode === "agent" ? 48 : mode === "plan" ? 32 : 12;
+  const baseMaxTurns = mode === "agent" ? 48 : mode === "plan" ? 32 : 12;
+  const maxTurns = (() => {
+    const mw: any = (runState as any).multiWrite ?? null;
+    const enabled = Boolean(mw && typeof mw === "object" && mw.enabled);
+    const expected = Number(mw?.expected ?? 0);
+    if (enabled && Number.isFinite(expected) && expected >= 2 && expected <= 9) {
+      // 经验：每篇至少经历 8~12 个 turn（含：templates kb / draft / post-draft kb / copy / lint / write 及少量重试）
+      return Math.min(220, Math.max(baseMaxTurns, baseMaxTurns + expected * 12));
+    }
+    return baseMaxTurns;
+  })();
 
 
 
@@ -4946,6 +5155,131 @@ fastify.post(
         reply.raw.end();
         agentRunWaiters.delete(runId);
         return;
+      }
+
+      // writing_multi：防止“一次性写入多篇”导致同质化与状态机错乱。
+      // - 规则：每个 turn 最多执行 1 个“正文写入类”工具（doc.write/doc.applyEdits/doc.replaceSelection/doc.restoreSnapshot/doc.splitToDir）。
+      // - 其余写入会在下一篇的闭环里逐步生成并写入。
+      try {
+        const mw: any = (runState as any).multiWrite ?? null;
+        const enabled = Boolean(mw && typeof mw === "object" && mw.enabled);
+        const expected = Number(mw?.expected ?? 0);
+        const done = Number(mw?.done ?? 0);
+        if (enabled && Number.isFinite(expected) && expected >= 2 && expected <= 9 && Number.isFinite(done) && done < expected) {
+          const isRunTool = (name: string) => String(name ?? "").startsWith("run.");
+          const before = toolCalls.slice();
+          // 1) 禁止提前 run.done：如果还没写完全部篇数，则丢弃 run.done（保留其它工具继续执行）
+          const droppedDone = before.some((c: any) => String(c?.name ?? "") === "run.done");
+          if (droppedDone) {
+            const kept2 = before.filter((c: any) => String(c?.name ?? "") !== "run.done");
+            toolCalls.splice(0, toolCalls.length, ...kept2);
+            writePolicyDecision({
+              turn,
+              policy: "MultiWritePolicy",
+              decision: kept2.length ? "drop_run_done" : "drop_run_done_empty",
+              reasonCodes: [`multi:${Math.max(0, done)}/${expected}`, "run.done_not_allowed_until_finished"],
+              detail: { done, expected },
+            });
+            writeRunNotice({
+              turn,
+              kind: "info",
+              title: "writing_multi：已忽略提前 run.done",
+              message: `当前写入进度 ${Math.max(0, done)}/${expected}，未完成全部篇数前不能 run.done。系统已忽略本轮 run.done，并继续执行其它工具（如有）。`,
+              policy: "MultiWritePolicy",
+              reasonCodes: [`multi:${Math.max(0, done)}/${expected}`, "run.done_not_allowed_until_finished"],
+            });
+            // 若本轮只有 run.done（被丢弃后为空），则要求模型立刻继续下一篇
+            if (toolCalls.length === 0) {
+              if (runState.workflowRetryBudget > 0) {
+                writePolicyDecision({
+                  turn,
+                  policy: "MultiWritePolicy",
+                  decision: "retry",
+                  reasonCodes: [`multi:${Math.max(0, done)}/${expected}`, "need_continue_next_article"],
+                  detail: {
+                    budget: "workflow",
+                    budgetBefore: runState.workflowRetryBudget,
+                    budgetAfter: Math.max(0, runState.workflowRetryBudget - 1),
+                  },
+                });
+                runState.workflowRetryBudget -= 1;
+                writeRunNotice({
+                  turn,
+                  kind: "info",
+                  title: "writing_multi：继续生成下一篇（自动重试）",
+                  message: `你还没写完全部篇数（${Math.max(0, done)}/${expected}）。系统将自动继续一次，请开始下一篇。`,
+                  policy: "MultiWritePolicy",
+                  reasonCodes: [`multi:${Math.max(0, done)}/${expected}`, "need_continue_next_article"],
+                });
+                messages.push({ role: "system", content: `你还没写完全部篇数（${Math.max(0, done)}/${expected}）。请继续生成下一篇：先 kb.search（模板/结构）→ 初稿 → 二次 kb.search(one_liner/ending) → lint → doc.write。不要 run.done。` });
+                continue;
+              }
+              // 预算耗尽：继续往下走会导致“空执行”，这里直接拦截并结束
+              writePolicyDecision({
+                turn,
+                policy: "MultiWritePolicy",
+                decision: "block_end",
+                reasonCodes: [`multi:${Math.max(0, done)}/${expected}`, "need_continue_next_article", "auto_retry_budget_exhausted"],
+                detail: { done, expected },
+              });
+              writeRunNotice({
+                turn,
+                kind: "warn",
+                title: "writing_multi：未写完全部篇数，且达到自动重试上限",
+                message: `你还没写完全部篇数（${Math.max(0, done)}/${expected}），但已达到自动重试上限。请回复“继续”让我再试一次。`,
+                policy: "MultiWritePolicy",
+                reasonCodes: [`multi:${Math.max(0, done)}/${expected}`, "auto_retry_budget_exhausted"],
+              });
+              writeEvent("run.end", { runId, reason: "multi_not_finished", reasonCodes: ["multi_not_finished", "auto_retry_budget_exhausted"], turn });
+              writeEvent("assistant.done", { reason: "multi_not_finished", turn });
+              reply.raw.end();
+              agentRunWaiters.delete(runId);
+              return;
+            }
+          }
+          const afterDoneDrop = toolCalls.slice();
+          const writes = afterDoneDrop.filter((c: any) => isContentWriteTool(String(c?.name ?? "")));
+          if (writes.length > 1) {
+            let keptWrite = false;
+            const kept = afterDoneDrop.filter((c: any) => {
+              const n = String(c?.name ?? "");
+              if (!n) return false;
+              if (isRunTool(n)) return true;
+              if (!isContentWriteTool(n)) return true;
+              if (!keptWrite) {
+                keptWrite = true;
+                return true;
+              }
+              return false; // drop extra writes
+            });
+            if (kept.length && kept.length < before.length) {
+              toolCalls.splice(0, toolCalls.length, ...kept);
+              writePolicyDecision({
+                turn,
+                policy: "MultiWritePolicy",
+                decision: "auto_split_writes",
+                reasonCodes: [`multi:${Math.max(0, done)}/${expected}`, "multi_write_only_one_per_turn"],
+                detail: {
+                  kept: kept.map((c: any) => String(c?.name ?? "")).filter(Boolean),
+                  dropped: before
+                    .filter((c: any) => !kept.includes(c))
+                    .map((c: any) => String(c?.name ?? ""))
+                    .filter(Boolean),
+                },
+              });
+              writeRunNotice({
+                turn,
+                kind: "info",
+                title: "writing_multi：已自动拆分写入（每回合仅写 1 篇）",
+                message: "检测到同一回合包含多个正文写入工具调用。为保证逐篇独立闭环与稳定性，系统已仅保留 1 次写入，其余将延后到下一篇继续生成。",
+                policy: "MultiWritePolicy",
+                reasonCodes: [`multi:${Math.max(0, done)}/${expected}`, "multi_write_only_one_per_turn"],
+              });
+            }
+          }
+        }
+      } catch {
+        // ignore
       }
 
       // 风格库写作强约束：
@@ -6908,6 +7242,80 @@ fastify.post(
         }
         const toolResultText = `[tool_result name="${String(call.name ?? "")}"]\n${toolResultJson}\n[/tool_result]`;
         messages.push(...buildInjectedToolResultMessages({ toolResultFormat, toolResultXml, toolResultText }));
+
+        // writing_multi：写入完成后推进到下一篇（并重置 style_imitate 闭环状态，确保每篇独立两段 KB + lint）
+        if (payload.ok && String(call.name ?? "") === "doc.write") {
+          try {
+            const mw: any = (runState as any).multiWrite ?? null;
+            const enabled = Boolean(mw && typeof mw === "object" && mw.enabled);
+            const expected = Number(mw?.expected ?? 0);
+            const done0 = Number(mw?.done ?? 0);
+            const applied = String((payload.meta as any)?.applyPolicy ?? "") === "auto_apply";
+            if (enabled && applied && Number.isFinite(expected) && expected >= 2 && expected <= 9) {
+              const done = Math.min(expected, Math.max(0, Math.floor(done0)) + 1);
+              mw.done = done;
+              const p = typeof (payload.output as any)?.path === "string" ? String((payload.output as any).path).trim() : "";
+              if (p) {
+                const arr = Array.isArray(mw.writtenPaths) ? (mw.writtenPaths as any[]) : [];
+                const nextArr = [...arr.map((x) => String(x ?? "").trim()).filter(Boolean), p];
+                mw.writtenPaths = Array.from(new Set(nextArr)).slice(0, 24);
+              }
+              writePolicyDecision({
+                turn,
+                policy: "MultiWritePolicy",
+                decision: done < expected ? "written_continue" : "written_all",
+                reasonCodes: [`multi:${done}/${expected}`, "doc.write:auto_apply"],
+                detail: { path: p || null, outputDir: String(mw?.outputDir ?? "") || null },
+              });
+
+              if (done < expected) {
+                // 重置：下一篇重新走 templates -> draft -> post_draft_kb -> (copy) -> style -> write
+                runState.hasStyleKbSearch = false;
+                runState.hasDraftText = false;
+                runState.hasPostDraftStyleKbSearch = false;
+                runState.lastStyleKbSearch = null;
+                runState.styleKbDegraded = false;
+
+                runState.copyLintPassed = false;
+                runState.copyLintFailCount = 0;
+                runState.copyGateDegraded = false;
+                runState.lastCopyLint = null;
+                (runState as any).copyLintObservedCount = 0;
+                (runState as any).lastCopyRisk = null;
+
+                runState.styleLintPassed = false;
+                runState.styleLintFailCount = 0;
+                runState.lintGateDegraded = false;
+                runState.bestStyleDraft = null;
+                runState.draftCandidatesV1 = [];
+                runState.bestDraft = null;
+                runState.lastStyleLint = null;
+                // lintReworkBudget：重置为每篇独立回炉预算
+                runState.lintReworkBudget = Number.isFinite(Number(lintMaxRework as any)) ? Math.max(0, Math.floor(Number(lintMaxRework))) : runState.lintReworkBudget;
+
+                const nextIdx = done + 1;
+                const dir = String(mw?.outputDir ?? "").trim();
+                messages.push({
+                  role: "system",
+                  content:
+                    `【writing_multi】已完成第 ${done}/${expected} 篇写入${p ? `：${p}` : ""}。\n` +
+                    `现在开始第 ${nextIdx}/${expected} 篇：请按“逐篇闭环”继续（先 kb.search 模板/结构，再产初稿，再二次 kb.search(one_liner/ending)，再 lint，最后 doc.write）。\n` +
+                    (dir ? `写入建议目录：${dir}/（每篇一个新文件；建议命名：${String(nextIdx).padStart(2, "0")}_标题.md）。\n` : "") +
+                    "注意：不要合并多篇后再 splitToDir；不要一次性写入多篇。\n",
+                });
+              } else {
+                messages.push({
+                  role: "system",
+                  content:
+                    `【writing_multi】已完成全部 ${expected} 篇写入。\n` +
+                    "- 现在请调用 run.done 结束本次 Run，并在 note 里给出写入文件清单（相对路径）。\n",
+                });
+              }
+            }
+          } catch {
+            // ignore
+          }
+        }
 
         // Copy Linter 闸门（V2 anti-regurgitation）：在 copyGateEnabled 且 lintMode=gate/safe 时启用。
         if (effectiveGates.copyGateEnabled && String(call.name ?? "") === "lint.copy") {

@@ -88,4 +88,26 @@ v0.1 的实现方式：在同一进程内做一个 **async mutex（按路径 key
 - Desktop Tool：`apps/desktop/src/agent/toolRegistry.ts`
   - `writing.batch.start` 增加可选参数 `filesConcurrency`
 
+---
+
+## GitHub 对标：并发/限流/分组串行（keyed queue）
+
+> 这类库的共同点：把“并发上限、速率限制、按 key 串行”等调度约束从业务里抽成可测的调度层，避免工程里散落 `Promise.all` 造成 429/踩踏。
+
+- **p-queue（★4.1k）**：`https://github.com/sindresorhus/p-queue`
+  - Promise 队列 + `concurrency`，很适合表达“文件级 worker pool = `filesConcurrency`”（map 并行，上限可控）。
+- **p-limit（★2.7k）**：`https://github.com/sindresorhus/p-limit`
+  - 极简并发 limiter；适合把 `processOneFile` 这类任务做并发 map，并确保上限稳定。
+- **Bottleneck（★2.0k）**：`https://github.com/SGrondin/bottleneck`
+  - `Group.key(str)` 会把同 key 的任务路由到同一个 limiter（天然“同 key 串行、跨 key 并行”）。
+  - 对我们：把 key 设为 `inputFileRelPath`（或 lessonId）能更明确表达“同一课 clips 串行，不同课并行”。
+- **BullMQ（★8.3k）**：`https://github.com/taskforcesh/bullmq`
+  - Redis 持久化队列；如果未来把 batch runner 从 renderer store 迁到后台 worker/daemon，可用它承载持久队列、重试与可观测性。
+
+### 对“多篇路由”的直接启发
+
+- **A 路由（现有实现）**：worker pool / semaphore 范式即可（当前 `writingBatchStore.ts` 的 `nextFi + workers` 就是同一范式）。
+- **B 路由（单次 Run 的小批量多篇，例如 2–9 篇）**：同样建议用“microtask map + 并发上限 + microtask 内串行 phase”，并禁止“先合并再 split”的捷径，避免回到你看到的“一大坨再分割”。
+  - microtask（单篇）phase 示例：`kb.search(模板)` → `draft` → `kb.search(punchline/ending)` → `lint.style` → `doc.write`
+
 
