@@ -3289,7 +3289,8 @@ fastify.post(
       allowTools: ["run.setTodoList", "run.todo.upsertMany", "run.mainDoc.update", "run.mainDoc.get"],
       hint:
         "【Todo Gate】当前阶段：todo_required（先立计划，再行动）。\n" +
-        "- 你必须先设置 Todo（run.setTodoList 或 run.todo.upsertMany；建议 5–12 条，含“等待确认/blocked”项）。\n" +
+        "- 你必须先设置 Todo（run.setTodoList 或 run.todo.upsertMany；建议 5–12 条，全部可执行）。\n" +
+        "- 默认不要创建 status=blocked/等待确认 条目；如有不确定点：写成 todo，并在 note 写明“默认假设”，继续推进（不要硬等用户）。\n" +
         "- 本回合不要调用 kb.search / lint.* / doc.* / project.* 等其它工具；不要输出最终正文。\n" +
         "- 注意：若要调用工具，本条消息必须且只能输出严格的 <tool_calls>...</tool_calls> XML（不要夹杂自然语言）。",
       autoRetry: ({ runState, toolCapsPhase }) => {
@@ -3303,6 +3304,7 @@ fastify.post(
           systemMessage:
             "你还没有设置 Todo。请立刻调用 run.setTodoList（或 run.todo.upsertMany）写入可执行 Todo，再继续下一步。\n" +
             "- 建议：先写 5–12 条，包含：检索模板 → 产候选稿 → 二次检索金句/收束 → lint.style → 写入。\n" +
+            "- 默认不要创建 status=blocked/等待确认 条目；如有不确定点：写明默认假设继续推进。\n" +
             "- 本条消息必须是纯 <tool_calls> XML（不要夹杂自然语言）。",
         };
       },
@@ -3581,7 +3583,8 @@ fastify.post(
           "【Skill: style_imitate】当前阶段：need_style。\n" +
           "- 本回合禁止调用任何“正文写入类” doc.*（doc.write/doc.applyEdits/doc.replaceSelection/doc.restoreSnapshot/doc.splitToDir/...）。\n" +
           "- 允许文件/目录操作（doc.deletePath/doc.renamePath/doc.mkdir），但高风险操作仍应走 proposal-first。\n" +
-          "- 你可以输出候选稿（纯文本），然后调用 lint.style(text=候选稿) 做终稿闸门。";
+          "- 你现在必须调用 lint.style(text=候选稿全文) 做终稿闸门：把“补强后的完整候选稿全文”直接放进 text 参数。\n" +
+          "- 注意：本回合只输出严格的 <tool_calls>...</tool_calls> XML（不要夹杂自然语言/不要单独输出正文）。";
         reasonCodes.push("phase:style_need_style");
       } else {
         phase = "style_can_write";
@@ -4559,7 +4562,7 @@ fastify.post(
                 (needLint
                   ? effectiveGates.styleGateEnabled && effectiveGates.copyGateEnabled && !runState.copyLintPassed
                     ? "\n并且：先 lint.copy 做“防贴原文”检查；未通过则按 topOverlaps 局部回炉后复检。"
-                    : "\n并且：按需 lint.style 获取问题清单并回炉。"
+                    : "\n并且：必须调用 lint.style(text=候选稿全文) 获取问题清单；未通过则按 rewritePrompt 局部回炉后复检（最多 2 次）。"
                   : ""),
               policy: "AutoRetryPolicy",
               reasonCodes,
@@ -4607,8 +4610,8 @@ fastify.post(
                     "  - 若用户要求写入/分割到文件夹：请调用 doc.splitToDir（或 doc.write 等）完成写入。\n" +
                     "  - 文件写入策略：默认新写不覆盖。若需要新文件且路径可能已存在，请在 doc.write/doc.previewDiff 里传 ifExists=\"rename\" 并给 suggestedName 起一个更合适的新文件名；若用户明确要求覆盖，则传 ifExists=\"overwrite\"。\n" +
                     (needTodo
-                      ? "- 在你成功设置 todo 之后，如果仍需要澄清：下一条消息再输出最多 5 个问题（纯文本 Markdown），并在 todo 中标记为 blocked/等待用户输入；用户不答时写明默认假设继续推进。"
-                      : "- 如仍需要澄清：下一条消息再输出最多 5 个问题（纯文本 Markdown），并明确默认假设后继续推进（不要重置 todo）。"))
+                      ? "- 在你成功设置 todo 之后，如仍需澄清：下一条消息再输出最多 5 个问题（纯文本 Markdown），并写明默认假设后继续推进（不要把 todo 标记为 blocked 等待用户）。"
+                      : "- 如仍需要澄清：下一条消息再输出最多 5 个问题（纯文本 Markdown），并明确默认假设后继续推进（不要重置 todo；不要把 todo 标记为 blocked 等待用户）。"))
             });
             continue;
           }
@@ -6501,8 +6504,8 @@ fastify.post(
               if (status === "done" || status === "skipped") return false;
               const text = String(t?.text ?? "").trim();
               const note = String(t?.note ?? "").trim();
-              if (status === "blocked") return true;
-              if (/^(blocked|wait_user|need_user|clarify_waiting)\b/i.test(note)) return true;
+              // 仅当 todo 明确标记“硬等待”时才停；避免模型把 status=blocked 当普通状态字段导致误停。
+              if (/^(wait_user|need_user):/i.test(note)) return true;
               return false;
             })
             .slice(0, 5)
