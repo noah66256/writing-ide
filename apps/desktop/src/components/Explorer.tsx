@@ -1021,10 +1021,10 @@ export function Explorer() {
             const existsFile = !!s.files.find((f) => f.path === dest);
             const existsDir = dest && s.dirs.includes(dest);
             if (existsFile || existsDir) return;
-            void (async () => {
-              const r = await s.renamePath(src, dest);
-              if (!r.ok) void uiAlert({ title: "移动失败", message: `移动失败：${src} → ${dest}\n原因：${r.error ?? "RENAME_FAILED"}` });
-            })();
+                void (async () => {
+                  const r = await s.renamePath(src, dest);
+                  if (!r.ok) void uiAlert({ title: "移动失败", message: `移动失败：${src} → ${dest}\n原因：${r.error ?? "RENAME_FAILED"}` });
+                })();
             setDragOver(null);
           }}
         >

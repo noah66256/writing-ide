@@ -250,6 +250,8 @@ export const WRITING_BATCH_SKILL: SkillManifest = {
       "writing.batch.pause",
       "writing.batch.resume",
       "writing.batch.cancel",
+      // 允许批处理启动前/中查阅风格库（避免与 style_imitate 冲突时 kb.search 被误禁）
+      "kb.search",
       "run.done",
     ],
   },
