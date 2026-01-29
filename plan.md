@@ -37,6 +37,7 @@
 - [使用说明视频公开链接 v0.1（spec）](docs/specs/tutorial-video-public-link-v0.1.md)
 - [KB Manager V2（更像原文）方案草案](kb-manager-v2-spec.md)
 - [Style Selector v1（自动选簇/选21卡，按话题适配，模型解耦）](style-selector-v1.md)
+- [风格维度激活与提示结构化（research v0.1）](docs/research/style-dimension-activation-v0.1.md)
 - [Style Skill 门禁（让风格库只在“开写”后介入，research v1）](docs/research/style-skill-gating-v1.md)
 - [仿写（style_imitate）链路系统性复盘：从“修补”到“范式”（research v1）](docs/research/style-imitate-paradigm-review-v1.md)
 - [风格闭环“越改越飘”范式复盘与修复方案 v1（research）](docs/research/style-lint-drift-mitigation-v1.md)
