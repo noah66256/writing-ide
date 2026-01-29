@@ -2927,6 +2927,13 @@ fastify.post(
         const n = Number(m2[1]);
         if (Number.isFinite(n) && n > 0) return Math.floor(n);
       }
+      // C) 兼容口语： “字数分别是1200左右/字数1200/字数在1200左右”
+      // - 仅在出现“字数”关键词时生效，避免误把其它 4 位数（年份/编号）当字数目标
+      const m3 = t.match(/字数[^\d]{0,12}(\d{2,5})(?:\s*字)?/);
+      if (m3?.[1]) {
+        const n = Number(m3[1]);
+        if (Number.isFinite(n) && n > 0) return Math.floor(n);
+      }
     }
     return null;
   })();

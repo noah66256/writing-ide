@@ -165,13 +165,29 @@ function seededMaxOverlap(args: { a: string; b: string; seedLen: number; maxSeed
   return { maxLen: bestLen, snippet: bestSnippet };
 }
 
-function computeCopyRiskObserve(args: { draftText: string; styleSamples: Array<{ text: string }>; selectionText?: string }) {
+function computeCopyRiskObserve(args: {
+  draftText: string;
+  styleSamples: Array<{ text: string }>;
+  selectionText?: string;
+  /** 可选：额外对照源（例如最近 doc.read/kb.cite 的原文片段），用于降低“贴无关原文”漏检 */
+  extraSources?: Array<{ id?: string; text: string }>;
+}) {
   const draftText = String(args.draftText ?? "");
   const sources: Array<{ id: string; text: string }> = [];
 
   const selectionText = typeof args.selectionText === "string" ? args.selectionText : "";
   const selectionNorm = selectionText.trim();
   if (selectionNorm) sources.push({ id: "editor_selection", text: selectionNorm.slice(0, 6000) });
+
+  const extraSources = Array.isArray(args.extraSources) ? args.extraSources : [];
+  for (const s of extraSources) {
+    const text = String((s as any)?.text ?? "").trim();
+    if (!text) continue;
+    const id0 = String((s as any)?.id ?? "").trim();
+    const id = id0 ? `extra:${id0}` : "extra:source";
+    sources.push({ id, text: text.slice(0, 3000) });
+    if (sources.length >= 14) break; // 控量：观测期不追求覆盖所有样例
+  }
 
   const styleSamples = Array.isArray(args.styleSamples) ? args.styleSamples : [];
   for (const s of styleSamples) {
@@ -1055,6 +1071,24 @@ const tools: ToolDefinition[] = [
         return t.trim() ? t : "";
       })();
 
+      // 额外对照源：最近的 doc.read / kb.cite（常见于“改写/续写”任务，能显著降低“贴无关原文”漏检）
+      const extraSources = (() => {
+        const steps = Array.isArray(useRunStore.getState().steps) ? (useRunStore.getState().steps as any[]) : [];
+        const out: Array<{ id?: string; text: string }> = [];
+        for (const st of [...steps].reverse()) {
+          if (!st || st.type !== "tool") continue;
+          if (String(st.status ?? "") !== "success") continue;
+          const toolName = String(st.toolName ?? "").trim();
+          if (toolName !== "doc.read" && toolName !== "kb.cite") continue;
+          const content = String(st.output?.content ?? "").trim();
+          if (!content) continue;
+          const path = typeof st.output?.path === "string" ? String(st.output.path) : "";
+          out.push({ id: path ? `${toolName}:${path}` : toolName, text: content });
+          if (out.length >= 3) break;
+        }
+        return out.length ? out : undefined;
+      })();
+
       const maxSources = typeof args.maxSources === "number" ? Math.max(4, Math.min(24, Math.floor(args.maxSources))) : 14;
       // anchors（优先）：来自 Main Doc 的 styleContractV1（可追溯的小引用，<=200字），比“段落样例池”更贴近 V2 的证据位定义
       const anchorSamples = (() => {
@@ -1074,7 +1108,7 @@ const tools: ToolDefinition[] = [
       const combinedSamples = [...anchorSamples, ...styleSamples].slice(0, 24);
       const samplesForCopy = Array.isArray(combinedSamples) ? combinedSamples.slice(0, Math.max(0, Math.min(24, maxSources))) : [];
 
-      const copyRisk = computeCopyRiskObserve({ draftText, styleSamples: samplesForCopy, selectionText });
+      const copyRisk = computeCopyRiskObserve({ draftText, styleSamples: samplesForCopy, selectionText, extraSources });
       const riskLevel = String((copyRisk as any)?.riskLevel ?? "").trim().toLowerCase();
       const passed = riskLevel === "low";
 
@@ -1152,7 +1186,23 @@ const tools: ToolDefinition[] = [
         const t = String(model.getValueInRange(sel) ?? "");
         return t.trim() ? t : "";
       })();
-      const copyRisk = computeCopyRiskObserve({ draftText, styleSamples, selectionText });
+      const extraSources = (() => {
+        const steps = Array.isArray(useRunStore.getState().steps) ? (useRunStore.getState().steps as any[]) : [];
+        const out: Array<{ id?: string; text: string }> = [];
+        for (const st of [...steps].reverse()) {
+          if (!st || st.type !== "tool") continue;
+          if (String(st.status ?? "") !== "success") continue;
+          const toolName = String(st.toolName ?? "").trim();
+          if (toolName !== "doc.read" && toolName !== "kb.cite") continue;
+          const content = String(st.output?.content ?? "").trim();
+          if (!content) continue;
+          const path = typeof st.output?.path === "string" ? String(st.output.path) : "";
+          out.push({ id: path ? `${toolName}:${path}` : toolName, text: content });
+          if (out.length >= 3) break;
+        }
+        return out.length ? out : undefined;
+      })();
+      const copyRisk = computeCopyRiskObserve({ draftText, styleSamples, selectionText, extraSources });
 
       const model = typeof args.model === "string" ? String(args.model).trim() : "";
       const maxIssues = typeof args.maxIssues === "number" ? Math.max(3, Math.min(24, Math.floor(args.maxIssues))) : 10;

@@ -259,6 +259,11 @@ export function detectRunIntent(args: {
     const looksLikeGenerateTo = /(生成|输出).{0,12}(到|至)/.test(t);
     if (looksLikeGenerateTo && hasWriteTargetHint) return true;
 
+    // “生成 md 文件/生成文件”：用户明确在说“落盘成文件”，即便没写“到/至”
+    const looksLikeGenerateFile =
+      /(生成|输出|导出).{0,16}(?:md|markdown)\s*文件/i.test(t) || /(生成|输出|导出).{0,10}(?:文件|目录|文件夹)/i.test(t);
+    if (looksLikeGenerateFile && hasWriteTargetHint) return true;
+
     // 写@{file}：目标文件写作/改写（最稳）
     if (/(写|仿写|改写|润色|续写|扩写)\s*@\{[^}]+\}/.test(t)) return true;
 
@@ -270,7 +275,11 @@ export function detectRunIntent(args: {
     /(不用回别的|别回别的|不要回别的|就行)/.test(userPrompt);
   const isWritingTask =
     mode !== "chat" &&
-    (/(仿写|改写|润色|续写|扩写|写(一篇|一段|一条|稿|文|文章|脚本|文案)|写.{0,8}\d{2,5}字|生成(文章|稿|文案)|按.+风格)/.test(userPrompt) ||
+    (/(仿写|改写|润色|续写|扩写|写(一篇|一段|一条|稿|文|文章|脚本|文案)|写.{0,10}\d{2,5}字|生成(文章|稿|文案)|按.+风格)/.test(userPrompt) ||
+      // “写5篇/写3条口播/写10条稿子”等（避免因为不写“一篇”导致误判为非写作）
+      /写\s*\d{1,3}\s*(?:篇|条|个|份)\s*(?:[^。！？\n]{0,16})?(?:稿|文稿|稿子|文章|文案|口播|脚本)/.test(userPrompt) ||
+      // “生成/输出 md 文件”也应视为写作任务（往往伴随写入）
+      /(生成|输出|导出)\s*(?:[^。！？\n]{0,20})?(?:md|markdown)\s*文件/i.test(userPrompt) ||
       /(写|仿写|改写|润色|续写|扩写)\s*@\{[^}]+\}/.test(userPrompt) || // 写@{示例.md}
       /\bcluster[_-]\d+\b/i.test(userPrompt) || // 选簇续跑：用户仅回复 cluster_1 等，也应视为写作流程的一部分
       /写法\s*[ABC]\b/i.test(userPrompt)); // 选簇续跑：用户仅回复“写法B/写法C”也应保持写作闭环
@@ -314,6 +323,11 @@ export function detectRunIntent(args: {
     // 注意：这里的“弱 sticky”只用于承接“写作闭环”的续跑（避免用户回一句“继续/视频脚本”导致写作闭环掉线）。
     // 但不能把“查一下/搜一下/全网+GitHub 大搜”这类研究/检索请求误判为写作（否则会触发 style_imitate 抢跑，污染检索阶段）。
     const looksLikeExplicitContinue = /^(继续|好|可以|行|没问题|确认|按这个来|就这样|ok|OK)\b/i.test(promptTrim);
+    // “把稿子放这里/直接输出文稿/贴出来”等：通常是“继续把结果给我”的续跑指令
+    const looksLikeDeliverDraft =
+      /(直接|就)\s*(生成|输出|给我|发我|贴出|贴出来|放这|放在这|放在这里|发出来|把(?:生成的)?(?:文稿|稿子|文章|文案|口播稿|脚本).{0,6}(?:放在这|放在这里|贴出来|发出来))/i.test(
+        promptTrim,
+      ) && promptTrim.length <= 80;
     const looksLikeFormatSwitch =
       promptTrim.length <= 24 && /(视频脚本|脚本|文案|口播|小红书|公众号|B站|抖音|标题|大纲|提纲|终稿)/.test(promptTrim);
     const looksLikeResearchOnly =
@@ -335,7 +349,7 @@ export function detectRunIntent(args: {
       return hits.length >= 2;
     })();
     const shortFollowUpLike =
-      (looksLikeExplicitContinue || looksLikeFormatSwitch || looksLikeChoice || looksLikeNumberedAnswers) &&
+      (looksLikeExplicitContinue || looksLikeDeliverDraft || looksLikeFormatSwitch || looksLikeChoice || looksLikeNumberedAnswers) &&
       promptTrim.length <= 160 &&
       !looksLikeResearchOnly;
     const hasWaiting = todo.some((t: any) => {
