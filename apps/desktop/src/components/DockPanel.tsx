@@ -6,6 +6,7 @@ import { useProjectStore } from "../state/projectStore";
 import { parseMarkdownHeadings, moveSectionByHeadingLine, shiftHeadingLevelsInSection } from "../utils/markdown";
 import { DiffEditor } from "@monaco-editor/react";
 import { useDialogStore } from "../state/dialogStore";
+import { ToolBlock } from "./ToolBlock";
 
 export function DockPanel() {
   const tab = useUiStore((s) => s.dockTab);
@@ -68,6 +69,14 @@ export function DockPanel() {
     () => steps.filter((s) => s.type === "tool").map((s) => s),
     [steps],
   );
+
+  const problemSteps = useMemo(() => {
+    const list = (steps ?? []).filter((s: any) => s && s.type === "tool") as any[];
+    return list
+      .filter((s) => String(s.toolName ?? "").startsWith("lint."))
+      .slice()
+      .reverse();
+  }, [steps]);
 
   const mainDocMd = useMemo(() => {
     const lines: string[] = [];
@@ -391,7 +400,20 @@ export function DockPanel() {
             ) : null}
           </div>
         )}
-        {tab === "problems" && <div>（占位）后续接入 lint.style / lint.platform / lint.facts。</div>}
+        {tab === "problems" && (
+          <div style={{ display: "grid", gap: 10 }}>
+            <div style={{ color: "var(--text)" }}>Problems（Lint 结果/修复提案）</div>
+            {problemSteps.length === 0 ? (
+              <div style={{ color: "var(--muted)" }}>暂无 Lint 结果。你可以在右侧调用 lint.style / lint.copy。</div>
+            ) : (
+              <div style={{ display: "grid", gap: 10 }}>
+                {problemSteps.map((s: any) => (
+                  <ToolBlock key={s.id} step={s} />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         {tab === "runs" && (
           <div style={{ display: "grid", gap: 10 }}>
             <div style={{ color: "var(--text)" }}>Main Doc（当前 Run）</div>

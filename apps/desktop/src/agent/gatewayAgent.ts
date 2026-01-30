@@ -60,6 +60,168 @@ function parseSseToolArgs(rawArgs: Record<string, string>) {
   return out;
 }
 
+// ======== patch-style edits（用于 lint.style -> TextEdit[] -> diff 预览 -> Keep/Undo 应用） ========
+function computeLineStarts(text: string) {
+  const starts = [0];
+  for (let i = 0; i < text.length; i += 1) if (text[i] === "\n") starts.push(i + 1);
+  return starts;
+}
+
+function getOffsetAt(text: string, lineStarts: number[], lineNumber: number, column: number) {
+  const ln = Math.max(1, Math.floor(lineNumber));
+  const col = Math.max(1, Math.floor(column));
+  const lineIdx = ln - 1;
+  const lineStart = lineStarts[lineIdx] ?? text.length;
+  const nextLineStart = lineStarts[lineIdx + 1] ?? text.length;
+  const lineEnd = nextLineStart > 0 ? Math.max(lineStart, nextLineStart - 1) : lineStart;
+  const maxCol0 = Math.max(0, lineEnd - lineStart);
+  const col0 = Math.min(maxCol0, col - 1);
+  return Math.min(text.length, lineStart + col0);
+}
+
+function applyTextEdits(args: {
+  before: string;
+  edits: Array<{ startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number; text: string }>;
+}) {
+  const before = args.before;
+  const lineStarts = computeLineStarts(before);
+  const ranges = args.edits
+    .map((e) => {
+      const startOffset = getOffsetAt(before, lineStarts, e.startLineNumber, e.startColumn);
+      const endOffset = getOffsetAt(before, lineStarts, e.endLineNumber, e.endColumn);
+      return { ...e, startOffset, endOffset };
+    })
+    .sort((a, b) => b.startOffset - a.startOffset);
+  let after = before;
+  for (const r of ranges) after = after.slice(0, r.startOffset) + r.text + after.slice(r.endOffset);
+  return { after };
+}
+
+function unifiedDiff(args: { path: string; before: string; after: string; context?: number; maxCells?: number; maxHunkLines?: number }) {
+  const beforeLines = args.before.split("\n");
+  const afterLines = args.after.split("\n");
+  const n = beforeLines.length;
+  const m = afterLines.length;
+
+  const maxCells = args.maxCells ?? 900_000;
+  if (n * m > maxCells) {
+    return {
+      truncated: true,
+      diff: `--- a/${args.path}\n+++ b/${args.path}\n@@\n(文件过大：diff 预览已跳过。建议先缩小改动范围或仅显示片段预览)\n`,
+      stats: null as any,
+    };
+  }
+
+  const dp: Uint32Array[] = [];
+  for (let i = 0; i <= n; i += 1) dp.push(new Uint32Array(m + 1));
+  for (let i = 1; i <= n; i += 1) {
+    const ai = beforeLines[i - 1];
+    const row = dp[i];
+    const prev = dp[i - 1];
+    for (let j = 1; j <= m; j += 1) {
+      if (ai === afterLines[j - 1]) row[j] = prev[j - 1] + 1;
+      else row[j] = Math.max(prev[j], row[j - 1]);
+    }
+  }
+
+  type Op = { type: " " | "+" | "-"; line: string; oldLine: number | null; newLine: number | null };
+  const ops: Op[] = [];
+  let i = n;
+  let j = m;
+  let oldNo = n;
+  let newNo = m;
+  while (i > 0 && j > 0) {
+    if (beforeLines[i - 1] === afterLines[j - 1]) {
+      ops.push({ type: " ", line: beforeLines[i - 1], oldLine: oldNo, newLine: newNo });
+      i -= 1;
+      j -= 1;
+      oldNo -= 1;
+      newNo -= 1;
+    } else if (dp[i - 1][j] >= dp[i][j - 1]) {
+      ops.push({ type: "-", line: beforeLines[i - 1], oldLine: oldNo, newLine: null });
+      i -= 1;
+      oldNo -= 1;
+    } else {
+      ops.push({ type: "+", line: afterLines[j - 1], oldLine: null, newLine: newNo });
+      j -= 1;
+      newNo -= 1;
+    }
+  }
+  while (i > 0) {
+    ops.push({ type: "-", line: beforeLines[i - 1], oldLine: oldNo, newLine: null });
+    i -= 1;
+    oldNo -= 1;
+  }
+  while (j > 0) {
+    ops.push({ type: "+", line: afterLines[j - 1], oldLine: null, newLine: newNo });
+    j -= 1;
+    newNo -= 1;
+  }
+  ops.reverse();
+
+  let o = 1;
+  let nn = 1;
+  const seq: Op[] = ops.map((x) => {
+    const out: Op = { ...x, oldLine: null, newLine: null };
+    if (x.type !== "+") out.oldLine = o;
+    if (x.type !== "-") out.newLine = nn;
+    if (x.type !== "+") o += 1;
+    if (x.type !== "-") nn += 1;
+    return out;
+  });
+
+  const context = args.context ?? 3;
+  const changeIdx: number[] = [];
+  for (let k = 0; k < seq.length; k += 1) if (seq[k].type !== " ") changeIdx.push(k);
+  if (!changeIdx.length) {
+    return { truncated: false, diff: `--- a/${args.path}\n+++ b/${args.path}\n@@\n(无差异)\n`, stats: { added: 0, removed: 0 } };
+  }
+
+  const hunks: Array<{ start: number; end: number }> = [];
+  let pos = 0;
+  while (pos < changeIdx.length) {
+    const first = changeIdx[pos];
+    let start = Math.max(0, first - context);
+    let end = Math.min(seq.length, first + context + 1);
+    while (true) {
+      pos += 1;
+      const next = changeIdx[pos];
+      if (next === undefined) break;
+      if (next <= end + context) {
+        end = Math.min(seq.length, next + context + 1);
+        continue;
+      }
+      break;
+    }
+    hunks.push({ start, end });
+  }
+
+  let added = 0;
+  let removed = 0;
+  const maxHunkLines = args.maxHunkLines ?? 320;
+  let outLines: string[] = [`--- a/${args.path}`, `+++ b/${args.path}`];
+  let emitted = 0;
+  for (const h of hunks) {
+    const slice = seq.slice(h.start, h.end);
+    const oldStart = slice.find((x) => x.oldLine !== null)?.oldLine ?? 1;
+    const newStart = slice.find((x) => x.newLine !== null)?.newLine ?? 1;
+    const oldCount = slice.filter((x) => x.type !== "+").length;
+    const newCount = slice.filter((x) => x.type !== "-").length;
+    outLines.push(`@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`);
+    for (const x of slice) {
+      if (emitted >= maxHunkLines) {
+        outLines.push("...(diff 已截断)");
+        return { truncated: true, diff: outLines.join("\n") + "\n", stats: { added, removed } };
+      }
+      if (x.type === "+") added += 1;
+      if (x.type === "-") removed += 1;
+      outLines.push(`${x.type}${x.line}`);
+      emitted += 1;
+    }
+  }
+  return { truncated: false, diff: outLines.join("\n") + "\n", stats: { added, removed } };
+}
+
 function oneLine(s: unknown, max = 48) {
   const t = String(s ?? "").replace(/\s+/g, " ").trim();
   if (!t) return "";
@@ -2356,6 +2518,107 @@ export function startGatewayRun(args: {
                         }
                       : {}),
                   });
+
+                  // lint.style（server tool）增强：如果返回 edits，并且能定位到目标文件，则生成 unified diff 预览 + Keep/Undo 应用
+                  try {
+                    if (ok0 && st.toolName === "lint.style" && out && typeof out === "object") {
+                      const edits0 = Array.isArray((out as any).edits) ? ((out as any).edits as any[]) : [];
+                      const normEdits = edits0
+                        .map((e: any) => ({
+                          startLineNumber: Math.max(1, Math.floor(Number(e?.startLineNumber ?? NaN))),
+                          startColumn: Math.max(1, Math.floor(Number(e?.startColumn ?? 1))),
+                          endLineNumber: Math.max(1, Math.floor(Number(e?.endLineNumber ?? NaN))),
+                          endColumn: Math.max(1, Math.floor(Number(e?.endColumn ?? 9999))),
+                          text: String(e?.text ?? ""),
+                        }))
+                        .filter((e: any) =>
+                          [e.startLineNumber, e.startColumn, e.endLineNumber, e.endColumn].every((n: any) => Number.isFinite(n) && n > 0),
+                        )
+                        .slice(0, 24);
+
+                      const stepNow = (useRunStore.getState().steps ?? []).find((x: any) => x && x.type === "tool" && x.id === stepId) as any;
+                      const inPathRaw =
+                        stepNow?.input && typeof stepNow.input === "object" ? String((stepNow.input as any)?.path ?? "").trim() : "";
+                      const inputText =
+                        stepNow?.input && typeof stepNow.input === "object" ? String((stepNow.input as any)?.text ?? "").trim() : "";
+                      const targetPath = (inPathRaw || useProjectStore.getState().activePath || "").replaceAll("\\", "/");
+                      const proj = useProjectStore.getState();
+                      const file = targetPath ? proj.getFileByPath(targetPath) : null;
+                      if (file && normEdits.length) {
+                        const before = await proj.ensureLoaded(file.path).catch(() => file.content ?? "");
+                        const after = applyTextEdits({ before, edits: normEdits }).after;
+                        const d = unifiedDiff({ path: targetPath, before, after });
+                        const preview = {
+                          diffUnified: d.diff,
+                          truncated: d.truncated,
+                          stats: d.stats ?? null,
+                          path: targetPath,
+                          note: "lint.style（patch）已生成局部修改提案：点击 Keep 应用 edits；Undo 可回滚。",
+                        };
+
+                        const apply = () => {
+                          const snap = useProjectStore.getState().snapshot();
+                          const st2 = useProjectStore.getState();
+                          const exists = !!st2.getFileByPath(targetPath);
+                          if (!exists) return { undo: () => useProjectStore.getState().restore(snap) };
+                          if (st2.activePath === targetPath && st2.editorRef?.getModel()) {
+                            const model = st2.editorRef.getModel()!;
+                            const full = model.getFullModelRange();
+                            st2.editorRef.executeEdits("agent", [{ range: full, text: after, forceMoveMarkers: true }]);
+                            const written = st2.editorRef.getModel()?.getValue() ?? after;
+                            st2.updateFile(targetPath, written);
+                          } else {
+                            st2.updateFile(targetPath, after);
+                          }
+                          return { undo: () => useProjectStore.getState().restore(snap) };
+                        };
+
+                        patchTool(stepId, {
+                          output: { ...(out as any), preview },
+                          applyPolicy: "proposal",
+                          riskLevel: "low",
+                          apply,
+                          undoable: false,
+                        } as any);
+                      } else if (inputText && normEdits.length) {
+                        // text-only：没有明确 path（或 path 不存在）时，仍提供 patch/diff 预览；
+                        // Keep 默认写入一个新文件 drafts/ 下，避免覆盖用户已有文档。
+                        const before = inputText.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+                        const after = applyTextEdits({ before, edits: normEdits }).after;
+                        const pseudoPath = "__draft__/lint.style";
+                        const d = unifiedDiff({ path: pseudoPath, before, after });
+                        const outPath = `drafts/lint-style-${Date.now()}.md`;
+                        const preview = {
+                          diffUnified: d.diff,
+                          truncated: d.truncated,
+                          stats: d.stats ?? null,
+                          path: pseudoPath,
+                          note: `lint.style（patch）已生成“纯文本草稿”的局部修改提案：点击 Keep 会写入新文件 ${outPath}；Undo 可回滚。`,
+                        };
+
+                        const apply = () => {
+                          const snap = useProjectStore.getState().snapshot();
+                          const st2 = useProjectStore.getState();
+                          // 仅新建文件，不覆盖
+                          const exists = !!st2.getFileByPath(outPath);
+                          const finalPath = exists ? `drafts/lint-style-${Date.now()}-2.md` : outPath;
+                          st2.createFile(finalPath, after);
+                          return { undo: () => useProjectStore.getState().restore(snap) };
+                        };
+
+                        patchTool(stepId, {
+                          output: { ...(out as any), preview, patchTarget: { kind: "new_file", path: outPath } },
+                          applyPolicy: "proposal",
+                          riskLevel: "low",
+                          apply,
+                          undoable: false,
+                        } as any);
+                      }
+                    }
+                  } catch {
+                    // ignore
+                  }
+
                   // 出队：避免同一个 toolCallId（跨回合复用 1/2/3…）导致映射错误或无限增长
                   if (q.length) q.shift();
                   if (q.length) gatewayToolStepIdsByCallId.set(toolCallId, q);

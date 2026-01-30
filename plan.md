@@ -45,6 +45,7 @@
 - [批处理写作：并行路由（A 方案）与调度器 v0.1（research）](docs/research/writing-batch-parallel-router-v0.1.md)
 - [doc.write 新写/覆盖策略（research v1）](docs/research/doc-write-ifexists-v1.md)
 - [流式输出空内容根因与修复（research v1）](docs/research/stream-empty-output-root-cause-v1.md)
+- [lint.style patch 模式（spec v0.1：局部 edits + diff + Keep/Undo）](docs/specs/lint-style-patch-v0.1.md)
 - [Electron 原生对话框导致输入失效（research v1）](docs/research/electron-native-dialog-focus-bug-v1.md)
 - [IDE Agent 上下文机制：劣势与完善方法（research v1）](docs/research/context-pack-mechanism-improvements-v1.md)
 - [writing-agent.md（写作 Agent 约定/协议）](writing-agent.md)

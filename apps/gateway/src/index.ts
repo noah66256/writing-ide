@@ -10434,6 +10434,7 @@ fastify.post(
     "1) draft：候选稿（以及它的确定性统计 draft.stats：每100句/每1000字等）。",
     "2) libraries：风格库的“确定性统计指纹”（libraries[*].stats）、高频口癖 Top（topNgrams，带 per1kChars）、以及少量原文样例（samples）。",
     "3) expect（可选）：本轮必须执行的“维度子集”（mustFacetIds）与维度卡（facetCards），以及目标统计指纹（softRanges）。",
+    "4) draftLines（可选）：候选稿的逐行编号版本（用于输出局部 edits）。",
     "",
     "任务：",
     "- 逐条指出 draft 跟风格库“不像”的地方（不是泛泛而谈，必须可执行）。",
@@ -10441,10 +10442,14 @@ fastify.post(
     "- 证据：每条 issue 至少给 1 条 draft 里的原句片段（quote）；尽量再给 1 条风格库证据（可引用 topNgrams 或 samples 里的原句）。",
     "- 若提供 expect.mustFacetIds：你必须输出维度覆盖报告（expected/covered/missing），并在 rewritePrompt 里明确补齐 missing 的维度（每个 missing 至少给 1 条可执行改法）。",
     "- 最后生成一段 rewritePrompt：给工作模型（如 deepseek）使用，要求它在“不新增事实”的前提下，把 draft 改到更像风格库。",
+    "- （重要）如果提供了 draftLines：请尽量输出 edits（TextEdit[]）作为“局部补丁”，用于 IDE 直接应用局部改动；避免整篇重写。",
     "",
     "硬约束：",
     "- stats/topNgrams 是确定性数据，你不得编造或篡改数字。",
     "- 不要新增事实/事件/数字；只允许改写表达方式与结构。",
+    "- edits 必须是局部修改：每条 edit 应尽量覆盖一个自然段/几行；不要用 1 条 edit 覆盖全文。",
+    "- edits 的列号允许用 1..9999（系统会自动裁剪到行尾）；行号必须基于 draftLines 的行号。",
+    "- edits 之间不要重叠；最多输出 12 条。",
     "",
     "输出要求：你必须且只能输出一个 JSON 对象（不要代码块，不要多余文字）。",
     "JSON 结构：",
@@ -10464,11 +10469,23 @@ fastify.post(
     '      "fix": string',
     "    }",
     "  ],",
+    '  "edits": [{ "startLineNumber": number, "startColumn": number, "endLineNumber": number, "endColumn": number, "text": string }] (可选：TextEdit[]),',
     '  "rewritePrompt": string',
     "}",
     "",
     `限制：issues 最多 ${Math.max(3, Math.min(24, maxIssues))} 条；rewritePrompt 要短、硬、可执行（建议分条）。维度数组（expected/covered/missing）最多各 16 项。`,
   ].join("\n");
+
+  const draftLines = (() => {
+    const lines = String(body?.draft?.text ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+    // 控量：避免超长文档把 prompt 撑爆；写作稿通常远小于此
+    const max = 800;
+    const out: Array<{ line: number; text: string }> = [];
+    for (let i = 0; i < Math.min(lines.length, max); i += 1) {
+      out.push({ line: i + 1, text: String(lines[i] ?? "") });
+    }
+    return out;
+  })();
 
   const user = JSON.stringify(
     {
@@ -10478,6 +10495,7 @@ fastify.post(
         sentences: body.draft.sentences ?? null,
         stats: body.draft.stats ?? null,
       },
+      draftLines,
       expect: body.expect ?? null,
       libraries: (body.libraries ?? []).map((l) => ({
         id: l.id ?? "",
@@ -10639,6 +10657,33 @@ fastify.post(
         fix,
       };
     });
+
+    // edits：可选（IDE 局部补丁）。仅做弱校验与裁剪，避免上游偶发输出导致前端崩溃。
+    try {
+      const raw = Array.isArray((p as any).edits) ? (p as any).edits : [];
+      const lineMax = Math.max(1, Math.floor(draftLines.length || 1));
+      const norm: Array<{ startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number; text: string }> = [];
+      for (const it of raw as any[]) {
+        const sl = Math.max(1, Math.min(lineMax, Math.floor(Number(it?.startLineNumber ?? NaN))));
+        const sc = Math.max(1, Math.min(9999, Math.floor(Number(it?.startColumn ?? 1))));
+        const el = Math.max(1, Math.min(lineMax, Math.floor(Number(it?.endLineNumber ?? NaN))));
+        const ec = Math.max(1, Math.min(9999, Math.floor(Number(it?.endColumn ?? 9999))));
+        const text = String(it?.text ?? "");
+        if (!Number.isFinite(sl) || !Number.isFinite(el)) continue;
+        // 允许 text 为空（表示删除），但必须提供有效范围
+        norm.push({ startLineNumber: sl, startColumn: sc, endLineNumber: el, endColumn: ec, text });
+        if (norm.length >= 12) break;
+      }
+      if (norm.length) {
+        // 排序：便于前端从后往前应用
+        norm.sort((a, b) => (b.startLineNumber - a.startLineNumber) || (b.startColumn - a.startColumn));
+        (p as any).edits = norm;
+      } else {
+        delete (p as any).edits;
+      }
+    } catch {
+      delete (p as any).edits;
+    }
 
     return p;
   };
