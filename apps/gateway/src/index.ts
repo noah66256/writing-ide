@@ -2911,11 +2911,14 @@ fastify.post(
     String((mainDocFromPack as any)?.styleLintFailPolicy ?? "").trim() === "keep_best";
 
   const targetChars = (() => {
-    const texts = [String(userPrompt ?? ""), String((mainDocFromPack as any)?.goal ?? "")];
-    for (const raw of texts) {
+    // 设计原则：
+    // - userPrompt 优先于 mainDoc.goal（用户本轮口述应覆盖历史目标）
+    // - 尽量只在“语义明确是字数目标”时命中，避免把年份/编号/批量规模当字数
+    const parseOne = (raw: string) => {
       const t = String(raw ?? "");
-      // A) 显式 “1200字/1500字” 等
-      const m1 = t.match(/(\d{2,5})\s*字/);
+      if (!t.trim()) return null;
+      // A) 显式 “1200字/1200字左右/1200 字上下/1200字以内” 等
+      const m1 = t.match(/(\d{2,5})\s*字(?:\s*(?:左右|上下|以内|内|出头|多点|少点))?/);
       if (m1?.[1]) {
         const n = Number(m1[1]);
         if (Number.isFinite(n) && n > 0) return Math.floor(n);
@@ -2934,7 +2937,15 @@ fastify.post(
         const n = Number(m3[1]);
         if (Number.isFinite(n) && n > 0) return Math.floor(n);
       }
-    }
+      return null;
+    };
+
+    // 强优先：userPrompt
+    const fromPrompt = parseOne(String(userPrompt ?? ""));
+    if (fromPrompt) return fromPrompt;
+    // 次优先：mainDoc.goal（历史目标）
+    const fromGoal = parseOne(String((mainDocFromPack as any)?.goal ?? ""));
+    if (fromGoal) return fromGoal;
     return null;
   })();
 
@@ -3801,7 +3812,9 @@ fastify.post(
           "【Skill: style_imitate】当前阶段：need_draft。\n" +
           "- 本回合**不要调用任何工具**（即使你看到 run.* 在允许列表里也不要用）；更不要输出 <tool_calls>。\n" +
           "- 本回合禁止调用 kb.search、lint.copy、lint.style 与任何“正文写入类” doc.*（doc.write/doc.applyEdits/...）。\n" +
-          "- 请直接输出一版候选正文（纯文本；不要写入，不要分点解释流程）。\n" +
+          (Number.isFinite(Number(targetChars as any)) && Number(targetChars as any) >= 200
+            ? `- 字数要求：目标≈${Math.floor(Number(targetChars as any))}字（允许浮动±20%）。强建议分 4 段输出、每段按目标/4 控制，结尾一句金句收束。\n`
+            : "- 请直接输出一版候选正文（纯文本；不要写入，不要分点解释流程）。\n") +
           "- 下一回合会进入“初稿后二次检索（补金句/收束）”，再进入 lint.copy。";
         reasonCodes.push("phase:style_need_draft");
       } else if (

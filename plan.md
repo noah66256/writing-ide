@@ -29,6 +29,7 @@
 - [Phase Contracts & Retry 范式（research v1）](docs/research/phase-contracts-and-retry-paradigm-v1.md)
 - [Human-in-the-loop：中断/等待/恢复（research v1）](docs/research/hitl-interrupt-clarify-waiting-v1.md)
 - [显式 run.done：终止协议与执行报告（research v1）](docs/research/explicit-run-done-and-execution-report-v1.md)
+- [LengthGate 与字数收敛（research v1）](docs/research/length-gate-and-wordcount-v1.md)
 - [Run Todo v0.2（spec）](docs/specs/run-todo-v0.2.md)
 - [Desktop 打包与发布（Windows/macOS）](docs/release/desktop-packaging.md)
 - [Desktop 自动更新：方案调研 v1（research）](docs/research/desktop-auto-update-options-v1.md)
