@@ -11075,6 +11075,20 @@ fastify.post(
           }),
         )
         .max(24),
+      // 可选：IDE 局部补丁（TextEdit[]）。若上游模型输出了 edits，这里必须透传，否则前端无法生成 diff/Keep/Undo。
+      edits: z
+        .array(
+          z.object({
+            startLineNumber: z.number().int().min(1),
+            startColumn: z.number().int().min(1).max(9999),
+            endLineNumber: z.number().int().min(1),
+            endColumn: z.number().int().min(1).max(9999),
+            // 允许空串（表示删除）
+            text: z.string(),
+          }),
+        )
+        .max(12)
+        .optional(),
       rewritePrompt: z.string().min(1),
     });
 
