@@ -10578,6 +10578,14 @@ fastify.post(
   const env = await getLinterEnv();
   const timeoutMs = env.ok ? env.timeoutMs : 60_000;
 
+  // A/B：是否把风格库“原句 reference”下发给模型/前端。
+  // 背景：reference 会被模型当成可复用素材，极易导致“把库原文贴进正文”的污染。
+  // - off（默认）：不返回 issues.evidence.reference（只保留 draft evidence + fix）
+  // - on：保留 reference（用于诊断/人工比对）
+  const evidenceReferenceModeRaw = String(process.env.LINT_STYLE_EVIDENCE_REFERENCE_MODE ?? "off").trim().toLowerCase();
+  const evidenceReferenceMode: "off" | "on" =
+    evidenceReferenceModeRaw === "on" || evidenceReferenceModeRaw === "1" || evidenceReferenceModeRaw === "true" ? "on" : "off";
+
   // 可靠性策略（v1.1）：
   // - 上游偶发“不遵守 JSON / schema”会导致 lint.style 工具失败，从而让 style_gate 卡在 style_need_style（doc.write 被禁止）。
   // - 为避免卡死：我们对输出做确定性纠偏；必要时用小模型做“结构修复”；仍失败则返回最小可用兜底结果（ok=true，score=0+high issue）。
@@ -10796,7 +10804,8 @@ fastify.post(
       const reference = ev ? clampArr(ev.reference) : null;
       const evidence: any = {};
       if (draft && draft.length) evidence.draft = draft;
-      if (reference && reference.length) evidence.reference = reference;
+      // 方案A：默认不下发库原句（reference），避免“原文喂给模型”后被抄进正文
+      if (evidenceReferenceMode === "on" && reference && reference.length) evidence.reference = reference;
       const hasEvidence = Object.keys(evidence).length > 0;
 
       const title = nonEmptyStr(x.title, `风格差异点 #${idx + 1}`);
