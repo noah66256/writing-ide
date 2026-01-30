@@ -10586,6 +10586,12 @@ fastify.post(
   const evidenceReferenceMode: "off" | "on" =
     evidenceReferenceModeRaw === "on" || evidenceReferenceModeRaw === "1" || evidenceReferenceModeRaw === "true" ? "on" : "off";
 
+  // 兜底：当上游 lint.style 未返回 edits（或 edits 因格式问题被清洗为空）时，尝试用小模型生成“局部补丁 edits”。
+  // - 目的：稳定产出 IDE 的 diff + Keep/Undo（区域修改），避免总是回到 rewritePrompt 的“整段重写”。
+  // - 默认开启：符合“宁可少给材料，也不要抄原文；尽量用局部 edits”的产品取向。
+  const patchFallbackEnabledRaw = String(process.env.LINT_STYLE_PATCH_FALLBACK_ENABLED ?? "1").trim().toLowerCase();
+  const patchFallbackEnabled = patchFallbackEnabledRaw === "1" || patchFallbackEnabledRaw === "true" || patchFallbackEnabledRaw === "on";
+
   // 可靠性策略（v1.1）：
   // - 上游偶发“不遵守 JSON / schema”会导致 lint.style 工具失败，从而让 style_gate 卡在 style_need_style（doc.write 被禁止）。
   // - 为避免卡死：我们对输出做确定性纠偏；必要时用小模型做“结构修复”；仍失败则返回最小可用兜底结果（ok=true，score=0+high issue）。
@@ -10853,6 +10859,102 @@ fastify.post(
     return p;
   };
 
+  async function tryGeneratePatchEdits(args: {
+    draftLines: Array<{ line: number; text: string }>;
+    rewritePrompt: string;
+    issues: Array<{ id: string; title: string; severity: string; fix: string }>;
+  }): Promise<
+    | { ok: true; edits: Array<{ startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number; text: string }>; meta: any }
+    | { ok: false; error: string }
+  > {
+    if (!patchFallbackEnabled) return { ok: false, error: "disabled" };
+    try {
+      const stage = await aiConfig.resolveStage("agent.tool_call_repair");
+      const baseUrl = stage.baseURL;
+      const endpoint = stage.endpoint || "/v1/chat/completions";
+      const apiKey = stage.apiKey;
+      const model = stage.model;
+      const modelIdUsed = stage.modelId ?? null;
+      if (!baseUrl || !model) return { ok: false, error: "stage_not_configured" };
+
+      const maxLines = 500;
+      const lines = (args.draftLines ?? []).slice(0, maxLines);
+      const issuesBrief = (args.issues ?? []).slice(0, 10).map((x) => ({
+        id: String(x.id ?? "").trim(),
+        title: String(x.title ?? "").trim(),
+        severity: String(x.severity ?? "").trim(),
+        fix: String(x.fix ?? "").trim(),
+      }));
+
+      const sys =
+        "你是写作 IDE 的「lint.style patch 生成器」。任务：把 rewritePrompt/issue 修复建议落实为一组 TextEdit（局部修改补丁）。\n" +
+        "严格规则（必须遵守）：\n" +
+        "- 你必须且只能输出一个 JSON 数组（不要代码块/不要多余文字）。\n" +
+        "- 数组元素结构：{startLineNumber,startColumn,endLineNumber,endColumn,text}。\n" +
+        "- 行号必须来自 draftLines 的 line；列号 1..9999（行尾可用 9999）。\n" +
+        "- edits 必须是“局部修改”：每条尽量覆盖 1 个自然段或几行；不要用 1 条 edit 覆盖全文。\n" +
+        "- edits 之间不要重叠；最多 12 条。\n" +
+        "- 不要新增事实/事件/数字；只改表达/句式/节奏/用词。\n" +
+        "- 重点目标：提升风格对齐（问句/语气助词/句式层次/少量数字具象化/更像该作者口吻）。\n";
+
+      const user =
+        "rewritePrompt:\n" +
+        String(args.rewritePrompt ?? "").trim() +
+        "\n\nissuesBrief(JSON):\n" +
+        JSON.stringify(issuesBrief, null, 2) +
+        "\n\ndraftLines(JSON，按行号修改；最多展示前 500 行):\n" +
+        JSON.stringify(lines, null, 2);
+
+      const ret = await completionOnceViaProvider({
+        baseUrl,
+        endpoint,
+        apiKey,
+        model,
+        temperature: 0,
+        maxTokens: 1400,
+        messages: [
+          { role: "system", content: sys },
+          { role: "user", content: user },
+        ],
+      });
+      if (!ret.ok) return { ok: false, error: `llm_failed:${String((ret as any).error ?? "")}` };
+
+      const raw = String((ret as any).content ?? "").trim();
+      const tryParseLocal = (s: string) => {
+        try {
+          return JSON.parse(s);
+        } catch {
+          return null;
+        }
+      };
+      let parsed: any = tryParseLocal(raw);
+      if (!parsed) {
+        const m = raw.match(/\[[\s\S]*\]/);
+        if (m?.[0]) parsed = tryParseLocal(m[0]);
+      }
+      if (!Array.isArray(parsed)) return { ok: false, error: "not_json_array" };
+
+      // 复用 sanitize 的编辑规整逻辑：借用同样的规则把坐标夹紧 + 截断
+      const lineMax = Math.max(1, Math.floor((args.draftLines ?? []).length || 1));
+      const norm: Array<{ startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number; text: string }> = [];
+      for (const it of parsed as any[]) {
+        const sl = Math.max(1, Math.min(lineMax, Math.floor(Number(it?.startLineNumber ?? NaN))));
+        const sc = Math.max(1, Math.min(9999, Math.floor(Number(it?.startColumn ?? 1))));
+        const el = Math.max(1, Math.min(lineMax, Math.floor(Number(it?.endLineNumber ?? NaN))));
+        const ec = Math.max(1, Math.min(9999, Math.floor(Number(it?.endColumn ?? 9999))));
+        const text = String(it?.text ?? "");
+        if (!Number.isFinite(sl) || !Number.isFinite(el)) continue;
+        norm.push({ startLineNumber: sl, startColumn: sc, endLineNumber: el, endColumn: ec, text });
+        if (norm.length >= 12) break;
+      }
+      if (!norm.length) return { ok: false, error: "empty_edits" };
+      norm.sort((a, b) => (b.startLineNumber - a.startLineNumber) || (b.startColumn - a.startColumn));
+      return { ok: true, edits: norm, meta: { used: true, model: stage.model, modelIdUsed } };
+    } catch (e: any) {
+      return { ok: false, error: String(e?.message ?? e ?? "patch_fallback_failed") };
+    }
+  }
+
   const buildFallbackOut = (args: { reason: string; detail?: any }) => {
     const snippet = pickDraftSnippet(draftText);
     const expectMust = Array.isArray(body?.expect?.mustFacetIds) ? body.expect!.mustFacetIds.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
@@ -11104,6 +11206,27 @@ fastify.post(
     try {
       const out = outSchema.parse(parsed);
 
+      // patch 兜底：上游未给 edits（或被清洗为空）时，尝试用小模型补齐 edits
+      let outWithPatch: any = out;
+      try {
+        const hasEdits = Array.isArray((out as any).edits) && (out as any).edits.length > 0;
+        if (!hasEdits) {
+          const patch = await tryGeneratePatchEdits({
+            draftLines,
+            rewritePrompt: String((out as any).rewritePrompt ?? "").trim(),
+            issues: (Array.isArray((out as any).issues) ? (out as any).issues : []).map((x: any) => ({
+              id: String(x?.id ?? "").trim(),
+              title: String(x?.title ?? "").trim(),
+              severity: String(x?.severity ?? "").trim(),
+              fix: String(x?.fix ?? "").trim(),
+            })),
+          });
+          if (patch.ok) outWithPatch = { ...(out as any), edits: patch.edits, patchFallback: patch.meta };
+        }
+      } catch {
+        // ignore patch fallback errors
+      }
+
       // 计费：按 usage（对齐 stage=lint.style 绑定的模型单价），仅非 admin
       let billing: any = null;
       try {
@@ -11134,7 +11257,7 @@ fastify.post(
         timeoutMs,
         ...(((ret as any)?.usage ?? null) ? { usage: (ret as any).usage } : {}),
         ...(billing ? { billing } : {}),
-        ...out,
+        ...outWithPatch,
       });
     } catch (e: any) {
       // schema 不合规：优先尝试“输出修复器”（小模型）；仍失败再切换备用模型
