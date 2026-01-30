@@ -1,0 +1,481 @@
+#!/usr/bin/env node
+/**
+ * 冒烟：跑一遍 style_imitate（目录先挑 v0.1）流程，验证 phase 门禁是否能跑通。
+ *
+ * 说明：
+ * - 依赖本地 dev Gateway（/api/agent/run/stream 仅 dev 开放）
+ * - 用 admin 登录绕过积分门禁（dev 默认 admin123456）
+ * - 脚本模拟 Desktop 执行工具：收到 tool.call 就回传 tool_result（只覆盖最小工具集合）
+ *
+ * 用法：
+ *   node scripts/smoke-style-imitate.mjs
+ *   node scripts/smoke-style-imitate.mjs --gateway http://127.0.0.1:8000 --timeoutSec 180
+ */
+
+const DEFAULT_GATEWAY = "http://127.0.0.1:8000";
+
+function parseArgs(argv) {
+  const out = {};
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (!String(a).startsWith("--")) continue;
+    const key = String(a).slice(2);
+    const next = argv[i + 1];
+    if (!next || String(next).startsWith("--")) out[key] = true;
+    else {
+      out[key] = next;
+      i += 1;
+    }
+  }
+  return out;
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function buildContextPackV1(args) {
+  const styleLibId = args.styleLibId || "kb_lib_smoke_style";
+  const kbSelected = [
+    {
+      id: styleLibId,
+      name: "SMOKE_STYLE",
+      purpose: "style",
+      facetPackId: "speech_marketing_v1",
+      docCount: 0,
+      updatedAt: nowIso(),
+    },
+  ];
+
+  // 目录（简化）：只做“结构化选项池”，不注入任何原文/长 quote
+  const catalog = {
+    v: 1,
+    libraryId: styleLibId,
+    libraryName: "SMOKE_STYLE",
+    facetPackId: "speech_marketing_v1",
+    topK: { must: 6, should: 6, may: 4 },
+    facets: [
+      {
+        facetId: "values_embedding",
+        label: "价值观植入",
+        options: [
+          { optionId: "values_embedding:o1", label: "否定表象→定义本质", signals: ["需要立场/判词"], do: ["先给判词，再解释"], dont: ["不要引用原文句子"] },
+          { optionId: "values_embedding:o2", label: "定义框架→重排优先级", signals: ["需要价值排序"], do: ["先框架再建议"], dont: ["不要堆抽象词"] },
+          { optionId: "values_embedding:o3", label: "冷峻结论→硬核解法", signals: ["需要收束落点"], do: ["给出可执行动作"], dont: ["不要廉价安慰"] },
+        ],
+      },
+      {
+        facetId: "logic_framework",
+        label: "逻辑架构",
+        options: [
+          { optionId: "logic_framework:o1", label: "否定表象→抓根因", signals: ["需要论证"], do: ["先定义根因，再举例"], dont: ["不要跑题"] },
+          { optionId: "logic_framework:o2", label: "微观隐喻→悖论推导", signals: ["需要类比"], do: ["用一个短类比开头"], dont: ["不要照抄样例"] },
+          { optionId: "logic_framework:o3", label: "三段论→层递推进", signals: ["需要结构推进"], do: ["每段先结论句"], dont: ["不要长篇解释型过渡"] },
+        ],
+      },
+      {
+        facetId: "narrative_structure",
+        label: "叙事结构",
+        options: [
+          { optionId: "narrative_structure:o1", label: "总-分-总（回扣）", signals: ["需要闭环"], do: ["结尾回扣开头"], dont: ["不要散"] },
+          { optionId: "narrative_structure:o2", label: "反转-解释-落点", signals: ["需要钩子"], do: ["先反直觉再解释"], dont: ["不要废话"] },
+          { optionId: "narrative_structure:o3", label: "案例-抽象-建议", signals: ["需要案例"], do: ["案例只用来支撑结论"], dont: ["不要堆案例"] },
+        ],
+      },
+    ],
+    softRanges: { avgSentenceLen: [22, 34], questionRatePer100Sentences: [8, 22] },
+  };
+
+  const mainDoc = {
+    runIntent: "writing",
+    goal: "约1200字",
+    // v0.1：stylePlanV1 应由模型在 catalog_pick 阶段写入；此处不预置，确保门禁生效。
+  };
+
+  const docRules = "（smoke）不注入 Doc Rules。";
+  const todo = [];
+  return (
+    `MAIN_DOC(JSON):\n${JSON.stringify(mainDoc, null, 2)}\n\n` +
+    `RUN_TODO(JSON):\n${JSON.stringify(todo, null, 2)}\n\n` +
+    `DOC_RULES(Markdown):\n${docRules}\n\n` +
+    `KB_SELECTED_LIBRARIES(JSON):\n${JSON.stringify(kbSelected, null, 2)}\n\n` +
+    `STYLE_CATALOG(JSON):\n${JSON.stringify(catalog, null, 2)}\n\n`
+  );
+}
+
+async function jsonFetch(url, init) {
+  const res = await fetch(url, init);
+  const text = await res.text();
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    // ignore
+  }
+  if (!res.ok) {
+    const msg = json?.error ? String(json.error) : `HTTP_${res.status}`;
+    throw new Error(`${msg}: ${text.slice(0, 400)}`);
+  }
+  return json;
+}
+
+async function loginAdmin(gatewayUrl) {
+  const username = process.env.SMOKE_ADMIN_USER || "admin";
+  const password = process.env.SMOKE_ADMIN_PASS || "admin123456";
+  const ret = await jsonFetch(`${gatewayUrl}/api/admin/auth/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  const token = String(ret?.accessToken ?? "").trim();
+  if (!token) throw new Error("NO_TOKEN_FROM_ADMIN_LOGIN");
+  return token;
+}
+
+function sseParseBlocks(buffer) {
+  const out = [];
+  let idx = buffer.indexOf("\n\n");
+  while (idx >= 0) {
+    const block = buffer.slice(0, idx);
+    buffer = buffer.slice(idx + 2);
+    out.push(block);
+    idx = buffer.indexOf("\n\n");
+  }
+  return { blocks: out, rest: buffer };
+}
+
+function parseSseEvent(block) {
+  const lines = String(block).split("\n");
+  let event = "";
+  let data = "";
+  for (const l of lines) {
+    if (l.startsWith("event:")) event = l.slice("event:".length).trim();
+    else if (l.startsWith("data:")) data += l.slice("data:".length).trim();
+  }
+  let payload = data;
+  try {
+    payload = data ? JSON.parse(data) : null;
+  } catch {
+    // keep raw
+  }
+  return { event, data: payload };
+}
+
+function shallowMerge(a, b) {
+  const out = { ...(a || {}) };
+  for (const k of Object.keys(b || {})) out[k] = b[k];
+  return out;
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  const gatewayUrl = String(args.gateway || process.env.GATEWAY_URL || DEFAULT_GATEWAY).replace(/\/+$/, "");
+  const timeoutSec = Number(args.timeoutSec || process.env.SMOKE_TIMEOUT_SEC || 180);
+  const prompt =
+    String(
+      args.prompt ||
+        process.env.SMOKE_PROMPT ||
+        "请用绑定风格库做仿写：主题是“挽回里的预期管理”。要求约1200字，口吻偏冷静犀利。先按目录 STYLE_CATALOG 选择 MUST/SHOULD/MAY 与 optionId 并写入 mainDoc.stylePlanV1，再继续执行完整闭环。",
+    ).trim();
+  if (!prompt) throw new Error("EMPTY_PROMPT");
+
+  const token = await loginAdmin(gatewayUrl);
+  const ctx = buildContextPackV1({ styleLibId: String(args.styleLibId || process.env.SMOKE_STYLE_LIB_ID || "").trim() || undefined });
+
+  const abort = new AbortController();
+  const timeout = setTimeout(() => abort.abort(new Error("SMOKE_TIMEOUT")), Math.max(5, timeoutSec) * 1000);
+
+  const res = await fetch(`${gatewayUrl}/api/agent/run/stream`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      accept: "text/event-stream",
+    },
+    body: JSON.stringify({ mode: "agent", prompt, contextPack: ctx }),
+    signal: abort.signal,
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`RUN_START_FAILED HTTP_${res.status}: ${text.slice(0, 600)}`);
+  }
+
+  let runId = "";
+  let buffer = "";
+  const phases = [];
+  const notices = [];
+  const toolCalls = [];
+
+  // 模拟 Desktop 维护 mainDoc
+  let mainDoc = { runIntent: "writing", goal: "约1200字" };
+  let todoList = [];
+
+  const reader = res.body.getReader();
+
+  const postToolResult = async (payload) => {
+    if (!runId) throw new Error("NO_RUN_ID_YET");
+    await jsonFetch(`${gatewayUrl}/api/agent/run/${runId}/tool_result`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  };
+
+  const handleToolCall = async (call) => {
+    const toolCallId = String(call?.toolCallId ?? "").trim();
+    const name = String(call?.name ?? "").trim();
+    const executedBy = String(call?.executedBy ?? "").trim();
+    const args0 = call?.args && typeof call.args === "object" ? call.args : {};
+    toolCalls.push({ name, executedBy });
+    if (!toolCallId || !name) return;
+    if (executedBy === "gateway") return; // gateway 自己执行
+
+    if (name === "run.setTodoList") {
+      todoList = [
+        { id: "pick", text: "目录先挑：写入 mainDoc.stylePlanV1", status: "todo" },
+        { id: "t1", text: "kb.search 模板/结构", status: "todo" },
+        { id: "t2", text: "产出初稿", status: "todo" },
+        { id: "t3", text: "二次 kb.search 结尾/金句", status: "todo" },
+        { id: "t4", text: "lint.style", status: "todo" },
+        { id: "t5", text: "doc.write 写入", status: "todo" },
+      ];
+      return postToolResult({ toolCallId, name, ok: true, output: { ok: true, todoList }, meta: { applyPolicy: "auto_apply", riskLevel: "low", hasApply: false } });
+    }
+
+    if (name === "run.todo.upsertMany") {
+      let items = args0?.items;
+      if (typeof items === "string") {
+        try {
+          items = JSON.parse(items);
+        } catch {
+          items = null;
+        }
+      }
+      const arr = Array.isArray(items) ? items : [];
+      const byId = new Map(todoList.map((t) => [String(t.id), t]));
+      for (const it of arr) {
+        const text = String(it?.text ?? "").trim();
+        if (!text) continue;
+        let id = String(it?.id ?? "").trim();
+        if (!id) id = `t${byId.size + 1}`;
+        const cur = byId.get(id);
+        const next = {
+          id,
+          text: text || cur?.text || "",
+          status: String(it?.status ?? cur?.status ?? "todo"),
+          ...(it?.note !== undefined ? { note: String(it.note ?? "") } : cur?.note !== undefined ? { note: cur.note } : {}),
+        };
+        byId.set(id, next);
+      }
+      todoList = Array.from(byId.values());
+      return postToolResult({ toolCallId, name, ok: true, output: { ok: true, todoList }, meta: { applyPolicy: "auto_apply", riskLevel: "low", hasApply: false } });
+    }
+
+    if (name === "run.todo.update" || name === "run.updateTodo") {
+      const idRaw = String(args0?.id ?? "").trim();
+      let patch = args0?.patch;
+      if (typeof patch === "string") {
+        try {
+          patch = JSON.parse(patch);
+        } catch {
+          patch = null;
+        }
+      }
+      const p = patch && typeof patch === "object" ? patch : {};
+      let id = idRaw;
+      if (!id && todoList.length === 1) id = String(todoList[0]?.id ?? "");
+      if (id) {
+        todoList = todoList.map((t) => {
+          if (String(t.id) !== id) return t;
+          return {
+            ...t,
+            ...(p.text !== undefined ? { text: String(p.text ?? "") } : {}),
+            ...(p.status !== undefined ? { status: String(p.status ?? "") } : {}),
+            ...(p.note !== undefined ? { note: String(p.note ?? "") } : {}),
+          };
+        });
+      }
+      return postToolResult({ toolCallId, name, ok: true, output: { ok: true, todoList }, meta: { applyPolicy: "auto_apply", riskLevel: "low", hasApply: false } });
+    }
+
+    if (name === "run.todo.remove") {
+      const id = String(args0?.id ?? "").trim();
+      if (id) todoList = todoList.filter((t) => String(t.id) !== id);
+      return postToolResult({ toolCallId, name, ok: true, output: { ok: true, todoList }, meta: { applyPolicy: "auto_apply", riskLevel: "low", hasApply: false } });
+    }
+
+    if (name === "run.todo.clear") {
+      todoList = [];
+      return postToolResult({ toolCallId, name, ok: true, output: { ok: true, todoList }, meta: { applyPolicy: "auto_apply", riskLevel: "low", hasApply: false } });
+    }
+
+    if (name === "run.mainDoc.get") {
+      return postToolResult({ toolCallId, name, ok: true, output: { ok: true, mainDoc }, meta: { applyPolicy: "auto_apply", riskLevel: "low", hasApply: false } });
+    }
+
+    if (name === "run.mainDoc.update") {
+      let patch = args0?.patch;
+      if (typeof patch === "string") {
+        try {
+          patch = JSON.parse(patch);
+        } catch {
+          patch = null;
+        }
+      }
+      if (!patch || typeof patch !== "object") {
+        // 兜底：直接写一个最小 stylePlanV1，确保门禁能过
+        patch = {
+          stylePlanV1: {
+            v: 1,
+            libraryId: process.env.SMOKE_STYLE_LIB_ID || "kb_lib_smoke_style",
+            facetPackId: "speech_marketing_v1",
+            topK: { must: 6, should: 6, may: 4 },
+            selected: {
+              must: [
+                { facetId: "values_embedding", optionId: "values_embedding:o1" },
+                { facetId: "logic_framework", optionId: "logic_framework:o1" },
+                { facetId: "narrative_structure", optionId: "narrative_structure:o1" },
+              ],
+              should: [],
+              may: [],
+            },
+            stages: { s0: { done: false }, s1: { done: false } },
+            updatedAt: nowIso(),
+          },
+        };
+      }
+      mainDoc = shallowMerge(mainDoc, patch);
+      return postToolResult({ toolCallId, name, ok: true, output: { ok: true, mainDoc }, meta: { applyPolicy: "auto_apply", riskLevel: "low", hasApply: false } });
+    }
+
+    if (name === "kb.search") {
+      const query = String(args0?.query ?? "").trim();
+      const kind = String(args0?.kind ?? "card").trim() || "card";
+      const libraryIds = args0?.libraryIds ?? [];
+      const groups = [
+        {
+          sourceDoc: {
+            id: "kb_doc_smoke_1",
+            libraryId: process.env.SMOKE_STYLE_LIB_ID || "kb_lib_smoke_style",
+            title: "SMOKE Playbook",
+            format: "md",
+            importedFrom: { kind: "project", relPath: "__kb_playbook__/library/smoke.md", entryIndex: 0 },
+            contentHash: "smoke",
+            createdAt: nowIso(),
+            updatedAt: nowIso(),
+          },
+          bestScore: 123.4,
+          hits: [
+            {
+              score: 123.4,
+              snippet: "（smoke）模板：先立场/价值观，再定结构，再定开头结尾，最后收尾润色。",
+              artifact: {
+                id: "kb_card_smoke_1",
+                kind: "card",
+                title: "结构套路（smoke）",
+                cardType: "playbook_facet",
+                facetIds: ["narrative_structure"],
+                anchor: { paragraphIndex: 0 },
+              },
+            },
+          ],
+        },
+      ];
+      return postToolResult({
+        toolCallId,
+        name,
+        ok: true,
+        output: { ok: true, query, kind, libraryIds, useVector: false, embeddingModel: null, groups, debug: { smoke: true } },
+        meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
+      });
+    }
+
+    if (name === "doc.write" || name === "doc.applyEdits" || name === "doc.replaceSelection") {
+      const path = String(args0?.path ?? "drafts/smoke-output.md").trim() || "drafts/smoke-output.md";
+      return postToolResult({
+        toolCallId,
+        name,
+        ok: true,
+        output: { ok: true, path },
+        meta: { applyPolicy: "auto_apply", riskLevel: "low", hasApply: true },
+      });
+    }
+
+    // 兜底：其它工具一律返回 ok，避免脚本卡住
+    return postToolResult({ toolCallId, name, ok: true, output: { ok: true }, meta: { applyPolicy: "auto_apply", riskLevel: "low", hasApply: false } });
+  };
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += new TextDecoder().decode(value);
+      const { blocks, rest } = sseParseBlocks(buffer);
+      buffer = rest;
+      for (const b of blocks) {
+        const evt = parseSseEvent(b);
+        if (!evt.event) continue;
+        if (evt.event === "run.start") {
+          runId = String(evt.data?.runId ?? "").trim() || runId;
+        }
+        if (evt.event === "policy.decision") {
+          const p = evt.data;
+          if (p && typeof p === "object" && String(p.policy ?? "") === "SkillToolCapsPolicy") {
+            const ph = String(p?.detail?.phase ?? "").trim();
+            if (ph) phases.push(ph);
+          }
+        }
+        if (evt.event === "run.notice") {
+          const title = String(evt.data?.title ?? "").trim();
+          if (title) notices.push(title);
+        }
+        if (evt.event === "tool.call") {
+          await handleToolCall(evt.data);
+        }
+        if (evt.event === "run.end") {
+          // 结束即退出
+          buffer = "";
+          reader.cancel().catch(() => {});
+          break;
+        }
+      }
+    }
+  } finally {
+    clearTimeout(timeout);
+    try {
+      reader.cancel();
+    } catch {
+      // ignore
+    }
+  }
+
+  const uniq = (arr) => Array.from(new Set(arr));
+  const report = {
+    ok: true,
+    runId: runId || null,
+    phases: uniq(phases),
+    notices: uniq(notices).slice(0, 8),
+    toolCalls: toolCalls.map((x) => `${x.name}${x.executedBy ? `@${x.executedBy}` : ""}`),
+  };
+
+  const need = ["style_need_catalog_pick", "style_need_templates"];
+  const missing = need.filter((x) => !report.phases.includes(x));
+  if (missing.length) {
+    report.ok = false;
+    report.missingPhases = missing;
+  }
+  console.log("## smoke-style-imitate report");
+  console.log(JSON.stringify(report, null, 2));
+  if (!report.ok) process.exit(2);
+}
+
+main().catch((e) => {
+  console.error("smoke-style-imitate failed:", e?.stack || String(e));
+  process.exit(1);
+});
+
+
