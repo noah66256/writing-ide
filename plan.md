@@ -41,6 +41,7 @@
 - [Style Skill 门禁（让风格库只在“开写”后介入，research v1）](docs/research/style-skill-gating-v1.md)
 - [仿写（style_imitate）链路系统性复盘：从“修补”到“范式”（research v1）](docs/research/style-imitate-paradigm-review-v1.md)
 - [风格闭环“越改越飘”范式复盘与修复方案 v1（research）](docs/research/style-lint-drift-mitigation-v1.md)
+- [仿写工业化 v0.1（目录先挑 + 分阶段执行 + 只给规则不给原文）](docs/specs/style-imitate-industrial-v0.1.md)
 - [批处理写作任务（Writing Batch Jobs）v0.1（research）](docs/research/writing-batch-jobs-v0.1.md)
 - [批处理写作：并行路由（A 方案）与调度器 v0.1（research）](docs/research/writing-batch-parallel-router-v0.1.md)
 - [doc.write 新写/覆盖策略（research v1）](docs/research/doc-write-ifexists-v1.md)
