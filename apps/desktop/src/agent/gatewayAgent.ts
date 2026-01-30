@@ -1101,17 +1101,18 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
   // （解决：仅做“搜索/盘点热点”时，绑定风格库也不应抢跑影响素材收集与选题广度）
   const allowInjectStyleContext = styleSkillActive && !webTopicRadarActive;
 
+  // v0.1：目录先挑（只给规则不给原文）。默认不再把 KB_LIBRARY_PLAYBOOK 全文注入模型上下文（容易导致贴原文）。
+  // 可通过环境变量临时回滚：DESKTOP_STYLE_INJECT_PLAYBOOK=1
+  const injectPlaybook = String((import.meta as any)?.env?.DESKTOP_STYLE_INJECT_PLAYBOOK ?? "").trim() === "1";
   const playbookSection = await (async () => {
     if (!allowInjectStyleContext) return "";
+    if (!injectPlaybook) return "";
     const ids = Array.isArray(kbAttached) ? kbAttached.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
-    const playbookText = await useKbStore
-      .getState()
-      .getPlaybookTextForLibraries(ids)
-      .catch(() => "");
+    const playbookText = await useKbStore.getState().getPlaybookTextForLibraries(ids).catch(() => "");
     if (!playbookText) return "";
     return (
       `KB_LIBRARY_PLAYBOOK(Markdown):\n${playbookText}\n\n` +
-      `提示：上面已注入库级“仿写手册”（Style Profile + 维度写法）。如需更多原文证据/更多样例，再调用 kb.search。\n\n`
+      `提示：上面已注入库级“仿写手册”（风险：可能导致贴原文）。默认已关闭；仅用于回滚排查。\n\n`
     );
   })();
 
@@ -1171,6 +1172,120 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
   let styleSelectorPayload: any = null;
   let styleSelectorSelectedFacets: SelectedFacetV1[] = [];
   let styleSelectorSelectedFacetIds: string[] = [];
+  const STYLE_PLAN_TOPK_V1 = { must: 6, should: 6, may: 4 };
+
+  const sanitizeRuleTextV1 = (md: string) => {
+    // 去掉明显“证据段/原文示例”形态，保留规则/套路/清单类文本
+    const raw = String(md ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    const lines = raw.split("\n");
+    const out: string[] = [];
+    for (const line of lines) {
+      const t = line.trim();
+      // 大段引用块：高风险（容易被直接复制）
+      if (t.startsWith(">")) continue;
+      // 含长引号句：高风险（像原文）
+      if ((t.includes("“") && t.includes("”") && t.length >= 24) || (t.includes("\"") && t.length >= 28)) continue;
+      out.push(line);
+    }
+    return out.join("\n").trim();
+  };
+
+  const extractFacetOptionsV1 = (args: { facetId: string; content: string }) => {
+    const max = 5;
+    const src = sanitizeRuleTextV1(args.content);
+    const lines = src.split("\n").map((x) => x.trim());
+    const cand: string[] = [];
+    let inTrick = false;
+    for (const l of lines) {
+      if (!l) continue;
+      // 粗粒度：遇到 “套路/模板/清单” 开始收集 bullet/编号项
+      if (/^#{2,6}\s*(套路|模板|检查清单|写法|步骤|做法)/.test(l) || /^(套路|模板|检查清单|写法|步骤|做法)[:：]/.test(l)) {
+        inTrick = true;
+        continue;
+      }
+      if (/^#{2,6}\s+/.test(l) && inTrick) {
+        // 新小节：停
+        inTrick = false;
+      }
+      if (!inTrick) continue;
+      const m1 = l.match(/^[-*]\s+(.+)$/);
+      const m2 = l.match(/^\d+\.\s+(.+)$/);
+      const item = (m1?.[1] ?? m2?.[1] ?? "").trim();
+      if (!item) continue;
+      if (item.length < 6) continue;
+      // 脱敏：去掉引号段落
+      if ((item.includes("“") && item.includes("”")) || item.includes("【证据")) continue;
+      cand.push(item.replace(/\s+/g, " ").trim());
+      if (cand.length >= 18) break;
+    }
+    const uniq: string[] = [];
+    for (const c of cand) if (!uniq.includes(c)) uniq.push(c);
+    const picked = uniq.slice(0, max);
+    // 兜底：如果没抓到套路段，退化为从任意 bullet 抓 3 条
+    if (!picked.length) {
+      const anyBullets: string[] = [];
+      for (const l of lines) {
+        const m = l.match(/^[-*]\s+(.+)$/);
+        const item = (m?.[1] ?? "").trim();
+        if (!item || item.length < 8) continue;
+        if ((item.includes("“") && item.includes("”")) || item.includes("【证据")) continue;
+        anyBullets.push(item.replace(/\s+/g, " ").trim());
+        if (anyBullets.length >= 8) break;
+      }
+      const u2: string[] = [];
+      for (const c of anyBullets) if (!u2.includes(c)) u2.push(c);
+      picked.push(...u2.slice(0, max));
+    }
+    return picked.map((label, idx) => ({
+      optionId: `${args.facetId}:o${idx + 1}`,
+      label: label.length > 26 ? label.slice(0, 26) + "…" : label,
+      signals: [] as string[],
+      do: [label],
+      dont: ["不要引用原文句子/长 quote；只复刻规则与结构。"],
+    }));
+  };
+
+  const styleCatalogSection = await (async () => {
+    // v0.1：注入目录（21维度+每维度3-5子套路），让模型先挑，再写入 mainDoc.stylePlanV1
+    if (!allowInjectStyleContext) return "";
+    const styleLibs = kbSelected.filter((l: any) => String(l?.purpose ?? "").trim() === "style").slice(0, 1);
+    if (!styleLibs.length) return "";
+    const lib = styleLibs[0];
+    const libId = String(lib?.id ?? "").trim();
+    if (!libId) return "";
+    const facetPackId = String((lib as any)?.facetPackId ?? "speech_marketing_v1").trim() || "speech_marketing_v1";
+    const pack = getFacetPack(facetPackId);
+    const facetIdsAll = pack.facets.map((f) => f.id);
+    const ret = await useKbStore
+      .getState()
+      .getPlaybookFacetCardsForLibrary({ libraryId: libId, facetIds: facetIdsAll, maxCharsPerCard: 1200, maxTotalChars: 28_000 })
+      .catch(() => ({ ok: false, cards: [] } as any));
+    const cards = ret?.ok && Array.isArray(ret.cards) ? ret.cards : [];
+    const cardByFacet = new Map<string, any>();
+    for (const c of cards) {
+      const fid = String((c as any)?.facetId ?? "").trim();
+      if (!fid) continue;
+      if (!cardByFacet.has(fid)) cardByFacet.set(fid, c);
+    }
+    const facets = pack.facets.map((f) => {
+      const card = cardByFacet.get(f.id);
+      const content = card ? String(card.content ?? "") : "";
+      const options = content ? extractFacetOptionsV1({ facetId: f.id, content }) : [];
+      return { facetId: f.id, label: f.label, options };
+    });
+    const payload = {
+      v: 1,
+      libraryId: libId,
+      libraryName: String(lib?.name ?? libId),
+      facetPackId,
+      topK: STYLE_PLAN_TOPK_V1,
+      facets,
+    };
+    return (
+      `STYLE_CATALOG(JSON):\n${JSON.stringify(payload, null, 2)}\n\n` +
+      `提示：这是“仿写工业化目录”（只给规则不给原文）。你必须先基于此目录选择 MUST/SHOULD/MAY 并写入 mainDoc.stylePlanV1（run.mainDoc.update），再进入后续写作闭环。\n\n`
+    );
+  })();
   const styleSelectorSection = await (async () => {
     // Selector v1：为“自动选簇/选卡”提供结构化输出，保证换生成模型也稳定可用
     if (!allowInjectStyleContext) return "";
@@ -1236,17 +1351,17 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
       if (!selectedFacetIds.length) return "";
       const ret = await useKbStore
         .getState()
-        .getPlaybookFacetCardsForLibrary({ libraryId: libId, facetIds: selectedFacetIds, maxCharsPerCard: 1000, maxTotalChars: 6500 })
+        .getPlaybookFacetCardsForLibrary({ libraryId: libId, facetIds: selectedFacetIds, maxCharsPerCard: 900, maxTotalChars: 6500 })
         .catch(() => ({ ok: false, cards: [] } as any));
       const cards = ret?.ok && Array.isArray(ret.cards) ? ret.cards : [];
       const body = cards
-        .map((c: any) => String(c?.content ?? "").trim())
+        .map((c: any) => sanitizeRuleTextV1(String(c?.content ?? "")))
         .filter(Boolean)
         .join("\n\n");
       if (!body) return "";
       return (
         `STYLE_FACETS_SELECTED(Markdown):\n${body}\n\n` +
-        `提示：以上为本次 Selector 选出的“维度卡子集”（只执行这些卡；不要自行扩展到 21 张）。如需更多原文证据，请调用 kb.search 并带 facetIds 过滤。\n\n`
+        `提示：以上为本次选中的“规则卡子集”（已脱敏：不含原文证据段/长 quote）。只执行这些卡；不要自行扩展到 21 张。\n\n`
       );
     })();
 
@@ -1458,6 +1573,7 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
   pushSeg({ name: "KB_SELECTED_LIBRARIES", content: kbText, priority: "p1", trusted: true, source: "desktop" });
   pushSeg({ name: "ACTIVE_SKILLS", content: skillsText, priority: "p1", trusted: true, source: "desktop" });
   if (playbookSection) pushSeg({ name: "KB_LIBRARY_PLAYBOOK", content: playbookSection, priority: "p2", trusted: false, source: "desktop" });
+  if (styleCatalogSection) pushSeg({ name: "STYLE_CATALOG", content: styleCatalogSection, priority: "p2", trusted: false, source: "desktop" });
   if (styleClustersSection) pushSeg({ name: "KB_STYLE_CLUSTERS", content: styleClustersSection, priority: "p2", trusted: false, source: "desktop" });
   if (styleSelectorSection) pushSeg({ name: "STYLE_SELECTOR", content: styleSelectorSection, priority: "p2", trusted: false, source: "desktop" });
   if (styleDimensionsSection) pushSeg({ name: "STYLE_DIMENSIONS", content: styleDimensionsSection, priority: "p2", trusted: false, source: "desktop" });

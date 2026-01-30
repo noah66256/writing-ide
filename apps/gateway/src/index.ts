@@ -3084,6 +3084,8 @@ fastify.post(
     workflowRetryBudget: workflowRetryBudgetEffective,
     lintReworkBudget: lintMaxRework
   });
+  // v0.1：让 Gateway 在本次 run 内看到 mainDoc 的“最新值”（否则门禁只能看到初始 contextPack，会误判卡死）
+  (runState as any).mainDocLatest = mainDocFromPack as any;
   // 关键：续跑时 Context Pack 可能已包含 RUN_TODO（但本次 run 未必会再次 run.setTodoList），
   // 不应因此触发 AutoRetryPolicy 的 need_todo 误判。
   if (Array.isArray(runTodoFromPack) && runTodoFromPack.length) {
@@ -3459,6 +3461,7 @@ fastify.post(
     | "web_need_search"
     | "web_need_fetch"
     | "batch_active"
+    | "style_need_catalog_pick"
     | "style_need_templates"
     | "style_need_draft"
     | "style_need_punchline"
@@ -3552,6 +3555,38 @@ fastify.post(
             "  A) 启动：调用 writing.batch.start（不传 inputDir，默认用当前活动文件）。\n" +
             "  B) 查询：调用 writing.batch.status（若你认为已经启动过）。\n" +
             "- 完成后：建议调用 run.done 结束本次 run（批处理会在后台继续）。\n",
+        };
+      },
+    },
+    style_need_catalog_pick: {
+      phase: "style_need_catalog_pick",
+      allowTools: ["run.mainDoc.update", "run.mainDoc.get", "run.setTodoList", "run.todo.upsertMany", "run.todo.update"],
+      hint:
+        "【Skill: style_imitate】当前阶段：need_catalog_pick（目录先挑，工业化 v0.1）。\n" +
+        "- 你必须先基于 Context Pack 里的 STYLE_CATALOG(JSON) 选择维度与子套路选项，并写入 Main Doc：run.mainDoc.update。\n" +
+        "- 选择规则：MUST=6，SHOULD=6，MAY=4；每个维度必须选择 1 个 optionId（来自目录 options）。\n" +
+        "- 写入位置：mainDoc.stylePlanV1={v:1,libraryId,facetPackId,topK,selected:{must/should/may},stages:{s0..s7},updatedAt}。\n" +
+        "- 本回合禁止 kb.search / lint.* / doc.*；不要输出正文。\n" +
+        "- 注意：若要调用工具，本条消息必须且只能输出严格的 <tool_calls>...</tool_calls> XML（不要夹杂自然语言）。",
+      autoRetry: ({ runState, toolCapsPhase }) => {
+        if (toolCapsPhase !== "style_need_catalog_pick") return null;
+        const md: any = (runState as any)?.mainDocLatest ?? null;
+        const sp: any = md && typeof md === "object" ? (md as any).stylePlanV1 : null;
+        const okPick =
+          sp &&
+          typeof sp === "object" &&
+          !Array.isArray(sp) &&
+          Number((sp as any).v ?? 0) >= 1 &&
+          (Array.isArray((sp as any)?.selected?.must) ? (sp as any).selected.must.length : 0) > 0;
+        if (okPick) return { shouldRetry: false, reasonCodes: ["style_catalog_picked"], reasons: [], systemMessage: "" };
+        return {
+          shouldRetry: true,
+          reasonCodes: ["need_style_catalog_pick"],
+          reasons: ["尚未完成 STYLE_CATALOG 目录选择（未写入 mainDoc.stylePlanV1）"],
+          systemMessage:
+            "你还没有完成目录选择。请立刻调用 run.mainDoc.update 写入 mainDoc.stylePlanV1（工业化 v0.1）。\n" +
+            "- 要求：MUST=6，SHOULD=6，MAY=4；每个 facet 选 1 个 optionId。\n" +
+            "- 本条消息必须是纯 <tool_calls> XML（不要夹杂自然语言）。",
         };
       },
     },
@@ -3707,6 +3742,26 @@ fastify.post(
 
     // 5) StyleImitateSkill（V2.1：templates -> draft -> post_draft_kb -> (copy opt) -> style -> write）
     if (effectiveGates.styleGateEnabled) {
+      // v0.1：目录先挑（仅 style_imitate + 写作类任务）
+      const hasStyleSkill = activeSkillIds.includes("style_imitate");
+      const md: any = (runState as any)?.mainDocLatest ?? null;
+      const sp: any = md && typeof md === "object" ? (md as any).stylePlanV1 : null;
+      const hasCatalogPick =
+        sp &&
+        typeof sp === "object" &&
+        !Array.isArray(sp) &&
+        Number((sp as any).v ?? 0) >= 1 &&
+        (Array.isArray((sp as any)?.selected?.must) ? (sp as any).selected.must.length : 0) > 0;
+
+      if (hasStyleSkill && intent.isWritingTask && !intent.wantsOkOnly && !hasCatalogPick) {
+        phase = "style_need_catalog_pick";
+        const contract = PHASE_CONTRACTS_V1.style_need_catalog_pick!;
+        const allowSet = new Set<string>([...contract.allowTools, ...Array.from(ALWAYS_ALLOW_TOOL_NAMES)]);
+        for (const name of Array.from(allowed)) if (!allowSet.has(name)) allowed.delete(name);
+        hint = contract.hint;
+        reasonCodes.push("phase:style_need_catalog_pick");
+        return { phase, allowed, hint, reasonCodes };
+      }
       if (!runState.hasStyleKbSearch) {
         phase = "style_need_templates";
         // 禁止 lint.copy / lint.style & 写入类 doc.*，避免 “LINT_BEFORE_KB / WRITE_BEFORE_KB”
@@ -6898,6 +6953,13 @@ fastify.post(
             reply.raw.end();
             agentRunWaiters.delete(runId);
             return;
+          }
+        }
+        // v0.1：同步 mainDocLatest（来自 Desktop 侧 run.mainDoc.* 的 tool_result）
+        if (payload.ok && (payload.name === "run.mainDoc.update" || payload.name === "run.mainDoc.get")) {
+          const nextMainDoc = (payload.output as any)?.mainDoc;
+          if (nextMainDoc && typeof nextMainDoc === "object" && !Array.isArray(nextMainDoc)) {
+            (runState as any).mainDocLatest = nextMainDoc;
           }
         }
         if (
