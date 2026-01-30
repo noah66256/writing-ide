@@ -3084,6 +3084,16 @@ fastify.post(
     workflowRetryBudget: workflowRetryBudgetEffective,
     lintReworkBudget: lintMaxRework
   });
+  // LengthGatePolicy 专用预算（避免被 workflowRetryBudget 的其它重试消耗殆尽导致“字数门禁卡死”）
+  // - 短文（<=900）更容易超长/过短，给更高预算
+  // - 中长文默认更保守，避免无限回炉
+  (runState as any).lengthRetryBudget = (() => {
+    const t = Number(targetChars as any);
+    if (!Number.isFinite(t) || t < 200) return 0;
+    if (t <= 900) return 4;
+    if (t <= 1800) return 3;
+    return 2;
+  })();
   // v0.1：让 Gateway 在本次 run 内看到 mainDoc 的“最新值”（否则门禁只能看到初始 contextPack，会误判卡死）
   (runState as any).mainDocLatest = mainDocFromPack as any;
   // 关键：续跑时 Context Pack 可能已包含 RUN_TODO（但本次 run 未必会再次 run.setTodoList），
@@ -3124,6 +3134,7 @@ fastify.post(
     protocolRetryBudget: runState.protocolRetryBudget,
     workflowRetryBudget: runState.workflowRetryBudget,
     lintReworkBudget: runState.lintReworkBudget,
+    lengthRetryBudget: Number((runState as any).lengthRetryBudget ?? 0) || 0,
     hasTodoList: runState.hasTodoList,
     hasWriteOps: runState.hasWriteOps,
     hasWriteProposed: runState.hasWriteProposed,
@@ -3560,13 +3571,15 @@ fastify.post(
     },
     style_need_catalog_pick: {
       phase: "style_need_catalog_pick",
-      allowTools: ["run.mainDoc.update", "run.mainDoc.get", "run.setTodoList", "run.todo.upsertMany", "run.todo.update"],
+      // 为了提升“呆瓜用户 prompt”鲁棒性：允许提前 kb.search（不会再因为误调用而 tool_caps_blocked）。
+      // 但仍通过 hint + AutoRetry 要求“必须先写 mainDoc.stylePlanV1”，保持顺序偏好。
+      allowTools: ["run.mainDoc.update", "run.mainDoc.get", "run.setTodoList", "run.todo.upsertMany", "run.todo.update", "kb.search"],
       hint:
         "【Skill: style_imitate】当前阶段：need_catalog_pick（目录先挑，工业化 v0.1）。\n" +
         "- 你必须先基于 Context Pack 里的 STYLE_CATALOG(JSON) 选择维度与子套路选项，并写入 Main Doc：run.mainDoc.update。\n" +
         "- 选择规则：MUST=6，SHOULD=6，MAY=4；每个维度必须选择 1 个 optionId（来自目录 options）。\n" +
         "- 写入位置：mainDoc.stylePlanV1={v:1,libraryId,facetPackId,topK,selected:{must/should/may},stages:{s0..s7},updatedAt}。\n" +
-        "- 本回合禁止 kb.search / lint.* / doc.*；不要输出正文。\n" +
+        "- 强约束：先完成 run.mainDoc.update（目录选择）再 kb.search；本阶段不要 lint.* / doc.*；不要输出正文。\n" +
         "- 注意：若要调用工具，本条消息必须且只能输出严格的 <tool_calls>...</tool_calls> XML（不要夹杂自然语言）。",
       autoRetry: ({ runState, toolCapsPhase }) => {
         if (toolCapsPhase !== "style_need_catalog_pick") return null;
@@ -3781,16 +3794,14 @@ fastify.post(
       } else if (effectiveGates.lintGateEnabled && intent.isWritingTask && !intent.wantsOkOnly && !runState.hasDraftText) {
         phase = "style_need_draft";
         // 禁止 kb.search / lint.copy / lint.style / 写入类 doc.*：先产候选正文（纯文本）
-        allowed.delete("kb.search");
-        allowed.delete("lint.copy");
-        allowed.delete("lint.style");
-        for (const name of Array.from(allowed)) {
-          if (isContentWriteTool(name)) allowed.delete(name);
-        }
+        // 并且：收紧为“只允许 run.* + time.now”，最大化降低模型在本阶段乱调用工具导致 tool_caps_blocked 的概率。
+        const allowSet = new Set<string>(Array.from(ALWAYS_ALLOW_TOOL_NAMES));
+        allowed = new Set<string>(Array.from(baseAllowed).filter((n) => allowSet.has(n)));
         hint =
           "【Skill: style_imitate】当前阶段：need_draft。\n" +
-          "- 本回合禁止调用 kb.search、lint.copy、lint.style 与任何“正文写入类” doc.*。\n" +
-          "- 请先输出一版候选正文（纯文本；不要写入）。\n" +
+          "- 本回合**不要调用任何工具**（即使你看到 run.* 在允许列表里也不要用）；更不要输出 <tool_calls>。\n" +
+          "- 本回合禁止调用 kb.search、lint.copy、lint.style 与任何“正文写入类” doc.*（doc.write/doc.applyEdits/...）。\n" +
+          "- 请直接输出一版候选正文（纯文本；不要写入，不要分点解释流程）。\n" +
           "- 下一回合会进入“初稿后二次检索（补金句/收束）”，再进入 lint.copy。";
         reasonCodes.push("phase:style_need_draft");
       } else if (
@@ -4872,6 +4883,7 @@ fastify.post(
                     ? `你上一条输出的正文长度与目标字数偏离较大。\n` +
                       `- 目标：≈${targetChars}字；当前：≈${assistantText.trim().length}字。\n` +
                       `- 你现在必须把正文扩写/删减到目标附近（允许上下浮动约 ±20%），并直接输出修订后的正文（Markdown 纯文本）。\n` +
+                      `- 只输出正文，不要写“任务完成/流程回顾/我做了什么”。建议分 4 段，每段控制在目标/4 左右，结尾用一句金句收束。\n` +
                       `- 不要调用任何工具；不要输出 <tool_calls>/<tool_call>；不要输出 XML。\n`
                   : "你刚才输出了纯文本，但任务尚未完成。\n" +
                     "- 你必须先输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
@@ -5138,6 +5150,72 @@ fastify.post(
         agentRunWaiters.delete(runId);
         return;
         }
+      }
+
+      // 单篇写作：禁止过早 run.done（否则会在未完成“二次检索/闸门/写入”前直接结束）
+      // 说明：writing_multi 已有专门防护；这里补齐“单篇 style_imitate”场景的鲁棒性。
+      try {
+        if (
+          toolCalls &&
+          toolCalls.length &&
+          intent.isWritingTask &&
+          effectiveGates.styleGateEnabled &&
+          !intent.wantsOkOnly
+        ) {
+          const before = toolCalls.slice();
+          const hasRunDone = before.some((c: any) => String(c?.name ?? "") === "run.done");
+          const hasAnyWrite = Boolean(runState.hasWriteApplied || runState.hasWriteProposed || runState.hasWriteOps);
+          if (hasRunDone && !hasAnyWrite) {
+            const kept = before.filter((c: any) => String(c?.name ?? "") !== "run.done");
+            toolCalls.splice(0, toolCalls.length, ...kept);
+            writePolicyDecision({
+              turn,
+              policy: "CompletionPolicy",
+              decision: kept.length ? "drop_run_done" : "drop_run_done_empty",
+              reasonCodes: ["run.done_not_allowed_until_write"],
+              detail: { hasAnyWrite, phase: toolCapsPhase },
+            });
+            writeRunNotice({
+              turn,
+              kind: "info",
+              title: "已忽略提前 run.done",
+              message: "当前尚未完成写入（doc.write/doc.applyEdits）。系统已忽略本轮 run.done，并继续推进写作闭环。",
+              policy: "CompletionPolicy",
+              reasonCodes: ["run.done_not_allowed_until_write"],
+              detail: { phase: toolCapsPhase },
+            });
+            // 若本轮只有 run.done（被丢弃后为空），强制继续下一步（消耗 workflow 预算）
+            if (toolCalls.length === 0) {
+              if (runState.workflowRetryBudget > 0) {
+                writePolicyDecision({
+                  turn,
+                  policy: "CompletionPolicy",
+                  decision: "retry",
+                  reasonCodes: ["run.done_not_allowed_until_write", "need_continue"],
+                  detail: {
+                    budget: "workflow",
+                    budgetBefore: runState.workflowRetryBudget,
+                    budgetAfter: Math.max(0, runState.workflowRetryBudget - 1),
+                  },
+                });
+                runState.workflowRetryBudget -= 1;
+                writeRunNotice({
+                  turn,
+                  kind: "info",
+                  title: "继续推进（自动重试）",
+                  message: "你还没有完成写入。系统将自动继续一次，请按当前 phase 要求继续推进。",
+                  policy: "CompletionPolicy",
+                  reasonCodes: ["run.done_not_allowed_until_write", "need_continue"],
+                });
+                messages.push({ role: "assistant", content: assistantText });
+                messages.push({ role: "system", content: "你还没有完成写入（doc.write/doc.applyEdits）。请继续按阶段要求推进，不要 run.done。" });
+                continue;
+              }
+            }
+          }
+        }
+      } catch {
+        // ignore
       }
 
       const capDeniedTools = toolCalls
@@ -6295,7 +6373,8 @@ fastify.post(
         const bad = writes.filter((w: any) => w.len < min || w.len > max);
 
         if (bad.length) {
-          if (runState.workflowRetryBudget > 0) {
+          const lengthRetryBudget = Number((runState as any).lengthRetryBudget ?? 0) || 0;
+          if (lengthRetryBudget > 0) {
             writePolicyDecision({
               turn,
               policy: "LengthGatePolicy",
@@ -6305,12 +6384,12 @@ fastify.post(
                 target,
                 range: { min, max },
                 bad: bad.slice(0, 6).map((b: any) => ({ path: b.path, len: b.len })),
-                budget: "workflow",
-                budgetBefore: runState.workflowRetryBudget,
-                budgetAfter: Math.max(0, runState.workflowRetryBudget - 1),
+                budget: "length",
+                budgetBefore: lengthRetryBudget,
+                budgetAfter: Math.max(0, lengthRetryBudget - 1),
               }
             });
-            runState.workflowRetryBudget -= 1;
+            (runState as any).lengthRetryBudget = Math.max(0, lengthRetryBudget - 1);
             writeRunNotice({
               turn,
               kind: "info",
@@ -6327,13 +6406,15 @@ fastify.post(
               detail: { target, min, max, bad: bad.slice(0, 6) },
             });
             writeEvent("assistant.done", { reason: "auto_retry_length_gate", turn });
+            const perPara = Math.max(60, Math.floor(target / 4));
             messages.push({
               role: "system",
               content:
                 "你上一轮准备写入 doc.write 的正文长度与目标字数偏离较大。\n" +
                 `- 目标：≈${target}字；允许范围：≈${min}~${max}字。\n` +
                 "- 你现在必须重新输出严格的 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。\n" +
-                "- 要求：把 doc.write.content 扩写/删减到目标附近；再调用 doc.write 写入。\n" +
+                "- 要求：把 doc.write.content **严格**扩写/删减到目标附近；只写“正文”，不要写“任务完成/流程回顾/我做了什么”。\n" +
+                `- 强建议：分 4 段输出（每段≈${perPara}字），结尾必须一句金句收束；不要超过上限。\n` +
                 "- 注意：不要把 kb.search / lint.copy / lint.style 与 doc.write 混在同一回合（需要先拿到 tool_result 再写入）。\n"
             });
             continue turnLoop;

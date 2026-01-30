@@ -9,8 +9,12 @@
  *
  * 用法：
  *   node scripts/smoke-style-imitate.mjs
- *   node scripts/smoke-style-imitate.mjs --gateway http://127.0.0.1:8000 --timeoutSec 180
+ *   node scripts/smoke-style-imitate.mjs --gateway http://127.0.0.1:8001 --timeoutSec 300
+ *   node scripts/smoke-style-imitate.mjs --out out/smoke-style-imitate-latest.md
  */
+
+import fs from "node:fs";
+import path from "node:path";
 
 const DEFAULT_GATEWAY = "http://127.0.0.1:8000";
 
@@ -171,15 +175,24 @@ function shallowMerge(a, b) {
   return out;
 }
 
+function ensureDirForFile(filePath) {
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true });
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const gatewayUrl = String(args.gateway || process.env.GATEWAY_URL || DEFAULT_GATEWAY).replace(/\/+$/, "");
-  const timeoutSec = Number(args.timeoutSec || process.env.SMOKE_TIMEOUT_SEC || 180);
+  const timeoutSec = Number(args.timeoutSec || process.env.SMOKE_TIMEOUT_SEC || 300);
+  const idleTimeoutSec = Number(args.idleTimeoutSec || process.env.SMOKE_IDLE_TIMEOUT_SEC || 45);
+  const outPathArg = String(args.out || process.env.SMOKE_OUT || "").trim();
+  const outPath = outPathArg ? outPathArg : "out/smoke-style-imitate-latest.md";
   const prompt =
     String(
       args.prompt ||
         process.env.SMOKE_PROMPT ||
-        "请用绑定风格库做仿写：主题是“挽回里的预期管理”。要求约1200字，口吻偏冷静犀利。先按目录 STYLE_CATALOG 选择 MUST/SHOULD/MAY 与 optionId 并写入 mainDoc.stylePlanV1，再继续执行完整闭环。",
+        // “呆瓜用户一句话”：不教顺序，只给目标与约束（避免批量/多篇等触发 writing_batch）
+        "帮我用绑定的风格库仿写一篇短视频口播稿，主题是「挽回里的预期管理」，大概1200字，语气犀利但克制。",
     ).trim();
   if (!prompt) throw new Error("EMPTY_PROMPT");
 
@@ -187,7 +200,13 @@ async function main() {
   const ctx = buildContextPackV1({ styleLibId: String(args.styleLibId || process.env.SMOKE_STYLE_LIB_ID || "").trim() || undefined });
 
   const abort = new AbortController();
-  const timeout = setTimeout(() => abort.abort(new Error("SMOKE_TIMEOUT")), Math.max(5, timeoutSec) * 1000);
+  // 总超时 + 空闲超时（无事件就判定卡死）
+  const totalTimer = setTimeout(() => abort.abort(new Error("SMOKE_TIMEOUT")), Math.max(5, timeoutSec) * 1000);
+  let idleTimer = setTimeout(() => abort.abort(new Error("SMOKE_IDLE_TIMEOUT")), Math.max(3, idleTimeoutSec) * 1000);
+  const bumpIdle = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => abort.abort(new Error("SMOKE_IDLE_TIMEOUT")), Math.max(3, idleTimeoutSec) * 1000);
+  };
 
   const res = await fetch(`${gatewayUrl}/api/agent/run/stream`, {
     method: "POST",
@@ -209,6 +228,8 @@ async function main() {
   const phases = [];
   const notices = [];
   const toolCalls = [];
+  const assistantTextParts = [];
+  let runEnd = null;
 
   // 模拟 Desktop 维护 mainDoc
   let mainDoc = { runIntent: "writing", goal: "约1200字" };
@@ -413,12 +434,14 @@ async function main() {
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
+      bumpIdle();
       buffer += new TextDecoder().decode(value);
       const { blocks, rest } = sseParseBlocks(buffer);
       buffer = rest;
       for (const b of blocks) {
         const evt = parseSseEvent(b);
         if (!evt.event) continue;
+        bumpIdle();
         if (evt.event === "run.start") {
           runId = String(evt.data?.runId ?? "").trim() || runId;
         }
@@ -433,10 +456,15 @@ async function main() {
           const title = String(evt.data?.title ?? "").trim();
           if (title) notices.push(title);
         }
+        if (evt.event === "assistant.delta") {
+          const delta = String(evt.data?.delta ?? "");
+          if (delta) assistantTextParts.push(delta);
+        }
         if (evt.event === "tool.call") {
           await handleToolCall(evt.data);
         }
         if (evt.event === "run.end") {
+          runEnd = evt.data ?? null;
           // 结束即退出
           buffer = "";
           reader.cancel().catch(() => {});
@@ -445,7 +473,8 @@ async function main() {
       }
     }
   } finally {
-    clearTimeout(timeout);
+    clearTimeout(totalTimer);
+    clearTimeout(idleTimer);
     try {
       reader.cancel();
     } catch {
@@ -454,19 +483,54 @@ async function main() {
   }
 
   const uniq = (arr) => Array.from(new Set(arr));
+  const assistantText = assistantTextParts.join("").trim();
+  const stripToolXml = (s) =>
+    String(s ?? "")
+      .replace(/<tool_result[\s\S]*?<\/tool_result>/g, "")
+      .replace(/<tool_calls[\s\S]*?<\/tool_calls>/g, "")
+      .replace(/<tool_call[\s\S]*?<\/tool_call>/g, "")
+      .trim();
+  const draftText = stripToolXml(assistantText);
+  const assistantChars = assistantText.length;
+  const draftChars = draftText.length;
+  const assistantPreview = assistantText ? assistantText.slice(0, 260) : "";
+  const draftPreview = draftText ? draftText.slice(0, 260) : "";
   const report = {
     ok: true,
     runId: runId || null,
     phases: uniq(phases),
     notices: uniq(notices).slice(0, 8),
     toolCalls: toolCalls.map((x) => `${x.name}${x.executedBy ? `@${x.executedBy}` : ""}`),
+    assistant: {
+      chars: assistantChars,
+      preview: assistantPreview,
+      draftChars,
+      draftPreview,
+    },
+    draftFile: null,
+    runEnd,
   };
 
-  const need = ["style_need_catalog_pick", "style_need_templates"];
+  // 落盘：把“正文（去掉 tool XML）”写到 outPath，方便人类直接打开看
+  try {
+    ensureDirForFile(outPath);
+    fs.writeFileSync(outPath, draftText ? draftText + "\n" : "", "utf8");
+    report.draftFile = outPath;
+  } catch (e) {
+    report.draftFile = null;
+    report.draftFileError = String(e?.message ?? e);
+  }
+
+  const need = ["style_need_catalog_pick", "style_need_templates", "style_need_draft"];
   const missing = need.filter((x) => !report.phases.includes(x));
   if (missing.length) {
     report.ok = false;
     report.missingPhases = missing;
+  }
+  // 至少要看到一段“稿子文本”（否则等于没出稿）
+  if (draftChars < 600) {
+    report.ok = false;
+    report.missingDraftText = true;
   }
   console.log("## smoke-style-imitate report");
   console.log(JSON.stringify(report, null, 2));
