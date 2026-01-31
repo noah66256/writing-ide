@@ -18,6 +18,72 @@ import path from "node:path";
 
 const DEFAULT_GATEWAY = "http://127.0.0.1:8000";
 
+function readTextIfExists(p) {
+  try {
+    return fs.readFileSync(p, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+function normalizeForOverlap(s) {
+  return String(s ?? "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function splitMarkdownToParagraphs(md) {
+  const t = normalizeForOverlap(md);
+  if (!t) return [];
+  // 粗分：按空行切；忽略非常短的段落
+  return t
+    .split(/\n\s*\n/g)
+    .map((x) => x.trim())
+    .filter((x) => x.length >= 20);
+}
+
+function pickKeywords(q) {
+  const s = String(q ?? "").trim();
+  if (!s) return [];
+  // 简易：按空白/标点切词，保留长度>=2 的词
+  return s
+    .split(/[\s,，。！？;；、"'“”‘’()（）【】\[\]<>《》·\-_/]+/)
+    .map((x) => x.trim())
+    .filter((x) => x.length >= 2)
+    .slice(0, 16);
+}
+
+function scoreParagraph(p, kws) {
+  if (!p) return 0;
+  if (!kws.length) return 0;
+  let s = 0;
+  for (const k of kws) {
+    const re = new RegExp(k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
+    const m = p.match(re);
+    if (m) s += Math.min(5, m.length);
+  }
+  // 轻微偏好短一点的“可抄片段”（更像 kb.search snippet）
+  s += p.length <= 220 ? 1 : 0;
+  return s;
+}
+
+function detectDirectCopies(args) {
+  const draft = normalizeForOverlap(args.draftText);
+  const snippets = (args.snippets ?? []).map((x) => String(x ?? "")).filter(Boolean);
+  const hits = [];
+  for (const sn of snippets) {
+    const s = normalizeForOverlap(sn);
+    if (s.length < (args.minLen ?? 40)) continue;
+    if (draft.includes(s)) hits.push({ len: s.length, snippet: s.slice(0, 120) + (s.length > 120 ? "…" : "") });
+    if (hits.length >= 8) break;
+  }
+  hits.sort((a, b) => b.len - a.len);
+  return hits;
+}
+
 function parseArgs(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -187,6 +253,13 @@ async function main() {
   const idleTimeoutSec = Number(args.idleTimeoutSec || process.env.SMOKE_IDLE_TIMEOUT_SEC || 45);
   const outPathArg = String(args.out || process.env.SMOKE_OUT || "").trim();
   const outPath = outPathArg ? outPathArg : "out/smoke-style-imitate-latest.md";
+  const kbFilesArg = String(args.kbFile || process.env.SMOKE_KB_FILE || "李叔短视频稿.md").trim();
+  const kbFiles = kbFilesArg
+    ? kbFilesArg
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean)
+    : [];
   const prompt =
     String(
       args.prompt ||
@@ -230,10 +303,28 @@ async function main() {
   const toolCalls = [];
   const assistantTextParts = [];
   let runEnd = null;
+  const kbSnippetsUsed = [];
+  const lintStyleStats = { calls: 0, hasEdits: 0, hasReference: 0, patchFallbackUsed: 0 };
 
   // 模拟 Desktop 维护 mainDoc
   let mainDoc = { runIntent: "writing", goal: "约1200字" };
   let todoList = [];
+  let lastWritten = { path: "", text: "" };
+
+  const kbCorpus = (() => {
+    const out = [];
+    for (const rel of kbFiles) {
+      const abs = path.isAbsolute(rel) ? rel : path.join(process.cwd(), rel);
+      const txt = readTextIfExists(abs);
+      if (!txt) continue;
+      out.push({
+        relPath: rel.replaceAll("\\", "/"),
+        absPath: abs,
+        paragraphs: splitMarkdownToParagraphs(txt),
+      });
+    }
+    return out;
+  })();
 
   const reader = res.body.getReader();
 
@@ -377,35 +468,75 @@ async function main() {
       const query = String(args0?.query ?? "").trim();
       const kind = String(args0?.kind ?? "card").trim() || "card";
       const libraryIds = args0?.libraryIds ?? [];
-      const groups = [
-        {
+
+      const kws = pickKeywords(query);
+      const groups = [];
+      let gid = 0;
+      for (const doc of kbCorpus) {
+        const scored = doc.paragraphs
+          .map((p, idx) => ({ p, idx, score: scoreParagraph(p, kws) }))
+          .filter((x) => x.score > 0)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, kind === "paragraph" ? 3 : 2);
+        if (!scored.length) continue;
+        gid += 1;
+        groups.push({
           sourceDoc: {
-            id: "kb_doc_smoke_1",
-            libraryId: process.env.SMOKE_STYLE_LIB_ID || "kb_lib_smoke_style",
-            title: "SMOKE Playbook",
+            id: `kb_doc_smoke_${gid}`,
+            libraryId: (Array.isArray(libraryIds) && libraryIds.length ? String(libraryIds[0]) : process.env.SMOKE_STYLE_LIB_ID) || "kb_lib_smoke_style",
+            title: path.basename(doc.relPath),
             format: "md",
-            importedFrom: { kind: "project", relPath: "__kb_playbook__/library/smoke.md", entryIndex: 0 },
+            importedFrom: { kind: "project", relPath: doc.relPath, entryIndex: 0 },
             contentHash: "smoke",
             createdAt: nowIso(),
             updatedAt: nowIso(),
           },
-          bestScore: 123.4,
+          bestScore: 100 + scored[0].score,
+          hits: scored.map((x, i) => {
+            const snippet = x.p.length > 160 ? x.p.slice(0, 160) + "…" : x.p;
+            kbSnippetsUsed.push(snippet);
+            return {
+              score: 100 + x.score - i,
+              snippet,
+              artifact: {
+                id: `kb_art_smoke_${gid}_${x.idx}`,
+                kind: kind === "paragraph" ? "paragraph" : "card",
+                title: kind === "paragraph" ? `段落#${x.idx}` : "写法片段（smoke）",
+                cardType: kind === "paragraph" ? undefined : "other",
+                facetIds: [],
+                anchor: { paragraphIndex: x.idx },
+              },
+            };
+          }),
+        });
+        if (groups.length >= 4) break;
+      }
+
+      if (!groups.length) {
+        // 兜底：避免模型因空检索卡死
+        const snippet = "（smoke）未命中本地 KB 文件，建议换关键词或扩大检索范围。";
+        kbSnippetsUsed.push(snippet);
+        groups.push({
+          sourceDoc: {
+            id: "kb_doc_smoke_empty",
+            libraryId: process.env.SMOKE_STYLE_LIB_ID || "kb_lib_smoke_style",
+            title: "SMOKE_EMPTY",
+            format: "md",
+            importedFrom: { kind: "project", relPath: kbFiles[0] || "SMOKE_EMPTY.md", entryIndex: 0 },
+            contentHash: "smoke",
+            createdAt: nowIso(),
+            updatedAt: nowIso(),
+          },
+          bestScore: 1,
           hits: [
             {
-              score: 123.4,
-              snippet: "（smoke）模板：先立场/价值观，再定结构，再定开头结尾，最后收尾润色。",
-              artifact: {
-                id: "kb_card_smoke_1",
-                kind: "card",
-                title: "结构套路（smoke）",
-                cardType: "playbook_facet",
-                facetIds: ["narrative_structure"],
-                anchor: { paragraphIndex: 0 },
-              },
+              score: 1,
+              snippet,
+              artifact: { id: "kb_art_smoke_empty", kind: "card", title: "检索兜底", cardType: "other", facetIds: [], anchor: { paragraphIndex: 0 } },
             },
           ],
-        },
-      ];
+        });
+      }
       return postToolResult({
         toolCallId,
         name,
@@ -416,12 +547,14 @@ async function main() {
     }
 
     if (name === "doc.write" || name === "doc.applyEdits" || name === "doc.replaceSelection") {
-      const path = String(args0?.path ?? "drafts/smoke-output.md").trim() || "drafts/smoke-output.md";
+      const p = String(args0?.path ?? "drafts/smoke-output.md").trim() || "drafts/smoke-output.md";
+      const text = typeof args0?.text === "string" ? String(args0.text) : "";
+      if (name === "doc.write" && text) lastWritten = { path: p, text };
       return postToolResult({
         toolCallId,
         name,
         ok: true,
-        output: { ok: true, path },
+        output: { ok: true, path: p },
         meta: { applyPolicy: "auto_apply", riskLevel: "low", hasApply: true },
       });
     }
@@ -463,6 +596,28 @@ async function main() {
         if (evt.event === "tool.call") {
           await handleToolCall(evt.data);
         }
+        if (evt.event === "tool.result") {
+          try {
+            const payload = evt.data;
+            const name = String(payload?.name ?? "").trim();
+            if (name === "lint.style") {
+              lintStyleStats.calls += 1;
+              const out = payload?.output;
+              const edits = Array.isArray(out?.edits) ? out.edits : [];
+              if (edits.length) lintStyleStats.hasEdits += 1;
+              if (out?.patchFallback?.used) lintStyleStats.patchFallbackUsed += 1;
+              const issues = Array.isArray(out?.issues) ? out.issues : [];
+              for (const it of issues) {
+                if (it?.evidence?.reference && Array.isArray(it.evidence.reference) && it.evidence.reference.length) {
+                  lintStyleStats.hasReference += 1;
+                  break;
+                }
+              }
+            }
+          } catch {
+            // ignore
+          }
+        }
         if (evt.event === "run.end") {
           runEnd = evt.data ?? null;
           // 结束即退出
@@ -491,16 +646,21 @@ async function main() {
       .replace(/<tool_call[\s\S]*?<\/tool_call>/g, "")
       .trim();
   const draftText = stripToolXml(assistantText);
+  // 优先用 doc.write 捕获的“真实写入正文”（更接近最终落盘）
+  const finalText = lastWritten?.text && String(lastWritten.text).trim().length > 0 ? String(lastWritten.text) : draftText;
   const assistantChars = assistantText.length;
-  const draftChars = draftText.length;
+  const draftChars = finalText.length;
   const assistantPreview = assistantText ? assistantText.slice(0, 260) : "";
-  const draftPreview = draftText ? draftText.slice(0, 260) : "";
+  const draftPreview = finalText ? finalText.slice(0, 260) : "";
+  const copyHits = detectDirectCopies({ draftText: finalText, snippets: kbSnippetsUsed, minLen: 40 });
   const report = {
     ok: true,
     runId: runId || null,
     phases: uniq(phases),
     notices: uniq(notices).slice(0, 8),
     toolCalls: toolCalls.map((x) => `${x.name}${x.executedBy ? `@${x.executedBy}` : ""}`),
+    kb: { files: kbFiles, snippetsUsed: kbSnippetsUsed.length, copyHits: copyHits.slice(0, 6) },
+    lintStyle: lintStyleStats,
     assistant: {
       chars: assistantChars,
       preview: assistantPreview,
@@ -514,7 +674,7 @@ async function main() {
   // 落盘：把“正文（去掉 tool XML）”写到 outPath，方便人类直接打开看
   try {
     ensureDirForFile(outPath);
-    fs.writeFileSync(outPath, draftText ? draftText + "\n" : "", "utf8");
+    fs.writeFileSync(outPath, finalText ? finalText + "\n" : "", "utf8");
     report.draftFile = outPath;
   } catch (e) {
     report.draftFile = null;
@@ -531,6 +691,11 @@ async function main() {
   if (draftChars < 600) {
     report.ok = false;
     report.missingDraftText = true;
+  }
+  // 如果出现明显“长串原文复用”，直接判定失败（方便 CI/回归）
+  if (copyHits.length) {
+    report.ok = false;
+    report.copyDetected = true;
   }
   console.log("## smoke-style-imitate report");
   console.log(JSON.stringify(report, null, 2));
