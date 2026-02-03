@@ -6314,13 +6314,22 @@ fastify.post(
           const best = String(bestText ?? "");
           if (!content.trim() || !best.trim() || content.trim() === best.trim()) continue;
 
-          // 如果存在“目标字数”且当前 content 已达标，但 bestDraft 明显不达标，则不要强制换回 bestDraft（否则永远卡在 need_length）。
+          // 如果存在“目标字数”，则 bestDraft coercion 必须与 LengthGate 一致：
+          // - content 已达标但 bestDraft 不达标：不替换
+          // - 都没达标：仅当 bestDraft 更接近目标长度时才替换
           if (targetForLenGate && minForLenGate && maxForLenGate) {
             const bestLen = best.trim().length;
             const contentLen = content.trim().length;
             const bestIn = bestLen >= minForLenGate && bestLen <= maxForLenGate;
             const contentIn = contentLen >= minForLenGate && contentLen <= maxForLenGate;
             if (!bestIn && contentIn) continue;
+
+            // 都没达标时，避免把“更接近目标”的 content 换回更短/更偏离目标的 bestDraft（否则 LengthGate 永远过不去）。
+            if (!bestIn && !contentIn) {
+              const bestDist = Math.abs(bestLen - targetForLenGate);
+              const contentDist = Math.abs(contentLen - targetForLenGate);
+              if (contentDist < bestDist) continue;
+            }
           }
 
           (call as any).args = { ...raw, content: best };
