@@ -3805,13 +3805,16 @@ fastify.post(
       } else if (effectiveGates.lintGateEnabled && intent.isWritingTask && !intent.wantsOkOnly && !runState.hasDraftText) {
         phase = "style_need_draft";
         // 禁止 kb.search / lint.copy / lint.style / 写入类 doc.*：先产候选正文（纯文本）
-        // 并且：收紧为“只允许 run.* + time.now”，最大化降低模型在本阶段乱调用工具导致 tool_caps_blocked 的概率。
-        const allowSet = new Set<string>(Array.from(ALWAYS_ALLOW_TOOL_NAMES));
+        // 但：若用户通过 @{file} 引用长原文，Desktop 的 REFERENCES 可能触发截断（file truncated），
+        // 需要允许 doc.read 以便模型在写初稿前读取全文（否则只能对截断内容“改写”，体量会严重偏小）。
+        const allowSet = new Set<string>([...Array.from(ALWAYS_ALLOW_TOOL_NAMES), "doc.read"]);
         allowed = new Set<string>(Array.from(baseAllowed).filter((n) => allowSet.has(n)));
         hint =
           "【Skill: style_imitate】当前阶段：need_draft。\n" +
-          "- 本回合**不要调用任何工具**（即使你看到 run.* 在允许列表里也不要用）；更不要输出 <tool_calls>。\n" +
+          "- 你现在要产出“候选正文（draft）”。\n" +
+          "- 如果上文 REFERENCES 里出现 “(file truncated)” / “…(file truncated)”：你必须先调用 doc.read(path=...) 读取原文全文后再写候选正文。\n" +
           "- 本回合禁止调用 kb.search、lint.copy、lint.style 与任何“正文写入类” doc.*（doc.write/doc.applyEdits/...）。\n" +
+          "- 注意：本回合要么输出 <tool_calls> 调 doc.read，要么直接输出候选正文；不要把工具 XML 和正文混在同一条消息。\n" +
           (Number.isFinite(Number(targetChars as any)) && Number(targetChars as any) >= 200
             ? `- 字数要求：目标≈${Math.floor(Number(targetChars as any))}字（允许浮动±20%）。强建议分 4 段输出、每段按目标/4 控制，结尾一句金句收束。\n`
             : "- 请直接输出一版候选正文（纯文本；不要写入，不要分点解释流程）。\n") +
