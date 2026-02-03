@@ -10651,18 +10651,31 @@ fastify.post(
   const draftLines = (() => {
     const lines = String(body?.draft?.text ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
     // 控量：避免超长文档把 prompt 撑爆；写作稿通常远小于此
-    const max = 800;
+    const max = 420;
     const out: Array<{ line: number; text: string }> = [];
     for (let i = 0; i < Math.min(lines.length, max); i += 1) {
-      out.push({ line: i + 1, text: String(lines[i] ?? "") });
+      // 单行也做裁剪，避免个别超长行（例如整段无换行）把 prompt 撑爆
+      const t = String(lines[i] ?? "");
+      out.push({ line: i + 1, text: t.length > 600 ? t.slice(0, 600) + "…(truncated)" : t });
     }
     return out;
+  })();
+
+  // draft 正文控量：长文只保留“头+尾”以降低 lint.style 上游超时概率（仍保留统计特征与局部证据提取能力）。
+  const draftTextForPrompt = (() => {
+    const t = String(body?.draft?.text ?? "").trim();
+    if (!t) return "";
+    const max = 20_000;
+    if (t.length <= max) return t;
+    const head = 15_000;
+    const tail = 4_000;
+    return `${t.slice(0, head)}\n…(truncated,totalLen=${t.length})…\n${t.slice(Math.max(0, t.length - tail))}`;
   })();
 
   const user = JSON.stringify(
     {
       draft: {
-        text: String(body.draft.text ?? "").trim(),
+        text: draftTextForPrompt,
         chars: body.draft.chars ?? null,
         sentences: body.draft.sentences ?? null,
         stats: body.draft.stats ?? null,
@@ -10674,8 +10687,8 @@ fastify.post(
         name: l.name ?? "",
         corpus: l.corpus ?? null,
         stats: l.stats ?? null,
-        topNgrams: (l.topNgrams ?? []).slice(0, 16),
-        samples: (l.samples ?? []).map((s) => ({
+        topNgrams: (l.topNgrams ?? []).slice(0, 10),
+        samples: (l.samples ?? []).slice(0, 10).map((s) => ({
           docId: s.docId ?? "",
           docTitle: s.docTitle ?? "",
           paragraphIndex: typeof s.paragraphIndex === "number" ? s.paragraphIndex : null,
@@ -10683,18 +10696,19 @@ fastify.post(
         })),
       })),
     },
-    null,
-    2
+    undefined,
+    0
   );
 
   // 上游超时兜底：避免整条链路卡死。
-  // - 默认：跟随 linter stage 的 timeoutMs（默认 60s）
+  // - 默认：快失败（默认 30s），避免每次都卡满 60s
   // - 若显式配置 LLM_LINTER_UPSTREAM_TIMEOUT_MS，则使用该值（但不超过 timeoutMs）
   const upstreamTimeoutMsCfg = Number(String(process.env.LLM_LINTER_UPSTREAM_TIMEOUT_MS ?? "").trim());
+  const upstreamTimeoutMsDefault = Math.max(10_000, Math.min(timeoutMs, 30_000));
   const upstreamTimeoutMs =
     Number.isFinite(upstreamTimeoutMsCfg) && upstreamTimeoutMsCfg > 0
       ? Math.max(10_000, Math.min(timeoutMs, Math.floor(upstreamTimeoutMsCfg)))
-      : Math.max(10_000, Math.floor(timeoutMs));
+      : upstreamTimeoutMsDefault;
   const draftText = String(body?.draft?.text ?? "").trim();
   const repairEnabled =
     String(process.env.LINT_STYLE_OUTPUT_REPAIR_ENABLED ?? "").trim() === "1" ||
@@ -11097,7 +11111,8 @@ fastify.post(
   const MAX_FALLBACK = 2; // 最多切换 2 次（主 + 2 备）
   for (let attempt = 0; attempt < Math.min(candidateModelIds.length, 1 + MAX_FALLBACK); attempt += 1) {
     const mid = candidateModelIds[attempt] ? String(candidateModelIds[attempt]).trim() : "";
-    if (mid && request.user?.role !== "admin") {
+    // 可靠性：admin 也应参与备用模型切换（否则线上排障/冒烟时永远卡在主模型超时，误以为“fallback 无效”）
+    if (mid) {
       try {
         const m = await aiConfig.resolveModel(mid);
         const ep = String(m.endpoint || "").trim();
