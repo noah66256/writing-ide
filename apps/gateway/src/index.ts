@@ -6299,8 +6299,9 @@ fastify.post(
           mode !== "chat" && Number.isFinite(Number(targetChars as any)) && Number(targetChars) >= 200 && intent.isWritingTask
             ? Math.floor(Number(targetChars))
             : null;
-        const minForLenGate = targetForLenGate ? Math.floor(targetForLenGate * 0.8) : null;
-        const maxForLenGate = targetForLenGate ? Math.floor(targetForLenGate * 1.2) : null;
+        // LengthGate：默认允许 ±10% 浮动（更接近用户对“字数左右”的预期）
+        const minForLenGate = targetForLenGate ? Math.floor(targetForLenGate * 0.9) : null;
+        const maxForLenGate = targetForLenGate ? Math.floor(targetForLenGate * 1.1) : null;
 
         for (const call of toolCalls) {
           if (String(call?.name ?? "") !== "doc.write") continue;
@@ -6368,8 +6369,9 @@ fastify.post(
       // 这让“字数约束”以写入产物为准（doc.write.content），避免先写入后才发现 need_length。
       if (mode !== "chat" && Number.isFinite(Number(targetChars as any)) && Number(targetChars) >= 200 && intent.isWritingTask) {
         const target = Math.floor(Number(targetChars));
-        const min = Math.floor(target * 0.8);
-        const max = Math.floor(target * 1.2);
+        // LengthGate：默认允许 ±10% 浮动（更接近用户对“字数左右”的预期）
+        const min = Math.floor(target * 0.9);
+        const max = Math.floor(target * 1.1);
         const writes = toolCalls
           .filter((c: any) => String(c?.name ?? "") === "doc.write")
           .map((c: any) => {
