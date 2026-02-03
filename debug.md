@@ -14,6 +14,60 @@
 
 ---
 
+### 0.1) 服务器突然“全部不通”：B 端 `Failed to fetch` + 外网端口超时 + SSH 卡在 banner exchange
+
+> 典型场景：你在 B 端做了某个操作（例如提交模型配置），随后发现 **B 端刷不出来**，浏览器 Console 报 `Failed to fetch`；同时外网 `curl` 端口超时、SSH 连接卡在 `banner exchange`。
+> 这种问题**很像“服务挂了”**，但更常见是 **实例层面网络栈/sshd/防火墙/资源异常**。
+
+#### 现象
+- 浏览器 Console：`Uncaught (in promise) Error: Failed to fetch`
+- 外网探测：
+  - `curl http://<ip>:8001` / `curl http://<ip>:8000/api/health` **无响应超时**
+  - `ssh <host>`：可能表现为 **TCP 已建立**，但卡在 `Connection timed out during banner exchange`
+- `ping <ip>` 往往仍正常（误导性很强）
+
+#### 最快判定（按顺序）
+1) **从外网 curl（你本机）**
+
+```bash
+curl -I -m 5 http://<ip>:8001/ || true
+curl -sS -m 5 http://<ip>:8000/api/health || true
+ssh -o ConnectTimeout=5 <host> 'echo OK' || true
+```
+
+2) **如果 SSH 能上但外网端口不通：优先查实例内防火墙/反代/监听**
+
+```bash
+export PATH=/www/server/nvm/versions/node/v22.21.1/bin:$PATH
+pm2 ls
+ss -lntp | egrep ':(8000|8001|443)\\b' || true
+curl -sS -m 2 http://127.0.0.1:8000/api/health || true
+curl -I -m 2 http://127.0.0.1:8001/ | head -n 5 || true
+```
+
+3) **如果 SSH 都卡 banner exchange：优先用云控制台 VNC/管理终端进实例**
+- 重点看：是否 OOM、是否磁盘满、是否出现大量异常连接/扫描流量导致服务无响应。
+
+#### 常见根因（按概率）
+- **实例层异常导致“所有服务端口都像死了一样”**
+  - CPU/内存被打满（或 kernel/sshd 卡死），导致新连接无法及时响应（包括 SSH banner）
+  - 防火墙（UFW/iptables）策略误伤或被安全产品动态注入规则
+  - 被扫成“开放代理/端口扫描目标”，异常流量把连接/队列打爆（日志里常见绝对 URL 形式的请求，如 `GET http://example.com/`）
+- **注意**：如果重启实例后恢复，往往更支持“实例/网络栈/资源异常”而不是“应用逻辑 bug”。
+
+#### 复盘与沉淀（下次再出现怎么做）
+- **先救火**：实例重启 → 验证 `pm2 ls` + `127.0.0.1` 自检 OK
+- **再定位**：
+  - `pm2 logs writing-gateway --lines 200`
+  - `pm2 logs writing-admin-web --lines 200`
+  - `dmesg | tail -n 120`
+  - `free -h`、`df -h`
+  - `ss -s`
+
+#### 可选防复发（先记录，不立即改）
+- **只对外暴露 443（Nginx 反代 8000/8001）**，公网关闭 8000/8001（安全组/ufw），减少高端口被运营商/策略抽风与被扫。
+- **Gateway 拦截“代理探测”流量**：拒绝 absolute-form URL（例如 `GET http://xx/`）/ CONNECT，降低被当开放代理带来的风险。
+
 ### 1) 打包安装包后「模型列表为空 / 连不上 Gateway」
 
 #### 现象
