@@ -1,5 +1,9 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 export type User = {
   id: string;
@@ -253,7 +257,16 @@ export type RunAudit = {
 const DEFAULT_DB: Db = { users: [], pointsTransactions: [], llmConfig: undefined, aiConfig: undefined, toolConfig: undefined, runAudits: [] };
 
 function getDbFilePath() {
-  return path.resolve(process.cwd(), "data", "db.json");
+  // 重要：不要用 process.cwd() 作为 db.json 基准路径。
+  // 生产环境下进程的 cwd 可能因 pm2/启动脚本不同而变化，导致“换库”读到一个全新空 db.json，
+  // 表现为 Admin-Web 用户列表为空、审计/流水丢失等。
+  //
+  // 默认固定到：apps/gateway/data/db.json（与 src/dist 同级的 data 目录）
+  // 允许通过环境变量覆盖，便于迁移到独立数据盘/容器 volume。
+  const env =
+    String(process.env.GATEWAY_DB_FILE ?? process.env.WRITING_IDE_DB_FILE ?? process.env.DB_FILE ?? "").trim();
+  if (env) return path.resolve(env);
+  return path.resolve(__dirname, "../data/db.json");
 }
 
 export async function loadDb(): Promise<Db> {
