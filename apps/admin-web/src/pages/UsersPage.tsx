@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ApiError } from "../api/client";
 import {
+  adminCreateUser,
   adminListUsers,
   adminListUserTransactions,
   adminRechargeUserPoints,
@@ -21,6 +22,10 @@ export function UsersPage() {
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  const [createEmail, setCreateEmail] = useState("");
+  const [createPhone, setCreatePhone] = useState("");
+  const [createPoints, setCreatePoints] = useState("0");
 
   const [drawerUser, setDrawerUser] = useState<UserDto | null>(null);
   const [txs, setTxs] = useState<PointsTransactionDto[]>([]);
@@ -44,6 +49,30 @@ export function UsersPage() {
   useEffect(() => {
     void refresh();
   }, []);
+
+  const onCreateUser = async () => {
+    const email = createEmail.trim();
+    const phone = createPhone.trim();
+    const pointsBalance = Math.max(0, Math.floor(Number(createPoints) || 0));
+    if (!email && !phone) {
+      alert("请填写 email 或 phone（至少一个）");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await adminCreateUser({ email: email || undefined, phone: phone || undefined, pointsBalance });
+      setCreateEmail("");
+      setCreatePhone("");
+      setCreatePoints("0");
+      await refresh();
+    } catch (e: any) {
+      const err = e as ApiError;
+      setError(`创建用户失败：${err.code}`);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const filtered = useMemo(() => {
     const kw = q.trim().toLowerCase();
@@ -124,6 +153,42 @@ export function UsersPage() {
       </div>
 
       {error ? <div className="error">{error}</div> : null}
+
+      <div className="card" style={{ padding: 12, marginBottom: 12 }}>
+        <div style={{ fontWeight: 700, marginBottom: 8 }}>创建用户（自救入口）</div>
+        <div className="muted" style={{ marginBottom: 10, fontSize: 12 }}>
+          如果这里显示“暂无数据”，通常是用户库被重置/新环境还没有用户登录过。你可以先在这里创建用户，再用“充值”给积分。
+        </div>
+        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+          <input
+            className="input"
+            placeholder="email（可选）"
+            value={createEmail}
+            onChange={(e) => setCreateEmail(e.target.value)}
+            style={{ minWidth: 220 }}
+            disabled={busy}
+          />
+          <input
+            className="input"
+            placeholder="phone（可选，数字即可）"
+            value={createPhone}
+            onChange={(e) => setCreatePhone(e.target.value)}
+            style={{ minWidth: 180 }}
+            disabled={busy}
+          />
+          <input
+            className="input"
+            placeholder="初始积分（默认0）"
+            value={createPoints}
+            onChange={(e) => setCreatePoints(e.target.value)}
+            style={{ width: 160 }}
+            disabled={busy}
+          />
+          <button className="btn" type="button" onClick={() => void onCreateUser()} disabled={busy}>
+            创建
+          </button>
+        </div>
+      </div>
 
       <div className="tableWrap">
         <table className="table">

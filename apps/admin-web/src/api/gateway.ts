@@ -344,6 +344,13 @@ export async function adminListUsers() {
   return apiFetchJson<{ users: UserDto[] }>("/api/admin/users");
 }
 
+export async function adminCreateUser(args: { email?: string; phone?: string; role?: UserRole; pointsBalance?: number }) {
+  return apiFetchJson<{ ok: true; user: UserDto; existed: boolean }>("/api/admin/users/create", {
+    method: "POST",
+    body: JSON.stringify(args),
+  });
+}
+
 export async function adminSetUserRole(args: { userId: string; role: UserRole }) {
   return apiFetchJson<{ ok: true }>(`/api/admin/users/${encodeURIComponent(args.userId)}/role`, {
     method: "PATCH",
