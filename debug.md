@@ -68,6 +68,37 @@ curl -I -m 2 http://127.0.0.1:8001/ | head -n 5 || true
 - **只对外暴露 443（Nginx 反代 8000/8001）**，公网关闭 8000/8001（安全组/ufw），减少高端口被运营商/策略抽风与被扫。
 - **Gateway 拦截“代理探测”流量**：拒绝 absolute-form URL（例如 `GET http://xx/`）/ CONNECT，降低被当开放代理带来的风险。
 
+---
+
+### 0.2) DB（users/points）再次变空：积分=0 + B 端用户管理“暂无数据”
+
+#### 现象
+- Desktop 端显示积分为 0（甚至触发 `402 INSUFFICIENT_POINTS`）
+- Admin Web 的“用户管理”页显示“暂无数据”
+
+#### 根因（高概率、已落修复）
+Gateway 目前用 `apps/gateway/data/db.json` 作为开发期本地 DB。旧实现存在两个致命组合：
+
+1) **`loadDb()` 遇到任何异常会静默回退到空库**  
+旧逻辑是 `catch { return DEFAULT_DB }`。只要读文件/JSON parse 失败，就把 DB 当成空库继续跑。
+
+2) **`updateDb()` 无条件 `saveDb()`**  
+因此一旦某次 `loadDb()` 误回退空库，后续任意一次更新（登录、配置更新、充值等）都会把空库写回磁盘，造成“真实用户/积分数据被覆盖成空”的永久损失。
+
+同时还有一个放大器：
+- **`saveDb()` 的 tmp 文件名固定（`${file}.tmp`）**。如果服务端误启动多个 gateway 进程（我们确实观察到过重复 node 进程/端口冲突），多进程并发写会互相覆盖 tmp，提升 JSON 损坏/读失败概率。
+
+#### 已做的修复（已部署）
+- `loadDb()`：仅 `ENOENT`（文件不存在）才回空库；JSON parse 失败会尝试从 `db.json.bak` 恢复，否则直接抛错（避免“静默洗库”）。
+- `saveDb()`：写入前自动备份 `db.json.bak`；并把 tmp 改成**唯一文件名**，避免多进程互踩。
+- 运行态：gateway 用 PM2 单实例管理，避免重复进程。
+- 自救：新增 `/api/admin/users/create` + Admin Web“创建用户”面板，方便在库为空时快速重建账号并充值。
+
+#### 如何验证
+- `apps/gateway/data/` 下会出现 `db.json.bak`（每次写入前都会更新）。
+- `GET /api/admin/users` 能稳定返回已创建用户列表。
+- Desktop 重新登录后 `/api/points/balance` 返回非 0。
+
 ### 1) 打包安装包后「模型列表为空 / 连不上 Gateway」
 
 #### 现象
