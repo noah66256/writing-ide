@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -271,9 +271,37 @@ function getDbFilePath() {
 
 export async function loadDb(): Promise<Db> {
   const file = getDbFilePath();
+  const isErrno = (e: any, code: string) => Boolean(e && typeof e === "object" && String((e as any).code ?? "") === code);
+
+  let raw = "";
   try {
-    const raw = await readFile(file, "utf-8");
-    const parsed = JSON.parse(raw) as Partial<Db>;
+    raw = await readFile(file, "utf-8");
+  } catch (e: any) {
+    if (isErrno(e, "ENOENT")) return { ...DEFAULT_DB };
+    throw e;
+  }
+
+  let parsed0: any = null;
+  try {
+    parsed0 = raw && raw.trim() ? JSON.parse(raw) : {};
+  } catch (e: any) {
+    // 关键：不要在 JSON 解析失败时静默回退 DEFAULT_DB（否则 updateDb/saveDb 可能会把真实库覆盖成空库）。
+    // 尝试从备份恢复；若仍失败则直接抛错，让上层显式感知“DB 已损坏/不可读”。
+    const bak = `${file}.bak`;
+    const rawBak = await readFile(bak, "utf-8").catch(() => "");
+    try {
+      parsed0 = rawBak && rawBak.trim() ? JSON.parse(rawBak) : null;
+    } catch {
+      parsed0 = null;
+    }
+    if (!parsed0 || typeof parsed0 !== "object") {
+      const err: any = new Error("DB_JSON_PARSE_FAILED");
+      err.detail = { file, bak };
+      throw err;
+    }
+  }
+
+  const parsed = (parsed0 && typeof parsed0 === "object" ? parsed0 : {}) as Partial<Db>;
     const usersRaw = Array.isArray(parsed.users) ? (parsed.users as any[]) : [];
     const users: User[] = usersRaw
       .map((u) => {
@@ -680,15 +708,20 @@ export async function loadDb(): Promise<Db> {
       .filter((x): x is RunAudit => Boolean(x));
 
     return { users, pointsTransactions, llmConfig, aiConfig, toolConfig, runAudits };
-  } catch {
-    return { ...DEFAULT_DB };
-  }
 }
 
 export async function saveDb(db: Db): Promise<void> {
   const file = getDbFilePath();
   await mkdir(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp`;
+  // 最小兜底：写入前先备份上一版（只保留 1 份），避免“意外覆盖成空库/坏库”后无法恢复。
+  // 备份失败不应阻塞主写入（例如首次写入/文件不存在）。
+  const bak = `${file}.bak`;
+  try {
+    await copyFile(file, bak);
+  } catch {
+    // ignore
+  }
   await writeFile(tmp, JSON.stringify(db, null, 2), "utf-8");
   await rename(tmp, file);
 }
