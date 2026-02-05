@@ -713,7 +713,9 @@ export async function loadDb(): Promise<Db> {
 export async function saveDb(db: Db): Promise<void> {
   const file = getDbFilePath();
   await mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp`;
+  // 关键：tmp 文件名必须唯一，否则多进程并发 save 时会互相覆盖 tmp，导致最终 db.json 损坏/丢数据。
+  // 这里用 pid + timestamp + random 做唯一性；rename 仍保持原子替换。
+  const tmp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
   // 最小兜底：写入前先备份上一版（只保留 1 份），避免“意外覆盖成空库/坏库”后无法恢复。
   // 备份失败不应阻塞主写入（例如首次写入/文件不存在）。
   const bak = `${file}.bak`;
