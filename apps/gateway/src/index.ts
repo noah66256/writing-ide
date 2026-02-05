@@ -8239,6 +8239,61 @@ fastify.get(
   }
 );
 
+// Admin 创建用户（用于“DB 被清空/新环境未登录过”的自救：先创建账号再充值）
+fastify.post(
+  "/api/admin/users/create",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async (request, reply) => {
+    const bodySchema = z
+      .object({
+        email: z.string().email().optional(),
+        phone: z.string().optional(),
+        role: z.enum(["admin", "user"]).optional(),
+        pointsBalance: z.number().int().min(0).max(1_000_000_000).optional(),
+      })
+      .refine((x) => Boolean((x.email ?? "").trim()) || Boolean((x.phone ?? "").trim()), {
+        message: "email_or_phone_required",
+        path: ["email"],
+      });
+    const body = bodySchema.parse((request as any).body ?? {});
+
+    const email = body.email ? String(body.email).trim().toLowerCase() : null;
+    const phoneRaw = body.phone ? String(body.phone).trim() : "";
+    const phone = phoneRaw ? phoneRaw.replace(/[^\d]/g, "") : null;
+    const role: User["role"] = body.role === "admin" ? "admin" : "user";
+    const pointsBalance = Math.max(0, Math.floor(Number(body.pointsBalance) || 0));
+
+    try {
+      const ret = await updateDb((db) => {
+        const existing =
+          (email ? db.users.find((u) => (u.email ?? "").toLowerCase() === email) : null) ||
+          (phone ? db.users.find((u) => String(u.phone ?? "") === phone) : null) ||
+          null;
+        if (existing) {
+          return { ok: true, user: existing, existed: true };
+        }
+
+        const user: User = {
+          id: randomUUID(),
+          email,
+          phone,
+          role,
+          pointsBalance,
+          createdAt: new Date().toISOString(),
+        };
+        db.users.push(user);
+        return { ok: true, user, existed: false };
+      });
+      return reply.send(ret);
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : String(e);
+      return reply.code(500).send({ error: "CREATE_USER_FAILED", detail: msg.slice(0, 800) });
+    }
+  },
+);
+
 fastify.patch(
   "/api/admin/users/:id/role",
   {
