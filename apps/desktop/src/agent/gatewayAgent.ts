@@ -1149,7 +1149,10 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
             questionRatePer100Sentences: (c?.softRanges as any)?.questionRatePer100Sentences,
             digitPer1kChars: (c?.softRanges as any)?.digitPer1kChars,
           },
-          evidence: Array.isArray(c?.evidence) ? c.evidence.slice(0, 3).map((e: any) => String(e?.quote ?? "").trim()).filter(Boolean) : [],
+          // v2: 不注入原文 quote（防抄），改为注入句式特征描述
+          evidenceFeatures: Array.isArray(c?.evidence)
+            ? c.evidence.slice(0, 3).map((e: any) => summarizeQuoteAsFeatureV1(String(e?.quote ?? ""))).filter(Boolean)
+            : [],
           facetIds: Array.isArray(c?.facetPlan) ? c.facetPlan.map((f: any) => String(f?.facetId ?? "").trim()).filter(Boolean).slice(0, 8) : [],
         }))
         .filter((c: any) => c.id);
@@ -1174,6 +1177,27 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
   let styleSelectorSelectedFacetIds: string[] = [];
   const STYLE_PLAN_TOPK_V1 = { must: 6, should: 6, may: 4 };
 
+  /** 将证据原文/anchor 降级为"句式特征描述"，防止模型照抄原文。 */
+  const summarizeQuoteAsFeatureV1 = (quote: string): string => {
+    const t = String(quote ?? "").trim();
+    if (!t) return "";
+    const chars = t.length;
+    const sentences = t.split(/[。！？\n]+/).filter((s) => s.trim());
+    const avgLen = sentences.length ? Math.round(sentences.reduce((a, s) => a + s.trim().length, 0) / sentences.length) : chars;
+    const features: string[] = [];
+    features.push(`均句${avgLen}字`);
+    if (/[？?]/.test(t)) features.push("含反问/设问");
+    if (/\d+[%％万亿千百]|\d+\.\d/.test(t)) features.push("含数据论证");
+    if (/比如|例如|举个例子|就像/.test(t)) features.push("含举例");
+    if (/但是|然而|不过|其实|反而/.test(t)) features.push("含转折");
+    if (/——/.test(t)) features.push("含破折号修辞");
+    if (/……/.test(t)) features.push("含省略号");
+    if (/你|我们|咱|大家/.test(t)) features.push("口语化/对话感");
+    if (avgLen <= 12) features.push("短句为主");
+    else if (avgLen >= 35) features.push("长句为主");
+    return `[${features.join(";")}](${chars}字/${sentences.length}句)`;
+  };
+
   const sanitizeRuleTextV1 = (md: string) => {
     // 去掉明显“证据段/原文示例”形态，保留规则/套路/清单类文本
     const raw = String(md ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
@@ -1185,6 +1209,8 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
       if (t.startsWith(">")) continue;
       // 含长引号句：高风险（像原文）
       if ((t.includes("“") && t.includes("”") && t.length >= 24) || (t.includes("\"") && t.length >= 28)) continue;
+      // v2: 连续长自然语句（>=40字，不以列表/标题标记开头）极可能是原文段落
+      if (!/^[-*#\d]/.test(t) && t.length >= 40 && !/[:：=｜|]/.test(t)) continue;
       out.push(line);
     }
     return out.join("\n").trim();
@@ -2162,8 +2188,16 @@ export function startGatewayRun(args: {
                     clusterRulesV1: pickedRules,
                     values: pickedRules?.values ?? null,
                     analysisLenses: pickedRules?.analysisLenses ?? null,
-                    anchors: Array.isArray(picked?.anchors) ? picked.anchors.slice(0, 8) : [],
-                    evidence: Array.isArray(picked?.evidence) ? picked.evidence.slice(0, 5) : [],
+                    // v2: 不存原文（防抄），只存句式特征描述 + 数量
+                    anchorsCount: Array.isArray(picked?.anchors) ? picked.anchors.length : 0,
+                    anchorsFeatures: Array.isArray(picked?.anchors)
+                      ? picked.anchors.slice(0, 5).map((a: any) => summarizeQuoteAsFeatureV1(typeof a === "string" ? a : String(a?.text ?? a?.content ?? a?.quote ?? "")))
+                          .filter(Boolean)
+                      : [],
+                    evidenceFeatures: Array.isArray(picked?.evidence)
+                      ? picked.evidence.slice(0, 5).map((e: any) => summarizeQuoteAsFeatureV1(String(e?.quote ?? "")))
+                          .filter(Boolean)
+                      : [],
                     softRanges: picked?.softRanges ?? {},
                     facetPlan: Array.isArray(picked?.facetPlan) ? picked.facetPlan.slice(0, 8) : [],
                     queries: Array.isArray(picked?.queries) ? picked.queries.slice(0, 8) : [],
