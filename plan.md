@@ -6,6 +6,7 @@
 - [项目开发与写作引擎说明书（handbook v1）](docs/dev-handbook-v1.md)
 - [Agent 流程系统性审计与改造路线图（路线2）](agent-flow-audit-roadmap.md)
 - [Intent Routing（第一道门禁）](intent-routing.md)
+- [意图识别/路由模块成熟方案调研 v1（research）](docs/research/intent-routing-modules-survey-v1.md)
 - [Vibe Coding Playbook（面向“非专业但有逻辑”的开发者）](vibe-coding-playbook.md)
 - [IDE 工具与全项目搜索（研究）](docs/research/ide-tools-search-and-file-ops-v1.md)
 - [Web Search 选型与落地路径（研究 v1）](docs/research/web-search-v1.md)
