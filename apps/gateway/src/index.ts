@@ -25,6 +25,7 @@ import { createAiConfigService } from "./aiConfig.js";
 import { toolConfig } from "./toolConfig.js";
 import { checkSmsVerifyCode, normalizeCnPhone, sendSmsVerifyCode } from "./smsVerify.js";
 import { TOOL_LIST, validateToolCallArgs } from "@writing-ide/tools";
+import { registerRechargeRoutes } from "./recharge.js";
 import {
   decideServerToolExecution,
   executeServerToolOnGateway,
@@ -210,11 +211,53 @@ await fastify.register(jwt, {
   secret: JWT_SECRET
 });
 
+// 关键：微信支付回调验签需要原始请求体（raw body）。
+// 使用 parseAs: 'buffer' 让 Fastify 同时提供：
+// - request.body（解析后的 JSON）
+// - request.rawBody（原始 Buffer）
+fastify.addContentTypeParser(/^application\/json/i, { parseAs: "buffer" }, (req, body, done) => {
+  try {
+    (req as any).rawBody = body;
+    const text = Buffer.isBuffer(body) ? body.toString("utf8") : String(body ?? "");
+    const parsed = text && text.trim() ? JSON.parse(text) : {};
+    done(null, parsed);
+  } catch (e) {
+    done(e as any, undefined);
+  }
+});
+
 fastify.decorate("authenticate", async (request: any, reply: any) => {
   try {
     await request.jwtVerify();
   } catch {
     return reply.code(401).send({ error: "UNAUTHORIZED" });
+  }
+
+  // 兼容：若历史上发生过“换库/迁移”（例如 db.json 路径调整）导致 token.sub 在当前 DB 中不存在，
+  // 则尝试按 phone/email 将该 token 映射回同一账号，避免出现“同手机号多个账号/积分分裂”。
+  // admin token 的 sub 形如 admin:xxx，不参与映射。
+  try {
+    if (request.user?.role !== "admin") {
+      const sub0 = typeof request.user?.sub === "string" ? String(request.user.sub).trim() : "";
+      if (sub0) {
+        const db = await loadDb();
+        const exists = db.users.some((u) => u.id === sub0);
+        if (!exists) {
+          const phone = request.user?.phone ? String(request.user.phone).trim() : "";
+          const email = request.user?.email ? String(request.user.email).trim().toLowerCase() : "";
+          const byPhone = phone ? db.users.find((u) => String(u.phone ?? "") === phone) : null;
+          const byEmail = !byPhone && email ? db.users.find((u) => String(u.email ?? "").toLowerCase() === email) : null;
+          const hit = byPhone || byEmail || null;
+          if (hit?.id) {
+            (request.user as any).sub0 = sub0;
+            (request.user as any).resolvedFrom = byPhone ? "phone" : "email";
+            request.user.sub = hit.id;
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore（不应影响正常鉴权）
   }
 });
 
@@ -240,6 +283,9 @@ async function requirePositivePointsForLlm(request: any, reply: any) {
     });
   }
 }
+
+// ======== Recharge（真实充值：仅通道 B - 公众号 H5(JSAPI) 收银台） ========
+registerRechargeRoutes(fastify);
 
 async function tryGetJwtUser(request: any): Promise<{ id: string; email?: string; phone?: string; role?: string } | null> {
   const auth = String(request?.headers?.authorization ?? "").trim();
@@ -8051,6 +8097,7 @@ fastify.post("/api/auth/phone/verify", async (request, reply) => {
           phone: phoneNumber,
           role: "user",
           pointsBalance: 0,
+          billingGroup: null,
           createdAt: new Date().toISOString(),
         };
         db.users.push(u);
@@ -8128,6 +8175,7 @@ fastify.post("/api/auth/email/verify", async (request, reply) => {
         phone: null,
         role,
         pointsBalance: 0,
+        billingGroup: null,
         createdAt: new Date().toISOString()
       };
       db.users.push(user);
@@ -8233,6 +8281,7 @@ fastify.get(
         phone: u.phone,
         role: u.role,
         pointsBalance: u.pointsBalance,
+        billingGroup: (u as any).billingGroup ?? null,
         createdAt: u.createdAt
       }))
     };
@@ -8281,6 +8330,7 @@ fastify.post(
           phone,
           role,
           pointsBalance,
+          billingGroup: null,
           createdAt: new Date().toISOString(),
         };
         db.users.push(user);
@@ -8310,6 +8360,30 @@ fastify.patch(
       if (!user) return { error: "USER_NOT_FOUND" };
       user.role = role;
       return { ok: true };
+    });
+  }
+);
+
+fastify.patch(
+  "/api/admin/users/:id/billing-group",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin]
+  },
+  async (request) => {
+    const paramsSchema = z.object({ id: z.string().min(1) });
+    const bodySchema = z.object({
+      billingGroup: z.string().max(64).optional().nullable(),
+    });
+    const { id } = paramsSchema.parse((request as any).params);
+    const { billingGroup } = bodySchema.parse((request as any).body);
+
+    return updateDb((db) => {
+      const user = db.users.find((u) => u.id === id);
+      if (!user) return { error: "USER_NOT_FOUND" };
+      const g = billingGroup === null || billingGroup === undefined ? "" : String(billingGroup);
+      const v = g.trim();
+      (user as any).billingGroup = v ? v : null;
+      return { ok: true, billingGroup: (user as any).billingGroup ?? null };
     });
   }
 );
@@ -8358,6 +8432,150 @@ fastify.get(
     const db = await loadDb();
     return { transactions: listUserTransactions(db, id) };
   }
+);
+
+// ======== Admin：充值（买积分）配置（热生效） ========
+
+fastify.get(
+  "/api/admin/recharge/config",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin]
+  },
+  async () => {
+    const db = await loadDb();
+    const cfg = (db as any).rechargeConfig ?? null;
+    return { ok: true, config: cfg };
+  }
+);
+
+fastify.put(
+  "/api/admin/recharge/config",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin]
+  },
+  async (request, reply) => {
+    const bodySchema = z.object({
+      defaultGroup: z.string().min(1).max(64),
+      pointsPerCnyByGroup: z.record(z.string(), z.number().int().min(1).max(10_000)),
+      giftEnabled: z.boolean().optional(),
+      // 允许小数：0.5=赠送50%，1=买一送一（赠送100%）
+      giftMultiplierByGroup: z.record(z.string(), z.number().min(0).max(10)).optional(),
+      giftDefaultMultiplier: z.number().min(0).max(10).optional(),
+    });
+    const body = bodySchema.parse((request as any).body ?? {});
+    if (!body.pointsPerCnyByGroup?.[body.defaultGroup]) {
+      return reply.code(400).send({ error: "DEFAULT_GROUP_NOT_DEFINED" });
+    }
+    const t = new Date().toISOString();
+    const ret = await updateDb((db) => {
+      const prev = (db as any).rechargeConfig ?? null;
+      const createdAt = prev && typeof prev?.createdAt === "string" ? String(prev.createdAt) : t;
+      const prevGiftMultiplierByGroup =
+        prev && prev.giftMultiplierByGroup && typeof prev.giftMultiplierByGroup === "object" ? (prev.giftMultiplierByGroup as any) : {};
+      const prevGiftDefaultMultiplier = Number(prev?.giftDefaultMultiplier);
+
+      const nextGiftEnabled = body.giftEnabled ?? Boolean(prev?.giftEnabled);
+      const nextGiftDefaultMultiplier =
+        body.giftDefaultMultiplier ??
+        (Number.isFinite(prevGiftDefaultMultiplier) && prevGiftDefaultMultiplier >= 0 ? Math.min(10, prevGiftDefaultMultiplier) : 0);
+      const nextGiftMultiplierByGroup = (body.giftMultiplierByGroup ?? prevGiftMultiplierByGroup) as Record<string, number>;
+      // 归一化：若启用了赠送且 default>0，但“分组覆盖表”全是 0，
+      // 这通常是误配置（B 端默认填了 normal=0/vip=0），会导致默认赠送永远不生效。
+      // 此时把覆盖表清空，让 default multiplier 生效。
+      const normalizedGiftMultiplierByGroup =
+        nextGiftEnabled &&
+        Number(nextGiftDefaultMultiplier) > 0 &&
+        nextGiftMultiplierByGroup &&
+        typeof nextGiftMultiplierByGroup === "object" &&
+        Object.keys(nextGiftMultiplierByGroup).length > 0 &&
+        Object.values(nextGiftMultiplierByGroup).every((v) => Number(v) === 0)
+          ? {}
+          : nextGiftMultiplierByGroup;
+      (db as any).rechargeConfig = {
+        pointsPerCnyByGroup: body.pointsPerCnyByGroup,
+        defaultGroup: body.defaultGroup,
+        giftEnabled: nextGiftEnabled,
+        giftMultiplierByGroup: normalizedGiftMultiplierByGroup,
+        giftDefaultMultiplier: nextGiftDefaultMultiplier,
+        updatedBy: String((request as any).user?.sub ?? "") || null,
+        createdAt,
+        updatedAt: t,
+      };
+      return { ok: true, config: (db as any).rechargeConfig };
+    });
+    return reply.send(ret);
+  }
+);
+
+// ======== Admin：充值 SKU（档位）配置（热生效） ========
+
+fastify.get(
+  "/api/admin/recharge/products",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async () => {
+    const db = await loadDb();
+    const products = Array.isArray((db as any).rechargeProducts) ? ((db as any).rechargeProducts as any[]) : [];
+    return { ok: true, products };
+  },
+);
+
+fastify.put(
+  "/api/admin/recharge/products",
+  {
+    preHandler: [(fastify as any).authenticate, requireAdmin],
+  },
+  async (request, reply) => {
+    const productSchema = z.object({
+      sku: z.string().min(1).max(64),
+      name: z.string().min(1).max(200),
+      amountCent: z.number().int().min(1).max(100_000_000),
+      originalAmountCent: z.number().int().min(1).max(100_000_000).optional().nullable(),
+      pointsFixed: z.number().int().min(0).max(1_000_000_000).optional().nullable(),
+      status: z.enum(["active", "inactive"]).optional(),
+    });
+    const bodySchema = z.object({
+      products: z.array(productSchema).min(1).max(200),
+    });
+    const body = bodySchema.parse((request as any).body ?? {});
+    const seen = new Set<string>();
+    for (const p of body.products) {
+      const sku = String(p.sku ?? "").trim();
+      if (!sku) return reply.code(400).send({ error: "SKU_REQUIRED" });
+      if (seen.has(sku)) return reply.code(400).send({ error: "SKU_DUPLICATE", detail: { sku } });
+      seen.add(sku);
+    }
+
+    const t = new Date().toISOString();
+    const ret = await updateDb((db) => {
+      const prev = Array.isArray((db as any).rechargeProducts) ? (((db as any).rechargeProducts as any[]) ?? []) : [];
+      const prevBySku = new Map<string, any>();
+      for (const p of prev) {
+        const sku = typeof p?.sku === "string" ? String(p.sku).trim() : "";
+        if (sku) prevBySku.set(sku, p);
+      }
+      (db as any).rechargeProducts = body.products.map((p) => {
+        const sku = String(p.sku).trim();
+        const existed = prevBySku.get(sku) ?? null;
+        const createdAt = existed && typeof existed?.createdAt === "string" ? String(existed.createdAt) : t;
+        return {
+          id: sku, // 稳定：用 sku 作为 id
+          sku,
+          name: String(p.name).trim(),
+          amountCent: Math.max(1, Math.floor(Number(p.amountCent))),
+          pointsFixed: p.pointsFixed === null || p.pointsFixed === undefined ? null : Math.max(0, Math.floor(Number(p.pointsFixed))),
+          originalAmountCent:
+            p.originalAmountCent === null || p.originalAmountCent === undefined ? null : Math.max(1, Math.floor(Number(p.originalAmountCent))),
+          status: p.status === "inactive" ? "inactive" : "active",
+          createdAt,
+          updatedAt: t,
+        };
+      });
+      return { ok: true, products: (db as any).rechargeProducts };
+    });
+    return reply.send(ret);
+  },
 );
 
 fastify.get(

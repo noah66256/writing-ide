@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { getGatewayBaseUrl } from "../agent/gatewayUrl";
 import { useAuthStore } from "../state/authStore";
+import * as QRCode from "qrcode";
+
+function fmtCny(amountCent: number) {
+  const n = Number(amountCent);
+  if (!Number.isFinite(n)) return "¥0.00";
+  return `¥${(Math.max(0, Math.floor(n)) / 100).toFixed(2)}`;
+}
 
 function normalizeGatewayUrlOrEmpty(raw: string) {
   let s = String(raw ?? "").trim();
@@ -27,12 +34,44 @@ export function AccountModal(props: { open: boolean; onClose: () => void; onOpen
   const refreshMe = useAuthStore((s) => s.refreshMe);
   const refreshPoints = useAuthStore((s) => s.refreshPoints);
   const listTransactions = useAuthStore((s) => s.listTransactions);
+  const listRechargeProducts = useAuthStore((s) => s.listRechargeProducts);
+  const createRechargeOrder = useAuthStore((s) => s.createRechargeOrder);
+  const getRechargePayStatus = useAuthStore((s) => s.getRechargePayStatus);
 
   const [gatewayOverride, setGatewayOverride] = useState("");
 
   const [txOpen, setTxOpen] = useState(false);
   const [txBusy, setTxBusy] = useState(false);
   const [txs, setTxs] = useState<any[]>([]);
+
+  const [rechargeBusy, setRechargeBusy] = useState(false);
+  const [rechargeError, setRechargeError] = useState("");
+  const [rechargeProducts, setRechargeProducts] = useState<
+    Array<{ id: string; sku: string; name: string; amountCent: number; originalAmountCent: number | null; points: number }>
+  >([]);
+  const [rechargeMeta, setRechargeMeta] = useState<{ billingGroup: string; pointsPerCny: number; giftEnabled: boolean; giftMultiplier: number } | null>(null);
+  const [activePay, setActivePay] = useState<null | { orderId: string; payUrl: string; expireAt: string; pointsToCredit: number; amountCent: number }>(null);
+  const [qrUrl, setQrUrl] = useState<string>("");
+
+  const refreshRechargeProducts = async () => {
+    if (!user) return;
+    setRechargeBusy(true);
+    setRechargeError("");
+    try {
+      const r = await listRechargeProducts();
+      setRechargeProducts(Array.isArray(r.products) ? r.products : []);
+      setRechargeMeta({
+        billingGroup: String(r.billingGroup ?? "normal"),
+        pointsPerCny: Number(r.pointsPerCny ?? 0) || 0,
+        giftEnabled: Boolean((r as any).giftEnabled),
+        giftMultiplier: Number((r as any).giftMultiplier ?? 0) || 0,
+      });
+    } catch (e: any) {
+      setRechargeError(String(e?.code ?? e?.message ?? e));
+    } finally {
+      setRechargeBusy(false);
+    }
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -49,6 +88,46 @@ export function AccountModal(props: { open: boolean; onClose: () => void; onOpen
     void refreshMe().catch(() => void 0);
     void refreshPoints().catch(() => void 0);
   }, [open, refreshMe, refreshPoints]);
+
+  useEffect(() => {
+    if (!open) return;
+    setRechargeBusy(false);
+    setRechargeError("");
+    setRechargeProducts([]);
+    setRechargeMeta(null);
+    setActivePay(null);
+    setQrUrl("");
+    if (!user) return;
+    void refreshRechargeProducts();
+  }, [open, user, listRechargeProducts]);
+
+  useEffect(() => {
+    if (!open) return;
+    if (!user) return;
+    if (!activePay?.orderId) return;
+    let stopped = false;
+    let tries = 0;
+    const tick = async () => {
+      if (stopped) return;
+      tries += 1;
+      if (tries > 45) return; // ~90s
+      try {
+        const s = await getRechargePayStatus({ orderId: activePay.orderId });
+        if (s?.paid) {
+          await refreshPoints().catch(() => void 0);
+          return;
+        }
+        if (String(s?.status ?? "") === "closed") return;
+      } catch {
+        // ignore transient
+      }
+      window.setTimeout(() => void tick(), 2000);
+    };
+    void tick();
+    return () => {
+      stopped = true;
+    };
+  }, [open, user, activePay, getRechargePayStatus, refreshPoints]);
 
   useEffect(() => {
     if (!open) return;
@@ -215,6 +294,155 @@ export function AccountModal(props: { open: boolean; onClose: () => void; onOpen
                 )}
               </div>
             ) : null}
+
+            <div style={{ marginTop: 16 }}>
+              <div style={{ fontWeight: 800, marginBottom: 8 }}>充值积分（微信支付）</div>
+              <div className="muted" style={{ fontSize: 12 }}>
+                仅支持「通道B：公众号 H5(JSAPI) 收银台」。请用手机微信扫一扫二维码打开支付页完成支付。
+                {rechargeMeta ? (
+                  <span style={{ marginLeft: 8 }}>
+                    当前分组：{rechargeMeta.billingGroup} · 兑换率：{rechargeMeta.pointsPerCny || "?"} 积分/元
+                    {" · "}
+                    活动赠送：{rechargeMeta.giftEnabled ? `+${Math.round((rechargeMeta.giftMultiplier || 0) * 100)}%` : "关闭"}
+                  </span>
+                ) : null}
+              </div>
+
+              {rechargeError ? <div className="error" style={{ marginTop: 10 }}>{rechargeError}</div> : null}
+
+              <div className="row" style={{ gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                <button className="btn" type="button" disabled={rechargeBusy || !user} onClick={() => void refreshRechargeProducts()}>
+                  刷新档位/赠送
+                </button>
+                <div className="muted" style={{ fontSize: 12, alignSelf: "center" }}>
+                  提示：预计到账积分以服务端计算为准（已包含活动赠送）。
+                </div>
+              </div>
+
+              {rechargeProducts.length ? (
+                <div className="refList" style={{ marginTop: 10 }}>
+                  {rechargeProducts.map((p) => (
+                    <div key={p.id} className="refItem" style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontWeight: 700 }}>
+                          {p.name} <span className="muted" style={{ fontWeight: 500 }}>（{fmtCny(p.amountCent)} → {Number(p.points) || 0} 积分）</span>
+                        </div>
+                        <div className="muted" style={{ fontSize: 12 }}>sku: {p.sku}</div>
+                      </div>
+                      <button
+                        className="btn primary"
+                        type="button"
+                        disabled={rechargeBusy}
+                        onClick={() => {
+                          setRechargeBusy(true);
+                          setRechargeError("");
+                          setActivePay(null);
+                          setQrUrl("");
+                          void (async () => {
+                            try {
+                              const r = await createRechargeOrder({ productId: p.id });
+                              const payUrl = String(r.payUrl ?? "").trim();
+                              setActivePay({
+                                orderId: String(r.orderId ?? ""),
+                                payUrl,
+                                expireAt: String(r.expireAt ?? ""),
+                                pointsToCredit: Number(r.pointsToCredit ?? 0) || 0,
+                                amountCent: Number(r.amountCent ?? 0) || 0,
+                              });
+                              if (payUrl) {
+                                try {
+                                  const dataUrl = await QRCode.toDataURL(payUrl, { margin: 1, width: 220 });
+                                  setQrUrl(String(dataUrl ?? ""));
+                                } catch {
+                                  setQrUrl("");
+                                }
+                              }
+                            } catch (e: any) {
+                              setRechargeError(String(e?.code ?? e?.message ?? e));
+                            } finally {
+                              setRechargeBusy(false);
+                            }
+                          })();
+                        }}
+                      >
+                        生成二维码
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="muted" style={{ marginTop: 10 }}>暂无可用充值档位</div>
+              )}
+
+              {activePay ? (
+                <div style={{ marginTop: 12 }}>
+                  <div className="card" style={{ padding: 12 }}>
+                    <div style={{ fontWeight: 800, marginBottom: 8 }}>待支付订单</div>
+                    <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
+                      订单：{activePay.orderId} · 金额：{fmtCny(activePay.amountCent)} · 预计到账：{activePay.pointsToCredit} 积分
+                      {activePay.expireAt ? <span> · 过期：{fmtTime(activePay.expireAt)}</span> : null}
+                    </div>
+                    <div className="row" style={{ gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+                      {qrUrl ? (
+                        <img src={qrUrl} alt="pay_qr" style={{ width: 220, height: 220, borderRadius: 8, background: "#fff" }} />
+                      ) : (
+                        <div className="muted" style={{ width: 220, height: 220, borderRadius: 8, background: "rgba(255,255,255,.06)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                          （二维码生成失败）
+                        </div>
+                      )}
+                      <div style={{ flex: 1, minWidth: 220 }}>
+                        <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>支付链接（复制到微信打开也可）</div>
+                        <div className="refItem" style={{ userSelect: "text", wordBreak: "break-all" }}>{activePay.payUrl}</div>
+                        <div className="row" style={{ gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                          <button
+                            className="btn"
+                            type="button"
+                            onClick={() => {
+                              const text = String(activePay.payUrl ?? "");
+                              if (!text) return;
+                              void navigator.clipboard?.writeText?.(text).catch(() => void 0);
+                            }}
+                          >
+                            复制链接
+                          </button>
+                          <button
+                            className="btn"
+                            type="button"
+                            disabled={rechargeBusy}
+                            onClick={() => {
+                              setRechargeBusy(true);
+                              setRechargeError("");
+                              void (async () => {
+                                try {
+                                  const s = await getRechargePayStatus({ orderId: activePay.orderId });
+                                  if (s?.paid) {
+                                    await refreshPoints().catch(() => void 0);
+                                  } else {
+                                    setRechargeError(`未检测到支付成功（status=${String(s?.status ?? "")}）`);
+                                  }
+                                } catch (e: any) {
+                                  setRechargeError(String(e?.code ?? e?.message ?? e));
+                                } finally {
+                                  setRechargeBusy(false);
+                                }
+                              })();
+                            }}
+                          >
+                            我已支付，刷新
+                          </button>
+                          <button className="btn" type="button" onClick={() => { setActivePay(null); setQrUrl(""); }}>
+                            取消本次
+                          </button>
+                        </div>
+                        <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
+                          提示：支付完成后该窗口会尝试自动轮询一段时间；如未自动到账，可点“我已支付，刷新”。
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+            </div>
           </div>
         )}
       </div>

@@ -887,6 +887,27 @@ function stripToolXmlFromText(text: string) {
     .trim();
 }
 
+/** 将证据原文/anchor 降级为"句式特征描述"，防止模型照抄原文。 */
+function summarizeQuoteAsFeatureV1(quote: string): string {
+  const t = String(quote ?? "").trim();
+  if (!t) return "";
+  const chars = t.length;
+  const sentences = t.split(/[。！？\n]+/).filter((s) => s.trim());
+  const avgLen = sentences.length ? Math.round(sentences.reduce((a, s) => a + s.trim().length, 0) / sentences.length) : chars;
+  const features: string[] = [];
+  features.push(`均句${avgLen}字`);
+  if (/[？?]/.test(t)) features.push("含反问/设问");
+  if (/\d+[%％万亿千百]|\d+\.\d/.test(t)) features.push("含数据论证");
+  if (/比如|例如|举个例子|就像/.test(t)) features.push("含举例");
+  if (/但是|然而|不过|其实|反而/.test(t)) features.push("含转折");
+  if (/——/.test(t)) features.push("含破折号修辞");
+  if (/……/.test(t)) features.push("含省略号");
+  if (/你|我们|咱|大家/.test(t)) features.push("口语化/对话感");
+  if (avgLen <= 12) features.push("短句为主");
+  else if (avgLen >= 35) features.push("长句为主");
+  return `[${features.join(";")}](${chars}字/${sentences.length}句)`;
+}
+
 type DialogueTurn = { user: string; assistant: string };
 
 function buildDialogueTurnsFromSteps(steps: any[]): DialogueTurn[] {
@@ -1176,27 +1197,6 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
   let styleSelectorSelectedFacets: SelectedFacetV1[] = [];
   let styleSelectorSelectedFacetIds: string[] = [];
   const STYLE_PLAN_TOPK_V1 = { must: 6, should: 6, may: 4 };
-
-  /** 将证据原文/anchor 降级为"句式特征描述"，防止模型照抄原文。 */
-  const summarizeQuoteAsFeatureV1 = (quote: string): string => {
-    const t = String(quote ?? "").trim();
-    if (!t) return "";
-    const chars = t.length;
-    const sentences = t.split(/[。！？\n]+/).filter((s) => s.trim());
-    const avgLen = sentences.length ? Math.round(sentences.reduce((a, s) => a + s.trim().length, 0) / sentences.length) : chars;
-    const features: string[] = [];
-    features.push(`均句${avgLen}字`);
-    if (/[？?]/.test(t)) features.push("含反问/设问");
-    if (/\d+[%％万亿千百]|\d+\.\d/.test(t)) features.push("含数据论证");
-    if (/比如|例如|举个例子|就像/.test(t)) features.push("含举例");
-    if (/但是|然而|不过|其实|反而/.test(t)) features.push("含转折");
-    if (/——/.test(t)) features.push("含破折号修辞");
-    if (/……/.test(t)) features.push("含省略号");
-    if (/你|我们|咱|大家/.test(t)) features.push("口语化/对话感");
-    if (avgLen <= 12) features.push("短句为主");
-    else if (avgLen >= 35) features.push("长句为主");
-    return `[${features.join(";")}](${chars}字/${sentences.length}句)`;
-  };
 
   const sanitizeRuleTextV1 = (md: string) => {
     // 去掉明显“证据段/原文示例”形态，保留规则/套路/清单类文本
@@ -2809,6 +2809,7 @@ export function startGatewayRun(args: {
       setActivity(null);
     } catch (e: any) {
       const msg = e?.message ? String(e.message) : String(e);
+      const stack = e?.stack ? String(e.stack) : "";
       // 用户点击“停止/取消”会触发 AbortController.abort；这不应显示为“网络错误”
       const aborted =
         abort.signal.aborted ||
@@ -2834,7 +2835,7 @@ export function startGatewayRun(args: {
         return;
       }
 
-      log("error", "gateway.network_error", { message: msg });
+      log("error", "gateway.network_error", { message: msg, stack });
       const a = currentAssistantId ?? addAssistant("", false, false);
       patchAssistant(a, { hidden: false });
       appendAssistantDelta(a, `\n\n[网络错误] ${msg}`);
@@ -2870,5 +2871,4 @@ export function startGatewayRun(args: {
     }
   };
 }
-
 

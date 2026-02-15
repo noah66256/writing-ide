@@ -4,13 +4,38 @@ export type ApiError = {
   detail?: unknown;
 };
 
-// 默认同源请求：/api/*
-// - 开发期：vite.config.ts 会 proxy /api 到 Gateway
-// - 线上：建议由 8001 的静态服务反代 /api 到 Gateway（避免暴露 8000 裸端口、也避免跨域/跨端口问题）
-// 如需显式指定 Gateway，再配置 VITE_GATEWAY_URL。
-const API_BASE = String(import.meta.env.VITE_GATEWAY_URL ?? "")
-  .trim()
-  .replace(/\/+$/g, "");
+function normalizeBaseUrl(url: string) {
+  return String(url ?? "")
+    .trim()
+    .replace(/\/+$/g, "");
+}
+
+// API_BASE 的策略（按优先级）：
+// 1) build-time：VITE_GATEWAY_URL（显式指定）
+// 2) runtime：window.__GATEWAY_URL__（可选，适合静态托管时注入）
+// 3) auto：当 admin-web 以 8001 裸端口对外提供、但 /api 未做反代时，自动指向同主机 :8000
+//
+// 说明：
+// - 开发期：vite.config.ts 会 proxy /api 到 Gateway，通常不需要配置 API_BASE
+// - 线上推荐：Nginx 在 443 上把 /api 反代到 Gateway（避免跨端口/混合内容/暴露 8000）
+const ENV_API_BASE = normalizeBaseUrl(String(import.meta.env.VITE_GATEWAY_URL ?? ""));
+
+function getRuntimeApiBase(): string {
+  try {
+    const w = typeof window === "undefined" ? null : (window as any);
+    if (!w) return "";
+    const injected = normalizeBaseUrl(String(w.__GATEWAY_URL__ ?? ""));
+    if (injected) return injected;
+    const loc = w.location as Location | undefined;
+    // 仅在“admin-web 直接暴露 8001，且没有 /api 反代”的场景下兜底到同主机 8000
+    if (loc && String(loc.port) === "8001") return `${loc.protocol}//${loc.hostname}:8000`;
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+const API_BASE = ENV_API_BASE || getRuntimeApiBase();
 
 const TOKEN_KEY = "writing-ide.admin.accessToken.v1";
 

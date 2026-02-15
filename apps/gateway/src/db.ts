@@ -14,6 +14,8 @@ export type User = {
   role: "admin" | "user";
   createdAt: string;
   pointsBalance: number; // 积分余额（整数）
+  /** 计费分组：用于“充值兑换率/倍率”等配置（热生效）。 */
+  billingGroup: string | null;
 };
 
 export type PointsTxType = "recharge" | "consume" | "adjust";
@@ -26,6 +28,67 @@ export type PointsTransaction = {
   reason?: string;
   meta?: unknown; // 扣费明细/审计信息（可选）
   createdAt: string;
+};
+
+// ======== Recharge（真实充值：买积分，微信支付 JSAPI） ========
+
+export type RechargeConfig = {
+  /**
+   * 兑换率（积分/元），按用户分组覆盖。
+   * - 例：normal=500（100 元→50,000 积分），vip=1000（100 元→100,000 积分）
+   */
+  pointsPerCnyByGroup: Record<string, number>;
+  /** 默认分组（当 user.billingGroup 为空或不在 map 中时） */
+  defaultGroup: string;
+  /**
+   * 活动赠送（热生效）
+   * - giftEnabled=false：不赠送
+   * - giftMultiplierByGroup[normal]=1：买一送一（赠送 100%）
+   * - giftDefaultMultiplier：当 group 未命中时的兜底倍率（默认 0）
+   */
+  giftEnabled: boolean;
+  giftMultiplierByGroup: Record<string, number>;
+  giftDefaultMultiplier: number;
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RechargeProduct = {
+  id: string;
+  sku: string;
+  name: string;
+  amountCent: number;
+  /** 可选：固定积分（不走 amount*兑换率）；为空则按兑换率计算 */
+  pointsFixed: number | null;
+  /** 预留：划线价（分） */
+  originalAmountCent: number | null;
+  status: "active" | "inactive";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RechargeOrderStatus = "created" | "paid" | "closed";
+
+export type RechargeOrder = {
+  id: string;
+  userId: string;
+  productId: string;
+  productSnapshot: Pick<RechargeProduct, "sku" | "name" | "amountCent" | "pointsFixed" | "originalAmountCent">;
+  amountCent: number;
+  billingGroup: string;
+  pointsPerCny: number;
+  pointsToCredit: number;
+  status: RechargeOrderStatus;
+  outTradeNo: string;
+  transactionId: string | null;
+  payerOpenid: string | null;
+  payLinkToken: string;
+  payLinkCreatedAt: string;
+  paidAt: string | null;
+  expireAt: string; // ISO（创建后 30 分钟过期）
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type LlmModelPrice = {
@@ -222,6 +285,9 @@ export type SmsVerifyConfig = {
 export type Db = {
   users: User[];
   pointsTransactions: PointsTransaction[];
+  rechargeConfig?: RechargeConfig;
+  rechargeProducts?: RechargeProduct[];
+  rechargeOrders?: RechargeOrder[];
   llmConfig?: LlmConfig;
   aiConfig?: AiConfig;
   toolConfig?: ToolConfig;
@@ -254,7 +320,17 @@ export type RunAudit = {
   meta: unknown | null;
 };
 
-const DEFAULT_DB: Db = { users: [], pointsTransactions: [], llmConfig: undefined, aiConfig: undefined, toolConfig: undefined, runAudits: [] };
+const DEFAULT_DB: Db = {
+  users: [],
+  pointsTransactions: [],
+  rechargeConfig: undefined,
+  rechargeProducts: [],
+  rechargeOrders: [],
+  llmConfig: undefined,
+  aiConfig: undefined,
+  toolConfig: undefined,
+  runAudits: [],
+};
 
 function getDbFilePath() {
   // 重要：不要用 process.cwd() 作为 db.json 基准路径。
@@ -311,11 +387,13 @@ export async function loadDb(): Promise<Db> {
         const phone = phoneRaw.trim() ? phoneRaw.trim() : null;
         const role = u?.role === "admin" ? "admin" : "user";
         const pointsBalance = Number.isFinite(u?.pointsBalance) ? Number(u.pointsBalance) : 0;
+        const billingGroupRaw = typeof (u as any)?.billingGroup === "string" ? String((u as any).billingGroup).trim() : "";
+        const billingGroup = billingGroupRaw ? billingGroupRaw : null;
         const createdAt = typeof u?.createdAt === "string" ? u.createdAt : new Date().toISOString();
         const id = typeof u?.id === "string" ? u.id : "";
         // 兼容历史：旧数据一定有 email；新数据允许 phone-only 或 email-only
         if (!id || (!email && !phone)) return null;
-        return { id, email, phone, role, pointsBalance, createdAt };
+        return { id, email, phone, role, pointsBalance, billingGroup, createdAt };
       })
       .filter((u): u is User => Boolean(u));
 
@@ -338,6 +416,122 @@ export async function loadDb(): Promise<Db> {
         return meta !== undefined ? { ...withReason, meta } : withReason;
       })
       .filter((t): t is PointsTransaction => t !== null);
+
+    const rechargeConfig: Db["rechargeConfig"] = (() => {
+      const raw = (parsed as any)?.rechargeConfig;
+      const nowIso2 = new Date().toISOString();
+      if (!raw || typeof raw !== "object") return undefined;
+      const pointsPerCnyByGroupRaw = (raw as any)?.pointsPerCnyByGroup;
+      const pointsPerCnyByGroup: Record<string, number> = {};
+      if (pointsPerCnyByGroupRaw && typeof pointsPerCnyByGroupRaw === "object") {
+        for (const [k, v] of Object.entries(pointsPerCnyByGroupRaw as any)) {
+          const key = String(k ?? "").trim();
+          const n = Number(v);
+          if (!key) continue;
+          if (!Number.isFinite(n) || n <= 0) continue;
+          pointsPerCnyByGroup[key] = Math.floor(n);
+        }
+      }
+      const defaultGroup = String((raw as any)?.defaultGroup ?? "").trim() || "normal";
+      const giftEnabled = Boolean((raw as any)?.giftEnabled);
+      const giftMultiplierByGroupRaw = (raw as any)?.giftMultiplierByGroup;
+      const giftMultiplierByGroup: Record<string, number> = {};
+      if (giftMultiplierByGroupRaw && typeof giftMultiplierByGroupRaw === "object") {
+        for (const [k, v] of Object.entries(giftMultiplierByGroupRaw as any)) {
+          const key = String(k ?? "").trim();
+          const n = Number(v);
+          if (!key) continue;
+          if (!Number.isFinite(n) || n < 0) continue;
+          // 允许小数：0.5=赠送50%，1=赠送100%
+          giftMultiplierByGroup[key] = Math.min(10, n);
+        }
+      }
+      const giftDefaultMultiplierRaw = Number((raw as any)?.giftDefaultMultiplier);
+      const giftDefaultMultiplier = Number.isFinite(giftDefaultMultiplierRaw) && giftDefaultMultiplierRaw >= 0 ? Math.min(10, giftDefaultMultiplierRaw) : 0;
+      const updatedBy = typeof (raw as any)?.updatedBy === "string" ? String((raw as any).updatedBy) : null;
+      const createdAt = typeof (raw as any)?.createdAt === "string" ? String((raw as any).createdAt) : nowIso2;
+      const updatedAt = typeof (raw as any)?.updatedAt === "string" ? String((raw as any).updatedAt) : createdAt;
+      return { pointsPerCnyByGroup, defaultGroup, giftEnabled, giftMultiplierByGroup, giftDefaultMultiplier, updatedBy, createdAt, updatedAt };
+    })();
+
+    const rechargeProducts: RechargeProduct[] = (() => {
+      const arr = Array.isArray((parsed as any)?.rechargeProducts) ? (((parsed as any).rechargeProducts as any[]) ?? []) : [];
+      const nowIso2 = new Date().toISOString();
+      return arr
+        .map((p) => {
+          const sku = typeof p?.sku === "string" ? String(p.sku).trim() : "";
+          const id = typeof p?.id === "string" ? String(p.id).trim() : sku;
+          const name = typeof p?.name === "string" ? String(p.name).trim() : "";
+          const amountCent = Number.isFinite(p?.amountCent) ? Math.max(0, Math.floor(Number(p.amountCent))) : 0;
+          const pointsFixed = Number.isFinite(p?.pointsFixed) ? Math.max(0, Math.floor(Number(p.pointsFixed))) : null;
+          const originalAmountCent = Number.isFinite(p?.originalAmountCent) ? Math.max(0, Math.floor(Number(p.originalAmountCent))) : null;
+          const status: RechargeProduct["status"] = p?.status === "inactive" ? "inactive" : "active";
+          const createdAt = typeof p?.createdAt === "string" ? String(p.createdAt) : nowIso2;
+          const updatedAt = typeof p?.updatedAt === "string" ? String(p.updatedAt) : createdAt;
+          if (!sku || !name || amountCent <= 0) return null;
+          return { id, sku, name, amountCent, pointsFixed, originalAmountCent, status, createdAt, updatedAt } satisfies RechargeProduct;
+        })
+        .filter((x): x is RechargeProduct => Boolean(x));
+    })();
+
+    const rechargeOrders: RechargeOrder[] = (() => {
+      const arr = Array.isArray((parsed as any)?.rechargeOrders) ? (((parsed as any).rechargeOrders as any[]) ?? []) : [];
+      const nowIso2 = new Date().toISOString();
+      return arr
+        .map((o) => {
+          const id = typeof o?.id === "string" ? String(o.id).trim() : "";
+          const userId = typeof o?.userId === "string" ? String(o.userId).trim() : "";
+          const productId = typeof o?.productId === "string" ? String(o.productId).trim() : "";
+          const amountCent = Number.isFinite(o?.amountCent) ? Math.max(0, Math.floor(Number(o.amountCent))) : 0;
+          const billingGroup = typeof o?.billingGroup === "string" ? String(o.billingGroup).trim() : "";
+          const pointsPerCny = Number.isFinite(o?.pointsPerCny) ? Math.max(0, Math.floor(Number(o.pointsPerCny))) : 0;
+          const pointsToCredit = Number.isFinite(o?.pointsToCredit) ? Math.max(0, Math.floor(Number(o.pointsToCredit))) : 0;
+          const status0 = typeof o?.status === "string" ? String(o.status).trim() : "";
+          const status: RechargeOrderStatus = status0 === "paid" || status0 === "closed" ? (status0 as any) : "created";
+          const outTradeNo = typeof o?.outTradeNo === "string" ? String(o.outTradeNo).trim() : "";
+          const transactionId = typeof o?.transactionId === "string" ? String(o.transactionId).trim() : null;
+          const payerOpenid = typeof o?.payerOpenid === "string" ? String(o.payerOpenid).trim() : null;
+          const payLinkToken = typeof o?.payLinkToken === "string" ? String(o.payLinkToken).trim() : "";
+          const payLinkCreatedAt = typeof o?.payLinkCreatedAt === "string" ? String(o.payLinkCreatedAt) : nowIso2;
+          const paidAt = typeof o?.paidAt === "string" ? String(o.paidAt) : null;
+          const expireAt = typeof o?.expireAt === "string" ? String(o.expireAt) : nowIso2;
+          const createdAt = typeof o?.createdAt === "string" ? String(o.createdAt) : nowIso2;
+          const updatedAt = typeof o?.updatedAt === "string" ? String(o.updatedAt) : createdAt;
+          const snap = o?.productSnapshot && typeof o.productSnapshot === "object" ? (o.productSnapshot as any) : null;
+          const productSnapshot = snap
+            ? {
+                sku: typeof snap.sku === "string" ? String(snap.sku) : "",
+                name: typeof snap.name === "string" ? String(snap.name) : "",
+                amountCent: Number.isFinite(snap.amountCent) ? Math.max(0, Math.floor(Number(snap.amountCent))) : amountCent,
+                pointsFixed: Number.isFinite(snap.pointsFixed) ? Math.max(0, Math.floor(Number(snap.pointsFixed))) : null,
+                originalAmountCent: Number.isFinite(snap.originalAmountCent) ? Math.max(0, Math.floor(Number(snap.originalAmountCent))) : null,
+              }
+            : { sku: "", name: "", amountCent, pointsFixed: null, originalAmountCent: null };
+          if (!id || !userId || !productId || !outTradeNo || !payLinkToken) return null;
+          if (amountCent <= 0 || pointsToCredit < 0 || pointsPerCny < 0) return null;
+          return {
+            id,
+            userId,
+            productId,
+            productSnapshot,
+            amountCent,
+            billingGroup: billingGroup || "normal",
+            pointsPerCny,
+            pointsToCredit,
+            status,
+            outTradeNo,
+            transactionId,
+            payerOpenid,
+            payLinkToken,
+            payLinkCreatedAt,
+            paidAt,
+            expireAt,
+            createdAt,
+            updatedAt,
+          } satisfies RechargeOrder;
+        })
+        .filter((x): x is RechargeOrder => Boolean(x));
+    })();
 
     const rawCfg = (parsed as any)?.llmConfig;
     const nowIso = new Date().toISOString();
@@ -707,10 +901,25 @@ export async function loadDb(): Promise<Db> {
       })
       .filter((x): x is RunAudit => Boolean(x));
 
-    return { users, pointsTransactions, llmConfig, aiConfig, toolConfig, runAudits };
+    return { users, pointsTransactions, rechargeConfig, rechargeProducts, rechargeOrders, llmConfig, aiConfig, toolConfig, runAudits };
 }
 
 export async function saveDb(db: Db): Promise<void> {
+  // 约束：手机号必须唯一（避免同手机号出现多个 user，导致积分/订单分裂）。
+  // 注意：合并历史重复数据应在上线前一次性处理；此处用于防止后续写入产生新重复。
+  const phoneToUserId = new Map<string, string>();
+  for (const u of db.users ?? []) {
+    const phone = typeof (u as any)?.phone === "string" ? String((u as any).phone).trim() : "";
+    if (!phone) continue;
+    const prev = phoneToUserId.get(phone);
+    if (prev && prev !== String((u as any)?.id ?? "")) {
+      const err: any = new Error("DB_USER_PHONE_DUPLICATE");
+      err.detail = { phone, userId1: prev, userId2: String((u as any)?.id ?? "") };
+      throw err;
+    }
+    phoneToUserId.set(phone, String((u as any)?.id ?? ""));
+  }
+
   const file = getDbFilePath();
   await mkdir(path.dirname(file), { recursive: true });
   // 关键：tmp 文件名必须唯一，否则多进程并发 save 时会互相覆盖 tmp，导致最终 db.json 损坏/丢数据。

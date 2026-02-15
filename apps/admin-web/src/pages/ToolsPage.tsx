@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ApiError } from "../api/client";
 import {
+  adminGetRechargeConfig,
+  adminGetRechargeProducts,
+  adminUpdateRechargeConfig,
+  adminUpdateRechargeProducts,
+  type RechargeConfigDto,
+  type RechargeProductDto,
   toolConfigGetCapabilities,
   toolConfigGetSmsVerify,
   toolConfigGetWebSearch,
@@ -34,7 +40,7 @@ function domainsToText(domains: string[]) {
 }
 
 export function ToolsPage() {
-  const [tab, setTab] = useState<"web" | "sms" | "tools" | "skills">("web");
+  const [tab, setTab] = useState<"web" | "sms" | "tools" | "skills" | "recharge" | "rechargeProducts">("web");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -83,12 +89,39 @@ export function ToolsPage() {
   const [smsAutoRetry, setSmsAutoRetry] = useState("1");
   const [smsTesting, setSmsTesting] = useState(false);
 
+  const [rechargeStored, setRechargeStored] = useState<RechargeConfigDto | null>(null);
+  const [rechargeDefaultGroup, setRechargeDefaultGroup] = useState("normal");
+  const [rechargeMapText, setRechargeMapText] = useState("normal=250\nvip=500");
+  const [rechargeGiftEnabled, setRechargeGiftEnabled] = useState(false);
+  const [rechargeGiftDefaultMultiplier, setRechargeGiftDefaultMultiplier] = useState("0");
+  // 留空=不做“分组覆盖”，统一使用 giftDefaultMultiplier（更符合“启用活动赠送”的直觉）
+  const [rechargeGiftMapText, setRechargeGiftMapText] = useState("");
+  const [rechargeSaving, setRechargeSaving] = useState(false);
+  const [rechargeProductsStored, setRechargeProductsStored] = useState<RechargeProductDto[]>([]);
+  const [rechargeProductsRows, setRechargeProductsRows] = useState<
+    Array<{
+      sku: string;
+      name: string;
+      amountYuan: string;
+      originalAmountYuan: string;
+      pointsFixed: string;
+      status: "active" | "inactive";
+    }>
+  >([]);
+  const [rechargeProductsSaving, setRechargeProductsSaving] = useState(false);
+
   const refresh = async () => {
     setError("");
     setNotice("");
     setBusy(true);
     try {
-      const [web, sms, caps] = await Promise.all([toolConfigGetWebSearch(), toolConfigGetSmsVerify(), toolConfigGetCapabilities()]);
+      const [web, sms, caps, recharge, rechargeProducts] = await Promise.all([
+        toolConfigGetWebSearch(),
+        toolConfigGetSmsVerify(),
+        toolConfigGetCapabilities(),
+        adminGetRechargeConfig(),
+        adminGetRechargeProducts(),
+      ]);
       setStored(web.stored);
       setEffective(web.effective);
       setIsEnabled(Boolean(web.stored.isEnabled));
@@ -117,6 +150,37 @@ export function ToolsPage() {
       setCapsRegistry(caps.registry);
       setCapsStored(caps.stored);
       setCapsEffective(caps.effective);
+
+      const cfg = recharge?.config ?? null;
+      setRechargeStored(cfg);
+      if (cfg) {
+        setRechargeDefaultGroup(String(cfg.defaultGroup ?? "normal") || "normal");
+        const pairs = Object.entries(cfg.pointsPerCnyByGroup ?? {}).map(([k, v]) => `${k}=${v}`);
+        setRechargeMapText(pairs.length ? pairs.join("\n") : "normal=250\nvip=500");
+        setRechargeGiftEnabled(Boolean((cfg as any).giftEnabled));
+        setRechargeGiftDefaultMultiplier(String((cfg as any).giftDefaultMultiplier ?? 0));
+        const gpairs = Object.entries((cfg as any).giftMultiplierByGroup ?? {}).map(([k, v]) => `${k}=${v}`);
+        setRechargeGiftMapText(gpairs.length ? gpairs.join("\n") : "");
+      } else {
+        setRechargeDefaultGroup("normal");
+        setRechargeMapText("normal=250\nvip=500");
+        setRechargeGiftEnabled(false);
+        setRechargeGiftDefaultMultiplier("0");
+        setRechargeGiftMapText("");
+      }
+
+      const prods = Array.isArray(rechargeProducts?.products) ? (rechargeProducts.products as RechargeProductDto[]) : [];
+      setRechargeProductsStored(prods);
+      setRechargeProductsRows(
+        prods.map((p) => ({
+          sku: String(p.sku ?? ""),
+          name: String(p.name ?? ""),
+          amountYuan: p.amountCent ? String((Number(p.amountCent) / 100).toFixed(2)) : "",
+          originalAmountYuan: p.originalAmountCent ? String((Number(p.originalAmountCent) / 100).toFixed(2)) : "",
+          pointsFixed: p.pointsFixed === null || p.pointsFixed === undefined ? "" : String(p.pointsFixed),
+          status: p.status === "inactive" ? "inactive" : "active",
+        })),
+      );
     } catch (e: any) {
       const err = e as ApiError;
       setError(`加载工具配置失败：${err.code}`);
@@ -128,6 +192,121 @@ export function ToolsPage() {
   useEffect(() => {
     void refresh();
   }, []);
+
+  const parseRechargeMap = (text: string) => {
+    const out: Record<string, number> = {};
+    const lines = String(text ?? "")
+      .split(/\r?\n/g)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const line of lines) {
+      const i = line.indexOf("=");
+      if (i <= 0) continue;
+      const k = line.slice(0, i).trim();
+      const v = Number(line.slice(i + 1).trim());
+      if (!k) continue;
+      if (!Number.isFinite(v) || v <= 0) continue;
+      out[k] = Math.floor(v);
+    }
+    return out;
+  };
+
+  const parseGiftMap = (text: string) => {
+    const out: Record<string, number> = {};
+    const lines = String(text ?? "")
+      .split(/\r?\n/g)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const line of lines) {
+      const i = line.indexOf("=");
+      if (i <= 0) continue;
+      const k = line.slice(0, i).trim();
+      const v = Number(line.slice(i + 1).trim());
+      if (!k) continue;
+      if (!Number.isFinite(v) || v < 0) continue;
+      out[k] = Math.min(10, v);
+    }
+    return out;
+  };
+
+  const saveRecharge = async () => {
+    const def = rechargeDefaultGroup.trim() || "normal";
+    const map = parseRechargeMap(rechargeMapText);
+    if (!Object.keys(map).length) {
+      setError("兑换率不能为空（至少一行：group=pointsPerCny）");
+      return;
+    }
+    if (!map[def]) {
+      setError(`默认分组 ${def} 未在兑换率表中定义`);
+      return;
+    }
+    const giftDefault = Number(String(rechargeGiftDefaultMultiplier ?? "").trim() || "0");
+    const giftDefaultMultiplier = Number.isFinite(giftDefault) && giftDefault >= 0 ? Math.min(10, giftDefault) : 0;
+    const giftMultiplierByGroup = parseGiftMap(rechargeGiftMapText);
+    setRechargeSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      const res = await adminUpdateRechargeConfig({
+        defaultGroup: def,
+        pointsPerCnyByGroup: map,
+        giftEnabled: rechargeGiftEnabled,
+        giftDefaultMultiplier,
+        giftMultiplierByGroup,
+      });
+      setRechargeStored(res.config);
+      setNotice("已保存充值倍率（热生效）");
+    } catch (e: any) {
+      const err = e as ApiError;
+      setError(`保存充值倍率失败：${err.code}`);
+    } finally {
+      setRechargeSaving(false);
+    }
+  };
+
+  const saveRechargeProducts = async () => {
+    setError("");
+    setNotice("");
+    setRechargeProductsSaving(true);
+    try {
+      const toCent = (s: string) => {
+        const raw = String(s ?? "").trim();
+        if (!raw) return null;
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n <= 0) return null;
+        return Math.floor(n * 100);
+      };
+      const toIntOrNull = (s: string) => {
+        const raw = String(s ?? "").trim();
+        if (!raw) return null;
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n < 0) return null;
+        return Math.floor(n);
+      };
+      const products = rechargeProductsRows.map((r) => ({
+        sku: String(r.sku ?? "").trim(),
+        name: String(r.name ?? "").trim(),
+        amountCent: toCent(r.amountYuan) ?? 0,
+        originalAmountCent: toCent(r.originalAmountYuan),
+        pointsFixed: toIntOrNull(r.pointsFixed),
+        status: (r.status === "inactive" ? "inactive" : "active") as "active" | "inactive",
+      }));
+      for (const p of products) {
+        if (!p.sku) throw Object.assign(new Error("SKU_REQUIRED"), { code: "SKU_REQUIRED" });
+        if (!p.name) throw Object.assign(new Error("NAME_REQUIRED"), { code: "NAME_REQUIRED" });
+        if (!Number.isFinite(p.amountCent) || p.amountCent <= 0) throw Object.assign(new Error("AMOUNT_REQUIRED"), { code: "AMOUNT_REQUIRED" });
+      }
+      const res = await adminUpdateRechargeProducts({ products });
+      setRechargeProductsStored(res.products ?? []);
+      setNotice("已保存充值 SKU（热生效）");
+      await refresh();
+    } catch (e: any) {
+      const err = e as ApiError;
+      setError(`保存充值 SKU 失败：${err.code ?? e?.code ?? e?.message ?? e}`);
+    } finally {
+      setRechargeProductsSaving(false);
+    }
+  };
 
   const effectiveSummary = useMemo(() => {
     if (!effective) return null;
@@ -348,6 +527,12 @@ export function ToolsPage() {
             <button className="btn" type="button" onClick={() => setTab("sms")} disabled={tab === "sms"}>
               SMS Verify
             </button>
+            <button className="btn" type="button" onClick={() => setTab("recharge")} disabled={tab === "recharge"}>
+              充值倍率
+            </button>
+            <button className="btn" type="button" onClick={() => setTab("rechargeProducts")} disabled={tab === "rechargeProducts"}>
+              充值SKU
+            </button>
             <button className="btn" type="button" onClick={() => setTab("tools")} disabled={tab === "tools"}>
               Tools
             </button>
@@ -366,6 +551,14 @@ export function ToolsPage() {
             <button className="btn primary" type="button" onClick={() => void saveSms()} disabled={busy}>
               保存
             </button>
+          ) : tab === "recharge" ? (
+            <button className="btn primary" type="button" onClick={() => void saveRecharge()} disabled={busy || rechargeSaving}>
+              {rechargeSaving ? "保存中…" : "保存"}
+            </button>
+          ) : tab === "rechargeProducts" ? (
+            <button className="btn primary" type="button" onClick={() => void saveRechargeProducts()} disabled={busy || rechargeProductsSaving}>
+              {rechargeProductsSaving ? "保存中…" : "保存"}
+            </button>
           ) : (
             <button className="btn primary" type="button" onClick={() => void saveCapabilities()} disabled={busy || capsSaving || !capsStored}>
               {capsSaving ? "保存中…" : "保存"}
@@ -376,6 +569,158 @@ export function ToolsPage() {
 
       {notice ? <div className="hint">{notice}</div> : null}
       {error ? <div className="error">{error}</div> : null}
+
+      {tab === "recharge" ? (
+        <div className="tableWrap" style={{ padding: 14, marginBottom: 14 }}>
+          <div style={{ fontWeight: 900, marginBottom: 8 }}>充值倍率（积分/元）</div>
+          <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
+            说明：配置按用户分组生效（热生效）。Desktop 侧“充值积分”会按该表计算“预计到账积分”。
+          </div>
+
+          <div className="row" style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <label className="field" style={{ minWidth: 260 }}>
+              <div className="label">默认分组（defaultGroup）</div>
+              <input className="input" value={rechargeDefaultGroup} onChange={(e) => setRechargeDefaultGroup(e.target.value)} placeholder="normal" />
+            </label>
+            <div className="muted" style={{ fontSize: 12 }}>
+              {rechargeStored ? `updatedAt: ${rechargeStored.updatedAt}` : "（尚未保存，使用默认值）"}
+            </div>
+          </div>
+
+          <div style={{ marginTop: 10 }}>
+            <div className="label">兑换率表（每行：group=pointsPerCny）</div>
+            <textarea
+              className="input"
+              style={{ width: "100%", height: 160, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}
+              value={rechargeMapText}
+              onChange={(e) => setRechargeMapText(e.target.value)}
+            />
+            <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+              示例：normal=250（100元→25,000积分） / vip=500（100元→50,000积分）
+            </div>
+          </div>
+
+          <div style={{ marginTop: 14 }}>
+            <div style={{ fontWeight: 900, marginBottom: 8 }}>活动赠送（买一送一等，热生效）</div>
+            <label className="row" style={{ gap: 8, alignItems: "center", marginBottom: 8 }}>
+              <input type="checkbox" checked={rechargeGiftEnabled} onChange={(e) => setRechargeGiftEnabled(e.target.checked)} />
+              <span>启用赠送</span>
+            </label>
+            <div className="row" style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <label className="field" style={{ minWidth: 260 }}>
+                <div className="label">默认赠送倍率（giftDefaultMultiplier）</div>
+                <input className="input" value={rechargeGiftDefaultMultiplier} onChange={(e) => setRechargeGiftDefaultMultiplier(e.target.value)} placeholder="0" />
+              </label>
+              <div className="muted" style={{ fontSize: 12 }}>
+                说明：1=买一送一（赠送 100%），0.5=赠送 50%，0=不赠送
+              </div>
+            </div>
+            <div style={{ marginTop: 10 }}>
+              <div className="label">分组赠送倍率（每行：group=giftMultiplier）</div>
+              <textarea
+                className="input"
+                style={{ width: "100%", height: 120, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}
+                value={rechargeGiftMapText}
+                onChange={(e) => setRechargeGiftMapText(e.target.value)}
+              />
+              <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+                提示：留空=所有分组都按“默认赠送倍率”生效；填写某个 group 才会覆盖该分组（例如 normal=0 表示 normal 不参与赠送）。
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {tab === "rechargeProducts" ? (
+        <div className="tableWrap" style={{ padding: 14, marginBottom: 14 }}>
+          <div style={{ fontWeight: 900, marginBottom: 8 }}>充值 SKU（档位）配置</div>
+          <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
+            说明：保存后立即热生效。sku 建议保持稳定（我们用 sku 作为产品 id）。金额单位为“元”。
+          </div>
+
+          <div className="row" style={{ gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+            <button
+              className="btn"
+              type="button"
+              onClick={() => {
+                setRechargeProductsRows([
+                  ...rechargeProductsRows,
+                  { sku: "", name: "", amountYuan: "100.00", originalAmountYuan: "", pointsFixed: "", status: "active" },
+                ]);
+              }}
+            >
+              新增一行
+            </button>
+            <span className="tag">rows {rechargeProductsRows.length}</span>
+            <span className="tag">stored {rechargeProductsStored.length}</span>
+          </div>
+
+          <table className="table">
+            <thead>
+              <tr>
+                <th>sku</th>
+                <th>名称</th>
+                <th>金额(元)</th>
+                <th>划线价(元)</th>
+                <th>固定积分(可选)</th>
+                <th>状态</th>
+                <th style={{ width: 80 }}>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rechargeProductsRows.map((r, idx) => (
+                <tr key={`${r.sku}-${idx}`}>
+                  <td>
+                    <input className="input" value={r.sku} onChange={(e) => {
+                      const next=[...rechargeProductsRows]; next[idx]={...next[idx], sku:e.target.value}; setRechargeProductsRows(next);
+                    }} placeholder="points_100_cny" />
+                  </td>
+                  <td>
+                    <input className="input" value={r.name} onChange={(e) => {
+                      const next=[...rechargeProductsRows]; next[idx]={...next[idx], name:e.target.value}; setRechargeProductsRows(next);
+                    }} placeholder="充值 ¥100" />
+                  </td>
+                  <td>
+                    <input className="input" value={r.amountYuan} onChange={(e) => {
+                      const next=[...rechargeProductsRows]; next[idx]={...next[idx], amountYuan:e.target.value}; setRechargeProductsRows(next);
+                    }} placeholder="100.00" />
+                  </td>
+                  <td>
+                    <input className="input" value={r.originalAmountYuan} onChange={(e) => {
+                      const next=[...rechargeProductsRows]; next[idx]={...next[idx], originalAmountYuan:e.target.value}; setRechargeProductsRows(next);
+                    }} placeholder="（可空）" />
+                  </td>
+                  <td>
+                    <input className="input" value={r.pointsFixed} onChange={(e) => {
+                      const next=[...rechargeProductsRows]; next[idx]={...next[idx], pointsFixed:e.target.value}; setRechargeProductsRows(next);
+                    }} placeholder="（可空）" />
+                  </td>
+                  <td>
+                    <select className="input" value={r.status} onChange={(e) => {
+                      const next=[...rechargeProductsRows]; next[idx]={...next[idx], status:(e.target.value as any)}; setRechargeProductsRows(next);
+                    }}>
+                      <option value="active">active</option>
+                      <option value="inactive">inactive</option>
+                    </select>
+                  </td>
+                  <td>
+                    <button className="btn" type="button" onClick={() => {
+                      const next=rechargeProductsRows.slice(); next.splice(idx,1); setRechargeProductsRows(next);
+                    }}>删除</button>
+                  </td>
+                </tr>
+              ))}
+              {!rechargeProductsRows.length ? (
+                <tr>
+                  <td colSpan={7} className="muted" style={{ padding: 16 }}>
+                    暂无数据（可点“新增一行”）
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
 
       {tab === "tools" || tab === "skills" ? (
         <div className="tableWrap" style={{ padding: 14, marginBottom: 14 }}>

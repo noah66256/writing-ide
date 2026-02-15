@@ -8,6 +8,7 @@ export type UserDto = {
   phone?: string | null;
   role: UserRole;
   pointsBalance: number;
+  billingGroup?: string | null;
   createdAt: string;
 };
 
@@ -358,6 +359,13 @@ export async function adminSetUserRole(args: { userId: string; role: UserRole })
   });
 }
 
+export async function adminSetUserBillingGroup(args: { userId: string; billingGroup?: string | null }) {
+  return apiFetchJson<{ ok: true; billingGroup: string | null }>(`/api/admin/users/${encodeURIComponent(args.userId)}/billing-group`, {
+    method: "PATCH",
+    body: JSON.stringify({ billingGroup: args.billingGroup ?? null }),
+  });
+}
+
 export async function adminRechargeUserPoints(args: { userId: string; points: number; reason?: string }) {
   return apiFetchJson<{
     ok: true;
@@ -373,6 +381,66 @@ export async function adminListUserTransactions(args: { userId: string }) {
   return apiFetchJson<{ transactions: PointsTransactionDto[] }>(
     `/api/admin/users/${encodeURIComponent(args.userId)}/points/transactions`,
   );
+}
+
+export type RechargeConfigDto = {
+  pointsPerCnyByGroup: Record<string, number>;
+  defaultGroup: string;
+  giftEnabled: boolean;
+  giftMultiplierByGroup: Record<string, number>;
+  giftDefaultMultiplier: number;
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export async function adminGetRechargeConfig() {
+  return apiFetchJson<{ ok: true; config: RechargeConfigDto | null }>("/api/admin/recharge/config");
+}
+
+export async function adminUpdateRechargeConfig(args: {
+  defaultGroup: string;
+  pointsPerCnyByGroup: Record<string, number>;
+  giftEnabled?: boolean;
+  giftMultiplierByGroup?: Record<string, number>;
+  giftDefaultMultiplier?: number;
+}) {
+  return apiFetchJson<{ ok: true; config: RechargeConfigDto }>("/api/admin/recharge/config", {
+    method: "PUT",
+    body: JSON.stringify(args),
+  });
+}
+
+export type RechargeProductDto = {
+  id: string;
+  sku: string;
+  name: string;
+  amountCent: number;
+  pointsFixed: number | null;
+  originalAmountCent: number | null;
+  status: "active" | "inactive";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export async function adminGetRechargeProducts() {
+  return apiFetchJson<{ ok: true; products: RechargeProductDto[] }>("/api/admin/recharge/products");
+}
+
+export async function adminUpdateRechargeProducts(args: {
+  products: Array<{
+    sku: string;
+    name: string;
+    amountCent: number;
+    originalAmountCent?: number | null;
+    pointsFixed?: number | null;
+    status?: "active" | "inactive";
+  }>;
+}) {
+  return apiFetchJson<{ ok: true; products: RechargeProductDto[] }>("/api/admin/recharge/products", {
+    method: "PUT",
+    body: JSON.stringify(args),
+  });
 }
 
 export async function adminGetLlmConfig() {

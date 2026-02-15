@@ -5,6 +5,7 @@ import {
   adminListUsers,
   adminListUserTransactions,
   adminRechargeUserPoints,
+  adminSetUserBillingGroup,
   adminSetUserRole,
   type PointsTransactionDto,
   type UserDto,
@@ -97,6 +98,24 @@ export function UsersPage() {
     } catch (e: any) {
       const err = e as ApiError;
       setError(`改角色失败：${err.code}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onSetBillingGroup = async (u: UserDto) => {
+    const cur = String((u as any).billingGroup ?? "").trim();
+    const nextRaw = prompt("设置计费分组（留空=normal）", cur || "normal");
+    if (nextRaw === null) return;
+    const next = nextRaw.trim() || "normal";
+    setBusy(true);
+    setError("");
+    try {
+      await adminSetUserBillingGroup({ userId: u.id, billingGroup: next });
+      await refresh();
+    } catch (e: any) {
+      const err = e as ApiError;
+      setError(`设置分组失败：${err.code}`);
     } finally {
       setBusy(false);
     }
@@ -196,6 +215,7 @@ export function UsersPage() {
             <tr>
               <th>账号</th>
               <th>角色</th>
+              <th>分组</th>
               <th>积分</th>
               <th>创建时间</th>
               <th style={{ width: 240 }}>操作</th>
@@ -213,6 +233,7 @@ export function UsersPage() {
                 <td>
                   <span className={`pill ${u.role === "admin" ? "pillAdmin" : "pillUser"}`}>{u.role}</span>
                 </td>
+                <td className="muted">{String((u as any).billingGroup ?? "normal")}</td>
                 <td style={{ fontVariantNumeric: "tabular-nums" }}>{u.pointsBalance ?? 0}</td>
                 <td className="muted">{fmtTime(u.createdAt)}</td>
                 <td>
@@ -229,6 +250,9 @@ export function UsersPage() {
                     >
                       复制ID
                     </button>
+                    <button className="btn" type="button" disabled={busy} onClick={() => void onSetBillingGroup(u)}>
+                      分组
+                    </button>
                     <button className="btn" type="button" disabled={busy} onClick={() => void onRecharge(u)}>
                       充值
                     </button>
@@ -241,7 +265,7 @@ export function UsersPage() {
             ))}
             {!filtered.length ? (
               <tr>
-                <td colSpan={5} className="muted" style={{ padding: 16 }}>
+                <td colSpan={6} className="muted" style={{ padding: 16 }}>
                   {busy ? "加载中…" : "暂无数据"}
                 </td>
               </tr>

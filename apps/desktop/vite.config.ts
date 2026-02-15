@@ -29,6 +29,10 @@ export default defineConfig({
       },
     },
   },
+  optimizeDeps: {
+    // 显式包含 qrcode，避免动态导入时 Vite 优化缓存失效导致 504 错误
+    include: ["qrcode"],
+  },
 });
 
 

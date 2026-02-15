@@ -36,6 +36,17 @@ type AuthState = {
   verifyEmailCode: (args: { email: string; requestId: string; code: string }) => Promise<void>;
 
   listTransactions: () => Promise<Array<{ id: string; type: string; delta: number; createdAt: string; reason?: string; meta?: any }>>;
+
+  // ======== Recharge（买积分：仅通道B - /pay/:token JSAPI 收银台） ========
+  listRechargeProducts: () => Promise<{
+    billingGroup: string;
+    pointsPerCny: number;
+    giftEnabled: boolean;
+    giftMultiplier: number;
+    products: Array<{ id: string; sku: string; name: string; amountCent: number; originalAmountCent: number | null; points: number }>;
+  }>;
+  createRechargeOrder: (args: { productId: string }) => Promise<{ orderId: string; payUrl: string; amountCent: number; pointsToCredit: number; expireAt: string }>;
+  getRechargePayStatus: (args: { orderId: string }) => Promise<{ paid: boolean; status: string; expireAt: string; pointsToCredit: number }>;
 };
 
 function apiUrl(path: string) {
@@ -193,6 +204,41 @@ export const useAuthStore = create<AuthState>()(
       listTransactions: async () => {
         const r = await apiFetchJson<{ transactions: any[] }>("/api/points/transactions", { method: "GET" });
         return Array.isArray(r.transactions) ? r.transactions : [];
+      },
+
+      listRechargeProducts: async () => {
+        const r = await apiFetchJson<any>("/api/recharge/products", { method: "GET" });
+        return {
+          billingGroup: String(r?.billingGroup ?? "normal"),
+          pointsPerCny: Number(r?.pointsPerCny ?? 0) || 0,
+          giftEnabled: Boolean(r?.giftEnabled),
+          giftMultiplier: Number(r?.giftMultiplier ?? 0) || 0,
+          products: Array.isArray(r?.products) ? r.products : [],
+        };
+      },
+
+      createRechargeOrder: async (args) => {
+        const r = await apiFetchJson<any>("/api/recharge/orders", {
+          method: "POST",
+          body: JSON.stringify({ productId: args.productId }),
+        });
+        return {
+          orderId: String(r?.orderId ?? ""),
+          payUrl: String(r?.payUrl ?? ""),
+          amountCent: Number(r?.amountCent ?? 0) || 0,
+          pointsToCredit: Number(r?.pointsToCredit ?? 0) || 0,
+          expireAt: String(r?.expireAt ?? ""),
+        };
+      },
+
+      getRechargePayStatus: async (args) => {
+        const r = await apiFetchJson<any>(`/api/recharge/orders/${encodeURIComponent(args.orderId)}/pay-status`, { method: "GET" });
+        return {
+          paid: Boolean(r?.paid),
+          status: String(r?.status ?? ""),
+          expireAt: String(r?.expireAt ?? ""),
+          pointsToCredit: Number(r?.pointsToCredit ?? 0) || 0,
+        };
       },
     }),
     { name: "writing-ide.auth.v1" },
