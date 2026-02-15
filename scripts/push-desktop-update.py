@@ -142,12 +142,13 @@ def main() -> int:
             scp_cmd += ["-i", str(args.ssh_key)]
 
         # 1) mkdir -p remoteDir
-        # 重要：Windows Git Bash 下 args.remote_dir 可能会被 MSYS 路径转换污染（例如 /www/... 变成 C:/Program Files/Git/www/...）。
+        # 重要：Windows Git Bash 下 args.remote_dir 可能会被 MSYS 路径转换污染
+        # （例如 /www/... 或 /opt/... 变成 C:/Program Files/Git/www/... 或 C:/Program Files/Git/opt/...）。
         # 这里对 remote_dir 做一次“强制还原”：
-        # - 如果出现 "C:/Program Files/Git/www/..." 这种形式，截取从 "/www/" 开始的部分
+        # - 如果出现 "C:/Program Files/Git/(www|opt)/..." 这种形式，截取从 "/www/" 或 "/opt/" 开始的部分
         # - 只在明显被污染时处理，不影响正常 Linux 路径
         remote_dir = str(args.remote_dir)
-        m = re.search(r"(/www/.*)$", remote_dir)
+        m = re.search(r"(/(?:www|opt)/.*)$", remote_dir)
         if m:
             remote_dir = m.group(1)
         mkdir_cmd = ssh_cmd + [args.ssh, f"mkdir -p {remote_dir}"]
