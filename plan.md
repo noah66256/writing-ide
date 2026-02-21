@@ -3,6 +3,8 @@
 ### 导航（常用入口）
 - [README（项目说明）](README.md)
 - [debug.md（问题记录/排查）](debug.md)
+- [pi-agent-core 迁移方案 v0.1（Agent 循环 + 工具协议从 XML→Anthropic JSON）](docs/specs/pi-agent-core-migration-v0.1.md)
+- [Agent Runner 迁移后修补 v0.1（死代码清理 + per-turn 门禁 + 兼容性修复 + 冒烟测试）](docs/specs/agent-runner-post-migration-v0.1.md)
 - [项目开发与写作引擎说明书（handbook v1）](docs/dev-handbook-v1.md)
 - [Agent 流程系统性审计与改造路线图（路线2）](agent-flow-audit-roadmap.md)
 - [Intent Routing（第一道门禁）](intent-routing.md)

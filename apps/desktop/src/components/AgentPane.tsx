@@ -33,14 +33,6 @@ type LlmSelectorDto = {
   };
 };
 
-function stripToolXml(text: string) {
-  if (!text) return "";
-  const out = text
-    .replace(/<tool_calls[\s\S]*?<\/tool_calls>/g, "")
-    .replace(/<tool_call[\s\S]*?<\/tool_call>/g, "");
-  return out.replace(/\n{3,}/g, "\n\n");
-}
-
 function normalizeRefPath(p: string) {
   let s = String(p ?? "").trim().replaceAll("\\", "/");
   s = s.replace(/\/+/g, "/");
@@ -993,7 +985,6 @@ export function AgentPane() {
                           <PillSelect
                             value={mode}
                             options={[
-                              { value: "plan", label: "Plan" },
                               { value: "agent", label: "Agent" },
                               { value: "chat", label: "Chat" },
                             ]}
@@ -1176,7 +1167,7 @@ export function AgentPane() {
           }
           if (step.type === "assistant") {
             if (step.hidden) return null;
-            const raw = stripToolXml(step.text);
+            const raw = step.text;
             const text = raw.trim();
             const lineCount = text.split("\n").filter((x) => x.trim()).length;
             const looksLikeDraft = text.length >= 480 || lineCount >= 10;
@@ -1408,7 +1399,6 @@ export function AgentPane() {
               <PillSelect
                 value={mode}
                 options={[
-                  { value: "plan", label: "Plan" },
                   { value: "agent", label: "Agent" },
                   { value: "chat", label: "Chat" },
                 ]}

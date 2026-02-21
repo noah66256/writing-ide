@@ -1,6 +1,6 @@
 export type ToolRiskLevel = "low" | "medium" | "high";
 export type ToolApplyPolicy = "proposal" | "auto_apply";
-export type ToolMode = "plan" | "agent" | "chat";
+export type ToolMode = "agent" | "chat";
 
 export type ToolArgType = "string" | "number" | "boolean" | "json";
 
@@ -41,7 +41,7 @@ export const TOOL_LIST: ToolMeta[] = [
       "- 便于根据今天/最近/最新选择 freshness（oneDay/oneWeek/...）\n" +
       "输出包含：nowIso/year/month/day/weekday/unixMs/timezoneOffsetMinutes。",
     args: [],
-    modes: ["chat", "plan", "agent"],
+    modes: ["chat", "agent"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -61,7 +61,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "count", required: false, desc: "返回条数（1-50，默认 10）", type: "number" },
       { name: "summary", required: false, desc: "是否返回摘要（默认 true）", type: "boolean" },
     ],
-    modes: ["chat", "plan", "agent"],
+    modes: ["chat", "agent"],
     inputSchema: {
       type: "object",
       properties: {
@@ -85,7 +85,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "timeoutMs", required: false, desc: "超时毫秒（默认 10000）", type: "number" },
       { name: "maxChars", required: false, desc: "最大返回字符数（默认 12000，用于截断保护）", type: "number" },
     ],
-    modes: ["chat", "plan", "agent"],
+    modes: ["chat", "agent"],
     inputSchema: {
       type: "object",
       properties: {
@@ -95,6 +95,52 @@ export const TOOL_LIST: ToolMeta[] = [
         maxChars: { type: "number" },
       },
       required: ["url"],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: "kb.listLibraries",
+    description:
+      "列出本地知识库中的所有库（只读）。返回 id/name/purpose/docCount 列表。\n" +
+      "【何时用】在 kb.ingest 之前查看可用库，决定是新建还是导入到已有库。",
+    args: [],
+    modes: ["agent"],
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "kb.ingest",
+    description:
+      "语料抽卡入库（一键完成：导入文档→智能分块→LLM 抽卡→可选生成手册→自动挂载库）。\n" +
+      "【输入】text/path/url 三选一：\n" +
+      "- text：直接传入要分析的文本内容\n" +
+      "- path：项目内文件路径（相对路径）或绝对路径\n" +
+      "- url：网页 URL（自动抓取正文）\n" +
+      "【输出】返回 libraryId、docId、抽取的卡片数量（按 cardType 分类）。\n" +
+      "抽卡完成后库自动 attach，后续写作请求可直接通过 kb.search 检索使用。",
+    args: [
+      { name: "text", required: false, desc: "要导入的文本内容（text/path/url 三选一）", type: "string" },
+      { name: "path", required: false, desc: "文件路径（项目相对路径或绝对路径；text/path/url 三选一）", type: "string" },
+      { name: "url", required: false, desc: "网页 URL（text/path/url 三选一）", type: "string" },
+      { name: "libraryId", required: false, desc: "可选：指定已有库 ID；不传则自动创建新库", type: "string" },
+      { name: "libraryName", required: false, desc: "可选：新库名称（仅新建库时生效）", type: "string" },
+      { name: "purpose", required: false, desc: '可选：库用途 "style"|"material"|"product"（默认 "style"）', type: "string" },
+      { name: "autoPlaybook", required: false, desc: "可选：抽卡后是否自动生成风格手册（默认 true）", type: "boolean" },
+      { name: "autoAttach", required: false, desc: "可选：完成后是否自动 attach 库（默认 true）", type: "boolean" },
+    ],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string" },
+        path: { type: "string" },
+        url: { type: "string" },
+        libraryId: { type: "string" },
+        libraryName: { type: "string" },
+        purpose: { type: "string" },
+        autoPlaybook: { type: "boolean" },
+        autoAttach: { type: "boolean" },
+      },
+      oneOfRequired: [{ required: ["text"] }, { required: ["path"] }, { required: ["url"] }],
       additionalProperties: true,
     },
   },
@@ -123,7 +169,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "useVector", required: false, desc: "可选：是否使用向量做重排（true/false；默认 true）", type: "boolean" },
       { name: "embeddingModel", required: false, desc: '可选：向量模型 id（例如 "text-embedding-3-large" 或 "Embedding-V1"）', type: "string" },
     ],
-    modes: ["chat", "plan", "agent"],
+    modes: ["chat", "agent"],
     inputSchema: {
       type: "object",
       properties: {
@@ -159,7 +205,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "libraryIds", required: false, desc: "可选：风格库 ID 数组；不传则默认使用右侧已绑定的风格库（purpose=style）作为对照样例池", type: "json", jsonType: "array" },
       { name: "maxSources", required: false, desc: "可选：最多使用多少条对照源（默认 14；包含编辑器选区 + 少量风格样例）", type: "number" },
     ],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: {
       type: "object",
       properties: {
@@ -191,7 +237,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "model", required: false, desc: "可选：用于 linter 的强模型（默认优先 LLM_LINTER_MODEL，其次 LLM_CARD_MODEL）", type: "string" },
       { name: "maxIssues", required: false, desc: "可选：最多返回多少条“不像点”（默认 10）", type: "number" },
     ],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: {
       type: "object",
       properties: {
@@ -209,21 +255,21 @@ export const TOOL_LIST: ToolMeta[] = [
     name: "run.mainDoc.get",
     description: "读取本次 Run 的 Main Doc（主文档/主线）。",
     args: [],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "run.mainDoc.update",
     description: "更新本次 Run 的 Main Doc（主线）。输入 patch(JSON)。",
     args: [{ name: "patch", required: true, desc: "JSON 对象：MainDoc 的增量 patch", type: "json", jsonType: "object" }],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: { type: "object", properties: { patch: { type: "json", jsonType: "object" } }, required: ["patch"], additionalProperties: true },
   },
   {
     name: "run.setTodoList",
     description: "设置本次 Run 的 Todo List（用于进度追踪与防跑偏）。",
     args: [{ name: "items", required: true, desc: 'JSON 数组：TodoItem[]（{ id?, text, status?, note? }）', type: "json", jsonType: "array" }],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: { type: "object", properties: { items: { type: "json", jsonType: "array" } }, required: ["items"], additionalProperties: true },
   },
   {
@@ -241,7 +287,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "note", required: false, desc: "可选：备注/阻塞原因", type: "string" },
       { name: "text", required: false, desc: "可选：更新文本", type: "string" },
     ],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: {
       type: "object",
       properties: {
@@ -272,7 +318,7 @@ export const TOOL_LIST: ToolMeta[] = [
         jsonType: "array",
       },
     ],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: { type: "object", properties: { items: { type: "json", jsonType: "array" } }, required: ["items"], additionalProperties: true },
   },
   {
@@ -286,7 +332,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "status", required: false, desc: '可选：状态（"todo"|"in_progress"|"done"|"blocked"|"skipped"）', type: "string" },
       { name: "note", required: false, desc: "可选：备注/阻塞原因", type: "string" },
     ],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: {
       type: "object",
       properties: {
@@ -302,14 +348,14 @@ export const TOOL_LIST: ToolMeta[] = [
     name: "run.todo.remove",
     description: "删除一条 Todo（按 id）。",
     args: [{ name: "id", required: true, desc: "Todo ID", type: "string" }],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"], additionalProperties: true },
   },
   {
     name: "run.todo.clear",
     description: "清空本次 Run 的 Todo List。",
     args: [],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -321,7 +367,7 @@ export const TOOL_LIST: ToolMeta[] = [
       "- 尤其是：已完成写入（doc.write/doc.applyEdits/doc.splitToDir 等）并且 To-do 已清空/全部 done\n" +
       "【注意】调用 run.done 后，系统会生成一份“执行报告”并终止本次 run。",
     args: [{ name: "note", required: false, desc: "可选：完成口径/选取策略的简短备注（<=200字）", type: "string" }],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: {
       type: "object",
       properties: { note: { type: "string" } },
@@ -332,14 +378,14 @@ export const TOOL_LIST: ToolMeta[] = [
     name: "project.listFiles",
     description: "列出当前项目文件列表（path）。",
     args: [],
-    modes: ["chat", "plan", "agent"],
+    modes: ["chat", "agent"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "project.docRules.get",
     description: "读取项目级 Doc Rules（doc.rules.md）。",
     args: [],
-    modes: ["chat", "plan", "agent"],
+    modes: ["chat", "agent"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -357,7 +403,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "maxResults", required: false, desc: "可选：最多返回多少条命中（默认 80，最大 500）", type: "number" },
       { name: "maxPerFile", required: false, desc: "可选：每个文件最多返回多少条命中（默认 20，最大 200）", type: "number" },
     ],
-    modes: ["chat", "plan", "agent"],
+    modes: ["chat", "agent"],
     inputSchema: {
       type: "object",
       properties: {
@@ -376,14 +422,14 @@ export const TOOL_LIST: ToolMeta[] = [
     name: "doc.read",
     description: "读取文件内容（path）。",
     args: [{ name: "path", required: true, desc: "文件路径（如 drafts/draft.md）", type: "string" }],
-    modes: ["chat", "plan", "agent"],
+    modes: ["chat", "agent"],
     inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: true },
   },
   {
     name: "doc.mkdir",
     description: "创建目录（path）。用于新建文件夹/目录结构。",
     args: [{ name: "path", required: true, desc: "目录路径（如 drafts/ 或 assets/images/）", type: "string" }],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: true },
   },
   {
@@ -393,7 +439,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "fromPath", required: true, desc: "源路径（文件或目录）", type: "string" },
       { name: "toPath", required: true, desc: "目标路径（文件或目录）", type: "string" },
     ],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: {
       type: "object",
       properties: { fromPath: { type: "string" }, toPath: { type: "string" } },
@@ -405,28 +451,28 @@ export const TOOL_LIST: ToolMeta[] = [
     name: "doc.deletePath",
     description: "删除文件或目录（path）。真删磁盘内容；默认自动执行（可 Undo 回滚）。",
     args: [{ name: "path", required: true, desc: "文件或目录路径", type: "string" }],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: true },
   },
   {
     name: "doc.commitSnapshot",
     description: "创建一个项目快照（用于回滚/Undo）。",
     args: [{ name: "label", required: false, desc: "快照备注（可选）", type: "string" }],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: { type: "object", properties: { label: { type: "string" } }, additionalProperties: true },
   },
   {
     name: "doc.listSnapshots",
     description: "列出当前项目的快照列表（只读）。",
     args: [],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "doc.restoreSnapshot",
     description: "恢复到指定快照（proposal-first：Keep 才会真正恢复；Undo 可回滚）。",
     args: [{ name: "snapshotId", required: true, desc: "快照 ID（doc.commitSnapshot 的返回）", type: "string" }],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: { type: "object", properties: { snapshotId: { type: "string" } }, required: ["snapshotId"], additionalProperties: true },
   },
   {
@@ -439,7 +485,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "ifExists", required: false, desc: "文件已存在时的策略：rename/overwrite/error", type: "string" },
       { name: "suggestedName", required: false, desc: "建议的新文件名（仅 ifExists=rename 时使用）", type: "string" },
     ],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: {
       type: "object",
       properties: {
@@ -462,7 +508,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "ifExists", required: false, desc: "文件已存在时的策略：rename/overwrite/error", type: "string" },
       { name: "suggestedName", required: false, desc: "建议的新文件名（仅 ifExists=rename 时使用）", type: "string" },
     ],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: {
       type: "object",
       properties: { path: { type: "string" }, content: { type: "string" }, ifExists: { type: "string" }, suggestedName: { type: "string" } },
@@ -477,21 +523,21 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "path", required: true, desc: "源文件路径（如 直男财经.md）", type: "string" },
       { name: "targetDir", required: true, desc: "目标目录（如 直男财经/）", type: "string" },
     ],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: { type: "object", properties: { path: { type: "string" }, targetDir: { type: "string" } }, required: ["path", "targetDir"], additionalProperties: true },
   },
   {
     name: "doc.getSelection",
     description: "获取编辑器当前选区内容。",
     args: [],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "doc.replaceSelection",
     description: "替换当前选区为 text（可 Undo）。",
     args: [{ name: "text", required: true, desc: "替换后的文本", type: "string" }],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"], additionalProperties: true },
   },
   {
@@ -501,7 +547,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "path", required: false, desc: "文件路径（默认 activePath）", type: "string" },
       { name: "edits", required: true, desc: "JSON 数组：TextEdit[]", type: "json", jsonType: "array" },
     ],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: {
       type: "object",
       properties: { path: { type: "string" }, edits: { type: "json", jsonType: "array" } },
@@ -520,7 +566,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "clipsPerLesson", required: false, desc: "每节课生成多少篇（默认 5，范围 1-12）", type: "number" },
       { name: "outputBaseDir", required: false, desc: "输出根目录（相对项目；默认：当前活动文件同级目录；若无活动文件则 exports）", type: "string" },
     ],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: {
       type: "object",
       properties: {
@@ -535,28 +581,28 @@ export const TOOL_LIST: ToolMeta[] = [
     name: "writing.batch.status",
     description: "查询当前批处理状态与进度（只读）。",
     args: [],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "writing.batch.pause",
     description: "暂停当前批处理（后台停止推进，已生成内容保留）。",
     args: [],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "writing.batch.resume",
     description: "继续当前批处理（从 checkpoint 继续推进）。",
     args: [],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "writing.batch.cancel",
     description: "取消当前批处理（后台停止推进，已生成文件保留在输出目录）。",
     args: [],
-    modes: ["plan", "agent"],
+    modes: ["agent"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
 ];

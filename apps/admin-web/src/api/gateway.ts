@@ -25,7 +25,7 @@ export type PointsTransactionDto = {
 };
 
 export type RunAuditKind = "llm.chat" | "agent.run";
-export type RunAuditMode = "chat" | "plan" | "agent";
+export type RunAuditMode = "chat" | "agent";
 
 export type RunAuditUsageDto = {
   promptTokens: number;
@@ -598,7 +598,7 @@ export type CapabilitiesToolDto = {
   name: string;
   module: string;
   description: string;
-  modes: Array<"chat" | "plan" | "agent">;
+  modes: Array<"chat" | "agent">;
   args: Array<{ name: string; required?: boolean; desc: string; type?: string; jsonType?: string }>;
   inputSchema: any;
 };
@@ -618,7 +618,7 @@ export type CapabilitiesSkillDto = {
 };
 
 export type CapabilitiesStoredDto = {
-  tools: { disabledByMode: Partial<Record<"chat" | "plan" | "agent", string[]>> };
+  tools: { disabledByMode: Partial<Record<"chat" | "agent", string[]>> };
   skills: { disabled: string[] };
   lockedTools: string[];
   updatedBy: string | null;
@@ -628,7 +628,7 @@ export type CapabilitiesStoredDto = {
 
 export type CapabilitiesEffectiveDto = {
   lockedTools: string[];
-  tools: { disabledByMode: Record<"chat" | "plan" | "agent", string[]> };
+  tools: { disabledByMode: Record<"chat" | "agent", string[]> };
   skills: { disabled: string[] };
 };
 

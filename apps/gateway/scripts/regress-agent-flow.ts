@@ -10,12 +10,10 @@ import {
   detectRunIntent,
   deriveStyleGate,
   isStyleExampleKbSearch,
-  isToolCallMessage,
   pickSkillStageKeyForAgentRun,
   isProposalWaitingMeta,
   parseStyleLintResult,
   isWriteLikeTool,
-  parseToolCalls,
   type ParsedToolCall,
 } from "@writing-ide/agent-core";
 
@@ -33,34 +31,6 @@ function ok(name: string) {
 }
 
 async function main() {
-  // ======== 1) XML 协议：parseToolCalls ========
-  {
-    const msg =
-      `<tool_calls>` +
-      `<tool_call name="kb.search">` +
-      `<arg name="query"><![CDATA[test]]></arg>` +
-      `</tool_call>` +
-      `</tool_calls>`;
-    assert.equal(isToolCallMessage(msg), true);
-    const calls = parseToolCalls(msg);
-    assert.ok(calls && calls.length === 1);
-    assert.equal(calls[0].name, "kb.search");
-    assert.equal(String(calls[0].args.query ?? "").trim(), "test");
-  }
-  {
-    const msg =
-      "```xml\n" +
-      `<tool_call name="run.setTodoList">` +
-      `<arg name="items"><![CDATA[[]]]></arg>` +
-      `</tool_call>\n` +
-      "```";
-    assert.equal(isToolCallMessage(msg), true);
-    const calls = parseToolCalls(msg);
-    assert.ok(calls && calls.length === 1);
-    assert.equal(calls[0].name, "run.setTodoList");
-  }
-  ok("xmlProtocol.parseToolCalls");
-
   // ======== 2) StyleGate：workflow batch 判定 ========
   {
     const mode = "agent" as const;

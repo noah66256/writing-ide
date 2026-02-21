@@ -217,11 +217,9 @@ function normalizeNameList(v: unknown, max = 400): string[] {
 function normalizeDisabledByMode(input: unknown): Partial<Record<ToolMode, string[]>> {
   const o = (input && typeof input === "object" ? input : {}) as any;
   const chat = normalizeNameList(o.chat ?? []);
-  const plan = normalizeNameList(o.plan ?? []);
   const agent = normalizeNameList(o.agent ?? []);
   const out: Partial<Record<ToolMode, string[]>> = {};
   if (chat.length) out.chat = chat;
-  if (plan.length) out.plan = plan;
   if (agent.length) out.agent = agent;
   return out;
 }
@@ -796,7 +794,6 @@ export function createToolConfigService(args?: { cacheTtlMs?: number }) {
       lockedTools: LOCKED_TOOL_NAMES_V1.slice(),
       disabledToolsByMode: {
         chat: toSet("chat"),
-        plan: toSet("plan"),
         agent: toSet("agent"),
       },
       disabledSkillIds: new Set(stored.skills.disabled.map((x) => String(x ?? "").trim()).filter(Boolean)),

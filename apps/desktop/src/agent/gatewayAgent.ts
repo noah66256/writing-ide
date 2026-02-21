@@ -5,7 +5,6 @@ import { useAuthStore } from "../state/authStore";
 import { facetLabel, getFacetPack } from "../kb/facets";
 import { activateSkills, detectRunIntent } from "@writing-ide/agent-core";
 import { buildStyleLinterLibrariesSidecar, executeToolCall, getTool, toolsPrompt } from "./toolRegistry";
-import { isToolCallMessage, parseToolCalls, renderToolErrorXml, renderToolResultXml } from "./xmlProtocol";
 
 function authHeader(): Record<string, string> {
   const token = String(useAuthStore.getState().accessToken ?? "").trim();
@@ -523,19 +522,19 @@ function stageFacetWeightsV1(
     if (stageId === "opening")
       return {
         essential: ["opening_design", "intro", "question_design", "emotion_mobilization", "voice_rhythm", "one_liner_crafting"],
-        supportive: ["reader_interaction", "scene_building", "rhetoric"],
+        supportive: ["reader_interaction", "scene_building", "rhetoric", "values_embedding", "narrative_perspective"],
         k: 6,
       };
     if (stageId === "outline")
       return {
-        essential: ["narrative_structure", "logic_framework", "structure_patterns"],
-        supportive: ["topic_selection", "persuasion", "reader_interaction"],
+        essential: ["narrative_structure", "narrative_perspective", "logic_framework", "structure_patterns"],
+        supportive: ["topic_selection", "persuasion", "reader_interaction", "values_embedding"],
         k: 5,
       };
     if (stageId === "ending")
       return {
         essential: ["values_embedding", "resonance", "structure_patterns"],
-        supportive: ["one_liner_crafting", "reader_interaction", "emotion_mobilization"],
+        supportive: ["one_liner_crafting", "reader_interaction", "emotion_mobilization", "narrative_perspective"],
         k: 5,
       };
     if (stageId === "polish")
@@ -546,9 +545,9 @@ function stageFacetWeightsV1(
       };
     // draft / unknown
     return {
-      essential: ["logic_framework", "narrative_structure", "persuasion", "voice_rhythm", "emotion_mobilization"],
+      essential: ["logic_framework", "narrative_structure", "narrative_perspective", "persuasion", "voice_rhythm", "emotion_mobilization", "values_embedding"],
       supportive: ["reader_interaction", "scene_building", "one_liner_crafting", "rhetoric"],
-      k: 7,
+      k: 8,
     };
   }
 
@@ -849,7 +848,7 @@ function pickFacetIdsV1(cluster: any, max = 8): string[] {
     out.push(k);
   };
   // 先把“常见关键卡”放前面（存在才加入）
-  for (const id of ["opening_design", "narrative_structure", "one_liner_crafting", "emotion_mobilization", "logic_framework", "voice_rhythm"]) {
+  for (const id of ["opening_design", "narrative_structure", "narrative_perspective", "one_liner_crafting", "emotion_mobilization", "logic_framework", "voice_rhythm", "values_embedding"]) {
     if (all.includes(id)) push(id);
   }
   for (const id of all) {
@@ -878,13 +877,6 @@ function renderContextManifestV1(args: { mode: Mode; segments: ContextManifestSe
     segments: args.segments,
   };
   return `CONTEXT_MANIFEST(JSON):\n${JSON.stringify(payload, null, 2)}\n\n`;
-}
-
-function stripToolXmlFromText(text: string) {
-  return String(text ?? "")
-    .replace(/<tool_calls[\s\S]*?<\/tool_calls>/g, "")
-    .replace(/<tool_call[\s\S]*?<\/tool_call>/g, "")
-    .trim();
 }
 
 /** 将证据原文/anchor 降级为"句式特征描述"，防止模型照抄原文。 */
@@ -927,14 +919,14 @@ function buildDialogueTurnsFromSteps(steps: any[]): DialogueTurn[] {
     if (!st || typeof st !== "object") continue;
     if (st.type === "user") {
       if (curUser) flush();
-      curUser = stripToolXmlFromText(String(st.text ?? ""));
+      curUser = String(st.text ?? "").trim();
       curAssistant = "";
       continue;
     }
     if (st.type === "assistant") {
       if (st.hidden) continue;
       if (!curUser) continue;
-      const t = stripToolXmlFromText(String(st.text ?? ""));
+      const t = String(st.text ?? "").trim();
       if (!t) continue;
       curAssistant = curAssistant ? `${curAssistant}\n${t}` : t;
     }

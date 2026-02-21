@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { ProjectSnapshot } from "./projectStore";
 
-export type Mode = "plan" | "agent" | "chat";
+export type Mode = "agent" | "chat";
 export type ToolApplyPolicy = "proposal" | "auto_apply";
 export type ToolRiskLevel = "low" | "medium" | "high";
 
@@ -101,9 +101,9 @@ export type RunActivity = {
 
 type RunState = {
   mode: Mode;
-  /** Chat 模式选中的模型（可与 Agent/Plan 分开记忆） */
+  /** Chat 模式选中的模型（可与 Agent 分开记忆） */
   chatModel: string;
-  /** Plan/Agent 模式选中的模型（共用） */
+  /** Agent 模式选中的模型 */
   agentModel: string;
   model: string;
   /** 对话滚动摘要（按 mode 存储；用于长对话上下文压缩） */
@@ -220,12 +220,12 @@ function dedupeCtxRefs(items: CtxRefItem[]) {
 export const useRunStore = create<RunState>()(
   persist(
     (set, get) => ({
-  mode: "plan",
+  mode: "agent",
   chatModel: "",
   agentModel: "",
   model: "",
-  dialogueSummaryByMode: { plan: "", agent: "", chat: "" },
-  dialogueSummaryTurnCursorByMode: { plan: 0, agent: 0, chat: 0 },
+  dialogueSummaryByMode: { agent: "", chat: "" },
+  dialogueSummaryTurnCursorByMode: { agent: 0, chat: 0 },
   mainDoc: { goal: "" },
   todoList: [],
   steps: [],
@@ -255,7 +255,7 @@ export const useRunStore = create<RunState>()(
   setMainDoc: (mainDoc) => set({ mainDoc }),
   setDialogueSummary: (mode, summary, cursorTurns) =>
     set((s) => {
-      const m: Mode = mode === "chat" ? "chat" : mode === "agent" ? "agent" : "plan";
+      const m: Mode = mode === "chat" ? "chat" : "agent";
       const nextSummary = String(summary ?? "");
       const nextCursor = Number.isFinite(Number(cursorTurns)) ? Math.max(0, Math.floor(Number(cursorTurns))) : 0;
       return {
@@ -335,7 +335,7 @@ export const useRunStore = create<RunState>()(
       }
       return { ...(step as any), id } as Step;
     });
-    const mode = s.mode === "plan" || s.mode === "agent" || s.mode === "chat" ? s.mode : get().mode;
+    const mode = s.mode === "agent" || s.mode === "chat" ? s.mode : get().mode;
     const model = typeof s.model === "string" ? s.model : get().model;
     const prev = get();
     const chatModel = mode === "chat" ? model : prev.chatModel;

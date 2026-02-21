@@ -63,9 +63,7 @@ export function startMockRun(prompt: string): MockRunController {
   }
 
   const intro =
-    mode === "plan"
-      ? "收到。我先给你一份最小 Todo（你可以随时打断）：\n- 定平台画像/受众/目的\n- 生成选题+标题池\n- 你选一个写进 Main Doc\n- 新建草稿并给出结构\n\n下面先生成选题/标题池…"
-      : "收到。我会直接生成选题/标题池，你选一个作为主线（写进 Main Doc），并自动创建草稿文件（可 Undo）。";
+    "收到。我会直接生成选题/标题池，你选一个作为主线（写进 Main Doc），并自动创建草稿文件（可 Undo）。";
 
   say(intro, () => {
     finishAssistant(assistantId);

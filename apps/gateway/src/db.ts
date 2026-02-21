@@ -223,7 +223,7 @@ export type WebSearchConfig = {
   updatedAt: string;
 };
 
-export type ToolMode = "chat" | "plan" | "agent";
+export type ToolMode = "chat" | "agent";
 
 export type CapabilitiesConfig = {
   tools: {
@@ -306,7 +306,7 @@ export type RunAuditEvent = {
 export type RunAudit = {
   id: string; // runId
   kind: RunAuditKind;
-  mode: "chat" | "plan" | "agent";
+  mode: "chat" | "agent";
   userId: string | null;
   model: string | null;
   endpoint: string | null;
@@ -865,7 +865,7 @@ export async function loadDb(): Promise<Db> {
       .map((r) => {
         const id = typeof r?.id === "string" ? r.id : "";
         const kind: RunAuditKind = r?.kind === "agent.run" ? "agent.run" : "llm.chat";
-        const mode: RunAudit["mode"] = r?.mode === "plan" ? "plan" : r?.mode === "agent" ? "agent" : "chat";
+        const mode: RunAudit["mode"] = r?.mode === "agent" ? "agent" : "chat";
         if (!id) return null;
         const userId = typeof r?.userId === "string" ? String(r.userId) : null;
         const model = typeof r?.model === "string" ? String(r.model) : null;

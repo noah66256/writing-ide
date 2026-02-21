@@ -143,7 +143,7 @@ export const STYLE_IMITATE_SKILL: SkillManifest = {
   stageKey: "agent.skill.style_imitate",
   autoEnable: true,
   triggers: [
-    { when: "mode_in", args: { modes: ["plan", "agent"] } },
+    { when: "mode_in", args: { modes: ["agent"] } },
     { when: "has_style_library", args: { purpose: "style" } },
     { when: "run_intent_in", args: { intents: ["writing", "rewrite", "polish"] } },
   ],
@@ -153,10 +153,10 @@ export const STYLE_IMITATE_SKILL: SkillManifest = {
       "0) 若 Context Pack 提供 KB_STYLE_CLUSTERS(JSON)（写法候选/子簇）或 STYLE_SELECTOR(JSON)：请在输出开头用 1–2 句说明“本次默认采用的写法”（selectedClusterId/label），并列出另外 1–2 个备选写法（带 clusterId/label + 1 句代表证据 + 2~3 个关键数字口径）。不要停下来等用户确认：默认按推荐/已选写法继续写作；用户可随时改口切换。\n" +
       "1) 若 Main Doc 尚未写入 styleContractV1（或用户改口要求切写法），再调用 run.mainDoc.update 写入/更新 mainDoc.styleContractV1（短 JSON：{v,libraryId,selectedCluster{id,label},anchors,evidence,softRanges,facetPlan,updatedAt}）。若 Main Doc 已有且用户未要求变更，则不要重复写入。\n" +
       "2) 若提供 STYLE_DIMENSIONS(JSON)：\n" +
-      "- mustApply.facetIds 为 MUST，必须覆盖（每个至少落地一次），不要自行扩展到 21 张；\n" +
+      "- mustApply.facetIds 为 MUST，必须覆盖（每个至少落地一次），不要自行扩展到全部维度；\n" +
       "- shouldApply.softRanges 为 SHOULD，尽量贴近统计指纹（句长/问句率/人称密度等）；\n" +
       "- mayApply.cardTypesHint 仅用于检索素材（可选）。\n" +
-      "3) 若提供 STYLE_SELECTOR(JSON)：必须把 selectedFacetIds/selectedFacets 当作本次要执行的“维度卡子集”（只执行这些卡，不要自行扩展到 21 张）。若同时提供 STYLE_DIMENSIONS(JSON)，以 mustApply.facetIds 为准；若同时提供 STYLE_FACETS_SELECTED(Markdown)，优先按其卡片内容执行；并对每张入选 facet 结合 kbQueries（或 facetId+话题）用 kb.search 拉样例/证据再落笔。\n" +
+      "3) 若提供 STYLE_SELECTOR(JSON)：必须把 selectedFacetIds/selectedFacets 当作本次要执行的”维度卡子集”（只执行这些卡，不要自行扩展到全部维度）。若同时提供 STYLE_DIMENSIONS(JSON)，以 mustApply.facetIds 为准；若同时提供 STYLE_FACETS_SELECTED(Markdown)，优先按其卡片内容执行；并对每张入选 facet 结合 kbQueries（或 facetId+话题）用 kb.search 拉样例/证据再落笔。\n" +
       "4) 单篇写作建议走“两段式检索”：\n" +
       "- 第一段（写前）：kb.search 拉规则卡/结构骨架/开头钩子/结尾收束（kind=card + 显式 cardTypes）。\n" +
       "- 第二段（初稿后）：再 kb.search 拉金句/收束模板（one_liner/ending），把 punchline 与收尾补齐后再进入 lint。\n" +
@@ -165,8 +165,7 @@ export const STYLE_IMITATE_SKILL: SkillManifest = {
       "- 不要复制原文的句子/段落；任何明显的逐句改写/近似复述都视为失败。\n" +
       "- 在“不新增事实”的前提下，必须做结构与表达的再创作：重排段落、改句式、换衔接、换比喻/类比、把数字堆砌改成叙事化解释。\n" +
       "- 如需引用原文中的专有名词/关键结论：只保留“必要短语”，不要出现长串连续复用。\n" +
-      "7) lint.style 用于“提示/审计/问题清单”：未通过时必须按 rewritePrompt 回炉改写并复检；不要把分数当成唯一门禁导致卡死。\n" +
-      "工具调用仍按 XML 协议输出。",
+      "7) lint.style 用于”提示/审计/问题清单”：未通过时必须按 rewritePrompt 回炉改写并复检；不要把分数当成唯一门禁导致卡死。",
     context: "ACTIVE_SKILLS: style_imitate（原因见 reasonCodes；UI 需可见）",
   },
   policies: ["StyleGatePolicy", "AutoRetryPolicy"],
@@ -182,7 +181,7 @@ export const WEB_TOPIC_RADAR_SKILL: SkillManifest = {
   stageKey: "agent.skill.web_topic_radar",
   autoEnable: true,
   triggers: [
-    { when: "mode_in", args: { modes: ["plan", "agent"] } },
+    { when: "mode_in", args: { modes: ["agent"] } },
     {
       when: "text_regex",
       args: {
@@ -228,7 +227,7 @@ export const WRITING_BATCH_SKILL: SkillManifest = {
   stageKey: "agent.skill.writing_batch",
   autoEnable: true,
   triggers: [
-    { when: "mode_in", args: { modes: ["plan", "agent"] } },
+    { when: "mode_in", args: { modes: ["agent"] } },
     { when: "run_intent_in", args: { intents: ["writing", "rewrite", "polish"] } },
     {
       when: "text_regex",
@@ -268,7 +267,7 @@ export const WRITING_MULTI_SKILL: SkillManifest = {
   stageKey: "agent.skill.writing_multi",
   autoEnable: true,
   triggers: [
-    { when: "mode_in", args: { modes: ["plan", "agent"] } },
+    { when: "mode_in", args: { modes: ["agent"] } },
     { when: "run_intent_in", args: { intents: ["writing", "rewrite", "polish"] } },
     {
       when: "text_regex",
@@ -289,8 +288,7 @@ export const WRITING_MULTI_SKILL: SkillManifest = {
       "1) 目标：在一次 Run 内，按“逐篇独立闭环”生成并写入多篇（2–9）。每篇必须有自己的开头/结构/收束与金句，不要批量同质化。\n" +
       "2) 禁止：不要把多篇正文合并成一个大文档再调用 doc.splitToDir；不要先产出 N 篇完整正文再一次性写入。\n" +
       "3) 允许：逐篇循环执行：写前 kb.search（结构/开头/结尾模板）→ 产初稿 → 初稿后二次 kb.search（one_liner/ending）→（若开启）lint.copy →（若开启）lint.style → doc.write 单篇落盘。\n" +
-      "4) 写入建议：每篇用一个新文件（doc.write ifExists=rename），默认写入到同一输出目录；文件名建议包含序号与标题。\n" +
-      "工具调用仍按 XML 协议输出。",
+      "4) 写入建议：每篇用一个新文件（doc.write ifExists=rename），默认写入到同一输出目录；文件名建议包含序号与标题。",
     context: "ACTIVE_SKILLS: writing_multi（小规模多篇：逐篇闭环，禁止 splitToDir）",
   },
   policies: ["SkillToolCapsPolicy"],
@@ -301,7 +299,71 @@ export const WRITING_MULTI_SKILL: SkillManifest = {
   ui: { badge: "MULTI", color: "teal" },
 };
 
-export const SKILL_MANIFESTS_V1: SkillManifest[] = [WRITING_BATCH_SKILL, WRITING_MULTI_SKILL, WEB_TOPIC_RADAR_SKILL, STYLE_IMITATE_SKILL];
+export const CORPUS_INGEST_SKILL: SkillManifest = {
+  id: "corpus_ingest",
+  name: "语料导入与抽卡",
+  description:
+    "当用户给出文本/文件/URL 并要求抽卡、学风格或分析文风时，自动完成导入语料→抽卡入库→可选生成手册→自动挂载库。",
+  priority: 90,
+  stageKey: "agent.skill.corpus_ingest",
+  autoEnable: true,
+  triggers: [
+    { when: "mode_in", args: { modes: ["agent"] } },
+    {
+      when: "text_regex",
+      args: {
+        pattern:
+          // A) 直接关键词
+          "(?:抽卡)|" +
+          // B) "学/分析/提取/模仿" + 风格/写法/文风/语气
+          "(?:学|分析|提取|模仿|研究|拆解)[\\s\\S]{0,12}(?:风格|写法|文风|语气|笔法)|" +
+          // C) 风格/写法 + "学/分析"（反序）
+          "(?:风格|写法|文风|语气|笔法)[\\s\\S]{0,12}(?:学习|分析|提取|模仿|研究|拆解)|" +
+          // D) "导入" + 语料/素材/风格库/知识库
+          "(?:导入|上传|添加)[\\s\\S]{0,12}(?:语料|素材|风格库|知识库|样本)|" +
+          // E) "学习这篇/这段/他的/她的" + 风格/写法
+          "(?:学习|分析)[\\s\\S]{0,6}(?:这篇|这段|这个|他的|她的|它的)[\\s\\S]{0,12}(?:风格|写法|文风|语气)|" +
+          // F) "语料/素材" + "入库/建库"
+          "(?:语料|素材|风格)[\\s\\S]{0,6}(?:入库|建库)|" +
+          // G) "新建" + 风格库/知识库
+          "新建[\\s\\S]{0,6}(?:风格库|知识库|素材库)|" +
+          // H) 显式工具调用
+          "kb\\.ingest",
+      },
+    },
+  ],
+  promptFragments: {
+    system:
+      "当 skill=corpus_ingest 激活时（语料导入与抽卡）：\n" +
+      "1) 你的首要任务是帮用户把语料导入知识库并完成抽卡。\n" +
+      "2) 调用 kb.ingest 工具：\n" +
+      "   - 若用户提供了文本，用 text 参数。\n" +
+      "   - 若用户提供了文件路径，用 path 参数。\n" +
+      "   - 若用户提供了 URL，用 url 参数。\n" +
+      "3) 默认创建 purpose=style 的库（除非用户明确说是素材/产品库）。\n" +
+      "4) 抽卡完成后，向用户报告：\n" +
+      "   - 抽到了多少张卡（按 cardType 分类：hook/thesis/ending/one_liner/outline）\n" +
+      "   - 库已自动 attach，后续写作可直接使用\n" +
+      "5) 若用户在同一 run 里接着要求写作：直接进入写作流程（kb.search 已可命中新卡）。\n" +
+      "6) 不要在未调用 kb.ingest 前就尝试 kb.search 搜索未导入的内容。",
+    context: "ACTIVE_SKILLS: corpus_ingest（语料导入与抽卡）",
+  },
+  policies: [],
+  toolCaps: {
+    allowTools: [
+      "kb.ingest",
+      "kb.listLibraries",
+      "kb.search",
+      "run.setTodoList",
+      "run.todo.upsertMany",
+      "run.todo.update",
+      "run.done",
+    ],
+  },
+  ui: { badge: "INGEST", color: "green" },
+};
+
+export const SKILL_MANIFESTS_V1: SkillManifest[] = [CORPUS_INGEST_SKILL, WRITING_BATCH_SKILL, WRITING_MULTI_SKILL, WEB_TOPIC_RADAR_SKILL, STYLE_IMITATE_SKILL];
 
 export function activateSkills(args: {
   mode: AgentMode;

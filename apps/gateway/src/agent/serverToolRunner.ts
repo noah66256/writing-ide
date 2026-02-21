@@ -25,7 +25,8 @@ function getServerToolAllowlist(): Set<string> {
   const cfg = String(process.env.GATEWAY_SERVER_TOOL_ALLOWLIST ?? "").trim();
   const list = cfg
     ? parseCsv(cfg)
-    : ["lint.style", "project.listFiles", "project.docRules.get", "web.search", "web.fetch", "time.now", "run.done"];
+    : ["lint.style", "project.listFiles", "project.docRules.get", "web.search", "web.fetch", "time.now",
+       "run.done", "run.setTodoList", "run.todo.upsertMany", "run.todo.update", "run.mainDoc.update", "run.mainDoc.get"];
   return new Set(list.map((x) => String(x ?? "").trim()).filter(Boolean));
 }
 
@@ -64,6 +65,7 @@ export function decideServerToolExecution(args: {
   if (name === "time.now") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "time_now_server_side"] };
   // run.*：系统编排类工具（无副作用，但会影响 run 生命周期），应 server-side 执行
   if (name === "run.done") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "run_done_server_side"] };
+  if (name.startsWith("run.")) return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "run_orchestration_server_side"] };
 
   // 逐步迁回：先落地 lint.style(text=...)（只读；需要 Desktop sidecar 提供指纹/样例）。
   if (name === "lint.style") {
@@ -462,6 +464,18 @@ export async function executeServerToolOnGateway(args: {
 }) {
   const name = String(args.call?.name ?? "").trim();
   if (name === "run.done") return { ok: true as const, output: { ok: true } };
+
+  // run.* 编排工具：server-side 直接 ACK（结果通过 SSE 事件回传 Desktop 更新 UI）
+  if (name === "run.setTodoList" || name === "run.todo.upsertMany" || name === "run.todo.update") {
+    const items = args.call?.args?.items ?? args.call?.args?.todos ?? [];
+    return { ok: true as const, output: { ok: true, items } };
+  }
+  if (name === "run.mainDoc.update") {
+    return { ok: true as const, output: { ok: true } };
+  }
+  if (name === "run.mainDoc.get") {
+    return { ok: true as const, output: { ok: true, mainDoc: null } };
+  }
   if (name === "time.now") return executeTimeNowOnGateway();
   if (name === "web.search") return executeWebSearchOnGateway({ call: args.call });
   if (name === "web.fetch") return executeWebFetchOnGateway({ call: args.call });

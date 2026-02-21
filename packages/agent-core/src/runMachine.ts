@@ -1,5 +1,9 @@
 import type { AgentMode } from "./index.js";
-import type { ParsedToolCall } from "./xmlProtocol.js";
+
+export type ParsedToolCall = {
+  name: string;
+  args: Record<string, string>;
+};
 
 export type KbSelectedLibrary = {
   id: string;

@@ -439,12 +439,12 @@ export function ToolsPage() {
     };
   }, [capsStored]);
 
-  const isToolEnabledInMode = (name: string, mode: "chat" | "plan" | "agent") => {
+  const isToolEnabledInMode = (name: string, mode: "chat" | "agent") => {
     if (lockSet.has(name)) return true;
     return !(disabledByMode as any)[mode].includes(name);
   };
 
-  const toggleToolMode = (name: string, mode: "chat" | "plan" | "agent", enabled: boolean) => {
+  const toggleToolMode = (name: string, mode: "chat" | "agent", enabled: boolean) => {
     if (!capsStored) return;
     if (lockSet.has(name) && !enabled) return;
     const cur = (capsStored.tools?.disabledByMode ?? {}) as any;
@@ -747,7 +747,6 @@ export function ToolsPage() {
                 {g.tools.map((t) => {
                   const locked = lockSet.has(t.name);
                   const chatOk = isToolEnabledInMode(t.name, "chat");
-                  const planOk = isToolEnabledInMode(t.name, "plan");
                   const agentOk = isToolEnabledInMode(t.name, "agent");
                   return (
                     <div key={t.name} className="modelCard" style={{ cursor: "pointer" }} onClick={() => setDrawerTool(t)} role="presentation">
@@ -756,7 +755,6 @@ export function ToolsPage() {
                           <div className="modelName">{t.name}</div>
                           {locked ? <span className="tag tagPurple">LOCKED</span> : null}
                           <span className={`tag ${chatOk ? "tagGreen" : "tagRed"}`}>chat</span>
-                          <span className={`tag ${planOk ? "tagGreen" : "tagRed"}`}>plan</span>
                           <span className={`tag ${agentOk ? "tagGreen" : "tagRed"}`}>agent</span>
                         </div>
                       </div>
@@ -1044,7 +1042,7 @@ export function ToolsPage() {
               <div>
                 <div style={{ fontWeight: 800, marginBottom: 6 }}>启用（按 mode）</div>
                 <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
-                  {(["chat", "plan", "agent"] as const).map((m) => {
+                  {(["chat", "agent"] as const).map((m) => {
                     const enabled = isToolEnabledInMode(drawerTool.name, m);
                     const locked = lockSet.has(drawerTool.name);
                     return (
