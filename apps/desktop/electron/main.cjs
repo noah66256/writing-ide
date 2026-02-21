@@ -1218,10 +1218,25 @@ function registerIpc() {
 }
 
 function createWindow() {
+  const isMac = process.platform === "darwin";
+
   const win = new BrowserWindow({
     width: 1280,
     height: 840,
+    minWidth: 640,
+    minHeight: 480,
     title: "写作 IDE",
+
+    // macOS 原生感：隐藏标题栏但保留 traffic lights
+    ...(isMac
+      ? {
+          titleBarStyle: "hiddenInset",
+          trafficLightPosition: { x: 16, y: 18 },
+          vibrancy: "sidebar",
+          visualEffectState: "active",
+        }
+      : {}),
+
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,

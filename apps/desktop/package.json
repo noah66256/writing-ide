@@ -20,15 +20,24 @@
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
     "@writing-ide/agent-core": "0.0.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.575.0",
     "mammoth": "^1.11.0",
     "monaco-editor": "^0.52.2",
+    "motion": "^12.34.3",
     "pdf-parse": "^1.1.4",
     "qrcode": "^1.5.4",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "tailwind-merge": "^3.5.0",
     "zustand": "^5.0.3"
   },
   "devDependencies": {
+    "@rollup/rollup-darwin-arm64": "^4.58.0",
+    "@tailwindcss/vite": "^4.2.0",
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.5",
     "@types/react-dom": "^19.2.3",
@@ -37,6 +46,7 @@
     "cross-env": "^7.0.3",
     "electron": "34.5.8",
     "electron-builder": "^24.13.3",
+    "tailwindcss": "^4.2.0",
     "typescript": "~5.9.3",
     "vite": "^7.2.4",
     "wait-on": "^8.0.3"

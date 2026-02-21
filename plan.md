@@ -65,7 +65,9 @@
 > - **ReAct（Reason+Act 工具调用范式）**：Agent 采用“思考→调用工具→观察→继续”的循环来完成复杂写作任务（对用户展示为可追溯的步骤日志与可应用的修改 diff）。
 
 ### 0.1 已确定的方向（当前共识）
-- **产品定位**：偏“写作 IDE”（文档/项目为中心），布局类似 VSCode：左侧项目/文档，中间编辑器（Tab 多标签），右侧 Agent。
+- **产品定位**：偏”写作 IDE”（文档/项目为中心）。
+  - **当前布局（2026-02）**：对话为中心的极简界面——56px 图标导航栏 + 全宽对话区 + 按需工作面板。详见 [UI 重设计 v0.1](docs/specs/ui-redesign-v0.1.md)。
+  - ~~旧布局：VSCode 五栏（Explorer + Editor + AgentPane + DockPanel），已在 Phase 4 移除入口。~~
 - **编辑器形态**：MVP 先 Markdown。
 - **账号体系**：需要登录；MVP 先做**邮箱登录**（建议验证码/魔法链接），为后续**手机号**与**第三方快捷登录**预留扩展位。
 - **计费方式**：以**充值积分**为主（C 端展示余额/流水；后续模型调用按 usage 扣费）。
@@ -92,9 +94,13 @@
 - **内容运营/增长**：爆款拆解→选题→资料入库→大纲/脚本→初稿→改写润色→多平台适配（标题/摘要/短视频口播/视频脚本）。
 - **学术/严肃写作**：引用管理、脚注、公式/LaTeX、查重与事实核对（后置增强）。
 
-### 2. 产品形态与核心布局（建议）
+### 2. 产品形态与核心布局
 - **桌面端优先（跨平台）**：写作与本地文件/项目强绑定，桌面壳层更合适。
-- **VSCode 风格三栏 IDE 布局**：
+- **当前布局（2026-02）**：对话为中心的极简界面。详见 [UI 重设计 v0.1](docs/specs/ui-redesign-v0.1.md)。
+
+> **以下 2.x 小节描述的是旧版五栏 IDE 布局的设计细节，仅作历史参考。实际入口已在 UI 重设计 Phase 4 中移除。**
+
+- ~~**VSCode 风格三栏 IDE 布局**~~：
   - 左：项目/文件树 + 索引（标签、人物/概念卡、搜索）
   - 中：编辑器（Markdown；多标签 Tab；快捷键；可扩展自动补全）
   - 右：Agent（对话/任务、工具步骤、结果预览、可应用的修改 diff）
@@ -472,6 +478,13 @@
 - ✅ proposal-first 写入：`doc.applyEdits` 与覆盖写入类工具先出提案，点 Keep 才 apply；Undo 可回滚
 - ✅ Diff 预览（增强）：Tool Block 以“文件级头部”展示（NEW/MOD + +X/-Y），并对 +/- 行做红绿高亮；支持复制 diff
 - ✅ 快照：`doc.commitSnapshot` / `doc.listSnapshots` / `doc.restoreSnapshot`（restore 为 proposal-first）
+
+- ✅ **UI 重设计（对话为中心）**：从五栏 IDE 布局迁移到"56px 图标导航栏 + 全宽对话区"的极简界面。完整方案详见 [UI 重设计 v0.1](docs/specs/ui-redesign-v0.1.md)
+  - Phase 0：Tailwind CSS 4 + shadcn/ui + Lucide + Motion + macOS 原生窗口
+  - Phase 1：ConversationLayout / NavSidebar / ChatArea / InputBar / WelcomePage
+  - Phase 2：startGatewayRun 集成 + 对话归档/加载 + 草稿自动保存
+  - Phase 3：@ 浮层（技能/KB）+ 拖拽附件 + react-markdown 渲染
+  - Phase 4：App.tsx 清理，移除旧五栏布局入口
 
 #### TODO（按优先级，滚动更新）
 - **P0（写作 IDE 日用闭环）**

@@ -1,4 +1,6 @@
+import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
+import path from "node:path";
 import { defineConfig } from "vite";
 
 function resolveDevPort(defaultPort = 5173) {
@@ -17,7 +19,12 @@ const gatewayTarget = process.env.VITE_GATEWAY_URL || "http://120.26.6.147:8000"
 export default defineConfig({
   // Electron file:// 加载时需要相对路径
   base: "./",
-  plugins: [react()],
+  plugins: [tailwindcss(), react()],
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "./src"),
+    },
+  },
   server: {
     port: devPort,
     strictPort: true,

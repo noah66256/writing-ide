@@ -7,8 +7,9 @@
 
 ### 0) TL;DR：一句话理解这个项目
 
-我们在做一款**写作 IDE（桌面端）**：左侧文件树，中间编辑器（Tab + 补全），右侧 Agent（Plan/Agent/Chat），中下方 Dock Panel（KB/Outline/Graph/Problems/Search/Runs）。  
-写作“强”的关键不在于更长提示词，而在于把写作做成工程：**有计划（Todo）、有主线（Main Doc）、有工具边界（Schema+XML）、有可审阅改动（diff）、有可撤销（Keep/Undo）、有素材与风格的可追溯证据（KB + 引用）**。
+我们在做一款**写作 IDE（桌面端）**，UI 采用**对话为中心的极简布局**：56px 图标导航栏 + 全宽对话区 + 按需展开的右侧工作面板。用户的主要操作入口是对话框，而非菜单/面板/侧边栏。
+写作”强”的关键不在于更长提示词，而在于把写作做成工程：**有计划（Todo）、有主线（Main Doc）、有工具边界（Schema+XML）、有可审阅改动（diff）、有可撤销（Keep/Undo）、有素材与风格的可追溯证据（KB + 引用）**。
+> 布局变更详见 [UI 重设计 v0.1](specs/ui-redesign-v0.1.md)。旧的”五栏 IDE 布局”（Explorer + Editor + AgentPane + DockPanel）已在 Phase 4 清理完毕。
 
 ---
 
@@ -68,10 +69,11 @@
 
 #### 4.1 Desktop（`apps/desktop`）
 
-- **Electron**：主进程/窗口/文件系统桥接、打包与自动更新相关
+- **Electron**：主进程/窗口/文件系统桥接、打包与自动更新相关（macOS：hiddenInset + vibrancy 原生窗口）
 - **Vite + React 19**：渲染层 UI
-- **Monaco Editor**：中间编辑器（VSCode 同源体验：Tab、补全扩展更容易）
-- **Zustand**：状态管理（stores：workspace/run/kb/auth 等）
+- **Tailwind CSS 4 + shadcn/ui**：新 UI 设计系统（原子化样式 + Radix 无障碍组件）
+- **Lucide Icons + Motion**：图标库 + 动画
+- **Zustand**：状态管理（stores：workspace/run/kb/auth/conversation 等）
 - **关键工程点**：
   - dev 下 `/api/*` 走 Vite proxy（避免跨域）
   - packaged 下没有 proxy，必须走绝对 Gateway URL（见 `apps/desktop/src/agent/gatewayUrl.ts`）
