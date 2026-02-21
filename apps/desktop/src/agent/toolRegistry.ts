@@ -904,6 +904,171 @@ function parseArgs(rawArgs: Record<string, string>) {
 
 const tools: ToolDefinition[] = [
   {
+    name: "kb.listLibraries",
+    description: "列出本地知识库中的所有库（只读）。",
+    args: [],
+    riskLevel: "low",
+    applyPolicy: "proposal",
+    reversible: false,
+    run: async () => {
+      const ready = await useKbStore.getState().ensureReady().catch(() => false);
+      if (!ready) return { ok: false, error: "KB_NOT_READY" };
+      await useKbStore.getState().refreshLibraries().catch(() => void 0);
+      const kb = useKbStore.getState();
+      const libraries = (kb.libraries ?? []).map((l) => ({
+        id: l.id,
+        name: l.name,
+        purpose: l.purpose ?? "material",
+        docCount: l.docCount ?? 0,
+        updatedAt: l.updatedAt,
+      }));
+      return {
+        ok: true,
+        output: { ok: true, currentLibraryId: kb.currentLibraryId, libraries },
+        undoable: false,
+      };
+    },
+  },
+  {
+    name: "kb.ingest",
+    description:
+      "语料抽卡入库：接收 text/path/url（三选一），自动完成导入→抽卡→可选手册生成→可选自动关联。",
+    args: [
+      { name: "text", desc: "原始文本（text/path/url 三选一）" },
+      { name: "path", desc: "文件路径（项目相对或绝对路径；text/path/url 三选一）" },
+      { name: "url", desc: "网页 URL（text/path/url 三选一）" },
+      { name: "libraryId", desc: "目标库 ID（优先）" },
+      { name: "libraryName", desc: "目标库名称（不存在则自动创建）" },
+      { name: "purpose", desc: '库用途：material|style|product（默认 style）' },
+      { name: "autoPlaybook", desc: "是否自动生成风格手册（默认 true）" },
+      { name: "autoAttach", desc: "是否自动关联（默认 true）" },
+    ],
+    riskLevel: "medium",
+    applyPolicy: "proposal",
+    reversible: false,
+    run: async (args) => {
+      // ---------- 1) 解析输入 ----------
+      const textInput = String(args.text ?? "").trim();
+      const pathInput = String(args.path ?? "").trim();
+      const urlInput = String(args.url ?? "").trim();
+      const inputKinds = [textInput ? "text" : "", pathInput ? "path" : "", urlInput ? "url" : ""].filter(Boolean);
+      if (inputKinds.length !== 1) return { ok: false, error: "MUST_PROVIDE_EXACTLY_ONE_OF_TEXT_PATH_URL" };
+      if (urlInput) {
+        try { new URL(urlInput); } catch { return { ok: false, error: "INVALID_URL" }; }
+      }
+
+      // ---------- 2) 确保 kbStore 就绪 ----------
+      const ready = await useKbStore.getState().ensureReady().catch(() => false);
+      if (!ready) return { ok: false, error: "KB_NOT_READY" };
+      await useKbStore.getState().refreshLibraries().catch(() => void 0);
+
+      // ---------- 3) 创建或选择库 ----------
+      const purposeRaw = String(args.purpose ?? "").trim();
+      const purpose = (purposeRaw === "style" || purposeRaw === "material" || purposeRaw === "product")
+        ? purposeRaw as "style" | "material" | "product"
+        : "style";
+
+      let libraryId = String(args.libraryId ?? "").trim();
+      const libraryNameArg = String(args.libraryName ?? "").trim();
+      const currentLibraries = useKbStore.getState().libraries ?? [];
+
+      // 按 ID 查找
+      if (libraryId && !currentLibraries.some((l) => l.id === libraryId)) {
+        return { ok: false, error: "LIBRARY_NOT_FOUND" };
+      }
+      // 按名称查找
+      if (!libraryId && libraryNameArg) {
+        const hit = currentLibraries.find((l) => String(l.name ?? "").trim() === libraryNameArg);
+        if (hit?.id) libraryId = hit.id;
+      }
+      // 使用当前选中库
+      if (!libraryId) libraryId = String(useKbStore.getState().currentLibraryId ?? "").trim();
+      // 仍无库：自动创建
+      if (!libraryId) {
+        const createName = libraryNameArg || `语料_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`;
+        const created = await useKbStore.getState().createLibrary(createName);
+        if (!created.ok || !created.id) return { ok: false, error: created.error ?? "CREATE_LIBRARY_FAILED" };
+        libraryId = created.id;
+        // 仅对新建库设置 purpose，避免覆盖已有库的用途
+        await useKbStore.getState().setLibraryPurpose(libraryId, purpose).catch(() => void 0);
+      }
+      // 选中库 + 设置用途（仅新建库时设置，避免覆盖已有库的 purpose）
+      useKbStore.getState().setCurrentLibrary(libraryId);
+
+      // ---------- 4) 导入文档 ----------
+      let importRet: { imported: number; skipped: number; docIds: string[]; errors?: any[] } | null = null;
+      let tmpPath: string | null = null;
+
+      try {
+        if (textInput) {
+          // 文本输入：创建项目内临时文件 → 导入 → 清理
+          tmpPath = `.kb_ingest_tmp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.md`;
+          // createFile 同步加入 projectStore 内存，importProjectPaths 可通过 ensureLoaded/getFileByPath 读取
+          useProjectStore.getState().createFile(tmpPath, textInput);
+          importRet = await useKbStore.getState().importProjectPaths([tmpPath]);
+        } else if (pathInput) {
+          const isAbsolute = /^([a-zA-Z]:[\\/]|\/)/.test(pathInput);
+          importRet = isAbsolute
+            ? await useKbStore.getState().importExternalFiles([pathInput])
+            : await useKbStore.getState().importProjectPaths([normalizeRelPath(pathInput)]);
+        } else {
+          importRet = await useKbStore.getState().importUrls([urlInput]);
+        }
+      } finally {
+        // 无论成功与否，清理临时文件
+        if (tmpPath) {
+          useProjectStore.getState().deletePath(tmpPath).catch(() => void 0);
+        }
+      }
+
+      const docIds = (importRet?.docIds ?? []).map((x) => String(x ?? "").trim()).filter(Boolean);
+      if (!docIds.length) {
+        return { ok: false, error: "INGEST_NO_DOCS", output: { ok: false, libraryId, import: importRet } };
+      }
+
+      // ---------- 5) 抽卡 ----------
+      const cardsRet = await useKbStore.getState().extractCardsForDocs(docIds);
+      if (!cardsRet.ok) {
+        return { ok: false, error: cardsRet.error ?? "EXTRACT_CARDS_FAILED", output: { ok: false, libraryId, docIds, cards: cardsRet } };
+      }
+
+      // ---------- 6) 可选：生成风格手册 ----------
+      const autoPlaybook = args.autoPlaybook === undefined ? true : Boolean(args.autoPlaybook);
+      let playbookRet: { ok: boolean; facets?: number; error?: string } = { ok: false, error: "skipped" };
+      if (autoPlaybook) {
+        playbookRet = await useKbStore.getState().generateLibraryPlaybook(libraryId).catch((e: any) => ({
+          ok: false, error: String(e?.message ?? e),
+        }));
+      }
+
+      // ---------- 7) 可选：自动 attach ----------
+      const autoAttach = args.autoAttach === undefined ? true : Boolean(args.autoAttach);
+      if (autoAttach) {
+        const cur = useRunStore.getState().kbAttachedLibraryIds ?? [];
+        if (!cur.includes(libraryId)) {
+          useRunStore.getState().setKbAttachedLibraries([...cur, libraryId]);
+        }
+      }
+
+      // ---------- 8) 返回结果 ----------
+      const libMeta = (useKbStore.getState().libraries ?? []).find((l) => l.id === libraryId);
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          library: libMeta
+            ? { id: libMeta.id, name: libMeta.name, purpose: libMeta.purpose, docCount: libMeta.docCount }
+            : { id: libraryId },
+          docIds,
+          cards: { extracted: cardsRet.extracted, skipped: cardsRet.skipped },
+          playbook: { ok: playbookRet.ok, facets: (playbookRet as any).facets ?? 0 },
+          attached: autoAttach,
+        },
+        undoable: false,
+      };
+    },
+  },
+  {
     name: "kb.search",
     description:
       "在本地知识库中检索（按库过滤、按 source_doc 分组）。默认只在右侧已关联的库里搜索。用于写作引用素材（套路卡片/段落证据）。提示：kind=outline 仅对含 Markdown 标题(#)的文档有效；想找结构套路更建议 kind=card + cardTypes=[outline]。",
