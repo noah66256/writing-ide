@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { activateSkills, type ActiveSkill } from "@writing-ide/agent-core";
+import { activateSkills, type ActiveSkill, BUILTIN_SUB_AGENTS } from "@writing-ide/agent-core";
 import { startGatewayRun } from "../agent/gatewayAgent";
 import { useRunStore, type MainDoc } from "../state/runStore";
 import { useProjectStore } from "../state/projectStore";
@@ -411,6 +411,18 @@ export function AgentPane() {
     `- Input: ~${Math.ceil(inputChars / 4)}\n` +
     `（提示：后续接入真实 usage 后会用真实 token 计数替代）`;
 
+/** Parse @agentName mention from input text. Returns { agentId, cleanText } or null. */
+  function parseAtMention(text: string): { agentId: string; agentName: string; cleanText: string } | null {
+    const m = text.match(/^@(\S+)\s+/);
+    if (!m) return null;
+    const mention = m[1];
+    const agent = BUILTIN_SUB_AGENTS.find(
+      (a) => a.enabled && (a.id === mention || a.name === mention),
+    );
+    if (!agent) return null;
+    return { agentId: agent.id, agentName: agent.name, cleanText: text.slice(m[0].length) };
+  }
+
   const startTurn = (text: string) => {
     if (!text) return;
     // 允许“运行中发送”：先中断当前 run，再启动新一轮（human-in-the-loop / 用户确认用）
@@ -439,7 +451,8 @@ export function AgentPane() {
     };
     useRunStore.getState().addUser(text, baseline as any);
 
-    const c = startGatewayRun({ gatewayUrl, mode, model, prompt: text });
+    const atMention = parseAtMention(text);
+    const c = startGatewayRun({ gatewayUrl, mode, model, prompt: atMention ? atMention.cleanText : text, ...(atMention ? { targetAgentId: atMention.agentId } : {}) });
     controllerRef.current = c;
     void c.done.finally(() => {
       if (controllerRef.current === c) controllerRef.current = null;
@@ -1171,10 +1184,20 @@ export function AgentPane() {
             const text = raw.trim();
             const lineCount = text.split("\n").filter((x) => x.trim()).length;
             const looksLikeDraft = text.length >= 480 || lineCount >= 10;
+            const isSubAgent = !!step.agentId;
+            const agentLabel = step.agentName || step.agentId || "";
             return (
-              <div key={step.id} className="msgAssistant">
+              <div key={step.id} className={`msgAssistant${isSubAgent ? " msgSubAgent" : ""}`}>
                 <div className="assistantMsgHeader">
-                  <div className="assistantMsgTitle">输出</div>
+                  <div className="assistantMsgTitle">
+                    {isSubAgent ? (
+                      <span className="subAgentTag" title={`Sub-agent: ${step.agentId}`}>
+                        {agentLabel}
+                      </span>
+                    ) : (
+                      "输出"
+                    )}
+                  </div>
                   <button
                     className="btn btnIcon"
                     type="button"

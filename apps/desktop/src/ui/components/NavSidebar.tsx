@@ -1,21 +1,25 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import {
   Plus,
-  MessageSquare,
   Settings,
   Trash2,
   Sun,
   Moon,
   Monitor,
   LogOut,
+  LogIn,
   ChevronRight,
   Check,
+  Cpu,
+  Users,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useConversationStore, type Conversation } from "@/state/conversationStore";
 import { useRunStore, type ToolBlockStep } from "@/state/runStore";
 import { useAuthStore } from "@/state/authStore";
 import { useThemeStore, THEME_OPTIONS, type ThemeId } from "@/state/themeStore";
+import { useModelStore } from "@/state/modelStore";
+import { TeamModal } from "@/components/TeamModal";
 
 /* ─── Helpers ─── */
 
@@ -59,7 +63,7 @@ export function NavSidebar() {
   const openLoginModal = useAuthStore((s) => s.openLoginModal);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [themeSubOpen, setThemeSubOpen] = useState(false);
+  const [teamModalOpen, setTeamModalOpen] = useState(false);
   const settingsRef = useRef<HTMLDivElement>(null);
 
   const hasCurrentContent = useMemo(() => {
@@ -110,7 +114,6 @@ export function NavSidebar() {
     const handler = (e: MouseEvent) => {
       if (settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
         setSettingsOpen(false);
-        setThemeSubOpen(false);
       }
     };
     document.addEventListener("mousedown", handler);
@@ -171,29 +174,17 @@ export function NavSidebar() {
 
       {/* 底部：用户信息 */}
       <div className="relative border-t border-[var(--color-nav-border)]" ref={settingsRef}>
-        {/* 设置弹出菜单 */}
         {settingsOpen && (
           <SettingsPopover
-            onClose={() => {
-              setSettingsOpen(false);
-              setThemeSubOpen(false);
-            }}
-            themeSubOpen={themeSubOpen}
-            onThemeSubToggle={() => setThemeSubOpen(!themeSubOpen)}
-            onLogout={() => {
-              logout();
-              setSettingsOpen(false);
-            }}
-            onLogin={() => {
-              openLoginModal();
-              setSettingsOpen(false);
-            }}
+            onLogout={() => { logout(); setSettingsOpen(false); }}
+            onLogin={() => { openLoginModal(); setSettingsOpen(false); }}
+            onOpenTeam={() => { setTeamModalOpen(true); setSettingsOpen(false); }}
             isLoggedIn={!!user}
           />
         )}
 
         <button
-          onClick={() => setSettingsOpen(!settingsOpen)}
+          onClick={() => setSettingsOpen((v) => !v)}
           className={cn(
             "flex items-center gap-3 w-full px-4 py-3.5",
             "hover:bg-surface/60 transition-colors duration-fast",
@@ -212,6 +203,8 @@ export function NavSidebar() {
           </div>
         </button>
       </div>
+
+      {teamModalOpen && <TeamModal onClose={() => setTeamModalOpen(false)} />}
     </nav>
   );
 }
@@ -219,22 +212,25 @@ export function NavSidebar() {
 /* ─── 设置弹出菜单 ─── */
 
 function SettingsPopover({
-  onClose,
-  themeSubOpen,
-  onThemeSubToggle,
   onLogout,
   onLogin,
+  onOpenTeam,
   isLoggedIn,
 }: {
-  onClose: () => void;
-  themeSubOpen: boolean;
-  onThemeSubToggle: () => void;
   onLogout: () => void;
   onLogin: () => void;
+  onOpenTeam: () => void;
   isLoggedIn: boolean;
 }) {
   const theme = useThemeStore((s) => s.theme);
   const setTheme = useThemeStore((s) => s.setTheme);
+  const model = useRunStore((s) => s.model);
+  const setModel = useRunStore((s) => s.setModel);
+  const availableModels = useModelStore((s) => s.availableModels);
+
+  // 当前主题/模型的显示名
+  const themeName = THEME_OPTIONS.find((o) => o.id === theme)?.label ?? "";
+  const modelName = availableModels.find((m) => m.id === model)?.label || model || "未选择";
 
   return (
     <div
@@ -245,77 +241,134 @@ function SettingsPopover({
       )}
     >
       {/* 设置 */}
-      <MenuItem icon={<Settings size={15} />} label="设置" onClick={onClose} />
+      <MenuItem icon={<Settings size={15} />} label="设置" />
 
-      {/* 主题 */}
-      <div className="relative">
-        <MenuItem
-          icon={<Sun size={15} />}
-          label="主题"
-          trailing={<ChevronRight size={13} className="text-text-faint" />}
-          onClick={onThemeSubToggle}
-          highlighted={themeSubOpen}
-        />
+      {/* 团队管理 */}
+      <MenuItem icon={<Users size={15} />} label="团队管理" onClick={onOpenTeam} />
 
-        {/* 主题子菜单 */}
-        {themeSubOpen && (
-          <div
-            className={cn(
-              "absolute left-full top-0 ml-1 z-50",
-              "bg-surface rounded-xl border border-border shadow-lg",
-              "py-1.5 min-w-[140px]",
-            )}
-          >
-            {THEME_OPTIONS.map((opt) => (
-              <ThemeItem
-                key={opt.id}
-                themeId={opt.id}
-                label={opt.label}
-                active={theme === opt.id}
-                onSelect={() => setTheme(opt.id)}
-              />
-            ))}
-          </div>
+      {/* 主题 — hover 展开 */}
+      <SubMenu
+        icon={<Sun size={15} />}
+        label="主题"
+        hint={themeName}
+      >
+        {THEME_OPTIONS.map((opt) => (
+          <OptionItem
+            key={opt.id}
+            label={opt.label}
+            active={theme === opt.id}
+            onSelect={() => setTheme(opt.id)}
+          />
+        ))}
+      </SubMenu>
+
+      {/* 模型 — hover 展开 */}
+      <SubMenu
+        icon={<Cpu size={15} />}
+        label="模型"
+        hint={modelName}
+      >
+        {availableModels.length === 0 ? (
+          <div className="px-3 py-2 text-[12px] text-text-faint">暂无可用模型</div>
+        ) : (
+          availableModels.map((item) => (
+            <OptionItem
+              key={item.id}
+              label={item.label}
+              active={model === item.id}
+              onSelect={() => setModel(item.id)}
+            />
+          ))
         )}
-      </div>
+      </SubMenu>
 
       <div className="mx-2 my-1 border-t border-border-soft" />
 
       {/* 登录/退出 */}
       {isLoggedIn ? (
-        <MenuItem
-          icon={<LogOut size={15} />}
-          label="退出登录"
-          onClick={onLogout}
-          danger
-        />
+        <MenuItem icon={<LogOut size={15} />} label="退出登录" onClick={onLogout} danger />
       ) : (
-        <MenuItem
-          icon={<LogOut size={15} />}
-          label="登录"
-          onClick={onLogin}
-        />
+        <MenuItem icon={<LogIn size={15} />} label="登录" onClick={onLogin} />
       )}
     </div>
   );
 }
 
-/* ─── 菜单项 ─── */
+/* ─── 带 hover 展开的子菜单 ─── */
+
+function SubMenu({
+  icon,
+  label,
+  hint,
+  children,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+
+  const handleEnter = () => {
+    clearTimeout(timerRef.current);
+    setOpen(true);
+  };
+  const handleLeave = () => {
+    timerRef.current = setTimeout(() => setOpen(false), 120);
+  };
+
+  useEffect(() => () => clearTimeout(timerRef.current), []);
+
+  return (
+    <div
+      className="relative"
+      onMouseEnter={handleEnter}
+      onMouseLeave={handleLeave}
+    >
+      <button
+        className={cn(
+          "flex items-center gap-2.5 w-full px-3 py-2 mx-0",
+          "rounded-lg transition-colors duration-fast",
+          "text-text hover:bg-surface-alt",
+          open && "bg-surface-alt",
+        )}
+      >
+        <span className="shrink-0 text-text-muted">{icon}</span>
+        <span className="flex-1 text-left text-[13px]">{label}</span>
+        {hint && (
+          <span className="text-[11px] text-text-faint truncate max-w-[80px]">{hint}</span>
+        )}
+        <ChevronRight size={13} className="text-text-faint shrink-0" />
+      </button>
+
+      {open && (
+        <div
+          className={cn(
+            "absolute left-full top-0 ml-1 z-[60]",
+            "bg-surface rounded-xl border border-border shadow-lg",
+            "py-1.5 min-w-[200px]",
+          )}
+        >
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── 菜单项（无子菜单） ─── */
 
 function MenuItem({
   icon,
   label,
-  trailing,
   onClick,
   danger,
-  highlighted,
 }: {
   icon: React.ReactNode;
   label: string;
-  trailing?: React.ReactNode;
   onClick?: () => void;
   danger?: boolean;
-  highlighted?: boolean;
 }) {
   return (
     <button
@@ -324,53 +377,43 @@ function MenuItem({
         "flex items-center gap-2.5 w-full px-3 py-2 mx-0",
         "rounded-lg transition-colors duration-fast",
         danger ? "text-error hover:bg-error/8" : "text-text hover:bg-surface-alt",
-        highlighted && "bg-surface-alt",
       )}
     >
       <span className="shrink-0 text-text-muted">{icon}</span>
       <span className="flex-1 text-left text-[13px]">{label}</span>
-      {trailing && <span className="shrink-0">{trailing}</span>}
     </button>
   );
 }
 
-/* ─── 主题选项 ─── */
+/* ─── 子菜单选项（主题/模型共用） ─── */
 
-function ThemeItem({
-  themeId,
+function OptionItem({
   label,
   active,
   onSelect,
 }: {
-  themeId: ThemeId;
   label: string;
   active: boolean;
   onSelect: () => void;
 }) {
-  const iconMap: Record<ThemeId, React.ReactNode> = {
-    light: <Sun size={14} />,
-    dark: <Moon size={14} />,
-    auto: <Monitor size={14} />,
-    "light-glass": <Sun size={14} />,
-    "classic-dark": <Moon size={14} />,
-  };
-
   return (
     <button
       onClick={onSelect}
       className={cn(
         "flex items-center gap-2.5 w-full px-3 py-2",
         "rounded-lg transition-colors duration-fast",
-        "text-text hover:bg-surface-alt",
+        active
+          ? "bg-accent-soft/60 text-accent"
+          : "text-text hover:bg-surface-alt",
       )}
     >
-      {active && (
-        <span className="w-2 h-2 rounded-full bg-success shrink-0" />
-      )}
-      <span className={cn("shrink-0 text-text-muted", !active && "ml-[18px]")}>
-        {iconMap[themeId]}
-      </span>
-      <span className="flex-1 text-left text-[13px]">{label}</span>
+      <span
+        className={cn(
+          "w-2 h-2 rounded-full shrink-0",
+          active ? "bg-success" : "bg-transparent",
+        )}
+      />
+      <span className="flex-1 text-left text-[13px] truncate">{label}</span>
       {active && <Check size={13} className="text-success shrink-0" />}
     </button>
   );

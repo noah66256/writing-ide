@@ -1917,6 +1917,7 @@ export function startGatewayRun(args: {
   mode: Mode;
   model: string;
   prompt: string;
+  targetAgentId?: string;
 }): GatewayRunController {
   const {
     setRunning,
@@ -2282,8 +2283,10 @@ export function startGatewayRun(args: {
       setActivity("正在请求模型…", { resetTimer: true });
       bumpProgress();
 
-      // 前端硬门禁：未登录直接提示并弹窗（避免“卡住/没反应”的错觉）
-      if (!requireLoginForLlm({ why: "未登录无法使用基于 LLM 的功能" }).ok) {
+      // 前端硬门禁：未登录直接提示并弹窗（避免”卡住/没反应”的错觉）
+      // DEV 模式跳过登录检查（上线前移除）
+      const _isDev = String((import.meta as any).env?.MODE ?? "") !== "production";
+      if (!_isDev && !requireLoginForLlm({ why: "未登录无法使用基于 LLM 的功能" }).ok) {
         const a = addAssistant("", false, false);
         patchAssistant(a, { hidden: false });
         appendAssistantDelta(a, "\n\n[需要登录] 未登录无法使用 AI 功能，请先登录后再试。");
@@ -2348,6 +2351,7 @@ export function startGatewayRun(args: {
           model: args.model,
           mode: args.mode,
           prompt: promptForGateway,
+          ...(args.targetAgentId ? { targetAgentId: args.targetAgentId } : {}),
           contextPack:
             args.mode === "chat"
               ? buildChatContextPack({ referencesText })
@@ -2411,13 +2415,15 @@ export function startGatewayRun(args: {
       let buffer = "";
       let runId: string | null = null;
       let assistantId: string | null = null;
+      let currentAgentId: string | null = null;
+      let currentAgentName: string | null = null;
       // 关键：toolCallId 是“与 Gateway 对齐的相关 ID”，不应直接当作 UI step.id（会跨回合重复：1/2/3…）
       // 仅用于 gateway-executed tools：tool.call 创建占位 step，tool.result 回填时需要找到对应 stepId。
       const gatewayToolStepIdsByCallId = new Map<string, string[]>();
 
       const ensureAssistant = () => {
         if (assistantId) return assistantId;
-        assistantId = addAssistant("", true, false);
+        assistantId = addAssistant("", true, false, currentAgentId ? { agentId: currentAgentId, agentName: currentAgentName ?? undefined } : undefined);
         currentAssistantId = assistantId;
         return assistantId;
       };
@@ -2460,6 +2466,35 @@ export function startGatewayRun(args: {
               log("info", "agent.run.start", payload);
             } catch {
               log("info", "agent.run.start", evt.data);
+            }
+          }
+
+
+          // Sub-agent lifecycle events
+          if (evt.event === "subagent.start") {
+            try {
+              const payload = JSON.parse(evt.data);
+              const agName = String(payload?.agentName ?? payload?.agentId ?? "");
+              log("info", "subagent.start", payload);
+              if (useRunStore.getState().isRunning) {
+                setActivity(agName ? `${agName} 正在处理…` : "子 Agent 正在处理…", { resetTimer: true });
+              }
+            } catch {
+              log("info", "subagent.start", evt.data);
+            }
+          }
+
+          if (evt.event === "subagent.done") {
+            try {
+              const payload = JSON.parse(evt.data);
+              currentAgentId = null;
+              currentAgentName = null;
+              log("info", "subagent.done", payload);
+              if (useRunStore.getState().isRunning) {
+                setActivity("正在继续…");
+              }
+            } catch {
+              log("info", "subagent.done", evt.data);
             }
           }
 
@@ -2515,11 +2550,11 @@ export function startGatewayRun(args: {
           }
 
           if (evt.event === "assistant.start") {
-            // SSE 强边界：Gateway 会在每次模型调用前发 assistant.start(turn)
-            // - 用于强制切分“回合边界”，避免下一轮 delta 追加到上一条 assistant 气泡
-            // - 兼容旧实现：如果 Gateway 不发 assistant.start，本地仍会在首个 delta 时创建气泡
             try {
               const payload = JSON.parse(evt.data);
+              // Track sub-agent context from SSE events
+              currentAgentId = payload?.agentId ? String(payload.agentId) : null;
+              currentAgentName = payload?.agentName ? String(payload.agentName) : null;
               log("info", "assistant.start", payload);
             } catch {
               log("info", "assistant.start", evt.data);

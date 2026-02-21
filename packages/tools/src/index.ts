@@ -20,13 +20,27 @@ export type ToolJsonSchema = {
   oneOfRequired?: Array<{ required: string[] }>;
 };
 
+/** Tool output schema */
+export type ToolOutputSchema = {
+  type: "object";
+  description?: string;
+  properties: Record<string, ToolOutputFieldSchema>;
+};
+
+export type ToolOutputFieldSchema = {
+  type: "string" | "number" | "boolean" | "array" | "object";
+  description?: string;
+  items?: ToolOutputFieldSchema;
+  properties?: Record<string, ToolOutputFieldSchema>;
+};
+
 export type ToolMeta = {
   name: string;
   description: string;
   args: ToolArgSpec[];
   modes?: ToolMode[];
   inputSchema?: ToolJsonSchema;
-  outputSchema?: unknown;
+  outputSchema?: ToolOutputSchema;
 };
 
 // 工具契约（单一来源）：
@@ -43,6 +57,60 @@ export const TOOL_LIST: ToolMeta[] = [
     args: [],
     modes: ["chat", "agent"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    outputSchema: {
+      "type": "object",
+      "description": "Current time (multi-format)",
+      "properties": {
+        "nowIso": {
+          "type": "string",
+          "description": "ISO 8601 timestamp"
+        },
+        "unixMs": {
+          "type": "number",
+          "description": "Unix timestamp (ms)"
+        },
+        "utc": {
+          "type": "object",
+          "description": "UTC components",
+          "properties": {
+            "year": {
+              "type": "number"
+            },
+            "month": {
+              "type": "number"
+            },
+            "day": {
+              "type": "number"
+            },
+            "weekday": {
+              "type": "number"
+            }
+          }
+        },
+        "local": {
+          "type": "object",
+          "description": "Local time components",
+          "properties": {
+            "year": {
+              "type": "number"
+            },
+            "month": {
+              "type": "number"
+            },
+            "day": {
+              "type": "number"
+            },
+            "weekday": {
+              "type": "number"
+            },
+            "timezoneOffsetMinutes": {
+              "type": "number"
+            }
+          }
+        }
+      }
+    },
+
   },
   {
     name: "web.search",
@@ -73,6 +141,50 @@ export const TOOL_LIST: ToolMeta[] = [
       required: ["query"],
       additionalProperties: true,
     },
+    outputSchema: {
+      "type": "object",
+      "description": "Search results",
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "fetchedAt": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "results": {
+          "type": "array",
+          "description": "Result list",
+          "items": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "snippet": {
+                "type": "string"
+              },
+              "summary": {
+                "type": "string",
+                "description": "Full summary (when summary=true)"
+              },
+              "publishedAt": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+
   },
   {
     name: "web.fetch",
@@ -97,6 +209,39 @@ export const TOOL_LIST: ToolMeta[] = [
       required: ["url"],
       additionalProperties: true,
     },
+    outputSchema: {
+      "type": "object",
+      "description": "Web page fetch result",
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "finalUrl": {
+          "type": "string",
+          "description": "Final URL after redirects"
+        },
+        "status": {
+          "type": "number",
+          "description": "HTTP status code"
+        },
+        "title": {
+          "type": "string",
+          "description": "Page title"
+        },
+        "fetchedAt": {
+          "type": "string"
+        },
+        "extractedMarkdown": {
+          "type": "string",
+          "description": "Extracted markdown content (default)"
+        },
+        "extractedText": {
+          "type": "string",
+          "description": "Extracted plain text (when format=text)"
+        }
+      }
+    },
+
   },
   {
     name: "kb.listLibraries",
@@ -106,6 +251,38 @@ export const TOOL_LIST: ToolMeta[] = [
     args: [],
     modes: ["agent"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    outputSchema: {
+      "type": "object",
+      "description": "Library list",
+      "properties": {
+        "currentLibraryId": {
+          "type": "string"
+        },
+        "libraries": {
+          "type": "array",
+          "description": "Libraries",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "purpose": {
+                "type": "string",
+                "description": "material|style|product"
+              },
+              "docCount": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      }
+    },
+
   },
   {
     name: "kb.ingest",
@@ -189,6 +366,74 @@ export const TOOL_LIST: ToolMeta[] = [
       required: ["query"],
       additionalProperties: true,
     },
+    outputSchema: {
+      "type": "object",
+      "description": "KB search results (grouped by source doc)",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "groups": {
+          "type": "array",
+          "description": "Hit groups by source document",
+          "items": {
+            "type": "object",
+            "properties": {
+              "sourceDoc": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                }
+              },
+              "bestScore": {
+                "type": "number"
+              },
+              "hits": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "score": {
+                      "type": "number"
+                    },
+                    "snippet": {
+                      "type": "string"
+                    },
+                    "artifact": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "kind": {
+                          "type": "string"
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "cardType": {
+                          "type": "string",
+                          "description": "hook|thesis|ending|one_liner|outline"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+
   },
   {
     name: "lint.copy",
@@ -217,6 +462,44 @@ export const TOOL_LIST: ToolMeta[] = [
       oneOfRequired: [{ required: ["text"] }, { required: ["path"] }],
       additionalProperties: true,
     },
+    outputSchema: {
+      "type": "object",
+      "description": "Copy detection result",
+      "properties": {
+        "passed": {
+          "type": "boolean",
+          "description": "Whether passed detection"
+        },
+        "riskLevel": {
+          "type": "string",
+          "description": "low|medium|high"
+        },
+        "maxOverlapChars": {
+          "type": "number"
+        },
+        "maxChar5gramJaccard": {
+          "type": "number"
+        },
+        "topOverlaps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string"
+              },
+              "overlapChars": {
+                "type": "number"
+              },
+              "snippet": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+
   },
   {
     name: "lint.style",
@@ -250,6 +533,58 @@ export const TOOL_LIST: ToolMeta[] = [
       oneOfRequired: [{ required: ["text"] }, { required: ["path"] }],
       additionalProperties: true,
     },
+    outputSchema: {
+      "type": "object",
+      "description": "Style check result",
+      "properties": {
+        "score": {
+          "type": "number",
+          "description": "Style similarity score"
+        },
+        "issues": {
+          "type": "array",
+          "description": "Issue list",
+          "items": {
+            "type": "object",
+            "properties": {
+              "dimension": {
+                "type": "string"
+              },
+              "issue": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string",
+                "description": "low|medium|high"
+              },
+              "rewritePrompt": {
+                "type": "string"
+              },
+              "snippet": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "rewritePrompt": {
+          "type": "string",
+          "description": "Unified rewrite prompt"
+        },
+        "copyRisk": {
+          "type": "object",
+          "description": "Attached copy risk result",
+          "properties": {
+            "riskLevel": {
+              "type": "string"
+            },
+            "maxOverlapChars": {
+              "type": "number"
+            }
+          }
+        }
+      }
+    },
+
   },
   {
     name: "run.mainDoc.get",
@@ -424,6 +759,23 @@ export const TOOL_LIST: ToolMeta[] = [
     args: [{ name: "path", required: true, desc: "文件路径（如 drafts/draft.md）", type: "string" }],
     modes: ["chat", "agent"],
     inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: true },
+    outputSchema: {
+      "type": "object",
+      "description": "File content",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "virtualFromProposal": {
+          "type": "boolean",
+          "description": "Whether from unapplied proposal"
+        }
+      }
+    },
+
   },
   {
     name: "doc.mkdir",
@@ -515,6 +867,40 @@ export const TOOL_LIST: ToolMeta[] = [
       required: ["path", "content"],
       additionalProperties: true,
     },
+    outputSchema: {
+      "type": "object",
+      "description": "File write result",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Actual written path"
+        },
+        "created": {
+          "type": "boolean",
+          "description": "Whether new file created"
+        },
+        "diffUnified": {
+          "type": "string",
+          "description": "Unified diff"
+        },
+        "stats": {
+          "type": "object",
+          "properties": {
+            "added": {
+              "type": "number"
+            },
+            "removed": {
+              "type": "number"
+            }
+          }
+        },
+        "renamedFrom": {
+          "type": "string",
+          "description": "Original name if auto-renamed"
+        }
+      }
+    },
+
   },
   {
     name: "doc.splitToDir",
@@ -605,6 +991,44 @@ export const TOOL_LIST: ToolMeta[] = [
     modes: ["agent"],
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
+  {
+    name: "agent.delegate",
+    description:
+      "负责人将任务委托给子 Agent（员工）执行。\n" +
+      "只有负责人可调用此工具（子 Agent 不可再委托）。\n" +
+      "调用后 Gateway 会启动独立的子 Agent 推理循环，完成后产物返回负责人上下文。",
+    args: [
+      { name: "agentId", required: true, desc: "目标子 Agent ID（如 copywriter、seo_specialist）", type: "string" },
+      { name: "task", required: true, desc: "任务描述（自然语言，尽量具体）", type: "string" },
+      { name: "inputArtifacts", required: false, desc: "上游产物引用（JSON 数组：串联场景传入前一个 Agent 的产出）", type: "json", jsonType: "array" },
+      { name: "acceptanceCriteria", required: false, desc: "验收标准（可选）", type: "string" },
+      { name: "budget", required: false, desc: "覆盖默认预算（JSON 对象：{ maxTurns?, maxToolCalls?, timeoutMs? }）", type: "json", jsonType: "object" },
+    ],
+    // Phase 1A: modes 为空，不自动进入 toolsPrompt；需 subagent.enabled feature flag 开启后由 Gateway 手动注入
+    modes: [],
+    inputSchema: {
+      type: "object",
+      properties: {
+        agentId: { type: "string" },
+        task: { type: "string" },
+        inputArtifacts: { type: "json", jsonType: "array" },
+        acceptanceCriteria: { type: "string" },
+        budget: { type: "json", jsonType: "object" },
+      },
+      required: ["agentId", "task"],
+    },
+    outputSchema: {
+      type: "object",
+      description: "agent.delegate 返回值",
+      properties: {
+        agentId: { type: "string", description: "执行的子 Agent ID" },
+        status: { type: "string", description: "执行状态：completed / error / timeout" },
+        artifact: { type: "string", description: "子 Agent 产出的主要内容" },
+        turnsUsed: { type: "number", description: "实际使用的推理轮数" },
+        toolCallsUsed: { type: "number", description: "实际使用的工具调用次数" },
+      },
+    },
+  },
 ];
 
 export function getToolsForMode(mode: ToolMode) {
@@ -632,9 +1056,41 @@ export function getToolMeta(name: string): ToolMeta | null {
   return TOOL_LIST.find((t) => t.name === key) ?? null;
 }
 
-export type ToolArgValidationError = {
-  code: string;
+/** Standard tool error codes */
+export type ToolErrorCode =
+  | "VALIDATION_ERROR"
+  | "NOT_FOUND"
+  | "PERMISSION_DENIED"
+  | "EXECUTION_ERROR"
+  | "TIMEOUT"
+  | "RATE_LIMIT";
+
+/** Standard tool error */
+export type ToolError = {
+  code: ToolErrorCode | (string & {});
   message: string;
+  retryable: boolean;
+  retryAfterMs?: number;
+};
+
+/** Standard tool handler result */
+export type ToolHandlerResult<T = unknown> =
+  | { ok: true; data: T }
+  | { ok: false; error: ToolError };
+
+export function toolOk<T>(data: T): ToolHandlerResult<T> {
+  return { ok: true, data };
+}
+
+export function toolErr(
+  code: ToolErrorCode | (string & {}),
+  message: string,
+  opts?: { retryable?: boolean; retryAfterMs?: number },
+): ToolHandlerResult<never> {
+  return { ok: false, error: { code, message, retryable: opts?.retryable ?? false, retryAfterMs: opts?.retryAfterMs } };
+}
+
+export type ToolArgValidationError = ToolError & {
   field?: string;
 };
 
@@ -653,7 +1109,7 @@ export function validateToolCallArgs(args: { name: string; toolArgs: Record<stri
   const required = Array.isArray(schema.required) ? schema.required : [];
   for (const k of required) {
     if (!hasNonEmpty(k)) {
-      return { ok: false as const, error: { code: "MISSING_REQUIRED", message: `缺少必填参数：${k}`, field: k } satisfies ToolArgValidationError };
+      return { ok: false as const, error: { code: "MISSING_REQUIRED", message: `缺少必填参数：${k}`, field: k, retryable: false } satisfies ToolArgValidationError };
     }
   }
 
@@ -666,6 +1122,7 @@ export function validateToolCallArgs(args: { name: string; toolArgs: Record<stri
         error: {
           code: "ONE_OF_REQUIRED",
           message: `参数不满足二选一约束：${oneOf.map((g) => `[${g.required.join(", ")}]`).join(" 或 ")}`,
+          retryable: false,
         } satisfies ToolArgValidationError,
       };
     }
@@ -679,23 +1136,23 @@ export function validateToolCallArgs(args: { name: string; toolArgs: Record<stri
 
     if (rule.type === "number") {
       const n = Number(s);
-      if (!Number.isFinite(n)) return { ok: false as const, error: { code: "INVALID_NUMBER", message: `参数 ${k} 不是合法数字`, field: k } };
+      if (!Number.isFinite(n)) return { ok: false as const, error: { code: "INVALID_NUMBER", message: `参数 ${k} 不是合法数字`, field: k, retryable: false } satisfies ToolArgValidationError };
     } else if (rule.type === "boolean") {
       const t = s.trim().toLowerCase();
       const ok = t === "true" || t === "false" || t === "1" || t === "0";
-      if (!ok) return { ok: false as const, error: { code: "INVALID_BOOLEAN", message: `参数 ${k} 不是合法布尔值(true/false)`, field: k } };
+      if (!ok) return { ok: false as const, error: { code: "INVALID_BOOLEAN", message: `参数 ${k} 不是合法布尔值(true/false)`, field: k, retryable: false } satisfies ToolArgValidationError };
     } else if (rule.type === "json") {
       let parsed: any = null;
       try {
         parsed = JSON.parse(s);
       } catch {
-        return { ok: false as const, error: { code: "INVALID_JSON", message: `参数 ${k} 不是合法 JSON`, field: k } };
+        return { ok: false as const, error: { code: "INVALID_JSON", message: `参数 ${k} 不是合法 JSON`, field: k, retryable: false } satisfies ToolArgValidationError };
       }
       if (rule.jsonType === "array" && !Array.isArray(parsed)) {
-        return { ok: false as const, error: { code: "JSON_TYPE_MISMATCH", message: `参数 ${k} 必须是 JSON 数组`, field: k } };
+        return { ok: false as const, error: { code: "JSON_TYPE_MISMATCH", message: `参数 ${k} 必须是 JSON 数组`, field: k, retryable: false } satisfies ToolArgValidationError };
       }
       if (rule.jsonType === "object" && (parsed === null || Array.isArray(parsed) || typeof parsed !== "object")) {
-        return { ok: false as const, error: { code: "JSON_TYPE_MISMATCH", message: `参数 ${k} 必须是 JSON 对象`, field: k } };
+        return { ok: false as const, error: { code: "JSON_TYPE_MISMATCH", message: `参数 ${k} 必须是 JSON 对象`, field: k, retryable: false } satisfies ToolArgValidationError };
       }
     }
   }

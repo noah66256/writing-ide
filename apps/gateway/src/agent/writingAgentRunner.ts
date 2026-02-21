@@ -21,6 +21,8 @@ import {
   type RunState,
   type ActiveSkill,
   type ParsedToolCall,
+  BUILTIN_SUB_AGENTS,
+  type SubAgentBudget,
 } from "@writing-ide/agent-core";
 
 import { TOOL_LIST } from "@writing-ide/tools";
@@ -66,6 +68,10 @@ export type RunContext = {
   computePerTurnAllowed?: (state: RunState) => { allowed: Set<string>; hint: string } | null;
   /** 初始运行状态：由 gateway 从 contextPack 预初始化（hasTodoList、multiWrite 等），供 runner 继承。 */
   initialRunState?: RunState;
+  /** 子 Agent ID（设置后 writeEvent 自动注入 agentId 到每条 SSE 事件） */
+  agentId?: string;
+  /** 允许覆盖默认最大回合数（子 Agent 可用） */
+  maxTurns?: number;
 };
 
 type ToolExecResult = {
@@ -122,15 +128,70 @@ function parseObjectJson(jsonText: string): Record<string, unknown> {
   return {};
 }
 
+
+function clampIntLocal(value: unknown, min: number, max: number, fallback: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
+function resolveSubAgentBudget(baseBudget: SubAgentBudget, budgetOverrideJson: string): SubAgentBudget {
+  const override = parseObjectJson(budgetOverrideJson);
+  return {
+    maxTurns: clampIntLocal(override.maxTurns, 1, MAX_TURNS, Math.max(1, Math.floor(baseBudget.maxTurns))),
+    maxToolCalls: clampIntLocal(override.maxToolCalls, 1, 100, Math.max(1, Math.floor(baseBudget.maxToolCalls))),
+    timeoutMs: clampIntLocal(override.timeoutMs, 5_000, 300_000, Math.max(5_000, Math.floor(baseBudget.timeoutMs))),
+  };
+}
+
+function extractLastAssistantText(messages: AnthropicMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = messages[i];
+    if (msg.role !== "assistant") continue;
+    if (typeof msg.content === "string") {
+      const text = msg.content.trim();
+      if (text) return text;
+      continue;
+    }
+    if (!Array.isArray(msg.content)) continue;
+    for (let j = (msg.content as any[]).length - 1; j >= 0; j -= 1) {
+      const block = (msg.content as any[])[j];
+      if (block.type !== "text") continue;
+      const text = String(block.text ?? "").trim();
+      if (text) return text;
+    }
+  }
+  return "";
+}
+
+function countAssistantToolUses(messages: AnthropicMessage[]): number {
+  let total = 0;
+  for (const msg of messages) {
+    if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+    total += (msg.content as any[]).filter((block: any) => block.type === "tool_use").length;
+  }
+  return total;
+}
+
 export class WritingAgentRunner {
   private readonly ctx: RunContext;
   private readonly messages: AnthropicMessage[] = [];
   private readonly runState: RunState;
   private turn = 0;
-  private readonly maxTurns = MAX_TURNS;
+  private readonly maxTurns: number;
 
   constructor(ctx: RunContext) {
+    // 若设置了 agentId，包装 writeEvent 自动注入到每条 SSE 事件
+    if (ctx.agentId) {
+      const raw = ctx.writeEvent;
+      const aid = ctx.agentId;
+      ctx = { ...ctx, writeEvent: (event, data) => {
+        const d = data && typeof data === "object" ? { ...(data as any), agentId: aid } : data;
+        raw(event, d);
+      }};
+    }
     this.ctx = ctx;
+    this.maxTurns = Math.min(ctx.maxTurns ?? MAX_TURNS, MAX_TURNS);
     this.runState = ctx.initialRunState ? { ...ctx.initialRunState } : createInitialRunState();
   }
 
@@ -405,6 +466,18 @@ export class WritingAgentRunner {
     const rawInput = toolUse.input ?? {};
     const strArgs = toStringArgs(rawInput);
 
+    // Sub-agent delegation: intercept before generic server tool routing
+    if (toolUse.name === "agent.delegate") {
+      this.ctx.writeEvent("tool.call", {
+        toolCallId: toolUse.id,
+        name: toolUse.name,
+        args: rawInput,
+        executedBy: "gateway",
+        turn: this.turn,
+      });
+      return this._executeSubAgent(toolUse, strArgs);
+    }
+
     const decision = decideServerToolExecution({
       name: toolUse.name,
       toolArgs: strArgs,
@@ -455,6 +528,201 @@ export class WritingAgentRunner {
     }
 
     return this._waitForDesktopToolResult(toolUse.id, toolUse.name);
+  }
+
+
+  private async _executeSubAgent(
+    toolUse: ContentBlockToolUse,
+    strArgs: Record<string, string>,
+  ): Promise<ToolExecResult> {
+    const agentId = String(strArgs.agentId ?? "").trim();
+    const task = String(strArgs.task ?? "").trim();
+
+    if (!agentId) {
+      return { ok: false, output: { ok: false, error: "VALIDATION_ERROR", detail: "agentId is required" } };
+    }
+    if (!task) {
+      return { ok: false, output: { ok: false, error: "VALIDATION_ERROR", detail: "task is required" } };
+    }
+
+    const subAgent = BUILTIN_SUB_AGENTS.find((a) => a.id === agentId && a.enabled);
+    if (!subAgent) {
+      const knownIds = BUILTIN_SUB_AGENTS.filter((a) => a.enabled).map((a) => a.id);
+      return {
+        ok: false,
+        output: { ok: false, error: "NOT_FOUND", detail: `Unknown or disabled agentId "${agentId}". Available: ${knownIds.join(", ")}` },
+      };
+    }
+
+    const budget = resolveSubAgentBudget(subAgent.budget, strArgs.budget ?? "");
+    const subRunId = `${this.ctx.runId}:sub:${toolUse.id}`;
+
+    // Sub-agent tools: from definition, exclude agent.delegate (prevent nesting)
+    const subAllowedToolNames = new Set(
+      (subAgent.tools ?? []).map((n) => String(n ?? "").trim()).filter(Boolean),
+    );
+    subAllowedToolNames.delete("agent.delegate");
+
+    // Abort control: chain parent abort + budget timeout
+    const subAbort = new AbortController();
+    let timeoutTriggered = false;
+    let toolBudgetExceeded = false;
+    let toolCallsUsed = 0;
+
+    const onParentAbort = () => { if (!subAbort.signal.aborted) subAbort.abort(); };
+    if (this.ctx.abortSignal.aborted) onParentAbort();
+    else this.ctx.abortSignal.addEventListener("abort", onParentAbort, { once: true });
+
+    const budgetTimeout = setTimeout(() => {
+      timeoutTriggered = true;
+      if (!subAbort.signal.aborted) subAbort.abort();
+    }, budget.timeoutMs);
+
+    // Wrap writeEvent to count tool calls, enforce budget, and filter lifecycle events
+    const subWriteEvent: SseWriter = (event, data) => {
+      // Filter out sub-agent run.end to prevent premature UI stop
+      if (event === "run.end") return;
+      if (event === "tool.call") {
+        toolCallsUsed += 1;
+        if (toolCallsUsed > budget.maxToolCalls && !subAbort.signal.aborted) {
+          toolBudgetExceeded = true;
+          subAbort.abort();
+        }
+      }
+      this.ctx.writeEvent(event, data);
+    };
+
+    // Build sub-agent RunContext with minimal intent/gates (no style workflow interference)
+    const subCtx: RunContext = {
+      runId: subRunId,
+      mode: "agent",
+      intent: { forceProceed: true, wantsWrite: false, wantsOkOnly: false, isWritingTask: false, skipLint: true, skipCta: true },
+      gates: { styleGateEnabled: false, lintGateEnabled: false, copyGateEnabled: false, hasStyleLibrary: false, hasNonStyleLibraries: false, styleLibIds: [], nonStyleLibIds: [], styleLibIdSet: new Set() },
+      activeSkills: [],
+      allowedToolNames: subAllowedToolNames,
+      systemPrompt: String(subAgent.systemPrompt ?? "").trim() || this.ctx.systemPrompt,
+      toolSidecar: this.ctx.toolSidecar,
+      styleLinterLibraries: this.ctx.styleLinterLibraries,
+      fastify: this.ctx.fastify,
+      authorization: this.ctx.authorization,
+      modelId: this.ctx.modelId,
+      apiKey: this.ctx.apiKey,
+      baseUrl: this.ctx.baseUrl,
+      styleLibIds: this.ctx.styleLibIds,
+      writeEvent: subWriteEvent,
+      waiters: this.ctx.waiters,
+      abortSignal: subAbort.signal,
+      agentId: subAgent.id,
+      maxTurns: budget.maxTurns,
+      onTurnUsage: (promptTokens, completionTokens) => {
+        // Forward to parent's usage callback
+        this.ctx.onTurnUsage?.(promptTokens, completionTokens);
+        // Emit usage event with agentId for billing attribution
+        this.ctx.writeEvent("subagent.usage", {
+          parentRunId: this.ctx.runId,
+          runId: subRunId,
+          agentId: subAgent.id,
+          promptTokens,
+          completionTokens,
+        });
+      },
+    };
+
+    const subRunner = new WritingAgentRunner(subCtx);
+    const startedAt = Date.now();
+
+    // Build task message with inputArtifacts and acceptanceCriteria
+    const inputArtifacts = (() => {
+      const raw = strArgs.inputArtifacts ?? "";
+      if (!raw.trim()) return [];
+      try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch { return []; }
+    })();
+    const acceptanceCriteria = String(strArgs.acceptanceCriteria ?? "").trim();
+
+    let taskMessage = task;
+    if (inputArtifacts.length > 0) {
+      const artifactTexts = inputArtifacts.map((a: any, i: number) => {
+        if (typeof a === "string") return `[${i + 1}] ${a}`;
+        const label = String(a?.agentId ?? a?.label ?? `artifact_${i + 1}`);
+        const content = String(a?.artifact ?? a?.content ?? JSON.stringify(a));
+        return `[${label}]\n${content}`;
+      });
+      taskMessage = `## 上游产物\n${artifactTexts.join("\n\n")}\n\n## 任务\n${task}`;
+    }
+    if (acceptanceCriteria) {
+      taskMessage += `\n\n## 验收标准\n${acceptanceCriteria}`;
+    }
+
+    this.ctx.writeEvent("subagent.start", {
+      turn: this.turn,
+      toolCallId: toolUse.id,
+      parentRunId: this.ctx.runId,
+      runId: subRunId,
+      agentId: subAgent.id,
+      agentName: subAgent.name,
+      budget,
+    });
+
+    let status: "completed" | "error" | "timeout" = "completed";
+    let errorDetail: string | null = null;
+
+    try {
+      await subRunner.run(taskMessage);
+      if (this.ctx.abortSignal.aborted) {
+        status = "error";
+        errorDetail = errorDetail ?? "PARENT_ABORTED";
+      } else if (timeoutTriggered) {
+        status = "timeout";
+      } else if (toolBudgetExceeded) {
+        status = "error";
+      }
+    } catch (err) {
+      errorDetail = toErrorMessage(err);
+      status = timeoutTriggered ? "timeout" : "error";
+    } finally {
+      clearTimeout(budgetTimeout);
+      this.ctx.abortSignal.removeEventListener("abort", onParentAbort);
+    }
+
+    if (toolBudgetExceeded && !errorDetail) {
+      errorDetail = `SUB_AGENT_TOOL_BUDGET_EXCEEDED(${budget.maxToolCalls})`;
+    }
+
+    const messages = subRunner.getMessages();
+    const artifact = extractLastAssistantText(messages);
+    const turnsUsed = subRunner.getTurn();
+    const toolCallsUsedFinal = Math.max(toolCallsUsed, countAssistantToolUses(messages));
+
+    this.ctx.writeEvent("subagent.done", {
+      turn: this.turn,
+      toolCallId: toolUse.id,
+      parentRunId: this.ctx.runId,
+      runId: subRunId,
+      agentId: subAgent.id,
+      agentName: subAgent.name,
+      status,
+      artifact: artifact.slice(0, 2000),
+      turnsUsed,
+      toolCallsUsed: toolCallsUsedFinal,
+      budget,
+      durationMs: Math.max(0, Date.now() - startedAt),
+      error: errorDetail ?? undefined,
+    });
+
+    return {
+      ok: true,
+      output: {
+        agentId: subAgent.id,
+        status,
+        artifact,
+        turnsUsed,
+        toolCallsUsed: toolCallsUsedFinal,
+      },
+      meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
+    };
   }
 
   private _waitForDesktopToolResult(

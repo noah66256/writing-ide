@@ -62,6 +62,10 @@ export type AssistantStep = {
   text: string;
   streaming?: boolean;
   hidden?: boolean;
+  /** Sub-agent ID (if this message is from a sub-agent) */
+  agentId?: string;
+  /** Sub-agent display name */
+  agentName?: string;
 };
 
 export type ToolBlockStep = {
@@ -77,11 +81,14 @@ export type ToolBlockStep = {
   kept: boolean;
   applied: boolean;
 
-  // proposal-first：Keep 时执行 apply（如存在），再标记 applied/undoable
+  // proposal-first: Keep apply then mark applied/undoable
   apply?: () => void | { undo?: () => void };
 
   undoable: boolean;
   undo?: () => void;
+
+  /** Sub-agent ID (if this tool call is from a sub-agent) */
+  agentId?: string;
 };
 
 export type Step = UserStep | AssistantStep | ToolBlockStep;
@@ -156,7 +163,7 @@ type RunState = {
   truncateAfter: (stepId: string) => void; // 保留 stepId（包含它），清除其后
   truncateFrom: (stepId: string) => void; // 清除 stepId（包含它）及其后
 
-  addAssistant: (initialText?: string, streaming?: boolean, hidden?: boolean) => string;
+  addAssistant: (initialText?: string, streaming?: boolean, hidden?: boolean, opts?: { agentId?: string; agentName?: string }) => string;
   appendAssistantDelta: (stepId: string, delta: string) => void;
   finishAssistant: (stepId: string) => void;
   patchAssistant: (stepId: string, patch: Partial<AssistantStep>) => void;
@@ -433,10 +440,10 @@ export const useRunStore = create<RunState>()(
       return { steps: s.steps.slice(0, idx) };
     }),
 
-  addAssistant: (initialText = "", streaming = false, hidden = false) => {
+  addAssistant: (initialText = "", streaming = false, hidden = false, opts?: { agentId?: string; agentName?: string }) => {
     const id = makeId("a");
     set((s) => ({
-      steps: [...s.steps, { id, type: "assistant", text: initialText, streaming, hidden }],
+      steps: [...s.steps, { id, type: "assistant" as const, text: initialText, streaming, hidden, ...(opts?.agentId ? { agentId: opts.agentId, agentName: opts.agentName } : {}) }],
     }));
     return id;
   },

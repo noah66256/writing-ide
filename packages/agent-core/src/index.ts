@@ -3,8 +3,8 @@ export type AgentMode = "agent" | "chat";
 
 export type { ParsedToolCall } from "./runMachine.js";
 
-export type { TriggerRule, SkillManifest, ActiveSkill } from "./skills.js";
-export { CORPUS_INGEST_SKILL, SKILL_MANIFESTS_V1, STYLE_IMITATE_SKILL, activateSkills, pickSkillStageKeyForAgentRun, parseActiveSkillsFromContextPack } from "./skills.js";
+export type { TriggerRule, SkillManifest, ActiveSkill, SkillConfigOverride, SkillConfig } from "./skills.js";
+export { CORPUS_INGEST_SKILL, SKILL_MANIFESTS_V1, STYLE_IMITATE_SKILL, activateSkills, pickSkillStageKeyForAgentRun, parseActiveSkillsFromContextPack, mergeSkillManifests } from "./skills.js";
 
 export type {
   KbSelectedLibrary,
@@ -35,6 +35,9 @@ export {
   analyzeStyleWorkflowBatch,
   isProposalWaitingMeta,
 } from "./runMachine.js";
+
+export type { SubAgentDefinition, SubAgentBudget } from "./subAgent.js";
+export { BUILTIN_SUB_AGENTS } from "./subAgent.js";
 
 
 

@@ -1025,6 +1025,22 @@ body {
   color: var(--muted);
 }
 
+.msgSubAgent {
+  border-left: 3px solid var(--accent, #6366f1);
+}
+
+.subAgentTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent-bg, rgba(99, 102, 241, 0.1));
+  color: var(--accent, #6366f1);
+  font-size: 12px;
+  font-weight: 500;
+}
+
 .assistantTextArea {
   width: 100%;
   min-height: 220px;
@@ -1794,4 +1810,178 @@ body {
   overflow: auto;
 }
 
+/* Team Modal */
+.teamModal {
+  width: min(560px, calc(100vw - 24px));
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
+  padding: 16px;
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+}
+.teamModalHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.teamModalTitle {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+.teamModalBody {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.teamSection {}
+.teamSectionTitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.teamModeRow {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.teamModeOption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.teamModeOption:hover {
+  background: var(--panel2);
+}
+.teamModeOption input[type="radio"] {
+  margin: 0;
+}
+.teamModeLabel {
+  font-weight: 500;
+  color: var(--text);
+}
+.teamModeDesc {
+  width: 100%;
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.teamBadgeExp {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(245, 158, 11, 0.15);
+  color: #d97706;
+  font-size: 11px;
+  font-weight: 500;
+}
+.teamAgentList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.teamAgentCard {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.teamAgentCard.teamAgentDisabled {
+  opacity: 0.55;
+}
+.teamAgentRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.teamAgentRow:hover {
+  background: var(--panel2);
+}
+.teamAgentAvatar {
+  font-size: 20px;
+  flex-shrink: 0;
+  width: 28px;
+  text-align: center;
+}
+.teamAgentInfo {
+  flex: 1;
+  min-width: 0;
+}
+.teamAgentName {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+.teamAgentMeta {
+  font-size: 11px;
+  color: var(--muted);
+}
+.teamToggle {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  flex-shrink: 0;
+}
+.teamToggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.teamToggleSlider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: var(--border);
+  border-radius: 20px;
+  transition: background 0.2s;
+}
+.teamToggleSlider::before {
+  content: "";
+  position: absolute;
+  height: 16px;
+  width: 16px;
+  left: 2px;
+  bottom: 2px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+.teamToggle input:checked + .teamToggleSlider {
+  background: var(--accent, #6366f1);
+}
+.teamToggle input:checked + .teamToggleSlider::before {
+  transform: translateX(16px);
+}
+.teamAgentDetail {
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--panel2);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.teamDetailRow {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.teamDetailLabel {
+  flex-shrink: 0;
+  width: 56px;
+  color: var(--muted);
+  font-weight: 500;
+}
 

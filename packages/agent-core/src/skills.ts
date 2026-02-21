@@ -19,6 +19,14 @@ export type SkillManifest = {
   promptFragments: { system?: string; context?: string };
   policies: string[];
   toolCaps?: { allowTools?: string[]; denyTools?: string[] };
+  /** 语义化版本号（如 "1.0.0"），用于后续配置化加载时的版本管理 */
+  version?: string;
+  /** 与本 Skill 冲突的 Skill ID 列表（互斥，不能同时激活） */
+  conflicts?: string[];
+  /** 本 Skill 依赖的前置 Skill ID 列表（须先激活） */
+  requires?: string[];
+  /** 来源标记 */
+  source?: "builtin" | "standard" | "user" | "admin";
   ui: { badge: string; color?: string };
 };
 
@@ -169,6 +177,8 @@ export const STYLE_IMITATE_SKILL: SkillManifest = {
     context: "ACTIVE_SKILLS: style_imitate（原因见 reasonCodes；UI 需可见）",
   },
   policies: ["StyleGatePolicy", "AutoRetryPolicy"],
+  version: "1.0.0",
+  source: "builtin",
   ui: { badge: "STYLE", color: "blue" },
 };
 
@@ -215,6 +225,8 @@ export const WEB_TOPIC_RADAR_SKILL: SkillManifest = {
     context: "ACTIVE_SKILLS: web_topic_radar（广度优先：热点/新闻/素材盘点）",
   },
   policies: [],
+  version: "1.0.0",
+  source: "builtin",
   ui: { badge: "WEB", color: "purple" },
 };
 
@@ -255,6 +267,9 @@ export const WRITING_BATCH_SKILL: SkillManifest = {
     context: "ACTIVE_SKILLS: writing_batch（硬路由：批量任务走批处理工具）",
   },
   policies: ["SkillToolCapsPolicy"],
+  version: "1.0.0",
+  conflicts: ["writing_multi"],
+  source: "builtin",
   ui: { badge: "BATCH", color: "orange" },
 };
 
@@ -296,6 +311,9 @@ export const WRITING_MULTI_SKILL: SkillManifest = {
     // 关键：禁用“合并后再分割”的捷径（这会导致同质化、并且在门禁阶段经常触发 denied）
     denyTools: ["doc.splitToDir"],
   },
+  version: "1.0.0",
+  conflicts: ["writing_batch"],
+  source: "builtin",
   ui: { badge: "MULTI", color: "teal" },
 };
 
@@ -360,6 +378,8 @@ export const CORPUS_INGEST_SKILL: SkillManifest = {
       "run.done",
     ],
   },
+  version: "1.0.0",
+  source: "builtin",
   ui: { badge: "INGEST", color: "green" },
 };
 
@@ -379,9 +399,26 @@ export function activateSkills(args: {
   const intent = args.intent ?? detectRunIntent({ mode, userPrompt, mainDocRunIntent: args.mainDocRunIntent });
   const manifests = args.manifests?.length ? args.manifests : SKILL_MANIFESTS_V1;
 
+  // 按 priority 降序排序后再迭代，确保高优先级 Skill 优先激活（影响 conflicts 裁决）
+  const sorted = [...manifests].sort(
+    (a, b) => (b.priority ?? 0) - (a.priority ?? 0) || String(a.id).localeCompare(String(b.id)),
+  );
+
   const out: Array<{ m: SkillManifest; s: ActiveSkill }> = [];
-  for (const m of manifests) {
+  const activeSkillIds = new Set<string>();
+  const blockedByConflict = new Set<string>();
+  for (const m of sorted) {
     if (!m?.autoEnable) continue;
+    const skillId = normStr(m.id);
+    if (!skillId) continue;
+    // conflicts 互斥：被已激活 Skill 声明为冲突的，或自身声明与已激活 Skill 冲突的，跳过
+    if (blockedByConflict.has(skillId)) continue;
+    const conflicts = normalizeStringArray(m.conflicts);
+    if (conflicts.some((id) => activeSkillIds.has(id))) continue;
+    // requires 依赖：前置 Skill 必须已激活
+    const requires = normalizeStringArray(m.requires);
+    if (requires.length && !requires.every((id) => activeSkillIds.has(id))) continue;
+
     const reasonCodes: string[] = [`skill:${m.id}`];
     const detail: Record<string, unknown> = { stageKey: m.stageKey };
     let ok = true;
@@ -402,6 +439,8 @@ export function activateSkills(args: {
       }
     }
     if (!ok) continue;
+    activeSkillIds.add(skillId);
+    for (const cid of conflicts) blockedByConflict.add(cid);
     out.push({
       m,
       s: {
@@ -413,7 +452,7 @@ export function activateSkills(args: {
       },
     });
   }
-  out.sort((a, b) => (b.m.priority ?? 0) - (a.m.priority ?? 0) || String(a.m.id).localeCompare(String(b.m.id)));
+  // 迭代前已按 priority 排序，无需再排
   return out.map((x) => x.s);
 }
 
@@ -437,4 +476,58 @@ export function parseActiveSkillsFromContextPack(ctx?: string): ActiveSkill[] {
   }
 }
 
+export type SkillConfigOverride = {
+  /** 仅 enabled 可覆盖（映射到 autoEnable） */
+  enabled?: boolean;
+};
 
+export type SkillConfig = {
+  /** 对内置 Skill 的覆盖（key=skillId） */
+  builtinOverrides?: Record<string, SkillConfigOverride>;
+  /** 标准 Skill 包（已由调用方解析好的 SkillManifest 数组列表） */
+  standardPacks?: SkillManifest[][];
+  /** 用户自定义 Skill */
+  userSkills?: SkillManifest[];
+};
+
+export function mergeSkillManifests(config?: SkillConfig): SkillManifest[] {
+  // 1) builtin 基座（浅拷贝）
+  const builtin = SKILL_MANIFESTS_V1.map((m) => ({ ...m }));
+  const builtinIds = new Set(builtin.map((m) => normStr(m.id)).filter(Boolean));
+
+  // 2) builtinOverrides：只改 autoEnable
+  const overrides = config?.builtinOverrides ?? {};
+  for (const m of builtin) {
+    const o = overrides[normStr(m.id)];
+    if (typeof o?.enabled === "boolean") {
+      m.autoEnable = o.enabled;
+    }
+  }
+
+  // 3) standardPacks：flat -> 过滤 builtin 同 id -> 标记 source="standard" -> 同 id 后入覆盖先入
+  const standardMap = new Map<string, SkillManifest>();
+  for (const pack of config?.standardPacks ?? []) {
+    if (!Array.isArray(pack)) continue;
+    for (const m of pack) {
+      const id = normStr(m?.id);
+      if (!id || builtinIds.has(id) || !normStr(m?.name)) continue;
+      standardMap.set(id, { ...m, source: "standard" });
+    }
+  }
+
+  // 4) userSkills：过滤 builtin 同 id -> 标记 source="user" -> 同 id 覆盖 standard
+  const userMap = new Map<string, SkillManifest>();
+  for (const m of config?.userSkills ?? []) {
+    const id = normStr(m?.id);
+    if (!id || builtinIds.has(id) || !normStr(m?.name)) continue;
+    userMap.set(id, { ...m, source: "user" });
+  }
+
+  // standard 去掉被 user 覆盖的
+  for (const id of userMap.keys()) {
+    standardMap.delete(id);
+  }
+
+  // 5) 合并返回
+  return [...builtin, ...standardMap.values(), ...userMap.values()];
+}
