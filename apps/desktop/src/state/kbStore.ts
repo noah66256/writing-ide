@@ -4920,6 +4920,8 @@ export const useKbStore = create<KbState>()(
               { facetId: "language_style", why: "口语化/标志性语块" },
               { facetId: "one_liner_crafting", why: "金句/节奏锤" },
               { facetId: "question_design", why: "问题链脚手架" },
+              { facetId: "values_embedding", why: "价值取向/判断框架" },
+              { facetId: "narrative_perspective", why: "叙事人称/立场/视角选择" },
             ];
 
             const clustersV1 = clusters

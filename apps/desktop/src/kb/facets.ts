@@ -19,6 +19,7 @@ export const FACET_PACKS: FacetPack[] = [
       { id: "intro", label: "引言" },
       { id: "opening_design", label: "开场设计" },
       { id: "narrative_structure", label: "叙事结构" },
+      { id: "narrative_perspective", label: "叙事视角" },
       { id: "language_style", label: "语言风格" },
       { id: "one_liner_crafting", label: "金句制造" },
       { id: "topic_selection", label: "话题选择" },

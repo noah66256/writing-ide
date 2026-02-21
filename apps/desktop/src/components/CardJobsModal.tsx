@@ -1335,7 +1335,7 @@ export function CardJobsModal() {
                               const ok = await uiConfirm({
                                 title: "确认入队生成风格手册？",
                                 message:
-                                  `为库「${lib.name}」入队生成风格手册（21+1）？\n\n` +
+                                  `为库「${lib.name}」入队生成风格手册（22+1）？\n\n` +
                                   "- 会读取该库已抽出的单篇要素卡（hook/thesis/ending/one_liner/outline）\n" +
                                   "- 并生成 1 张 Style Profile + 每个维度 1 张写法手册卡\n" +
                                   "- 产物会落到一个“【仿写手册】”虚拟文档下，可被右侧 Agent 直接使用\n\n" +
@@ -2149,7 +2149,7 @@ export function CardJobsModal() {
         {tab === "jobs" ? (
           <>
             <div className="explorerHint" style={{ marginBottom: 10 }}>
-              抽卡任务说明：导入后先入队，需点击 ▶ 开始；为每篇文档生成最终要素卡（hook/thesis/ending/one_liner/outline），用于后续生成库级 21+1 风格手册；已抽过会自动跳过。
+              抽卡任务说明：导入后先入队，需点击 ▶ 开始；为每篇文档生成最终要素卡（hook/thesis/ending/one_liner/outline），用于后续生成库级 22+1 风格手册；已抽过会自动跳过。
             </div>
 
             <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
@@ -2372,14 +2372,14 @@ export function CardJobsModal() {
                         ? "请先停止/暂停抽卡任务"
                         : (currentLibrary.docCount ?? 0) <= 0
                           ? "该库暂无文档"
-                          : "生成库级风格手册（Style Profile + 21+1）"
+                          : "生成库级风格手册（Style Profile + 22+1）"
                   }
                   onClick={() => {
                     const lib = currentLibrary;
                     if (!lib) return;
                     const pendingInLib = jobs.filter((j) => j.libraryId === lib.id && (j.status === "pending" || j.status === "running")).length;
                     const msg =
-                      `为当前库「${lib.name}」入队生成风格手册（21+1）？\n\n` +
+                      `为当前库「${lib.name}」入队生成风格手册（22+1）？\n\n` +
                       "- 会读取该库已抽出的单篇要素卡（hook/thesis/ending/one_liner/outline）\n" +
                       "- 并生成 1 张 Style Profile + 每个维度 1 张写法手册卡\n" +
                       "- 产物会落到一个“【仿写手册】”虚拟文档下，可被右侧 Agent 直接使用\n" +
