@@ -1,13 +1,13 @@
 @import "tailwindcss";
 
 /*
- * Writing IDE — 新 UI 设计系统
- * 基于 Tailwind CSS 4 + shadcn/ui
- * 与 app.css（旧样式）共存，逐步迁移
+ * Writing IDE — 设计系统（多主题）
+ * 基于 Tailwind CSS 4 + data-theme 属性切换
+ * 主题：light / dark / auto / light-glass / classic-dark
  */
 
 @theme {
-  /* ---------- 颜色系统 ---------- */
+  /* ---------- 颜色系统（Light 默认值） ---------- */
   --color-bg:          #fafafa;
   --color-surface:     #ffffff;
   --color-surface-alt: #f5f5f7;
@@ -25,6 +25,10 @@
   --color-success:     #22c55e;
   --color-warning:     #f59e0b;
   --color-error:       #ef4444;
+
+  /* ---------- 导航栏 ---------- */
+  --color-nav-bg:      rgba(245, 245, 247, 0.85);
+  --color-nav-border:  #e8e8ec;
 
   /* ---------- 字体 ---------- */
   --font-sans: "SF Pro Display", "PingFang SC", -apple-system, BlinkMacSystemFont,
@@ -45,8 +49,7 @@
   --shadow-xl:  0 8px 32px rgba(0, 0, 0, 0.10);
 
   /* ---------- 布局 ---------- */
-  --nav-width:       56px;
-  --nav-width-open:  240px;
+  --nav-width:       240px;
   --chat-max-width:  720px;
   --panel-min-width: 360px;
 
@@ -57,26 +60,77 @@
   --duration-slow: 400ms;
 }
 
-/* ---------- Dark Theme ---------- */
+/* ========== Theme: Light Glass（浅色玻璃） ========== */
+html[data-theme="light-glass"] {
+  --color-bg:          #f8faf8;
+  --color-surface:     rgba(255, 255, 255, 0.88);
+  --color-surface-alt: rgba(245, 248, 245, 0.75);
+  --color-border:      rgba(200, 210, 200, 0.35);
+  --color-border-soft: rgba(220, 230, 220, 0.28);
+  --color-nav-bg:      rgba(232, 245, 233, 0.55);
+  --color-nav-border:  rgba(200, 220, 200, 0.30);
+}
+
+/* ========== Theme: Dark（深色） ========== */
+html[data-theme="dark"] {
+  --color-bg:          #0f0f14;
+  --color-surface:     #1a1a24;
+  --color-surface-alt: #22222e;
+  --color-border:      #2a2a3a;
+  --color-border-soft: #1f1f2e;
+  --color-text:        #e4e4ed;
+  --color-text-muted:  #8b8b9e;
+  --color-text-faint:  #5a5a6e;
+  --color-accent:      #818cf8;
+  --color-accent-hover:#6366f1;
+  --color-accent-soft: #1e1b4b;
+  --color-nav-bg:      rgba(18, 18, 26, 0.90);
+  --color-nav-border:  #2a2a3a;
+}
+
+/* ========== Theme: Classic Dark（经典暗色） ========== */
+html[data-theme="classic-dark"] {
+  --color-bg:          #1a1a1a;
+  --color-surface:     #242424;
+  --color-surface-alt: #2e2e2e;
+  --color-border:      #3a3a3a;
+  --color-border-soft: #303030;
+  --color-text:        #e0e0e0;
+  --color-text-muted:  #999999;
+  --color-text-faint:  #666666;
+  --color-accent:      #818cf8;
+  --color-accent-hover:#6366f1;
+  --color-accent-soft: #2a2540;
+  --color-nav-bg:      rgba(30, 30, 30, 0.92);
+  --color-nav-border:  #3a3a3a;
+}
+
+/* ========== Theme: Auto（跟随系统） ========== */
 @media (prefers-color-scheme: dark) {
-  @theme {
+  html[data-theme="auto"] {
     --color-bg:          #0f0f14;
     --color-surface:     #1a1a24;
     --color-surface-alt: #22222e;
     --color-border:      #2a2a3a;
     --color-border-soft: #1f1f2e;
-
     --color-text:        #e4e4ed;
     --color-text-muted:  #8b8b9e;
     --color-text-faint:  #5a5a6e;
-
     --color-accent:      #818cf8;
     --color-accent-hover:#6366f1;
     --color-accent-soft: #1e1b4b;
+    --color-nav-bg:      rgba(18, 18, 26, 0.90);
+    --color-nav-border:  #2a2a3a;
   }
 }
 
-/* ---------- Markdown 内容样式 ---------- */
+/* ========== 全局基础 ========== */
+html, body {
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+/* ========== Markdown 内容样式 ========== */
 .markdown-body {
   font-size: 14px;
   line-height: 1.7;

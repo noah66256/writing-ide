@@ -1,14 +1,10 @@
-import { useState } from "react";
 import { NavSidebar } from "../components/NavSidebar";
 import { ChatArea } from "../components/ChatArea";
 
 /**
- * 新 UI 主布局：左侧导航 + 中央对话区
- * 替代旧的 IDE 五栏布局
+ * 主布局：左侧导航（240px 固定）+ 中央对话区
  */
 export function ConversationLayout() {
-  const [navExpanded, setNavExpanded] = useState(false);
-
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-bg text-text font-sans">
       {/* macOS titlebar drag region */}
@@ -18,7 +14,7 @@ export function ConversationLayout() {
       />
 
       {/* 左侧导航栏 */}
-      <NavSidebar expanded={navExpanded} onToggle={() => setNavExpanded(!navExpanded)} />
+      <NavSidebar />
 
       {/* 主区域 */}
       <main className="flex-1 flex flex-col min-w-0 relative">

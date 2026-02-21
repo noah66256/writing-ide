@@ -5,6 +5,7 @@ import { useProjectStore } from "./state/projectStore";
 import { useWorkspaceStore } from "./state/workspaceStore";
 import { useUpdateStore } from "./state/updateStore";
 import { getUpdateBaseUrl } from "./agent/updateBaseUrl";
+import "./state/themeStore"; // side-effect: apply theme on load
 
 export default function App() {
   const setUpdateCheckResult = useUpdateStore((s) => s.setCheckResult);
