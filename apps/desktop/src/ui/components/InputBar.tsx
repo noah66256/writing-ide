@@ -95,11 +95,20 @@ export function InputBar({
 
   const handleMentionSelect = useCallback(
     (item: MentionItem) => {
+      if (item.type === "agent") {
+        // Agent mention: insert @agentName as text prefix
+        setValue((v) => {
+          const stripped = v.replace(/@\S*$/, "").trimEnd();
+          return "@" + item.id + " " + stripped;
+        });
+        setMentionVisible(false);
+        textareaRef.current?.focus();
+        return;
+      }
       setMentions((prev) => {
         if (prev.some((m) => m.id === item.id)) return prev;
         return [...prev, item];
       });
-      // 移除输入框中的 @query
       setValue((v) => v.replace(/@\S*$/, "").trimEnd() + " ");
       setMentionVisible(false);
       textareaRef.current?.focus();

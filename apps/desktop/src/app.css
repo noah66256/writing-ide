@@ -464,6 +464,45 @@ body {
   background: rgba(0, 0, 0, 0.04);
 }
 
+.refSectionLabel {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted, #888);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 0;
+  margin-bottom: 4px;
+}
+
+.refListAgents {
+  max-height: 160px;
+}
+
+.refItemAgent {
+  gap: 8px;
+}
+
+.refAgentAvatar {
+  flex: 0 0 auto;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.refAgentName {
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.refAgentDesc {
+  flex: 1 1 auto;
+  font-size: 11px;
+  color: var(--text-muted, #888);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .refKind {
   flex: 0 0 auto;
   font-size: 11px;

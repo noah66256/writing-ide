@@ -26,8 +26,18 @@ import { startGatewayRun } from "@/agent/gatewayAgent";
 import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
 import { WelcomePage } from "./WelcomePage";
 import { InputBar } from "./InputBar";
+import { BUILTIN_SUB_AGENTS } from "@writing-ide/agent-core";
 
 type RunController = { cancel: (reason?: string) => void; done: Promise<void> };
+function parseAtMention(text: string): { agentId: string; cleanText: string } | null {
+  const m = text.match(/^@(\S+)\s+/);
+  if (!m) return null;
+  const mention = m[1];
+  const agent = BUILTIN_SUB_AGENTS.find(a => a.enabled && (a.id === mention || a.name === mention));
+  if (!agent) return null;
+  return { agentId: agent.id, cleanText: text.slice(m[0].length) };
+}
+
 
 export function ChatArea() {
   const steps = useRunStore((s) => s.steps);
@@ -116,14 +126,9 @@ export function ChatArea() {
         return;
       }
 
-      const me = useAuthStore.getState().user;
-      if (!me) {
-        useRunStore.getState().addAssistant("（未登录：请先登录后使用 AI 功能。）");
-        return;
-      }
-
       const gatewayUrl = getGatewayBaseUrl();
-      const c = startGatewayRun({ gatewayUrl, mode, model, prompt: text });
+      const atMention = parseAtMention(text);
+      const c = startGatewayRun({ gatewayUrl, mode, model, prompt: atMention ? atMention.cleanText : text, ...(atMention ? { targetAgentId: atMention.agentId } : {}) });
       controllerRef.current = c;
       void c.done.finally(() => {
         if (controllerRef.current === c) controllerRef.current = null;

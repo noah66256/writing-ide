@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { Sparkles, Search, BookOpen, Package, FileText, FolderOpen } from "lucide-react";
+import { Sparkles, Search, BookOpen, Package, FileText, FolderOpen, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { BUILTIN_SUB_AGENTS } from "@writing-ide/agent-core";
 import { useKbStore } from "@/state/kbStore";
 
 export type MentionItem = {
   id: string;
-  type: "skill" | "kb" | "file";
+  type: "skill" | "kb" | "file" | "agent";
   label: string;
   icon: React.ReactNode;
 };
@@ -50,7 +51,17 @@ export function MentionPopover({
     [kbLibraries],
   );
 
-  const allItems = useMemo(() => [...SKILL_ITEMS, ...kbItems], [kbItems]);
+  const agentItems: MentionItem[] = useMemo(
+    () => BUILTIN_SUB_AGENTS.filter(a => a.enabled).map(a => ({
+      id: a.id,
+      type: "agent" as const,
+      label: `${a.avatar ?? "🤖"} ${a.name}`,
+      icon: <Users size={14} />,
+    })),
+    [],
+  );
+  
+  const allItems = useMemo(() => [...agentItems, ...SKILL_ITEMS, ...kbItems], [agentItems, kbItems]);
 
   const filtered = useMemo(() => {
     const q = query.toLowerCase().trim();
@@ -96,6 +107,7 @@ export function MentionPopover({
   if (!visible || filtered.length === 0) return null;
 
   // 按类别分组
+  const agents = filtered.filter((i) => i.type === "agent");
   const skills = filtered.filter((i) => i.type === "skill");
   const kbs = filtered.filter((i) => i.type === "kb");
   const files = filtered.filter((i) => i.type === "file");
@@ -109,6 +121,19 @@ export function MentionPopover({
       )}
       style={{ bottom: anchorBottom, left: anchorLeft }}
     >
+      {agents.length > 0 && (
+        <Group label="团队成员">
+          {agents.map((item) => (
+            <Item
+              key={item.id}
+              item={item}
+              selected={filtered[selectedIdx]?.id === item.id}
+              onSelect={onSelect}
+              colorClass="text-emerald-500"
+            />
+          ))}
+        </Group>
+      )}
       {skills.length > 0 && (
         <Group label="技能">
           {skills.map((item) => (

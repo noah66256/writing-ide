@@ -654,7 +654,17 @@ export function AgentPane() {
     setEditingText((v) => (v ? v + " " + token + " " : token + " "));
   };
 
-  // 把输入框里出现的 @{} 自动“钉”到 ctxRefs（只增不减），避免发送后 input 被清空导致上下文丢失。
+  const applyAgentMention = (agentId: string, agentName: string) => {
+    const cur = composerRef.current?.getValue() ?? input;
+    const stripped = cur.replace(/^@\S+\s+/, "");
+    const next = "@" + agentName + " " + stripped;
+    setInput(next);
+    composerRef.current?.setValue(next);
+    setRefPickerOpen(false);
+    focusComposerSoon();
+  };
+
+  // 把输入框里出现的 @{} 自动”钉”到 ctxRefs（只增不减），避免发送后 input 被清空导致上下文丢失。
   useEffect(() => {
     const refs = parseRefsFromText(input);
     if (!refs.length) return;
@@ -1582,10 +1592,31 @@ export function AgentPane() {
           }}
         >
           <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
-            <div className="modalTitle">引用文件/文件夹</div>
+            <div className="modalTitle">@ 引用</div>
             <div className="modalDesc">
-              选择后会插入 <span className="rtCode">@{"{path}"}</span>，发送时会自动把引用内容注入上下文（文件夹会展开为其下文件）。
+              指派团队成员或引用文件/文件夹。
             </div>
+
+            {/* 团队成员 */}
+            <div className="refSectionLabel">团队成员</div>
+            <div className="refList refListAgents" role="list">
+              {BUILTIN_SUB_AGENTS.filter(a => a.enabled).map(agent => (
+                <button
+                  key={agent.id}
+                  className="refItem refItemAgent"
+                  type="button"
+                  onClick={() => applyAgentMention(agent.id, agent.name)}
+                  title={agent.description}
+                >
+                  <span className="refAgentAvatar">{agent.avatar ?? "🤖"}</span>
+                  <span className="refAgentName">{agent.name}</span>
+                  <span className="refAgentDesc">{agent.description}</span>
+                </button>
+              ))}
+            </div>
+
+            {/* 文件引用 */}
+            <div className="refSectionLabel" style={{ marginTop: 12 }}>文件 / 文件夹</div>
             <input
               ref={refPickerInputRef}
               className="modalInput"
