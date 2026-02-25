@@ -1523,6 +1523,7 @@ export async function prepareAgentRun(args: {
   const requestedIdRaw = body.model ? String(body.model).trim() : "";
   const requestedId =
     requestedIdRaw && stageAllowedIds?.length ? (stageAllowedIds.includes(requestedIdRaw) ? requestedIdRaw : "") : requestedIdRaw;
+  // 用户选的 model 优先；不再 fallback 到 env.defaultModel
   const pickedId = requestedId || stageDefaultId || (stageAllowedIds?.length ? stageAllowedIds[0] : "") || env.defaultModel || "";
 
   let model = pickedId || env.defaultModel;
@@ -1541,6 +1542,8 @@ export async function prepareAgentRun(args: {
       toolResultFormat = m.toolResultFormat;
       modelIdUsed = m.modelId;
     } catch {
+      // resolveModel 失败时（model 未在后台注册），直接用用户选的 id 作为 model name
+      model = pickedId;
       modelIdUsed = pickedId;
     }
   }

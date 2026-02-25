@@ -1064,7 +1064,7 @@ export class WritingAgentRunner {
       agentId: subAgent.id,
       agentName: subAgent.name,
       status,
-      artifact: artifact.slice(0, 2000),
+      artifact,
       turnsUsed,
       toolCallsUsed: toolCallsUsedFinal,
       budget,

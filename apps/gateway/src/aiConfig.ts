@@ -181,7 +181,7 @@ function hasPricing(m: AiModel) {
 }
 
 export function getDefaultStageDefinitionsFromEnv(): AiStageDefinition[] {
-  const llmModel = String(process.env.LLM_MODEL ?? "").trim() || "deepseek-v3";
+  const llmModel = String(process.env.LLM_MODEL ?? "").trim();
   const embedModels = String(process.env.LLM_EMBED_MODELS ?? "")
     .split(",")
     .map((s) => s.trim())
