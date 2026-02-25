@@ -892,6 +892,12 @@ export class WritingAgentRunner {
     );
     subAllowedToolNames.delete("agent.delegate");
 
+    // 方案 A：自动注入 MCP 工具到子 Agent（与负责人共享 MCP 工具池）
+    const mcpTools: any[] = (this.ctx as any).mcpTools ?? [];
+    for (const t of mcpTools) {
+      if (t.name) subAllowedToolNames.add(t.name);
+    }
+
     // Abort control: chain parent abort + budget timeout
     const subAbort = new AbortController();
     let timeoutTriggered = false;
@@ -975,6 +981,11 @@ export class WritingAgentRunner {
         });
       },
     };
+
+    // 将 MCP 工具传递给子 Agent context
+    if (mcpTools.length) {
+      (subCtx as any).mcpTools = mcpTools;
+    }
 
     const subRunner = new WritingAgentRunner(subCtx);
     const startedAt = Date.now();
@@ -1146,15 +1157,6 @@ export class WritingAgentRunner {
 
     if (name === "run.setTodoList" || name === "run.todo.upsertMany") {
       this.runState.hasTodoList = true;
-      return;
-    }
-
-    if (name === "web.search") {
-      this.runState.hasWebSearch = true;
-      this.runState.webSearchCount = Math.max(
-        0,
-        Math.floor(Number(this.runState.webSearchCount ?? 0)),
-      ) + 1;
       return;
     }
 

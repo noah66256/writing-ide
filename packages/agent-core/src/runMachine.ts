@@ -69,7 +69,7 @@ export type RunState = {
   hasWriteOps: boolean;
   hasAnyToolCall: boolean;
   hasKbSearch: boolean;
-  // 时间上下文：用于 web.search 等“时间敏感”工具调用前的门禁（避免模型用错年份/日期）
+  // 时间上下文：用于”时间敏感”工具调用前的门禁（避免模型用错年份/日期）
   hasTimeNow: boolean;
   lastTimeNowIso: string | null;
   hasWebSearch: boolean;

@@ -63,9 +63,9 @@ export const TOOL_LIST: ToolMeta[] = [
   {
     name: "time.now",
     description:
-      "获取当前时间（只读、无副作用）。用于所有“时间敏感”的任务，尤其是 web.search 之前：\n" +
-      "- 让模型明确当前年份/日期，避免在 2026 还搜索 2024 之类的过期关键词\n" +
-      "- 便于根据今天/最近/最新选择 freshness（oneDay/oneWeek/...）\n" +
+      "获取当前时间（只读、无副作用）。用于所有时间敏感的任务：\n" +
+      "- 让模型明确当前年份/日期，避免过期关键词\n" +
+      "- 便于根据今天/最近/最新选择搜索时间范围\n" +
       "输出包含：nowIso/year/month/day/weekday/unixMs/timezoneOffsetMinutes。",
     args: [],
     modes: ["chat", "agent"],
@@ -120,137 +120,6 @@ export const TOOL_LIST: ToolMeta[] = [
               "type": "number"
             }
           }
-        }
-      }
-    },
-
-  },
-  {
-    name: "web.search",
-    description:
-      "联网搜索（默认使用博查 Bocha Web Search API），返回结构化结果供你后续 web.fetch 抓正文证据。\n" +
-      "【何时用】\n" +
-      "- 用户明确要求“联网/上网/全网/查资料/找素材/最新/时事/新闻”\n" +
-      "- 或你判断问题强依赖最新信息（防止过时/幻觉）\n" +
-      "【建议】\n" +
-      "- freshness 推荐用：oneDay/oneWeek/oneMonth/oneYear/noLimit；也支持 YYYY-MM-DD 或 YYYY-MM-DD..YYYY-MM-DD\n" +
-      "- count 1–50，默认 10\n" +
-      "- summary=true 可返回更长摘要（更适合 AI 使用）",
-    args: [
-      { name: "query", required: true, desc: "搜索词/问题", type: "string" },
-      { name: "freshness", required: false, desc: "时间范围：noLimit|oneYear|oneMonth|oneWeek|oneDay|YYYY-MM-DD|YYYY-MM-DD..YYYY-MM-DD", type: "string" },
-      { name: "count", required: false, desc: "返回条数（1-50，默认 10）", type: "number" },
-      { name: "summary", required: false, desc: "是否返回摘要（默认 true）", type: "boolean" },
-    ],
-    modes: ["chat", "agent"],
-    inputSchema: {
-      type: "object",
-      properties: {
-        query: { type: "string" },
-        freshness: { type: "string" },
-        count: { type: "number" },
-        summary: { type: "boolean" },
-      },
-      required: ["query"],
-      additionalProperties: true,
-    },
-    outputSchema: {
-      "type": "object",
-      "description": "Search results",
-      "properties": {
-        "provider": {
-          "type": "string"
-        },
-        "fetchedAt": {
-          "type": "string"
-        },
-        "query": {
-          "type": "string"
-        },
-        "results": {
-          "type": "array",
-          "description": "Result list",
-          "items": {
-            "type": "object",
-            "properties": {
-              "title": {
-                "type": "string"
-              },
-              "url": {
-                "type": "string"
-              },
-              "snippet": {
-                "type": "string"
-              },
-              "summary": {
-                "type": "string",
-                "description": "Full summary (when summary=true)"
-              },
-              "publishedAt": {
-                "type": "string"
-              },
-              "source": {
-                "type": "string"
-              }
-            }
-          }
-        }
-      }
-    },
-
-  },
-  {
-    name: "web.fetch",
-    description:
-      "抓取网页正文（只读）。用于把 web.search 的 URL 抓成可复核的“正文证据”。\n" +
-      "【注意】仅抓取公开网页；遵守域名 allow/deny 配置；超时/失败会返回结构化错误。",
-    args: [
-      { name: "url", required: true, desc: "目标网页 URL", type: "string" },
-      { name: "format", required: false, desc: '返回格式："markdown"|"text"（默认 markdown）', type: "string" },
-      { name: "timeoutMs", required: false, desc: "超时毫秒（默认 10000）", type: "number" },
-      { name: "maxChars", required: false, desc: "最大返回字符数（默认 12000，用于截断保护）", type: "number" },
-    ],
-    modes: ["chat", "agent"],
-    inputSchema: {
-      type: "object",
-      properties: {
-        url: { type: "string" },
-        format: { type: "string" },
-        timeoutMs: { type: "number" },
-        maxChars: { type: "number" },
-      },
-      required: ["url"],
-      additionalProperties: true,
-    },
-    outputSchema: {
-      "type": "object",
-      "description": "Web page fetch result",
-      "properties": {
-        "url": {
-          "type": "string"
-        },
-        "finalUrl": {
-          "type": "string",
-          "description": "Final URL after redirects"
-        },
-        "status": {
-          "type": "number",
-          "description": "HTTP status code"
-        },
-        "title": {
-          "type": "string",
-          "description": "Page title"
-        },
-        "fetchedAt": {
-          "type": "string"
-        },
-        "extractedMarkdown": {
-          "type": "string",
-          "description": "Extracted markdown content (default)"
-        },
-        "extractedText": {
-          "type": "string",
-          "description": "Extracted plain text (when format=text)"
         }
       }
     },
@@ -531,7 +400,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "path", required: false, desc: "要检查的文件路径（text/path 二选一必填；会优先读取提案态内容）", type: "string" },
       { name: "libraryIds", required: false, desc: "可选：风格库 ID 数组；不传则默认使用右侧已绑定的风格库（purpose=style）", type: "array" },
       { name: "model", required: false, desc: "可选：用于 linter 的强模型（默认优先 LLM_LINTER_MODEL，其次 LLM_CARD_MODEL）", type: "string" },
-      { name: "maxIssues", required: false, desc: "可选：最多返回多少条“不像点”（默认 10）", type: "number" },
+      { name: "maxIssues", required: false, desc: "\u53ef\u9009\uff1a\u6700\u591a\u8fd4\u56de\u591a\u5c11\u6761\u201c\u4e0d\u50cf\u70b9\u201d\uff08\u9ed8\u8ba4 10\uff09", type: "number" },
     ],
     modes: ["agent"],
     inputSchema: {
@@ -712,7 +581,7 @@ export const TOOL_LIST: ToolMeta[] = [
       "【何时用】\n" +
       "- 你确认任务已完成，且不需要再调用任何工具\n" +
       "- 尤其是：已完成写入（doc.write/doc.applyEdits/doc.splitToDir 等）并且 To-do 已清空/全部 done\n" +
-      "【注意】调用 run.done 后，系统会生成一份“执行报告”并终止本次 run。",
+      "【注意】调用 run.done 后，系统会生成一份\u201c执行报告\u201d并终止本次 run。",
     args: [{ name: "note", required: false, desc: "可选：完成口径/选取策略的简短备注（<=200字）", type: "string" }],
     modes: ["agent"],
     inputSchema: {
@@ -916,7 +785,7 @@ export const TOOL_LIST: ToolMeta[] = [
   },
   {
     name: "doc.splitToDir",
-    description: "将一个大文档按“标题/文案(正文)”块分割成多篇，并写入目标文件夹（proposal-first：Keep 才会真正写入；Undo 可回滚）。",
+    description: "\u5c06\u4e00\u4e2a\u5927\u6587\u6863\u6309\u201c\u6807\u9898/\u6587\u6848(\u6b63\u6587)\u201d\u5757\u5206\u5272\u6210\u591a\u7bc7\uff0c\u5e76\u5199\u5165\u76ee\u6807\u6587\u4ef6\u5939\uff08proposal-first\uff1aKeep \u624d\u4f1a\u771f\u6b63\u5199\u5165\uff1bUndo \u53ef\u56de\u6eda\uff09\u3002",
     args: [
       { name: "path", required: true, desc: "源文件路径（如 直男财经.md）", type: "string" },
       { name: "targetDir", required: true, desc: "目标目录（如 直男财经/）", type: "string" },

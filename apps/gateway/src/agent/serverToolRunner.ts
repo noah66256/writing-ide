@@ -25,7 +25,7 @@ function getServerToolAllowlist(): Set<string> {
   const cfg = String(process.env.GATEWAY_SERVER_TOOL_ALLOWLIST ?? "").trim();
   const list = cfg
     ? parseCsv(cfg)
-    : ["lint.style", "project.listFiles", "project.docRules.get", "web.search", "web.fetch", "time.now",
+    : ["lint.style", "project.listFiles", "project.docRules.get", "time.now",
        "run.done", "run.setTodoList", "run.todo.upsertMany", "run.todo.update", "run.mainDoc.update", "run.mainDoc.get",
        "agent.delegate"];
   return new Set(list.map((x) => String(x ?? "").trim()).filter(Boolean));
@@ -59,9 +59,6 @@ export function decideServerToolExecution(args: {
   const sidecar = (args.toolSidecar ?? null) as any;
   const styleLinterLibraries = Array.isArray(sidecar?.styleLinterLibraries) ? (sidecar.styleLinterLibraries as any[]) : [];
 
-  // web.*：完全 server-side（只读联网）；不依赖 Desktop sidecar
-  if (name === "web.search") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "web_search_server_side"] };
-  if (name === "web.fetch") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "web_fetch_server_side"] };
   // time.*：完全 server-side（只读时间）；不依赖 Desktop sidecar
   if (name === "time.now") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "time_now_server_side"] };
   // run.*：系统编排类工具（无副作用，但会影响 run 生命周期），应 server-side 执行
@@ -518,8 +515,6 @@ export async function executeServerToolOnGateway(args: {
     return { ok: true as const, output: { ok: true, mainDoc: args.mainDoc } };
   }
   if (name === "time.now") return executeTimeNowOnGateway();
-  if (name === "web.search") return executeWebSearchOnGateway({ call: args.call });
-  if (name === "web.fetch") return executeWebFetchOnGateway({ call: args.call });
   if (name === "lint.style") {
     return executeLintStyleOnGateway({
       fastify: args.fastify,

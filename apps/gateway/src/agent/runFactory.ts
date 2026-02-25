@@ -137,7 +137,7 @@ export const ROUTE_REGISTRY_V1 = [
     todoPolicy: "required" as const,
     toolPolicy: "allow_readonly" as const,
     nextAction: "enter_workflow" as const,
-    desc: "全网热点/新闻/素材盘点（广度优先：多轮 web.search + 多篇 web.fetch）",
+    desc: "全网热点/新闻/素材盘点（广度优先：多轮联网搜索）",
     examples: ["今天 AI 圈财经圈热点盘点", "全网热点雷达", "找一些最新资料/选题", "全网+GitHub 大搜：查一下这个问题怎么解决"],
   },
   {
@@ -319,9 +319,8 @@ export function buildAgentProtocolPrompt(args: {
   const modePolicy =
     mode === "chat"
       ? `当前模式：Chat（只读协作）。\n` +
-        `- 允许调用只读工具（以"下方列出的工具"为准）：例如 doc.read / project.search / kb.search / time.now / web.search / web.fetch。\n` +
+        `- 允许调用只读工具（以"下方列出的工具"为准）：例如 doc.read / project.search / kb.search / time.now。\n` +
         `- 禁止任何写入/副作用工具（例如 doc.write/doc.applyEdits/doc.deletePath/kb.ingest* 等）。\n` +
-        `- 时间敏感联网：调用 web.search 前先调用 time.now，再决定 query/freshness。\n` +
         `- 直接用 Markdown 给出可读结果。\n\n`
       : `当前模式：Agent（直接执行）。\n` +
         `工作流程：\n` +
@@ -330,7 +329,6 @@ export function buildAgentProtocolPrompt(args: {
         `- 用户若明确要求只回一句/只回 OK/只答是或否，且不需要工具，严格短答并结束。\n` +
         `- 上下文优先级：优先使用 Context Pack 的 REFERENCES 与已关联 KB（KB_SELECTED_LIBRARIES/KB_LIBRARY_PLAYBOOK/KB_STYLE_CLUSTERS）。信息不足再读项目文件或遍历目录。\n` +
         `- 风格库优先：当 KB_SELECTED_LIBRARIES 含 purpose=style 且任务为写作/仿写/改写/润色时，口吻/节奏/结构以风格库为第一优先（除非用户明确覆盖）。\n` +
-        `- 时间敏感联网：调用 web.search 前先调用 time.now，再决定 query/freshness。\n` +
         `- 完成即停：本轮目标达成后立刻停止，不追加新任务或开启下一段流程。\n\n` +
         `执行机制：\n` +
         `1) Todo（任务清单）：进入执行流后默认维护 Todo。\n` +
