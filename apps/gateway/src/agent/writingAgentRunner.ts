@@ -25,7 +25,7 @@ import {
   type SubAgentDefinition,
 } from "@writing-ide/agent-core";
 
-import { TOOL_LIST } from "@writing-ide/tools";
+import { TOOL_LIST, encodeToolName } from "@writing-ide/tools";
 
 import {
   decideServerToolExecution,
@@ -353,11 +353,11 @@ export class WritingAgentRunner {
       return tool.modes.includes(this.ctx.mode);
     }).map(toolMetaToAnthropicDef);
 
-    // MCP 工具：从 context 的 mcpTools 生成 tool definitions
+    // MCP 工具：从 context 的 mcpTools 生成 tool definitions（需编码 name，与内置工具一致）
     const mcpToolDefs = ((this.ctx as any).mcpTools ?? [])
       .filter((t: any) => effectiveAllowed.has(t.name))
       .map((t: any) => ({
-        name: t.name,
+        name: encodeToolName(String(t.name ?? "")),
         description: String(t.description ?? ""),
         input_schema: t.inputSchema ?? { type: "object" as const, properties: {} },
       }));

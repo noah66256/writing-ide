@@ -337,8 +337,9 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           const mcpApi = (window as any).desktop?.mcp;
           if (mcpApi) {
             const servers = await mcpApi.getServers();
-            const mcpTools = (Array.isArray(servers) ? servers : [])
-              .filter((s: any) => s.status === "connected" && Array.isArray(s.tools) && s.tools.length)
+            const serverList = Array.isArray(servers) ? servers : [];
+            const connectedWithTools = serverList.filter((s: any) => s.status === "connected" && Array.isArray(s.tools) && s.tools.length);
+            const mcpTools = connectedWithTools
               .flatMap((s: any) => s.tools.map((t: any) => ({
                 name: `mcp.${s.id}.${t.name}`,
                 description: `[MCP:${s.name}] ${t.description ?? ""}`,
@@ -348,9 +349,17 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                 originalName: t.name,
               })));
             if (mcpTools.length) out.mcpTools = mcpTools;
+            log("info", "sidecar.mcp", {
+              mcpApiAvailable: true,
+              servers: serverList.length,
+              connected: connectedWithTools.length,
+              tools: mcpTools.length,
+            });
+          } else {
+            log("info", "sidecar.mcp", { mcpApiAvailable: false });
           }
-        } catch {
-          // MCP 不可用时静默
+        } catch (e: any) {
+          log("warn", "sidecar.mcp.error", { error: String(e?.message ?? e) });
         }
 
         return out;
@@ -633,6 +642,33 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               if (executedBy === "gateway") {
                 // Gateway already handled this tool — nothing to do on Desktop
                 log("info", "tool.call.subagent.skip", { toolCallId, name, agentId: toolAgentId });
+                return;
+              }
+              // MCP 工具路由（子 Agent 也走 MCP 通道）
+              if (name.startsWith("mcp.")) {
+                const parts = name.split(".");
+                const serverId = parts[1] ?? "";
+                const mcpToolName = parts.slice(2).join(".");
+                log("info", "tool.call.subagent.mcp", { toolCallId, serverId, mcpToolName, agentId: toolAgentId });
+                try {
+                  const mcpApi = (window as any).desktop?.mcp;
+                  const result = mcpApi
+                    ? await mcpApi.callTool(serverId, mcpToolName, rawArgs)
+                    : { ok: false, error: "MCP_API_NOT_AVAILABLE" };
+                  submitToolResult({
+                    toolCallId, name,
+                    ok: result.ok,
+                    output: result.ok ? result.output : { ok: false, error: result.error },
+                    meta: { applyPolicy: "auto", riskLevel: "low", hasApply: false },
+                  });
+                } catch (e: any) {
+                  submitToolResult({
+                    toolCallId, name,
+                    ok: false,
+                    output: { ok: false, error: String(e?.message ?? e) },
+                    meta: { applyPolicy: "auto", riskLevel: "low", hasApply: false },
+                  });
+                }
                 return;
               }
               // Desktop-executed tool for sub-agent: run & send result, skip UI
