@@ -19,6 +19,7 @@ type AuthState = {
   busy: boolean;
   error: string;
   loginModalOpen: boolean;
+  initStatus: "idle" | "checking" | "done";
 
   setAccessToken: (token: string) => void;
   logout: () => void;
@@ -92,6 +93,7 @@ export const useAuthStore = create<AuthState>()(
       busy: false,
       error: "",
       loginModalOpen: false,
+      initStatus: "idle" as const,
 
       setAccessToken: (token) => set({ accessToken: String(token ?? "").trim() }),
       logout: () => set({ accessToken: "", user: null, error: "" }),
@@ -100,8 +102,10 @@ export const useAuthStore = create<AuthState>()(
 
       init: async () => {
         const token = String(get().accessToken ?? "").trim();
-        if (!token) return;
+        if (!token) { set({ initStatus: "done" }); return; }
+        set({ initStatus: "checking" });
         await get().refreshMe().catch(() => void 0);
+        set({ initStatus: "done" });
       },
 
       refreshMe: async () => {
@@ -241,7 +245,7 @@ export const useAuthStore = create<AuthState>()(
         };
       },
     }),
-    { name: "writing-ide.auth.v1" },
+    { name: "writing-ide.auth.v1", partialize: (s) => ({ accessToken: s.accessToken, user: s.user }) },
   ),
 );
 

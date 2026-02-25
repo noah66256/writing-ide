@@ -905,12 +905,12 @@ const agentRunBodySchema = z.object({
         })
         .optional(),
       mcpTools: z.array(z.object({
-        name: z.string().min(1).max(200),
-        description: z.string().max(2000).optional().default(""),
+        name: z.string().min(1).max(500),
+        description: z.string().optional().default(""),
         inputSchema: z.any().optional(),
-        serverId: z.string().min(1).max(100),
-        serverName: z.string().max(200).optional().default(""),
-        originalName: z.string().max(200).optional().default(""),
+        serverId: z.string().min(1).max(200),
+        serverName: z.string().optional().default(""),
+        originalName: z.string().optional().default(""),
       })).max(200).optional(),
     })
     .optional(),

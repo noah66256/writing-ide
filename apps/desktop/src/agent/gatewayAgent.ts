@@ -38,6 +38,7 @@ export type GatewayRunArgs = {
   targetAgentId?: string;
   targetAgentIds?: string[];
   activeSkillIds?: string[];
+  kbMentionIds?: string[];
 };
 
 
@@ -934,7 +935,7 @@ function buildRecentDialogueJsonFromTurns(turns: DialogueTurn[], maxTurns: numbe
   return msgs.length ? `RECENT_DIALOGUE(JSON):\n${JSON.stringify(msgs, null, 2)}\n\n` : "";
 }
 
-export async function buildContextPack(extra?: { referencesText?: string; userPrompt?: string }) {
+export async function buildContextPack(extra?: { referencesText?: string; userPrompt?: string; kbMentionIds?: string[] }) {
   const mainDoc = useRunStore.getState().mainDoc;
   const todoList = useRunStore.getState().todoList;
   const proj = useProjectStore.getState();
@@ -942,6 +943,12 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   const kbAttached = useRunStore.getState().kbAttachedLibraryIds ?? [];
   const kbLibraries = useKbStore.getState().libraries ?? [];
   const userPrompt = String(extra?.userPrompt ?? "");
+  // 合并持久化 attached + 本次消息 @提及的库（去重）
+  const kbMentionIds = Array.isArray(extra?.kbMentionIds) ? extra!.kbMentionIds : [];
+  const kbSelectedIds = Array.from(new Set([
+    ...kbAttached.map((x: any) => String(x ?? "").trim()).filter(Boolean),
+    ...kbMentionIds,
+  ]));
   // PROJECT_STATE：只提供最小信息（避免"光标文件/全量文件列表"对模型产生过强暗示）
   const state = {
     fileCount: proj.files.length,
@@ -1024,7 +1031,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
 
   const refs = extra?.referencesText ? `${extra.referencesText}\n\n` : "";
   const kbSelected = (() => {
-    const ids = Array.isArray(kbAttached) ? kbAttached.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
+    const ids = kbSelectedIds;
     const map = new Map(
       kbLibraries.map((l: any) => [
         l.id,
@@ -1092,7 +1099,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   const playbookSection = await (async () => {
     if (!allowInjectStyleContext) return "";
     if (!injectPlaybook) return "";
-    const ids = Array.isArray(kbAttached) ? kbAttached.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
+    const ids = kbSelectedIds;
     const playbookText = await useKbStore.getState().getPlaybookTextForLibraries(ids).catch(() => "");
     if (!playbookText) return "";
     return (
@@ -1822,6 +1829,8 @@ export function startGatewayRun(args: {
   prompt: string;
   targetAgentId?: string;
   targetAgentIds?: string[];
+  activeSkillIds?: string[];
+  kbMentionIds?: string[];
 }): GatewayRunController {
   return startGatewayRunWs(args as GatewayRunArgs);
 }

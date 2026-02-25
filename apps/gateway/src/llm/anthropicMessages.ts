@@ -359,3 +359,105 @@ export async function* streamAnthropicMessages(
     reader.releaseLock();
   }
 }
+
+// ──────────────────────────────────────────────
+// Anthropic Messages API 非流式调用（用于抽卡等后台任务）
+// ──────────────────────────────────────────────
+
+export type AnthropicOnceArgs = {
+  apiKey: string;
+  baseUrl?: string;
+  model: string;
+  system?: string;
+  messages: Array<{ role: string; content: string }>;
+  temperature?: number;
+  maxTokens?: number;
+  signal?: AbortSignal;
+};
+
+export type AnthropicOnceResult = {
+  ok: boolean;
+  content?: string;
+  error?: string;
+  status?: number;
+  rawText?: string;
+  raw?: any;
+  usage?: { promptTokens: number; completionTokens: number; totalTokens?: number };
+};
+
+/**
+ * Anthropic Messages API 非流式调用。
+ * 用于抽卡、评估等后台工作流——这些场景不需要流式，但需要走原生 Anthropic 协议。
+ */
+export async function completionOnceAnthropicMessages(args: AnthropicOnceArgs): Promise<AnthropicOnceResult> {
+  const url = `${normalizeBaseUrl(args.baseUrl)}/messages`;
+  const maxTokens =
+    typeof args.maxTokens === "number" && args.maxTokens > 0 ? Math.floor(args.maxTokens) : 8192;
+
+  const body: Record<string, unknown> = {
+    model: args.model,
+    messages: args.messages,
+    max_tokens: maxTokens,
+    stream: false,
+  };
+  if (typeof args.system === "string" && args.system.length > 0) body.system = args.system;
+  if (typeof args.temperature === "number" && Number.isFinite(args.temperature)) {
+    body.temperature = args.temperature;
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "x-api-key": args.apiKey,
+      },
+      body: JSON.stringify(body),
+      signal: args.signal,
+    });
+  } catch (e) {
+    return { ok: false, error: toErrorString(e) };
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    return { ok: false, error: text || `UPSTREAM_${res.status}`, status: res.status, rawText: text };
+  }
+
+  let json: any = null;
+  try {
+    json = await res.json();
+  } catch {
+    const text = await res.text().catch(() => "");
+    return { ok: false, error: "UPSTREAM_INVALID_JSON", status: res.status, rawText: text };
+  }
+
+  // Anthropic Messages API 响应格式：{ content: [{ type: "text", text: "..." }], usage: {...} }
+  const blocks: any[] = Array.isArray(json?.content) ? json.content : [];
+  const textParts = blocks
+    .filter((b: any) => b?.type === "text")
+    .map((b: any) => String(b?.text ?? ""));
+  const content = textParts.join("");
+
+  if (!content.trim()) {
+    return { ok: false, error: "UPSTREAM_EMPTY_CONTENT", status: res.status, rawText: JSON.stringify(json) };
+  }
+
+  const u = json?.usage;
+  const pt = Number(u?.input_tokens ?? 0);
+  const ct = Number(u?.output_tokens ?? 0);
+  const usage =
+    Number.isFinite(pt) || Number.isFinite(ct)
+      ? {
+          promptTokens: Math.max(0, Math.floor(pt)),
+          completionTokens: Math.max(0, Math.floor(ct)),
+          totalTokens: Math.max(0, Math.floor(pt) + Math.floor(ct)),
+        }
+      : undefined;
+
+  return usage
+    ? { ok: true, content, raw: json, usage }
+    : { ok: true, content, raw: json };
+}

@@ -864,6 +864,169 @@ fastify.post(
   }
 });
 
+// ── KB LLM 语义搜索（用 Haiku 替代 embedding 向量检索） ──
+fastify.post(
+  "/api/kb/llm-search",
+  { preHandler: [(fastify as any).authenticate, requirePositivePointsForLlm] },
+  async (request: any, reply) => {
+  const jwtUser = await tryGetJwtUser(request as any);
+
+  const candidateSchema = z.object({
+    id: z.string().min(1),
+    title: z.string().optional(),
+    content: z.string().min(1).max(3000),
+    kind: z.string().min(1),
+    cardType: z.string().optional(),
+  });
+  const bodySchema = z.object({
+    query: z.string().min(1),
+    candidates: z.array(candidateSchema).min(1).max(1200),
+    topN: z.number().int().min(1).max(200).optional(),
+  });
+
+  let body: z.infer<typeof bodySchema>;
+  try {
+    body = bodySchema.parse((request as any).body);
+  } catch (e: any) {
+    return reply.code(400).send({ error: "INVALID_BODY", detail: e?.message ?? String(e) });
+  }
+
+  const topN = body.topN ?? 20;
+
+  // 获取 LLM 配置（复用 chat 的 baseUrl/apiKey）
+  const env = await getLlmEnv();
+  if (!env.ok) {
+    return reply.code(500).send({
+      error: "LLM_NOT_CONFIGURED",
+      hint: "LLM chat \u914D\u7F6E\u4E0D\u53EF\u7528\uFF0C\u65E0\u6CD5\u6267\u884C KB \u8BED\u4E49\u641C\u7D22\u3002",
+    });
+  }
+
+  const model = "claude-haiku-4-5-20251001";
+
+  // \u6784\u9020\u5019\u9009\u5217\u8868\u6587\u672C
+  const candidateLines = body.candidates.map((c, i) => {
+    const parts = [`[${i + 1}] id=${c.id} kind=${c.kind}`];
+    if (c.cardType) parts[0] += ` cardType=${c.cardType}`;
+    if (c.title) parts.push(`\u6807\u9898\uFF1A${c.title}`);
+    // \u622A\u53D6\u5185\u5BB9\u524D 400 \u5B57\u7B26\u4EE5\u63A7\u5236 token \u91CF
+    const content = c.content.length > 400 ? c.content.slice(0, 400) + "\u2026" : c.content;
+    parts.push(`\u5185\u5BB9\uFF1A${content}`);
+    return parts.join("\n");
+  });
+
+  const sysPrompt =
+    "\u4F60\u662F\u77E5\u8BC6\u5E93\u8BED\u4E49\u641C\u7D22\u5F15\u64CE\u3002\u7ED9\u5B9A\u7528\u6237\u67E5\u8BE2\u548C\u4E00\u7EC4\u5019\u9009\u6587\u672C\u7247\u6BB5\uFF0C\u4F60\u9700\u8981\u627E\u51FA\u4E0E\u67E5\u8BE2\u8BED\u4E49\u6700\u76F8\u5173\u7684\u7247\u6BB5\u3002\n\n" +
+    "\u8BC4\u5224\u6807\u51C6\uFF1A\n" +
+    "- \u8BED\u4E49\u76F8\u5173\u6027\uFF1A\u7247\u6BB5\u5185\u5BB9\u662F\u5426\u80FD\u56DE\u7B54/\u652F\u6491\u67E5\u8BE2\u610F\u56FE\n" +
+    "- \u98CE\u683C\u5339\u914D\uFF1A\u5982\u679C\u67E5\u8BE2\u6D89\u53CA\u98CE\u683C/\u8BED\u6C14/\u5199\u6CD5\uFF0C\u4F18\u5148\u5339\u914D\u98CE\u683C\u63A5\u8FD1\u7684\u7247\u6BB5\n" +
+    "- \u4E3B\u9898\u8986\u76D6\uFF1A\u4F18\u5148\u9009\u62E9\u4E3B\u9898\u8986\u76D6\u5EA6\u9AD8\u7684\u7247\u6BB5\n\n" +
+    `\u8F93\u51FA\u683C\u5F0F\uFF1AJSON \u6570\u7EC4\uFF0C\u6309\u76F8\u5173\u6027\u964D\u5E8F\u6392\u5217\uFF0C\u6700\u591A ${topN} \u4E2A\u3002\n` +
+    '[{"id": "\u7247\u6BB5ID", "score": 0-100\u7684\u76F8\u5173\u6027\u5206\u6570}]\n\n' +
+    "\u53EA\u8F93\u51FA JSON\uFF0C\u4E0D\u8981\u4EFB\u4F55\u89E3\u91CA\u3002";
+
+  const userPrompt =
+    `\u67E5\u8BE2\uFF1A${body.query}\n\n` +
+    `\u5019\u9009\u7247\u6BB5\uFF08\u5171 ${body.candidates.length} \u4E2A\uFF09\uFF1A\n\n` +
+    candidateLines.join("\n\n");
+
+  try {
+    const ret = await completionOnceViaProvider({
+      baseUrl: env.baseUrl.replace(/\/+$/g, ""),
+      endpoint: env.endpoint || "/v1/chat/completions",
+      apiKey: env.apiKey,
+      model,
+      temperature: 0,
+      maxTokens: 2000,
+      messages: [
+        { role: "system", content: sysPrompt },
+        { role: "user", content: userPrompt },
+      ],
+    });
+
+    if (!ret.ok) {
+      return reply.code(ret.status ?? 502).send({
+        error: "KB_LLM_SEARCH_FAILED",
+        detail: (ret as any).error ?? "LLM \u8C03\u7528\u5931\u8D25",
+      });
+    }
+
+    const raw = String((ret as any).text ?? "").trim();
+
+    // \u89E3\u6790 JSON \u8FD4\u56DE\uFF08\u591A\u79CD\u5BB9\u9519\u7B56\u7565\uFF09
+    let parsed: any[] | null = null;
+    // 1) \u76F4\u63A5 parse
+    try { parsed = JSON.parse(raw); } catch {}
+    // 2) \u63D0\u53D6 code block
+    if (!parsed) {
+      const cbMatch = raw.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
+      if (cbMatch?.[1]) try { parsed = JSON.parse(cbMatch[1].trim()); } catch {}
+    }
+    // 3) \u63D0\u53D6\u6570\u7EC4\u90E8\u5206
+    if (!parsed) {
+      const arrMatch = raw.match(/\[[\s\S]*\]/);
+      if (arrMatch) try { parsed = JSON.parse(arrMatch[0]); } catch {}
+    }
+
+    if (!Array.isArray(parsed)) {
+      return reply.code(502).send({
+        error: "KB_LLM_SEARCH_PARSE_FAILED",
+        detail: "\u65E0\u6CD5\u89E3\u6790 LLM \u8FD4\u56DE\u7684 JSON",
+        raw: raw.slice(0, 500),
+      });
+    }
+
+    const resultSchema = z.array(z.object({
+      id: z.string(),
+      score: z.number(),
+    }));
+    let results: Array<{ id: string; score: number }>;
+    try {
+      results = resultSchema.parse(parsed);
+    } catch {
+      // \u5BBD\u677E\u89E3\u6790\uFF1A\u53EA\u53D6\u6709 id+score \u7684\u5143\u7D20
+      results = (parsed as any[])
+        .filter((x: any) => typeof x?.id === "string" && typeof x?.score === "number")
+        .map((x: any) => ({ id: String(x.id), score: Number(x.score) }));
+    }
+
+    // \u6309 score \u964D\u5E8F\uFF0C\u622A\u53D6 topN
+    results.sort((a, b) => b.score - a.score);
+    results = results.slice(0, topN);
+
+    // \u8BA1\u8D39
+    const usage = (ret as any).usage ?? null;
+    try {
+      if (jwtUser?.id && jwtUser.role !== "admin" && usage) {
+        await chargeUserForLlmUsage({
+          userId: jwtUser.id,
+          modelId: model,
+          usage: {
+            promptTokens: usage.prompt_tokens ?? usage.promptTokens ?? 0,
+            completionTokens: usage.completion_tokens ?? usage.completionTokens ?? 0,
+            totalTokens: (usage.prompt_tokens ?? usage.promptTokens ?? 0) + (usage.completion_tokens ?? usage.completionTokens ?? 0),
+          },
+          source: "kb.llm_search",
+        });
+      }
+    } catch {
+      // ignore billing failure
+    }
+
+    return {
+      ok: true,
+      results,
+      usage: usage ? {
+        promptTokens: usage.prompt_tokens ?? usage.promptTokens ?? 0,
+        completionTokens: usage.completion_tokens ?? usage.completionTokens ?? 0,
+      } : undefined,
+    };
+  } catch (e: any) {
+    const msg = e?.message ? String(e.message) : String(e);
+    return reply.code(500).send({ error: "KB_LLM_SEARCH_ERROR", detail: msg });
+  }
+});
+
 fastify.post(
   "/api/llm/chat/stream",
   { preHandler: [(fastify as any).authenticate, requirePositivePointsForLlm] },

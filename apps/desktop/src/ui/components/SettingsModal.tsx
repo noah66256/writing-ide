@@ -2,7 +2,8 @@ import { useState, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
 import {
   X, Users, Plug, Sparkles, ChevronDown, ChevronRight, Plus,
-  Bot, BookOpen, FolderOpen, Link2, Unlink, RefreshCw, Pencil, Trash2, Terminal, Globe, Radio,
+  Bot, BookOpen, FolderOpen, RefreshCw, Pencil, Trash2, Terminal, Globe, Radio,
+  Eye, EyeOff, Monitor, ExternalLink,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TeamModal } from "@/components/TeamModal";
@@ -10,7 +11,7 @@ import { listRegisteredSkills, type SkillManifest } from "@writing-ide/agent-cor
 import { useSkillStore } from "@/state/skillStore";
 import { usePersonaStore } from "@/state/personaStore";
 import { useKbStore } from "@/state/kbStore";
-import { useRunStore } from "@/state/runStore";
+import { useDialogStore } from "@/state/dialogStore";
 import { useMcpStore, type McpServerState } from "@/state/mcpStore";
 
 type Tab = "persona" | "team" | "mcp" | "skill" | "kb";
@@ -23,8 +24,20 @@ const TABS: { id: Tab; label: string; icon: typeof Users }[] = [
   { id: "skill", label: "技能", icon: Sparkles },
 ];
 
-export function SettingsModal({ onClose }: { onClose: () => void }) {
-  const [tab, setTab] = useState<Tab>("persona");
+export function SettingsModal({ onClose, initialTab, kbSelectMode }: {
+  onClose: () => void;
+  initialTab?: string;
+  kbSelectMode?: { onSelect: (id: string) => void };
+}) {
+  const [tab, setTab] = useState<Tab>(() => {
+    const t = initialTab as Tab;
+    return TABS.some((x) => x.id === t) ? t : "persona";
+  });
+
+  // kbSelectMode 请求到达时强制切换到 KB tab
+  useEffect(() => {
+    if (kbSelectMode && initialTab === "kb") setTab("kb");
+  }, [kbSelectMode, initialTab]);
 
   return createPortal(
     <div
@@ -69,7 +82,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           </div>
           <div className="flex-1 overflow-y-auto p-6">
             {tab === "persona" && <PersonaTabContent />}
-            {tab === "kb" && <KbTabContent />}
+            {tab === "kb" && <KbTabContent kbSelectMode={kbSelectMode} />}
             {tab === "team" && <TeamTabContent />}
             {tab === "mcp" && <McpTabContent />}
             {tab === "skill" && <SkillTabContent />}
@@ -132,12 +145,14 @@ function PersonaTabContent() {
 
 /* ─── KB Tab ─── */
 
-function KbTabContent() {
+function KbTabContent({ kbSelectMode }: { kbSelectMode?: { onSelect: (id: string) => void } }) {
   const baseDir = useKbStore((s) => s.baseDir);
   const libraries = useKbStore((s) => s.libraries);
   const refreshLibraries = useKbStore((s) => s.refreshLibraries);
-  const kbAttachedIds = useRunStore((s) => s.kbAttachedLibraryIds);
-  const setKbAttached = useRunStore((s) => s.setKbAttachedLibraries);
+  const createLibrary = useKbStore((s) => s.createLibrary);
+  const renameLibrary = useKbStore((s) => s.renameLibrary);
+  const deleteLibraryToTrash = useKbStore((s) => s.deleteLibraryToTrash);
+  const setCurrentLibrary = useKbStore((s) => s.setCurrentLibrary);
 
   const handlePickDir = async () => {
     const api = window.desktop?.fs;
@@ -148,25 +163,54 @@ function KbTabContent() {
     await refreshLibraries().catch(() => void 0);
   };
 
-  const toggleAttach = (libId: string, purpose: string) => {
-    const cur = kbAttachedIds;
-    if (cur.includes(libId)) {
-      setKbAttached(cur.filter((x) => x !== libId));
-    } else {
-      if (purpose === "style") {
-        const styleIds = new Set(libraries.filter((l) => l.purpose === "style").map((l) => l.id));
-        const keep = cur.filter((x) => !styleIds.has(x));
-        setKbAttached([...keep, libId]);
-      } else {
-        setKbAttached([...cur, libId]);
-      }
+  const handleCreateLibrary = async () => {
+    const name = await useDialogStore.getState().openPrompt({
+      title: "新建知识库",
+      placeholder: "请输入库名称",
+      defaultValue: "",
+    });
+    if (!name) return;
+    const ret = await createLibrary(name);
+    if (!ret.ok) return;
+    // kbSelectMode 下，新建后直接选中
+    if (kbSelectMode && ret.id) {
+      setCurrentLibrary(ret.id);
+      kbSelectMode.onSelect(ret.id);
     }
+  };
+
+  const handleRenameLibrary = async (id: string, oldName: string) => {
+    const newName = await useDialogStore.getState().openPrompt({
+      title: "重命名知识库",
+      placeholder: "请输入新名称",
+      defaultValue: oldName,
+    });
+    if (!newName) return;
+    await renameLibrary(id, newName);
+  };
+
+  const handleDeleteLibrary = async (id: string, name: string) => {
+    const ok = await useDialogStore.getState().openConfirm({
+      title: "删除知识库？",
+      message: `确认删除「${name}」吗？该库会移入回收站，可在库管理中恢复。`,
+      danger: true,
+    });
+    if (!ok) return;
+    await deleteLibraryToTrash(id);
+  };
+
+  const handleSelectLibrary = (id: string) => {
+    if (!kbSelectMode) return;
+    setCurrentLibrary(id);
+    kbSelectMode.onSelect(id);
   };
 
   return (
     <div className="flex flex-col gap-5">
       <div className="text-[12px] text-text-muted leading-relaxed">
-        知识库存储在本地磁盘，选择目录后自动发现库文件。关联后，Agent 的 kb.search 会自动搜索这些库，也可在输入框 @ 提及。
+        {kbSelectMode
+          ? "请选择一个目标库用于抽卡入库，也可新建库。选中后将自动继续导入流程。"
+          : "知识库存储在本地磁盘，选择目录后自动发现库文件。在输入框 @ 提及库名即可在写作时检索。"}
       </div>
       <div className="flex flex-col gap-1.5">
         <label className="text-[13px] font-medium text-text">库目录</label>
@@ -193,9 +237,18 @@ function KbTabContent() {
             <span className="text-[13px] font-medium text-text">
               已发现的库 ({libraries.length})
             </span>
-            <button onClick={() => void refreshLibraries()} className="text-[11px] text-accent hover:underline">
-              刷新
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => void handleCreateLibrary()}
+                className="shrink-0 flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium bg-accent-soft text-accent hover:bg-accent-soft/80 transition-colors"
+              >
+                <Plus size={12} />
+                新建库
+              </button>
+              <button onClick={() => void refreshLibraries()} className="text-[11px] text-accent hover:underline">
+                刷新
+              </button>
+            </div>
           </div>
           {libraries.length === 0 ? (
             <div className="text-[12px] text-text-faint py-4 text-center border border-dashed border-border rounded-lg">
@@ -203,38 +256,45 @@ function KbTabContent() {
             </div>
           ) : (
             <div className="flex flex-col gap-1.5">
-              {libraries.map((lib) => {
-                const attached = kbAttachedIds.includes(lib.id);
-                return (
-                  <div
-                    key={lib.id}
-                    className={cn(
-                      "flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-colors",
-                      attached ? "border-accent/40 bg-accent-soft/20" : "border-border hover:bg-surface-alt/50",
-                    )}
-                  >
-                    <BookOpen size={16} className={attached ? "text-accent" : "text-text-muted"} />
-                    <div className="flex-1 min-w-0">
-                      <div className="text-[13px] font-medium text-text truncate">{lib.name}</div>
-                      <div className="text-[11px] text-text-muted">
-                        {lib.purpose === "style" ? "风格库" : lib.purpose === "product" ? "产品库" : "素材库"}
-                        {" · "}{lib.docCount}{" 篇"}
-                      </div>
+              {libraries.map((lib) => (
+                <div
+                  key={lib.id}
+                  onClick={() => handleSelectLibrary(lib.id)}
+                  className={cn(
+                    "flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-colors",
+                    "border-border hover:bg-surface-alt/50",
+                    kbSelectMode && "cursor-pointer hover:border-accent/40 hover:bg-accent-soft/10",
+                  )}
+                >
+                  <BookOpen size={16} className="text-text-muted" />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[13px] font-medium text-text truncate">{lib.name}</div>
+                    <div className="text-[11px] text-text-muted">
+                      {lib.purpose === "style" ? "风格库" : lib.purpose === "product" ? "产品库" : "素材库"}
+                      {" · "}{lib.docCount}{" 篇"}
+                      {kbSelectMode ? " · 点击选择" : ""}
                     </div>
-                    <button
-                      onClick={() => toggleAttach(lib.id, lib.purpose)}
-                      className={cn(
-                        "shrink-0 flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors",
-                        attached
-                          ? "bg-accent/10 text-accent hover:bg-error/10 hover:text-error"
-                          : "bg-surface-alt text-text-muted hover:bg-accent-soft hover:text-accent",
-                      )}
-                    >
-                      {attached ? <><Unlink size={12} />取消关联</> : <><Link2 size={12} />关联</>}
-                    </button>
                   </div>
-                );
-              })}
+                  {!kbSelectMode && (
+                    <div className="shrink-0 flex items-center gap-1">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); void handleRenameLibrary(lib.id, lib.name); }}
+                        className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-text-muted hover:bg-surface-alt hover:text-text transition-colors"
+                      >
+                        <Pencil size={12} />
+                        重命名
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); void handleDeleteLibrary(lib.id, lib.name); }}
+                        className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-error hover:bg-error/10 transition-colors"
+                      >
+                        <Trash2 size={12} />
+                        删除
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
           )}
         </div>
@@ -326,6 +386,118 @@ const TRANSPORT_LABELS: Record<TransportType, string> = {
   sse: "SSE",
 };
 
+// ── 浏览器状态栏（MCP 标签页顶部） ──────────────────
+function BrowserStatusBar() {
+  const [info, setInfo] = useState<{ path: string | null; name: string | null; autoDetected: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const result = await (window as any).desktop?.browser?.getInfo?.();
+      if (result) setInfo(result);
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const handleResetDetect = async () => {
+    setBusy(true);
+    try {
+      await (window as any).desktop?.browser?.resetDetect?.();
+      await load();
+    } catch { /* ignore */ }
+    setBusy(false);
+  };
+
+  const handlePickPath = async () => {
+    setBusy(true);
+    try {
+      const result = await (window as any).desktop?.browser?.pickPath?.();
+      if (result?.ok && result.path) {
+        await (window as any).desktop?.browser?.setPath?.(result.path);
+        await load();
+      }
+    } catch { /* ignore */ }
+    setBusy(false);
+  };
+
+  const handleOpenChromeDownload = () => {
+    try {
+      window.open("https://www.google.com/chrome/", "_blank");
+    } catch { /* ignore */ }
+  };
+
+  if (!info) return null;
+
+  const found = Boolean(info.path);
+  // 截断过长路径
+  const shortPath = info.path && info.path.length > 60
+    ? "..." + info.path.slice(-55)
+    : info.path;
+
+  return (
+    <div className={cn(
+      "flex flex-col gap-1.5 px-3 py-2.5 rounded-lg border text-[12px]",
+      found
+        ? "border-border bg-surface"
+        : "border-yellow-500/30 bg-yellow-500/5",
+    )}>
+      <div className="flex items-center gap-2">
+        <Monitor size={14} className={found ? "text-green-500" : "text-yellow-500"} />
+        <span className="font-medium text-text">
+          {found ? `系统浏览器: ${info.name || "Chromium"}` : "未检测到 Chromium 系浏览器"}
+        </span>
+      </div>
+      {found ? (
+        <>
+          <div className="text-text-faint ml-[22px] truncate" title={info.path ?? ""}>
+            {shortPath}
+          </div>
+          <div className="flex items-center gap-2 ml-[22px]">
+            <span className="text-text-faint">{info.autoDetected ? "自动检测" : "手动指定"}</span>
+            <span className="text-text-faint">·</span>
+            <button
+              onClick={handleResetDetect}
+              disabled={busy}
+              className="text-accent hover:underline disabled:opacity-50"
+            >
+              重新检测
+            </button>
+            <button
+              onClick={handlePickPath}
+              disabled={busy}
+              className="text-accent hover:underline disabled:opacity-50"
+            >
+              手动指定
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="text-text-faint ml-[22px]">
+            部分 MCP Server 需要浏览器来抓取动态网页内容
+          </div>
+          <div className="flex items-center gap-2 ml-[22px]">
+            <button
+              onClick={handlePickPath}
+              disabled={busy}
+              className="text-accent hover:underline disabled:opacity-50"
+            >
+              手动指定路径
+            </button>
+            <button
+              onClick={handleOpenChromeDownload}
+              className="flex items-center gap-1 text-accent hover:underline"
+            >
+              安装 Chrome <ExternalLink size={11} />
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function McpTabContent() {
   const servers = useMcpStore((s) => s.servers);
   const refresh = useMcpStore((s) => s.refresh);
@@ -337,6 +509,9 @@ function McpTabContent() {
 
   return (
     <div className="flex flex-col gap-4">
+      {/* 浏览器状态栏 */}
+      <BrowserStatusBar />
+
       <div className="flex items-center justify-between">
         <div className="text-[13px] font-semibold text-text">MCP Server</div>
         <button
@@ -542,6 +717,15 @@ function McpAddDialog({ editId, onClose }: { editId: string | null; onClose: () 
   const [command, setCommand] = useState(existing?.config?.command ?? "");
   const [args, setArgs] = useState(existing?.config?.args?.join(" ") ?? "");
   const [endpoint, setEndpoint] = useState(existing?.config?.endpoint ?? "");
+  const [envPairs, setEnvPairs] = useState<Array<{ key: string; value: string; visible: boolean }>>(
+    () => {
+      const env = existing?.config?.env;
+      if (env && typeof env === "object" && Object.keys(env).length > 0) {
+        return Object.entries(env).map(([k, v]) => ({ key: k, value: v, visible: false }));
+      }
+      return [];
+    },
+  );
   const [saving, setSaving] = useState(false);
 
   const canSave = name.trim() && (
@@ -562,6 +746,16 @@ function McpAddDialog({ editId, onClose }: { editId: string | null; onClose: () 
       config.args = args.trim() ? args.trim().split(/\s+/) : [];
     } else {
       config.endpoint = endpoint.trim();
+    }
+
+    // 环境变量
+    const envObj: Record<string, string> = {};
+    for (const p of envPairs) {
+      const k = p.key.trim();
+      if (k) envObj[k] = p.value;
+    }
+    if (Object.keys(envObj).length > 0) {
+      config.env = envObj;
     }
 
     if (editId) {
@@ -653,6 +847,69 @@ function McpAddDialog({ editId, onClose }: { editId: string | null; onClose: () 
           />
         </div>
       )}
+
+      {/* 环境变量 */}
+      <div className="flex flex-col gap-1.5">
+        <label className="text-[12px] font-medium text-text">环境变量</label>
+        {envPairs.length > 0 && (
+          <div className="flex flex-col gap-1.5">
+            {envPairs.map((pair, idx) => (
+              <div key={idx} className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  value={pair.key}
+                  onChange={(e) => {
+                    const next = [...envPairs];
+                    next[idx] = { ...pair, key: e.target.value };
+                    setEnvPairs(next);
+                  }}
+                  placeholder="KEY"
+                  className="w-[40%] px-2.5 py-1.5 rounded-lg border border-border bg-surface text-[12px] text-text font-mono placeholder:text-text-faint focus:outline-none focus:border-accent transition-colors"
+                />
+                <div className="relative flex-1">
+                  <input
+                    type={pair.visible ? "text" : "password"}
+                    value={pair.value}
+                    onChange={(e) => {
+                      const next = [...envPairs];
+                      next[idx] = { ...pair, value: e.target.value };
+                      setEnvPairs(next);
+                    }}
+                    placeholder="value"
+                    className="w-full px-2.5 py-1.5 pr-8 rounded-lg border border-border bg-surface text-[12px] text-text font-mono placeholder:text-text-faint focus:outline-none focus:border-accent transition-colors"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = [...envPairs];
+                      next[idx] = { ...pair, visible: !pair.visible };
+                      setEnvPairs(next);
+                    }}
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 text-text-faint hover:text-text-muted transition-colors"
+                  >
+                    {pair.visible ? <EyeOff size={13} /> : <Eye size={13} />}
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEnvPairs(envPairs.filter((_, i) => i !== idx))}
+                  className="w-7 h-7 flex items-center justify-center rounded-md text-text-faint hover:text-red-500 hover:bg-red-500/10 transition-colors shrink-0"
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={() => setEnvPairs([...envPairs, { key: "", value: "", visible: false }])}
+          className="flex items-center gap-1.5 text-[12px] text-text-muted hover:text-accent transition-colors self-start"
+        >
+          <Plus size={12} />
+          添加环境变量
+        </button>
+      </div>
 
       {/* Actions */}
       <div className="flex items-center justify-end gap-2 mt-1">

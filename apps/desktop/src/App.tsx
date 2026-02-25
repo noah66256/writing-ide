@@ -1,15 +1,29 @@
 import { DialogHost } from "./components/DialogHost";
+import { LoginModal } from "./components/LoginModal";
 import { ConversationLayout } from "./ui/layouts/ConversationLayout";
+import { LoginPage } from "./ui/components/LoginPage";
 import { useEffect } from "react";
 import { useProjectStore } from "./state/projectStore";
 import { useWorkspaceStore } from "./state/workspaceStore";
 import { useUpdateStore } from "./state/updateStore";
+import { useAuthStore } from "./state/authStore";
 import { getUpdateBaseUrl } from "./agent/updateBaseUrl";
+import { Loader2 } from "lucide-react";
 import "./state/themeStore"; // side-effect: apply theme on load
 
 export default function App() {
   const setUpdateCheckResult = useUpdateStore((s) => s.setCheckResult);
   const setDownload = useUpdateStore((s) => s.setDownload);
+
+  const initStatus = useAuthStore((s) => s.initStatus);
+  const user = useAuthStore((s) => s.user);
+  const loginModalOpen = useAuthStore((s) => s.loginModalOpen);
+  const closeLoginModal = useAuthStore((s) => s.closeLoginModal);
+
+  // 启动时校验已保存的 token
+  useEffect(() => {
+    useAuthStore.getState().init();
+  }, []);
 
   // 启动时：尝试恢复上次打开的项目
   useEffect(() => {
@@ -131,10 +145,30 @@ export default function App() {
     };
   }, [setDownload]);
 
+  // 初始化中：居中 loading
+  if (initStatus !== "done") {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-bg">
+        <div
+          className="fixed top-0 left-0 right-0 h-[52px] z-50"
+          style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+        />
+        <Loader2 size={24} className="animate-spin text-text-faint" />
+      </div>
+    );
+  }
+
+  // 未登录：全屏登录页
+  if (!user) {
+    return <LoginPage />;
+  }
+
+  // 已登录：正常应用
   return (
     <>
       <ConversationLayout />
       <DialogHost />
+      <LoginModal open={loginModalOpen} onClose={() => closeLoginModal()} />
     </>
   );
 }

@@ -377,7 +377,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       const contextPack =
         args.mode === "chat"
           ? buildChatContextPack({ referencesText })
-          : await buildContextPack({ referencesText, userPrompt: promptForGateway });
+          : await buildContextPack({ referencesText, userPrompt: promptForGateway, kbMentionIds: args.kbMentionIds });
 
       // ====================================================================
       // 2. WebSocket connection

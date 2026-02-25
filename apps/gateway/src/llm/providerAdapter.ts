@@ -1,6 +1,7 @@
 import type { ChatCompletionOnceResult, OpenAiChatMessage, StreamDeltaEvent } from "./openaiCompat.js";
 import { chatCompletionOnce, streamChatCompletions } from "./openaiCompat.js";
 import { isGeminiEndpoint, streamGeminiGenerateContent } from "./gemini.js";
+import { completionOnceAnthropicMessages } from "./anthropicMessages.js";
 
 export type ProviderStreamArgs = {
   baseUrl: string;
@@ -90,6 +91,33 @@ function parseUpstreamStatusFromErrorText(errorText: string): number | undefined
 
 export async function completionOnceViaProvider(args: ProviderStreamArgs): Promise<ChatCompletionOnceResult> {
   const endpoint = String(args.endpoint || "/v1/chat/completions");
+
+  // Claude 模型走原生 Anthropic Messages API（避免代理的 OpenAI 兼容层非流式转换问题）
+  const modelLower = String(args.model ?? "").toLowerCase();
+  if (modelLower.includes("claude")) {
+    // 转换 OpenAI 格式的 messages 为 Anthropic 格式（提取 system）
+    let systemText = "";
+    const userAssistantMsgs: Array<{ role: string; content: string }> = [];
+    for (const m of args.messages) {
+      if (m.role === "system") {
+        systemText += (systemText ? "\n\n" : "") + String(m.content ?? "");
+      } else {
+        userAssistantMsgs.push({ role: m.role, content: String(m.content ?? "") });
+      }
+    }
+    const r = await completionOnceAnthropicMessages({
+      apiKey: args.apiKey,
+      baseUrl: args.baseUrl,
+      model: args.model,
+      system: systemText || undefined,
+      messages: userAssistantMsgs,
+      temperature: args.temperature,
+      maxTokens: args.maxTokens ?? undefined,
+      signal: args.signal,
+    });
+    return r as ChatCompletionOnceResult;
+  }
+
   if (!isGeminiEndpoint(endpoint)) {
     return chatCompletionOnce({
       config: { baseUrl: args.baseUrl, apiKey: args.apiKey },

@@ -43,6 +43,8 @@ let watchedRoot = null;
 let watchTimer = null;
 let watchChanged = new Set();
 let mcpManager = null;
+let appSettings = {};  // 应用级设置（含浏览器路径等）
+let appSettingsModules = null;  // { loadSettings, saveSettings, detectBrowser }
 
 // ======== Single Instance Lock（防止多开导致新旧并行/占用文件） ========
 let gotSingleInstanceLock = true;
@@ -1249,6 +1251,77 @@ function registerIpc() {
     if (!mcpManager) return { ok: false, error: "MCP_NOT_READY" };
     return mcpManager.callTool(serverId, toolName, toolArgs);
   });
+
+  // ── 浏览器检测 ──────────────────────────
+  ipcMain.handle("app.getBrowserInfo", async () => ({
+    path: appSettings.browserPath || null,
+    name: appSettings.browserName || null,
+    autoDetected: appSettings.browserAutoDetected !== false,
+  }));
+
+  ipcMain.handle("app.setBrowserPath", async (_event, newPath) => {
+    try {
+      appSettings.browserPath = newPath || null;
+      appSettings.browserName = null; // 用户手动指定时清除自动检测名称
+      appSettings.browserAutoDetected = false;
+      if (appSettingsModules) {
+        await appSettingsModules.saveSettings(app.getPath("userData"), appSettings);
+      }
+      // 始终更新全局 env（传 null 时会清除旧值）
+      if (mcpManager) {
+        mcpManager.setGlobalEnv({ BROWSER_PATH: newPath || null });
+        // 重连已连接的 stdio server 使新 env 生效
+        mcpManager.reconnectStdioServers().catch(() => void 0);
+      }
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
+  ipcMain.handle("app.resetBrowserDetect", async () => {
+    try {
+      if (!appSettingsModules) return { ok: false, error: "MODULES_NOT_READY" };
+      const detected = await appSettingsModules.detectBrowser();
+      appSettings.browserPath = detected.path;
+      appSettings.browserName = detected.name;
+      appSettings.browserAutoDetected = true;
+      await appSettingsModules.saveSettings(app.getPath("userData"), appSettings);
+      // 始终更新全局 env（未检测到时传 null 清除）
+      if (mcpManager) {
+        mcpManager.setGlobalEnv({ BROWSER_PATH: detected.path || null });
+        mcpManager.reconnectStdioServers().catch(() => void 0);
+      }
+      return { ok: true, ...detected };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
+  ipcMain.handle("app.pickBrowserPath", async () => {
+    try {
+      const win = BrowserWindow.getFocusedWindow();
+      const isMac = process.platform === "darwin";
+      const result = await dialog.showOpenDialog(win ?? undefined, {
+        title: "选择浏览器可执行文件",
+        properties: isMac ? ["openFile", "treatPackageAsDirectory"] : ["openFile"],
+        filters: isMac
+          ? [{ name: "可执行文件", extensions: ["*"] }]
+          : [{ name: "可执行文件", extensions: ["exe"] }],
+      });
+      if (result.canceled || !result.filePaths?.[0]) return { ok: false, canceled: true };
+      const picked = result.filePaths[0];
+      // 校验文件是否存在且可访问
+      try {
+        await fsp.access(picked);
+      } catch {
+        return { ok: false, error: "FILE_NOT_ACCESSIBLE" };
+      }
+      return { ok: true, path: picked };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
 }
 
 function createWindow() {
@@ -1320,8 +1393,33 @@ app.whenReady().then(async () => {
 
   // ======== MCP Client 初始化 ========
   try {
+    // 1. 加载 app settings + 浏览器检测
+    const settingsMod = await import("./app-settings.mjs");
+    const browserMod = await import("./browser-detect.mjs");
+    appSettingsModules = {
+      loadSettings: settingsMod.loadSettings,
+      saveSettings: settingsMod.saveSettings,
+      detectBrowser: browserMod.detectBrowser,
+    };
+    appSettings = await settingsMod.loadSettings(app.getPath("userData"));
+
+    // 2. 浏览器自动检测（仅自动检测模式或首次）
+    if (!appSettings.browserPath || appSettings.browserAutoDetected !== false) {
+      const detected = await browserMod.detectBrowser();
+      if (detected.found) {
+        appSettings.browserPath = detected.path;
+        appSettings.browserName = detected.name;
+        appSettings.browserAutoDetected = true;
+        await settingsMod.saveSettings(app.getPath("userData"), appSettings);
+      }
+    }
+
+    // 3. 初始化 MCP Manager 并注入浏览器路径
     const { McpManager } = await import("./mcp-manager.mjs");
     mcpManager = new McpManager(app.getPath("userData"));
+    if (appSettings.browserPath) {
+      mcpManager.setGlobalEnv({ BROWSER_PATH: appSettings.browserPath });
+    }
     await mcpManager.loadConfig();
     // 状态变更推送给 renderer
     mcpManager.onStatusChange((payload) => {

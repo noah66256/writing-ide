@@ -145,6 +145,20 @@ contextBridge.exposeInMainWorld("desktop", {
       return () => ipcRenderer.removeListener("mcp.statusChange", listener);
     },
   },
+  browser: {
+    getInfo() {
+      return ipcRenderer.invoke("app.getBrowserInfo");
+    },
+    setPath(browserPath) {
+      return ipcRenderer.invoke("app.setBrowserPath", browserPath);
+    },
+    resetDetect() {
+      return ipcRenderer.invoke("app.resetBrowserDetect");
+    },
+    pickPath() {
+      return ipcRenderer.invoke("app.pickBrowserPath");
+    },
+  },
 });
 
 

@@ -19,6 +19,7 @@ export type McpServerState = {
     args?: string[];
     endpoint?: string;
     headers?: Record<string, string>;
+    env?: Record<string, string>;
   };
 };
 

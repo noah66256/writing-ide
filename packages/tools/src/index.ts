@@ -225,8 +225,6 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "debug", required: false, desc: "可选：返回检索诊断信息（默认 true）", type: "boolean" },
       { name: "perDocTopN", required: false, desc: "每篇文档最多返回多少条命中（默认 3）", type: "number" },
       { name: "topDocs", required: false, desc: "最多返回多少篇文档（默认 12）", type: "number" },
-      { name: "useVector", required: false, desc: "可选：是否使用向量做重排（true/false；默认 true）", type: "boolean" },
-      { name: "embeddingModel", required: false, desc: '可选：向量模型 id（例如 "text-embedding-3-large" 或 "Embedding-V1"）', type: "string" },
     ],
     modes: ["chat", "agent"],
     inputSchema: {
@@ -242,8 +240,6 @@ export const TOOL_LIST: ToolMeta[] = [
         debug: { type: "boolean" },
         perDocTopN: { type: "number" },
         topDocs: { type: "number" },
-        useVector: { type: "boolean" },
-        embeddingModel: { type: "string" },
       },
       required: ["query"],
       additionalProperties: true,

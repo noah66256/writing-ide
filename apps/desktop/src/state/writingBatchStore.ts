@@ -498,7 +498,6 @@ async function kbSearchCardSnippets(args: { libraryId: string; query: string; ca
         perDocTopN: "1",
         topDocs: "10",
         debug: "false",
-        useVector: "false",
       },
     });
     if (!(r.result as any)?.ok) return "- （检索失败）";

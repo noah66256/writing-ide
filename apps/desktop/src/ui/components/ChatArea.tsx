@@ -154,10 +154,12 @@ export function ChatArea() {
       const targetAgentIds = meta?.targetAgentIds ?? (parsed ? [parsed.agentId] : undefined);
       const cleanPrompt = !meta?.targetAgentIds && parsed ? parsed.cleanText : text;
       const activeSkillIds = meta?.mentions?.filter((m) => m.type === "skill").map((m) => m.id);
+      const kbMentionIds = meta?.mentions?.filter((m) => m.type === "kb").map((m) => m.id);
       const c = startGatewayRun({
         gatewayUrl, mode, model, prompt: cleanPrompt,
         ...(targetAgentIds?.length ? { targetAgentIds } : {}),
         ...(activeSkillIds?.length ? { activeSkillIds } : {}),
+        ...(kbMentionIds?.length ? { kbMentionIds } : {}),
       });
       controllerRef.current = c;
       void c.done.finally(() => {

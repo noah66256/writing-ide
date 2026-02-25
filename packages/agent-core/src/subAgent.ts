@@ -81,7 +81,7 @@ export const BUILTIN_SUB_AGENTS: SubAgentDefinition[] = [
     budget: {
       maxTurns: 15,
       maxToolCalls: 30,
-      timeoutMs: 120_000,
+      timeoutMs: 300_000,
     },
     triggerPatterns: ["写文案", "改写", "润色", "小红书", "公众号", "口播"],
     priority: 100,

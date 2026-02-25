@@ -26,11 +26,6 @@ export function AccountFooter() {
       .catch(() => void 0);
   }, []);
 
-  useEffect(() => {
-    // 启动时：若已保存 token，则自动拉取 /api/me（失败会清空 token）
-    void useAuthStore.getState().init().catch(() => void 0);
-  }, []);
-
   return (
     <>
     <div className="accountFooter">

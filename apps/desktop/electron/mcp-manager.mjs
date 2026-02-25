@@ -37,6 +37,24 @@ export class McpManager {
     this._servers = new Map();
     /** @type {Set<(payload: any) => void>} */
     this._listeners = new Set();
+    /** @type {Record<string, string>} 全局环境变量，自动注入到所有 stdio MCP Server */
+    this._globalEnv = {};
+  }
+
+  /**
+   * 设置全局环境变量（如浏览器路径），会自动注入到所有 stdio MCP Server 进程。
+   * 用户在单个 Server 的 env 中显式设置的值会覆盖全局值。
+   * 传 null/空字符串的 value 会删除该 key。
+   * @param {Record<string, string | null>} env
+   */
+  setGlobalEnv(env) {
+    for (const [k, v] of Object.entries(env)) {
+      if (v === null || v === undefined || v === "") {
+        delete this._globalEnv[k];
+      } else {
+        this._globalEnv[k] = v;
+      }
+    }
   }
 
   // ── Config 持久化 ──────────────────────────
@@ -77,6 +95,21 @@ export class McpManager {
     for (const [id, entry] of this._servers) {
       if (entry.config.enabled) {
         tasks.push(this.connect(id).catch(() => void 0));
+      }
+    }
+    await Promise.allSettled(tasks);
+  }
+
+  /** 重连所有已连接的 stdio 类型 server（全局环境变量变更后调用） */
+  async reconnectStdioServers() {
+    const tasks = [];
+    for (const [id, entry] of this._servers) {
+      if (entry.config.transport === "stdio" && entry.status === "connected") {
+        tasks.push(
+          this.disconnect(id)
+            .then(() => this.connect(id))
+            .catch(() => void 0),
+        );
       }
     }
     await Promise.allSettled(tasks);
@@ -152,9 +185,17 @@ export class McpManager {
       const command = String(config.command ?? "").trim();
       if (!command) throw new Error("STDIO_COMMAND_REQUIRED");
       const args = Array.isArray(config.args) ? config.args.map(String) : [];
-      const env = config.env && typeof config.env === "object"
-        ? { ...process.env, ...config.env }
-        : process.env;
+      // 构建环境变量：process.env → 全局注入（浏览器等） → 用户显式配置（优先级最高）
+      const baseEnv = { ...process.env };
+      // 注入全局浏览器路径等环境变量
+      const browserPath = this._globalEnv?.BROWSER_PATH || "";
+      if (browserPath) {
+        baseEnv.KINDLY_BROWSER_EXECUTABLE_PATH ??= browserPath;
+        baseEnv.CHROME_PATH ??= browserPath;
+        baseEnv.BROWSER_PATH ??= browserPath;
+      }
+      const userEnv = config.env && typeof config.env === "object" ? config.env : {};
+      const env = { ...baseEnv, ...userEnv };
       return new StdioClientTransport({ command, args, env });
     }
 
@@ -263,12 +304,12 @@ export class McpManager {
       status: entry.status,
       tools: entry.tools,
       error: entry.error,
-      // 传给 renderer 的配置摘要（不暴露敏感 env）
       config: {
         command: entry.config.command,
         args: entry.config.args,
         endpoint: entry.config.endpoint,
         headers: entry.config.headers,
+        env: entry.config.env ?? {},
       },
     }));
   }

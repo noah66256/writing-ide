@@ -21,6 +21,7 @@ import { useThemeStore, THEME_OPTIONS, type ThemeId } from "@/state/themeStore";
 import { useModelStore } from "@/state/modelStore";
 import { TeamModal } from "@/components/TeamModal";
 import { SettingsModal } from "./SettingsModal";
+import { useKbStore } from "@/state/kbStore";
 
 /* ─── Helpers ─── */
 
@@ -65,6 +66,7 @@ export function NavSidebar() {
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const settingsModalRequest = useKbStore((s) => s.settingsModalRequest);
   const settingsRef = useRef<HTMLDivElement>(null);
 
   const hasCurrentContent = useMemo(() => {
@@ -212,7 +214,28 @@ export function NavSidebar() {
         </button>
       </div>
 
-      {settingsModalOpen && <SettingsModal onClose={() => setSettingsModalOpen(false)} />}
+      {(settingsModalOpen || settingsModalRequest) && (
+        <SettingsModal
+          onClose={() => {
+            // 关闭时取消库选择请求
+            if (settingsModalRequest) {
+              useKbStore.getState().clearSettingsModalRequest();
+            }
+            setSettingsModalOpen(false);
+          }}
+          initialTab={settingsModalRequest?.tab}
+          kbSelectMode={settingsModalRequest?.kbSelectMode
+            ? {
+                onSelect: (id: string) => {
+                  const req = useKbStore.getState().settingsModalRequest;
+                  req?.kbSelectMode?.resolve?.(id);
+                  useKbStore.getState().setSettingsModalRequest(null);
+                  setSettingsModalOpen(false);
+                },
+              }
+            : undefined}
+        />
+      )}
     </nav>
   );
 }

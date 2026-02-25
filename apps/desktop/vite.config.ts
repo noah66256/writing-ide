@@ -14,7 +14,7 @@ function resolveDevPort(defaultPort = 5173) {
 const devPort = resolveDevPort();
 
 // Gateway 地址：优先环境变量，否则用服务器（本地调试 Gateway 时可改回 127.0.0.1:8000）
-const gatewayTarget = process.env.VITE_GATEWAY_URL || "http://localhost:8000";
+const gatewayTarget = process.env.VITE_GATEWAY_URL || "http://120.26.6.147:8000";
 
 export default defineConfig({
   // Electron file:// 加载时需要相对路径

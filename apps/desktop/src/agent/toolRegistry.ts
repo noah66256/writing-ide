@@ -349,7 +349,6 @@ export async function buildStyleLinterLibrariesSidecar(args?: {
         libraryIds: [libId],
         perDocTopN: 3,
         topDocs: 6,
-        useVector: false,
         debug: false,
       } as any)
       .catch(() => ({ ok: false } as any));
@@ -941,11 +940,11 @@ const tools: ToolDefinition[] = [
       { name: "text", desc: "原始文本（text/path/url 三选一）" },
       { name: "path", desc: "文件路径（项目相对或绝对路径；text/path/url 三选一）" },
       { name: "url", desc: "网页 URL（text/path/url 三选一）" },
-      { name: "libraryId", desc: "目标库 ID（优先）" },
-      { name: "libraryName", desc: "目标库名称（不存在则自动创建）" },
+      { name: "libraryId", desc: "目标库 ID（可选；不传则弹出选择界面）" },
+      { name: "libraryName", desc: "目标库名称（可选；匹配已有库）" },
       { name: "purpose", desc: '库用途：material|style|product（默认 style）' },
       { name: "autoPlaybook", desc: "是否自动生成风格手册（默认 true）" },
-      { name: "autoAttach", desc: "是否自动关联（默认 true）" },
+      { name: "autoAttach", desc: "是否自动添加到当前会话（默认 true）" },
     ],
     riskLevel: "medium",
     applyPolicy: "proposal",
@@ -967,14 +966,9 @@ const tools: ToolDefinition[] = [
       await useKbStore.getState().refreshLibraries().catch(() => void 0);
 
       // ---------- 3) 创建或选择库 ----------
-      const purposeRaw = String(args.purpose ?? "").trim();
-      const purpose = (purposeRaw === "style" || purposeRaw === "material" || purposeRaw === "product")
-        ? purposeRaw as "style" | "material" | "product"
-        : "style";
-
       let libraryId = String(args.libraryId ?? "").trim();
       const libraryNameArg = String(args.libraryName ?? "").trim();
-      const currentLibraries = useKbStore.getState().libraries ?? [];
+      let currentLibraries = useKbStore.getState().libraries ?? [];
 
       // 按 ID 查找
       if (libraryId && !currentLibraries.some((l) => l.id === libraryId)) {
@@ -985,18 +979,18 @@ const tools: ToolDefinition[] = [
         const hit = currentLibraries.find((l) => String(l.name ?? "").trim() === libraryNameArg);
         if (hit?.id) libraryId = hit.id;
       }
-      // 使用当前选中库
-      if (!libraryId) libraryId = String(useKbStore.getState().currentLibraryId ?? "").trim();
-      // 仍无库：自动创建
+      // 仍无库：弹出设置页让用户选择（不再自动创建）
       if (!libraryId) {
-        const createName = libraryNameArg || `语料_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`;
-        const created = await useKbStore.getState().createLibrary(createName);
-        if (!created.ok || !created.id) return { ok: false, error: created.error ?? "CREATE_LIBRARY_FAILED" };
-        libraryId = created.id;
-        // 仅对新建库设置 purpose，避免覆盖已有库的用途
-        await useKbStore.getState().setLibraryPurpose(libraryId, purpose).catch(() => void 0);
+        const selected = await useKbStore.getState().requestLibrarySelect();
+        if (!selected) return { ok: false, error: "LIBRARY_SELECTION_CANCELLED" };
+        libraryId = String(selected).trim();
+        await useKbStore.getState().refreshLibraries().catch(() => void 0);
+        currentLibraries = useKbStore.getState().libraries ?? [];
       }
-      // 选中库 + 设置用途（仅新建库时设置，避免覆盖已有库的 purpose）
+      if (!libraryId || !currentLibraries.some((l) => l.id === libraryId)) {
+        return { ok: false, error: "LIBRARY_NOT_FOUND" };
+      }
+      // 选中库
       useKbStore.getState().setCurrentLibrary(libraryId);
 
       // ---------- 4) 导入文档 ----------
@@ -1075,11 +1069,11 @@ const tools: ToolDefinition[] = [
   {
     name: "kb.search",
     description:
-      "在本地知识库中检索（按库过滤、按 source_doc 分组）。默认只在右侧已关联的库里搜索。用于写作引用素材（套路卡片/段落证据）。提示：kind=outline 仅对含 Markdown 标题(#)的文档有效；想找结构套路更建议 kind=card + cardTypes=[outline]。",
+      "在本地知识库中检索（按库过滤、按 source_doc 分组）。检索由 LLM 做语义排序。用于写作引用素材（套路卡片/段落证据）。提示：kind=outline 仅对含 Markdown 标题(#)的文档有效；想找结构套路更建议 kind=card + cardTypes=[outline]。",
     args: [
       { name: "query", required: true, desc: "搜索关键词/问题" },
       { name: "kind", desc: '可选：artifact kind（"card"|"outline"|"paragraph"），默认 card' },
-      { name: "libraryIds", desc: "可选：库 ID 数组；不传则用右侧已关联库" },
+      { name: "libraryIds", desc: "可选：库 ID 数组；不传则用已关联库" },
       { name: "facetIds", desc: "可选：outlineFacet id 数组（多选）" },
       { name: "cardTypes", desc: "可选：仅 kind=card 时生效；限制 cardType（例如 hook/one_liner/ending/outline/thesis）" },
       { name: "anchorParagraphIndexMax", desc: "可选：只搜前 N 段（开头样例；paragraphIndex < N）" },
@@ -1087,8 +1081,6 @@ const tools: ToolDefinition[] = [
       { name: "debug", desc: "可选：返回检索诊断信息（默认 true）" },
       { name: "perDocTopN", desc: "每篇文档最多返回多少条命中（默认 3）" },
       { name: "topDocs", desc: "最多返回多少篇文档（默认 12）" },
-      { name: "useVector", desc: "可选：是否用向量做重排（默认 true；需要 Gateway 配置 embeddings 代理）" },
-      { name: "embeddingModel", desc: '可选：向量模型 ID（例如 "text-embedding-3-large" 或 "Embedding-V1"）；不传则用服务器默认' },
     ],
     riskLevel: "low",
     applyPolicy: "proposal",
@@ -1105,14 +1097,12 @@ const tools: ToolDefinition[] = [
       const debug = args.debug === undefined ? true : Boolean(args.debug);
       const perDocTopN = typeof args.perDocTopN === "number" ? Math.max(1, Math.floor(args.perDocTopN)) : 3;
       const topDocs = typeof args.topDocs === "number" ? Math.max(1, Math.floor(args.topDocs)) : 12;
-      const useVector = args.useVector === undefined ? true : Boolean(args.useVector);
-      const embeddingModel = String(args.embeddingModel ?? "").trim() || undefined;
       const explicitLibs = Array.isArray(args.libraryIds) ? (args.libraryIds as any[]).map((x) => String(x ?? "").trim()).filter(Boolean) : [];
       const attached = useRunStore.getState().kbAttachedLibraryIds ?? [];
       const libraryIds = explicitLibs.length ? explicitLibs : attached;
       if (!libraryIds.length) return { ok: false, error: "NO_LIBRARY_SELECTED" };
 
-      const ret = await useKbStore.getState().searchForAgent({ query, kind, facetIds, cardTypes, anchorParagraphIndexMax, anchorFromEndMax, debug, libraryIds, perDocTopN, topDocs, useVector, embeddingModel });
+      const ret = await useKbStore.getState().searchForAgent({ query, kind, facetIds, cardTypes, anchorParagraphIndexMax, anchorFromEndMax, debug, libraryIds, perDocTopN, topDocs });
       if (!ret.ok) return { ok: false, error: ret.error ?? "SEARCH_FAILED" };
 
       // 输出精简：按文档分组
@@ -1134,7 +1124,7 @@ const tools: ToolDefinition[] = [
         })),
       }));
 
-      return { ok: true, output: { ok: true, query, kind, libraryIds, useVector, embeddingModel: embeddingModel ?? null, groups, debug: (ret as any).debug ?? null }, undoable: false };
+      return { ok: true, output: { ok: true, query, kind, libraryIds, groups, debug: (ret as any).debug ?? null }, undoable: false };
     },
   },
 

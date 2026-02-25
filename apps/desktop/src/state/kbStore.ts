@@ -98,7 +98,7 @@ export type KbArtifact = {
   cardType?: string;
   content: string;
   facetIds?: string[];
-  // 向量缓存：key=embeddingModel，value=embedding vector
+  // 向量缓存（已废弃：搜索已改用 LLM 语义搜索，此字段仅为兼容旧数据保留）
   embeddings?: Record<string, number[]>;
   // doc_v2：保留模型返回的完整引用段落索引（用于库级手册聚合时做证据）
   evidenceParagraphIndices?: number[];
@@ -234,6 +234,11 @@ export type KbSearchGroup = {
   hits: Array<{ artifact: KbArtifact; score: number; snippet: string }>;
 };
 
+export type SettingsModalRequest = {
+  tab: string;
+  kbSelectMode?: { resolve: (id: string | null) => void };
+};
+
 type KbState = {
   baseDir: string | null;
   ownerKey: string; // MVP: 没有真实登录态时先用 local_anonymous；后续替换为 userId/email
@@ -274,6 +279,12 @@ type KbState = {
   // 导入：未选库时先暂存，待用户选择库后自动继续
   pendingImport: KbPendingImport | null;
   setPendingImport: (pending: KbPendingImport | null) => void;
+
+  // 设置页打开请求（供 kb.ingest 等工具弹出库选择器）
+  settingsModalRequest: SettingsModalRequest | null;
+  setSettingsModalRequest: (req: SettingsModalRequest | null) => void;
+  clearSettingsModalRequest: () => void;
+  requestLibrarySelect: () => Promise<string | null>;
 
   setQuery: (q: string) => void;
   setBaseDir: (dir: string | null) => void;
@@ -412,9 +423,6 @@ type KbState = {
     libraryIds: string[];
     perDocTopN?: number;
     topDocs?: number;
-    // 向量检索：默认开启；embeddingModel 可用于 A/B（例如 text-embedding-3-large / Embedding-V1）
-    useVector?: boolean;
-    embeddingModel?: string;
   }) => Promise<{ ok: boolean; groups?: KbSearchGroup[]; error?: string; debug?: any }>;
 
   // 供 Agent 工具使用：按 sourceDoc/anchor 精确取证据段（用于引用/审计）
@@ -2013,6 +2021,50 @@ async function fetchEmbedding(args: { model?: string; input: string }): Promise<
   }
 }
 
+async function llmSearch(args: {
+  query: string;
+  candidates: Array<{ id: string; title?: string; content: string; kind: string; cardType?: string }>;
+  topN?: number;
+}): Promise<{ ok: true; results: Array<{ id: string; score: number }> } | { ok: false; error: string }> {
+  const gatewayUrl = getGatewayUrl();
+  const url = gatewayUrl ? `${gatewayUrl}/api/kb/llm-search` : "/api/kb/llm-search";
+  const auth = authHeader();
+  if (!auth.Authorization) {
+    try {
+      useAuthStore.getState().openLoginModal?.();
+    } catch { /* ignore */ }
+    return { ok: false, error: "AUTH_REQUIRED" };
+  }
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...auth },
+      body: JSON.stringify({
+        query: String(args.query ?? ""),
+        candidates: Array.isArray(args.candidates) ? args.candidates : [],
+        topN: typeof args.topN === "number" ? Math.max(1, Math.floor(args.topN)) : undefined,
+      }),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok) {
+      const code = json?.error ? String(json.error) : "";
+      if (res.status === 401 && code === "UNAUTHORIZED") {
+        try { useAuthStore.getState().logout?.(); useAuthStore.getState().openLoginModal?.(); } catch { /* ignore */ }
+      }
+      const detail = json?.detail ? JSON.stringify(json.detail).slice(0, 300) : JSON.stringify(json).slice(0, 300);
+      return { ok: false, error: `KB_LLM_SEARCH_HTTP_${res.status}:${detail}` };
+    }
+    const rows = Array.isArray(json?.results) ? json.results : null;
+    if (!rows) return { ok: false, error: "KB_LLM_SEARCH_INVALID_RESPONSE" };
+    const results = rows
+      .map((x: any) => ({ id: String(x?.id ?? "").trim(), score: Number(x?.score) }))
+      .filter((x: any) => x.id && Number.isFinite(x.score));
+    return { ok: true, results };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+}
+
 async function fetchEmbeddingsBatch(args: {
   model?: string;
   inputs: string[];
@@ -2104,8 +2156,29 @@ export const useKbStore = create<KbState>()(
       cardJobRunStartedAtMs: null,
       cardJobRunElapsedMs: 0,
       pendingImport: null,
+      settingsModalRequest: null,
 
       setQuery: (query) => set({ query }),
+      setSettingsModalRequest: (req) => set({ settingsModalRequest: req ?? null }),
+      clearSettingsModalRequest: () => {
+        const prev = get().settingsModalRequest;
+        try { prev?.kbSelectMode?.resolve?.(null); } catch { /* ignore */ }
+        set({ settingsModalRequest: null });
+      },
+      requestLibrarySelect: async () => {
+        const myReq: SettingsModalRequest = {
+          tab: "kb",
+          kbSelectMode: { resolve: () => {} },
+        };
+        return await new Promise<string | null>((resolve) => {
+          const prev = get().settingsModalRequest;
+          try { prev?.kbSelectMode?.resolve?.(null); } catch { /* ignore */ }
+          myReq.kbSelectMode = { resolve: (id) => resolve(id ?? null) };
+          set({ settingsModalRequest: myReq });
+        }).finally(() => {
+          if (get().settingsModalRequest === myReq) set({ settingsModalRequest: null });
+        });
+      },
       setPendingImport: (pending) => {
         kbLog("info", "kb.pending_import.set", {
           kind: pending?.kind ?? null,
@@ -2314,10 +2387,13 @@ export const useKbStore = create<KbState>()(
         const rel = dbRelPath(ownerKey);
         const res = await api.deleteFile(baseDir, rel);
         if (!res?.ok) return { ok: false, error: res?.error ?? "DELETE_FAILED" };
+        const pendingReq = get().settingsModalRequest;
+        try { pendingReq?.kbSelectMode?.resolve?.(null); } catch { /* ignore */ }
         set({
           query: "",
           groups: [],
           currentLibraryId: null,
+          settingsModalRequest: null,
           pendingImport: null,
           libraries: [],
           trashLibraries: [],
@@ -5307,24 +5383,15 @@ export const useKbStore = create<KbState>()(
         const topDocs = args.topDocs ?? 12;
         const libraryIds = Array.from(new Set((args.libraryIds ?? []).map((x) => String(x ?? "").trim()).filter(Boolean)));
         if (!libraryIds.length) return { ok: false, error: "NO_LIBRARY_SELECTED" };
-        const useVector = args.useVector === undefined ? true : Boolean(args.useVector);
-        const embeddingModel = String(args.embeddingModel ?? "").trim() || undefined;
 
         try {
-          // 运行态提示：避免用户以为“卡死”（仅在 Run 进行时提示）
           const run = useRunStore.getState();
           const setActivity = (text: string, opts?: { resetTimer?: boolean }) => {
-            try {
-              if (run.isRunning) run.setActivity(text, opts);
-            } catch {
-              // ignore
-            }
+            try { if (run.isRunning) run.setActivity(text, opts); } catch { /* ignore */ }
           };
-
           let lastStageAt = 0;
           const stage = (text: string, opts?: { resetTimer?: boolean }) => {
             const now = Date.now();
-            // 节流，避免高频更新导致 UI 抖动
             if (!opts?.resetTimer && now - lastStageAt < 180) return;
             lastStageAt = now;
             setActivity(text, opts);
@@ -5336,28 +5403,14 @@ export const useKbStore = create<KbState>()(
           if (!allowLibs.size) return { ok: false, error: "LIBRARY_NOT_ACTIVE" };
 
           const docsById = new Map(db.sourceDocs.map((d) => [d.id, d]));
-          const hitsByDoc = new Map<string, KbSearchGroup>();
-
-          const debugOut: any = debugEnabled
-            ? {
-                query,
-                kind: kind ?? null,
-                facetIds: facetIds.slice(0, 16),
-                cardTypes: cardTypes.slice(0, 16),
-                anchorParagraphIndexMax: anchorParagraphIndexMax ?? null,
-                anchorFromEndMax: anchorFromEndMax ?? null,
-                useVector,
-                stages: { lex: { docs: 0, hits: 0 }, vector: { enabled: useVector, mode: null as null | 'rerank' | 'fallback' }, recentFallback: false },
-              }
-            : null;
 
           const docMaxParaIndex = new Map<string, number>();
           if (anchorFromEndMax !== undefined) {
             for (const a of db.artifacts) {
-              if (a.kind !== 'paragraph') continue;
+              if (a.kind !== "paragraph") continue;
               const doc = docsById.get(a.sourceDocId);
               if (!doc) continue;
-              if (!allowLibs.has(String(doc.libraryId ?? ''))) continue;
+              if (!allowLibs.has(String(doc.libraryId ?? ""))) continue;
               const pi = Number(a.anchor?.paragraphIndex);
               if (!Number.isFinite(pi)) continue;
               const prev = docMaxParaIndex.get(doc.id);
@@ -5366,9 +5419,13 @@ export const useKbStore = create<KbState>()(
           }
 
           const passesExtra = (a: KbArtifact) => {
-            if (cardTypes.length > 0 && a.kind === 'card') {
-              const t = String((a as any).cardType ?? '');
+            if (cardTypes.length > 0 && a.kind === "card") {
+              const t = String((a as any).cardType ?? "");
               if (!cardTypes.includes(t)) return false;
+            }
+            if (facetIds.length > 0 && a.kind === "card") {
+              const setIds = new Set(a.facetIds ?? []);
+              if (!facetIds.some((f) => setIds.has(f))) return false;
             }
             if (anchorParagraphIndexMax !== undefined) {
               const pi = Number(a.anchor?.paragraphIndex);
@@ -5383,266 +5440,146 @@ export const useKbStore = create<KbState>()(
             return true;
           };
 
-          stage("正在知识库检索：词法召回…", { resetTimer: true });
-          for (const a of db.artifacts) {
-            if (kind && a.kind !== kind) continue;
-            // facetIds 目前主要用于 card（playbook_facet / style_profile 等）。paragraph/outline 默认没有 facetIds。
-            // 若对 paragraph/outline 也做硬过滤，会导致“段落检索永远为空”（影响风格证据段拉取与强闭环判断）。
-            if (facetIds.length > 0 && a.kind === "card") {
-              const setIds = new Set(a.facetIds ?? []);
-              const any = facetIds.some((f) => setIds.has(f));
-              if (!any) continue;
-            }
+          const filteredArtifacts = db.artifacts.filter((a) => {
+            if (kind && a.kind !== kind) return false;
             const doc = docsById.get(a.sourceDocId);
+            if (!doc) return false;
+            if (!allowLibs.has(String(doc.libraryId ?? ""))) return false;
+            if (!passesExtra(a)) return false;
+            return true;
+          });
+
+          const debugOut: any = debugEnabled
+            ? {
+                query,
+                kind: kind ?? null,
+                facetIds: facetIds.slice(0, 16),
+                cardTypes: cardTypes.slice(0, 16),
+                anchorParagraphIndexMax: anchorParagraphIndexMax ?? null,
+                anchorFromEndMax: anchorFromEndMax ?? null,
+                mode: "llm_search",
+                candidateCount: filteredArtifacts.length,
+              }
+            : null;
+
+          const docsInLib = db.sourceDocs
+            .filter((d) => allowLibs.has(String(d.libraryId ?? "")))
+            .slice()
+            .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
+
+          const artifactsByDoc = new Map<string, KbArtifact[]>();
+          for (const a of filteredArtifacts) {
+            const list = artifactsByDoc.get(a.sourceDocId) ?? [];
+            list.push(a);
+            artifactsByDoc.set(a.sourceDocId, list);
+          }
+
+          const buildRecentGroups = () => {
+            const groups: KbSearchGroup[] = [];
+            for (const doc of docsInLib) {
+              const list = (artifactsByDoc.get(doc.id) ?? [])
+                .slice()
+                .sort((a, b) => {
+                  const ap = Number(a.anchor?.paragraphIndex);
+                  const bp = Number(b.anchor?.paragraphIndex);
+                  return (Number.isFinite(bp) ? bp : -1) - (Number.isFinite(ap) ? ap : -1);
+                })
+                .slice(0, perDocTopN)
+                .map((a, idx) => ({
+                  artifact: a,
+                  score: Math.max(0, perDocTopN - idx),
+                  snippet: String(a.content ?? "").slice(0, 160),
+                }));
+              if (!list.length) continue;
+              groups.push({ sourceDoc: doc, bestScore: list[0]!.score, hits: list });
+              if (groups.length >= topDocs) break;
+            }
+            return groups;
+          };
+
+          // 特殊路径：query 以 "__" 开头（lint.style 取样本等），直接返回最近片段
+          if (query.startsWith("__")) {
+            stage("\u6b63\u5728\u77e5\u8bc6\u5e93\u68c0\u7d22\uff1a\u6700\u8fd1\u7247\u6bb5\u2026", { resetTimer: true });
+            const groups = buildRecentGroups();
+            if (debugOut) {
+              debugOut.mode = "recent";
+              debugOut.reason = "special_query";
+            }
+            return debugOut ? { ok: true, groups, debug: debugOut } : { ok: true, groups };
+          }
+
+          if (!filteredArtifacts.length) {
+            return debugOut ? { ok: true, groups: [], debug: debugOut } : { ok: true, groups: [] };
+          }
+
+          // LLM 语义搜索
+          stage("\u6b63\u5728\u77e5\u8bc6\u5e93\u68c0\u7d22\uff1aLLM \u8bed\u4e49\u641c\u7d22\u2026", { resetTimer: true });
+          // 截断候选到 1200 上限（后端限制），优先保留最新的
+          const candidateSrc = filteredArtifacts.length > 1200 ? filteredArtifacts.slice(-1200) : filteredArtifacts;
+          const candidates = candidateSrc.map((a) => ({
+            id: a.id,
+            title: a.title,
+            content: String(a.content ?? "").slice(0, 2000),
+            kind: a.kind,
+            cardType: (a as any).cardType,
+          }));
+          const llmTopN = Math.max(perDocTopN, Math.min(candidates.length, Math.max(24, perDocTopN * topDocs * 2)));
+          const llmRet = await llmSearch({ query, candidates, topN: llmTopN });
+
+          // LLM 失败时兜底返回最近片段
+          if (!llmRet.ok) {
+            if (debugOut) debugOut.llmError = llmRet.error;
+            const groups = buildRecentGroups();
+            if (debugOut) debugOut.mode = "recent_fallback";
+            return debugOut ? { ok: true, groups, debug: debugOut } : { ok: true, groups };
+          }
+
+          const artById = new Map(filteredArtifacts.map((a) => [a.id, a]));
+          const seen = new Set<string>();
+          const ranked = (llmRet.results ?? [])
+            .map((r) => ({ id: String(r.id ?? "").trim(), score: Number(r.score) }))
+            .filter((x) => x.id && Number.isFinite(x.score) && artById.has(x.id))
+            .sort((a, b) => b.score - a.score)
+            .filter((x) => { if (seen.has(x.id)) return false; seen.add(x.id); return true; });
+
+          const groupsByDoc = new Map<string, KbSearchGroup>();
+          for (const item of ranked) {
+            const artifact = artById.get(item.id);
+            if (!artifact) continue;
+            const doc = docsById.get(artifact.sourceDocId);
             if (!doc) continue;
-            if (!allowLibs.has(String(doc.libraryId ?? ""))) continue;
-            const { score, idx } = scoreArtifactText({ haystack: a.content, query });
-            if (score <= 0) continue;
-            const snippet = makeSnippet({ text: a.content, matchIndex: idx, queryLen: query.length });
-            const g = hitsByDoc.get(doc.id) ?? { sourceDoc: doc, bestScore: 0, hits: [] };
-            g.hits.push({ artifact: a, score, snippet });
-            if (score > g.bestScore) g.bestScore = score;
-            hitsByDoc.set(doc.id, g);
+            const g = groupsByDoc.get(doc.id) ?? { sourceDoc: doc, bestScore: Number.NEGATIVE_INFINITY, hits: [] };
+            g.hits.push({
+              artifact,
+              score: item.score,
+              snippet: String(artifact.content ?? "").slice(0, 160),
+            });
+            if (item.score > g.bestScore) g.bestScore = item.score;
+            groupsByDoc.set(doc.id, g);
           }
 
-
-          if (debugOut) {
-            debugOut.stages.lex.docs = hitsByDoc.size;
-            debugOut.stages.lex.hits = Array.from(hitsByDoc.values()).reduce((n, g) => n + (g.hits?.length ?? 0), 0);
-          }
-
-          let groups = Array.from(hitsByDoc.values())
+          const groups = Array.from(groupsByDoc.values())
             .map((g) => ({
               ...g,
-              hits: g.hits.sort((a, b) => b.score - a.score).slice(0, perDocTopN * 3),
+              hits: g.hits.sort((a, b) => b.score - a.score).slice(0, perDocTopN),
             }))
+            .map((g) => ({ ...g, bestScore: g.hits.length ? g.hits[0]!.score : 0 }))
             .sort((a, b) => b.bestScore - a.bestScore)
             .slice(0, topDocs);
 
-          const vectorBudgetMs = 90_000;
-          const vectorBudgetStart = Date.now();
-          const budgetExceeded = () => Date.now() - vectorBudgetStart > vectorBudgetMs;
-
-          // 可选：向量重排（先词法召回，再对候选集做 embedding cosine similarity）
-          if (useVector && groups.length > 0) {
-            if (debugOut) debugOut.stages.vector.mode = 'rerank';
-            stage("正在知识库检索：向量检索（重排）…", { resetTimer: true });
-            const q = query.slice(0, 800); // 控制 query 长度
-            const qEmb = await fetchEmbedding({ model: embeddingModel, input: q });
-            if (qEmb.ok && qEmb.embedding.length > 0 && !budgetExceeded()) {
-              const modelUsed = embeddingModel ?? qEmb.modelUsed ?? "";
-              const key = modelUsed || "default";
-              const maxCandidates = Math.min(120, groups.reduce((sum, g) => sum + g.hits.length, 0));
-
-              // 先收集候选（稳定顺序：按当前 groups/hits 顺序）
-              const candidates: Array<{ hit: { artifact: KbArtifact; score: number; snippet: string } }> = [];
-              for (const g of groups) {
-                for (const h of g.hits) {
-                  if (candidates.length >= maxCandidates) break;
-                  candidates.push({ hit: h });
-                }
-                if (candidates.length >= maxCandidates) break;
-              }
-
-              // 批量补齐缺失向量（分片，避免一次 body 过大）
-              const missing: Array<{ art: KbArtifact; text: string }> = [];
-              for (const c of candidates) {
-                const a = c.hit.artifact;
-                if (a.embeddings?.[key]?.length) continue;
-                missing.push({ art: a, text: String(a.content ?? "").slice(0, 1200) });
-              }
-
-              let mutated = false;
-              const chunkSize = 32;
-              for (let i = 0; i < missing.length; i += chunkSize) {
-                if (budgetExceeded()) break;
-                const chunk = missing.slice(i, i + chunkSize);
-                const totalChunks = Math.max(1, Math.ceil(missing.length / chunkSize));
-                const chunkNo = Math.floor(i / chunkSize) + 1;
-                stage(`正在知识库检索：向量检索（重排 ${chunkNo}/${totalChunks}）…`);
-                const ret = await fetchEmbeddingsBatch({ model: embeddingModel, inputs: chunk.map((x) => x.text) });
-                if (!ret.ok) break;
-                for (let j = 0; j < chunk.length; j += 1) {
-                  const vec = ret.embeddings[j] ?? [];
-                  if (vec.length) {
-                    const a = chunk[j]!.art;
-                    a.embeddings = { ...(a.embeddings ?? {}), [key]: vec };
-                    mutated = true;
-                  }
-                }
-              }
-
-              // 计算相似度并重排
-              for (const g of groups) {
-                for (const h of g.hits) {
-                  if (budgetExceeded()) break;
-                  const a = h.artifact;
-                  const vec = a.embeddings?.[key];
-                  if (vec && vec.length > 0) {
-                    const sim = cosineSim(qEmb.embedding, vec);
-                    const lex = Number(h.score) || 0;
-                    h.score = sim * 1000 + Math.min(100, lex);
-                  }
-                }
-                g.hits = g.hits.sort((a, b) => b.score - a.score).slice(0, perDocTopN);
-                g.bestScore = g.hits.length ? g.hits[0]!.score : 0;
-              }
-              groups = groups.sort((a, b) => b.bestScore - a.bestScore).slice(0, topDocs);
-
-              if (mutated) {
-                try {
-                  await saveDb({ baseDir, ownerKey, db });
-                } catch {
-                  // ignore cache write failures
-                }
-              }
-            }
-          } else if (!useVector) {
-            // no vector：回到每篇 topN
-            groups = groups
-              .map((g) => ({ ...g, hits: g.hits.slice(0, perDocTopN) }))
-              .sort((a, b) => b.bestScore - a.bestScore)
-              .slice(0, topDocs);
-          } else if (useVector && groups.length === 0) {
-            if (debugOut) debugOut.stages.vector.mode = 'fallback';
-            // 向量兜底召回：当词法召回为 0 时，仍可通过 embedding 从库内候选集中找相似内容
-            stage("正在知识库检索：向量检索（兜底召回）…", { resetTimer: true });
-            const q = query.slice(0, 800);
-            const qEmb = await fetchEmbedding({ model: embeddingModel, input: q });
-            if (qEmb.ok && qEmb.embedding.length > 0 && !budgetExceeded()) {
-              const modelUsed = embeddingModel ?? qEmb.modelUsed ?? "";
-              const key = modelUsed || "default";
-
-              // 候选集：按库 + kind + facet 过滤，按“最近文档优先”收集（稳定且更贴近当前库）
-              const docsInLib = db.sourceDocs
-                .filter((d) => allowLibs.has(String(d.libraryId ?? "")))
-                .slice()
-                .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
-              const docIdSet = new Set(docsInLib.map((d) => d.id));
-              const artsByDoc = new Map<string, KbArtifact[]>();
-              for (const a of db.artifacts) {
-                if (kind && a.kind !== kind) continue;
-                    if (!docIdSet.has(a.sourceDocId)) continue;
-                if (facetIds.length > 0 && a.kind === "card") {
-                  const setIds = new Set(a.facetIds ?? []);
-                  const any = facetIds.some((f) => setIds.has(f));
-                  if (!any) continue;
-                }
-                const list = artsByDoc.get(a.sourceDocId) ?? [];
-                list.push(a);
-                artsByDoc.set(a.sourceDocId, list);
-              }
-
-              const maxCandidates = 220; // 控制成本/时间：兜底召回只要够覆盖 topDocs 即可
-              const candidates: Array<{ art: KbArtifact; doc: KbSourceDoc }> = [];
-              for (const d of docsInLib) {
-                const list = artsByDoc.get(d.id) ?? [];
-                for (const a of list) {
-                  candidates.push({ art: a, doc: d });
-                  if (candidates.length >= maxCandidates) break;
-                }
-                if (candidates.length >= maxCandidates) break;
-              }
-
-              // 批量补齐缺失向量
-              const missing: Array<{ art: KbArtifact; text: string }> = [];
-              for (const c of candidates) {
-                if (c.art.embeddings?.[key]?.length) continue;
-                missing.push({ art: c.art, text: String(c.art.content ?? "").slice(0, 1200) });
-              }
-              let mutated = false;
-              const chunkSize = 32;
-              for (let i = 0; i < missing.length; i += chunkSize) {
-                if (budgetExceeded()) break;
-                const chunk = missing.slice(i, i + chunkSize);
-                const totalChunks = Math.max(1, Math.ceil(missing.length / chunkSize));
-                const chunkNo = Math.floor(i / chunkSize) + 1;
-                stage(`正在知识库检索：向量检索（兜底 ${chunkNo}/${totalChunks}）…`);
-                const ret = await fetchEmbeddingsBatch({ model: embeddingModel, inputs: chunk.map((x) => x.text) });
-                if (!ret.ok) break;
-                for (let j = 0; j < chunk.length; j += 1) {
-                  const vec = ret.embeddings[j] ?? [];
-                  if (vec.length) {
-                    const a = chunk[j]!.art;
-                    a.embeddings = { ...(a.embeddings ?? {}), [key]: vec };
-                    mutated = true;
-                  }
-                }
-              }
-
-              const scored: Array<{ artifact: KbArtifact; doc: KbSourceDoc; score: number; snippet: string }> = [];
-              for (const c of candidates) {
-                if (budgetExceeded()) break;
-                const vec = c.art.embeddings?.[key];
-                if (!vec || !vec.length) continue;
-                const sim = cosineSim(qEmb.embedding, vec);
-                const snippet = makeSnippet({ text: c.art.content, matchIndex: -1, queryLen: 0 });
-                scored.push({ artifact: c.art, doc: c.doc, score: sim, snippet });
-              }
-
-              // 分组：按 doc 聚合，每篇取 topN
-              const byDoc = new Map<string, KbSearchGroup>();
-              for (const s of scored.sort((a, b) => b.score - a.score)) {
-                const g = byDoc.get(s.doc.id) ?? { sourceDoc: s.doc, bestScore: 0, hits: [] };
-                if (g.hits.length < perDocTopN) {
-                  g.hits.push({ artifact: s.artifact, score: s.score, snippet: s.snippet });
-                  if (s.score > g.bestScore) g.bestScore = s.score;
-                  byDoc.set(s.doc.id, g);
-                }
-                if (byDoc.size >= topDocs && g.hits.length >= perDocTopN) {
-                  // 轻量提前结束：已覆盖足够多文档时可不再扩
-                }
-              }
-
-              groups = Array.from(byDoc.values())
-                .sort((a, b) => b.bestScore - a.bestScore)
-                .slice(0, topDocs);
-
-              if (mutated) {
-                try {
-                  await saveDb({ baseDir, ownerKey, db });
-                } catch {
-                  // ignore cache write failures
-                }
-              }
-            }
+          if (debugOut) {
+            debugOut.llmTopN = llmTopN;
+            debugOut.llmReturned = (llmRet.results ?? []).length;
+            debugOut.llmAccepted = ranked.length;
           }
 
-          // 兜底：如果仍无命中（例如 query 主题与库无关，且 embeddings 不可用），返回“最近片段”作为风格样例
-          // 目的：仿写时“宁可给一些可抄样例”，也不要空结果导致 Agent 直接放弃检索。
-          if (groups.length === 0) {
-            stage("正在知识库检索：兜底（最近片段）…", { resetTimer: true });
-            if (debugOut) debugOut.stages.recentFallback = true;
-            const docsInLib = db.sourceDocs
-              .filter((d) => allowLibs.has(String(d.libraryId ?? "")))
-              .slice()
-              .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
-            const fallbackGroups: KbSearchGroup[] = [];
-            for (const doc of docsInLib) {
-              const hits = db.artifacts
-                .filter((a) => {
-                  if (a.sourceDocId !== doc.id) return false;
-                  if (kind && a.kind !== kind) return false;
-                  if (!passesExtra(a)) return false;
-                  if (facetIds.length > 0 && a.kind === "card") {
-                    const setIds = new Set(a.facetIds ?? []);
-                    const any = facetIds.some((f) => setIds.has(f));
-                    if (!any) return false;
-                  }
-                  return true;
-                })
-                .slice()
-                .sort((a, b) => (Number(a.anchor?.paragraphIndex ?? 0) || 0) - (Number(b.anchor?.paragraphIndex ?? 0) || 0))
-                .slice(0, perDocTopN)
-                .map((a) => ({ artifact: a, score: 0, snippet: makeSnippet({ text: a.content, matchIndex: -1, queryLen: 0 }) }));
-              if (!hits.length) continue;
-              fallbackGroups.push({ sourceDoc: doc, bestScore: 0, hits });
-              if (fallbackGroups.length >= topDocs) break;
-            }
-            groups = fallbackGroups;
+          // LLM 返回但有效结果为空时，兜底到最近片段
+          if (!groups.length) {
+            if (debugOut) debugOut.mode = "recent_fallback_empty_llm";
+            const fallbackGroups = buildRecentGroups();
+            return debugOut ? { ok: true, groups: fallbackGroups, debug: debugOut } : { ok: true, groups: fallbackGroups };
           }
 
-          // kb.search 完成：把状态留给上层（gatewayAgent 会设置“等待模型继续/生成…”）
           return debugOut ? { ok: true, groups, debug: debugOut } : { ok: true, groups };
         } catch (e: any) {
           return { ok: false, error: String(e?.message ?? e) };

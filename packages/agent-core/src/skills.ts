@@ -186,7 +186,7 @@ export const CORPUS_INGEST_SKILL: SkillManifest = {
   id: "corpus_ingest",
   name: "语料导入与抽卡",
   description:
-    "当用户给出文本/文件/URL 并要求抽卡、学风格或分析文风时，自动完成导入语料→抽卡入库→可选生成手册→自动挂载库。",
+    "当用户给出文本/文件/URL 并要求抽卡、学风格或分析文风时，自动完成导入语料→抽卡入库→可选生成手册。",
   priority: 90,
   stageKey: "agent.skill.corpus_ingest",
   autoEnable: true,
@@ -223,10 +223,10 @@ export const CORPUS_INGEST_SKILL: SkillManifest = {
       "   - 若用户提供了文本，用 text 参数。\n" +
       "   - 若用户提供了文件路径，用 path 参数。\n" +
       "   - 若用户提供了 URL，用 url 参数。\n" +
-      "3) 默认创建 purpose=style 的库（除非用户明确说是素材/产品库）。\n" +
+      "3) 不需要指定 libraryId 或 libraryName —— 工具会自动让用户选择目标库。除非用户明确说了库名，否则不要传 libraryId/libraryName 参数。\n" +
       "4) 抽卡完成后，向用户报告：\n" +
       "   - 抽到了多少张卡（按 cardType 分类：hook/thesis/ending/one_liner/outline）\n" +
-      "   - 库已自动 attach，后续写作可直接使用\n" +
+      "   - 用户可在输入框 @ 提及该库名来在写作时使用\n" +
       "5) 若用户在同一 run 里接着要求写作：直接进入写作流程（kb.search 已可命中新卡）。\n" +
       "6) 不要在未调用 kb.ingest 前就尝试 kb.search 搜索未导入的内容。",
     context: "ACTIVE_SKILLS: corpus_ingest（语料导入与抽卡）",
