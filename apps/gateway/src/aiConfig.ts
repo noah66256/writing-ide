@@ -510,26 +510,6 @@ export function createAiConfigService(args: {
       appendToStage(stageMap.get("agent.run"), envOpusModel);
     }
 
-    // 3.1) env 额外声明的 haiku 模型也追加到 chat/agent 候选（让用户可选）
-    const haikuDoc = envHaikuModel ? byId.get(envHaikuModel) : null;
-    if (envHaikuModel && haikuDoc?.isEnabled) {
-      const appendToStage = (stage: AiStageConfig | undefined, modelId: string) => {
-        if (!stage || stage.stage === "embedding") return;
-        const cur = Array.isArray(stage.modelIds)
-          ? stage.modelIds.map((x) => normalizeModelId(String(x))).filter(Boolean)
-          : [];
-        const merged = Array.from(
-          new Set([...cur, normalizeModelId(String(stage.modelId ?? "")), modelId].filter(Boolean)),
-        ).slice(0, 60);
-        if (merged.join(",") !== (cur.join(",") || "")) {
-          stage.modelIds = merged.length ? merged : null;
-          stage.updatedAt = nowIso();
-        }
-      };
-      appendToStage(stageMap.get("llm.chat"), envHaikuModel);
-      appendToStage(stageMap.get("agent.run"), envHaikuModel);
-    }
-
       db.aiConfig = { ...ai, updatedAt: nowIso() };
     };
 
