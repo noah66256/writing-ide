@@ -320,7 +320,7 @@ function uniqueMdName(base: string, used: Set<string>) {
 function resolveDefaultDraftModel() {
   const run: any = useRunStore.getState();
   const v = String(run?.model ?? run?.agentModel ?? "").trim();
-  return v || "deepseek-v3.2";
+  return v || "claude-sonnet-4-6";
 }
 
 async function callLlmTextOnce(args: { model: string; system: string; user: string; abort: AbortController }) {
