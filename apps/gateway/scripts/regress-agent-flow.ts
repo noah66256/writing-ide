@@ -203,25 +203,24 @@ async function main() {
     assert.equal(skills.some((s) => s.id === "style_imitate"), true);
   }
   {
-    // 关键回归：存在旧 RUN_TODO（写作闭环）时，用户发起“全网/GitHub 调研/查资料”不应被误判为写作续跑（否则会触发 style_imitate 抢跑污染检索）。
-    const mode = "agent" as const;
-    const userPrompt = "查一查全网和github，看看这种问题怎么解决";
+    // web_topic_radar 已移除，此场景下 style_imitate 不应被激活（因为是搜索场景，不是写作）
+    const mode = “agent” as const;
+    const userPrompt = “查一查全网和github，看看这种问题怎么解决”;
     const runTodo = [
-      { id: "vs", text: "确认需求：形式（视频脚本vs文章）与素材扩充边界", status: "blocked", note: "等待用户回复" },
-      { id: "t2", text: "检索风格素材：拉取直男财经样例", status: "todo" },
-      { id: "lint_style", text: "风格自检：使用 lint.style", status: "todo" },
+      { id: “vs”, text: “确认需求：形式（视频脚本vs文章）与素材扩充边界”, status: “blocked”, note: “等待用户回复” },
+      { id: “t2”, text: “检索风格素材：拉取直男财经样例”, status: “todo” },
+      { id: “lint_style”, text: “风格自检：使用 lint.style”, status: “todo” },
     ];
-    const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: "auto", runTodo });
+    const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: “auto”, runTodo });
     assert.equal(intent.isWritingTask, false);
     const skills = activateSkills({
       mode,
       userPrompt,
-      mainDocRunIntent: "auto",
-      kbSelected: [{ id: "style-1", purpose: "style" }],
+      mainDocRunIntent: “auto”,
+      kbSelected: [{ id: “style-1”, purpose: “style” }],
       intent,
     });
-    assert.equal(skills.some((s) => s.id === "style_imitate"), false);
-    assert.equal(skills.some((s) => s.id === "web_topic_radar"), true);
+    assert.equal(skills.some((s) => s.id === “style_imitate”), false);
   }
   {
     const mode = "agent" as const;

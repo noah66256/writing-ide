@@ -353,6 +353,16 @@ export class WritingAgentRunner {
       return tool.modes.includes(this.ctx.mode);
     }).map(toolMetaToAnthropicDef);
 
+    // MCP 工具：从 context 的 mcpTools 生成 tool definitions
+    const mcpToolDefs = ((this.ctx as any).mcpTools ?? [])
+      .filter((t: any) => effectiveAllowed.has(t.name))
+      .map((t: any) => ({
+        name: t.name,
+        description: String(t.description ?? ""),
+        input_schema: t.inputSchema ?? { type: "object" as const, properties: {} },
+      }));
+    tools.push(...mcpToolDefs);
+
     // hint 追加到本轮 system prompt（不修改 ctx.systemPrompt 本身）
     const turnSystemPrompt = perTurnCaps?.hint
       ? `${this.ctx.systemPrompt}\n\n${perTurnCaps.hint}`
@@ -757,6 +767,18 @@ export class WritingAgentRunner {
         },
         meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
       };
+    }
+
+    // MCP 工具：直接路由到 Desktop 执行
+    if (toolUse.name.startsWith("mcp.")) {
+      this.ctx.writeEvent("tool.call", {
+        toolCallId: toolUse.id,
+        name: toolUse.name,
+        args: rawInput,
+        executedBy: "desktop",
+        turn: this.turn,
+      });
+      return this._waitForDesktopToolResult(toolUse.id, toolUse.name);
     }
 
     const decision = decideServerToolExecution({

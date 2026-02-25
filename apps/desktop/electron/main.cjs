@@ -42,6 +42,7 @@ let watcher = null;
 let watchedRoot = null;
 let watchTimer = null;
 let watchChanged = new Set();
+let mcpManager = null;
 
 // ======== Single Instance Lock（防止多开导致新旧并行/占用文件） ========
 let gotSingleInstanceLock = true;
@@ -1215,6 +1216,39 @@ function registerIpc() {
   ipcMain.handle("app.getVersion", async () => ({ ok: true, version: String(app.getVersion() ?? "") }));
   ipcMain.handle("update.check", async (_event, opts) => checkForUpdates(opts));
   ipcMain.handle("update.checkInteractive", async (_event, opts) => interactiveUpdateFlow(opts));
+
+  // MCP
+  ipcMain.handle("mcp.getServers", async () => {
+    try { return mcpManager ? mcpManager.getServers() : []; } catch { return []; }
+  });
+  ipcMain.handle("mcp.addServer", async (_event, config) => {
+    if (!mcpManager) return { ok: false, error: "MCP_NOT_READY" };
+    return mcpManager.addServer(config);
+  });
+  ipcMain.handle("mcp.updateServer", async (_event, id, config) => {
+    if (!mcpManager) return { ok: false, error: "MCP_NOT_READY" };
+    return mcpManager.updateServer(id, config);
+  });
+  ipcMain.handle("mcp.removeServer", async (_event, id) => {
+    if (!mcpManager) return { ok: false, error: "MCP_NOT_READY" };
+    return mcpManager.removeServer(id);
+  });
+  ipcMain.handle("mcp.connect", async (_event, id) => {
+    if (!mcpManager) return { ok: false, error: "MCP_NOT_READY" };
+    try { await mcpManager.connect(id); return { ok: true }; } catch (e) { return { ok: false, error: String(e?.message ?? e) }; }
+  });
+  ipcMain.handle("mcp.disconnect", async (_event, id) => {
+    if (!mcpManager) return { ok: false, error: "MCP_NOT_READY" };
+    try { await mcpManager.disconnect(id); return { ok: true }; } catch (e) { return { ok: false, error: String(e?.message ?? e) }; }
+  });
+  ipcMain.handle("mcp.getTools", async (_event, id) => {
+    if (!mcpManager) return [];
+    try { return mcpManager.getTools(id); } catch { return []; }
+  });
+  ipcMain.handle("mcp.callTool", async (_event, serverId, toolName, toolArgs) => {
+    if (!mcpManager) return { ok: false, error: "MCP_NOT_READY" };
+    return mcpManager.callTool(serverId, toolName, toolArgs);
+  });
 }
 
 function createWindow() {
@@ -1271,10 +1305,8 @@ function createWindow() {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // ======== Network（packaged） ========
-  // Electron/Chromium 默认会使用系统代理设置；在某些机器上会导致访问自建 Gateway（IP:port）返回 502（代理无法转发）。
-  // 这里对 packaged 强制直连，避免“模型列表为空/Failed to fetch”。
   try {
     if (app.isPackaged) {
       void session.defaultSession.setProxy({ proxyRules: "direct://" }).catch(() => void 0);
@@ -1286,6 +1318,20 @@ app.whenReady().then(() => {
   registerAppProtocol();
   createWindow();
 
+  // ======== MCP Client 初始化 ========
+  try {
+    const { McpManager } = await import("./mcp-manager.mjs");
+    mcpManager = new McpManager(app.getPath("userData"));
+    await mcpManager.loadConfig();
+    // 状态变更推送给 renderer
+    mcpManager.onStatusChange((payload) => {
+      try { mainWindow?.webContents?.send("mcp.statusChange", payload); } catch { /* ignore */ }
+    });
+    await mcpManager.connectEnabled();
+  } catch (e) {
+    console.error("[electron] MCP Manager 初始化失败:", e);
+  }
+
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -1293,6 +1339,7 @@ app.whenReady().then(() => {
 
 app.on("window-all-closed", () => {
   stopWatch();
+  try { mcpManager?.dispose?.(); } catch { /* ignore */ }
   if (process.platform !== "darwin") app.quit();
 });
 

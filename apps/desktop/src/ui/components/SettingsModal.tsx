@@ -1,22 +1,26 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
-import { X, Users, Plug, Sparkles, ChevronDown, ChevronRight, Plus, Info, Bot, BookOpen, FolderOpen, Link2, Unlink } from "lucide-react";
+import {
+  X, Users, Plug, Sparkles, ChevronDown, ChevronRight, Plus,
+  Bot, BookOpen, FolderOpen, Link2, Unlink, RefreshCw, Pencil, Trash2, Terminal, Globe, Radio,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TeamModal } from "@/components/TeamModal";
-import { SKILL_MANIFESTS_V1, type SkillManifest, type TriggerRule } from "@writing-ide/agent-core";
+import { listRegisteredSkills, type SkillManifest } from "@writing-ide/agent-core";
 import { useSkillStore } from "@/state/skillStore";
 import { usePersonaStore } from "@/state/personaStore";
 import { useKbStore } from "@/state/kbStore";
 import { useRunStore } from "@/state/runStore";
+import { useMcpStore, type McpServerState } from "@/state/mcpStore";
 
 type Tab = "persona" | "team" | "mcp" | "skill" | "kb";
 
 const TABS: { id: Tab; label: string; icon: typeof Users }[] = [
-  { id: "persona", label: "\u8d1f\u8d23\u4eba", icon: Bot },
-  { id: "kb", label: "\u77e5\u8bc6\u5e93", icon: BookOpen },
-  { id: "team", label: "\u56e2\u961f\u7ba1\u7406", icon: Users },
+  { id: "persona", label: "负责人", icon: Bot },
+  { id: "kb", label: "知识库", icon: BookOpen },
+  { id: "team", label: "团队管理", icon: Users },
   { id: "mcp", label: "MCP", icon: Plug },
-  { id: "skill", label: "\u6280\u80fd", icon: Sparkles },
+  { id: "skill", label: "技能", icon: Sparkles },
 ];
 
 export function SettingsModal({ onClose }: { onClose: () => void }) {
@@ -31,7 +35,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         {/* Left tabs */}
         <div className="w-[180px] shrink-0 border-r border-border bg-surface-alt py-4 px-2 flex flex-col gap-1">
           <div className="text-[11px] uppercase tracking-wider text-text-faint font-medium px-3 mb-2">
-            {"\u8bbe\u7f6e"}
+            设置
           </div>
           {TABS.map((t) => (
             <button
@@ -88,12 +92,12 @@ function PersonaTabContent() {
   return (
     <div className="flex flex-col gap-5">
       <div className="text-[12px] text-text-muted leading-relaxed">
-        {"\u4e2a\u6027\u5316\u4f60\u7684 AI \u8d1f\u8d23\u4eba\uff0c\u8bbe\u5b9a\u5b83\u7684\u540d\u5b57\u548c\u6027\u683c\u3002\u8fd9\u4e0d\u4f1a\u5f71\u54cd\u7cfb\u7edf\u80fd\u529b\uff0c\u53ea\u662f\u8ba9\u4f53\u9a8c\u66f4\u4eb2\u5207\u3002"}
+        个性化你的 AI 负责人，设定它的名字和性格。这不会影响系统能力，只是让体验更亲切。
       </div>
 
       <div className="flex flex-col gap-1.5">
         <label className="text-[13px] font-medium text-text">
-          {"\u8d1f\u8d23\u4eba\u540d\u79f0"}
+          负责人名称
         </label>
         <input
           type="text"
@@ -103,23 +107,23 @@ function PersonaTabContent() {
           className="w-full px-3 py-2 rounded-lg border border-border bg-surface text-[13px] text-text placeholder:text-text-faint focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 transition-colors"
         />
         <div className="text-[11px] text-text-faint">
-          {"\u7559\u7a7a\u9ed8\u8ba4\u4e3a Friday"}
+          留空默认为 Friday
         </div>
       </div>
 
       <div className="flex flex-col gap-1.5">
         <label className="text-[13px] font-medium text-text">
-          {"\u4e2a\u6027\u5316\u63cf\u8ff0"}
+          个性化描述
         </label>
         <textarea
           value={personaPrompt}
           onChange={(e) => setPersonaPrompt(e.target.value)}
-          placeholder={"\u4f8b\u5982\uff1a\u53eb\u6211\u8001\u677f\uff0c\u8bf4\u8bdd\u5e72\u7ec3\u7b80\u6d01\uff0c\u7528\u5e7d\u9ed8\u7684\u8bed\u6c14\uff0c\u504f\u597d\u53e3\u8bed\u5316\u8868\u8fbe"}
+          placeholder="例如：叫我老板，说话干练简洁，用幽默的语气，偏好口语化表达"
           rows={4}
           className="w-full px-3 py-2 rounded-lg border border-border bg-surface text-[13px] text-text placeholder:text-text-faint focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent/30 transition-colors resize-none leading-relaxed"
         />
         <div className="text-[11px] text-text-faint">
-          {"\u63cf\u8ff0\u4f60\u5e0c\u671b\u7684\u8bf4\u8bdd\u98ce\u683c\u3001\u79f0\u547c\u65b9\u5f0f\u3001\u6027\u683c\u7279\u70b9\u7b49"}
+          描述你希望的说话风格、称呼方式、性格特点等
         </div>
       </div>
     </div>
@@ -131,7 +135,6 @@ function PersonaTabContent() {
 function KbTabContent() {
   const baseDir = useKbStore((s) => s.baseDir);
   const libraries = useKbStore((s) => s.libraries);
-  const pickBaseDir = useKbStore((s) => s.pickBaseDir);
   const refreshLibraries = useKbStore((s) => s.refreshLibraries);
   const kbAttachedIds = useRunStore((s) => s.kbAttachedLibraryIds);
   const setKbAttached = useRunStore((s) => s.setKbAttachedLibraries);
@@ -150,7 +153,6 @@ function KbTabContent() {
     if (cur.includes(libId)) {
       setKbAttached(cur.filter((x) => x !== libId));
     } else {
-      // style library: single-select (replace other style libs)
       if (purpose === "style") {
         const styleIds = new Set(libraries.filter((l) => l.purpose === "style").map((l) => l.id));
         const keep = cur.filter((x) => !styleIds.has(x));
@@ -164,49 +166,40 @@ function KbTabContent() {
   return (
     <div className="flex flex-col gap-5">
       <div className="text-[12px] text-text-muted leading-relaxed">
-        {"\u77e5\u8bc6\u5e93\u5b58\u50a8\u5728\u672c\u5730\u78c1\u76d8\uff0c\u9009\u62e9\u76ee\u5f55\u540e\u81ea\u52a8\u53d1\u73b0\u5e93\u6587\u4ef6\u3002\u5173\u8054\u540e\uff0cAgent \u7684 kb.search \u4f1a\u81ea\u52a8\u641c\u7d22\u8fd9\u4e9b\u5e93\uff0c\u4e5f\u53ef\u5728\u8f93\u5165\u6846 @ \u63d0\u53ca\u3002"}
+        知识库存储在本地磁盘，选择目录后自动发现库文件。关联后，Agent 的 kb.search 会自动搜索这些库，也可在输入框 @ 提及。
       </div>
-
-      {/* Directory picker */}
       <div className="flex flex-col gap-1.5">
-        <label className="text-[13px] font-medium text-text">
-          {"\u5e93\u76ee\u5f55"}
-        </label>
+        <label className="text-[13px] font-medium text-text">库目录</label>
         <div className="flex items-center gap-2">
           <div className={cn(
             "flex-1 px-3 py-2 rounded-lg border border-border bg-surface text-[13px] truncate",
             baseDir ? "text-text" : "text-text-faint",
           )}>
-            {baseDir || "\u672a\u8bbe\u7f6e"}
+            {baseDir || "未设置"}
           </div>
           <button
             onClick={() => void handlePickDir()}
             className="shrink-0 flex items-center gap-1.5 px-3 py-2 rounded-lg text-[12px] font-medium bg-accent-soft text-accent hover:bg-accent-soft/80 transition-colors"
           >
             <FolderOpen size={14} />
-            {baseDir ? "\u66f4\u6362" : "\u9009\u62e9\u76ee\u5f55"}
+            {baseDir ? "更换" : "选择目录"}
           </button>
         </div>
       </div>
 
-      {/* Library list */}
       {baseDir && (
         <div className="flex flex-col gap-2">
           <div className="flex items-center justify-between">
             <span className="text-[13px] font-medium text-text">
-              {"\u5df2\u53d1\u73b0\u7684\u5e93"} ({libraries.length})
+              已发现的库 ({libraries.length})
             </span>
-            <button
-              onClick={() => void refreshLibraries()}
-              className="text-[11px] text-accent hover:underline"
-            >
-              {"\u5237\u65b0"}
+            <button onClick={() => void refreshLibraries()} className="text-[11px] text-accent hover:underline">
+              刷新
             </button>
           </div>
-
           {libraries.length === 0 ? (
             <div className="text-[12px] text-text-faint py-4 text-center border border-dashed border-border rounded-lg">
-              {"\u8be5\u76ee\u5f55\u4e0b\u672a\u53d1\u73b0\u77e5\u8bc6\u5e93"}
+              该目录下未发现知识库
             </div>
           ) : (
             <div className="flex flex-col gap-1.5">
@@ -224,8 +217,8 @@ function KbTabContent() {
                     <div className="flex-1 min-w-0">
                       <div className="text-[13px] font-medium text-text truncate">{lib.name}</div>
                       <div className="text-[11px] text-text-muted">
-                        {lib.purpose === "style" ? "\u98ce\u683c\u5e93" : lib.purpose === "product" ? "\u4ea7\u54c1\u5e93" : "\u7d20\u6750\u5e93"}
-                        {" \u00b7 "}{lib.docCount}{" \u7bc7"}
+                        {lib.purpose === "style" ? "风格库" : lib.purpose === "product" ? "产品库" : "素材库"}
+                        {" · "}{lib.docCount}{" 篇"}
                       </div>
                     </div>
                     <button
@@ -237,7 +230,7 @@ function KbTabContent() {
                           : "bg-surface-alt text-text-muted hover:bg-accent-soft hover:text-accent",
                       )}
                     >
-                      {attached ? <><Unlink size={12} />{"\u53d6\u6d88\u5173\u8054"}</> : <><Link2 size={12} />{"\u5173\u8054"}</>}
+                      {attached ? <><Unlink size={12} />取消关联</> : <><Link2 size={12} />关联</>}
                     </button>
                   </div>
                 );
@@ -258,217 +251,430 @@ function TeamTabContent() {
   );
 }
 
-/* ─── Skill Tab ─── */
+/* ─── Skill Tab（简化版） ─── */
 
-const BADGE_COLORS: Record<string, string> = {
-  blue: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300",
-  purple: "bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300",
-  orange: "bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300",
-  teal: "bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300",
-  green: "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300",
+const SKILL_DESCRIPTIONS: Record<string, string> = {
+  style_imitate: "绑定风格库后自动启用，在写作时自动检索样例、lint 风格、写入",
+  corpus_ingest: "识别到「抽卡/学风格/导入语料」时自动启用导入流程",
 };
-
-function triggerSummary(rule: TriggerRule): string {
-  const w = rule.when;
-  const a = rule.args as Record<string, unknown>;
-  if (w === "mode_in") {
-    const modes = Array.isArray(a?.modes) ? a.modes.join("/") : "";
-    return `\u6a21\u5f0f: ${modes}`;
-  }
-  if (w === "has_style_library") return "\u5df2\u7ed1\u5b9a\u98ce\u683c\u5e93";
-  if (w === "run_intent_in") {
-    const intents = Array.isArray(a?.intents) ? a.intents.join("/") : "";
-    return `\u610f\u56fe: ${intents}`;
-  }
-  if (w === "text_regex") return "\u6587\u672c\u6b63\u5219\u5339\u914d";
-  return w;
-}
 
 function SkillTabContent() {
   const skillOverrides = useSkillStore((s) => s.skillOverrides);
   const setSkillEnabled = useSkillStore((s) => s.setSkillEnabled);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const allSkills = listRegisteredSkills();
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <div className="text-[13px] font-semibold text-text">
-          {"\u5185\u7f6e\u6280\u80fd"} ({SKILL_MANIFESTS_V1.length})
-        </div>
-      </div>
       <div className="text-[12px] text-text-muted leading-relaxed">
-        {"\u6280\u80fd\u662f\u5bf9 Agent \u884c\u4e3a\u7684\u589e\u5f3a\u6a21\u5757\uff0c\u901a\u8fc7\u6761\u4ef6\u89e6\u53d1\u81ea\u52a8\u6fc0\u6d3b\u3002\u5f00\u542f\u540e\uff0c\u7b26\u5408\u6761\u4ef6\u65f6\u4f1a\u81ea\u52a8\u6ce8\u5165 prompt \u7247\u6bb5\u5e76\u63a7\u5236\u5de5\u5177\u6743\u9650\u3002"}
+        技能是 Agent 的增强模块，符合条件时自动激活。内置技能不可删除，仅可开关。
       </div>
       <div className="flex flex-col gap-2">
-        {SKILL_MANIFESTS_V1.map((skill) => (
-          <SkillCard
-            key={skill.id}
-            skill={skill}
-            enabled={skillOverrides[skill.id]?.enabled ?? skill.autoEnable}
-            expanded={expandedId === skill.id}
-            onToggle={(v) => setSkillEnabled(skill.id, v)}
-            onExpand={() => setExpandedId(expandedId === skill.id ? null : skill.id)}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function SkillCard({
-  skill,
-  enabled,
-  expanded,
-  onToggle,
-  onExpand,
-}: {
-  skill: SkillManifest;
-  enabled: boolean;
-  expanded: boolean;
-  onToggle: (v: boolean) => void;
-  onExpand: () => void;
-}) {
-  const badgeColor = BADGE_COLORS[skill.ui.color ?? "blue"] ?? BADGE_COLORS.blue;
-
-  return (
-    <div className={cn("border border-border rounded-lg overflow-hidden transition-opacity", !enabled && "opacity-55")}>
-      <div className="flex items-center gap-3 px-3 py-2.5 cursor-pointer hover:bg-surface-alt/50" onClick={onExpand}>
-        {expanded ? <ChevronDown size={14} className="text-text-faint shrink-0" /> : <ChevronRight size={14} className="text-text-faint shrink-0" />}
-        <span className={cn("inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide shrink-0", badgeColor)}>
-          {skill.ui.badge}
-        </span>
-        <div className="flex-1 min-w-0">
-          <div className="text-[13px] font-medium text-text truncate">{skill.name}</div>
-          <div className="text-[11px] text-text-muted truncate">{skill.description}</div>
-        </div>
-        <label className="teamToggle shrink-0" onClick={(e) => e.stopPropagation()}>
-          <input
-            type="checkbox"
-            checked={enabled}
-            onChange={(e) => onToggle(e.target.checked)}
-          />
-          <span className="teamToggleSlider" />
-        </label>
-      </div>
-      {expanded && (
-        <div className="px-3 pb-3 pt-1 border-t border-border bg-surface-alt/30">
-          <div className="grid grid-cols-[80px_1fr] gap-y-1.5 text-[12px]">
-            <span className="text-text-faint">{"\u4f18\u5148\u7ea7"}</span>
-            <span className="text-text">{skill.priority}</span>
-
-            <span className="text-text-faint">{"\u89e6\u53d1\u6761\u4ef6"}</span>
-            <span className="text-text">{skill.triggers.map(triggerSummary).join(" + ")}</span>
-
-            {skill.conflicts?.length ? (
-              <>
-                <span className="text-text-faint">{"\u4e92\u65a5"}</span>
-                <span className="text-text">{skill.conflicts.join(", ")}</span>
-              </>
-            ) : null}
-
-            {skill.requires?.length ? (
-              <>
-                <span className="text-text-faint">{"\u4f9d\u8d56"}</span>
-                <span className="text-text">{skill.requires.join(", ")}</span>
-              </>
-            ) : null}
-
-            {skill.toolCaps?.allowTools?.length ? (
-              <>
-                <span className="text-text-faint">{"\u5141\u8bb8\u5de5\u5177"}</span>
-                <span className="text-text font-mono text-[11px]">{skill.toolCaps.allowTools.join(", ")}</span>
-              </>
-            ) : null}
-
-            {skill.toolCaps?.denyTools?.length ? (
-              <>
-                <span className="text-text-faint">{"\u7981\u7528\u5de5\u5177"}</span>
-                <span className="text-text font-mono text-[11px]">{skill.toolCaps.denyTools.join(", ")}</span>
-              </>
-            ) : null}
-
-            <span className="text-text-faint">{"\u7248\u672c"}</span>
-            <span className="text-text">{skill.version ?? "1.0.0"}</span>
-
-            <span className="text-text-faint">Stage</span>
-            <span className="text-text font-mono text-[11px]">{skill.stageKey}</span>
-          </div>
-          {skill.promptFragments.system && (
-            <div className="mt-2">
-              <div className="text-[11px] text-text-faint mb-1">System Prompt</div>
-              <div className="text-[11px] text-text-muted bg-surface rounded px-2 py-1.5 max-h-[100px] overflow-y-auto whitespace-pre-wrap font-mono leading-relaxed">
-                {skill.promptFragments.system.slice(0, 300)}{skill.promptFragments.system.length > 300 ? "..." : ""}
+        {allSkills.map((skill) => {
+          const enabled = skillOverrides[skill.id]?.enabled ?? skill.autoEnable;
+          const friendlyDesc = SKILL_DESCRIPTIONS[skill.id] ?? skill.description;
+          return (
+            <div
+              key={skill.id}
+              className={cn(
+                "flex items-center gap-3 px-4 py-3 rounded-lg border transition-all",
+                enabled ? "border-accent/30 bg-accent-soft/10" : "border-border opacity-60",
+              )}
+            >
+              <div className="w-2 h-2 rounded-full shrink-0" style={{
+                backgroundColor: enabled ? "var(--color-accent)" : "var(--color-text-faint)",
+              }} />
+              <div className="flex-1 min-w-0">
+                <div className="text-[13px] font-medium text-text">{skill.name}</div>
+                <div className="text-[11px] text-text-muted mt-0.5 leading-relaxed">{friendlyDesc}</div>
               </div>
+              <label className="teamToggle shrink-0" onClick={(e) => e.stopPropagation()}>
+                <input
+                  type="checkbox"
+                  checked={enabled}
+                  onChange={(e) => setSkillEnabled(skill.id, e.target.checked)}
+                />
+                <span className="teamToggleSlider" />
+              </label>
             </div>
-          )}
-        </div>
-      )}
+          );
+        })}
+      </div>
     </div>
   );
 }
 
 /* ─── MCP Tab ─── */
 
+type TransportType = "stdio" | "streamable-http" | "sse";
+
+const STATUS_COLORS: Record<string, string> = {
+  connected: "bg-green-500",
+  connecting: "bg-yellow-500 animate-pulse",
+  error: "bg-red-500",
+  disconnected: "bg-gray-400",
+};
+
+const TRANSPORT_ICONS: Record<TransportType, typeof Terminal> = {
+  stdio: Terminal,
+  "streamable-http": Globe,
+  sse: Radio,
+};
+
+const TRANSPORT_LABELS: Record<TransportType, string> = {
+  stdio: "stdio",
+  "streamable-http": "HTTP",
+  sse: "SSE",
+};
+
 function McpTabContent() {
+  const servers = useMcpStore((s) => s.servers);
+  const refresh = useMcpStore((s) => s.refresh);
+  const [showAdd, setShowAdd] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  useEffect(() => { void refresh(); }, []);
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
         <div className="text-[13px] font-semibold text-text">MCP Server</div>
         <button
-          disabled
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-accent-soft text-accent opacity-50 cursor-not-allowed"
+          onClick={() => { setShowAdd(true); setEditingId(null); }}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-accent-soft text-accent hover:bg-accent-soft/80 transition-colors"
         >
           <Plus size={14} />
-          {"\u6dfb\u52a0 Server"}
+          添加 Server
         </button>
       </div>
 
-      <div className="flex items-start gap-3 p-3 rounded-lg bg-surface-alt/50 border border-border">
-        <Info size={16} className="text-accent shrink-0 mt-0.5" />
-        <div className="text-[12px] text-text-muted leading-relaxed">
-          <p className="font-medium text-text mb-1">
-            {"\u4ec0\u4e48\u662f MCP\uff1f"}
-          </p>
-          <p>
-            {"MCP (Model Context Protocol) \u662f Anthropic \u63d0\u51fa\u7684\u6a21\u578b\u4e0a\u4e0b\u6587\u534f\u8bae\uff0c\u5141\u8bb8 AI \u5e94\u7528\u901a\u8fc7\u6807\u51c6\u5316\u63a5\u53e3\u8fde\u63a5\u5916\u90e8\u5de5\u5177\u548c\u6570\u636e\u6e90\u3002\u914d\u7f6e MCP Server \u540e\uff0c\u5176\u63d0\u4f9b\u7684\u5de5\u5177\u4f1a\u81ea\u52a8\u6ce8\u5165 Agent \u53ef\u7528\u5de5\u5177\u6c60\u3002"}
-          </p>
+      {servers.length === 0 && !showAdd ? (
+        <div className="flex flex-col items-center justify-center py-10 text-text-faint">
+          <Plug size={32} className="mb-2 opacity-40" />
+          <div className="text-[13px]">尚未配置 MCP Server</div>
+          <div className="text-[11px] mt-1">点击上方「添加 Server」连接外部工具</div>
         </div>
-      </div>
-
-      <div className="text-[12px] text-text-muted leading-relaxed">
-        <p className="font-medium text-text mb-1.5">
-          {"\u652f\u6301\u7684\u4f20\u8f93\u6a21\u5f0f"}
-        </p>
-        <div className="grid grid-cols-3 gap-2">
-          <TransportCard
-            label="stdio"
-            desc={"\u672c\u5730\u5b50\u8fdb\u7a0b\uff0c\u901a\u8fc7 JSON-RPC \u901a\u4fe1"}
-          />
-          <TransportCard
-            label="HTTP"
-            desc={"Streamable HTTP\uff0c\u9002\u5408\u8fdc\u7a0b\u670d\u52a1"}
-          />
-          <TransportCard
-            label="SSE"
-            desc={"Server-Sent Events\uff0c\u5b9e\u65f6\u63a8\u9001"}
-          />
+      ) : (
+        <div className="flex flex-col gap-2">
+          {servers.map((server) => (
+            <McpServerCard
+              key={server.id}
+              server={server}
+              expanded={expandedId === server.id}
+              onExpand={() => setExpandedId(expandedId === server.id ? null : server.id)}
+              onEdit={() => { setEditingId(server.id); setShowAdd(true); }}
+            />
+          ))}
         </div>
-      </div>
+      )}
 
-      <div className="flex flex-col items-center justify-center py-8 text-text-faint">
-        <Plug size={32} className="mb-2 opacity-40" />
-        <div className="text-[13px]">{"\u5c1a\u672a\u914d\u7f6e MCP Server"}</div>
-        <div className="text-[11px] mt-1">{"\u5f85 MCP Client \u5b9e\u88c5\u540e\u53ef\u5728\u6b64\u6dfb\u52a0\u548c\u7ba1\u7406"}</div>
-      </div>
+      {showAdd && (
+        <McpAddDialog
+          editId={editingId}
+          onClose={() => { setShowAdd(false); setEditingId(null); }}
+        />
+      )}
     </div>
   );
 }
 
-function TransportCard({ label, desc }: { label: string; desc: string }) {
+function McpServerCard({
+  server,
+  expanded,
+  onExpand,
+  onEdit,
+}: {
+  server: McpServerState;
+  expanded: boolean;
+  onExpand: () => void;
+  onEdit: () => void;
+}) {
+  const removeServer = useMcpStore((s) => s.removeServer);
+  const connect = useMcpStore((s) => s.connect);
+  const disconnect = useMcpStore((s) => s.disconnect);
+  const refresh = useMcpStore((s) => s.refresh);
+  const [busy, setBusy] = useState(false);
+
+  const TIcon = TRANSPORT_ICONS[server.transport] ?? Terminal;
+  const statusColor = STATUS_COLORS[server.status] ?? STATUS_COLORS.disconnected;
+
+  const handleToggle = async (enable: boolean) => {
+    setBusy(true);
+    try {
+      if (enable) {
+        const api = (window as any).desktop?.mcp;
+        if (api) {
+          await api.updateServer(server.id, { enabled: true });
+          await api.connect(server.id);
+        }
+      } else {
+        const api = (window as any).desktop?.mcp;
+        if (api) {
+          await api.disconnect(server.id);
+          await api.updateServer(server.id, { enabled: false });
+        }
+      }
+      await refresh();
+    } catch { /* ignore */ }
+    setBusy(false);
+  };
+
+  const handleRetry = async () => {
+    setBusy(true);
+    try { await connect(server.id); } catch { /* ignore */ }
+    await refresh();
+    setBusy(false);
+  };
+
+  const handleDelete = async () => {
+    await removeServer(server.id);
+  };
+
   return (
-    <div className="border border-border rounded-lg px-2.5 py-2">
-      <div className="text-[12px] font-medium text-text font-mono">{label}</div>
-      <div className="text-[11px] text-text-muted mt-0.5">{desc}</div>
+    <div className={cn(
+      "border rounded-lg overflow-hidden transition-colors",
+      server.status === "connected" ? "border-green-500/30" :
+      server.status === "error" ? "border-red-500/30" : "border-border",
+    )}>
+      {/* Header row */}
+      <div className="flex items-center gap-3 px-3 py-2.5 cursor-pointer hover:bg-surface-alt/50" onClick={onExpand}>
+        <div className={cn("w-2 h-2 rounded-full shrink-0", statusColor)} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-[13px] font-medium text-text truncate">{server.name}</span>
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-surface-alt text-text-muted shrink-0">
+              <TIcon size={10} />
+              {TRANSPORT_LABELS[server.transport]}
+            </span>
+          </div>
+          {server.status === "connected" && server.tools.length > 0 && (
+            <div className="text-[11px] text-text-muted mt-0.5">
+              {server.tools.length} 个可用工具
+            </div>
+          )}
+          {server.status === "error" && server.error && (
+            <div className="text-[11px] text-red-500 mt-0.5 truncate">
+              {server.error}
+            </div>
+          )}
+          {server.status === "connecting" && (
+            <div className="text-[11px] text-yellow-600 dark:text-yellow-400 mt-0.5">
+              正在连接...
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+          {server.status === "error" && (
+            <button
+              onClick={handleRetry}
+              disabled={busy}
+              className="w-7 h-7 flex items-center justify-center rounded-md text-text-muted hover:text-accent hover:bg-accent-soft/50 transition-colors"
+              title="重试"
+            >
+              <RefreshCw size={13} className={busy ? "animate-spin" : ""} />
+            </button>
+          )}
+          <label className="teamToggle shrink-0">
+            <input
+              type="checkbox"
+              checked={server.enabled && server.status !== "disconnected"}
+              disabled={busy}
+              onChange={(e) => void handleToggle(e.target.checked)}
+            />
+            <span className="teamToggleSlider" />
+          </label>
+        </div>
+        {expanded ? <ChevronDown size={14} className="text-text-faint shrink-0" /> : <ChevronRight size={14} className="text-text-faint shrink-0" />}
+      </div>
+
+      {/* Expanded details */}
+      {expanded && (
+        <div className="px-3 pb-3 pt-1 border-t border-border bg-surface-alt/30">
+          {/* Tools list */}
+          {server.tools.length > 0 && (
+            <div className="mb-2">
+              <div className="text-[11px] text-text-faint mb-1">可用工具</div>
+              <div className="flex flex-wrap gap-1">
+                {server.tools.map((tool) => (
+                  <span
+                    key={tool.name}
+                    className="inline-flex items-center px-2 py-0.5 rounded-md bg-surface text-[11px] text-text-muted font-mono border border-border"
+                    title={tool.description}
+                  >
+                    {tool.name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+          {/* Actions */}
+          <div className="flex items-center gap-2 mt-2">
+            <button
+              onClick={onEdit}
+              className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-text-muted hover:text-accent hover:bg-accent-soft/50 transition-colors"
+            >
+              <Pencil size={11} /> 编辑
+            </button>
+            <button
+              onClick={() => void handleDelete()}
+              className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-text-muted hover:text-red-500 hover:bg-red-500/10 transition-colors"
+            >
+              <Trash2 size={11} /> 删除
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─── MCP Add/Edit Dialog ─── */
+
+function McpAddDialog({ editId, onClose }: { editId: string | null; onClose: () => void }) {
+  const servers = useMcpStore((s) => s.servers);
+  const addServer = useMcpStore((s) => s.addServer);
+  const updateServer = useMcpStore((s) => s.updateServer);
+
+  const existing = editId ? servers.find((s) => s.id === editId) : null;
+
+  const [transport, setTransport] = useState<TransportType>(existing?.transport ?? "stdio");
+  const [name, setName] = useState(existing?.name ?? "");
+  const [command, setCommand] = useState(existing?.config?.command ?? "");
+  const [args, setArgs] = useState(existing?.config?.args?.join(" ") ?? "");
+  const [endpoint, setEndpoint] = useState(existing?.config?.endpoint ?? "");
+  const [saving, setSaving] = useState(false);
+
+  const canSave = name.trim() && (
+    transport === "stdio" ? command.trim() :
+    transport === "streamable-http" || transport === "sse" ? endpoint.trim() : false
+  );
+
+  const handleSave = async () => {
+    if (!canSave) return;
+    setSaving(true);
+    const config: any = {
+      name: name.trim(),
+      transport,
+      enabled: true,
+    };
+    if (transport === "stdio") {
+      config.command = command.trim();
+      config.args = args.trim() ? args.trim().split(/\s+/) : [];
+    } else {
+      config.endpoint = endpoint.trim();
+    }
+
+    if (editId) {
+      await updateServer(editId, config);
+    } else {
+      await addServer(config);
+    }
+    setSaving(false);
+    onClose();
+  };
+
+  return (
+    <div className="border border-accent/30 rounded-lg bg-surface p-4 flex flex-col gap-3">
+      <div className="text-[13px] font-semibold text-text">
+        {editId ? "编辑 Server" : "添加 MCP Server"}
+      </div>
+
+      {/* Transport selector */}
+      <div className="flex flex-col gap-1.5">
+        <label className="text-[12px] font-medium text-text">传输方式</label>
+        <div className="flex gap-2">
+          {(["stdio", "streamable-http", "sse"] as TransportType[]).map((t) => {
+            const TIcon = TRANSPORT_ICONS[t];
+            return (
+              <button
+                key={t}
+                onClick={() => setTransport(t)}
+                className={cn(
+                  "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] border transition-colors",
+                  transport === t
+                    ? "border-accent bg-accent-soft text-accent font-medium"
+                    : "border-border text-text-muted hover:bg-surface-alt",
+                )}
+              >
+                <TIcon size={13} />
+                {TRANSPORT_LABELS[t]}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Name */}
+      <div className="flex flex-col gap-1">
+        <label className="text-[12px] font-medium text-text">名称</label>
+        <input
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="例如：文件系统助手"
+          className="w-full px-3 py-1.5 rounded-lg border border-border bg-surface text-[12px] text-text placeholder:text-text-faint focus:outline-none focus:border-accent transition-colors"
+        />
+      </div>
+
+      {/* Transport-specific fields */}
+      {transport === "stdio" && (
+        <>
+          <div className="flex flex-col gap-1">
+            <label className="text-[12px] font-medium text-text">命令</label>
+            <input
+              type="text"
+              value={command}
+              onChange={(e) => setCommand(e.target.value)}
+              placeholder="例如：npx -y @anthropic/mcp-server-filesystem"
+              className="w-full px-3 py-1.5 rounded-lg border border-border bg-surface text-[12px] text-text font-mono placeholder:text-text-faint focus:outline-none focus:border-accent transition-colors"
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-[12px] font-medium text-text">参数（空格分隔）</label>
+            <input
+              type="text"
+              value={args}
+              onChange={(e) => setArgs(e.target.value)}
+              placeholder="例如：/Users/me/Documents"
+              className="w-full px-3 py-1.5 rounded-lg border border-border bg-surface text-[12px] text-text font-mono placeholder:text-text-faint focus:outline-none focus:border-accent transition-colors"
+            />
+          </div>
+        </>
+      )}
+      {(transport === "streamable-http" || transport === "sse") && (
+        <div className="flex flex-col gap-1">
+          <label className="text-[12px] font-medium text-text">Endpoint URL</label>
+          <input
+            type="text"
+            value={endpoint}
+            onChange={(e) => setEndpoint(e.target.value)}
+            placeholder="https://example.com/mcp"
+            className="w-full px-3 py-1.5 rounded-lg border border-border bg-surface text-[12px] text-text font-mono placeholder:text-text-faint focus:outline-none focus:border-accent transition-colors"
+          />
+        </div>
+      )}
+
+      {/* Actions */}
+      <div className="flex items-center justify-end gap-2 mt-1">
+        <button
+          onClick={onClose}
+          className="px-3 py-1.5 rounded-lg text-[12px] text-text-muted hover:bg-surface-alt transition-colors"
+        >
+          取消
+        </button>
+        <button
+          onClick={() => void handleSave()}
+          disabled={!canSave || saving}
+          className={cn(
+            "px-4 py-1.5 rounded-lg text-[12px] font-medium transition-colors",
+            canSave && !saving
+              ? "bg-accent text-white hover:bg-accent/90"
+              : "bg-surface-alt text-text-faint cursor-not-allowed",
+          )}
+        >
+          {saving ? "保存中..." : editId ? "保存" : "添加"}
+        </button>
+      </div>
     </div>
   );
 }

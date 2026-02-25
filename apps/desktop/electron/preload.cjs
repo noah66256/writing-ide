@@ -113,6 +113,38 @@ contextBridge.exposeInMainWorld("desktop", {
       return () => ipcRenderer.removeListener("update.event", listener);
     },
   },
+  mcp: {
+    getServers() {
+      return ipcRenderer.invoke("mcp.getServers");
+    },
+    addServer(config) {
+      return ipcRenderer.invoke("mcp.addServer", config);
+    },
+    updateServer(id, config) {
+      return ipcRenderer.invoke("mcp.updateServer", id, config);
+    },
+    removeServer(id) {
+      return ipcRenderer.invoke("mcp.removeServer", id);
+    },
+    connect(id) {
+      return ipcRenderer.invoke("mcp.connect", id);
+    },
+    disconnect(id) {
+      return ipcRenderer.invoke("mcp.disconnect", id);
+    },
+    getTools(id) {
+      return ipcRenderer.invoke("mcp.getTools", id);
+    },
+    callTool(serverId, toolName, args) {
+      return ipcRenderer.invoke("mcp.callTool", serverId, toolName, args);
+    },
+    onStatusChange(handler) {
+      if (typeof handler !== "function") return () => {};
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on("mcp.statusChange", listener);
+      return () => ipcRenderer.removeListener("mcp.statusChange", listener);
+    },
+  },
 });
 
 

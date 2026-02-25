@@ -331,6 +331,28 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
         };
         const out: any = { projectFiles, docRules, ideSummary };
         if (styleLinterLibraries) out.styleLinterLibraries = styleLinterLibraries;
+
+        // MCP 工具快照：将已连接的 MCP Server 工具注入 sidecar
+        try {
+          const mcpApi = (window as any).desktop?.mcp;
+          if (mcpApi) {
+            const servers = await mcpApi.getServers();
+            const mcpTools = (Array.isArray(servers) ? servers : [])
+              .filter((s: any) => s.status === "connected" && Array.isArray(s.tools) && s.tools.length)
+              .flatMap((s: any) => s.tools.map((t: any) => ({
+                name: `mcp.${s.id}.${t.name}`,
+                description: `[MCP:${s.name}] ${t.description ?? ""}`,
+                inputSchema: t.inputSchema ?? null,
+                serverId: s.id,
+                serverName: s.name,
+                originalName: t.name,
+              })));
+            if (mcpTools.length) out.mcpTools = mcpTools;
+          }
+        } catch {
+          // MCP 不可用时静默
+        }
+
         return out;
       })();
 
@@ -631,6 +653,34 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
 
             setActivity(humanizeToolActivity(name, parsedArgsPreview), { resetTimer: true });
             if (assistantId) { finishAssistant(assistantId); assistantId = null; }
+
+            // -- MCP 工具路由：name 格式 "mcp.<serverId>.<toolName>" --
+            if (name.startsWith("mcp.")) {
+              const parts = name.split(".");
+              const serverId = parts[1] ?? "";
+              const mcpToolName = parts.slice(2).join(".");
+              log("info", "tool.call.mcp", { toolCallId, serverId, mcpToolName });
+              try {
+                const mcpApi = (window as any).desktop?.mcp;
+                const result = mcpApi
+                  ? await mcpApi.callTool(serverId, mcpToolName, rawArgs)
+                  : { ok: false, error: "MCP_API_NOT_AVAILABLE" };
+                submitToolResult({
+                  toolCallId, name,
+                  ok: result.ok,
+                  output: result.ok ? result.output : { ok: false, error: result.error },
+                  meta: { applyPolicy: "auto", riskLevel: "low", hasApply: false },
+                });
+              } catch (e: any) {
+                submitToolResult({
+                  toolCallId, name,
+                  ok: false,
+                  output: { ok: false, error: String(e?.message ?? e) },
+                  meta: { applyPolicy: "auto", riskLevel: "low", hasApply: false },
+                });
+              }
+              return;
+            }
 
             // -- Gateway-executed tools --
             if (executedBy === "gateway") {

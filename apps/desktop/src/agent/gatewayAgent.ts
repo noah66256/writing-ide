@@ -826,7 +826,7 @@ function pickFacetIdsV1(cluster: any, max = 8): string[] {
     seen.add(k);
     out.push(k);
   };
-  // 先把“常见关键卡”放前面（存在才加入）
+  // 先把"常见关键卡"放前面（存在才加入）
   for (const id of ["opening_design", "narrative_structure", "narrative_perspective", "one_liner_crafting", "emotion_mobilization", "logic_framework", "voice_rhythm", "values_embedding"]) {
     if (all.includes(id)) push(id);
   }
@@ -942,7 +942,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   const kbAttached = useRunStore.getState().kbAttachedLibraryIds ?? [];
   const kbLibraries = useKbStore.getState().libraries ?? [];
   const userPrompt = String(extra?.userPrompt ?? "");
-  // PROJECT_STATE：只提供最小信息（避免“光标文件/全量文件列表”对模型产生过强暗示）
+  // PROJECT_STATE：只提供最小信息（避免"光标文件/全量文件列表"对模型产生过强暗示）
   const state = {
     fileCount: proj.files.length,
     // 说明：activePath/openPaths 仍存在于 Desktop 内部（工具默认路径等会用到），但不默认注入给模型
@@ -959,7 +959,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     const maxChars = 4000;
     const truncated = fullText.length > maxChars;
     const selectedText = truncated ? fullText.slice(0, maxChars) : fullText;
-    // 无选区时不要携带 path/range（避免模型把“光标文件”当作默认上下文）
+    // 无选区时不要携带 path/range（避免模型把"光标文件"当作默认上下文）
     if (!fullText.length) return { ok: true, hasSelection: false, reason: "EMPTY_SELECTION" as const };
     return {
       ok: true,
@@ -1041,7 +1041,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     return ids.map((id: string) => map.get(id) ?? { id, name: id });
   })();
 
-  // recentDialogue（仅用于本地意图/skills 的“续跑判定”，不注入模型 messages）
+  // recentDialogue（仅用于本地意图/skills 的"续跑判定"，不注入模型 messages）
   const recentDialogueForIntent = (() => {
     const turnsAll = buildDialogueTurnsFromSteps(useRunStore.getState().steps ?? []);
     const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
@@ -1061,7 +1061,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     userPrompt,
     mainDocRunIntent: (mainDoc as any)?.runIntent,
     kbSelected: kbSelected as any,
-    // 关键：与 Gateway 对齐（detectRunIntent 会参考 RUN_TODO 做“续跑/短句”意图继承）
+    // 关键：与 Gateway 对齐（detectRunIntent 会参考 RUN_TODO 做"续跑/短句"意图继承）
     intent: detectRunIntent({
       mode: useRunStore.getState().mode as any,
       userPrompt,
@@ -1072,26 +1072,19 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     }),
   });
   const idSetRaw = new Set((activeSkillsRaw ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean));
-  const webTopicRadarActive = idSetRaw.has("web_topic_radar");
 
-  // 与 Gateway 对齐：WebRadar 收集阶段 suppress style_imitate（避免误导模型抢跑进入风格闭环）
-  const activeSkills = webTopicRadarActive
-    ? (activeSkillsRaw ?? []).filter((s: any) => String(s?.id ?? "").trim() !== "style_imitate")
-    : activeSkillsRaw;
+  const activeSkills = activeSkillsRaw;
 
   const skillsText = `ACTIVE_SKILLS(JSON):\n${JSON.stringify(activeSkills, null, 2)}\n\n`;
 
   const activeSkillIdSet = new Set((activeSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean));
   const styleSkillActive = activeSkillIdSet.has("style_imitate");
 
-  const kbHint = webTopicRadarActive
-    ? `提示：当前为“全网热点/素材收集（web_topic_radar）”。优先使用 web.search/web.fetch 完成素材收集；收集阶段不要调用 kb.search（尤其是风格库）。\n\n`
-    : `提示：如需引用知识库内容，请调用工具 kb.search（默认只在已关联库中检索）。\n\n`;
+  const kbHint = `提示：如需引用知识库内容，请调用工具 kb.search（默认只在已关联库中检索）。\n\n`;
   const kbText = `KB_SELECTED_LIBRARIES(JSON):\n${JSON.stringify(kbSelected, null, 2)}\n\n` + kbHint;
 
-  // 关键：风格 playbook/写法候选等“强引导”上下文，只在写作闭环真正激活时注入。
-  // （解决：仅做“搜索/盘点热点”时，绑定风格库也不应抢跑影响素材收集与选题广度）
-  const allowInjectStyleContext = styleSkillActive && !webTopicRadarActive;
+  // 关键：风格 playbook/写法候选等"强引导"上下文，只在写作闭环真正激活时注入。
+  const allowInjectStyleContext = styleSkillActive;
 
   // v0.1：目录先挑（只给规则不给原文）。默认不再把 KB_LIBRARY_PLAYBOOK 全文注入模型上下文（容易导致贴原文）。
   // 可通过环境变量临时回滚：DESKTOP_STYLE_INJECT_PLAYBOOK=1
@@ -1104,12 +1097,12 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     if (!playbookText) return "";
     return (
       `KB_LIBRARY_PLAYBOOK(Markdown):\n${playbookText}\n\n` +
-      `提示：上面已注入库级“仿写手册”（风险：可能导致贴原文）。默认已关闭；仅用于回滚排查。\n\n`
+      `提示：上面已注入库级"仿写手册"（风险：可能导致贴原文）。默认已关闭；仅用于回滚排查。\n\n`
     );
   })();
 
   const styleClustersSection = await (async () => {
-    // M3：从最新声音指纹快照提取“写法候选（子簇）”，用于写作前选定写法并写入 Main Doc
+    // M3：从最新声音指纹快照提取"写法候选（子簇）"，用于写作前选定写法并写入 Main Doc
     if (!allowInjectStyleContext) return "";
     const styleLibs = kbSelected.filter((l: any) => String(l?.purpose ?? "").trim() === "style").slice(0, 4);
     if (!styleLibs.length) return "";
@@ -1160,7 +1153,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     if (!payload.length) return "";
     return (
       `KB_STYLE_CLUSTERS(JSON):\n${JSON.stringify(payload, null, 2)}\n\n` +
-      `提示：这是“写法候选（子簇）”摘要。系统可能已默认选定推荐写法继续写作；你也可随时改口切换（回复 clusterId 或 “写法A/写法B/写法C”）。\n\n`
+      `提示：这是"写法候选（子簇）"摘要。系统可能已默认选定推荐写法继续写作；你也可随时改口切换（回复 clusterId 或 "写法A/写法B/写法C"）。\n\n`
     );
   })();
 
@@ -1170,7 +1163,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   const STYLE_PLAN_TOPK_V1 = { must: 6, should: 6, may: 4 };
 
   const sanitizeRuleTextV1 = (md: string) => {
-    // 去掉明显“证据段/原文示例”形态，保留规则/套路/清单类文本
+    // 去掉明显"证据段/原文示例"形态，保留规则/套路/清单类文本
     const raw = String(md ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     const lines = raw.split("\n");
     const out: string[] = [];
@@ -1179,7 +1172,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
       // 大段引用块：高风险（容易被直接复制）
       if (t.startsWith(">")) continue;
       // 含长引号句：高风险（像原文）
-      if ((t.includes("“") && t.includes("”") && t.length >= 24) || (t.includes("\"") && t.length >= 28)) continue;
+      if ((t.includes("\u201c") && t.includes("\u201d") && t.length >= 24) || (t.includes("\"") && t.length >= 28)) continue;
       // v2: 连续长自然语句（>=40字，不以列表/标题标记开头）极可能是原文段落
       if (!/^[-*#\d]/.test(t) && t.length >= 40 && !/[:：=｜|]/.test(t)) continue;
       out.push(line);
@@ -1195,7 +1188,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     let inTrick = false;
     for (const l of lines) {
       if (!l) continue;
-      // 粗粒度：遇到 “套路/模板/清单” 开始收集 bullet/编号项
+      // 粗粒度：遇到 "套路/模板/清单" 开始收集 bullet/编号项
       if (/^#{2,6}\s*(套路|模板|检查清单|写法|步骤|做法)/.test(l) || /^(套路|模板|检查清单|写法|步骤|做法)[:：]/.test(l)) {
         inTrick = true;
         continue;
@@ -1211,7 +1204,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
       if (!item) continue;
       if (item.length < 6) continue;
       // 脱敏：去掉引号段落
-      if ((item.includes("“") && item.includes("”")) || item.includes("【证据")) continue;
+      if ((item.includes("\u201c") && item.includes("\u201d")) || item.includes("【证据")) continue;
       cand.push(item.replace(/\s+/g, " ").trim());
       if (cand.length >= 18) break;
     }
@@ -1225,7 +1218,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
         const m = l.match(/^[-*]\s+(.+)$/);
         const item = (m?.[1] ?? "").trim();
         if (!item || item.length < 8) continue;
-        if ((item.includes("“") && item.includes("”")) || item.includes("【证据")) continue;
+        if ((item.includes("\u201c") && item.includes("\u201d")) || item.includes("【证据")) continue;
         anyBullets.push(item.replace(/\s+/g, " ").trim());
         if (anyBullets.length >= 8) break;
       }
@@ -1280,11 +1273,11 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     };
     return (
       `STYLE_CATALOG(JSON):\n${JSON.stringify(payload, null, 2)}\n\n` +
-      `提示：这是“仿写工业化目录”（只给规则不给原文）。你必须先基于此目录选择 MUST/SHOULD/MAY 并写入 mainDoc.stylePlanV1（run.mainDoc.update），再进入后续写作闭环。\n\n`
+      `提示：这是"仿写工业化目录"（只给规则不给原文）。你必须先基于此目录选择 MUST/SHOULD/MAY 并写入 mainDoc.stylePlanV1（run.mainDoc.update），再进入后续写作闭环。\n\n`
     );
   })();
   const styleSelectorSection = await (async () => {
-    // Selector v1：为“自动选簇/选卡”提供结构化输出，保证换生成模型也稳定可用
+    // Selector v1：为"自动选簇/选卡"提供结构化输出，保证换生成模型也稳定可用
     if (!allowInjectStyleContext) return "";
     const styleSkillActive = Array.isArray(activeSkills) && activeSkills.some((s: any) => String(s?.id ?? "") === "style_imitate");
     if (!styleSkillActive) return "";
@@ -1334,7 +1327,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     const why: string[] = [];
     if (selectedByMainDoc) why.push("已按 Main Doc 锁定写法（用户可改口覆盖）。");
     const anchorsCount = selected && Array.isArray(selected?.anchors) ? selected.anchors.length : 0;
-    if (anchorsCount > 0) why.push(`本簇已采纳 anchors：${anchorsCount} 段（优先“更像原文”）。`);
+    if (anchorsCount > 0) why.push(`本簇已采纳 anchors：${anchorsCount} 段（优先"更像原文"）。`);
     if (autoPick.topicHits?.length) why.push(`话题命中关键词：${autoPick.topicHits.slice(0, 4).join("、")}`);
     why.push(`写作阶段：${stage.label}（${stage.by}）`);
     if (selectedFacetIds.length) why.push(`本次维度子集：${selectedFacetIds.length} 张（TopK，选出来就必须执行）`);
@@ -1358,7 +1351,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
       if (!body) return "";
       return (
         `STYLE_FACETS_SELECTED(Markdown):\n${body}\n\n` +
-        `提示：以上为本次选中的“规则卡子集”（已脱敏：不含原文证据段/长 quote）。只执行这些卡；不要自行扩展到 21 张。\n\n`
+        `提示：以上为本次选中的"规则卡子集"（已脱敏：不含原文证据段/长 quote）。只执行这些卡；不要自行扩展到 21 张。\n\n`
       );
     })();
 
@@ -1457,7 +1450,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     );
   })();
 
-  // Pending proposals：用于“proposal-first 不落盘”但仍可继续下一步（避免下一轮说‘没有初稿’）
+  // Pending proposals：用于"proposal-first 不落盘"但仍可继续下一步（避免下一轮说‘没有初稿’）
   const pendingProposals = (() => {
     const steps = useRunStore.getState().steps ?? [];
     const out: Array<{ toolName: string; path?: string; note?: string }> = [];
@@ -1505,7 +1498,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   })();
   const pendingSection = pendingProposals.length
     ? `PENDING_FILE_PROPOSALS(JSON):\n${JSON.stringify(pendingProposals, null, 2)}\n\n` +
-      `提示：存在未 Keep 的“文件提案”。后续若调用 doc.read 读取对应文件，系统会优先返回“提案态最新内容”（不要求先 Keep）。\n\n`
+      `提示：存在未 Keep 的"文件提案"。后续若调用 doc.read 读取对应文件，系统会优先返回"提案态最新内容"（不要求先 Keep）。\n\n`
     : "";
 
   const segments: ContextManifestSegmentV1[] = [];
@@ -1627,7 +1620,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     name: "NOTES",
     content:
       `注意：\n` +
-      `- 已提供当前编辑器选区（EDITOR_SELECTION）。若用户说“改写我选中的这段”，优先用该选区。\n` +
+      `- 已提供当前编辑器选区（EDITOR_SELECTION）。若用户说"改写我选中的这段"，优先用该选区。\n` +
       `- 如需文件正文请调用 doc.read；如需刷新选区也可调用 doc.getSelection。\n` +
       `- 本次 Context Pack 仅注入少量最近对话片段（RECENT_DIALOGUE），不是完整历史；关键决策请写入 Main Doc（run.mainDoc.update），历史素材请用 @{} 显式引用。\n\n`,
     priority: "p3",
@@ -1696,7 +1689,7 @@ export function buildChatContextPack(extra?: { referencesText?: string }) {
 
   pushSeg({ name: "DOC_RULES", content: `DOC_RULES(Markdown):\n${docRules}\n\n`, priority: "p0", trusted: true, source: "desktop" });
 
-  // Chat：也携带“滚动摘要 + 最近 3 个完整回合”（用户要求：Chat 带历史，但仍保持上下文可控）
+  // Chat：也携带"滚动摘要 + 最近 3 个完整回合"（用户要求：Chat 带历史，但仍保持上下文可控）
   const chatSummary = (() => {
     const byMode: any = (useRunStore.getState() as any).dialogueSummaryByMode ?? {};
     const s = String(byMode?.chat ?? "").trim();
@@ -1783,7 +1776,7 @@ export async function rollDialogueSummaryIfNeeded(args: {
   const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
 
   const RAW_KEEP_TURNS = 3; // Chat/Plan/Agent：都保留最近 3 个完整回合原文
-  const TRIGGER_MIN_TURNS = 3; // 每累计 3 个新回合就滚动一次摘要（“3–5轮摘要”先用 3）
+  const TRIGGER_MIN_TURNS = 3; // 每累计 3 个新回合就滚动一次摘要（"3–5轮摘要"先用 3）
 
   const turnsToSummarize = Math.max(0, completeTurns.length - RAW_KEEP_TURNS);
   const cursorByMode: any = run.dialogueSummaryTurnCursorByMode ?? {};
@@ -1795,7 +1788,7 @@ export async function rollDialogueSummaryIfNeeded(args: {
 
   const summaryByMode: any = run.dialogueSummaryByMode ?? {};
   const previousSummary = String(summaryByMode?.[args.mode] ?? "");
-  // 用户要求：摘要模型默认复用“agentModel”（即使在 chat 模式），后续可在 B 端单独配置 stage 覆盖/约束
+  // 用户要求：摘要模型默认复用"agentModel"（即使在 chat 模式），后续可在 B 端单独配置 stage 覆盖/约束
   const preferModelId = String(run.agentModel || "").trim() || String(run.model || "").trim();
   if (!preferModelId) return { ok: true as const, rolled: false as const };
 
@@ -1813,7 +1806,7 @@ export async function rollDialogueSummaryIfNeeded(args: {
     return { ok: false as const, error: ret.error };
   }
 
-  // 写回 store（持久化），并推进 cursor 到 “已摘要覆盖的 turn 数”
+  // 写回 store（持久化），并推进 cursor 到 "已摘要覆盖的 turn 数"
   try {
     (useRunStore.getState() as any).setDialogueSummary(args.mode, ret.summary, turnsToSummarize);
   } catch {

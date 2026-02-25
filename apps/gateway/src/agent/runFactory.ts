@@ -14,6 +14,7 @@ import {
 } from "../audit/runAudit.js";
 import {
   SKILL_MANIFESTS_V1,
+  listRegisteredSkills,
   activateSkills,
   createInitialRunState,
   detectRunIntent,
@@ -507,35 +508,6 @@ export function looksLikeExecuteOrWriteIntent(text: string): boolean {
   );
 }
 
-export function looksLikeWebRadarIntent(text: string): boolean {
-  const t = String(text ?? "").trim();
-  if (!t) return false;
-  const hasSearchVerb = /(搜索|检索|搜一下|查找|查(一下)?|上网|全网|联网|web\.search|web\.fetch)/i.test(t);
-  const hasWebSignal = /(全网|上网|联网|web\.search|web\.fetch)/i.test(t);
-  const hasGithubSignal = /github/i.test(t);
-  const hasProjectHints =
-    /(文件|目录|项目|代码|路径|\.md|\.mdx|\.ts|\.tsx|\.js|\.json|@\{[^}]+\}|src\/|apps\/|packages\/)/i.test(t) ||
-    /(哪里用到了|在哪(里)?用|引用|import|require|调用|定义|实现)/i.test(t);
-  const hasHotSignal = /(热点|新闻|时事|快讯|资讯|盘前|盘中|盘后)/.test(t);
-  const hasTimeSignal = /(今天|今日|最新|最近|实时|刚刚)/.test(t);
-  const hasInventorySignal = /(盘点|汇总|整理|列表|清单|多少条|几条|选题|话题|方向|素材|雷达)/.test(t);
-  const hasResearchSignal = /(大搜|调研|研究|资料|论文|方案|最佳实践|best\s*practice|怎么解决|如何解决|怎么做|怎么搞)/i.test(t);
-
-  const looksLikeSingleDocEdit =
-    /(整理|润色|改写|精简|扩写|续写)/.test(t) &&
-    /(这篇|这条|本文|该文|这则|这份)/.test(t) &&
-    /(新闻|资讯|快讯|文章)/.test(t) &&
-    !hasSearchVerb &&
-    !hasTimeSignal &&
-    !/https?:\/\//i.test(t);
-  if (looksLikeSingleDocEdit) return false;
-
-  if ((hasWebSignal || (hasGithubSignal && !hasProjectHints)) && (hasSearchVerb || hasResearchSignal)) return true;
-  if (hasSearchVerb && (hasHotSignal || hasTimeSignal || hasInventorySignal)) return true;
-  if (hasInventorySignal && (hasHotSignal || hasTimeSignal)) return true;
-  return false;
-}
-
 export function looksLikeProjectSearchIntent(text: string): boolean {
   const t = String(text ?? "").trim();
   if (!t) return false;
@@ -704,33 +676,6 @@ export function computeIntentRouteDecisionPhase0(args: {
       reason: `mainDoc.runIntent=${mainDocIntent}：进入任务闭环`,
       derivedFrom: [`mainDocIntent:${mainDocIntent}`, ...derivedFrom],
       routeId: "task_execution",
-    };
-  }
-
-  if (looksLikeWebRadarIntent(pTrim)) {
-    const wantsWriteFile =
-      /(写入|保存|另存为|落盘|生成\s*(?:md|markdown)|生成.*\.(?:md|markdown)\b|写到|输出到|存到|创建\s*文件|doc\.write)/i.test(pTrim);
-    if (wantsWriteFile || args.intent?.wantsWrite || args.intent?.isWritingTask) {
-      return {
-        intentType: "task_execution",
-        confidence: 0.9,
-        nextAction: "enter_workflow",
-        todoPolicy: "required",
-        toolPolicy: "allow_tools",
-        reason: "web_radar 但用户明确要求生成/写入文件：允许工具闭环（最终写入 doc.write）",
-        derivedFrom: ["regex:web_radar", "signal:write_file", ...derivedFrom],
-        routeId: "task_execution",
-      };
-    }
-    return {
-      intentType: "task_execution",
-      confidence: 0.88,
-      nextAction: "enter_workflow",
-      todoPolicy: "required",
-      toolPolicy: "allow_readonly",
-      reason: "用户在做全网热点/新闻/素材盘点：允许只读联网工具（web.search/web.fetch）",
-      derivedFrom: ["regex:web_radar", ...derivedFrom],
-      routeId: "web_radar",
     };
   }
 
@@ -1018,8 +963,6 @@ export type PreparedRun = {
   activeSkillIds: string[];
   rawActiveSkillIds: string[];
   suppressedSkillIds: string[];
-  webRadarByText: boolean;
-  webRadarActive: boolean;
   stageKeyForRun: string;
   billingSource: string;
   model: string;
@@ -1068,6 +1011,7 @@ export type PreparedRun = {
   computePerTurnAllowed: (state: RunState) => { allowed: Set<string>; hint: string } | null;
   resolveSubAgentModel: NonNullable<RunContext["resolveSubAgentModel"]>;
   runnerStyleLibIds: string[];
+  mcpToolsFromSidecar: Array<{ name: string; description: string; inputSchema?: any; serverId: string; serverName: string; originalName: string }>;
   authorization: string;
 };
 
@@ -1118,7 +1062,8 @@ export async function prepareAgentRun(args: {
   const disabledSkillIds = new Set<string>(
     capsForSkills && capsForSkills.disabledSkillIds ? Array.from(capsForSkills.disabledSkillIds as Set<string>) : [],
   );
-  const skillManifestsEffective = (SKILL_MANIFESTS_V1 as any[]).filter((m: any) => !disabledSkillIds.has(String(m?.id ?? "").trim()));
+  const skillManifestsEffective = (listRegisteredSkills() as any[]).filter((m: any) => !disabledSkillIds.has(String(m?.id ?? "").trim()));
+  const skillManifestById = new Map(skillManifestsEffective.map((m: any) => [String(m?.id ?? "").trim(), m] as const));
 
   const rawActiveSkills = activateSkills({
     mode,
@@ -1129,15 +1074,30 @@ export async function prepareAgentRun(args: {
     manifests: skillManifestsEffective as any,
   });
 
-  // Merge explicitly mentioned skill IDs (from @ mentions) that weren't auto-detected
+  // 合并 @ 提及但未自动激活的 Skill（须遵守 conflicts/requires）
   const mentionedSkillIds = Array.isArray((body as any).activeSkillIds)
     ? ((body as any).activeSkillIds as any[]).map((x: any) => String(x ?? "").trim()).filter(Boolean)
     : [];
+  const mentionedSkillIdSet = new Set(mentionedSkillIds);
   const autoActivatedIds = new Set((rawActiveSkills ?? []).map((s: any) => String(s?.id ?? "").trim()));
   for (const sid of mentionedSkillIds) {
     if (autoActivatedIds.has(sid)) continue;
-    const manifest = (skillManifestsEffective as any[]).find((m: any) => String(m?.id ?? "").trim() === sid);
+    const manifest = skillManifestById.get(sid) as any;
     if (!manifest) continue;
+    // conflicts 检查：与已激活 Skill 互斥则跳过
+    const conflicts = Array.isArray(manifest.conflicts) ? manifest.conflicts.map((c: any) => String(c ?? "").trim()).filter(Boolean) : [];
+    if (conflicts.some((cid: string) => autoActivatedIds.has(cid))) continue;
+    // 反向 conflicts：已激活 Skill 声明与本 Skill 冲突
+    let reverseConflict = false;
+    for (const aid of autoActivatedIds) {
+      const am = skillManifestById.get(aid) as any;
+      const ac = Array.isArray(am?.conflicts) ? am.conflicts.map((c: any) => String(c ?? "").trim()) : [];
+      if (ac.includes(sid)) { reverseConflict = true; break; }
+    }
+    if (reverseConflict) continue;
+    // requires 检查：前置 Skill 必须已激活
+    const requires = Array.isArray(manifest.requires) ? manifest.requires.map((r: any) => String(r ?? "").trim()).filter(Boolean) : [];
+    if (requires.length && !requires.every((rid: string) => autoActivatedIds.has(rid))) continue;
     rawActiveSkills.push({
       id: manifest.id,
       name: manifest.name,
@@ -1145,94 +1105,21 @@ export async function prepareAgentRun(args: {
       badge: manifest.ui?.badge || manifest.id.toUpperCase(),
       activatedBy: { reasonCodes: [`skill:${manifest.id}`, "mentioned_by_user"], detail: { trigger: "mention" } },
     });
+    autoActivatedIds.add(sid);
   }
 
   const rawActiveSkillIds = (rawActiveSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
 
-  const webRadarByText = looksLikeWebRadarIntent(userPrompt);
-  const webRadarActive =
-    webRadarByText || (rawActiveSkillIds.includes("web_topic_radar") && String((intentRoute as any)?.routeId ?? "") === "web_radar");
+  // @ 提及的 Skill 绕过 toolPolicy 压制，但不提升 toolPolicy 权限（不越权）
   const suppressSkillsByToolPolicy = String((intentRoute as any)?.toolPolicy ?? "").trim() !== "allow_tools";
   const corpusIngestActive = rawActiveSkillIds.includes("corpus_ingest");
-  const suppressStyle = webRadarActive || suppressSkillsByToolPolicy || corpusIngestActive;
-  const suppressMulti = suppressSkillsByToolPolicy || corpusIngestActive;
-  const suppressBatch = suppressSkillsByToolPolicy || corpusIngestActive;
+  const suppressStyle = (suppressSkillsByToolPolicy && !mentionedSkillIdSet.has("style_imitate")) || corpusIngestActive;
   const suppressedSkillIds: string[] = [];
-  const routeId0 = String((intentRoute as any)?.routeId ?? "").trim();
-  const suppressWebRadarSkillByRoute = routeId0 === "project_search";
 
   let activeSkills = (rawActiveSkills ?? []) as any[];
-  if (suppressWebRadarSkillByRoute) {
-    if (rawActiveSkillIds.includes("web_topic_radar")) suppressedSkillIds.push("web_topic_radar");
-    activeSkills = activeSkills.filter((s: any) => String(s?.id ?? "").trim() !== "web_topic_radar");
-  }
-  if (suppressBatch) {
-    if (rawActiveSkillIds.includes("writing_batch")) suppressedSkillIds.push("writing_batch");
-    activeSkills = activeSkills.filter((s: any) => String(s?.id ?? "").trim() !== "writing_batch");
-  }
-  if (suppressMulti) {
-    if (rawActiveSkillIds.includes("writing_multi")) suppressedSkillIds.push("writing_multi");
-    activeSkills = activeSkills.filter((s: any) => String(s?.id ?? "").trim() !== "writing_multi");
-  }
   if (suppressStyle) {
     if (rawActiveSkillIds.includes("style_imitate")) suppressedSkillIds.push("style_imitate");
     activeSkills = activeSkills.filter((s: any) => String(s?.id ?? "").trim() !== "style_imitate");
-  }
-
-  {
-    const SMALL_BATCH_THRESHOLD = 6;
-    const todoItems = Array.isArray(runTodoFromPack) ? runTodoFromPack : [];
-    const pendingCount = todoItems.filter((t: any) => {
-      const status = String((t as any)?.status ?? "").trim().toLowerCase();
-      return status !== "done" && status !== "cancelled";
-    }).length;
-
-    const parseCnInt = (token: string): number | null => {
-      const s = String(token ?? "").trim();
-      if (!s) return null;
-      if (/^\d{1,2}$/.test(s)) {
-        const n = Number(s);
-        return Number.isFinite(n) ? Math.floor(n) : null;
-      }
-      const map: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
-      if (s === "十") return 10;
-      if (s.startsWith("十") && s.length === 2) return 10 + (map[s[1]] ?? 0);
-      if (s.length === 2 && map[s[0]] && s[1] === "十") return map[s[0]] * 10;
-      if (s.length === 3 && map[s[0]] && s[1] === "十") return map[s[0]] * 10 + (map[s[2]] ?? 0);
-      return map[s] ?? null;
-    };
-
-    const inferCountFromText = (raw: string): number | null => {
-      const t = String(raw ?? "");
-      if (!t.trim()) return null;
-      const m =
-        t.match(/(?:top|前)\s*([0-9]{1,2}|[一二三四五六七八九十两]{1,3})\s*(?:篇|条|个)/i) ||
-        t.match(/([0-9]{1,2}|[一二三四五六七八九十两]{1,3})\s*(?:篇|条|个)(?:\s*(?:文章|文案|口播|脚本|稿))?/);
-      const token = m?.[1] ? String(m[1]) : "";
-      if (!token) return null;
-      return parseCnInt(token);
-    };
-
-    const requestedCount = (() => {
-      const texts = [String(userPrompt ?? ""), String((mainDocFromPack as any)?.goal ?? "")];
-      for (const raw of texts) {
-        const n = inferCountFromText(raw);
-        if (!Number.isFinite(n as any)) continue;
-        const nn = Number(n);
-        if (nn <= 0) continue;
-        return Math.floor(nn);
-      }
-      return null as number | null;
-    })();
-
-    const wantsSmallBatch =
-      (pendingCount > 0 && pendingCount <= SMALL_BATCH_THRESHOLD) ||
-      (pendingCount === 0 && requestedCount !== null && requestedCount > 0 && requestedCount <= SMALL_BATCH_THRESHOLD);
-
-    if (wantsSmallBatch && rawActiveSkillIds.includes("writing_batch")) {
-      if (!suppressedSkillIds.includes("writing_batch")) suppressedSkillIds.push("writing_batch");
-      activeSkills = activeSkills.filter((s: any) => String(s?.id ?? "").trim() !== "writing_batch");
-    }
   }
 
   const activeSkillIds = (activeSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
@@ -1242,19 +1129,41 @@ export async function prepareAgentRun(args: {
         .find(Boolean)
     : "") || pickSkillStageKeyForAgentRun(activeSkills, "agent.run");
   const billingSource = stageKeyForRun.startsWith("agent.skill.") ? stageKeyForRun : `agent.${mode}`;
-  const skillManifestById = new Map((skillManifestsEffective as any[]).map((m: any) => [String(m?.id ?? "").trim(), m]));
 
+  // 构建系统提示词：可用 Skill 清单 + 已激活 Skill 的 promptFragments
   const skillsSystemPrompt = (() => {
-    if (!activeSkillIds.length) return "";
-    const frags = activeSkillIds
-      .map((id: string) => {
-        const m: any = skillManifestById.get(id);
-        const s = String(m?.promptFragments?.system ?? "").trim();
-        return s;
-      })
-      .filter(Boolean);
-    if (!frags.length) return "";
-    return `【Active Skills】${activeSkillIds.join(", ")}（stageKey=${stageKeyForRun}）\n${frags.map((x) => `- ${x}`).join("\n")}`;
+    const parts: string[] = [];
+
+    // 1) 可用 Skill 清单——让负责人知道有哪些能力可建议用户使用
+    const availableLines = skillManifestsEffective.map((m: any) => {
+      const id = String(m?.id ?? "").trim();
+      const name = String(m?.name ?? "").trim() || id;
+      const desc = String(m?.description ?? "").trim();
+      const brief = desc.length > 80 ? desc.slice(0, 80) + "…" : desc;
+      const mode0 = m?.autoEnable ? "自动" : "手动";
+      return `  - ${id}（${name}，${mode0}）：${brief}`;
+    });
+    if (availableLines.length) {
+      parts.push(`【可用 Skills】共 ${availableLines.length} 个已注册能力：\n${availableLines.join("\n")}`);
+    }
+
+    // 2) 已激活 Skill 的 promptFragments
+    if (activeSkillIds.length) {
+      const frags = activeSkillIds
+        .map((id: string) => {
+          const m: any = skillManifestById.get(id);
+          return String(m?.promptFragments?.system ?? "").trim();
+        })
+        .filter(Boolean);
+      const header = `【Active Skills】${activeSkillIds.join(", ")}（stageKey=${stageKeyForRun}）`;
+      if (frags.length) {
+        parts.push(`${header}\n${frags.map((x) => `- ${x}`).join("\n")}`);
+      } else {
+        parts.push(header);
+      }
+    }
+
+    return parts.join("\n\n");
   })();
 
   const env = await services.getLlmEnv();
@@ -1658,6 +1567,16 @@ export async function prepareAgentRun(args: {
   const projectFilesCount = Array.isArray(toolSidecar?.projectFiles) ? (toolSidecar.projectFiles as any[]).length : 0;
   const docRulesChars = typeof toolSidecar?.docRules?.content === "string" ? String(toolSidecar.docRules.content).length : 0;
 
+  // MCP 工具：从 sidecar 提取，标记为 Desktop 执行
+  const mcpToolsFromSidecar: Array<{ name: string; description: string; inputSchema?: any; serverId: string; serverName: string; originalName: string }> =
+    Array.isArray(toolSidecar?.mcpTools) ? (toolSidecar.mcpTools as any[]) : [];
+  // 如果 toolPolicy 允许工具，则将 MCP 工具名加入允许列表
+  if (mcpToolsFromSidecar.length && intentRoute.toolPolicy !== "deny") {
+    for (const t of mcpToolsFromSidecar) {
+      baseAllowedToolNames.add(t.name);
+    }
+  }
+
   const messages: OpenAiChatMessage[] = [
     {
       role: "system",
@@ -1727,120 +1646,19 @@ export async function prepareAgentRun(args: {
   const webGateNeedsSearch = !hasUrlInPrompt && (webTriggerByText || sourcesPolicy === "web" || sourcesPolicy === "kb_and_web");
   const webGateNeedsFetch = hasUrlInPrompt || webTriggerByText || sourcesPolicy === "web" || sourcesPolicy === "kb_and_web";
 
-  const clampInt = (v: any, min: number, max: number, fallback: number) => {
-    const n = Number(v);
-    if (!Number.isFinite(n)) return fallback;
-    return Math.max(min, Math.min(max, Math.floor(n)));
-  };
-
-  const radarMinSearch = clampInt(process.env.WEB_RADAR_MIN_SEARCH ?? 3, 1, 8, 3);
-  const radarMinFetch = clampInt(process.env.WEB_RADAR_MIN_FETCH ?? 5, 1, 12, 5);
-  const radarMinTopics = clampInt(process.env.WEB_RADAR_MIN_TOPICS ?? 15, 8, 40, 15);
-  const radarMinTopicsByPrompt = (() => {
-    const parseTopN = (raw: string) => {
-      const t = String(raw ?? "");
-      const m =
-        t.match(/(?:top|前)\s*([0-9]{1,2}|[一二三四五六七八九十两]{1,3})\s*(?:篇|条|个)/i) ||
-        t.match(/([0-9]{1,2}|[一二三四五六七八九十两]{1,3})\s*(?:篇|条|个)\s*(?:分别|各|左右|上下|即可|就行|就好)/i);
-      const token = m?.[1] ? String(m[1]) : "";
-      if (!token) return null;
-      if (/^\d{1,2}$/.test(token)) {
-        const n = Number(token);
-        return Number.isFinite(n) ? Math.floor(n) : null;
-      }
-      const map: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
-      const s = token.trim();
-      if (!s) return null;
-      if (s === "十") return 10;
-      if (s.startsWith("十") && s.length === 2) return 10 + (map[s[1]] ?? 0);
-      if (s.length === 2 && map[s[0]] && s[1] === "十") return map[s[0]] * 10;
-      if (s.length === 3 && map[s[0]] && s[1] === "十") return map[s[0]] * 10 + (map[s[2]] ?? 0);
-      return map[s] ?? null;
-    };
-    const texts = [String(userPrompt ?? ""), String((mainDocFromPack as any)?.goal ?? "")];
-    for (const raw of texts) {
-      const n = parseTopN(raw);
-      if (!Number.isFinite(n as any)) continue;
-      const nn = Number(n);
-      if (nn <= 0 || nn > 10) continue;
-      return Math.max(1, Math.floor(nn));
-    }
-    return null as number | null;
-  })();
-
-  const radarMinTopicsEffective = radarMinTopicsByPrompt ? Math.max(3, radarMinTopicsByPrompt) : radarMinTopics;
-
   const webGate = {
     enabled: webGateBaseEnabled,
     needsSearch: webGateNeedsSearch,
     needsFetch: webGateNeedsFetch,
-    requiredSearchCount: webGateNeedsSearch ? (webRadarActive ? radarMinSearch : 1) : 0,
-    requiredFetchCount: webGateNeedsFetch ? (webRadarActive ? radarMinFetch : 1) : 0,
-    requiredUniqueSearchQueries: webRadarActive ? Math.min(radarMinSearch, 3) : 0,
-    requiredUniqueFetchDomains: webRadarActive ? 3 : 0,
-    minTopics: webRadarActive ? radarMinTopicsEffective : 0,
-    radar: webRadarActive,
+    requiredSearchCount: webGateNeedsSearch ? 1 : 0,
+    requiredFetchCount: webGateNeedsFetch ? 1 : 0,
+    requiredUniqueSearchQueries: 0,
+    requiredUniqueFetchDomains: 0,
+    minTopics: 0,
+    radar: false,
   };
 
-  const multiWritePlan = (() => {
-    const enabledBySkill = activeSkillIds.includes("writing_multi");
-    if (!enabledBySkill) return { enabled: false as const, expected: 0, outputDir: "" };
-    if (activeSkillIds.includes("writing_batch")) return { enabled: false as const, expected: 0, outputDir: "" };
-
-    const parseCnInt = (token: string): number | null => {
-      const s = String(token ?? "").trim();
-      if (!s) return null;
-      if (/^\d{1,2}$/.test(s)) {
-        const n = Number(s);
-        return Number.isFinite(n) ? Math.floor(n) : null;
-      }
-      const map: Record<string, number> = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
-      if (s === "十") return 10;
-      if (s.startsWith("十") && s.length === 2) return 10 + (map[s[1]] ?? 0);
-      if (s.length === 2 && map[s[0]] && s[1] === "十") return map[s[0]] * 10;
-      if (s.length === 3 && map[s[0]] && s[1] === "十") return map[s[0]] * 10 + (map[s[2]] ?? 0);
-      return map[s] ?? null;
-    };
-
-    const inferCountFromText = (raw: string): number | null => {
-      const t = String(raw ?? "");
-      if (!t.trim()) return null;
-      const m =
-        t.match(/(?:top|前)\s*([0-9]{1,2}|[一二三四五六七八九十两]{1,3})\s*(?:篇|条|个)/i) ||
-        t.match(/([0-9]{1,2}|[一二三四五六七八九十两]{1,3})\s*(?:篇|条|个)(?:\s*(?:文章|文案|口播|脚本|稿))?/);
-      const token = m?.[1] ? String(m[1]) : "";
-      if (!token) return null;
-      return parseCnInt(token);
-    };
-
-    const explicitCount = (() => {
-      const texts = [String(userPrompt ?? ""), String((mainDocFromPack as any)?.goal ?? "")];
-      for (const raw of texts) {
-        const n = inferCountFromText(raw);
-        if (!Number.isFinite(n as any)) continue;
-        const nn = Number(n);
-        if (nn >= 2 && nn <= 9) return Math.floor(nn);
-      }
-      return null as number | null;
-    })();
-
-    const ambiguousMulti =
-      /(多篇|几篇|若干篇|多条|几条|若干条)/.test(String(userPrompt ?? "")) &&
-      /(每篇|每条|分别|各写|各自|逐篇|逐条)/.test(String(userPrompt ?? ""));
-    const expected = explicitCount ?? (ambiguousMulti ? 5 : null);
-    const safeExpected = expected && Number.isFinite(Number(expected)) ? Math.floor(Number(expected)) : 0;
-    if (!(safeExpected >= 2 && safeExpected <= 9)) return { enabled: false as const, expected: 0, outputDir: "" };
-
-    const outputDir = `exports/multi_${String(runId).slice(0, 8)}`;
-    return { enabled: true as const, expected: safeExpected, outputDir };
-  })();
-
-  const workflowRetryBudgetEffective = (() => {
-    const base = 3;
-    if (!multiWritePlan.enabled) return base;
-    const per = 4;
-    return Math.min(120, Math.max(base, base + multiWritePlan.expected * per + 8));
-  })();
+  const workflowRetryBudgetEffective = 3;
 
   const runState = createInitialRunState({
     protocolRetryBudget: 2,
@@ -1860,33 +1678,7 @@ export async function prepareAgentRun(args: {
     runState.hasTodoList = true;
     (runState as any).todoList = runTodoFromPack;
   }
-
-  if (multiWritePlan.enabled) {
-    (runState as any).multiWrite = {
-      enabled: true,
-      expected: multiWritePlan.expected,
-      done: 0,
-      outputDir: multiWritePlan.outputDir,
-      writtenPaths: [] as string[],
-    };
-    try {
-      const insertAt = Math.max(0, messages.length - 1);
-      messages.splice(insertAt, 0, {
-        role: "system",
-        content:
-          "【writing_multi】检测到小规模多篇写作任务（逐篇闭环）。\n" +
-          `- 目标篇数：${multiWritePlan.expected}（2–9）\n` +
-          `- 输出目录：${multiWritePlan.outputDir}/（建议每篇一个新文件：${multiWritePlan.outputDir}/01_标题.md ...）\n` +
-          "- 关键约束：逐篇执行“写前 kb.search → 初稿 → 初稿后二次 kb.search(one_liner/ending) →（可选）lint.copy → lint.style → doc.write 落盘”。\n" +
-          "- 禁止：不要把多篇正文合并成一个大文档再 splitToDir；不要一次性写入多篇。\n" +
-          "- 完成全部写入后再调用 run.done。\n",
-      } as any);
-    } catch {
-      // ignore
-    }
-  } else {
-    (runState as any).multiWrite = { enabled: false };
-  }
+  (runState as any).multiWrite = { enabled: false };
 
   const PHASE_CONTRACTS_V1: Partial<Record<SkillToolCapsPhase, PhaseContractV1>> = {
     todo_required: {
@@ -1909,46 +1701,6 @@ export async function prepareAgentRun(args: {
             "你还没有设置 Todo。请立刻调用 run.setTodoList（或 run.todo.upsertMany）写入可执行 Todo，再继续下一步。\n" +
             "- 建议：先写 5–12 条，包含：检索模板 → 产候选稿 → 二次检索金句/收束 → lint.style → 写入。\n" +
             "- 默认不要创建 status=blocked/等待确认 条目；如有不确定点：写明默认假设继续推进。\n",
-        };
-      },
-    },
-    batch_active: {
-      phase: "batch_active",
-      allowTools: [
-        "writing.batch.start",
-        "writing.batch.status",
-        "writing.batch.pause",
-        "writing.batch.resume",
-        "writing.batch.cancel",
-        "project.listFiles",
-        "kb.search",
-        "run.done",
-      ],
-      hint:
-        "【Skill: writing_batch】当前阶段：batch_active（硬路由，契约驱动）。\n" +
-        "- 你不得在单次对话里直接输出 N 篇完整正文；必须调用 writing.batch.start 启动后台批处理。\n" +
-        "- inputDir 缺失：直接调用 writing.batch.start（会用当前活动文件/项目推断，不要弹系统选目录）。\n" +
-        "- 启动后建议：调用 writing.batch.status 获取 jobId/outputDir，然后调用 run.done 结束本次 run（批处理会在后台继续）。\n" +
-        "- 需要控制：writing.batch.pause/resume/cancel。\n" +
-        "- 本回合除 writing.batch.* / kb.search / run.* 外不要调用其它工具；不要输出最终长文正文。\n",
-      autoRetry: ({ runState, toolCapsPhase }) => {
-        if (toolCapsPhase !== "batch_active") return null;
-        const hasBatchJob =
-          !!(runState as any).batchJobId ||
-          !!(runState as any).batchJobRunning ||
-          (typeof (runState as any).batchJobStatus === "string" && String((runState as any).batchJobStatus) !== "idle");
-        if (hasBatchJob) return { shouldRetry: false, reasonCodes: ["batch_started"], reasons: [], systemMessage: "" };
-
-        return {
-          shouldRetry: true,
-          reasonCodes: ["need_batch_start"],
-          reasons: ["批处理未启动（batch_active 阶段必须先 start/status）"],
-          systemMessage:
-            "你上一条没有按 batch_active 契约调用批处理工具。\n" +
-            "- 请选择其一：\n" +
-            "  A) 启动：调用 writing.batch.start（不传 inputDir，默认用当前活动文件）。\n" +
-            "  B) 查询：调用 writing.batch.status（若你认为已经启动过）。\n" +
-            "- 完成后：建议调用 run.done 结束本次 run（批处理会在后台继续）。\n",
         };
       },
     },
@@ -2071,8 +1823,6 @@ export async function prepareAgentRun(args: {
       activeSkillIds,
       rawActiveSkillIds,
       suppressedSkillIds,
-      webRadarByText,
-      webRadarActive,
       stageKeyForRun,
       billingSource,
       model,
@@ -2104,6 +1854,7 @@ export async function prepareAgentRun(args: {
       computePerTurnAllowed,
       resolveSubAgentModel,
       runnerStyleLibIds,
+      mcpToolsFromSidecar,
       authorization: String((request as any)?.headers?.authorization ?? ""),
     },
   };
@@ -2128,8 +1879,6 @@ export async function executeAgentRun(args: {
     activeSkillIds,
     rawActiveSkillIds,
     suppressedSkillIds,
-    webRadarActive,
-    webRadarByText,
     stageKeyForRun,
     model,
     endpoint,
@@ -2153,6 +1902,7 @@ export async function executeAgentRun(args: {
     resolveSubAgentModel,
     mainDocFromPack,
     personaFromPack,
+    mcpToolsFromSidecar,
   } = prepared;
 
   services.agentRunWaiters.set(runId, transport.waiters);
@@ -2457,7 +2207,7 @@ export async function executeAgentRun(args: {
       stageKey: stageKeyForRun,
       activeSkillIds,
       activeSkills,
-      ...(suppressedSkillIds.length ? { suppressedSkillIds, webRadarActive, webRadarByText } : {}),
+      ...(suppressedSkillIds.length ? { suppressedSkillIds } : {}),
       rawActiveSkillIds: rawActiveSkillIds.slice(0, 8),
     },
   });
@@ -2612,6 +2362,11 @@ export async function executeAgentRun(args: {
     mainDoc: mainDocFromPack && typeof mainDocFromPack === "object" ? { ...(mainDocFromPack as Record<string, unknown>) } : {},
     customAgentDefinitions: personaFromPack?.customAgentDefinitions ?? [],
   };
+
+  // 将 MCP 工具传递给 runner（用于生成 tool definitions）
+  if (mcpToolsFromSidecar.length) {
+    (runCtx as any).mcpTools = mcpToolsFromSidecar;
+  }
 
   (runState as any).mainDocLatest = runCtx.mainDoc;
 
