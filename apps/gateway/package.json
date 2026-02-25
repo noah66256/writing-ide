@@ -13,6 +13,7 @@
     "@alicloud/dypnsapi20170525": "^2.0.0",
     "@fastify/cors": "^8.5.0",
     "@fastify/jwt": "^8.0.0",
+    "@fastify/websocket": "^10.0.1",
     "@writing-ide/agent-core": "0.0.0",
     "@writing-ide/kb-core": "0.0.0",
     "@writing-ide/tools": "0.0.0",
@@ -22,9 +23,8 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3"
   }
 }
-
-

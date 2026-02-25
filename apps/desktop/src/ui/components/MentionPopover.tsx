@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Sparkles, Search, BookOpen, Package, FileText, FolderOpen, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { BUILTIN_SUB_AGENTS } from "@writing-ide/agent-core";
+import { useTeamStore, getEffectiveAgents } from "@/state/teamStore";
 import { useKbStore } from "@/state/kbStore";
 
 export type MentionItem = {
@@ -16,9 +16,6 @@ type Props = {
   visible: boolean;
   onSelect: (item: MentionItem) => void;
   onClose: () => void;
-  /** 锚点位置（输入框上方） */
-  anchorBottom: number;
-  anchorLeft: number;
 };
 
 const SKILL_ITEMS: MentionItem[] = [
@@ -33,8 +30,6 @@ export function MentionPopover({
   visible,
   onSelect,
   onClose,
-  anchorBottom,
-  anchorLeft,
 }: Props) {
   const kbLibraries = useKbStore((s) => s.libraries);
   const [selectedIdx, setSelectedIdx] = useState(0);
@@ -51,14 +46,17 @@ export function MentionPopover({
     [kbLibraries],
   );
 
+  const agentOverrides = useTeamStore((s) => s.agentOverrides);
+  const customAgentsKeys = useTeamStore((s) => Object.keys(s.customAgents).join(","));
+
   const agentItems: MentionItem[] = useMemo(
-    () => BUILTIN_SUB_AGENTS.filter(a => a.enabled).map(a => ({
+    () => getEffectiveAgents().filter(a => a.effectiveEnabled).map(a => ({
       id: a.id,
       type: "agent" as const,
       label: `${a.avatar ?? "🤖"} ${a.name}`,
       icon: <Users size={14} />,
     })),
-    [],
+    [agentOverrides, customAgentsKeys],
   );
   
   const allItems = useMemo(() => [...agentItems, ...SKILL_ITEMS, ...kbItems], [agentItems, kbItems]);
@@ -115,11 +113,11 @@ export function MentionPopover({
   return (
     <div
       className={cn(
-        "fixed z-[100] w-[260px] max-h-[320px] overflow-y-auto",
-        "rounded-xl border border-border bg-surface shadow-lg backdrop-blur-xl",
+        "absolute inset-x-1 bottom-[46px] z-50",
+        "max-h-[240px] overflow-y-auto",
+        "rounded-lg border border-border bg-surface shadow-md",
         "py-1.5",
       )}
-      style={{ bottom: anchorBottom, left: anchorLeft }}
     >
       {agents.length > 0 && (
         <Group label="团队成员">

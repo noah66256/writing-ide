@@ -6,7 +6,6 @@ import {
   ChevronDown,
   ChevronUp,
   Copy,
-  User,
   Bot,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -26,6 +25,7 @@ import { startGatewayRun } from "@/agent/gatewayAgent";
 import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
 import { WelcomePage } from "./WelcomePage";
 import { InputBar } from "./InputBar";
+import { usePersonaStore } from "@/state/personaStore";
 import { BUILTIN_SUB_AGENTS } from "@writing-ide/agent-core";
 
 type RunController = { cancel: (reason?: string) => void; done: Promise<void> };
@@ -68,7 +68,7 @@ export function ChatArea() {
     stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
   }, []);
 
-  // 自动保存草稿到 conversationStore
+  // 自动保存草稿到 conversationStore，同时更新活跃对话
   useEffect(() => {
     if (steps.length === 0) return;
     const timer = setTimeout(() => {
@@ -78,7 +78,7 @@ export function ChatArea() {
         const { apply, undo, ...rest } = s;
         return { ...rest, undoable: false };
       });
-      useConversationStore.getState().setDraftSnapshot({
+      const snap = {
         mode: state.mode,
         model: state.model,
         mainDoc: JSON.parse(JSON.stringify(state.mainDoc ?? {})),
@@ -87,7 +87,12 @@ export function ChatArea() {
         logs: JSON.parse(JSON.stringify(state.logs ?? [])),
         kbAttachedLibraryIds: JSON.parse(JSON.stringify(state.kbAttachedLibraryIds ?? [])),
         ctxRefs: JSON.parse(JSON.stringify(state.ctxRefs ?? [])),
-      });
+      };
+      useConversationStore.getState().setDraftSnapshot(snap);
+      const convId = useConversationStore.getState().activeConvId;
+      if (convId) {
+        useConversationStore.getState().updateConversation(convId, { snapshot: snap });
+      }
     }, 2000);
     return () => clearTimeout(timer);
   }, [steps]);
@@ -103,7 +108,7 @@ export function ChatArea() {
   }, []);
 
   const handleSend = useCallback(
-    (text: string) => {
+    (text: string, meta?: { mentions?: Array<{ id: string; label: string; type: string }>; targetAgentIds?: string[] }) => {
       // 运行中发送：先中断当前 run
       if (controllerRef.current) {
         controllerRef.current.cancel("start_new_turn_or_user_interrupt");
@@ -119,7 +124,25 @@ export function ChatArea() {
         todoList: JSON.parse(JSON.stringify(useRunStore.getState().todoList ?? [])),
         ctxRefs: JSON.parse(JSON.stringify(useRunStore.getState().ctxRefs ?? [])),
       };
-      useRunStore.getState().addUser(text, baseline as any);
+      const userMentions = meta?.mentions?.length ? meta.mentions : undefined;
+      useRunStore.getState().addUser(text, baseline as any, userMentions);
+
+      // 首次发送时自动创建对话条目
+      if (!useConversationStore.getState().activeConvId) {
+        const title = text.length > 20 ? text.slice(0, 20) + "\u2026" : text;
+        const emptySnap = {
+          mode: useRunStore.getState().mode,
+          model: useRunStore.getState().model,
+          mainDoc: JSON.parse(JSON.stringify(useRunStore.getState().mainDoc ?? {})),
+          todoList: [],
+          steps: [],
+          logs: [],
+          kbAttachedLibraryIds: [],
+          ctxRefs: [],
+        };
+        const convId = useConversationStore.getState().addConversation({ title, snapshot: emptySnap as any });
+        useConversationStore.getState().setActiveConvId(convId);
+      }
 
       if (!model) {
         useRunStore.getState().addAssistant("（未选择模型：请先启动 Gateway 并选择一个模型）");
@@ -127,8 +150,15 @@ export function ChatArea() {
       }
 
       const gatewayUrl = getGatewayBaseUrl();
-      const atMention = parseAtMention(text);
-      const c = startGatewayRun({ gatewayUrl, mode, model, prompt: atMention ? atMention.cleanText : text, ...(atMention ? { targetAgentId: atMention.agentId } : {}) });
+      const parsed = parseAtMention(text);
+      const targetAgentIds = meta?.targetAgentIds ?? (parsed ? [parsed.agentId] : undefined);
+      const cleanPrompt = !meta?.targetAgentIds && parsed ? parsed.cleanText : text;
+      const activeSkillIds = meta?.mentions?.filter((m) => m.type === "skill").map((m) => m.id);
+      const c = startGatewayRun({
+        gatewayUrl, mode, model, prompt: cleanPrompt,
+        ...(targetAgentIds?.length ? { targetAgentIds } : {}),
+        ...(activeSkillIds?.length ? { activeSkillIds } : {}),
+      });
       controllerRef.current = c;
       void c.done.finally(() => {
         if (controllerRef.current === c) controllerRef.current = null;
@@ -202,12 +232,27 @@ function StepRenderer({ step }: { step: Step }) {
 
 function UserMessage({ step }: { step: UserStep }) {
   return (
-    <div className="flex gap-3 py-4">
-      <div className="shrink-0 w-7 h-7 rounded-full bg-surface-alt flex items-center justify-center">
-        <User size={14} className="text-text-muted" />
-      </div>
-      <div className="flex-1 min-w-0 pt-0.5">
-        <div className="text-[11px] text-text-faint mb-1.5">你</div>
+    <div className="flex justify-end py-3">
+      <div className="max-w-[85%] bg-accent-soft rounded-2xl rounded-tr-md px-4 py-2.5">
+        {step.mentions && step.mentions.length > 0 && (
+          <div className="flex flex-wrap gap-1 mb-1.5">
+            {step.mentions.map((m) => (
+              <span
+                key={m.id}
+                className={cn(
+                  "inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium",
+                  m.type === "agent"
+                    ? "bg-emerald-100/80 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
+                    : m.type === "skill"
+                      ? "bg-accent-soft/80 text-accent"
+                      : "bg-blue-100/80 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300",
+                )}
+              >
+                {m.label}
+              </span>
+            ))}
+          </div>
+        )}
         <div className="text-[14px] text-text leading-relaxed whitespace-pre-wrap break-words">
           {step.text}
         </div>
@@ -221,13 +266,20 @@ function UserMessage({ step }: { step: UserStep }) {
 function AssistantMessage({ step }: { step: AssistantStep }) {
   if (step.hidden) return null;
 
+  const subAgent = step.agentId
+    ? BUILTIN_SUB_AGENTS.find((a) => a.id === step.agentId)
+    : null;
+  const agentName = usePersonaStore((s) => s.agentName);
+  const avatar = subAgent?.avatar;
+  const displayName = (subAgent?.name ?? step.agentName ?? agentName) || "Friday";
+
   return (
-    <div className="flex gap-3 py-4 border-t border-border-soft">
-      <div className="shrink-0 w-7 h-7 rounded-full bg-accent-soft flex items-center justify-center">
-        <Bot size={14} className="text-accent" />
+    <div className="flex gap-3 py-3">
+      <div className="shrink-0 w-7 h-7 rounded-full bg-accent-soft flex items-center justify-center text-[14px]">
+        {avatar ? <span>{avatar}</span> : <Bot size={14} className="text-accent" />}
       </div>
       <div className="flex-1 min-w-0 pt-0.5">
-        <div className="text-[11px] text-text-faint mb-1.5">助手</div>
+        <div className="text-[11px] text-text-faint mb-1.5">{displayName}</div>
         <div className="text-[14px] text-text leading-relaxed">
           {step.streaming && !step.text ? (
             <span className="inline-flex items-center gap-1.5 text-text-faint">

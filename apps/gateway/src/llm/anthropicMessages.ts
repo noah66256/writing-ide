@@ -2,6 +2,7 @@
 // 内部规范格式：所有工具协议统一以此表示，取代原 XML ReAct 协议
 
 import type { ToolMeta } from "@writing-ide/tools";
+import { encodeToolName, decodeToolName } from "@writing-ide/tools";
 
 // ──────────────────────────────────────────────
 // 核心类型（对齐 Anthropic Messages API v1）
@@ -63,6 +64,7 @@ export type AnthropicStreamArgs = {
   system?: string;
   messages: AnthropicMessage[];
   tools?: AnthropicToolDef[];
+  tool_choice?: { type: "auto" } | { type: "any" } | { type: "tool"; name: string } | { type: "none" };
   temperature?: number;
   maxTokens?: number;
   signal?: AbortSignal;
@@ -78,34 +80,24 @@ function normalizeBaseUrl(baseUrl?: string): string {
 }
 
 function toErrorString(err: unknown): string {
-  if (err instanceof Error && err.message) return err.message;
-  return String(err ?? "UNKNOWN_ERROR");
+  if (!(err instanceof Error)) return String(err ?? "UNKNOWN_ERROR");
+  const parts: string[] = [];
+  if (err.message) parts.push(err.message);
+  // Node.js undici fetch errors wrap the real cause (ECONNREFUSED, ETIMEDOUT, etc.)
+  const cause = (err as any).cause;
+  if (cause instanceof Error && cause.message && cause.message !== err.message) {
+    parts.push(cause.message);
+    const inner = (cause as any).cause;
+    if (inner instanceof Error && inner.message) parts.push(inner.message);
+  }
+  return parts.join(" → ") || "UNKNOWN_ERROR";
 }
 
 // 将 ToolMeta arg 转为标准 JSON Schema property。
-// ToolMeta 使用自定义类型 "json"，需映射到标准的 "object"/"array"。
+// ToolArgType 与 JSON Schema type 一一对应（string/number/boolean/object/array）。
 function toolArgToJsonSchemaProp(arg: ToolMeta["args"][number]): Record<string, unknown> {
-  let type: string;
-  if (arg.type === "number") type = "number";
-  else if (arg.type === "boolean") type = "boolean";
-  else if (arg.type === "json") type = arg.jsonType === "array" ? "array" : "object";
-  else type = "string";
-
+  const type = arg.type ?? "string";
   return arg.desc ? { type, description: arg.desc } : { type };
-}
-
-// ──────────────────────────────────────────────
-// 工具名编/解码：把 "run.setTodoList" 这类含 "." 的名字
-// 编码为符合 OpenAI function name 规则 [a-zA-Z0-9_-] 的形式，
-// 避免 VectorEngine 等兼容层代理因严格校验而拒绝请求。
-// 编码规则：. → __dot__（保证可逆且不与合法字符冲突）
-// ──────────────────────────────────────────────
-function encodeToolName(name: string): string {
-  return name.replace(/\./g, "__dot__");
-}
-
-function decodeToolName(name: string): string {
-  return name.replace(/__dot__/g, ".");
 }
 
 // ──────────────────────────────────────────────
@@ -113,9 +105,7 @@ function decodeToolName(name: string): string {
 // ──────────────────────────────────────────────
 
 export function toolMetaToAnthropicDef(meta: ToolMeta): AnthropicToolDef {
-  // 不能直接透传 inputSchema.properties：其 type 是自定义 ToolArgType（含 "json"），
-  // Anthropic API 要求标准 JSON Schema 类型（string/number/boolean/object/array）。
-  // 始终从 meta.args 构建 properties，经 toolArgToJsonSchemaProp 规范化。
+  // ToolArgType 现已与 JSON Schema type 一一对应，直接透传。
   const properties = Object.fromEntries(
     (meta.args ?? []).map((arg) => [arg.name, toolArgToJsonSchemaProp(arg)]),
   );
@@ -168,14 +158,30 @@ export async function* streamAnthropicMessages(
   const maxTokens =
     typeof args.maxTokens === "number" && args.maxTokens > 0 ? Math.floor(args.maxTokens) : 8192;
 
+  // Re-encode tool_use names in historical messages:
+  // Internal code uses decoded names (e.g., "run.setTodoList") but the API
+  // requires them to match the encoded names in the tools parameter (e.g., "run_dot_setTodoList").
+  const messages = args.messages.map((msg) => {
+    if (msg.role !== "assistant" || !Array.isArray(msg.content)) return msg;
+    const hasToolUse = (msg.content as any[]).some((b) => b?.type === "tool_use");
+    if (!hasToolUse) return msg;
+    return {
+      ...msg,
+      content: (msg.content as any[]).map((b) =>
+        b?.type === "tool_use" ? { ...b, name: encodeToolName(String(b.name ?? "")) } : b,
+      ),
+    };
+  });
+
   const body: Record<string, unknown> = {
     model: args.model,
-    messages: args.messages,
+    messages,
     stream: true,
     max_tokens: maxTokens,
   };
   if (typeof args.system === "string" && args.system.length > 0) body.system = args.system;
   if (Array.isArray(args.tools) && args.tools.length > 0) body.tools = args.tools;
+  if (args.tool_choice) body.tool_choice = args.tool_choice;
   if (typeof args.temperature === "number" && Number.isFinite(args.temperature)) {
     body.temperature = args.temperature;
   }

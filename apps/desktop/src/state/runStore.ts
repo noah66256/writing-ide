@@ -41,12 +41,15 @@ export type TodoItem = {
   note?: string;
 };
 
+export type UserMention = { id: string; label: string; type: string };
+
 export type UserStep = {
   id: string;
   type: "user";
   text: string;
   ts: number;
   edited?: boolean;
+  mentions?: UserMention[];
   // 用于“从历史消息提交”时回滚（文件 + 主文档）
   baseline?: {
     project: ProjectSnapshot;
@@ -158,7 +161,7 @@ type RunState = {
     ctxRefs?: CtxRefItem[];
   }) => void;
 
-  addUser: (text: string, baseline?: UserStep["baseline"]) => string;
+  addUser: (text: string, baseline?: UserStep["baseline"], mentions?: UserMention[]) => string;
   patchUser: (stepId: string, patch: Partial<UserStep>) => void;
   truncateAfter: (stepId: string) => void; // 保留 stepId（包含它），清除其后
   truncateFrom: (stepId: string) => void; // 清除 stepId（包含它）及其后
@@ -299,8 +302,8 @@ export const useRunStore = create<RunState>()(
       mainDoc: { goal: "" },
       todoList: [],
       ctxRefs: [],
-      dialogueSummaryByMode: { plan: "", agent: "", chat: "" },
-      dialogueSummaryTurnCursorByMode: { plan: 0, agent: 0, chat: 0 },
+      dialogueSummaryByMode: { agent: "", chat: "" },
+      dialogueSummaryTurnCursorByMode: { agent: 0, chat: 0 },
     }),
   clearConversationSteps: () =>
     set({
@@ -309,8 +312,8 @@ export const useRunStore = create<RunState>()(
       isRunning: false,
       activity: null,
       // 对话清空后摘要无意义：一并清掉，避免旧摘要被注入 Context Pack 造成跑偏
-      dialogueSummaryByMode: { plan: "", agent: "", chat: "" },
-      dialogueSummaryTurnCursorByMode: { plan: 0, agent: 0, chat: 0 },
+      dialogueSummaryByMode: { agent: "", chat: "" },
+      dialogueSummaryTurnCursorByMode: { agent: 0, chat: 0 },
     }),
   loadSnapshot: (snap) => {
     const s = snap && typeof snap === "object" ? snap : ({} as any);
@@ -357,19 +360,17 @@ export const useRunStore = create<RunState>()(
       dialogueSummaryByMode:
         ds && typeof ds === "object"
           ? {
-              plan: String((ds as any).plan ?? ""),
               agent: String((ds as any).agent ?? ""),
               chat: String((ds as any).chat ?? ""),
             }
-          : { plan: "", agent: "", chat: "" },
+          : { agent: "", chat: "" },
       dialogueSummaryTurnCursorByMode:
         dc && typeof dc === "object"
           ? {
-              plan: Number.isFinite(Number((dc as any).plan)) ? Math.max(0, Math.floor(Number((dc as any).plan))) : 0,
               agent: Number.isFinite(Number((dc as any).agent)) ? Math.max(0, Math.floor(Number((dc as any).agent))) : 0,
               chat: Number.isFinite(Number((dc as any).chat)) ? Math.max(0, Math.floor(Number((dc as any).chat))) : 0,
             }
-          : { plan: 0, agent: 0, chat: 0 },
+          : { agent: 0, chat: 0 },
       mainDoc: (s.mainDoc && typeof s.mainDoc === "object" ? s.mainDoc : get().mainDoc) as MainDoc,
       todoList: Array.isArray(s.todoList) ? (s.todoList as TodoItem[]) : [],
       steps: normalized,
@@ -415,9 +416,9 @@ export const useRunStore = create<RunState>()(
     }),
   clearCtxRefs: () => set({ ctxRefs: [] }),
 
-  addUser: (text, baseline) => {
+  addUser: (text, baseline, mentions) => {
     const id = makeId("u");
-    const step: UserStep = { id, type: "user", text, ts: Date.now(), baseline };
+    const step: UserStep = { id, type: "user", text, ts: Date.now(), baseline, ...(mentions?.length ? { mentions } : {}) };
     set((s) => ({ steps: [...s.steps, step] }));
     return id;
   },
@@ -594,6 +595,11 @@ export const useRunStore = create<RunState>()(
       message,
       data
     };
+    // DEV: mirror to browser console with CST (UTC+8) timestamp
+    const _ts = new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false });
+    const _tag = level === "error" ? "ERR" : level === "warn" ? "WRN" : "INF";
+    const _fn = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
+    _fn(`[${_ts}] [${_tag}] ${message}`, data !== undefined ? data : "");
     set((s) => {
       const next = [...s.logs, entry];
       // cap，避免长时间测试占用内存

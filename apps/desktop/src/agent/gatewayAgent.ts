@@ -3,15 +3,17 @@ import { useRunStore, type Mode } from "../state/runStore";
 import { useKbStore } from "../state/kbStore";
 import { useAuthStore } from "../state/authStore";
 import { facetLabel, getFacetPack } from "../kb/facets";
-import { activateSkills, detectRunIntent } from "@writing-ide/agent-core";
-import { buildStyleLinterLibrariesSidecar, executeToolCall, getTool, toolsPrompt } from "./toolRegistry";
+import { activateSkills, detectRunIntent, BUILTIN_SUB_AGENTS } from "@writing-ide/agent-core";
+import { usePersonaStore } from "../state/personaStore";
+import { useTeamStore, getEffectiveAgents } from "../state/teamStore";
+import { startGatewayRunWs } from "./wsTransport";
 
-function authHeader(): Record<string, string> {
+export function authHeader(): Record<string, string> {
   const token = String(useAuthStore.getState().accessToken ?? "").trim();
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-function requireLoginForLlm(args?: { why?: string }) {
+export function requireLoginForLlm(args?: { why?: string }) {
   const token = String(useAuthStore.getState().accessToken ?? "").trim();
   if (token) return { ok: true as const };
   try {
@@ -23,20 +25,25 @@ function requireLoginForLlm(args?: { why?: string }) {
   return { ok: false as const };
 }
 
-type GatewayRunController = {
+export type GatewayRunController = {
   cancel: (reason?: string) => void;
   done: Promise<void>;
 };
 
-type ChatRole = "system" | "user" | "assistant";
-type ChatMessage = { role: ChatRole; content: string };
-
-type SseEvent = {
-  event: string;
-  data: string;
+export type GatewayRunArgs = {
+  gatewayUrl: string;
+  mode: Mode;
+  model: string;
+  prompt: string;
+  targetAgentId?: string;
+  targetAgentIds?: string[];
+  activeSkillIds?: string[];
 };
 
-function coerceSseArgValue(v: string): unknown {
+
+function coerceSseArgValue(v: unknown): unknown {
+  // WS JSON 已解析后值可能已是对象/数组/数字等，无需再 String() 转换
+  if (v !== null && v !== undefined && typeof v !== "string") return v;
   const raw = String(v ?? "");
   const s = raw.trim();
   if (!s) return "";
@@ -53,7 +60,7 @@ function coerceSseArgValue(v: string): unknown {
   return raw;
 }
 
-function parseSseToolArgs(rawArgs: Record<string, string>) {
+export function parseSseToolArgs(rawArgs: Record<string, unknown>) {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(rawArgs ?? {})) out[k] = coerceSseArgValue(v);
   return out;
@@ -78,7 +85,7 @@ function getOffsetAt(text: string, lineStarts: number[], lineNumber: number, col
   return Math.min(text.length, lineStart + col0);
 }
 
-function applyTextEdits(args: {
+export function applyTextEdits(args: {
   before: string;
   edits: Array<{ startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number; text: string }>;
 }) {
@@ -96,7 +103,7 @@ function applyTextEdits(args: {
   return { after };
 }
 
-function unifiedDiff(args: { path: string; before: string; after: string; context?: number; maxCells?: number; maxHunkLines?: number }) {
+export function unifiedDiff(args: { path: string; before: string; after: string; context?: number; maxCells?: number; maxHunkLines?: number }) {
   const beforeLines = args.before.split("\n");
   const afterLines = args.after.split("\n");
   const n = beforeLines.length;
@@ -227,7 +234,7 @@ function oneLine(s: unknown, max = 48) {
   return t.length <= max ? t : t.slice(0, max) + "…";
 }
 
-function humanizeToolActivity(name: string, args: Record<string, unknown>) {
+export function humanizeToolActivity(name: string, args: Record<string, unknown>) {
   const tool = String(name ?? "");
   if (!tool) return "正在执行工具…";
   if (tool === "time.now") return "正在读取时间…";
@@ -252,48 +259,20 @@ function humanizeToolActivity(name: string, args: Record<string, unknown>) {
   }
   if (tool === "lint.style") return "正在做风格校验…";
   if (tool === "lint.copy") return "正在做抄袭/复述风险检查…";
+  if (tool === "agent.delegate") {
+    const agentId = String((args as any)?.agentId ?? "");
+    return agentId ? `正在委托给：${agentId}…` : "正在委托子 Agent…";
+  }
+  if (tool === "agent.config.create") return "正在创建团队成员…";
+  if (tool === "agent.config.list") return "正在查看团队配置…";
+  if (tool === "agent.config.update") return "正在更新团队成员…";
+  if (tool === "agent.config.remove") return "正在移除团队成员…";
   return `正在执行：${tool}…`;
 }
 
-function parseSseBlock(block: string): SseEvent | null {
-  // Very small SSE parser: expects lines like "event: xxx" and "data: {...}"
-  const lines = block
-    .split("\n")
-    .map((l) => l.replace(/\r$/, ""))
-    .filter(Boolean);
-  if (!lines.length) return null;
+export type Ref = { kind: "file" | "dir"; path: string };
 
-  let event = "message";
-  let data = "";
-  for (const line of lines) {
-    if (line.startsWith("event:")) event = line.slice("event:".length).trim();
-    if (line.startsWith("data:")) data += line.slice("data:".length).trim();
-  }
-  return { event, data };
-}
-
-function buildAgentProtocolPrompt() {
-  return (
-    `你是写作 IDE 的内置 Agent（偏写作产出与编辑体验，不要跑偏成通用工作流平台）。\n\n` +
-    `你可以在需要时“调用工具”。当你要调用工具时，你必须输出 **且只能输出** 下面 XML 之一：\n` +
-    `- 单次：<tool_call name="..."><arg name="...">...</arg></tool_call>\n` +
-    `- 多次：<tool_calls>...多个 tool_call...</tool_calls>\n\n` +
-    `规则：\n` +
-    `- 如果你输出 tool_call/tool_calls，则消息里禁止夹杂任何其它自然语言。\n` +
-    `- <arg> 内可以放 JSON（不要代码块，不要反引号）。\n` +
-    `- 工具结果会由系统用 XML 回传（system message）：<tool_result name="xxx"><![CDATA[{...json}]]></tool_result>\n\n` +
-    `编辑器选区约定：\n` +
-    `- Context Pack 会提供 EDITOR_SELECTION。\n` +
-    `- 如果用户要求“改写/润色我选中的这段”，请优先使用 EDITOR_SELECTION.selectedText；如 hasSelection=false，再提示用户先选中，或用 doc.read 获取全文后让用户指定范围。\n` +
-    `- 写回选区请用 doc.replaceSelection。\n\n` +
-    `你可用的工具如下（只能调用这里列出的）：\n\n` +
-    toolsPrompt()
-  );
-}
-
-type Ref = { kind: "file" | "dir"; path: string };
-
-function parseRefsFromPrompt(prompt: string): Ref[] {
+export function parseRefsFromPrompt(prompt: string): Ref[] {
   const out: Ref[] = [];
   const re = /@\{([^}]+)\}/g;
   let m: RegExpExecArray | null = null;
@@ -315,7 +294,7 @@ function parseRefsFromPrompt(prompt: string): Ref[] {
   });
 }
 
-async function buildReferencesTextFromRefs(refs: Ref[]) {
+export async function buildReferencesTextFromRefs(refs: Ref[]) {
   const list = Array.isArray(refs) ? refs : [];
   if (!list.length) return "";
   const proj = useProjectStore.getState();
@@ -402,7 +381,7 @@ function rankStabilityForSelectorV1(stability: string): number {
   return s === "high" ? 3 : s === "medium" ? 2 : s === "low" ? 1 : 0;
 }
 
-function buildTopicTextForSelectorV1(args: { userPrompt: string; mainDoc: any }): string {
+export function buildTopicTextForSelectorV1(args: { userPrompt: string; mainDoc: any }): string {
   const g = String(args?.mainDoc?.goal ?? "").trim();
   const p = String(args?.userPrompt ?? "").trim();
   return [g, p].filter(Boolean).join("\n");
@@ -724,7 +703,7 @@ function pickFacetsSelectorV1(args: {
   };
 }
 
-function pickClusterSelectorV1(args: {
+export function pickClusterSelectorV1(args: {
   clusters: any[];
   defaultClusterId?: string;
   topicText?: string;
@@ -880,7 +859,7 @@ function renderContextManifestV1(args: { mode: Mode; segments: ContextManifestSe
 }
 
 /** 将证据原文/anchor 降级为"句式特征描述"，防止模型照抄原文。 */
-function summarizeQuoteAsFeatureV1(quote: string): string {
+export function summarizeQuoteAsFeatureV1(quote: string): string {
   const t = String(quote ?? "").trim();
   if (!t) return "";
   const chars = t.length;
@@ -955,7 +934,7 @@ function buildRecentDialogueJsonFromTurns(turns: DialogueTurn[], maxTurns: numbe
   return msgs.length ? `RECENT_DIALOGUE(JSON):\n${JSON.stringify(msgs, null, 2)}\n\n` : "";
 }
 
-async function buildContextPack(extra?: { referencesText?: string; userPrompt?: string }) {
+export async function buildContextPack(extra?: { referencesText?: string; userPrompt?: string }) {
   const mainDoc = useRunStore.getState().mainDoc;
   const todoList = useRunStore.getState().todoList;
   const proj = useProjectStore.getState();
@@ -1448,7 +1427,7 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
             }))
             .filter((f: any) => Boolean((f as any).facetId))
             .slice(0, 10);
-    const shouldFacetIds = planFacetIds.filter((id) => !mustFacetIds.includes(id)).slice(0, 8);
+    const shouldFacetIds = planFacetIds.filter((id: string) => !mustFacetIds.includes(id)).slice(0, 8);
     const softRanges = (() => {
       const s = contract?.softRanges;
       if (!s || typeof s !== "object" || Array.isArray(s)) return null;
@@ -1553,6 +1532,33 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
     });
   };
 
+  // p0: Agent 身份与团队花名册（可信）
+  const agentPersona = (() => {
+    const persona = usePersonaStore.getState();
+    const agents = getEffectiveAgents().filter((a) => a.effectiveEnabled);
+    const teamRoster = agents.map((a) => ({
+      id: a.id,
+      name: a.name,
+      avatar: a.avatar,
+      description: a.description,
+    }));
+    // Full definitions for custom agents — gateway needs them for agent.delegate
+    const customAgentDefinitions = Object.values(useTeamStore.getState().customAgents);
+    return {
+      agentName: persona.agentName || "",
+      personaPrompt: persona.personaPrompt || "",
+      teamRoster,
+      customAgentDefinitions,
+    };
+  })();
+  pushSeg({
+    name: "AGENT_PERSONA",
+    content: `AGENT_PERSONA(JSON):\n${JSON.stringify(agentPersona, null, 2)}\n\n`,
+    priority: "p0",
+    trusted: true,
+    source: "desktop",
+  });
+
   // p0: 任务主线/约束（可信）
   pushSeg({
     name: "MAIN_DOC",
@@ -1633,7 +1639,7 @@ async function buildContextPack(extra?: { referencesText?: string; userPrompt?: 
   return manifest + parts.join("");
 }
 
-function buildChatContextPack(extra?: { referencesText?: string }) {
+export function buildChatContextPack(extra?: { referencesText?: string }) {
   const proj = useProjectStore.getState();
   const docRules = proj.getFileByPath("doc.rules.md")?.content ?? "";
   const selection = (() => {
@@ -1719,102 +1725,6 @@ function buildChatContextPack(extra?: { referencesText?: string }) {
   return manifest + parts.join("");
 }
 
-async function fetchChatStream(args: {
-  gatewayUrl: string;
-  model: string;
-  messages: ChatMessage[];
-  abort: AbortController;
-  onDelta: (delta: string) => void;
-  log: (level: "info" | "warn" | "error", message: string, data?: unknown) => void;
-}) {
-  const doFetch = async (baseUrl: string) => {
-    const url = baseUrl ? `${baseUrl}/api/llm/chat/stream` : "/api/llm/chat/stream";
-    return fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeader() },
-      body: JSON.stringify({
-        model: args.model,
-        messages: args.messages,
-      }),
-      signal: args.abort.signal,
-    });
-  };
-
-  let res: Response | null = null;
-  try {
-    res = await doFetch(args.gatewayUrl);
-  } catch (e: any) {
-    const msg = e?.message ? String(e.message) : String(e);
-    if (msg.includes("Failed to fetch") && args.gatewayUrl.includes("localhost")) {
-      const fallback = args.gatewayUrl.replace("localhost", "127.0.0.1");
-      args.log("warn", "gateway.fetch_retry", { from: args.gatewayUrl, to: fallback });
-      res = await doFetch(fallback);
-    } else {
-      throw e;
-    }
-  }
-
-  args.log("info", "gateway.response", { status: res.status });
-  if (!res.ok || !res.body) {
-    const text = await res.text().catch(() => "");
-    return { ok: false as const, error: text || `HTTP_${res.status}` };
-  }
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let deltaCount = 0;
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    let idx = buffer.indexOf("\n\n");
-    while (idx >= 0) {
-      const block = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 2);
-
-      const evt = parseSseBlock(block);
-      if (!evt) {
-        idx = buffer.indexOf("\n\n");
-        continue;
-      }
-
-      if (evt.event === "assistant.delta") {
-        try {
-          const payload = JSON.parse(evt.data);
-          const delta = payload?.delta;
-          if (typeof delta === "string") {
-            deltaCount += 1;
-            args.onDelta(delta);
-          }
-        } catch {
-          // ignore
-        }
-      }
-
-      if (evt.event === "assistant.done") {
-        return { ok: true as const, deltaCount };
-      }
-
-      if (evt.event === "error") {
-        try {
-          const payload = JSON.parse(evt.data);
-          const msg = payload?.error ? String(payload.error) : "unknown";
-          return { ok: false as const, error: msg };
-        } catch {
-          return { ok: false as const, error: String(evt.data) };
-        }
-      }
-
-      idx = buffer.indexOf("\n\n");
-    }
-  }
-
-  return { ok: true as const, deltaCount, endedWithoutDone: true as const };
-}
-
 async function fetchContextSummaryOnce(args: {
   gatewayUrl: string;
   preferModelId: string;
@@ -1862,7 +1772,7 @@ async function fetchContextSummaryOnce(args: {
   return { ok: true as const, summary, modelIdUsed: json?.modelIdUsed ?? null };
 }
 
-async function rollDialogueSummaryIfNeeded(args: {
+export async function rollDialogueSummaryIfNeeded(args: {
   gatewayUrl: string;
   mode: Mode;
   abort: AbortController;
@@ -1918,984 +1828,8 @@ export function startGatewayRun(args: {
   model: string;
   prompt: string;
   targetAgentId?: string;
+  targetAgentIds?: string[];
 }): GatewayRunController {
-  const {
-    setRunning,
-    setActivity,
-    addAssistant,
-    appendAssistantDelta,
-    finishAssistant,
-    patchAssistant,
-    addTool,
-    patchTool,
-    updateMainDoc,
-    log
-  } = useRunStore.getState();
-
-  setRunning(true);
-  setActivity("正在构建上下文…", { resetTimer: true });
-  // 不要每轮覆盖 goal：只在为空时初始化（后续由 run.mainDoc.update 维护主线）
-  // 关键：不要把整段长原文/长 prompt 塞进 Main Doc（会每轮注入 Context Pack，导致仿写手册/约束被淹没，输出变差）
-  const cur = useRunStore.getState().mainDoc;
-  if (!cur.goal) {
-    const raw = String(args.prompt ?? "").trim();
-    const oneLine = raw.replace(/\s+/g, " ");
-    const max = 180;
-    const short = oneLine.length > max ? oneLine.slice(0, max) + "…（已截断；原始输入见置顶回合/历史）" : oneLine;
-    updateMainDoc({ goal: short });
-  }
-
-  // 用户偏好：lint 不过就保留最高分（写入 Main Doc，跨本轮对话生效）
-  const wantsKeepBestOnLintFail =
-    /(lint|linter|风格(对齐|校验|检查)).{0,30}(不过|不通过).{0,30}(保留|留下|用).{0,30}(最高分|最好|最佳)/i.test(
-      String(args.prompt ?? ""),
-    );
-  if (wantsKeepBestOnLintFail) updateMainDoc({ styleLintFailPolicy: "keep_best" });
-
-  const abort = new AbortController();
-  let cancelReason: string | null = null;
-  let ended = false;
-  let resolveDone: (() => void) | null = null;
-  const done = new Promise<void>((resolve) => {
-    resolveDone = resolve;
-  });
-  const resolveDoneOnce = () => {
-    if (resolveDone) {
-      const r = resolveDone;
-      resolveDone = null;
-      r();
-    }
-  };
-  let currentAssistantId: string | null = null;
-  // Watchdog：用于定位“流式卡住但没报错”的情况（例如网络/代理导致 SSE 读不到数据也不抛异常）
-  let lastProgressAt = Date.now();
-  let stalledLogged = false;
-  let watchdogId: number | null = null;
-  const bumpProgress = () => {
-    lastProgressAt = Date.now();
-    stalledLogged = false;
-  };
-  const clearWatchdog = () => {
-    if (watchdogId !== null) {
-      try {
-        window.clearInterval(watchdogId);
-      } catch {
-        // ignore
-      }
-      watchdogId = null;
-    }
-  };
-  try {
-    watchdogId = window.setInterval(() => {
-      try {
-        if (ended) return;
-        if (abort.signal.aborted) return;
-        if (!useRunStore.getState().isRunning) return;
-        const ms = Date.now() - lastProgressAt;
-        if (ms < 120_000) return;
-        if (stalledLogged) return;
-        stalledLogged = true;
-        log("warn", "gateway.run.stalled", { idleMs: ms, cancelReason });
-        // 只提示状态，不自动终止；避免误杀“确实很慢”的长任务
-        setActivity(`连接可能中断…（已 ${Math.floor(ms / 1000)}s 无新事件，可尝试停止/重试）`, { resetTimer: false });
-      } catch {
-        // ignore
-      }
-    }, 2000);
-  } catch {
-    // ignore
-  }
-
-  (async () => {
-    log("info", "gateway.run.start", { gatewayUrl: args.gatewayUrl, model: args.model, mode: args.mode });
-    try {
-      bumpProgress();
-      let promptForGateway = String(args.prompt ?? "");
-      const promptRefs = parseRefsFromPrompt(args.prompt);
-      // refs：以“常驻 ctxRefs”为主；本轮 prompt 里的 @{} 作为增量补充
-      const pinned = (useRunStore.getState().ctxRefs ?? []).map((r: any) => ({
-        kind: r?.kind === "dir" ? ("dir" as const) : ("file" as const),
-        path: String(r?.path ?? "").trim(),
-      }));
-      const effectiveRefs = (() => {
-        const seen = new Set<string>();
-        const out: Ref[] = [];
-        const push = (r: Ref) => {
-          const kind = r.kind === "dir" ? "dir" : "file";
-          let p = String(r.path ?? "").trim().replaceAll("\\", "/").replace(/^\.\//, "");
-          p = p.replace(/\/+/g, "/");
-          if (!p) return;
-          if (kind === "dir") p = p.replace(/\/+$/g, "");
-          else p = p.replace(/\/+$/g, "");
-          const key = `${kind}:${p}`;
-          if (seen.has(key)) return;
-          seen.add(key);
-          out.push({ kind, path: p });
-        };
-        for (const r of pinned) push(r);
-        for (const r of promptRefs) push(r);
-        return out;
-      })();
-      // 把 prompt refs “钉”到 ctxRefs（避免下一轮只回“继续”时丢上下文）
-      if (promptRefs.length) {
-        for (const r of promptRefs) useRunStore.getState().addCtxRef({ kind: r.kind, path: r.path } as any);
-      }
-      const referencesText = await buildReferencesTextFromRefs(effectiveRefs).catch(() => "");
-      setActivity("正在构建上下文…");
-      bumpProgress();
-      // 尽量确保 doc.rules 与 activePath 已加载，避免“上下文不对”（空规则/空正文）
-      const proj = useProjectStore.getState();
-      const docRulesPath = proj.getFileByPath("doc.rules.md")?.path;
-      if (docRulesPath) {
-        await proj.ensureLoaded(docRulesPath).catch(() => void 0);
-      }
-      if (proj.activePath) {
-        await proj.ensureLoaded(proj.activePath).catch(() => void 0);
-      }
-
-      // 关键：确保 KB 库列表（含 purpose=style 等元信息）已刷新，否则 Context Pack 里可能注入不到风格库用途，导致 Gateway 不开启“风格库强闭环闸门”
-      const kb = useKbStore.getState();
-      const attached = useRunStore.getState().kbAttachedLibraryIds ?? [];
-      if (Array.isArray(attached) && attached.length) {
-        await kb.refreshLibraries().catch(() => void 0);
-      }
-
-      // Selector v1：写作任务默认自动选簇并写入 styleContractV1（可改口、可解释、与生成模型解耦）
-      // - 不再强制 clarify_waiting 卡住用户
-      // - 但用户仍可随时改口（写法A/B/C 或 cluster_0/1/2）
-      try {
-        const run = useRunStore.getState();
-        const main: any = run.mainDoc ?? {};
-        const existing = main?.styleContractV1;
-        const libsMeta = useKbStore.getState().libraries ?? [];
-        const metaById = new Map(libsMeta.map((l: any) => [String(l?.id ?? "").trim(), l]));
-        const styleLibIds = (run.kbAttachedLibraryIds ?? [])
-          .map((x: any) => String(x ?? "").trim())
-          .filter(Boolean)
-          .filter((id: string) => String((metaById.get(id) as any)?.purpose ?? "").trim() === "style");
-        const libId = styleLibIds.length ? styleLibIds[0] : "";
-
-        const existingLibId = String(existing?.libraryId ?? "").trim();
-        const existingClusterId = String(existing?.selectedCluster?.id ?? "").trim();
-        const shouldConsider = libId && (!existing || existingLibId !== libId || !existingClusterId);
-        if (shouldConsider) {
-          // 仅在“本轮会激活 style_imitate skill（写作/改写/润色类）”时才自动写入，避免非写作任务被误导
-          const kbSelectedForSkills = (run.kbAttachedLibraryIds ?? [])
-            .map((id: any) => String(id ?? "").trim())
-            .filter(Boolean)
-            .map((id: string) => {
-              const m = metaById.get(id) as any;
-              return { id, purpose: String(m?.purpose ?? "material") };
-            });
-          const activeForThisRun = activateSkills({
-            mode: args.mode as any,
-            userPrompt: String(args.prompt ?? ""),
-            mainDocRunIntent: main?.runIntent,
-            kbSelected: kbSelectedForSkills as any,
-          });
-          const hasStyleSkill = activeForThisRun.some((s: any) => String(s?.id ?? "") === "style_imitate");
-          if (!hasStyleSkill) {
-            // 非写作任务：不自动写入 styleContract
-          } else {
-            const fpRet = await useKbStore.getState().getLatestLibraryFingerprint(libId).catch(() => ({ ok: false } as any));
-            const snapshot = fpRet?.ok ? (fpRet as any).snapshot : null;
-            const clusters = Array.isArray(snapshot?.clustersV1) ? snapshot.clustersV1 : [];
-            const cfg = await useKbStore.getState().getLibraryStyleConfig(libId).catch(() => ({ ok: false, anchors: [] } as any));
-            const defaultClusterId = cfg?.ok ? String((cfg as any).defaultClusterId ?? "").trim() : "";
-            const rulesByCluster =
-              cfg?.ok && (cfg as any)?.clusterRulesV1 && typeof (cfg as any).clusterRulesV1 === "object"
-                ? ((cfg as any).clusterRulesV1 as any)
-                : null;
-
-            if (clusters.length) {
-              const prompt = String(args.prompt ?? "").trim();
-              const topicText = buildTopicTextForSelectorV1({ userPrompt: prompt, mainDoc: main });
-              const pickedByPrompt = (() => {
-              // 1) 用户直接输入 clusterId（最稳）
-              const m = prompt.match(/\b(cluster[_-]\d+)\b/i);
-              if (m?.[1]) {
-                const cid = String(m[1]).replace("-", "_");
-                const byId = new Map(clusters.map((c: any) => [String(c?.id ?? "").trim(), c]));
-                if (byId.get(cid)) return byId.get(cid);
-              }
-              // 2) 用户输入“写法A/B/C”
-              const m2 = prompt.match(/写法\s*([ABC])\b/i);
-              if (m2?.[1]) {
-                const letter = String(m2[1]).toUpperCase();
-                const label = `写法${letter}`;
-                const hit = clusters.find((c: any) => String(c?.label ?? "").includes(label));
-                if (hit) return hit;
-              }
-              // 3) 用户输入“继续/按推荐/就用推荐”：接受推荐写法
-              if (/^(继续|按推荐|用推荐|就用推荐|默认就行)$/i.test(prompt)) {
-                // 下面会走 pickRecommended
-                return "__USE_RECOMMENDED__" as any;
-              }
-              return null;
-              })();
-
-              const byId = new Map(clusters.map((c: any) => [String(c?.id ?? "").trim(), c]));
-              let picked: any = null;
-              if (pickedByPrompt && pickedByPrompt !== "__USE_RECOMMENDED__") picked = pickedByPrompt;
-              if (!picked) {
-                const auto = pickClusterSelectorV1({ clusters, defaultClusterId, topicText });
-                if (auto?.selectedId && byId.get(String(auto.selectedId).trim())) picked = byId.get(String(auto.selectedId).trim());
-              }
-
-              if (picked) {
-                const meta = metaById.get(libId) as any;
-                // 关键修正：用户回复“写法C/写法B/cluster_2”时，不要把这句话原样当成 userPrompt 交给模型；
-                // 否则模型可能把“写法C”误解为“C语言”，跑偏到编程话题。
-                // 这里把 prompt 改写成“继续（已选 cluster_x）”，并依赖 Main Doc 里的 goal + styleContractV1 继续写作闭环。
-                const pickedId = String(picked?.id ?? "").trim();
-                if (pickedId) {
-                  const raw = String(args.prompt ?? "").trim();
-                  const looksLikePureChoice =
-                    raw.length <= 16 &&
-                    (/^(写法\s*[ABC]\b|cluster[_-]\d+\b|继续|按推荐|用推荐|就用推荐|默认就行)[\s。！？!]*$/i.test(raw) ||
-                      /^就用写法\s*[ABC]\b[\s。！？!]*$/i.test(raw));
-                  if (looksLikePureChoice) {
-                    promptForGateway = `继续（已选 ${pickedId}）`;
-                  }
-                }
-                const pickedRules = (() => {
-                  if (!pickedId || !rulesByCluster) return null;
-                  try {
-                    const r = (rulesByCluster as any)[pickedId];
-                    return r && typeof r === "object" && !Array.isArray(r) ? r : null;
-                  } catch {
-                    return null;
-                  }
-                })();
-                updateMainDoc({
-                  styleContractV1: {
-                    v: 1,
-                    updatedAt: new Date().toISOString(),
-                    libraryId: libId,
-                    libraryName: String(meta?.name ?? libId),
-                    selectedCluster: {
-                      id: String(picked?.id ?? "").trim(),
-                      label: String(picked?.label ?? "").trim(),
-                    },
-                    // V2：写法簇规则卡（values / analysisLenses / templates / checks 等；来自本库 prefs）
-                    clusterRulesV1: pickedRules,
-                    values: pickedRules?.values ?? null,
-                    analysisLenses: pickedRules?.analysisLenses ?? null,
-                    // v2: 不存原文（防抄），只存句式特征描述 + 数量
-                    anchorsCount: Array.isArray(picked?.anchors) ? picked.anchors.length : 0,
-                    anchorsFeatures: Array.isArray(picked?.anchors)
-                      ? picked.anchors.slice(0, 5).map((a: any) => summarizeQuoteAsFeatureV1(typeof a === "string" ? a : String(a?.text ?? a?.content ?? a?.quote ?? "")))
-                          .filter(Boolean)
-                      : [],
-                    evidenceFeatures: Array.isArray(picked?.evidence)
-                      ? picked.evidence.slice(0, 5).map((e: any) => summarizeQuoteAsFeatureV1(String(e?.quote ?? "")))
-                          .filter(Boolean)
-                      : [],
-                    softRanges: picked?.softRanges ?? {},
-                    facetPlan: Array.isArray(picked?.facetPlan) ? picked.facetPlan.slice(0, 8) : [],
-                    queries: Array.isArray(picked?.queries) ? picked.queries.slice(0, 8) : [],
-                  },
-                } as any);
-              }
-            }
-          }
-        }
-      } catch {
-        // ignore：仅是“默认写法预填充”，失败不影响 run
-      }
-
-      // 记录 Context Pack 摘要（便于排查“上下文不对/自动终止”）
-      try {
-        const todo = useRunStore.getState().todoList ?? [];
-        const done = todo.filter((t) => t.status === "done").length;
-        const refs = effectiveRefs;
-        const kbLibCount = (useKbStore.getState().libraries ?? []).length;
-        const pendingProposals = (() => {
-          const steps = useRunStore.getState().steps ?? [];
-          const out: Array<{ toolName: string; path?: string }> = [];
-          for (const st of steps as any[]) {
-            if (!st || typeof st !== "object") continue;
-            if (st.type !== "tool") continue;
-            if (st.status !== "success") continue;
-            if (st.applyPolicy !== "proposal") continue;
-            if (st.applied === true) continue;
-            if (st.status === "undone") continue;
-            if (st.toolName === "doc.write") {
-              out.push({
-                toolName: "doc.write",
-                path: typeof st.input?.path === "string" ? st.input.path : typeof st.output?.path === "string" ? st.output.path : undefined,
-              });
-              continue;
-            }
-            if (st.toolName === "doc.applyEdits") {
-              out.push({
-                toolName: "doc.applyEdits",
-                path: typeof st.output?.path === "string" ? st.output.path : typeof st.input?.path === "string" ? st.input.path : undefined,
-              });
-              continue;
-            }
-            if (st.toolName === "doc.splitToDir") {
-              out.push({
-                toolName: "doc.splitToDir",
-                path: typeof st.output?.targetDir === "string" ? st.output.targetDir : undefined,
-              });
-              continue;
-            }
-            if (st.toolName === "doc.restoreSnapshot") {
-              out.push({
-                toolName: "doc.restoreSnapshot",
-                path: typeof st.output?.preview?.path === "string" ? st.output.preview.path : undefined,
-              });
-              continue;
-            }
-          }
-          return out.slice(-20);
-        })();
-        const ed = proj.editorRef;
-        const hasSelection = (() => {
-          const model = ed?.getModel();
-          const sel = ed?.getSelection();
-          if (!ed || !model || !sel) return false;
-          return model.getValueInRange(sel).length > 0;
-        })();
-        const docRulesChars = proj.getFileByPath("doc.rules.md")?.content?.length ?? 0;
-        log("info", "context.pack.summary", {
-          mode: args.mode,
-          model: args.model,
-          activePath: proj.activePath,
-          openPaths: proj.openPaths?.length ?? 0,
-          fileCount: proj.files?.length ?? 0,
-          docRulesChars,
-          refs: refs.map((r) => ({ kind: r.kind, path: r.path })),
-          todo: { done, total: todo.length },
-          pendingProposals: { total: pendingProposals.length, tail: pendingProposals.slice(-6) },
-          hasSelection,
-        });
-      } catch {
-        // ignore
-      }
-
-      // Chat：也走 Gateway 的 /api/agent/run/stream（mode=chat），允许只读工具（读文档/读项目/读网页），禁止任何写入/副作用工具。
-
-      // Plan/Agent：改为走 Gateway 的 /api/agent/run/stream（Gateway 负责 ReAct 循环；Desktop 负责执行工具并回传 tool_result）
-      const url = args.gatewayUrl ? `${args.gatewayUrl}/api/agent/run/stream` : "/api/agent/run/stream";
-
-      setActivity("正在请求模型…", { resetTimer: true });
-      bumpProgress();
-
-      // 前端硬门禁：未登录直接提示并弹窗（避免”卡住/没反应”的错觉）
-      // DEV 模式跳过登录检查（上线前移除）
-      const _isDev = String((import.meta as any).env?.MODE ?? "") !== "production";
-      if (!_isDev && !requireLoginForLlm({ why: "未登录无法使用基于 LLM 的功能" }).ok) {
-        const a = addAssistant("", false, false);
-        patchAssistant(a, { hidden: false });
-        appendAssistantDelta(a, "\n\n[需要登录] 未登录无法使用 AI 功能，请先登录后再试。");
-        finishAssistant(a);
-        setRunning(false);
-        setActivity(null);
-        return;
-      }
-      // toolSidecar：用于“工具逐步迁回 Gateway”时携带必要的本地只读上下文（不注入模型 messages，避免 token 爆炸）
-      const toolSidecar = await (async () => {
-        const proj = useProjectStore.getState();
-        const projectFiles = (proj.files ?? [])
-          .map((f: any) => ({ path: String(f?.path ?? "").trim() }))
-          .filter((f: any) => f.path)
-          .slice(0, 5000);
-        const docRulesFile = proj.getFileByPath("doc.rules.md");
-        const docRules = docRulesFile ? { path: docRulesFile.path, content: docRulesFile.content ?? "" } : null;
-
-        const attached = useRunStore.getState().kbAttachedLibraryIds ?? [];
-        let styleLinterLibraries: any[] | undefined = undefined;
-        if (Array.isArray(attached) && attached.length) {
-          // 仅携带风格库的 lint 所需 payload（stats/ngrams/samples）；非风格库不带
-          const ret = await buildStyleLinterLibrariesSidecar({ maxLibraries: 6 }).catch(() => ({ ok: false } as any));
-          if (ret?.ok && Array.isArray(ret.libraries) && ret.libraries.length) styleLinterLibraries = ret.libraries;
-        }
-
-        // ideSummary：用于 Gateway 侧的 Intent Router/澄清（不注入模型 messages，避免“光标文件/默认文件”过强暗示）。
-        // 仅提供最小元信息（不含正文/不含 openPaths 列表）。
-        const ed = proj.editorRef;
-        const { hasSelection, selectionChars } = (() => {
-          const model = ed?.getModel();
-          const sel = ed?.getSelection();
-          if (!ed || !model || !sel) return { hasSelection: false, selectionChars: 0 };
-          const n = model.getValueInRange(sel).length;
-          return { hasSelection: n > 0, selectionChars: n };
-        })();
-        const ideSummary = {
-          activePath: proj.activePath ?? null,
-          openPaths: proj.openPaths?.length ?? 0,
-          fileCount: proj.files?.length ?? 0,
-          hasSelection,
-          selectionChars,
-        };
-
-        const out: any = { projectFiles, docRules, ideSummary };
-        if (styleLinterLibraries) out.styleLinterLibraries = styleLinterLibraries;
-        return out;
-      })();
-
-      // 自动滚动摘要：Chat/Plan/Agent 都会用（Chat 也带历史）；失败不阻塞本轮 run
-      try {
-        const r = await rollDialogueSummaryIfNeeded({ gatewayUrl: args.gatewayUrl, mode: args.mode, abort, log });
-        if (r?.rolled) setActivity("正在构建上下文…", { resetTimer: false });
-      } catch (e: any) {
-        const msg = e?.message ? String(e.message) : String(e);
-        log("warn", "context.summary.exception", { error: msg });
-      }
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeader() },
-        body: JSON.stringify({
-          model: args.model,
-          mode: args.mode,
-          prompt: promptForGateway,
-          ...(args.targetAgentId ? { targetAgentId: args.targetAgentId } : {}),
-          contextPack:
-            args.mode === "chat"
-              ? buildChatContextPack({ referencesText })
-              : await buildContextPack({ referencesText, userPrompt: promptForGateway }),
-          toolSidecar,
-        }),
-        signal: abort.signal,
-      });
-
-      log("info", "gateway.agent.response", { status: res.status });
-      bumpProgress();
-      if (!res.ok || !res.body) {
-        const text = await res.text().catch(() => "");
-        let parsed: any = null;
-        try {
-          parsed = text ? JSON.parse(text) : null;
-        } catch {
-          parsed = null;
-        }
-        const code = parsed?.error ? String(parsed.error) : "";
-        // 只把“真正的用户鉴权失败”当作需要重新登录：Gateway 会返回 { error: "UNAUTHORIZED" }
-        // 避免把上游模型/代理 401（如 API key 无效）误判成“用户未登录”
-        if (res.status === 401 && code === "UNAUTHORIZED") {
-          try {
-            useAuthStore.getState().logout?.();
-            useAuthStore.getState().openLoginModal?.();
-            useAuthStore.setState({ error: "请先登录再使用 AI 功能" });
-          } catch {
-            // ignore
-          }
-          const a = addAssistant("", false, false);
-          patchAssistant(a, { hidden: false });
-          appendAssistantDelta(a, "\n\n[需要登录] 请先登录再使用 AI 功能。");
-          finishAssistant(a);
-          setRunning(false);
-          setActivity(null);
-          return;
-        }
-        if (res.status === 402 || code === "INSUFFICIENT_POINTS") {
-          const bal = Number(parsed?.pointsBalance);
-          const a = addAssistant("", false, false);
-          patchAssistant(a, { hidden: false });
-          appendAssistantDelta(a, `\n\n[积分不足] 当前积分余额：${Number.isFinite(bal) ? Math.max(0, Math.floor(bal)) : "未知"}。请先充值积分后再使用 AI 功能。`);
-          finishAssistant(a);
-          setRunning(false);
-          setActivity(null);
-          return;
-        }
-
-        const a = addAssistant("", false, false);
-        patchAssistant(a, { hidden: false });
-        appendAssistantDelta(a, `\n\n[Gateway 错误] ${text || `HTTP_${res.status}`}`);
-        finishAssistant(a);
-        setRunning(false);
-        setActivity(null);
-        return;
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let runId: string | null = null;
-      let assistantId: string | null = null;
-      let currentAgentId: string | null = null;
-      let currentAgentName: string | null = null;
-      // 关键：toolCallId 是“与 Gateway 对齐的相关 ID”，不应直接当作 UI step.id（会跨回合重复：1/2/3…）
-      // 仅用于 gateway-executed tools：tool.call 创建占位 step，tool.result 回填时需要找到对应 stepId。
-      const gatewayToolStepIdsByCallId = new Map<string, string[]>();
-
-      const ensureAssistant = () => {
-        if (assistantId) return assistantId;
-        assistantId = addAssistant("", true, false, currentAgentId ? { agentId: currentAgentId, agentName: currentAgentName ?? undefined } : undefined);
-        currentAssistantId = assistantId;
-        return assistantId;
-      };
-
-      const postToolResult = async (payload: any) => {
-        if (!runId) return;
-        const postUrl = args.gatewayUrl
-          ? `${args.gatewayUrl}/api/agent/run/${runId}/tool_result`
-          : `/api/agent/run/${runId}/tool_result`;
-        await fetch(postUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...authHeader() },
-          body: JSON.stringify(payload),
-          signal: abort.signal,
-        });
-      };
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        bumpProgress();
-        buffer += decoder.decode(value, { stream: true });
-
-        let idx = buffer.indexOf("\n\n");
-        while (idx >= 0) {
-          const block = buffer.slice(0, idx);
-          buffer = buffer.slice(idx + 2);
-
-          const evt = parseSseBlock(block);
-          if (!evt) {
-            idx = buffer.indexOf("\n\n");
-            continue;
-          }
-          bumpProgress();
-
-          if (evt.event === "run.start") {
-            try {
-              const payload = JSON.parse(evt.data);
-              runId = payload?.runId ? String(payload.runId) : runId;
-              log("info", "agent.run.start", payload);
-            } catch {
-              log("info", "agent.run.start", evt.data);
-            }
-          }
-
-
-          // Sub-agent lifecycle events
-          if (evt.event === "subagent.start") {
-            try {
-              const payload = JSON.parse(evt.data);
-              const agName = String(payload?.agentName ?? payload?.agentId ?? "");
-              log("info", "subagent.start", payload);
-              if (useRunStore.getState().isRunning) {
-                setActivity(agName ? `${agName} 正在处理…` : "子 Agent 正在处理…", { resetTimer: true });
-              }
-            } catch {
-              log("info", "subagent.start", evt.data);
-            }
-          }
-
-          if (evt.event === "subagent.done") {
-            try {
-              const payload = JSON.parse(evt.data);
-              currentAgentId = null;
-              currentAgentName = null;
-              log("info", "subagent.done", payload);
-              if (useRunStore.getState().isRunning) {
-                setActivity("正在继续…");
-              }
-            } catch {
-              log("info", "subagent.done", evt.data);
-            }
-          }
-
-          if (evt.event === "run.end") {
-            log("info", "agent.run.end", evt.data);
-            // 关键：Gateway 已明确结束本次 Run（包括 clarify_waiting / proposal_waiting 等“等待用户”的结束态）
-            // UI 必须立刻停下来，否则底部会错误显示“正在生成/可停止”。
-            setRunning(false);
-            setActivity(null);
-          }
-
-          if (evt.event === "policy.decision") {
-            try {
-              const payload = JSON.parse(evt.data);
-              log("info", "policy.decision", payload);
-            } catch {
-              log("info", "policy.decision", evt.data);
-            }
-          }
-
-          if (evt.event === "billing.charge") {
-            try {
-              const payload = JSON.parse(evt.data);
-              const ok = payload?.ok === undefined ? true : Boolean(payload.ok);
-              const nb = Number(payload?.newBalance);
-              if (ok && Number.isFinite(nb)) {
-                const u = useAuthStore.getState().user;
-                if (u) {
-                  useAuthStore.setState({ user: { ...u, pointsBalance: Math.max(0, Math.floor(nb)) } });
-                }
-              }
-              log("info", "billing.charge", payload);
-            } catch {
-              // ignore
-            }
-          }
-
-          if (evt.event === "run.notice") {
-            try {
-              const payload = JSON.parse(evt.data);
-              const kind0 = String(payload?.kind ?? "info").trim().toLowerCase();
-              const level = kind0 === "error" ? "error" : kind0 === "warn" ? "warn" : "info";
-              log(level as any, "run.notice", payload);
-              const title = String(payload?.title ?? "").trim();
-              if (useRunStore.getState().isRunning && title) {
-                // 关键：内部策略提示不应作为“输出气泡”刷屏；用 ActivityBar 提示即可。
-                setActivity(`系统：${title}`, { resetTimer: true });
-              }
-            } catch {
-              log("info", "run.notice", evt.data);
-              if (useRunStore.getState().isRunning) setActivity("系统：正在自动调整流程…", { resetTimer: true });
-            }
-          }
-
-          if (evt.event === "assistant.start") {
-            try {
-              const payload = JSON.parse(evt.data);
-              // Track sub-agent context from SSE events
-              currentAgentId = payload?.agentId ? String(payload.agentId) : null;
-              currentAgentName = payload?.agentName ? String(payload.agentName) : null;
-              log("info", "assistant.start", payload);
-            } catch {
-              log("info", "assistant.start", evt.data);
-            }
-            if (assistantId) finishAssistant(assistantId);
-            assistantId = null;
-            if (useRunStore.getState().isRunning) setActivity("正在生成…");
-          }
-
-          if (evt.event === "assistant.delta") {
-            try {
-              const payload = JSON.parse(evt.data);
-              const delta = payload?.delta;
-              if (typeof delta === "string" && delta.length) {
-                // 一旦开始输出正文，更新状态（避免用户以为卡住）
-                setActivity("正在生成…");
-                const id = ensureAssistant();
-                appendAssistantDelta(id, delta);
-              }
-            } catch {
-              // ignore
-            }
-          }
-
-          if (evt.event === "assistant.done") {
-            if (assistantId) finishAssistant(assistantId);
-            assistantId = null;
-            // 一个 assistant 气泡结束后，先标记“继续运行中”，直到 run.end 或下一个 tool.call
-            if (useRunStore.getState().isRunning) setActivity("正在继续…");
-          }
-
-          if (evt.event === "tool.call") {
-            let payload: any = null;
-            try {
-              payload = JSON.parse(evt.data);
-            } catch {
-              payload = null;
-            }
-            const toolCallId = String(payload?.toolCallId ?? "");
-            const name = String(payload?.name ?? "");
-            const rawArgs = (payload?.args ?? {}) as Record<string, string>;
-            const executedBy = String(payload?.executedBy ?? "desktop");
-            const parsedArgsPreview = parseSseToolArgs(rawArgs);
-
-            log("info", "tool.call", { toolCallId, name });
-            setActivity(humanizeToolActivity(name, parsedArgsPreview), { resetTimer: true });
-
-            // 兼容：旧实现里 Gateway 可能不会在每次模型调用结束都发 assistant.done（现在 tool_calls 分支也会发）。
-            // 如果此时不手动结束当前 assistant 气泡，后续新的 assistant.delta 会继续追加到“上面那条气泡”，
-            // 造成视觉上“工具卡片插入后，内容在中间继续生成/自动滚动失效”。
-            if (assistantId) {
-              finishAssistant(assistantId);
-              assistantId = null;
-            }
-
-            // Gateway 执行：Desktop 只创建占位 ToolBlock（running），等待 tool.result 回填，不执行本地工具也不回传 tool_result。
-            if (executedBy === "gateway") {
-              const def = getTool(name);
-              const parsedArgs = parsedArgsPreview;
-              const stepId = addTool({
-                toolName: name,
-                status: "running",
-                input: parsedArgs,
-                output: null,
-                riskLevel: def?.riskLevel ?? "high",
-                applyPolicy: def?.applyPolicy ?? "proposal",
-                undoable: false,
-                kept: false,
-                applied: false,
-              });
-              if (toolCallId) {
-                const q = gatewayToolStepIdsByCallId.get(toolCallId) ?? [];
-                q.push(stepId);
-                gatewayToolStepIdsByCallId.set(toolCallId, q);
-              }
-              continue;
-            }
-
-            const exec = await executeToolCall({ toolName: name, rawArgs, mode: args.mode });
-            const def = exec.def;
-            const stepApplyPolicy =
-              exec.result.ok ? exec.result.applyPolicy ?? def?.applyPolicy ?? "proposal" : def?.applyPolicy ?? "proposal";
-            const stepRiskLevel =
-              exec.result.ok ? exec.result.riskLevel ?? def?.riskLevel ?? "high" : def?.riskLevel ?? "high";
-            const initialKept = stepApplyPolicy === "auto_apply";
-
-            const stepId = addTool({
-              toolName: name,
-              status: exec.result.ok ? "success" : "failed",
-              input: exec.parsedArgs,
-              output: exec.result.ok ? exec.result.output : { ok: false, error: exec.result.error },
-              riskLevel: stepRiskLevel,
-              applyPolicy: stepApplyPolicy,
-              undoable: exec.result.ok ? exec.result.undoable : false,
-              undo: exec.result.ok ? exec.result.undo : undefined,
-              apply: exec.result.ok ? exec.result.apply : undefined,
-              kept: initialKept,
-              applied: stepApplyPolicy === "auto_apply",
-            });
-            void stepId;
-
-            await postToolResult({
-              toolCallId,
-              name,
-              ok: exec.result.ok,
-              output: exec.result.ok ? exec.result.output : { ok: false, error: exec.result.error },
-              meta: {
-                applyPolicy: stepApplyPolicy,
-                riskLevel: stepRiskLevel,
-                hasApply: exec.result.ok ? typeof exec.result.apply === "function" : false,
-              },
-            });
-            if (useRunStore.getState().isRunning) setActivity("正在等待模型继续…", { resetTimer: true });
-          }
-
-          if (evt.event === "tool.result") {
-            // server-side tool：tool.call 只占位（running），tool.result 在这里回填
-            try {
-              const payload = JSON.parse(evt.data);
-              const toolCallId = String(payload?.toolCallId ?? "");
-              const ok0 = Boolean(payload?.ok);
-              const out = payload?.output;
-              const meta = payload?.meta ?? null;
-              if (toolCallId) {
-                const q = gatewayToolStepIdsByCallId.get(toolCallId) ?? [];
-                const stepId = q.length ? q[0] : "";
-                const st = stepId
-                  ? (useRunStore.getState().steps ?? []).find((s: any) => s && s.type === "tool" && s.id === stepId)
-                  : null;
-                if (st && st.type === "tool" && st.status === "running") {
-                  patchTool(stepId, {
-                    status: ok0 ? "success" : "failed",
-                    output: out,
-                    ...(meta && typeof meta === "object"
-                      ? {
-                          applyPolicy: (meta as any).applyPolicy ?? st.applyPolicy,
-                          riskLevel: (meta as any).riskLevel ?? st.riskLevel,
-                        }
-                      : {}),
-                  });
-
-                  // lint.style（server tool）增强：如果返回 edits，并且能定位到目标文件，则生成 unified diff 预览 + Keep/Undo 应用
-                  try {
-                    if (ok0 && st.toolName === "lint.style" && out && typeof out === "object") {
-                      const edits0 = Array.isArray((out as any).edits) ? ((out as any).edits as any[]) : [];
-                      const normEdits = edits0
-                        .map((e: any) => ({
-                          startLineNumber: Math.max(1, Math.floor(Number(e?.startLineNumber ?? NaN))),
-                          startColumn: Math.max(1, Math.floor(Number(e?.startColumn ?? 1))),
-                          endLineNumber: Math.max(1, Math.floor(Number(e?.endLineNumber ?? NaN))),
-                          endColumn: Math.max(1, Math.floor(Number(e?.endColumn ?? 9999))),
-                          text: String(e?.text ?? ""),
-                        }))
-                        .filter((e: any) =>
-                          [e.startLineNumber, e.startColumn, e.endLineNumber, e.endColumn].every((n: any) => Number.isFinite(n) && n > 0),
-                        )
-                        .slice(0, 24);
-
-                      const stepNow = (useRunStore.getState().steps ?? []).find((x: any) => x && x.type === "tool" && x.id === stepId) as any;
-                      const inPathRaw =
-                        stepNow?.input && typeof stepNow.input === "object" ? String((stepNow.input as any)?.path ?? "").trim() : "";
-                      const inputText =
-                        stepNow?.input && typeof stepNow.input === "object" ? String((stepNow.input as any)?.text ?? "").trim() : "";
-                      const targetPath = (inPathRaw || useProjectStore.getState().activePath || "").replaceAll("\\", "/");
-                      const proj = useProjectStore.getState();
-                      const file = targetPath ? proj.getFileByPath(targetPath) : null;
-                      if (file && normEdits.length) {
-                        const before = await proj.ensureLoaded(file.path).catch(() => file.content ?? "");
-                        const after = applyTextEdits({ before, edits: normEdits }).after;
-                        const d = unifiedDiff({ path: targetPath, before, after });
-                        const preview = {
-                          diffUnified: d.diff,
-                          truncated: d.truncated,
-                          stats: d.stats ?? null,
-                          path: targetPath,
-                          note: "lint.style（patch）已生成局部修改提案：点击 Keep 应用 edits；Undo 可回滚。",
-                        };
-
-                        const apply = () => {
-                          const snap = useProjectStore.getState().snapshot();
-                          const st2 = useProjectStore.getState();
-                          const exists = !!st2.getFileByPath(targetPath);
-                          if (!exists) return { undo: () => useProjectStore.getState().restore(snap) };
-                          if (st2.activePath === targetPath && st2.editorRef?.getModel()) {
-                            const model = st2.editorRef.getModel()!;
-                            const full = model.getFullModelRange();
-                            st2.editorRef.executeEdits("agent", [{ range: full, text: after, forceMoveMarkers: true }]);
-                            const written = st2.editorRef.getModel()?.getValue() ?? after;
-                            st2.updateFile(targetPath, written);
-                          } else {
-                            st2.updateFile(targetPath, after);
-                          }
-                          return { undo: () => useProjectStore.getState().restore(snap) };
-                        };
-
-                        patchTool(stepId, {
-                          output: { ...(out as any), preview },
-                          applyPolicy: "proposal",
-                          riskLevel: "low",
-                          apply,
-                          undoable: false,
-                        } as any);
-                      } else if (inputText && normEdits.length) {
-                        // text-only：没有明确 path（或 path 不存在）时，仍提供 patch/diff 预览；
-                        // Keep 默认写入一个新文件 drafts/ 下，避免覆盖用户已有文档。
-                        const before = inputText.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-                        const after = applyTextEdits({ before, edits: normEdits }).after;
-                        const pseudoPath = "__draft__/lint.style";
-                        const d = unifiedDiff({ path: pseudoPath, before, after });
-                        const outPath = `drafts/lint-style-${Date.now()}.md`;
-                        const preview = {
-                          diffUnified: d.diff,
-                          truncated: d.truncated,
-                          stats: d.stats ?? null,
-                          path: pseudoPath,
-                          note: `lint.style（patch）已生成“纯文本草稿”的局部修改提案：点击 Keep 会写入新文件 ${outPath}；Undo 可回滚。`,
-                        };
-
-                        const apply = () => {
-                          const snap = useProjectStore.getState().snapshot();
-                          const st2 = useProjectStore.getState();
-                          // 仅新建文件，不覆盖
-                          const exists = !!st2.getFileByPath(outPath);
-                          const finalPath = exists ? `drafts/lint-style-${Date.now()}-2.md` : outPath;
-                          st2.createFile(finalPath, after);
-                          return { undo: () => useProjectStore.getState().restore(snap) };
-                        };
-
-                        patchTool(stepId, {
-                          output: { ...(out as any), preview, patchTarget: { kind: "new_file", path: outPath } },
-                          applyPolicy: "proposal",
-                          riskLevel: "low",
-                          apply,
-                          undoable: false,
-                        } as any);
-                      }
-                    }
-                  } catch {
-                    // ignore
-                  }
-
-                  // 出队：避免同一个 toolCallId（跨回合复用 1/2/3…）导致映射错误或无限增长
-                  if (q.length) q.shift();
-                  if (q.length) gatewayToolStepIdsByCallId.set(toolCallId, q);
-                  else gatewayToolStepIdsByCallId.delete(toolCallId);
-                  if (useRunStore.getState().isRunning) setActivity("正在等待模型继续…", { resetTimer: true });
-                }
-              }
-              log("info", "tool.result", payload);
-            } catch {
-              log("info", "tool.result", evt.data);
-            }
-          }
-
-          if (evt.event === "error") {
-            try {
-              const payload = JSON.parse(evt.data);
-              const msg = payload?.error ? String(payload.error) : "unknown";
-              const id = ensureAssistant();
-              patchAssistant(id, { hidden: false });
-              appendAssistantDelta(id, `\n\n[模型错误] ${msg}`);
-              finishAssistant(id);
-            } catch {
-              const id = ensureAssistant();
-              patchAssistant(id, { hidden: false });
-              appendAssistantDelta(id, `\n\n[模型错误] ${evt.data}`);
-              finishAssistant(id);
-            }
-            setRunning(false);
-            setActivity(null);
-            return;
-          }
-
-          idx = buffer.indexOf("\n\n");
-        }
-      }
-
-      setRunning(false);
-      setActivity(null);
-    } catch (e: any) {
-      const msg = e?.message ? String(e.message) : String(e);
-      const stack = e?.stack ? String(e.stack) : "";
-      // 用户点击“停止/取消”会触发 AbortController.abort；这不应显示为“网络错误”
-      const aborted =
-        abort.signal.aborted ||
-        String(e?.name ?? "") === "AbortError" ||
-        /BodyStreamBuffer was aborted/i.test(msg) ||
-        /\baborted\b/i.test(msg);
-      if (aborted) {
-        const signalReason = (() => {
-          try {
-            const r = (abort.signal as any)?.reason;
-            return r === undefined ? null : r;
-          } catch {
-            return null;
-          }
-        })();
-        log("info", "gateway.run.aborted", { message: msg, cancelReason, signalReason });
-        setRunning(false);
-        setActivity(null);
-        if (currentAssistantId) {
-          finishAssistant(currentAssistantId);
-          currentAssistantId = null;
-        }
-        return;
-      }
-
-      log("error", "gateway.network_error", { message: msg, stack });
-      const a = currentAssistantId ?? addAssistant("", false, false);
-      patchAssistant(a, { hidden: false });
-      appendAssistantDelta(a, `\n\n[网络错误] ${msg}`);
-      finishAssistant(a);
-      setRunning(false);
-      setActivity(null);
-    } finally {
-      ended = true;
-      clearWatchdog();
-      resolveDoneOnce();
-    }
-  })();
-
-  return {
-    done,
-    cancel: (reason?: string) => {
-      if (ended) return;
-      const r = String(reason ?? "unknown").trim() || "unknown";
-      cancelReason = r;
-      log("warn", "gateway.run.cancel", { reason: r });
-      try {
-        // Node/Electron supports abort(reason) in modern runtimes; ignore if not.
-        (abort as any).abort(r);
-      } catch {
-        abort.abort();
-      }
-      setRunning(false);
-      setActivity(null);
-      if (currentAssistantId) {
-        finishAssistant(currentAssistantId);
-        currentAssistantId = null;
-      }
-    }
-  };
+  return startGatewayRunWs(args as GatewayRunArgs);
 }
 

@@ -402,6 +402,10 @@ export function createAiConfigService(args: {
       normalizeBaseURL(String(process.env.LLM_CONTEXT_SELECTOR_BASE_URL ?? "")) || envToolRepairBase || envBase;
     const envContextSelectorKey =
       normalizeApiKeyInput(String(process.env.LLM_CONTEXT_SELECTOR_API_KEY ?? "")) || envToolRepairKey || envKey;
+    const envOpusModel = normalizeModelId(String(process.env.LLM_OPUS_MODEL ?? ""));
+    const envHaikuModel = normalizeModelId(String(process.env.LLM_HAIKU_MODEL ?? ""));
+    const envHaikuBase = normalizeBaseURL(String(process.env.LLM_HAIKU_BASE_URL ?? "")) || envBase;
+    const envHaikuKey = normalizeApiKeyInput(String(process.env.LLM_HAIKU_API_KEY ?? "")) || envKey;
 
     const pickCredsForStage = (stageKey: string) => {
       if (stageKey === "embedding") return { baseURL: envEmbedBase || envBase, apiKey: envEmbedKey || envKey };
@@ -409,6 +413,7 @@ export function createAiConfigService(args: {
       if (stageKey === "lint.style") return { baseURL: envLinterBase || envBase, apiKey: envLinterKey || envKey };
       if (stageKey === "agent.tool_call_repair") return { baseURL: envToolRepairBase || envBase, apiKey: envToolRepairKey || envKey };
       if (stageKey === "agent.context_selector") return { baseURL: envContextSelectorBase || envBase, apiKey: envContextSelectorKey || envKey };
+      if (stageKey === "llm.haiku") return { baseURL: envHaikuBase || envBase, apiKey: envHaikuKey || envKey };
       return { baseURL: envBase, apiKey: envKey };
     };
 
@@ -451,6 +456,16 @@ export function createAiConfigService(args: {
     for (const d of defs) {
       ensureModel(d.defaultModel, d.key, d.defaultEndpoint);
     }
+    // 1.1) env 额外声明的 opus 模型（共用 chat creds）
+    if (envOpusModel) {
+      const chatEndpoint = defMap.get("llm.chat")?.defaultEndpoint || "/v1/chat/completions";
+      ensureModel(envOpusModel, "llm.chat", chatEndpoint);
+    }
+    // 1.2) env 额外声明的 haiku 模型（可独立配置 LLM_HAIKU_BASE_URL/API_KEY，未配置则回退主 LLM）
+    if (envHaikuModel) {
+      const chatEndpoint = defMap.get("llm.chat")?.defaultEndpoint || "/v1/chat/completions";
+      ensureModel(envHaikuModel, "llm.haiku", chatEndpoint);
+    }
 
     // 2) 确保所有 stage 都有 stage 配置（缺失则补齐）
     const stageMap = new Map<string, AiStageConfig>((ai.stages ?? []).map((s) => [s.stage, s]));
@@ -473,6 +488,26 @@ export function createAiConfigService(args: {
       };
       stageMap.set(d.key, s);
       ai.stages = [...(ai.stages ?? []), s];
+    }
+
+    // 3) 把 env opus 模型追加到 chat/agent 的候选列表中（仅在模型已启用时）
+    const opusDoc = envOpusModel ? byId.get(envOpusModel) : null;
+    if (envOpusModel && opusDoc?.isEnabled) {
+      const appendToStage = (stage: AiStageConfig | undefined, modelId: string) => {
+        if (!stage || stage.stage === "embedding") return;
+        const cur = Array.isArray(stage.modelIds)
+          ? stage.modelIds.map((x) => normalizeModelId(String(x))).filter(Boolean)
+          : [];
+        const merged = Array.from(
+          new Set([...cur, normalizeModelId(String(stage.modelId ?? "")), modelId].filter(Boolean)),
+        ).slice(0, 60);
+        if (merged.join(",") !== (cur.join(",") || "")) {
+          stage.modelIds = merged.length ? merged : null;
+          stage.updatedAt = nowIso();
+        }
+      };
+      appendToStage(stageMap.get("llm.chat"), envOpusModel);
+      appendToStage(stageMap.get("agent.run"), envOpusModel);
     }
 
       db.aiConfig = { ...ai, updatedAt: nowIso() };

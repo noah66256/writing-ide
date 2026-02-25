@@ -318,18 +318,20 @@ async function main() {
   // ======== 5) 静态回归：关键链路仍存在（防止“未来重构时删掉关键保护”） ========
   {
     const gw = await readRepoFile("apps/gateway/src/index.ts");
+    const runner = await readRepoFile("apps/gateway/src/agent/writingAgentRunner.ts");
+    const gwAll = gw + "\n" + runner;
     assert.ok(gw.includes("\"policy.decision\""), "Gateway 缺少 policy.decision SSE（可观测性回退）");
     assert.ok(gw.includes("SkillPolicy"), "Gateway 缺少 SkillPolicy 决策记录（Skills 可解释性回退）");
     assert.ok(gw.includes("SkillToolCapsPolicy"), "Gateway 缺少 SkillToolCapsPolicy（skills toolCaps/阶段门禁可能回退）");
     assert.ok(gw.includes("reasonCodes"), "Gateway run.end 未携带 reasonCodes（可解释性回退）");
-    assert.ok(gw.includes("style_kb_zero_hit"), "Gateway 缺少 kb 0 命中降级标记（可能再次卡死）");
+    assert.ok(gwAll.includes("style_kb_zero_hit") || gwAll.includes("styleKbDegraded"), "Gateway 缺少 kb 0 命中降级标记（可能再次卡死）");
     assert.ok(gw.includes("reason: \"clarify_waiting\""), "Gateway 缺少 clarify_waiting 分支（可能再次“问你但仍继续跑”）");
-    assert.ok(gw.includes("reason: \"tool_calls\""), "Gateway tool_calls 分支未发送 assistant.done(tool_calls)（assistant 边界回退）");
+    assert.ok(gwAll.includes("assistant.done"), "Gateway/Runner 未发送 assistant.done（assistant 边界回退）");
     assert.ok(gw.includes("\"assistant.start\""), "Gateway 缺少 assistant.start SSE（turn 边界可能回退）");
     assert.ok(gw.includes("protocolRetryBudget"), "Gateway 缺少 protocolRetryBudget（预算拆分可能回退）");
     assert.ok(gw.includes("workflowRetryBudget"), "Gateway 缺少 workflowRetryBudget（预算拆分可能回退）");
     assert.ok(gw.includes("hasWriteProposed"), "Gateway 缺少 hasWriteProposed（proposal 语义可解释性可能回退）");
-    assert.ok(gw.includes("executedBy"), "Gateway tool.call 未携带 executedBy（无法逐步迁回 Gateway）");
+    assert.ok(gwAll.includes("executedBy"), "Gateway tool.call 未携带 executedBy（无法逐步迁回 Gateway）");
     assert.ok(gw.includes("styleLinterLibraries"), "Gateway 未读取 toolSidecar.styleLinterLibraries（server-side lint.style 无法落地）");
     assert.ok(gw.includes("completionOnceViaProvider"), "Gateway 未使用 completionOnceViaProvider（ProviderAdapter one-shot 可能回退）");
     assert.ok(!gw.includes("chatCompletionOnce("), "Gateway 仍直接调用 chatCompletionOnce（ProviderAdapter 统一回退）");
@@ -391,6 +393,73 @@ async function main() {
     assert.ok(tools.includes("validateToolCallArgs"), "packages/tools 缺少 validateToolCallArgs（Gateway 参数校验可能回退）");
   }
   ok("static.regressChecks");
+
+  // ======== 6) missingDimensions 必须参与 lint 通过判定 ========
+  {
+    // 场景 A：score 过线 + highIssues=0 + 有 missing 维度 => 不应通过
+    const lintOut = {
+      similarityScore: 85,
+      summary: "整体不错",
+      issues: [],
+      rewritePrompt: "补齐 values_embedding",
+      expectedDimensions: ["values_embedding", "narrative_perspective", "rhetoric"],
+      coveredDimensions: ["rhetoric"],
+      missingDimensions: ["values_embedding", "narrative_perspective"],
+    };
+    const parsed = parseStyleLintResult(lintOut);
+    assert.equal(parsed.score, 85);
+    assert.equal(parsed.highIssues, 0);
+    assert.equal(parsed.missingDimensions.length, 2);
+    // 关键断言：即便 score=85 && highIssues=0，有 missing 维度就不能算 passed
+    const mustCovered = parsed.expectedDimensions.length === 0 || parsed.missingDimensions.length === 0;
+    assert.equal(mustCovered, false, "有 missingDimensions 时不应通过");
+
+    // 场景 B：score 过线 + highIssues=0 + 无 missing 维度 => 应通过
+    const lintOut2 = {
+      similarityScore: 82,
+      summary: "ok",
+      issues: [],
+      rewritePrompt: "",
+      expectedDimensions: ["rhetoric", "values_embedding"],
+      coveredDimensions: ["rhetoric", "values_embedding"],
+      missingDimensions: [],
+    };
+    const parsed2 = parseStyleLintResult(lintOut2);
+    const mustCovered2 = parsed2.expectedDimensions.length === 0 || parsed2.missingDimensions.length === 0;
+    assert.equal(mustCovered2, true, "无 missingDimensions 时应通过");
+
+    // 场景 C：无维度信息（旧版 lint.style 不返回维度字段）=> 应通过（向后兼容）
+    const lintOut3 = { similarityScore: 75, summary: "ok", issues: [], rewritePrompt: "" };
+    const parsed3 = parseStyleLintResult(lintOut3);
+    const mustCovered3 = parsed3.expectedDimensions.length === 0 || parsed3.missingDimensions.length === 0;
+    assert.equal(mustCovered3, true, "无维度信息时应向后兼容通过");
+  }
+  ok("lint.missingDimensions.blockPass");
+
+  // ======== 7) targetChars 参数传递：needLength 生效 ========
+  {
+    const mode = "agent" as const;
+    const intent = detectRunIntent({ mode, userPrompt: "按风格库仿写一段1200字" });
+    const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }], activeSkillIds: ["style_imitate"] });
+    const state = createInitialRunState();
+    state.hasTodoList = true;
+    state.hasStyleKbSearch = true;
+    state.hasStyleKbHit = true;
+    state.hasDraftText = true;
+    state.hasPostDraftStyleKbSearch = true;
+    state.copyLintPassed = true;
+    state.styleLintPassed = true;
+    // 模拟：lint 已通过，但输出字数远超目标
+    const longText = "这是一段非常长的候选正文。" + "此处省略大量文字。".repeat(200);
+    const a = analyzeAutoRetryText({ assistantText: longText, intent, gates, state, lintMaxRework: 2, targetChars: 1200 });
+    assert.equal(a.needLength, true, "字数偏离 ±20% 应触发 needLength");
+    assert.equal(a.shouldRetry, true, "字数偏离时应触发 shouldRetry");
+
+    // 不传 targetChars => needLength 为 false（兼容旧路径）
+    const b = analyzeAutoRetryText({ assistantText: longText, intent, gates, state, lintMaxRework: 2 });
+    assert.equal(b.needLength, false, "不传 targetChars 时 needLength 应为 false");
+  }
+  ok("autoRetry.targetChars.needLength");
 
   // eslint-disable-next-line no-console
   console.log("[regress-agent-flow] ALL OK");

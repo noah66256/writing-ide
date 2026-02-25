@@ -948,7 +948,7 @@ export const useWritingBatchStore = create<WritingBatchState>()(
             {
               v: 1,
               createdAt: job.createdAt,
-              inputDir,
+              inputDir: inputAbs,
               inputFilesCount: inputFiles.length,
               clipsPerLesson,
               filesConcurrency,
@@ -1215,7 +1215,7 @@ export const useWritingBatchStore = create<WritingBatchState>()(
             if (ended) await writeJobCheckpoint({ rootDir, job: ended });
 
             if (abortReason === "cancel") {
-              useDialogStore.getState().openAlert?.("已取消批处理：已停止执行（已生成的文件保留在输出目录）。");
+              useDialogStore.getState().openAlert?.({ message: "已取消批处理：已停止执行（已生成的文件保留在输出目录）。" });
             }
           } catch (e: any) {
             const msg = e?.message ? String(e.message) : String(e);

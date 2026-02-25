@@ -978,3 +978,4 @@ type McpServerDefinition = {
 | 2026-02-21 | v0.1.1 | Review 修正：SSE 协议兼容、SubAgentRunContext 组装契约、工具权限优先级链、@ 直达语义澄清、feature flags、MCP 标注预留、工具 ID 校验说明 |
 | 2026-02-21 | v0.1.2 | 新增 Section 11 前置改造：Skill/Tool/MCP 接口标准化审计与改造计划（SkillManifest 配置化、ToolError 标准、MCP 路径） |
 | 2026-02-21 | v0.1.3 | P0 进度更新 + Skill 三层配置化方案（builtin/standard/user 分层、配置文件格式、合并逻辑、热生效机制、实现路径） |
+| 2026-02-22 | v0.1.4 | P1-3 全面落地：(1) 子 Agent 真实 systemPrompt + 工具白名单校验（防幻觉工具调用）；(2) agent.delegate 并行执行（Promise.all）+ SSE 事件按 agentId 路由；(3) Desktop 并行气泡（subAgentBubbles Map）；(4) 聊天气泡样式（用户右对齐、助手左对齐+头像/角色名）；(5) @mention chip 化显示（emerald 样式）；(6) 侧边栏任务列表实装（首条消息自动创建、实时更新）；(7) 统一设置弹窗（团队管理/MCP/Skill 三标签页） |

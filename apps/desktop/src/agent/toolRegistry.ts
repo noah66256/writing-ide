@@ -3,6 +3,8 @@ import { useRunStore, type Mode, type ToolApplyPolicy, type ToolRiskLevel } from
 import { useKbStore } from "../state/kbStore";
 import { useAuthStore } from "../state/authStore";
 import { useWritingBatchStore } from "../state/writingBatchStore";
+import { useTeamStore, getEffectiveAgents, validateCustomAgent, generateCustomAgentId } from "../state/teamStore";
+import { TOOL_LIST } from "@writing-ide/tools";
 import { getGatewayBaseUrl } from "./gatewayUrl";
 
 function authHeader(): Record<string, string> {
@@ -879,9 +881,11 @@ function normalizeTodoStatus(input: unknown): TodoStatus {
   return "todo";
 }
 
-function coerceValue(v: string): unknown {
-  const raw = v;
-  const s = v.trim();
+function coerceValue(v: unknown): unknown {
+  // SSE JSON parse 后值可能已是对象/数组/数字等，无需再 String() 转换
+  if (v !== null && v !== undefined && typeof v !== "string") return v;
+  const raw = v as string;
+  const s = raw.trim();
   if (!s) return "";
   if ((s.startsWith("{") && s.endsWith("}")) || (s.startsWith("[") && s.endsWith("]"))) {
     try {
@@ -896,7 +900,7 @@ function coerceValue(v: string): unknown {
   return raw;
 }
 
-function parseArgs(rawArgs: Record<string, string>) {
+function parseArgs(rawArgs: Record<string, unknown>) {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(rawArgs)) out[k] = coerceValue(v);
   return out;
@@ -2786,6 +2790,191 @@ const tools: ToolDefinition[] = [
       return { ok: true, output: { ok: true }, undoable: false };
     },
   },
+  // ── agent.config.* ─────────────────────────────
+  {
+    name: "agent.config.create",
+    description: "创建自定义子 Agent",
+    args: [
+      { name: "name", required: true, desc: "显示名称" },
+      { name: "description", required: true, desc: "职责描述" },
+      { name: "systemPrompt", required: true, desc: "system prompt" },
+    ],
+    riskLevel: "medium" as ToolRiskLevel,
+    applyPolicy: "auto_apply" as ToolApplyPolicy,
+    reversible: true,
+    run: async (args: Record<string, unknown>) => {
+      const name = String(args.name ?? "").trim();
+      const description = String(args.description ?? "").trim();
+      const systemPrompt = String(args.systemPrompt ?? "").trim();
+      const avatar = String(args.avatar ?? "🤖").trim();
+      const model = String(args.model ?? "haiku").trim();
+      const toolPolicy = String(args.toolPolicy ?? "proposal_first").trim() as "readonly" | "proposal_first" | "auto_apply";
+      const priority = typeof args.priority === "number" ? args.priority : 50;
+      const tools = Array.isArray(args.tools)
+        ? args.tools.map((t: unknown) => String(t ?? "").trim()).filter(Boolean)
+        : [];
+      const triggerPatterns = Array.isArray(args.triggerPatterns)
+        ? args.triggerPatterns.map((t: unknown) => String(t ?? "").trim()).filter(Boolean)
+        : [];
+      const budgetRaw = args.budget && typeof args.budget === "object" ? (args.budget as Record<string, unknown>) : {};
+      const budget = {
+        maxTurns: typeof budgetRaw.maxTurns === "number" ? budgetRaw.maxTurns : 10,
+        maxToolCalls: typeof budgetRaw.maxToolCalls === "number" ? budgetRaw.maxToolCalls : 20,
+        timeoutMs: typeof budgetRaw.timeoutMs === "number" ? budgetRaw.timeoutMs : 90_000,
+      };
+
+      const id = generateCustomAgentId(name);
+
+      // Check for ID collision
+      const existing = useTeamStore.getState().customAgents[id];
+      if (existing) {
+        return { ok: false, error: `Agent ID "${id}" 已存在，请使用不同的名称` };
+      }
+
+      const def = {
+        id, name, avatar, description, systemPrompt, tools,
+        skills: [] as string[], mcpServers: [] as string[],
+        model, fallbackModels: [] as string[], toolPolicy, budget,
+        triggerPatterns, priority, enabled: true, version: "1.0.0",
+      };
+
+      const knownTools = new Set(TOOL_LIST.map((t) => t.name));
+      const v = validateCustomAgent(def, knownTools);
+      if (!v.ok) {
+        return { ok: false, error: `验证失败：${v.errors.join("；")}` };
+      }
+
+      useTeamStore.getState().addCustomAgent(def);
+
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          agentId: id,
+          name: def.name,
+          description: def.description,
+          tools: def.tools,
+          model: def.model,
+          toolPolicy: def.toolPolicy,
+        },
+        undoable: false,
+      };
+    },
+  },
+  {
+    name: "agent.config.list",
+    description: "列出所有子 Agent",
+    args: [],
+    riskLevel: "low" as ToolRiskLevel,
+    applyPolicy: "auto_apply" as ToolApplyPolicy,
+    reversible: false,
+    run: async () => {
+      const agents = getEffectiveAgents();
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          agents: agents.map((a) => ({
+            id: a.id,
+            name: a.name,
+            avatar: a.avatar,
+            source: a.source,
+            enabled: a.effectiveEnabled,
+            description: a.description,
+            tools: a.tools,
+            model: a.model,
+            toolPolicy: a.toolPolicy,
+            budget: a.budget,
+            triggerPatterns: a.triggerPatterns,
+          })),
+        },
+        undoable: false,
+      };
+    },
+  },
+  {
+    name: "agent.config.update",
+    description: "更新子 Agent 配置",
+    args: [{ name: "agentId", required: true, desc: "Agent ID" }],
+    riskLevel: "medium" as ToolRiskLevel,
+    applyPolicy: "auto_apply" as ToolApplyPolicy,
+    reversible: true,
+    run: async (args: Record<string, unknown>) => {
+      const agentId = String(args.agentId ?? "").trim();
+      if (!agentId) return { ok: false, error: "agentId 不能为空" };
+
+      const isCustom = agentId.startsWith("custom_");
+
+      // For builtin agents, only allow enable/disable
+      if (!isCustom) {
+        if (typeof args.enabled !== "boolean") {
+          return { ok: false, error: "内置 Agent 只能修改 enabled 状态" };
+        }
+        useTeamStore.getState().setAgentEnabled(agentId, args.enabled);
+        return { ok: true, output: { ok: true, agentId, updated: ["enabled"] }, undoable: false };
+      }
+
+      // Custom agent: full patch
+      const existing = useTeamStore.getState().customAgents[agentId];
+      if (!existing) return { ok: false, error: `未找到自定义 Agent "${agentId}"` };
+
+      const patch: Record<string, unknown> = {};
+      if (typeof args.enabled === "boolean") {
+        useTeamStore.getState().setAgentEnabled(agentId, args.enabled);
+      }
+      if (typeof args.name === "string") patch.name = String(args.name).trim();
+      if (typeof args.description === "string") patch.description = String(args.description).trim();
+      if (typeof args.systemPrompt === "string") patch.systemPrompt = String(args.systemPrompt).trim();
+      if (typeof args.avatar === "string") patch.avatar = String(args.avatar).trim();
+      if (typeof args.model === "string") patch.model = String(args.model).trim();
+      if (typeof args.toolPolicy === "string") patch.toolPolicy = String(args.toolPolicy).trim();
+      if (typeof args.priority === "number") patch.priority = args.priority;
+      if (Array.isArray(args.tools)) {
+        patch.tools = args.tools.map((t: unknown) => String(t ?? "").trim()).filter(Boolean);
+      }
+      if (Array.isArray(args.triggerPatterns)) {
+        patch.triggerPatterns = args.triggerPatterns.map((t: unknown) => String(t ?? "").trim()).filter(Boolean);
+      }
+      if (args.budget && typeof args.budget === "object") {
+        const b = args.budget as Record<string, unknown>;
+        patch.budget = {
+          maxTurns: typeof b.maxTurns === "number" ? b.maxTurns : existing.budget.maxTurns,
+          maxToolCalls: typeof b.maxToolCalls === "number" ? b.maxToolCalls : existing.budget.maxToolCalls,
+          timeoutMs: typeof b.timeoutMs === "number" ? b.timeoutMs : existing.budget.timeoutMs,
+        };
+      }
+
+      if (Object.keys(patch).length > 0) {
+        const merged = { ...existing, ...patch, id: agentId };
+        const knownTools = new Set(TOOL_LIST.map((t) => t.name));
+        const v = validateCustomAgent(merged as any, knownTools);
+        if (!v.ok) return { ok: false, error: `验证失败：${v.errors.join("；")}` };
+        useTeamStore.getState().updateCustomAgent(agentId, patch as any);
+      }
+
+      return { ok: true, output: { ok: true, agentId, updated: Object.keys(patch) }, undoable: false };
+    },
+  },
+  {
+    name: "agent.config.remove",
+    description: "删除自定义子 Agent",
+    args: [{ name: "agentId", required: true, desc: "Agent ID" }],
+    riskLevel: "high" as ToolRiskLevel,
+    applyPolicy: "auto_apply" as ToolApplyPolicy,
+    reversible: true,
+    run: async (args: Record<string, unknown>) => {
+      const agentId = String(args.agentId ?? "").trim();
+      if (!agentId) return { ok: false, error: "agentId 不能为空" };
+      if (!agentId.startsWith("custom_")) {
+        return { ok: false, error: "只能删除自定义 Agent（custom_ 开头）。内置 Agent 请使用 agent.config.update 禁用。" };
+      }
+      const existing = useTeamStore.getState().customAgents[agentId];
+      if (!existing) return { ok: false, error: `未找到自定义 Agent "${agentId}"` };
+
+      useTeamStore.getState().removeCustomAgent(agentId);
+      return { ok: true, output: { ok: true, removed: agentId, name: existing.name }, undoable: false };
+    },
+  },
 ];
 
 export function listTools() {
@@ -2808,7 +2997,7 @@ export function toolsPrompt() {
 
 export async function executeToolCall(args: {
   toolName: string;
-  rawArgs: Record<string, string>;
+  rawArgs: Record<string, unknown>;
   mode: Mode;
 }): Promise<{
   def?: ToolDefinition;

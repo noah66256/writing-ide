@@ -463,6 +463,7 @@ export async function executeServerToolOnGateway(args: {
   toolSidecar: ToolSidecar | null;
   styleLinterLibraries: any[];
   authorization?: string | null;
+  mainDoc: Record<string, unknown>;
 }) {
   const name = String(args.call?.name ?? "").trim();
   if (name === "run.done") return { ok: true as const, output: { ok: true } };
@@ -473,10 +474,48 @@ export async function executeServerToolOnGateway(args: {
     return { ok: true as const, output: { ok: true, items } };
   }
   if (name === "run.mainDoc.update") {
+    const patchRaw = args.call?.args?.patch;
+    if (!patchRaw || typeof patchRaw !== "object" || Array.isArray(patchRaw)) {
+      return {
+        ok: false as const,
+        error: "INVALID_MAIN_DOC_PATCH: patch 必须是 JSON object。",
+      };
+    }
+
+    const patch = patchRaw as Record<string, unknown>;
+    const MAX_FIELD_CHARS = 800;
+    const MAX_MAIN_DOC_CHARS = 3000;
+    const safeLen = (v: unknown): number => {
+      if (typeof v === "string") return v.length;
+      try { return JSON.stringify(v ?? "").length; } catch { return String(v ?? "").length; }
+    };
+
+    // 单字段大小限制
+    for (const [key, value] of Object.entries(patch)) {
+      const fieldChars = safeLen(value);
+      if (fieldChars > MAX_FIELD_CHARS) {
+        return {
+          ok: false as const,
+          error: `MAIN_DOC_FIELD_TOO_LARGE: 字段 "${key}" 长度 ${fieldChars} 超过 ${MAX_FIELD_CHARS}。mainDoc 只存摘要/约束，请用 doc.write 存储草稿或 lint 结果。`,
+        };
+      }
+    }
+
+    // 合并后总量限制
+    const merged = { ...args.mainDoc, ...patch };
+    const mergedChars = safeLen(merged);
+    if (mergedChars > MAX_MAIN_DOC_CHARS) {
+      return {
+        ok: false as const,
+        error: `MAIN_DOC_TOO_LARGE: mainDoc 总长度 ${mergedChars} 超过 ${MAX_MAIN_DOC_CHARS}。请把草稿/中间产物用 doc.write 写入文件。`,
+      };
+    }
+
+    Object.assign(args.mainDoc, patch);
     return { ok: true as const, output: { ok: true } };
   }
   if (name === "run.mainDoc.get") {
-    return { ok: true as const, output: { ok: true, mainDoc: null } };
+    return { ok: true as const, output: { ok: true, mainDoc: args.mainDoc } };
   }
   if (name === "time.now") return executeTimeNowOnGateway();
   if (name === "web.search") return executeWebSearchOnGateway({ call: args.call });

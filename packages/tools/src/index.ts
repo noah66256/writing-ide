@@ -2,19 +2,18 @@ export type ToolRiskLevel = "low" | "medium" | "high";
 export type ToolApplyPolicy = "proposal" | "auto_apply";
 export type ToolMode = "agent" | "chat";
 
-export type ToolArgType = "string" | "number" | "boolean" | "json";
+export type ToolArgType = "string" | "number" | "boolean" | "object" | "array";
 
 export type ToolArgSpec = {
   name: string;
   required?: boolean;
   desc: string;
   type?: ToolArgType;
-  jsonType?: "object" | "array";
 };
 
 export type ToolJsonSchema = {
   type: "object";
-  properties: Record<string, { type: ToolArgType; jsonType?: "object" | "array" }>;
+  properties: Record<string, { type: ToolArgType }>;
   required?: string[];
   additionalProperties?: boolean;
   oneOfRequired?: Array<{ required: string[] }>;
@@ -42,6 +41,20 @@ export type ToolMeta = {
   inputSchema?: ToolJsonSchema;
   outputSchema?: ToolOutputSchema;
 };
+
+/**
+ * LLM function-calling API 工具名编码/解码。
+ * 大部分 LLM API（Anthropic / OpenAI / Gemini）的 function name 限制为
+ * [a-zA-Z0-9_-]，不允许 "." 等字符。
+ * 编码规则：. → _dot_（可逆，不与合法字符冲突）
+ */
+export function encodeToolName(name: string): string {
+  return name.replace(/\./g, "_dot_");
+}
+
+export function decodeToolName(encoded: string): string {
+  return encoded.replace(/_dot_/g, ".");
+}
 
 // 工具契约（单一来源）：
 // - Gateway 用于 toolsPrompt/allowlist（提示词与审计）
@@ -335,9 +348,9 @@ export const TOOL_LIST: ToolMeta[] = [
     args: [
       { name: "query", required: true, desc: "搜索关键词/问题", type: "string" },
       { name: "kind", required: false, desc: '可选：artifact kind（"card"|"outline"|"paragraph"），默认 "card"', type: "string" },
-      { name: "libraryIds", required: false, desc: "可选：库 ID 数组；不传则默认使用右侧已关联库", type: "json", jsonType: "array" },
-      { name: "facetIds", required: false, desc: "可选：outlineFacet id 数组（多选）", type: "json", jsonType: "array" },
-      { name: "cardTypes", required: false, desc: "可选：仅 kind=card 时生效；限制 cardType（例如 hook/one_liner/ending/outline/thesis）", type: "json", jsonType: "array" },
+      { name: "libraryIds", required: false, desc: "可选：库 ID 数组；不传则默认使用右侧已关联库", type: "array" },
+      { name: "facetIds", required: false, desc: "可选：outlineFacet id 数组（多选）", type: "array" },
+      { name: "cardTypes", required: false, desc: "可选：仅 kind=card 时生效；限制 cardType（例如 hook/one_liner/ending/outline/thesis）", type: "array" },
       { name: "anchorParagraphIndexMax", required: false, desc: "可选：只搜前 N 段（开头样例；paragraphIndex < N）", type: "number" },
       { name: "anchorFromEndMax", required: false, desc: "可选：只搜距结尾 N 段内（结尾样例）", type: "number" },
       { name: "debug", required: false, desc: "可选：返回检索诊断信息（默认 true）", type: "boolean" },
@@ -352,9 +365,9 @@ export const TOOL_LIST: ToolMeta[] = [
       properties: {
         query: { type: "string" },
         kind: { type: "string" },
-        libraryIds: { type: "json", jsonType: "array" },
-        facetIds: { type: "json", jsonType: "array" },
-        cardTypes: { type: "json", jsonType: "array" },
+        libraryIds: { type: "array" },
+        facetIds: { type: "array" },
+        cardTypes: { type: "array" },
         anchorParagraphIndexMax: { type: "number" },
         anchorFromEndMax: { type: "number" },
         debug: { type: "boolean" },
@@ -447,7 +460,7 @@ export const TOOL_LIST: ToolMeta[] = [
     args: [
       { name: "text", required: false, desc: "要检查的候选稿文本（text/path 二选一必填）", type: "string" },
       { name: "path", required: false, desc: "要检查的文件路径（text/path 二选一必填；会优先读取提案态内容）", type: "string" },
-      { name: "libraryIds", required: false, desc: "可选：风格库 ID 数组；不传则默认使用右侧已绑定的风格库（purpose=style）作为对照样例池", type: "json", jsonType: "array" },
+      { name: "libraryIds", required: false, desc: "可选：风格库 ID 数组；不传则默认使用右侧已绑定的风格库（purpose=style）作为对照样例池", type: "array" },
       { name: "maxSources", required: false, desc: "可选：最多使用多少条对照源（默认 14；包含编辑器选区 + 少量风格样例）", type: "number" },
     ],
     modes: ["agent"],
@@ -456,7 +469,7 @@ export const TOOL_LIST: ToolMeta[] = [
       properties: {
         text: { type: "string" },
         path: { type: "string" },
-        libraryIds: { type: "json", jsonType: "array" },
+        libraryIds: { type: "array" },
         maxSources: { type: "number" },
       },
       oneOfRequired: [{ required: ["text"] }, { required: ["path"] }],
@@ -516,7 +529,7 @@ export const TOOL_LIST: ToolMeta[] = [
     args: [
       { name: "text", required: false, desc: "要检查的候选稿文本（text/path 二选一必填）", type: "string" },
       { name: "path", required: false, desc: "要检查的文件路径（text/path 二选一必填；会优先读取提案态内容）", type: "string" },
-      { name: "libraryIds", required: false, desc: "可选：风格库 ID 数组；不传则默认使用右侧已绑定的风格库（purpose=style）", type: "json", jsonType: "array" },
+      { name: "libraryIds", required: false, desc: "可选：风格库 ID 数组；不传则默认使用右侧已绑定的风格库（purpose=style）", type: "array" },
       { name: "model", required: false, desc: "可选：用于 linter 的强模型（默认优先 LLM_LINTER_MODEL，其次 LLM_CARD_MODEL）", type: "string" },
       { name: "maxIssues", required: false, desc: "可选：最多返回多少条“不像点”（默认 10）", type: "number" },
     ],
@@ -526,7 +539,7 @@ export const TOOL_LIST: ToolMeta[] = [
       properties: {
         text: { type: "string" },
         path: { type: "string" },
-        libraryIds: { type: "json", jsonType: "array" },
+        libraryIds: { type: "array" },
         model: { type: "string" },
         maxIssues: { type: "number" },
       },
@@ -596,16 +609,16 @@ export const TOOL_LIST: ToolMeta[] = [
   {
     name: "run.mainDoc.update",
     description: "更新本次 Run 的 Main Doc（主线）。输入 patch(JSON)。",
-    args: [{ name: "patch", required: true, desc: "JSON 对象：MainDoc 的增量 patch", type: "json", jsonType: "object" }],
+    args: [{ name: "patch", required: true, desc: "JSON 对象：MainDoc 的增量 patch", type: "object" }],
     modes: ["agent"],
-    inputSchema: { type: "object", properties: { patch: { type: "json", jsonType: "object" } }, required: ["patch"], additionalProperties: true },
+    inputSchema: { type: "object", properties: { patch: { type: "object" } }, required: ["patch"], additionalProperties: true },
   },
   {
     name: "run.setTodoList",
     description: "设置本次 Run 的 Todo List（用于进度追踪与防跑偏）。",
-    args: [{ name: "items", required: true, desc: 'JSON 数组：TodoItem[]（{ id?, text, status?, note? }）', type: "json", jsonType: "array" }],
+    args: [{ name: "items", required: true, desc: 'JSON 数组：TodoItem[]（{ id?, text, status?, note? }）', type: "array" }],
     modes: ["agent"],
-    inputSchema: { type: "object", properties: { items: { type: "json", jsonType: "array" } }, required: ["items"], additionalProperties: true },
+    inputSchema: { type: "object", properties: { items: { type: "array" } }, required: ["items"], additionalProperties: true },
   },
   {
     name: "run.updateTodo",
@@ -617,7 +630,7 @@ export const TOOL_LIST: ToolMeta[] = [
       "  B) 顶层字段：status/note/text（Gateway 会自动封装成 patch）",
     args: [
       { name: "id", required: false, desc: "Todo ID（来自 run.setTodoList 的返回）。若当前仅有 1 条 todo，可省略。", type: "string" },
-      { name: "patch", required: false, desc: "JSON 对象：{ status?, note?, text? }（推荐写法）", type: "json", jsonType: "object" },
+      { name: "patch", required: false, desc: "JSON 对象：{ status?, note?, text? }（推荐写法）", type: "object" },
       { name: "status", required: false, desc: '可选：状态（"todo"|"in_progress"|"done"|"blocked"|"skipped"）', type: "string" },
       { name: "note", required: false, desc: "可选：备注/阻塞原因", type: "string" },
       { name: "text", required: false, desc: "可选：更新文本", type: "string" },
@@ -627,7 +640,7 @@ export const TOOL_LIST: ToolMeta[] = [
       type: "object",
       properties: {
         id: { type: "string" },
-        patch: { type: "json", jsonType: "object" },
+        patch: { type: "object" },
         status: { type: "string" },
         note: { type: "string" },
         text: { type: "string" },
@@ -649,12 +662,11 @@ export const TOOL_LIST: ToolMeta[] = [
         name: "items",
         required: true,
         desc: 'JSON 数组：Array<{ id?: string; text?: string; status?: "todo"|"in_progress"|"done"|"blocked"|"skipped"; note?: string }>',
-        type: "json",
-        jsonType: "array",
+        type: "array",
       },
     ],
     modes: ["agent"],
-    inputSchema: { type: "object", properties: { items: { type: "json", jsonType: "array" } }, required: ["items"], additionalProperties: true },
+    inputSchema: { type: "object", properties: { items: { type: "array" } }, required: ["items"], additionalProperties: true },
   },
   {
     name: "run.todo.update",
@@ -734,7 +746,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "query", required: true, desc: "搜索关键字（或正则表达式文本）", type: "string" },
       { name: "useRegex", required: false, desc: "可选：是否按正则搜索（默认 false）", type: "boolean" },
       { name: "caseSensitive", required: false, desc: "可选：是否大小写敏感（默认 false）", type: "boolean" },
-      { name: "paths", required: false, desc: "可选：限制搜索范围（JSON 数组：文件路径或目录前缀）", type: "json", jsonType: "array" },
+      { name: "paths", required: false, desc: "可选：限制搜索范围（JSON 数组：文件路径或目录前缀）", type: "array" },
       { name: "maxResults", required: false, desc: "可选：最多返回多少条命中（默认 80，最大 500）", type: "number" },
       { name: "maxPerFile", required: false, desc: "可选：每个文件最多返回多少条命中（默认 20，最大 200）", type: "number" },
     ],
@@ -745,7 +757,7 @@ export const TOOL_LIST: ToolMeta[] = [
         query: { type: "string" },
         useRegex: { type: "boolean" },
         caseSensitive: { type: "boolean" },
-        paths: { type: "json", jsonType: "array" },
+        paths: { type: "array" },
         maxResults: { type: "number" },
         maxPerFile: { type: "number" },
       },
@@ -833,7 +845,7 @@ export const TOOL_LIST: ToolMeta[] = [
     args: [
       { name: "path", required: true, desc: "文件路径", type: "string" },
       { name: "newContent", required: false, desc: "新内容全文", type: "string" },
-      { name: "edits", required: false, desc: "JSON 数组：TextEdit[]", type: "json", jsonType: "array" },
+      { name: "edits", required: false, desc: "JSON 数组：TextEdit[]", type: "array" },
       { name: "ifExists", required: false, desc: "文件已存在时的策略：rename/overwrite/error", type: "string" },
       { name: "suggestedName", required: false, desc: "建议的新文件名（仅 ifExists=rename 时使用）", type: "string" },
     ],
@@ -843,7 +855,7 @@ export const TOOL_LIST: ToolMeta[] = [
       properties: {
         path: { type: "string" },
         newContent: { type: "string" },
-        edits: { type: "json", jsonType: "array" },
+        edits: { type: "array" },
         ifExists: { type: "string" },
         suggestedName: { type: "string" },
       },
@@ -931,12 +943,12 @@ export const TOOL_LIST: ToolMeta[] = [
     description: "对指定文件应用一组 TextEdit（默认提案，Keep 才 apply）。",
     args: [
       { name: "path", required: false, desc: "文件路径（默认 activePath）", type: "string" },
-      { name: "edits", required: true, desc: "JSON 数组：TextEdit[]", type: "json", jsonType: "array" },
+      { name: "edits", required: true, desc: "JSON 数组：TextEdit[]", type: "array" },
     ],
     modes: ["agent"],
     inputSchema: {
       type: "object",
-      properties: { path: { type: "string" }, edits: { type: "json", jsonType: "array" } },
+      properties: { path: { type: "string" }, edits: { type: "array" } },
       required: ["edits"],
       additionalProperties: true,
     },
@@ -1000,20 +1012,19 @@ export const TOOL_LIST: ToolMeta[] = [
     args: [
       { name: "agentId", required: true, desc: "目标子 Agent ID（如 copywriter、seo_specialist）", type: "string" },
       { name: "task", required: true, desc: "任务描述（自然语言，尽量具体）", type: "string" },
-      { name: "inputArtifacts", required: false, desc: "上游产物引用（JSON 数组：串联场景传入前一个 Agent 的产出）", type: "json", jsonType: "array" },
+      { name: "inputArtifacts", required: false, desc: "上游产物引用（JSON 数组：串联场景传入前一个 Agent 的产出）", type: "array" },
       { name: "acceptanceCriteria", required: false, desc: "验收标准（可选）", type: "string" },
-      { name: "budget", required: false, desc: "覆盖默认预算（JSON 对象：{ maxTurns?, maxToolCalls?, timeoutMs? }）", type: "json", jsonType: "object" },
+      { name: "budget", required: false, desc: "覆盖默认预算（JSON 对象：{ maxTurns?, maxToolCalls?, timeoutMs? }）", type: "object" },
     ],
-    // Phase 1A: modes 为空，不自动进入 toolsPrompt；需 subagent.enabled feature flag 开启后由 Gateway 手动注入
-    modes: [],
+    modes: ["agent"],
     inputSchema: {
       type: "object",
       properties: {
         agentId: { type: "string" },
         task: { type: "string" },
-        inputArtifacts: { type: "json", jsonType: "array" },
+        inputArtifacts: { type: "array" },
         acceptanceCriteria: { type: "string" },
-        budget: { type: "json", jsonType: "object" },
+        budget: { type: "object" },
       },
       required: ["agentId", "task"],
     },
@@ -1027,6 +1038,103 @@ export const TOOL_LIST: ToolMeta[] = [
         turnsUsed: { type: "number", description: "实际使用的推理轮数" },
         toolCallsUsed: { type: "number", description: "实际使用的工具调用次数" },
       },
+    },
+  },
+  // ── agent.config.* ─────────────────────────────
+  {
+    name: "agent.config.create",
+    description:
+      "创建一个自定义子 Agent（团队成员）。\n" +
+      "创建后立即生效，负责人可通过 agent.delegate 委托任务给它。",
+    args: [
+      { name: "name", required: true, desc: "显示名称（最长 32 字符）", type: "string" },
+      { name: "description", required: true, desc: "一句话职责描述（最长 200 字符）", type: "string" },
+      { name: "systemPrompt", required: true, desc: "完整的 system prompt（指导子 Agent 的行为）", type: "string" },
+      { name: "tools", required: false, desc: "工具白名单（JSON 字符串数组；不传则为空）", type: "array" },
+      { name: "model", required: false, desc: "偏好模型（如 sonnet / haiku；默认 haiku）", type: "string" },
+      { name: "toolPolicy", required: false, desc: "工具策略：readonly / proposal_first / auto_apply（默认 proposal_first）", type: "string" },
+      { name: "budget", required: false, desc: "执行预算 JSON 对象", type: "object" },
+      { name: "triggerPatterns", required: false, desc: "触发关键词数组", type: "array" },
+      { name: "avatar", required: false, desc: "头像（emoji 或图片 URL）", type: "string" },
+      { name: "priority", required: false, desc: "优先级（默认 50）", type: "number" },
+    ],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        description: { type: "string" },
+        systemPrompt: { type: "string" },
+        tools: { type: "array" },
+        model: { type: "string" },
+        toolPolicy: { type: "string" },
+        budget: { type: "object" },
+        triggerPatterns: { type: "array" },
+        avatar: { type: "string" },
+        priority: { type: "number" },
+      },
+      required: ["name", "description", "systemPrompt"],
+    },
+  },
+  {
+    name: "agent.config.list",
+    description: "列出所有子 Agent（内置 + 自定义），包含各自的启用状态、工具列表、模型等配置。",
+    args: [],
+    modes: ["agent"],
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "agent.config.update",
+    description:
+      "更新子 Agent 配置。\n" +
+      "自定义 Agent（custom_ 开头）可修改全部字段；内置 Agent 只能修改 enabled 状态。",
+    args: [
+      { name: "agentId", required: true, desc: "要更新的 Agent ID", type: "string" },
+      { name: "enabled", required: false, desc: "启用/禁用", type: "boolean" },
+      { name: "name", required: false, desc: "新的显示名称", type: "string" },
+      { name: "description", required: false, desc: "新的职责描述", type: "string" },
+      { name: "systemPrompt", required: false, desc: "新的 system prompt", type: "string" },
+      { name: "tools", required: false, desc: "新的工具白名单", type: "array" },
+      { name: "model", required: false, desc: "新的偏好模型", type: "string" },
+      { name: "toolPolicy", required: false, desc: "新的工具策略", type: "string" },
+      { name: "budget", required: false, desc: "新的执行预算", type: "object" },
+      { name: "triggerPatterns", required: false, desc: "新的触发关键词", type: "array" },
+      { name: "avatar", required: false, desc: "新的头像", type: "string" },
+      { name: "priority", required: false, desc: "新的优先级", type: "number" },
+    ],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        agentId: { type: "string" },
+        enabled: { type: "boolean" },
+        name: { type: "string" },
+        description: { type: "string" },
+        systemPrompt: { type: "string" },
+        tools: { type: "array" },
+        model: { type: "string" },
+        toolPolicy: { type: "string" },
+        budget: { type: "object" },
+        triggerPatterns: { type: "array" },
+        avatar: { type: "string" },
+        priority: { type: "number" },
+      },
+      required: ["agentId"],
+    },
+  },
+  {
+    name: "agent.config.remove",
+    description: "删除一个自定义子 Agent。内置 Agent 不可删除（只能通过 agent.config.update 禁用）。",
+    args: [
+      { name: "agentId", required: true, desc: "要删除的自定义 Agent ID（必须以 custom_ 开头）", type: "string" },
+    ],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        agentId: { type: "string" },
+      },
+      required: ["agentId"],
     },
   },
 ];
@@ -1094,7 +1202,7 @@ export type ToolArgValidationError = ToolError & {
   field?: string;
 };
 
-export function validateToolCallArgs(args: { name: string; toolArgs: Record<string, string> }) {
+export function validateToolCallArgs(args: { name: string; toolArgs: Record<string, unknown> }) {
   const meta = getToolMeta(args.name);
   if (!meta?.inputSchema) return { ok: true as const };
 
@@ -1103,7 +1211,9 @@ export function validateToolCallArgs(args: { name: string; toolArgs: Record<stri
 
   const hasNonEmpty = (k: string) => {
     const v = rawArgs[k];
-    return typeof v === "string" && String(v).trim().length > 0;
+    if (v === null || v === undefined) return false;
+    if (typeof v === "string") return v.trim().length > 0;
+    return true;
   };
 
   const required = Array.isArray(schema.required) ? schema.required : [];
@@ -1131,28 +1241,36 @@ export function validateToolCallArgs(args: { name: string; toolArgs: Record<stri
   for (const [k, v] of Object.entries(rawArgs)) {
     if (!schema.properties?.[k]) continue;
     const rule = schema.properties[k]!;
-    const s = String(v ?? "");
-    if (!s.trim()) continue;
+    if (v === null || v === undefined) continue;
 
     if (rule.type === "number") {
-      const n = Number(s);
-      if (!Number.isFinite(n)) return { ok: false as const, error: { code: "INVALID_NUMBER", message: `参数 ${k} 不是合法数字`, field: k, retryable: false } satisfies ToolArgValidationError };
+      if (typeof v === "number") {
+        if (!Number.isFinite(v)) return { ok: false as const, error: { code: "INVALID_NUMBER", message: `参数 ${k} 不是合法数字`, field: k, retryable: false } satisfies ToolArgValidationError };
+      } else {
+        const n = Number(String(v));
+        if (!Number.isFinite(n)) return { ok: false as const, error: { code: "INVALID_NUMBER", message: `参数 ${k} 不是合法数字`, field: k, retryable: false } satisfies ToolArgValidationError };
+      }
     } else if (rule.type === "boolean") {
-      const t = s.trim().toLowerCase();
-      const ok = t === "true" || t === "false" || t === "1" || t === "0";
-      if (!ok) return { ok: false as const, error: { code: "INVALID_BOOLEAN", message: `参数 ${k} 不是合法布尔值(true/false)`, field: k, retryable: false } satisfies ToolArgValidationError };
-    } else if (rule.type === "json") {
-      let parsed: any = null;
-      try {
-        parsed = JSON.parse(s);
-      } catch {
-        return { ok: false as const, error: { code: "INVALID_JSON", message: `参数 ${k} 不是合法 JSON`, field: k, retryable: false } satisfies ToolArgValidationError };
+      if (typeof v !== "boolean") {
+        const t = String(v).trim().toLowerCase();
+        const ok = t === "true" || t === "false" || t === "1" || t === "0";
+        if (!ok) return { ok: false as const, error: { code: "INVALID_BOOLEAN", message: `参数 ${k} 不是合法布尔值(true/false)`, field: k, retryable: false } satisfies ToolArgValidationError };
       }
-      if (rule.jsonType === "array" && !Array.isArray(parsed)) {
-        return { ok: false as const, error: { code: "JSON_TYPE_MISMATCH", message: `参数 ${k} 必须是 JSON 数组`, field: k, retryable: false } satisfies ToolArgValidationError };
+    } else if (rule.type === "array") {
+      if (Array.isArray(v)) { /* native array — ok */ }
+      else if (typeof v === "string") {
+        try { if (!Array.isArray(JSON.parse(v))) return { ok: false as const, error: { code: "JSON_TYPE_MISMATCH", message: `参数 ${k} 必须是数组`, field: k, retryable: false } satisfies ToolArgValidationError }; }
+        catch { return { ok: false as const, error: { code: "INVALID_JSON", message: `参数 ${k} 不是合法 JSON`, field: k, retryable: false } satisfies ToolArgValidationError }; }
+      } else {
+        return { ok: false as const, error: { code: "JSON_TYPE_MISMATCH", message: `参数 ${k} 必须是数组`, field: k, retryable: false } satisfies ToolArgValidationError };
       }
-      if (rule.jsonType === "object" && (parsed === null || Array.isArray(parsed) || typeof parsed !== "object")) {
-        return { ok: false as const, error: { code: "JSON_TYPE_MISMATCH", message: `参数 ${k} 必须是 JSON 对象`, field: k, retryable: false } satisfies ToolArgValidationError };
+    } else if (rule.type === "object") {
+      if (typeof v === "object" && !Array.isArray(v)) { /* native object — ok */ }
+      else if (typeof v === "string") {
+        try { const p = JSON.parse(v); if (p === null || Array.isArray(p) || typeof p !== "object") return { ok: false as const, error: { code: "JSON_TYPE_MISMATCH", message: `参数 ${k} 必须是对象`, field: k, retryable: false } satisfies ToolArgValidationError }; }
+        catch { return { ok: false as const, error: { code: "INVALID_JSON", message: `参数 ${k} 不是合法 JSON`, field: k, retryable: false } satisfies ToolArgValidationError }; }
+      } else {
+        return { ok: false as const, error: { code: "JSON_TYPE_MISMATCH", message: `参数 ${k} 必须是对象`, field: k, retryable: false } satisfies ToolArgValidationError };
       }
     }
   }

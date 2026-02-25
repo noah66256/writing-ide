@@ -25,7 +25,10 @@ export interface SubAgentDefinition {
   systemPrompt: string;
   /** 允许使用的工具 ID 列表 */
   tools: string[];
-  /** 允许激活的技能 ID 列表 */
+  /**
+   * 允许激活的技能 ID 列表
+   * @deprecated 技能激活逻辑由编排器负责；此字段仅为兼容保留，不在 _executeSubAgent 中生效。
+   */
   skills: string[];
   /** 允许使用的 MCP Server ID 列表（v0.1 预留） */
   mcpServers: string[];
@@ -54,7 +57,21 @@ export const BUILTIN_SUB_AGENTS: SubAgentDefinition[] = [
     name: "文案写手",
     avatar: "✍️",
     description: "负责公众号/小红书/口播等内容写作与改写交付。",
-    systemPrompt: "[TODO] copywriter system prompt；待从主 Agent prompt 拆分",
+    systemPrompt: [
+      "你是「文案写手」，负责内容写作与改写交付。",
+      "",
+      "你的职责：",
+      "- 根据任务要求写作公众号/小红书/口播等内容",
+      "- 改写、润色、调整语气与风格",
+      "- 使用 kb.search 查询风格库与语料库",
+      "- 使用 doc.write/doc.applyEdits 输出内容",
+      "- 使用 lint.style/lint.copy 检查风格一致性",
+      "",
+      "规则：",
+      "- 严格按任务描述执行，不自行发散",
+      "- 完成后简要汇报结果",
+      "- 只使用分配给你的工具",
+    ].join("\n"),
     tools: ["kb.search", "doc.write", "doc.applyEdits", "lint.style", "lint.copy"],
     skills: ["style_imitate"],
     mcpServers: [],
@@ -76,7 +93,20 @@ export const BUILTIN_SUB_AGENTS: SubAgentDefinition[] = [
     name: "选题策划",
     avatar: "🔍",
     description: "负责热点追踪、选题日历、竞品分析与内容规划。",
-    systemPrompt: "[TODO] topic_planner system prompt；待拆分",
+    systemPrompt: [
+      "你是「选题策划」，负责热点追踪、竞品分析与内容规划。",
+      "",
+      "你的职责：",
+      "- 使用 web.search/web.fetch 搜索行业热点和趋势",
+      "- 使用 kb.search 查询已有的内容库避免重复",
+      "- 使用 time.now 获取当前时间以确保时效性",
+      "- 输出结构化的选题建议（包含标题、角度、关键词、参考源）",
+      "",
+      "规则：",
+      "- 只做调研和规划，不写正文",
+      "- 完成后简要汇报结果",
+      "- 只使用分配给你的工具",
+    ].join("\n"),
     tools: ["web.search", "web.fetch", "time.now", "kb.search"],
     skills: [],
     mcpServers: [],
@@ -98,7 +128,19 @@ export const BUILTIN_SUB_AGENTS: SubAgentDefinition[] = [
     name: "SEO 专员",
     avatar: "📊",
     description: "负责关键词研究、标签优化、标题改写以提升搜索曝光。",
-    systemPrompt: "[TODO] seo_specialist system prompt；待拆分",
+    systemPrompt: [
+      "你是「SEO 专员」，负责关键词研究、标签优化和标题改写。",
+      "",
+      "你的职责：",
+      "- 使用 web.search/web.fetch 研究关键词热度和竞争情况",
+      "- 使用 kb.search 了解已有内容的 SEO 现状",
+      "- 提供关键词建议、标题优化方案、标签策略",
+      "",
+      "规则：",
+      "- 只做分析和建议，不直接修改内容",
+      "- 完成后简要汇报结果",
+      "- 只使用分配给你的工具",
+    ].join("\n"),
     tools: ["web.search", "web.fetch", "kb.search"],
     skills: [],
     mcpServers: [],

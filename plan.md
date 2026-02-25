@@ -1,4 +1,4 @@
-## 写作 IDE（内置 Agent）方案草案（plan.md）
+## 产品方案草案（plan.md）— "一个人的内容团队"
 
 ### 导航（常用入口）
 - [README（项目说明）](README.md)
@@ -46,7 +46,7 @@
 - [Style Skill 门禁（让风格库只在“开写”后介入，research v1）](docs/research/style-skill-gating-v1.md)
 - [仿写（style_imitate）链路系统性复盘：从“修补”到“范式”（research v1）](docs/research/style-imitate-paradigm-review-v1.md)
 - [风格闭环“越改越飘”范式复盘与修复方案 v1（research）](docs/research/style-lint-drift-mitigation-v1.md)
-- [仿写工业化 v0.1（目录先挑 + 分阶段执行 + 只给规则不给原文）](docs/specs/style-imitate-industrial-v0.1.md)
+- ~~[仿写工业化 v0.1（目录先挑 + 分阶段执行 + 只给规则不给原文）](docs/specs/style-imitate-industrial-v0.1.md)~~（已删除，被 V2 Clean 取代）
 - [批处理写作任务（Writing Batch Jobs）v0.1（research）](docs/research/writing-batch-jobs-v0.1.md)
 - [批处理写作：并行路由（A 方案）与调度器 v0.1（research）](docs/research/writing-batch-parallel-router-v0.1.md)
 - [doc.write 新写/覆盖策略（research v1）](docs/research/doc-write-ifexists-v1.md)
@@ -55,17 +55,28 @@
 - [Electron 原生对话框导致输入失效（research v1）](docs/research/electron-native-dialog-focus-bug-v1.md)
 - [IDE Agent 上下文机制：劣势与完善方法（research v1）](docs/research/context-pack-mechanism-improvements-v1.md)
 - [writing-agent.md（写作 Agent 约定/协议）](writing-agent.md)
+- [产品定位与角色覆盖 v0.1（"一个人的内容团队"：11 角色 + 能力矩阵 + Subagent 架构）](docs/specs/product-positioning-v0.1.md)
+- [Corpus Ingest 技能 v0.1（kb.ingest / kb.listLibraries 工具 + 技能压制逻辑）](docs/specs/corpus-ingest-skill-v0.1.md)
+- [Facet 维度提权 v0.1（narrative_perspective 新增 + values_embedding 提权）](docs/specs/facet-weights-tuning-v0.1.md)
+- [KB 抽卡增强 v2（spec：两阶段抽卡 + 维度补全 + 灵魂维度特殊提取）](docs/specs/kb-card-extraction-v2.md)
+- [Sub-agent 架构规范 v0.1（标准接口 + 中转/广播模式 + 群聊 UI + 工程路径）](docs/specs/sub-agent-architecture-v0.1.md)
+- [Sub-Agent 定义规范 v0.1（SubAgentDefinition 接口 + 字段说明 + 执行机制 + 注册方式）](docs/specs/agent-definition-standard-v0.1.md)
+- [Skill 定义规范 v0.1（SkillManifest 接口 + TriggerRule + 激活机制 + 内置 Skill 列表）](docs/specs/skill-definition-standard-v0.1.md)
+- [MCP 接入规范 v0.1（McpServerDefinition 接口 + 传输模式 + 生命周期 + Agent 集成）](docs/specs/mcp-integration-standard-v0.1.md)
+- [负责人自主配置能力 v0.1（system.* 工具 + 动态 Agent/Skill/MCP 管理 + 实现路径）](docs/specs/agent-self-config-v0.1.md)
 
 ### 0. 背景与目标
-- **愿景**：做一个“写作 IDE”，把写作当成工程：项目化管理、可追溯修改、可复用模板/工作流，并内置一个能“调用工具”的 Agent 作为写作搭档。
-- **核心差异**：不是单纯聊天写作，而是“围绕文档/项目”的生成、改写、查证、结构化与发布（含审阅、diff、回滚）。
+- **愿景**：做”一个人的内容团队”——对话驱动的 AI 内容团队，通过 11 个专业角色替代内容创业者需要雇的岗位。软件本身是通道，用户通过对话下达任务、传递素材、获取产出。
+- **核心差异**：不是通用聊天机器人，而是专注内容赛道的 AI 团队——风格库（学会你的调性）+ 记忆系统（无限上下文）+ 成品产出（Excel/Word/PPT/图片）+ 执行能力（bash/MCP/API）。
+- ~~旧愿景：做一个”写作 IDE”，把写作当成工程。~~
 
 > 说明：你提到的“react 机制”这里按两层理解并落地：  
 > - **React（UI/状态）**：前端用 React 组织编辑器+面板+工具结果。  
 > - **ReAct（Reason+Act 工具调用范式）**：Agent 采用“思考→调用工具→观察→继续”的循环来完成复杂写作任务（对用户展示为可追溯的步骤日志与可应用的修改 diff）。
 
 ### 0.1 已确定的方向（当前共识）
-- **产品定位**：偏”写作 IDE”（文档/项目为中心）。
+- **产品定位**：**”一个人的内容团队”**——对话驱动的 AI 内容团队，替代内容创业者需要雇的 11 个角色。详见 [产品定位与角色覆盖 v0.1](docs/specs/product-positioning-v0.1.md)。
+  - ~~旧定位：偏”写作 IDE”（文档/项目为中心）。~~
   - **当前布局（2026-02）**：对话为中心的极简界面——56px 图标导航栏 + 全宽对话区 + 按需工作面板。详见 [UI 重设计 v0.1](docs/specs/ui-redesign-v0.1.md)。
   - ~~旧布局：VSCode 五栏（Explorer + Editor + AgentPane + DockPanel），已在 Phase 4 移除入口。~~
 - **编辑器形态**：MVP 先 Markdown。
@@ -77,7 +88,7 @@
 - **文档元数据**：Markdown 允许/推荐使用 Frontmatter（YAML）作为统一元数据。
 - **离线入口**：启动时允许“跳过登录进入离线模式”（已确定）。
 
-### 0.2 范围审计（防跑偏：什么是“写作 IDE”，什么不是）
+### 0.2 范围审计（~~防跑偏：什么是”写作 IDE”，什么不是~~ → 历史参考，产品已转向”对话驱动内容团队”）
 - **我们做的是写作 IDE（要坚守的中心）**
   - 项目/文档为中心（文件树、Tab、编辑器、搜索、版本/快照）
   - Agent 作为“写作搭档”，产出必须可审阅（diff）可应用可回滚
@@ -485,6 +496,10 @@
   - Phase 2：startGatewayRun 集成 + 对话归档/加载 + 草稿自动保存
   - Phase 3：@ 浮层（技能/KB）+ 拖拽附件 + react-markdown 渲染
   - Phase 4：App.tsx 清理，移除旧五栏布局入口
+- ✅ **Sub-agent 架构（P1-3 落地）**：子 Agent 分层调度与并行执行。详见 [Sub-agent 架构规范 v0.1](docs/specs/sub-agent-architecture-v0.1.md)
+  - P1：SubAgentDefinition 接口 + BUILTIN_SUB_AGENTS（copywriter/topic_planner/seo_specialist）+ agent.delegate 工具
+  - P2：Gateway 并行执行（agent.delegate 用 Promise.all）+ SSE 事件注入 agentId 路由
+  - P3：Desktop 并行气泡（subAgentBubbles Map）+ 聊天气泡样式（用户右对齐、助手左对齐+头像/角色名）+ @mention chip 显示 + 侧边栏任务列表实装 + 统一设置弹窗（团队管理/MCP/Skill）
 
 #### TODO（按优先级，滚动更新）
 - **P0（写作 IDE 日用闭环）**
@@ -500,7 +515,12 @@
 - **P1（写作增强）**
   - [ ] Outline：从 Markdown 标题树生成大纲，并与编辑器联动（点击定位）
   - [ ] Lint（style/platform/facts）Problems 面板展示与一键修复提案
-  - [ ] Web 导入兜底：`web.fetch`（博查）遇到 `HTTP_403/JS 渲染/空正文` 时，提供“浏览器渲染抓取”fallback（优先 Desktop/Electron 侧；allowlist + 短超时 + 正文抽取）
+  - [ ] Web 导入兜底：`web.fetch`（博查）遇到 `HTTP_403/JS 渲染/空正文` 时，提供”浏览器渲染抓取”fallback（优先 Desktop/Electron 侧；allowlist + 短超时 + 正文抽取）
+  - [ ] **Gateway 子 Agent 上下文自动增强**：扩展 `buildSubAgentContextHint()` + `_executeSubAgent()`，根据任务类型自动注入上下文，减少对负责人 LLM 自觉传递 inputArtifacts 的依赖。具体：
+    - 延续/修改任务：自动从 `mainDoc` 读取当前稿件全文注入 inputArtifacts；若最近一轮有 `lint.style` 结果，一并附带
+    - 新任务：仅注入目标/约束，不携带无关对话历史
+    - 任务类型判定：分析 `agent.delegate` 的 task 文本（关键词匹配”改””修””润色””续写” → 延续；否则 → 新任务），或新增 `taskType: “new” | “continuation”` 参数
+    - 参考：Anthropic multi-agent、Manus 的 Context Protocol、CrewAI context injection 模式
 - **P2（治理与审计）**
   - [ ] Gateway Tool Registry（Schema+XML）完善 + 工具执行迁回 Gateway（鉴权/审计/计费）
   - [ ] Run 审计：Run 列表、工具调用记录、费用 usage 归因

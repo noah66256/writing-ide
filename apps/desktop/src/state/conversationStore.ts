@@ -32,12 +32,16 @@ export type Conversation = {
 
 type ConversationState = {
   conversations: Conversation[];
-  /** 当前“草稿对话”（未归档到历史，也无需点 +），用于重启后自动恢复右侧内容 */
+  /** 当前”草稿对话”（未归档到历史，也无需点 +），用于重启后自动恢复右侧内容 */
   draftSnapshot: RunSnapshot | null;
+  /** 当前活跃的对话 ID（发送首条消息时创建，侧边栏切换时设置） */
+  activeConvId: string | null;
   hydrateFromDisk: () => Promise<void>;
   addConversation: (c: Omit<Conversation, "id" | "createdAt" | "updatedAt"> & { id?: string }) => string;
   deleteConversation: (id: string) => void;
   renameConversation: (id: string, title: string) => void;
+  updateConversation: (id: string, patch: { snapshot?: RunSnapshot; title?: string }) => void;
+  setActiveConvId: (id: string | null) => void;
   setDraftSnapshot: (snap: RunSnapshot | null) => void;
   clearAll: () => void;
 };
@@ -122,6 +126,7 @@ export const useConversationStore = create<ConversationState>()(
     (set, get) => ({
       conversations: [],
       draftSnapshot: null,
+      activeConvId: null,
       hydrateFromDisk: async () => {
         if (diskHydrated) return;
         diskHydrated = true;
@@ -196,6 +201,26 @@ export const useConversationStore = create<ConversationState>()(
           schedulePersistToDisk({ conversations: next, draftSnapshot: get().draftSnapshot ?? null });
           return { conversations: next };
         });
+      },
+      updateConversation: (id, patch) => {
+        const v = String(id ?? "").trim();
+        if (!v) return;
+        set((s) => {
+          const next = (s.conversations ?? []).map((x) => {
+            if (x.id !== v) return x;
+            return {
+              ...x,
+              ...(patch.title != null ? { title: clampTitle(patch.title) } : {}),
+              ...(patch.snapshot != null ? { snapshot: patch.snapshot } : {}),
+              updatedAt: Date.now(),
+            };
+          });
+          schedulePersistToDisk({ conversations: next, draftSnapshot: get().draftSnapshot ?? null });
+          return { conversations: next };
+        });
+      },
+      setActiveConvId: (id) => {
+        set({ activeConvId: id });
       },
       setDraftSnapshot: (snap) => {
         const next = snap && typeof snap === "object" ? (snap as any) : null;

@@ -2,7 +2,7 @@ import type { AgentMode } from "./index.js";
 
 export type ParsedToolCall = {
   name: string;
-  args: Record<string, string>;
+  args: Record<string, unknown>;
 };
 
 export type KbSelectedLibrary = {
@@ -589,17 +589,17 @@ export type AutoRetryAnalysis = {
   isFIMLeak: boolean;
   isClarify: boolean;
   needTodo: boolean;
-  needWrite: boolean;
-  needKb: boolean;
-  needDraft: boolean;
-  needPostDraftKbSearch: boolean;
-  needCopy: boolean;
-  needLint: boolean;
-  needLength: boolean;
   needFinalText: boolean;
   reasons: string[];
 };
 
+/**
+ * AutoRetry — error recovery only.
+ *
+ * Checks for genuine errors (empty output, FIM leak) and optional todo enforcement.
+ * Workflow enforcement (kb → draft → lint → write) is removed — that guidance
+ * now lives in skill-level promptFragments (e.g. STYLE_IMITATE_SKILL).
+ */
 export function analyzeAutoRetryText(args: {
   assistantText: string;
   intent: RunIntent;
@@ -607,103 +607,30 @@ export function analyzeAutoRetryText(args: {
   state: RunState;
   lintMaxRework: number;
   targetChars?: number | null;
-  // Intent Router（Policy-0）：只有当 todoPolicy=required 时才强制 need_todo。
-  // - required：沿用现状（没有 todo 就会触发 need_todo 自动重试）
-  // - optional/skip：不再强制 todo（避免“讨论/解释类”被误伤进入闭环）
   todoPolicy?: "skip" | "optional" | "required";
 }) : AutoRetryAnalysis {
   const t = String(args.assistantText ?? "").trim();
   const isEmpty = t.length === 0;
   const isFIMLeak = looksLikeFIMLeak(args.assistantText);
-  // 关键修正：口播正文里会大量出现“问题来了/是不是？”等问句，不能误判为“向用户澄清”。
-  // 若看起来像正文稿，则一律不视为澄清（否则会导致 needLint/needWrite 被关闭，Run 提前结束）。
   const isClarify = looksLikeClarifyQuestions(t) && !args.intent.forceProceed && !looksLikeDraftText(t);
 
   const todoPolicy: "skip" | "optional" | "required" = args.todoPolicy ?? "required";
   const needTodo = todoPolicy === "required" && !args.state.hasTodoList && !args.intent.wantsOkOnly;
-  let needWrite = args.intent.wantsWrite && !args.state.hasWriteOps && !isClarify;
-  const needKb = args.gates.styleGateEnabled && !args.state.hasStyleKbSearch && !isClarify;
-  // V2.1：在 lint/write 之前，必须先产出一版“候选正文”（纯文本），并在初稿后做二次 KB 检索补金句/收束。
-  // - 不应依赖 copyGateEnabled：即便 STYLE_COPY_LINT_MODE=observe（不强制 lint.copy），也要走“templates -> draft -> post_draft_kb”保证质量。
-  // - 但应依赖 lintGateEnabled：当用户显式“跳过 linter”或系统处于 hint 模式时，不强制走 draft/post_draft_kb 闭环，避免误伤“快速写入/只要结果”场景。
-  // - 仅当 KB 已完成后才开始要求（避免与 templates 阶段冲突）
-  const needDraft =
-    args.gates.styleGateEnabled &&
-    args.gates.lintGateEnabled &&
-    args.state.hasStyleKbSearch &&
-    !args.state.hasDraftText &&
-    args.intent.isWritingTask &&
-    !args.intent.wantsOkOnly &&
-    !isClarify;
-  const needPostDraftKbSearch =
-    args.gates.styleGateEnabled &&
-    args.gates.lintGateEnabled &&
-    args.state.hasDraftText &&
-    !args.state.hasPostDraftStyleKbSearch &&
-    args.intent.isWritingTask &&
-    !args.intent.wantsOkOnly &&
-    !isClarify;
-  const needCopy = args.gates.copyGateEnabled && !args.state.copyLintPassed && !isClarify;
-  let needLint =
-    args.gates.lintGateEnabled && !args.state.styleLintPassed && args.state.styleLintFailCount <= args.lintMaxRework && !isClarify;
-  const target = Number.isFinite(Number(args.targetChars as any)) ? Math.max(0, Number(args.targetChars)) : 0;
-  const looksDraft =
-    looksLikeDraftText(t) || (t.length >= 400 && /[。！？]/.test(t) && t.split(/\n{2,}/).filter(Boolean).length >= 3);
-  let needLength =
-    !isClarify &&
-    target >= 200 &&
-    looksDraft &&
-    args.intent.isWritingTask &&
-    // 与提示文案保持一致：目标字数允许上下浮动约 ±20%
-    (t.length < target * 0.8 || t.length > target * 1.2);
-  const needFinalText = isEmpty && !needTodo && !needWrite && !needKb && !needCopy && !needLint;
-
-  // 顺序约束（关键）：避免在“尚未完成上游步骤”时，同时提示 lint/长度/写入，导致模型误调用被阶段门禁禁止的工具。
-  // 目标顺序：kb(templates) -> draft -> post_draft_kb -> (copy) -> lint.style -> length -> write
-  if (needKb || needDraft || needPostDraftKbSearch || needCopy) {
-    // 上游步骤未完成：先别要求 lint/长度/写入，避免“在 style_need_punchline 里去 lint.style / doc.write”之类误伤
-    needLint = false;
-    needLength = false;
-    needWrite = false;
-  }
-  if (needLint) {
-    // lint 还没过：先别要求长度/写入（长度可在 lint 通过后再微调；写入必须在 lint 后）
-    needLength = false;
-    needWrite = false;
-  }
-  if (needLength) {
-    // 长度不达标：先别要求写入
-    needWrite = false;
-  }
+  const needFinalText = isEmpty && !needTodo;
 
   const reasons: string[] = [];
   if (isFIMLeak) reasons.push("模型输出异常(FIM token)");
   else if (isEmpty) reasons.push("输出为空");
   if (needFinalText) reasons.push("缺少最终回复");
   if (needTodo) reasons.push("Todo 未设置");
-  if (needKb) reasons.push("风格样例未检索");
-  if (needDraft) reasons.push("未产出候选正文（draft）");
-  if (needPostDraftKbSearch) reasons.push("未进行初稿后二次检索（补金句/收束）");
-  if (needCopy) reasons.push("未进行防贴原文检查(lint.copy)");
-  if (needLint) reasons.push("未进行风格对齐(lint.style)");
-  if (needLength) reasons.push("字数与目标偏离较大");
-  if (needWrite) reasons.push("写入未执行");
 
-  const shouldRetry =
-    isFIMLeak || isEmpty || needTodo || needWrite || needKb || needDraft || needPostDraftKbSearch || needCopy || needLint || needLength;
+  const shouldRetry = isFIMLeak || isEmpty || needTodo;
   return {
     shouldRetry,
     isEmpty,
     isFIMLeak,
     isClarify,
     needTodo,
-    needWrite,
-    needKb,
-    needDraft,
-    needPostDraftKbSearch,
-    needCopy,
-    needLint,
-    needLength,
     needFinalText,
     reasons,
   };

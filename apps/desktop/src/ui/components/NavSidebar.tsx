@@ -20,6 +20,7 @@ import { useAuthStore } from "@/state/authStore";
 import { useThemeStore, THEME_OPTIONS, type ThemeId } from "@/state/themeStore";
 import { useModelStore } from "@/state/modelStore";
 import { TeamModal } from "@/components/TeamModal";
+import { SettingsModal } from "./SettingsModal";
 
 /* ─── Helpers ─── */
 
@@ -63,7 +64,7 @@ export function NavSidebar() {
   const openLoginModal = useAuthStore((s) => s.openLoginModal);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [teamModalOpen, setTeamModalOpen] = useState(false);
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const settingsRef = useRef<HTMLDivElement>(null);
 
   const hasCurrentContent = useMemo(() => {
@@ -73,27 +74,34 @@ export function NavSidebar() {
     );
   }, [steps]);
 
-  const [activeConvId, setActiveConvId] = useState<string | null>(null);
+  const activeConvId = useConversationStore((s) => s.activeConvId);
+  const storeSetActiveConvId = useConversationStore((s) => s.setActiveConvId);
 
   const handleNewChat = useCallback(() => {
-    if (hasCurrentContent) {
+    if (hasCurrentContent && !activeConvId) {
       addConversation({ title: conversationTitle(), snapshot: buildSnapshot() });
+    } else if (hasCurrentContent && activeConvId) {
+      useConversationStore.getState().updateConversation(activeConvId, { snapshot: buildSnapshot() });
     }
     resetRun();
-    setActiveConvId(null);
-  }, [hasCurrentContent, addConversation, resetRun]);
+    storeSetActiveConvId(null);
+  }, [hasCurrentContent, activeConvId, addConversation, resetRun, storeSetActiveConvId]);
 
   const handleLoadConversation = useCallback(
     (id: string) => {
       if (hasCurrentContent && activeConvId !== id) {
-        addConversation({ title: conversationTitle(), snapshot: buildSnapshot() });
+        if (activeConvId) {
+          useConversationStore.getState().updateConversation(activeConvId, { snapshot: buildSnapshot() });
+        } else {
+          addConversation({ title: conversationTitle(), snapshot: buildSnapshot() });
+        }
       }
       const conv = conversations.find((c) => c.id === id);
       if (!conv) return;
       loadSnapshot(conv.snapshot);
-      setActiveConvId(id);
+      storeSetActiveConvId(id);
     },
-    [hasCurrentContent, activeConvId, conversations, addConversation, loadSnapshot],
+    [hasCurrentContent, activeConvId, conversations, addConversation, loadSnapshot, storeSetActiveConvId],
   );
 
   const handleDeleteConversation = useCallback(
@@ -102,10 +110,10 @@ export function NavSidebar() {
       deleteConversation(id);
       if (activeConvId === id) {
         resetRun();
-        setActiveConvId(null);
+        storeSetActiveConvId(null);
       }
     },
-    [activeConvId, deleteConversation, resetRun],
+    [activeConvId, deleteConversation, resetRun, storeSetActiveConvId],
   );
 
   // 点击外部关闭设置菜单
@@ -178,7 +186,7 @@ export function NavSidebar() {
           <SettingsPopover
             onLogout={() => { logout(); setSettingsOpen(false); }}
             onLogin={() => { openLoginModal(); setSettingsOpen(false); }}
-            onOpenTeam={() => { setTeamModalOpen(true); setSettingsOpen(false); }}
+            onOpenTeam={() => { setSettingsModalOpen(true); setSettingsOpen(false); }}
             isLoggedIn={!!user}
           />
         )}
@@ -204,7 +212,7 @@ export function NavSidebar() {
         </button>
       </div>
 
-      {teamModalOpen && <TeamModal onClose={() => setTeamModalOpen(false)} />}
+      {settingsModalOpen && <SettingsModal onClose={() => setSettingsModalOpen(false)} />}
     </nav>
   );
 }
@@ -241,10 +249,7 @@ function SettingsPopover({
       )}
     >
       {/* 设置 */}
-      <MenuItem icon={<Settings size={15} />} label="设置" />
-
-      {/* 团队管理 */}
-      <MenuItem icon={<Users size={15} />} label="团队管理" onClick={onOpenTeam} />
+      <MenuItem icon={<Settings size={15} />} label="设置" onClick={onOpenTeam} />
 
       {/* 主题 — hover 展开 */}
       <SubMenu
@@ -308,7 +313,7 @@ function SubMenu({
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const handleEnter = () => {
     clearTimeout(timerRef.current);
