@@ -90,7 +90,7 @@ npm run dev:admin
 
 Desktop dev 使用 Vite proxy 将 `/api/*` 转发到 Gateway，避免跨域问题。
 
-- Dev Gateway 地址：`http://120.26.6.147:8000`（Vite proxy 默认指向此地址）
+- Dev Gateway 地址：`http://120.26.6.1XX:8000`（Vite proxy 默认指向此地址）
 - 本地调 Gateway 时用 `VITE_GATEWAY_URL=http://localhost:8000` 覆盖
 
 ## License
