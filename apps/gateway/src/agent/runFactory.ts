@@ -1569,10 +1569,10 @@ export async function prepareAgentRun(args: {
   const docRulesChars = typeof toolSidecar?.docRules?.content === "string" ? String(toolSidecar.docRules.content).length : 0;
 
   // MCP 工具：从 sidecar 提取，标记为 Desktop 执行
+  // MCP 工具是用户主动配置的外部能力，始终加入允许列表（不受 toolPolicy 限制）
   const mcpToolsFromSidecar: Array<{ name: string; description: string; inputSchema?: any; serverId: string; serverName: string; originalName: string }> =
     Array.isArray(toolSidecar?.mcpTools) ? (toolSidecar.mcpTools as any[]) : [];
-  // 如果 toolPolicy 允许工具，则将 MCP 工具名加入允许列表
-  if (mcpToolsFromSidecar.length && intentRoute.toolPolicy !== "deny") {
+  if (mcpToolsFromSidecar.length) {
     for (const t of mcpToolsFromSidecar) {
       baseAllowedToolNames.add(t.name);
     }
