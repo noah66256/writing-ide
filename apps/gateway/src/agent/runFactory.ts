@@ -982,6 +982,7 @@ export type PreparedRun = {
   personaFromPack: AgentPersonaFromPack | null;
   intent: any;
   intentRoute: IntentRouteDecision;
+  effectiveToolPolicy: ToolPolicy;
   intentRouterTrace: any;
   activeSkills: any[];
   activeSkillIds: string[];
@@ -1135,7 +1136,10 @@ export async function prepareAgentRun(args: {
   const rawActiveSkillIds = (rawActiveSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
 
   // @ 提及的 Skill 绕过 toolPolicy 压制，但不提升 toolPolicy 权限（不越权）
-  const suppressSkillsByToolPolicy = String((intentRoute as any)?.toolPolicy ?? "").trim() !== "allow_tools";
+  // 注意：模式下限（agent→allow_tools, chat→allow_readonly）也要参与判断
+  const modeFloorIsAllowTools = mode === "agent";
+  const suppressSkillsByToolPolicy =
+    !modeFloorIsAllowTools && String((intentRoute as any)?.toolPolicy ?? "").trim() !== "allow_tools";
   const corpusIngestActive = rawActiveSkillIds.includes("corpus_ingest");
   const suppressStyle = (suppressSkillsByToolPolicy && !mentionedSkillIdSet.has("style_imitate")) || corpusIngestActive;
   const suppressedSkillIds: string[] = [];
@@ -1582,10 +1586,22 @@ export async function prepareAgentRun(args: {
     disabledToolNamesForMode.size > 0
       ? new Set(Array.from(allToolNamesForMode).filter((n) => !disabledToolNamesForMode.has(n)))
       : allToolNamesForMode;
+
+  // 模式决定工具访问的硬下限：
+  //   agent（创作）→ allow_tools：IntentPolicy 不能 deny
+  //   chat（探索）→ allow_readonly：始终可用只读工具
+  // IntentPolicy 可在此基础上放宽，但不能收紧到低于模式下限
+  const toolPolicyRank: Record<ToolPolicy, number> = { deny: 0, allow_readonly: 1, allow_tools: 2 };
+  const modeFloorPolicy: ToolPolicy = mode === "agent" ? "allow_tools" : "allow_readonly";
+  const effectiveToolPolicy: ToolPolicy =
+    toolPolicyRank[intentRoute.toolPolicy] >= toolPolicyRank[modeFloorPolicy]
+      ? intentRoute.toolPolicy
+      : modeFloorPolicy;
+
   const baseAllowedToolNames =
-    intentRoute.toolPolicy === "deny"
+    effectiveToolPolicy === "deny"
       ? new Set<string>()
-      : intentRoute.toolPolicy === "allow_readonly"
+      : effectiveToolPolicy === "allow_readonly"
         ? new Set(Array.from(allToolNamesForModeEffective).filter((n) => !isWriteLikeTool(n)))
         : allToolNamesForModeEffective;
 
@@ -1860,6 +1876,7 @@ export async function prepareAgentRun(args: {
       personaFromPack,
       intent,
       intentRoute,
+      effectiveToolPolicy,
       intentRouterTrace,
       activeSkills,
       activeSkillIds,
@@ -1916,6 +1933,7 @@ export async function executeAgentRun(args: {
     toolSidecar,
     intent,
     intentRoute,
+    effectiveToolPolicy,
     messages,
     activeSkills,
     activeSkillIds,
@@ -2177,11 +2195,11 @@ export async function executeAgentRun(args: {
     turn: 0,
     policy: "IntentPolicy",
     decision: "route",
-    reasonCodes: [`intent:${intentRoute.intentType}`, `todo:${intentRoute.todoPolicy}`, `tools:${intentRoute.toolPolicy}`],
-    detail: { ...intentRoute, trace: intentRouterTrace },
+    reasonCodes: [`intent:${intentRoute.intentType}`, `todo:${intentRoute.todoPolicy}`, `tools:${intentRoute.toolPolicy}`, `tools_effective:${effectiveToolPolicy}`],
+    detail: { ...intentRoute, effectiveToolPolicy, modeFloor: mode === "agent" ? "allow_tools" : "allow_readonly", trace: intentRouterTrace },
   });
 
-  if (intentRoute.toolPolicy === "deny") {
+  if (effectiveToolPolicy === "deny") {
     try {
       const insertAt = Math.max(0, messages.length - 1);
       messages.splice(insertAt, 0, {

@@ -8,8 +8,9 @@ import {
   type DragEvent,
   type RefObject,
 } from "react";
-import { Mic, SendHorizontal, Square, Paperclip, Image, AtSign, X, FileIcon } from "lucide-react";
+import { Mic, SendHorizontal, Square, Paperclip, Image, AtSign, X, FileIcon, FolderOpen } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useRunStore, type Mode } from "@/state/runStore";
 import { MentionPopover, type MentionItem } from "./MentionPopover";
 
 // ─── 内部 AST ────────────────────────────────────────────────────────────────
@@ -32,6 +33,11 @@ type InputBarProps = {
 // ─── 工具函数 ────────────────────────────────────────────────────────────────
 
 const MENTION_QUERY_RE = /@([^\s@]*)$/;
+
+const MODE_OPTIONS: { value: Mode; label: string }[] = [
+  { value: "chat", label: "探索" },
+  { value: "agent", label: "创作" },
+];
 
 function isMentionChip(node: Node | null): node is HTMLSpanElement {
   return !!node && node instanceof HTMLSpanElement && node.dataset.mentionChip === "true";
@@ -344,6 +350,8 @@ export function InputBar({
   const containerRef = useRef<HTMLDivElement>(null);
   const { segments, syncFromDOM, replaceAllText, clearEditor, insertText, insertMention } =
     useSegments(editorRef);
+  const mode = useRunStore((s) => s.mode);
+  const setMode = useRunStore((s) => s.setMode);
 
   const [droppedFiles, setDroppedFiles] = useState<File[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -665,7 +673,32 @@ export function InputBar({
 
         {/* 底部工具栏 */}
         <div className="flex items-center justify-between px-3 pb-2.5 pt-1">
-          <div className="flex items-center gap-0.5">
+          <div className="flex items-center gap-1">
+            {/* 打开项目（占位） */}
+            <ToolButton icon={FolderOpen} title="打开项目" onClick={() => void 0} />
+
+            {/* 模式切换 */}
+            <div className="inline-flex items-center rounded-lg border border-border bg-surface-alt p-0.5">
+              {MODE_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => setMode(opt.value)}
+                  className={cn(
+                    "px-2.5 py-1 rounded-md text-[12px] leading-none font-medium transition-colors duration-fast",
+                    mode === opt.value
+                      ? "bg-accent text-white shadow-sm"
+                      : "text-text-muted hover:text-text hover:bg-surface",
+                  )}
+                  title={`切换到${opt.label}模式`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
+            <span className="mx-0.5 h-4 w-px bg-border" aria-hidden="true" />
+
             <ToolButton icon={Paperclip} title="附件" onClick={handleFileClick} />
             <ToolButton icon={Image} title="图片" onClick={handleFileClick} />
             <ToolButton
