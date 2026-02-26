@@ -78,6 +78,8 @@ export type RunContext = {
   agentId?: string;
   /** 允许覆盖默认最大回合数（子 Agent 可用） */
   maxTurns?: number;
+  /** 首轮 tool_choice 覆盖（仅首轮生效；用于子 Agent 强制调工具） */
+  toolChoiceFirstTurn?: { type: "auto" } | { type: "any" } | { type: "tool"; name: string };
   /** 目标字数（从 userPrompt/mainDoc.goal 中提取），用于 AutoRetry 字数校验 */
   targetChars?: number | null;
   /** 运行期间 mainDoc 的可变状态，供 run.mainDoc.get / run.mainDoc.update 读写 */
@@ -401,6 +403,7 @@ export class WritingAgentRunner {
         system: turnSystemPrompt,
         messages: this.messages,
         tools,
+        tool_choice: this.turn === 1 && tools.length > 0 ? this.ctx.toolChoiceFirstTurn : undefined,
         signal: this.ctx.abortSignal,
       });
 
@@ -967,6 +970,7 @@ export class WritingAgentRunner {
       abortSignal: subAbort.signal,
       agentId: subAgent.id,
       maxTurns: budget.maxTurns,
+      toolChoiceFirstTurn: subAllowedToolNames.size > 0 ? { type: "any" as const } : undefined,
       mainDoc: this.ctx.mainDoc,
       onTurnUsage: (promptTokens, completionTokens) => {
         // Forward to parent's usage callback
