@@ -248,7 +248,7 @@ export const CORPUS_INGEST_SKILL: SkillManifest = {
 // ── Skill 注册表 ──────────────────────────────────────────────
 
 const BUILTIN_MANIFESTS: SkillManifest[] = [
-  CORPUS_INGEST_SKILL, STYLE_IMITATE_SKILL,
+  STYLE_IMITATE_SKILL,
 ];
 
 export type RegisterSkillOptions = { replace?: boolean };
