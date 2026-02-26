@@ -12,11 +12,14 @@ export type McpServerState = {
   transport: "stdio" | "streamable-http" | "sse";
   status: "disconnected" | "connecting" | "connected" | "error";
   enabled: boolean;
+  bundled?: boolean;
+  builtin?: boolean;
   tools: McpToolInfo[];
   error?: string | null;
   config?: {
     command?: string;
     args?: string[];
+    modulePath?: string;
     endpoint?: string;
     headers?: Record<string, string>;
     env?: Record<string, string>;
@@ -70,6 +73,9 @@ export const useMcpStore = create<McpState>((set, get) => ({
   async removeServer(id) {
     const api = (window as any).desktop?.mcp;
     if (!api) return;
+    // builtin server 不可删除（后端也会拒绝）
+    const target = get().servers.find((s) => s.id === id);
+    if (target?.builtin) return;
     await api.removeServer(id);
     await get().refresh();
   },

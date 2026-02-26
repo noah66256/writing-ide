@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import {
   X, Users, Plug, Sparkles, ChevronDown, ChevronRight, Plus,
   Bot, BookOpen, FolderOpen, RefreshCw, Pencil, Trash2, Terminal, Globe, Radio,
-  Eye, EyeOff, Monitor, ExternalLink,
+  Eye, EyeOff, Monitor, ExternalLink, Package,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TeamModal } from "@/components/TeamModal";
@@ -614,13 +614,19 @@ function McpServerCard({
       {/* Header row */}
       <div className="flex items-center gap-3 px-3 py-2.5 cursor-pointer hover:bg-surface-alt/50" onClick={onExpand}>
         <div className={cn("w-2 h-2 rounded-full shrink-0", statusColor)} />
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
+        <div className="flex-1 min-w-0 overflow-hidden">
+          <div className="flex items-center gap-2 min-w-0">
             <span className="text-[13px] font-medium text-text truncate">{server.name}</span>
             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-surface-alt text-text-muted shrink-0">
               <TIcon size={10} />
               {TRANSPORT_LABELS[server.transport]}
             </span>
+            {server.builtin && (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-accent-soft text-accent shrink-0">
+                <Package size={10} />
+                内置
+              </span>
+            )}
           </div>
           {server.status === "connected" && server.tools.length > 0 && (
             <div className="text-[11px] text-text-muted mt-0.5">
@@ -628,7 +634,7 @@ function McpServerCard({
             </div>
           )}
           {server.status === "error" && server.error && (
-            <div className="text-[11px] text-red-500 mt-0.5 truncate">
+            <div className="text-[11px] text-red-500 mt-0.5 truncate" title={server.error}>
               {server.error}
             </div>
           )}
@@ -690,12 +696,14 @@ function McpServerCard({
             >
               <Pencil size={11} /> 编辑
             </button>
-            <button
-              onClick={() => void handleDelete()}
-              className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-text-muted hover:text-red-500 hover:bg-red-500/10 transition-colors"
-            >
-              <Trash2 size={11} /> 删除
-            </button>
+            {!server.builtin && (
+              <button
+                onClick={() => void handleDelete()}
+                className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-text-muted hover:text-red-500 hover:bg-red-500/10 transition-colors"
+              >
+                <Trash2 size={11} /> 删除
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -711,6 +719,7 @@ function McpAddDialog({ editId, onClose }: { editId: string | null; onClose: () 
   const updateServer = useMcpStore((s) => s.updateServer);
 
   const existing = editId ? servers.find((s) => s.id === editId) : null;
+  const isBundled = existing?.bundled === true;
 
   const [transport, setTransport] = useState<TransportType>(existing?.transport ?? "stdio");
   const [name, setName] = useState(existing?.name ?? "");
@@ -729,6 +738,7 @@ function McpAddDialog({ editId, onClose }: { editId: string | null; onClose: () 
   const [saving, setSaving] = useState(false);
 
   const canSave = name.trim() && (
+    isBundled ? true :
     transport === "stdio" ? command.trim() :
     transport === "streamable-http" || transport === "sse" ? endpoint.trim() : false
   );
@@ -742,7 +752,9 @@ function McpAddDialog({ editId, onClose }: { editId: string | null; onClose: () 
       enabled: true,
     };
     if (transport === "stdio") {
-      config.command = command.trim();
+      if (!isBundled) {
+        config.command = command.trim();
+      }
       config.args = args.trim() ? args.trim().split(/\s+/) : [];
     } else {
       config.endpoint = endpoint.trim();
@@ -782,12 +794,14 @@ function McpAddDialog({ editId, onClose }: { editId: string | null; onClose: () 
             return (
               <button
                 key={t}
-                onClick={() => setTransport(t)}
+                onClick={() => !isBundled && setTransport(t)}
+                disabled={isBundled}
                 className={cn(
                   "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] border transition-colors",
                   transport === t
                     ? "border-accent bg-accent-soft text-accent font-medium"
                     : "border-border text-text-muted hover:bg-surface-alt",
+                  isBundled && "opacity-60 cursor-not-allowed",
                 )}
               >
                 <TIcon size={13} />
@@ -813,16 +827,26 @@ function McpAddDialog({ editId, onClose }: { editId: string | null; onClose: () 
       {/* Transport-specific fields */}
       {transport === "stdio" && (
         <>
-          <div className="flex flex-col gap-1">
-            <label className="text-[12px] font-medium text-text">命令</label>
-            <input
-              type="text"
-              value={command}
-              onChange={(e) => setCommand(e.target.value)}
-              placeholder="例如：npx -y @anthropic/mcp-server-filesystem"
-              className="w-full px-3 py-1.5 rounded-lg border border-border bg-surface text-[12px] text-text font-mono placeholder:text-text-faint focus:outline-none focus:border-accent transition-colors"
-            />
-          </div>
+          {!isBundled && (
+            <div className="flex flex-col gap-1">
+              <label className="text-[12px] font-medium text-text">命令</label>
+              <input
+                type="text"
+                value={command}
+                onChange={(e) => setCommand(e.target.value)}
+                placeholder="例如：npx -y @anthropic/mcp-server-filesystem"
+                className="w-full px-3 py-1.5 rounded-lg border border-border bg-surface text-[12px] text-text font-mono placeholder:text-text-faint focus:outline-none focus:border-accent transition-colors"
+              />
+            </div>
+          )}
+          {isBundled && (
+            <div className="flex flex-col gap-1">
+              <label className="text-[12px] font-medium text-text-muted">模块（内置，不可修改）</label>
+              <div className="w-full px-3 py-1.5 rounded-lg border border-border bg-surface-alt/50 text-[12px] text-text-muted font-mono">
+                {existing?.config?.modulePath ?? "bundled"}
+              </div>
+            </div>
+          )}
           <div className="flex flex-col gap-1">
             <label className="text-[12px] font-medium text-text">参数（空格分隔）</label>
             <input

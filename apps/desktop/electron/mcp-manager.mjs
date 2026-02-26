@@ -3,6 +3,7 @@
  *
  * 管理 MCP Server 连接、工具发现和调用。
  * 支持 stdio / streamable-http / sse 三种传输。
+ * 支持 bundled server（随应用打包，通过 ELECTRON_RUN_AS_NODE 启动）。
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -12,6 +13,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
+import { createRequire } from "node:module";
 
 /** @typedef {"disconnected"|"connecting"|"connected"|"error"} McpStatus */
 
@@ -21,18 +23,41 @@ import crypto from "node:crypto";
  * @property {string} name
  * @property {"stdio"|"streamable-http"|"sse"} transport
  * @property {boolean} enabled
- * @property {string} [command]     - stdio 专用
- * @property {string[]} [args]      - stdio 专用
+ * @property {string} [command]      - stdio 专用（非 bundled 时必填）
+ * @property {string[]} [args]       - stdio 专用
+ * @property {boolean} [bundled]     - stdio 专用：是否为内置 server（通过 ELECTRON_RUN_AS_NODE 启动）
+ * @property {string} [modulePath]   - stdio 专用：bundled=true 时的入口脚本（相对 app root）
+ * @property {boolean} [builtin]     - 是否为不可删除的预置 server
  * @property {Record<string,string>} [env] - stdio 专用
- * @property {string} [endpoint]    - http/sse 专用
+ * @property {string} [endpoint]     - http/sse 专用
  * @property {Record<string,string>} [headers] - http/sse 专用
  */
 
+/** 内置 MCP Server 清单 */
+const BUILTIN_SERVERS = [
+  {
+    id: "playwright",
+    name: "Playwright 浏览器自动化",
+    transport: "stdio",
+    bundled: true,
+    builtin: true,
+    modulePath: "node_modules/@playwright/mcp/cli.js",
+    args: ["--browser", "chrome"],
+    enabled: false,
+  },
+];
+
 export class McpManager {
-  /** @param {string} userDataPath - app.getPath('userData') */
-  constructor(userDataPath) {
+  /**
+   * @param {string} userDataPath - app.getPath('userData')
+   * @param {string} [appBasePath] - app.getAppPath()
+   * @param {boolean} [isPackaged] - app.isPackaged
+   */
+  constructor(userDataPath, appBasePath = process.cwd(), isPackaged = false) {
     /** @type {string} */
     this._configPath = path.join(userDataPath, "mcp-servers.json");
+    this._appBasePath = String(appBasePath || process.cwd());
+    this._isPackaged = Boolean(isPackaged);
     /** @type {Map<string, {config: McpServerConfig, client: Client|null, transport: any, status: McpStatus, tools: any[], error: string|null}>} */
     this._servers = new Map();
     /** @type {Set<(payload: any) => void>} */
@@ -60,8 +85,10 @@ export class McpManager {
   // ── Config 持久化 ──────────────────────────
 
   async loadConfig() {
+    let fileExists = false;
     try {
       const raw = await fs.readFile(this._configPath, "utf-8");
+      fileExists = true;
       const data = JSON.parse(raw);
       const list = Array.isArray(data) ? data : [];
       for (const cfg of list) {
@@ -75,9 +102,15 @@ export class McpManager {
           error: null,
         });
       }
-    } catch {
-      // 文件不存在或解析失败，使用空配置
+    } catch (e) {
+      if (fileExists) {
+        // JSON 解析失败，记录错误但不覆盖文件
+        console.error("[McpManager] 配置文件解析失败，跳过写回:", e?.message);
+      }
+      // 文件不存在则正常继续（_ensureBuiltinServers 会创建）
     }
+    // 加载后注入内置 server（已存在的不覆盖）
+    await this._ensureBuiltinServers();
   }
 
   async _saveConfig() {
@@ -86,6 +119,45 @@ export class McpManager {
     await fs.mkdir(path.dirname(this._configPath), { recursive: true });
     await fs.writeFile(tmp, JSON.stringify(list, null, 2), "utf-8");
     await fs.rename(tmp, this._configPath);
+  }
+
+  // ── 内置 Server 注册 ──────────────────────────
+
+  /** 确保所有内置 server 存在于配置中，并回填/锁定核心字段 */
+  async _ensureBuiltinServers() {
+    let changed = false;
+    for (const builtin of BUILTIN_SERVERS) {
+      const existing = this._servers.get(builtin.id);
+      if (!existing) {
+        // 不存在则注入
+        this._servers.set(builtin.id, {
+          config: { ...builtin },
+          client: null,
+          transport: null,
+          status: "disconnected",
+          tools: [],
+          error: null,
+        });
+        changed = true;
+      } else {
+        // 已存在：回填/锁定核心字段（防止手改配置文件破坏）
+        const cfg = existing.config;
+        let patched = false;
+        for (const key of ["bundled", "builtin", "modulePath", "transport"]) {
+          if (cfg[key] !== builtin[key]) {
+            cfg[key] = builtin[key];
+            patched = true;
+          }
+        }
+        if (patched) changed = true;
+      }
+    }
+    if (changed) await this._saveConfig();
+  }
+
+  /** 按 BUILTIN_SERVERS 常量判断，不依赖配置文件中的 flag */
+  _isBuiltinId(id) {
+    return BUILTIN_SERVERS.some((b) => b.id === id);
   }
 
   // ── 连接管理 ──────────────────────────
@@ -182,12 +254,15 @@ export class McpManager {
     const type = config.transport;
 
     if (type === "stdio") {
-      const command = String(config.command ?? "").trim();
-      if (!command) throw new Error("STDIO_COMMAND_REQUIRED");
+      const bundled = config?.bundled === true;
       const args = Array.isArray(config.args) ? config.args.map(String) : [];
-      // 构建环境变量：process.env → 全局注入（浏览器等） → 用户显式配置（优先级最高）
+
+      // 构建环境变量：process.env → 全局注入 → 用户显式配置（优先级最高）
       const baseEnv = { ...process.env };
-      // 注入全局浏览器路径等环境变量
+      // 注入全局环境变量（浏览器路径等）
+      for (const [k, v] of Object.entries(this._globalEnv ?? {})) {
+        if (v) baseEnv[k] ??= v;
+      }
       const browserPath = this._globalEnv?.BROWSER_PATH || "";
       if (browserPath) {
         baseEnv.KINDLY_BROWSER_EXECUTABLE_PATH ??= browserPath;
@@ -196,6 +271,23 @@ export class McpManager {
       }
       const userEnv = config.env && typeof config.env === "object" ? config.env : {};
       const env = { ...baseEnv, ...userEnv };
+
+      // ── bundled server：通过 ELECTRON_RUN_AS_NODE 用 Electron 自身的 Node 运行 ──
+      if (bundled) {
+        const modulePath = String(config.modulePath ?? "").trim();
+        if (!modulePath) throw new Error("STDIO_BUNDLED_MODULE_PATH_REQUIRED");
+        const resolvedEntry = await this._resolveBundledModulePath(modulePath);
+        env.ELECTRON_RUN_AS_NODE = "1";
+        return new StdioClientTransport({
+          command: process.execPath,
+          args: [resolvedEntry, ...args],
+          env,
+        });
+      }
+
+      // ── 普通 stdio server：用户指定 command ──
+      const command = String(config.command ?? "").trim();
+      if (!command) throw new Error("STDIO_COMMAND_REQUIRED");
       return new StdioClientTransport({ command, args, env });
     }
 
@@ -215,6 +307,93 @@ export class McpManager {
     }
 
     throw new Error(`UNKNOWN_TRANSPORT:${type}`);
+  }
+
+  // ── Bundled 路径解析 ──────────────────────────
+
+  /**
+   * 将 app.asar 路径替换为 app.asar.unpacked（asarUnpack 提取后的真实路径）
+   * @param {string} targetPath
+   * @returns {string}
+   */
+  _replaceAsarWithUnpacked(targetPath) {
+    const normalized = path.normalize(targetPath);
+    const asarSegment = `${path.sep}app.asar${path.sep}`;
+    if (normalized.includes(asarSegment)) {
+      return normalized.replace(asarSegment, `${path.sep}app.asar.unpacked${path.sep}`);
+    }
+    if (normalized.endsWith(`${path.sep}app.asar`)) {
+      return `${normalized}.unpacked`;
+    }
+    return normalized;
+  }
+
+  /**
+   * 解析 bundled server 的入口脚本真实磁盘路径。
+   * 打包模式下优先查找 app.asar.unpacked/，开发模式下直接用 appBasePath。
+   * @param {string} modulePath - 相对 app root 的路径，如 "node_modules/@playwright/mcp/cli.js"
+   * @returns {Promise<string>}
+   */
+  async _resolveBundledModulePath(modulePath) {
+    const raw = String(modulePath ?? "").trim();
+    if (!raw) throw new Error("STDIO_BUNDLED_MODULE_PATH_REQUIRED");
+
+    const fromAppBase = path.isAbsolute(raw) ? raw : path.resolve(this._appBasePath, raw);
+    const candidates = [];
+
+    if (this._isPackaged) {
+      // 打包后：app.asar 内的路径不能被 spawn，只尝试 app.asar.unpacked
+      candidates.push(this._replaceAsarWithUnpacked(fromAppBase));
+      // 兼顾 process.resourcesPath（Windows/Mac 均可用）
+      if (typeof process.resourcesPath === "string") {
+        candidates.push(path.resolve(process.resourcesPath, "app.asar.unpacked", raw));
+      }
+      // 打包模式下不回退到 app.asar（spawn 必定失败），直接用 unpacked 候选
+    } else {
+      // 开发环境：直接用 appBasePath
+      candidates.push(fromAppBase);
+      // monorepo 场景：依赖可能被提升到上层 node_modules，通过模块解析查找
+      if (raw.startsWith("node_modules/")) {
+        try {
+          const require = createRequire(path.join(this._appBasePath, "package.json"));
+          // "node_modules/@playwright/mcp/cli.js" → 包名 "@playwright/mcp"，子路径 "cli.js"
+          const withoutNM = raw.replace(/^node_modules\//, ""); // "@playwright/mcp/cli.js"
+          const parts = withoutNM.startsWith("@")
+            ? withoutNM.split("/").slice(0, 2) // scoped: ["@playwright", "mcp"]
+            : withoutNM.split("/").slice(0, 1); // unscoped: ["some-pkg"]
+          const pkgName = parts.join("/");
+          const subPath = withoutNM.slice(pkgName.length + 1); // "cli.js"
+          // resolve 包主入口，再定位同目录下的子路径
+          const pkgEntry = require.resolve(pkgName);
+          const pkgDir = path.dirname(pkgEntry);
+          if (subPath) {
+            candidates.push(path.resolve(pkgDir, subPath));
+          } else {
+            candidates.push(pkgEntry);
+          }
+        } catch {
+          // require.resolve 失败，继续用其他候选
+        }
+      }
+    }
+
+    // 去重后依次验证
+    const deduped = [...new Set(candidates.map((p) => path.normalize(p)))];
+    for (const candidate of deduped) {
+      if (await this._pathExists(candidate)) return candidate;
+    }
+
+    throw new Error(`STDIO_BUNDLED_MODULE_NOT_FOUND:${raw} (tried: ${deduped.join(", ")})`);
+  }
+
+  /** @param {string} filePath */
+  async _pathExists(filePath) {
+    try {
+      await fs.access(filePath);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   // ── 工具操作 ──────────────────────────
@@ -251,6 +430,10 @@ export class McpManager {
 
   async addServer(config) {
     const id = config?.id || crypto.randomUUID();
+    // 禁止通过 addServer 覆盖内置 server
+    if (this._isBuiltinId(id)) {
+      return { ok: false, error: "BUILTIN_ID_RESERVED" };
+    }
     const name = String(config?.name ?? "").trim() || `Server ${id.slice(0, 6)}`;
     const transport = config?.transport ?? "stdio";
     const enabled = config?.enabled !== false;
@@ -276,6 +459,14 @@ export class McpManager {
     if (!entry) return { ok: false, error: "NOT_FOUND" };
     // 断开旧连接
     await this.disconnect(id);
+    // builtin server 的核心字段不可修改（按常量判断，不依赖配置 flag）
+    if (this._isBuiltinId(id)) {
+      delete config.id;
+      delete config.bundled;
+      delete config.builtin;
+      delete config.modulePath;
+      delete config.transport;
+    }
     entry.config = { ...entry.config, ...config, id };
     await this._saveConfig();
     if (entry.config.enabled) {
@@ -286,6 +477,9 @@ export class McpManager {
   }
 
   async removeServer(id) {
+    if (this._isBuiltinId(id)) {
+      return { ok: false, error: "BUILTIN_SERVER_CANNOT_BE_REMOVED" };
+    }
     await this.disconnect(id);
     this._servers.delete(id);
     await this._saveConfig();
@@ -301,12 +495,15 @@ export class McpManager {
       name: entry.config.name,
       transport: entry.config.transport,
       enabled: entry.config.enabled,
+      bundled: entry.config.bundled === true,
+      builtin: entry.config.builtin === true,
       status: entry.status,
       tools: entry.tools,
       error: entry.error,
       config: {
         command: entry.config.command,
         args: entry.config.args,
+        modulePath: entry.config.modulePath,
         endpoint: entry.config.endpoint,
         headers: entry.config.headers,
         env: entry.config.env ?? {},
