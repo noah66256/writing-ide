@@ -75,6 +75,7 @@ export function NavSidebar() {
 
     // 清空右侧 + 立即创建新条目
     resetRun();
+    useProjectStore.getState().clearProject();
     const emptySnapshot = buildCurrentSnapshot();
     const newId = addConversation({ title: "新任务", snapshot: emptySnapshot });
     storeSetActiveConvId(newId);

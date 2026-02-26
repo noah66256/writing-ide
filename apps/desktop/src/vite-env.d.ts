@@ -78,6 +78,7 @@ declare global {
           ok: boolean;
           conversations?: any[];
           draftSnapshot?: any | null;
+          activeConvId?: string | null;
           used?: "primary" | "fallback";
           file?: string;
           error?: string;

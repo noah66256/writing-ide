@@ -386,11 +386,12 @@ export class McpManager {
     const raw = String(modulePath ?? "").trim();
     if (!raw) throw new Error("STDIO_BUNDLED_MODULE_PATH_REQUIRED");
 
-    const fromAppBase = path.isAbsolute(raw) ? raw : path.resolve(this._appBasePath, raw);
+    const appBase = path.resolve(this._appBasePath || process.cwd());
     const candidates = [];
 
     if (this._isPackaged) {
       // 打包后：app.asar 内的路径不能被 spawn，只尝试 app.asar.unpacked
+      const fromAppBase = path.isAbsolute(raw) ? raw : path.resolve(appBase, raw);
       candidates.push(this._replaceAsarWithUnpacked(fromAppBase));
       // 兼顾 process.resourcesPath（Windows/Mac 均可用）
       if (typeof process.resourcesPath === "string") {
@@ -398,39 +399,66 @@ export class McpManager {
       }
       // 打包模式下不回退到 app.asar（spawn 必定失败），直接用 unpacked 候选
     } else {
-      // 开发环境：直接用 appBasePath
-      candidates.push(fromAppBase);
+      // ── 开发环境 ──
+      // app.getAppPath() 在 `electron <file>` 模式下返回入口脚本所在目录，
+      // 而非 package.json 所在的项目根。例如 main.cjs 在 electron/ 子目录时，
+      // appBase = ".../apps/desktop/electron/"，modulePath = "electron/mcp-servers/..."
+      // 会拼出 ".../electron/electron/mcp-servers/..."（双重 electron）。
+      // 因此需要多组候选覆盖这种情况。
+
+      if (path.isAbsolute(raw)) {
+        candidates.push(raw);
+      } else {
+        // 候选 1：直接拼接
+        candidates.push(path.resolve(appBase, raw));
+        // 候选 2：父目录（覆盖 appBase 多了一层子目录的场景）
+        candidates.push(path.resolve(appBase, "..", raw));
+        // 候选 3：appBase 已是 "electron" 且 raw 以 "electron/" 开头时去重
+        if (path.basename(appBase).toLowerCase() === "electron" && raw.startsWith("electron/")) {
+          candidates.push(path.resolve(appBase, raw.slice("electron/".length)));
+        }
+      }
+
       // monorepo 场景：依赖可能被提升到上层 node_modules，通过模块解析查找
       if (raw.startsWith("node_modules/")) {
-        try {
-          const require = createRequire(path.join(this._appBasePath, "package.json"));
-          // "node_modules/@playwright/mcp/cli.js" → 包名 "@playwright/mcp"，子路径 "cli.js"
-          const withoutNM = raw.replace(/^node_modules\//, ""); // "@playwright/mcp/cli.js"
-          const parts = withoutNM.startsWith("@")
-            ? withoutNM.split("/").slice(0, 2) // scoped: ["@playwright", "mcp"]
-            : withoutNM.split("/").slice(0, 1); // unscoped: ["some-pkg"]
-          const pkgName = parts.join("/");
-          const subPath = withoutNM.slice(pkgName.length + 1); // "cli.js"
-          // resolve 包主入口，再定位同目录下的子路径
-          const pkgEntry = require.resolve(pkgName);
-          const pkgDir = path.dirname(pkgEntry);
-          if (subPath) {
-            candidates.push(path.resolve(pkgDir, subPath));
-          } else {
-            candidates.push(pkgEntry);
+        const resolveRoots = [...new Set([appBase, path.resolve(appBase, "..")])];
+        const withoutNM = raw.replace(/^node_modules\//, ""); // "@playwright/mcp/cli.js"
+        const parts = withoutNM.startsWith("@")
+          ? withoutNM.split("/").slice(0, 2) // scoped: ["@playwright", "mcp"]
+          : withoutNM.split("/").slice(0, 1); // unscoped: ["some-pkg"]
+        const pkgName = parts.join("/");
+        const subPath = withoutNM.slice(pkgName.length + 1); // "cli.js"
+
+        for (const root of resolveRoots) {
+          try {
+            const require = createRequire(path.join(root, "package.json"));
+            const pkgEntry = require.resolve(pkgName);
+            const pkgDir = path.dirname(pkgEntry);
+            candidates.push(subPath ? path.resolve(pkgDir, subPath) : pkgEntry);
+          } catch {
+            // require.resolve 失败，继续用其他候选
           }
-        } catch {
-          // require.resolve 失败，继续用其他候选
         }
       }
     }
 
     // 去重后依次验证
     const deduped = [...new Set(candidates.map((p) => path.normalize(p)))];
+
+    console.info("[McpManager] resolving bundled module", {
+      raw, isPackaged: this._isPackaged, appBase, candidates: deduped,
+    });
+
     for (const candidate of deduped) {
-      if (await this._pathExists(candidate)) return candidate;
+      if (await this._pathExists(candidate)) {
+        console.info("[McpManager] bundled module resolved →", candidate);
+        return candidate;
+      }
     }
 
+    console.error("[McpManager] bundled module NOT FOUND", {
+      raw, isPackaged: this._isPackaged, appBase, cwd: process.cwd(), tried: deduped,
+    });
     throw new Error(`STDIO_BUNDLED_MODULE_NOT_FOUND:${raw} (tried: ${deduped.join(", ")})`);
   }
 

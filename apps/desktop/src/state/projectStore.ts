@@ -70,6 +70,9 @@ type ProjectState = {
   applyDocOp: (path: string, nextContent: string, label: string) => void;
   undoDocOp: (path: string) => void;
   redoDocOp: (path: string) => void;
+
+  /** 清除项目绑定（新任务时调用），恢复到无项目的默认状态 */
+  clearProject: () => void;
 };
 
 const DEFAULT_DOC_RULES =
@@ -721,6 +724,39 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       docOpUndoByPath: { ...s.docOpUndoByPath, [p]: [...(s.docOpUndoByPath[p] ?? []), rec].slice(-200) },
     }));
     get().updateFile(p, rec.after);
+  },
+
+  clearProject: () => {
+    // 停止旧项目的文件监听
+    if (get().rootDir) {
+      window.desktop?.fs?.watchStop?.().catch(() => void 0);
+    }
+    set({
+      rootDir: null,
+      isLoading: false,
+      error: null,
+      dirs: [],
+      files: [
+        {
+          path: "drafts/draft.md",
+          content: `---\ntitle: 草稿\nplatform_type: feed_preview\n---\n\n# 草稿\n\n在这里开始写作…\n`,
+          loaded: true,
+          dirty: false,
+        },
+        {
+          path: "doc.rules.md",
+          content: DEFAULT_DOC_RULES,
+          loaded: true,
+          dirty: false,
+        },
+      ],
+      openPaths: ["drafts/draft.md"],
+      activePath: "drafts/draft.md",
+      previewPath: "drafts/draft.md",
+      snapshots: [],
+      docOpUndoByPath: {},
+      docOpRedoByPath: {},
+    });
   },
 }));
 

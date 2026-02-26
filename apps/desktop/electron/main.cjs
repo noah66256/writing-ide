@@ -1192,7 +1192,8 @@ function registerIpc() {
         const parsed = JSON.parse(String(raw ?? ""));
         const list = Array.isArray(parsed?.conversations) ? parsed.conversations : Array.isArray(parsed) ? parsed : [];
         const draftSnapshot = parsed && typeof parsed === "object" ? (parsed.draftSnapshot ?? null) : null;
-        return { ok: true, conversations: list, draftSnapshot, used, file };
+        const activeConvId = parsed && typeof parsed === "object" ? (parsed.activeConvId ?? null) : null;
+        return { ok: true, conversations: list, draftSnapshot, activeConvId, used, file };
       } catch (e) {
         const msg = String(e?.code ?? e?.message ?? e);
         if (msg.includes("ENOENT")) return { ok: true, conversations: [], draftSnapshot: null, used, file };

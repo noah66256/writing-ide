@@ -79,7 +79,7 @@ export type Conversation = {
 
 type ConversationState = {
   conversations: Conversation[];
-  /** 当前”草稿对话”（未归档到历史，也无需点 +），用于重启后自动恢复右侧内容 */
+  /** 当前"草稿对话"（未归档到历史，也无需点 +），用于重启后自动恢复右侧内容 */
   draftSnapshot: RunSnapshot | null;
   /** 当前活跃的对话 ID（发送首条消息时创建，侧边栏切换时设置） */
   activeConvId: string | null;
@@ -152,11 +152,14 @@ function schedulePersistToDisk(args: { conversations: Conversation[]; draftSnaps
 
   const conversations = capConversations(args.conversations);
   const draftSnapshot = args.draftSnapshot ?? null;
+  // activeConvId 自动从 store 读取（避免改动所有调用处）
+  const activeConvId = useConversationStore?.getState?.()?.activeConvId ?? null;
   pendingPayload = {
     version: 1,
     updatedAt: Date.now(),
     conversations,
     draftSnapshot,
+    activeConvId,
   };
 
   if (persistTimer) return;
@@ -184,6 +187,7 @@ export const useConversationStore = create<ConversationState>()(
           const res = await api.loadConversations();
           const list = Array.isArray((res as any)?.conversations) ? ((res as any).conversations as any[]) : [];
           const diskDraft = ((res as any)?.draftSnapshot ?? null) as any;
+          const diskActiveConvId = ((res as any)?.activeConvId ?? null) as string | null;
 
           // 磁盘优先：localStorage 只作为极弱兜底（避免 QuotaExceededError 把渲染打崩）
           const curConvs = get().conversations ?? [];
@@ -192,14 +196,20 @@ export const useConversationStore = create<ConversationState>()(
           const patch: Partial<ConversationState> = {};
           if (!curConvs.length && list.length) patch.conversations = capConversations(list as any);
           if (!curDraft && diskDraft && typeof diskDraft === "object") patch.draftSnapshot = diskDraft as any;
+
+          // 恢复 activeConvId（仅当对话仍存在时）
+          const finalConvs = (patch.conversations ?? curConvs) as Conversation[];
+          if (diskActiveConvId && finalConvs.some((c) => c.id === diskActiveConvId)) {
+            patch.activeConvId = diskActiveConvId;
+          }
+
           if (Object.keys(patch).length) set(patch as any);
 
-          const finalConvs = (patch.conversations ?? curConvs) as any;
           const finalDraft = (patch.draftSnapshot ?? curDraft) as any;
-          // 把“最终态”同步回磁盘，保证 dev/packaged/迁移都能恢复
+          // 把"最终态"同步回磁盘，保证 dev/packaged/迁移都能恢复
           schedulePersistToDisk({ conversations: finalConvs, draftSnapshot: finalDraft });
 
-          // 并把 localStorage 写回一个“很小的占位”，清掉旧的大对象（避免下一次 setItem 直接 quota 崩溃）
+          // 并把 localStorage 写回一个"很小的占位"，清掉旧的大对象（避免下一次 setItem 直接 quota 崩溃）
           try {
             safeLocalStorage.setItem(
               "writing-ide.conversations.v1",
@@ -268,6 +278,9 @@ export const useConversationStore = create<ConversationState>()(
       },
       setActiveConvId: (id) => {
         set({ activeConvId: id });
+        // activeConvId 变更需要落盘，避免重启后丢失导致重复创建对话
+        const s = get();
+        schedulePersistToDisk({ conversations: s.conversations ?? [], draftSnapshot: s.draftSnapshot ?? null });
       },
       setDraftSnapshot: (snap) => {
         const next = snap && typeof snap === "object" ? (snap as any) : null;
@@ -280,21 +293,21 @@ export const useConversationStore = create<ConversationState>()(
       clearAll: () =>
         set(() => {
           schedulePersistToDisk({ conversations: [], draftSnapshot: null });
-          return { conversations: [], draftSnapshot: null };
+          return { conversations: [], draftSnapshot: null, activeConvId: null };
         }),
     }),
     {
       name: "writing-ide.conversations.v1",
       // 关键：历史对话与草稿快照都落盘到 userData（history.saveConversations）。
-      // localStorage 只存“极小占位”用于兜底（否则会因 5MB 配额触发 QuotaExceededError，导致渲染崩溃）。
+      // localStorage 只存"极小占位"用于兜底（否则会因 5MB 配额触发 QuotaExceededError，导致渲染崩溃）。
       storage: createJSONStorage(() => safeLocalStorage as any),
       partialize: (s) => {
         // Electron 环境：磁盘 API 负责持久化，localStorage 只存极小占位
-        if (hasDiskHistoryApi()) return { conversations: [], draftSnapshot: null };
+        if (hasDiskHistoryApi()) return { conversations: [], draftSnapshot: null, activeConvId: null };
         // 非 Electron 环境（纯浏览器 dev / Web）：localStorage 作为唯一持久化方式
         // 限制最多 10 条以控制体积，避免 QuotaExceededError
         const capped = (s.conversations ?? []).slice(0, 10);
-        return { conversations: capped, draftSnapshot: s.draftSnapshot ?? null };
+        return { conversations: capped, draftSnapshot: s.draftSnapshot ?? null, activeConvId: s.activeConvId ?? null };
       },
     },
   ),
