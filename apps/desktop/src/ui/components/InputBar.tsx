@@ -10,7 +10,9 @@ import {
 } from "react";
 import { Mic, SendHorizontal, Square, Paperclip, Image, AtSign, X, FileIcon, FolderOpen } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useProjectStore } from "@/state/projectStore";
 import { useRunStore, type Mode } from "@/state/runStore";
+import { useWorkspaceStore } from "@/state/workspaceStore";
 import { MentionPopover, type MentionItem } from "./MentionPopover";
 
 // ─── 内部 AST ────────────────────────────────────────────────────────────────
@@ -567,6 +569,15 @@ export function InputBar({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const handleFileClick = useCallback(() => fileInputRef.current?.click(), []);
+
+  const handleOpenProject = useCallback(async () => {
+    const api = window.desktop?.fs;
+    if (!api) return;
+    const res = await api.pickDirectory();
+    if (!res.ok || !res.dir) return;
+    useWorkspaceStore.getState().addRecentProjectDir(res.dir);
+    await useProjectStore.getState().loadProjectFromDisk(res.dir);
+  }, []);
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     if (files.length > 0) setDroppedFiles((prev) => [...prev, ...files]);
@@ -674,8 +685,8 @@ export function InputBar({
         {/* 底部工具栏 */}
         <div className="flex items-center justify-between px-3 pb-2.5 pt-1">
           <div className="flex items-center gap-1">
-            {/* 打开项目（占位） */}
-            <ToolButton icon={FolderOpen} title="打开项目" onClick={() => void 0} />
+            {/* 打开项目 */}
+            <ToolButton icon={FolderOpen} title="打开项目" onClick={handleOpenProject} />
 
             {/* 模式切换 */}
             <div className="inline-flex items-center rounded-lg border border-border bg-surface-alt p-0.5">
