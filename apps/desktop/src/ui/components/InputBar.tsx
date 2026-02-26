@@ -355,6 +355,15 @@ export function InputBar({
   const mode = useRunStore((s) => s.mode);
   const setMode = useRunStore((s) => s.setMode);
 
+  const rootDir = useProjectStore((s) => s.rootDir);
+  const projectName = useMemo(() => {
+    if (!rootDir) return "";
+    const normalized = rootDir.replace(/[\\/]+$/g, "");
+    if (!normalized) return "";
+    const parts = normalized.split(/[\\/]/).filter(Boolean);
+    return parts[parts.length - 1] ?? "";
+  }, [rootDir]);
+
   const [droppedFiles, setDroppedFiles] = useState<File[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [mentionVisible, setMentionVisible] = useState(false);
@@ -687,6 +696,21 @@ export function InputBar({
           <div className="flex items-center gap-1">
             {/* 打开项目 */}
             <ToolButton icon={FolderOpen} title="打开项目" onClick={handleOpenProject} />
+            {projectName && (
+              <button
+                type="button"
+                onClick={handleOpenProject}
+                className={cn(
+                  "max-w-[140px] truncate rounded px-1.5 py-0.5",
+                  "text-[11px] leading-none text-text-faint",
+                  "hover:bg-surface-alt hover:text-text-muted",
+                  "transition-colors duration-fast",
+                )}
+                title={rootDir ?? ""}
+              >
+                {projectName}
+              </button>
+            )}
 
             {/* 模式切换 */}
             <div className="inline-flex items-center rounded-lg border border-border bg-surface-alt p-0.5">

@@ -324,6 +324,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           return { hasSelection: n > 0, selectionChars: n };
         })();
         const ideSummary = {
+          projectDir: p.rootDir ?? null,
           activePath: p.activePath ?? null,
           openPaths: p.openPaths?.length ?? 0,
           fileCount: p.files?.length ?? 0,

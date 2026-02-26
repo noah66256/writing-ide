@@ -343,6 +343,7 @@ export function buildAgentProtocolPrompt(args: {
         `   - 写作/改写/润色/仿写 → 委派文案写手（copywriter）；\n` +
         `   - 热点调研/选题/竞品分析 → 委派选题策划（topic_planner）；\n` +
         `   - SEO 关键词/标签优化 → 委派 SEO 专员（seo_specialist）；\n` +
+        `   - 语料导入/抽卡/学风格/分析文风 → 委派学习专员（learning_specialist）；\n` +
         `   - 委派时在 task 中写清目标、约束、验收标准；子 agent 会自行搜索素材和执行，你不需要提前帮它搜。\n` +
         `   - 子 agent 返回结果后：审核质量 → 必要时要求返工或自行润色 → 交付用户。\n` +
         `   上下文传递规则（agent.delegate 的 inputArtifacts / task 参数）：\n` +
@@ -386,7 +387,7 @@ export function buildAgentProtocolPrompt(args: {
         `你同时负责两个方向的沟通——向上对接用户需求，向下调度团队成员。\n\n` +
         `你的团队成员（通过 agent.delegate 调度）：\n${teamLines}\n没有列出的角色你不具备，不要虚构。\n\n` +
         `管理者准则（有团队成员时严格遵守）：\n` +
-        `- 你不是一线执行者。凡是团队成员职责范围内的工作（写稿、调研、SEO 优化等），必须通过 agent.delegate 委派，不要自己动手。\n` +
+        `- 你不是一线执行者。凡是团队成员职责范围内的工作（写稿、调研、SEO 优化、语料导入/抽卡等），必须通过 agent.delegate 委派，不要自己动手。\n` +
         `- 你可以做的事：分析用户需求、制定计划（Todo）、记录决策（mainDoc）、委派任务、审核子 agent 返回的结果、润色/整合后交付用户。\n` +
         `- 你不应该做的事：自己调用 kb.search 拉素材写稿、自己调用 doc.write 写正文、自己调用 lint.style 做风格检查——这些是团队成员的活。\n` +
         `- 唯一例外：用户明确要求你本人回答的简单问答/只读查询（如"这篇稿子写得怎么样""帮我解释一下这个概念"），不涉及执行产出的，可以直接回答。\n\n`
@@ -441,8 +442,9 @@ export function normalizeIdeMeta(args: { ideSummary: any; contextPack?: string; 
       ? Math.max(0, Math.floor(Number(ide.selectionChars)))
       : packSelectionChars ?? (hasSelection ? 1 : 0);
 
+  const projectDir = coerceNonEmptyString(ide?.projectDir);
   const kbAttached = Array.isArray(args.kbSelected) ? args.kbSelected : [];
-  return { activePath, openPaths, fileCount, hasSelection, selectionChars, kbAttached };
+  return { projectDir, activePath, openPaths, fileCount, hasSelection, selectionChars, kbAttached };
 }
 
 function formatKbAttachedBrief(kbAttached: any[]): string {
@@ -915,6 +917,7 @@ const agentRunBodySchema = z.object({
         .optional(),
       ideSummary: z
         .object({
+          projectDir: z.string().max(500).nullable().optional(),
           activePath: z.string().min(1).max(500).nullable().optional(),
           openPaths: z.number().int().nonnegative().optional(),
           fileCount: z.number().int().nonnegative().optional(),
@@ -1469,6 +1472,7 @@ export async function prepareAgentRun(args: {
               hasRunTodo: Array.isArray(runTodoFromPack) && runTodoFromPack.length > 0,
               ...(routerContextHints ? { contextHints: routerContextHints } : {}),
               ide: {
+                projectDir: coerceNonEmptyString(ideSummaryFromSidecar?.projectDir),
                 activePath: coerceNonEmptyString(ideSummaryFromSidecar?.activePath),
                 openPaths: typeof ideSummaryFromSidecar?.openPaths === "number" ? ideSummaryFromSidecar.openPaths : null,
                 hasSelection: typeof ideSummaryFromSidecar?.hasSelection === "boolean" ? ideSummaryFromSidecar.hasSelection : null,
@@ -1635,12 +1639,15 @@ export async function prepareAgentRun(args: {
     }
   }
 
+  const projectDirFromSidecar = coerceNonEmptyString(ideSummaryFromSidecar?.projectDir);
+
   const messages: OpenAiChatMessage[] = [
     {
       role: "system",
       content: buildAgentProtocolPrompt({ mode, allowedToolNames: baseAllowedToolNames as any, persona: personaFromPack }),
     },
     ...(skillsSystemPrompt ? ([{ role: "system", content: skillsSystemPrompt }] as OpenAiChatMessage[]) : []),
+    ...(projectDirFromSidecar ? ([{ role: "system", content: `用户当前已打开项目目录：${projectDirFromSidecar}\n项目内的文件操作（doc.read/doc.write/project.search 等）均基于此目录。` }] as OpenAiChatMessage[]) : []),
     ...(body.contextPack ? ([{ role: "system", content: body.contextPack }] as OpenAiChatMessage[]) : []),
     { role: "user", content: body.prompt },
   ];
