@@ -234,7 +234,6 @@ export const CORPUS_INGEST_SKILL: SkillManifest = {
   toolCaps: {
     allowTools: [
       "agent.delegate",
-      "kb.listLibraries",
       "run.setTodoList",
       "run.todo.upsertMany",
       "run.todo.update",
