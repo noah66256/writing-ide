@@ -14,8 +14,9 @@ import {
   Users,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useConversationStore, type Conversation } from "@/state/conversationStore";
-import { useRunStore, type ToolBlockStep } from "@/state/runStore";
+import { buildCurrentSnapshot, useConversationStore, type Conversation } from "@/state/conversationStore";
+import { useRunStore } from "@/state/runStore";
+import { useProjectStore } from "@/state/projectStore";
 import { useAuthStore } from "@/state/authStore";
 import { useThemeStore, THEME_OPTIONS, type ThemeId } from "@/state/themeStore";
 import { useModelStore } from "@/state/modelStore";
@@ -24,25 +25,6 @@ import { SettingsModal } from "./SettingsModal";
 import { useKbStore } from "@/state/kbStore";
 
 /* ─── Helpers ─── */
-
-function buildSnapshot() {
-  const state = useRunStore.getState();
-  const serial = (state.steps ?? []).map((s) => {
-    if (s.type !== "tool") return s;
-    const { apply, undo, ...rest } = s as ToolBlockStep;
-    return { ...rest, undoable: false };
-  });
-  return {
-    mode: state.mode,
-    model: state.model,
-    mainDoc: JSON.parse(JSON.stringify(state.mainDoc ?? {})),
-    todoList: JSON.parse(JSON.stringify(state.todoList ?? [])),
-    steps: serial as any,
-    logs: JSON.parse(JSON.stringify(state.logs ?? [])),
-    kbAttachedLibraryIds: JSON.parse(JSON.stringify(state.kbAttachedLibraryIds ?? [])),
-    ctxRefs: JSON.parse(JSON.stringify(state.ctxRefs ?? [])),
-  };
-}
 
 function conversationTitle(): string {
   const all = useRunStore.getState().steps ?? [];
@@ -80,27 +62,42 @@ export function NavSidebar() {
   const storeSetActiveConvId = useConversationStore((s) => s.setActiveConvId);
 
   const handleNewChat = useCallback(() => {
+    // 防抖：当前已是空白"新任务"对话，不重复创建
+    const activeConv = activeConvId ? conversations.find((c) => c.id === activeConvId) : null;
+    if (activeConv?.title === "新任务" && steps.length === 0) return;
+
+    // 保存当前对话
     if (hasCurrentContent && !activeConvId) {
-      addConversation({ title: conversationTitle(), snapshot: buildSnapshot() });
+      addConversation({ title: conversationTitle(), snapshot: buildCurrentSnapshot() });
     } else if (hasCurrentContent && activeConvId) {
-      useConversationStore.getState().updateConversation(activeConvId, { snapshot: buildSnapshot() });
+      useConversationStore.getState().updateConversation(activeConvId, { snapshot: buildCurrentSnapshot() });
     }
+
+    // 清空右侧 + 立即创建新条目
     resetRun();
-    storeSetActiveConvId(null);
-  }, [hasCurrentContent, activeConvId, addConversation, resetRun, storeSetActiveConvId]);
+    const emptySnapshot = buildCurrentSnapshot();
+    const newId = addConversation({ title: "新任务", snapshot: emptySnapshot });
+    storeSetActiveConvId(newId);
+  }, [steps.length, hasCurrentContent, activeConvId, conversations, addConversation, resetRun, storeSetActiveConvId]);
 
   const handleLoadConversation = useCallback(
     (id: string) => {
       if (hasCurrentContent && activeConvId !== id) {
         if (activeConvId) {
-          useConversationStore.getState().updateConversation(activeConvId, { snapshot: buildSnapshot() });
+          useConversationStore.getState().updateConversation(activeConvId, { snapshot: buildCurrentSnapshot() });
         } else {
-          addConversation({ title: conversationTitle(), snapshot: buildSnapshot() });
+          addConversation({ title: conversationTitle(), snapshot: buildCurrentSnapshot() });
         }
       }
       const conv = conversations.find((c) => c.id === id);
       if (!conv) return;
       loadSnapshot(conv.snapshot);
+      // 恢复对话绑定的项目文件夹（旧对话无此字段则跳过）
+      const snapDir = conv.snapshot?.projectDir ?? null;
+      const currentDir = useProjectStore.getState().rootDir;
+      if (snapDir && snapDir !== currentDir) {
+        void useProjectStore.getState().loadProjectFromDisk(snapDir).catch(() => {});
+      }
       storeSetActiveConvId(id);
     },
     [hasCurrentContent, activeConvId, conversations, addConversation, loadSnapshot, storeSetActiveConvId],

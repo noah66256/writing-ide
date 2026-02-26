@@ -1,4 +1,4 @@
-export const DEFAULT_GATEWAY_URL = "http://localhost:8000";
+export const DEFAULT_GATEWAY_URL = "http://120.26.6.147:8000";
 
 function trimSlash(url: string) {
   return String(url ?? "")

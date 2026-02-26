@@ -1,9 +1,11 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { NavSidebar } from "../components/NavSidebar";
 import { ChatArea } from "../components/ChatArea";
 import { useModelStore } from "@/state/modelStore";
 import { useRunStore } from "@/state/runStore";
+import { useProjectStore } from "@/state/projectStore";
 import { useKbStore } from "@/state/kbStore";
+import { useConversationStore } from "@/state/conversationStore";
 
 /**
  * 主布局：左侧导航（240px 固定）+ 中央对话区
@@ -11,6 +13,36 @@ import { useKbStore } from "@/state/kbStore";
  */
 export function ConversationLayout() {
   const fetchModels = useModelStore((s) => s.fetchModels);
+  const hydrateFromDisk = useConversationStore((s) => s.hydrateFromDisk);
+  const draftSnapshot = useConversationStore((s) => s.draftSnapshot);
+  const restoredRef = useRef(false);
+
+  // 启动时从磁盘/localStorage 水合历史对话
+  useEffect(() => {
+    void hydrateFromDisk().catch(() => void 0);
+  }, [hydrateFromDisk]);
+
+  // 水合后恢复草稿快照（若当前 run 为空）
+  useEffect(() => {
+    if (restoredRef.current) return;
+    if (!draftSnapshot) return;
+    const st = useRunStore.getState();
+    const hasAny =
+      (st.steps ?? []).length > 0 ||
+      Object.values(st.mainDoc ?? {}).some((v) => String(v ?? "").trim());
+    if (hasAny) {
+      restoredRef.current = true;
+      return;
+    }
+    st.loadSnapshot(draftSnapshot as any);
+    // 恢复草稿绑定的项目文件夹
+    const snapDir = (draftSnapshot as any)?.projectDir ?? null;
+    const currentDir = useProjectStore.getState().rootDir;
+    if (snapDir && snapDir !== currentDir) {
+      void useProjectStore.getState().loadProjectFromDisk(snapDir).catch(() => {});
+    }
+    restoredRef.current = true;
+  }, [draftSnapshot]);
 
   useEffect(() => {
     let cancelled = false;

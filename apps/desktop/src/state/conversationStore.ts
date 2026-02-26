@@ -1,6 +1,16 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import type { MainDoc, TodoItem, Step, LogEntry, Mode, ToolBlockStep, CtxRefItem } from "./runStore";
+import { useProjectStore } from "./projectStore";
+import {
+  useRunStore,
+  type MainDoc,
+  type TodoItem,
+  type Step,
+  type LogEntry,
+  type Mode,
+  type ToolBlockStep,
+  type CtxRefItem,
+} from "./runStore";
 
 export type SerializableToolStep = Omit<ToolBlockStep, "apply" | "undo"> & {
   // 历史会话只做展示/续聊入口，不保留可执行的 apply/undo 函数
@@ -20,7 +30,44 @@ export type RunSnapshot = {
   logs: LogEntry[];
   kbAttachedLibraryIds: string[];
   ctxRefs?: CtxRefItem[];
+  projectDir?: string | null;
+  dialogueSummaryByMode?: Record<Mode, string>;
+  dialogueSummaryTurnCursorByMode?: Record<Mode, number>;
 };
+
+function deepClone<T>(value: T): T {
+  if (value === undefined || value === null) return value;
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+/**
+ * 从当前 runStore + projectStore 构建可序列化的 RunSnapshot。
+ * 替代 NavSidebar / ChatArea 中的 inline buildSnapshot()。
+ */
+export function buildCurrentSnapshot(): RunSnapshot {
+  const s = useRunStore.getState();
+  const projectDir = useProjectStore.getState().rootDir ?? null;
+
+  const steps: SerializableStep[] = (s.steps ?? []).map((step) => {
+    if (step.type !== "tool") return deepClone(step as Exclude<Step, ToolBlockStep>) as SerializableStep;
+    const { apply, undo, ...rest } = step as ToolBlockStep;
+    return deepClone({ ...rest, undoable: false } as SerializableToolStep);
+  });
+
+  return {
+    mode: s.mode,
+    model: s.model,
+    mainDoc: deepClone(s.mainDoc ?? {}),
+    todoList: deepClone(s.todoList ?? []),
+    steps,
+    logs: deepClone(s.logs ?? []),
+    kbAttachedLibraryIds: deepClone(s.kbAttachedLibraryIds ?? []),
+    ctxRefs: deepClone(s.ctxRefs ?? []),
+    projectDir,
+    dialogueSummaryByMode: deepClone(s.dialogueSummaryByMode ?? { agent: "", chat: "" }),
+    dialogueSummaryTurnCursorByMode: deepClone(s.dialogueSummaryTurnCursorByMode ?? { agent: 0, chat: 0 }),
+  };
+}
 
 export type Conversation = {
   id: string;
@@ -241,11 +288,13 @@ export const useConversationStore = create<ConversationState>()(
       // 关键：历史对话与草稿快照都落盘到 userData（history.saveConversations）。
       // localStorage 只存“极小占位”用于兜底（否则会因 5MB 配额触发 QuotaExceededError，导致渲染崩溃）。
       storage: createJSONStorage(() => safeLocalStorage as any),
-      partialize: (_s) => {
-        // Electron 环境：禁用 localStorage 持久化大对象
+      partialize: (s) => {
+        // Electron 环境：磁盘 API 负责持久化，localStorage 只存极小占位
         if (hasDiskHistoryApi()) return { conversations: [], draftSnapshot: null };
-        // 非 Electron 环境：也不要存大对象，保守兜底
-        return { conversations: [], draftSnapshot: null };
+        // 非 Electron 环境（纯浏览器 dev / Web）：localStorage 作为唯一持久化方式
+        // 限制最多 10 条以控制体积，避免 QuotaExceededError
+        const capped = (s.conversations ?? []).slice(0, 10);
+        return { conversations: capped, draftSnapshot: s.draftSnapshot ?? null };
       },
     },
   ),

@@ -20,7 +20,7 @@ import {
 } from "@/state/runStore";
 import { useProjectStore } from "@/state/projectStore";
 import { useAuthStore } from "@/state/authStore";
-import { useConversationStore } from "@/state/conversationStore";
+import { useConversationStore, buildCurrentSnapshot } from "@/state/conversationStore";
 import { startGatewayRun } from "@/agent/gatewayAgent";
 import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
 import { WelcomePage } from "./WelcomePage";
@@ -72,22 +72,7 @@ export function ChatArea() {
   useEffect(() => {
     if (steps.length === 0) return;
     const timer = setTimeout(() => {
-      const state = useRunStore.getState();
-      const serial = (state.steps ?? []).map((s) => {
-        if (s.type !== "tool") return s;
-        const { apply, undo, ...rest } = s;
-        return { ...rest, undoable: false };
-      });
-      const snap = {
-        mode: state.mode,
-        model: state.model,
-        mainDoc: JSON.parse(JSON.stringify(state.mainDoc ?? {})),
-        todoList: JSON.parse(JSON.stringify(state.todoList ?? [])),
-        steps: serial as any,
-        logs: JSON.parse(JSON.stringify(state.logs ?? [])),
-        kbAttachedLibraryIds: JSON.parse(JSON.stringify(state.kbAttachedLibraryIds ?? [])),
-        ctxRefs: JSON.parse(JSON.stringify(state.ctxRefs ?? [])),
-      };
+      const snap = buildCurrentSnapshot();
       useConversationStore.getState().setDraftSnapshot(snap);
       const convId = useConversationStore.getState().activeConvId;
       if (convId) {
@@ -127,21 +112,18 @@ export function ChatArea() {
       const userMentions = meta?.mentions?.length ? meta.mentions : undefined;
       useRunStore.getState().addUser(text, baseline as any, userMentions);
 
-      // 首次发送时自动创建对话条目
-      if (!useConversationStore.getState().activeConvId) {
-        const title = text.length > 20 ? text.slice(0, 20) + "\u2026" : text;
-        const emptySnap = {
-          mode: useRunStore.getState().mode,
-          model: useRunStore.getState().model,
-          mainDoc: JSON.parse(JSON.stringify(useRunStore.getState().mainDoc ?? {})),
-          todoList: [],
-          steps: [],
-          logs: [],
-          kbAttachedLibraryIds: [],
-          ctxRefs: [],
-        };
-        const convId = useConversationStore.getState().addConversation({ title, snapshot: emptySnap as any });
-        useConversationStore.getState().setActiveConvId(convId);
+      // 首次发送：优先重命名预创建的"新任务"对话；兜底仍支持直接创建
+      const convStore = useConversationStore.getState();
+      const currentConvId = convStore.activeConvId;
+      const title = text.length > 20 ? text.slice(0, 20) + "\u2026" : text;
+      if (currentConvId) {
+        const currentConv = convStore.conversations.find((c) => c.id === currentConvId);
+        if (currentConv?.title === "新任务") {
+          convStore.renameConversation(currentConvId, title);
+        }
+      } else {
+        const convId = convStore.addConversation({ title, snapshot: buildCurrentSnapshot() });
+        convStore.setActiveConvId(convId);
       }
 
       if (!model) {
