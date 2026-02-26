@@ -182,6 +182,9 @@ export async function* streamAnthropicMessages(
   if (typeof args.system === "string" && args.system.length > 0) body.system = args.system;
   if (Array.isArray(args.tools) && args.tools.length > 0) body.tools = args.tools;
   if (args.tool_choice) body.tool_choice = args.tool_choice;
+  if (args.tool_choice) {
+    console.log(`[anthropic-api] tool_choice=${JSON.stringify(args.tool_choice)} tools_count=${Array.isArray(args.tools) ? args.tools.length : 0} model=${args.model} url=${url}`);
+  }
   if (typeof args.temperature === "number" && Number.isFinite(args.temperature)) {
     body.temperature = args.temperature;
   }
@@ -205,6 +208,9 @@ export async function* streamAnthropicMessages(
 
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
+    if (args.tool_choice) {
+      console.error(`[anthropic-api] tool_choice request FAILED: HTTP_${res.status} ${errText.slice(0, 200)}`);
+    }
     yield { type: "error", error: `HTTP_${res.status}: ${errText.slice(0, 500)}` };
     return;
   }
