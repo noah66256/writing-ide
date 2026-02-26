@@ -756,6 +756,24 @@ export function computeIntentRouteDecisionPhase0(args: {
     };
   }
 
+  // KB/语料操作：抽卡、导入、学风格等——需要工具闭环
+  const looksKbOps =
+    /(抽卡|入库|导入语料|导入素材|学.{0,4}风格|学.{0,4}写法|学.{0,4}文风|分析.{0,4}文风|分析.{0,4}风格|提取.{0,4}风格|语料|素材.{0,6}入库|新建.{0,6}风格库|新建.{0,6}知识库|kb\.ingest)/.test(
+      pTrim,
+    );
+  if (looksKbOps) {
+    return {
+      intentType: "task_execution",
+      confidence: 0.88,
+      nextAction: "enter_workflow",
+      todoPolicy: "optional",
+      toolPolicy: "allow_tools",
+      reason: "KB/语料操作（抽卡/导入/学风格）：需要工具闭环",
+      derivedFrom: ["regex:kb_ops", ...derivedFrom],
+      routeId: "kb_ops",
+    };
+  }
+
   const looksDebug =
     /(为什么|原因|解释|讨论|原理|报错|错误|bug|日志|排查|怎么修|怎么解决|失败|卡住|空的|不行)/.test(pTrim) &&
     !/(写|仿写|改写|润色|生成|写入|保存|落盘|打包|安装包|exe|nsis|portable)/.test(pTrim);
@@ -1583,6 +1601,21 @@ export async function prepareAgentRun(args: {
   if (mcpToolsFromSidecar.length) {
     for (const t of mcpToolsFromSidecar) {
       baseAllowedToolNames.add(t.name);
+    }
+  }
+
+  // 已激活 Skill 声明的 toolCaps.allowTools：即使 toolPolicy=deny 也应放行
+  // 这确保 corpus_ingest 等 Skill 激活后其必要工具可用
+  if (activeSkillIds.length) {
+    for (const sid of activeSkillIds) {
+      const manifest = skillManifestById.get(sid);
+      const allowTools = (manifest as any)?.toolCaps?.allowTools;
+      if (Array.isArray(allowTools)) {
+        for (const tn of allowTools) {
+          const name = String(tn ?? "").trim();
+          if (name && allToolNamesForMode.has(name)) baseAllowedToolNames.add(name);
+        }
+      }
     }
   }
 
