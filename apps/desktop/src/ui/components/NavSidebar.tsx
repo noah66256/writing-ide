@@ -93,11 +93,15 @@ export function NavSidebar() {
       const conv = conversations.find((c) => c.id === id);
       if (!conv) return;
       loadSnapshot(conv.snapshot);
-      // 恢复对话绑定的项目文件夹（旧对话无此字段则跳过）
+      // 恢复对话绑定的项目文件夹：每个对话独立绑定
       const snapDir = conv.snapshot?.projectDir ?? null;
       const currentDir = useProjectStore.getState().rootDir;
-      if (snapDir && snapDir !== currentDir) {
-        void useProjectStore.getState().loadProjectFromDisk(snapDir).catch(() => {});
+      if (snapDir !== currentDir) {
+        if (snapDir) {
+          void useProjectStore.getState().loadProjectFromDisk(snapDir).catch(() => {});
+        } else {
+          useProjectStore.getState().clearProject();
+        }
       }
       storeSetActiveConvId(id);
     },

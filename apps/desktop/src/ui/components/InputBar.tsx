@@ -14,6 +14,7 @@ import { useProjectStore } from "@/state/projectStore";
 import { useRunStore, type Mode } from "@/state/runStore";
 import { useWorkspaceStore } from "@/state/workspaceStore";
 import { MentionPopover, type MentionItem } from "./MentionPopover";
+import { SlashPopover } from "./SlashPopover";
 
 // ─── 内部 AST ────────────────────────────────────────────────────────────────
 
@@ -35,6 +36,7 @@ type InputBarProps = {
 // ─── 工具函数 ────────────────────────────────────────────────────────────────
 
 const MENTION_QUERY_RE = /@([^\s@]*)$/;
+const SLASH_QUERY_RE = /\/([^\s/]*)$/;
 
 const MODE_OPTIONS: { value: Mode; label: string }[] = [
   { value: "chat", label: "探索" },
@@ -335,7 +337,42 @@ function useSegments(editorRef: RefObject<HTMLDivElement | null>) {
     syncFromDOM();
   }, [editorRef, syncFromDOM]);
 
-  return { segments, syncFromDOM, replaceAllText, clearEditor, insertText, insertMention };
+  /** 在光标处插入 slash chip（替换已输入的 /query） */
+  const insertSlash = useCallback((item: MentionItem) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const range = ensureSelectionInEditor(editor);
+    if (!range) return;
+
+    const working = range.cloneRange();
+
+    if (working.collapsed && working.endContainer.nodeType === Node.TEXT_NODE) {
+      const textNode = working.endContainer as Text;
+      const before = textNode.data.slice(0, working.endOffset);
+      const match = before.match(SLASH_QUERY_RE);
+      if (match) {
+        working.setStart(textNode, working.endOffset - match[0].length);
+      }
+    }
+
+    working.deleteContents();
+
+    const chip = createChipElement(item);
+    working.insertNode(chip);
+
+    const sel = window.getSelection();
+    if (sel) {
+      const r = document.createRange();
+      r.setStartAfter(chip);
+      r.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(r);
+    }
+
+    syncFromDOM();
+  }, [editorRef, syncFromDOM]);
+
+  return { segments, syncFromDOM, replaceAllText, clearEditor, insertText, insertMention, insertSlash };
 }
 
 // ─── InputBar ─────────────────────────────────────────────────────────────────
@@ -350,7 +387,7 @@ export function InputBar({
 }: InputBarProps) {
   const editorRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const { segments, syncFromDOM, replaceAllText, clearEditor, insertText, insertMention } =
+  const { segments, syncFromDOM, replaceAllText, clearEditor, insertText, insertMention, insertSlash } =
     useSegments(editorRef);
   const mode = useRunStore((s) => s.mode);
   const setMode = useRunStore((s) => s.setMode);
@@ -368,6 +405,8 @@ export function InputBar({
   const [isDragOver, setIsDragOver] = useState(false);
   const [mentionVisible, setMentionVisible] = useState(false);
   const [mentionQuery, setMentionQuery] = useState("");
+  const [slashVisible, setSlashVisible] = useState(false);
+  const [slashQuery, setSlashQuery] = useState("");
   const blurTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 组件卸载时清理 blur 定时器
@@ -411,37 +450,46 @@ export function InputBar({
     }
   }, [externalValue, onExternalValueConsumed, replaceAllText]);
 
-  // 每次 input 后同步 segments + 更新 @ 浮层状态
+  // 统一检测 @/触发词状态（互斥：@ 和 / 不同时打开）
+  const updateTriggerQuery = useCallback(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const before = getTextBeforeCaret(editor) ?? "";
+
+    const mentionMatch = before.match(MENTION_QUERY_RE);
+    if (mentionMatch) {
+      setMentionQuery(mentionMatch[1]);
+      setMentionVisible(true);
+      setSlashQuery("");
+      setSlashVisible(false);
+      return;
+    }
+
+    const slashMatch = before.match(SLASH_QUERY_RE);
+    // 避免 URL/路径误触发：要求 / 在行首或前面是空白
+    if (slashMatch && (slashMatch.index === 0 || /\s/.test(before[slashMatch.index! - 1]))) {
+      setSlashQuery(slashMatch[1]);
+      setSlashVisible(true);
+      setMentionQuery("");
+      setMentionVisible(false);
+      return;
+    }
+
+    setMentionQuery("");
+    setMentionVisible(false);
+    setSlashQuery("");
+    setSlashVisible(false);
+  }, []);
+
+  // 每次 input 后同步 segments + 更新弹层触发状态
   const handleEditorInput = useCallback(() => {
     if (blurTimerRef.current) clearTimeout(blurTimerRef.current);
     syncFromDOM();
-    const editor = editorRef.current;
-    if (!editor) return;
-    const before = getTextBeforeCaret(editor) ?? "";
-    const match = before.match(MENTION_QUERY_RE);
-    if (match) {
-      setMentionQuery(match[1]);
-      setMentionVisible(true);
-    } else {
-      setMentionQuery("");
-      setMentionVisible(false);
-    }
-  }, [syncFromDOM]);
+    updateTriggerQuery();
+  }, [syncFromDOM, updateTriggerQuery]);
 
-  // 光标移动时也更新 @ 浮层（防止点击导致 query 不更新）
-  const updateMentionQuery = useCallback(() => {
-    const editor = editorRef.current;
-    if (!editor) return;
-    const before = getTextBeforeCaret(editor) ?? "";
-    const match = before.match(MENTION_QUERY_RE);
-    if (match) {
-      setMentionQuery(match[1]);
-      setMentionVisible(true);
-    } else {
-      setMentionQuery("");
-      setMentionVisible(false);
-    }
-  }, []);
+  // 光标移动时也更新弹层触发状态（防止点击导致 query 不更新）
+  const updateMentionQuery = updateTriggerQuery;
 
   const handleMentionSelect = useCallback(
     (item: MentionItem) => {
@@ -449,9 +497,24 @@ export function InputBar({
       insertMention(item);
       setMentionVisible(false);
       setMentionQuery("");
+      setSlashVisible(false);
+      setSlashQuery("");
       editorRef.current?.focus();
     },
     [insertMention],
+  );
+
+  const handleSlashSelect = useCallback(
+    (item: MentionItem) => {
+      if (blurTimerRef.current) clearTimeout(blurTimerRef.current);
+      insertSlash(item);
+      setSlashVisible(false);
+      setSlashQuery("");
+      setMentionVisible(false);
+      setMentionQuery("");
+      editorRef.current?.focus();
+    },
+    [insertSlash],
   );
 
   const handleSend = useCallback(() => {
@@ -475,6 +538,8 @@ export function InputBar({
     setDroppedFiles([]);
     setMentionVisible(false);
     setMentionQuery("");
+    setSlashVisible(false);
+    setSlashQuery("");
 
     requestAnimationFrame(() => editorRef.current?.focus());
   }, [segments, droppedFiles, onSend, clearEditor]);
@@ -515,25 +580,29 @@ export function InputBar({
               syncFromDOM();
               setMentionVisible(false);
               setMentionQuery("");
+              setSlashVisible(false);
+              setSlashQuery("");
               return;
             }
           }
         }
       }
 
-      // @ 浮层打开时，键盘让浮层处理
-      if (mentionVisible) return;
+      // 弹层打开且有候选时，键盘事件由弹层 capture handler 拦截（stopImmediatePropagation），
+      // 此处不会被触发。弹层无候选时事件会正常到达这里，允许 Enter 发送。
 
       if (e.key === "Enter" && !e.nativeEvent.isComposing) {
         e.preventDefault();
-        if (e.shiftKey) {
-          insertText("\n");
+        if (e.shiftKey || e.metaKey || e.ctrlKey) {
+          // contenteditable 中 insertText("\n") 不产生视觉换行，需用 insertLineBreak
+          document.execCommand("insertLineBreak");
+          syncFromDOM();
         } else if (hasContent) {
           handleSend();
         }
       }
     },
-    [mentionVisible, hasContent, handleSend, insertText, syncFromDOM],
+    [hasContent, handleSend, insertText, syncFromDOM],
   );
 
   const handleActionClick = useCallback(() => {
@@ -550,6 +619,8 @@ export function InputBar({
     insertText("@");
     setMentionVisible(true);
     setMentionQuery("");
+    setSlashVisible(false);
+    setSlashQuery("");
   }, [insertText]);
 
   // ─── 拖拽处理 ──────────────────────────────────────────────────────────────
@@ -623,6 +694,14 @@ export function InputBar({
           onClose={() => setMentionVisible(false)}
         />
 
+        {/* / 命令浮层 */}
+        <SlashPopover
+          query={slashQuery}
+          visible={slashVisible}
+          onSelect={handleSlashSelect}
+          onClose={() => setSlashVisible(false)}
+        />
+
         {/* 拖拽覆盖提示 */}
         {isDragOver && (
           <div className="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-accent-soft/50 backdrop-blur-sm">
@@ -656,7 +735,7 @@ export function InputBar({
               className="pointer-events-none absolute inset-x-4 top-3 text-[14px] leading-relaxed text-text-faint select-none"
               aria-hidden="true"
             >
-              描述任务，@ 可调用技能...
+              描述任务，@ 提及成员 / 命令调用技能...
             </div>
           )}
 
@@ -667,7 +746,7 @@ export function InputBar({
             role="textbox"
             aria-multiline="true"
             aria-label="消息输入框"
-            aria-placeholder="描述任务，@ 可调用技能..."
+            aria-placeholder="描述任务，@ 提及成员 / 命令调用技能..."
             tabIndex={0}
             onInput={handleEditorInput}
             onKeyDown={handleKeyDown}
@@ -678,8 +757,11 @@ export function InputBar({
               if (blurTimerRef.current) clearTimeout(blurTimerRef.current);
             }}
             onBlur={() => {
-              // 延迟关闭，让 mention 点击先触发；用 ref 管理避免竞态
-              blurTimerRef.current = setTimeout(() => setMentionVisible(false), 200);
+              // 延迟关闭，让 mention/slash 点击先触发；用 ref 管理避免竞态
+              blurTimerRef.current = setTimeout(() => {
+                setMentionVisible(false);
+                setSlashVisible(false);
+              }, 200);
             }}
             className={cn(
               "w-full bg-transparent outline-none",
@@ -779,7 +861,7 @@ export function InputBar({
 
       <div className="text-center mt-2">
         <span className="text-[11px] text-text-faint">
-          Enter 发送 · Shift+Enter 换行 · @ 调用技能
+          Enter 发送 · Shift/⌘+Enter 换行 · @ 提及 · / 命令
         </span>
       </div>
     </div>
