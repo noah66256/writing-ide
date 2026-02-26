@@ -1097,30 +1097,16 @@ const tools: ToolDefinition[] = [
       if (!ready) return { ok: false, error: "KB_NOT_READY" };
       await useKbStore.getState().refreshLibraries().catch(() => void 0);
 
-      // ---------- 3) 选择/匹配库 ----------
-      let libraryId = String(args.libraryId ?? "").trim();
-      const libraryNameArg = String(args.libraryName ?? "").trim();
-      const purposeArg = String(args.purpose ?? "").trim();
+      // ---------- 3) 弹出库选择器（始终由用户手动选择，防止 LLM 自动选库） ----------
+      let libraryId = "";
       let currentLibraries = useKbStore.getState().libraries ?? [];
 
-      if (libraryId && !currentLibraries.some((l) => l.id === libraryId)) {
-        return { ok: false, error: "LIBRARY_NOT_FOUND" };
-      }
-      if (!libraryId && libraryNameArg) {
-        const hit = currentLibraries.find((l) => {
-          if (String(l.name ?? "").trim() !== libraryNameArg) return false;
-          if (!purposeArg) return true;
-          return String((l as any).purpose ?? "material").trim() === purposeArg;
-        });
-        if (hit?.id) libraryId = hit.id;
-      }
-      if (!libraryId) {
-        const selected = await useKbStore.getState().requestLibrarySelect();
-        if (!selected) return { ok: false, error: "LIBRARY_SELECTION_CANCELLED" };
-        libraryId = String(selected).trim();
-        await useKbStore.getState().refreshLibraries().catch(() => void 0);
-        currentLibraries = useKbStore.getState().libraries ?? [];
-      }
+      const selected = await useKbStore.getState().requestLibrarySelect();
+      if (!selected) return { ok: false, error: "LIBRARY_SELECTION_CANCELLED" };
+      libraryId = String(selected).trim();
+      await useKbStore.getState().refreshLibraries().catch(() => void 0);
+      currentLibraries = useKbStore.getState().libraries ?? [];
+
       if (!libraryId || !currentLibraries.some((l) => l.id === libraryId)) {
         return { ok: false, error: "LIBRARY_NOT_FOUND" };
       }
