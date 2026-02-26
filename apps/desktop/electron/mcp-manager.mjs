@@ -45,6 +45,54 @@ const BUILTIN_SERVERS = [
     args: ["--browser", "chrome"],
     enabled: false,
   },
+  {
+    id: "bocha-search",
+    name: "博查搜索（国内）",
+    transport: "stdio",
+    bundled: true,
+    builtin: true,
+    modulePath: "electron/mcp-servers/bocha-search.mjs",
+    args: [],
+    enabled: false,
+    configFields: [
+      {
+        envKey: "BOCHA_API_KEY",
+        label: "博查 API Key",
+        placeholder: "sk-...",
+        helpUrl: "https://open.bochaai.com",
+        helpText: "前往博查AI开放平台获取",
+        required: true,
+      },
+    ],
+  },
+  {
+    id: "web-search",
+    name: "Web Search（国际）",
+    transport: "stdio",
+    bundled: true,
+    builtin: true,
+    modulePath: "electron/mcp-servers/web-search.mjs",
+    args: [],
+    enabled: false,
+    configFields: [
+      {
+        envKey: "SERPER_API_KEY",
+        label: "Serper API Key",
+        placeholder: "串号...",
+        helpUrl: "https://serper.dev",
+        helpText: "推荐，Google 搜索结果",
+        required: false,
+      },
+      {
+        envKey: "TAVILY_API_KEY",
+        label: "Tavily API Key",
+        placeholder: "tvly-...",
+        helpUrl: "https://tavily.com",
+        helpText: "备选搜索服务",
+        required: false,
+      },
+    ],
+  },
 ];
 
 export class McpManager {
@@ -143,8 +191,8 @@ export class McpManager {
         // 已存在：回填/锁定核心字段（防止手改配置文件破坏）
         const cfg = existing.config;
         let patched = false;
-        for (const key of ["bundled", "builtin", "modulePath", "transport"]) {
-          if (cfg[key] !== builtin[key]) {
+        for (const key of ["bundled", "builtin", "modulePath", "transport", "configFields"]) {
+          if (JSON.stringify(cfg[key]) !== JSON.stringify(builtin[key])) {
             cfg[key] = builtin[key];
             patched = true;
           }
@@ -508,6 +556,7 @@ export class McpManager {
         headers: entry.config.headers,
         env: entry.config.env ?? {},
       },
+      ...(entry.config.configFields ? { configFields: entry.config.configFields } : {}),
     }));
   }
 

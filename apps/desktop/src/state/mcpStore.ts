@@ -6,6 +6,15 @@ export type McpToolInfo = {
   inputSchema?: any;
 };
 
+export type McpConfigField = {
+  envKey: string;
+  label: string;
+  placeholder?: string;
+  helpUrl?: string;
+  helpText?: string;
+  required?: boolean;
+};
+
 export type McpServerState = {
   id: string;
   name: string;
@@ -16,6 +25,7 @@ export type McpServerState = {
   builtin?: boolean;
   tools: McpToolInfo[];
   error?: string | null;
+  configFields?: McpConfigField[];
   config?: {
     command?: string;
     args?: string[];

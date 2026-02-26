@@ -642,6 +642,22 @@ function McpServerCard({
               正在连接...
             </div>
           )}
+          {server.status === "disconnected" && !server.enabled && server.configFields?.length && (() => {
+            const env = server.config?.env ?? {};
+            const missing = server.configFields.filter((f) => f.required && !env[f.envKey]?.trim());
+            const anyFilled = server.configFields.some((f) => env[f.envKey]?.trim());
+            if (missing.length > 0) return (
+              <div className="text-[11px] text-amber-600 dark:text-amber-400 mt-0.5">
+                需要配置 {missing.map((f) => f.label).join("、")}
+              </div>
+            );
+            if (!anyFilled && server.configFields.some((f) => !f.required)) return (
+              <div className="text-[11px] text-amber-600 dark:text-amber-400 mt-0.5">
+                需要至少配置一个 API Key
+              </div>
+            );
+            return null;
+          })()}
         </div>
         <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
           {server.status === "error" && (
@@ -719,6 +735,8 @@ function McpAddDialog({ editId, onClose }: { editId: string | null; onClose: () 
 
   const existing = editId ? servers.find((s) => s.id === editId) : null;
   const isBundled = existing?.bundled === true;
+  const configFields = existing?.configFields ?? [];
+  const hasConfigFields = configFields.length > 0;
 
   const [transport, setTransport] = useState<TransportType>(existing?.transport ?? "stdio");
   const [name, setName] = useState(existing?.name ?? "");
@@ -728,8 +746,13 @@ function McpAddDialog({ editId, onClose }: { editId: string | null; onClose: () 
   const [envPairs, setEnvPairs] = useState<Array<{ key: string; value: string; visible: boolean }>>(
     () => {
       const env = existing?.config?.env;
-      if (env && typeof env === "object" && Object.keys(env).length > 0) {
-        return Object.entries(env).map(([k, v]) => ({ key: k, value: v, visible: false }));
+      const envMap = (env && typeof env === "object") ? env : {};
+      // 有 configFields 时，按字段定义初始化（保留用户已填的值）
+      if (configFields.length > 0) {
+        return configFields.map((f) => ({ key: f.envKey, value: envMap[f.envKey] ?? "", visible: false }));
+      }
+      if (Object.keys(envMap).length > 0) {
+        return Object.entries(envMap).map(([k, v]) => ({ key: k, value: v, visible: false }));
       }
       return [];
     },
@@ -759,11 +782,11 @@ function McpAddDialog({ editId, onClose }: { editId: string | null; onClose: () 
       config.endpoint = endpoint.trim();
     }
 
-    // 环境变量
+    // 环境变量（空值不写入，避免覆盖系统环境变量）
     const envObj: Record<string, string> = {};
     for (const p of envPairs) {
       const k = p.key.trim();
-      if (k) envObj[k] = p.value;
+      if (k && p.value.trim()) envObj[k] = p.value.trim();
     }
     if (Object.keys(envObj).length > 0) {
       config.env = envObj;
@@ -871,7 +894,58 @@ function McpAddDialog({ editId, onClose }: { editId: string | null; onClose: () 
         </div>
       )}
 
-      {/* 环境变量 */}
+      {/* 环境变量 / API Key 配置 */}
+      {hasConfigFields ? (
+        <div className="flex flex-col gap-2.5">
+          <label className="text-[12px] font-medium text-text">API 密钥配置</label>
+          {configFields.map((field, idx) => (
+            <div key={field.envKey} className="flex flex-col gap-1">
+              <div className="flex items-center gap-2">
+                <label className="text-[12px] font-medium text-text-muted">{field.label}</label>
+                {field.helpUrl && (
+                  <a
+                    href={field.helpUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-0.5 text-[11px] text-accent hover:underline"
+                    onClick={(e) => { e.stopPropagation(); (window as any).desktop?.shell?.openExternal?.(field.helpUrl); e.preventDefault(); }}
+                  >
+                    {field.helpText || "获取密钥"}
+                    <ExternalLink size={10} />
+                  </a>
+                )}
+                {field.required && (
+                  <span className="text-[10px] text-red-500/70 font-medium">必填</span>
+                )}
+              </div>
+              <div className="relative">
+                <input
+                  type={envPairs[idx]?.visible ? "text" : "password"}
+                  value={envPairs[idx]?.value ?? ""}
+                  onChange={(e) => {
+                    const next = [...envPairs];
+                    next[idx] = { ...next[idx], value: e.target.value };
+                    setEnvPairs(next);
+                  }}
+                  placeholder={field.placeholder || "请输入..."}
+                  className="w-full px-3 py-1.5 pr-8 rounded-lg border border-border bg-surface text-[12px] text-text font-mono placeholder:text-text-faint focus:outline-none focus:border-accent transition-colors"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = [...envPairs];
+                    next[idx] = { ...next[idx], visible: !next[idx]?.visible };
+                    setEnvPairs(next);
+                  }}
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 text-text-faint hover:text-text-muted transition-colors"
+                >
+                  {envPairs[idx]?.visible ? <EyeOff size={13} /> : <Eye size={13} />}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
       <div className="flex flex-col gap-1.5">
         <label className="text-[12px] font-medium text-text">环境变量</label>
         {envPairs.length > 0 && (
@@ -933,6 +1007,7 @@ function McpAddDialog({ editId, onClose }: { editId: string | null; onClose: () 
           添加环境变量
         </button>
       </div>
+      )}
 
       {/* Actions */}
       <div className="flex items-center justify-end gap-2 mt-1">
