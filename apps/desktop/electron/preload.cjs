@@ -98,6 +98,9 @@ contextBridge.exposeInMainWorld("desktop", {
     getVersion() {
       return ipcRenderer.invoke("app.getVersion");
     },
+    getTempPath() {
+      return ipcRenderer.invoke("app.getTempPath");
+    },
   },
   update: {
     check(opts) {

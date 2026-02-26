@@ -1066,6 +1066,254 @@ const tools: ToolDefinition[] = [
       };
     },
   },
+  // ── kb.import（仅导入，不抽卡）──────────────────────────
+  {
+    name: "kb.import",
+    description: "仅导入语料到知识库（不抽卡）：接收 text/path/url（三选一），秒级返回导入结果。",
+    args: [
+      { name: "text", desc: "原始文本（text/path/url 三选一）" },
+      { name: "path", desc: "文件路径（项目相对或绝对路径；text/path/url 三选一）" },
+      { name: "url", desc: "网页 URL（text/path/url 三选一）" },
+      { name: "libraryId", desc: "目标库 ID（可选；不传则弹出选择界面）" },
+      { name: "libraryName", desc: "目标库名称（可选；匹配已有库）" },
+      { name: "purpose", desc: '库用途：material|style|product（可选）' },
+    ],
+    riskLevel: "medium",
+    applyPolicy: "proposal",
+    reversible: false,
+    run: async (args) => {
+      // ---------- 1) 校验输入 ----------
+      const textInput = String(args.text ?? "").trim();
+      const pathInput = String(args.path ?? "").trim();
+      const urlInput = String(args.url ?? "").trim();
+      const inputKinds = [textInput ? "text" : "", pathInput ? "path" : "", urlInput ? "url" : ""].filter(Boolean);
+      if (inputKinds.length !== 1) return { ok: false, error: "MUST_PROVIDE_EXACTLY_ONE_OF_TEXT_PATH_URL" };
+      if (urlInput) {
+        try { new URL(urlInput); } catch { return { ok: false, error: "INVALID_URL" }; }
+      }
+
+      // ---------- 2) 确保 kbStore 就绪 ----------
+      const ready = await useKbStore.getState().ensureReady().catch(() => false);
+      if (!ready) return { ok: false, error: "KB_NOT_READY" };
+      await useKbStore.getState().refreshLibraries().catch(() => void 0);
+
+      // ---------- 3) 选择/匹配库 ----------
+      let libraryId = String(args.libraryId ?? "").trim();
+      const libraryNameArg = String(args.libraryName ?? "").trim();
+      const purposeArg = String(args.purpose ?? "").trim();
+      let currentLibraries = useKbStore.getState().libraries ?? [];
+
+      if (libraryId && !currentLibraries.some((l) => l.id === libraryId)) {
+        return { ok: false, error: "LIBRARY_NOT_FOUND" };
+      }
+      if (!libraryId && libraryNameArg) {
+        const hit = currentLibraries.find((l) => {
+          if (String(l.name ?? "").trim() !== libraryNameArg) return false;
+          if (!purposeArg) return true;
+          return String((l as any).purpose ?? "material").trim() === purposeArg;
+        });
+        if (hit?.id) libraryId = hit.id;
+      }
+      if (!libraryId) {
+        const selected = await useKbStore.getState().requestLibrarySelect();
+        if (!selected) return { ok: false, error: "LIBRARY_SELECTION_CANCELLED" };
+        libraryId = String(selected).trim();
+        await useKbStore.getState().refreshLibraries().catch(() => void 0);
+        currentLibraries = useKbStore.getState().libraries ?? [];
+      }
+      if (!libraryId || !currentLibraries.some((l) => l.id === libraryId)) {
+        return { ok: false, error: "LIBRARY_NOT_FOUND" };
+      }
+      useKbStore.getState().setCurrentLibrary(libraryId);
+
+      // ---------- 4) 导入 ----------
+      let importRet: { imported: number; skipped: number; docIds: string[] } | null = null;
+      const tmpFileName = textInput
+        ? `writing_ide_kb_import_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.md`
+        : "";
+      // 通过 Electron IPC 获取跨平台临时目录（macOS/Windows/Linux 均正确）
+      let tmpDir = "/tmp";
+      try {
+        const ret = await window.desktop?.app?.getTempPath();
+        if (ret?.ok && ret.path) tmpDir = ret.path;
+      } catch { /* fallback /tmp */ }
+
+      try {
+        if (textInput) {
+          const api = window.desktop?.fs;
+          if (!api) return { ok: false, error: "FS_API_UNAVAILABLE" };
+          const writeRet = await api.writeFile(tmpDir, tmpFileName, textInput);
+          if (!writeRet?.ok) return { ok: false, error: "TMP_FILE_WRITE_FAILED" };
+          // 拼接绝对路径：去掉 tmpDir 末尾分隔符，用 / 连接（Node.js fs 兼容混合分隔符）
+          const absPath = `${tmpDir.replace(/[\\/]+$/, "")}/${tmpFileName}`;
+          importRet = await useKbStore.getState().importExternalFiles([absPath]);
+        } else if (pathInput) {
+          const isAbsolute = /^([a-zA-Z]:[\\/]|\/)/.test(pathInput);
+          importRet = isAbsolute
+            ? await useKbStore.getState().importExternalFiles([pathInput])
+            : await useKbStore.getState().importProjectPaths([normalizeRelPath(pathInput)]);
+        } else {
+          importRet = await useKbStore.getState().importUrls([urlInput]);
+        }
+      } finally {
+        // 清理临时文件
+        if (tmpFileName) {
+          window.desktop?.fs?.deletePath?.(tmpDir, tmpFileName).catch(() => void 0);
+        }
+      }
+
+      const docIds = (importRet?.docIds ?? []).map((x) => String(x ?? "").trim()).filter(Boolean);
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          libraryId,
+          docIds,
+          imported: importRet?.imported ?? 0,
+          skipped: importRet?.skipped ?? 0,
+        },
+        undoable: false,
+      };
+    },
+  },
+  // ── kb.extract（入队抽卡，毫秒级返回）──────────────────────────
+  {
+    name: "kb.extract",
+    description: "入队抽卡并启动（立即返回）：将 docIds 入队到后台抽卡队列，支持可选入队手册任务与自动 attach。",
+    args: [
+      { name: "docIds", required: true, desc: "文档 ID 数组" },
+      { name: "autoPlaybook", desc: "可选：是否自动入队风格手册任务（默认 false）" },
+      { name: "autoAttach", desc: "可选：是否自动关联库到当前 run（默认 false）" },
+    ],
+    riskLevel: "medium",
+    applyPolicy: "proposal",
+    reversible: false,
+    run: async (args) => {
+      const rawDocIds = Array.isArray(args.docIds) ? args.docIds : [];
+      const docIds = Array.from(new Set((rawDocIds as unknown[]).map((x) => String(x ?? "").trim()).filter(Boolean)));
+      if (!docIds.length) return { ok: false, error: "DOC_IDS_REQUIRED" };
+
+      const ready = await useKbStore.getState().ensureReady().catch(() => false);
+      if (!ready) return { ok: false, error: "KB_NOT_READY" };
+
+      // 入队抽卡并启动
+      await useKbStore.getState().enqueueCardJobs(docIds, { autoStart: true });
+
+      // 收集相关 libraryIds
+      const currentLibraryId = String(useKbStore.getState().currentLibraryId ?? "").trim();
+      const libraryIds = currentLibraryId ? [currentLibraryId] : [];
+
+      // 可选：入队手册任务（不 await，避免阻塞）
+      const autoPlaybook = Boolean(args.autoPlaybook ?? false);
+      let enqueuedPlaybook = 0;
+      if (autoPlaybook) {
+        for (const libId of libraryIds) {
+          const ret = await useKbStore.getState().enqueuePlaybookJob(libId).catch(() => ({ ok: false }));
+          if ((ret as any)?.ok) enqueuedPlaybook++;
+        }
+      }
+
+      // 可选：自动 attach 库
+      const autoAttach = Boolean(args.autoAttach ?? false);
+      const attachedIds: string[] = [];
+      if (autoAttach && libraryIds.length) {
+        const cur = useRunStore.getState().kbAttachedLibraryIds ?? [];
+        for (const id of libraryIds) {
+          if (!cur.includes(id)) attachedIds.push(id);
+        }
+        if (attachedIds.length) {
+          useRunStore.getState().setKbAttachedLibraries([...cur, ...attachedIds]);
+        }
+      }
+
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          enqueuedCards: docIds.length,
+          enqueuedPlaybook,
+          attached: attachedIds,
+        },
+        undoable: false,
+      };
+    },
+  },
+  // ── kb.jobStatus（查询抽卡进度）──────────────────────────
+  {
+    name: "kb.jobStatus",
+    description: "查询 KB 抽卡/手册任务进度（毫秒级返回；可选按 docIds 过滤）。",
+    args: [{ name: "docIds", desc: "可选：仅返回这些 docIds 相关的任务" }],
+    riskLevel: "low",
+    applyPolicy: "proposal",
+    reversible: false,
+    run: async (args) => {
+      const ready = await useKbStore.getState().ensureReady().catch(() => false);
+      if (!ready) return { ok: false, error: "KB_NOT_READY" };
+
+      const rawDocIds = Array.isArray(args.docIds) ? (args.docIds as unknown[]) : [];
+      const docIdFilter = new Set(rawDocIds.map((x) => String(x ?? "").trim()).filter(Boolean));
+
+      const kb = useKbStore.getState();
+      const jobs = (kb.cardJobs ?? [])
+        .filter((j) => !docIdFilter.size || docIdFilter.has(j.docId))
+        .map((j) => ({
+          docId: j.docId,
+          docTitle: j.docTitle,
+          libraryId: j.libraryId,
+          libraryName: j.libraryName,
+          status: j.status,
+          extractedCards: j.extractedCards,
+          error: j.error,
+          updatedAt: j.updatedAt,
+        }));
+
+      // 手册任务：按 card jobs 涉及的 libraryIds 过滤
+      const libFilter = new Set(jobs.map((j) => String(j.libraryId ?? "")).filter(Boolean));
+      const playbookJobs = (kb.playbookJobs ?? [])
+        .filter((j) => !docIdFilter.size || libFilter.has(j.libraryId))
+        .map((j) => ({
+          libraryId: j.libraryId,
+          libraryName: j.libraryName,
+          status: j.status,
+          totalFacets: j.totalFacets,
+          generatedFacets: j.generatedFacets,
+          phase: j.phase,
+          error: j.error,
+          updatedAt: j.updatedAt,
+        }));
+
+      // 汇总统计
+      const countByStatus = (items: Array<{ status: string }>) => {
+        const r = { total: items.length, pending: 0, running: 0, success: 0, failed: 0, skipped: 0, cancelled: 0 };
+        for (const item of items) {
+          const s = item.status;
+          if (s === "pending") r.pending++;
+          else if (s === "running") r.running++;
+          else if (s === "success") r.success++;
+          else if (s === "failed") r.failed++;
+          else if (s === "skipped") r.skipped++;
+          else if (s === "cancelled") r.cancelled++;
+        }
+        return r;
+      };
+
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          status: kb.cardJobStatus,
+          jobs,
+          playbookJobs,
+          summary: {
+            cardJobStatus: kb.cardJobStatus,
+            cards: countByStatus(jobs),
+            playbook: countByStatus(playbookJobs),
+          },
+        },
+        undoable: false,
+      };
+    },
+  },
   {
     name: "kb.search",
     description:

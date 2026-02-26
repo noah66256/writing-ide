@@ -218,25 +218,23 @@ export const CORPUS_INGEST_SKILL: SkillManifest = {
   promptFragments: {
     system:
       "当 skill=corpus_ingest 激活时（语料导入与抽卡）：\n" +
-      "1) 你的首要任务是帮用户把语料导入知识库并完成抽卡。\n" +
-      "2) 调用 kb.ingest 工具：\n" +
-      "   - 若用户提供了文本，用 text 参数。\n" +
-      "   - 若用户提供了文件路径，用 path 参数。\n" +
-      "   - 若用户提供了 URL，用 url 参数。\n" +
-      "3) 不需要指定 libraryId 或 libraryName —— 工具会自动让用户选择目标库。除非用户明确说了库名，否则不要传 libraryId/libraryName 参数。\n" +
-      "4) 抽卡完成后，向用户报告：\n" +
-      "   - 抽到了多少张卡（按 cardType 分类：hook/thesis/ending/one_liner/outline）\n" +
-      "   - 用户可在输入框 @ 提及该库名来在写作时使用\n" +
-      "5) 若用户在同一 run 里接着要求写作：直接进入写作流程（kb.search 已可命中新卡）。\n" +
-      "6) 不要在未调用 kb.ingest 前就尝试 kb.search 搜索未导入的内容。",
-    context: "ACTIVE_SKILLS: corpus_ingest（语料导入与抽卡）",
+      "1) 你的团队中有「学习专员」(learning_specialist)，所有语料导入和抽卡任务都委派给它。\n" +
+      "2) 使用 agent.delegate 委派：\n" +
+      "   - agentId: \"learning_specialist\"\n" +
+      "   - task: 包含用户原始请求及语料来源信息（文本/文件/URL）\n" +
+      "   - 如用户指定了库名，在 task 中说明\n" +
+      "   - 如用户提供了大段文本，直接在 task 中完整传递，不要截断\n" +
+      "3) 学习专员返回结果后，向用户汇报：\n" +
+      "   - 导入了多少文档、抽卡已在后台进行\n" +
+      "   - 用户可在输入框 @ 提及库名来在写作时使用\n" +
+      "4) 若用户在同一 run 里接着要求写作：直接进入写作流程。",
+    context: "ACTIVE_SKILLS: corpus_ingest（语料导入与抽卡 → 委派学习专员）",
   },
   policies: [],
   toolCaps: {
     allowTools: [
-      "kb.ingest",
+      "agent.delegate",
       "kb.listLibraries",
-      "kb.search",
       "run.setTodoList",
       "run.todo.upsertMany",
       "run.todo.update",

@@ -1,6 +1,7 @@
 import type { editor } from "monaco-editor";
 import { create } from "zustand";
 import { useRunStore } from "./runStore";
+import { useWorkspaceStore } from "./workspaceStore";
 
 export type ProjectFile = {
   path: string;
@@ -418,6 +419,16 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       await api.watchStart?.(rootDir);
     } catch {
       // ignore
+    }
+
+    // KB 自动关联：项目打开时若未设置 KB 目录，自动关联到项目目录
+    // 延迟导入 kbStore 以避免循环依赖（kbStore → projectStore → kbStore）
+    const currentKbDir = useWorkspaceStore.getState().kbBaseDir;
+    if (!currentKbDir) {
+      import("./kbStore").then(({ useKbStore }) => {
+        useKbStore.getState().setBaseDir(rootDir);
+        void useKbStore.getState().refreshLibraries().catch(() => void 0);
+      }).catch(() => void 0);
     }
   },
 

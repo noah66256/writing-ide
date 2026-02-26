@@ -204,6 +204,155 @@ export const TOOL_LIST: ToolMeta[] = [
     },
   },
   {
+    name: "kb.import",
+    description:
+      "仅导入语料到知识库（不抽卡）：接收 text/path/url（三选一），秒级完成入库。\n" +
+      "【输入】text/path/url 三选一；可选 libraryId/libraryName/purpose 指定目标库。\n" +
+      "【输出】返回 libraryId、docIds、imported/skipped 计数。\n" +
+      "【与 kb.ingest 区别】kb.import 只做导入不抽卡，适合大体量语料场景——导入后用 kb.extract 异步入队抽卡。",
+    args: [
+      { name: "text", required: false, desc: "要导入的文本内容（text/path/url 三选一）", type: "string" },
+      { name: "path", required: false, desc: "文件路径（项目相对路径或绝对路径；text/path/url 三选一）", type: "string" },
+      { name: "url", required: false, desc: "网页 URL（text/path/url 三选一）", type: "string" },
+      { name: "libraryId", required: false, desc: "可选：目标库 ID；不传则弹出库选择器", type: "string" },
+      { name: "libraryName", required: false, desc: "可选：目标库名称（用于匹配已有库）", type: "string" },
+      { name: "purpose", required: false, desc: '可选：库用途 "style"|"material"|"product"（用于匹配库）', type: "string" },
+    ],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string" },
+        path: { type: "string" },
+        url: { type: "string" },
+        libraryId: { type: "string" },
+        libraryName: { type: "string" },
+        purpose: { type: "string" },
+      },
+      oneOfRequired: [{ required: ["text"] }, { required: ["path"] }, { required: ["url"] }],
+      additionalProperties: true,
+    },
+    outputSchema: {
+      type: "object",
+      description: "KB import result",
+      properties: {
+        ok: { type: "boolean" },
+        libraryId: { type: "string" },
+        docIds: { type: "array", items: { type: "string" } },
+        imported: { type: "number" },
+        skipped: { type: "number" },
+      },
+    },
+  },
+  {
+    name: "kb.extract",
+    description:
+      "入队抽卡并启动（毫秒级返回）：将 docIds 入队到后台抽卡队列并自动开始执行。\n" +
+      "抽卡在后台异步进行，不阻塞当前工具调用。可选入队手册任务、自动关联库。\n" +
+      "【配合使用】先 kb.import 导入 → 拿到 docIds → kb.extract 启动抽卡 → kb.jobStatus 查进度。",
+    args: [
+      { name: "docIds", required: true, desc: "文档 ID 数组（必填，来自 kb.import 的返回）", type: "array" },
+      { name: "autoPlaybook", required: false, desc: "可选：是否自动入队风格手册生成任务（默认 false）", type: "boolean" },
+      { name: "autoAttach", required: false, desc: "可选：是否自动将库关联到当前会话（默认 false）", type: "boolean" },
+    ],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        docIds: { type: "array" },
+        autoPlaybook: { type: "boolean" },
+        autoAttach: { type: "boolean" },
+      },
+      required: ["docIds"],
+      additionalProperties: true,
+    },
+    outputSchema: {
+      type: "object",
+      description: "KB extract enqueue result",
+      properties: {
+        ok: { type: "boolean" },
+        enqueuedCards: { type: "number" },
+        enqueuedPlaybook: { type: "number" },
+        attached: { type: "array", items: { type: "string" } },
+      },
+    },
+  },
+  {
+    name: "kb.jobStatus",
+    description:
+      "查询 KB 抽卡/手册任务的进度（毫秒级返回）。\n" +
+      "默认返回全部任务；可选传 docIds 仅查看指定文档的相关进度。\n" +
+      "返回值包含逐条任务状态 + 汇总统计。",
+    args: [{ name: "docIds", required: false, desc: "可选：仅查看这些文档 ID 相关的任务", type: "array" }],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        docIds: { type: "array" },
+      },
+      additionalProperties: true,
+    },
+    outputSchema: {
+      type: "object",
+      description: "KB jobs status",
+      properties: {
+        status: { type: "string", description: "idle|running|paused" },
+        jobs: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              docId: { type: "string" },
+              docTitle: { type: "string" },
+              status: { type: "string" },
+              extractedCards: { type: "number" },
+              error: { type: "string" },
+            },
+          },
+        },
+        playbookJobs: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              libraryId: { type: "string" },
+              libraryName: { type: "string" },
+              status: { type: "string" },
+              totalFacets: { type: "number" },
+              generatedFacets: { type: "number" },
+              phase: { type: "string" },
+            },
+          },
+        },
+        summary: {
+          type: "object",
+          properties: {
+            cards: {
+              type: "object",
+              properties: {
+                total: { type: "number" },
+                pending: { type: "number" },
+                running: { type: "number" },
+                success: { type: "number" },
+                failed: { type: "number" },
+              },
+            },
+            playbook: {
+              type: "object",
+              properties: {
+                total: { type: "number" },
+                pending: { type: "number" },
+                running: { type: "number" },
+                success: { type: "number" },
+                failed: { type: "number" },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  {
     name: "kb.search",
     description:
       "在本地知识库中检索（按库过滤、按 source_doc 分组返回）。\n" +

@@ -1216,6 +1216,7 @@ function registerIpc() {
 
   // Update（v0.1）
   ipcMain.handle("app.getVersion", async () => ({ ok: true, version: String(app.getVersion() ?? "") }));
+  ipcMain.handle("app.getTempPath", async () => ({ ok: true, path: app.getPath("temp") }));
   ipcMain.handle("update.check", async (_event, opts) => checkForUpdates(opts));
   ipcMain.handle("update.checkInteractive", async (_event, opts) => interactiveUpdateFlow(opts));
 

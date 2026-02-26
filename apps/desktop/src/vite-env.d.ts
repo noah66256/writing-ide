@@ -10,6 +10,7 @@ declare global {
       onMenuAction?: (handler: (payload: any) => void) => () => void;
       app?: {
         getVersion: () => Promise<{ ok: boolean; version?: string; error?: string }>;
+        getTempPath: () => Promise<{ ok: boolean; path?: string; error?: string }>;
       };
       update?: {
         check: (opts?: { baseUrl?: string }) => Promise<{
