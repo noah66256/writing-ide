@@ -1286,6 +1286,23 @@ export class WritingAgentRunner {
   }
 
   private _checkAutoRetry(assistantText: string): boolean {
+    // Sub-agent tool nudge: if a sub-agent's early turns produce text without
+    // calling any tools (and tools are available), inject a nudge message.
+    // This handles API proxies that strip tool_choice: "any" from the request.
+    if (this.ctx.agentId && this.turn <= 2 && this.ctx.allowedToolNames.size > 0) {
+      this.messages.push({
+        role: "user",
+        content: "请立即调用工具执行任务。不要输出分析或计划——直接调用第一个需要的工具。",
+      });
+      this.ctx.writeEvent("run.notice", {
+        turn: this.turn,
+        kind: "info",
+        title: "SubAgentToolNudge",
+        message: "子 Agent 未调用工具，已注入工具调用提醒并继续下一轮。",
+      });
+      return true;
+    }
+
     if (!this.ctx.intent.isWritingTask) return false;
 
     const analysis = analyzeAutoRetryText({

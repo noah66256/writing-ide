@@ -2234,6 +2234,10 @@ const tools: ToolDefinition[] = [
     run: async (args) => {
       const dir = normalizeRelPath(String(args.path ?? ""));
       if (!dir) return { ok: false, error: "MISSING_PATH" };
+      // 没有项目目录时阻止创建目录
+      if (!useProjectStore.getState().rootDir) {
+        return { ok: false, error: "NO_PROJECT", output: { ok: false, message: "当前未打开项目文件夹，无法创建目录。请先让用户打开一个项目文件夹。" } };
+      }
       const snap = useProjectStore.getState().snapshot();
       const s = useProjectStore.getState();
       await s.mkdir(dir);
@@ -2309,6 +2313,10 @@ const tools: ToolDefinition[] = [
     run: async (args) => {
       const path0 = normalizeRelPath(String(args.path ?? ""));
       if (!path0) return { ok: false, error: "MISSING_PATH" };
+      // 没有项目目录时阻止删除操作
+      if (!useProjectStore.getState().rootDir) {
+        return { ok: false, error: "NO_PROJECT", output: { ok: false, message: "当前未打开项目文件夹，无法执行删除操作。请先让用户打开一个项目文件夹。" } };
+      }
       const proj = useProjectStore.getState();
       const isFile = !!proj.files.find((f) => f.path === path0);
       const isDir = proj.dirs.includes(path0);
@@ -2566,6 +2574,10 @@ const tools: ToolDefinition[] = [
     run: async (args) => {
       const pathRaw = normalizeRelPath(String(args.path ?? ""));
       const content = String(args.content ?? "");
+      // 没有项目目录时阻止写入——文件无法持久化到磁盘
+      if (!useProjectStore.getState().rootDir) {
+        return { ok: false, error: "NO_PROJECT", output: { ok: false, message: "当前未打开项目文件夹，文件无法保存到磁盘。请先让用户通过「打开项目」按钮选择一个项目文件夹。" } };
+      }
       if (!pathRaw) return { ok: false, error: "MISSING_PATH" };
       const ifExistsRaw = String((args as any).ifExists ?? "").trim().toLowerCase();
       const ifExists = ifExistsRaw === "overwrite" ? "overwrite" : ifExistsRaw === "error" ? "error" : "rename";
@@ -2656,6 +2668,10 @@ const tools: ToolDefinition[] = [
       const srcPath = normalizeRelPath(String(args.path ?? ""));
       const dirRaw = normalizeRelPath(String(args.targetDir ?? ""));
       const targetDir = dirRaw.replace(/\/+$/g, "");
+      // 没有项目目录时阻止分割写入
+      if (!useProjectStore.getState().rootDir) {
+        return { ok: false, error: "NO_PROJECT", output: { ok: false, message: "当前未打开项目文件夹，文件无法保存到磁盘。请先让用户通过「打开项目」按钮选择一个项目文件夹。" } };
+      }
       if (!srcPath) return { ok: false, error: "MISSING_PATH" };
       if (!targetDir) return { ok: false, error: "MISSING_TARGET_DIR" };
 

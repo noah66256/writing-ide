@@ -386,11 +386,11 @@ export function buildAgentProtocolPrompt(args: {
       ? `你的角色是项目经理：负责任务分解、流程协调、委派执行、审核质量、整合结果并交付给用户。\n` +
         `你同时负责两个方向的沟通——向上对接用户需求，向下调度团队成员。\n\n` +
         `你的团队成员（通过 agent.delegate 调度）：\n${teamLines}\n没有列出的角色你不具备，不要虚构。\n\n` +
-        `管理者准则（有团队成员时严格遵守）：\n` +
-        `- 你不是一线执行者。凡是团队成员职责范围内的工作（写稿、调研、SEO 优化、语料导入/抽卡等），必须通过 agent.delegate 委派，不要自己动手。\n` +
-        `- 你可以做的事：分析用户需求、制定计划（Todo）、记录决策（mainDoc）、委派任务、审核子 agent 返回的结果、润色/整合后交付用户。\n` +
-        `- 你不应该做的事：自己调用 kb.search 拉素材写稿、自己调用 doc.write 写正文、自己调用 lint.style 做风格检查——这些是团队成员的活。\n` +
-        `- 唯一例外：用户明确要求你本人回答的简单问答/只读查询（如"这篇稿子写得怎么样""帮我解释一下这个概念"），不涉及执行产出的，可以直接回答。\n\n`
+        `管理者准则（有团队成员时优先遵守）：\n` +
+        `- 你拥有所有工具的完整权限，但作为管理者，应优先委派给合适的团队成员执行。\n` +
+        `- 优先委派：写稿、调研、SEO 优化、语料导入/抽卡等属于团队成员专长的工作，优先通过 agent.delegate 委派。\n` +
+        `- 亲自执行：当任务简单（如快速读取文档、记录决策、小幅修改）、不在任何成员职责范围内、或用户明确要求你亲自处理时，直接使用工具执行。\n` +
+        `- 审核整合：子 agent 返回的结果由你审核、润色、整合后交付用户。\n\n`
       : `你目前没有团队成员，所有任务由你独立执行。\n\n`) +
     `交付文化：先给结果再补说明；不弹确认菜单。\n` +
     personaLine +
@@ -1651,7 +1651,9 @@ export async function prepareAgentRun(args: {
       content: buildAgentProtocolPrompt({ mode, allowedToolNames: baseAllowedToolNames as any, persona: personaFromPack }),
     },
     ...(skillsSystemPrompt ? ([{ role: "system", content: skillsSystemPrompt }] as OpenAiChatMessage[]) : []),
-    ...(projectDirFromSidecar ? ([{ role: "system", content: `用户当前已打开项目目录：${projectDirFromSidecar}\n项目内的文件操作（doc.read/doc.write/project.search 等）均基于此目录。` }] as OpenAiChatMessage[]) : []),
+    ...(projectDirFromSidecar
+      ? ([{ role: "system", content: `用户当前已打开项目目录：${projectDirFromSidecar}\n项目内的文件操作（doc.read/doc.write/project.search 等）均基于此目录。` }] as OpenAiChatMessage[])
+      : ([{ role: "system", content: `当前没有打开项目文件夹。文件写入工具（doc.write/doc.splitToDir/doc.mkdir 等）需要项目目录才能正常工作。\n在执行任何文件写入之前，你必须先提醒用户通过「打开项目」按钮选择或创建一个项目文件夹。不要在没有项目目录的情况下尝试写入文件。` }] as OpenAiChatMessage[])),
     ...(body.contextPack ? ([{ role: "system", content: body.contextPack }] as OpenAiChatMessage[]) : []),
     { role: "user", content: body.prompt },
   ];
