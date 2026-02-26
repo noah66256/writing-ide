@@ -20,7 +20,6 @@ type Props = {
 
 const SKILL_ITEMS: MentionItem[] = [
   { id: "style_imitate", type: "skill", label: "风格仿写", icon: <Sparkles size={14} /> },
-  { id: "corpus_ingest", type: "skill", label: "学风格/抽卡", icon: <BookOpen size={14} /> },
 ];
 
 export function MentionPopover({

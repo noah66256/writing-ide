@@ -315,7 +315,6 @@ function TeamTabContent() {
 
 const SKILL_DESCRIPTIONS: Record<string, string> = {
   style_imitate: "绑定风格库后自动启用，在写作时自动检索样例、lint 风格、写入",
-  corpus_ingest: "识别到「抽卡/学风格/导入语料」时自动启用导入流程",
 };
 
 function SkillTabContent() {

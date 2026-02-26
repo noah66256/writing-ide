@@ -550,6 +550,14 @@ export function looksLikeFileOpsIntent(text: string): boolean {
   return hasTargetHint;
 }
 
+// KB/语料操作关键词（抽卡、导入、学风格等）——复用于意图路由 + 自动委派
+const KB_OPS_PROMPT_RE =
+  /(抽卡|入库|导入语料|导入素材|学.{0,4}风格|学.{0,4}写法|学.{0,4}文风|分析.{0,4}文风|分析.{0,4}风格|提取.{0,4}风格|语料|素材.{0,6}入库|新建.{0,6}风格库|新建.{0,6}知识库|kb\.ingest)/;
+
+export function looksLikeKbOpsIntent(text: string): boolean {
+  return KB_OPS_PROMPT_RE.test(String(text ?? "").trim());
+}
+
 export function buildClarifyQuestionSlotBased(args: {
   userPrompt: string;
   meta: ReturnType<typeof normalizeIdeMeta>;
@@ -759,11 +767,7 @@ export function computeIntentRouteDecisionPhase0(args: {
   }
 
   // KB/语料操作：抽卡、导入、学风格等——需要工具闭环
-  const looksKbOps =
-    /(抽卡|入库|导入语料|导入素材|学.{0,4}风格|学.{0,4}写法|学.{0,4}文风|分析.{0,4}文风|分析.{0,4}风格|提取.{0,4}风格|语料|素材.{0,6}入库|新建.{0,6}风格库|新建.{0,6}知识库|kb\.ingest)/.test(
-      pTrim,
-    );
-  if (looksKbOps) {
+  if (looksLikeKbOpsIntent(pTrim)) {
     return {
       intentType: "task_execution",
       confidence: 0.88,
@@ -2222,7 +2226,7 @@ export async function executeAgentRun(args: {
     }
   }
 
-  if (mode !== "chat" && intentRoute.nextAction === "ask_clarify" && !intent.forceProceed) {
+  if (mode !== "chat" && intentRoute.nextAction === "ask_clarify" && !intent.forceProceed && !looksLikeKbOpsIntent(userPrompt)) {
     const turn = 0;
     const meta = normalizeIdeMeta({ ideSummary: ideSummaryFromSidecar, contextPack: body.contextPack, kbSelected: kbSelectedList as any[] });
     const hasRunTodo = Array.isArray(runTodoFromPack) && runTodoFromPack.length > 0;
@@ -2386,6 +2390,28 @@ export async function executeAgentRun(args: {
     .filter(Boolean)
     .join("\n\n");
 
+  // ── 代码级自动委派：KB ops → learning_specialist ──────────────
+  // 当用户提示词匹配 KB 操作（抽卡/入库/学风格）且未显式 @mention 任何 agent 时，
+  // 自动路由到 learning_specialist，绕过主 LLM 循环的不确定性。
+  // 混合意图保护：如果同时包含写作意图，交给主 Agent 按正常流程编排。
+  const explicitTargetAgentIds = Array.isArray(body.targetAgentIds)
+    ? (body.targetAgentIds as string[]).map((id) => String(id ?? "").trim()).filter(Boolean)
+    : [];
+  const autoKbOps =
+    mode === "agent" &&
+    explicitTargetAgentIds.length === 0 &&
+    looksLikeKbOpsIntent(userPrompt) &&
+    !intent.isWritingTask;
+  const runTargetAgentIds = autoKbOps
+    ? ["learning_specialist"]
+    : explicitTargetAgentIds.length > 0
+      ? explicitTargetAgentIds
+      : undefined;
+
+  if (autoKbOps) {
+    services.fastify?.log?.info?.({ runId, trigger: "auto_kb_ops_delegate" }, "KB ops detected → auto-delegate to learning_specialist");
+  }
+
   const runCtx: RunContext = {
     runId,
     mode: mode as "agent" | "chat",
@@ -2394,7 +2420,7 @@ export async function executeAgentRun(args: {
     activeSkills,
     allowedToolNames: baseAllowedToolNames,
     systemPrompt: fullSystemPrompt,
-    targetAgentIds: body.targetAgentIds ?? undefined,
+    targetAgentIds: runTargetAgentIds,
     toolSidecar,
     styleLinterLibraries,
     fastify: services.fastify,
