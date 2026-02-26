@@ -188,8 +188,8 @@ export const BUILTIN_SUB_AGENTS: SubAgentDefinition[] = [
     tools: ["kb.import", "kb.extract", "kb.jobStatus"],
     skills: [],
     mcpServers: [],
-    model: "haiku",
-    fallbackModels: ["sonnet"],
+    model: "sonnet",
+    fallbackModels: ["haiku"],
     toolPolicy: "auto_apply",
     budget: {
       maxTurns: 6,
