@@ -80,9 +80,9 @@ jobs:
           TITLE="Desktop v${VER}"
           echo "version=${VER}  tag=${TAG}"
 
-          # 收集产物
-          NSIS_PATH="$(find apps/desktop/out -maxdepth 2 -name '*.exe' ! -name '__*' -print | head -n 1 || true)"
-          BLOCKMAP="$(find apps/desktop/out -maxdepth 2 -name '*.exe.blockmap' -print | head -n 1 || true)"
+          # 收集产物（排除 win-unpacked 目录中的应用 exe）
+          NSIS_PATH="$(find apps/desktop/out -maxdepth 1 -name '*Setup*.exe' -print | head -n 1 || true)"
+          BLOCKMAP="$(find apps/desktop/out -maxdepth 1 -name '*.exe.blockmap' -print | head -n 1 || true)"
 
           if [ -z "${NSIS_PATH:-}" ]; then
             echo "EXE not found under apps/desktop/out"
