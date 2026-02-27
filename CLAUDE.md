@@ -135,6 +135,7 @@ Claude Code 与 Codex 组成双引擎协作：
 - Git commit 风格跟随仓库最近 5 条（中文为主）
 - Dev Gateway 地址：`http://120.26.6.147:8000`（Vite proxy 默认指向此地址）
 - 本地调 Gateway 时用 `VITE_GATEWAY_URL=http://localhost:8000` 覆盖
+- LLM 代理 `api.vectorengine.ai` **完全支持 Anthropic 原生协议**（Messages API `/v1/messages`），流式和非流式均可用，不要怀疑代理兼容性
 
 ---
 
@@ -159,21 +160,33 @@ Claude Code 与 Codex 组成双引擎协作：
 
 ### Desktop 打包与分发
 
-**打包命令**（在项目根目录执行）：
+**打包命令**：
 
 ```bash
-# Mac arm64 (DMG + ZIP)
+# Mac arm64 (DMG + ZIP)  —— 本地 macOS 执行
 cd apps/desktop && npm run dist:mac
 
-# Windows x64 NSIS 安装包（可从 macOS 交叉编译）
-cd apps/desktop && npm run dist:win
-
-# 其他变体
+# 其他 Mac 变体
 npm run dist:mac:x64          # Mac x64
 npm run dist:mac:universal     # Mac 通用二进制
-npm run dist:win:portable      # Win 便携版
-npm run dist:win:all           # Win NSIS + 便携版
 ```
+
+**Windows 打包必须通过 GitHub Actions**（macOS 交叉编译会导致 NSIS 卸载程序损坏 + ICU 路径问题）：
+
+```bash
+# 触发 GitHub Actions 构建（需先 git push）
+gh workflow run "Desktop Windows EXE" --ref master -f build_type=nsis
+
+# 查看构建状态
+gh run list --workflow=desktop-windows-exe.yml --limit=1
+
+# 产物自动上传到 GitHub Release desktop-v{version}
+gh release view desktop-v{version}
+```
+
+可选 `build_type`：`nsis`（安装版）、`portable`（便携版）、`all`（两者）。
+
+**重要：`productName` 为 ASCII `"WritingIDE"`**（避免 Windows CJK 路径导致 Chromium `icudtl.dat` 加载失败）。中文显示名通过 `nsis.shortcutName: "写作IDE"` 和 `artifactName` 保持。**不要改回 CJK productName。**
 
 **前置条件**：`npm run build` 会自动先编译 `@writing-ide/agent-core`，再 Vite 构建 renderer。
 

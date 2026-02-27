@@ -417,6 +417,19 @@ export async function completionOnceAnthropicMessages(args: AnthropicOnceArgs): 
     body.temperature = args.temperature;
   }
 
+  const _bodyStr = JSON.stringify(body);
+  const _t0 = Date.now();
+  console.log(`[once] start model=${args.model} body=${_bodyStr.length}B msgs=${args.messages.length}`);
+
+  // 组合 signal：外部传入的 + 90s 超时（取先触发的）
+  let signal = args.signal;
+  const timeoutMs = 90_000;
+  if (!signal) {
+    signal = AbortSignal.timeout(timeoutMs);
+  } else {
+    signal = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
+  }
+
   let res: Response;
   try {
     res = await fetch(url, {
@@ -426,15 +439,20 @@ export async function completionOnceAnthropicMessages(args: AnthropicOnceArgs): 
         "anthropic-version": "2023-06-01",
         "x-api-key": args.apiKey,
       },
-      body: JSON.stringify(body),
-      signal: args.signal,
+      body: _bodyStr,
+      signal,
     });
   } catch (e) {
-    return { ok: false, error: toErrorString(e) };
+    const errStr = toErrorString(e);
+    console.error(`[once] fetch-err ${Date.now() - _t0}ms ${errStr}`);
+    return { ok: false, error: errStr };
   }
+
+  console.log(`[once] res ${Date.now() - _t0}ms status=${res.status}`);
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
+    console.error(`[once] http-err ${res.status} ${text.slice(0, 300)}`);
     return { ok: false, error: text || `UPSTREAM_${res.status}`, status: res.status, rawText: text };
   }
 
