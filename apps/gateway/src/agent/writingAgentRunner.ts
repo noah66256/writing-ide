@@ -970,7 +970,10 @@ export class WritingAgentRunner {
       abortSignal: subAbort.signal,
       agentId: subAgent.id,
       maxTurns: budget.maxTurns,
-      toolChoiceFirstTurn: subAllowedToolNames.size > 0 ? { type: "any" as const } : undefined,
+      // 不再对子 agent 第一轮强制 tool_choice=any：
+      // 大上下文时模型推理选工具期间 SSE 流长时间静默，代理 idle timeout 会断连。
+      // 子 agent 的 systemPrompt 已明确指示第一步调哪个工具，无需强制。
+      toolChoiceFirstTurn: undefined,
       mainDoc: this.ctx.mainDoc,
       onTurnUsage: (promptTokens, completionTokens) => {
         // Forward to parent's usage callback
