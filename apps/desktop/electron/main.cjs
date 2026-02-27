@@ -1528,10 +1528,21 @@ app.on("window-all-closed", () => {
 // 同时清理 SingleInstanceLock，避免安装器误报"应用还在运行"
 app.on("will-quit", () => {
   // 清理 Electron 的 SingleInstanceLock 文件（防止安装器误报）
-  try {
-    const lockPath = path.join(app.getPath("userData"), "SingleInstanceLock");
-    fs.unlinkSync(lockPath);
-  } catch { /* ignore */ }
+  // 同时清理旧版 "写作IDE" 和新版 "WritingIDE" 两个路径
+  const lockDirs = new Set();
+  try { lockDirs.add(app.getPath("userData")); } catch { /* ignore */ }
+  if (process.platform === "win32") {
+    const appData = String(process.env.APPDATA ?? "").trim();
+    const localAppData = String(process.env.LOCALAPPDATA ?? "").trim();
+    for (const base of [appData, localAppData]) {
+      if (!base) continue;
+      lockDirs.add(path.join(base, "WritingIDE"));
+      lockDirs.add(path.join(base, "写作IDE"));
+    }
+  }
+  for (const dir of lockDirs) {
+    try { fs.unlinkSync(path.join(dir, "SingleInstanceLock")); } catch { /* ignore */ }
+  }
 
   if (!pendingUpdate) return;
   const { launchPath } = pendingUpdate;

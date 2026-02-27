@@ -1,18 +1,25 @@
-; 自定义 NSIS 安装脚本 —— 修复 "写作IDE无法关闭" 误报
+; 自定义 NSIS 安装脚本
 ; electron-builder 会自动加载 build/installer.nsh
 ;
-; 问题：默认 _CHECK_APP_RUNNING 用 tasklist|find.exe 管道检测进程，
-;       CJK 进程名在 cmd.exe 管道中编码不兼容导致误报。
-;       升级时运行旧卸载程序（内置同样 buggy 检查）也会误报。
+; v0.2: productName 从 "写作IDE" 改为 "WritingIDE"（ASCII），避免 Windows 下
+;       CJK 安装路径导致 Chromium icudtl.dat 加载失败。
+;       同时清理旧版 "写作IDE" 遗留的锁文件和注册表键。
 ;
 ; 策略：完全跳过进程检测（只清理锁文件），用 DeleteRegKey 阻止旧卸载程序运行。
-;       不调用任何 NSIS 插件函数（nsExec/nsProcess），确保 macOS 交叉编译兼容。
+;       不调用任何 NSIS 插件函数（nsExec/nsProcess），确保跨平台编译兼容。
+
+; 旧版 productName（v0.0.1 及之前）
+!define LEGACY_CJK_NAME "写作IDE"
 
 ; ── 安装器 .onInit ──
 ; 注意：此宏仅在安装器中展开，不编译进卸载器
 !macro customInit
+  ; 清理当前版本锁文件
   Delete "$LOCALAPPDATA\${PRODUCT_FILENAME}\SingleInstanceLock"
   Delete "$APPDATA\${PRODUCT_FILENAME}\SingleInstanceLock"
+  ; 清理旧版 CJK 名称锁文件
+  Delete "$LOCALAPPDATA\${LEGACY_CJK_NAME}\SingleInstanceLock"
+  Delete "$APPDATA\${LEGACY_CJK_NAME}\SingleInstanceLock"
 
   ; 删除旧版卸载注册表键 → uninstallOldVersion 读不到旧卸载路径 → 跳过旧卸载程序
   DeleteRegKey HKCU "${UNINSTALL_REGISTRY_KEY}"
@@ -30,11 +37,15 @@
 !macro customCheckAppRunning
   Delete "$LOCALAPPDATA\${PRODUCT_FILENAME}\SingleInstanceLock"
   Delete "$APPDATA\${PRODUCT_FILENAME}\SingleInstanceLock"
+  Delete "$LOCALAPPDATA\${LEGACY_CJK_NAME}\SingleInstanceLock"
+  Delete "$APPDATA\${LEGACY_CJK_NAME}\SingleInstanceLock"
 !macroend
 
 ; ── 卸载器 un.onInit ──
 !macro customUnInit
   Delete "$LOCALAPPDATA\${PRODUCT_FILENAME}\SingleInstanceLock"
   Delete "$APPDATA\${PRODUCT_FILENAME}\SingleInstanceLock"
+  Delete "$LOCALAPPDATA\${LEGACY_CJK_NAME}\SingleInstanceLock"
+  Delete "$APPDATA\${LEGACY_CJK_NAME}\SingleInstanceLock"
   Sleep 300
 !macroend

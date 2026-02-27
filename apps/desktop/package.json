@@ -55,7 +55,7 @@
   },
   "build": {
     "appId": "com.writing-ide.desktop",
-    "productName": "写作IDE",
+    "productName": "WritingIDE",
     "directories": {
       "output": "out"
     },
@@ -100,7 +100,8 @@
       "target": [
         "dmg",
         "zip"
-      ]
+      ],
+      "artifactName": "写作IDE-${version}-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -109,6 +110,8 @@
       "allowElevation": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
+      "shortcutName": "写作IDE",
+      "artifactName": "写作IDE Setup ${version}.${ext}",
       "include": "build/installer.nsh"
     }
   }
