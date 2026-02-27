@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { activateSkills, type ActiveSkill, BUILTIN_SUB_AGENTS } from "@writing-ide/agent-core";
+import { activateSkills, listRegisteredSkills, type ActiveSkill, BUILTIN_SUB_AGENTS } from "@writing-ide/agent-core";
 import { startGatewayRun } from "../agent/gatewayAgent";
 import { useRunStore, type MainDoc } from "../state/runStore";
 import { useProjectStore } from "../state/projectStore";
@@ -13,6 +13,7 @@ import { useConversationStore, type RunSnapshot, type SerializableStep } from ".
 import { ModelPickerModal, type ModelPickerItem } from "./ModelPickerModal";
 import { getGatewayBaseUrl } from "../agent/gatewayUrl";
 import { useAuthStore } from "../state/authStore";
+import { useSkillStore } from "../state/skillStore";
 import { useDialogStore } from "../state/dialogStore";
 
 type RunController = { cancel: (reason?: string) => void; done: Promise<void> };
@@ -267,9 +268,12 @@ export function AgentPane() {
     return "";
   }, [input, steps]);
 
+  const externalSkills = useSkillStore((s) => s.externalSkills);
+
   const activeSkills = useMemo((): ActiveSkill[] => {
-    return activateSkills({ mode: mode as any, userPrompt: skillPrompt, mainDocRunIntent: runIntentValue, kbSelected: [] as any });
-  }, [mode, runIntentValue, skillPrompt]);
+    const allManifests = [...listRegisteredSkills(), ...externalSkills];
+    return activateSkills({ mode: mode as any, userPrompt: skillPrompt, mainDocRunIntent: runIntentValue, kbSelected: [] as any, manifests: allManifests as any });
+  }, [mode, runIntentValue, skillPrompt, externalSkills]);
 
   const skillsLabel =
     activeSkills.length === 0

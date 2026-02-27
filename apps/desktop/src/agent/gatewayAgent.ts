@@ -3,9 +3,10 @@ import { useRunStore, type Mode } from "../state/runStore";
 import { useKbStore } from "../state/kbStore";
 import { useAuthStore } from "../state/authStore";
 import { facetLabel, getFacetPack } from "../kb/facets";
-import { activateSkills, detectRunIntent, BUILTIN_SUB_AGENTS } from "@writing-ide/agent-core";
+import { activateSkills, detectRunIntent, listRegisteredSkills, BUILTIN_SUB_AGENTS } from "@writing-ide/agent-core";
 import { usePersonaStore } from "../state/personaStore";
 import { useTeamStore, getEffectiveAgents } from "../state/teamStore";
+import { useSkillStore } from "../state/skillStore";
 import { startGatewayRunWs } from "./wsTransport";
 
 export function authHeader(): Record<string, string> {
@@ -1059,11 +1060,15 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     return out.length ? out : undefined;
   })();
 
+  // 合并内置 + 外部扩展包的 skill manifests
+  const allManifests = [...listRegisteredSkills(), ...useSkillStore.getState().externalSkills];
+
   const activeSkillsRaw = activateSkills({
     mode: useRunStore.getState().mode as any,
     userPrompt,
     mainDocRunIntent: (mainDoc as any)?.runIntent,
     kbSelected: kbSelected as any,
+    manifests: allManifests as any,
     // 关键：与 Gateway 对齐（detectRunIntent 会参考 RUN_TODO 做"续跑/短句"意图继承）
     intent: detectRunIntent({
       mode: useRunStore.getState().mode as any,

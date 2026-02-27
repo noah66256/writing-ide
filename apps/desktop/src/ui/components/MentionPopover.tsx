@@ -102,7 +102,11 @@ export function MentionPopover({ query, visible, onSelect, onClose }: Props) {
   const customAgentsKeys = useTeamStore((s) => Object.keys(s.customAgents).join(","));
   const libraries = useKbStore((s) => s.libraries);
   const skillOverrides = useSkillStore((s) => s.skillOverrides);
-  const allSkills = useMemo(() => listRegisteredSkills(), []);
+  const externalSkills = useSkillStore((s) => s.externalSkills);
+  const allSkills = useMemo(
+    () => [...listRegisteredSkills(), ...externalSkills],
+    [externalSkills],
+  );
 
   const agentItems = useMemo<MentionItem[]>(
     () =>

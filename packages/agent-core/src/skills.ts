@@ -8,6 +8,24 @@ export type TriggerRule = {
   args: Record<string, unknown>;
 };
 
+/**
+ * Skill 级 MCP Server 声明（外部扩展包热加载用）。
+ * - stdio: `entry` 为相对 skill 目录的入口脚本（.mjs/.cjs）
+ * - streamable-http / sse: `endpoint` 为服务地址
+ * - 运行时由 Desktop 主进程映射为 McpManager 的 server 配置
+ */
+export type SkillMcpConfig = {
+  serverId: string;
+  name?: string;
+  transport: "stdio" | "streamable-http" | "sse";
+  /** stdio 专用：相对 skill 目录的入口脚本路径 */
+  entry?: string;
+  /** http/sse 专用：服务端点 URL */
+  endpoint?: string;
+  /** 可选环境变量 */
+  env?: Record<string, string>;
+};
+
 export type SkillManifest = {
   id: string;
   name: string;
@@ -27,6 +45,8 @@ export type SkillManifest = {
   requires?: string[];
   /** 来源标记 */
   source?: "builtin" | "standard" | "user" | "admin";
+  /** 可选：该 Skill 自带的 MCP Server 声明 */
+  mcp?: SkillMcpConfig;
   ui: { badge: string; color?: string };
 };
 

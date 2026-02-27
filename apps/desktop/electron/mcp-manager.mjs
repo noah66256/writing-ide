@@ -162,7 +162,10 @@ export class McpManager {
   }
 
   async _saveConfig() {
-    const list = [...this._servers.values()].map((s) => s.config);
+    // skillManaged server 由 SkillLoader 管理，不持久化
+    const list = [...this._servers.values()]
+      .filter((s) => !s.config.skillManaged)
+      .map((s) => s.config);
     const tmp = this._configPath + `.tmp.${Date.now()}`;
     await fs.mkdir(path.dirname(this._configPath), { recursive: true });
     await fs.writeFile(tmp, JSON.stringify(list, null, 2), "utf-8");
@@ -530,6 +533,55 @@ export class McpManager {
     return { ok: true, id };
   }
 
+  // ── Skill-managed Server（由 SkillLoader 管理，不持久化） ──
+
+  /**
+   * 注册 skill-managed MCP server。不持久化到 mcp-servers.json。
+   * 如果同 id 已存在且也是 skillManaged，先断开再更新。
+   * @param {McpServerConfig & {skillManaged:true, skillId:string}} config
+   */
+  async addSkillServer(config) {
+    const id = config?.id;
+    if (!id) return { ok: false, error: "ID_REQUIRED" };
+    if (this._isBuiltinId(id)) return { ok: false, error: "BUILTIN_ID_RESERVED" };
+
+    const existing = this._servers.get(id);
+    if (existing) {
+      // 只允许覆盖 skillManaged 的
+      if (!existing.config.skillManaged) return { ok: false, error: "ID_CONFLICT_USER_SERVER" };
+      await this.disconnect(id);
+    }
+
+    const full = { ...config, enabled: true, skillManaged: true };
+    this._servers.set(id, {
+      config: full,
+      client: null,
+      transport: null,
+      status: "disconnected",
+      tools: [],
+      error: null,
+    });
+    // 不调用 _saveConfig()
+    // 等待连接完成（而非 fire-and-forget），避免竞态孤儿连接
+    await this.connect(id).catch(() => void 0);
+    this._notify();
+    return { ok: true, id };
+  }
+
+  /**
+   * 移除 skill-managed MCP server。
+   * @param {string} id
+   */
+  async removeSkillServer(id) {
+    const entry = this._servers.get(id);
+    if (!entry || !entry.config.skillManaged) return { ok: false, error: "NOT_SKILL_MANAGED" };
+    await this.disconnect(id);
+    this._servers.delete(id);
+    // 不调用 _saveConfig()
+    this._notify();
+    return { ok: true };
+  }
+
   async updateServer(id, config) {
     const entry = this._servers.get(id);
     if (!entry) return { ok: false, error: "NOT_FOUND" };
@@ -573,6 +625,8 @@ export class McpManager {
       enabled: entry.config.enabled,
       bundled: entry.config.bundled === true,
       builtin: entry.config.builtin === true,
+      skillManaged: entry.config.skillManaged === true,
+      skillId: entry.config.skillId || null,
       status: entry.status,
       tools: entry.tools,
       error: entry.error,
@@ -583,6 +637,7 @@ export class McpManager {
         endpoint: entry.config.endpoint,
         headers: entry.config.headers,
         env: entry.config.env ?? {},
+        skillDigest: entry.config.skillDigest || null,
       },
       ...(entry.config.configFields ? { configFields: entry.config.configFields } : {}),
     }));

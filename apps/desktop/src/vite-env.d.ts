@@ -99,6 +99,13 @@ declare global {
         writeText: (text: string) => Promise<{ ok: boolean; error?: string }>;
         writeRichText: (payload: { html: string; text?: string }) => Promise<{ ok: boolean; error?: string }>;
       };
+      skills?: {
+        list: () => Promise<any[]>;
+        errors: () => Promise<Array<{ dirName: string; error: string; ts: number }>>;
+        reload: () => Promise<any[]>;
+        openDir: () => Promise<{ ok: boolean }>;
+        onChange: (handler: (payload: { manifests: any[]; errors: Array<{ dirName: string; error: string; ts: number }> } | any[]) => void) => () => void;
+      };
     };
   }
 }

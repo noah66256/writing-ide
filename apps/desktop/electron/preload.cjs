@@ -154,6 +154,26 @@ contextBridge.exposeInMainWorld("desktop", {
       return () => ipcRenderer.removeListener("mcp.statusChange", listener);
     },
   },
+  skills: {
+    list() {
+      return ipcRenderer.invoke("skills.list");
+    },
+    errors() {
+      return ipcRenderer.invoke("skills.errors");
+    },
+    reload() {
+      return ipcRenderer.invoke("skills.reload");
+    },
+    openDir() {
+      return ipcRenderer.invoke("skills.openDir");
+    },
+    onChange(handler) {
+      if (typeof handler !== "function") return () => {};
+      const listener = (_event, manifests) => handler(manifests);
+      ipcRenderer.on("skills.changed", listener);
+      return () => ipcRenderer.removeListener("skills.changed", listener);
+    },
+  },
   browser: {
     getInfo() {
       return ipcRenderer.invoke("app.getBrowserInfo");

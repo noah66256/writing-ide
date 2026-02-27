@@ -7,6 +7,7 @@ import { useProjectStore } from "./state/projectStore";
 import { useWorkspaceStore } from "./state/workspaceStore";
 import { useUpdateStore } from "./state/updateStore";
 import { useAuthStore } from "./state/authStore";
+import { useSkillStore } from "./state/skillStore";
 import { getUpdateBaseUrl } from "./agent/updateBaseUrl";
 import { Loader2 } from "lucide-react";
 import "./state/themeStore"; // side-effect: apply theme on load
@@ -23,6 +24,11 @@ export default function App() {
   // 启动时校验已保存的 token
   useEffect(() => {
     useAuthStore.getState().init();
+  }, []);
+
+  // 初始化外部 Skill 加载监听
+  useEffect(() => {
+    useSkillStore.getState().initListener();
   }, []);
 
   // 启动时：尝试恢复上次打开的项目

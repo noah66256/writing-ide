@@ -414,6 +414,10 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
         ? args.targetAgentIds
         : args.targetAgentId ? [args.targetAgentId] : undefined;
 
+      // 外部扩展包 skill manifests（发给 Gateway，使其也能参与激活计算）
+      const externalSkills = (await import("../state/skillStore")).useSkillStore.getState().externalSkills;
+      const userSkillManifests = externalSkills?.length ? externalSkills : undefined;
+
       socket.send(JSON.stringify({
         type: "run.request",
         payload: {
@@ -424,6 +428,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           toolSidecar,
           ...(targetAgentIds ? { targetAgentIds } : {}),
           ...(args.activeSkillIds?.length ? { activeSkillIds: args.activeSkillIds } : {}),
+          ...(userSkillManifests ? { userSkillManifests } : {}),
         },
       }));
 

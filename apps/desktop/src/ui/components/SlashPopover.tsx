@@ -31,8 +31,12 @@ export function SlashPopover({ query, visible, onSelect, onClose }: Props) {
   const [selectedIdx, setSelectedIdx] = useState(0);
   const libraries = useKbStore((s) => s.libraries);
   const skillOverrides = useSkillStore((s) => s.skillOverrides);
+  const externalSkills = useSkillStore((s) => s.externalSkills);
 
-  const allSkills = useMemo(() => listRegisteredSkills(), []);
+  const allSkills = useMemo(
+    () => [...listRegisteredSkills(), ...externalSkills],
+    [externalSkills],
+  );
   const enabledSkills = useMemo(
     () => allSkills.filter((sk) => skillOverrides[sk.id]?.enabled ?? sk.autoEnable),
     [allSkills, skillOverrides],

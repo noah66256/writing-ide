@@ -907,6 +907,8 @@ const agentRunBodySchema = z.object({
   prompt: z.string().min(1),
   targetAgentIds: z.array(z.string()).max(5).optional(),
   activeSkillIds: z.array(z.string()).max(10).optional(),
+  /** Desktop 传来的外部扩展包 skill manifests */
+  userSkillManifests: z.array(z.any()).max(20).optional(),
   contextPack: z.string().optional(),
   toolSidecar: z
     .object({
@@ -1094,7 +1096,17 @@ export async function prepareAgentRun(args: {
   const disabledSkillIds = new Set<string>(
     capsForSkills && capsForSkills.disabledSkillIds ? Array.from(capsForSkills.disabledSkillIds as Set<string>) : [],
   );
-  const skillManifestsEffective = (listRegisteredSkills() as any[]).filter((m: any) => !disabledSkillIds.has(String(m?.id ?? "").trim()));
+  // 合并内置 + Desktop 传来的外部扩展包 manifests
+  const builtinSkills = (listRegisteredSkills() as any[]);
+  const userSkills = Array.isArray((body as any).userSkillManifests)
+    ? ((body as any).userSkillManifests as any[])
+        .filter((m: any) => m && typeof m === "object" && String(m?.id ?? "").trim() && String(m?.name ?? "").trim())
+        .map((m: any) => ({ ...m, source: "user" }))
+    : [];
+  // 去重：内置 id 优先，外部同 id 不覆盖
+  const builtinIdSet = new Set(builtinSkills.map((m: any) => String(m?.id ?? "").trim()));
+  const mergedSkills = [...builtinSkills, ...userSkills.filter((m: any) => !builtinIdSet.has(String(m?.id ?? "").trim()))];
+  const skillManifestsEffective = mergedSkills.filter((m: any) => !disabledSkillIds.has(String(m?.id ?? "").trim()));
   const skillManifestById = new Map(skillManifestsEffective.map((m: any) => [String(m?.id ?? "").trim(), m] as const));
 
   const rawActiveSkills = activateSkills({

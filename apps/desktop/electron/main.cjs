@@ -43,8 +43,60 @@ let watchedRoot = null;
 let watchTimer = null;
 let watchChanged = new Set();
 let mcpManager = null;
+let skillLoader = null;  // Skill 扩展包加载器
 let appSettings = {};  // 应用级设置（含浏览器路径等）
 let appSettingsModules = null;  // { loadSettings, saveSettings, detectBrowser }
+
+/**
+ * 差量更新 skill-managed MCP Server：增删改对齐到最新的 loaded skills。
+ * 内置串行锁，防止并发 reconcile 导致竞态。
+ * @param {Array<{id:string, mcpConfig:object|null}>} skills
+ */
+let _reconcileLock = null;
+async function reconcileSkillMcpServers(skills) {
+  // 串行锁：等待上一次 reconcile 完成
+  while (_reconcileLock) await _reconcileLock;
+  let unlock;
+  _reconcileLock = new Promise((r) => { unlock = r; });
+  try {
+    await _doReconcile(skills);
+  } finally {
+    _reconcileLock = null;
+    unlock();
+  }
+}
+async function _doReconcile(skills) {
+  if (!mcpManager) return;
+  const { toMcpServerConfig } = await import("./skill-loader.mjs");
+
+  // 当前 skill-managed 的 server id 集合
+  const currentServers = mcpManager.getServers().filter((s) => s.skillManaged);
+  const currentIds = new Set(currentServers.map((s) => s.id));
+
+  // 最新 skill 需要的 MCP server（带 digest 用于差量检测）
+  const wanted = new Map();
+  for (const sk of skills) {
+    const cfg = toMcpServerConfig(sk);
+    if (cfg) wanted.set(cfg.id, { cfg, digest: sk.digest ?? "" });
+  }
+
+  // 删除不再需要的
+  for (const id of currentIds) {
+    if (!wanted.has(id)) {
+      await mcpManager.removeSkillServer(id).catch(() => void 0);
+    }
+  }
+
+  // 添加/更新（仅当 digest 变化或不存在时才操作，避免无变更重连）
+  for (const [id, { cfg, digest }] of wanted) {
+    const existing = currentServers.find((s) => s.id === id);
+    if (existing && existing.config?.skillDigest === digest) continue; // 未变更，跳过
+    cfg.skillDigest = digest; // 附加 digest 到 config 供下次比较
+    await mcpManager.addSkillServer(cfg).catch((e) =>
+      console.warn(`[electron] skill MCP reconcile addSkillServer failed: ${id}`, e)
+    );
+  }
+}
 
 // ======== Single Instance Lock（防止多开导致新旧并行/占用文件） ========
 let gotSingleInstanceLock = true;
@@ -1335,6 +1387,25 @@ function registerIpc() {
     return mcpManager.callTool(serverId, toolName, toolArgs);
   });
 
+  // ── Skill 扩展包 ──────────────────────────
+  ipcMain.handle("skills.list", async () => {
+    if (!skillLoader) return [];
+    return skillLoader.getSkills().map((s) => s.manifest);
+  });
+  ipcMain.handle("skills.errors", async () => {
+    if (!skillLoader) return [];
+    return skillLoader.getErrors();
+  });
+  ipcMain.handle("skills.reload", async () => {
+    if (!skillLoader) return [];
+    const skills = await skillLoader.reload();
+    return skills.map((s) => s.manifest);
+  });
+  ipcMain.handle("skills.openDir", async () => {
+    if (!skillLoader) return { ok: false };
+    try { await shell.openPath(skillLoader.rootDir); return { ok: true }; } catch { return { ok: false }; }
+  });
+
   // ── 浏览器检测 ──────────────────────────
   ipcMain.handle("app.getBrowserInfo", async () => ({
     path: appSettings.browserPath || null,
@@ -1513,6 +1584,33 @@ app.whenReady().then(async () => {
     console.error("[electron] MCP Manager 初始化失败:", e);
   }
 
+  // ======== Skill 扩展包加载器初始化 ========
+  try {
+    const { SkillLoader, toMcpServerConfig } = await import("./skill-loader.mjs");
+    skillLoader = new SkillLoader(app.getPath("userData"));
+
+    // 热更新回调：差量更新 skill-managed MCP Server + 通知 renderer
+    skillLoader.onDidChange(async ({ skills, errors }) => {
+      try {
+        await reconcileSkillMcpServers(skills);
+      } catch (e) {
+        console.error("[electron] skill MCP reconcile error:", e);
+      }
+      try {
+        mainWindow?.webContents?.send("skills.changed", {
+          manifests: skills.map((s) => s.manifest),
+          errors: errors ?? [],
+        });
+      } catch { /* ignore */ }
+    });
+
+    // start() 内部会触发 onDidChange，MCP 注册在回调中完成，不需要额外手动循环
+    const loaded = await skillLoader.start();
+    console.log(`[electron] SkillLoader started: ${loaded.length} skill(s) from ${skillLoader.rootDir}`);
+  } catch (e) {
+    console.error("[electron] SkillLoader 初始化失败:", e);
+  }
+
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -1520,6 +1618,7 @@ app.whenReady().then(async () => {
 
 app.on("window-all-closed", () => {
   stopWatch();
+  try { skillLoader?.dispose?.(); } catch { /* ignore */ }
   try { mcpManager?.dispose?.(); } catch { /* ignore */ }
   if (process.platform !== "darwin") app.quit();
 });

@@ -328,7 +328,16 @@ const SKILL_DESCRIPTIONS: Record<string, string> = {
 function SkillTabContent() {
   const skillOverrides = useSkillStore((s) => s.skillOverrides);
   const setSkillEnabled = useSkillStore((s) => s.setSkillEnabled);
-  const allSkills = listRegisteredSkills();
+  const externalSkills = useSkillStore((s) => s.externalSkills);
+  const externalErrors = useSkillStore((s) => s.externalErrors);
+  const loadExternalSkills = useSkillStore((s) => s.loadExternalSkills);
+  const builtinSkills = listRegisteredSkills();
+
+  // 合并列表：内置在前，外部在后
+  const allSkills = [
+    ...builtinSkills.map((s) => ({ ...s, _isExternal: false as const })),
+    ...externalSkills.map((s) => ({ ...s, _isExternal: true as const })),
+  ];
 
   return (
     <div className="flex flex-col gap-4">
@@ -339,6 +348,7 @@ function SkillTabContent() {
         {allSkills.map((skill) => {
           const enabled = skillOverrides[skill.id]?.enabled ?? skill.autoEnable;
           const friendlyDesc = SKILL_DESCRIPTIONS[skill.id] ?? skill.description;
+          const isExt = skill._isExternal;
           return (
             <div
               key={skill.id}
@@ -351,7 +361,20 @@ function SkillTabContent() {
                 backgroundColor: enabled ? "var(--color-accent)" : "var(--color-text-faint)",
               }} />
               <div className="flex-1 min-w-0">
-                <div className="text-[13px] font-medium text-text">{skill.name}</div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[13px] font-medium text-text">{skill.name}</span>
+                  {isExt ? (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-500/15 text-orange-400 font-medium">扩展</span>
+                  ) : (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent/15 text-accent font-medium">内置</span>
+                  )}
+                  {isExt && skill.version && (
+                    <span className="text-[10px] text-text-faint">v{skill.version}</span>
+                  )}
+                  {isExt && skill.mcp && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/15 text-purple-400">MCP</span>
+                  )}
+                </div>
                 <div className="text-[11px] text-text-muted mt-0.5 leading-relaxed">{friendlyDesc}</div>
               </div>
               <label className="teamToggle shrink-0" onClick={(e) => e.stopPropagation()}>
@@ -365,6 +388,41 @@ function SkillTabContent() {
             </div>
           );
         })}
+      </div>
+
+      {/* 加载错误提示 */}
+      {externalErrors.length > 0 && (
+        <div className="flex flex-col gap-1 mt-1">
+          {externalErrors.map((err, i) => (
+            <div key={i} className="text-[11px] text-red-400 bg-red-500/10 px-3 py-1.5 rounded">
+              <span className="font-medium">{err.dirName}：</span>{err.error}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 底部操作栏 */}
+      <div className="flex items-center gap-2 mt-2 pt-3 border-t border-border">
+        <button
+          className="text-[11px] text-text-muted hover:text-text flex items-center gap-1.5 transition-colors"
+          onClick={() => window.desktop?.skills?.openDir()}
+        >
+          <FolderOpen size={13} />
+          打开扩展目录
+        </button>
+        <button
+          className="text-[11px] text-text-muted hover:text-text flex items-center gap-1.5 transition-colors"
+          onClick={() => loadExternalSkills()}
+        >
+          <RefreshCw size={13} />
+          刷新
+        </button>
+        <div className="flex-1" />
+        <span className="text-[10px] text-text-faint">
+          {externalSkills.length > 0
+            ? `${externalSkills.length} 个扩展包已加载`
+            : "在扩展目录中放入 skill 文件夹即可生效"}
+        </span>
       </div>
     </div>
   );
