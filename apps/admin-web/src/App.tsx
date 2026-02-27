@@ -8,6 +8,7 @@ import { LlmPage } from "./pages/LlmPage";
 import { LoginPage } from "./pages/LoginPage";
 import { ToolsPage } from "./pages/ToolsPage";
 import { UsersPage } from "./pages/UsersPage";
+import { SystemPage } from "./pages/SystemPage";
 
 type Me = { id: string; email: string; role: "admin" | "user"; pointsBalance: number };
 
@@ -121,6 +122,7 @@ function App() {
       {page === "llm" ? <LlmPage /> : null}
       {page === "tools" ? <ToolsPage /> : null}
       {page === "audit" ? <AuditRunsPage /> : null}
+      {page === "system" ? <SystemPage /> : null}
     </AdminLayout>
   );
 }

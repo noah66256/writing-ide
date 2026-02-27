@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import type { WebSocket } from "ws";
 import { z } from "zod";
 import dotenv from "dotenv";
-import { loadDb, saveDb, updateDb, type Db, type LlmConfig, type LlmModelPrice, type RunAudit, type User } from "./db.js";
+import { loadDb, saveDb, updateDb, listBackups, createBackup, restoreBackup, getBackupFilePath, type Db, type LlmConfig, type LlmModelPrice, type RunAudit, type User } from "./db.js";
 import { kbSearch, type KbCard } from "@writing-ide/kb-core";
 import { MemoryKbStore } from "./kb/memoryStore.js";
 import { adjustUserPoints, calculateCostPoints, listUserTransactions, type LlmTokenUsage } from "./billing.js";
@@ -2253,6 +2253,61 @@ fastify.get(
     const found = runs.find((r: any) => String(r?.id ?? "") === id) || null;
     if (!found) return reply.code(404).send({ error: "RUN_NOT_FOUND" });
     return reply.send({ run: found });
+  },
+);
+
+// ======== 数据备份管理 ========
+
+fastify.get(
+  "/api/admin/backup/list",
+  { preHandler: [(fastify as any).authenticate, requireAdmin] },
+  async (_request, reply) => {
+    const backups = await listBackups();
+    return reply.send({ backups });
+  },
+);
+
+fastify.post(
+  "/api/admin/backup/create",
+  { preHandler: [(fastify as any).authenticate, requireAdmin] },
+  async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const note = typeof body.note === "string" ? body.note : undefined;
+    const backup = await createBackup(note);
+    return reply.send({ ok: true, backup });
+  },
+);
+
+fastify.post(
+  "/api/admin/backup/restore",
+  { preHandler: [(fastify as any).authenticate, requireAdmin] },
+  async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (!name) return reply.code(400).send({ error: "MISSING_NAME" });
+    try {
+      const result = await restoreBackup(name);
+      return reply.send({ ok: true, ...result });
+    } catch (e: any) {
+      const msg = String(e?.message ?? "RESTORE_FAILED");
+      const code = msg === "BACKUP_NOT_FOUND" ? 404 : msg === "BACKUP_NAME_INVALID" ? 400 : 500;
+      return reply.code(code).send({ error: msg });
+    }
+  },
+);
+
+fastify.get(
+  "/api/admin/backup/download/:name",
+  { preHandler: [(fastify as any).authenticate, requireAdmin] },
+  async (request, reply) => {
+    const name = String((request.params as any)?.name ?? "");
+    const filePath = await getBackupFilePath(name);
+    if (!filePath) return reply.code(404).send({ error: "BACKUP_NOT_FOUND" });
+    const stream = fs.createReadStream(filePath);
+    return reply
+      .header("Content-Type", "application/json")
+      .header("Content-Disposition", `attachment; filename="${name}"`)
+      .send(stream);
   },
 );
 

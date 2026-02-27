@@ -37,6 +37,11 @@ function getRuntimeApiBase(): string {
 
 const API_BASE = ENV_API_BASE || getRuntimeApiBase();
 
+/** 获取 Gateway API 基础 URL（用于构建直接下载链接等场景） */
+export function getApiBase(): string {
+  return API_BASE;
+}
+
 const TOKEN_KEY = "writing-ide.admin.accessToken.v1";
 
 export function getAccessToken(): string | null {

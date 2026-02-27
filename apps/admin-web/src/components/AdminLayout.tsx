@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-export type AdminPageKey = "users" | "llm" | "tools" | "audit";
+export type AdminPageKey = "users" | "llm" | "tools" | "audit" | "system";
 
 export function AdminLayout(props: {
   page: AdminPageKey;
@@ -27,6 +27,7 @@ export function AdminLayout(props: {
           <NavItem id="llm" label="AI 配置" />
           <NavItem id="tools" label="工具配置" />
           <NavItem id="audit" label="Run 审计" />
+          <NavItem id="system" label="系统" />
         </div>
       </aside>
       <div className="main">

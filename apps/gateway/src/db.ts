@@ -1,4 +1,4 @@
-import { copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -958,4 +958,157 @@ export function updateDb<T>(fn: (db: Db) => Promise<T> | T): Promise<T> {
   });
 }
 
+// ======== 备份管理 ========
 
+const BACKUP_FILE_SAFE_RE = /^[a-zA-Z0-9._-]+\.json$/;
+const BACKUP_KEEP_LIMIT = 50;
+
+function formatBackupTimestamp(date = new Date()): string {
+  // 20260227T162649
+  return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "");
+}
+
+function isErrnoCode(err: unknown, code: string): boolean {
+  return Boolean(err && typeof err === "object" && "code" in err && (err as any).code === code);
+}
+
+export function getBackupDir(): string {
+  const env = String(process.env.GATEWAY_BACKUP_DIR ?? "").trim();
+  if (env) return path.resolve(env);
+  return path.resolve(path.dirname(getDbFilePath()), "backups");
+}
+
+type BackupFileStat = { name: string; absPath: string; size: number; createdAt: string; mtimeMs: number };
+
+async function readBackupFileStats(dir: string): Promise<BackupFileStat[]> {
+  const names = await readdir(dir).catch((e: unknown) => {
+    if (isErrnoCode(e, "ENOENT")) return [] as string[];
+    throw e;
+  });
+  const items = await Promise.all(
+    names
+      .filter((n) => n.startsWith("db-") && n.endsWith(".json"))
+      .map(async (n) => {
+        const abs = path.resolve(dir, n);
+        try {
+          const info = await stat(abs);
+          if (!info.isFile()) return null;
+          return { name: n, absPath: abs, size: info.size, createdAt: info.mtime.toISOString(), mtimeMs: info.mtimeMs };
+        } catch {
+          return null;
+        }
+      }),
+  );
+  return items.filter((x): x is BackupFileStat => Boolean(x));
+}
+
+async function pruneBackups(dir: string): Promise<void> {
+  const files = await readBackupFileStats(dir);
+  const overflow = files.length - BACKUP_KEEP_LIMIT;
+  if (overflow <= 0) return;
+  const oldest = files.sort((a, b) => a.mtimeMs - b.mtimeMs).slice(0, overflow);
+  await Promise.all(oldest.map((f) => unlink(f.absPath).catch(() => void 0)));
+}
+
+export type BackupEntry = { name: string; size: number; createdAt: string; userCount: number; txCount: number };
+
+export async function listBackups(): Promise<BackupEntry[]> {
+  const dir = getBackupDir();
+  const files = await readBackupFileStats(dir);
+
+  const result = await Promise.all(
+    files.map(async (f) => {
+      let userCount = -1;
+      let txCount = -1;
+      try {
+        const raw = await readFile(f.absPath, "utf-8");
+        const parsed = JSON.parse(raw);
+        userCount = Array.isArray(parsed?.users) ? parsed.users.length : -1;
+        txCount = Array.isArray(parsed?.pointsTransactions) ? parsed.pointsTransactions.length : -1;
+      } catch {
+        // 解析失败保持 -1
+      }
+      return { name: f.name, size: f.size, createdAt: f.createdAt, userCount, txCount, _mt: f.mtimeMs };
+    }),
+  );
+
+  return result
+    .sort((a, b) => b._mt - a._mt)
+    .map(({ _mt, ...item }) => item);
+}
+
+export async function createBackup(note?: string): Promise<{ name: string; size: number; createdAt: string }> {
+  void note; // 预留：将来可写入备份元数据
+  const dir = getBackupDir();
+  await mkdir(dir, { recursive: true });
+
+  const name = `db-${formatBackupTimestamp()}.json`;
+  const dest = path.resolve(dir, name);
+  await copyFile(getDbFilePath(), dest);
+
+  const info = await stat(dest);
+  await pruneBackups(dir);
+  return { name, size: info.size, createdAt: info.mtime.toISOString() };
+}
+
+export async function restoreBackup(
+  name: string,
+): Promise<{ userCount: number; txCount: number; preRestoreBackup: string }> {
+  if (!BACKUP_FILE_SAFE_RE.test(name)) throw new Error("BACKUP_NAME_INVALID");
+
+  const backupPath = await getBackupFilePath(name);
+  if (!backupPath) throw new Error("BACKUP_NOT_FOUND");
+
+  // 读取并基础校验备份内容
+  const raw = await readFile(backupPath, "utf-8");
+  const parsed = JSON.parse(raw);
+  const userCount = Array.isArray(parsed?.users) ? parsed.users.length : 0;
+  const txCount = Array.isArray(parsed?.pointsTransactions) ? parsed.pointsTransactions.length : 0;
+
+  // 通过 dbUpdateQueue 串行化，防止与 updateDb 并发写覆盖
+  const preRestoreBackup = await new Promise<string>((resolve, reject) => {
+    dbUpdateQueue = dbUpdateQueue.catch(() => void 0).then(async () => {
+      try {
+        // 恢复前先保存当前状态
+        const dir = getBackupDir();
+        await mkdir(dir, { recursive: true });
+        const preName = `db-pre-restore-${formatBackupTimestamp()}.json`;
+        const preRestorePath = path.resolve(dir, preName);
+        try {
+          await copyFile(getDbFilePath(), preRestorePath);
+        } catch (e) {
+          if (isErrnoCode(e, "ENOENT")) {
+            await writeFile(preRestorePath, JSON.stringify(DEFAULT_DB, null, 2), "utf-8");
+          } else {
+            throw e;
+          }
+        }
+
+        // 原子写入恢复数据
+        const dbFile = getDbFilePath();
+        await mkdir(path.dirname(dbFile), { recursive: true });
+        const tmp = `${dbFile}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+        await writeFile(tmp, raw, "utf-8");
+        await rename(tmp, dbFile);
+
+        await pruneBackups(dir);
+        resolve(preName);
+      } catch (e) {
+        reject(e);
+      }
+    });
+  });
+
+  return { userCount, txCount, preRestoreBackup };
+}
+
+export async function getBackupFilePath(name: string): Promise<string | null> {
+  if (!BACKUP_FILE_SAFE_RE.test(name)) return null;
+  const abs = path.resolve(getBackupDir(), name);
+  try {
+    const info = await stat(abs);
+    return info.isFile() ? abs : null;
+  } catch {
+    return null;
+  }
+}

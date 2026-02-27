@@ -648,4 +648,30 @@ export async function toolConfigUpdateCapabilities(body: Partial<{ tools: { disa
   return apiFetchJson<{ ok: true }>("/api/tool-config/capabilities", { method: "PUT", body: JSON.stringify(body) });
 }
 
+// ======== 数据备份 ========
 
+export type BackupEntry = {
+  name: string;
+  size: number;
+  createdAt: string;
+  userCount: number;
+  txCount: number;
+};
+
+export async function adminListBackups() {
+  return apiFetchJson<{ backups: BackupEntry[] }>("/api/admin/backup/list");
+}
+
+export async function adminCreateBackup(note?: string) {
+  return apiFetchJson<{ ok: true; backup: { name: string; size: number; createdAt: string } }>(
+    "/api/admin/backup/create",
+    { method: "POST", body: JSON.stringify({ note }) },
+  );
+}
+
+export async function adminRestoreBackup(name: string) {
+  return apiFetchJson<{ ok: true; preRestoreBackup: string; userCount: number; txCount: number }>(
+    "/api/admin/backup/restore",
+    { method: "POST", body: JSON.stringify({ name }) },
+  );
+}

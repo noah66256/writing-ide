@@ -738,4 +738,64 @@ MSYS2_ARG_CONV_EXCL='*' cmd.exe /c "taskkill /F /T /PID <pid>"
 
 ---
 
+### 20) 手动 rsync 部署覆盖生产 DB（users 清空）
+
+#### 现象
+
+- B 端"用户管理"显示"暂无数据"
+- Desktop 端无法登录（用户不存在）
+- 积分余额为 0
+
+#### 根因
+
+使用 `rsync -avz --delete` 手动部署 Gateway 目录时，**未排除 `data/` 目录**：
+
+```bash
+# ❌ 错误示范：没有排除 data/
+rsync -avz --delete \
+  --exclude='node_modules' --exclude='.git' --exclude='dist' --exclude='.env*' \
+  /Users/noah/writing-ide/apps/gateway/ root@<ip>:/www/wwwroot/writing-ide/apps/gateway/
+```
+
+本地 `apps/gateway/data/db.json` 的 `users: []`（空库）覆盖了服务器上有真实用户的 db.json。`--delete` 还会删除服务器上存在但本地不存在的文件。
+
+#### 为什么 deploy-gateway.sh 没这个问题
+
+`scripts/deploy-gateway.sh` 使用 `git pull --rebase` 更新代码，而 `apps/gateway/data/` 在 `.gitignore` 中，git 不会触碰它。**只有手动 rsync 才会出事。**
+
+#### 预防（强制规则）
+
+1. **永远不要手动 rsync gateway 的 `data/` 目录**。部署 Gateway 优先使用 `scripts/deploy-gateway.sh`。
+2. 如果必须手动 rsync，**必须加 `--exclude='data/'`**：
+
+```bash
+# ✅ 正确示范
+rsync -avz --delete \
+  --exclude='node_modules' --exclude='.git' --exclude='dist' --exclude='.env*' \
+  --exclude='data/' \
+  /Users/noah/writing-ide/apps/gateway/ root@<ip>:/www/wwwroot/writing-ide/apps/gateway/
+```
+
+3. 如果 rsync 整个 monorepo，需排除所有 `data/` 目录：
+
+```bash
+rsync -avz --delete \
+  --exclude='node_modules' --exclude='.git' --exclude='dist' --exclude='.env*' \
+  --exclude='**/data/db.json' --exclude='**/data/db.json.bak' \
+  ...
+```
+
+#### 数据恢复
+
+- 如果 `db.json.bak` 也被覆盖（rsync 同步了本地的 .bak），**无法自动恢复**。
+- 通过 B 端"创建用户"（`/api/admin/users/create`）重建账号并充值。
+- **教训**：应配置定期备份（crontab + 异地存储），而不是依赖 `.bak` 单文件备份。
+
+#### 后续改进（TODO）
+
+- [ ] 服务器端 crontab 定期备份 `data/db.json` 到独立目录（如 `/www/backup/gateway-db/`）
+- [ ] 备份保留最近 7 天的每日快照
+
+---
+
 
