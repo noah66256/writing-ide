@@ -408,6 +408,13 @@ export function InputBar({
   const [slashVisible, setSlashVisible] = useState(false);
   const [slashQuery, setSlashQuery] = useState("");
   const blurTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // @ 消抖：记录被放弃（弹出但未选择）的 @ 的文本前缀，用于抑制同一 @ 重复弹出
+  const mentionDismissedPrefix = useRef<string | null>(null);
+  // 标记是否刚完成了 mention 选择（区分"选择关闭"和"放弃关闭"）
+  const mentionJustSelected = useRef(false);
+  const mentionVisiblePrev = useRef(false);
+  // 缓存最近一次弹层打开时光标前文本（blur 后 selection 可能不在 editor 内）
+  const lastMentionBefore = useRef<string | null>(null);
 
   // 组件卸载时清理 blur 定时器
   useEffect(() => {
@@ -415,6 +422,24 @@ export function InputBar({
       if (blurTimerRef.current) clearTimeout(blurTimerRef.current);
     };
   }, []);
+
+  // @ 消抖：弹层关闭时如果不是因为选择，标记该 @ 为 dismissed
+  useEffect(() => {
+    if (mentionVisiblePrev.current && !mentionVisible) {
+      if (mentionJustSelected.current) {
+        mentionJustSelected.current = false;
+      } else {
+        // 使用缓存的 before 文本（blur 后 selection 可能已不在 editor 内）
+        const before = lastMentionBefore.current ?? "";
+        const match = before.match(MENTION_QUERY_RE);
+        if (match && typeof match.index === "number") {
+          mentionDismissedPrefix.current = before.slice(0, match.index + 1);
+        }
+      }
+    }
+    if (!mentionVisible) lastMentionBefore.current = null;
+    mentionVisiblePrev.current = mentionVisible;
+  }, [mentionVisible]);
 
   // 序列化（发送时 + 派生状态用）
   const serialized = useMemo(() => serializeSegments(segments), [segments]);
@@ -457,12 +482,19 @@ export function InputBar({
     const before = getTextBeforeCaret(editor) ?? "";
 
     const mentionMatch = before.match(MENTION_QUERY_RE);
-    if (mentionMatch) {
-      setMentionQuery(mentionMatch[1]);
-      setMentionVisible(true);
-      setSlashQuery("");
-      setSlashVisible(false);
-      return;
+    if (mentionMatch && typeof mentionMatch.index === "number") {
+      // @ 消抖：检查该 @ 是否已被放弃（前缀匹配 → 同一个 @，当普通字符处理）
+      const mentionPrefix = before.slice(0, mentionMatch.index + 1);
+      if (mentionPrefix !== mentionDismissedPrefix.current) {
+        mentionDismissedPrefix.current = null;
+        lastMentionBefore.current = before;
+        setMentionQuery(mentionMatch[1]);
+        setMentionVisible(true);
+        setSlashQuery("");
+        setSlashVisible(false);
+        return;
+      }
+      // 被 dismiss 的 @ → 跳过，继续检查 / 触发
     }
 
     const slashMatch = before.match(SLASH_QUERY_RE);
@@ -485,6 +517,16 @@ export function InputBar({
   const handleEditorInput = useCallback(() => {
     if (blurTimerRef.current) clearTimeout(blurTimerRef.current);
     syncFromDOM();
+    // @ 消抖：如果之前 dismiss 的 @ 已被删除（光标前无 @ 匹配），重置 dismiss
+    if (mentionDismissedPrefix.current !== null) {
+      const editor = editorRef.current;
+      if (editor) {
+        const before = getTextBeforeCaret(editor) ?? "";
+        if (!before.match(MENTION_QUERY_RE)) {
+          mentionDismissedPrefix.current = null;
+        }
+      }
+    }
     updateTriggerQuery();
   }, [syncFromDOM, updateTriggerQuery]);
 
@@ -494,6 +536,8 @@ export function InputBar({
   const handleMentionSelect = useCallback(
     (item: MentionItem) => {
       if (blurTimerRef.current) clearTimeout(blurTimerRef.current);
+      mentionJustSelected.current = true;
+      mentionDismissedPrefix.current = null;
       insertMention(item);
       setMentionVisible(false);
       setMentionQuery("");
@@ -540,6 +584,8 @@ export function InputBar({
     setMentionQuery("");
     setSlashVisible(false);
     setSlashQuery("");
+    mentionDismissedPrefix.current = null;
+    mentionJustSelected.current = false;
 
     requestAnimationFrame(() => editorRef.current?.focus());
   }, [segments, droppedFiles, onSend, clearEditor]);
@@ -615,6 +661,7 @@ export function InputBar({
   }, [buttonMode, handleSend, onStop]);
 
   const handleAtButtonClick = useCallback(() => {
+    mentionDismissedPrefix.current = null;
     editorRef.current?.focus();
     insertText("@");
     setMentionVisible(true);
@@ -735,7 +782,7 @@ export function InputBar({
               className="pointer-events-none absolute inset-x-4 top-3 text-[14px] leading-relaxed text-text-faint select-none"
               aria-hidden="true"
             >
-              描述任务，@ 提及成员 / 命令调用技能...
+              描述任务，@ 提及成员/文件/技能/知识库...
             </div>
           )}
 
@@ -746,7 +793,7 @@ export function InputBar({
             role="textbox"
             aria-multiline="true"
             aria-label="消息输入框"
-            aria-placeholder="描述任务，@ 提及成员 / 命令调用技能..."
+            aria-placeholder="描述任务，@ 提及成员/文件/技能/知识库..."
             tabIndex={0}
             onInput={handleEditorInput}
             onKeyDown={handleKeyDown}
@@ -820,7 +867,7 @@ export function InputBar({
             <ToolButton icon={Image} title="图片" onClick={handleFileClick} />
             <ToolButton
               icon={AtSign}
-              title="提及技能/文件"
+              title="提及成员/文件/技能/知识库"
               onClick={handleAtButtonClick}
               onMouseDown={(e) => e.preventDefault()}
             />
@@ -861,7 +908,7 @@ export function InputBar({
 
       <div className="text-center mt-2">
         <span className="text-[11px] text-text-faint">
-          Enter 发送 · Shift/⌘+Enter 换行 · @ 提及 · / 命令
+          Enter 发送 · Shift/⌘+Enter 换行 · @ 提及
         </span>
       </div>
     </div>
