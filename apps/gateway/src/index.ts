@@ -4312,18 +4312,24 @@ fastify.post(
     });
     if (ret.ok) break;
 
+    const errText = String(ret.error ?? "");
     const is429 =
-      ret.status === 429 || String(ret.error ?? "").includes("Too Many Requests") || String(ret.error ?? "").includes("负载已饱和");
-    if (!is429 || attempt >= retryMax) break;
+      ret.status === 429 || errText.includes("Too Many Requests") || errText.includes("负载已饱和");
+    const isNetErr = /fetch failed|Timeout|ECONNREFUSED|ECONNRESET|ETIMEDOUT/i.test(errText)
+      || ret.status === 502 || ret.status === 503;
+    const isRetryable = is429 || isNetErr;
+    if (!isRetryable || attempt >= retryMax) break;
     const jitter = Math.floor(Math.random() * 200);
     const wait = retryBaseMs * Math.pow(2, attempt) + jitter;
     await sleep(wait);
   }
 
   if (!ret?.ok) {
-    return reply.code(ret?.status === 429 ? 503 : 502).send({
-      error: "UPSTREAM_ERROR",
-      message: String(ret?.error ?? "upstream error"),
+    const errText = String(ret?.error ?? "");
+    const is429 = ret?.status === 429 || errText.includes("Too Many Requests") || errText.includes("负载已饱和");
+    return reply.code(is429 ? 503 : 502).send({
+      error: is429 ? "UPSTREAM_BUSY" : "UPSTREAM_ERROR",
+      message: errText || "upstream error",
       status: ret?.status ?? null
     });
   }
