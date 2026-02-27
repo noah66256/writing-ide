@@ -104,7 +104,7 @@ export default function App() {
     };
   }, []);
 
-  // Update（v0.1）：启动 + 每 6 小时 silent check
+  // Update（v0.2）：启动 + 每 6 小时 silent check → 自动后台下载
   useEffect(() => {
     const api = window.desktop?.update;
     if (!api) return;
@@ -112,6 +112,14 @@ export default function App() {
       const r = await api.check({ baseUrl: getUpdateBaseUrl() }).catch((e) => ({ ok: false, error: String(e?.message ?? e) } as any));
       if (!r?.ok) return setUpdateCheckResult({ updateAvailable: false, latestVersion: "", error: r?.error ?? "CHECK_FAILED" });
       setUpdateCheckResult({ updateAvailable: Boolean(r.updateAvailable), latestVersion: String(r.latestVersion ?? ""), error: "" });
+
+      // 无感下载：检测到更新后自动后台下载
+      if (r.updateAvailable && api.silentDownload) {
+        const dl = await api.silentDownload({ baseUrl: getUpdateBaseUrl() }).catch(() => null);
+        if (dl?.ok && dl?.downloaded) {
+          useUpdateStore.getState().setDownloadReady(String(dl.version ?? r.latestVersion ?? ""));
+        }
+      }
     };
     const t0 = window.setTimeout(() => void run(), 8000);
     const id = window.setInterval(() => void run(), 6 * 60 * 60 * 1000);
@@ -133,6 +141,14 @@ export default function App() {
         const transferred = Number(evt?.transferred ?? 0) || 0;
         const total = Number(evt?.total ?? 0) || 0;
         setDownload({ running: true, transferred, total });
+        return;
+      }
+      if (t === "download.done") {
+        setDownload(null);
+        return;
+      }
+      if (t === "silent.ready") {
+        useUpdateStore.getState().setDownloadReady(String(evt?.version ?? ""));
         return;
       }
     });

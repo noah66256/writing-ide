@@ -1,25 +1,36 @@
 #!/usr/bin/env python3
 """
-一键推送 Desktop Windows 安装包（NSIS）到更新源目录，并生成/上传 latest.json。
+一键推送 Desktop 安装包（Win NSIS / Mac DMG）到更新源目录，并生成/上传 latest.json。
 
-约定（v0.1）：
+约定（v0.2）：
 - 更新源由 Gateway 暴露：
   - GET /downloads/desktop/stable/latest.json
   - GET /downloads/desktop/stable/:file
 - 服务器目录：${DESKTOP_UPDATES_DIR}/stable/
 
 本脚本做什么：
-1) 计算 installer.exe 的 sha256（可选写入 latest.json）
-2) 生成 latest.json（windows.nsisUrl 指向 Gateway）
+1) 计算安装包的 sha256（可选写入 latest.json）
+2) 生成 latest.json（windows.nsisUrl / mac.dmgUrl 指向 Gateway）
 3) ssh 创建远端目录
-4) scp 上传 exe 与 latest.json
+4) scp 上传安装包与 latest.json
 
 使用示例（在项目根目录下）：
+    # 仅推送 Windows
     python scripts/push-desktop-update.py \
       --ssh root@120.26.6.147 \
       --remote-dir /opt/writing-ide/desktop-updates/stable \
       --gateway-base http://120.26.6.147:8000 \
       --installer "apps/desktop/out/写作IDE Setup 0.0.4.exe" \
+      --version 0.0.4 \
+      --notes "修复自动更新；优化体验"
+
+    # 同时推送 Windows + Mac
+    python scripts/push-desktop-update.py \
+      --ssh root@120.26.6.147 \
+      --remote-dir /opt/writing-ide/desktop-updates/stable \
+      --gateway-base http://120.26.6.147:8000 \
+      --installer "apps/desktop/out/写作IDE Setup 0.0.4.exe" \
+      --mac-installer "apps/desktop/out/写作IDE-0.0.4-arm64.dmg" \
       --version 0.0.4 \
       --notes "修复自动更新；优化体验"
 
@@ -83,6 +94,7 @@ def main() -> int:
     ap.add_argument("--remote-dir", required=True, help="远端 stable 目录，例如 /opt/writing-ide/desktop-updates/stable")
     ap.add_argument("--gateway-base", required=True, help="Gateway base，例如 http://120.26.6.147:8000")
     ap.add_argument("--installer", required=True, help="本地 NSIS 安装包 exe 路径")
+    ap.add_argument("--mac-installer", default="", help="本地 Mac DMG 安装包路径（可选）")
     ap.add_argument("--version", required=True, help="版本号，例如 0.0.4")
     ap.add_argument("--notes", default="", help="更新说明（可选）")
     ap.add_argument("--no-sha256", action="store_true", help="不计算/写入 sha256")
@@ -95,24 +107,47 @@ def main() -> int:
         print(f"[!] installer 不存在: {installer}")
         return 2
 
+    mac_installer = ""
+    if args.mac_installer:
+        mac_installer = os.path.abspath(args.mac_installer)
+        if not os.path.exists(mac_installer):
+            print(f"[!] mac-installer 不存在: {mac_installer}")
+            return 2
+
     file_name = os.path.basename(installer)
     gateway_base = str(args.gateway_base).rstrip("/")
     nsis_url = f"{gateway_base}/downloads/desktop/stable/{quote(file_name)}"
 
     print("=" * 60)
-    print("写作 IDE - Desktop 更新推送脚本（v0.1）")
+    print("写作 IDE - Desktop 更新推送脚本（v0.2）")
     print("=" * 60)
     print(f"[i] ssh: {args.ssh}")
     print(f"[i] remoteDir: {args.remote_dir}")
-    print(f"[i] installer: {installer}")
+    print(f"[i] installer (win): {installer}")
+    if mac_installer:
+        print(f"[i] installer (mac): {mac_installer}")
     print(f"[i] version: {args.version}")
     print(f"[i] nsisUrl: {nsis_url}")
 
+    # Windows sha256
     sha = ""
     if not args.no_sha256:
-        print("[i] 计算 sha256...")
+        print("[i] 计算 Windows sha256...")
         sha = sha256_file(installer)
-        print(f"[i] sha256: {sha}")
+        print(f"[i] sha256 (win): {sha}")
+
+    # Mac sha256
+    mac_sha = ""
+    mac_file_name = ""
+    dmg_url = ""
+    if mac_installer:
+        mac_file_name = os.path.basename(mac_installer)
+        dmg_url = f"{gateway_base}/downloads/desktop/stable/{quote(mac_file_name)}"
+        print(f"[i] dmgUrl: {dmg_url}")
+        if not args.no_sha256:
+            print("[i] 计算 Mac sha256...")
+            mac_sha = sha256_file(mac_installer)
+            print(f"[i] sha256 (mac): {mac_sha}")
 
     latest = {
         "channel": "stable",
@@ -124,6 +159,12 @@ def main() -> int:
             "sha256": sha,
         },
     }
+
+    if mac_installer:
+        latest["mac"] = {
+            "dmgUrl": dmg_url,
+            "sha256": mac_sha,
+        }
 
     # 写入临时 latest.json
     with tempfile.TemporaryDirectory() as td:
@@ -144,7 +185,7 @@ def main() -> int:
         # 1) mkdir -p remoteDir
         # 重要：Windows Git Bash 下 args.remote_dir 可能会被 MSYS 路径转换污染
         # （例如 /www/... 或 /opt/... 变成 C:/Program Files/Git/www/... 或 C:/Program Files/Git/opt/...）。
-        # 这里对 remote_dir 做一次“强制还原”：
+        # 这里对 remote_dir 做一次"强制还原"：
         # - 如果出现 "C:/Program Files/Git/(www|opt)/..." 这种形式，截取从 "/www/" 或 "/opt/" 开始的部分
         # - 只在明显被污染时处理，不影响正常 Linux 路径
         remote_dir = str(args.remote_dir)
@@ -153,37 +194,54 @@ def main() -> int:
             remote_dir = m.group(1)
         mkdir_cmd = ssh_cmd + [args.ssh, f"mkdir -p {remote_dir}"]
 
-        # 2) 上传：installer 到 remoteDir（目录末尾 /，避免处理带空格的远端文件路径 quoting）
+        # 2) 上传文件列表
+        upload_files = [installer]
+        if mac_installer:
+            upload_files.append(mac_installer)
+
         scp_exe_cmd = scp_cmd + [installer, f"{args.ssh}:{remote_dir}/"]
+        scp_mac_cmd = scp_cmd + [mac_installer, f"{args.ssh}:{remote_dir}/"] if mac_installer else None
         scp_latest_cmd = scp_cmd + [latest_path, f"{args.ssh}:{remote_dir}/latest.json"]
+
+        total_steps = 3 + (1 if mac_installer else 0)
 
         print("-" * 60)
         print("[i] 将执行：")
         print("  ", " ".join(mkdir_cmd))
         print("  ", " ".join(scp_exe_cmd))
+        if scp_mac_cmd:
+            print("  ", " ".join(scp_mac_cmd))
         print("  ", " ".join(scp_latest_cmd))
 
         if args.dry_run:
             print("[i] dry-run：未执行上传。")
             return 0
 
+        step = 0
         print("-" * 60)
-        print("[1/3] 创建远端目录…")
+        step += 1
+        print(f"[{step}/{total_steps}] 创建远端目录…")
         run(mkdir_cmd)
-        print("[2/3] 上传 installer…")
+        step += 1
+        print(f"[{step}/{total_steps}] 上传 Windows installer…")
         run(scp_exe_cmd)
-        print("[3/3] 上传 latest.json…")
+        if scp_mac_cmd:
+            step += 1
+            print(f"[{step}/{total_steps}] 上传 Mac DMG…")
+            run(scp_mac_cmd)
+        step += 1
+        print(f"[{step}/{total_steps}] 上传 latest.json…")
         run(scp_latest_cmd)
 
         print("-" * 60)
         print("[OK] 上传完成")
         print(f"[OK] latest.json: {gateway_base}/downloads/desktop/stable/latest.json")
-        print(f"[OK] installer : {nsis_url}")
+        print(f"[OK] installer (win): {nsis_url}")
+        if dmg_url:
+            print(f"[OK] installer (mac): {dmg_url}")
 
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-

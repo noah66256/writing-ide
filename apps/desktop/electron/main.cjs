@@ -426,8 +426,9 @@ function updateMenu() {
   }
 }
 
-// ======== Desktop Update (v0.1: Windows installer only, confirm then download) ========
+// ======== Desktop Update (v0.2: silent download + install on quit) ========
 const DEFAULT_GATEWAY_URL = "http://120.26.6.147:8000";
+let pendingUpdate = null; // { version, cachedPath, launchPath } — 下载完成后设置，退出时静默安装
 function trimSlash(url) {
   return String(url ?? "").trim().replace(/\/+$/g, "");
 }
@@ -649,6 +650,8 @@ async function checkForUpdates(args) {
   const notes = String(j.notes ?? "").trim();
   const nsisUrl = String(j?.windows?.nsisUrl ?? "").trim();
   const sha256 = String(j?.windows?.sha256 ?? "").trim().toLowerCase();
+  const dmgUrl = String(j?.mac?.dmgUrl ?? "").trim();
+  const macSha256 = String(j?.mac?.sha256 ?? "").trim().toLowerCase();
 
   if (!latestVersion) return { ok: false, error: "LATEST_VERSION_MISSING", latestUrl, currentVersion };
 
@@ -661,6 +664,8 @@ async function checkForUpdates(args) {
     updateAvailable: newer,
     nsisUrl,
     sha256,
+    dmgUrl,
+    macSha256,
     baseUrl,
     latestUrl,
   };
@@ -895,6 +900,71 @@ async function interactiveUpdateFlow(args) {
     // ignore
   }
   return { ok: true, installing: true, cachePath, launchPath: finalLaunchPath, reusedDownload: !needDownload };
+}
+
+// ======== v0.2: 静默下载（无弹框）+ 退出时自动安装 ========
+async function silentDownloadUpdate(args) {
+  // 仅 Windows 安装版支持
+  if (process.platform !== "win32") return { ok: true, supported: false };
+  if (Boolean(process.env.PORTABLE_EXECUTABLE_DIR)) return { ok: true, supported: false, portable: true };
+
+  const opts = args && typeof args === "object" ? args : {};
+  const info = await checkForUpdates(opts);
+  if (!info.ok) return info;
+  if (!info.updateAvailable) return { ok: true, updateAvailable: false };
+  if (!info.nsisUrl) return { ok: false, error: "NSIS_URL_MISSING" };
+
+  // 文件名/路径逻辑（复用 interactiveUpdateFlow 中的方式）
+  const nsisUrlObj = new URL(info.nsisUrl);
+  const decodedPathname = (() => {
+    try { return decodeURIComponent(String(nsisUrlObj.pathname ?? "")); } catch { return String(nsisUrlObj.pathname ?? ""); }
+  })();
+  const fileName = path.basename(decodedPathname || "");
+  const safeName = sanitizeFileName(fileName, `writing-ide-setup-${info.latestVersion}.exe`);
+  const cachePath = path.join(app.getPath("userData"), "updates", safeName);
+  const launchPath = path.join(app.getPath("temp"), "writing-ide-updates", safeName);
+
+  // sha256 缓存检查
+  const expectedSha = String(info.sha256 ?? "").trim().toLowerCase();
+  const hasExpectedSha = Boolean(expectedSha && /^[a-f0-9]{64}$/.test(expectedSha));
+  const cacheExists = await fsp.access(cachePath).then(() => true).catch(() => false);
+  let needDownload = true;
+  if (cacheExists && hasExpectedSha) {
+    const h = await sha256File(cachePath);
+    if (h.ok && String(h.sha256).toLowerCase() === expectedSha) needDownload = false;
+  }
+
+  if (needDownload) {
+    try { mainWindow?.webContents?.send("update.event", { type: "download.start", version: info.latestVersion, target: cachePath }); } catch { /* ignore */ }
+    const dl = await downloadToFile(info.nsisUrl, cachePath, ({ transferred, total }) => {
+      try { mainWindow?.webContents?.send("update.event", { type: "download.progress", transferred, total }); } catch { /* ignore */ }
+    });
+    if (!dl.ok) return { ok: false, error: "DOWNLOAD_FAILED", detail: dl.error };
+  }
+
+  // sha256 验证
+  if (hasExpectedSha) {
+    const h = await sha256File(cachePath);
+    if (!h.ok || String(h.sha256).toLowerCase() !== expectedSha) {
+      try { await fsp.unlink(cachePath); } catch { /* ignore */ }
+      return { ok: false, error: "SHA256_MISMATCH" };
+    }
+  }
+
+  // 复制到 launchPath（避免 Unicode 路径问题）
+  try {
+    await fsp.mkdir(path.dirname(launchPath), { recursive: true });
+    await fsp.copyFile(cachePath, launchPath);
+  } catch { /* ignore */ }
+  const finalPath = await fsp.access(launchPath).then(() => launchPath).catch(() => cachePath);
+
+  pendingUpdate = { version: info.latestVersion, cachedPath: cachePath, launchPath: finalPath };
+  try {
+    mainWindow?.webContents?.send("update.event", { type: "silent.ready", version: info.latestVersion });
+    mainWindow?.webContents?.send("update.event", { type: "download.done", version: info.latestVersion, target: cachePath });
+  } catch { /* ignore */ }
+
+  return { ok: true, updateAvailable: true, downloaded: true, version: info.latestVersion, path: finalPath, reusedDownload: !needDownload };
 }
 
 function registerIpc() {
@@ -1220,6 +1290,17 @@ function registerIpc() {
   ipcMain.handle("app.getTempPath", async () => ({ ok: true, path: app.getPath("temp") }));
   ipcMain.handle("update.check", async (_event, opts) => checkForUpdates(opts));
   ipcMain.handle("update.checkInteractive", async (_event, opts) => interactiveUpdateFlow(opts));
+  ipcMain.handle("update.silentDownload", async (_event, opts) => silentDownloadUpdate(opts));
+  ipcMain.handle("update.installPending", async () => {
+    if (!pendingUpdate) return { ok: false, error: "NO_PENDING_UPDATE" };
+    try {
+      const { launchPath } = pendingUpdate;
+      pendingUpdate = null;
+      spawn(launchPath, ["/S"], { detached: true, stdio: "ignore" }).unref();
+    } catch { /* ignore */ }
+    setTimeout(() => { try { app.quit(); } catch { /* ignore */ } }, 100);
+    return { ok: true };
+  });
 
   // MCP
   ipcMain.handle("mcp.getServers", async () => {
@@ -1441,6 +1522,27 @@ app.on("window-all-closed", () => {
   stopWatch();
   try { mcpManager?.dispose?.(); } catch { /* ignore */ }
   if (process.platform !== "darwin") app.quit();
+});
+
+// v0.2: 退出时检测 pendingUpdate → 静默启动 NSIS 安装器
+// 同时清理 SingleInstanceLock，避免安装器误报"应用还在运行"
+app.on("will-quit", () => {
+  // 清理 Electron 的 SingleInstanceLock 文件（防止安装器误报）
+  try {
+    const lockPath = path.join(app.getPath("userData"), "SingleInstanceLock");
+    fs.unlinkSync(lockPath);
+  } catch { /* ignore */ }
+
+  if (!pendingUpdate) return;
+  const { launchPath } = pendingUpdate;
+  pendingUpdate = null; // 防止重入
+  try {
+    // /S = NSIS silent install
+    spawn(launchPath, ["/S"], { detached: true, stdio: "ignore" }).unref();
+  } catch {
+    // 兜底：非 silent 启动
+    try { spawn(launchPath, [], { detached: true, stdio: "ignore" }).unref(); } catch { /* ignore */ }
+  }
 });
 
 

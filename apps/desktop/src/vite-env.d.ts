@@ -25,6 +25,15 @@ declare global {
           latestUrl?: string;
         }>;
         checkInteractive: (opts?: { baseUrl?: string }) => Promise<any>;
+        silentDownload: (opts?: { baseUrl?: string }) => Promise<{
+          ok: boolean;
+          error?: string;
+          updateAvailable?: boolean;
+          downloaded?: boolean;
+          version?: string;
+          supported?: boolean;
+        }>;
+        installPending: () => Promise<{ ok: boolean; error?: string }>;
         onEvent?: (handler: (payload: any) => void) => () => void;
       };
       fs?: {

@@ -616,6 +616,12 @@ export const useRunStore = create<RunState>()(
         agentModel: s.agentModel,
         kbAttachedLibraryIds: s.kbAttachedLibraryIds,
       }),
+      merge: (persisted: unknown, current: RunState) => {
+        const p = persisted && typeof persisted === "object" ? { ...(persisted as Record<string, unknown>) } : {};
+        // 老版本可能存了 mode:"plan" 等已废弃值，新版 Gateway 只接受 "agent"|"chat"
+        if (p.mode !== "agent" && p.mode !== "chat") p.mode = "agent";
+        return { ...current, ...p } as RunState;
+      },
     },
   ),
 );

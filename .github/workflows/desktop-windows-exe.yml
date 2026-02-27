@@ -1,0 +1,83 @@
+name: Desktop Windows EXE
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build type"
+        required: true
+        default: "nsis"
+        type: choice
+        options:
+          - nsis
+          - portable
+          - all
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install
+        run: npm ci
+
+      - name: Clean output
+        run: if (Test-Path apps/desktop/out) { Remove-Item -Recurse -Force apps/desktop/out }
+        shell: pwsh
+
+      - name: Build EXE
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "build_type=${{ inputs.build_type }}"
+          if [ "${{ inputs.build_type }}" = "nsis" ]; then
+            npm run dist:desktop:win
+          elif [ "${{ inputs.build_type }}" = "portable" ]; then
+            npm run dist:desktop:win:portable
+          elif [ "${{ inputs.build_type }}" = "all" ]; then
+            npm run dist:desktop:win:all
+          else
+            echo "Unknown build_type: ${{ inputs.build_type }}"
+            exit 2
+          fi
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="$(node -p "require('./apps/desktop/package.json').version")"
+          TAG="desktop-v${VER}"
+          TITLE="Desktop v${VER}"
+          echo "version=${VER}  tag=${TAG}"
+
+          # 收集产物
+          NSIS_PATH="$(find apps/desktop/out -maxdepth 2 -name '*.exe' ! -name '__*' -print | head -n 1 || true)"
+          BLOCKMAP="$(find apps/desktop/out -maxdepth 2 -name '*.exe.blockmap' -print | head -n 1 || true)"
+
+          if [ -z "${NSIS_PATH:-}" ]; then
+            echo "EXE not found under apps/desktop/out"
+            exit 3
+          fi
+          echo "exe=${NSIS_PATH}"
+
+          # 创建或复用 release
+          gh release view "${TAG}" >/dev/null 2>&1 || gh release create "${TAG}" -t "${TITLE}" -n "" --latest=false
+          gh release upload "${TAG}" "${NSIS_PATH}" --clobber
+          if [ -n "${BLOCKMAP:-}" ]; then
+            gh release upload "${TAG}" "${BLOCKMAP}" --clobber
+          fi

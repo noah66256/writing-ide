@@ -8,6 +8,8 @@ export function AccountFooter() {
   const updateAvailable = useUpdateStore((s) => s.updateAvailable);
   const latestVersion = useUpdateStore((s) => s.latestVersion);
   const download = useUpdateStore((s) => s.download);
+  const downloadReady = useUpdateStore((s) => s.downloadReady);
+  const readyVersion = useUpdateStore((s) => s.readyVersion);
   const [version, setVersion] = useState<string>("");
   const [accountOpen, setAccountOpen] = useState(false);
   const loginOpen = useAuthStore((s) => s.loginModalOpen);
@@ -53,7 +55,19 @@ export function AccountFooter() {
       >
         <div className="accountName">
           {user ? (user.phone ?? user.email ?? "已登录") : "未登录"}{" "}
-          {updateAvailable ? (
+          {downloadReady ? (
+            <button
+              className="tag"
+              style={{ marginLeft: 8, cursor: "pointer", background: "var(--accent)", color: "#fff", border: "none" }}
+              title="点击重启并安装更新"
+              onClick={(e) => {
+                e.stopPropagation();
+                void window.desktop?.update?.installPending?.();
+              }}
+            >
+              重启以更新{readyVersion ? ` v${readyVersion}` : ""}
+            </button>
+          ) : updateAvailable ? (
             <span className="tag" style={{ marginLeft: 8 }}>
               有更新{latestVersion ? ` v${latestVersion}` : ""}
             </span>
@@ -68,7 +82,7 @@ export function AccountFooter() {
           ) : (
             <>
               {version ? `Desktop v${version}` : "Desktop"}
-              {accessToken ? <span style={{ marginLeft: 8, color: "var(--muted)" }}>（登录态异常，点设置重登）</span> : null}
+              {accessToken ? <span style={{ marginLeft: 8, color: "var(--muted)" }}>(登录态异常，点设置重登)</span> : null}
             </>
           )}{" "}
           {download?.running ? (
@@ -99,14 +113,3 @@ export function AccountFooter() {
     </>
   );
 }
-
-
-
-
-
-
-
-
-
-
-

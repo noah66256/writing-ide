@@ -109,6 +109,12 @@ contextBridge.exposeInMainWorld("desktop", {
     checkInteractive(opts) {
       return ipcRenderer.invoke("update.checkInteractive", opts);
     },
+    silentDownload(opts) {
+      return ipcRenderer.invoke("update.silentDownload", opts);
+    },
+    installPending() {
+      return ipcRenderer.invoke("update.installPending");
+    },
     onEvent(handler) {
       if (typeof handler !== "function") return () => {};
       const listener = (_event, payload) => handler(payload);

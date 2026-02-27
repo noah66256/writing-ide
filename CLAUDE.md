@@ -159,12 +159,49 @@ Claude Code 与 Codex 组成双引擎协作：
 
 ### Desktop 打包与分发
 
+**打包命令**（在项目根目录执行）：
+
 ```bash
-npm -w @writing-ide/desktop run build:mac   # macOS (arm64 dmg)
-npm -w @writing-ide/desktop run build:win   # Windows (exe)
+# Mac arm64 (DMG + ZIP)
+cd apps/desktop && npm run dist:mac
+
+# Windows x64 NSIS 安装包（可从 macOS 交叉编译）
+cd apps/desktop && npm run dist:win
+
+# 其他变体
+npm run dist:mac:x64          # Mac x64
+npm run dist:mac:universal     # Mac 通用二进制
+npm run dist:win:portable      # Win 便携版
+npm run dist:win:all           # Win NSIS + 便携版
 ```
 
-产物位于 `apps/desktop/dist/`。
+**前置条件**：`npm run build` 会自动先编译 `@writing-ide/agent-core`，再 Vite 构建 renderer。
+
+**产物位置**：`apps/desktop/out/`，命名规则：
+- Win NSIS：`写作IDE Setup {version}.exe`
+- Mac DMG：`写作IDE-{version}-arm64.dmg`
+- Mac ZIP：`写作IDE-{version}-arm64-mac.zip`
+
+**内置 MCP Server**：通过 `asarUnpack` 配置保证 Playwright、博查搜索、Web Search 三个 bundled MCP server 在打包后可用（从 `app.asar.unpacked/` 目录加载）。
+
+**发版后复制产物到 `apps/` 目录**留存归档。
+
+**推送更新到服务器**：
+
+```bash
+python scripts/push-desktop-update.py \
+  --ssh root@120.26.6.147 \
+  --remote-dir /opt/writing-ide/desktop-updates/stable \
+  --gateway-base http://120.26.6.147:8000 \
+  --installer "apps/写作IDE Setup {version}.exe" \
+  --mac-installer "apps/写作IDE-{version}-arm64.dmg" \
+  --version {version} \
+  --notes "更新说明"
+```
+
+**自动更新机制**（v0.2）：
+- Win 安装版：启动后 8s + 每 6h 静默检查 → 后台静默下载 → 退出时 NSIS `/S` 静默安装
+- Mac / Win 便携版：仅显示"有更新"提示，不自动安装
 
 ### Admin-web 部署
 
