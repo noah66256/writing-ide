@@ -3390,6 +3390,7 @@ fastify.post(
     }
 
     // JSON 解析失败：视为可重试（模型偶尔返回非法格式）
+    console.warn(`[extract_cards] INVALID_MODEL_OUTPUT attempt=${attempt} raw=${raw.slice(0, 500)}`);
     lastErr = { is429: false, isTimeout: false, detail: "INVALID_MODEL_OUTPUT", status: 500 };
     lastDetail = "INVALID_MODEL_OUTPUT";
     lastStatus = 500;
@@ -3782,6 +3783,7 @@ fastify.post(
     }
 
     // JSON 解析失败：视为可重试
+    console.warn(`[build_library_playbook] INVALID_MODEL_OUTPUT attempt=${attempt} mode=${usedMode} raw=${raw.slice(0, 500)}`);
     lastErr = { is429: false, isTimeout: false, detail: "INVALID_MODEL_OUTPUT", status: 500 };
     lastDetail = "INVALID_MODEL_OUTPUT";
     lastStatus = 500;
