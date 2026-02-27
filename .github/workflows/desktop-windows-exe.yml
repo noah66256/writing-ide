@@ -32,9 +32,9 @@ jobs:
           cache: "npm"
 
       - name: Install
-        # npm ci 会因 package-lock 中的 macOS optional deps 报 EBADPLATFORM
-        # 用 npm install 让 npm 自动解析当前平台的 optional deps
-        run: npm install --no-audit --no-fund
+        # package-lock 含 macOS optional deps（@rollup/rollup-darwin-arm64 等）
+        # --force 跳过平台检查，Windows 平台的 optional deps 会正确安装
+        run: npm install --force --no-audit --no-fund
 
       - name: Clean output
         run: if (Test-Path apps/desktop/out) { Remove-Item -Recurse -Force apps/desktop/out }
