@@ -39,6 +39,7 @@ export function CardJobsModal() {
   const open = useKbStore((s) => s.kbManagerOpen);
   const tab = useKbStore((s) => s.kbManagerTab);
   const notice = useKbStore((s) => s.kbManagerNotice);
+  const viewLibIdFromStore = useKbStore((s) => s.kbManagerViewLibId);
   const isLoading = useKbStore((s) => s.isLoading);
   const status = useKbStore((s) => s.cardJobStatus);
   const jobs = useKbStore((s) => s.cardJobs);
@@ -195,6 +196,14 @@ export function CardJobsModal() {
     if (!open) return;
     void refreshLibraries().catch(() => void 0);
   }, [open, refreshLibraries]);
+
+  // 从 store 同步 viewLibId（设置页点击库跳转过来时自动展开目标库）
+  useEffect(() => {
+    if (!open || tab !== "libraries" || !viewLibIdFromStore) return;
+    setViewLibId(viewLibIdFromStore);
+    setViewTab("health");
+    setFpAdvanced(false);
+  }, [open, tab, viewLibIdFromStore]);
 
   // 关键：确保内层 prompt 打开后立刻可输入（避免“弹窗出现但焦点仍在编辑器，打不了字”）
   useLayoutEffect(() => {

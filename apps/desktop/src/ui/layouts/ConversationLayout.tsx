@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { NavSidebar } from "../components/NavSidebar";
 import { ChatArea } from "../components/ChatArea";
+import { CardJobsModal } from "@/components/CardJobsModal";
 import { useModelStore } from "@/state/modelStore";
 import { useRunStore } from "@/state/runStore";
 import { useProjectStore } from "@/state/projectStore";
@@ -93,6 +94,8 @@ export function ConversationLayout() {
       <main className="flex-1 flex flex-col min-w-0 relative z-10">
         <ChatArea />
       </main>
+
+      <CardJobsModal />
     </div>
   );
 }

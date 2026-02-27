@@ -204,6 +204,45 @@ export const TOOL_LIST: ToolMeta[] = [
     },
   },
   {
+    name: "kb.learn",
+    description:
+      "一键学习入库 workflow（导入 → 入队抽卡 → 入队手册生成 → 自动挂载）。\n" +
+      "【用途】处理用户提交的学习语料（文本/文件/URL），完整执行学习入库流程。\n" +
+      "抽卡和手册生成在后台异步执行，本工具毫秒级返回。用 kb.jobStatus 查询进度。\n" +
+      "【输入方式】textRef/text/path/url 四选一：\n" +
+      "- textRef：大文本场景，系统会自动生成引用 ID，直接传入\n" +
+      "- text：短文本场景，可直接传入文本内容\n" +
+      "- path：文件路径\n" +
+      "- url：网页 URL",
+    args: [
+      { name: "textRef", required: false, desc: "系统自动生成的文本引用 ID（大文本场景，由系统预存）", type: "string" as const },
+      { name: "text", required: false, desc: "文本内容（短文本可直接传入；大文本请用 textRef）", type: "string" as const },
+      { name: "path", required: false, desc: "文件路径（项目相对路径或绝对路径）", type: "string" as const },
+      { name: "url", required: false, desc: "网页 URL", type: "string" as const },
+      { name: "autoPlaybook", required: false, desc: "可选：是否入队手册生成（默认 true）", type: "boolean" as const },
+      { name: "autoAttach", required: false, desc: "可选：是否自动挂载库（默认 true）", type: "boolean" as const },
+    ],
+    modes: ["agent"] as const,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        textRef: { type: "string" },
+        text: { type: "string" },
+        path: { type: "string" },
+        url: { type: "string" },
+        autoPlaybook: { type: "boolean" },
+        autoAttach: { type: "boolean" },
+      },
+      oneOfRequired: [
+        { required: ["textRef"] },
+        { required: ["text"] },
+        { required: ["path"] },
+        { required: ["url"] },
+      ],
+      additionalProperties: true,
+    },
+  },
+  {
     name: "kb.import",
     description:
       "仅导入语料到知识库（不抽卡）：接收 text/path/url（三选一），秒级完成入库。\n" +

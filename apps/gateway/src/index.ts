@@ -3284,8 +3284,10 @@ fastify.post(
   let lastDetail: string | undefined = undefined;
 
   let ret: any = null;
+  let parsedCards: any[] | null = null;
+
   for (let attempt = 0; attempt <= retryMax; attempt += 1) {
-    // 超时兜底：逐次降级输入规模，优先保证“能抽出卡”而不是卡死等待
+    // 超时兗底：逐次降级输入规模，优先保证“能抽出卡”而不是卡死等待
     const maxCount = attempt <= 0 ? 160 : attempt === 1 ? 80 : attempt === 2 ? 48 : 32;
     const maxCharsPerPara = attempt <= 0 ? 520 : attempt === 1 ? 360 : attempt === 2 ? 260 : 220;
     const user = buildUser(body.paragraphs as any, maxCount, maxCharsPerPara);
@@ -3303,64 +3305,73 @@ fastify.post(
       maxTokens: stageMaxTokens ?? null,
     });
 
-    if (ret.ok) break;
+    if (!ret.ok) {
+      lastStatus = ret.status;
+      lastDetail = ret.error;
+      const errText = String(ret.error ?? "");
+      const is429 = ret.status === 429 || errText.includes("Too Many Requests") || errText.includes("负载已饱和");
+      const isTimeout = /Headers Timeout Error|timeout|超时/i.test(errText) || /fetch failed/i.test(errText);
+      const isRetryable = is429 || isTimeout || ret.status === 502 || ret.status === 503 || errText.includes("UPSTREAM_502") || errText.includes("UPSTREAM_503");
+      lastErr = { is429, isTimeout, detail: ret.error, status: ret.status };
+      if (!isRetryable || attempt >= retryMax) break;
 
-    lastStatus = ret.status;
-    lastDetail = ret.error;
-    const errText = String(ret.error ?? "");
-    const is429 = ret.status === 429 || errText.includes("Too Many Requests") || errText.includes("负载已饱和");
-    const isTimeout = /Headers Timeout Error|timeout|超时/i.test(errText) || /fetch failed/i.test(errText);
-    const isRetryable = is429 || isTimeout || ret.status === 502 || ret.status === 503 || errText.includes("UPSTREAM_502") || errText.includes("UPSTREAM_503");
-    lastErr = { is429, isTimeout, detail: ret.error, status: ret.status };
-    if (!isRetryable || attempt >= retryMax) break;
+      const jitter = Math.floor(Math.random() * 200);
+      const wait = retryBaseMs * Math.pow(2, attempt) + jitter;
+      await sleep(wait);
+      continue;
+    }
+
+    // LLM 调用成功，尝试解析 JSON
+    const raw = String(ret.content ?? "").trim();
+    const tryParse = (s: string) => { try { return JSON.parse(s); } catch { return null; } };
+    let parsed: any = tryParse(raw);
+    if (!parsed) {
+      const m = raw.match(/\[[\s\S]*\]/);
+      if (m?.[0]) parsed = tryParse(m[0]);
+    }
+    if (Array.isArray(parsed)) {
+      parsedCards = parsed;
+      break;
+    }
+
+    // JSON 解析失败：视为可重试（模型偶尔返回非法格式）
+    lastErr = { is429: false, isTimeout: false, detail: "INVALID_MODEL_OUTPUT", status: 500 };
+    lastDetail = "INVALID_MODEL_OUTPUT";
+    lastStatus = 500;
+    if (attempt >= retryMax) break;
 
     const jitter = Math.floor(Math.random() * 200);
     const wait = retryBaseMs * Math.pow(2, attempt) + jitter;
     await sleep(wait);
   }
 
-  if (!ret?.ok) {
+  if (!ret?.ok && !parsedCards) {
     const is429 = Boolean(lastErr?.is429);
     const isTimeout = Boolean(lastErr?.isTimeout);
+    const isInvalidOutput = String(lastDetail ?? "") === "INVALID_MODEL_OUTPUT";
     const parsed = parseUpstream(String(lastDetail ?? ""));
     const payload = {
-      error: is429 ? "UPSTREAM_BUSY" : isTimeout ? "UPSTREAM_TIMEOUT" : "UPSTREAM_ERROR",
+      error: is429 ? "UPSTREAM_BUSY" : isTimeout ? "UPSTREAM_TIMEOUT" : isInvalidOutput ? "INVALID_MODEL_OUTPUT" : "UPSTREAM_ERROR",
       message:
-        (parsed.message || "upstream error") +
-        (isTimeout
-          ? "\n\n提示：上游模型响应超时（可能负载过高或输入过长）。可稍后重试，或减少语料长度/拆分文件，或切换更快的抽卡模型（LLM_CARD_MODEL）。"
-          : ""),
+        isInvalidOutput
+          ? "模型未返回合法 JSON 数组（已重试 " + String(retryMax + 1) + " 次）。可稍后重试，或切换更稳定的抽卡模型（LLM_CARD_MODEL）。"
+          : (parsed.message || "upstream error") +
+            (isTimeout
+              ? "\n\n提示：上游模型响应超时（可能负载过高或输入过长）。可稍后重试，或减少语料长度/拆分文件，或切换更快的抽卡模型（LLM_CARD_MODEL）。"
+              : ""),
       requestId: parsed.requestId,
       status: lastStatus ?? null,
       retry: { attempts: retryMax + 1, retryMax, retryBaseMs }
     };
-    return reply.code(is429 ? 503 : 502).send(payload);
+    return reply.code(is429 ? 503 : isInvalidOutput ? 500 : 502).send(payload);
   }
 
-  const raw = String(ret.content ?? "").trim();
-
-  const tryParse = (s: string) => {
-    try {
-      const x = JSON.parse(s);
-      return x;
-    } catch {
-      return null;
-    }
-  };
-
-  let parsed: any = tryParse(raw);
-  if (!parsed) {
-    // 宽松兜底：截取第一个 JSON 数组
-    const m = raw.match(/\[[\s\S]*\]/);
-    if (m?.[0]) parsed = tryParse(m[0]);
-  }
-
-  if (!Array.isArray(parsed)) {
+  if (!parsedCards) {
     return reply.code(500).send({ error: "INVALID_MODEL_OUTPUT", hint: "模型未返回合法 JSON 数组" });
   }
 
   // 轻量清洗
-  const cards = parsed
+  const cards = parsedCards
     .map((c: any) => ({
       title: typeof c?.title === "string" ? c.title.trim().slice(0, 120) : "",
       type: typeof c?.type === "string" ? c.type.trim() : undefined,
@@ -3658,6 +3669,7 @@ fastify.post(
   let lastDetail: string | undefined = undefined;
 
   let ret: any = null;
+  let parsedResult: any = null;
   let usedMode: "lite" | "full" = effectiveMode;
   for (let attempt = 0; attempt <= retryMax; attempt += 1) {
     const sys = usedMode === "lite" ? sysLite : sysFull;
@@ -3679,84 +3691,74 @@ fastify.post(
     });
     clearTimeout(timer);
 
-    if (ret.ok) break;
-
-    lastStatus = ret.status;
-    lastDetail = ret.error;
-    const errText = String(ret.error ?? "");
-    const isTimeout = /aborted|AbortError|timeout/i.test(errText);
-    const is429 = ret.status === 429 || errText.includes("Too Many Requests") || errText.includes("负载已饱和");
-    lastErr = { is429, isTimeout, detail: ret.error, status: ret.status };
-    // timeout：优先“full→lite”降级一次；如果已经是 lite 仍超时，则不继续内层重试（交给上层做拆分/重试）
-    if (isTimeout) {
-      if (usedMode !== "lite") {
-        usedMode = "lite";
-        continue;
+    if (!ret.ok) {
+      lastStatus = ret.status;
+      lastDetail = ret.error;
+      const errText = String(ret.error ?? "");
+      const isTimeout = /aborted|AbortError|timeout/i.test(errText);
+      const is429 = ret.status === 429 || errText.includes("Too Many Requests") || errText.includes("负载已饱和");
+      lastErr = { is429, isTimeout, detail: ret.error, status: ret.status };
+      if (isTimeout) {
+        if (usedMode !== "lite") {
+          usedMode = "lite";
+          continue;
+        }
+        break;
       }
+      if (!is429 || attempt >= retryMax) break;
+
+      const jitter = Math.floor(Math.random() * 200);
+      const wait = retryBaseMs * Math.pow(2, attempt) + jitter;
+      await sleep(wait);
+      continue;
+    }
+
+    // LLM 调用成功，尝试解析 JSON
+    const raw = String(ret.content ?? "").trim();
+    const tryParse = (s: string) => { try { return JSON.parse(s); } catch { return null; } };
+    let parsed: any = tryParse(raw);
+    if (!parsed) {
+      const m = raw.match(/\{[\s\S]*\}/);
+      if (m?.[0]) parsed = tryParse(m[0]);
+    }
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      parsedResult = parsed;
       break;
     }
-    if (!is429 || attempt >= retryMax) break;
+
+    // JSON 解析失败：视为可重试
+    lastErr = { is429: false, isTimeout: false, detail: "INVALID_MODEL_OUTPUT", status: 500 };
+    lastDetail = "INVALID_MODEL_OUTPUT";
+    lastStatus = 500;
+    if (attempt >= retryMax) break;
 
     const jitter = Math.floor(Math.random() * 200);
     const wait = retryBaseMs * Math.pow(2, attempt) + jitter;
     await sleep(wait);
   }
 
-  if (!ret?.ok) {
+  if (!ret?.ok && !parsedResult) {
     const is429 = Boolean(lastErr?.is429);
     const isTimeout = Boolean(lastErr?.isTimeout);
+    const isInvalidOutput = String(lastDetail ?? "") === "INVALID_MODEL_OUTPUT";
     const parsed = parseUpstream(String(lastDetail ?? ""));
-
-    // 不再用 5xx 失败中断前端任务：返回“占位卡”保证风格手册流程可完成（后续可重跑覆盖）。
-    const msg = (isTimeout ? `upstream timeout after ${timeoutMs}ms` : parsed.message) || "upstream error";
-    const spEvidence = fallbackEvidence.slice(0, 1);
-    const filled = facetIds.map((id) => ({
-      facetId: id,
-      title: `（上游失败）${id}`,
-      content:
-        `- （上游失败：${is429 ? "忙/限流" : isTimeout ? "超时" : "错误"}）\n` +
-        `- 建议：稍后重试；或在 B 端把 stage=rag.ingest.build_library_playbook 切到更快/更稳定的模型。\n` +
-        `- 备注：本卡为占位，便于整套手册生成不中断。`,
-      evidence: spEvidence,
-    }));
-
-    return reply.send({
-      ok: true,
-      styleProfile: {
-        title: "（占位）风格画像",
-        content: `- （上游失败：${msg}）\n- 已返回占位维度卡；可稍后重试覆盖。`,
-        evidence: spEvidence,
-      },
-      playbookFacets: filled,
-      upstream: {
-        ok: false,
-        error: is429 ? "UPSTREAM_BUSY" : isTimeout ? "UPSTREAM_TIMEOUT" : "UPSTREAM_ERROR",
-        message: msg,
-        requestId: parsed.requestId ?? null,
-        status: lastStatus ?? null,
-        retry: { attempts: retryMax + 1, retryMax, retryBaseMs },
-      },
+    const msg = isInvalidOutput
+      ? "INVALID_MODEL_OUTPUT"
+      : (isTimeout ? `upstream timeout after ${timeoutMs}ms` : parsed.message) || "upstream error";
+    return reply.code(is429 ? 503 : isInvalidOutput ? 500 : 502).send({
+      ok: false,
+      error: is429 ? "UPSTREAM_BUSY" : isTimeout ? "UPSTREAM_TIMEOUT" : isInvalidOutput ? "INVALID_MODEL_OUTPUT" : "UPSTREAM_ERROR",
+      message: msg,
+      requestId: parsed.requestId ?? null,
+      status: lastStatus ?? null,
+      retry: { attempts: retryMax + 1, retryMax, retryBaseMs },
     });
   }
 
-  const raw = String(ret.content ?? "").trim();
-  const tryParse = (s: string) => {
-    try {
-      const x = JSON.parse(s);
-      return x;
-    } catch {
-      return null;
-    }
-  };
-
-  let parsed: any = tryParse(raw);
-  if (!parsed) {
-    const m = raw.match(/\{[\s\S]*\}/);
-    if (m?.[0]) parsed = tryParse(m[0]);
-  }
-  if (!parsed || typeof parsed !== "object") {
+  if (!parsedResult) {
     return reply.code(500).send({ error: "INVALID_MODEL_OUTPUT", hint: "模型未返回合法 JSON 对象" });
   }
+  const parsed = parsedResult;
 
   const evSchema = z.object({
     docId: z.string().min(1),

@@ -86,6 +86,8 @@ export type RunContext = {
   mainDoc: Record<string, unknown>;
   /** Custom agent definitions from Desktop (for agent.delegate to resolve custom agents) */
   customAgentDefinitions?: SubAgentDefinition[];
+  /** 大文本 blob 池：避免大文本经过 LLM 回显。key=blobId, value=原始文本 */
+  textBlobPool?: Map<string, string>;
 };
 
 type ToolExecResult = {
@@ -699,7 +701,7 @@ export class WritingAgentRunner {
   }
 
   private async _executeTool(toolUse: ContentBlockToolUse): Promise<ToolExecResult> {
-    const rawInput = toolUse.input ?? {};
+    let rawInput = toolUse.input ?? {};
 
     // Sub-agent delegation: intercept before generic server tool routing
     if (toolUse.name === "agent.delegate") {
@@ -782,6 +784,39 @@ export class WritingAgentRunner {
         turn: this.turn,
       });
       return this._waitForDesktopToolResult(toolUse.id, toolUse.name);
+    }
+
+    // textRef 解析：将 blob 引用替换为实际文本（在路由到 Desktop 前注入）
+    if (toolUse.name === "kb.learn") {
+      const textRef = String((rawInput as Record<string, unknown>).textRef ?? "").trim();
+      if (textRef) {
+        const blobText = this.ctx.textBlobPool?.get(textRef);
+        if (blobText) {
+          rawInput = { ...rawInput, text: blobText };
+          // 清理冲突字段，确保 Desktop 端 one-of 校验通过
+          delete (rawInput as Record<string, unknown>).textRef;
+          delete (rawInput as Record<string, unknown>).path;
+          delete (rawInput as Record<string, unknown>).url;
+          // 不在此处删除 blob：如果工具执行失败 LLM 重试时仍需引用。
+          // blob 随 runner 上下文 GC 自动清理（每次 run 最多 1 个 blob）。
+        } else {
+          this.ctx.writeEvent("tool.call", {
+            toolCallId: toolUse.id,
+            name: toolUse.name,
+            args: { textRef, error: "TEXT_REF_NOT_FOUND" },
+            executedBy: "gateway",
+            turn: this.turn,
+          });
+          return {
+            ok: false as const,
+            output: {
+              ok: false,
+              error: "TEXT_REF_NOT_FOUND",
+              detail: `文本引用 "${textRef}" 未找到，可能已过期。请要求用户重新提交文本。`,
+            },
+          };
+        }
+      }
     }
 
     const decision = decideServerToolExecution({
@@ -948,6 +983,13 @@ export class WritingAgentRunner {
       ? { ...this.ctx.gates }
       : { styleGateEnabled: false, lintGateEnabled: false, copyGateEnabled: false, hasStyleLibrary: false, hasNonStyleLibraries: false, styleLibIds: [] as string[], nonStyleLibIds: [] as string[], styleLibIdSet: new Set<string>() };
 
+    // 大文本预判：若子 agent 有 kb.learn 且 task 超阈值，提前初始化 blob 池
+    // 必须在 subCtx 构建之前，确保 Map 引用能共享给子 runner
+    const needsTextBlob = task.length > 2000 && subAllowedToolNames.has("kb.learn");
+    if (needsTextBlob && !this.ctx.textBlobPool) {
+      (this.ctx as any).textBlobPool = new Map<string, string>();
+    }
+
     // Build sub-agent RunContext
     const subCtx: RunContext = {
       runId: subRunId,
@@ -975,6 +1017,7 @@ export class WritingAgentRunner {
       // 子 agent 的 systemPrompt 已明确指示第一步调哪个工具，无需强制。
       toolChoiceFirstTurn: undefined,
       mainDoc: this.ctx.mainDoc,
+      textBlobPool: this.ctx.textBlobPool,
       onTurnUsage: (promptTokens, completionTokens) => {
         // Forward to parent's usage callback
         this.ctx.onTurnUsage?.(promptTokens, completionTokens);
@@ -1009,6 +1052,20 @@ export class WritingAgentRunner {
     const acceptanceCriteria = String(rawArgs.acceptanceCriteria ?? "").trim();
 
     let taskMessage = task;
+
+    // 大文本外置到 blob pool —— 避免 LLM 回显巨量文本导致 SSE 超时
+    if (needsTextBlob && this.ctx.textBlobPool) {
+      const blobId = `blob_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      this.ctx.textBlobPool.set(blobId, task);
+      const charCount = task.length;
+      const preview = task.slice(0, 150).replace(/\n/g, " ") + "...";
+      taskMessage = [
+        `用户提交了约${charCount}字的文本，内容预览：「${preview}」`,
+        "",
+        `请调用 kb.learn 工具开始学习入库流程，传入 textRef="${blobId}"。`,
+        "文本已由系统预存，无需你传递原文。",
+      ].join("\n");
+    }
 
     // 自动注入精简上下文到 taskMessage（风格库 ID + mainDoc 目标/约束）
     const contextHint = buildSubAgentContextHint({

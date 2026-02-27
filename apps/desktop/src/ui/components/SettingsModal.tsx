@@ -82,7 +82,7 @@ export function SettingsModal({ onClose, initialTab, kbSelectMode }: {
           </div>
           <div className="flex-1 overflow-y-auto p-6">
             {tab === "persona" && <PersonaTabContent />}
-            {tab === "kb" && <KbTabContent kbSelectMode={kbSelectMode} />}
+            {tab === "kb" && <KbTabContent kbSelectMode={kbSelectMode} onClose={onClose} />}
             {tab === "team" && <TeamTabContent />}
             {tab === "mcp" && <McpTabContent />}
             {tab === "skill" && <SkillTabContent />}
@@ -145,13 +145,17 @@ function PersonaTabContent() {
 
 /* ─── KB Tab ─── */
 
-function KbTabContent({ kbSelectMode }: { kbSelectMode?: { onSelect: (id: string) => void } }) {
+function KbTabContent({ kbSelectMode, onClose }: {
+  kbSelectMode?: { onSelect: (id: string) => void };
+  onClose?: () => void;
+}) {
   const baseDir = useKbStore((s) => s.baseDir);
   const libraries = useKbStore((s) => s.libraries);
   const refreshLibraries = useKbStore((s) => s.refreshLibraries);
   const createLibrary = useKbStore((s) => s.createLibrary);
   const renameLibrary = useKbStore((s) => s.renameLibrary);
   const deleteLibraryToTrash = useKbStore((s) => s.deleteLibraryToTrash);
+  const openKbManager = useKbStore((s) => s.openKbManager);
   const setCurrentLibrary = useKbStore((s) => s.setCurrentLibrary);
 
   const handlePickDir = async () => {
@@ -200,9 +204,14 @@ function KbTabContent({ kbSelectMode }: { kbSelectMode?: { onSelect: (id: string
   };
 
   const handleSelectLibrary = (id: string) => {
-    if (!kbSelectMode) return;
-    setCurrentLibrary(id);
-    kbSelectMode.onSelect(id);
+    if (kbSelectMode) {
+      setCurrentLibrary(id);
+      kbSelectMode.onSelect(id);
+      return;
+    }
+    // 非选择模式：关闭设置 → 打开库管理并展开目标库
+    openKbManager("libraries", null, id);
+    onClose?.();
   };
 
   return (
@@ -261,9 +270,8 @@ function KbTabContent({ kbSelectMode }: { kbSelectMode?: { onSelect: (id: string
                   key={lib.id}
                   onClick={() => handleSelectLibrary(lib.id)}
                   className={cn(
-                    "flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-colors",
-                    "border-border hover:bg-surface-alt/50",
-                    kbSelectMode && "cursor-pointer hover:border-accent/40 hover:bg-accent-soft/10",
+                    "flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-colors cursor-pointer",
+                    "border-border hover:bg-surface-alt/50 hover:border-accent/40",
                   )}
                 >
                   <BookOpen size={16} className="text-text-muted" />
@@ -272,7 +280,7 @@ function KbTabContent({ kbSelectMode }: { kbSelectMode?: { onSelect: (id: string
                     <div className="text-[11px] text-text-muted">
                       {lib.purpose === "style" ? "风格库" : lib.purpose === "product" ? "产品库" : "素材库"}
                       {" · "}{lib.docCount}{" 篇"}
-                      {kbSelectMode ? " · 点击选择" : ""}
+                      {kbSelectMode ? " · 点击选择" : " · 点击管理"}
                     </div>
                   </div>
                   {!kbSelectMode && (

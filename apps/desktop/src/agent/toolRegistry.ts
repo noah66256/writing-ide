@@ -1066,6 +1066,121 @@ const tools: ToolDefinition[] = [
       };
     },
   },
+  // ── kb.learn（一键学习入库 workflow：导入 + 异步抽卡 + 手册 + 挂载）──────────────────────────
+  {
+    name: "kb.learn",
+    description: "一键学习入库 workflow：导入 + 入队抽卡 + 入队手册 + 自动挂载。",
+    args: [
+      { name: "text", desc: "文本内容（由 Gateway textRef 注入）" },
+      { name: "path", desc: "文件路径" },
+      { name: "url", desc: "网页 URL" },
+      { name: "autoPlaybook", desc: "是否入队手册（默认 true）" },
+      { name: "autoAttach", desc: "是否自动挂载（默认 true）" },
+    ],
+    riskLevel: "medium" as ToolRiskLevel,
+    applyPolicy: "proposal" as ToolApplyPolicy,
+    reversible: false,
+    run: async (args: Record<string, unknown>) => {
+      // --- 1) 解析输入（text 由 Gateway textRef 注入，或直接传入）---
+      const textInput = String(args.text ?? "").trim();
+      const pathInput = String(args.path ?? "").trim();
+      const urlInput = String(args.url ?? "").trim();
+      const inputKinds = [textInput, pathInput, urlInput].filter(Boolean);
+      if (inputKinds.length !== 1) {
+        return { ok: false, error: "MUST_PROVIDE_EXACTLY_ONE_OF_TEXT_PATH_URL" };
+      }
+      if (urlInput) {
+        try { new URL(urlInput); } catch { return { ok: false, error: "INVALID_URL" }; }
+      }
+
+      // --- 2) 确保 kbStore 就绪 ---
+      const ready = await useKbStore.getState().ensureReady().catch(() => false);
+      if (!ready) return { ok: false, error: "KB_NOT_READY" };
+      await useKbStore.getState().refreshLibraries().catch(() => void 0);
+
+      // --- 3) 弹出库选择器（始终由用户手动选择，防止 LLM 自动选库） ---
+      let libraryId = "";
+      let currentLibraries = useKbStore.getState().libraries ?? [];
+
+      const selected = await useKbStore.getState().requestLibrarySelect();
+      if (!selected) return { ok: false, error: "LIBRARY_SELECTION_CANCELLED" };
+      libraryId = String(selected).trim();
+      await useKbStore.getState().refreshLibraries().catch(() => void 0);
+      currentLibraries = useKbStore.getState().libraries ?? [];
+
+      if (!libraryId || !currentLibraries.some((l: any) => l.id === libraryId)) {
+        return { ok: false, error: "LIBRARY_NOT_FOUND" };
+      }
+      useKbStore.getState().setCurrentLibrary(libraryId);
+
+      // --- 4) 导入文档（同步，快速）---
+      let importRet: { imported: number; skipped: number; docIds: string[]; errors?: any[] } | null = null;
+      let tmpPath: string | null = null;
+
+      try {
+        if (textInput) {
+          tmpPath = `.kb_learn_tmp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.md`;
+          useProjectStore.getState().createFile(tmpPath, textInput);
+          importRet = await useKbStore.getState().importProjectPaths([tmpPath]);
+        } else if (pathInput) {
+          const isAbsolute = /^([a-zA-Z]:[\\/]|\/)/.test(pathInput);
+          importRet = isAbsolute
+            ? await useKbStore.getState().importExternalFiles([pathInput])
+            : await useKbStore.getState().importProjectPaths([normalizeRelPath(pathInput)]);
+        } else {
+          importRet = await useKbStore.getState().importUrls([urlInput]);
+        }
+      } finally {
+        if (tmpPath) {
+          useProjectStore.getState().deletePath(tmpPath).catch(() => void 0);
+        }
+      }
+
+      const docIds = (importRet?.docIds ?? []).map((x: any) => String(x ?? "").trim()).filter(Boolean);
+      if (!docIds.length) {
+        return { ok: false, error: "LEARN_NO_DOCS", output: { ok: false, libraryId, import: importRet } };
+      }
+
+      // --- 5) 入队抽卡（异步，毫秒级返回）---
+      await useKbStore.getState().enqueueCardJobs(docIds, { open: true, autoStart: true });
+
+      // --- 6) 入队手册生成（异步）---
+      const autoPlaybook = args.autoPlaybook === undefined ? true : Boolean(args.autoPlaybook);
+      let enqueuedPlaybook = 0;
+      if (autoPlaybook) {
+        const ret = await useKbStore.getState().enqueuePlaybookJob(libraryId, { skipConfirm: true }).catch(() => ({ ok: false }));
+        if ((ret as any)?.ok) enqueuedPlaybook = 1;
+      }
+
+      // --- 7) 自动挂载 ---
+      const autoAttach = args.autoAttach === undefined ? true : Boolean(args.autoAttach);
+      if (autoAttach) {
+        const cur = useRunStore.getState().kbAttachedLibraryIds ?? [];
+        if (!cur.includes(libraryId)) {
+          useRunStore.getState().setKbAttachedLibraries([...cur, libraryId]);
+        }
+      }
+
+      // --- 8) 返回 ---
+      const libMeta = (useKbStore.getState().libraries ?? []).find((l: any) => l.id === libraryId);
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          library: libMeta
+            ? { id: libMeta.id, name: libMeta.name, purpose: (libMeta as any).purpose }
+            : { id: libraryId },
+          docIds,
+          imported: importRet?.imported ?? 0,
+          enqueuedCards: docIds.length,
+          enqueuedPlaybook,
+          attached: autoAttach,
+          message: "语料已导入，抽卡和手册生成已入队后台执行。可用 kb.jobStatus 查询进度。",
+        },
+        undoable: false,
+      };
+    },
+  },
   // ── kb.import（仅导入，不抽卡）──────────────────────────
   {
     name: "kb.import",

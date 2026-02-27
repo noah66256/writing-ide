@@ -267,6 +267,8 @@ type KbState = {
   kbManagerOpen: boolean;
   kbManagerTab: "libraries" | "jobs" | "trash";
   kbManagerNotice: string | null;
+  /** 打开库管理时自动展开的库 ID（一次性消费） */
+  kbManagerViewLibId: string | null;
 
   // 任务队列（抽卡 + 风格手册）
   cardJobStatus: "idle" | "running" | "paused";
@@ -387,10 +389,10 @@ type KbState = {
     maxTotalChars?: number;
   }) => Promise<{ ok: boolean; cards: Array<{ facetId: string; title: string; content: string }>; error?: string }>;
 
-  openKbManager: (tab?: KbState["kbManagerTab"], notice?: string | null) => void;
+  openKbManager: (tab?: KbState["kbManagerTab"], notice?: string | null, viewLibId?: string | null) => void;
   closeKbManager: () => void;
   enqueueCardJobs: (docIds: string[], opts?: { open?: boolean; autoStart?: boolean }) => Promise<void>;
-  enqueuePlaybookJob: (libraryId: string, opts?: { open?: boolean }) => Promise<{ ok: boolean; enqueued?: boolean; error?: string }>;
+  enqueuePlaybookJob: (libraryId: string, opts?: { open?: boolean; skipConfirm?: boolean }) => Promise<{ ok: boolean; enqueued?: boolean; error?: string }>;
   startCardJobs: () => Promise<void>;
   pauseCardJobs: () => void;
   resumeCardJobs: () => Promise<void>;
@@ -2132,6 +2134,8 @@ function makeSnippet(args: { text: string; matchIndex: number; queryLen: number 
 let cardJobsRunner: Promise<void> | null = null;
 let cardJobsAbort: AbortController | null = null;
 let cardJobsAbortReason: null | "pause" | "cancel" = null;
+/** 代际号：防止旧 runner 的 .finally() 意外清除新 runner */
+let cardJobsGeneration = 0;
 
 export const useKbStore = create<KbState>()(
   persist(
@@ -2149,6 +2153,7 @@ export const useKbStore = create<KbState>()(
       kbManagerOpen: false,
       kbManagerTab: "libraries",
       kbManagerNotice: null,
+      kbManagerViewLibId: null,
       cardJobStatus: "idle",
       cardJobError: null,
       cardJobs: [],
@@ -2496,13 +2501,14 @@ export const useKbStore = create<KbState>()(
         return { ok: true, removedLibraries, removedDocs, removedArtifacts };
       },
 
-      openKbManager: (tab, notice) =>
+      openKbManager: (tab, notice, viewLibId) =>
         set({
           kbManagerOpen: true,
           kbManagerTab: tab ?? "libraries",
           kbManagerNotice: notice ?? null,
+          kbManagerViewLibId: viewLibId ?? null,
         }),
-      closeKbManager: () => set({ kbManagerOpen: false, kbManagerNotice: null }),
+      closeKbManager: () => set({ kbManagerOpen: false, kbManagerNotice: null, kbManagerViewLibId: null }),
 
       enqueueCardJobs: async (docIds, opts) => {
         const ok = await get().ensureReady();
@@ -2602,9 +2608,9 @@ export const useKbStore = create<KbState>()(
           return { ok: true, enqueued: false };
         }
 
-        // 已跑过：提示“取消 / 仍然重跑”
+        // 已跑过：提示”取消 / 仍然重跑”（workflow 自动调用时可通过 skipConfirm 跳过确认）
         const alreadyRun = alreadyGenerated || existing?.status === "success";
-        if (alreadyRun) {
+        if (alreadyRun && !opts?.skipConfirm) {
           const yes = await useDialogStore.getState().openConfirm({
             title: "确认重跑？",
             message:
@@ -2677,11 +2683,30 @@ export const useKbStore = create<KbState>()(
         }));
 
         if (cardJobsRunner) {
-          // 可能存在：用户“暂停”后很快点击“继续”，旧 runner 还没退出。
-          // 这里等待旧 runner 退出后，如仍处于 running 状态则自动拉起新的 runner。
-          return cardJobsRunner.then(async () => {
-            if (get().cardJobStatus === "running") await get().startCardJobs();
-          });
+          // 新一轮抽卡入队后，旧 runner 可能仍在跑（卡在 generateLibraryPlaybook 等重型任务）。
+          // 中止旧 runner → 等待其退出（短超时防死锁）→ 强制清理 → 启动新 runner。
+          const staleRunner = cardJobsRunner;
+
+          // 仅在旧 runner 尚未被中止时发起 abort（避免覆盖 pause 语义）
+          if (!cardJobsAbort?.signal.aborted) {
+            cardJobsAbortReason = "cancel";
+            try { cardJobsAbort?.abort(); } catch { /* ignore */ }
+          }
+
+          await Promise.race([
+            staleRunner.catch(() => undefined),
+            new Promise<void>((r) => setTimeout(r, 1200)),
+          ]);
+
+          // 仅清理"确实是旧 runner"的引用；若另一个 startCardJobs 已接管则不动
+          if (cardJobsRunner === staleRunner) {
+            cardJobsRunner = null;
+            cardJobsAbort = null;
+            cardJobsAbortReason = null;
+          }
+
+          // 防并发：若其他 startCardJobs 已创建新 runner，本次直接退出
+          if (cardJobsRunner != null) return;
         }
 
         const markCardJob = (jobId: string, patch: Partial<KbCardJob>) => {
@@ -2859,10 +2884,14 @@ export const useKbStore = create<KbState>()(
           }
         };
 
+        const gen = ++cardJobsGeneration;
         cardJobsRunner = run().finally(() => {
-          cardJobsRunner = null;
-          cardJobsAbort = null;
-          cardJobsAbortReason = null;
+          // 只有当前代际的 runner 才清理；防止旧 runner 的 finally 意外清除新 runner
+          if (gen === cardJobsGeneration) {
+            cardJobsRunner = null;
+            cardJobsAbort = null;
+            cardJobsAbortReason = null;
+          }
         });
         return cardJobsRunner;
       },

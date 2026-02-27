@@ -187,6 +187,9 @@ export async function* streamAnthropicMessages(
   }
 
   let res: Response;
+  const _t0 = Date.now();
+  const _bodyStr = JSON.stringify(body);
+  console.log(`[stream] start model=${args.model} tools=${(args.tools ?? []).length} tc=${JSON.stringify(args.tool_choice ?? null)} body=${_bodyStr.length}B msgs=${args.messages.length}`);
   try {
     res = await fetch(url, {
       method: "POST",
@@ -195,13 +198,16 @@ export async function* streamAnthropicMessages(
         "anthropic-version": "2023-06-01",
         "x-api-key": args.apiKey,
       },
-      body: JSON.stringify(body),
+      body: _bodyStr,
       signal: args.signal,
     });
   } catch (err) {
+    console.error(`[stream] fetch-err ${Date.now() - _t0}ms ${toErrorString(err)}`);
     yield { type: "error", error: toErrorString(err) };
     return;
   }
+
+  console.log(`[stream] res ${Date.now() - _t0}ms status=${res.status}`);
 
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
@@ -335,9 +341,15 @@ export async function* streamAnthropicMessages(
     }
   }
 
+  let _rc = 0;
   try {
     while (true) {
       const { value, done } = await reader.read();
+      _rc++;
+      if (_rc <= 2) {
+        const _p = value ? new TextDecoder().decode(value).slice(0, 300) : "(empty)";
+        console.log(`[stream] read#${_rc} ${Date.now() - _t0}ms done=${done} bytes=${value?.byteLength ?? 0} ${JSON.stringify(_p)}`);
+      }
       if (done) break;
 
       buf += decoder.decode(value, { stream: true });
