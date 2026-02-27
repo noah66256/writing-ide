@@ -940,15 +940,11 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   const todoList = useRunStore.getState().todoList;
   const proj = useProjectStore.getState();
   const docRules = proj.getFileByPath("doc.rules.md")?.content ?? "";
-  const kbAttached = useRunStore.getState().kbAttachedLibraryIds ?? [];
   const kbLibraries = useKbStore.getState().libraries ?? [];
   const userPrompt = String(extra?.userPrompt ?? "");
-  // 合并持久化 attached + 本次消息 @提及的库（去重）
+  // 仅使用本次消息 @提及的库（绑定机制已废弃）
   const kbMentionIds = Array.isArray(extra?.kbMentionIds) ? extra!.kbMentionIds : [];
-  const kbSelectedIds = Array.from(new Set([
-    ...kbAttached.map((x: any) => String(x ?? "").trim()).filter(Boolean),
-    ...kbMentionIds,
-  ]));
+  const kbSelectedIds = Array.from(new Set(kbMentionIds));
   // PROJECT_STATE：只提供最小信息（避免"光标文件/全量文件列表"对模型产生过强暗示）
   const state = {
     fileCount: proj.files.length,

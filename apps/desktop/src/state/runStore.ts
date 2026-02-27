@@ -375,9 +375,7 @@ export const useRunStore = create<RunState>()(
       todoList: Array.isArray(s.todoList) ? (s.todoList as TodoItem[]) : [],
       steps: normalized,
       logs: Array.isArray(s.logs) ? (s.logs as LogEntry[]) : [],
-      kbAttachedLibraryIds: Array.isArray(s.kbAttachedLibraryIds)
-        ? (s.kbAttachedLibraryIds as string[]).map((x) => String(x ?? "").trim()).filter(Boolean)
-        : get().kbAttachedLibraryIds,
+      kbAttachedLibraryIds: [],
       ctxRefs: Array.isArray((s as any).ctxRefs) ? dedupeCtxRefs((s as any).ctxRefs as any) : [],
       isRunning: false,
       activity: null,

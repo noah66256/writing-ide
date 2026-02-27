@@ -170,33 +170,27 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       if (proj.activePath) await proj.ensureLoaded(proj.activePath).catch(() => void 0);
 
       // -- KB refresh ---
-      const attached = useRunStore.getState().kbAttachedLibraryIds ?? [];
-      if (Array.isArray(attached) && attached.length) {
-        await useKbStore.getState().refreshLibraries().catch(() => void 0);
-      }
+      await useKbStore.getState().refreshLibraries().catch(() => void 0);
 
       // -- Selector V1 ---
+      // 绑定机制已废弃，styleContractV1 不再基于 kbAttachedLibraryIds 自动选择
+      // 风格库的选择由 @ 提及或 agent 主动触发
       try {
         const run = useRunStore.getState();
         const main: any = run.mainDoc ?? {};
         const existing = main?.styleContractV1;
         const libsMeta = useKbStore.getState().libraries ?? [];
         const metaById = new Map(libsMeta.map((l: any) => [String(l?.id ?? "").trim(), l]));
-        const styleLibIds = (run.kbAttachedLibraryIds ?? [])
-          .map((x: any) => String(x ?? "").trim()).filter(Boolean)
-          .filter((id: string) => String((metaById.get(id) as any)?.purpose ?? "").trim() === "style");
-        const libId = styleLibIds.length ? styleLibIds[0] : "";
+        // 不再自动从绑定中获取风格库 — 用户通过 @ 提及
+        const libId = "";
         const existingLibId = String(existing?.libraryId ?? "").trim();
         const existingClusterId = String(existing?.selectedCluster?.id ?? "").trim();
         const shouldConsider = libId && (!existing || existingLibId !== libId || !existingClusterId);
 
         if (shouldConsider) {
-          const kbSelectedForSkills = (run.kbAttachedLibraryIds ?? [])
-            .map((id: any) => String(id ?? "").trim()).filter(Boolean)
-            .map((id: string) => { const m = metaById.get(id) as any; return { id, purpose: String(m?.purpose ?? "material") }; });
           const activeForThisRun = activateSkills({
             mode: args.mode as any, userPrompt: String(args.prompt ?? ""),
-            mainDocRunIntent: main?.runIntent, kbSelected: kbSelectedForSkills as any,
+            mainDocRunIntent: main?.runIntent, kbSelected: [] as any,
           });
           const hasStyleSkill = activeForThisRun.some((s: any) => String(s?.id ?? "") === "style_imitate");
           if (hasStyleSkill) {

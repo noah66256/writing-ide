@@ -235,18 +235,11 @@ export function AgentPane() {
 
   // dev：留空 => 走 /api（Vite proxy）；packaged(file://)：默认回落到 DEFAULT_GATEWAY_URL
   const gatewayUrl = getGatewayBaseUrl();
-  const kbAttached = useRunStore((s) => s.kbAttachedLibraryIds);
-  const toggleAttach = useRunStore((s) => s.toggleKbAttachedLibrary);
   const openKbManager = useKbStore((s) => s.openKbManager);
   const kbLibraries = useKbStore((s) => s.libraries);
   const ctxRefs = useRunStore((s) => s.ctxRefs);
   const addCtxRef = useRunStore((s) => s.addCtxRef);
   const removeCtxRef = useRunStore((s) => s.removeCtxRef);
-  const attachedKbLibraries = useMemo(() => {
-    const ids = Array.isArray(kbAttached) ? kbAttached.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
-    const map = new Map((kbLibraries ?? []).map((l: any) => [String(l.id ?? "").trim(), l]));
-    return ids.map((id) => map.get(id) ?? { id, name: id }).filter((x: any) => x && x.id);
-  }, [kbAttached, kbLibraries]);
 
   type RunIntentValue = NonNullable<MainDoc["runIntent"]>;
   const runIntentValue = (mainDoc?.runIntent ?? "auto") as RunIntentValue;
@@ -275,23 +268,8 @@ export function AgentPane() {
   }, [input, steps]);
 
   const activeSkills = useMemo((): ActiveSkill[] => {
-    const ids = Array.isArray(kbAttached) ? kbAttached.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
-    const map = new Map(
-      (kbLibraries ?? []).map((l: any) => [
-        l.id,
-        {
-          id: l.id,
-          name: l.name,
-          purpose: l.purpose ?? "material",
-          facetPackId: l.facetPackId,
-          docCount: l.docCount,
-          updatedAt: l.updatedAt,
-        },
-      ]),
-    );
-    const selected = ids.map((id: string) => map.get(id) ?? { id, name: id });
-    return activateSkills({ mode: mode as any, userPrompt: skillPrompt, mainDocRunIntent: runIntentValue, kbSelected: selected as any });
-  }, [kbAttached, kbLibraries, mode, runIntentValue, skillPrompt]);
+    return activateSkills({ mode: mode as any, userPrompt: skillPrompt, mainDocRunIntent: runIntentValue, kbSelected: [] as any });
+  }, [mode, runIntentValue, skillPrompt]);
 
   const skillsLabel =
     activeSkills.length === 0
@@ -506,7 +484,7 @@ export function AgentPane() {
       todoList: JSON.parse(JSON.stringify(state.todoList ?? [])),
       steps: serial,
       logs: JSON.parse(JSON.stringify(state.logs ?? [])),
-      kbAttachedLibraryIds: JSON.parse(JSON.stringify(state.kbAttachedLibraryIds ?? [])),
+      kbAttachedLibraryIds: [],
       ctxRefs: JSON.parse(JSON.stringify(state.ctxRefs ?? [])),
     };
   }
@@ -579,8 +557,7 @@ export function AgentPane() {
     try {
       const run = useRunStore.getState();
       const kb = useKbStore.getState();
-      const libs = run.kbAttachedLibraryIds ?? [];
-      const playbook = await kb.getPlaybookTextForLibraries(libs).catch(() => "");
+      const playbook = "";
       const toolCalls = (run.steps ?? [])
         .filter((s: any) => s && typeof s === "object" && s.type === "tool")
         .map((t: any) => ({ toolName: t.toolName, status: t.status }));
@@ -594,8 +571,8 @@ export function AgentPane() {
         ts: new Date().toISOString(),
         mode: run.mode,
         model: run.model,
-        kbAttachedLibraryIds: libs,
-        kbAttachedLibraries: (kb.libraries ?? []).filter((l: any) => libs.includes(l.id)),
+        kbAttachedLibraryIds: [],
+        kbAttachedLibraries: [],
         playbookChars: playbook.length,
         mainDocLens,
         todo: {
@@ -817,7 +794,7 @@ export function AgentPane() {
     // 复用现有的“安全快照”（裁剪 steps/移除 apply/undo）
     setDraftSnapshot(buildSnapshot());
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [steps, mainDoc, todoList, ctxRefs, mode, model, kbAttached, setDraftSnapshot]);
+  }, [steps, mainDoc, todoList, ctxRefs, mode, model, setDraftSnapshot]);
 
   // 启动自动恢复：若当前 run 为空，则加载 draftSnapshot
   const restoredDraftRef = useRef(false);
@@ -1350,7 +1327,7 @@ export function AgentPane() {
               }
               style={{ cursor: "pointer", border: "none" }}
             >
-              上下文 {ctxStripOpen ? "▾" : "▸"} · 引用 {ctxRefs.length} · KB {attachedKbLibraries.length}
+              上下文 {ctxStripOpen ? "▾" : "▸"} · 引用 {ctxRefs.length}
             </button>
             <div className="composerCtxStripRight">
               <div className="ctxPill" title={ctxTitle} aria-label="Context 使用量">
@@ -1359,15 +1336,6 @@ export function AgentPane() {
               <div className="ctxPill" title={skillsTitle} aria-label="Active Skills">
                 {skillsLabel}
               </div>
-              <button
-                className="ctxPill"
-                type="button"
-                title={attachedKbLibraries.length ? `已关联库：${attachedKbLibraries.length}` : "未关联任何库"}
-                onClick={() => openKbManager("libraries")}
-                style={{ cursor: "pointer", border: "none" }}
-              >
-                KB {attachedKbLibraries.length}库
-              </button>
               <button className="ctxPill" type="button" title="@ 引用选择器" onClick={() => openRefPicker("main")} style={{ cursor: "pointer", border: "none" }}>
                 @{ctxRefs.length || 0}
               </button>
@@ -1394,26 +1362,8 @@ export function AgentPane() {
                 </div>
               </div>
 
-              <div className="composerCtxSection">
-                <div className="composerCtxTitle">已关联 KB 库（{attachedKbLibraries.length}）</div>
-                <div className="composerCtxItems">
-                  {attachedKbLibraries.length ? (
-                    attachedKbLibraries.map((l: any) => (
-                      <span key={String(l.id ?? "")} className="refChip" title={`${l.name ?? l.id}（${l.id}）`}>
-                        <span className="refChipLabel">{String(l.name ?? l.id)}</span>
-                        <span className="refChipClose" onClick={() => toggleAttach(String(l.id ?? ""))}>
-                          ×
-                        </span>
-                      </span>
-                    ))
-                  ) : (
-                    <div className="explorerHint">未关联任何库。点上面的「KB 0库」去关联。</div>
-                  )}
-                </div>
-              </div>
-
               <div className="explorerHint">
-                提示：只会优先使用上述“引用文件/目录”与“已关联库”作为上下文；找不到再考虑全项目遍历（project.listFiles）。
+                提示：只会优先使用上述”引用文件/目录”作为上下文；找不到再考虑全项目遍历（project.listFiles）。用 @ 提及知识库可在对话中引用。
               </div>
             </div>
           ) : null}

@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useKbStore, type KbCardJob, type KbLibraryFingerprintSnapshot, type KbTextSpanRefV1 } from "../state/kbStore";
-import { useRunStore } from "../state/runStore";
 import { useDialogStore } from "../state/dialogStore";
 import { FACET_PACKS, facetPackLabel, getFacetPack } from "../kb/facets";
 import { RichText } from "./RichText";
+import { cn } from "@/lib/utils";
 
 function statusLabel(s: KbCardJob["status"]) {
   if (s === "pending") return "等待";
@@ -15,13 +15,13 @@ function statusLabel(s: KbCardJob["status"]) {
   return s;
 }
 
-function statusColor(s: KbCardJob["status"]) {
-  if (s === "running") return "rgba(37, 99, 235, 0.95)";
-  if (s === "success") return "rgba(22, 163, 74, 0.95)";
-  if (s === "skipped") return "rgba(100, 116, 139, 0.95)";
-  if (s === "failed") return "rgba(220, 38, 38, 0.95)";
-  if (s === "cancelled") return "rgba(100, 116, 139, 0.95)";
-  return "var(--muted)";
+function statusColorClass(s: KbCardJob["status"]) {
+  if (s === "running") return "text-blue-600";
+  if (s === "success") return "text-green-600";
+  if (s === "skipped") return "text-slate-500";
+  if (s === "failed") return "text-red-600";
+  if (s === "cancelled") return "text-slate-500";
+  return "text-text-muted";
 }
 
 function formatDuration(ms: number) {
@@ -75,38 +75,6 @@ export function CardJobsModal() {
   const uiAlert = useDialogStore((s) => s.openAlert);
   const uiConfirm = useDialogStore((s) => s.openConfirm);
   const uiPrompt = useDialogStore((s) => s.openPrompt);
-
-  const attached = useRunStore((s) => s.kbAttachedLibraryIds);
-  const toggleAttachSmart = async (id: string) => {
-    await refreshLibraries().catch(() => void 0);
-    const libId = String(id ?? "").trim();
-    if (!libId) return;
-
-    const libs = useKbStore.getState().libraries ?? [];
-    const libById = new Map(libs.map((l: any) => [String(l.id ?? "").trim(), l]));
-    const isStyle = String(libById.get(libId)?.purpose ?? "") === "style";
-
-    const cur = (useRunStore.getState().kbAttachedLibraryIds ?? []).map((x: any) => String(x ?? "").trim()).filter(Boolean);
-    const has = cur.includes(libId);
-    if (has) {
-      useRunStore.getState().setKbAttachedLibraries(cur.filter((x: string) => x !== libId));
-      return;
-    }
-
-    if (isStyle) {
-      const styleIds = new Set(
-        libs
-          .filter((l: any) => String(l?.purpose ?? "") === "style")
-          .map((l: any) => String(l.id ?? "").trim())
-          .filter(Boolean),
-      );
-      const keep = cur.filter((x: string) => !styleIds.has(x));
-      useRunStore.getState().setKbAttachedLibraries([...keep, libId]);
-      return;
-    }
-
-    useRunStore.getState().setKbAttachedLibraries([...cur, libId]);
-  };
 
   const listCardsForLibrary = useKbStore((s) => s.listCardsForLibrary);
   const getLatestLibraryFingerprint = useKbStore((s) => s.getLatestLibraryFingerprint);
@@ -205,7 +173,7 @@ export function CardJobsModal() {
     setFpAdvanced(false);
   }, [open, tab, viewLibIdFromStore]);
 
-  // 关键：确保内层 prompt 打开后立刻可输入（避免“弹窗出现但焦点仍在编辑器，打不了字”）
+  // 关键：确保内层 prompt 打开后立刻可输入（避免"弹窗出现但焦点仍在编辑器，打不了字"）
   useLayoutEffect(() => {
     if (!prompt) return;
     try {
@@ -231,7 +199,7 @@ export function CardJobsModal() {
   }, [jobs, playbookJobs]);
 
   const progress = useMemo(() => {
-    // 总体进度条：把“抽卡=按文档计数” + “风格手册=StyleProfile(1)+facet(N)”统一成“单元”计数
+    // 总体进度条：把"抽卡=按文档计数" + "风格手册=StyleProfile(1)+facet(N)"统一成"单元"计数
     const libById = new Map(libraries.map((l) => [l.id, l]));
 
     const cardTotal = jobs.length;
@@ -304,7 +272,7 @@ export function CardJobsModal() {
   const [anchorPickerSelected, setAnchorPickerSelected] = useState<Record<string, boolean>>({});
   const [anchorPickerClusterId, setAnchorPickerClusterId] = useState<string | null>(null);
   const [segmentFilter, setSegmentFilter] = useState<string>("");
-  // rules auto-generate：按 cluster 记录状态，避免“点一个全都显示生成中”的 UI 误导
+  // rules auto-generate：按 cluster 记录状态，避免"点一个全都显示生成中"的 UI 误导
   const [rulesGenLoadingByCluster, setRulesGenLoadingByCluster] = useState<Record<string, boolean>>({});
   const [rulesGenErrByCluster, setRulesGenErrByCluster] = useState<Record<string, string>>({});
 
@@ -321,7 +289,7 @@ export function CardJobsModal() {
     return e;
   };
 
-  // 兜底：若正在查看的库已被删除/进入回收站（不在当前库列表），自动收起，避免继续使用旧 id 导致“library not found”
+  // 兜底：若正在查看的库已被删除/进入回收站（不在当前库列表），自动收起，避免继续使用旧 id 导致"library not found"
   useEffect(() => {
     if (!open) return;
     if (tab !== "libraries") return;
@@ -497,7 +465,7 @@ export function CardJobsModal() {
     for (const id of selectedIds) next[id] = true;
     setAnchorPickerSelected(next);
     setAnchorPickerAdvanced(selectedIds.length > 5);
-    // 默认把筛选框填成簇 id（避免“我点了某簇采纳，但列表里看不出”）
+    // 默认把筛选框填成簇 id（避免"我点了某簇采纳，但列表里看不出"）
     if (clusterId) setSegmentFilter(clusterId);
     if (clusterId && selectedIds.length === 0) {
       setAnchorPickerNotice("该簇没有可选样本段（可能样本过短/未分簇）。建议更新体检或改选其他簇。");
@@ -859,30 +827,21 @@ export function CardJobsModal() {
 
   return (
     <div
-      className="modalMask"
+      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 backdrop-blur-sm"
       onMouseDown={(e) => {
-        // 点击遮罩关闭
         if (e.target === e.currentTarget) close();
       }}
     >
       <div
-        className="modal"
+        className="w-[920px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-4rem)] bg-surface rounded-2xl border border-border shadow-2xl flex flex-col overflow-hidden p-5"
         style={{
-          width: "min(920px, calc(100vw - 24px))",
           transform: `translate3d(${pos.x}px, ${pos.y}px, 0)`,
           willChange: dragRef.current ? "transform" : undefined,
         }}
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 8,
-            userSelect: "none",
-            cursor: dragRef.current ? "grabbing" : "grab",
-          }}
+          className={cn("flex items-center justify-between gap-2 select-none px-1", dragRef.current ? "cursor-grabbing" : "cursor-grab")}
           title="拖动：按住标题栏拖动；双击回到居中"
           onDoubleClick={() => setPos({ x: 0, y: 0 })}
           onPointerDown={(e) => {
@@ -935,41 +894,44 @@ export function CardJobsModal() {
             }
           }}
         >
-          <div className="modalTitle" style={{ marginBottom: 0 }}>
+          <div className="text-base font-semibold text-text">
             知识库管理
           </div>
-          <button className="btn btnIcon" type="button" onClick={close} onPointerDown={(e) => e.stopPropagation()}>
+          <button className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors" type="button" onClick={close} onPointerDown={(e) => e.stopPropagation()}>
             关闭
           </button>
         </div>
 
-        <div className="modalDesc" style={{ marginTop: 10 }}>
+        <div className="text-sm text-text-muted mt-2.5 px-1">
           这里统一管理「库 / 抽卡任务 / 回收站」。为避免误操作，导入语料前必须先选择当前库。
         </div>
 
-        <div className="dockTabs" style={{ padding: 0, borderBottom: "none", marginBottom: 10 }}>
-          <div className={`dockTab ${tab === "libraries" ? "dockTabActive" : ""}`} onClick={() => openKbManager("libraries")}>
-            库
-          </div>
-          <div className={`dockTab ${tab === "jobs" ? "dockTabActive" : ""}`} onClick={() => openKbManager("jobs")}>
-            抽卡任务
-          </div>
-          <div className={`dockTab ${tab === "trash" ? "dockTabActive" : ""}`} onClick={() => openKbManager("trash")}>
-            回收站
-          </div>
+        <div className="flex gap-1 mt-2.5 mb-2.5">
+          {(["libraries", "jobs", "trash"] as const).map((t) => (
+            <button
+              key={t}
+              className={cn(
+                "px-3 py-1.5 text-sm rounded-lg transition-colors cursor-pointer",
+                tab === t ? "bg-accent-soft text-accent font-medium" : "text-text-muted hover:bg-surface-alt hover:text-text",
+              )}
+              onClick={() => openKbManager(t)}
+            >
+              {t === "libraries" ? "库" : t === "jobs" ? "抽卡任务" : "回收站"}
+            </button>
+          ))}
         </div>
 
         {notice ? (
-          <div className="explorerHint" style={{ marginBottom: 10 }}>
+          <div className="text-xs text-text-faint mb-2.5 px-1">
             {notice}
           </div>
         ) : null}
 
         {tab === "libraries" ? (
-          <div style={{ display: "grid", gap: 10 }}>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <div className="grid gap-2.5">
+            <div className="flex gap-2 flex-wrap items-center">
               <button
-                className="btn btnIcon"
+                className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
                 type="button"
                 onClick={() => {
                   ask({
@@ -987,23 +949,23 @@ export function CardJobsModal() {
               >
                 新建库
               </button>
-              <button className="btn btnIcon" type="button" onClick={() => void refreshLibraries()}>
+              <button className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors" type="button" onClick={() => void refreshLibraries()}>
                 刷新
               </button>
               <button
-                className="btn btnIcon"
+                className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors disabled:opacity-50"
                 type="button"
                 disabled={!currentLibraryId || isLoading}
                 title={!currentLibraryId ? "请先设为当前库，再导入 URL" : "导入网页正文到本地 KB（每行一个 URL）"}
                 onClick={() => {
                   void (async () => {
                     if (!currentLibraryId) {
-                      void uiAlert({ title: "提示", message: "请先选择一个库并设为“当前库”，再导入 URL。" });
+                      void uiAlert({ title: "提示", message: "请先选择一个库并设为「当前库」，再导入 URL。" });
                       return;
                     }
                     const v = await uiPrompt({
                       title: "导入 URL",
-                      message: "每行一个 URL（仅支持 http/https）。导入后会入队到“抽卡任务”（不自动开始）。",
+                      message: "每行一个 URL（仅支持 http/https）。导入后会入队到「抽卡任务」（不自动开始）。",
                       placeholder: "https://example.com/article\nhttps://example.com/another",
                       confirmText: "开始导入",
                       multiline: true,
@@ -1035,42 +997,20 @@ export function CardJobsModal() {
               >
                 导入 URL
               </button>
-              <span className="ctxPill">当前库：{currentLibraryId ? currentLibraryId : "（未选择）"}</span>
+              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">当前库：{currentLibraryId ? currentLibraryId : "（未选择）"}</span>
             </div>
 
-            <div
-              style={{
-                border: "1px solid var(--border)",
-                borderRadius: 12,
-                background: "var(--panel)",
-                padding: 10,
-                maxHeight: "min(52vh, 520px)",
-                overflow: "auto",
-                display: "grid",
-                gap: 10,
-              }}
-            >
+            <div className="border border-border rounded-xl bg-surface p-2.5 max-h-[min(52vh,520px)] overflow-auto grid gap-2.5">
               {libraries.length ? (
                 libraries.map((l) => {
                   const isCur = l.id === currentLibraryId;
-                  const isAttached = attached.includes(l.id);
                   return (
-                    <div key={l.id} style={{ borderBottom: "1px dashed var(--border)", paddingBottom: 10 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-                        <div style={{ minWidth: 0 }}>
+                    <div key={l.id} className="border-b border-dashed border-border pb-2.5 last:border-b-0">
+                      <div className="flex justify-between gap-2.5 items-center">
+                        <div className="min-w-0">
                           <button
                             type="button"
-                            className="btn"
-                            style={{
-                              padding: "4px 8px",
-                              fontSize: 13,
-                              fontWeight: 700,
-                              color: "var(--text)",
-                              maxWidth: 420,
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              whiteSpace: "nowrap",
-                            }}
+                            className="text-[13px] font-bold text-text max-w-[420px] overflow-hidden text-ellipsis whitespace-nowrap hover:text-accent transition-colors text-left"
                             title="展开该库（库体检/卡片预览）"
                             onClick={() => {
                               setViewLibId((prev) => {
@@ -1085,33 +1025,33 @@ export function CardJobsModal() {
                           >
                             {l.name}
                           </button>
-                          <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                          <div className="text-xs text-text-muted">
                             文档 {l.docCount} 篇 · 更新 {new Date(l.updatedAt).toLocaleString()} · 标签 {facetPackLabel(l.facetPackId)} · 用途{" "}
                             {l.purpose === "style" ? "风格库" : l.purpose === "product" ? "产品库" : "素材库"}
                           </div>
                           {l.fingerprint ? (
-                            <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                            <div className="mt-1.5 flex gap-1.5 flex-wrap">
                               <span
-                                className="ctxPill"
+                                className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft"
                                 title={`体裁/声音识别置信度：${Math.round((l.fingerprint.confidence ?? 0) * 100)}% · 体检时间：${new Date(
                                   l.fingerprint.computedAt,
                                 ).toLocaleString()}`}
                               >
                                 像：{l.fingerprint.primaryLabel}
                               </span>
-                              <span className="ctxPill">
+                              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">
                                 稳定：
                                 {l.fingerprint.stability === "high" ? "高" : l.fingerprint.stability === "medium" ? "中" : "低"}
                               </span>
                             </div>
                           ) : null}
-                          <div style={{ fontSize: 12, color: "var(--muted)" }}>id: {l.id}</div>
+                          <div className="text-xs text-text-muted">id: {l.id}</div>
                         </div>
-                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                        <div className="flex gap-2 flex-wrap justify-end shrink-0">
                           <select
-                            className="btn"
+                            className="px-2 py-1 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors cursor-pointer"
                             value={l.purpose ?? "material"}
-                            title="库用途：只有“风格库”会触发“绑定后写作默认先 kb.search 拉样例”的策略"
+                            title="库用途：只有「风格库」会触发写作时默认先 kb.search 拉样例的策略"
                             onChange={(e) => {
                               const next = String(e.target.value ?? "material") as any;
                               void (async () => {
@@ -1126,30 +1066,12 @@ export function CardJobsModal() {
                             <option value="product">产品库</option>
                           </select>
                           <button
-                            className="btn btnIcon"
-                            type="button"
-                            title="打开库体检（像什么/稳不稳/怎么修）"
-                            onClick={() => {
-                              setViewLibId(l.id);
-                              setViewTab("health");
-                              setFpAdvanced(false);
-                            }}
-                          >
-                            库体检
-                          </button>
-                          <button
-                            className="btn btnIcon"
-                            type="button"
-                            title="打开卡片预览（库内 card 浏览/筛选）"
-                            onClick={() => {
-                              setViewLibId(l.id);
-                              setViewTab("cards");
-                            }}
-                          >
-                            看卡片
-                          </button>
-                          <button
-                            className={`btn btnIcon ${isCur ? "btnPrimary" : ""}`}
+                            className={cn(
+                              "px-3 py-1.5 text-xs rounded-lg border transition-colors",
+                              isCur
+                                ? "border-accent bg-accent text-white hover:bg-accent-hover"
+                                : "border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text"
+                            )}
                             type="button"
                             onClick={() => setCurrentLibrary(isCur ? null : l.id)}
                             title={isCur ? "再次点击可取消当前库" : "设为当前库"}
@@ -1157,15 +1079,7 @@ export function CardJobsModal() {
                             {isCur ? "当前库" : "设为当前"}
                           </button>
                           <button
-                            className={`btn btnIcon ${isAttached ? "btnPrimary" : ""}`}
-                            type="button"
-                            title="关联到右侧 Agent（素材/产品库可多选；风格库默认单选，会替换已有风格库）"
-                            onClick={() => void toggleAttachSmart(l.id)}
-                          >
-                            {isAttached ? "已关联右侧" : "关联到右侧"}
-                          </button>
-                          <button
-                            className="btn btnIcon"
+                            className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
                             type="button"
                             onClick={() => {
                               ask({
@@ -1185,7 +1099,7 @@ export function CardJobsModal() {
                             重命名
                           </button>
                           <button
-                            className="btn btnDanger btnIcon"
+                            className="px-3 py-1.5 text-xs rounded-lg border border-error/30 text-error hover:bg-error/10 transition-colors"
                             type="button"
                             onClick={() => {
                               void (async () => {
@@ -1200,7 +1114,7 @@ export function CardJobsModal() {
                                 const r = await deleteLibraryToTrash(l.id);
                                 if (!r.ok) void uiAlert({ title: "删除失败", message: `删除失败：${r.error ?? "unknown"}` });
                                 await refreshLibraries().catch(() => void 0);
-                                // 若正在查看该库，自动收起，避免继续“库体检/指纹”报错
+                                // 若正在查看该库，自动收起，避免继续"库体检/指纹"报错
                                 setViewLibId((prev) => {
                                   if (prev && prev === l.id) {
                                     setFp(null);
@@ -1227,25 +1141,21 @@ export function CardJobsModal() {
                   );
                 })
               ) : (
-                <div className="explorerHint">还没有库。先点「新建库」，然后设为当前库再导入语料。</div>
+                <div className="text-xs text-text-faint">还没有库。先点「新建库」，然后设为当前库再导入语料。</div>
               )}
             </div>
 
             {viewLibId ? (
-              <div
-                style={{
-                  border: "1px solid var(--border)",
-                  borderRadius: 12,
-                  background: "var(--panel)",
-                  padding: 10,
-                  display: "grid",
-                  gap: 10,
-                }}
-              >
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", justifyContent: "space-between" }}>
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <div className="border border-border rounded-xl bg-surface p-2.5 grid gap-2.5">
+                <div className="flex gap-2 flex-wrap items-center justify-between">
+                  <div className="flex gap-2 flex-wrap items-center">
                     <button
-                      className={`btn btnIcon ${viewTab === "health" ? "btnPrimary" : ""}`}
+                      className={cn(
+                        "px-3 py-1.5 text-xs rounded-lg border transition-colors",
+                        viewTab === "health"
+                          ? "border-accent bg-accent text-white hover:bg-accent-hover"
+                          : "border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text"
+                      )}
                       type="button"
                       onClick={() => setViewTab("health")}
                       title="像什么 / 稳不稳 / 怎么修"
@@ -1253,7 +1163,12 @@ export function CardJobsModal() {
                       库体检
                     </button>
                     <button
-                      className={`btn btnIcon ${viewTab === "cards" ? "btnPrimary" : ""}`}
+                      className={cn(
+                        "px-3 py-1.5 text-xs rounded-lg border transition-colors",
+                        viewTab === "cards"
+                          ? "border-accent bg-accent text-white hover:bg-accent-hover"
+                          : "border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text"
+                      )}
                       type="button"
                       onClick={() => setViewTab("cards")}
                       title="浏览该库抽出的卡片"
@@ -1262,29 +1177,29 @@ export function CardJobsModal() {
                     </button>
                     {viewTab === "health" ? (
                       <>
-                        {fpLoading ? <span className="ctxPill">加载中…</span> : null}
-                        {fpErr ? <span className="ctxPill" style={{ color: "rgba(220, 38, 38, 0.95)" }}>{fpErr}</span> : null}
-                        {fp?.computedAt ? <span className="ctxPill">体检：{new Date(fp.computedAt).toLocaleString()}</span> : null}
+                        {fpLoading ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">加载中…</span> : null}
+                        {fpErr ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-red-600 border border-border-soft">{fpErr}</span> : null}
+                        {fp?.computedAt ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">体检：{new Date(fp.computedAt).toLocaleString()}</span> : null}
                       </>
                     ) : (
                       <>
-                        <span className="ctxPill">共 {cardsTotal} 条</span>
-                        {cardsLoading ? <span className="ctxPill">加载中…</span> : null}
-                        {cardsErr ? <span className="ctxPill" style={{ color: "rgba(220, 38, 38, 0.95)" }}>{cardsErr}</span> : null}
+                        <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">共 {cardsTotal} 条</span>
+                        {cardsLoading ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">加载中…</span> : null}
+                        {cardsErr ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-red-600 border border-border-soft">{cardsErr}</span> : null}
                       </>
                     )}
                   </div>
-                  <button className="btn btnIcon" type="button" onClick={() => setViewLibId(null)}>
+                  <button className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors" type="button" onClick={() => setViewLibId(null)}>
                     收起
                   </button>
                 </div>
 
                 {viewTab === "health" ? (
                   <>
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", justifyContent: "space-between" }}>
-                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                    <div className="flex gap-2 flex-wrap items-center justify-between">
+                      <div className="flex gap-2 flex-wrap items-center">
                         <button
-                          className="btn btnIcon"
+                          className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
                           type="button"
                           disabled={fpLoading}
                           onClick={() => {
@@ -1293,7 +1208,7 @@ export function CardJobsModal() {
                                 title: "确认生成声音指纹？",
                                 message:
                                   "生成/更新该库的「声音指纹（数字版）」？\n\n" +
-                                  "- 会统计“率/分布/n-gram”，并尝试用 Gateway 做开集体裁识别\n" +
+                                  "- 会统计「率/分布/n-gram」，并尝试用 Gateway 做开集体裁识别\n" +
                                   "- 产物只写入本地 KB，不会改动原文\n",
                                 confirmText: "生成",
                                 cancelText: "取消",
@@ -1335,7 +1250,7 @@ export function CardJobsModal() {
                           生成：声音指纹（数字版）
                         </button>
                         <button
-                          className="btn btnIcon"
+                          className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
                           type="button"
                           onClick={() => {
                             const lib = libraries.find((x) => x.id === viewLibId);
@@ -1347,7 +1262,7 @@ export function CardJobsModal() {
                                   `为库「${lib.name}」入队生成风格手册（22+1）？\n\n` +
                                   "- 会读取该库已抽出的单篇要素卡（hook/thesis/ending/one_liner/outline）\n" +
                                   "- 并生成 1 张 Style Profile + 每个维度 1 张写法手册卡\n" +
-                                  "- 产物会落到一个“【仿写手册】”虚拟文档下，可被右侧 Agent 直接使用\n\n" +
+                                  "- 产物会落到一个「【仿写手册】」虚拟文档下，可被右侧 Agent 直接使用\n\n" +
                                   "提示：生成手册是异步队列任务，需到「抽卡任务」Tab 点击 ▶ 执行。",
                                 confirmText: "入队",
                                 cancelText: "取消",
@@ -1362,7 +1277,7 @@ export function CardJobsModal() {
                           生成/更新：风格手册（推荐）
                         </button>
                         <button
-                          className="btn btnIcon"
+                          className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
                           type="button"
                           disabled={fpLoading}
                           onClick={() => {
@@ -1387,28 +1302,28 @@ export function CardJobsModal() {
                           对比：上次 vs 这次
                         </button>
                       </div>
-                      <button className="btn btnIcon" type="button" onClick={() => setFpAdvanced((v) => !v)}>
+                      <button className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors" type="button" onClick={() => setFpAdvanced((v) => !v)}>
                         {fpAdvanced ? "收起细节" : "我懂点，展开细节"}
                       </button>
                     </div>
 
                     {!fpLoading && !fp ? (
-                      <div className="explorerHint">还没有体检数据。点「生成：声音指纹（数字版）」开始。</div>
+                      <div className="text-xs text-text-faint">还没有体检数据。点「生成：声音指纹（数字版）」开始。</div>
                     ) : null}
 
                     {fp ? (
-                      <div style={{ display: "grid", gap: 10 }}>
-                        <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))" }}>
-                          <div style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel2)", padding: 10 }}>
-                            <div style={{ fontWeight: 800 }}>像什么（最重要）</div>
-                            <div style={{ marginTop: 6, fontSize: 16, fontWeight: 900 }}>
+                      <div className="grid gap-2.5">
+                        <div className="grid gap-2.5 grid-cols-[repeat(auto-fit,minmax(240px,1fr))]">
+                          <div className="border border-border rounded-xl bg-surface-alt p-2.5">
+                            <div className="font-bold">像什么（最重要）</div>
+                            <div className="mt-1.5 text-base font-black">
                               {fp.genres?.primary?.label ?? "unknown"}（{Math.round((fp.genres?.primary?.confidence ?? 0) * 100)}%）
                             </div>
-                            <div style={{ marginTop: 6, color: "var(--muted)", fontSize: 12, whiteSpace: "pre-wrap" }}>
+                            <div className="mt-1.5 text-xs text-text-muted whitespace-pre-wrap">
                               {fp.genres?.primary?.why ?? ""}
                             </div>
                             {Array.isArray(fp.genres?.candidates) && fp.genres.candidates.length > 1 ? (
-                              <div style={{ marginTop: 8, color: "var(--muted)", fontSize: 12 }}>
+                              <div className="mt-2 text-xs text-text-muted">
                                 也可能像：
                                 {fp.genres.candidates
                                   .slice(1, 4)
@@ -1418,36 +1333,36 @@ export function CardJobsModal() {
                             ) : null}
                           </div>
 
-                          <div style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel2)", padding: 10 }}>
-                            <div style={{ fontWeight: 800 }}>稳不稳（风格一致性）</div>
-                            <div style={{ marginTop: 6, fontSize: 16, fontWeight: 900 }}>
+                          <div className="border border-border rounded-xl bg-surface-alt p-2.5">
+                            <div className="font-bold">稳不稳（风格一致性）</div>
+                            <div className="mt-1.5 text-base font-black">
                               {fp.stability?.level === "high" ? "稳定：高" : fp.stability?.level === "medium" ? "稳定：中" : "稳定：低"}
                             </div>
-                            <div style={{ marginTop: 6, color: "var(--muted)", fontSize: 12, whiteSpace: "pre-wrap" }}>{fp.stability?.note ?? ""}</div>
+                            <div className="mt-1.5 text-xs text-text-muted whitespace-pre-wrap">{fp.stability?.note ?? ""}</div>
                             {Array.isArray(fp.stability?.outlierDocIds) && fp.stability.outlierDocIds.length ? (
-                              <div style={{ marginTop: 8, color: "var(--muted)", fontSize: 12 }}>
+                              <div className="mt-2 text-xs text-text-muted">
                                 离群文档（建议先修/分库）：{fp.stability.outlierDocIds.join(", ")}
                               </div>
                             ) : null}
                           </div>
 
-                          <div style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel2)", padding: 10 }}>
-                            <div style={{ fontWeight: 800 }}>怎么修（只给按钮）</div>
-                            <div style={{ marginTop: 8, color: "var(--muted)", fontSize: 12, whiteSpace: "pre-wrap" }}>
-                              - 想让右侧 Agent “像本人写的”：优先生成风格手册 + 终稿润色清单\n- 想先确认这库到底偏哪：先生成声音指纹（数字版）\n- 如果稳定性低：建议分库或先补同体裁语料
+                          <div className="border border-border rounded-xl bg-surface-alt p-2.5">
+                            <div className="font-bold">怎么修（只给按钮）</div>
+                            <div className="mt-2 text-xs text-text-muted whitespace-pre-wrap">
+                              - 想让右侧 Agent "像本人写的"：优先生成风格手册 + 终稿润色清单\n- 想先确认这库到底偏哪：先生成声音指纹（数字版）\n- 如果稳定性低：建议分库或先补同体裁语料
                             </div>
                           </div>
                         </div>
 
                         {isStyleLib ? (
                           <>
-                            <div style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel2)", padding: 10, display: "grid", gap: 10 }}>
-                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-                                <div style={{ fontWeight: 800 }}>写法候选（子簇）</div>
-                                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                            <div className="border border-border rounded-xl bg-surface-alt p-2.5 grid gap-2.5">
+                              <div className="flex items-center justify-between gap-2.5">
+                                <div className="font-bold">写法候选（子簇）</div>
+                                <div className="flex gap-2 flex-wrap justify-end">
                                   {defaultClusterId ? (
                                     <button
-                                      className="btn btnIcon"
+                                      className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
                                       type="button"
                                       disabled={anchorsLoading}
                                       onClick={() => {
@@ -1461,7 +1376,7 @@ export function CardJobsModal() {
                                           setAnchorsLoading(false);
                                         })();
                                       }}
-                                      title="取消“仅对该库生效”的默认写法"
+                                      title="取消「仅对该库生效」的默认写法"
                                     >
                                       取消默认
                                     </button>
@@ -1470,9 +1385,9 @@ export function CardJobsModal() {
                               </div>
 
                               {!fpClusters.length ? (
-                                <div className="explorerHint">样本不足或未生成子簇：先点「生成：声音指纹（数字版）」刷新。</div>
+                                <div className="text-xs text-text-faint">样本不足或未生成子簇：先点「生成：声音指纹（数字版）」刷新。</div>
                               ) : (
-                                <div style={{ display: "grid", gap: 10 }}>
+                                <div className="grid gap-2.5">
                                   {fpClusters.map((c: any) => {
                                     const cid = String(c?.id ?? "").trim();
                                     if (!cid) return null;
@@ -1500,39 +1415,39 @@ export function CardJobsModal() {
                                     const canAutoGenerate = anchorN + evidenceN >= 2;
 
                                     return (
-                                      <div key={cid} style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel)", padding: 10 }}>
-                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
-                                          <div style={{ minWidth: 0 }}>
-                                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-                                              <span className="ctxPill">{cid}</span>
-                                              {isRec ? <span className="ctxPill">Recommended</span> : null}
-                                              {isDefault ? <span className="ctxPill">默认写法</span> : null}
-                                              {st ? <span className="ctxPill">稳定：{st === "high" ? "高" : st === "medium" ? "中" : "低"}</span> : null}
-                                              {isTinyCluster ? <span className="ctxPill" title="样本很少：建议不要设为默认；规则卡也可能无法自动生成">小簇</span> : null}
-                                              <span className="ctxPill">
+                                      <div key={cid} className="border border-border rounded-xl bg-surface p-2.5">
+                                        <div className="flex justify-between gap-2.5 items-start">
+                                          <div className="min-w-0">
+                                            <div className="flex gap-1.5 flex-wrap items-center">
+                                              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">{cid}</span>
+                                              {isRec ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">Recommended</span> : null}
+                                              {isDefault ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">默认写法</span> : null}
+                                              {st ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">稳定：{st === "high" ? "高" : st === "medium" ? "中" : "低"}</span> : null}
+                                              {isTinyCluster ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft" title="样本很少：建议不要设为默认；规则卡也可能无法自动生成">小簇</span> : null}
+                                              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">
                                                 覆盖 {docCovCount}/{Number(fp?.corpus?.docs ?? 0) || 0} 篇 · {Math.round(docCovRate * 100)}%
                                               </span>
-                                              {anchorN ? <span className="ctxPill">anchors：{anchorN}</span> : null}
-                                              <span className="ctxPill" title="该簇规则卡（clusterRulesV1）是否已生成">
+                                              {anchorN ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">anchors：{anchorN}</span> : null}
+                                              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft" title="该簇规则卡（clusterRulesV1）是否已生成">
                                                 {gen ? `规则卡：已生成${genUpdatedAt ? `（${genUpdatedAt}）` : ""}` : "规则卡：未生成"}
                                               </span>
                                             </div>
-                                            <div style={{ marginTop: 6, fontSize: 14, fontWeight: 900, color: "var(--text)" }}>{label}</div>
-                                            <div style={{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
-                                              <span className="ctxPill" title="平均句长">
+                                            <div className="mt-1.5 text-sm font-black text-text">{label}</div>
+                                            <div className="mt-1.5 flex gap-1.5 flex-wrap">
+                                              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft" title="平均句长">
                                                 句长 {fmtRange(sr.avgSentenceLen)}
                                               </span>
-                                              <span className="ctxPill" title="问句率（每100句）">
+                                              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft" title="问句率（每100句）">
                                                 问句 {fmtRange(sr.questionRatePer100Sentences)}
                                               </span>
-                                              <span className="ctxPill" title="数字密度（每1000字符）">
+                                              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft" title="数字密度（每1000字符）">
                                                 数字 {fmtRange(sr.digitPer1kChars)}
                                               </span>
                                             </div>
                                           </div>
-                                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                                          <div className="flex gap-2 flex-wrap justify-end">
                                             <button
-                                              className="btn btnIcon"
+                                              className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
                                               type="button"
                                               disabled={anchorsLoading}
                                               onClick={() => {
@@ -1557,7 +1472,7 @@ export function CardJobsModal() {
                                               改名
                                             </button>
                                             <button
-                                              className="btn btnIcon"
+                                              className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
                                               type="button"
                                               disabled={anchorsLoading}
                                               title="编辑该写法簇的 V2 规则卡（values / analysis lenses 等），写作时会注入 styleContractV1"
@@ -1566,7 +1481,7 @@ export function CardJobsModal() {
                                               规则卡
                                             </button>
                                             <button
-                                              className="btn btnIcon"
+                                              className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
                                               type="button"
                                               disabled={anchorsLoading || isGenLoading || !canAutoGenerate}
                                               title={
@@ -1597,7 +1512,7 @@ export function CardJobsModal() {
                                               {isGenLoading ? "生成中…" : anyGenLoading ? "等待…" : "自动生成"}
                                             </button>
                                             <button
-                                              className={`btn btnIcon ${isDefault ? "btnPrimary" : ""}`}
+                                              className={cn("px-3 py-1.5 text-xs rounded-lg border transition-colors", isDefault ? "border-accent bg-accent text-white hover:bg-accent-hover" : "border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text")}
                                               type="button"
                                               disabled={anchorsLoading}
                                               onClick={() => {
@@ -1617,7 +1532,7 @@ export function CardJobsModal() {
                                               {isDefault ? "默认（点击取消）" : "设为默认"}
                                             </button>
                                             <button
-                                              className="btn btnIcon"
+                                              className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
                                               type="button"
                                               disabled={anchorsLoading || (!fpSegments.length && evidenceN === 0)}
                                               title={
@@ -1637,22 +1552,22 @@ export function CardJobsModal() {
                                         </div>
 
                                         {evidence.length ? (
-                                          <div style={{ marginTop: 8, display: "grid", gap: 6 }}>
-                                            <div style={{ fontWeight: 800, fontSize: 12, color: "var(--muted)" }}>代表样例（证据）</div>
+                                          <div className="mt-2 grid gap-1.5">
+                                            <div className="font-bold text-xs text-text-muted">代表样例（证据）</div>
                                             {evidence.map((e: any) => (
-                                              <div key={String(e?.segmentId ?? Math.random())} style={{ color: "var(--muted)", fontSize: 12, whiteSpace: "pre-wrap" }}>
+                                              <div key={String(e?.segmentId ?? Math.random())} className="text-xs text-text-muted whitespace-pre-wrap">
                                                 - {String(e?.quote ?? "").trim()}
                                               </div>
                                             ))}
                                           </div>
                                         ) : null}
                                         {!canAutoGenerate && !genErr ? (
-                                          <div style={{ marginTop: 8, fontSize: 12, color: "var(--muted)", whiteSpace: "pre-wrap" }}>
+                                          <div className="mt-2 text-xs text-text-muted whitespace-pre-wrap">
                                             样本偏少：该簇当前证据={evidenceN}，anchors={anchorN}（至少需要 2 条）——建议先点「采纳 anchors（本簇）」或补更多同体裁样本后再生成规则卡。
                                           </div>
                                         ) : null}
                                         {genErr ? (
-                                          <div style={{ marginTop: 8, fontSize: 12, color: "rgba(220, 38, 38, 0.95)", whiteSpace: "pre-wrap" }}>
+                                          <div className="mt-2 text-xs text-red-600 whitespace-pre-wrap">
                                             规则卡生成失败：{genErr}
                                           </div>
                                         ) : null}
@@ -1663,34 +1578,34 @@ export function CardJobsModal() {
                               )}
                             </div>
 
-                            <div style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel2)", padding: 10, display: "grid", gap: 10 }}>
-                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-                                <div style={{ fontWeight: 800 }}>Anchors（黄金样本）</div>
-                                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                            <div className="border border-border rounded-xl bg-surface-alt p-2.5 grid gap-2.5">
+                              <div className="flex items-center justify-between gap-2.5">
+                                <div className="font-bold">Anchors（黄金样本）</div>
+                                <div className="flex gap-2 flex-wrap justify-end">
                                   <button
-                                    className="btn btnIcon"
+                                    className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
                                     type="button"
                                     disabled={anchorsLoading || fpSegments.length === 0}
                                     onClick={() => (anchorPickerOpen ? closeAnchorPicker() : openAnchorPicker())}
-                                    title={fpSegments.length ? "采纳推荐段落作为“本库口味代表作”" : "需要先生成声音指纹（数字版）"}
+                                    title={fpSegments.length ? "采纳推荐段落作为「本库口味代表作」" : "需要先生成声音指纹（数字版）"}
                                   >
                                     {anchorPickerOpen ? "收起选择" : "采纳 anchors（推荐5段）"}
                                   </button>
-                                  <button className="btn btnDanger btnIcon" type="button" disabled={anchorsLoading || anchors.length === 0} onClick={() => void clearAnchors()}>
+                                  <button className="px-3 py-1.5 text-xs rounded-lg border border-error/30 text-error hover:bg-error/10 transition-colors" type="button" disabled={anchorsLoading || anchors.length === 0} onClick={() => void clearAnchors()}>
                                     清空
                                   </button>
                                 </div>
                               </div>
 
-                              <div className="explorerHint">
+                              <div className="text-xs text-text-faint">
                                 已选 {anchors.length} 段（默认 5；高级最多 8；同文档最多 2 段；仅对该库生效）
                               </div>
 
-                              {anchorsErr ? <div className="explorerError">配置错误：{anchorsErr}</div> : null}
-                              {anchorsLoading ? <div className="explorerHint">加载/保存中…</div> : null}
+                              {anchorsErr ? <div className="text-xs text-red-600">配置错误：{anchorsErr}</div> : null}
+                              {anchorsLoading ? <div className="text-xs text-text-faint">加载/保存中…</div> : null}
 
                               {anchors.length ? (
-                                <div style={{ display: "grid", gap: 8 }}>
+                                <div className="grid gap-2">
                                   {anchors.map((a) => {
                                     const imp: any = (a as any)?.importedFrom;
                                     const path = imp?.kind === "project" ? String(imp.relPath ?? "") : imp?.kind === "file" ? String(imp.absPath ?? "") : "";
@@ -1700,23 +1615,23 @@ export function CardJobsModal() {
                                     return (
                                       <div
                                         key={`${a.segmentId}`}
-                                        style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel)", padding: 10 }}
+                                        className="border border-border rounded-xl bg-surface p-2.5"
                                       >
-                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
-                                          <div style={{ minWidth: 0 }}>
-                                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-                                              <span className="ctxPill" title={title}>
+                                        <div className="flex justify-between gap-2.5 items-start">
+                                          <div className="min-w-0">
+                                            <div className="flex gap-1.5 flex-wrap items-center">
+                                              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft" title={title}>
                                                 {title ? title.replaceAll("\\", "/").split("/").slice(-1)[0] : a.sourceDocId}
                                               </span>
-                                              {cid ? <span className="ctxPill">{cid}</span> : <span className="ctxPill">未分簇</span>}
-                                              {typeof a.paragraphIndexStart === "number" ? <span className="ctxPill">段落#{a.paragraphIndexStart}</span> : null}
-                                              <span className="ctxPill">{a.segmentId}</span>
+                                              {cid ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">{cid}</span> : <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">未分簇</span>}
+                                              {typeof a.paragraphIndexStart === "number" ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">段落#{a.paragraphIndexStart}</span> : null}
+                                              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">{a.segmentId}</span>
                                             </div>
-                                            <div style={{ marginTop: 6, color: "var(--muted)", fontSize: 12, whiteSpace: "pre-wrap" }}>
+                                            <div className="mt-1.5 text-xs text-text-muted whitespace-pre-wrap">
                                               {String(a.quote ?? "").trim() || "（空）"}
                                             </div>
                                           </div>
-                                          <button className="btn btnIcon" type="button" disabled={anchorsLoading} onClick={() => void removeAnchor(a.segmentId)}>
+                                          <button className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors" type="button" disabled={anchorsLoading} onClick={() => void removeAnchor(a.segmentId)}>
                                             移除
                                           </button>
                                         </div>
@@ -1725,17 +1640,17 @@ export function CardJobsModal() {
                                   })}
                                 </div>
                               ) : (
-                                <div className="explorerHint">还没有 anchors。建议先采纳推荐 5 段，再按需要微调。</div>
+                                <div className="text-xs text-text-faint">还没有 anchors。建议先采纳推荐 5 段，再按需要微调。</div>
                               )}
 
                               {anchorPickerOpen ? (
-                                <div style={{ border: "1px dashed var(--border)", borderRadius: 12, background: "var(--panel)", padding: 10, display: "grid", gap: 10 }}>
-                                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-                                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                                      <span className="ctxPill">选择 anchors</span>
-                                      {anchorPickerClusterId ? <span className="ctxPill">限定：{anchorPickerClusterId}</span> : null}
+                                <div className="border border-dashed border-border rounded-xl bg-surface p-2.5 grid gap-2.5">
+                                  <div className="flex items-center justify-between gap-2.5 flex-wrap">
+                                    <div className="flex gap-2 flex-wrap items-center">
+                                      <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">选择 anchors</span>
+                                      {anchorPickerClusterId ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">限定：{anchorPickerClusterId}</span> : null}
                                       <button
-                                        className="btn btnIcon"
+                                        className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
                                         type="button"
                                         onClick={() => {
                                           setAnchorPickerNotice(null);
@@ -1758,32 +1673,31 @@ export function CardJobsModal() {
                                         {anchorPickerAdvanced ? "退出高级（最多5段）" : "高级（最多8段）"}
                                       </button>
                                     </div>
-                                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                                      <button className="btn btnIcon" type="button" disabled={anchorsLoading} onClick={() => void saveAnchorsFromSelected()}>
+                                    <div className="flex gap-2 flex-wrap">
+                                      <button className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors" type="button" disabled={anchorsLoading} onClick={() => void saveAnchorsFromSelected()}>
                                         确认采纳
                                       </button>
-                                      <button className="btn btnIcon" type="button" onClick={() => closeAnchorPicker()}>
+                                      <button className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors" type="button" onClick={() => closeAnchorPicker()}>
                                         取消
                                       </button>
                                     </div>
                                   </div>
 
-                                  {anchorPickerNotice ? <div className="explorerHint">{anchorPickerNotice}</div> : null}
+                                  {anchorPickerNotice ? <div className="text-xs text-text-faint">{anchorPickerNotice}</div> : null}
 
-                                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                                  <div className="flex gap-2 flex-wrap items-center">
                                     <input
-                                      className="modalInput"
-                                      style={{ maxWidth: 360 }}
+                                      className="w-full max-w-[360px] px-3 py-2 text-sm rounded-lg border border-border bg-surface text-text placeholder:text-text-faint outline-none focus:border-accent transition-colors"
                                       value={segmentFilter}
                                       placeholder="筛选段落（文件名/预览）…"
                                       onChange={(e) => setSegmentFilter(e.target.value)}
                                     />
-                                    <span className="ctxPill">
+                                    <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">
                                       已选 {Object.keys(anchorPickerSelected).filter((k) => anchorPickerSelected[k]).length} / {anchorPickerAdvanced ? 8 : 5}
                                     </span>
                                   </div>
 
-                                  <div style={{ maxHeight: "min(32vh, 320px)", overflow: "auto", display: "grid", gap: 8 }}>
+                                  <div className="max-h-[min(32vh,320px)] overflow-auto grid gap-2">
                                     {fpSegments
                                       .filter((s: any) => {
                                         const cid = String(s?.clusterId ?? "").trim();
@@ -1804,33 +1718,24 @@ export function CardJobsModal() {
                                         return (
                                           <label
                                             key={id}
-                                            style={{
-                                              border: "1px solid var(--border)",
-                                              borderRadius: 12,
-                                              background: "var(--panel2)",
-                                              padding: 10,
-                                              display: "flex",
-                                              gap: 10,
-                                              alignItems: "flex-start",
-                                              cursor: "pointer",
-                                            }}
+                                            className="border border-border rounded-xl bg-surface-alt p-2.5 flex gap-2.5 items-start cursor-pointer"
                                           >
                                             <input
                                               type="checkbox"
                                               checked={checked}
                                               onChange={() => toggleAnchorPick(id)}
-                                              style={{ marginTop: 2 }}
+                                              className="mt-0.5"
                                             />
-                                            <div style={{ minWidth: 0 }}>
-                                              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-                                                <span className="ctxPill" title={path || file || id}>
+                                            <div className="min-w-0">
+                                              <div className="flex gap-1.5 flex-wrap items-center">
+                                                <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft" title={path || file || id}>
                                                   {file || id}
                                                 </span>
-                                                {cid ? <span className="ctxPill">{cid}</span> : null}
-                                                {typeof s?.paragraphIndexStart === "number" ? <span className="ctxPill">段落#{s.paragraphIndexStart}</span> : null}
-                                                <span className="ctxPill">{id}</span>
+                                                {cid ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">{cid}</span> : null}
+                                                {typeof s?.paragraphIndexStart === "number" ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">段落#{s.paragraphIndexStart}</span> : null}
+                                                <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">{id}</span>
                                               </div>
-                                              <div style={{ marginTop: 6, color: "var(--muted)", fontSize: 12, whiteSpace: "pre-wrap" }}>
+                                              <div className="mt-1.5 text-xs text-text-muted whitespace-pre-wrap">
                                                 {String(s?.preview ?? "").trim() || "（旧快照无预览：建议重新生成声音指纹）"}
                                               </div>
                                             </div>
@@ -1845,39 +1750,39 @@ export function CardJobsModal() {
                         ) : null}
 
                         {fpCompare ? (
-                          <div style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel2)", padding: 10 }}>
-                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-                              <div style={{ fontWeight: 800 }}>对比结果</div>
-                              <div className="ctxPill">
+                          <div className="border border-border rounded-xl bg-surface-alt p-2.5">
+                            <div className="flex items-center justify-between gap-2.5">
+                              <div className="font-bold">对比结果</div>
+                              <div className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">
                                 {new Date(fpCompare.olderAt).toLocaleString()} → {new Date(fpCompare.newerAt).toLocaleString()}
                               </div>
                             </div>
-                            <pre style={{ margin: "8px 0 0", whiteSpace: "pre-wrap" }}>{JSON.stringify(fpCompare.diff, null, 2)}</pre>
+                            <pre className="mt-2 whitespace-pre-wrap">{JSON.stringify(fpCompare.diff, null, 2)}</pre>
                           </div>
                         ) : null}
 
                         {fpAdvanced ? (
-                          <div style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel2)", padding: 10, display: "grid", gap: 10 }}>
-                            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                              <span className="ctxPill">
+                          <div className="border border-border rounded-xl bg-surface-alt p-2.5 grid gap-2.5">
+                            <div className="flex gap-2 flex-wrap items-center">
+                              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">
                                 样本：{fp.corpus?.docs ?? 0} 篇{(fp.corpus as any)?.segments ? ` · ${(fp.corpus as any).segments} 段` : ""}
                               </span>
-                              <span className="ctxPill">字数：{fp.corpus?.chars ?? 0}</span>
-                              <span className="ctxPill">句子：{fp.corpus?.sentences ?? 0}</span>
-                              <span className="ctxPill">证据覆盖（卡片）：{Math.round((fp.evidence?.cardsWithEvidenceRate ?? 0) * 100)}%</span>
-                              <span className="ctxPill">证据覆盖（手册）：{Math.round((fp.evidence?.playbookCardsWithEvidenceRate ?? 0) * 100)}%</span>
+                              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">字数：{fp.corpus?.chars ?? 0}</span>
+                              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">句子：{fp.corpus?.sentences ?? 0}</span>
+                              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">证据覆盖（卡片）：{Math.round((fp.evidence?.cardsWithEvidenceRate ?? 0) * 100)}%</span>
+                              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">证据覆盖（手册）：{Math.round((fp.evidence?.playbookCardsWithEvidenceRate ?? 0) * 100)}%</span>
                             </div>
 
-                            <div style={{ display: "grid", gap: 8 }}>
-                              <div style={{ fontWeight: 800 }}>核心指标（可解释、可量化）</div>
-                              <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(fp.stats ?? {}, null, 2)}</pre>
+                            <div className="grid gap-2">
+                              <div className="font-bold">核心指标（可解释、可量化）</div>
+                              <pre className="m-0 whitespace-pre-wrap">{JSON.stringify(fp.stats ?? {}, null, 2)}</pre>
                             </div>
 
-                            <div style={{ display: "grid", gap: 8 }}>
-                              <div style={{ fontWeight: 800 }}>高频短语（n‑gram Top）</div>
-                              <div style={{ display: "grid", gap: 6 }}>
+                            <div className="grid gap-2">
+                              <div className="font-bold">高频短语（n‑gram Top）</div>
+                              <div className="grid gap-1.5">
                                 {(fp.topNgrams ?? []).map((ng) => (
-                                  <div key={`${ng.n}:${ng.text}`} style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                                  <div key={`${ng.n}:${ng.text}`} className="flex gap-2 flex-wrap items-center">
                                     {(() => {
                                       const totalUnits =
                                         (fp.corpus as any)?.segments && Number((fp.corpus as any).segments) > 0
@@ -1896,10 +1801,10 @@ export function CardJobsModal() {
                                             : 0;
                                       return (
                                         <>
-                                    <span className="ctxPill">{ng.n}-gram</span>
-                                    <span style={{ fontWeight: 800 }}>{ng.text}</span>
-                                    <span className="ctxPill">每千字 {ng.per1kChars}</span>
-                                    <span className="ctxPill">
+                                    <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">{ng.n}-gram</span>
+                                    <span className="font-bold">{ng.text}</span>
+                                    <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">每千字 {ng.per1kChars}</span>
+                                    <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">
                                       覆盖 {covCount}/{totalUnits}
                                       {unitLabel} · {Math.round(covRate * 100)}%
                                     </span>
@@ -1912,21 +1817,20 @@ export function CardJobsModal() {
                             </div>
 
                             {fpSegments.length ? (
-                              <div style={{ display: "grid", gap: 8 }}>
-                                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", justifyContent: "space-between" }}>
-                                  <div style={{ fontWeight: 800 }}>样本段级（segments，更适合找“混合体裁/离群”）</div>
-                                  <span className="ctxPill">共 {fpSegments.length} 段（展示前 120）</span>
+                              <div className="grid gap-2">
+                                <div className="flex gap-2.5 flex-wrap items-center justify-between">
+                                  <div className="font-bold">样本段级（segments，更适合找"混合体裁/离群"）</div>
+                                  <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">共 {fpSegments.length} 段（展示前 120）</span>
                                 </div>
-                                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                                <div className="flex gap-2 flex-wrap items-center">
                                   <input
-                                    className="modalInput"
-                                    style={{ maxWidth: 360 }}
+                                    className="w-full max-w-[360px] px-3 py-2 text-sm rounded-lg border border-border bg-surface text-text placeholder:text-text-faint outline-none focus:border-accent transition-colors"
                                     value={segmentFilter}
                                     placeholder="筛选段落（文件名/预览）…"
                                     onChange={(e) => setSegmentFilter(e.target.value)}
                                   />
                                 </div>
-                                <div style={{ maxHeight: "min(28vh, 280px)", overflow: "auto", display: "grid", gap: 8 }}>
+                                <div className="max-h-[min(28vh,280px)] overflow-auto grid gap-2">
                                   {fpSegments
                                     .filter((s: any) => {
                                       const q = segmentFilter.trim();
@@ -1943,16 +1847,16 @@ export function CardJobsModal() {
                                       return (
                                         <div
                                           key={id}
-                                          style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel2)", padding: 10 }}
+                                          className="border border-border rounded-xl bg-surface-alt p-2.5"
                                         >
-                                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-                                            <span className="ctxPill" title={path || file || id}>
+                                          <div className="flex gap-1.5 flex-wrap items-center">
+                                            <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft" title={path || file || id}>
                                               {file || id}
                                             </span>
-                                            {typeof s?.paragraphIndexStart === "number" ? <span className="ctxPill">段落#{s.paragraphIndexStart}</span> : null}
-                                            <span className="ctxPill">{id}</span>
+                                            {typeof s?.paragraphIndexStart === "number" ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">段落#{s.paragraphIndexStart}</span> : null}
+                                            <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">{id}</span>
                                           </div>
-                                          <div style={{ marginTop: 6, color: "var(--muted)", fontSize: 12, whiteSpace: "pre-wrap" }}>
+                                          <div className="mt-1.5 text-xs text-text-muted whitespace-pre-wrap">
                                             {String(s?.preview ?? "").trim() || "（旧快照无预览：建议重新生成声音指纹）"}
                                           </div>
                                         </div>
@@ -1962,9 +1866,9 @@ export function CardJobsModal() {
                               </div>
                             ) : null}
 
-                            <div style={{ display: "grid", gap: 8 }}>
-                              <div style={{ fontWeight: 800 }}>源文档级（找离群/混合体裁）</div>
-                              <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>{JSON.stringify(fp.perDoc ?? [], null, 2)}</pre>
+                            <div className="grid gap-2">
+                              <div className="font-bold">源文档级（找离群/混合体裁）</div>
+                              <pre className="m-0 whitespace-pre-wrap">{JSON.stringify(fp.perDoc ?? [], null, 2)}</pre>
                             </div>
                           </div>
                         ) : null}
@@ -1973,15 +1877,14 @@ export function CardJobsModal() {
                   </>
                 ) : (
                   <>
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                    <div className="flex gap-2 flex-wrap items-center">
                       <input
-                        className="modalInput"
-                        style={{ maxWidth: 360 }}
+                        className="w-full max-w-[360px] px-3 py-2 text-sm rounded-lg border border-border bg-surface text-text placeholder:text-text-faint outline-none focus:border-accent transition-colors"
                         value={cardsQuery}
                         placeholder="搜索卡片（标题/内容/类型/文档名）…"
                         onChange={(e) => setCardsQuery(e.target.value)}
                       />
-                      <select className="btn" value={cardsType} onChange={(e) => setCardsType(String(e.target.value ?? "__all__"))} title="按卡片类型过滤">
+                      <select className="px-2 py-1 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors cursor-pointer" value={cardsType} onChange={(e) => setCardsType(String(e.target.value ?? "__all__"))} title="按卡片类型过滤">
                         <option value="__all__">全部类型</option>
                         <option value="hook">hook</option>
                         <option value="thesis">thesis</option>
@@ -1994,20 +1897,9 @@ export function CardJobsModal() {
                       </select>
                     </div>
 
-                    <div
-                      style={{
-                        border: "1px solid var(--border)",
-                        borderRadius: 12,
-                        background: "var(--panel2)",
-                        padding: 10,
-                        maxHeight: "min(44vh, 420px)",
-                        overflow: "auto",
-                        display: "grid",
-                        gap: 10,
-                      }}
-                    >
+                    <div className="border border-border rounded-xl bg-surface-alt p-2.5 max-h-[min(44vh,420px)] overflow-auto grid gap-2.5">
                       {!cardsLoading && !cards.length ? (
-                        <div className="explorerHint">暂无卡片（可能还没抽卡/没生成风格手册，或筛选条件无结果）。</div>
+                        <div className="text-xs text-text-faint">暂无卡片（可能还没抽卡/没生成风格手册，或筛选条件无结果）。</div>
                       ) : null}
                       {cards.map((it) => {
                         const t = String(it?.artifact?.cardType ?? "");
@@ -2017,23 +1909,23 @@ export function CardJobsModal() {
                         return (
                           <div
                             key={String(it?.artifact?.id ?? Math.random())}
-                            style={{ border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel)", padding: 10 }}
+                            className="border border-border rounded-xl bg-surface p-2.5"
                           >
-                            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-                              <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                <span className="ctxPill" style={{ marginRight: 8 }}>
+                            <div className="flex justify-between gap-2.5 items-center">
+                              <div className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
+                                <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft mr-2">
                                   {t || "card"}
                                 </span>
-                                <span style={{ fontWeight: 700 }}>{title}</span>
-                                {docTitle ? <span style={{ color: "var(--muted)" }}>{` · 文档：${docTitle}`}</span> : null}
+                                <span className="font-bold">{title}</span>
+                                {docTitle ? <span className="text-text-muted">{` · 文档：${docTitle}`}</span> : null}
                               </div>
                             </div>
                             {content ? (
-                              <div style={{ marginTop: 8 }}>
+                              <div className="mt-2">
                                 <RichText text={content} />
                               </div>
                             ) : (
-                              <div style={{ marginTop: 8, color: "var(--muted)", fontSize: 12 }}>（无内容）</div>
+                              <div className="mt-2 text-xs text-text-muted">（无内容）</div>
                             )}
                           </div>
                         );
@@ -2047,10 +1939,10 @@ export function CardJobsModal() {
         ) : null}
 
         {tab === "trash" ? (
-          <div style={{ display: "grid", gap: 10 }}>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <div className="grid gap-2.5">
+            <div className="flex gap-2 flex-wrap items-center">
               <button
-                className="btn btnDanger btnIcon"
+                className="px-3 py-1.5 text-xs rounded-lg border border-error/30 text-error hover:bg-error/10 transition-colors"
                 type="button"
                 onClick={() => {
                   void (async () => {
@@ -2075,39 +1967,28 @@ export function CardJobsModal() {
               >
                 清空回收站（永久删除）
               </button>
-              <button className="btn btnIcon" type="button" onClick={() => void refreshLibraries()}>
+              <button className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors" type="button" onClick={() => void refreshLibraries()}>
                 刷新
               </button>
             </div>
 
-            <div
-              style={{
-                border: "1px solid var(--border)",
-                borderRadius: 12,
-                background: "var(--panel)",
-                padding: 10,
-                maxHeight: "min(52vh, 520px)",
-                overflow: "auto",
-                display: "grid",
-                gap: 10,
-              }}
-            >
+            <div className="border border-border rounded-xl bg-surface p-2.5 max-h-[min(52vh,520px)] overflow-auto grid gap-2.5">
               {trash.length ? (
                 trash.map((l) => (
-                  <div key={l.id} style={{ borderBottom: "1px dashed var(--border)", paddingBottom: 10 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <div key={l.id} className="border-b border-dashed border-border pb-2.5">
+                    <div className="flex justify-between gap-2.5 items-center">
+                      <div className="min-w-0">
+                        <div className="text-[13px] font-bold text-text overflow-hidden text-ellipsis whitespace-nowrap">
                           {l.name}
                         </div>
-                        <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                        <div className="text-xs text-text-muted">
                           文档 {l.docCount} 篇 · 删除于 {new Date(l.deletedAt).toLocaleString()}
                         </div>
-                        <div style={{ fontSize: 12, color: "var(--muted)" }}>id: {l.id}</div>
+                        <div className="text-xs text-text-muted">id: {l.id}</div>
                       </div>
-                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                      <div className="flex gap-2 flex-wrap justify-end">
                         <button
-                          className="btn btnIcon"
+                          className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
                           type="button"
                           onClick={() => {
                             void (async () => {
@@ -2120,7 +2001,7 @@ export function CardJobsModal() {
                           恢复
                         </button>
                         <button
-                          className="btn btnDanger btnIcon"
+                          className="px-3 py-1.5 text-xs rounded-lg border border-error/30 text-error hover:bg-error/10 transition-colors"
                           type="button"
                           onClick={() => {
                             void (async () => {
@@ -2149,7 +2030,7 @@ export function CardJobsModal() {
                   </div>
                 ))
               ) : (
-                <div className="explorerHint">回收站为空。</div>
+                <div className="text-xs text-text-faint">回收站为空。</div>
               )}
             </div>
           </div>
@@ -2157,20 +2038,20 @@ export function CardJobsModal() {
 
         {tab === "jobs" ? (
           <>
-            <div className="explorerHint" style={{ marginBottom: 10 }}>
+            <div className="text-xs text-text-faint mb-2.5">
               抽卡任务说明：导入后先入队，需点击 ▶ 开始；为每篇文档生成最终要素卡（hook/thesis/ending/one_liner/outline），用于后续生成库级 22+1 风格手册；已抽过会自动跳过。
             </div>
 
-            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
-              <span className="ctxPill">当前库：{currentLibrary ? currentLibrary.name : "（未选择）"}</span>
-              <span className="ctxPill">处理集（Facet Pack）：</span>
+            <div className="flex gap-2.5 items-center flex-wrap mb-2.5">
+              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">当前库：{currentLibrary ? currentLibrary.name : "（未选择）"}</span>
+              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">处理集（Facet Pack）：</span>
               <select
-                className="btn"
+                className="px-2 py-1 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors cursor-pointer"
                 value={currentLibrary?.facetPackId ?? ""}
                 disabled={!currentLibrary || status !== "idle"}
                 title={
                   !currentLibrary
-                    ? "请先在“库”里设为当前库"
+                    ? "请先在「库」里设为当前库"
                     : status !== "idle"
                       ? "抽卡运行/暂停中不可切换处理集"
                       : "选择抽卡使用的处理集（第一轮前选；第二轮沿用）"
@@ -2204,81 +2085,61 @@ export function CardJobsModal() {
                   </option>
                 ))}
               </select>
-              {currentLibrary ? <span className="ctxPill">标签：{facetPackLabel(currentLibrary.facetPackId)}</span> : null}
+              {currentLibrary ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">标签：{facetPackLabel(currentLibrary.facetPackId)}</span> : null}
             </div>
 
-            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
-              <span className="ctxPill">状态：{status === "idle" ? "空闲" : status === "running" ? "运行中" : "已暂停"}</span>
-              <span className="ctxPill">
+            <div className="flex gap-2.5 items-center flex-wrap mb-2.5">
+              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">状态：{status === "idle" ? "空闲" : status === "running" ? "运行中" : "已暂停"}</span>
+              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">
                 进度：{summary.done}/{summary.total}
               </span>
-              {summary.failed ? <span className="ctxPill">失败：{summary.failed}</span> : null}
-              {summary.cancelled ? <span className="ctxPill">取消：{summary.cancelled}</span> : null}
-              {summary.runningLabel ? <span className="ctxPill">当前：{summary.runningLabel}</span> : null}
+              {summary.failed ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">失败：{summary.failed}</span> : null}
+              {summary.cancelled ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">取消：{summary.cancelled}</span> : null}
+              {summary.runningLabel ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">当前：{summary.runningLabel}</span> : null}
             </div>
 
             {progress.totalUnits ? (
-              <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <div
-                    style={{
-                      flex: 1,
-                      height: 8,
-                      borderRadius: 999,
-                      background: "var(--border)",
-                      overflow: "hidden",
-                    }}
-                  >
+              <div className="grid gap-1.5 mb-2.5">
+                <div className="flex items-center gap-2.5">
+                  <div className="flex-1 h-2 rounded-full bg-border overflow-hidden">
                     <div
-                      style={{
-                        height: "100%",
-                        width: `${Math.round(progress.pct * 100)}%`,
-                        background: progress.pct >= 1 ? "rgba(22, 163, 74, 0.95)" : "rgba(37, 99, 235, 0.95)",
-                        transition: "width 200ms linear",
-                      }}
+                      className={cn(
+                        "h-full transition-[width] duration-200",
+                        progress.pct >= 1 ? "bg-success" : "bg-accent"
+                      )}
+                      style={{ width: `${Math.round(progress.pct * 100)}%` }}
                     />
                   </div>
-                  <div style={{ fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>
+                  <div className="text-xs text-text-muted whitespace-nowrap">
                     {Math.round(progress.pct * 100)}%
                   </div>
                 </div>
-                <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                <div className="text-xs text-text-muted">
                   估算：{progress.doneUnits}/{progress.totalUnits} · 已用 {formatDuration(progress.elapsedMs)}
                   {progress.etaMs ? ` · 预计剩余 ~${formatDuration(progress.etaMs)}` : ""}
                 </div>
               </div>
             ) : null}
 
-            <div
-              style={{
-                border: "1px solid var(--border)",
-                borderRadius: 12,
-                background: "var(--panel)",
-                maxHeight: "min(52vh, 520px)",
-                overflow: "auto",
-                padding: 10,
-                display: "grid",
-                gap: 8,
-              }}
-            >
+            <div className="border border-border rounded-xl bg-surface max-h-[min(52vh,520px)] overflow-auto p-2.5 grid gap-2">
               {jobs.length || playbookJobs.length ? (
                 <>
                   {jobs.length
                     ? jobs.map((j) => (
-                        <div key={j.id} style={{ display: "grid", gap: 4, paddingBottom: 8, borderBottom: "1px dashed var(--border)" }}>
-                          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-                            <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              <span style={{ color: statusColor(j.status), fontWeight: 600 }}>{statusLabel(j.status)}</span>
-                              <span style={{ color: "var(--muted)" }}> · </span>
-                              <span style={{ color: "var(--text)" }}>{j.docTitle}</span>
-                              {j.libraryName ? <span style={{ color: "var(--muted)" }}>{` · 库：${j.libraryName}`}</span> : null}
+                        <div key={j.id} className="grid gap-1 pb-2 border-b border-dashed border-border">
+                          <div className="flex items-center justify-between gap-2.5">
+                            <div className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
+                              <span className={cn("font-semibold", statusColorClass(j.status))}>{statusLabel(j.status)}</span>
+                              <span className="text-text-muted"> · </span>
+                              <span className="text-text">{j.docTitle}</span>
+                              {j.libraryName ? <span className="text-text-muted">{` · 库：${j.libraryName}`}</span> : null}
                             </div>
-                            <div style={{ fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>
+                            <div className="text-xs text-text-muted whitespace-nowrap">
                               {typeof j.extractedCards === "number" ? `卡片 +${j.extractedCards}` : ""}
                             </div>
                           </div>
                           {j.error ? (
-                            <div style={{ fontSize: 12, color: "rgba(220, 38, 38, 0.95)", whiteSpace: "pre-wrap" }}>{j.error}</div>
+                            <div className="text-xs text-red-600 whitespace-pre-wrap">{j.error}</div>
                           ) : null}
                         </div>
                       ))
@@ -2287,19 +2148,19 @@ export function CardJobsModal() {
                   {playbookJobs.length ? (
                     <>
                       {jobs.length ? (
-                        <div className="explorerHint" style={{ paddingTop: 6 }}>
+                        <div className="text-xs text-text-faint pt-1.5">
                           风格手册任务
                         </div>
                       ) : null}
                       {playbookJobs.map((j) => (
-                        <div key={j.id} style={{ display: "grid", gap: 4, paddingBottom: 8, borderBottom: "1px dashed var(--border)" }}>
-                          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-                            <div style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              <span style={{ color: statusColor(j.status), fontWeight: 600 }}>{statusLabel(j.status)}</span>
-                              <span style={{ color: "var(--muted)" }}> · </span>
-                              <span style={{ color: "var(--text)" }}>{`【风格手册】${j.libraryName ?? j.libraryId}`}</span>
+                        <div key={j.id} className="grid gap-1 pb-2 border-b border-dashed border-border">
+                          <div className="flex items-center justify-between gap-2.5">
+                            <div className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
+                              <span className={cn("font-semibold", statusColorClass(j.status))}>{statusLabel(j.status)}</span>
+                              <span className="text-text-muted"> · </span>
+                              <span className="text-text">{`【风格手册】${j.libraryName ?? j.libraryId}`}</span>
                             </div>
-                            <div style={{ fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>
+                            <div className="text-xs text-text-muted whitespace-nowrap">
                               {typeof j.totalFacets === "number"
                                 ? `画像 ${j.generatedStyleProfile ? "✔" : "…"} · 维度 ${Math.max(
                                     0,
@@ -2311,7 +2172,7 @@ export function CardJobsModal() {
                             </div>
                           </div>
                           {j.error ? (
-                            <div style={{ fontSize: 12, color: "rgba(220, 38, 38, 0.95)", whiteSpace: "pre-wrap" }}>{j.error}</div>
+                            <div className="text-xs text-red-600 whitespace-pre-wrap">{j.error}</div>
                           ) : null}
                         </div>
                       ))}
@@ -2319,17 +2180,17 @@ export function CardJobsModal() {
                   ) : null}
                 </>
               ) : (
-                <div className="explorerHint">队列为空：导入语料后会自动加入抽卡队列；风格手册需点击“生成风格手册”入队。</div>
+                <div className="text-xs text-text-faint">队列为空：导入语料后会自动加入抽卡队列；风格手册需点击"生成风格手册"入队。</div>
               )}
             </div>
 
-            <div className="modalBtns" style={{ marginTop: 12, justifyContent: "space-between" }}>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button className="btn btnIcon" type="button" onClick={clearFinished} disabled={!jobs.length && !playbookJobs.length}>
+            <div className="flex gap-2 items-center justify-between mt-3">
+              <div className="flex gap-2">
+                <button className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors" type="button" onClick={clearFinished} disabled={!jobs.length && !playbookJobs.length}>
                   清理已完成
                 </button>
                 <button
-                  className="btn btnIcon"
+                  className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
                   type="button"
                   onClick={retryFailed}
                   disabled={!jobs.some((j) => j.status === "failed") && !playbookJobs.some((j) => j.status === "failed")}
@@ -2337,9 +2198,9 @@ export function CardJobsModal() {
                   重试失败
                 </button>
               </div>
-              <div style={{ display: "flex", gap: 8 }}>
+              <div className="flex gap-2">
                 <button
-                  className={`btn btnIcon ${status === "running" ? "btnPrimary" : ""}`}
+                  className={cn("px-3 py-1.5 text-xs rounded-lg border transition-colors", status === "running" ? "border-accent bg-accent text-white hover:bg-accent-hover" : "border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text")}
                   type="button"
                   title={status === "running" ? "暂停" : status === "paused" ? "继续" : "开始"}
                   disabled={status === "idle" && !jobs.some((j) => j.status === "pending") && !playbookJobs.some((j) => j.status === "pending")}
@@ -2358,7 +2219,7 @@ export function CardJobsModal() {
                   {status === "running" ? "⏸" : "▶"}
                 </button>
                 <button
-                  className="btn btnDanger btnIcon"
+                  className="px-3 py-1.5 text-xs rounded-lg border border-error/30 text-error hover:bg-error/10 transition-colors"
                   type="button"
                   title="停止（取消队列）"
                   onClick={cancel}
@@ -2371,7 +2232,7 @@ export function CardJobsModal() {
                   ■
                 </button>
                 <button
-                  className="btn btnIcon"
+                  className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
                   type="button"
                   disabled={!currentLibrary || status !== "idle" || (currentLibrary?.docCount ?? 0) <= 0}
                   title={
@@ -2391,8 +2252,8 @@ export function CardJobsModal() {
                       `为当前库「${lib.name}」入队生成风格手册（22+1）？\n\n` +
                       "- 会读取该库已抽出的单篇要素卡（hook/thesis/ending/one_liner/outline）\n" +
                       "- 并生成 1 张 Style Profile + 每个维度 1 张写法手册卡\n" +
-                      "- 产物会落到一个“【仿写手册】”虚拟文档下，可被右侧 Agent 直接使用\n" +
-                      "- 点击“确定”只会入队，不会自动开始；需要你点击 ▶ 执行\n\n" +
+                      "- 产物会落到一个「【仿写手册】」虚拟文档下，可被右侧 Agent 直接使用\n" +
+                      "- 点击「确定」只会入队，不会自动开始；需要你点击 ▶ 执行\n\n" +
                       (pendingInLib > 0 ? `提示：该库还有 ${pendingInLib} 个抽卡任务未完成，生成的手册可能不完整。\n\n` : "");
                     void (async () => {
                       const ok = await uiConfirm({
@@ -2417,17 +2278,15 @@ export function CardJobsModal() {
 
       {prompt ? (
         <div
-          className="modalMask"
+          className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/40 backdrop-blur-sm"
           role="dialog"
           aria-modal="true"
-          style={{ zIndex: 100000 }}
           onMouseDown={(e) => {
-            // 仅点击遮罩空白处关闭，避免点击输入框/按钮时被误关
             if (e.target === e.currentTarget) setPrompt(null);
           }}
         >
           <div
-            className="modal"
+            className="w-[480px] max-w-[calc(100vw-24px)] bg-surface rounded-2xl border border-border shadow-2xl p-5"
             onMouseDown={(e) => {
               e.stopPropagation();
               // 兜底：如果因为某些原因未聚焦，点弹窗任意位置也让输入框可输入
@@ -2446,11 +2305,11 @@ export function CardJobsModal() {
               }
             }}
           >
-            <div className="modalTitle">{prompt.title}</div>
-            {prompt.desc ? <div className="modalDesc">{prompt.desc}</div> : null}
+            <div className="text-base font-semibold text-text">{prompt.title}</div>
+            {prompt.desc ? <div className="text-sm text-text-muted mt-2.5">{prompt.desc}</div> : null}
             <input
               ref={promptInputRef}
-              className="modalInput"
+              className="w-full px-3 py-2 text-sm rounded-lg border border-border bg-surface text-text placeholder:text-text-faint outline-none focus:border-accent transition-colors"
               autoFocus
               value={prompt.value}
               placeholder={prompt.placeholder ?? ""}
@@ -2468,12 +2327,12 @@ export function CardJobsModal() {
                 }
               }}
             />
-            <div className="modalBtns" style={{ marginTop: 12 }}>
-              <button className="btn" type="button" onClick={() => setPrompt(null)}>
+            <div className="flex gap-2 items-center justify-end mt-3">
+              <button className="px-2 py-1 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors cursor-pointer" type="button" onClick={() => setPrompt(null)}>
                 取消
               </button>
               <button
-                className="btn btnPrimary"
+                className="px-3 py-1.5 text-xs rounded-lg border border-accent bg-accent text-white hover:bg-accent-hover transition-colors"
                 type="button"
                 onClick={() => {
                   const val = String(prompt.value ?? "").trim();
@@ -2489,10 +2348,9 @@ export function CardJobsModal() {
 
       {rulesEditor ? (
         <div
-          className="modalMask"
+          className="fixed inset-0 z-[100001] flex items-center justify-center bg-black/40 backdrop-blur-sm"
           role="dialog"
           aria-modal="true"
-          style={{ zIndex: 100001 }}
           onMouseDown={(e) => {
             if (e.target === e.currentTarget) {
               setRulesEditor(null);
@@ -2500,29 +2358,28 @@ export function CardJobsModal() {
             }
           }}
         >
-          <div className="modal" onMouseDown={(e) => e.stopPropagation()} style={{ width: "min(860px, calc(100vw - 24px))" }}>
-            <div className="modalTitle">{rulesEditor.title}</div>
-            <div className="modalDesc" style={{ whiteSpace: "pre-wrap" }}>
-              - 这是“仅对该库生效”的写法簇规则卡（建议放 values / analysisLenses / must/avoid/templates/checks 等）。{"\n"}
-              - 写作时会随 `mainDoc.styleContractV1` 注入，影响模型“站队/归因/战场”。{"\n"}
-              - 当前先做最小闭环：手动编辑保存；后续再补“从 anchors/segments 自动抽取”。
+          <div className="w-[860px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-4rem)] bg-surface rounded-2xl border border-border shadow-2xl p-5 flex flex-col overflow-hidden" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="text-base font-semibold text-text">{rulesEditor.title}</div>
+            <div className="text-sm text-text-muted mt-2.5 whitespace-pre-wrap">
+              - 这是"仅对该库生效"的写法簇规则卡（建议放 values / analysisLenses / must/avoid/templates/checks 等）。{"\n"}
+              - 写作时会随 `mainDoc.styleContractV1` 注入，影响模型"站队/归因/战场"。{"\n"}
+              - 当前先做最小闭环：手动编辑保存；后续再补"从 anchors/segments 自动抽取"。
             </div>
             <textarea
-              className="modalInput"
-              style={{ height: "min(52vh, 520px)", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace" }}
+              className="w-full px-3 py-2 text-sm rounded-lg border border-border bg-surface text-text placeholder:text-text-faint outline-none focus:border-accent transition-colors h-[min(52vh,520px)] font-mono"
               value={rulesEditor.value}
               onChange={(e) => setRulesEditor((p) => (p ? { ...p, value: e.target.value } : p))}
             />
 
-            <div style={{ marginTop: 10, border: "1px solid var(--border)", borderRadius: 12, background: "var(--panel)", padding: 10, display: "grid", gap: 10 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                <div style={{ fontWeight: 900 }}>证据绑定（anchors/segments）</div>
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
-                  <select className="btn" value={rulesEvidenceSource} onChange={(e) => setRulesEvidenceSource(e.target.value as any)} title="证据来源：来自体检簇证据，或来自你采纳的 anchors">
+            <div className="mt-2.5 border border-border rounded-xl bg-surface p-2.5 grid gap-2.5">
+              <div className="flex justify-between gap-2.5 flex-wrap items-center">
+                <div className="font-black">证据绑定（anchors/segments）</div>
+                <div className="flex gap-2 flex-wrap justify-end">
+                  <select className="px-2 py-1 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors cursor-pointer" value={rulesEvidenceSource} onChange={(e) => setRulesEvidenceSource(e.target.value as any)} title="证据来源：来自体检簇证据，或来自你采纳的 anchors">
                     <option value="cluster_evidence">本簇证据（体检代表样例）</option>
                     <option value="cluster_anchors">本簇 anchors（已采纳）</option>
                   </select>
-                  <select className="btn" value={rulesEvidenceTarget} onChange={(e) => setRulesEvidenceTarget(e.target.value as any)} title="把证据写到哪个维度下">
+                  <select className="px-2 py-1 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors cursor-pointer" value={rulesEvidenceTarget} onChange={(e) => setRulesEvidenceTarget(e.target.value as any)} title="把证据写到哪个维度下">
                     <option value="values.principles">values.principles[i].evidence</option>
                     <option value="values.priorities">values.priorities[i].evidence</option>
                     <option value="values.moralAccounting">values.moralAccounting[i].evidence</option>
@@ -2532,16 +2389,14 @@ export function CardJobsModal() {
                     <option value="analysisLenses">analysisLenses[i].evidence</option>
                   </select>
                   <input
-                    className="modalInput"
-                    style={{ width: 90, height: 34 }}
+                    className="w-[90px] h-[34px] px-3 py-2 text-sm rounded-lg border border-border bg-surface text-text placeholder:text-text-faint outline-none focus:border-accent transition-colors"
                     value={rulesEvidenceIndex}
                     onChange={(e) => setRulesEvidenceIndex(e.target.value)}
                     placeholder="i=0"
                     title="写入第几个条目（0-based）"
                   />
                   <input
-                    className="modalInput"
-                    style={{ width: 160, height: 34 }}
+                    className="w-[160px] h-[34px] px-3 py-2 text-sm rounded-lg border border-border bg-surface text-text placeholder:text-text-faint outline-none focus:border-accent transition-colors"
                     value={rulesEvidenceFilter}
                     onChange={(e) => setRulesEvidenceFilter(e.target.value)}
                     placeholder="过滤（命中 quote）"
@@ -2551,28 +2406,28 @@ export function CardJobsModal() {
               </div>
 
               {rulesEvidenceCandidates.length === 0 ? (
-                <div className="explorerHint">
+                <div className="text-xs text-text-faint">
                   没有可用证据。提示：先在「库体检」里生成声音指纹（数字版），或先采纳 anchors；并确保当前簇有代表样例。
                 </div>
               ) : (
-                <div style={{ display: "grid", gap: 8, maxHeight: 220, overflow: "auto" }}>
+                <div className="grid gap-2 max-h-[220px] overflow-auto">
                   {rulesEvidenceCandidates.map((r) => {
                     const segId = String((r as any)?.segmentId ?? "").trim();
                     const docId = String((r as any)?.sourceDocId ?? "").trim();
                     const quote = String((r as any)?.quote ?? "").trim();
                     return (
-                      <div key={segId} style={{ border: "1px dashed var(--border)", borderRadius: 10, padding: 8, display: "grid", gap: 6 }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                            {segId ? <span className="ctxPill">{segId}</span> : null}
-                            {docId ? <span className="ctxPill" title="sourceDocId">{docId}</span> : null}
+                      <div key={segId} className="border border-dashed border-border rounded-[10px] p-2 grid gap-1.5">
+                        <div className="flex justify-between gap-2.5 flex-wrap">
+                          <div className="flex gap-1.5 flex-wrap">
+                            {segId ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">{segId}</span> : null}
+                            {docId ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft" title="sourceDocId">{docId}</span> : null}
                           </div>
-                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
-                            <button className="btn btnIcon" type="button" onClick={() => appendEvidenceToRules(r)} title="将该证据追加到目标路径的 evidence[]">
+                          <div className="flex gap-2 flex-wrap justify-end">
+                            <button className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors" type="button" onClick={() => appendEvidenceToRules(r)} title="将该证据追加到目标路径的 evidence[]">
                               添加到 evidence
                             </button>
                             <button
-                              className="btn btnIcon"
+                              className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
                               type="button"
                               onClick={() => {
                                 const txt = JSON.stringify(r, null, 2);
@@ -2584,7 +2439,7 @@ export function CardJobsModal() {
                                 void (async () => {
                                   const v = await uiPrompt({
                                     title: "复制证据 JSON",
-                                    message: "提示：点击“复制”会写入剪贴板；也可以手动选中复制。",
+                                    message: "提示：点击「复制」会写入剪贴板；也可以手动选中复制。",
                                     defaultValue: txt,
                                     multiline: true,
                                     confirmText: "复制",
@@ -2605,7 +2460,7 @@ export function CardJobsModal() {
                             </button>
                           </div>
                         </div>
-                        <div style={{ color: "var(--muted)", fontSize: 12, whiteSpace: "pre-wrap" }}>{quote || "（空 quote）"}</div>
+                        <div className="text-xs text-text-muted whitespace-pre-wrap">{quote || "（空 quote）"}</div>
                       </div>
                     );
                   })}
@@ -2614,11 +2469,11 @@ export function CardJobsModal() {
             </div>
 
             {rulesEditorErr ? (
-              <div style={{ marginTop: 8, fontSize: 12, color: "rgba(220, 38, 38, 0.95)", whiteSpace: "pre-wrap" }}>{rulesEditorErr}</div>
+              <div className="mt-2 text-xs text-red-600 whitespace-pre-wrap">{rulesEditorErr}</div>
             ) : null}
-            <div className="modalBtns" style={{ marginTop: 12, justifyContent: "space-between" }}>
+            <div className="flex gap-2 items-center justify-between mt-3">
               <button
-                className="btn btnDanger"
+                className="px-3 py-1.5 text-xs rounded-lg border border-error/30 text-error hover:bg-error/10 transition-colors"
                 type="button"
                 onClick={() => {
                   if (!viewLibId) return;
@@ -2650,12 +2505,12 @@ export function CardJobsModal() {
               >
                 清空
               </button>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button className="btn" type="button" onClick={() => (setRulesEditor(null), setRulesEditorErr(null))}>
+              <div className="flex gap-2">
+                <button className="px-2 py-1 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors cursor-pointer" type="button" onClick={() => (setRulesEditor(null), setRulesEditorErr(null))}>
                   取消
                 </button>
                 <button
-                  className="btn btnPrimary"
+                  className="px-3 py-1.5 text-xs rounded-lg border border-accent bg-accent text-white hover:bg-accent-hover transition-colors"
                   type="button"
                   onClick={() => {
                     if (!viewLibId) return;
