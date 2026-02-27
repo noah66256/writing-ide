@@ -52,13 +52,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # agent-core 用 --skipLibCheck 避免 npm install --force 引入额外 @types 报 TS2688
+          npx tsc -p packages/agent-core/tsconfig.json --skipLibCheck
+          # Vite build + electron-builder
+          cd apps/desktop
+          npx vite build
           echo "build_type=${{ inputs.build_type }}"
           if [ "${{ inputs.build_type }}" = "nsis" ]; then
-            npm run dist:desktop:win
+            npx electron-builder --win nsis --x64
           elif [ "${{ inputs.build_type }}" = "portable" ]; then
-            npm run dist:desktop:win:portable
+            npx electron-builder --win portable --x64
           elif [ "${{ inputs.build_type }}" = "all" ]; then
-            npm run dist:desktop:win:all
+            npx electron-builder --win nsis portable --x64
           else
             echo "Unknown build_type: ${{ inputs.build_type }}"
             exit 2
