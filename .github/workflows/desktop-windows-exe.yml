@@ -80,19 +80,21 @@ jobs:
           TITLE="Desktop v${VER}"
           echo "version=${VER}  tag=${TAG}"
 
-          # 收集产物（排除 win-unpacked 目录中的应用 exe）
-          NSIS_PATH="$(find apps/desktop/out -maxdepth 1 -name '*Setup*.exe' -print | head -n 1 || true)"
+          # 收集产物（只找 out/ 根目录的 exe，排除 win-unpacked/ 子目录）
+          # NSIS 安装包含 "Setup"，portable 不含；两种都支持
+          EXES="$(find apps/desktop/out -maxdepth 1 -name '*.exe' -print || true)"
           BLOCKMAP="$(find apps/desktop/out -maxdepth 1 -name '*.exe.blockmap' -print | head -n 1 || true)"
 
-          if [ -z "${NSIS_PATH:-}" ]; then
+          if [ -z "${EXES:-}" ]; then
             echo "EXE not found under apps/desktop/out"
             exit 3
           fi
-          echo "exe=${NSIS_PATH}"
 
           # 创建或复用 release
           gh release view "${TAG}" >/dev/null 2>&1 || gh release create "${TAG}" -t "${TITLE}" -n "" --latest=false
-          gh release upload "${TAG}" "${NSIS_PATH}" --clobber
+          echo "${EXES}" | while IFS= read -r f; do
+            [ -n "$f" ] && echo "uploading: $f" && gh release upload "${TAG}" "$f" --clobber
+          done
           if [ -n "${BLOCKMAP:-}" ]; then
             gh release upload "${TAG}" "${BLOCKMAP}" --clobber
           fi
