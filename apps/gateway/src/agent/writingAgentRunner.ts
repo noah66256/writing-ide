@@ -431,10 +431,16 @@ export class WritingAgentRunner {
         if (streamErrored) break;
       }
 
+      // HTTP 200 但 body 为空（代理/上游异常）：视为可重试错误
+      const hasContent = assistantText.length > 0 || completedToolUses.length > 0;
+      if (!streamErrored && !hasContent) {
+        streamErrored = true;
+        lastStreamError = "EMPTY_RESPONSE: API 返回 200 但内容为空";
+      }
+
       if (!streamErrored) break;
 
       // Only retry if no content was produced (connection failed before model responded)
-      const hasContent = assistantText.length > 0 || completedToolUses.length > 0;
       if (hasContent || attempt >= STREAM_RETRY_MAX) break;
 
       const jitter = Math.floor(Math.random() * 200);

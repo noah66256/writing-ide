@@ -1679,7 +1679,7 @@ export async function prepareAgentRun(args: {
     ...(skillsSystemPrompt ? ([{ role: "system", content: skillsSystemPrompt }] as OpenAiChatMessage[]) : []),
     ...(projectDirFromSidecar
       ? ([{ role: "system", content: `用户当前已打开项目目录：${projectDirFromSidecar}\n项目内的文件操作（doc.read/doc.write/project.search 等）均基于此目录。` }] as OpenAiChatMessage[])
-      : ([{ role: "system", content: `当前没有打开项目文件夹。文件写入工具（doc.write/doc.splitToDir/doc.mkdir 等）和代码执行工具（code.exec）需要项目目录才能正常工作。\n在执行任何文件写入或代码执行之前，你必须先提醒用户点击输入框左下角的文件夹按钮选择或创建一个项目文件夹。不要在没有项目目录的情况下尝试写入文件或执行代码。` }] as OpenAiChatMessage[])),
+      : ([{ role: "system", content: `当前没有打开项目文件夹。文件写入工具（doc.write/doc.splitToDir/doc.mkdir 等）和代码执行工具（code.exec）需要项目目录才能正常工作。\n如果任务需要写入文件或执行代码，请在第一步提醒用户点击输入框左下角的文件夹按钮选择或创建一个项目文件夹。` }] as OpenAiChatMessage[])),
     ...(body.contextPack ? ([{ role: "system", content: body.contextPack }] as OpenAiChatMessage[]) : []),
     { role: "user", content: body.prompt },
   ];
