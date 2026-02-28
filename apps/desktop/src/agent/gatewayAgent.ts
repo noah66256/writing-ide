@@ -941,7 +941,6 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   const mainDoc = useRunStore.getState().mainDoc;
   const todoList = useRunStore.getState().todoList;
   const proj = useProjectStore.getState();
-  const docRules = proj.getFileByPath("doc.rules.md")?.content ?? "";
   const kbLibraries = useKbStore.getState().libraries ?? [];
   const userPrompt = String(extra?.userPrompt ?? "");
   // 仅使用本次消息 @提及的库（绑定机制已废弃）
@@ -1602,13 +1601,6 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     trusted: true,
     source: "desktop",
   });
-  pushSeg({
-    name: "DOC_RULES",
-    content: `DOC_RULES(Markdown):\n${docRules}\n\n`,
-    priority: "p0",
-    trusted: true,
-    source: "desktop",
-  });
 
   // p1: 滚动摘要/最近对话/引用（引用视为不可信数据）
   if (dialogueSummary) {
@@ -1669,7 +1661,6 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
 
 export function buildChatContextPack(extra?: { referencesText?: string }) {
   const proj = useProjectStore.getState();
-  const docRules = proj.getFileByPath("doc.rules.md")?.content ?? "";
   const selection = (() => {
     const ed = proj.editorRef;
     const model = ed?.getModel();
@@ -1721,8 +1712,6 @@ export function buildChatContextPack(extra?: { referencesText?: string }) {
       ...(seg.note ? { note: seg.note } : {}),
     });
   };
-
-  pushSeg({ name: "DOC_RULES", content: `DOC_RULES(Markdown):\n${docRules}\n\n`, priority: "p0", trusted: true, source: "desktop" });
 
   // Chat：也携带"滚动摘要 + 最近 3 个完整回合"（用户要求：Chat 带历史，但仍保持上下文可控）
   const chatSummary = (() => {

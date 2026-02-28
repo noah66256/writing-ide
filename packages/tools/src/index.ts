@@ -782,13 +782,6 @@ export const TOOL_LIST: ToolMeta[] = [
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
-    name: "project.docRules.get",
-    description: "读取项目级 Doc Rules（doc.rules.md）。",
-    args: [],
-    modes: ["chat", "agent"],
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-  },
-  {
     name: "project.search",
     description:
       "在当前项目中搜索文本（跨文件）。\n" +

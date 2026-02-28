@@ -109,6 +109,20 @@ export type RunActivity = {
   startedAt: number; // 用于 UI 显示耗时
 };
 
+// ─── 全局 Run 取消句柄（不放 store state，避免序列化问题） ─────────────────
+let _activeRunCancel: ((reason?: string) => void) | null = null;
+
+export function setActiveRunCancel(fn: ((reason?: string) => void) | null) {
+  _activeRunCancel = fn;
+}
+
+export function cancelActiveRun(reason = "manual_cancel") {
+  if (!_activeRunCancel) return;
+  const cancel = _activeRunCancel;
+  _activeRunCancel = null;
+  try { cancel(reason); } catch { /* ignore */ }
+}
+
 type RunState = {
   mode: Mode;
   /** Chat 模式选中的模型（可与 Agent 分开记忆） */

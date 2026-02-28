@@ -1965,21 +1965,6 @@ const tools: ToolDefinition[] = [
     },
   },
   {
-    name: "project.docRules.get",
-    description: "读取项目级 Doc Rules（doc.rules.md）。写作风格/禁用项等约束在这里。",
-    args: [],
-    riskLevel: "low",
-    applyPolicy: "proposal",
-    reversible: false,
-    run: async () => {
-      const s = useProjectStore.getState();
-      const file = s.getFileByPath("doc.rules.md");
-      if (!file) return { ok: false, error: "DOC_RULES_NOT_FOUND" };
-      const content = await s.ensureLoaded(file.path);
-      return { ok: true, output: { ok: true, path: file.path, content }, undoable: false };
-    },
-  },
-  {
     name: "run.mainDoc.get",
     description: "读取本次 Run 的 Main Doc（主文档/主线）。",
     args: [],
@@ -2724,6 +2709,11 @@ const tools: ToolDefinition[] = [
         useProjectStore.getState().createFile(path, content);
         const undo = () => useProjectStore.getState().restore(snap);
         const d = unifiedDiff({ path, before: "", after: content, maxCells: 400_000 });
+        const rootDir = useProjectStore.getState().rootDir!;
+        const sep = rootDir.includes("\\") ? "\\" : "/";
+        const absPath = rootDir.replace(/[/\\]+$/, "") + sep + path.replaceAll("/", sep);
+        const fileName = path.split("/").pop() || path;
+        const ext = fileName.includes(".") ? fileName.split(".").pop()!.toLowerCase() : "";
         return {
           ok: true,
           output: {
@@ -2734,6 +2724,7 @@ const tools: ToolDefinition[] = [
             truncated: d.truncated,
             stats: d.stats ?? null,
             ifExists,
+            artifact: { absPath, relPath: path, name: fileName, ext, sizeBytes: new Blob([content]).size },
             ...(resolved.renamedFrom ? { renamedFrom: resolved.renamedFrom, note: "已自动改名新建，避免覆盖原文件。" } : {}),
           },
           applyPolicy: "auto_apply",
@@ -2761,6 +2752,12 @@ const tools: ToolDefinition[] = [
         return { undo: () => useProjectStore.getState().restore(snap) };
       };
 
+      const rootDir2 = useProjectStore.getState().rootDir!;
+      const sep2 = rootDir2.includes("\\") ? "\\" : "/";
+      const absPath2 = rootDir2.replace(/[/\\]+$/, "") + sep2 + path.replaceAll("/", sep2);
+      const fileName2 = path.split("/").pop() || path;
+      const ext2 = fileName2.includes(".") ? fileName2.split(".").pop()!.toLowerCase() : "";
+
       return {
         ok: true,
         output: {
@@ -2768,6 +2765,7 @@ const tools: ToolDefinition[] = [
           path,
           created: false,
           preview: { note: "覆盖写入为提案：点击 Keep 才会覆盖文件；Undo 可回滚。", diffUnified: d.diff, truncated: d.truncated, stats: d.stats ?? null },
+          artifact: { absPath: absPath2, relPath: path, name: fileName2, ext: ext2, sizeBytes: new Blob([content]).size },
         },
         applyPolicy: "proposal",
         riskLevel: "medium",

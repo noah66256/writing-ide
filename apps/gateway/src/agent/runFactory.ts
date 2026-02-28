@@ -931,13 +931,6 @@ const agentRunBodySchema = z.object({
     .object({
       styleLinterLibraries: z.array(z.any()).max(6).optional(),
       projectFiles: z.array(z.object({ path: z.string().min(1).max(500) })).max(5000).optional(),
-      docRules: z
-        .object({
-          path: z.string().min(1).max(500),
-          content: z.string(),
-        })
-        .nullable()
-        .optional(),
       ideSummary: z
         .object({
           projectDir: z.string().max(500).nullable().optional(),
@@ -1036,7 +1029,6 @@ export type PreparedRun = {
   baseAllowedToolNames: Set<string>;
   styleLinterLibraries: any[];
   projectFilesCount: number;
-  docRulesChars: number;
   messages: OpenAiChatMessage[];
   gates: any;
   effectiveGates: any;
@@ -1645,7 +1637,6 @@ export async function prepareAgentRun(args: {
   const runId = randomUUID();
   const styleLinterLibraries = Array.isArray(toolSidecar?.styleLinterLibraries) ? (toolSidecar.styleLinterLibraries as any[]) : [];
   const projectFilesCount = Array.isArray(toolSidecar?.projectFiles) ? (toolSidecar.projectFiles as any[]).length : 0;
-  const docRulesChars = typeof toolSidecar?.docRules?.content === "string" ? String(toolSidecar.docRules.content).length : 0;
 
   // MCP 工具：从 sidecar 提取，标记为 Desktop 执行
   // MCP 工具是用户主动配置的外部能力，始终加入允许列表（不受 toolPolicy 限制）
@@ -1939,7 +1930,6 @@ export async function prepareAgentRun(args: {
       baseAllowedToolNames,
       styleLinterLibraries,
       projectFilesCount,
-      docRulesChars,
       messages,
       gates,
       effectiveGates,
@@ -1990,7 +1980,6 @@ export async function executeAgentRun(args: {
     baseAllowedToolNames,
     styleLinterLibraries,
     projectFilesCount,
-    docRulesChars,
     contextManifestFromPack,
     runTodoFromPack,
     recentDialogueFromPack,
@@ -2058,7 +2047,6 @@ export async function executeAgentRun(args: {
       toolSidecar: {
         styleLinterLibraries: styleLinterLibraries.length,
         projectFiles: projectFilesCount,
-        docRulesChars,
       },
     }),
   };

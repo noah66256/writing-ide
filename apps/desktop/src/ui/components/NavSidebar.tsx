@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { buildCurrentSnapshot, useConversationStore, type Conversation } from "@/state/conversationStore";
-import { useRunStore } from "@/state/runStore";
+import { useRunStore, cancelActiveRun } from "@/state/runStore";
 import { useProjectStore } from "@/state/projectStore";
 import { useAuthStore } from "@/state/authStore";
 import { useThemeStore, THEME_OPTIONS, type ThemeId } from "@/state/themeStore";
@@ -66,6 +66,7 @@ export function NavSidebar() {
     const activeConv = activeConvId ? conversations.find((c) => c.id === activeConvId) : null;
     if (activeConv?.title === "新任务" && steps.length === 0) return;
 
+    cancelActiveRun("conversation_switch");
     // 保存当前对话
     if (hasCurrentContent && !activeConvId) {
       addConversation({ title: conversationTitle(), snapshot: buildCurrentSnapshot() });
@@ -83,6 +84,9 @@ export function NavSidebar() {
 
   const handleLoadConversation = useCallback(
     (id: string) => {
+      if (activeConvId !== id) {
+        cancelActiveRun("conversation_switch");
+      }
       if (hasCurrentContent && activeConvId !== id) {
         if (activeConvId) {
           useConversationStore.getState().updateConversation(activeConvId, { snapshot: buildCurrentSnapshot() });
@@ -111,6 +115,9 @@ export function NavSidebar() {
   const handleDeleteConversation = useCallback(
     (id: string, e: React.MouseEvent) => {
       e.stopPropagation();
+      if (activeConvId === id) {
+        cancelActiveRun("conversation_delete");
+      }
       deleteConversation(id);
       if (activeConvId === id) {
         resetRun();

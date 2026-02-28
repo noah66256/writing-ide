@@ -337,7 +337,6 @@ async function main() {
     // lint.style：调用上游模型的 server-side 工具，必须计费（否则白嫖强模型）。
     assert.ok(gw.includes("source: \"tool.lint.style\"") || gw.includes("tool.lint.style"), "Gateway 未对 lint.style 扣费入账（工具计费回退）");
     assert.ok(gw.includes("projectFiles"), "Gateway 未接收 toolSidecar.projectFiles（server-side project.listFiles 无法落地）");
-    assert.ok(gw.includes("docRules"), "Gateway 未接收 toolSidecar.docRules（server-side project.docRules.get 无法落地）");
     assert.ok(gw.includes("/api/admin/audit/runs"), "Gateway 未暴露审计查询接口 /api/admin/audit/runs（审计落库回退）");
     assert.ok(gw.includes("需确认") || gw.includes("澄清"), "Gateway ClarifyPolicy 未覆盖 需确认/澄清（可能再次自说自话继续跑）");
     // Selector v1：写法候选不应再用 clarify_waiting 强制用户先选（默认自动选并继续）
@@ -353,7 +352,6 @@ async function main() {
     const desk = await readRepoFile("apps/desktop/src/agent/gatewayAgent.ts");
     assert.ok(desk.includes("toolSidecar"), "Desktop 未向 /api/agent/run/stream 发送 toolSidecar（server-side lint.style 无法落地）");
     assert.ok(desk.includes("projectFiles"), "Desktop 未在 toolSidecar 携带 projectFiles（server-side project.listFiles 无法落地）");
-    assert.ok(desk.includes("docRules"), "Desktop 未在 toolSidecar 携带 docRules（server-side project.docRules.get 无法落地）");
     assert.ok(desk.includes("assistant.start"), "Desktop 未处理 assistant.start（turn 边界可能回退）");
     assert.ok(desk.includes("ACTIVE_SKILLS(JSON)"), "Desktop 未注入 ACTIVE_SKILLS(JSON)（Skills 可见性回退）");
     assert.ok(desk.includes("KB_STYLE_CLUSTERS(JSON)"), "Desktop 未注入 KB_STYLE_CLUSTERS(JSON)（M3 写法候选回退）");
@@ -379,7 +377,6 @@ async function main() {
     const sr = await readRepoFile("apps/gateway/src/agent/serverToolRunner.ts");
     assert.ok(sr.includes("GATEWAY_SERVER_TOOL_ALLOWLIST"), "serverToolRunner 缺少 allowlist 环境变量（迁回入口可能回退）");
     assert.ok(sr.includes("project.listFiles"), "serverToolRunner 未支持 project.listFiles");
-    assert.ok(sr.includes("project.docRules.get"), "serverToolRunner 未支持 project.docRules.get");
   }
   {
     const db = await readRepoFile("apps/gateway/src/db.ts");

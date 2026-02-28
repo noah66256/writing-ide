@@ -11,7 +11,6 @@ export type ServerToolExecutionDecision = {
 export type ToolSidecar = {
   styleLinterLibraries?: any[];
   projectFiles?: Array<{ path: string }>;
-  docRules?: { path: string; content: string } | null;
 };
 
 function parseCsv(v: any) {
@@ -25,7 +24,7 @@ function getServerToolAllowlist(): Set<string> {
   const cfg = String(process.env.GATEWAY_SERVER_TOOL_ALLOWLIST ?? "").trim();
   const list = cfg
     ? parseCsv(cfg)
-    : ["lint.style", "project.listFiles", "project.docRules.get", "time.now",
+    : ["lint.style", "project.listFiles", "time.now",
        "run.done", "run.setTodoList", "run.todo.upsertMany", "run.todo.update", "run.mainDoc.update", "run.mainDoc.get",
        "agent.delegate"];
   return new Set(list.map((x) => String(x ?? "").trim()).filter(Boolean));
@@ -86,14 +85,6 @@ export function decideServerToolExecution(args: {
   if (name === "project.listFiles") {
     const files = Array.isArray(sidecar?.projectFiles) ? (sidecar.projectFiles as any[]) : [];
     if (files.length > 0) return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "project_files_from_sidecar"] };
-    return { executedBy: "desktop", reasonCodes: ["server_tool_condition_not_met"] };
-  }
-
-  if (name === "project.docRules.get") {
-    const dr = sidecar?.docRules ?? null;
-    if (dr && typeof dr === "object" && String(dr.path ?? "").trim()) {
-      return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "doc_rules_from_sidecar"] };
-    }
     return { executedBy: "desktop", reasonCodes: ["server_tool_condition_not_met"] };
   }
 
@@ -448,16 +439,6 @@ export async function executeProjectListFilesOnGateway(args: { toolSidecar: Tool
   return { ok: true as const, output: { ok: true, files } };
 }
 
-export async function executeProjectDocRulesGetOnGateway(args: { toolSidecar: ToolSidecar | null }) {
-  const sidecar: any = args.toolSidecar ?? null;
-  const dr = sidecar?.docRules ?? null;
-  if (!dr || typeof dr !== "object") return { ok: false as const, error: "DOC_RULES_NOT_FOUND" };
-  const path = String(dr?.path ?? "").trim();
-  const content = typeof dr?.content === "string" ? String(dr.content) : "";
-  if (!path) return { ok: false as const, error: "DOC_RULES_NOT_FOUND" };
-  return { ok: true as const, output: { ok: true, path, content } };
-}
-
 export async function executeServerToolOnGateway(args: {
   fastify: FastifyInstance;
   call: any;
@@ -528,7 +509,6 @@ export async function executeServerToolOnGateway(args: {
     });
   }
   if (name === "project.listFiles") return executeProjectListFilesOnGateway({ toolSidecar: args.toolSidecar });
-  if (name === "project.docRules.get") return executeProjectDocRulesGetOnGateway({ toolSidecar: args.toolSidecar });
   if (name === "agent.delegate") return { ok: false as const, error: "HANDLED_BY_RUNNER" };
   return { ok: false as const, error: "SERVER_TOOL_NOT_IMPLEMENTED" };
 }

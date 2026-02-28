@@ -25,6 +25,13 @@ type MemoryState = {
     preferModelId?: string;
     rootDir?: string;  // 调用时的项目目录，防止异步期间项目切换
   }) => Promise<void>;
+  /** 将项目摘要写入全局记忆的"跨项目进展"section */
+  updateProjectSummaryInGlobal: (args: {
+    projectName: string;
+    rootDir: string;
+    fileStats: Record<string, number>; // ext → count
+    totalFiles: number;
+  }) => Promise<void>;
 };
 
 const DEFAULT_PROJECT_MEMORY =
@@ -51,6 +58,99 @@ function mergeMemoryPatch(existing: string, patch: string): string {
   const ts = new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
   return `${existing.trimEnd()}\n\n---\n_${ts} 自动提取_\n\n${patch.trim()}\n`;
 }
+
+/* ─── 跨项目进展 section 解析/渲染 ─── */
+
+type ProjectSummaryEntry = {
+  name: string;
+  rootDir: string;
+  fileStats: string; // 如 "42 个（md:15, txt:8, 其他:19）"
+  recentOpen: string; // 如 "2026-02-28 14:30"
+  recentOpenTs: number; // 用于排序
+};
+
+const CROSS_PROJECT_HEADING = "# 跨项目进展";
+const MAX_PROJECT_ENTRIES = 10;
+
+/** 将全局记忆拆为 { before, section, after }，section 是"跨项目进展"段的纯文本 */
+function splitCrossProjectSection(globalMemory: string): { before: string; section: string; after: string } {
+  const lines = globalMemory.split("\n");
+  let sectionStart = -1;
+  let sectionEnd = lines.length;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (t === CROSS_PROJECT_HEADING || t === "# 跨项目进展") {
+      sectionStart = i;
+      continue;
+    }
+    // 遇到下一个 h1 标题，结束 section
+    if (sectionStart >= 0 && /^# [^#]/.test(t)) {
+      sectionEnd = i;
+      break;
+    }
+  }
+  if (sectionStart < 0) {
+    // section 不存在，追加到末尾
+    return { before: globalMemory.trimEnd(), section: "", after: "" };
+  }
+  const before = lines.slice(0, sectionStart).join("\n");
+  const section = lines.slice(sectionStart + 1, sectionEnd).join("\n");
+  const after = lines.slice(sectionEnd).join("\n");
+  return { before, section, after };
+}
+
+/** 解析 section 内的 ### 项目条目 */
+function parseProjectSummaryEntries(sectionText: string): ProjectSummaryEntry[] {
+  const entries: ProjectSummaryEntry[] = [];
+  const lines = sectionText.split("\n");
+  let current: Partial<ProjectSummaryEntry> | null = null;
+
+  const flush = () => {
+    if (current?.name) {
+      entries.push({
+        name: current.name,
+        rootDir: current.rootDir ?? "",
+        fileStats: current.fileStats ?? "",
+        recentOpen: current.recentOpen ?? "",
+        recentOpenTs: current.recentOpenTs ?? 0,
+      });
+    }
+    current = null;
+  };
+
+  for (const line of lines) {
+    const headingMatch = line.match(/^### (.+)$/);
+    if (headingMatch) {
+      flush();
+      current = { name: headingMatch[1].trim() };
+      continue;
+    }
+    if (!current) continue;
+    const dirMatch = line.match(/^- 目录[：:]\s*(.+)$/);
+    if (dirMatch) { current.rootDir = dirMatch[1].trim(); continue; }
+    const fileMatch = line.match(/^- 文件[：:]\s*(.+)$/);
+    if (fileMatch) { current.fileStats = fileMatch[1].trim(); continue; }
+    const openMatch = line.match(/^- 最近打开[：:]\s*(.+)$/);
+    if (openMatch) {
+      current.recentOpen = openMatch[1].trim();
+      // 尝试解析时间戳
+      try { current.recentOpenTs = new Date(current.recentOpen).getTime() || 0; } catch { current.recentOpenTs = 0; }
+      continue;
+    }
+  }
+  flush();
+  return entries;
+}
+
+/** 将条目列表渲染为 section 文本（不含 heading） */
+function renderProjectEntries(entries: ProjectSummaryEntry[]): string {
+  return entries
+    .map((e) => `### ${e.name}\n- 目录：${e.rootDir}\n- 文件：${e.fileStats}\n- 最近打开：${e.recentOpen}`)
+    .join("\n\n");
+}
+
+/** 简单异步互斥锁，防止并发读-改-写覆盖 */
+let _projectSummaryMutex: Promise<void> = Promise.resolve();
 
 export const useMemoryStore = create<MemoryState>((set, get) => ({
   globalMemory: "",
@@ -185,6 +285,79 @@ export const useMemoryStore = create<MemoryState>((set, get) => ({
       console.warn("[MemoryStore] extractMemory error:", e);
     } finally {
       set({ _extracting: false });
+    }
+  },
+
+  async updateProjectSummaryInGlobal(args) {
+    const { projectName, rootDir, fileStats, totalFiles } = args;
+    if (!projectName || !rootDir) return;
+
+    // 串行化：等前一次写入完成后再执行
+    const prev = _projectSummaryMutex;
+    let release: () => void;
+    _projectSummaryMutex = new Promise<void>((r) => { release = r; });
+    await prev;
+
+    try {
+      // 确保全局记忆已加载
+      if (!get().globalMemory.trim()) {
+        await get().loadGlobalMemory();
+      }
+
+      const globalMemory = get().globalMemory || DEFAULT_GLOBAL_MEMORY;
+
+      // 构建文件统计字符串
+      const statParts: string[] = [];
+      const sorted = Object.entries(fileStats).sort((a, b) => b[1] - a[1]);
+      for (const [ext, count] of sorted.slice(0, 5)) {
+        statParts.push(`${ext.replace(/^\./, "")}:${count}`);
+      }
+      const otherCount = sorted.slice(5).reduce((s, [, c]) => s + c, 0);
+      if (otherCount > 0) statParts.push(`其他:${otherCount}`);
+      const fileStatsStr = statParts.length
+        ? `${totalFiles} 个（${statParts.join(", ")}）`
+        : `${totalFiles} 个`;
+
+      const now = new Date();
+      const recentOpen = now.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+      const recentOpenTs = now.getTime();
+
+      const newEntry: ProjectSummaryEntry = {
+        name: projectName,
+        rootDir,
+        fileStats: fileStatsStr,
+        recentOpen,
+        recentOpenTs,
+      };
+
+      // 解析现有 section
+      const { before, section, after } = splitCrossProjectSection(globalMemory);
+      const entries = parseProjectSummaryEntries(section);
+
+      // 替换同名或同目录条目，优先按 rootDir 匹配
+      const idx = entries.findIndex((e) => e.rootDir === rootDir);
+      if (idx >= 0) {
+        entries[idx] = newEntry;
+      } else {
+        entries.push(newEntry);
+      }
+
+      // 按最近打开时间降序排序，保留前 N 条
+      entries.sort((a, b) => b.recentOpenTs - a.recentOpenTs);
+      const kept = entries.slice(0, MAX_PROJECT_ENTRIES);
+
+      // 重组全局记忆
+      const sectionBody = renderProjectEntries(kept);
+      const parts = [before.trimEnd(), `\n\n${CROSS_PROJECT_HEADING}\n${sectionBody}\n`];
+      if (after.trim()) parts.push(after.trimStart());
+      const merged = parts.join("\n").replace(/\n{4,}/g, "\n\n\n").trim() + "\n";
+
+      await get().saveGlobalMemory(merged);
+      console.log("[MemoryStore] 项目摘要已注入全局记忆：", projectName);
+    } catch (e) {
+      console.warn("[MemoryStore] updateProjectSummaryInGlobal error:", e);
+    } finally {
+      release!();
     }
   },
 }));

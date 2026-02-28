@@ -166,8 +166,6 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
 
       // -- ensure loaded ---
       const proj = useProjectStore.getState();
-      const docRulesPath = proj.getFileByPath("doc.rules.md")?.path;
-      if (docRulesPath) await proj.ensureLoaded(docRulesPath).catch(() => void 0);
       if (proj.activePath) await proj.ensureLoaded(proj.activePath).catch(() => void 0);
 
       // -- KB refresh ---
@@ -305,8 +303,6 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           : (p.files ?? [])
               .map((f: any) => ({ path: String(f?.path ?? "").trim() }))
               .filter((f: any) => f.path).slice(0, 5000);
-        const docRulesFile = p.getFileByPath("doc.rules.md");
-        const docRules = docRulesFile ? { path: docRulesFile.path, content: docRulesFile.content ?? "" } : null;
 
         const att = useRunStore.getState().kbAttachedLibraryIds ?? [];
         let styleLinterLibraries: any[] | undefined;
@@ -329,7 +325,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           fileCount: p.files?.length ?? 0,
           hasSelection, selectionChars,
         };
-        const out: any = { projectFiles, docRules, ideSummary };
+        const out: any = { projectFiles, ideSummary };
         if (styleLinterLibraries) out.styleLinterLibraries = styleLinterLibraries;
 
         // MCP 工具快照：将已连接的 MCP Server 工具注入 sidecar
@@ -499,6 +495,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
         async function drainQueue() {
           busy = true;
           while (queue.length) {
+            if (abort.signal.aborted || ended) { queue.length = 0; break; }
             const e = queue.shift()!;
             try { await handleMessage(e); } catch (err: any) {
               log("error", "ws.message.handler_error", { error: String(err?.message ?? err) });
@@ -508,6 +505,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
         }
 
         async function handleMessage(e: MessageEvent) {
+          if (abort.signal.aborted || ended) return;
           bumpProgress();
           let msg: any;
           try { msg = JSON.parse(String(e.data)); } catch { return; }

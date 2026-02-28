@@ -75,23 +75,6 @@ type ProjectState = {
   clearProject: () => void;
 };
 
-const DEFAULT_DOC_RULES =
-  `## Doc Rules（文档规则）\n\n` +
-  `> 这是“项目级长期规则”，跨 Run 生效；用于约束写作目标、风格与禁用项，防止越写越跑偏。\n` +
-  `> 修改规则必须走“提案→确认→写入”，并保留版本可回滚。\n\n` +
-  `### 写作定位\n` +
-  `- 本项目是**写作 IDE**：一切以写作产出与编辑体验为中心。\n\n` +
-  `### 默认风格与口吻（可按项目改）\n` +
-  `- 语气：清晰、直接、结构化。\n` +
-  `- 句长：中短句为主，避免拖沓。\n` +
-  `- 禁用：空泛口号、无依据的数据/年份、强行营销腔（除非目标明确需要）。\n\n` +
-  `### 平台画像优先级\n` +
-  `- 默认先明确平台画像（feed 试看型 / 点选搜索型 / 长内容订阅型），再写作与改写。\n\n` +
-  `### 引用与事实\n` +
-  `- 涉及事实/数据/年份：尽量给来源；不确定就提示风险，不要编造。\n\n` +
-  `### 输出格式约束（Plan/Agent）\n` +
-  `- 优先输出结构（outline）再展开正文。\n`;
-
 const saveTimers = new Map<string, number>();
 let refreshInFlight: Promise<void> | null = null;
 let refreshQueuedReason: string | null = null;
@@ -156,12 +139,6 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     {
       path: "drafts/draft.md",
       content: `---\ntitle: 草稿\nplatform_type: feed_preview\n---\n\n# 草稿\n\n在这里开始写作…\n`,
-      loaded: true,
-      dirty: false,
-    },
-    {
-      path: "doc.rules.md",
-      content: DEFAULT_DOC_RULES,
       loaded: true,
       dirty: false,
     },
@@ -391,10 +368,6 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
     let files = filesList.slice();
     let dirs = Array.isArray(dirsList) ? dirsList.slice() : [];
-    if (!files.includes("doc.rules.md")) {
-      await api.writeFile(rootDir, "doc.rules.md", DEFAULT_DOC_RULES);
-      files.unshift("doc.rules.md");
-    }
 
     const projFiles: ProjectFile[] = [];
     for (const p of files) {
@@ -434,9 +407,31 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       }).catch(() => void 0);
     }
 
-    // 构建全量项目索引（异步，不阻塞）
+    // 构建全量项目索引（异步，不阻塞）+ 索引完成后注入项目摘要到全局记忆
     import("./projectIndexStore").then(({ useProjectIndexStore }) => {
-      void useProjectIndexStore.getState().buildIndex(rootDir);
+      void useProjectIndexStore.getState().buildIndex(rootDir).then(() => {
+        // 校验：索引完成时项目未切换，才注入摘要
+        const currentRoot = get().rootDir;
+        if (currentRoot !== rootDir) return;
+        const idx = useProjectIndexStore.getState().index;
+        const idxFiles = idx?.files ?? [];
+        if (!idxFiles.length) return;
+        const stats: Record<string, number> = {};
+        for (const f of idxFiles) {
+          const ext = extnameLower(f.path) || "(无后缀)";
+          stats[ext] = (stats[ext] ?? 0) + 1;
+        }
+        const dirParts = rootDir.replace(/\\/g, "/").split("/");
+        const projectName = dirParts[dirParts.length - 1] || rootDir;
+        import("./memoryStore").then(({ useMemoryStore }) => {
+          void useMemoryStore.getState().updateProjectSummaryInGlobal({
+            projectName,
+            rootDir,
+            fileStats: stats,
+            totalFiles: idxFiles.length,
+          });
+        }).catch(() => void 0);
+      });
     }).catch(() => void 0);
 
     // 加载项目记忆 L2（异步，不阻塞）
@@ -750,12 +745,6 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         {
           path: "drafts/draft.md",
           content: `---\ntitle: 草稿\nplatform_type: feed_preview\n---\n\n# 草稿\n\n在这里开始写作…\n`,
-          loaded: true,
-          dirty: false,
-        },
-        {
-          path: "doc.rules.md",
-          content: DEFAULT_DOC_RULES,
           loaded: true,
           dirty: false,
         },

@@ -17,6 +17,8 @@ import {
   type UserStep,
   type AssistantStep,
   type ToolBlockStep,
+  setActiveRunCancel,
+  cancelActiveRun,
 } from "@/state/runStore";
 import { useProjectStore } from "@/state/projectStore";
 import { useAuthStore } from "@/state/authStore";
@@ -57,6 +59,7 @@ export function ChatArea() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
 
+  const activeConvId = useConversationStore((s) => s.activeConvId);
   const hasMessages = steps.length > 0;
 
   // 自动滚动到底部
@@ -90,20 +93,16 @@ export function ChatArea() {
   // 卸载时取消运行
   useEffect(() => {
     return () => {
-      if (controllerRef.current) {
-        controllerRef.current.cancel("unmount");
-        controllerRef.current = null;
-      }
+      cancelActiveRun("unmount");
+      controllerRef.current = null;
     };
   }, []);
 
   const handleSend = useCallback(
     (text: string, meta?: { mentions?: Array<{ id: string; label: string; type: string }>; targetAgentIds?: string[] }) => {
       // 运行中发送：先中断当前 run
-      if (controllerRef.current) {
-        controllerRef.current.cancel("start_new_turn_or_user_interrupt");
-        controllerRef.current = null;
-      }
+      cancelActiveRun("start_new_turn_or_user_interrupt");
+      controllerRef.current = null;
 
       stickRef.current = true;
 
@@ -149,18 +148,23 @@ export function ChatArea() {
         ...(kbMentionIds?.length ? { kbMentionIds } : {}),
       });
       controllerRef.current = c;
-      void c.done.finally(() => {
+      setActiveRunCancel((reason?: string) => {
         if (controllerRef.current === c) controllerRef.current = null;
+        c.cancel(reason);
+      });
+      void c.done.finally(() => {
+        if (controllerRef.current === c) {
+          controllerRef.current = null;
+          setActiveRunCancel(null);
+        }
       });
     },
     [mode, model],
   );
 
   const handleStop = useCallback(() => {
-    if (controllerRef.current) {
-      controllerRef.current.cancel("stop_button");
-      controllerRef.current = null;
-    }
+    cancelActiveRun("stop_button");
+    controllerRef.current = null;
   }, []);
 
   const handleSuggest = useCallback((text: string) => {
@@ -197,6 +201,7 @@ export function ChatArea() {
         isRunning={isRunning}
         externalValue={suggestText}
         onExternalValueConsumed={() => setSuggestText("")}
+        conversationId={activeConvId}
       />
     </div>
   );
@@ -270,14 +275,7 @@ function AssistantMessage({ step }: { step: AssistantStep }) {
 
   const openFileRef = useCallback(
     async (relPath: string) => {
-      // 优先在应用内打开（doc.write 创建的文件已在 projectStore 中）
-      const proj = useProjectStore.getState();
-      if (proj.getFileByPath(relPath)) {
-        proj.openFilePreview(relPath);
-        return;
-      }
-      // 不在项目文件列表中，用系统默认应用打开
-      const rd = proj.rootDir;
+      const rd = useProjectStore.getState().rootDir;
       if (!rd) return;
       const absPath = resolveProjectAbsPath(rd, relPath);
       const ret = await window.desktop?.exec?.openFile?.(absPath);

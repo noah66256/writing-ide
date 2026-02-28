@@ -175,6 +175,38 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
     };
   }, [step.output, step.toolName]);
 
+  // 统一提取产出文件（code.exec + doc.write）
+  const toolArtifacts = useMemo(() => {
+    const out = step.output as any;
+    if (!out || typeof out !== "object") return [];
+    if (step.toolName === "code.exec" && Array.isArray(out.artifacts)) {
+      return out.artifacts
+        .map((a: any, idx: number) => ({
+          id: String(a?.absPath ?? a?.relPath ?? `artifact_${idx}`),
+          absPath: String(a?.absPath ?? "").trim(),
+          relPath: String(a?.relPath ?? "").trim(),
+          name: String(a?.name ?? "").trim() || String(a?.relPath ?? "").split("/").pop() || "",
+          ext: String(a?.ext ?? "").trim(),
+          sizeBytes: Number(a?.sizeBytes ?? 0),
+        }))
+        .filter((a: any) => Boolean(a.absPath));
+    }
+    if (step.toolName === "doc.write" && out.artifact && typeof out.artifact === "object") {
+      const a = out.artifact;
+      const absPath = String(a.absPath ?? "").trim();
+      if (!absPath) return [];
+      return [{
+        id: absPath,
+        absPath,
+        relPath: String(a.relPath ?? "").trim(),
+        name: String(a.name ?? "").trim() || String(a.relPath ?? "").split("/").pop() || "",
+        ext: String(a.ext ?? "").trim(),
+        sizeBytes: Number(a.sizeBytes ?? 0),
+      }];
+    }
+    return [];
+  }, [step.output, step.toolName]);
+
   const canApplyPick = mode !== "chat" && step.status === "success" && !!topicOutput;
   const isMac = (window as any).desktop?.platform === "darwin";
 
@@ -364,26 +396,28 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
                 </div>
               </div>
             )}
-            {/* ── code.exec Artifact 卡片 ── */}
-            {codeExecInfo && codeExecInfo.artifacts.length > 0 && (
+            {/* ── 产出文件 Artifact 卡片 ── */}
+            {toolArtifacts.length > 0 && (
               <div style={{ display: "grid", gap: 8 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <div style={{ color: "var(--text)" }}>
-                    执行产物（{codeExecInfo.artifacts.length} 个文件）
+                    产出文件（{toolArtifacts.length} 个）
                   </div>
-                  <div style={{ color: "var(--muted)", fontSize: 12 }}>
-                    {codeExecInfo.timedOut
-                      ? "超时"
-                      : codeExecInfo.durationMs != null
-                        ? `${(codeExecInfo.durationMs / 1000).toFixed(1)}s`
+                  {codeExecInfo && (
+                    <div style={{ color: "var(--muted)", fontSize: 12 }}>
+                      {codeExecInfo.timedOut
+                        ? "超时"
+                        : codeExecInfo.durationMs != null
+                          ? `${(codeExecInfo.durationMs / 1000).toFixed(1)}s`
+                          : ""}
+                      {codeExecInfo.exitCode != null && codeExecInfo.exitCode !== 0
+                        ? ` · exit=${codeExecInfo.exitCode}`
                         : ""}
-                    {codeExecInfo.exitCode != null && codeExecInfo.exitCode !== 0
-                      ? ` · exit=${codeExecInfo.exitCode}`
-                      : ""}
-                  </div>
+                    </div>
+                  )}
                 </div>
                 <div style={{ display: "grid", gap: 8 }}>
-                  {codeExecInfo.artifacts.map((a: any) => (
+                  {toolArtifacts.map((a: any) => (
                     <div
                       key={a.id}
                       style={{

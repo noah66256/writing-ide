@@ -31,12 +31,16 @@ type InputBarProps = {
   disabled?: boolean;
   externalValue?: string;
   onExternalValueConsumed?: () => void;
+  conversationId?: string | null;
 };
 
 // ─── 工具函数 ────────────────────────────────────────────────────────────────
 
 const MENTION_QUERY_RE = /@([^\s@]*)$/;
 const SLASH_QUERY_RE = /\/([^\s/]*)$/;
+
+// 每个对话独立的输入草稿（模块级，跨渲染保留）
+const conversationDraftMap = new Map<string, string>();
 
 const MODE_OPTIONS: { value: Mode; label: string }[] = [
   { value: "chat", label: "探索" },
@@ -384,6 +388,7 @@ export function InputBar({
   disabled,
   externalValue,
   onExternalValueConsumed,
+  conversationId,
 }: InputBarProps) {
   const editorRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -415,6 +420,46 @@ export function InputBar({
   const mentionVisiblePrev = useRef(false);
   // 缓存最近一次弹层打开时光标前文本（blur 后 selection 可能不在 editor 内）
   const lastMentionBefore = useRef<string | null>(null);
+
+  // ─── 对话切换：保存旧草稿，恢复新草稿 ────────────────────────────────────
+  const prevConvIdRef = useRef<string | null | undefined>(undefined); // undefined = 未初始化
+  useEffect(() => {
+    const prevId = prevConvIdRef.current;
+    const nextId = conversationId ?? null;
+    const isInitialMount = prevId === undefined;
+
+    // 非首次挂载且 id 未变 → 跳过
+    if (!isInitialMount && prevId === nextId) return;
+
+    // 保存旧对话草稿（首次挂载时不保存）
+    if (!isInitialMount) {
+      const editor = editorRef.current;
+      if (editor && prevId) {
+        const { text } = serializeSegments(readSegmentsFromDOM(editor));
+        const clean = text.replace(/\u00A0/g, " ").trim();
+        if (clean) conversationDraftMap.set(prevId, clean);
+        else conversationDraftMap.delete(prevId);
+      }
+    }
+
+    // 恢复新对话草稿（或清空）
+    const draft = nextId ? (conversationDraftMap.get(nextId) ?? "") : "";
+    if (draft) replaceAllText(draft);
+    else if (!isInitialMount) clearEditor();
+
+    // 重置弹层等临时状态
+    if (!isInitialMount) {
+      setDroppedFiles([]);
+      setMentionVisible(false);
+      setMentionQuery("");
+      setSlashVisible(false);
+      setSlashQuery("");
+      mentionDismissedPrefix.current = null;
+      mentionJustSelected.current = false;
+    }
+
+    prevConvIdRef.current = nextId;
+  }, [conversationId, replaceAllText, clearEditor]);
 
   // 组件卸载时清理 blur 定时器
   useEffect(() => {
@@ -579,6 +624,7 @@ export function InputBar({
     });
 
     clearEditor();
+    if (conversationId) conversationDraftMap.delete(conversationId);
     setDroppedFiles([]);
     setMentionVisible(false);
     setMentionQuery("");
@@ -588,7 +634,7 @@ export function InputBar({
     mentionJustSelected.current = false;
 
     requestAnimationFrame(() => editorRef.current?.focus());
-  }, [segments, droppedFiles, onSend, clearEditor]);
+  }, [segments, droppedFiles, onSend, clearEditor, conversationId]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLDivElement>) => {
