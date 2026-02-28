@@ -8,6 +8,8 @@ export type ToolRiskLevel = "low" | "medium" | "high";
 
 export type CtxRefItem = { kind: "file" | "dir"; path: string };
 
+export type ImageAttachment = { mediaType: string; data: string; name: string };
+
 export type MainDoc = {
   goal?: string;
   // 结构化意图（优先于正则启发式；用于后端门禁/skills 自动启用）
@@ -50,6 +52,7 @@ export type UserStep = {
   ts: number;
   edited?: boolean;
   mentions?: UserMention[];
+  images?: ImageAttachment[];
   // 用于“从历史消息提交”时回滚（文件 + 主文档）
   baseline?: {
     project: ProjectSnapshot;
@@ -175,7 +178,7 @@ type RunState = {
     ctxRefs?: CtxRefItem[];
   }) => void;
 
-  addUser: (text: string, baseline?: UserStep["baseline"], mentions?: UserMention[]) => string;
+  addUser: (text: string, baseline?: UserStep["baseline"], mentions?: UserMention[], images?: ImageAttachment[]) => string;
   patchUser: (stepId: string, patch: Partial<UserStep>) => void;
   truncateAfter: (stepId: string) => void; // 保留 stepId（包含它），清除其后
   truncateFrom: (stepId: string) => void; // 清除 stepId（包含它）及其后
@@ -428,9 +431,13 @@ export const useRunStore = create<RunState>()(
     }),
   clearCtxRefs: () => set({ ctxRefs: [] }),
 
-  addUser: (text, baseline, mentions) => {
+  addUser: (text, baseline, mentions, images) => {
     const id = makeId("u");
-    const step: UserStep = { id, type: "user", text, ts: Date.now(), baseline, ...(mentions?.length ? { mentions } : {}) };
+    const step: UserStep = {
+      id, type: "user", text, ts: Date.now(), baseline,
+      ...(mentions?.length ? { mentions } : {}),
+      ...(images?.length ? { images } : {}),
+    };
     set((s) => ({ steps: [...s.steps, step] }));
     return id;
   },

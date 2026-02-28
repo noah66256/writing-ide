@@ -2,7 +2,12 @@ export type OpenAiChatRole = "system" | "user" | "assistant" | "tool";
 
 export type OpenAiChatMessage = {
   role: OpenAiChatRole;
-  content: string;
+  content:
+    | string
+    | Array<
+        | { type: "text"; text: string }
+        | { type: "image_url"; image_url: { url: string } }
+      >;
 };
 
 export type OpenAiCompatConfig = {

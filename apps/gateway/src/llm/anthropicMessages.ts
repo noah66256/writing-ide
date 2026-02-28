@@ -13,6 +13,15 @@ export type ContentBlockText = {
   text: string;
 };
 
+export type ContentBlockImage = {
+  type: "image";
+  source: {
+    type: "base64";
+    media_type: string;
+    data: string;
+  };
+};
+
 export type ContentBlockToolUse = {
   type: "tool_use";
   id: string;
@@ -27,7 +36,7 @@ export type ContentBlockToolResult = {
   is_error?: boolean;
 };
 
-export type ContentBlock = ContentBlockText | ContentBlockToolUse | ContentBlockToolResult;
+export type ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockToolUse | ContentBlockToolResult;
 
 export type AnthropicMessage = {
   role: "user" | "assistant";

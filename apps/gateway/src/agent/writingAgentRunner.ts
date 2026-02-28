@@ -3,6 +3,7 @@ import {
   toolMetaToAnthropicDef,
   buildToolResultMessage,
   type AnthropicMessage,
+  type ContentBlockImage,
   type ContentBlockToolUse,
   type MsgStreamEvent,
 } from "../llm/anthropicMessages.js";
@@ -88,6 +89,8 @@ export type RunContext = {
   customAgentDefinitions?: SubAgentDefinition[];
   /** 大文本 blob 池：避免大文本经过 LLM 回显。key=blobId, value=原始文本 */
   textBlobPool?: Map<string, string>;
+  /** 首轮图片附件（base64，Anthropic image block 格式） */
+  images?: Array<{ mediaType: string; data: string }>;
 };
 
 type ToolExecResult = {
@@ -243,8 +246,17 @@ export class WritingAgentRunner {
     this.runState = ctx.initialRunState ? { ...ctx.initialRunState } : createInitialRunState();
   }
 
-  async run(userMessage: string): Promise<void> {
-    this.messages.push({ role: "user", content: userMessage });
+  async run(userMessage: string, images?: Array<{ mediaType: string; data: string }>): Promise<void> {
+    const userContent: AnthropicMessage["content"] = images?.length
+      ? [
+          ...images.map((img): ContentBlockImage => ({
+            type: "image",
+            source: { type: "base64", media_type: img.mediaType, data: img.data },
+          })),
+          { type: "text", text: userMessage },
+        ]
+      : userMessage;
+    this.messages.push({ role: "user", content: userContent });
 
     // If user @mentioned specific agents, auto-delegate before main loop
     if (this.ctx.targetAgentIds?.length) {

@@ -1,5 +1,5 @@
 import { useProjectStore } from "../state/projectStore";
-import { useRunStore, type Mode } from "../state/runStore";
+import { useRunStore, type ImageAttachment, type Mode } from "../state/runStore";
 import { useKbStore } from "../state/kbStore";
 import { useAuthStore } from "../state/authStore";
 import { facetLabel, getFacetPack } from "../kb/facets";
@@ -41,6 +41,7 @@ export type GatewayRunArgs = {
   targetAgentIds?: string[];
   activeSkillIds?: string[];
   kbMentionIds?: string[];
+  images?: ImageAttachment[];
 };
 
 
@@ -1848,6 +1849,7 @@ export function startGatewayRun(args: {
   targetAgentIds?: string[];
   activeSkillIds?: string[];
   kbMentionIds?: string[];
+  images?: ImageAttachment[];
 }): GatewayRunController {
   return startGatewayRunWs(args as GatewayRunArgs);
 }

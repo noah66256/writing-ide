@@ -17,6 +17,7 @@ import {
   type UserStep,
   type AssistantStep,
   type ToolBlockStep,
+  type ImageAttachment,
   setActiveRunCancel,
   cancelActiveRun,
 } from "@/state/runStore";
@@ -43,6 +44,23 @@ function parseAtMention(text: string): { agentId: string; cleanText: string } | 
   const agent = BUILTIN_SUB_AGENTS.find(a => a.enabled && (a.id === mention || a.name === mention));
   if (!agent) return null;
   return { agentId: agent.id, cleanText: text.slice(m[0].length) };
+}
+
+function fileToImageAttachment(file: File): Promise<ImageAttachment | null> {
+  if (!String(file.type ?? "").startsWith("image/")) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const raw = typeof reader.result === "string" ? reader.result : "";
+      const comma = raw.indexOf(",");
+      const data = (comma >= 0 ? raw.slice(comma + 1) : raw).trim();
+      if (!data) { resolve(null); return; }
+      resolve({ mediaType: file.type || "image/png", data, name: file.name || "image" });
+    };
+    reader.onerror = () => resolve(null);
+    reader.onabort = () => resolve(null);
+    reader.readAsDataURL(file);
+  });
 }
 
 
@@ -99,7 +117,12 @@ export function ChatArea() {
   }, []);
 
   const handleSend = useCallback(
-    (text: string, meta?: { mentions?: Array<{ id: string; label: string; type: string }>; targetAgentIds?: string[] }) => {
+    async (text: string, meta?: { mentions?: Array<{ id: string; label: string; type: string }>; files?: File[]; targetAgentIds?: string[] }) => {
+      const imageFiles = (meta?.files ?? []).filter((f) => String(f.type ?? "").startsWith("image/"));
+      const images = (
+        await Promise.all(imageFiles.map((f) => fileToImageAttachment(f)))
+      ).filter((it): it is ImageAttachment => Boolean(it));
+
       // 运行中发送：先中断当前 run
       cancelActiveRun("start_new_turn_or_user_interrupt");
       controllerRef.current = null;
@@ -114,12 +137,13 @@ export function ChatArea() {
         ctxRefs: JSON.parse(JSON.stringify(useRunStore.getState().ctxRefs ?? [])),
       };
       const userMentions = meta?.mentions?.length ? meta.mentions : undefined;
-      useRunStore.getState().addUser(text, baseline as any, userMentions);
+      useRunStore.getState().addUser(text, baseline as any, userMentions, images.length ? images : undefined);
 
       // 首次发送：优先重命名预创建的"新任务"对话；兜底仍支持直接创建
       const convStore = useConversationStore.getState();
       const currentConvId = convStore.activeConvId;
-      const title = text.length > 20 ? text.slice(0, 20) + "\u2026" : text;
+      const titleSeed = text.trim() || (images.length ? "图片消息" : text);
+      const title = titleSeed.length > 20 ? titleSeed.slice(0, 20) + "\u2026" : titleSeed;
       if (currentConvId) {
         const currentConv = convStore.conversations.find((c) => c.id === currentConvId);
         if (currentConv?.title === "新任务") {
@@ -138,11 +162,14 @@ export function ChatArea() {
       const gatewayUrl = getGatewayBaseUrl();
       const parsed = parseAtMention(text);
       const targetAgentIds = meta?.targetAgentIds ?? (parsed ? [parsed.agentId] : undefined);
-      const cleanPrompt = !meta?.targetAgentIds && parsed ? parsed.cleanText : text;
+      const cleanPromptRaw = !meta?.targetAgentIds && parsed ? parsed.cleanText : text;
+      // 纯图片消息时 prompt 不能为空（Gateway schema min(1)），用空格占位
+      const cleanPrompt = cleanPromptRaw.trim().length > 0 ? cleanPromptRaw : images.length > 0 ? " " : cleanPromptRaw;
       const activeSkillIds = meta?.mentions?.filter((m) => m.type === "skill").map((m) => m.id);
       const kbMentionIds = meta?.mentions?.filter((m) => m.type === "kb").map((m) => m.id);
       const c = startGatewayRun({
         gatewayUrl, mode, model, prompt: cleanPrompt,
+        ...(images.length ? { images } : {}),
         ...(targetAgentIds?.length ? { targetAgentIds } : {}),
         ...(activeSkillIds?.length ? { activeSkillIds } : {}),
         ...(kbMentionIds?.length ? { kbMentionIds } : {}),
@@ -247,9 +274,23 @@ function UserMessage({ step }: { step: UserStep }) {
             ))}
           </div>
         )}
+        {step.images && step.images.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-1.5">
+            {step.images.map((img, i) => (
+              <img
+                key={`${step.id}-img-${i}`}
+                src={`data:${img.mediaType};base64,${img.data}`}
+                alt={img.name || `image-${i + 1}`}
+                className="h-8 w-8 object-cover rounded"
+              />
+            ))}
+          </div>
+        )}
+        {step.text.length > 0 && (
         <div className="text-[14px] text-text leading-relaxed whitespace-pre-wrap break-words">
           {step.text}
         </div>
+        )}
       </div>
     </div>
   );

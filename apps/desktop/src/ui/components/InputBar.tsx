@@ -6,9 +6,10 @@ import {
   useMemo,
   type KeyboardEvent,
   type DragEvent,
+  type ClipboardEvent,
   type RefObject,
 } from "react";
-import { Mic, SendHorizontal, Square, Paperclip, Image, AtSign, X, FileIcon, FolderOpen } from "lucide-react";
+import { Mic, SendHorizontal, Square, Paperclip, Image, AtSign, X, FolderOpen } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/state/projectStore";
 import { useRunStore, type Mode } from "@/state/runStore";
@@ -163,6 +164,10 @@ function dedupeMentions(mentions: MentionItem[]): MentionItem[] {
     seen.add(key);
     return true;
   });
+}
+
+function filterImageFiles(files: File[]): File[] {
+  return files.filter((f) => String(f.type ?? "").startsWith("image/"));
 }
 
 // ─── 光标工具函数 ─────────────────────────────────────────────────────────────
@@ -491,9 +496,24 @@ export function InputBar({
 
   // 是否有内容（从 serialized 派生，单一数据源）
   const hasContent = useMemo(
-    () => serialized.text.trim().length > 0 || serialized.mentions.length > 0,
-    [serialized],
+    () =>
+      serialized.text.trim().length > 0 ||
+      serialized.mentions.length > 0 ||
+      droppedFiles.length > 0,
+    [serialized, droppedFiles.length],
   );
+
+  // 图片预览 URL（每次 droppedFiles 变更时重建；cleanup 时 revoke）
+  const droppedFilePreviews = useMemo(
+    () => droppedFiles.map((file) => ({ file, url: URL.createObjectURL(file) })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [droppedFiles],
+  );
+  useEffect(() => {
+    return () => {
+      for (const p of droppedFilePreviews) URL.revokeObjectURL(p.url);
+    };
+  }, [droppedFilePreviews]);
 
   // 占位符：所有 segment 均为空白文本（或没有 segment）时显示
   const isEmpty = useMemo(
@@ -612,7 +632,7 @@ export function InputBar({
     const liveSegments = editor ? readSegmentsFromDOM(editor) : segments;
     const { text, mentions } = serializeSegments(liveSegments);
     const normalizedText = text.trim();
-    if (!normalizedText && mentions.length === 0) return;
+    if (!normalizedText && mentions.length === 0 && droppedFiles.length === 0) return;
 
     const uniqueMentions = dedupeMentions(mentions);
     const agentMentions = uniqueMentions.filter((m) => m.type === "agent");
@@ -734,8 +754,15 @@ export function InputBar({
     e.preventDefault();
     e.stopPropagation();
     setIsDragOver(false);
-    const files = Array.from(e.dataTransfer.files);
+    const files = filterImageFiles(Array.from(e.dataTransfer.files));
     if (files.length > 0) setDroppedFiles((prev) => [...prev, ...files]);
+  }, []);
+
+  const handlePaste = useCallback((e: ClipboardEvent<HTMLDivElement>) => {
+    const files = filterImageFiles(Array.from(e.clipboardData?.files ?? []));
+    if (!files.length) return;
+    e.preventDefault();
+    setDroppedFiles((prev) => [...prev, ...files]);
   }, []);
 
   // ─── 文件选择 ──────────────────────────────────────────────────────────────
@@ -752,7 +779,7 @@ export function InputBar({
     await useProjectStore.getState().loadProjectFromDisk(res.dir);
   }, []);
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files ?? []);
+    const files = filterImageFiles(Array.from(e.target.files ?? []));
     if (files.length > 0) setDroppedFiles((prev) => [...prev, ...files]);
     e.target.value = "";
   }, []);
@@ -803,17 +830,23 @@ export function InputBar({
         )}
 
         {/* 附件预览 */}
-        {droppedFiles.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 px-3 pt-2.5">
-            {droppedFiles.map((f, i) => (
+        {droppedFilePreviews.length > 0 && (
+          <div className="flex flex-wrap gap-2 px-3 pt-2.5">
+            {droppedFilePreviews.map(({ file, url }, i) => (
               <span
-                key={`file-${i}`}
-                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] bg-surface-alt text-text-muted"
+                key={`file-${file.name}-${file.lastModified}-${i}`}
+                className="inline-flex items-center gap-1.5 px-1.5 py-1 rounded-md bg-surface-alt text-text-muted"
               >
-                <FileIcon size={10} />
-                <span>{f.name.length > 20 ? `${f.name.slice(0, 18)}...` : f.name}</span>
-                <button onClick={() => removeFile(i)} className="hover:text-error transition-colors">
-                  <X size={10} />
+                <img
+                  src={url}
+                  alt={file.name || `image-${i + 1}`}
+                  className="h-8 w-8 rounded object-cover"
+                />
+                <span className="max-w-[120px] truncate text-[11px]">
+                  {file.name.length > 20 ? `${file.name.slice(0, 18)}...` : file.name}
+                </span>
+                <button type="button" onClick={() => removeFile(i)} className="hover:text-error transition-colors">
+                  <X size={11} />
                 </button>
               </span>
             ))}
@@ -844,6 +877,7 @@ export function InputBar({
             onInput={handleEditorInput}
             onKeyDown={handleKeyDown}
             onKeyUp={updateMentionQuery}
+            onPaste={handlePaste}
             onMouseUp={updateMentionQuery}
             onFocus={() => {
               // 重新聚焦时清理 blur 定时器，防止 popover 被延迟关闭
@@ -947,6 +981,7 @@ export function InputBar({
           ref={fileInputRef}
           type="file"
           multiple
+          accept="image/*"
           className="hidden"
           onChange={handleFileChange}
         />

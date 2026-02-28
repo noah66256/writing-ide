@@ -927,6 +927,11 @@ const agentRunBodySchema = z.object({
   /** Desktop 传来的外部扩展包 skill manifests */
   userSkillManifests: z.array(z.any()).max(20).optional(),
   contextPack: z.string().optional(),
+  images: z.array(z.object({
+    mediaType: z.string().min(1).max(200),
+    data: z.string().min(1),
+    name: z.string().min(1).max(500),
+  })).max(20).optional(),
   toolSidecar: z
     .object({
       styleLinterLibraries: z.array(z.any()).max(6).optional(),
@@ -2484,7 +2489,7 @@ export async function executeAgentRun(args: {
 
   const runner = new WritingAgentRunner(runCtx);
   try {
-    await runner.run(userPrompt);
+    await runner.run(userPrompt, body.images?.length ? body.images : undefined);
   } catch (err: any) {
     const msg = String(err?.message ?? err ?? "RUNNER_ERROR");
     transport.writeEventRaw("error", { error: msg });

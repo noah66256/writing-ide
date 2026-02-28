@@ -427,6 +427,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           prompt: promptForGateway,
           contextPack,
           toolSidecar,
+          ...(args.images?.length ? { images: args.images } : {}),
           ...(targetAgentIds ? { targetAgentIds } : {}),
           ...(args.activeSkillIds?.length ? { activeSkillIds: args.activeSkillIds } : {}),
           ...(userSkillManifests ? { userSkillManifests } : {}),
