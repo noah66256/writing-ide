@@ -3480,6 +3480,30 @@ const tools: ToolDefinition[] = [
       return { ok: true, output: { ok: true, level, section, updated: true }, undoable: false };
     },
   },
+  // ── file.open: 用系统默认应用打开文件 ──
+  {
+    name: "file.open",
+    description: "用系统默认应用打开文件（如 PPT 用 Keynote/PowerPoint，PDF 用预览/Acrobat）。",
+    args: [
+      { name: "path", required: true, desc: "文件路径（相对项目根目录，如 output/AI改变未来.pptx）" },
+    ],
+    riskLevel: "low" as const,
+    applyPolicy: "auto_apply" as const,
+    reversible: false,
+    run: async (args) => {
+      const rel = String((args as any).path ?? "").trim();
+      if (!rel) return { ok: false, error: "MISSING_PATH" };
+      const rootDir = useProjectStore.getState().rootDir;
+      if (!rootDir) return { ok: false, error: "未打开项目目录" };
+      // 构造绝对路径
+      const sep = rootDir.includes("\\") ? "\\" : "/";
+      const absPath = rootDir.replace(/[/\\]+$/, "") + sep + rel.replaceAll("\\", "/").replace(/^\/+/, "").replace(/\//g, sep);
+      const res = await window.desktop?.exec?.openFile?.(absPath);
+      if (!res) return { ok: false, error: "IPC_UNAVAILABLE" };
+      if (!res.ok) return { ok: false, error: res.error ?? "OPEN_FAILED", detail: res.detail };
+      return { ok: true, output: { ok: true, opened: rel }, undoable: false };
+    },
+  },
 ];
 
 export function listTools() {

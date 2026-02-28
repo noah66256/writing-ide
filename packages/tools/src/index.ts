@@ -819,6 +819,25 @@ export const TOOL_LIST: ToolMeta[] = [
     },
   },
   {
+    name: "file.open",
+    description: "用系统默认应用打开文件（如 PPT 用 Keynote/PowerPoint，PDF 用预览/Acrobat，图片用系统图片查看器）。仅在用户要求打开/预览文件时使用。",
+    args: [{ name: "path", required: true, desc: "文件路径（相对项目根目录，如 output/report.pptx）", type: "string" }],
+    modes: ["agent"] as ("chat" | "agent")[],
+    inputSchema: {
+      type: "object",
+      properties: { path: { type: "string" } },
+      required: ["path"],
+      additionalProperties: true,
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        ok: { type: "boolean" },
+        opened: { type: "string", description: "已打开的文件路径" },
+      },
+    },
+  },
+  {
     name: "doc.read",
     description: "读取文件内容（path）。",
     args: [{ name: "path", required: true, desc: "文件路径（如 drafts/draft.md）", type: "string" }],
