@@ -3234,10 +3234,10 @@ const tools: ToolDefinition[] = [
     reversible: false,
     run: async (args: Record<string, unknown>) => {
       const projectDir = String(useProjectStore.getState().rootDir ?? "").trim();
-      if (!projectDir) return { ok: false, error: "PROJECT_NOT_OPENED" };
+      if (!projectDir) return { ok: false, error: "PROJECT_NOT_OPENED: 用户尚未打开项目目录，代码执行需要项目作为沙箱环境。请提示用户先点击输入框左下角的文件夹按钮打开或新建一个项目文件夹。" };
 
       const execApi = (window as any).desktop?.exec;
-      if (!execApi?.run) return { ok: false, error: "EXEC_API_NOT_AVAILABLE" };
+      if (!execApi?.run) return { ok: false, error: "EXEC_API_NOT_AVAILABLE: 代码执行服务未就绪，请确认在桌面客户端中使用。" };
 
       const runtime = String(args.runtime ?? "python").trim() || "python";
       const code = typeof args.code === "string" ? args.code : "";
