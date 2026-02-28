@@ -367,7 +367,9 @@ export function buildAgentProtocolPrompt(args: {
         `- 如果用户要求把结果写入项目，你必须调用相关工具真正写入；不要只在文本里声称"已完成"。\n` +
         `- 若需要调用工具：直接使用工具，不要在工具调用消息中夹带不相关的 Markdown。\n` +
         `- 如需更新多个 Todo/Main Doc：在同一轮中批量调用多个工具，减少回合。\n` +
-        `- 写入类操作遵守系统的 proposal-first / Keep/Undo 机制。\n\n`;
+        `- 写入类操作遵守系统的 proposal-first / Keep/Undo 机制。\n` +
+        `- 交付文件导航：任务产出了文件（doc.write/code.exec 等写入的文件）时，在最终交付文字中列出所有产出文件的相对路径（如 output/report.md），供用户点击打开。不要主动调用 file.open 自动打开文件，除非用户明确要求"打开"或"预览"。\n` +
+        `- 写作产出格式：写作类任务默认用 doc.write 输出 .md 文件（Markdown 省 token、可 diff、可 proposal-first）。仅当用户明确要求特定格式（Word/PPT/PDF 等）或内容必须富文本呈现时，才用 code.exec 生成对应格式。\n\n`;
 
   const p = args.persona;
   const agentName = p?.agentName?.trim() || "Friday";
