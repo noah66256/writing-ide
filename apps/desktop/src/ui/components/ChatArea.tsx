@@ -8,7 +8,7 @@ import {
   Copy,
   Bot,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 import {
@@ -295,6 +295,7 @@ function AssistantMessage({ step }: { step: AssistantStep }) {
             <div className="whitespace-pre-wrap break-words max-w-none markdown-body">
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
+                urlTransform={(url) => url.startsWith("file-ref:") ? url : defaultUrlTransform(url)}
                 components={{
                   a: ({ href, children }) => {
                     const relPath = parseFileRefHref(href);
