@@ -43,7 +43,7 @@ const BUILTIN_SERVERS = [
     builtin: true,
     modulePath: "node_modules/@playwright/mcp/cli.js",
     args: ["--browser", "chrome"],
-    enabled: false,
+    enabled: true,
   },
   {
     id: "bocha-search",

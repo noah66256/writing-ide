@@ -158,6 +158,12 @@ Claude Code 与 Codex 组成双引擎协作：
 
 可选环境变量：`DEPLOY_SSH_HOST` / `DEPLOY_BRANCH` / `DEPLOY_PUSH` / `DEPLOY_ALLOW_DIRTY` 等，详见脚本注释。
 
+**已知问题与规避**：
+- SSH 别名 `writing` 在某些环境下报 `hostname contains invalid characters`，需用 `DEPLOY_SSH_HOST=root@120.26.6.147` 覆盖
+- 本地有未跟踪文件（如 `.playwright-mcp/`、`drafts/`、打包产物）时脚本会拒绝执行，需设 `DEPLOY_ALLOW_DIRTY=1`
+- Gateway 没有 `/health` 路由，health check 固定 404 不影响服务；验证时用 `/api/llm/selector` 等业务接口
+- 脚本报错时的手动部署命令：`ssh root@120.26.6.147 'export PATH=/www/server/nvm/versions/node/v22.21.1/bin:$PATH && cd /www/wwwroot/writing-ide && git pull --rebase --autostash origin master && npm install -w @writing-ide/gateway --no-audit --no-fund --force && npm -w @writing-ide/agent-core run build && npm -w @writing-ide/tools run build && npm -w @writing-ide/gateway run build && pm2 restart writing-gateway'`
+
 ### Desktop 打包与分发
 
 **打包命令**：
