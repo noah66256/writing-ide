@@ -176,6 +176,7 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
   }, [step.output, step.toolName]);
 
   const canApplyPick = mode !== "chat" && step.status === "success" && !!topicOutput;
+  const isMac = (window as any).desktop?.platform === "darwin";
 
   const applyPick = (candidate: TopicCandidate, idx: number) => {
     if (!canApplyPick) return;
@@ -419,17 +420,29 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
                         <button
                           className="btn"
                           type="button"
-                          onClick={() => {
-                            void (window as any).desktop?.exec?.showInFolder?.(a.absPath);
+                          onClick={async () => {
+                            const res = await window.desktop?.exec?.openFile?.(a.absPath);
+                            if (res && !res.ok) {
+                              alert(res.detail || res.error === "INVALID_ARTIFACT_PATH" ? "文件路径无效" : "无法打开文件，可能已被删除或移动");
+                            }
                           }}
                         >
-                          {process.platform === "darwin" ? "在 Finder 显示" : "打开文件位置"}
+                          打开
                         </button>
                         <button
                           className="btn"
                           type="button"
                           onClick={() => {
-                            void (window as any).desktop?.exec?.saveArtifact?.({
+                            void window.desktop?.exec?.showInFolder?.(a.absPath);
+                          }}
+                        >
+                          {isMac ? "在 Finder 显示" : "打开文件位置"}
+                        </button>
+                        <button
+                          className="btn"
+                          type="button"
+                          onClick={() => {
+                            void window.desktop?.exec?.saveArtifact?.({
                               absPath: a.absPath,
                               defaultName: a.name || undefined,
                             });

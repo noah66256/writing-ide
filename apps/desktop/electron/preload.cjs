@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld("desktop", {
   ping() {
     return "pong";
   },
+  platform: process.platform,
   window: {
     focusMain() {
       return ipcRenderer.invoke("window.focusMain");
@@ -134,6 +135,9 @@ contextBridge.exposeInMainWorld("desktop", {
   exec: {
     run(params) {
       return ipcRenderer.invoke("exec.run", params);
+    },
+    openFile(absPath) {
+      return ipcRenderer.invoke("exec.openFile", absPath);
     },
     showInFolder(absPath) {
       return ipcRenderer.invoke("exec.showInFolder", absPath);

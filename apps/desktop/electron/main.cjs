@@ -1539,6 +1539,19 @@ function registerIpc() {
     }
   }
 
+  ipcMain.handle("exec.openFile", async (_event, absPath) => {
+    try {
+      const p = path.resolve(String(absPath ?? "").trim());
+      if (!p) return { ok: false, error: "MISSING_PATH" };
+      if (!(await isValidArtifactPath(p))) return { ok: false, error: "INVALID_ARTIFACT_PATH" };
+      const openError = await shell.openPath(p);
+      if (openError) return { ok: false, error: "OPEN_FAILED", detail: openError };
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
   ipcMain.handle("exec.showInFolder", async (_event, absPath) => {
     try {
       const p = path.resolve(String(absPath ?? "").trim());

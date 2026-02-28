@@ -4,6 +4,7 @@ declare global {
   interface Window {
     desktop?: {
       ping: () => string;
+      platform?: "darwin" | "win32" | "linux" | string;
       window?: {
         focusMain: () => Promise<{ ok: boolean; error?: string }>;
       };
@@ -66,6 +67,7 @@ declare global {
           error?: string;
           detail?: string;
         }>;
+        openFile: (absPath: string) => Promise<{ ok: boolean; error?: string; detail?: string }>;
         showInFolder: (absPath: string) => Promise<{ ok: boolean; error?: string }>;
         saveArtifact: (opts: {
           absPath: string;
