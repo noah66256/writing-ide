@@ -270,8 +270,16 @@ function AssistantMessage({ step }: { step: AssistantStep }) {
 
   const openFileRef = useCallback(
     async (relPath: string) => {
-      if (!rootDir) return;
-      const absPath = resolveProjectAbsPath(rootDir, relPath);
+      // 优先在应用内打开（doc.write 创建的文件已在 projectStore 中）
+      const proj = useProjectStore.getState();
+      if (proj.getFileByPath(relPath)) {
+        proj.openFilePreview(relPath);
+        return;
+      }
+      // 不在项目文件列表中，用系统默认应用打开
+      const rd = proj.rootDir;
+      if (!rd) return;
+      const absPath = resolveProjectAbsPath(rd, relPath);
       const ret = await window.desktop?.exec?.openFile?.(absPath);
       if (ret && !ret.ok) alert(ret.detail || `无法打开文件：${relPath}`);
     },
