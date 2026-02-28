@@ -46,6 +46,7 @@ let mcpManager = null;
 let skillLoader = null;  // Skill 扩展包加载器
 let appSettings = {};  // 应用级设置（含浏览器路径等）
 let appSettingsModules = null;  // { loadSettings, saveSettings, detectBrowser }
+let codeExecManager = null;  // 代码执行管理器（Python 沙箱执行）
 
 /**
  * 差量更新 skill-managed MCP Server：增删改对齐到最新的 loaded skills。
@@ -1337,6 +1338,63 @@ function registerIpc() {
     }
   });
 
+  // Code Exec（沙箱化代码执行）
+  ipcMain.handle("exec.run", async (_event, params) => {
+    try {
+      if (!codeExecManager) return { ok: false, error: "EXEC_MANAGER_NOT_READY" };
+      return await codeExecManager.exec(params ?? {});
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
+  // 校验路径是否在某个 .writing-ide/exec/ 目录内（防止任意文件访问）
+  // 使用 realpath 归一化，防止符号链接绕过
+  async function isInsideExecDir(absPath) {
+    try {
+      const real = await fsp.realpath(absPath);
+      const normalized = real.replace(/\\/g, "/");
+      return /\/.writing-ide\/exec\//.test(normalized);
+    } catch {
+      return false;
+    }
+  }
+
+  ipcMain.handle("exec.showInFolder", async (_event, absPath) => {
+    try {
+      const p = path.resolve(String(absPath ?? "").trim());
+      if (!p) return { ok: false, error: "MISSING_PATH" };
+      if (!(await isInsideExecDir(p))) return { ok: false, error: "PATH_NOT_IN_EXEC_DIR" };
+      shell.showItemInFolder(p);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
+  ipcMain.handle("exec.saveArtifact", async (_event, opts) => {
+    try {
+      const src = path.resolve(String(opts?.absPath ?? "").trim());
+      if (!src) return { ok: false, error: "MISSING_SOURCE_PATH" };
+      if (!(await isInsideExecDir(src))) return { ok: false, error: "PATH_NOT_IN_EXEC_DIR" };
+      await fsp.access(src);
+
+      const suggested = String(opts?.defaultName ?? path.basename(src)).trim() || path.basename(src);
+      const win = BrowserWindow.getFocusedWindow();
+      const saveRet = await dialog.showSaveDialog(win ?? mainWindow, {
+        title: "另存为",
+        defaultPath: path.join(app.getPath("downloads"), suggested),
+      });
+      if (saveRet.canceled || !saveRet.filePath) return { ok: false, canceled: true };
+
+      await fsp.mkdir(path.dirname(saveRet.filePath), { recursive: true });
+      await fsp.copyFile(src, saveRet.filePath);
+      return { ok: true, savedPath: saveRet.filePath };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
   // Update（v0.1）
   ipcMain.handle("app.getVersion", async () => ({ ok: true, version: String(app.getVersion() ?? "") }));
   ipcMain.handle("app.getTempPath", async () => ({ ok: true, path: app.getPath("temp") }));
@@ -1545,6 +1603,16 @@ app.whenReady().then(async () => {
   registerAppProtocol();
   createWindow();
 
+  // ======== Code Exec 初始化 ========
+  try {
+    const { CodeExecManager } = await import("./code-exec-manager.mjs");
+    codeExecManager = new CodeExecManager();
+    console.log("[electron] CodeExecManager initialized");
+  } catch (e) {
+    codeExecManager = null;
+    console.error("[electron] CodeExecManager 初始化失败:", e);
+  }
+
   // ======== MCP Client 初始化 ========
   try {
     // 1. 加载 app settings + 浏览器检测
@@ -1619,6 +1687,7 @@ app.whenReady().then(async () => {
 app.on("window-all-closed", () => {
   stopWatch();
   try { skillLoader?.dispose?.(); } catch { /* ignore */ }
+  try { codeExecManager?.dispose?.(); } catch { /* ignore */ }
   try { mcpManager?.dispose?.(); } catch { /* ignore */ }
   if (process.platform !== "darwin") app.quit();
 });

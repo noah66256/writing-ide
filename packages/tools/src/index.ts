@@ -1140,6 +1140,66 @@ export const TOOL_LIST: ToolMeta[] = [
       required: ["agentId"],
     },
   },
+  // ── 代码执行 ──────────────────────────────────────
+  {
+    name: "code.exec",
+    description:
+      "在沙箱工作目录中执行代码（当前仅支持 Python），用于产出 Office 文件等二进制结果。\n" +
+      "支持内联代码（code）或项目内入口脚本（entryFile）二选一；可选 requirements 自动安装 pip 依赖。\n" +
+      "产物文件通过 artifactGlobs 匹配并在执行结果中列出。",
+    args: [
+      { name: "runtime", required: false, desc: "运行时（默认 python）", type: "string" as ToolArgType },
+      { name: "code", required: false, desc: "内联代码（与 entryFile 二选一）", type: "string" as ToolArgType },
+      { name: "entryFile", required: false, desc: "项目内脚本路径（与 code 二选一）", type: "string" as ToolArgType },
+      { name: "args", required: false, desc: "脚本参数数组", type: "array" as ToolArgType },
+      { name: "requirements", required: false, desc: "pip 依赖数组，如 [\"python-pptx==1.0.2\"]", type: "array" as ToolArgType },
+      { name: "timeoutMs", required: false, desc: "执行超时（毫秒），默认 120000，最大 600000", type: "number" as ToolArgType },
+      { name: "artifactGlobs", required: false, desc: "产物匹配 glob 数组，默认匹配 Office/PDF/图片文件", type: "array" as ToolArgType },
+    ],
+    modes: ["agent" as ToolMode],
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        runtime: { type: "string" as ToolArgType },
+        code: { type: "string" as ToolArgType },
+        entryFile: { type: "string" as ToolArgType },
+        args: { type: "array" as ToolArgType },
+        requirements: { type: "array" as ToolArgType },
+        timeoutMs: { type: "number" as ToolArgType },
+        artifactGlobs: { type: "array" as ToolArgType },
+      },
+      oneOfRequired: [{ required: ["code"] }, { required: ["entryFile"] }],
+      additionalProperties: true,
+    },
+    outputSchema: {
+      type: "object" as const,
+      description: "代码执行结果",
+      properties: {
+        ok: { type: "boolean" as const, description: "执行是否成功" },
+        runId: { type: "string" as const, description: "执行任务 ID" },
+        exitCode: { type: "number" as const, description: "进程退出码" },
+        timedOut: { type: "boolean" as const, description: "是否超时" },
+        durationMs: { type: "number" as const, description: "执行耗时（毫秒）" },
+        stdout: { type: "string" as const, description: "标准输出（可能截断）" },
+        stderr: { type: "string" as const, description: "标准错误（可能截断）" },
+        error: { type: "string" as const, description: "失败时的错误信息" },
+        artifacts: {
+          type: "array" as const,
+          description: "匹配到的产物文件",
+          items: {
+            type: "object" as const,
+            properties: {
+              name: { type: "string" as const },
+              ext: { type: "string" as const },
+              absPath: { type: "string" as const },
+              relPath: { type: "string" as const },
+              sizeBytes: { type: "number" as const },
+            },
+          },
+        },
+      },
+    },
+  },
 ];
 
 export function getToolsForMode(mode: ToolMode) {

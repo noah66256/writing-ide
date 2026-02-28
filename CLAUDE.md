@@ -197,6 +197,16 @@ gh release view desktop-v{version}
 
 **内置 MCP Server**：通过 `asarUnpack` 配置保证 Playwright、博查搜索、Web Search 三个 bundled MCP server 在打包后可用（从 `app.asar.unpacked/` 目录加载）。
 
+**Skill 扩展包目录**（`app.getPath("userData")/skills/`）：
+
+| 环境 | userData 路径 |
+|------|--------------|
+| dev（`npm run dev`） | `~/Library/Application Support/Electron/` |
+| 打包后 Mac（productName=WritingIDE） | `~/Library/Application Support/WritingIDE/` |
+| 打包后 Win（productName=WritingIDE） | `%APPDATA%/WritingIDE/` |
+
+注意 dev 模式下 Electron 未设 `name` 时 userData 默认走 `Electron/`，与打包后不同。扩展包放到对应环境的 `skills/` 子目录下即可热加载。
+
 **发版后复制产物到 `apps/` 目录**留存归档。
 
 **推送更新到服务器**：

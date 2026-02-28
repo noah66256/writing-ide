@@ -80,6 +80,22 @@ function safeJson(x: unknown) {
   }
 }
 
+function formatBytes(bytes?: number) {
+  const n = Number(bytes ?? 0);
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  if (n < 1024) return `${Math.floor(n)} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function artifactExtBadge(name?: string, ext?: string) {
+  const e = String(ext ?? "").trim().toLowerCase();
+  if (e) return e.toUpperCase().slice(0, 4);
+  const n = String(name ?? "").trim();
+  if (!n.includes(".")) return "FILE";
+  return String(n.split(".").pop() ?? "FILE").toUpperCase().slice(0, 4);
+}
+
 function openFileFromToolBlock(args: { path: string; pinned?: boolean }) {
   const p = String(args.path ?? "").trim().replaceAll("\\", "/");
   if (!p) return;
@@ -131,6 +147,33 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
   }, [step.output, step.toolName]);
 
   const diffInfo = useMemo(() => findDiffInfo(step.output as any), [step.output]);
+
+  const codeExecInfo = useMemo(() => {
+    if (step.toolName !== "code.exec") return null;
+    const out = step.output as any;
+    if (!out || typeof out !== "object") return null;
+    const artifacts = (Array.isArray(out.artifacts) ? out.artifacts : [])
+      .map((a: any, idx: number) => ({
+        id: String(a?.absPath ?? a?.relPath ?? `artifact_${idx}`),
+        absPath: String(a?.absPath ?? "").trim(),
+        relPath: String(a?.relPath ?? "").trim(),
+        name: String(a?.name ?? "").trim() || String(a?.relPath ?? "").split("/").pop() || "",
+        ext: String(a?.ext ?? "").trim(),
+        sizeBytes: Number(a?.sizeBytes ?? 0),
+      }))
+      .filter((a: any) => Boolean(a.absPath));
+
+    return {
+      artifacts,
+      stdout: typeof out.stdout === "string" ? out.stdout : "",
+      stderr: typeof out.stderr === "string" ? out.stderr : "",
+      stdoutTruncated: Boolean(out.stdoutTruncated),
+      stderrTruncated: Boolean(out.stderrTruncated),
+      exitCode: Number.isFinite(Number(out.exitCode)) ? Number(out.exitCode) : null,
+      timedOut: Boolean(out.timedOut),
+      durationMs: Number.isFinite(Number(out.durationMs)) ? Number(out.durationMs) : null,
+    };
+  }, [step.output, step.toolName]);
 
   const canApplyPick = mode !== "chat" && step.status === "success" && !!topicOutput;
 
@@ -318,6 +361,137 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
                     </button>
                   )}
                 </div>
+              </div>
+            )}
+            {/* ── code.exec Artifact 卡片 ── */}
+            {codeExecInfo && codeExecInfo.artifacts.length > 0 && (
+              <div style={{ display: "grid", gap: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div style={{ color: "var(--text)" }}>
+                    执行产物（{codeExecInfo.artifacts.length} 个文件）
+                  </div>
+                  <div style={{ color: "var(--muted)", fontSize: 12 }}>
+                    {codeExecInfo.timedOut
+                      ? "超时"
+                      : codeExecInfo.durationMs != null
+                        ? `${(codeExecInfo.durationMs / 1000).toFixed(1)}s`
+                        : ""}
+                    {codeExecInfo.exitCode != null && codeExecInfo.exitCode !== 0
+                      ? ` · exit=${codeExecInfo.exitCode}`
+                      : ""}
+                  </div>
+                </div>
+                <div style={{ display: "grid", gap: 8 }}>
+                  {codeExecInfo.artifacts.map((a: any) => (
+                    <div
+                      key={a.id}
+                      style={{
+                        border: "1px solid var(--border)",
+                        borderRadius: 10,
+                        padding: 10,
+                        background: "var(--panel)",
+                        display: "grid",
+                        gap: 6,
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                        <div style={{ display: "flex", gap: 8, minWidth: 0, alignItems: "center" }}>
+                          <span className="diffFileKind">{artifactExtBadge(a.name, a.ext)}</span>
+                          <span
+                            style={{
+                              color: "var(--text)",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {a.name || a.relPath}
+                          </span>
+                        </div>
+                        <span style={{ color: "var(--muted)", fontSize: 12, flexShrink: 0 }}>
+                          {formatBytes(a.sizeBytes)}
+                        </span>
+                      </div>
+                      <div style={{ color: "var(--muted)", fontSize: 12, overflowWrap: "anywhere" }}>
+                        {a.relPath || a.absPath}
+                      </div>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button
+                          className="btn"
+                          type="button"
+                          onClick={() => {
+                            void (window as any).desktop?.exec?.showInFolder?.(a.absPath);
+                          }}
+                        >
+                          {process.platform === "darwin" ? "在 Finder 显示" : "打开文件位置"}
+                        </button>
+                        <button
+                          className="btn"
+                          type="button"
+                          onClick={() => {
+                            void (window as any).desktop?.exec?.saveArtifact?.({
+                              absPath: a.absPath,
+                              defaultName: a.name || undefined,
+                            });
+                          }}
+                        >
+                          另存为
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* ── code.exec stdout/stderr 折叠 ── */}
+            {codeExecInfo && (codeExecInfo.stdout.trim() || codeExecInfo.stderr.trim()) && (
+              <div style={{ display: "grid", gap: 6 }}>
+                {codeExecInfo.stdout.trim() && (
+                  <details>
+                    <summary style={{ cursor: "pointer", color: "var(--text)", fontSize: 13 }}>
+                      stdout{codeExecInfo.stdoutTruncated ? "（已截断）" : ""}
+                    </summary>
+                    <pre
+                      style={{
+                        margin: "6px 0 0",
+                        whiteSpace: "pre-wrap",
+                        color: "var(--muted)",
+                        background: "var(--panel)",
+                        border: "1px solid var(--border)",
+                        borderRadius: 8,
+                        padding: 8,
+                        fontSize: 12,
+                        maxHeight: 300,
+                        overflow: "auto",
+                      }}
+                    >
+                      {codeExecInfo.stdout}
+                    </pre>
+                  </details>
+                )}
+                {codeExecInfo.stderr.trim() && (
+                  <details>
+                    <summary style={{ cursor: "pointer", color: "var(--text)", fontSize: 13 }}>
+                      stderr{codeExecInfo.stderrTruncated ? "（已截断）" : ""}
+                    </summary>
+                    <pre
+                      style={{
+                        margin: "6px 0 0",
+                        whiteSpace: "pre-wrap",
+                        color: "var(--muted)",
+                        background: "var(--panel)",
+                        border: "1px solid var(--border)",
+                        borderRadius: 8,
+                        padding: 8,
+                        fontSize: 12,
+                        maxHeight: 300,
+                        overflow: "auto",
+                      }}
+                    >
+                      {codeExecInfo.stderr}
+                    </pre>
+                  </details>
+                )}
               </div>
             )}
             {expanded && (

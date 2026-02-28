@@ -122,6 +122,17 @@ contextBridge.exposeInMainWorld("desktop", {
       return () => ipcRenderer.removeListener("update.event", listener);
     },
   },
+  exec: {
+    run(params) {
+      return ipcRenderer.invoke("exec.run", params);
+    },
+    showInFolder(absPath) {
+      return ipcRenderer.invoke("exec.showInFolder", absPath);
+    },
+    saveArtifact(opts) {
+      return ipcRenderer.invoke("exec.saveArtifact", opts);
+    },
+  },
   mcp: {
     getServers() {
       return ipcRenderer.invoke("mcp.getServers");

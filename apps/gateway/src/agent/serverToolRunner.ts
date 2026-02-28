@@ -53,6 +53,10 @@ export function decideServerToolExecution(args: {
   toolSidecar: ToolSidecar | null;
 }): ServerToolExecutionDecision {
   const name = String(args.name ?? "").trim();
+
+  // 代码执行器强制走 Desktop（无论 allowlist 如何配置）
+  if (name === "code.exec") return { executedBy: "desktop", reasonCodes: ["code_exec_desktop_only"] };
+
   const allow = getServerToolAllowlist();
   if (!allow.has(name)) return { executedBy: "desktop", reasonCodes: ["server_tool_not_allowed"] };
 

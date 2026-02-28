@@ -3216,6 +3216,71 @@ const tools: ToolDefinition[] = [
       };
     },
   },
+  // ── 代码执行 ──
+  {
+    name: "code.exec",
+    description: "在沙箱中执行 Python 脚本，可产出 .pptx/.docx/.xlsx 等文件。",
+    args: [
+      { name: "runtime", desc: "运行时（默认 python）" },
+      { name: "code", desc: "内联代码（与 entryFile 二选一）" },
+      { name: "entryFile", desc: "项目内脚本路径（与 code 二选一）" },
+      { name: "args", desc: "脚本参数数组" },
+      { name: "requirements", desc: "pip 依赖数组" },
+      { name: "timeoutMs", desc: "执行超时（毫秒），默认 120000，最大 600000" },
+      { name: "artifactGlobs", desc: "产物 glob 数组" },
+    ],
+    riskLevel: "medium" as ToolRiskLevel,
+    applyPolicy: "auto_apply" as ToolApplyPolicy,
+    reversible: false,
+    run: async (args: Record<string, unknown>) => {
+      const projectDir = String(useProjectStore.getState().rootDir ?? "").trim();
+      if (!projectDir) return { ok: false, error: "PROJECT_NOT_OPENED" };
+
+      const execApi = (window as any).desktop?.exec;
+      if (!execApi?.run) return { ok: false, error: "EXEC_API_NOT_AVAILABLE" };
+
+      const runtime = String(args.runtime ?? "python").trim() || "python";
+      const code = typeof args.code === "string" ? args.code : "";
+      const entryFile = typeof args.entryFile === "string" ? args.entryFile : "";
+      const timeoutMs = (() => {
+        const n = Number(args.timeoutMs);
+        if (!Number.isFinite(n)) return 120_000;
+        return Math.max(1_000, Math.min(600_000, Math.floor(n)));
+      })();
+      const argv = Array.isArray(args.args) ? args.args.map((x: any) => String(x ?? "")) : [];
+      const requirements = Array.isArray(args.requirements)
+        ? args.requirements.map((x: any) => String(x ?? "").trim()).filter(Boolean)
+        : [];
+      const artifactGlobs = Array.isArray(args.artifactGlobs)
+        ? args.artifactGlobs.map((x: any) => String(x ?? "").trim()).filter(Boolean)
+        : [];
+
+      const result = await execApi.run({
+        projectDir,
+        runtime,
+        ...(code.trim() ? { code } : {}),
+        ...(entryFile.trim() ? { entryFile } : {}),
+        args: argv,
+        requirements,
+        timeoutMs,
+        ...(artifactGlobs.length ? { artifactGlobs } : {}),
+      });
+
+      if (!result) return { ok: false, error: "EXEC_IPC_FAILED" };
+
+      // 有 exitCode 说明脚本确实执行了（即使退出非零）——工具本身成功
+      // 让 stdout/stderr/artifacts 完整传给 Gateway（LLM 需要 stderr 来调试）
+      if (result.exitCode !== undefined) {
+        return { ok: true, output: result, undoable: false };
+      }
+
+      // 基础设施级错误（venv 创建失败、并发满等）——工具执行失败
+      return {
+        ok: false,
+        error: String(result.error ?? "CODE_EXEC_FAILED"),
+      };
+    },
+  },
   {
     name: "agent.config.list",
     description: "列出所有子 Agent",

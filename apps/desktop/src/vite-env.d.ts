@@ -36,6 +36,42 @@ declare global {
         installPending: () => Promise<{ ok: boolean; error?: string }>;
         onEvent?: (handler: (payload: any) => void) => () => void;
       };
+      exec?: {
+        run: (params: {
+          projectDir: string;
+          runtime?: string;
+          code?: string;
+          entryFile?: string;
+          args?: string[];
+          requirements?: string[];
+          timeoutMs?: number;
+          artifactGlobs?: string[];
+        }) => Promise<{
+          ok: boolean;
+          runId?: string;
+          exitCode?: number;
+          stdout?: string;
+          stderr?: string;
+          stdoutTruncated?: boolean;
+          stderrTruncated?: boolean;
+          timedOut?: boolean;
+          durationMs?: number;
+          artifacts?: Array<{
+            name: string;
+            ext: string;
+            absPath: string;
+            relPath: string;
+            sizeBytes: number;
+          }>;
+          error?: string;
+          detail?: string;
+        }>;
+        showInFolder: (absPath: string) => Promise<{ ok: boolean; error?: string }>;
+        saveArtifact: (opts: {
+          absPath: string;
+          defaultName?: string;
+        }) => Promise<{ ok: boolean; canceled?: boolean; savedPath?: string; error?: string }>;
+      };
       fs?: {
         pickDirectory: () => Promise<{ ok: boolean; dir?: string; canceled?: boolean; error?: string }>;
         listFiles: (rootDir: string) => Promise<{ ok: boolean; files?: string[]; error?: string }>;
