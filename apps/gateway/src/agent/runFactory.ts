@@ -934,7 +934,7 @@ const agentRunBodySchema = z.object({
       ideSummary: z
         .object({
           projectDir: z.string().max(500).nullable().optional(),
-          activePath: z.string().min(1).max(500).nullable().optional(),
+          activePath: z.string().max(500).nullable().optional(),
           openPaths: z.number().int().nonnegative().optional(),
           fileCount: z.number().int().nonnegative().optional(),
           hasSelection: z.boolean().optional(),
