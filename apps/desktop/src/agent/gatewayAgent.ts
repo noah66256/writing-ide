@@ -7,6 +7,7 @@ import { activateSkills, detectRunIntent, listRegisteredSkills, BUILTIN_SUB_AGEN
 import { usePersonaStore } from "../state/personaStore";
 import { useTeamStore, getEffectiveAgents } from "../state/teamStore";
 import { useSkillStore } from "../state/skillStore";
+import { useMemoryStore } from "../state/memoryStore";
 import { startGatewayRunWs } from "./wsTransport";
 
 export function authHeader(): Record<string, string> {
@@ -1559,6 +1560,32 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     trusted: true,
     source: "desktop",
   });
+
+  // L1: 全局记忆（跨项目持久化）
+  const globalMemory = useMemoryStore.getState().globalMemory;
+  if (globalMemory.trim()) {
+    pushSeg({
+      name: "L1_GLOBAL_MEMORY",
+      content: `L1_GLOBAL_MEMORY(Markdown):\n${globalMemory}\n\n`,
+      priority: "p0",
+      trusted: true,
+      source: "desktop",
+      note: "全局记忆（跨项目持久化）",
+    });
+  }
+
+  // L2: 项目记忆（跟随项目目录持久化）
+  const projectMemory = useMemoryStore.getState().projectMemory;
+  if (projectMemory.trim()) {
+    pushSeg({
+      name: "L2_PROJECT_MEMORY",
+      content: `L2_PROJECT_MEMORY(Markdown):\n${projectMemory}\n\n`,
+      priority: "p0",
+      trusted: true,
+      source: "desktop",
+      note: "项目级长期记忆（跟随项目目录持久化）",
+    });
+  }
 
   // p0: 任务主线/约束（可信）
   pushSeg({

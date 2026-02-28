@@ -4,6 +4,7 @@ import { BookOpen, ChevronLeft, ChevronRight, FileText, Folder, FolderOpen, Spar
 import { cn } from "@/lib/utils";
 import { useKbStore } from "@/state/kbStore";
 import { useProjectStore } from "@/state/projectStore";
+import { useProjectIndexStore } from "@/state/projectIndexStore";
 import { useSkillStore } from "@/state/skillStore";
 import { useTeamStore, getEffectiveAgents } from "@/state/teamStore";
 
@@ -96,6 +97,8 @@ export function MentionPopover({ query, visible, onSelect, onClose }: Props) {
 
   // 数据源
   const rootDir = useProjectStore((s) => s.rootDir);
+  const indexFiles = useProjectIndexStore((s) => s.index?.files);
+  const indexDirs = useProjectIndexStore((s) => s.index?.dirs);
   const storeFiles = useProjectStore((s) => s.files);
   const storeDirs = useProjectStore((s) => s.dirs);
   const agentOverrides = useTeamStore((s) => s.agentOverrides);
@@ -150,13 +153,20 @@ export function MentionPopover({ query, visible, onSelect, onClose }: Props) {
 
   const filePaths = useMemo(() => {
     if (!rootDir) return [];
+    // 优先使用全量索引，回退到 projectStore（仅 .md/.mdx/.txt）
+    if (indexFiles?.length) {
+      return Array.from(new Set(indexFiles.map((f) => normRel(f.path)).filter(Boolean))).sort();
+    }
     return Array.from(new Set(storeFiles.map((f) => normRel(f.path)).filter(Boolean))).sort();
-  }, [rootDir, storeFiles]);
+  }, [rootDir, indexFiles, storeFiles]);
 
   const rawDirs = useMemo(() => {
     if (!rootDir) return [];
+    if (indexDirs?.length) {
+      return Array.from(new Set(indexDirs.map((d) => normRel(d)).filter(Boolean))).sort();
+    }
     return Array.from(new Set(storeDirs.map((d) => normRel(d)).filter(Boolean))).sort();
-  }, [rootDir, storeDirs]);
+  }, [rootDir, indexDirs, storeDirs]);
 
   const dirSet = useMemo(() => buildDirSet(filePaths, rawDirs), [filePaths, rawDirs]);
 

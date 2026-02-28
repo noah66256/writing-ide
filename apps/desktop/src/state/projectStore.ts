@@ -433,6 +433,16 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         void useKbStore.getState().refreshLibraries().catch(() => void 0);
       }).catch(() => void 0);
     }
+
+    // 构建全量项目索引（异步，不阻塞）
+    import("./projectIndexStore").then(({ useProjectIndexStore }) => {
+      void useProjectIndexStore.getState().buildIndex(rootDir);
+    }).catch(() => void 0);
+
+    // 加载项目记忆 L2（异步，不阻塞）
+    import("./memoryStore").then(({ useMemoryStore }) => {
+      void useMemoryStore.getState().loadProjectMemory(rootDir);
+    }).catch(() => void 0);
   },
 
   refreshFromDisk: async (reason) => {

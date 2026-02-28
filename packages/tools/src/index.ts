@@ -1201,6 +1201,48 @@ export const TOOL_LIST: ToolMeta[] = [
       },
     },
   },
+  // ── 记忆系统 ──────────────────────────────────────
+  {
+    name: "memory.read",
+    description:
+      "读取记忆内容。支持读取 L1（全局记忆）或 L2（项目记忆）。\n" +
+      "全局记忆包含用户画像、决策偏好、跨项目进展。\n" +
+      "项目记忆包含项目概况、项目决策、重要约定、当前进展。",
+    args: [
+      { name: "level", required: true, desc: "记忆层级：'global'（L1 全局）或 'project'（L2 项目）", type: "string" as ToolArgType },
+    ],
+    modes: ["agent" as ToolMode],
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        level: { type: "string" as ToolArgType },
+      },
+      required: ["level"],
+    },
+  },
+  {
+    name: "memory.update",
+    description:
+      "更新记忆内容。将新的事实或决策追加到指定记忆层级的指定 section。\n" +
+      "全局记忆 section：用户画像、决策偏好、跨项目进展。\n" +
+      "项目记忆 section：项目概况、项目决策、重要约定、当前进展。\n" +
+      "只应记录值得跨对话持久化的重要信息，不要记录临时讨论内容。",
+    args: [
+      { name: "level", required: true, desc: "记忆层级：'global'（L1 全局）或 'project'（L2 项目）", type: "string" as ToolArgType },
+      { name: "section", required: true, desc: "要更新的 section 标题（如 项目决策、用户画像 等）", type: "string" as ToolArgType },
+      { name: "content", required: true, desc: "要追加的内容（Markdown 格式）", type: "string" as ToolArgType },
+    ],
+    modes: ["agent" as ToolMode],
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        level: { type: "string" as ToolArgType },
+        section: { type: "string" as ToolArgType },
+        content: { type: "string" as ToolArgType },
+      },
+      required: ["level", "section", "content"],
+    },
+  },
 ];
 
 export function getToolsForMode(mode: ToolMode) {

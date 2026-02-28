@@ -1794,12 +1794,20 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "project.listFiles",
-    description: "列出当前项目内存文件列表（path）。需要知道可用文件时使用。",
+    description: "列出当前项目所有文件（包含路径、类型、大小信息）。需要知道项目文件结构时使用。",
     args: [],
     riskLevel: "low",
     applyPolicy: "proposal",
     reversible: false,
     run: async () => {
+      // 优先使用全量索引
+      const { useProjectIndexStore } = await import("../state/projectIndexStore");
+      const idxFiles = useProjectIndexStore.getState().index?.files;
+      if (idxFiles?.length) {
+        const files = idxFiles.map((f) => ({ path: f.path, type: f.type, size: f.size }));
+        return { ok: true, output: { ok: true, files }, undoable: false };
+      }
+      // 回退到 projectStore
       const files = useProjectStore.getState().files.map((f) => ({ path: f.path }));
       return { ok: true, output: { ok: true, files }, undoable: false };
     },
@@ -3393,6 +3401,83 @@ const tools: ToolDefinition[] = [
 
       useTeamStore.getState().removeCustomAgent(agentId);
       return { ok: true, output: { ok: true, removed: agentId, name: existing.name }, undoable: false };
+    },
+  },
+  // ── 记忆系统工具 ──
+  {
+    name: "memory.read",
+    description: "读取记忆内容（L1 全局记忆或 L2 项目记忆）。",
+    args: [{ name: "level", required: true, desc: "'global' 或 'project'" }],
+    riskLevel: "low" as ToolRiskLevel,
+    applyPolicy: "auto_apply" as ToolApplyPolicy,
+    reversible: false,
+    run: async (args: Record<string, unknown>) => {
+      const level = String(args.level ?? "").trim().toLowerCase();
+      if (level !== "global" && level !== "project") {
+        return { ok: false, error: "level 必须是 'global' 或 'project'" };
+      }
+      const { useMemoryStore } = await import("../state/memoryStore");
+      const state = useMemoryStore.getState();
+      const content = level === "global" ? state.globalMemory : state.projectMemory;
+      return { ok: true, output: { ok: true, level, content }, undoable: false };
+    },
+  },
+  {
+    name: "memory.update",
+    description: "更新记忆内容（向指定 section 追加信息）。",
+    args: [
+      { name: "level", required: true, desc: "'global' 或 'project'" },
+      { name: "section", required: true, desc: "section 标题（如'项目决策'、'用户画像'）" },
+      { name: "content", required: true, desc: "要追加的 Markdown 内容" },
+    ],
+    riskLevel: "medium" as ToolRiskLevel,
+    applyPolicy: "auto_apply" as ToolApplyPolicy,
+    reversible: false,
+    run: async (args: Record<string, unknown>) => {
+      const level = String(args.level ?? "").trim().toLowerCase();
+      if (level !== "global" && level !== "project") {
+        return { ok: false, error: "level 必须是 'global' 或 'project'" };
+      }
+      const section = String(args.section ?? "").trim();
+      if (!section) return { ok: false, error: "section 不能为空" };
+      const content = String(args.content ?? "").trim();
+      if (!content) return { ok: false, error: "content 不能为空" };
+
+      const { useMemoryStore } = await import("../state/memoryStore");
+      const state = useMemoryStore.getState();
+      const existing = level === "global" ? state.globalMemory : state.projectMemory;
+
+      // 按 section 标题定位并追加
+      const sectionHeader = `# ${section}`;
+      const headerIdx = existing.indexOf(sectionHeader);
+      let updated: string;
+
+      if (headerIdx >= 0) {
+        // 找到 section：在下一个 # 标题之前追加
+        const afterHeader = headerIdx + sectionHeader.length;
+        const nextSectionIdx = existing.indexOf("\n# ", afterHeader);
+        if (nextSectionIdx >= 0) {
+          const before = existing.slice(0, nextSectionIdx);
+          const after = existing.slice(nextSectionIdx);
+          updated = `${before.trimEnd()}\n${content}\n${after}`;
+        } else {
+          // 没有下一个 section，追加到末尾
+          updated = `${existing.trimEnd()}\n${content}\n`;
+        }
+      } else {
+        // 未找到 section：新增
+        updated = `${existing.trimEnd()}\n\n${sectionHeader}\n${content}\n`;
+      }
+
+      if (level === "global") {
+        await state.saveGlobalMemory(updated);
+      } else {
+        const rootDir = state._projectRootDir;
+        if (!rootDir) return { ok: false, error: "未打开项目，无法更新项目记忆" };
+        await state.saveProjectMemory(rootDir, updated);
+      }
+
+      return { ok: true, output: { ok: true, level, section, updated: true }, undoable: false };
     },
   },
 ];

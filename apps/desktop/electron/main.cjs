@@ -31,7 +31,26 @@ try {
 }
 
 const IGNORE_DIRS = new Set(["node_modules", ".git", "dist", "out", "build", ".next"]);
+const IGNORE_ALL_DIRS = new Set([...IGNORE_DIRS, ".writing-ide"]);
 const TEXT_EXT = new Set([".md", ".mdx", ".txt"]);
+
+// 全量索引用的文件类型分类
+const INDEX_TEXT_EXT = new Set([
+  ".md", ".mdx", ".txt", ".json", ".yaml", ".yml", ".toml", ".csv",
+  ".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".css", ".scss", ".less",
+  ".xml", ".svg", ".sh", ".bash", ".zsh", ".bat", ".cmd", ".ps1",
+  ".cfg", ".ini", ".conf", ".env", ".gitignore", ".editorconfig",
+  ".prettierrc", ".eslintrc", ".vue", ".svelte", ".astro",
+]);
+const INDEX_BINARY_EXT = new Set([
+  ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp",
+  ".pptx", ".docx", ".xlsx", ".pdf",
+  ".mp4", ".mp3", ".wav", ".avi", ".mov", ".mkv", ".flv",
+  ".zip", ".tar", ".gz", ".rar", ".7z",
+  ".exe", ".dmg", ".msi", ".deb", ".rpm",
+  ".woff", ".woff2", ".ttf", ".otf", ".eot",
+]);
+const MAX_INDEX_FILES = 10000;
 
 const HISTORY_DIRNAME = "writing-ide-data";
 const HISTORY_FILENAME = "conversations.v1.json";
@@ -212,6 +231,70 @@ async function walkEntries(dir, rootDir, outFiles, outDirs) {
     const rel = path.relative(rootDir, full).split(path.sep).join("/");
     const ext = path.extname(rel).toLowerCase();
     if (TEXT_EXT.has(ext)) outFiles.push(rel);
+  }
+}
+
+// dotfile 文件名映射（扩展名为空但属于文本类型）
+const INDEX_TEXT_FILENAMES = new Set([
+  ".env", ".gitignore", ".gitattributes", ".editorconfig",
+  ".prettierrc", ".eslintrc", ".babelrc", ".npmrc",
+  ".dockerignore", ".nvmrc", ".node-version",
+  "Makefile", "Dockerfile", "Procfile",
+]);
+
+function classifyFileType(ext, filename) {
+  if (ext) {
+    const lower = ext.toLowerCase();
+    if (INDEX_TEXT_EXT.has(lower)) return "text";
+    if (INDEX_BINARY_EXT.has(lower)) return "binary";
+  }
+  // 无扩展名时按文件名匹配
+  if (filename && INDEX_TEXT_FILENAMES.has(filename)) return "text";
+  return "other";
+}
+
+/**
+ * 递归扫描所有文件（不限扩展名），用于项目索引。
+ * outFiles: { path, size, mtime, type }[]
+ * outDirs: string[]
+ * cap: 最大文件数限制
+ */
+async function walkAllEntries(dir, rootDir, outFiles, outDirs, cap) {
+  if (outFiles.length >= cap) return;
+  let entries = [];
+  try {
+    entries = await fsp.readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const ent of entries) {
+    if (outFiles.length >= cap) return;
+    if (!ent?.name) continue;
+    // 跳过隐藏目录和忽略目录
+    if (ent.isDirectory()) {
+      if (ent.name.startsWith(".") || IGNORE_ALL_DIRS.has(ent.name)) continue;
+      const full = path.join(dir, ent.name);
+      const relDir = path.relative(rootDir, full).split(path.sep).join("/");
+      outDirs.push(relDir);
+      await walkAllEntries(full, rootDir, outFiles, outDirs, cap);
+      continue;
+    }
+    if (!ent.isFile()) continue;
+    const full = path.join(dir, ent.name);
+    const rel = path.relative(rootDir, full).split(path.sep).join("/");
+    const ext = path.extname(ent.name).toLowerCase();
+    let stat = null;
+    try {
+      stat = await fsp.stat(full);
+    } catch {
+      continue;
+    }
+    outFiles.push({
+      path: rel,
+      size: stat.size ?? 0,
+      mtime: Math.floor(stat.mtimeMs ?? 0),
+      type: classifyFileType(ext, ent.name),
+    });
   }
 }
 
@@ -1183,6 +1266,93 @@ function registerIpc() {
     files.sort((a, b) => a.localeCompare(b));
     dirs.sort((a, b) => a.localeCompare(b));
     return { ok: true, files, dirs };
+  });
+
+  // 全量文件扫描（含所有文件类型，用于项目索引）
+  ipcMain.handle("project.listAllEntries", async (_event, rootDir) => {
+    const root = String(rootDir ?? "");
+    if (!root) return { ok: false, error: "MISSING_ROOT" };
+    const files = [];
+    const dirs = [];
+    await walkAllEntries(root, root, files, dirs, MAX_INDEX_FILES);
+    files.sort((a, b) => a.path.localeCompare(b.path));
+    dirs.sort((a, b) => a.localeCompare(b));
+    return { ok: true, files, dirs };
+  });
+
+  // 读取持久化项目索引
+  ipcMain.handle("project.readIndex", async (_event, rootDir) => {
+    const root = String(rootDir ?? "");
+    if (!root) return { ok: false, error: "MISSING_ROOT" };
+    const indexPath = path.join(root, ".writing-ide", "project-index.json");
+    try {
+      const raw = await fsp.readFile(indexPath, "utf-8");
+      const data = JSON.parse(raw);
+      return { ok: true, data };
+    } catch (e) {
+      if (e?.code === "ENOENT") return { ok: true, data: null };
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
+  // 写入持久化项目索引
+  ipcMain.handle("project.writeIndex", async (_event, rootDir, data) => {
+    const root = String(rootDir ?? "");
+    if (!root) return { ok: false, error: "MISSING_ROOT" };
+    const indexDir = path.join(root, ".writing-ide");
+    await fsp.mkdir(indexDir, { recursive: true });
+    const indexPath = path.join(indexDir, "project-index.json");
+    await fsp.writeFile(indexPath, JSON.stringify(data, null, 2), "utf-8");
+    return { ok: true };
+  });
+
+  // ── 记忆系统 IPC ──
+
+  // L2: 项目记忆（跟随项目目录）
+  ipcMain.handle("memory.readProject", async (_event, rootDir) => {
+    const root = String(rootDir ?? "");
+    if (!root) return { ok: false, error: "MISSING_ROOT" };
+    const memPath = path.join(root, ".writing-ide", "project-memory.md");
+    try {
+      const content = await fsp.readFile(memPath, "utf-8");
+      return { ok: true, content };
+    } catch (e) {
+      if (e?.code === "ENOENT") return { ok: true, content: "" };
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
+  ipcMain.handle("memory.writeProject", async (_event, rootDir, content) => {
+    const root = String(rootDir ?? "");
+    if (!root) return { ok: false, error: "MISSING_ROOT" };
+    const memDir = path.join(root, ".writing-ide");
+    await fsp.mkdir(memDir, { recursive: true });
+    await fsp.writeFile(path.join(memDir, "project-memory.md"), String(content ?? ""), "utf-8");
+    return { ok: true };
+  });
+
+  // L1: 全局记忆（跟随应用 userData）
+  ipcMain.handle("memory.readGlobal", async () => {
+    try {
+      const memDir = path.join(app.getPath("userData"), "memory");
+      const memPath = path.join(memDir, "global.md");
+      const content = await fsp.readFile(memPath, "utf-8");
+      return { ok: true, content };
+    } catch (e) {
+      if (e?.code === "ENOENT") return { ok: true, content: "" };
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
+  ipcMain.handle("memory.writeGlobal", async (_event, content) => {
+    try {
+      const memDir = path.join(app.getPath("userData"), "memory");
+      await fsp.mkdir(memDir, { recursive: true });
+      await fsp.writeFile(path.join(memDir, "global.md"), String(content ?? ""), "utf-8");
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
   });
 
   ipcMain.handle("doc.readFile", async (_event, rootDir, relPath) => {

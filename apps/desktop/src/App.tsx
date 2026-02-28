@@ -4,6 +4,8 @@ import { ConversationLayout } from "./ui/layouts/ConversationLayout";
 import { LoginPage } from "./ui/components/LoginPage";
 import { useEffect } from "react";
 import { useProjectStore } from "./state/projectStore";
+import { useProjectIndexStore } from "./state/projectIndexStore";
+import { useMemoryStore } from "./state/memoryStore";
 import { useWorkspaceStore } from "./state/workspaceStore";
 import { useUpdateStore } from "./state/updateStore";
 import { useAuthStore } from "./state/authStore";
@@ -31,6 +33,11 @@ export default function App() {
     useSkillStore.getState().initListener();
   }, []);
 
+  // 启动时加载全局记忆 L1
+  useEffect(() => {
+    void useMemoryStore.getState().loadGlobalMemory();
+  }, []);
+
   // 启动时：尝试恢复上次打开的项目
   useEffect(() => {
     const last = useWorkspaceStore.getState().lastProjectDir;
@@ -51,6 +58,7 @@ export default function App() {
       const cur = useProjectStore.getState().rootDir;
       if (!rootDir || !cur || rootDir !== cur) return;
       void useProjectStore.getState().refreshFromDisk("fs.watch");
+      void useProjectIndexStore.getState().refreshIfStale(rootDir);
     });
     return () => {
       try {

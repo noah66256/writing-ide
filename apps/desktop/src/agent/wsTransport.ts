@@ -8,6 +8,7 @@
  */
 
 import { useProjectStore } from "../state/projectStore";
+import { useProjectIndexStore } from "../state/projectIndexStore";
 import { useRunStore, type Mode } from "../state/runStore";
 import { useKbStore } from "../state/kbStore";
 import { useAuthStore } from "../state/authStore";
@@ -297,9 +298,13 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
 
       const toolSidecar = await (async () => {
         const p = useProjectStore.getState();
-        const projectFiles = (p.files ?? [])
-          .map((f: any) => ({ path: String(f?.path ?? "").trim() }))
-          .filter((f: any) => f.path).slice(0, 5000);
+        // 优先用全量索引（含所有文件类型），回退到 projectStore（仅 .md/.mdx/.txt）
+        const idxFiles = useProjectIndexStore.getState().index?.files;
+        const projectFiles = idxFiles?.length
+          ? idxFiles.map((f) => ({ path: f.path, type: f.type })).slice(0, 5000)
+          : (p.files ?? [])
+              .map((f: any) => ({ path: String(f?.path ?? "").trim() }))
+              .filter((f: any) => f.path).slice(0, 5000);
         const docRulesFile = p.getFileByPath("doc.rules.md");
         const docRules = docRulesFile ? { path: docRulesFile.path, content: docRulesFile.content ?? "" } : null;
 
@@ -554,6 +559,28 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           if (event === "run.end") {
             log("info", "agent.run.end", data);
             setRunning(false); setActivity(null);
+
+            // 触发记忆提取（异步，不阻塞 UI）
+            try {
+              const runState = useRunStore.getState();
+              const mode = runState.mode ?? "chat";
+              const summary = runState.dialogueSummaryByMode?.[mode] ?? "";
+              if (summary.trim()) {
+                const projStore = useProjectStore.getState();
+                const rootDir = projStore.rootDir ?? "";
+                const projectName = rootDir ? (rootDir.split(/[/\\]/).pop() ?? "") : "";
+                import("../state/memoryStore").then(({ useMemoryStore }) => {
+                  void useMemoryStore.getState().extractMemory({
+                    dialogueSummary: summary,
+                    projectName,
+                    rootDir,  // 捕获当前 rootDir，防止项目切换后串写
+                  });
+                }).catch(() => void 0);
+              }
+            } catch {
+              // ignore memory extraction errors
+            }
+
             finish();
           }
 

@@ -25,6 +25,15 @@ contextBridge.exposeInMainWorld("desktop", {
     listEntries(rootDir) {
       return ipcRenderer.invoke("project.listEntries", rootDir);
     },
+    listAllEntries(rootDir) {
+      return ipcRenderer.invoke("project.listAllEntries", rootDir);
+    },
+    readIndex(rootDir) {
+      return ipcRenderer.invoke("project.readIndex", rootDir);
+    },
+    writeIndex(rootDir, data) {
+      return ipcRenderer.invoke("project.writeIndex", rootDir, data);
+    },
     readFile(rootDir, relPath) {
       return ipcRenderer.invoke("doc.readFile", rootDir, relPath);
     },
@@ -131,6 +140,20 @@ contextBridge.exposeInMainWorld("desktop", {
     },
     saveArtifact(opts) {
       return ipcRenderer.invoke("exec.saveArtifact", opts);
+    },
+  },
+  memory: {
+    readProject(rootDir) {
+      return ipcRenderer.invoke("memory.readProject", rootDir);
+    },
+    writeProject(rootDir, content) {
+      return ipcRenderer.invoke("memory.writeProject", rootDir, content);
+    },
+    readGlobal() {
+      return ipcRenderer.invoke("memory.readGlobal");
+    },
+    writeGlobal(content) {
+      return ipcRenderer.invoke("memory.writeGlobal", content);
     },
   },
   mcp: {

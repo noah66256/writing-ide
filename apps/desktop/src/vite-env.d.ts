@@ -72,10 +72,24 @@ declare global {
           defaultName?: string;
         }) => Promise<{ ok: boolean; canceled?: boolean; savedPath?: string; error?: string }>;
       };
+      memory?: {
+        readProject: (rootDir: string) => Promise<{ ok: boolean; content?: string; error?: string }>;
+        writeProject: (rootDir: string, content: string) => Promise<{ ok: boolean; error?: string }>;
+        readGlobal: () => Promise<{ ok: boolean; content?: string; error?: string }>;
+        writeGlobal: (content: string) => Promise<{ ok: boolean; error?: string }>;
+      };
       fs?: {
         pickDirectory: () => Promise<{ ok: boolean; dir?: string; canceled?: boolean; error?: string }>;
         listFiles: (rootDir: string) => Promise<{ ok: boolean; files?: string[]; error?: string }>;
         listEntries: (rootDir: string) => Promise<{ ok: boolean; files?: string[]; dirs?: string[]; error?: string }>;
+        listAllEntries: (rootDir: string) => Promise<{
+          ok: boolean;
+          files?: Array<{ path: string; size: number; mtime: number; type: "text" | "binary" | "other" }>;
+          dirs?: string[];
+          error?: string;
+        }>;
+        readIndex: (rootDir: string) => Promise<{ ok: boolean; data?: any; error?: string }>;
+        writeIndex: (rootDir: string, data: any) => Promise<{ ok: boolean; error?: string }>;
         readFile: (rootDir: string, relPath: string) => Promise<{ ok: boolean; content?: string; error?: string }>;
         writeFile: (
           rootDir: string,
