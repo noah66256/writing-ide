@@ -1679,7 +1679,7 @@ fastify.get("/ws/agent/run", { websocket: true, preHandler: [authenticateWs] }, 
   try {
     result = await prepareAgentRun({ request, body: envelope.payload, services });
   } catch (e: any) {
-    const msg = e instanceof z.ZodError ? e.issues.map((x: any) => x.message).join("; ") : String(e?.message ?? e);
+    const msg = e instanceof z.ZodError ? e.issues.map((x: any) => `${x.path?.join(".")||"?"}: ${x.message}`).join("; ") : String(e?.message ?? e);
     try { socket.send(JSON.stringify({ type: "error", payload: { error: "BAD_REQUEST", detail: msg } })); } catch {}
     try { socket.close(4002, "PREPARE_FAILED"); } catch {}
     return;
