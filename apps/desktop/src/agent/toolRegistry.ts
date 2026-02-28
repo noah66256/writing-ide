@@ -3219,7 +3219,7 @@ const tools: ToolDefinition[] = [
   // ── 代码执行 ──
   {
     name: "code.exec",
-    description: "在沙箱中执行 Python 脚本，可产出 .pptx/.docx/.xlsx 等文件。",
+    description: "在沙箱中执行 Python 脚本，可产出 .pptx/.docx/.xlsx 等文件。产物保存在当前工作目录或项目目录下会被自动收集。项目目录可通过环境变量 PROJECT_DIR 获取。",
     args: [
       { name: "runtime", desc: "运行时（默认 python）" },
       { name: "code", desc: "内联代码（与 entryFile 二选一）" },

@@ -1146,7 +1146,8 @@ export const TOOL_LIST: ToolMeta[] = [
     description:
       "在沙箱工作目录中执行代码（当前仅支持 Python），用于产出 Office 文件等二进制结果。\n" +
       "支持内联代码（code）或项目内入口脚本（entryFile）二选一；可选 requirements 自动安装 pip 依赖。\n" +
-      "产物文件通过 artifactGlobs 匹配并在执行结果中列出。",
+      "产物文件保存在当前工作目录（os.getcwd()）或项目目录下会被自动收集并在结果中列出。\n" +
+      "项目目录可通过环境变量 PROJECT_DIR 获取（如 os.environ['PROJECT_DIR']）。",
     args: [
       { name: "runtime", required: false, desc: "运行时（默认 python）", type: "string" as ToolArgType },
       { name: "code", required: false, desc: "内联代码（与 entryFile 二选一）", type: "string" as ToolArgType },

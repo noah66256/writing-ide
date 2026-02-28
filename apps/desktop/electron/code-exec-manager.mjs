@@ -378,7 +378,7 @@ export class CodeExecManager {
 
     const child = spawn(venvPython, [entryAbs, ...args], {
       cwd: runDir,
-      env: { ...process.env, PYTHONUNBUFFERED: "1" },
+      env: { ...process.env, PYTHONUNBUFFERED: "1", PROJECT_DIR: projectDir },
       detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -429,8 +429,11 @@ export class CodeExecManager {
 
     const exitCode = Number.isFinite(Number(finished.code)) ? Number(finished.code) : -1;
 
-    // 收集产物
-    const artifacts = await this._collectArtifacts(runDir, artifactGlobs);
+    // 收集产物：优先 runDir，同时扫描 projectDir 中新创建的文件
+    // mtime 容差 2s：某些文件系统（如 HFS+）mtime 精度为 1s
+    const artifacts = await this._collectArtifacts(runDir, artifactGlobs, [
+      { dir: projectDir, minMtimeMs: startedAt - 2000 },
+    ]);
 
     return {
       ok: exitCode === 0 && !timedOut,
@@ -569,53 +572,91 @@ export class CodeExecManager {
   }
 
   /**
-   * 递归扫描 runDir，按 glob 匹配收集产物文件。
+   * 递归扫描 runDir + 额外目录，按 glob 匹配收集产物文件。
+   * extraScanDirs 中的目录使用 mtime 过滤（仅收集执行期间新创建的文件）。
+   * @param {string} runDir
+   * @param {string[]} globs
+   * @param {Array<{ dir: string, minMtimeMs?: number }>} [extraScanDirs]
    */
-  async _collectArtifacts(runDir, globs) {
+  async _collectArtifacts(runDir, globs, extraScanDirs = []) {
     const patterns = globs.length ? globs : DEFAULT_ARTIFACT_GLOBS;
     const regexps = patterns.map(globToRegExp);
+    const runRoot = path.resolve(runDir);
 
-    const files = [];
-    const walk = async (dir) => {
-      let entries;
-      try {
-        entries = await fsp.readdir(dir, { withFileTypes: true });
-      } catch {
-        return;
-      }
-      for (const ent of entries) {
-        // 跳过隐藏目录和 __pycache__
-        if (ent.name.startsWith(".") || ent.name === "__pycache__") continue;
+    // 跳过的目录名（projectDir 扫描时避免进入大型/无关目录）
+    const SKIP_DIRS = new Set(["node_modules", "__pycache__", ".git", ".vscode", ".idea", "dist", "build"]);
+    const MAX_EXTRA_DEPTH = 3; // extraScanDirs 最多递归 3 层
 
-        const full = path.join(dir, ent.name);
-        if (ent.isDirectory()) {
-          await walk(full);
-        } else if (ent.isFile()) {
-          files.push(full);
-        }
-      }
-    };
-    await walk(runDir);
+    const scanRoots = [
+      { dir: runRoot, minMtimeMs: null, maxDepth: Infinity, isRunDir: true },
+      ...extraScanDirs
+        .map((item) => {
+          const rawDir = String(item?.dir ?? "").trim();
+          if (!rawDir) return null;
+          const resolved = path.resolve(rawDir);
+          // 跳过与 runDir 完全相同的目录（dedup 由 seenAbsPath 处理，无需跳过包含关系）
+          if (resolved === runRoot) return null;
+          const minMtimeMs = Number(item?.minMtimeMs);
+          return { dir: resolved, minMtimeMs: Number.isFinite(minMtimeMs) ? minMtimeMs : null, maxDepth: MAX_EXTRA_DEPTH, isRunDir: false };
+        })
+        .filter(Boolean),
+    ];
 
     const out = [];
-    for (const absPath of files) {
-      const relPath = norm(path.relative(runDir, absPath));
-      if (!relPath || relPath.startsWith("..")) continue;
-      // 跳过入口文件本身
-      if (relPath === "_entry.py") continue;
+    const seenAbsPath = new Set();
 
-      if (!regexps.some((r) => r.test(relPath))) continue;
+    for (const root of scanRoots) {
+      if (!(await pathExists(root.dir))) continue;
 
-      let sizeBytes = 0;
-      try {
-        sizeBytes = (await fsp.stat(absPath)).size ?? 0;
-      } catch {
-        sizeBytes = 0;
+      const files = [];
+      const walk = async (dir, depth) => {
+        if (depth > root.maxDepth) return;
+        let entries;
+        try {
+          entries = await fsp.readdir(dir, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        for (const ent of entries) {
+          // 跳过隐藏目录和 __pycache__（所有扫描根都适用）
+          if (ent.name.startsWith(".") || ent.name === "__pycache__") continue;
+          // 额外跳过规则仅对 extraScanDirs 生效（避免影响 runDir 旧行为）
+          if (!root.isRunDir && SKIP_DIRS.has(ent.name)) continue;
+
+          const full = path.join(dir, ent.name);
+          if (ent.isDirectory()) {
+            await walk(full, depth + 1);
+          } else if (ent.isFile()) {
+            files.push(full);
+          }
+        }
+      };
+      await walk(root.dir, 0);
+
+      for (const absPath of files) {
+        const relPath = norm(path.relative(root.dir, absPath));
+        if (!relPath || relPath.startsWith("..")) continue;
+        // 跳过 runDir 中的入口文件
+        if (root.dir === runRoot && relPath === "_entry.py") continue;
+        if (!regexps.some((r) => r.test(relPath))) continue;
+
+        const absKey = path.resolve(absPath);
+        if (seenAbsPath.has(absKey)) continue;
+
+        let stat = null;
+        try {
+          stat = await fsp.stat(absPath);
+        } catch {
+          continue;
+        }
+        // mtime 过滤：仅收集执行期间创建的文件
+        if (typeof root.minMtimeMs === "number" && stat.mtimeMs < root.minMtimeMs) continue;
+
+        seenAbsPath.add(absKey);
+        const name = path.basename(absPath);
+        const ext = path.extname(name).replace(/^\./, "").toLowerCase();
+        out.push({ name, ext, absPath, relPath, sizeBytes: stat.size ?? 0 });
       }
-
-      const name = path.basename(absPath);
-      const ext = path.extname(name).replace(/^\./, "").toLowerCase();
-      out.push({ name, ext, absPath, relPath, sizeBytes });
     }
 
     out.sort((a, b) => a.relPath.localeCompare(b.relPath));

@@ -1348,13 +1348,22 @@ function registerIpc() {
     }
   });
 
-  // 校验路径是否在某个 .writing-ide/exec/ 目录内（防止任意文件访问）
+  // 校验路径是否为合法的 artifact 文件路径：
+  // 1) 在 .writing-ide/exec/ 内（沙箱产物），或
+  // 2) 在某个已存在的常规文件路径（projectDir 产物）
   // 使用 realpath 归一化，防止符号链接绕过
-  async function isInsideExecDir(absPath) {
+  async function isValidArtifactPath(absPath) {
     try {
       const real = await fsp.realpath(absPath);
+      const stat = await fsp.stat(real);
+      if (!stat.isFile()) return false;
+      // .writing-ide/exec/ 内的文件始终允许
       const normalized = real.replace(/\\/g, "/");
-      return /\/.writing-ide\/exec\//.test(normalized);
+      if (/\/.writing-ide\/exec\//.test(normalized)) return true;
+      // 其他路径：必须是常规文件且不在敏感目录
+      const sensitivePatterns = [/\/\.ssh\//i, /\/\.gnupg\//i, /\/\.aws\//i, /\/\.env$/i];
+      if (sensitivePatterns.some((p) => p.test(normalized))) return false;
+      return true;
     } catch {
       return false;
     }
@@ -1364,7 +1373,7 @@ function registerIpc() {
     try {
       const p = path.resolve(String(absPath ?? "").trim());
       if (!p) return { ok: false, error: "MISSING_PATH" };
-      if (!(await isInsideExecDir(p))) return { ok: false, error: "PATH_NOT_IN_EXEC_DIR" };
+      if (!(await isValidArtifactPath(p))) return { ok: false, error: "INVALID_ARTIFACT_PATH" };
       shell.showItemInFolder(p);
       return { ok: true };
     } catch (e) {
@@ -1376,7 +1385,7 @@ function registerIpc() {
     try {
       const src = path.resolve(String(opts?.absPath ?? "").trim());
       if (!src) return { ok: false, error: "MISSING_SOURCE_PATH" };
-      if (!(await isInsideExecDir(src))) return { ok: false, error: "PATH_NOT_IN_EXEC_DIR" };
+      if (!(await isValidArtifactPath(src))) return { ok: false, error: "INVALID_ARTIFACT_PATH" };
       await fsp.access(src);
 
       const suggested = String(opts?.defaultName ?? path.basename(src)).trim() || path.basename(src);
