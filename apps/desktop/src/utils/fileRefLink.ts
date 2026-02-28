@@ -117,9 +117,14 @@ export function injectFileRefLinksInMarkdown(text: string): string {
     .split(MD_LINK_OR_CODE_RE)
     .map((chunk) => {
       if (!chunk) return chunk;
-      // 跳过代码块、行内代码、已有链接
+      // 跳过代码块和已有链接；但 inline code 中的纯文件路径要转为链接
       if (chunk.startsWith("```")) return chunk;
-      if (chunk.startsWith("`") && chunk.endsWith("`")) return chunk;
+      if (chunk.startsWith("`") && chunk.endsWith("`")) {
+        const inner = chunk.slice(1, -1).trim();
+        const normalized = normalizeFileRef(inner);
+        if (normalized) return `[${inner}](${toFileRefHref(normalized)})`;
+        return chunk;
+      }
       if (/^\[.*\]\(.*\)$/.test(chunk)) return chunk;
       const re = new RegExp(FILE_REF_RE.source, FILE_REF_RE.flags);
       return chunk.replace(re, (full: string, prefix: string, rawPath: string, _pathPrefix: string, ext: string) => {
