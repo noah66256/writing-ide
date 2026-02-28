@@ -796,6 +796,20 @@ export function computeIntentRouteDecisionPhase0(args: {
     };
   }
 
+  // mode=agent（创作）时，用户明确选了"创作"按钮——默认进入任务闭环
+  if (mode === "agent") {
+    return {
+      intentType: "task_execution",
+      confidence: 0.7,
+      nextAction: "enter_workflow",
+      todoPolicy: "required",
+      toolPolicy: "allow_tools",
+      reason: "mode=agent 且无明确讨论信号：默认进入任务闭环（用户选了「创作」）",
+      derivedFrom: ["default:agent_task", ...derivedFrom],
+      routeId: "task_execution",
+    };
+  }
+
   return {
     intentType: "discussion",
     confidence: 0.7,
