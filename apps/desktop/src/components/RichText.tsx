@@ -1,6 +1,54 @@
-import { Fragment, type ReactElement } from "react";
+import { Fragment, useCallback, type ReactElement } from "react";
+import { useProjectStore } from "../state/projectStore";
+import { getFileRefMatches, resolveProjectAbsPath } from "../utils/fileRefLink";
 
-function renderInline(text: string): Array<string | ReactElement> {
+type InlineOptions = {
+  onOpenFileRef?: (relPath: string, raw: string) => void;
+};
+
+/** 将纯文本中的文件引用渲染为可点击 span */
+function renderFileRefs(
+  text: string,
+  keyPrefix: string,
+  opts?: InlineOptions,
+): Array<string | ReactElement> {
+  const src = String(text ?? "");
+  if (!src || !opts?.onOpenFileRef) return [src];
+  const matches = getFileRefMatches(src);
+  if (!matches.length) return [src];
+
+  const out: Array<string | ReactElement> = [];
+  let cursor = 0;
+  for (let i = 0; i < matches.length; i++) {
+    const m = matches[i];
+    if (m.start > cursor) out.push(src.slice(cursor, m.start));
+    const normalized = m.normalized;
+    out.push(
+      <span
+        key={`${keyPrefix}-fr-${i}`}
+        className="rtFileRef"
+        role="button"
+        tabIndex={0}
+        title={`打开文件：${m.raw}`}
+        onClick={(e) => { e.preventDefault(); e.stopPropagation(); opts.onOpenFileRef?.(normalized, m.raw); }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            e.stopPropagation();
+            opts.onOpenFileRef?.(normalized, m.raw);
+          }
+        }}
+      >
+        {m.raw}
+      </span>,
+    );
+    cursor = m.end;
+  }
+  if (cursor < src.length) out.push(src.slice(cursor));
+  return out;
+}
+
+function renderInline(text: string, opts?: InlineOptions): Array<string | ReactElement> {
   // inline code: `code`
   const parts = text.split(/(`[^`]+`)/g);
   const out: Array<string | ReactElement> = [];
@@ -23,11 +71,11 @@ function renderInline(text: string): Array<string | ReactElement> {
       if (b.startsWith("**") && b.endsWith("**") && b.length >= 4) {
         out.push(
           <strong key={`b-${i}-${j}`} className="rtBold">
-            {b.slice(2, -2)}
+            {renderFileRefs(b.slice(2, -2), `b-${i}-${j}`, opts)}
           </strong>,
         );
       } else if (b) {
-        out.push(b);
+        out.push(...renderFileRefs(b, `t-${i}-${j}`, opts));
       }
     }
   }
@@ -37,6 +85,24 @@ function renderInline(text: string): Array<string | ReactElement> {
 
 export function RichText(props: { text: string; onHeadingClick?: (args: { level: 1 | 2 | 3; line: number; text: string }) => void }) {
   const text = props.text ?? "";
+  const rootDir = useProjectStore((s) => s.rootDir);
+
+  const openFileRef = useCallback(
+    async (relPath: string, raw: string) => {
+      if (!rootDir) return;
+      const absPath = resolveProjectAbsPath(rootDir, relPath);
+      const ret = await window.desktop?.exec?.openFile?.(absPath);
+      if (ret && !ret.ok) {
+        alert(ret.detail || `无法打开文件：${raw}`);
+      }
+    },
+    [rootDir],
+  );
+
+  const inlineOpts: InlineOptions | undefined = rootDir
+    ? { onOpenFileRef: openFileRef }
+    : undefined;
+
   const lines = text.split("\n");
 
   const blocks: ReactElement[] = [];
@@ -89,7 +155,7 @@ export function RichText(props: { text: string; onHeadingClick?: (args: { level:
               }
             }}
           >
-            {renderInline(content)}
+            {renderInline(content, inlineOpts)}
           </span>
         </Tag>,
       );
@@ -107,7 +173,7 @@ export function RichText(props: { text: string; onHeadingClick?: (args: { level:
       blocks.push(
         <ul key={`ul-${blocks.length}`} className="rtUl">
           {items.map((it, idx) => (
-            <li key={idx}>{renderInline(it)}</li>
+            <li key={idx}>{renderInline(it, inlineOpts)}</li>
           ))}
         </ul>,
       );
@@ -124,7 +190,7 @@ export function RichText(props: { text: string; onHeadingClick?: (args: { level:
       blocks.push(
         <ol key={`ol-${blocks.length}`} className="rtOl">
           {items.map((it, idx) => (
-            <li key={idx}>{renderInline(it)}</li>
+            <li key={idx}>{renderInline(it, inlineOpts)}</li>
           ))}
         </ol>,
       );
@@ -142,7 +208,7 @@ export function RichText(props: { text: string; onHeadingClick?: (args: { level:
         <blockquote key={`bq-${blocks.length}`} className="rtQuote">
           {items.map((it, idx) => (
             <Fragment key={idx}>
-              {renderInline(it)}
+              {renderInline(it, inlineOpts)}
               <br />
             </Fragment>
           ))}
@@ -167,7 +233,7 @@ export function RichText(props: { text: string; onHeadingClick?: (args: { level:
       <p key={`p-${blocks.length}`} className="rtP">
         {para.map((l, idx) => (
           <Fragment key={idx}>
-            {renderInline(l)}
+            {renderInline(l, inlineOpts)}
             {idx === para.length - 1 ? null : <br />}
           </Fragment>
         ))}
@@ -177,5 +243,3 @@ export function RichText(props: { text: string; onHeadingClick?: (args: { level:
 
   return <div className="richText">{blocks}</div>;
 }
-
-

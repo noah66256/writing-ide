@@ -989,6 +989,45 @@ body {
   padding: 1px 6px;
 }
 
+/* 文件引用链接 */
+.rtFileRef {
+  display: inline;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: none;
+  transition: background-color .15s, text-decoration-color .15s;
+}
+.rtFileRef:hover {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  text-decoration: underline;
+}
+.rtFileRef:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.rtFileRefDisabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+/* markdown-body 内的文件引用也复用同样的样式 */
+.markdown-body .rtFileRef {
+  display: inline;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  color: var(--color-accent);
+  cursor: pointer;
+  text-decoration: none;
+}
+.markdown-body .rtFileRef:hover {
+  background: color-mix(in srgb, var(--color-accent) 20%, transparent);
+  text-decoration: underline;
+}
+
 .modalMask {
   position: fixed;
   inset: 0;

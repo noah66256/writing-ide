@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
   XCircle,
@@ -27,6 +27,11 @@ import { WelcomePage } from "./WelcomePage";
 import { InputBar } from "./InputBar";
 import { usePersonaStore } from "@/state/personaStore";
 import { BUILTIN_SUB_AGENTS } from "@writing-ide/agent-core";
+import {
+  injectFileRefLinksInMarkdown,
+  parseFileRefHref,
+  resolveProjectAbsPath,
+} from "@/utils/fileRefLink";
 
 type RunController = { cancel: (reason?: string) => void; done: Promise<void> };
 function parseAtMention(text: string): { agentId: string; cleanText: string } | null {
@@ -256,6 +261,22 @@ function AssistantMessage({ step }: { step: AssistantStep }) {
   const agentName = usePersonaStore((s) => s.agentName);
   const avatar = subAgent?.avatar;
   const displayName = (subAgent?.name ?? step.agentName ?? agentName) || "Friday";
+  const rootDir = useProjectStore((s) => s.rootDir);
+
+  const markdownText = useMemo(
+    () => injectFileRefLinksInMarkdown(step.text),
+    [step.text],
+  );
+
+  const openFileRef = useCallback(
+    async (relPath: string) => {
+      if (!rootDir) return;
+      const absPath = resolveProjectAbsPath(rootDir, relPath);
+      const ret = await window.desktop?.exec?.openFile?.(absPath);
+      if (ret && !ret.ok) alert(ret.detail || `无法打开文件：${relPath}`);
+    },
+    [rootDir],
+  );
 
   return (
     <div className="flex gap-3 py-3">
@@ -272,7 +293,40 @@ function AssistantMessage({ step }: { step: AssistantStep }) {
             </span>
           ) : (
             <div className="whitespace-pre-wrap break-words max-w-none markdown-body">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{step.text}</ReactMarkdown>
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  a: ({ href, children }) => {
+                    const relPath = parseFileRefHref(href);
+                    if (relPath) {
+                      return (
+                        <span
+                          className={cn("rtFileRef", !rootDir && "rtFileRefDisabled")}
+                          role="button"
+                          tabIndex={rootDir ? 0 : -1}
+                          title={rootDir ? `打开文件：${relPath}` : "未打开项目目录"}
+                          onClick={(e) => { e.preventDefault(); void openFileRef(relPath); }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              void openFileRef(relPath);
+                            }
+                          }}
+                        >
+                          {children}
+                        </span>
+                      );
+                    }
+                    return (
+                      <a href={href} target="_blank" rel="noreferrer">
+                        {children}
+                      </a>
+                    );
+                  },
+                }}
+              >
+                {markdownText}
+              </ReactMarkdown>
             </div>
           )}
         </div>
