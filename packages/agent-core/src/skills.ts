@@ -202,6 +202,126 @@ export const STYLE_IMITATE_SKILL: SkillManifest = {
   ui: { badge: "STYLE", color: "blue" },
 };
 
+export const WEB_TOPIC_RADAR_SKILL: SkillManifest = {
+  id: "web_topic_radar",
+  name: "全网热点雷达",
+  description: "全网热点/新闻/选题调研：强调多轮搜索、多域抓取和话题广度，收集阶段不注入风格，避免风格抢跑。",
+  priority: 110,
+  stageKey: "agent.skill.web_topic_radar",
+  autoEnable: true,
+  triggers: [
+    { when: "mode_in", args: { modes: ["agent"] } },
+    {
+      when: "text_regex",
+      args: {
+        pattern:
+          // A) 直接关键词
+          "(?:热点|新闻|雷达|选题|找素材|盘点)|" +
+          // B) "全网" + 搜索/检索/调研/大搜
+          "(?:全网[\\s\\S]{0,4}(?:搜索|检索|调研|大搜|搜))|" +
+          // C) 调研/查资料/搜资料
+          "(?:调研|查资料|搜资料|大搜)|" +
+          // D) GitHub 调研（不区分大小写的中文语境匹配）
+          "(?:github|GitHub)[\\s\\S]{0,8}(?:搜|查|调研|找)",
+      },
+    },
+  ],
+  promptFragments: {
+    system:
+      "当 skill=web_topic_radar 激活时（全网热点雷达）：\n" +
+      "1) 本任务是「先收集后结论」，收集阶段不要写成稿，不注入风格化表达。\n" +
+      "2) 必须进行多轮搜索：web.search >= 3 次，且 query 需要有明显差异（主题/时间窗/角度）。\n" +
+      "3) 必须进行多域抓取：web.fetch >= 5 次，且尽量覆盖 >= 5 个不同域名。\n" +
+      "4) 最终盘点话题广度 >= 15 条；每条至少包含：话题名、1 句判断、URL 证据。\n" +
+      "5) Todo 必须完整可追踪：搜索轮次、抓取覆盖、话题去重、最终盘点四类步骤都要有。\n" +
+      "6) 搜索前必须先调用 time.now 获取当前时间，query 以当年为准。",
+    context: "ACTIVE_SKILLS: web_topic_radar（全网热点雷达/选题调研）",
+  },
+  policies: ["WebRadarPolicy", "WebGatePolicy"],
+  conflicts: ["style_imitate"],
+  version: "1.0.0",
+  source: "builtin",
+  ui: { badge: "RADAR", color: "purple" },
+};
+
+export const WRITING_MULTI_SKILL: SkillManifest = {
+  id: "writing_multi",
+  name: "小规模多篇",
+  description: "2-9 篇的小规模多篇写作：按篇拆解、逐篇完成、每篇走完整写作闭环。",
+  priority: 120,
+  stageKey: "agent.skill.writing_multi",
+  autoEnable: true,
+  triggers: [
+    { when: "mode_in", args: { modes: ["agent"] } },
+    {
+      when: "text_regex",
+      args: {
+        pattern:
+          // A) 阿拉伯数字 2-9 + 篇
+          "(?:^|\\D)(?:[2-9])\\s*篇|" +
+          // B) 中文数字 + 篇
+          "(?:[二三四五六七八九两])\\s*篇|" +
+          // C) 直接关键词
+          "(?:多篇|几篇)",
+      },
+    },
+  ],
+  promptFragments: {
+    system:
+      "当 skill=writing_multi 激活时（2-9 篇多篇写作）：\n" +
+      "1) 按「每篇一个子任务」执行，不要一次性混写多篇。\n" +
+      "2) 每篇都要有独立 Todo 条目，并在完成后单独勾选/更新进度。\n" +
+      "3) 单篇必须走完整写作闭环：需求确认→资料/结构→初稿→润色→交付。\n" +
+      "4) 完成一篇再进入下一篇，保持可回溯与可验收。\n" +
+      "5) 若绑定了风格库，每篇独立走 kb.search + lint.style 闭环。",
+    context: "ACTIVE_SKILLS: writing_multi（小规模多篇 2-9 篇）",
+  },
+  policies: [],
+  conflicts: ["writing_batch"],
+  version: "1.0.0",
+  source: "builtin",
+  ui: { badge: "MULTI", color: "orange" },
+};
+
+export const WRITING_BATCH_SKILL: SkillManifest = {
+  id: "writing_batch",
+  name: "批量写作长跑",
+  description: ">=10 篇批量写作：通过 writing.batch.* 工具族分片执行并持续追踪进度。",
+  priority: 130,
+  stageKey: "agent.skill.writing_batch",
+  autoEnable: true,
+  triggers: [
+    { when: "mode_in", args: { modes: ["agent"] } },
+    {
+      when: "text_regex",
+      args: {
+        pattern:
+          // A) 阿拉伯数字 >=10 + 篇
+          "(?:[1-9]\\d+)\\s*篇|" +
+          // B) 中文数字十以上 + 篇
+          "(?:十|[二三四五六七八九]十[\\s\\S]?)\\s*篇|" +
+          // C) 直接关键词
+          "(?:批量|大批|大量)[\\s\\S]{0,6}(?:写|生成|产出|创作)",
+      },
+    },
+  ],
+  promptFragments: {
+    system:
+      "当 skill=writing_batch 激活时（>=10 篇批量写作）：\n" +
+      "1) 优先使用 writing.batch.* 工具族（create/status/pause/resume/cancel），不在单次 run 内硬写全部。\n" +
+      "2) 采用分片执行（按主题/文件夹/批次），每片可独立重试与恢复。\n" +
+      "3) 持续做进度追踪：汇报 jobId、完成数/失败数/跳过数、下一步动作。\n" +
+      "4) 每片内的单篇仍走写作闭环，但简化交互（无需逐篇确认）。\n" +
+      "5) 若绑定风格库，批量写作共用同一个 styleContract，不必每篇重新选写法。",
+    context: "ACTIVE_SKILLS: writing_batch（批量写作长跑 >=10 篇）",
+  },
+  policies: [],
+  conflicts: ["writing_multi"],
+  version: "1.0.0",
+  source: "builtin",
+  ui: { badge: "BATCH", color: "red" },
+};
+
 export const CORPUS_INGEST_SKILL: SkillManifest = {
   id: "corpus_ingest",
   name: "语料导入与抽卡",
@@ -268,6 +388,9 @@ export const CORPUS_INGEST_SKILL: SkillManifest = {
 // ── Skill 注册表 ──────────────────────────────────────────────
 
 const BUILTIN_MANIFESTS: SkillManifest[] = [
+  WRITING_BATCH_SKILL,
+  WRITING_MULTI_SKILL,
+  WEB_TOPIC_RADAR_SKILL,
   STYLE_IMITATE_SKILL,
   CORPUS_INGEST_SKILL,
 ];
