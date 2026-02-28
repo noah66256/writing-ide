@@ -1320,6 +1320,74 @@ type ToolResultPayload = {
 const agentRunWaiters = new Map<string, Map<string, (payload: ToolResultPayload) => void>>();
 
 
+
+fastify.post(
+  "/api/agent/conv/title",
+  { preHandler: [authenticateSse, requirePositivePointsForLlm] },
+  async (request: any, reply) => {
+  if (!IS_DEV) return reply.code(404).send({ error: "NOT_AVAILABLE" });
+
+  const bodySchema = z.object({
+    firstMessage: z.string().min(1).max(2000),
+    preferModelId: z.string().optional(),
+  });
+  const body = bodySchema.parse((request as any).body ?? {});
+
+  // 模型选择：优先 stage "agent.conv_title"，fallback 到 preferModelId，再 fallback 到 Haiku
+  let stageDefaultId: string | null = null;
+  try {
+    const stages = await aiConfig.listStages();
+    const st = (stages as any[]).find((s: any) => s.stage === "agent.conv_title") || null;
+    stageDefaultId = typeof st?.modelId === "string" ? String(st.modelId) : null;
+  } catch { /* ignore */ }
+
+  const env = await getLlmEnv();
+  if (!env.ok) return reply.code(500).send({ error: "LLM_NOT_CONFIGURED" });
+
+  const preferModelId = body.preferModelId ? String(body.preferModelId).trim() : "";
+  const pickedId = stageDefaultId || preferModelId || env.defaultModel || "";
+
+  let model = pickedId || env.defaultModel;
+  let baseUrl = env.baseUrl;
+  let apiKey = env.apiKey;
+  let endpoint = "/v1/chat/completions";
+  if (pickedId) {
+    try {
+      const m = await aiConfig.resolveModel(pickedId);
+      model = m.model;
+      baseUrl = m.baseURL;
+      apiKey = m.apiKey;
+      endpoint = m.endpoint || endpoint;
+    } catch { /* fallback env */ }
+  }
+
+  const sys = "你是对话命名助手。根据用户的第一条消息，生成一个极简的中文标题。要求：不超过12个字，直接输出标题本身，不加引号、书名号或任何标点，不解释。";
+  const user = `用户消息：\n${body.firstMessage}`;
+
+  const ret = await completionOnceViaProvider({
+    baseUrl,
+    endpoint,
+    apiKey,
+    model,
+    temperature: 0.3,
+    maxTokens: 30,
+    messages: [
+      { role: "system", content: sys },
+      { role: "user", content: user },
+    ],
+  });
+
+  if (!ret.ok) {
+    return reply.code(ret.status ?? 502).send({ error: "TITLE_FAILED", detail: ret.error });
+  }
+
+  const title = String((ret as any).content ?? "").trim().replace(/["""''《》【】\[\]]/g, "").slice(0, 20);
+  if (!title) return reply.code(500).send({ error: "EMPTY_TITLE" });
+
+  return reply.send({ ok: true, title });
+},
+);
+
 fastify.post(
   "/api/agent/context/summary",
   { preHandler: [authenticateSse, requirePositivePointsForLlm] },

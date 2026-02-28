@@ -409,6 +409,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
     // 构建全量项目索引（异步，不阻塞）+ 索引完成后注入项目摘要到全局记忆
     import("./projectIndexStore").then(({ useProjectIndexStore }) => {
+      // 先同步清空旧索引，防止 buildIndex 完成前 sidecar 读到旧项目的文件列表
+      useProjectIndexStore.getState().clear();
       void useProjectIndexStore.getState().buildIndex(rootDir).then(() => {
         // 校验：索引完成时项目未切换，才注入摘要
         const currentRoot = get().rootDir;
@@ -736,6 +738,14 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (get().rootDir) {
       window.desktop?.fs?.watchStop?.().catch(() => void 0);
     }
+    // 同步清空项目索引，避免切换后 sidecar 带旧项目文件列表
+    import("./projectIndexStore").then(({ useProjectIndexStore }) => {
+      useProjectIndexStore.getState().clear();
+    }).catch(() => void 0);
+    // 清空旧的 @ 引用，避免残留指向旧项目的路径
+    import("./runStore").then(({ useRunStore }) => {
+      useRunStore.getState().clearCtxRefs();
+    }).catch(() => void 0);
     set({
       rootDir: null,
       isLoading: false,

@@ -75,6 +75,7 @@ export type Conversation = {
   createdAt: number;
   updatedAt: number;
   snapshot: RunSnapshot;
+  pinned?: boolean;
 };
 
 type ConversationState = {
@@ -86,6 +87,7 @@ type ConversationState = {
   hydrateFromDisk: () => Promise<void>;
   addConversation: (c: Omit<Conversation, "id" | "createdAt" | "updatedAt"> & { id?: string }) => string;
   deleteConversation: (id: string) => void;
+  pinConversation: (id: string, pinned: boolean) => void;
   renameConversation: (id: string, title: string) => void;
   updateConversation: (id: string, patch: { snapshot?: RunSnapshot; title?: string }) => void;
   setActiveConvId: (id: string | null) => void;
@@ -142,8 +144,11 @@ const safeLocalStorage = {
 
 function capConversations(list: Conversation[]) {
   const arr = Array.isArray(list) ? list : [];
-  // cap：避免文件与 localStorage 爆炸（仅保留最近 20 条）
-  return arr.length > 20 ? arr.slice(0, 20) : arr;
+  // 置顶的对话全部保留，非置顶最多保留 20 条
+  const pinned = arr.filter((c) => c.pinned);
+  const rest = arr.filter((c) => !c.pinned);
+  const capped = rest.length > 20 ? rest.slice(0, 20) : rest;
+  return [...pinned, ...capped];
 }
 
 function schedulePersistToDisk(args: { conversations: Conversation[]; draftSnapshot: RunSnapshot | null }) {
@@ -246,6 +251,15 @@ export const useConversationStore = create<ConversationState>()(
         if (!v) return;
         set((s) => {
           const next = (s.conversations ?? []).filter((x) => x.id !== v);
+          schedulePersistToDisk({ conversations: next, draftSnapshot: get().draftSnapshot ?? null });
+          return { conversations: next };
+        });
+      },
+      pinConversation: (id, pinned) => {
+        const v = String(id ?? "").trim();
+        if (!v) return;
+        set((s) => {
+          const next = (s.conversations ?? []).map((x) => (x.id === v ? { ...x, pinned, updatedAt: Date.now() } : x));
           schedulePersistToDisk({ conversations: next, draftSnapshot: get().draftSnapshot ?? null });
           return { conversations: next };
         });

@@ -12,6 +12,10 @@ import {
   Check,
   Cpu,
   Users,
+  MoreHorizontal,
+  Pin,
+  PinOff,
+  Pencil,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { buildCurrentSnapshot, useConversationStore, type Conversation } from "@/state/conversationStore";
@@ -23,6 +27,8 @@ import { useModelStore } from "@/state/modelStore";
 import { TeamModal } from "@/components/TeamModal";
 import { SettingsModal } from "./SettingsModal";
 import { useKbStore } from "@/state/kbStore";
+import { authHeader } from "@/agent/gatewayAgent";
+import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
 
 /* ─── Helpers ─── */
 
@@ -39,6 +45,8 @@ export function NavSidebar() {
   const conversations = useConversationStore((s) => s.conversations);
   const addConversation = useConversationStore((s) => s.addConversation);
   const deleteConversation = useConversationStore((s) => s.deleteConversation);
+  const pinConversation = useConversationStore((s) => s.pinConversation);
+  const renameConversation = useConversationStore((s) => s.renameConversation);
   const resetRun = useRunStore((s) => s.resetRun);
   const loadSnapshot = useRunStore((s) => s.loadSnapshot);
   const steps = useRunStore((s) => s.steps);
@@ -60,6 +68,51 @@ export function NavSidebar() {
 
   const activeConvId = useConversationStore((s) => s.activeConvId);
   const storeSetActiveConvId = useConversationStore((s) => s.setActiveConvId);
+
+  // 置顶优先，同组内按 updatedAt 降序
+  const sortedConversations = useMemo(() => {
+    const arr = [...(conversations ?? [])];
+    return arr.sort((a, b) => {
+      if (a.pinned && !b.pinned) return -1;
+      if (!a.pinned && b.pinned) return 1;
+      return b.updatedAt - a.updatedAt;
+    });
+  }, [conversations]);
+
+  // 智能命名：第一轮完成后，若标题仍是"新任务"，用 Haiku 生成标题
+  const autoNamingRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!activeConvId) return;
+    const conv = conversations.find((c) => c.id === activeConvId);
+    if (!conv || conv.title !== "新任务") return;
+    if (autoNamingRef.current.has(activeConvId)) return;
+
+    // 找第一条用户消息 + 已完成的助手回复
+    const allSteps = useRunStore.getState().steps ?? [];
+    const firstUser = allSteps.find((s: any) => s.type === "user") as any;
+    const hasCompletedAssistant = allSteps.some((s: any) => s.type === "assistant" && !s.streaming && String(s.text ?? "").trim());
+    if (!firstUser || !hasCompletedAssistant) return;
+
+    const firstMsg = String(firstUser.text ?? "").trim().slice(0, 300);
+    if (!firstMsg) return;
+
+    autoNamingRef.current.add(activeConvId);
+    const convId = activeConvId;
+    const gatewayUrl = getGatewayBaseUrl();
+    const url = gatewayUrl ? `${gatewayUrl}/api/agent/conv/title` : "/api/agent/conv/title";
+    fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeader() },
+      body: JSON.stringify({ firstMessage: firstMsg }),
+    })
+      .then((r) => r.json())
+      .then((j) => {
+        if (j?.ok && j?.title) {
+          renameConversation(convId, String(j.title));
+        }
+      })
+      .catch(() => void 0);
+  }, [steps.length, activeConvId, conversations, renameConversation]);
 
   const handleNewChat = useCallback(() => {
     // 防抖：当前已是空白"新任务"对话，不重复创建
@@ -176,16 +229,18 @@ export function NavSidebar() {
 
       {/* 对话历史列表 */}
       <div className="flex-1 overflow-y-auto overflow-x-hidden px-2 space-y-0.5">
-        {conversations.length === 0 ? (
+        {sortedConversations.length === 0 ? (
           <div className="px-3 py-6 text-[12px] text-text-faint text-center">暂无对话记录</div>
         ) : (
-          conversations.map((conv) => (
+          sortedConversations.map((conv) => (
             <ConvItem
               key={conv.id}
               conv={conv}
               active={activeConvId === conv.id}
               onClick={() => handleLoadConversation(conv.id)}
               onDelete={(e) => handleDeleteConversation(conv.id, e)}
+              onPin={(pinned) => pinConversation(conv.id, pinned)}
+              onRename={(title) => renameConversation(conv.id, title)}
             />
           ))
         )}
@@ -463,40 +518,178 @@ function ConvItem({
   active,
   onClick,
   onDelete,
+  onPin,
+  onRename,
 }: {
   conv: Conversation;
   active: boolean;
   onClick: () => void;
   onDelete: (e: React.MouseEvent) => void;
+  onPin: (pinned: boolean) => void;
+  onRename: (title: string) => void;
 }) {
   const [hovered, setHovered] = useState(false);
+  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState(conv.title);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // 进入重命名时聚焦并全选
+  useEffect(() => {
+    if (renaming) {
+      setRenameValue(conv.title);
+      setTimeout(() => { inputRef.current?.select(); }, 0);
+    }
+  }, [renaming, conv.title]);
+
+  const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setMenuPos({ x: e.clientX, y: e.clientY });
+  };
+
+  const handleMoreBtn = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setMenuPos({ x: rect.left, y: rect.bottom + 4 });
+  };
+
+  const handleRenameSubmit = () => {
+    const v = renameValue.trim();
+    if (v && v !== conv.title) onRename(v);
+    setRenaming(false);
+  };
+
+  if (renaming) {
+    return (
+      <div className="px-2 py-1">
+        <input
+          ref={inputRef}
+          value={renameValue}
+          onChange={(e) => setRenameValue(e.target.value)}
+          onBlur={handleRenameSubmit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") handleRenameSubmit();
+            if (e.key === "Escape") setRenaming(false);
+          }}
+          className="w-full px-2 py-1 rounded-md text-[13px] bg-surface border border-accent/50 text-text focus:outline-none"
+        />
+      </div>
+    );
+  }
 
   return (
-    <button
-      onClick={onClick}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      className={cn(
-        "group flex items-center gap-2.5 w-full rounded-lg px-3 py-2",
-        "text-[13px] truncate",
-        "transition-colors duration-fast",
-        active
-          ? "bg-accent-soft/60 text-accent font-medium"
-          : "text-text-muted hover:text-text hover:bg-surface/50",
+    <>
+      <button
+        onClick={onClick}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        onContextMenu={handleContextMenu}
+        className={cn(
+          "group flex items-center gap-1.5 w-full rounded-lg px-3 py-2",
+          "text-[13px]",
+          "transition-colors duration-fast",
+          active
+            ? "bg-accent-soft/60 text-accent font-medium"
+            : "text-text-muted hover:text-text hover:bg-surface/50",
+        )}
+        title={conv.title}
+      >
+        {conv.pinned && (
+          <Pin size={10} className="shrink-0 text-accent/60" />
+        )}
+        <span className="truncate flex-1 text-left">{conv.title}</span>
+        {hovered && (
+          <span
+            role="button"
+            onClick={handleMoreBtn}
+            className="shrink-0 p-0.5 rounded hover:bg-surface-alt transition-colors duration-fast"
+            title="更多操作"
+          >
+            <MoreHorizontal size={13} />
+          </span>
+        )}
+      </button>
+
+      {menuPos && (
+        <ConvContextMenu
+          pinned={!!conv.pinned}
+          pos={menuPos}
+          onClose={() => setMenuPos(null)}
+          onPin={() => { onPin(!conv.pinned); setMenuPos(null); }}
+          onRename={() => { setMenuPos(null); setRenaming(true); }}
+          onDelete={(e) => { setMenuPos(null); onDelete(e); }}
+        />
       )}
-      title={conv.title}
+    </>
+  );
+}
+
+/* ─── 对话右键/更多菜单 ─── */
+
+function ConvContextMenu({
+  pinned,
+  pos,
+  onClose,
+  onPin,
+  onRename,
+  onDelete,
+}: {
+  pinned: boolean;
+  pos: { x: number; y: number };
+  onClose: () => void;
+  onPin: () => void;
+  onRename: () => void;
+  onDelete: (e: React.MouseEvent) => void;
+}) {
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [onClose]);
+
+  // 防止菜单超出视口
+  const style: React.CSSProperties = {
+    position: "fixed",
+    zIndex: 9999,
+    left: Math.min(pos.x, window.innerWidth - 160),
+    top: Math.min(pos.y, window.innerHeight - 130),
+  };
+
+  return (
+    <div
+      ref={menuRef}
+      style={style}
+      className="w-36 bg-surface rounded-xl border border-border shadow-lg py-1 text-[13px]"
     >
-      <span className="truncate flex-1 text-left">{conv.title}</span>
-      {hovered && (
-        <span
-          role="button"
-          onClick={onDelete}
-          className="shrink-0 p-0.5 rounded hover:bg-error/10 hover:text-error transition-colors duration-fast"
-          title="删除对话"
-        >
-          <Trash2 size={12} />
-        </span>
-      )}
-    </button>
+      <button
+        onClick={onPin}
+        className="flex items-center gap-2.5 w-full px-3 py-2 rounded-lg text-text hover:bg-surface-alt transition-colors"
+      >
+        {pinned ? <PinOff size={13} className="text-text-muted" /> : <Pin size={13} className="text-text-muted" />}
+        {pinned ? "取消置顶" : "置顶"}
+      </button>
+      <button
+        onClick={onRename}
+        className="flex items-center gap-2.5 w-full px-3 py-2 rounded-lg text-text hover:bg-surface-alt transition-colors"
+      >
+        <Pencil size={13} className="text-text-muted" />
+        重命名
+      </button>
+      <div className="mx-2 my-0.5 border-t border-border-soft" />
+      <button
+        onClick={(e) => onDelete(e)}
+        className="flex items-center gap-2.5 w-full px-3 py-2 rounded-lg text-error hover:bg-error/8 transition-colors"
+      >
+        <Trash2 size={13} className="text-error/80" />
+        删除
+      </button>
+    </div>
   );
 }
