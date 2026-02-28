@@ -1760,33 +1760,33 @@ function createWindow() {
 
   // 诊断：避免”白屏但不知道加载失败/渲染进程崩溃”
   try {
-    win.webContents.on(“did-fail-load”, (_event, errorCode, errorDescription, validatedURL) => {
-      console.error(“[electron] did-fail-load”, { errorCode, errorDescription, validatedURL });
+    win.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
+      console.error("[electron] did-fail-load", { errorCode, errorDescription, validatedURL });
     });
-    win.webContents.on(“render-process-gone”, (_event, details) => {
-      console.error(“[electron] render-process-gone”, details);
+    win.webContents.on("render-process-gone", (_event, details) => {
+      console.error("[electron] render-process-gone", details);
     });
-    win.webContents.on(“unresponsive”, () => {
-      console.error(“[electron] webContents unresponsive”);
+    win.webContents.on("unresponsive", () => {
+      console.error("[electron] webContents unresponsive");
     });
 
     // 防止 renderer 意外导航（点击链接/file URL）导致页面跳转丢失内存状态
-    win.webContents.on(“will-navigate”, (event, url) => {
+    win.webContents.on("will-navigate", (event, url) => {
       const devServerUrl = process.env.VITE_DEV_SERVER_URL;
       // 开发模式允许 HMR 导航
       if (devServerUrl && url.startsWith(devServerUrl)) return;
       // 生产模式允许 app:// 协议
-      if (url.startsWith(“app://”)) return;
-      console.warn(“[electron] blocked will-navigate:”, url);
+      if (url.startsWith("app://")) return;
+      console.warn("[electron] blocked will-navigate:", url);
       event.preventDefault();
     });
 
     // 阻止 window.open / target=_blank 打开新窗口
     win.webContents.setWindowOpenHandler(({ url }) => {
-      if (url && (url.startsWith(“http:”) || url.startsWith(“https:”))) {
+      if (url && (url.startsWith("http:") || url.startsWith("https:"))) {
         shell.openExternal(url);
       }
-      return { action: “deny” };
+      return { action: "deny" };
     });
   } catch {
     // ignore
