@@ -7,15 +7,15 @@
 
 ### 0) TL;DR：一句话理解这个项目
 
-我们在做一款**写作 IDE（桌面端）**，UI 采用**对话为中心的极简布局**：56px 图标导航栏 + 全宽对话区 + 按需展开的右侧工作面板。用户的主要操作入口是对话框，而非菜单/面板/侧边栏。
+我们在做一款**”一个人的内容团队”**桌面应用，UI 采用**对话为中心的极简布局**：56px 图标导航栏 + 全宽对话区 + 按需展开的右侧工作面板。用户的主要操作入口是对话框，而非菜单/面板/侧边栏。
 写作”强”的关键不在于更长提示词，而在于把写作做成工程：**有计划（Todo）、有主线（Main Doc）、有工具边界（Schema+XML）、有可审阅改动（diff）、有可撤销（Keep/Undo）、有素材与风格的可追溯证据（KB + 引用）**。
-> 布局变更详见 [UI 重设计 v0.1](specs/ui-redesign-v0.1.md)。旧的”五栏 IDE 布局”（Explorer + Editor + AgentPane + DockPanel）已在 Phase 4 清理完毕。
+> 布局变更详见 [UI 重设计 v0.1](specs/ui-redesign-v0.1.md)。
 
 ---
 
 ### 1) 产品定位与核心约束（不要跑偏）
 
-- **我们做的是写作 IDE**：一切围绕“文档/项目/编辑体验 + 写作产出”。
+- **我们做的是”一个人的内容团队”**：一切围绕”内容产出”。
 - **我们刻意不做**：通用工作流平台（Dify/Flowise 形态）、通用协作/知识平台（Notion 全家桶）、BI 后台。
 - **三个用户价值支点**：
   - **产出**：从“选题/大纲/初稿/润色/平台适配/导出”闭环走完。
@@ -28,7 +28,7 @@
 
 本仓库是 npm workspaces：
 
-- `apps/desktop`：Electron + React 桌面端（编辑器/文件树/右侧 Agent/UI 与本地工具执行）
+- `apps/desktop`：Electron + React 桌面端（对话交互/本地工具执行/KB 管理）
 - `apps/gateway`：Fastify 网关（鉴权、模型接入、SSE 流式、Agent 编排、计费、ToolConfig、短信验证码等）
 - `apps/admin-web`：B 端管理后台（用户/积分/LLM 配置/工具与 skills 配置、短信配置）
 - `packages/agent-core`：Agent 运行状态机、意图路由/门禁、skills、策略与重试逻辑
@@ -42,7 +42,7 @@
 
 #### 3.1 三个进程/服务
 
-- **Desktop（Electron）**：负责 IDE UI、文件系统操作、本地 KB 管理与部分工具执行体验（Keep/Undo、diff 展示等）。
+- **Desktop（Electron）**：负责对话 UI、本地工具执行（文件操作/KB/lint 等）、MCP Client。
 - **Gateway（Fastify）**：负责“远端权威状态”和“可审计能力”：
   - 登录鉴权（邮箱验证码、手机号验证码）
   - 积分余额/流水/扣费（真实积分来源）
@@ -61,7 +61,7 @@
   - `POST /api/agent/run/:runId/tool_result`
 - Gateway 把工具结果注入后续回合，直到 `run.end`
 
-> 这条链路的好处：IDE 能做“像 IDE 一样”的交互（选区改写、diff、撤销），同时网关能做审计与计费。
+> 这条链路的好处：Desktop 能做丰富的本地交互（选区改写、diff、撤销），同时网关能做审计与计费。
 
 ---
 
@@ -103,7 +103,7 @@
 
 > 你可以把这部分当作“项目的操作系统”。
 
-#### 5.1 三种右侧模式：Plan / Agent / Chat
+#### 5.1 三种对话模式：Plan / Agent / Chat
 
 - **Plan**：逐步推进（适合用户参与决策）。目标是“每一步可确认、可回退”。
 - **Agent**：一次跑完 + 对话迭代（适合用户只想要结果）。仍可随时打断。
@@ -132,7 +132,7 @@
 - **Tools**：程序能力（读写文件、KB 检索、联网、快照、todo/mainDoc 更新…）——可验证、可审计、可做权限边界。
 - **Skills**：提示词策略/写作套路（例如风格仿写闭环、全网热点雷达…）——更灵活，但要通过结构化输出与 lint 收敛。
 
-#### 5.5 proposal-first + Keep/Undo（写作 IDE 的安全阀）
+#### 5.5 proposal-first + Keep/Undo（写作的安全阀）
 
 写作的“高风险动作”不是生成文字，而是**覆盖/批量改动用户内容**。
 
@@ -149,7 +149,7 @@ Agent 不是黑盒聊天：Gateway 会记录关键决策事件（例如 `policy.
 
 ---
 
-### 6) 本地开发（Windows Git Bash 友好）
+### 6) 本地开发
 
 #### 6.1 前置要求
 
@@ -327,7 +327,7 @@ Admin-Web 是静态资源 + 轻量 server：
 工程上要点：长文需要分段与截断保护，避免“只抽到开头/漏结尾”。
 
 3) **生成风格手册（Playbook）**  
-把整库聚合成“可注入写作上下文”的规则与模板（后续会逐步演进到 V2 的分簇/anchors 机制，见 `kb-manager-v2-spec.md`）。
+把整库聚合成“可注入写作上下文”的规则与模板（后续会逐步演进到 V2 的分簇/anchors 机制，见 `docs/specs/kb-manager-v2-spec.md`）。
 
 4) **库体检（Fingerprint/稳定性）**  
 用确定性统计得到“像什么/稳不稳/怎么修”的指标快照（例如句长、问句率、语气词密度、数字密度等），用于：
@@ -354,8 +354,8 @@ Admin-Web 是静态资源 + 轻量 server：
 
 ##### 10.1.4 运行时机制：Selector + Skill 门禁（避免误伤）
 
-- **Skill 门禁（style_imitate）**：风格库只在“明确写作类任务”时介入；用户只是讨论/排查时不会被强制拉进风格闭环（见 `intent-routing.md` 与 `docs/research/style-skill-gating-v1.md`）。
-- **Selector（选簇/选维度）**：运行时会产出结构化选择结果，约束生成模型“本次用哪种写法/执行哪些维度卡”（见 `style-selector-v1.md`、`kb-manager-v2-spec.md`）。
+- **Skill 门禁（style_imitate）**：风格库只在”明确写作类任务”时介入；用户只是讨论/排查时不会被强制拉进风格闭环（见 `docs/specs/intent-routing-v0.4.md` 与 `docs/research/style-skill-gating-v1.md`）。
+- **Selector（选簇/选维度）**：运行时会产出结构化选择结果，约束生成模型”本次用哪种写法/执行哪些维度卡”（见 `docs/specs/style-selector-v1.md`、`docs/specs/kb-manager-v2-spec.md`）。
 - **Context Pack 注入（关键）**：写作 Run 会把风格库的 playbook/selector 结果注入到上下文前部，确保换模型也能稳定消费（不依赖模型记忆长文）。
 
 ##### 10.1.5 代码入口（想看实现从这里开始）
@@ -363,7 +363,7 @@ Admin-Web 是静态资源 + 轻量 server：
 - **KB/抽卡/风格册/体检（Desktop）**：`apps/desktop/src/state/kbStore.ts`
 - **KB 检索核心（排序/去重/评分）**：`packages/kb-core/*`
 - **Skill 门禁与触发**：`packages/agent-core/src/skills.ts`（`style_imitate`）
-- **Selector 与 V2 方向**：`style-selector-v1.md`、`kb-manager-v2-spec.md`
+- **Selector 与 V2 方向**：`docs/specs/style-selector-v1.md`、`docs/specs/kb-manager-v2-spec.md`
 
 ---
 
@@ -373,8 +373,8 @@ Admin-Web 是静态资源 + 轻量 server：
 
 - `README.md`：启动方式 + 现状
 - `plan.md`：产品定位 + 决策 + 导航入口
-- `writing-agent.md`：写作 Agent 的闭环与纪律（Main Doc/Todo/Tools/Keep/Undo）
-- `intent-routing.md`：为什么需要门禁、如何防误伤
+- `docs/specs/writing-agent-v1.md`：写作 Agent 的闭环与纪律（Main Doc/Todo/Tools/Keep/Undo）
+- `docs/specs/intent-routing-v0.4.md`：为什么需要门禁、如何防误伤
 - `docs/specs/run-todo-v0.2.md`：Todo 工具/数据结构的约定
 - `docs/specs/capabilities-registry-v0.1.md`：Tools/Skills 热开关与 LOCKED 语义
 
@@ -390,7 +390,7 @@ Admin-Web 是静态资源 + 轻量 server：
 把下面这段丢给 LLM，并把文件列表一起喂给它，会更快进入状态：
 
 ```text
-你在阅读一个写作 IDE 的 monorepo。请先建立全局心智模型：
+你在阅读一个"对话驱动的 AI 内容团队"桌面应用的 monorepo。请先建立全局心智模型：
 1) 三个 app 的职责与边界（desktop/gateway/admin-web）
 2) Agent 的运行链路（SSE run → tool.call → tool_result）
 3) Main Doc / Run Todo / Context Pack / proposal-first 的作用

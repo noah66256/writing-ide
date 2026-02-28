@@ -1,56 +1,36 @@
 ## apps/desktop（C 端桌面客户端）
 
 ### 目标
-- 写作 IDE 主应用：左侧文件树，中间编辑器（Tab+补全），右侧 Agent（Plan/Agent/Chat），中下方 Dock Panel（KB/Outline/Graph/Problems…）。
 
-### 关键能力（规划）
-- Electron 壳（多窗口、托盘、快捷键、自动更新等）
-- Monaco Editor（Markdown）
-- 右侧 Agent Composer：模式/模型选择 + 多模态输入（@引用/图片/语音接口）
-- 右侧输出：流式输出 + 工具卡片（每个工具独立模块展示，支持 Keep/Undo）
-- Dock Panel：KB 管理/检索与引用、文章结构图（思维导图实时刷新）、Linter、Search、Runs/Logs
-  - KB 管理（可拖动）支持：库列表、抽卡队列、风格手册入队/生成、卡片预览、库体检（声音指纹：像什么/稳不稳/怎么修；高级里看“率/n‑gram/证据覆盖/离群文档”）
+"一个人的内容团队"桌面客户端：对话为中心的极简界面，用户通过对话框与 AI 内容团队交互。
 
-### 开发说明
-已补齐最小可运行骨架（Electron + Vite + React + TypeScript），用于快速打通：
-- 三栏布局 + Dock Panel（中下方）
-- Monaco Editor（Markdown）
-- 右侧 Agent：流式输出 + Tool Blocks（Keep/Undo）
-- 右侧正文 DraftBox（文本框+一键复制）+ “只看正文/显示步骤”切换（隐藏/展开工具步骤）
-- Plan/Agent：支持 **ReAct（XML `<tool_calls>`）** 的工具调用（开发期先在 Desktop 本地执行最小工具集）
-- 输入区支持“结构化意图（runIntent）”（开发期已落地）：`自动/写作/改写/润色/分析/操作`，会写入 Main Doc 并注入 Context Pack（减少写作强闭环误伤/漏判；为 M3 Skills 做准备）
-- Topic Lab 最小版：生成选题/标题/角度，选中后写入 Main Doc 并新建草稿文件（可 Undo）
+### 界面设计
 
-### ReAct（开发期：本地工具执行）
-Plan/Agent 模式会按回合注入 Context Pack：
-- Main Doc（本次 Run 主线；含结构化意图 `runIntent`）
-- Doc Rules（项目级：`doc.rules.md`）
-- 编辑器选区（`EDITOR_SELECTION`：路径/范围/选中文本，带截断）
-- 项目状态（打开文件、activePath、文件列表摘要）
+- **56px 导航栏**（左侧）：新对话、对话历史、用户设置
+- **全宽对话区**（主区域）：消息流居中，最大宽度 720px
+- **工作面板**（按需展开）：文档编辑（Monaco Editor）、知识库浏览、风格分析报告等
+- macOS 原生毛玻璃窗口（hiddenInset + vibrancy）
 
-工具调用协议：
-- 模型要调用工具时输出 **且只能输出** XML：`<tool_call/>` 或 `<tool_calls/>`
-- 系统执行工具后用 `<tool_result/>` 回传（system message）
-- 协议硬约束：工具调用 XML 必须“整条消息独占”，不得夹杂自然语言；否则 Gateway 会自动要求模型重试（避免“问你但仍继续跑”）
-- 当 todo 中出现 `blocked/等待确认/请确认`，Gateway 会以 `clarify_waiting` 暂停等待用户输入；你也可以回复“继续”让它按默认假设推进（可能偏离你的偏好）。
-- SSE 边界增强（开发期已落地）：Gateway 会在每次模型调用前发送 `assistant.start(turn)`，并为 `assistant.delta/assistant.done` 补齐 `turn` 字段；Desktop 据此切分回合边界（减少 UI 串气泡/时序猜测）。
+### 核心能力
 
-当前最小工具集：
-- `run.mainDoc.get` / `run.mainDoc.update`（low / auto_apply / 可 Undo）
-- `project.listFiles` / `project.docRules.get`（只读）
-- `doc.read`（只读；会优先读取提案态最新内容：`doc.write/doc.applyEdits/doc.restoreSnapshot/doc.splitToDir`，不要求先 Keep）
-- `kb.search`（只读：检索 KB 的段落/卡片；用于仿写取样例/模板）
-- `lint.style`（只读：对齐风格库，输出 issues + rewritePrompt）
-- `doc.write`（新建文件：low / auto_apply / 可 Undo；覆盖已有文件：medium / proposal-first，Keep 才覆盖）
-- `doc.getSelection` / `doc.replaceSelection`（选段改写；low / auto_apply / 可 Undo）
-- `doc.applyEdits`（**proposal-first**：先出预览，点击 Keep 才应用；Undo 可回滚）
+- **Electron 壳**：多窗口、自动更新、`app://` 自定义协议
+- **Agent 对话**：流式输出 + Tool Blocks（Keep/Undo）
+- **本地工具执行**：`doc.*` / `kb.*` / `lint.*` / `project.*` 等工具在本地执行
+- **知识库**：KB 数据全部在本地，检索在本地执行
+- **风格库**：本地存储，本地 lint
+- **MCP Client**：连接内置和外部 MCP Server
+- **Skill 扩展包**：热加载本地 skill 扩展
+- **代码执行沙箱**：`code.exec` 支持安全执行代码片段
 
-### 编辑器标签页（Tab）规则（仿 VSCode 预览模式）
-- **单击左侧文件**：预览打开（复用同一个预览 Tab，会替换/关闭上一个预览文件）
-- **双击左侧文件**：固定打开（新增一个 Tab，不会被单击替换）
-- **Tab 可关闭（×）**：关闭不会影响左侧文件树（仅关闭编辑区视图）
+### Agent 交互
+
+Desktop 通过 SSE 连接 Gateway 进行 Agent Run：
+- Gateway 发送 `tool.call` → Desktop 执行本地工具 → 回传 `tool_result`
+- Tool Blocks 支持 Keep/Undo（proposal-first 写入，确认才落盘）
+- Context Pack 每回合注入：Main Doc / Doc Rules / 选区 / @ 引用 / KB 检索 / 项目状态
 
 ### 运行（本地）
+
 在项目根目录：
 
 ```bash
@@ -59,8 +39,6 @@ npm run dev:desktop
 ```
 
 说明：
-- 会启动 Vite（默认 `5173`，可通过环境变量 `DESKTOP_DEV_PORT` 修改）并拉起 Electron。
-- 如需真实模型流式输出，请先启动 Gateway（默认 `8000`），并在根目录 `.env` 配好 `LLM_BASE_URL / LLM_MODEL / LLM_API_KEY`。
-- Desktop dev 通过 Vite proxy 把 `/api/*` 转发到 Gateway，避免 Electron renderer 跨域问题。
-
-
+- 会启动 Vite（默认 `5173`）并拉起 Electron。
+- 如需真实模型输出，请先启动 Gateway（默认 `8000`），并在根目录 `.env` 配好 LLM 相关变量。
+- Desktop dev 通过 Vite proxy 把 `/api/*` 转发到 Gateway。
