@@ -1,0 +1,19 @@
+{
+  "id": "xlsx",
+  "name": "Excel 电子表格",
+  "description": "创建、读取、编辑 .xlsx 电子表格。触发词：Excel、xlsx、表格、spreadsheet、数据表",
+  "version": "1.0.0",
+  "priority": 50,
+  "autoEnable": true,
+  "triggers": [
+    {
+      "when": "text_regex",
+      "args": {
+        "pattern": "(?i)(\\.xlsx|excel|电子表格|spreadsheet|数据表|工作表|表格.*导出|导出.*excel|做.*表格)"
+      }
+    }
+  ],
+  "policies": [],
+  "builtin": true,
+  "ui": { "badge": "XLSX", "color": "green" }
+}

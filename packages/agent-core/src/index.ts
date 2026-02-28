@@ -6,7 +6,7 @@ export type { ParsedToolCall } from "./runMachine.js";
 export type { TriggerRule, SkillManifest, ActiveSkill, SkillConfigOverride, SkillConfig, RegisterSkillOptions } from "./skills.js";
 export {
   SkillRegistry, skillRegistry, listRegisteredSkills,
-  CORPUS_INGEST_SKILL, SKILL_MANIFESTS_V1, STYLE_IMITATE_SKILL,
+  SKILL_MANIFESTS_V1, STYLE_IMITATE_SKILL,
   activateSkills, pickSkillStageKeyForAgentRun, parseActiveSkillsFromContextPack, mergeSkillManifests,
 } from "./skills.js";
 

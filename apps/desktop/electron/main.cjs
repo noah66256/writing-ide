@@ -1863,6 +1863,58 @@ app.whenReady().then(async () => {
     console.error("[electron] MCP Manager 初始化失败:", e);
   }
 
+  // ======== Bundled Skills 同步到 userData ========
+  try {
+    // 解析 bundled-skills 目录路径（兼容 dev 和 packaged 环境）
+    let resolvedBundledDir = "";
+    if (app.isPackaged) {
+      // 打包后从 app.asar.unpacked 加载
+      resolvedBundledDir = path.join(
+        process.resourcesPath,
+        "app.asar.unpacked",
+        "electron",
+        "bundled-skills",
+      );
+    } else {
+      // dev 模式：app.getAppPath() 返回入口脚本所在目录（electron/），
+      // bundled-skills 就在同级
+      resolvedBundledDir = path.join(app.getAppPath(), "bundled-skills");
+    }
+    const userSkillsDir = path.join(app.getPath("userData"), "skills");
+    await fsp.mkdir(userSkillsDir, { recursive: true });
+
+    let bundledEntries = [];
+    try {
+      bundledEntries = await fsp.readdir(resolvedBundledDir, { withFileTypes: true });
+    } catch { /* bundled-skills 目录不存在时静默跳过 */ }
+
+    for (const entry of bundledEntries) {
+      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+      const src = path.join(resolvedBundledDir, entry.name);
+      const dest = path.join(userSkillsDir, entry.name);
+      try {
+        const srcManifest = JSON.parse(await fsp.readFile(path.join(src, "skill.json"), "utf-8"));
+        let skip = false;
+        try {
+          const destManifest = JSON.parse(await fsp.readFile(path.join(dest, "skill.json"), "utf-8"));
+          // 仅当版本相同且 builtin 标记已一致时才跳过
+          if (destManifest.version === srcManifest.version && destManifest.builtin === srcManifest.builtin) {
+            skip = true;
+          }
+        } catch { /* 目标不存在或读取失败，需要复制 */ }
+        if (skip) continue;
+        // 先删后拷，避免旧文件残留
+        await fsp.rm(dest, { recursive: true, force: true }).catch(() => {});
+        await fsp.cp(src, dest, { recursive: true });
+        console.log(`[electron] seeded bundled skill: ${entry.name}`);
+      } catch (e) {
+        console.warn(`[electron] seed skill failed: ${entry.name} —`, e?.message);
+      }
+    }
+  } catch (e) {
+    console.warn("[electron] bundled skills seed error:", e?.message);
+  }
+
   // ======== Skill 扩展包加载器初始化 ========
   try {
     const { SkillLoader, toMcpServerConfig } = await import("./skill-loader.mjs");

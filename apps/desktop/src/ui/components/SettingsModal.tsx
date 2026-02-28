@@ -348,7 +348,7 @@ function SkillTabContent() {
         {allSkills.map((skill) => {
           const enabled = skillOverrides[skill.id]?.enabled ?? skill.autoEnable;
           const friendlyDesc = SKILL_DESCRIPTIONS[skill.id] ?? skill.description;
-          const isExt = skill._isExternal;
+          const isExt = skill._isExternal && !(skill as any).builtin;
           return (
             <div
               key={skill.id}
@@ -419,9 +419,12 @@ function SkillTabContent() {
         </button>
         <div className="flex-1" />
         <span className="text-[10px] text-text-faint">
-          {externalSkills.length > 0
-            ? `${externalSkills.length} 个扩展包已加载`
-            : "在扩展目录中放入 skill 文件夹即可生效"}
+          {(() => {
+            const userCount = externalSkills.filter((s) => !(s as any).builtin).length;
+            return userCount > 0
+              ? `${userCount} 个扩展包已加载`
+              : "在扩展目录中放入 skill 文件夹即可生效";
+          })()}
         </span>
       </div>
     </div>

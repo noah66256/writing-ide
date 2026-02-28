@@ -1,0 +1,19 @@
+{
+  "id": "pptx",
+  "name": "PPT 演示文稿",
+  "description": "创建、读取、编辑 .pptx 演示文稿。触发词：PPT、slides、演示文稿、幻灯片、deck",
+  "version": "1.0.0",
+  "priority": 50,
+  "autoEnable": true,
+  "triggers": [
+    {
+      "when": "text_regex",
+      "args": {
+        "pattern": "(?i)(\\.pptx|ppt|演示文稿|幻灯片|slides|slide\\s*deck|pitch\\s*deck|做.*PPT|创建.*演示)"
+      }
+    }
+  ],
+  "policies": [],
+  "builtin": true,
+  "ui": { "badge": "PPTX", "color": "orange" }
+}

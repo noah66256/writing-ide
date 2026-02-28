@@ -1,0 +1,19 @@
+{
+  "id": "docx",
+  "name": "Word 文档生成",
+  "description": "创建、读取、编辑 .docx 文件。触发词：Word、docx、文档、报告、备忘录、信函、模板",
+  "version": "1.0.0",
+  "priority": 50,
+  "autoEnable": true,
+  "triggers": [
+    {
+      "when": "text_regex",
+      "args": {
+        "pattern": "(?i)(\\.docx|word文档|word\\s*doc|生成.*文档|创建.*文档|写.*报告|备忘录|信函|文档模板|导出.*word)"
+      }
+    }
+  ],
+  "policies": [],
+  "builtin": true,
+  "ui": { "badge": "DOCX", "color": "blue" }
+}

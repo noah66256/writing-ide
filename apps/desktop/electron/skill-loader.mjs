@@ -207,6 +207,7 @@ function parseManifest(raw, skillDir, fallbackId) {
     ...(conflicts.length ? { conflicts } : {}),
     ...(requires.length ? { requires } : {}),
     source: "user",   // 外部扩展强制标记为 user
+    ...(typeof raw.builtin === "boolean" ? { builtin: raw.builtin } : {}),
     ...(mcp ? { mcp } : {}),
     ui: { badge, ...(color ? { color } : {}) },
   };
