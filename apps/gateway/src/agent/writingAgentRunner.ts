@@ -435,7 +435,7 @@ export class WritingAgentRunner {
       const hasContent = assistantText.length > 0 || completedToolUses.length > 0;
       if (!streamErrored && !hasContent) {
         streamErrored = true;
-        lastStreamError = "EMPTY_RESPONSE: API 返回 200 但内容为空";
+        lastStreamError = "模型服务返回了空响应，正在重试...";
       }
 
       if (!streamErrored) break;
