@@ -654,7 +654,12 @@ export class WritingAgentRunner {
         turn: this.turn,
       });
 
-      toolResultMessages.push(buildToolResultMessage(toolUse.id, result.output, !result.ok));
+      const MAX_TOOL_RESULT_CHARS = 60_000;
+      const rawOutput = typeof result.output === "string" ? result.output : JSON.stringify(result.output ?? null);
+      const cappedOutput = rawOutput.length > MAX_TOOL_RESULT_CHARS
+        ? rawOutput.slice(0, MAX_TOOL_RESULT_CHARS) + `\n...[工具结果已截断，共 ${rawOutput.length} 字符]`
+        : rawOutput;
+      toolResultMessages.push(buildToolResultMessage(toolUse.id, cappedOutput, !result.ok));
 
       if (toolUse.name === "run.done") {
         hasRunDone = true;
