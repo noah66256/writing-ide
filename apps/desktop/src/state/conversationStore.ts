@@ -106,6 +106,8 @@ function clampTitle(s: string) {
 }
 
 let diskHydrated = false;
+/** 水化完成前禁止写盘，防止 hydrateFromDisk IPC 未返回时把 conversations:[] 覆盖掉已有数据 */
+let diskWriteAllowed = false;
 let persistTimer: any = null;
 let pendingPayload: any = null;
 
@@ -154,6 +156,8 @@ function capConversations(list: Conversation[]) {
 function schedulePersistToDisk(args: { conversations: Conversation[]; draftSnapshot: RunSnapshot | null }) {
   const api = window.desktop?.history;
   if (!api?.saveConversations) return;
+  // 水化未完成时不写盘，避免以 conversations:[] 覆盖已有数据
+  if (!diskWriteAllowed) return;
 
   const conversations = capConversations(args.conversations);
   const draftSnapshot = args.draftSnapshot ?? null;
@@ -186,7 +190,11 @@ export const useConversationStore = create<ConversationState>()(
         if (diskHydrated) return;
         diskHydrated = true;
         const api = window.desktop?.history;
-        if (!api?.loadConversations) return;
+        if (!api?.loadConversations) {
+          // 无 Electron disk API（纯浏览器模式），直接开放写权限
+          diskWriteAllowed = true;
+          return;
+        }
 
         try {
           const res = await api.loadConversations();
@@ -210,8 +218,9 @@ export const useConversationStore = create<ConversationState>()(
 
           if (Object.keys(patch).length) set(patch as any);
 
+          // 水化成功后开放写权限，并把最终态同步回磁盘
+          diskWriteAllowed = true;
           const finalDraft = (patch.draftSnapshot ?? curDraft) as any;
-          // 把"最终态"同步回磁盘，保证 dev/packaged/迁移都能恢复
           schedulePersistToDisk({ conversations: finalConvs, draftSnapshot: finalDraft });
 
           // 并把 localStorage 写回一个"很小的占位"，清掉旧的大对象（避免下一次 setItem 直接 quota 崩溃）
@@ -224,7 +233,8 @@ export const useConversationStore = create<ConversationState>()(
             // ignore
           }
         } catch {
-          // ignore
+          // 读盘出错也要开放写权限，否则永远无法写入
+          diskWriteAllowed = true;
         }
       },
       addConversation: (c) => {
