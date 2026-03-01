@@ -330,6 +330,7 @@ export class WritingAgentRunner {
 
     // Build tool_result messages and emit events
     const toolResultBlocks: any[] = [];
+    const MAX_TOOL_RESULT_CHARS = 60_000;
     for (const { toolUse, result } of results) {
       const output = result.output;
       this.ctx.writeEvent("tool.result", {
@@ -338,10 +339,14 @@ export class WritingAgentRunner {
         ok: result.ok,
         output,
       });
+      const rawContent = typeof output === "string" ? output : JSON.stringify(output);
+      const content = rawContent.length > MAX_TOOL_RESULT_CHARS
+        ? rawContent.slice(0, MAX_TOOL_RESULT_CHARS) + `\n...[工具结果已截断，共 ${rawContent.length} 字符]`
+        : rawContent;
       toolResultBlocks.push({
         type: "tool_result",
         tool_use_id: toolUse.id,
-        content: typeof output === "string" ? output : JSON.stringify(output),
+        content,
       });
     }
 

@@ -2318,13 +2318,20 @@ const tools: ToolDefinition[] = [
       const virt = getVirtualFileContentFromPendingProposals({ path, baseExists: Boolean(file), baseContent: diskContent });
       if (!file && (!virt || !virt.exists)) return { ok: false, error: "FILE_NOT_FOUND" };
       if (virt && !virt.exists) return { ok: false, error: "FILE_NOT_FOUND" };
-      const content = virt && virt.exists ? virt.content : diskContent;
+      const fullContent = virt && virt.exists ? virt.content : diskContent;
+      const MAX_READ_CHARS = 40_000;
+      const truncated = fullContent.length > MAX_READ_CHARS;
+      const content = truncated
+        ? fullContent.slice(0, MAX_READ_CHARS) + `\n\n...[文件已截断，共 ${fullContent.length} 字符，仅返回前 ${MAX_READ_CHARS} 字符。如需后续内容请用 doc.read 配合 offset 参数分段读取]`
+        : fullContent;
       return {
         ok: true,
         output: {
           ok: true,
           path,
           content,
+          totalChars: fullContent.length,
+          truncated,
           virtualFromProposal: Boolean(virt),
           proposalSources: virt?.sources ?? [],
         },
