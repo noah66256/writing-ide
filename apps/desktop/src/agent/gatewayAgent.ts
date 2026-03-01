@@ -42,6 +42,8 @@ export type GatewayRunArgs = {
   activeSkillIds?: string[];
   kbMentionIds?: string[];
   images?: ImageAttachment[];
+  /** 本次 run 对应的对话 ID，用于多任务并发路由 */
+  convId?: string;
 };
 
 
@@ -1850,6 +1852,8 @@ export function startGatewayRun(args: {
   activeSkillIds?: string[];
   kbMentionIds?: string[];
   images?: ImageAttachment[];
+  /** 本次 run 对应的对话 ID，用于多任务并发路由 */
+  convId?: string;
 }): GatewayRunController {
   return startGatewayRunWs(args as GatewayRunArgs);
 }

@@ -21,6 +21,7 @@ import {
   setActiveRunCancel,
   cancelActiveRun,
 } from "@/state/runStore";
+import { cancelConvRun } from "@/state/runRegistry";
 import { useProjectStore } from "@/state/projectStore";
 import { useAuthStore } from "@/state/authStore";
 import { useConversationStore, buildCurrentSnapshot } from "@/state/conversationStore";
@@ -123,8 +124,13 @@ export function ChatArea() {
         await Promise.all(imageFiles.map((f) => fileToImageAttachment(f)))
       ).filter((it): it is ImageAttachment => Boolean(it));
 
-      // 运行中发送：先中断当前 run
-      cancelActiveRun("start_new_turn_or_user_interrupt");
+      // 运行中发送：先中断当前对话的 run（不影响其他对话的后台 run）
+      const preSendConvId = useConversationStore.getState().activeConvId;
+      if (preSendConvId) {
+        cancelConvRun(preSendConvId, "start_new_turn_or_user_interrupt");
+      } else {
+        cancelActiveRun("start_new_turn_or_user_interrupt");
+      }
       controllerRef.current = null;
 
       stickRef.current = true;
@@ -167,12 +173,15 @@ export function ChatArea() {
       const cleanPrompt = cleanPromptRaw.trim().length > 0 ? cleanPromptRaw : images.length > 0 ? " " : cleanPromptRaw;
       const activeSkillIds = meta?.mentions?.filter((m) => m.type === "skill").map((m) => m.id);
       const kbMentionIds = meta?.mentions?.filter((m) => m.type === "kb").map((m) => m.id);
+      // 读取当前 activeConvId（此时可能刚被 setActiveConvId 更新）
+      const runConvId = useConversationStore.getState().activeConvId ?? undefined;
       const c = startGatewayRun({
         gatewayUrl, mode, model, prompt: cleanPrompt,
         ...(images.length ? { images } : {}),
         ...(targetAgentIds?.length ? { targetAgentIds } : {}),
         ...(activeSkillIds?.length ? { activeSkillIds } : {}),
         ...(kbMentionIds?.length ? { kbMentionIds } : {}),
+        ...(runConvId ? { convId: runConvId } : {}),
       });
       controllerRef.current = c;
       setActiveRunCancel((reason?: string) => {

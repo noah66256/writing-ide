@@ -9,11 +9,12 @@
 
 import { useProjectStore } from "../state/projectStore";
 import { useProjectIndexStore } from "../state/projectIndexStore";
-import { useRunStore, type Mode } from "../state/runStore";
 import { useKbStore } from "../state/kbStore";
 import { useAuthStore } from "../state/authStore";
 import { activateSkills } from "@writing-ide/agent-core";
 import { buildStyleLinterLibrariesSidecar, executeToolCall, getTool } from "./toolRegistry";
+import { createRunTarget } from "./runTarget";
+import { cancelConvRun, setConvRunCancel } from "../state/runRegistry";
 import {
   type GatewayRunController,
   type GatewayRunArgs,
@@ -51,6 +52,10 @@ function toWsBase(baseUrl: string): string {
 // ---------------------------------------------------------------------------
 
 export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
+  // 取消该对话已有的 run（同一对话不允许并发）
+  if (args.convId) cancelConvRun(args.convId, "replaced_by_new_run");
+
+  const rt = createRunTarget(args.convId ?? "");
   const {
     setRunning,
     setActivity,
@@ -62,13 +67,13 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
     patchTool,
     updateMainDoc,
     log,
-  } = useRunStore.getState();
+  } = rt;
 
   setRunning(true);
   setActivity("正在构建上下文…", { resetTimer: true });
 
   // Main Doc goal 初始化
-  const cur = useRunStore.getState().mainDoc;
+  const cur = rt.getMainDoc();
   if (!cur.goal) {
     const raw = String(args.prompt ?? "").trim();
     const ol = raw.replace(/\s+/g, " ");
@@ -107,7 +112,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
   try {
     watchdogId = window.setInterval(() => {
       try {
-        if (ended || abort.signal.aborted || !useRunStore.getState().isRunning) return;
+        if (ended || abort.signal.aborted || !rt.getIsRunning()) return;
         const ms = Date.now() - lastProgressAt;
         if (ms < 120_000 || stalledLogged) return;
         stalledLogged = true;
@@ -119,6 +124,8 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
 
   // Keep a reference so cancel() can close the socket
   let socketRef: WebSocket | null = null;
+  // 防止旧 run 的 finally 清除新 run 的 cancel 句柄
+  let cancelledExternally = false;
 
   // -- Async run -----------------------------------------------------------
 
@@ -135,7 +142,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
 
       // -- refs ---
       const promptRefs = parseRefsFromPrompt(args.prompt);
-      const pinned = (useRunStore.getState().ctxRefs ?? []).map((r: any) => ({
+      const pinned = (rt.getCtxRefs() ?? []).map((r: any) => ({
         kind: r?.kind === "dir" ? ("dir" as const) : ("file" as const),
         path: String(r?.path ?? "").trim(),
       }));
@@ -158,7 +165,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
         return out;
       })();
       if (promptRefs.length) {
-        for (const r of promptRefs) useRunStore.getState().addCtxRef({ kind: r.kind, path: r.path } as any);
+        for (const r of promptRefs) rt.addCtxRef({ kind: r.kind, path: r.path } as any);
       }
       const referencesText = await buildReferencesTextFromRefs(effectiveRefs).catch(() => "");
       setActivity("正在构建上下文…");
@@ -175,8 +182,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       // 绑定机制已废弃，styleContractV1 不再基于 kbAttachedLibraryIds 自动选择
       // 风格库的选择由 @ 提及或 agent 主动触发
       try {
-        const run = useRunStore.getState();
-        const main: any = run.mainDoc ?? {};
+        const main: any = rt.getMainDoc() ?? {};
         const existing = main?.styleContractV1;
         const libsMeta = useKbStore.getState().libraries ?? [];
         const metaById = new Map(libsMeta.map((l: any) => [String(l?.id ?? "").trim(), l]));
@@ -304,7 +310,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               .map((f: any) => ({ path: String(f?.path ?? "").trim() }))
               .filter((f: any) => f.path).slice(0, 5000);
 
-        const att = useRunStore.getState().kbAttachedLibraryIds ?? [];
+        const att = rt.getKbAttachedLibraryIds() ?? [];
         let styleLinterLibraries: any[] | undefined;
         if (Array.isArray(att) && att.length) {
           const ret = await buildStyleLinterLibrariesSidecar({ maxLibraries: 6 }).catch(() => ({ ok: false } as any));
@@ -538,7 +544,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           if (event === "subagent.start") {
             const agName = String(data?.agentName ?? data?.agentId ?? "");
             log("info", "subagent.start", data);
-            if (useRunStore.getState().isRunning) {
+            if (rt.getIsRunning()) {
               setActivity(agName ? `${agName} 正在处理…` : "子 Agent 正在处理…", { resetTimer: true });
             }
           }
@@ -551,7 +557,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               if (bid) { finishAssistant(bid); subAgentBubbles.delete(doneAgId); }
             }
             log("info", "subagent.done", data);
-            if (useRunStore.getState().isRunning) setActivity("正在继续…");
+            if (rt.getIsRunning()) setActivity("正在继续…");
           }
 
           // ---- run.end ----
@@ -561,9 +567,8 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
 
             // 触发记忆提取（异步，不阻塞 UI）
             try {
-              const runState = useRunStore.getState();
-              const mode = runState.mode ?? "chat";
-              const summary = runState.dialogueSummaryByMode?.[mode] ?? "";
+              const mode = rt.getMode() ?? "chat";
+              const summary = rt.getDialogueSummaryByMode()?.[mode] ?? "";
               if (summary.trim()) {
                 const projStore = useProjectStore.getState();
                 const rootDir = projStore.rootDir ?? "";
@@ -605,7 +610,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             const level = kind0 === "error" ? "error" : kind0 === "warn" ? "warn" : "info";
             log(level as any, "run.notice", data);
             const title = String(data?.title ?? "").trim();
-            if (useRunStore.getState().isRunning && title) {
+            if (rt.getIsRunning() && title) {
               setActivity(`系统：${title}`, { resetTimer: true });
             }
           }
@@ -621,7 +626,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               if (assistantId) finishAssistant(assistantId);
               assistantId = null;
             }
-            if (useRunStore.getState().isRunning) setActivity("正在生成…");
+            if (rt.getIsRunning()) setActivity("正在生成…");
           }
 
           // ---- assistant.delta ----
@@ -649,7 +654,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               if (assistantId) finishAssistant(assistantId);
               assistantId = null;
             }
-            if (useRunStore.getState().isRunning) setActivity("正在继续…");
+            if (rt.getIsRunning()) setActivity("正在继续…");
           }
 
           // ---- tool.call ----
@@ -812,7 +817,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                 hasApply: exec.result.ok ? typeof exec.result.apply === "function" : false,
               },
             });
-            if (useRunStore.getState().isRunning) setActivity("正在等待模型继续…", { resetTimer: true });
+            if (rt.getIsRunning()) setActivity("正在等待模型继续…", { resetTimer: true });
           }
 
           // ---- tool.result (server-side tools backfill) ----
@@ -829,7 +834,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             if (toolCallId) {
               const q = gatewayToolStepIdsByCallId.get(toolCallId) ?? [];
               const stepId = q.length ? q[0] : "";
-              const st = stepId ? (useRunStore.getState().steps ?? []).find((s: any) => s && s.type === "tool" && s.id === stepId) : null;
+              const st = stepId ? (rt.getSteps() ?? []).find((s: any) => s && s.type === "tool" && s.id === stepId) : null;
 
               if (st && st.type === "tool" && st.status === "running") {
                 patchTool(stepId, {
@@ -855,7 +860,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                       .filter((e: any) => [e.startLineNumber, e.startColumn, e.endLineNumber, e.endColumn].every((n: any) => Number.isFinite(n) && n > 0))
                       .slice(0, 24);
 
-                    const stepNow = (useRunStore.getState().steps ?? []).find((x: any) => x && x.type === "tool" && x.id === stepId) as any;
+                    const stepNow = (rt.getSteps() ?? []).find((x: any) => x && x.type === "tool" && x.id === stepId) as any;
                     const inPathRaw = stepNow?.input && typeof stepNow.input === "object" ? String((stepNow.input as any)?.path ?? "").trim() : "";
                     const inputText = stepNow?.input && typeof stepNow.input === "object" ? String((stepNow.input as any)?.text ?? "").trim() : "";
                     const targetPath = (inPathRaw || useProjectStore.getState().activePath || "").replaceAll("\\", "/");
@@ -911,7 +916,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                 if (q.length) q.shift();
                 if (q.length) gatewayToolStepIdsByCallId.set(toolCallId, q);
                 else gatewayToolStepIdsByCallId.delete(toolCallId);
-                if (useRunStore.getState().isRunning) setActivity("正在等待模型继续…", { resetTimer: true });
+                if (rt.getIsRunning()) setActivity("正在等待模型继续…", { resetTimer: true });
               }
             }
             log("info", "tool.result", data);
@@ -931,7 +936,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       });
 
       // If we get here without run.end having set running=false, clean up
-      if (useRunStore.getState().isRunning) {
+      if (rt.getIsRunning()) {
         setRunning(false);
         setActivity(null);
       }
@@ -965,17 +970,22 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
     } finally {
       ended = true;
       clearWatchdog();
+      // 仅当 cancel 未被外部提前调用时才清除句柄
+      // （防止新 run 注册句柄后被旧 run 的 finally 误清）
+      if (args.convId && !cancelledExternally) setConvRunCancel(args.convId, null);
       if (socketRef) { try { socketRef.close(); } catch {} socketRef = null; }
       resolveDoneOnce();
     }
   })();
 
-  return {
+  const controller: GatewayRunController = {
     done,
     cancel: (reason?: string) => {
       if (ended) return;
+      cancelledExternally = true;
       const r = String(reason ?? "unknown").trim() || "unknown";
       cancelReason = r;
+      if (args.convId) setConvRunCancel(args.convId, null);
       log("warn", "ws.run.cancel", { reason: r });
       try { (abort as any).abort(r); } catch { abort.abort(); }
       setRunning(false); setActivity(null);
@@ -984,4 +994,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       subAgentBubbles.clear();
     },
   };
+  // 注册到每对话取消注册表（用于同一对话发新消息时取消旧 run）
+  if (args.convId) setConvRunCancel(args.convId, controller.cancel);
+  return controller;
 }

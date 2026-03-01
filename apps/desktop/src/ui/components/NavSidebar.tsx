@@ -18,8 +18,10 @@ import {
   Pencil,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { buildCurrentSnapshot, useConversationStore, type Conversation } from "@/state/conversationStore";
-import { useRunStore, cancelActiveRun } from "@/state/runStore";
+import { buildCurrentSnapshot, useConversationStore, type Conversation, type RunSnapshot } from "@/state/conversationStore";
+import { useRunStore, cancelActiveRun, type ToolBlockStep } from "@/state/runStore";
+import { useRunRegistry } from "@/state/runRegistry";
+import { cancelConvRun } from "@/state/runRegistry";
 import { useProjectStore } from "@/state/projectStore";
 import { useAuthStore } from "@/state/authStore";
 import { useThemeStore, THEME_OPTIONS, type ThemeId } from "@/state/themeStore";
@@ -31,6 +33,55 @@ import { authHeader } from "@/agent/gatewayAgent";
 import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
 
 /* ─── Helpers ─── */
+
+/** 将 registry buffer 中的最新状态合并到 base snapshot，生成可加载的快照。
+ *
+ * 合并策略：
+ * - steps：以 base.steps 为基础（含用户步骤/历史），buffer 中已有的 id 用 buffer 版本更新，
+ *   buffer 中新增的步骤（后台执行产生）追加到末尾。
+ * - mainDoc/todoList/ctxRefs/logs：直接用 buffer 中的最新版本。
+ */
+function buildSnapshotFromBuffer(base: RunSnapshot, buffer: import("@/state/runRegistry").RunBuffer): RunSnapshot {
+  const deepClone = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
+
+  function serializeStep(step: any): any {
+    if (step?.type !== "tool") return deepClone(step);
+    const { apply: _a, undo: _u, ...rest } = step as ToolBlockStep;
+    return deepClone({ ...rest, undoable: false });
+  }
+
+  // buffer 步骤索引（id → step）
+  const bufMap = new Map<string, any>();
+  for (const s of buffer.steps ?? []) {
+    if ((s as any).id) bufMap.set((s as any).id, s);
+  }
+
+  // 1. 以 base.steps 为基础，buffer 有同 id 的步骤则用 buffer 版本更新
+  const seenIds = new Set<string>();
+  const merged: any[] = [];
+  for (const s of base.steps ?? []) {
+    const id = (s as any).id;
+    if (id) seenIds.add(id);
+    merged.push(serializeStep(bufMap.has(id) ? bufMap.get(id) : s));
+  }
+
+  // 2. 追加 buffer 中新增的步骤（后台执行期间产生，base 快照里没有）
+  for (const s of buffer.steps ?? []) {
+    const id = (s as any).id;
+    if (id && !seenIds.has(id)) {
+      merged.push(serializeStep(s));
+    }
+  }
+
+  return {
+    ...base,
+    mainDoc: deepClone(buffer.mainDoc ?? base.mainDoc ?? {}),
+    todoList: deepClone(buffer.todoList ?? base.todoList ?? []),
+    steps: merged as RunSnapshot["steps"],
+    logs: deepClone(buffer.logs?.length ? buffer.logs : (base.logs ?? [])),
+    ctxRefs: deepClone(buffer.ctxRefs ?? base.ctxRefs ?? []),
+  };
+}
 
 function conversationTitle(): string {
   const all = useRunStore.getState().steps ?? [];
@@ -58,6 +109,15 @@ export function NavSidebar() {
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const settingsModalRequest = useKbStore((s) => s.settingsModalRequest);
   const settingsRef = useRef<HTMLDivElement>(null);
+
+  // 运行注册表：用于 NavSidebar 标签的状态指示
+  const convRuns = useRunRegistry((s) => s.runs);
+  // 用于触发 30s 后消隐 ✓ 标记的时间戳更新
+  const [nowTs, setNowTs] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowTs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const hasCurrentContent = useMemo(() => {
     return (
@@ -119,7 +179,11 @@ export function NavSidebar() {
     const activeConv = activeConvId ? conversations.find((c) => c.id === activeConvId) : null;
     if (activeConv?.title === "新任务" && steps.length === 0) return;
 
-    cancelActiveRun("conversation_switch");
+    if (activeConvId) {
+      cancelConvRun(activeConvId, "new_chat");
+    } else {
+      cancelActiveRun("new_chat");
+    }
     // 保存当前对话
     if (hasCurrentContent && !activeConvId) {
       addConversation({ title: conversationTitle(), snapshot: buildCurrentSnapshot() });
@@ -138,24 +202,42 @@ export function NavSidebar() {
   const handleLoadConversation = useCallback(
     (id: string) => {
       if (activeConvId !== id) {
-        cancelActiveRun("conversation_switch");
-      }
-      if (hasCurrentContent && activeConvId !== id) {
-        if (activeConvId) {
-          useConversationStore.getState().updateConversation(activeConvId, { snapshot: buildCurrentSnapshot() });
-        } else {
-          addConversation({ title: conversationTitle(), snapshot: buildCurrentSnapshot() });
+        // 不再强制取消后台 run——保留其继续执行
+        // 保存当前对话到 conversationStore
+        if (hasCurrentContent) {
+          if (activeConvId) {
+            useConversationStore.getState().updateConversation(activeConvId, { snapshot: buildCurrentSnapshot() });
+          } else {
+            addConversation({ title: conversationTitle(), snapshot: buildCurrentSnapshot() });
+          }
         }
       }
       const conv = conversations.find((c) => c.id === id);
       if (!conv) return;
-      loadSnapshot(conv.snapshot);
-      // 恢复对话绑定的项目文件夹：每个对话独立绑定
-      const snapDir = conv.snapshot?.projectDir ?? null;
+
+      // 若该对话有后台 buffer（正在运行或已完成但未被覆盖），用 buffer 恢复
+      const runEntry = useRunRegistry.getState().runs[id];
+      const snapshotToLoad = runEntry?.buffer
+        ? buildSnapshotFromBuffer(conv.snapshot, runEntry.buffer)
+        : conv.snapshot;
+
+      loadSnapshot(snapshotToLoad);
+
+      // 若后台 run 仍在执行，恢复 isRunning=true 和 activity
+      if (runEntry?.isRunning) {
+        useRunStore.getState().setRunning(true);
+        const actText = runEntry.buffer?.activity?.text;
+        if (actText) useRunStore.getState().setActivity(actText, { resetTimer: false });
+      } else {
+        useRunStore.getState().setRunning(false);
+      }
+
+      // 恢复对话绑定的项目文件夹
+      const snapDir = snapshotToLoad?.projectDir ?? null;
       const currentDir = useProjectStore.getState().rootDir;
       if (snapDir !== currentDir) {
         if (snapDir) {
-          void useProjectStore.getState().loadProjectFromDisk(snapDir).catch(() => {});
+          void useProjectStore.getState().loadProjectFromDisk(snapDir).catch(() => void 0);
         } else {
           useProjectStore.getState().clearProject();
         }
@@ -170,7 +252,11 @@ export function NavSidebar() {
       e.stopPropagation();
       if (activeConvId === id) {
         cancelActiveRun("conversation_delete");
+      } else {
+        // 后台运行的对话被删除：取消后台 run
+        cancelConvRun(id, "conversation_delete");
       }
+      useRunRegistry.getState().remove(id);
       deleteConversation(id);
       if (activeConvId === id) {
         resetRun();
@@ -232,17 +318,27 @@ export function NavSidebar() {
         {sortedConversations.length === 0 ? (
           <div className="px-3 py-6 text-[12px] text-text-faint text-center">暂无对话记录</div>
         ) : (
-          sortedConversations.map((conv) => (
-            <ConvItem
-              key={conv.id}
-              conv={conv}
-              active={activeConvId === conv.id}
-              onClick={() => handleLoadConversation(conv.id)}
-              onDelete={(e) => handleDeleteConversation(conv.id, e)}
-              onPin={(pinned) => pinConversation(conv.id, pinned)}
-              onRename={(title) => renameConversation(conv.id, title)}
-            />
-          ))
+        sortedConversations.map((conv) => {
+            const runEntry = convRuns[conv.id];
+            const isRunning = Boolean(runEntry?.isRunning);
+            const showCompleted =
+              !isRunning &&
+              Boolean(runEntry?.completedAt) &&
+              nowTs - Number(runEntry?.completedAt ?? 0) < 30_000;
+            return (
+              <ConvItem
+                key={conv.id}
+                conv={conv}
+                active={activeConvId === conv.id}
+                isRunning={isRunning}
+                showCompleted={showCompleted}
+                onClick={() => handleLoadConversation(conv.id)}
+                onDelete={(e) => handleDeleteConversation(conv.id, e)}
+                onPin={(pinned) => pinConversation(conv.id, pinned)}
+                onRename={(title) => renameConversation(conv.id, title)}
+              />
+            );
+          })
         )}
       </div>
 
@@ -516,6 +612,8 @@ function OptionItem({
 function ConvItem({
   conv,
   active,
+  isRunning,
+  showCompleted,
   onClick,
   onDelete,
   onPin,
@@ -523,6 +621,8 @@ function ConvItem({
 }: {
   conv: Conversation;
   active: boolean;
+  isRunning: boolean;
+  showCompleted: boolean;
   onClick: () => void;
   onDelete: (e: React.MouseEvent) => void;
   onPin: (pinned: boolean) => void;
@@ -599,6 +699,13 @@ function ConvItem({
           <Pin size={10} className="shrink-0 text-accent/60" />
         )}
         <span className="truncate flex-1 text-left">{conv.title}</span>
+        {/* 运行状态指示：脉冲点（running）或 ✓（刚完成，30s 内） */}
+        {isRunning && !hovered && (
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+        )}
+        {showCompleted && !isRunning && !hovered && (
+          <Check size={11} className="shrink-0 text-emerald-500/80" />
+        )}
         {hovered && (
           <span
             role="button"
