@@ -3596,10 +3596,45 @@ fastify.post(
     // LLM 调用成功，尝试解析 JSON
     const raw = String(ret.content ?? "").trim();
     const tryParse = (s: string) => { try { return JSON.parse(s); } catch { return null; } };
-    let parsed: any = tryParse(raw);
+
+    // 剥除 ```json ... ``` 代码围栏
+    const stripCodeFence = (s: string): string => {
+      const m = s.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```\s*$/);
+      return m ? m[1].trim() : s;
+    };
+
+    // 平衡括号提取：扫描所有 [ 候选，返回第一个能 JSON.parse 的完整数组
+    // 避免贪婪正则把 JSON 数组后的尾部文字（如 `已生成[18张]卡片`）误抓进去
+    const extractFirstCompleteJsonArray = (s: string): any => {
+      for (let start = 0; start < s.length; start++) {
+        if (s[start] !== "[") continue;
+        let depth = 0;
+        let inString = false;
+        let escape = false;
+        let end = -1;
+        for (let i = start; i < s.length; i++) {
+          const ch = s[i];
+          if (escape) { escape = false; continue; }
+          if (ch === "\\" && inString) { escape = true; continue; }
+          if (ch === '"') { inString = !inString; continue; }
+          if (inString) continue;
+          if (ch === "[") depth++;
+          else if (ch === "]") {
+            depth--;
+            if (depth === 0) { end = i; break; }
+          }
+        }
+        if (end === -1) continue;
+        const result = tryParse(s.slice(start, end + 1));
+        if (result !== null) return result;
+      }
+      return null;
+    };
+
+    const stripped = stripCodeFence(raw);
+    let parsed: any = tryParse(stripped);
     if (!parsed) {
-      const m = raw.match(/\[[\s\S]*\]/);
-      if (m?.[0]) parsed = tryParse(m[0]);
+      parsed = extractFirstCompleteJsonArray(stripped) ?? extractFirstCompleteJsonArray(raw);
     }
     if (Array.isArray(parsed)) {
       parsedCards = parsed;
@@ -3989,10 +4024,39 @@ fastify.post(
     // LLM 调用成功，尝试解析 JSON
     const raw = String(ret.content ?? "").trim();
     const tryParse = (s: string) => { try { return JSON.parse(s); } catch { return null; } };
-    let parsed: any = tryParse(raw);
+    const stripFence = (s: string): string => {
+      const m = s.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```\s*$/);
+      return m ? m[1].trim() : s;
+    };
+    const extractFirstCompleteJsonObject = (s: string): any => {
+      for (let start = 0; start < s.length; start++) {
+        if (s[start] !== "{") continue;
+        let depth = 0;
+        let inString = false;
+        let escape = false;
+        let end = -1;
+        for (let i = start; i < s.length; i++) {
+          const ch = s[i];
+          if (escape) { escape = false; continue; }
+          if (ch === "\\" && inString) { escape = true; continue; }
+          if (ch === '"') { inString = !inString; continue; }
+          if (inString) continue;
+          if (ch === "{") depth++;
+          else if (ch === "}") {
+            depth--;
+            if (depth === 0) { end = i; break; }
+          }
+        }
+        if (end === -1) continue;
+        const result = tryParse(s.slice(start, end + 1));
+        if (result !== null) return result;
+      }
+      return null;
+    };
+    const stripped2 = stripFence(raw);
+    let parsed: any = tryParse(stripped2);
     if (!parsed) {
-      const m = raw.match(/\{[\s\S]*\}/);
-      if (m?.[0]) parsed = tryParse(m[0]);
+      parsed = extractFirstCompleteJsonObject(stripped2) ?? extractFirstCompleteJsonObject(raw);
     }
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       parsedResult = parsed;

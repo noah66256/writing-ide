@@ -282,7 +282,7 @@ export function getDefaultStageDefinitionsFromEnv(): AiStageDefinition[] {
       description: "抽取知识卡（抽卡、分类等后台工作流）",
       defaultModel: cardModel,
       defaultTemperature: 0.2,
-      defaultMaxTokens: 8000,
+      defaultMaxTokens: 16000,
       defaultEndpoint: "/v1/chat/completions",
     },
     {
@@ -291,7 +291,7 @@ export function getDefaultStageDefinitionsFromEnv(): AiStageDefinition[] {
       description: "从要素卡生成库级仿写手册（StyleProfile/Facet Playbook）",
       defaultModel: cardModel,
       defaultTemperature: 0.2,
-      defaultMaxTokens: 8000,
+      defaultMaxTokens: 16000,
       defaultEndpoint: "/v1/chat/completions",
     },
     {

@@ -413,7 +413,7 @@ export type AnthropicOnceResult = {
 export async function completionOnceAnthropicMessages(args: AnthropicOnceArgs): Promise<AnthropicOnceResult> {
   const url = `${normalizeBaseUrl(args.baseUrl)}/messages`;
   const maxTokens =
-    typeof args.maxTokens === "number" && args.maxTokens > 0 ? Math.floor(args.maxTokens) : 8192;
+    typeof args.maxTokens === "number" && args.maxTokens > 0 ? Math.floor(args.maxTokens) : 16000;
 
   const body: Record<string, unknown> = {
     model: args.model,

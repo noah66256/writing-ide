@@ -162,7 +162,8 @@ Claude Code 与 Codex 组成双引擎协作：
 - SSH 别名 `writing` 在某些环境下报 `hostname contains invalid characters`，需用 `DEPLOY_SSH_HOST=root@120.26.6.147` 覆盖
 - 本地有未跟踪文件（如 `.playwright-mcp/`、`drafts/`、打包产物）时脚本会拒绝执行，需设 `DEPLOY_ALLOW_DIRTY=1`
 - Gateway 没有 `/health` 路由，health check 固定 404 不影响服务；验证时用 `/api/llm/selector` 等业务接口
-- 脚本报错时的手动部署命令：`ssh root@120.26.6.147 'export PATH=/www/server/nvm/versions/node/v22.21.1/bin:$PATH && cd /www/wwwroot/writing-ide && git pull --rebase --autostash origin master && npm install -w @writing-ide/gateway --no-audit --no-fund --force && npm -w @writing-ide/agent-core run build && npm -w @writing-ide/tools run build && npm -w @writing-ide/gateway run build && pm2 restart writing-gateway'`
+- 服务端 `npm install` 会因 `@rollup/rollup-darwin-arm64`（Desktop 的 macOS 专用 optional dep）报 `EBADPLATFORM`，可跳过 install 直接 build（依赖已在服务端 node_modules 中）
+- 脚本报错时的手动部署命令：`ssh root@120.26.6.147 'export PATH=/www/server/nvm/versions/node/v22.21.1/bin:$PATH && cd /www/wwwroot/writing-ide && git pull --rebase --autostash && npm -w @writing-ide/agent-core run build && npm -w @writing-ide/gateway run build && pm2 restart writing-gateway'`
 
 ### Desktop 打包与分发
 
@@ -197,7 +198,7 @@ gh release view desktop-v{version}
 **前置条件**：`npm run build` 会自动先编译 `@writing-ide/agent-core`，再 Vite 构建 renderer。
 
 **产物位置**：`apps/desktop/out/`，命名规则：
-- Win NSIS：`写作IDE Setup {version}.exe`
+- Win NSIS：`写作IDE Setup {version}.exe`（注意：GitHub Actions 产物会被截断为 `IDE.Setup.{version}.exe`，下载后需手动重命名）
 - Mac DMG：`写作IDE-{version}-arm64.dmg`
 - Mac ZIP：`写作IDE-{version}-arm64-mac.zip`
 
