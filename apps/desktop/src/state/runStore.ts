@@ -135,8 +135,10 @@ type RunState = {
   model: string;
   /** 对话滚动摘要（按 mode 存储；用于长对话上下文压缩） */
   dialogueSummaryByMode: Record<Mode, string>;
-  /** 已纳入摘要的“完整回合数”（turn cursor），用于增量滚动 */
+  /** 已纳入摘要的”完整回合数”（turn cursor），用于增量滚动 */
   dialogueSummaryTurnCursorByMode: Record<Mode, number>;
+  /** 已完成记忆提取的”完整回合数”（turn cursor），用于提取去重 */
+  memoryExtractTurnCursorByMode: Record<Mode, number>;
 
   mainDoc: MainDoc;
   todoList: TodoItem[];
@@ -162,6 +164,7 @@ type RunState = {
   setModel: (model: string) => void;
   setModelForMode: (mode: "chat" | "agent", model: string) => void;
   setDialogueSummary: (mode: Mode, summary: string, cursorTurns: number) => void;
+  setMemoryExtractTurnCursor: (mode: Mode, cursorTurns: number) => void;
   setMainDoc: (mainDoc: MainDoc) => void;
   resetRun: () => void;
   /** 仅清空对话步骤/日志（保留 MainDoc/Todo/Refs/绑定库），用于“清空当前对话但不丢计划” */
@@ -253,6 +256,7 @@ export const useRunStore = create<RunState>()(
   model: "",
   dialogueSummaryByMode: { agent: "", chat: "" },
   dialogueSummaryTurnCursorByMode: { agent: 0, chat: 0 },
+  memoryExtractTurnCursorByMode: { agent: 0, chat: 0 },
   mainDoc: { goal: "" },
   todoList: [],
   steps: [],
@@ -290,6 +294,18 @@ export const useRunStore = create<RunState>()(
         dialogueSummaryTurnCursorByMode: { ...s.dialogueSummaryTurnCursorByMode, [m]: nextCursor },
       };
     }),
+  setMemoryExtractTurnCursor: (mode, cursorTurns) =>
+    set((s) => {
+      const m: Mode = mode === "chat" ? "chat" : "agent";
+      const prevCursor = Number.isFinite(Number(s.memoryExtractTurnCursorByMode?.[m]))
+        ? Math.max(0, Math.floor(Number(s.memoryExtractTurnCursorByMode[m])))
+        : 0;
+      const nextCursor = Number.isFinite(Number(cursorTurns)) ? Math.max(0, Math.floor(Number(cursorTurns))) : 0;
+      // 单调递增：不允许游标回退
+      return {
+        memoryExtractTurnCursorByMode: { ...s.memoryExtractTurnCursorByMode, [m]: Math.max(prevCursor, nextCursor) },
+      };
+    }),
   setRunning: (running) =>
     set((s) => ({
       isRunning: running,
@@ -321,6 +337,7 @@ export const useRunStore = create<RunState>()(
       ctxRefs: [],
       dialogueSummaryByMode: { agent: "", chat: "" },
       dialogueSummaryTurnCursorByMode: { agent: 0, chat: 0 },
+      memoryExtractTurnCursorByMode: { agent: 0, chat: 0 },
     }),
   clearConversationSteps: () =>
     set({
@@ -331,6 +348,7 @@ export const useRunStore = create<RunState>()(
       // 对话清空后摘要无意义：一并清掉，避免旧摘要被注入 Context Pack 造成跑偏
       dialogueSummaryByMode: { agent: "", chat: "" },
       dialogueSummaryTurnCursorByMode: { agent: 0, chat: 0 },
+      memoryExtractTurnCursorByMode: { agent: 0, chat: 0 },
     }),
   loadSnapshot: (snap) => {
     const s = snap && typeof snap === "object" ? snap : ({} as any);
@@ -382,6 +400,14 @@ export const useRunStore = create<RunState>()(
             }
           : { agent: "", chat: "" },
       dialogueSummaryTurnCursorByMode:
+        dc && typeof dc === "object"
+          ? {
+              agent: Number.isFinite(Number((dc as any).agent)) ? Math.max(0, Math.floor(Number((dc as any).agent))) : 0,
+              chat: Number.isFinite(Number((dc as any).chat)) ? Math.max(0, Math.floor(Number((dc as any).chat))) : 0,
+            }
+          : { agent: 0, chat: 0 },
+      // memory 游标初始化对齐 summary 游标：加载已有快照时，summary cursor 以内的内容视为已处理，不重复提取
+      memoryExtractTurnCursorByMode:
         dc && typeof dc === "object"
           ? {
               agent: Number.isFinite(Number((dc as any).agent)) ? Math.max(0, Math.floor(Number((dc as any).agent))) : 0,

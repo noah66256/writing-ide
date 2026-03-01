@@ -2,11 +2,19 @@ import { create } from "zustand";
 import { getGatewayBaseUrl } from "../agent/gatewayUrl";
 import { authHeader } from "../agent/gatewayAgent";
 
+type ExtractMemoryArgs = {
+  dialogueSummary: string;
+  projectName?: string;
+  preferModelId?: string;
+  rootDir?: string; // 调用时的项目目录，防止异步期间项目切换
+};
+
 type MemoryState = {
   globalMemory: string;     // L1 全局记忆内容
   projectMemory: string;    // L2 项目记忆内容
   _projectRootDir: string | null;
   _extracting: boolean;
+  _pendingExtract: ExtractMemoryArgs | null; // 最多保留 1 个待处理请求（取最新）
 
   /** 加载项目记忆 */
   loadProjectMemory: (rootDir: string) => Promise<void>;
@@ -19,12 +27,7 @@ type MemoryState = {
   /** 清空项目记忆（项目切换时调用） */
   clearProjectMemory: () => void;
   /** 从对话中提取记忆（对话结束/切换时调用） */
-  extractMemory: (args: {
-    dialogueSummary: string;
-    projectName?: string;
-    preferModelId?: string;
-    rootDir?: string;  // 调用时的项目目录，防止异步期间项目切换
-  }) => Promise<void>;
+  extractMemory: (args: ExtractMemoryArgs) => Promise<void>;
   /** 将项目摘要写入全局记忆的"跨项目进展"section */
   updateProjectSummaryInGlobal: (args: {
     projectName: string;
@@ -46,17 +49,106 @@ const DEFAULT_GLOBAL_MEMORY =
   `# 跨项目进展\n（各项目最近状态摘要）\n`;
 
 /**
- * 将 patch 内容按 section 合并到现有记忆中。
- * patch 格式：以 # 标题开头的 section，内容 append 到对应 section 末尾。
+ * 所有合法的记忆文件顶级 section 标题（L1 全局 + L2 项目）。
+ * 只含记忆文件结构中的标题，不含对话摘要（P1 结构化摘要的 ## 标题不在此列）。
+ * patch 含未知 heading 时降级为 append-only，防止摘要段落误写入记忆文件。
+ */
+const KNOWN_MEMORY_HEADINGS = new Set([
+  // 全局记忆 L1
+  "用户画像", "决策偏好", "跨项目进展",
+  // 项目记忆 L2
+  "项目概况", "项目决策", "重要约定", "当前进展",
+]);
+
+type TopLevelSection = { heading: string; content: string };
+
+/** 解析 `# Heading` 顶级段落，返回 null 表示无法解析（无任何 # 标题） */
+function parseTopLevelSections(text: string): TopLevelSection[] | null {
+  if (!text.trim()) return null;
+  const lines = text.split("\n");
+  const sections: TopLevelSection[] = [];
+  let current: TopLevelSection | null = null;
+
+  const flush = () => {
+    if (current !== null) {
+      sections.push({ heading: current.heading, content: current.content.trimEnd() });
+      current = null;
+    }
+  };
+
+  for (const line of lines) {
+    const m = line.match(/^# (.+)$/);
+    if (m) {
+      flush();
+      current = { heading: m[1].trim(), content: "" };
+    } else if (current !== null) {
+      current.content += line + "\n";
+    }
+  }
+  flush();
+  return sections.length > 0 ? sections : null;
+}
+
+/** 将顶级段落列表渲染为字符串（section 间空一行，末尾单换行） */
+function renderTopLevelSections(sections: TopLevelSection[]): string {
+  return sections
+    .map((s) => `# ${s.heading}\n${s.content}`)
+    .join("\n\n")
+    .trim() + "\n";
+}
+
+/** 降级策略：无法按 section 合并时，直接追加 */
+function appendOnlyMergeMemoryPatch(existing: string, patch: string): string {
+  const ts = new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
+  return `${existing.trimEnd()}\n\n---\n_${ts} 自动提取_\n\n${patch.trim()}\n`;
+}
+
+/**
+ * 将 patch 内容按 section 合并到现有记忆中：
+ * - patch / existing 无法解析为 section 结构 → 追加
+ * - patch 含未知 heading → 追加（防止错误写入其他文件）
+ * - 正常路径：按 heading 匹配，追加到对应 section；新 heading 追加到末尾
  */
 function mergeMemoryPatch(existing: string, patch: string): string {
   if (!patch.trim()) return existing;
   if (!existing.trim()) return patch;
 
-  // 简单合并策略：直接追加分隔线 + patch 内容
-  // 后续可改为按 section 标题精确 merge
+  const patchSections = parseTopLevelSections(patch);
+  if (!patchSections || patchSections.length === 0) {
+    return appendOnlyMergeMemoryPatch(existing, patch);
+  }
+
+  // 含未知 heading 时降级，防止错误合并
+  const hasUnknown = patchSections.some((s) => !KNOWN_MEMORY_HEADINGS.has(s.heading));
+  if (hasUnknown) {
+    return appendOnlyMergeMemoryPatch(existing, patch);
+  }
+
+  const existingSections = parseTopLevelSections(existing);
+  if (!existingSections || existingSections.length === 0) {
+    return appendOnlyMergeMemoryPatch(existing, patch);
+  }
+
   const ts = new Date().toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
-  return `${existing.trimEnd()}\n\n---\n_${ts} 自动提取_\n\n${patch.trim()}\n`;
+  const mergedSections = [...existingSections];
+
+  for (const pSec of patchSections) {
+    const newContent = pSec.content.trim();
+    if (!newContent) continue;
+
+    const idx = mergedSections.findIndex((s) => s.heading === pSec.heading);
+    if (idx >= 0) {
+      const existingContent = mergedSections[idx].content.trimEnd();
+      mergedSections[idx] = {
+        heading: mergedSections[idx].heading,
+        content: `${existingContent}\n\n_${ts} 更新_\n${newContent}\n`,
+      };
+    } else {
+      mergedSections.push({ heading: pSec.heading, content: `${newContent}\n` });
+    }
+  }
+
+  return renderTopLevelSections(mergedSections);
 }
 
 /* ─── 跨项目进展 section 解析/渲染 ─── */
@@ -157,6 +249,7 @@ export const useMemoryStore = create<MemoryState>((set, get) => ({
   projectMemory: "",
   _projectRootDir: null,
   _extracting: false,
+  _pendingExtract: null,
 
   async loadProjectMemory(rootDir: string) {
     if (!rootDir || !window.desktop?.memory) return;
@@ -226,8 +319,12 @@ export const useMemoryStore = create<MemoryState>((set, get) => ({
     // 捕获调用时的 rootDir，防止异步期间项目切换后串写
     const capturedRootDir = (args as any).rootDir || get()._projectRootDir || "";
     if (!dialogueSummary?.trim()) return;
-    if (get()._extracting) return; // 防止并发提取
-    set({ _extracting: true });
+    if (get()._extracting) {
+      // 已有提取进行中：记录为 pending（最新请求覆盖旧请求），完成后自动消费
+      set({ _pendingExtract: args as ExtractMemoryArgs });
+      return;
+    }
+    set({ _extracting: true, _pendingExtract: null });
 
     try {
       const baseUrl = getGatewayBaseUrl();
@@ -273,18 +370,31 @@ export const useMemoryStore = create<MemoryState>((set, get) => ({
           await get().saveProjectMemory(capturedRootDir, merged);
           console.log("[MemoryStore] L2 project memory updated");
         } else {
-          // 项目已切换，直接通过 IPC 写入文件（不更新 store state）
-          await window.desktop?.memory?.writeProject(
-            capturedRootDir,
-            mergeMemoryPatch("", projectPatches),
-          ).catch(() => void 0);
-          console.log("[MemoryStore] L2 project memory written to disk (project switched)");
+          // 项目已切换：先从磁盘读取旧内容，再合并写入（不更新 store state）
+          const oldRes = await window.desktop?.memory?.readProject(capturedRootDir).catch(() => null);
+          if (!oldRes?.ok) {
+            // 读取失败（IPC 错误），不冒险写入，避免覆盖可能存在的旧内容
+            console.warn("[MemoryStore] L2 read failed for switched project, skipping write");
+          } else {
+            const oldContent = oldRes.content ?? "";
+            await window.desktop?.memory?.writeProject(
+              capturedRootDir,
+              mergeMemoryPatch(oldContent, projectPatches),
+            ).catch(() => void 0);
+            console.log("[MemoryStore] L2 project memory written to disk (project switched)");
+          }
         }
       }
     } catch (e) {
       console.warn("[MemoryStore] extractMemory error:", e);
     } finally {
       set({ _extracting: false });
+      // 消费 pending 请求（使用微任务避免调用栈过深）
+      const pending = get()._pendingExtract;
+      if (pending) {
+        set({ _pendingExtract: null });
+        void Promise.resolve().then(() => get().extractMemory(pending));
+      }
     }
   },
 

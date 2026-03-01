@@ -887,7 +887,10 @@ export function summarizeQuoteAsFeatureV1(quote: string): string {
 
 type DialogueTurn = { user: string; assistant: string };
 
-function buildDialogueTurnsFromSteps(steps: any[]): DialogueTurn[] {
+/** 每次向 Gateway 发送的"原文保留"回合数（不进入摘要压缩） */
+const RAW_KEEP_TURNS = 5;
+
+export function buildDialogueTurnsFromSteps(steps: any[]): DialogueTurn[] {
   const all = Array.isArray(steps) ? steps : [];
   const turns: DialogueTurn[] = [];
   let curUser = "";
@@ -1015,11 +1018,11 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     return merged.slice(0, 32);
   })();
 
-  // 最近对话片段（只注入少量：最后 3 个完整回合；关键决策仍应写入 Main Doc/Run Todo）
+  // 最近对话片段（注入最后 RAW_KEEP_TURNS 个完整回合；关键决策仍应写入 Main Doc/Run Todo）
   const recentDialogue = (() => {
     const turnsAll = buildDialogueTurnsFromSteps(useRunStore.getState().steps ?? []);
     const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
-    return buildRecentDialogueJsonFromTurns(completeTurns, 3);
+    return buildRecentDialogueJsonFromTurns(completeTurns, RAW_KEEP_TURNS);
   })();
 
   const dialogueSummary = (() => {
@@ -1716,7 +1719,7 @@ export function buildChatContextPack(extra?: { referencesText?: string }) {
     });
   };
 
-  // Chat：也携带"滚动摘要 + 最近 3 个完整回合"（用户要求：Chat 带历史，但仍保持上下文可控）
+  // Chat：也携带"滚动摘要 + 最近 RAW_KEEP_TURNS 个完整回合"（Chat 带历史，但仍保持上下文可控）
   const chatSummary = (() => {
     const byMode: any = (useRunStore.getState() as any).dialogueSummaryByMode ?? {};
     const s = String(byMode?.chat ?? "").trim();
@@ -1725,7 +1728,7 @@ export function buildChatContextPack(extra?: { referencesText?: string }) {
   const chatRecentDialogue = (() => {
     const turnsAll = buildDialogueTurnsFromSteps(useRunStore.getState().steps ?? []);
     const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
-    return buildRecentDialogueJsonFromTurns(completeTurns, 3);
+    return buildRecentDialogueJsonFromTurns(completeTurns, RAW_KEEP_TURNS);
   })();
   if (chatSummary) pushSeg({ name: "DIALOGUE_SUMMARY", content: chatSummary, priority: "p1", trusted: true, source: "desktop" });
   if (chatRecentDialogue)
@@ -1802,7 +1805,6 @@ export async function rollDialogueSummaryIfNeeded(args: {
   const turnsAll = buildDialogueTurnsFromSteps(run.steps ?? []);
   const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
 
-  const RAW_KEEP_TURNS = 3; // Chat/Plan/Agent：都保留最近 3 个完整回合原文
   const TRIGGER_MIN_TURNS = 3; // 每累计 3 个新回合就滚动一次摘要（"3–5轮摘要"先用 3）
 
   const turnsToSummarize = Math.max(0, completeTurns.length - RAW_KEEP_TURNS);
@@ -1839,7 +1841,7 @@ export async function rollDialogueSummaryIfNeeded(args: {
   } catch {
     // ignore
   }
-  return { ok: true as const, rolled: true as const };
+  return { ok: true as const, rolled: true as const, delta: delta.map((t) => ({ user: t.user, assistant: t.assistant })), newCursor: cursor + delta.length };
 }
 
 export function startGatewayRun(args: {

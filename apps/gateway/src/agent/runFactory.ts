@@ -181,6 +181,27 @@ export const ROUTE_REGISTRY_V1 = [
 type RouteId = (typeof ROUTE_REGISTRY_V1)[number]["routeId"];
 const RouteIdSchema = z.enum(ROUTE_REGISTRY_V1.map((r) => r.routeId) as [RouteId, ...RouteId[]]);
 
+/** 从 contextPack 中提取 Markdown 格式的段落（如 L1_GLOBAL_MEMORY、L2_PROJECT_MEMORY、DIALOGUE_SUMMARY）。
+ *  格式：`SEGMENT_NAME(Markdown):\ncontent\n\n`。解析失败返回空字符串。 */
+export function parseMarkdownSegmentFromContextPack(ctx?: string, segmentName?: string): string {
+  const text = String(ctx ?? "");
+  const name = String(segmentName ?? "").trim();
+  if (!text || !name) return "";
+
+  const prefix = `${name}(Markdown):\n`;
+  const start = text.indexOf(prefix);
+  if (start < 0) return "";
+
+  const from = start + prefix.length;
+  const rest = text.slice(from);
+  // 找下一个段落起始标记（大写字母+下划线组成的 NAME(JSON/Markdown): 格式）
+  const nextMarker = rest.match(/\n[A-Z0-9_]+\((?:JSON|Markdown)\):\n/);
+  const raw = nextMarker && typeof nextMarker.index === "number"
+    ? rest.slice(0, nextMarker.index)
+    : rest;
+  return String(raw ?? "").trim();
+}
+
 export function parseContextManifestFromContextPack(ctx?: string): any | null {
   const text = String(ctx ?? "");
   if (!text) return null;
@@ -353,6 +374,9 @@ export function buildAgentProtocolPrompt(args: {
         `      - task 中写明用户的修改要求原文；\n` +
         `      - 如有风格检查结果（lint.style 输出），一并放入 inputArtifacts。\n` +
         `   C) 对所有指派：不要传递无关的对话历史或冗余信息，只传与本次任务直接相关的内容。\n` +
+        `   D) task 描述规范（强制）：子 Agent 看不到对话历史，但系统会自动注入用户画像和项目约定。\n` +
+        `      - task 需写明：交付结果（一句话）、输入范围、硬约束（平台/字数/语气/禁用项）、输出格式、验收标准。\n` +
+        `      - 系统已注入记忆，无需在 task 重复；仅补充本次任务特有的约束或用户在对话中新提出的要求。\n` +
         `4) 续跑契约（workflowV1）：当你提出"请选择/请确认"并准备结束本轮等待用户时，先写入 mainDoc.workflowV1=waiting_user；用户回复后更新为 running/done。\n` +
         `5) 团队配置（agent.config 工具）：\n` +
         `   - 查看团队：agent.config.list\n` +
@@ -1061,6 +1085,9 @@ export type PreparedRun = {
   runnerStyleLibIds: string[];
   mcpToolsFromSidecar: Array<{ name: string; description: string; inputSchema?: any; serverId: string; serverName: string; originalName: string }>;
   authorization: string;
+  l1MemoryFromPack: string;
+  l2MemoryFromPack: string;
+  ctxDialogueSummaryFromPack: string;
 };
 
 export type PrepareAgentRunResult =
@@ -1087,6 +1114,9 @@ export async function prepareAgentRun(args: {
   const recentDialogueFromPack = parseRecentDialogueFromContextPack(body.contextPack);
   const contextManifestFromPack = parseContextManifestFromContextPack(body.contextPack);
   const personaFromPack = parseAgentPersonaFromContextPack(body.contextPack);
+  const l1MemoryFromPack = parseMarkdownSegmentFromContextPack(body.contextPack, "L1_GLOBAL_MEMORY");
+  const l2MemoryFromPack = parseMarkdownSegmentFromContextPack(body.contextPack, "L2_PROJECT_MEMORY");
+  const ctxDialogueSummaryFromPack = parseMarkdownSegmentFromContextPack(body.contextPack, "DIALOGUE_SUMMARY");
 
   const intent = detectRunIntent({
     mode,
@@ -1952,6 +1982,9 @@ export async function prepareAgentRun(args: {
       runnerStyleLibIds,
       mcpToolsFromSidecar,
       authorization: String((request as any)?.headers?.authorization ?? ""),
+      l1MemoryFromPack,
+      l2MemoryFromPack,
+      ctxDialogueSummaryFromPack,
     },
   };
 }
@@ -1999,6 +2032,9 @@ export async function executeAgentRun(args: {
     mainDocFromPack,
     personaFromPack,
     mcpToolsFromSidecar,
+    l1MemoryFromPack,
+    l2MemoryFromPack,
+    ctxDialogueSummaryFromPack,
   } = prepared;
 
   services.agentRunWaiters.set(runId, transport.waiters);
@@ -2478,6 +2514,9 @@ export async function executeAgentRun(args: {
     resolveSubAgentModel,
     mainDoc: mainDocFromPack && typeof mainDocFromPack === "object" ? { ...(mainDocFromPack as Record<string, unknown>) } : {},
     customAgentDefinitions: personaFromPack?.customAgentDefinitions ?? [],
+    l1Memory: l1MemoryFromPack || "",
+    l2Memory: l2MemoryFromPack || "",
+    ctxDialogueSummary: ctxDialogueSummaryFromPack || "",
   };
 
   // 将 MCP 工具传递给 runner（用于生成 tool definitions）

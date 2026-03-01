@@ -11,6 +11,7 @@ import { useProjectStore } from "../state/projectStore";
 import { useProjectIndexStore } from "../state/projectIndexStore";
 import { useKbStore } from "../state/kbStore";
 import { useAuthStore } from "../state/authStore";
+import { useRunStore } from "../state/runStore";
 import { activateSkills } from "@writing-ide/agent-core";
 import { buildStyleLinterLibrariesSidecar, executeToolCall, getTool } from "./toolRegistry";
 import { createRunTarget } from "./runTarget";
@@ -24,6 +25,7 @@ import {
   buildContextPack,
   buildChatContextPack,
   rollDialogueSummaryIfNeeded,
+  buildDialogueTurnsFromSteps,
   pickClusterSelectorV1,
   buildTopicTextForSelectorV1,
   summarizeQuoteAsFeatureV1,
@@ -45,6 +47,29 @@ function toWsBase(baseUrl: string): string {
     return `${proto}//${loc.host}`;
   }
   return baseUrl.replace(/^http:/i, "ws:").replace(/^https:/i, "wss:");
+}
+
+// ---------------------------------------------------------------------------
+// Memory extraction helpers
+// ---------------------------------------------------------------------------
+
+/** 把对话回合列表格式化为供记忆提取的原文文字 */
+function formatDialogueTurnsForMemoryExtract(turns: Array<{ user: string; assistant: string }>): string {
+  return (Array.isArray(turns) ? turns : [])
+    .map((t, i) => {
+      const u = String(t?.user ?? "").trim();
+      const a = String(t?.assistant ?? "").trim();
+      return u && a ? `第 ${i + 1} 轮\n用户：${u}\n助手：${a}` : "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+/** 读取 memoryExtractTurnCursorByMode 中的 cursor 值 */
+function readMemoryExtractCursor(mode: "agent" | "chat"): number {
+  const m = useRunStore.getState().memoryExtractTurnCursorByMode;
+  const n = Number((m as any)?.[mode]);
+  return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -126,6 +151,33 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
   let socketRef: WebSocket | null = null;
   // 防止旧 run 的 finally 清除新 run 的 cancel 句柄
   let cancelledExternally = false;
+
+  /**
+   * 触发一次记忆提取：把 [memoryCursor, nextCursor) 区间的原文传给 extractMemory。
+   * 先做游标去重——若 nextCursor <= 当前 memoryCursor 则跳过。
+   */
+  const enqueueMemoryExtract = (dialogueText: string, nextCursor: number) => {
+    const mode = (args.mode === "chat" ? "chat" : "agent") as "agent" | "chat";
+    const memoryCursor = readMemoryExtractCursor(mode);
+    if (!dialogueText.trim() || nextCursor <= memoryCursor) return;
+
+    const projStore = useProjectStore.getState();
+    const rootDir = projStore.rootDir ?? "";
+    const projectName = rootDir ? (rootDir.split(/[/\\]/).pop() ?? "") : "";
+
+    // 先推进游标，防止并发触发时重复提交
+    try {
+      useRunStore.getState().setMemoryExtractTurnCursor(mode, nextCursor);
+    } catch {
+      // ignore
+    }
+
+    import("../state/memoryStore")
+      .then(({ useMemoryStore }) => {
+        void useMemoryStore.getState().extractMemory({ dialogueSummary: dialogueText, projectName, rootDir });
+      })
+      .catch(() => void 0);
+  };
 
   // -- Async run -----------------------------------------------------------
 
@@ -370,7 +422,13 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       // -- dialogue summary ---
       try {
         const r = await rollDialogueSummaryIfNeeded({ gatewayUrl: args.gatewayUrl, mode: args.mode, abort, log });
-        if (r?.rolled) setActivity("正在构建上下文…", { resetTimer: false });
+        if (r?.rolled) {
+          setActivity("正在构建上下文…", { resetTimer: false });
+          // 摘要成功后：用 delta 原文（非压缩后的摘要）触发记忆提取，避免二次有损压缩
+          const rolledResult = r as { rolled: true; delta: Array<{ user: string; assistant: string }>; newCursor: number };
+          const dialogueText = formatDialogueTurnsForMemoryExtract(rolledResult.delta ?? []);
+          enqueueMemoryExtract(dialogueText, rolledResult.newCursor ?? 0);
+        }
       } catch (e: any) {
         log("warn", "context.summary.exception", { error: e?.message ? String(e.message) : String(e) });
       }
@@ -565,24 +623,25 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             log("info", "agent.run.end", data);
             setRunning(false); setActivity(null);
 
-            // 触发记忆提取（异步，不阻塞 UI）
+            // 兜底记忆提取（异步，不阻塞 UI）：
+            // 从 memoryCursor 到对话末尾，提取本轮 run 中尚未被滚动提取覆盖的所有完整回合
+            // - 若滚动提取已覆盖所有回合：completeTurns.length <= memoryCursor，跳过
+            // - 若本轮从未触发滚动摘要（短对话）：memoryCursor=0，提取全部
+            // - 若有尾部 1-2 轮未达滚动触发：summaryCursor < completeTurns.length，提取尾部
             try {
-              const mode = rt.getMode() ?? "chat";
-              const summary = rt.getDialogueSummaryByMode()?.[mode] ?? "";
-              if (summary.trim()) {
-                const projStore = useProjectStore.getState();
-                const rootDir = projStore.rootDir ?? "";
-                const projectName = rootDir ? (rootDir.split(/[/\\]/).pop() ?? "") : "";
-                import("../state/memoryStore").then(({ useMemoryStore }) => {
-                  void useMemoryStore.getState().extractMemory({
-                    dialogueSummary: summary,
-                    projectName,
-                    rootDir,  // 捕获当前 rootDir，防止项目切换后串写
-                  });
-                }).catch(() => void 0);
+              const mode = (rt.getMode() ?? "chat") as "agent" | "chat";
+              const memoryCursor = readMemoryExtractCursor(mode);
+
+              const completeTurns = buildDialogueTurnsFromSteps(rt.getSteps() ?? [])
+                .filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
+
+              if (completeTurns.length > memoryCursor) {
+                const turnsToExtract = completeTurns.slice(memoryCursor);
+                const dialogueText = formatDialogueTurnsForMemoryExtract(turnsToExtract);
+                enqueueMemoryExtract(dialogueText, completeTurns.length);
               }
             } catch {
-              // ignore memory extraction errors
+              // ignore memory fallback errors
             }
 
             finish();
