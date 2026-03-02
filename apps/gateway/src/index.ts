@@ -3366,6 +3366,145 @@ fastify.post(
 );
 
 /**
+ * KB 篇级切分：用便宜模型识别文档中的独立文章边界。
+ * 失败时由客户端回退到字符分块策略。
+ */
+fastify.post(
+  "/api/kb/dev/split_articles",
+  { preHandler: [(fastify as any).authenticate, requirePositivePointsForLlm] },
+  async (request: any, reply) => {
+    const jwtUser = await tryGetJwtUser(request as any);
+
+    const bodySchema = z.object({
+      model: z.string().optional(),
+      paragraphs: z
+        .array(z.object({ index: z.number().int().min(0), text: z.string().min(1) }))
+        .min(1)
+        .max(1200),
+    });
+    const body = bodySchema.parse((request as any).body);
+
+    const cardEnv = await getCardEnv();
+    if (!cardEnv.ok) {
+      return reply.code(500).send({ error: "LLM_NOT_CONFIGURED" });
+    }
+
+    let model = cardEnv.defaultModel;
+    let baseUrl = cardEnv.baseUrl;
+    let endpoint = (cardEnv as any).endpoint || "/v1/chat/completions";
+    let apiKey = cardEnv.apiKey;
+
+    if (body.model) {
+      try {
+        const m = await aiConfig.resolveModel(body.model);
+        const ep = String(m.endpoint || "").trim();
+        if (ep && (/chat\/completions/i.test(ep) || isGeminiLikeEndpoint(ep))) {
+          model = m.model;
+          baseUrl = m.baseURL;
+          apiKey = m.apiKey;
+          endpoint = ep;
+        }
+      } catch { /* ignore */ }
+    }
+
+    // 构建提示词：每段只取前80字，让模型快速判断边界
+    const ordered = (body.paragraphs as Array<{ index: number; text: string }>)
+      .slice()
+      .sort((a, b) => a.index - b.index);
+    const brief = (s: string) => {
+      const t = String(s ?? "").replace(/\s+/g, " ").trim();
+      return t.length > 80 ? `${t.slice(0, 80)}…` : t;
+    };
+
+    const sys = [
+      "你是写作 IDE 的「篇级分块器」。",
+      "任务：根据段落摘要，判断这些段落中包含几篇独立文章，并给出每篇起始段落号。",
+      "",
+      "输出要求：你必须且只能输出一个 JSON 数组，例如 [0, 15, 42]。",
+      "规则：",
+      "1) 每个数字是该篇文章的起始段落号（index），必须是下方列表中实际出现的 [#index] 值。",
+      "2) 数组必须严格递增、去重。",
+      "3) 必须包含第一篇文章的起始段落号。",
+      "4) 如果整个文档就是一篇完整文章，返回只含第一段号的数组，如 [0]。",
+      "5) 不要输出解释、不要输出代码块、不要输出除 JSON 以外的任何内容。",
+    ].join("\n");
+
+    const user = [
+      "请判断以下段落是否由多篇独立文章组成，并返回每篇起始段落号：",
+      ...ordered.map((p) => `[#${p.index}] ${brief(p.text)}`),
+    ].join("\n");
+
+    const timeoutMs = 90_000;
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), timeoutMs);
+    let ret: any = null;
+    try {
+      ret = await completionOnceViaProvider({
+        baseUrl, endpoint, apiKey, model,
+        messages: [
+          { role: "system", content: sys },
+          { role: "user", content: user },
+        ],
+        temperature: 0,
+        signal: abort.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!ret?.ok) {
+      const err = String(ret?.error ?? "UPSTREAM_ERROR");
+      const status = ret?.status === 429 ? 503 : /aborted|AbortError|timeout/i.test(err) ? 504 : 502;
+      return reply.code(status).send({ ok: false, error: err });
+    }
+
+    // 解析模型返回的 JSON 数组
+    const raw = String(ret.content ?? "").trim();
+    const tryParse = (s: string) => { try { return JSON.parse(s); } catch { return null; } };
+    const stripFence = (s: string) => { const m = s.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```\s*$/i); return m ? m[1].trim() : s; };
+    let parsed: any = tryParse(stripFence(raw));
+    // 贪婪查找第一个完整 JSON 数组
+    if (!Array.isArray(parsed)) {
+      const arrMatch = raw.match(/\[[\d\s,]+\]/);
+      if (arrMatch) parsed = tryParse(arrMatch[0]);
+    }
+    if (!Array.isArray(parsed)) {
+      return reply.code(502).send({ ok: false, error: "INVALID_MODEL_OUTPUT" });
+    }
+
+    const paraIndices = new Set(ordered.map((p) => p.index));
+    const splits = Array.from(
+      new Set(
+        parsed
+          .map((n: any) => Math.floor(Number(n)))
+          .filter((n: number) => Number.isFinite(n) && n >= 0 && paraIndices.has(n)),
+      ),
+    ).sort((a: number, b: number) => a - b) as number[];
+    const first = ordered[0]?.index ?? 0;
+    if (!splits.length || splits[0] !== first) splits.unshift(first);
+
+    // 计费
+    try {
+      const usage = (ret as any)?.usage ?? null;
+      if (
+        jwtUser?.id && jwtUser.role !== "admin" && usage &&
+        typeof usage === "object" &&
+        Number.isFinite((usage as any).promptTokens) &&
+        Number.isFinite((usage as any).completionTokens)
+      ) {
+        await chargeUserForLlmUsage({
+          userId: jwtUser.id, modelId: model, usage,
+          source: "kb.split_articles",
+          metaExtra: { paragraphs: ordered.length, splits: splits.length },
+        });
+      }
+    } catch { /* ignore */ }
+
+    return reply.send({ ok: true, splits });
+  },
+);
+
+/**
  * KB 抽卡（开发期）：输入段落列表，输出结构化卡片（JSON）。
  * - 不落库：由 Desktop 本地 KB 接口负责写入/断点续传。
  * - 不要求登录：因为 Desktop 目前还没接入真实登录态（后续可切到 authenticate）。

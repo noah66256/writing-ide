@@ -1615,6 +1615,35 @@ function gatewayBaseUrl() {
   return getGatewayBaseUrl();
 }
 
+async function postSplitArticles(args: {
+  paragraphs: Array<{ index: number; text: string }>;
+  signal?: AbortSignal;
+}): Promise<{ ok: true; splits: number[] } | { ok: false; error: string }> {
+  const base = gatewayBaseUrl();
+  const url = base ? `${base}/api/kb/dev/split_articles` : "/api/kb/dev/split_articles";
+  if (!ensureLoginForKbLlm("篇级分块")) return { ok: false, error: "AUTH_REQUIRED" };
+  const auth = authHeader();
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...auth },
+      signal: args.signal,
+      body: JSON.stringify({ paragraphs: args.paragraphs }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      let msg = `HTTP_${res.status}`;
+      try { const j = JSON.parse(text); msg = j?.error ?? j?.message ?? msg; } catch { /* ignore */ }
+      return { ok: false, error: msg };
+    }
+    const json = await res.json().catch(() => null);
+    if (!json?.ok || !Array.isArray(json?.splits)) return { ok: false, error: "INVALID_RESPONSE" };
+    return { ok: true, splits: json.splits.map((n: any) => Math.floor(Number(n))).filter((n: number) => Number.isFinite(n) && n >= 0) };
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
+}
+
 async function postExtractCards(args: {
   model?: string;
   maxCards?: number;
@@ -3567,12 +3596,53 @@ export const useKbStore = create<KbState>()(
               continue;
             }
 
-            // 分块抽卡：按实际内容块逐块提交，无块数上限；风格库小块+重叠，非风格库无重叠
-            const chunks = chunkParagraphsForExtraction(
-              isStyleLib
-                ? { paragraphs: allParas, maxChunks: Infinity, maxParasPerChunk: 60, maxCharsPerChunk: 12000, overlapParas: 2 }
-                : { paragraphs: allParas, maxChunks: Infinity, maxParasPerChunk: 80, maxCharsPerChunk: 15000, overlapParas: 0 },
-            );
+            // 分块抽卡：先尝试篇级切分（LLM 识别文章边界），失败则回退字符分块
+            const chunkCfg = isStyleLib
+              ? { maxChunks: Infinity, maxParasPerChunk: 60, maxCharsPerChunk: 12000, overlapParas: 2 }
+              : { maxChunks: Infinity, maxParasPerChunk: 80, maxCharsPerChunk: 15000, overlapParas: 0 };
+
+            let chunks: Array<Array<{ index: number; text: string; headingPath?: string[] }>> = [];
+            const allChars = allParas.reduce((s, p) => s + String(p.text ?? "").length, 0);
+
+            // 篇级切分：段落 > 10 且总字符 > 8000 才触发（小文档不需要）
+            if (allParas.length > 10 && allChars > 8000) {
+              const splitRet = await postSplitArticles({ paragraphs: allParas, signal: opts?.signal });
+              if (splitRet.ok && splitRet.splits.length > 1) {
+                console.log(`[kbStore] 篇级切分成功：${splitRet.splits.length} 篇，splits=`, splitRet.splits);
+                const splits = splitRet.splits.sort((a, b) => a - b);
+                const paraIdxMap = new Map(allParas.map((p, i) => [p.index, i]));
+                // 将 splits（段落 index）映射为 allParas 数组的 position
+                const positions = splits
+                  .map((idx) => paraIdxMap.get(idx) ?? -1)
+                  .filter((pos) => pos >= 0);
+                // 确保包含起始位置
+                if (!positions.length || positions[0] !== 0) positions.unshift(0);
+                // 去重并排序
+                const uniquePos = [...new Set(positions)].sort((a, b) => a - b);
+
+                if (uniquePos.length > 1) {
+                  for (let ai = 0; ai < uniquePos.length; ai++) {
+                    const start = uniquePos[ai]!;
+                    const end = ai + 1 < uniquePos.length ? uniquePos[ai + 1]! : allParas.length;
+                    const articleParas = allParas.slice(start, end);
+                    if (!articleParas.length) continue;
+                    const articleChars = articleParas.reduce((s, p) => s + String(p.text ?? "").length, 0);
+                    // 单篇超限时再用字符分块做二次拆分
+                    if (articleParas.length > chunkCfg.maxParasPerChunk || articleChars > chunkCfg.maxCharsPerChunk) {
+                      chunks.push(...chunkParagraphsForExtraction({ paragraphs: articleParas, ...chunkCfg }));
+                    } else {
+                      chunks.push(articleParas);
+                    }
+                  }
+                }
+              }
+            }
+
+            // fallback：原有字符/段落分块
+            if (!chunks.length) {
+              if (allParas.length > 10 && allChars > 8000) console.log("[kbStore] 篇级切分未生效，回退字符分块");
+              chunks = chunkParagraphsForExtraction({ paragraphs: allParas, ...chunkCfg });
+            }
 
             opts?.onProgress?.(0, chunks.length);
 
