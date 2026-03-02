@@ -100,12 +100,15 @@ export class McpManager {
    * @param {string} userDataPath - app.getPath('userData')
    * @param {string} [appBasePath] - app.getAppPath()
    * @param {boolean} [isPackaged] - app.isPackaged
+   * @param {string} [appDataPath] - app.getPath('appData')，用于跨版本迁移旧配置
    */
-  constructor(userDataPath, appBasePath = process.cwd(), isPackaged = false) {
+  constructor(userDataPath, appBasePath = process.cwd(), isPackaged = false, appDataPath = null) {
     /** @type {string} */
     this._configPath = path.join(userDataPath, "mcp-servers.json");
     this._appBasePath = String(appBasePath || process.cwd());
     this._isPackaged = Boolean(isPackaged);
+    /** @type {string|null} app.getPath('appData') 父目录，用于迁移 */
+    this._appDataPath = appDataPath ? String(appDataPath) : null;
     /** @type {Map<string, {config: McpServerConfig, client: Client|null, transport: any, status: McpStatus, tools: any[], error: string|null}>} */
     this._servers = new Map();
     /** @type {Set<(payload: any) => void>} */
@@ -155,13 +158,45 @@ export class McpManager {
         // JSON 解析失败，记录错误但不覆盖文件
         console.error("[McpManager] 配置文件解析失败，跳过写回:", e?.message);
       }
-      // 文件不存在则正常继续（_ensureBuiltinServers 会创建）
+      // 文件不存在则尝试从旧路径迁移，迁移失败再正常继续（_ensureBuiltinServers 会创建）
+      if (!fileExists) await this._tryMigrateLegacyConfig();
     }
     // 加载后注入内置 server（已存在的不覆盖）
     await this._ensureBuiltinServers();
   }
 
-  async _saveConfig() {
+  /**
+   * 当 mcp-servers.json 不存在时，尝试从旧 productName 路径迁移配置（一次性）。
+   * 覆盖场景：productName 从 "写作IDE" 改为 "WritingIDE" 后 userData 路径变化。
+   */
+  async _tryMigrateLegacyConfig() {
+    if (!this._appDataPath) return;
+    // 历史 productName 列表，按优先级排列
+    const legacyNames = ["写作IDE", "writing-ide"];
+    for (const name of legacyNames) {
+      const legacyPath = path.join(this._appDataPath, name, "mcp-servers.json");
+      try {
+        const raw = await fs.readFile(legacyPath, "utf-8");
+        JSON.parse(raw); // 验证 JSON 格式，解析失败则跳过
+        await fs.mkdir(path.dirname(this._configPath), { recursive: true });
+        await fs.writeFile(this._configPath, raw, "utf-8");
+        console.log(`[McpManager] 已迁移 MCP 配置：${legacyPath} → ${this._configPath}`);
+        // 重新解析迁移过来的文件
+        const data = JSON.parse(raw);
+        const list = Array.isArray(data) ? data : [];
+        for (const cfg of list) {
+          if (!cfg?.id || !cfg?.name) continue;
+          this._servers.set(cfg.id, {
+            config: cfg, client: null, transport: null,
+            status: "disconnected", tools: [], error: null,
+          });
+        }
+        return; // 迁移成功，不再尝试其他路径
+      } catch {
+        // 路径不存在或格式错误，继续尝试下一个
+      }
+    }
+  }
     // skillManaged server 由 SkillLoader 管理，不持久化
     const list = [...this._servers.values()]
       .filter((s) => !s.config.skillManaged)

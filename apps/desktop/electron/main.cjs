@@ -1849,7 +1849,7 @@ app.whenReady().then(async () => {
 
     // 3. 初始化 MCP Manager 并注入浏览器路径
     const { McpManager } = await import("./mcp-manager.mjs");
-    mcpManager = new McpManager(app.getPath("userData"), app.getAppPath(), app.isPackaged);
+    mcpManager = new McpManager(app.getPath("userData"), app.getAppPath(), app.isPackaged, app.getPath("appData"));
     if (appSettings.browserPath) {
       mcpManager.setGlobalEnv({ BROWSER_PATH: appSettings.browserPath });
     }
