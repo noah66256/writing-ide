@@ -172,7 +172,7 @@ export class McpManager {
   async _tryMigrateLegacyConfig() {
     if (!this._appDataPath) return;
     // 历史 productName 列表，按优先级排列
-    const legacyNames = ["写作IDE", "writing-ide"];
+    const legacyNames = ["写作IDE", "writing-ide", "Electron"];
     for (const name of legacyNames) {
       const legacyPath = path.join(this._appDataPath, name, "mcp-servers.json");
       try {
@@ -197,6 +197,8 @@ export class McpManager {
       }
     }
   }
+
+  async _saveConfig() {
     // skillManaged server 由 SkillLoader 管理，不持久化
     const list = [...this._servers.values()]
       .filter((s) => !s.config.skillManaged)

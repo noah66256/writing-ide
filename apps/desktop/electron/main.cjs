@@ -376,6 +376,27 @@ async function fileExists(p) {
   }
 }
 
+async function tryMigrateConversationHistory(userData, appData) {
+  if (!userData || !appData) return;
+  const targetDir = path.join(userData, HISTORY_DIRNAME);
+  const targetFile = path.join(targetDir, HISTORY_FILENAME);
+  if (await fileExists(targetFile)) return; // 已存在，跳过
+  const legacyCandidates = ["Electron", "写作IDE", "writing-ide"];
+  for (const name of legacyCandidates) {
+    const legacyFile = path.join(appData, name, HISTORY_DIRNAME, HISTORY_FILENAME);
+    try {
+      const raw = await fsp.readFile(legacyFile, "utf-8");
+      JSON.parse(raw); // 验证 JSON 格式，解析失败则跳过
+      await fsp.mkdir(targetDir, { recursive: true });
+      await fsp.writeFile(targetFile, raw, "utf-8");
+      console.log(`[electron] 已迁移对话历史：${legacyFile} → ${targetFile}`);
+      return;
+    } catch {
+      // 路径不存在或格式错误，继续尝试下一个
+    }
+  }
+}
+
 async function resolveHistoryFileForRead() {
   const { primary, fallback } = historyCandidateDirs();
   const p1 = primary ? path.join(primary, HISTORY_FILENAME) : null;
@@ -1816,6 +1837,14 @@ app.whenReady().then(async () => {
   }
   registerIpc();
   registerAppProtocol();
+
+  // ======== 对话历史迁移（一次性，从旧 productName 路径迁移，须在 createWindow 之前） ========
+  try {
+    await tryMigrateConversationHistory(app.getPath("userData"), app.getPath("appData"));
+  } catch (e) {
+    console.warn("[electron] 对话历史迁移失败:", e);
+  }
+
   createWindow();
 
   // ======== Code Exec 初始化 ========
