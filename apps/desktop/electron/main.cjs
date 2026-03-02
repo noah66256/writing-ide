@@ -2012,11 +2012,15 @@ app.on("will-quit", () => {
   const { launchPath } = pendingUpdate;
   pendingUpdate = null; // 防止重入
   try {
-    // /S = NSIS silent install
-    spawn(launchPath, ["/S"], { detached: true, stdio: "ignore" }).unref();
+    // 延迟 2s 启动安装器：等待当前进程完全退出后 NSIS 才检测运行进程，避免弹"无法关闭 WritingIDE"提示
+    const p = escapeForPsSingleQuoted(launchPath);
+    const ps = `Start-Sleep -Milliseconds 2000; Start-Process -FilePath '${p}' -ArgumentList '/S'`;
+    spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps], {
+      detached: true, stdio: "ignore", windowsHide: true,
+    }).unref();
   } catch {
-    // 兜底：非 silent 启动
-    try { spawn(launchPath, [], { detached: true, stdio: "ignore" }).unref(); } catch { /* ignore */ }
+    // 兜底：直接 spawn（无延迟）
+    try { spawn(launchPath, ["/S"], { detached: true, stdio: "ignore" }).unref(); } catch { /* ignore */ }
   }
 });
 
