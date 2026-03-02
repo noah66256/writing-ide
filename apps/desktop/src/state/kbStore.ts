@@ -3488,16 +3488,12 @@ export const useKbStore = create<KbState>()(
               continue;
             }
 
-            // 质量模式（风格库）：智能切割 → 分段抽卡 → 全局合并（保证覆盖，不靠截断）
-            const chunks = isStyleLib
-              ? chunkParagraphsForExtraction({
-                  paragraphs: allParas,
-                  maxChunks: 6,
-                  maxParasPerChunk: 60,
-                  maxCharsPerChunk: 12000,
-                  overlapParas: 2,
-                })
-              : [allParas.slice(0, 180)]; // 非风格库：保持原策略（速度优先）
+            // 分块抽卡：按实际内容块逐块提交，无块数上限；风格库小块+重叠，非风格库无重叠
+            const chunks = chunkParagraphsForExtraction(
+              isStyleLib
+                ? { paragraphs: allParas, maxChunks: Infinity, maxParasPerChunk: 60, maxCharsPerChunk: 12000, overlapParas: 2 }
+                : { paragraphs: allParas, maxChunks: Infinity, maxParasPerChunk: 80, maxCharsPerChunk: 15000, overlapParas: 0 },
+            );
 
             const merged: any[] = [];
             const seen = new Set<string>();
