@@ -3437,8 +3437,8 @@ fastify.post(
   const maxCards = body.maxCards ?? 18;
   const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 3);
   const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
-
-  // facet 列表：先用 plan.md 里的顶层枚举（后续接入更细的 taxonomy 文件）
+  const timeoutMsCfg = Number(String(process.env.LLM_CARD_TIMEOUT_MS ?? "").trim());
+  const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 90_000;
   const defaultFacetIds = [
     "intro",
     "opening_design",
@@ -3571,6 +3571,8 @@ fastify.post(
     const maxCharsPerPara = attempt <= 0 ? 520 : attempt === 1 ? 360 : attempt === 2 ? 260 : 220;
     const user = buildUser(body.paragraphs as any, maxCount, maxCharsPerPara);
 
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), timeoutMs);
     ret = await completionOnceViaProvider({
       baseUrl,
       endpoint,
@@ -3582,7 +3584,9 @@ fastify.post(
       ],
       temperature: 0.2,
       maxTokens: stageMaxTokens ?? null,
+      signal: abort.signal,
     });
+    clearTimeout(timer);
 
     if (!ret.ok) {
       lastStatus = ret.status;

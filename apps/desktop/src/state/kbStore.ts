@@ -191,6 +191,8 @@ export type KbCardJob = {
   libraryName?: string;
   status: KbCardJobStatus;
   extractedCards?: number;
+  chunksTotal?: number;
+  chunksDone?: number;
   error?: string;
   updatedAt: string;
 };
@@ -331,7 +333,10 @@ type KbState = {
     skippedSample?: Array<{ path: string; reason: string }>;
     errors?: Array<{ url: string; error: string }>;
   }>;
-  extractCardsForDocs: (docIds: string[], opts?: { signal?: AbortSignal }) => Promise<{
+  extractCardsForDocs: (
+    docIds: string[],
+    opts?: { signal?: AbortSignal; onProgress?: (chunk: number, totalChunks: number) => void },
+  ) => Promise<{
     ok: boolean;
     extracted: number;
     skipped: number;
@@ -2756,7 +2761,12 @@ export const useKbStore = create<KbState>()(
 
                 cardJobsAbort = new AbortController();
                 const signal = cardJobsAbort.signal;
-                const ret = await get().extractCardsForDocs([next.docId], { signal });
+                const ret = await get().extractCardsForDocs([next.docId], {
+                  signal,
+                  onProgress: (chunk, total) => {
+                    markCardJob(next.id, { chunksTotal: total, chunksDone: chunk });
+                  },
+                });
                 const aborted = Boolean(signal.aborted);
                 const reason = cardJobsAbortReason;
                 cardJobsAbort = null;
@@ -3495,6 +3505,8 @@ export const useKbStore = create<KbState>()(
                 : { paragraphs: allParas, maxChunks: Infinity, maxParasPerChunk: 80, maxCharsPerChunk: 15000, overlapParas: 0 },
             );
 
+            opts?.onProgress?.(0, chunks.length);
+
             const merged: any[] = [];
             const seen = new Set<string>();
             const addCard = (c: any) => {
@@ -3514,6 +3526,7 @@ export const useKbStore = create<KbState>()(
               const ret = await postExtractCards({ paragraphs: chunk, maxCards, facetIds: packFacetIds, mode: "doc_v2", signal: opts?.signal });
               if (!ret.ok) return { ok: false, extracted, skipped, error: ret.error };
               for (const c of ret.cards) addCard(c);
+              opts?.onProgress?.(ci + 1, chunks.length);
             }
 
             if (!merged.length) {

@@ -195,7 +195,9 @@ export function CardJobsModal() {
     const runningCard = jobs.find((j) => j.status === "running");
     const runningPlaybook = playbookJobs.find((j) => j.status === "running");
     const runningLabel = runningCard?.docTitle ?? (runningPlaybook ? `【风格手册】${runningPlaybook.libraryName ?? runningPlaybook.libraryId}` : null);
-    return { total, done, failed, cancelled, runningLabel };
+    const chunksDone = runningCard?.chunksDone;
+    const chunksTotal = runningCard?.chunksTotal;
+    return { total, done, failed, cancelled, runningLabel, chunksDone, chunksTotal };
   }, [jobs, playbookJobs]);
 
   const progress = useMemo(() => {
@@ -2095,7 +2097,7 @@ export function CardJobsModal() {
               </span>
               {summary.failed ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">失败：{summary.failed}</span> : null}
               {summary.cancelled ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">取消：{summary.cancelled}</span> : null}
-              {summary.runningLabel ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">当前：{summary.runningLabel}</span> : null}
+              {summary.runningLabel ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">当前：{summary.runningLabel}{typeof summary.chunksDone === "number" && typeof summary.chunksTotal === "number" && summary.chunksTotal > 1 ? `（块 ${summary.chunksDone}/${summary.chunksTotal}）` : ""}</span> : null}
             </div>
 
             {progress.totalUnits ? (
