@@ -53,6 +53,7 @@ export function CardJobsModal() {
   const cancel = useKbStore((s) => s.cancelCardJobs);
   const clearFinished = useKbStore((s) => s.clearFinishedCardJobs);
   const retryFailed = useKbStore((s) => s.retryFailedCardJobs);
+  const forceReextractSkipped = useKbStore((s) => s.forceReextractSkippedJobs);
 
   const libraries = useKbStore((s) => s.libraries);
   const trash = useKbStore((s) => s.trashLibraries);
@@ -2198,6 +2199,15 @@ export function CardJobsModal() {
                   disabled={!jobs.some((j) => j.status === "failed") && !playbookJobs.some((j) => j.status === "failed")}
                 >
                   重试失败
+                </button>
+                <button
+                  className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
+                  type="button"
+                  title="清除旧卡并重新抽卡（用于内容有误或被跳过的文档）"
+                  onClick={() => { forceReextractSkipped(); void start(); }}
+                  disabled={!jobs.some((j) => j.status === "skipped")}
+                >
+                  强制重抽
                 </button>
               </div>
               <div className="flex gap-2">

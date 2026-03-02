@@ -190,6 +190,7 @@ export type KbCardJob = {
   libraryId?: string;
   libraryName?: string;
   status: KbCardJobStatus;
+  force?: boolean;
   extractedCards?: number;
   chunksTotal?: number;
   chunksDone?: number;
@@ -335,7 +336,7 @@ type KbState = {
   }>;
   extractCardsForDocs: (
     docIds: string[],
-    opts?: { signal?: AbortSignal; onProgress?: (chunk: number, totalChunks: number) => void },
+    opts?: { signal?: AbortSignal; onProgress?: (chunk: number, totalChunks: number) => void; force?: boolean },
   ) => Promise<{
     ok: boolean;
     extracted: number;
@@ -396,7 +397,7 @@ type KbState = {
 
   openKbManager: (tab?: KbState["kbManagerTab"], notice?: string | null, viewLibId?: string | null) => void;
   closeKbManager: () => void;
-  enqueueCardJobs: (docIds: string[], opts?: { open?: boolean; autoStart?: boolean }) => Promise<void>;
+  enqueueCardJobs: (docIds: string[], opts?: { open?: boolean; autoStart?: boolean; force?: boolean }) => Promise<void>;
   enqueuePlaybookJob: (libraryId: string, opts?: { open?: boolean; skipConfirm?: boolean }) => Promise<{ ok: boolean; enqueued?: boolean; error?: string }>;
   startCardJobs: () => Promise<void>;
   pauseCardJobs: () => void;
@@ -404,6 +405,7 @@ type KbState = {
   cancelCardJobs: () => void;
   clearFinishedCardJobs: () => void;
   retryFailedCardJobs: () => void;
+  forceReextractSkippedJobs: () => void;
 
   // UI：查看某个库下的卡片（用于库管理里浏览）
   listCardsForLibrary: (args: {
@@ -2543,21 +2545,23 @@ export const useKbStore = create<KbState>()(
         }
 
         set((s) => {
-          const exists = new Set(s.cardJobs.map((j) => j.docId));
           const now = nowIso();
           const nextJobs = [...s.cardJobs];
           for (const id of unique) {
-            if (exists.has(id)) continue;
-            const lib = libByDocId.get(id);
-            nextJobs.push({
-              id: makeId("kb_card_job"),
-              docId: id,
-              docTitle: titleById.get(id) ?? id,
-              libraryId: lib?.libraryId,
-              libraryName: lib?.libraryName,
-              status: "pending",
-              updatedAt: now,
-            });
+            const existingIdx = nextJobs.findIndex((j) => j.docId === id);
+            if (opts?.force) {
+              // 强制重抽：已有 job 则重置为 pending+force，否则新建
+              if (existingIdx >= 0) {
+                nextJobs[existingIdx] = { ...nextJobs[existingIdx]!, status: "pending", force: true, updatedAt: now, error: undefined, chunksTotal: undefined, chunksDone: undefined };
+              } else {
+                const lib = libByDocId.get(id);
+                nextJobs.push({ id: makeId("kb_card_job"), docId: id, docTitle: titleById.get(id) ?? id, libraryId: lib?.libraryId, libraryName: lib?.libraryName, status: "pending", force: true, updatedAt: now });
+              }
+            } else {
+              if (existingIdx >= 0) continue;
+              const lib = libByDocId.get(id);
+              nextJobs.push({ id: makeId("kb_card_job"), docId: id, docTitle: titleById.get(id) ?? id, libraryId: lib?.libraryId, libraryName: lib?.libraryName, status: "pending", updatedAt: now });
+            }
           }
           return {
             cardJobs: nextJobs,
@@ -2755,14 +2759,24 @@ export const useKbStore = create<KbState>()(
                   return true;
                 });
                 if (hasCard) {
-                  markCardJob(next.id, { status: "skipped" });
-                  continue;
+                  if (!next.force) {
+                    markCardJob(next.id, { status: "skipped" });
+                    continue;
+                  }
+                  // 强制重抽：先删除该文档的旧卡
+                  db.artifacts = db.artifacts.filter((a) => {
+                    if (a.sourceDocId !== next.docId || a.kind !== "card") return true;
+                    const t = String(a.cardType ?? "");
+                    return ["style_profile", "playbook_facet"].includes(t); // 保留 playbook 卡
+                  });
+                  await saveDb({ baseDir, ownerKey, db });
                 }
 
                 cardJobsAbort = new AbortController();
                 const signal = cardJobsAbort.signal;
                 const ret = await get().extractCardsForDocs([next.docId], {
                   signal,
+                  force: next.force,
                   onProgress: (chunk, total) => {
                     markCardJob(next.id, { chunksTotal: total, chunksDone: chunk });
                   },
@@ -2969,6 +2983,19 @@ export const useKbStore = create<KbState>()(
           return {
             cardJobs: s.cardJobs.map((j) => (j.status === "failed" ? { ...j, status: "pending", error: undefined, updatedAt: now } : j)),
             playbookJobs: s.playbookJobs.map((j) => (j.status === "failed" ? { ...j, status: "pending", error: undefined, updatedAt: now } : j)),
+          };
+        });
+      },
+
+      forceReextractSkippedJobs: () => {
+        set((s) => {
+          const now = nowIso();
+          return {
+            cardJobs: s.cardJobs.map((j) =>
+              j.status === "skipped"
+                ? { ...j, status: "pending", force: true, error: undefined, chunksTotal: undefined, chunksDone: undefined, updatedAt: now }
+                : j,
+            ),
           };
         });
       },
@@ -3471,8 +3498,12 @@ export const useKbStore = create<KbState>()(
           for (const id of ids) {
             const hasCard = db.artifacts.some((a) => a.sourceDocId === id && (isDocV2Card(a) || (a.kind === "card" && !isPlaybookCard(a))));
             if (hasCard) {
-              skipped += 1;
-              continue;
+              if (!opts?.force) {
+                skipped += 1;
+                continue;
+              }
+              // force：删旧卡后继续
+              db.artifacts = db.artifacts.filter((a) => !(a.sourceDocId === id && (isDocV2Card(a) || (a.kind === "card" && !isPlaybookCard(a)))));
             }
 
             const doc = docById.get(id);
