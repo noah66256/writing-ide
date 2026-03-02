@@ -1038,24 +1038,32 @@ export function CardJobsModal() {
                   return (
                     <div key={l.id} className={cn("border-b border-dashed border-border pb-2.5 last:border-b-0 rounded-lg px-1.5 -mx-1.5 transition-colors", viewLibId === l.id && "bg-accent/5")}>
                       <div className="flex justify-between gap-2.5 items-center">
-                        <div className="min-w-0">
-                          <button
-                            type="button"
-                            className="text-[13px] font-bold text-text max-w-[420px] overflow-hidden text-ellipsis whitespace-nowrap hover:text-accent transition-colors text-left"
-                            title="展开该库（库体检/卡片预览）"
-                            onClick={() => {
-                              setViewLibId((prev) => {
-                                const next = prev === l.id ? null : l.id;
-                                if (next) {
-                                  setViewTab("health");
-                                  setFpAdvanced(false);
-                                }
-                                return next;
-                              });
-                            }}
-                          >
+                        <div
+                          className="min-w-0 cursor-pointer"
+                          role="button"
+                          tabIndex={0}
+                          title="展开该库（库体检/卡片预览）"
+                          onClick={() => {
+                            if (viewLibId !== l.id) {
+                              setViewTab("health");
+                              setFpAdvanced(false);
+                            }
+                            setViewLibId(l.id);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              if (viewLibId !== l.id) {
+                                setViewTab("health");
+                                setFpAdvanced(false);
+                              }
+                              setViewLibId(l.id);
+                            }
+                          }}
+                        >
+                          <span className="block text-[13px] font-bold text-text max-w-[420px] overflow-hidden text-ellipsis whitespace-nowrap hover:text-accent transition-colors text-left">
                             {l.name}
-                          </button>
+                          </span>
                           <div className="text-xs text-text-muted">
                             文档 {l.docCount} 篇 · 更新 {new Date(l.updatedAt).toLocaleString()} · 标签 {facetPackLabel(l.facetPackId)} · 用途{" "}
                             {l.purpose === "style" ? "风格库" : l.purpose === "product" ? "产品库" : "素材库"}
