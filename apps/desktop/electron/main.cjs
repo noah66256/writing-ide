@@ -1545,7 +1545,11 @@ function registerIpc() {
       if (!p) return { ok: false, error: "MISSING_PATH" };
       if (!(await isValidArtifactPath(p))) return { ok: false, error: "INVALID_ARTIFACT_PATH" };
       const openError = await shell.openPath(p);
-      if (openError) return { ok: false, error: "OPEN_FAILED", detail: openError };
+      if (openError) {
+        // 无法直接打开（如 .md 没有关联程序），fallback 到 Finder/文件管理器定位
+        shell.showItemInFolder(p);
+        return { ok: true, fallback: "showInFolder" };
+      }
       return { ok: true };
     } catch (e) {
       return { ok: false, error: String(e?.message ?? e) };
