@@ -2764,13 +2764,8 @@ export const useKbStore = create<KbState>()(
                     markCardJob(next.id, { status: "skipped" });
                     continue;
                   }
-                  // 强制重抽：先删除该文档的旧卡
-                  db.artifacts = db.artifacts.filter((a) => {
-                    if (a.sourceDocId !== next.docId || a.kind !== "card") return true;
-                    const t = String(a.cardType ?? "");
-                    return ["style_profile", "playbook_facet"].includes(t); // 保留 playbook 卡
-                  });
-                  await saveDb({ baseDir, ownerKey, db });
+                  // 强制重抽：旧卡由 extractCardsForDocs 内部 force 分支统一删除+落盘
+                  // 此处不 saveDb，避免失败时旧卡永久丢失
                 }
 
                 cardJobsAbort = new AbortController();

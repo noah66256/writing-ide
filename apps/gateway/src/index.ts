@@ -3573,20 +3573,23 @@ fastify.post(
 
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), timeoutMs);
-    ret = await completionOnceViaProvider({
-      baseUrl,
-      endpoint,
-      apiKey,
-      model,
-      messages: [
-        { role: "system", content: sys },
-        { role: "user", content: user }
-      ],
-      temperature: 0.2,
-      maxTokens: stageMaxTokens ?? null,
-      signal: abort.signal,
-    });
-    clearTimeout(timer);
+    try {
+      ret = await completionOnceViaProvider({
+        baseUrl,
+        endpoint,
+        apiKey,
+        model,
+        messages: [
+          { role: "system", content: sys },
+          { role: "user", content: user }
+        ],
+        temperature: 0.2,
+        maxTokens: stageMaxTokens ?? null,
+        signal: abort.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
 
     if (!ret.ok) {
       lastStatus = ret.status;

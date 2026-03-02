@@ -2232,7 +2232,7 @@ export function CardJobsModal() {
                   className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
                   type="button"
                   title="清除旧卡并重新抽卡（用于内容有误或被跳过的文档）"
-                  onClick={() => { forceReextractSkipped(); void start(); }}
+                  onClick={() => { forceReextractSkipped(); if (status !== "running") void start(); }}
                   disabled={!jobs.some((j) => j.status === "skipped")}
                 >
                   强制重抽
