@@ -3735,7 +3735,7 @@ fastify.post(
       lastDetail = ret.error;
       const errText = String(ret.error ?? "");
       const is429 = ret.status === 429 || errText.includes("Too Many Requests") || errText.includes("负载已饱和");
-      const isTimeout = /Headers Timeout Error|timeout|超时/i.test(errText) || /fetch failed/i.test(errText);
+      const isTimeout = /Headers Timeout Error|timeout|超时|aborted|AbortError/i.test(errText) || /fetch failed/i.test(errText);
       const isRetryable = is429 || isTimeout || ret.status === 502 || ret.status === 503 || errText.includes("UPSTREAM_502") || errText.includes("UPSTREAM_503");
       lastErr = { is429, isTimeout, detail: ret.error, status: ret.status };
       if (!isRetryable || attempt >= retryMax) break;

@@ -1656,6 +1656,8 @@ async function postExtractCards(args: {
   const url = base ? `${base}/api/kb/dev/extract_cards` : "/api/kb/dev/extract_cards";
   if (!ensureLoginForKbLlm("生成风格手册/抽卡")) return { ok: false, error: "AUTH_REQUIRED" };
   const auth = authHeader();
+  const t0 = Date.now();
+  console.log(`[kbStore] postExtractCards 请求: paragraphs=${args.paragraphs.length}, maxCards=${args.maxCards}, mode=${args.mode}, signalAborted=${Boolean(args.signal?.aborted)}`);
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -1679,13 +1681,20 @@ async function postExtractCards(args: {
       } catch {
         // ignore
       }
+      console.warn(`[kbStore] postExtractCards HTTP错误: status=${res.status}, error=${msg}, ${Date.now() - t0}ms, signalAborted=${Boolean(args.signal?.aborted)}`);
       return { ok: false, error: msg };
     }
     const json = await res.json().catch(() => null);
-    if (!json?.ok || !Array.isArray(json?.cards)) return { ok: false, error: "INVALID_RESPONSE" };
+    if (!json?.ok || !Array.isArray(json?.cards)) {
+      console.warn(`[kbStore] postExtractCards 响应无效: ${Date.now() - t0}ms`);
+      return { ok: false, error: "INVALID_RESPONSE" };
+    }
+    console.log(`[kbStore] postExtractCards 成功: cards=${json.cards.length}, ${Date.now() - t0}ms`);
     return { ok: true, cards: json.cards };
   } catch (e: any) {
-    return { ok: false, error: String(e?.message ?? e) };
+    const msg = String(e?.message ?? e);
+    console.error(`[kbStore] postExtractCards 异常: name=${e?.name}, error=${msg}, ${Date.now() - t0}ms, signalAborted=${Boolean(args.signal?.aborted)}`);
+    return { ok: false, error: msg };
   }
 }
 
@@ -3591,7 +3600,11 @@ export const useKbStore = create<KbState>()(
                 headingPath: Array.isArray(p.anchor?.headingPath) ? p.anchor.headingPath : [],
               }));
 
+            const allCharsTotal = allParas.reduce((s, p) => s + String(p.text ?? "").length, 0);
+            console.log(`[kbStore] 抽卡开始: docId=${id}, title=${doc?.title ?? "?"}, paragraphs=${allParas.length}, chars=${allCharsTotal}, isStyleLib=${isStyleLib}, signalAborted=${Boolean(opts?.signal?.aborted)}`);
+
             if (!allParas.length) {
+              console.log(`[kbStore] 跳过（无段落）: docId=${id}`);
               skipped += 1;
               continue;
             }
@@ -3602,10 +3615,9 @@ export const useKbStore = create<KbState>()(
               : { maxChunks: Infinity, maxParasPerChunk: 80, maxCharsPerChunk: 15000, overlapParas: 0 };
 
             let chunks: Array<Array<{ index: number; text: string; headingPath?: string[] }>> = [];
-            const allChars = allParas.reduce((s, p) => s + String(p.text ?? "").length, 0);
 
             // 篇级切分：段落 > 10 且总字符 > 8000 才触发（小文档不需要）
-            if (allParas.length > 10 && allChars > 8000) {
+            if (allParas.length > 10 && allCharsTotal > 8000) {
               const splitRet = await postSplitArticles({ paragraphs: allParas, signal: opts?.signal });
               if (splitRet.ok && splitRet.splits.length > 1) {
                 console.log(`[kbStore] 篇级切分成功：${splitRet.splits.length} 篇，splits=`, splitRet.splits);
@@ -3640,9 +3652,11 @@ export const useKbStore = create<KbState>()(
 
             // fallback：原有字符/段落分块
             if (!chunks.length) {
-              if (allParas.length > 10 && allChars > 8000) console.log("[kbStore] 篇级切分未生效，回退字符分块");
+              if (allParas.length > 10 && allCharsTotal > 8000) console.log("[kbStore] 篇级切分未生效，回退字符分块");
               chunks = chunkParagraphsForExtraction({ paragraphs: allParas, ...chunkCfg });
             }
+
+            console.log(`[kbStore] 分块计划: docId=${id}, chunks=${chunks.length}, paragraphs=${allParas.length}, chars=${allCharsTotal}`);
 
             opts?.onProgress?.(0, chunks.length);
 
@@ -3662,8 +3676,15 @@ export const useKbStore = create<KbState>()(
             for (let ci = 0; ci < chunks.length; ci += 1) {
               const chunk = chunks[ci]!;
               const maxCards = isStyleLib ? (ci === 0 ? 16 : 12) : 24;
+              const chunkChars = chunk.reduce((s, p) => s + String(p.text ?? "").length, 0);
+              console.log(`[kbStore] 抽卡chunk ${ci + 1}/${chunks.length}: docId=${id}, paras=${chunk.length}, chars=${chunkChars}, maxCards=${maxCards}`);
+              const chunkT0 = Date.now();
               const ret = await postExtractCards({ paragraphs: chunk, maxCards, facetIds: packFacetIds, mode: "doc_v2", signal: opts?.signal });
-              if (!ret.ok) return { ok: false, extracted, skipped, error: ret.error };
+              if (!ret.ok) {
+                console.error(`[kbStore] 抽卡chunk ${ci + 1}/${chunks.length} 失败: docId=${id}, error=${ret.error}, ${Date.now() - chunkT0}ms, signalAborted=${Boolean(opts?.signal?.aborted)}`);
+                return { ok: false, extracted, skipped, error: ret.error };
+              }
+              console.log(`[kbStore] 抽卡chunk ${ci + 1}/${chunks.length} 成功: docId=${id}, cards=${ret.cards.length}, ${Date.now() - chunkT0}ms`);
               for (const c of ret.cards) addCard(c);
               opts?.onProgress?.(ci + 1, chunks.length);
             }

@@ -33,11 +33,15 @@ export default defineConfig({
       "/api": {
         target: gatewayTarget,
         changeOrigin: true,
+        timeout: 600_000,
+        proxyTimeout: 600_000,
       },
       "/ws": {
         target: gatewayTarget,
         changeOrigin: true,
         ws: true,
+        timeout: 600_000,
+        proxyTimeout: 600_000,
       },
     },
   },
