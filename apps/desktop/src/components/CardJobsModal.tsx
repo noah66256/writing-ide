@@ -1036,7 +1036,7 @@ export function CardJobsModal() {
                 libraries.map((l) => {
                   const isCur = l.id === currentLibraryId;
                   return (
-                    <div key={l.id} className="border-b border-dashed border-border pb-2.5 last:border-b-0">
+                    <div key={l.id} className={cn("border-b border-dashed border-border pb-2.5 last:border-b-0 rounded-lg px-1.5 -mx-1.5 transition-colors", viewLibId === l.id && "bg-accent/5")}>
                       <div className="flex justify-between gap-2.5 items-center">
                         <div className="min-w-0">
                           <button
@@ -1177,7 +1177,7 @@ export function CardJobsModal() {
             </div>
 
             {viewLibId ? (
-              <div className="border border-border rounded-xl bg-surface p-2.5 grid gap-2.5">
+              <div className="border border-border rounded-xl bg-surface p-2.5 grid gap-2.5 max-h-[min(62vh,620px)] overflow-y-auto">
                 <div className="flex gap-2 flex-wrap items-center justify-between">
                   <div className="flex gap-2 flex-wrap items-center">
                     <button
@@ -1230,7 +1230,7 @@ export function CardJobsModal() {
                     <div className="flex gap-2 flex-wrap items-center justify-between">
                       <div className="flex gap-2 flex-wrap items-center">
                         <button
-                          className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
+                          className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors disabled:opacity-50"
                           type="button"
                           disabled={fpLoading}
                           onClick={() => {
@@ -1278,7 +1278,7 @@ export function CardJobsModal() {
                             })();
                           }}
                         >
-                          生成：声音指纹（数字版）
+                          生成：声音指纹（数字版）{fpLoading ? "…" : ""}
                         </button>
                         <button
                           className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
