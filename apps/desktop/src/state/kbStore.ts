@@ -334,6 +334,7 @@ type KbState = {
     skippedSample?: Array<{ path: string; reason: string }>;
     errors?: Array<{ url: string; error: string }>;
   }>;
+  importRawText: (text: string, title?: string) => Promise<{ imported: number; skipped: number; docIds: string[] }>;
   extractCardsForDocs: (
     docIds: string[],
     opts?: { signal?: AbortSignal; onProgress?: (chunk: number, totalChunks: number) => void; force?: boolean },
@@ -3304,6 +3305,48 @@ export const useKbStore = create<KbState>()(
         }
 
         return { imported, skipped, docIds: importedDocIds, skippedByReason, skippedSample, errors };
+      },
+
+      importRawText: async (text, title) => {
+        const ok = await get().ensureReady();
+        if (!ok) return { imported: 0, skipped: 0, docIds: [] };
+        const libId = get().currentLibraryId;
+        if (!libId) {
+          get().openKbManager("libraries", "请先选择一个库，再导入语料。");
+          return { imported: 0, skipped: 0, docIds: [] };
+        }
+        const baseDir = get().baseDir!;
+        const ownerKey = get().ownerKey;
+        const clean = String(text ?? "").trim();
+        if (!clean) return { imported: 0, skipped: 0, docIds: [] };
+        set({ isLoading: true, error: null });
+        try {
+          const db = await loadDb({ baseDir, ownerKey });
+          if (!db.libraries.some((l) => l.id === libId)) {
+            set({ isLoading: false, currentLibraryId: null });
+            get().openKbManager("libraries", "当前库已不存在，请重新选择库后再导入。");
+            return { imported: 0, skipped: 0, docIds: [] };
+          }
+          const docTitle = (title?.trim() || clean.split("\n")[0]?.slice(0, 60) || "粘贴文本").trim();
+          const contentHash = fnv1a32Hex(clean);
+          // 借用 file kind，absPath 用 paste:hash 保证去重正常工作
+          const importedFrom: ImportedFrom = { kind: "file", absPath: `paste:${contentHash}` };
+          const ret = await ingestEntryToDb({
+            db, baseDir, ownerKey, libId,
+            entryText: clean,
+            contentHash,
+            format: "txt",
+            entryTitle: docTitle,
+            importedFrom,
+          });
+          set({ isLoading: false });
+          await get().refreshLibraries().catch(() => void 0);
+          if (!ret.imported) return { imported: 0, skipped: 1, docIds: [ret.docId] };
+          return { imported: 1, skipped: 0, docIds: [ret.docId] };
+        } catch (e: any) {
+          set({ isLoading: false, error: String(e?.message ?? e) });
+          return { imported: 0, skipped: 0, docIds: [] };
+        }
       },
 
       importUrls: async (urls, opts) => {

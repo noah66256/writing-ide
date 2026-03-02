@@ -54,6 +54,19 @@ export function CardJobsModal() {
   const clearFinished = useKbStore((s) => s.clearFinishedCardJobs);
   const retryFailed = useKbStore((s) => s.retryFailedCardJobs);
   const forceReextractSkipped = useKbStore((s) => s.forceReextractSkippedJobs);
+  const importRawText = useKbStore((s) => s.importRawText);
+  const importExternalFiles = useKbStore((s) => s.importExternalFiles);
+  const [ingestMenuOpen, setIngestMenuOpen] = useState(false);
+  const ingestMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!ingestMenuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (ingestMenuRef.current && !ingestMenuRef.current.contains(e.target as Node)) setIngestMenuOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [ingestMenuOpen]);
 
   const libraries = useKbStore((s) => s.libraries);
   const trash = useKbStore((s) => s.trashLibraries);
@@ -955,51 +968,66 @@ export function CardJobsModal() {
               <button className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors" type="button" onClick={() => void refreshLibraries()}>
                 刷新
               </button>
-              <button
-                className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors disabled:opacity-50"
-                type="button"
-                disabled={!currentLibraryId || isLoading}
-                title={!currentLibraryId ? "请先设为当前库，再导入 URL" : "导入网页正文到本地 KB（每行一个 URL）"}
-                onClick={() => {
-                  void (async () => {
-                    if (!currentLibraryId) {
-                      void uiAlert({ title: "提示", message: "请先选择一个库并设为「当前库」，再导入 URL。" });
-                      return;
-                    }
-                    const v = await uiPrompt({
-                      title: "导入 URL",
-                      message: "每行一个 URL（仅支持 http/https）。导入后会入队到「抽卡任务」（不自动开始）。",
-                      placeholder: "https://example.com/article\nhttps://example.com/another",
-                      confirmText: "开始导入",
-                      multiline: true,
-                    });
-                    if (!v) return;
-                    const list = String(v)
-                      .split(/\r?\n/g)
-                      .map((s) => String(s ?? "").trim())
-                      .filter(Boolean);
-                    if (!list.length) return;
-
-                    const ret = await importUrls(list);
-                    const docIds = ret.docIds ?? [];
-                    const errorCount = Array.isArray(ret.errors) ? ret.errors.length : 0;
-                    const msg =
-                      `导入完成：新增/更新 ${ret.imported} 条，跳过 ${ret.skipped} 条` +
-                      (errorCount ? `，失败 ${errorCount} 条` : "") +
-                      (docIds.length ? `。\n\n已生成文档：${docIds.length} 条（将入队抽卡任务）` : "。");
-
-                    if (docIds.length) {
-                      await enqueueCardJobs(docIds, { open: true, autoStart: false });
-                      openKbManager("jobs", msg);
-                    } else {
-                      openKbManager("libraries", msg);
-                    }
-                    void uiAlert({ title: "导入结果", message: msg });
-                  })();
-                }}
-              >
-                导入 URL
-              </button>
+              <div className="relative" ref={ingestMenuRef}>
+                <button
+                  className="px-3 py-1.5 text-xs rounded-lg border border-accent bg-accent text-white hover:bg-accent-hover transition-colors disabled:opacity-50 flex items-center gap-1"
+                  type="button"
+                  disabled={!currentLibraryId || isLoading}
+                  title={!currentLibraryId ? "请先设为当前库，再开始抽卡" : "导入语料并开始抽卡"}
+                  onClick={() => setIngestMenuOpen((v) => !v)}
+                >
+                  开始抽卡 ▾
+                </button>
+                {ingestMenuOpen && (
+                  <div className="absolute left-0 top-full mt-1 z-50 w-32 rounded-lg border border-border bg-surface shadow-lg py-1 flex flex-col">
+                    {([{ label: "粘贴文本", key: "text" }, { label: "选择文件", key: "file" }, { label: "导入 URL", key: "url" }] as const).map(({ label, key }) => (
+                      <button
+                        key={key}
+                        className="px-3 py-2 text-xs text-left hover:bg-surface-alt text-text transition-colors"
+                        type="button"
+                        onClick={() => {
+                          setIngestMenuOpen(false);
+                          void (async () => {
+                            if (!currentLibraryId) {
+                              void uiAlert({ title: "提示", message: "请先选择一个库并设为「当前库」，再导入语料。" });
+                              return;
+                            }
+                            let docIds: string[] = [];
+                            if (key === "text") {
+                              const v = await uiPrompt({ title: "粘贴文本", message: "将文本粘贴到下方，直接入库并抽卡。", placeholder: "粘贴课程记录、文章、资料……", confirmText: "导入并抽卡", multiline: true });
+                              if (!v) return;
+                              const ret = await importRawText(v);
+                              docIds = ret.docIds;
+                            } else if (key === "file") {
+                              const picked = await window.desktop?.kb?.pickFiles({ title: "选择语料文件", multi: true });
+                              if (!picked?.ok || !picked.files?.length) return;
+                              const ret = await importExternalFiles(picked.files);
+                              docIds = ret.docIds ?? [];
+                            } else {
+                              const v = await uiPrompt({ title: "导入 URL", message: "每行一个 URL（仅支持 http/https）。", placeholder: "https://example.com/article", confirmText: "导入并抽卡", multiline: true });
+                              if (!v) return;
+                              const list = String(v).split(/\r?\n/g).map((s) => s.trim()).filter(Boolean);
+                              if (!list.length) return;
+                              const ret = await importUrls(list);
+                              docIds = ret.docIds ?? [];
+                            }
+                            if (!docIds.length) {
+                              void uiAlert({ title: "导入结果", message: "未导入任何新内容（可能已存在或内容为空）。" });
+                              return;
+                            }
+                            // 若已有任务在跑，只追加队列不重启（避免中断）；否则自动开始
+                            const isRunning = useKbStore.getState().cardJobStatus === "running";
+                            await enqueueCardJobs(docIds, { open: true, autoStart: !isRunning });
+                            openKbManager("jobs");
+                          })();
+                        }}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">当前库：{currentLibraryId ? currentLibraryId : "（未选择）"}</span>
             </div>
 
