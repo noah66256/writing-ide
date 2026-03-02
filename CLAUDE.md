@@ -266,3 +266,19 @@ rsync -avz --delete \
 ```
 
 **推荐**：始终使用 `scripts/deploy-gateway.sh`（走 git pull），避免手动 rsync。
+
+### ⚠️ Desktop 数据事故记录
+
+**conversations.v1.json 水化竞态导致对话历史清空（2026-03）**
+
+- 根因：`conversationStore` 在水化完成前就向磁盘写入了空的 `conversations: []`，覆盖了已有数据。
+- 已通过 commit 6352828（"fix: 水化完成前禁止写盘"）修复，此后不会再发生。
+- 已发生的数据丢失不可恢复（`draftSnapshot` 保留，`conversations` 数组为空）。
+- 教训：**conversations.v1.json 目前没有自动备份**，写入时应保留上一版本 `.bak`。
+
+**productName 变更（写作IDE → WritingIDE）导致 userData 路径孤岛（2026-03）**
+
+- 变更后 `userData` 从 `~/Library/Application Support/写作IDE/` 变为 `~/Library/Application Support/WritingIDE/`；开发模式数据在 `~/Library/Application Support/Electron/`（Electron 默认）。
+- 已在 `main.cjs` 添加 `tryMigrateConversationHistory()`，在 `createWindow()` **之前**一次性迁移对话历史。
+- MCP 配置迁移（`mcp-manager.mjs::_tryMigrateLegacyConfig`）已覆盖 `写作IDE`、`writing-ide`、`Electron` 三条旧路径。
+- 打包前须确认：`node --check apps/desktop/electron/mcp-manager.mjs`（曾发生 `_saveConfig` 方法声明丢失导致语法错误，commit 1c62815 修复）。
