@@ -1,14 +1,14 @@
 {
   "name": "@writing-ide/desktop",
   "private": true,
-  "version": "0.0.8",
+  "version": "0.0.9",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
-    "dev": "npm run -w @writing-ide/agent-core build && concurrently -n renderer,electron -c auto \"npm:dev:renderer\" \"npm:dev:electron\"",
+    "dev": "npm run -w @writing-ide/agent-core build && npm run -w @writing-ide/tools build && concurrently -n renderer,electron -c auto \"npm:dev:renderer\" \"npm:dev:electron\"",
     "dev:renderer": "vite",
     "dev:electron": "node scripts/dev-electron.cjs",
-    "build": "npm run -w @writing-ide/agent-core build && vite build",
+    "build": "npm run -w @writing-ide/agent-core build && npm run -w @writing-ide/tools build && vite build",
     "preview": "vite preview",
     "dist:win": "npm run build && electron-builder --win nsis --x64",
     "dist:win:portable": "npm run build && electron-builder --win portable --x64",
