@@ -111,6 +111,27 @@ function normalizeArgKey(key) {
   return String(key ?? "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 }
 
+/**
+ * 从参数校验错误文本中提取“缺失参数/未知参数”线索。
+ * 兼容常见 pydantic 文本格式。
+ * @param {string} text
+ * @returns {{missing:string[], unexpected:string[]}}
+ */
+function extractArgValidationSignals(text) {
+  const raw = String(text ?? "");
+  const missing = [];
+  const unexpected = [];
+  const missRe = /(?:^|\n)([A-Za-z_][A-Za-z0-9_]*)\n\s+Missing required argument/gi;
+  const unexpRe = /(?:^|\n)([A-Za-z_][A-Za-z0-9_]*)\n\s+Unexpected keyword argument/gi;
+  let m = null;
+  while ((m = missRe.exec(raw)) !== null) missing.push(String(m[1] ?? ""));
+  while ((m = unexpRe.exec(raw)) !== null) unexpected.push(String(m[1] ?? ""));
+  return {
+    missing: [...new Set(missing.filter(Boolean))],
+    unexpected: [...new Set(unexpected.filter(Boolean))],
+  };
+}
+
 export class McpManager {
   /**
    * @param {string} userDataPath - app.getPath('userData')
@@ -537,20 +558,11 @@ export class McpManager {
   }
 
   /**
-   * 依据工具 schema 做参数兜底映射（如 path -> filename）。
-   * 仅在“必填参数缺失”时生效，避免污染正常请求。
+   * 读取工具 schema 元信息。
    * @param {{tools:any[]}} entry
    * @param {string} toolName
-   * @param {any} rawArgs
-   * @returns {{args: Record<string, any>, rewrites: Array<{from:string,to:string,reason:string}>}}
    */
-  _normalizeToolArgs(entry, toolName, rawArgs) {
-    const args =
-      rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
-        ? { ...rawArgs }
-        : {};
-    const rewrites = [];
-
+  _getToolSchemaMeta(entry, toolName) {
     const tools = Array.isArray(entry?.tools) ? entry.tools : [];
     const tool = tools.find((t) => String(t?.name ?? "") === String(toolName ?? ""));
     const schema =
@@ -558,13 +570,43 @@ export class McpManager {
     const required = Array.isArray(schema?.required)
       ? schema.required.map((x) => String(x ?? "").trim()).filter(Boolean)
       : [];
-    if (!required.length) return { args, rewrites };
+    const properties =
+      schema?.properties && typeof schema.properties === "object"
+        ? Object.keys(schema.properties).map((x) => String(x ?? "").trim()).filter(Boolean)
+        : [];
+    const schemaKeys = new Set([...required, ...properties]);
+    const orderedTargets = [...required, ...properties.filter((k) => !required.includes(k))];
+    return { schemaKeys, orderedTargets };
+  }
+
+  /**
+   * 依据工具 schema 做参数兜底映射（如 path -> filename）。
+   * 默认优先 required；若 required 为空则回退到 properties。
+   * @param {{tools:any[]}} entry
+   * @param {string} toolName
+   * @param {any} rawArgs
+   * @param {{preferredTargets?: string[]}} [opts]
+   * @returns {{args: Record<string, any>, rewrites: Array<{from:string,to:string,reason:string}>, schemaKeys: Set<string>}}
+   */
+  _normalizeToolArgs(entry, toolName, rawArgs, opts = {}) {
+    const args =
+      rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
+        ? { ...rawArgs }
+        : {};
+    const rewrites = [];
+
+    const meta = this._getToolSchemaMeta(entry, toolName);
+    const targets = (Array.isArray(opts.preferredTargets) ? opts.preferredTargets : [])
+      .map((x) => String(x ?? "").trim())
+      .filter((x) => meta.schemaKeys.has(x));
+    const orderedTargets = targets.length > 0 ? targets : meta.orderedTargets;
+    if (!orderedTargets.length) return { args, rewrites, schemaKeys: meta.schemaKeys };
 
     /** @type {Map<string,string>} */
     const argKeyByNorm = new Map();
     for (const key of Object.keys(args)) argKeyByNorm.set(normalizeArgKey(key), key);
 
-    for (const reqKey of required) {
+    for (const reqKey of orderedTargets) {
       const hasReq = Object.prototype.hasOwnProperty.call(args, reqKey);
       if (hasReq) continue;
 
@@ -586,9 +628,67 @@ export class McpManager {
       args[reqKey] = value;
       rewrites.push({ from: sourceKey, to: reqKey, reason: "required_alias_fallback" });
       argKeyByNorm.set(reqNorm, reqKey);
+
+      // 若来源键不在 schema 中，删除以避免 strict server 报 unexpected keyword。
+      if (!meta.schemaKeys.has(sourceKey)) {
+        delete args[sourceKey];
+        rewrites.push({ from: sourceKey, to: reqKey, reason: "drop_non_schema_source" });
+        argKeyByNorm.delete(sourceNorm);
+      }
     }
 
-    return { args, rewrites };
+    return { args, rewrites, schemaKeys: meta.schemaKeys };
+  }
+
+  /**
+   * 基于错误文本进行一次性重试参数修复。
+   * @param {{tools:any[]}} entry
+   * @param {string} toolName
+   * @param {Record<string, any>} attemptedArgs
+   * @param {string} errorText
+   */
+  _buildRetryArgsFromError(entry, toolName, attemptedArgs, errorText) {
+    const signals = extractArgValidationSignals(errorText);
+    if (!signals.missing.length && !signals.unexpected.length) return null;
+
+    const normalized = this._normalizeToolArgs(entry, toolName, attemptedArgs, {
+      preferredTargets: signals.missing,
+    });
+    const args = { ...normalized.args };
+    const rewrites = [...normalized.rewrites];
+
+    // 显式删除报错中的未知字段（且确实不在 schema 中）
+    for (const key of signals.unexpected) {
+      if (!Object.prototype.hasOwnProperty.call(args, key)) continue;
+      if (normalized.schemaKeys.has(key)) continue;
+      delete args[key];
+      rewrites.push({ from: key, to: "", reason: "drop_unexpected_key_on_retry" });
+    }
+
+    const before = JSON.stringify(attemptedArgs ?? {});
+    const after = JSON.stringify(args ?? {});
+    if (before === after) return null;
+
+    return { args, rewrites, signals };
+  }
+
+  /**
+   * 单次调用 MCP 工具。
+   * @param {{client:any}} entry
+   * @param {string} toolName
+   * @param {Record<string, any>} callArgs
+   */
+  async _callToolOnce(entry, toolName, callArgs) {
+    const result = await entry.client.callTool({
+      name: toolName,
+      arguments: callArgs ?? {},
+    });
+    const textParts = (result?.content ?? [])
+      .filter((c) => c.type === "text")
+      .map((c) => c.text);
+    const output = textParts.join("\n") || JSON.stringify(result?.content ?? []);
+    const isError = result?.isError === true;
+    return { ok: !isError, output, raw: result };
   }
 
   async callTool(serverId, toolName, args) {
@@ -605,21 +705,41 @@ export class McpManager {
           rewrites: normalized.rewrites,
         });
       }
-      const result = await entry.client.callTool({
-        name: toolName,
-        arguments: normalized.args,
+      const first = await this._callToolOnce(entry, toolName, normalized.args);
+      if (first.ok) {
+        return {
+          ...first,
+          ...(normalized.rewrites.length > 0 ? { normalizedArgs: normalized.rewrites } : {}),
+        };
+      }
+
+      // 单次重试：仅在检测到参数校验问题时触发。
+      const retryPlan = this._buildRetryArgsFromError(
+        entry,
+        toolName,
+        normalized.args,
+        String(first.output ?? ""),
+      );
+      if (!retryPlan) {
+        return {
+          ...first,
+          ...(normalized.rewrites.length > 0 ? { normalizedArgs: normalized.rewrites } : {}),
+        };
+      }
+
+      console.info("[McpManager] tool args retry-normalized", {
+        serverId,
+        toolName,
+        signals: retryPlan.signals,
+        rewrites: retryPlan.rewrites,
       });
-      // MCP 工具返回 content 数组
-      const textParts = (result?.content ?? [])
-        .filter((c) => c.type === "text")
-        .map((c) => c.text);
-      const output = textParts.join("\n") || JSON.stringify(result?.content ?? []);
-      const isError = result?.isError === true;
+      const second = await this._callToolOnce(entry, toolName, retryPlan.args);
+      const allRewrites = [...normalized.rewrites, ...retryPlan.rewrites];
       return {
-        ok: !isError,
-        output,
-        raw: result,
-        ...(normalized.rewrites.length > 0 ? { normalizedArgs: normalized.rewrites } : {}),
+        ...second,
+        retried: true,
+        retrySignals: retryPlan.signals,
+        ...(allRewrites.length > 0 ? { normalizedArgs: allRewrites } : {}),
       };
     } catch (e) {
       return { ok: false, error: String(e?.message ?? e) };
