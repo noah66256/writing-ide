@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import {
   X, Users, Plug, Sparkles, ChevronDown, ChevronRight, Plus,
   Bot, BookOpen, FolderOpen, RefreshCw, Pencil, Trash2, Terminal, Globe, Radio,
-  Eye, EyeOff, Monitor, ExternalLink, Package,
+  Eye, EyeOff, Monitor, ExternalLink, Package, Link2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TeamModal } from "@/components/TeamModal";
@@ -434,6 +434,16 @@ function SkillTabContent() {
 /* ─── MCP Tab ─── */
 
 type TransportType = "stdio" | "streamable-http" | "sse";
+type McpDraft = {
+  name: string;
+  transport: TransportType;
+  command?: string;
+  args?: string[];
+  endpoint?: string;
+  env?: Record<string, string>;
+  sourceRepo: string;
+  notes: string[];
+};
 
 const STATUS_COLORS: Record<string, string> = {
   connected: "bg-green-500",
@@ -453,6 +463,172 @@ const TRANSPORT_LABELS: Record<TransportType, string> = {
   "streamable-http": "HTTP",
   sse: "SSE",
 };
+
+function parseGithubRepoUrl(input: string): { owner: string; repo: string } | null {
+  const raw = String(input ?? "").trim();
+  if (!raw) return null;
+  const noHash = raw.split("#")[0] ?? raw;
+  const noQuery = noHash.split("?")[0] ?? noHash;
+  const m = noQuery.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?(?:\/.*)?$/i);
+  if (!m?.[1] || !m?.[2]) return null;
+  return { owner: m[1], repo: m[2] };
+}
+
+function decodeGithubBase64(content: string): string {
+  const b64 = String(content ?? "").replace(/\s+/g, "");
+  const binary = atob(b64);
+  const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+async function fetchGithubRepoJson(owner: string, repo: string): Promise<any> {
+  const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  const res = await fetch(url, { headers: { Accept: "application/vnd.github+json" } });
+  if (!res.ok) {
+    throw new Error(`GitHub 仓库信息获取失败（${res.status}）`);
+  }
+  return res.json();
+}
+
+async function fetchGithubRepoText(owner: string, repo: string, branch: string, filePath: string): Promise<string | null> {
+  const url = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${filePath}?ref=${encodeURIComponent(branch)}`;
+  const res = await fetch(url, { headers: { Accept: "application/vnd.github+json" } });
+  if (res.status === 404) return null;
+  if (!res.ok) return null;
+  const payload = await res.json().catch(() => null as any);
+  const content = String(payload?.content ?? "");
+  if (!content) return null;
+  try {
+    return decodeGithubBase64(content);
+  } catch {
+    return null;
+  }
+}
+
+function tokenizeCommandLine(line: string): string[] {
+  const src = String(line ?? "").trim();
+  if (!src) return [];
+  const matches = src.match(/"[^"]*"|'[^']*'|[^\s]+/g) ?? [];
+  return matches
+    .map((x) => x.replace(/^['"]|['"]$/g, ""))
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+function pickCommandFromReadme(readme: string): { command: string; reason: string } | null {
+  const text = String(readme ?? "");
+  if (!text.trim()) return null;
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const re = /^(npx|uvx|python\s+-m|node|docker\s+run)\s+.+$/i;
+  const candidates = lines.filter((line) => re.test(line));
+  if (!candidates.length) return null;
+
+  const scored = candidates
+    .map((line) => {
+      const l = line.toLowerCase();
+      let score = 0;
+      if (l.includes("mcp")) score += 3;
+      if (l.includes("server")) score += 1;
+      if (l.includes("install")) score -= 1;
+      return { line, score };
+    })
+    .sort((a, b) => b.score - a.score);
+  const picked = scored[0]?.line ?? "";
+  if (!picked) return null;
+  return { command: picked, reason: "README 命令推断" };
+}
+
+function extractEnvKeysFromText(text: string): string[] {
+  const s = String(text ?? "");
+  const keys = Array.from(new Set(s.match(/\b[A-Z][A-Z0-9_]{2,}(?:KEY|TOKEN|SECRET)\b/g) ?? []));
+  return keys.slice(0, 8);
+}
+
+async function buildMcpDraftFromGithubUrl(repoUrl: string): Promise<McpDraft> {
+  const parsed = parseGithubRepoUrl(repoUrl);
+  if (!parsed) throw new Error("请提供标准 GitHub 仓库地址（例如 https://github.com/owner/repo）");
+  const { owner, repo } = parsed;
+  const repoInfo = await fetchGithubRepoJson(owner, repo);
+  const branch = String(repoInfo?.default_branch ?? "main").trim() || "main";
+  const prettyName = String(repoInfo?.name ?? repo).trim() || repo;
+  const notes: string[] = [];
+  const sourceRepo = `https://github.com/${owner}/${repo}`;
+
+  const [pkgText, pyText, readmeText, readmeAltText] = await Promise.all([
+    fetchGithubRepoText(owner, repo, branch, "package.json"),
+    fetchGithubRepoText(owner, repo, branch, "pyproject.toml"),
+    fetchGithubRepoText(owner, repo, branch, "README.md"),
+    fetchGithubRepoText(owner, repo, branch, "readme.md"),
+  ]);
+  const readme = readmeText || readmeAltText || "";
+
+  let draft: McpDraft | null = null;
+
+  if (pkgText) {
+    try {
+      const pkg = JSON.parse(pkgText);
+      const pkgName = String(pkg?.name ?? "").trim();
+      if (pkgName) {
+        draft = {
+          name: prettyName,
+          transport: "stdio",
+          command: "npx",
+          args: ["-y", pkgName],
+          sourceRepo,
+          notes: [`根据 package.json 推断 npm 包：${pkgName}`],
+        };
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  if (!draft && pyText) {
+    const m = pyText.match(/\[project\][\s\S]*?\nname\s*=\s*["']([^"']+)["']/i) || pyText.match(/\nname\s*=\s*["']([^"']+)["']/i);
+    const pyName = String(m?.[1] ?? "").trim();
+    if (pyName) {
+      draft = {
+        name: prettyName,
+        transport: "stdio",
+        command: "uvx",
+        args: [pyName],
+        sourceRepo,
+        notes: [`根据 pyproject.toml 推断 Python 包：${pyName}`],
+      };
+    }
+  }
+
+  if (!draft && readme) {
+    const picked = pickCommandFromReadme(readme);
+    if (picked) {
+      const parts = tokenizeCommandLine(picked.command);
+      const [command, ...args] = parts;
+      if (command) {
+        draft = {
+          name: prettyName,
+          transport: "stdio",
+          command,
+          args,
+          sourceRepo,
+          notes: [picked.reason, "请在保存前确认命令参数与环境变量"],
+        };
+      }
+    }
+  }
+
+  if (!draft) {
+    throw new Error("未能从仓库自动推断启动命令，请手动添加 Server（该仓库可能不是 stdio 启动范式）");
+  }
+
+  const envKeys = extractEnvKeysFromText(readme);
+  if (envKeys.length > 0) {
+    draft.env = Object.fromEntries(envKeys.map((k) => [k, ""]));
+    notes.push(`从 README 提取到 ${envKeys.length} 个可能的密钥变量`);
+  }
+
+  draft.notes = [...draft.notes, ...notes];
+  return draft;
+}
 
 // ── 浏览器状态栏（MCP 标签页顶部） ──────────────────
 function BrowserStatusBar() {
@@ -570,7 +746,9 @@ function McpTabContent() {
   const servers = useMcpStore((s) => s.servers);
   const refresh = useMcpStore((s) => s.refresh);
   const [showAdd, setShowAdd] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState<McpDraft | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   useEffect(() => { void refresh(); }, []);
@@ -582,13 +760,22 @@ function McpTabContent() {
 
       <div className="flex items-center justify-between">
         <div className="text-[13px] font-semibold text-text">MCP Server</div>
-        <button
-          onClick={() => { setShowAdd(true); setEditingId(null); }}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-accent-soft text-accent hover:bg-accent-soft/80 transition-colors"
-        >
-          <Plus size={14} />
-          添加 Server
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowImport(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-surface-alt text-text-muted hover:text-accent hover:bg-accent-soft/50 transition-colors"
+          >
+            <Link2 size={14} />
+            GitHub 导入
+          </button>
+          <button
+            onClick={() => { setDraft(null); setShowAdd(true); setEditingId(null); }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium bg-accent-soft text-accent hover:bg-accent-soft/80 transition-colors"
+          >
+            <Plus size={14} />
+            添加 Server
+          </button>
+        </div>
       </div>
 
       {servers.length === 0 && !showAdd ? (
@@ -614,7 +801,19 @@ function McpTabContent() {
       {showAdd && (
         <McpAddDialog
           editId={editingId}
+          initialDraft={draft}
           onClose={() => { setShowAdd(false); setEditingId(null); }}
+        />
+      )}
+      {showImport && (
+        <McpGithubImportDialog
+          onClose={() => setShowImport(false)}
+          onUseDraft={(nextDraft) => {
+            setDraft(nextDraft);
+            setEditingId(null);
+            setShowImport(false);
+            setShowAdd(true);
+          }}
         />
       )}
     </div>
@@ -797,7 +996,125 @@ function McpServerCard({
 
 /* ─── MCP Add/Edit Dialog ─── */
 
-function McpAddDialog({ editId, onClose }: { editId: string | null; onClose: () => void }) {
+function McpGithubImportDialog({
+  onClose,
+  onUseDraft,
+}: {
+  onClose: () => void;
+  onUseDraft: (draft: McpDraft) => void;
+}) {
+  const [repoUrl, setRepoUrl] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [draft, setDraft] = useState<McpDraft | null>(null);
+
+  const handleParse = async () => {
+    setBusy(true);
+    setErr(null);
+    setDraft(null);
+    try {
+      const parsed = await buildMcpDraftFromGithubUrl(repoUrl);
+      setDraft(parsed);
+    } catch (e: any) {
+      setErr(String(e?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="border border-accent/30 rounded-lg bg-surface p-4 flex flex-col gap-3">
+      <div className="text-[13px] font-semibold text-text">GitHub 导入（生成配置草案）</div>
+      <div className="text-[12px] text-text-muted">
+        仅解析并填充草案，不会自动安装或连接。请确认后再点「添加」。
+      </div>
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={repoUrl}
+          onChange={(e) => setRepoUrl(e.target.value)}
+          placeholder="https://github.com/owner/repo"
+          className="flex-1 px-3 py-1.5 rounded-lg border border-border bg-surface text-[12px] text-text placeholder:text-text-faint focus:outline-none focus:border-accent transition-colors"
+        />
+        <button
+          onClick={() => void handleParse()}
+          disabled={!repoUrl.trim() || busy}
+          className={cn(
+            "px-3 py-1.5 rounded-lg text-[12px] font-medium transition-colors",
+            repoUrl.trim() && !busy
+              ? "bg-accent text-white hover:bg-accent/90"
+              : "bg-surface-alt text-text-faint cursor-not-allowed",
+          )}
+        >
+          {busy ? "解析中..." : "解析"}
+        </button>
+      </div>
+      {err && (
+        <div className="text-[12px] text-red-500 bg-red-500/10 border border-red-500/20 rounded-lg px-2.5 py-2">
+          {err}
+        </div>
+      )}
+      {draft && (
+        <div className="border border-border rounded-lg bg-surface-alt/40 p-3 flex flex-col gap-2">
+          <div className="text-[12px] text-text"><span className="text-text-faint">名称：</span>{draft.name}</div>
+          <div className="text-[12px] text-text"><span className="text-text-faint">传输：</span>{TRANSPORT_LABELS[draft.transport]}</div>
+          {draft.command && (
+            <div className="text-[12px] text-text break-all">
+              <span className="text-text-faint">命令：</span>
+              <span className="font-mono">{[draft.command, ...(draft.args ?? [])].join(" ")}</span>
+            </div>
+          )}
+          {draft.endpoint && (
+            <div className="text-[12px] text-text break-all">
+              <span className="text-text-faint">Endpoint：</span>
+              <span className="font-mono">{draft.endpoint}</span>
+            </div>
+          )}
+          {draft.notes.length > 0 && (
+            <div className="text-[11px] text-text-muted leading-relaxed">
+              {draft.notes.join("；")}
+            </div>
+          )}
+          <div className="flex items-center gap-2 pt-1">
+            <a
+              href={draft.sourceRepo}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-[11px] text-accent hover:underline"
+              onClick={(e) => { e.preventDefault(); (window as any).desktop?.shell?.openExternal?.(draft.sourceRepo); }}
+            >
+              查看仓库 <ExternalLink size={11} />
+            </a>
+            <button
+              onClick={() => onUseDraft(draft)}
+              className="ml-auto px-3 py-1.5 rounded-lg text-[12px] font-medium bg-accent text-white hover:bg-accent/90 transition-colors"
+            >
+              填充到新增表单
+            </button>
+          </div>
+        </div>
+      )}
+      <div className="flex justify-end">
+        <button
+          onClick={onClose}
+          className="px-3 py-1.5 rounded-lg text-[12px] text-text-muted hover:bg-surface-alt transition-colors"
+        >
+          关闭
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function McpAddDialog({
+  editId,
+  initialDraft,
+  onClose,
+}: {
+  editId: string | null;
+  initialDraft?: McpDraft | null;
+  onClose: () => void;
+}) {
   const servers = useMcpStore((s) => s.servers);
   const addServer = useMcpStore((s) => s.addServer);
   const updateServer = useMcpStore((s) => s.updateServer);
@@ -807,21 +1124,27 @@ function McpAddDialog({ editId, onClose }: { editId: string | null; onClose: () 
   const configFields = existing?.configFields ?? [];
   const hasConfigFields = configFields.length > 0;
 
-  const [transport, setTransport] = useState<TransportType>(existing?.transport ?? "stdio");
-  const [name, setName] = useState(existing?.name ?? "");
-  const [command, setCommand] = useState(existing?.config?.command ?? "");
-  const [args, setArgs] = useState(existing?.config?.args?.join(" ") ?? "");
-  const [endpoint, setEndpoint] = useState(existing?.config?.endpoint ?? "");
+  const [transport, setTransport] = useState<TransportType>(existing?.transport ?? initialDraft?.transport ?? "stdio");
+  const [name, setName] = useState(existing?.name ?? initialDraft?.name ?? "");
+  const [command, setCommand] = useState(existing?.config?.command ?? initialDraft?.command ?? "");
+  const [args, setArgs] = useState(existing?.config?.args?.join(" ") ?? initialDraft?.args?.join(" ") ?? "");
+  const [endpoint, setEndpoint] = useState(existing?.config?.endpoint ?? initialDraft?.endpoint ?? "");
   const [envPairs, setEnvPairs] = useState<Array<{ key: string; value: string; visible: boolean }>>(
     () => {
       const env = existing?.config?.env;
       const envMap = (env && typeof env === "object") ? env : {};
+      const draftEnv = (!existing && initialDraft?.env && typeof initialDraft.env === "object")
+        ? initialDraft.env
+        : {};
       // 有 configFields 时，按字段定义初始化（保留用户已填的值）
       if (configFields.length > 0) {
         return configFields.map((f) => ({ key: f.envKey, value: envMap[f.envKey] ?? "", visible: false }));
       }
       if (Object.keys(envMap).length > 0) {
         return Object.entries(envMap).map(([k, v]) => ({ key: k, value: v, visible: false }));
+      }
+      if (Object.keys(draftEnv).length > 0) {
+        return Object.keys(draftEnv).map((k) => ({ key: k, value: "", visible: false }));
       }
       return [];
     },
@@ -875,6 +1198,17 @@ function McpAddDialog({ editId, onClose }: { editId: string | null; onClose: () 
       <div className="text-[13px] font-semibold text-text">
         {editId ? "编辑 Server" : "添加 MCP Server"}
       </div>
+      {!editId && initialDraft?.sourceRepo && (
+        <div className="text-[11px] text-text-muted">
+          草案来源：
+          <button
+            className="ml-1 text-accent hover:underline"
+            onClick={() => (window as any).desktop?.shell?.openExternal?.(initialDraft.sourceRepo)}
+          >
+            {initialDraft.sourceRepo}
+          </button>
+        </div>
+      )}
 
       {/* Transport selector */}
       <div className="flex flex-col gap-1.5">
