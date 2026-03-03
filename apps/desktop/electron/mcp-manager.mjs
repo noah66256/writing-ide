@@ -95,6 +95,22 @@ const BUILTIN_SERVERS = [
   },
 ];
 
+/** 参数别名组（按规范名聚类，运行时用于 MCP 工具参数兜底映射） */
+const ARG_ALIAS_GROUPS = [
+  ["filename", "file_name", "fileName", "path", "filepath", "filePath", "file"],
+  ["query", "q", "keyword", "keywords"],
+  ["url", "uri", "link", "href"],
+];
+
+/**
+ * 归一化参数键名：仅用于匹配，不改变原始键名。
+ * @param {string} key
+ * @returns {string}
+ */
+function normalizeArgKey(key) {
+  return String(key ?? "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+}
+
 export class McpManager {
   /**
    * @param {string} userDataPath - app.getPath('userData')
@@ -520,15 +536,78 @@ export class McpManager {
     return entry.tools;
   }
 
+  /**
+   * 依据工具 schema 做参数兜底映射（如 path -> filename）。
+   * 仅在“必填参数缺失”时生效，避免污染正常请求。
+   * @param {{tools:any[]}} entry
+   * @param {string} toolName
+   * @param {any} rawArgs
+   * @returns {{args: Record<string, any>, rewrites: Array<{from:string,to:string,reason:string}>}}
+   */
+  _normalizeToolArgs(entry, toolName, rawArgs) {
+    const args =
+      rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)
+        ? { ...rawArgs }
+        : {};
+    const rewrites = [];
+
+    const tools = Array.isArray(entry?.tools) ? entry.tools : [];
+    const tool = tools.find((t) => String(t?.name ?? "") === String(toolName ?? ""));
+    const schema =
+      tool?.inputSchema && typeof tool.inputSchema === "object" ? tool.inputSchema : null;
+    const required = Array.isArray(schema?.required)
+      ? schema.required.map((x) => String(x ?? "").trim()).filter(Boolean)
+      : [];
+    if (!required.length) return { args, rewrites };
+
+    /** @type {Map<string,string>} */
+    const argKeyByNorm = new Map();
+    for (const key of Object.keys(args)) argKeyByNorm.set(normalizeArgKey(key), key);
+
+    for (const reqKey of required) {
+      const hasReq = Object.prototype.hasOwnProperty.call(args, reqKey);
+      if (hasReq) continue;
+
+      const reqNorm = normalizeArgKey(reqKey);
+      const group = ARG_ALIAS_GROUPS.find((g) =>
+        g.map((x) => normalizeArgKey(x)).includes(reqNorm),
+      );
+      if (!group) continue;
+
+      const aliasNorms = group.map((x) => normalizeArgKey(x));
+      const sourceNorm = aliasNorms.find((n) => n !== reqNorm && argKeyByNorm.has(n));
+      if (!sourceNorm) continue;
+
+      const sourceKey = argKeyByNorm.get(sourceNorm);
+      if (!sourceKey) continue;
+      const value = args[sourceKey];
+      if (value === undefined || value === null || String(value).trim() === "") continue;
+
+      args[reqKey] = value;
+      rewrites.push({ from: sourceKey, to: reqKey, reason: "required_alias_fallback" });
+      argKeyByNorm.set(reqNorm, reqKey);
+    }
+
+    return { args, rewrites };
+  }
+
   async callTool(serverId, toolName, args) {
     const entry = this._servers.get(serverId);
     if (!entry?.client) {
       return { ok: false, error: `MCP_NOT_CONNECTED:${serverId}` };
     }
     try {
+      const normalized = this._normalizeToolArgs(entry, toolName, args);
+      if (normalized.rewrites.length > 0) {
+        console.info("[McpManager] tool args normalized", {
+          serverId,
+          toolName,
+          rewrites: normalized.rewrites,
+        });
+      }
       const result = await entry.client.callTool({
         name: toolName,
-        arguments: args ?? {},
+        arguments: normalized.args,
       });
       // MCP 工具返回 content 数组
       const textParts = (result?.content ?? [])
@@ -536,7 +615,12 @@ export class McpManager {
         .map((c) => c.text);
       const output = textParts.join("\n") || JSON.stringify(result?.content ?? []);
       const isError = result?.isError === true;
-      return { ok: !isError, output, raw: result };
+      return {
+        ok: !isError,
+        output,
+        raw: result,
+        ...(normalized.rewrites.length > 0 ? { normalizedArgs: normalized.rewrites } : {}),
+      };
     } catch (e) {
       return { ok: false, error: String(e?.message ?? e) };
     }
