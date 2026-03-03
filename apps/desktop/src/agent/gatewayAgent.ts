@@ -890,8 +890,80 @@ type DialogueTurn = { user: string; assistant: string };
 /** 每次向 Gateway 发送的"原文保留"回合数（不进入摘要压缩） */
 const RAW_KEEP_TURNS = 5;
 
-export function buildDialogueTurnsFromSteps(steps: any[]): DialogueTurn[] {
+/**
+ * 外部基线（2026-03）：
+ * - Claude Code：约 95% context window 触发自动压缩（常见窗口 200k）。
+ * - Codex：源码默认 90% context window 触发自动压缩（gpt-5.2-codex 为 272k）。
+ * 取较小阈值作为本地压缩触发线，避免“短回复续跑”前上下文先爆掉。
+ */
+const CLAUDE_CODE_AUTO_COMPACT_TOKENS = Math.floor(200_000 * 0.95);
+const CODEX_AUTO_COMPACT_TOKENS = Math.floor(272_000 * 0.9);
+const DIALOGUE_COMPACT_TRIGGER_TOKENS = Math.min(CLAUDE_CODE_AUTO_COMPACT_TOKENS, CODEX_AUTO_COMPACT_TOKENS);
+
+type BuildDialogueTurnOptions = {
+  includeToolSummaries?: boolean;
+  maxToolSummaryChars?: number;
+};
+
+function clipContextText(raw: unknown, maxChars: number) {
+  const t = typeof raw === "string" ? raw : raw == null ? "" : JSON.stringify(raw);
+  const flat = String(t ?? "").replace(/\s+/g, " ").trim();
+  if (!flat) return "";
+  return flat.length > maxChars ? `${flat.slice(0, maxChars).trimEnd()}…` : flat;
+}
+
+function summarizeToolStepForContext(step: any, maxChars: number) {
+  const toolName = String(step?.toolName ?? "").trim() || "tool";
+  const status0 = String(step?.status ?? "").trim().toLowerCase();
+  const statusLabel =
+    status0 === "success" ? "成功" :
+    status0 === "failed" ? "失败" :
+    status0 === "running" ? "进行中" :
+    status0 === "undone" ? "已撤销" : "已执行";
+  if (status0 === "running") return "";
+
+  const out = step?.output;
+  let detail = "";
+  if (typeof out === "string") {
+    detail = out;
+  } else if (out && typeof out === "object") {
+    const obj = out as Record<string, unknown>;
+    const picks = [
+      obj.error,
+      obj.detail,
+      obj.message,
+      obj.note,
+      obj.summary,
+      obj.path ? `path=${String(obj.path)}` : "",
+      typeof obj.totalChars === "number" ? `chars=${Math.max(0, Math.floor(obj.totalChars))}` : "",
+    ];
+    detail = picks.map((x) => clipContextText(x, maxChars)).find((x) => Boolean(x)) ?? "";
+    if (!detail && typeof obj.ok === "boolean" && obj.ok === false) detail = "执行失败";
+  }
+  const d = clipContextText(detail, maxChars);
+  return d ? `【工具 ${toolName}】${statusLabel}：${d}` : `【工具 ${toolName}】${statusLabel}`;
+}
+
+function estimateTokensApprox(raw: string) {
+  const s = String(raw ?? "");
+  if (!s.trim()) return 0;
+  const cjk = (s.match(/[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/g) ?? []).length;
+  const nonCjk = Math.max(0, s.length - cjk);
+  return cjk + Math.ceil(nonCjk / 4);
+}
+
+function estimateDialogueTokens(turns: DialogueTurn[], summaryText: string) {
+  let total = estimateTokensApprox(summaryText);
+  for (const t of turns) total += estimateTokensApprox(`${t.user}\n${t.assistant}`);
+  return total;
+}
+
+export function buildDialogueTurnsFromSteps(steps: any[], opts?: BuildDialogueTurnOptions): DialogueTurn[] {
   const all = Array.isArray(steps) ? steps : [];
+  const includeToolSummaries = Boolean(opts?.includeToolSummaries);
+  const maxToolSummaryChars = Number.isFinite(Number(opts?.maxToolSummaryChars))
+    ? Math.max(60, Math.min(600, Math.floor(Number(opts?.maxToolSummaryChars))))
+    : 180;
   const turns: DialogueTurn[] = [];
   let curUser = "";
   let curAssistant = "";
@@ -917,6 +989,13 @@ export function buildDialogueTurnsFromSteps(steps: any[]): DialogueTurn[] {
       const t = String(st.text ?? "").trim();
       if (!t) continue;
       curAssistant = curAssistant ? `${curAssistant}\n${t}` : t;
+      continue;
+    }
+    if (includeToolSummaries && st.type === "tool") {
+      if (!curUser) continue;
+      const s = summarizeToolStepForContext(st, maxToolSummaryChars);
+      if (!s) continue;
+      curAssistant = curAssistant ? `${curAssistant}\n${s}` : s;
     }
   }
   if (curUser) flush();
@@ -1020,7 +1099,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
 
   // 最近对话片段（注入最后 RAW_KEEP_TURNS 个完整回合；关键决策仍应写入 Main Doc/Run Todo）
   const recentDialogue = (() => {
-    const turnsAll = buildDialogueTurnsFromSteps(useRunStore.getState().steps ?? []);
+    const turnsAll = buildDialogueTurnsFromSteps(useRunStore.getState().steps ?? [], { includeToolSummaries: true });
     const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
     return buildRecentDialogueJsonFromTurns(completeTurns, RAW_KEEP_TURNS);
   })();
@@ -1053,7 +1132,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
 
   // recentDialogue（仅用于本地意图/skills 的"续跑判定"，不注入模型 messages）
   const recentDialogueForIntent = (() => {
-    const turnsAll = buildDialogueTurnsFromSteps(useRunStore.getState().steps ?? []);
+    const turnsAll = buildDialogueTurnsFromSteps(useRunStore.getState().steps ?? [], { includeToolSummaries: true });
     const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
     const tail = completeTurns.slice(-3);
     const out: Array<{ role: "user" | "assistant"; text: string }> = [];
@@ -1726,7 +1805,7 @@ export function buildChatContextPack(extra?: { referencesText?: string }) {
     return s ? `DIALOGUE_SUMMARY(Markdown):\n${s}\n\n` : "";
   })();
   const chatRecentDialogue = (() => {
-    const turnsAll = buildDialogueTurnsFromSteps(useRunStore.getState().steps ?? []);
+    const turnsAll = buildDialogueTurnsFromSteps(useRunStore.getState().steps ?? [], { includeToolSummaries: true });
     const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
     return buildRecentDialogueJsonFromTurns(completeTurns, RAW_KEEP_TURNS);
   })();
@@ -1802,10 +1881,15 @@ export async function rollDialogueSummaryIfNeeded(args: {
   log: (level: "info" | "warn" | "error", message: string, data?: unknown) => void;
 }) {
   const run: any = useRunStore.getState();
-  const turnsAll = buildDialogueTurnsFromSteps(run.steps ?? []);
+  const turnsAll = buildDialogueTurnsFromSteps(run.steps ?? [], { includeToolSummaries: true });
   const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
 
-  const TRIGGER_MIN_TURNS = 3; // 每累计 3 个新回合就滚动一次摘要（"3–5轮摘要"先用 3）
+  const summaryByMode: any = run.dialogueSummaryByMode ?? {};
+  const previousSummary = String(summaryByMode?.[args.mode] ?? "");
+  const approxTokens = estimateDialogueTokens(completeTurns, previousSummary);
+  if (approxTokens < DIALOGUE_COMPACT_TRIGGER_TOKENS) {
+    return { ok: true as const, rolled: false as const };
+  }
 
   const turnsToSummarize = Math.max(0, completeTurns.length - RAW_KEEP_TURNS);
   const cursorByMode: any = run.dialogueSummaryTurnCursorByMode ?? {};
@@ -1813,15 +1897,20 @@ export async function rollDialogueSummaryIfNeeded(args: {
   if (turnsToSummarize <= cursor) return { ok: true as const, rolled: false as const };
 
   const delta = completeTurns.slice(cursor, turnsToSummarize).slice(0, 12);
-  if (delta.length < TRIGGER_MIN_TURNS) return { ok: true as const, rolled: false as const };
+  if (delta.length < 1) return { ok: true as const, rolled: false as const };
 
-  const summaryByMode: any = run.dialogueSummaryByMode ?? {};
-  const previousSummary = String(summaryByMode?.[args.mode] ?? "");
   // 用户要求：摘要模型默认复用"agentModel"（即使在 chat 模式），后续可在 B 端单独配置 stage 覆盖/约束
   const preferModelId = String(run.agentModel || "").trim() || String(run.model || "").trim();
   if (!preferModelId) return { ok: true as const, rolled: false as const };
 
-  args.log("info", "context.summary.roll", { mode: args.mode, cursor, turnsToSummarize, deltaTurns: delta.length });
+  args.log("info", "context.summary.roll", {
+    mode: args.mode,
+    cursor,
+    turnsToSummarize,
+    deltaTurns: delta.length,
+    approxTokens,
+    triggerTokens: DIALOGUE_COMPACT_TRIGGER_TOKENS,
+  });
   const ret = await fetchContextSummaryOnce({
     gatewayUrl: args.gatewayUrl,
     preferModelId,
@@ -1859,4 +1948,3 @@ export function startGatewayRun(args: {
 }): GatewayRunController {
   return startGatewayRunWs(args as GatewayRunArgs);
 }
-
