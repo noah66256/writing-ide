@@ -862,6 +862,15 @@ function McpTabContent() {
         </div>
       </div>
 
+      {showAdd && (
+        <McpAddDialog
+          key={`mcp-edit-${editingId ?? "new"}-${draft?.sourceRepo ?? ""}`}
+          editId={editingId}
+          initialDraft={draft}
+          onClose={() => { setShowAdd(false); setEditingId(null); }}
+        />
+      )}
+
       {servers.length === 0 && !showAdd ? (
         <div className="flex flex-col items-center justify-center py-10 text-text-faint">
           <Plug size={32} className="mb-2 opacity-40" />
@@ -880,14 +889,6 @@ function McpTabContent() {
             />
           ))}
         </div>
-      )}
-
-      {showAdd && (
-        <McpAddDialog
-          editId={editingId}
-          initialDraft={draft}
-          onClose={() => { setShowAdd(false); setEditingId(null); }}
-        />
       )}
       {showImport && (
         <McpGithubImportDialog
