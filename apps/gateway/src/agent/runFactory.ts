@@ -2543,7 +2543,8 @@ export async function executeAgentRun(args: {
     endpoint: prepared.endpoint || "/v1/chat/completions",
     toolResultFormat: prepared.toolResultFormat === "text" ? "text" : "xml",
     styleLibIds: prepared.runnerStyleLibIds,
-    writeEvent: transport.writeEventRaw,
+    // 统一通过本地 writeEvent 透传，确保 runner 事件也进入 runAudit（便于排查工具链问题）
+    writeEvent,
     waiters: transport.waiters,
     abortSignal: transport.abortSignal,
     onTurnUsage: (promptTokens, completionTokens) => {
@@ -2585,16 +2586,16 @@ export async function executeAgentRun(args: {
     await runner.run(userPrompt, body.images?.length ? body.images : undefined);
   } catch (err: any) {
     const msg = String(err?.message ?? err ?? "RUNNER_ERROR");
-    transport.writeEventRaw("error", { error: msg });
+    writeEvent("error", { error: msg });
   }
 
-  transport.writeEventRaw("run.end", {
+  writeEvent("run.end", {
     runId,
     reason: "completed",
     reasonCodes: ["completed"],
     turn: runner.getTurn(),
   });
-  transport.writeEventRaw("assistant.done", { reason: "completed" });
+  writeEvent("assistant.done", { reason: "completed" });
 
   await persistOnce();
   } finally {
