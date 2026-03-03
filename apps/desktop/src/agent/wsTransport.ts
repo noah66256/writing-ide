@@ -745,10 +745,14 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                   const result = mcpApi
                     ? await mcpApi.callTool(serverId, mcpToolName, rawArgs)
                     : { ok: false, error: "MCP_API_NOT_AVAILABLE" };
+                  const failureOutput =
+                    result?.output !== undefined
+                      ? result.output
+                      : { ok: false, error: result?.error ?? "MCP_TOOL_FAILED" };
                   submitToolResult({
                     toolCallId, name,
                     ok: result.ok,
-                    output: result.ok ? result.output : { ok: false, error: result.error },
+                    output: result.ok ? result.output : failureOutput,
                     meta: { applyPolicy: "auto", riskLevel: "low", hasApply: false },
                   });
                 } catch (e: any) {
@@ -791,10 +795,14 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                 const result = mcpApi
                   ? await mcpApi.callTool(serverId, mcpToolName, rawArgs)
                   : { ok: false, error: "MCP_API_NOT_AVAILABLE" };
+                const failureOutput =
+                  result?.output !== undefined
+                    ? result.output
+                    : { ok: false, error: result?.error ?? "MCP_TOOL_FAILED" };
                 submitToolResult({
                   toolCallId, name,
                   ok: result.ok,
-                  output: result.ok ? result.output : { ok: false, error: result.error },
+                  output: result.ok ? result.output : failureOutput,
                   meta: { applyPolicy: "auto", riskLevel: "low", hasApply: false },
                 });
               } catch (e: any) {
