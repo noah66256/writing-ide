@@ -406,6 +406,10 @@ export function createAiConfigService(args: {
     const envHaikuModel = normalizeModelId(String(process.env.LLM_HAIKU_MODEL ?? ""));
     const envHaikuBase = normalizeBaseURL(String(process.env.LLM_HAIKU_BASE_URL ?? "")) || envBase;
     const envHaikuKey = normalizeApiKeyInput(String(process.env.LLM_HAIKU_API_KEY ?? "")) || envKey;
+    const envOpenAiModel = normalizeModelId(String(process.env.LLM_OPENAI_MODEL ?? ""));
+    const envOpenAiBase = normalizeBaseURL(String(process.env.LLM_OPENAI_BASE_URL ?? "")) || envBase;
+    const envOpenAiKey = normalizeApiKeyInput(String(process.env.LLM_OPENAI_API_KEY ?? "")) || envKey;
+    const envOpenAiEndpoint = normalizeEndpoint(String(process.env.LLM_OPENAI_ENDPOINT ?? "/v1/responses"), "/v1/responses");
 
     const pickCredsForStage = (stageKey: string) => {
       if (stageKey === "embedding") return { baseURL: envEmbedBase || envBase, apiKey: envEmbedKey || envKey };
@@ -414,6 +418,7 @@ export function createAiConfigService(args: {
       if (stageKey === "agent.tool_call_repair") return { baseURL: envToolRepairBase || envBase, apiKey: envToolRepairKey || envKey };
       if (stageKey === "agent.context_selector") return { baseURL: envContextSelectorBase || envBase, apiKey: envContextSelectorKey || envKey };
       if (stageKey === "llm.haiku") return { baseURL: envHaikuBase || envBase, apiKey: envHaikuKey || envKey };
+      if (stageKey === "llm.openai") return { baseURL: envOpenAiBase || envBase, apiKey: envOpenAiKey || envKey };
       return { baseURL: envBase, apiKey: envKey };
     };
 
@@ -427,13 +432,16 @@ export function createAiConfigService(args: {
 
       const enc = creds.apiKey ? encryptApiKey(creds.apiKey) : null;
       const t = nowIso();
+      const endpointNorm = normalizeEndpoint(endpoint, "/v1/chat/completions");
+      const useTextToolResult = /\/responses/i.test(endpointNorm);
       const m: AiModel = {
         id,
         model: id,
         providerId: null,
         baseURL: creds.baseURL,
-        endpoint: normalizeEndpoint(endpoint, "/v1/chat/completions"),
-        toolResultFormat: "xml",
+        endpoint: endpointNorm,
+        // /responses 在部分 OpenAI-compatible 上对 system+xml 注入兼容较差，默认改为 text 更稳。
+        toolResultFormat: useTextToolResult ? "text" : "xml",
         apiKeyEnc: enc ? enc.enc : null,
         apiKeyLast4: enc ? enc.last4 : null,
         priceInCnyPer1M: null,
@@ -465,6 +473,19 @@ export function createAiConfigService(args: {
     if (envHaikuModel) {
       const chatEndpoint = defMap.get("llm.chat")?.defaultEndpoint || "/v1/chat/completions";
       ensureModel(envHaikuModel, "llm.haiku", chatEndpoint);
+    }
+    // 1.3) env 额外声明的 OpenAI Responses 模型（默认 endpoint=/v1/responses）
+    if (envOpenAiModel) {
+      ensureModel(envOpenAiModel, "llm.openai", envOpenAiEndpoint);
+      const openAiDoc = byId.get(envOpenAiModel);
+      if (openAiDoc) {
+        const ep = normalizeEndpoint(openAiDoc.endpoint, "/v1/chat/completions");
+        if (/\/responses/i.test(ep) && openAiDoc.toolResultFormat !== "text") {
+          openAiDoc.toolResultFormat = "text";
+          openAiDoc.updatedAt = nowIso();
+          openAiDoc.updatedBy = "system";
+        }
+      }
     }
 
     // 2) 确保所有 stage 都有 stage 配置（缺失则补齐）
@@ -508,6 +529,26 @@ export function createAiConfigService(args: {
       };
       appendToStage(stageMap.get("llm.chat"), envOpusModel);
       appendToStage(stageMap.get("agent.run"), envOpusModel);
+    }
+
+    // 3.1) 把 env OpenAI 模型追加到 chat/agent 候选列表（用于 C 端模型切换）
+    const openAiDoc = envOpenAiModel ? byId.get(envOpenAiModel) : null;
+    if (envOpenAiModel && openAiDoc?.isEnabled) {
+      const appendToStage = (stage: AiStageConfig | undefined, modelId: string) => {
+        if (!stage || stage.stage === "embedding") return;
+        const cur = Array.isArray(stage.modelIds)
+          ? stage.modelIds.map((x) => normalizeModelId(String(x))).filter(Boolean)
+          : [];
+        const merged = Array.from(
+          new Set([...cur, normalizeModelId(String(stage.modelId ?? "")), modelId].filter(Boolean)),
+        ).slice(0, 60);
+        if (merged.join(",") !== (cur.join(",") || "")) {
+          stage.modelIds = merged.length ? merged : null;
+          stage.updatedAt = nowIso();
+        }
+      };
+      appendToStage(stageMap.get("llm.chat"), envOpenAiModel);
+      appendToStage(stageMap.get("agent.run"), envOpenAiModel);
     }
 
       db.aiConfig = { ...ai, updatedAt: nowIso() };
@@ -1258,6 +1299,7 @@ export function createAiConfigService(args: {
 
     const isGemini = isGeminiEndpoint(endpoint);
     const isEmbedding = /\/embeddings/i.test(endpoint);
+    const isResponses = /\/responses/i.test(endpoint);
     const controller = new AbortController();
     const timeoutMs = 20_000;
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -1278,6 +1320,14 @@ export function createAiConfigService(args: {
     } else if (isEmbedding) {
       headers.Authorization = `Bearer ${apiKey}`;
       body = { model: m.model, input: "ping" };
+    } else if (isResponses) {
+      headers.Authorization = `Bearer ${apiKey}`;
+      body = {
+        model: m.model,
+        input: [{ role: "user", content: "ping" }],
+        max_output_tokens: 8,
+        stream: false,
+      };
     } else {
       headers.Authorization = `Bearer ${apiKey}`;
       body = { model: m.model, messages: [{ role: "user", content: "ping" }], temperature: 0, max_tokens: 1, stream: false };
@@ -1315,6 +1365,29 @@ export function createAiConfigService(args: {
       } else {
         ok = true;
         error = null;
+        if (isResponses) {
+          const text = await resp.text().catch(() => "");
+          try {
+            const j = text ? JSON.parse(text) : null;
+            const hasText =
+              typeof j?.output_text === "string"
+                ? j.output_text.trim().length > 0
+                : Array.isArray(j?.output)
+                  ? j.output.some((x: any) =>
+                      Array.isArray(x?.content)
+                        ? x.content.some((c: any) => String(c?.text ?? c?.output_text ?? "").trim().length > 0)
+                        : String(x?.text ?? "").trim().length > 0,
+                    )
+                  : false;
+            if (!hasText) {
+              ok = false;
+              error = "UPSTREAM_EMPTY_CONTENT";
+            }
+          } catch {
+            ok = false;
+            error = "UPSTREAM_INVALID_JSON";
+          }
+        }
       }
 
       const tr: AiModelTestResult = { ok, latencyMs, status, error, testedAt, ...(headersObj ? { headers: headersObj } : {}) };
@@ -1354,5 +1427,3 @@ export function createAiConfigService(args: {
     getModelPricing,
   };
 }
-
-

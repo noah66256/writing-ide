@@ -452,6 +452,11 @@ function coerceNonEmptyString(v: any): string | null {
   return s ? s : null;
 }
 
+function isResponsesEndpoint(endpoint?: string): boolean {
+  const ep = String(endpoint ?? "").trim().toLowerCase();
+  return ep.endsWith("/responses") || ep === "/responses";
+}
+
 export function normalizeIdeMeta(args: { ideSummary: any; contextPack?: string; kbSelected: any[] }) {
   const sel = parseEditorSelectionFromContextPack(args.contextPack);
   const packHasSelection = Boolean(sel && typeof sel === "object" && (sel as any).hasSelection === true);
@@ -1639,6 +1644,10 @@ export async function prepareAgentRun(args: {
       modelIdUsed = pickedId;
     }
   }
+  // /responses 在部分 OpenAI-compatible 上默认使用 text 注入更稳，避免 tool_result 不被吸收导致重复调工具。
+  if (isResponsesEndpoint(endpoint) && toolResultFormat !== "text") {
+    toolResultFormat = "text";
+  }
 
   const allToolNamesForMode = toolNamesForMode(mode);
   const capsForTools = await services.toolConfig.resolveCapabilitiesRuntime().catch(() => null as any);
@@ -1896,7 +1905,13 @@ export async function prepareAgentRun(args: {
     const tryExact = async (id: string) => {
       try {
         const r = await services.aiConfig.resolveModel(id);
-        return { modelId: r.model, apiKey: r.apiKey, baseUrl: r.baseURL };
+        return {
+          modelId: r.model,
+          apiKey: r.apiKey,
+          baseUrl: r.baseURL,
+          endpoint: r.endpoint || "/v1/chat/completions",
+          toolResultFormat: ((isResponsesEndpoint(r.endpoint) || r.toolResultFormat === "text") ? "text" : "xml") as "xml" | "text",
+        };
       } catch {
         return null;
       }
@@ -2488,6 +2503,8 @@ export async function executeAgentRun(args: {
     modelId: prepared.modelIdUsed || prepared.model || prepared.pickedId,
     apiKey: String(prepared.apiKey ?? ""),
     baseUrl: prepared.baseUrl ?? undefined,
+    endpoint: prepared.endpoint || "/v1/chat/completions",
+    toolResultFormat: prepared.toolResultFormat === "text" ? "text" : "xml",
     styleLibIds: prepared.runnerStyleLibIds,
     writeEvent: transport.writeEventRaw,
     waiters: transport.waiters,

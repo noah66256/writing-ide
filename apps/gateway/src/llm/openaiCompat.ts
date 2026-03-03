@@ -35,6 +35,17 @@ export function openAiCompatUrl(baseUrl: string, path: string) {
   return `${withV1(b0)}${p}`;
 }
 
+function normalizeEndpointPath(endpoint?: string) {
+  const raw = String(endpoint || "").trim();
+  if (!raw) return "";
+  return raw.startsWith("/") ? raw.toLowerCase() : `/${raw.toLowerCase()}`;
+}
+
+function isResponsesEndpoint(endpoint?: string) {
+  const p = normalizeEndpointPath(endpoint);
+  return p.endsWith("/responses") || p === "/responses";
+}
+
 export type StreamDeltaEvent =
   | { type: "delta"; delta: string }
   | {
@@ -53,6 +64,119 @@ function kindOfContentLike(v: any): string {
   if (v === null) return "null";
   if (Array.isArray(v)) return "array";
   return typeof v;
+}
+
+function coerceUsageLike(v: any):
+  | { promptTokens: number; completionTokens: number; totalTokens?: number }
+  | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  const pt = Number(
+    v?.prompt_tokens ??
+      v?.input_tokens ??
+      v?.promptTokens ??
+      v?.inputTokens,
+  );
+  const ct = Number(
+    v?.completion_tokens ??
+      v?.output_tokens ??
+      v?.completionTokens ??
+      v?.outputTokens,
+  );
+  const tt = Number(v?.total_tokens ?? v?.totalTokens);
+  if (!Number.isFinite(pt) && !Number.isFinite(ct) && !Number.isFinite(tt)) {
+    return undefined;
+  }
+  return {
+    promptTokens: Number.isFinite(pt) ? Math.max(0, Math.floor(pt)) : 0,
+    completionTokens: Number.isFinite(ct) ? Math.max(0, Math.floor(ct)) : 0,
+    ...(Number.isFinite(tt) ? { totalTokens: Math.max(0, Math.floor(tt)) } : {}),
+  };
+}
+
+function messageContentToResponsesInput(
+  content: OpenAiChatMessage["content"],
+): Array<Record<string, unknown>> | string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const out: Array<Record<string, unknown>> = [];
+  for (const part of content) {
+    if (!part || typeof part !== "object") continue;
+    if ((part as any).type === "text") {
+      out.push({ type: "input_text", text: String((part as any).text ?? "") });
+      continue;
+    }
+    if ((part as any).type === "image_url") {
+      const url = String((part as any)?.image_url?.url ?? "");
+      if (!url) continue;
+      out.push({ type: "input_image", image_url: url });
+    }
+  }
+  if (out.length === 0) return "";
+  return out;
+}
+
+function chatMessagesToResponsesInput(messages: OpenAiChatMessage[]) {
+  const out: Array<Record<string, unknown>> = [];
+  for (const m of messages) {
+    const role = String(m?.role ?? "").trim().toLowerCase();
+    if (!role) continue;
+    const content = messageContentToResponsesInput(m.content);
+    if (
+      (typeof content === "string" && content.length === 0) ||
+      (Array.isArray(content) && content.length === 0)
+    ) {
+      continue;
+    }
+    out.push({
+      role: role === "tool" ? "user" : role,
+      content,
+    });
+  }
+  return out;
+}
+
+function extractResponsesTextFromAny(v: any, depth = 0): string {
+  if (depth > 6 || v === null || v === undefined) return "";
+  if (typeof v === "string") return v;
+  if (Array.isArray(v)) {
+    let out = "";
+    for (const item of v) out += extractResponsesTextFromAny(item, depth + 1);
+    return out;
+  }
+  if (typeof v !== "object") return "";
+
+  const type = String((v as any).type ?? "").trim().toLowerCase();
+  if (type.includes("output_text") || type === "text" || type === "message") {
+    const byText = coerceOpenAiContentToText((v as any).text);
+    if (byText) return byText;
+  }
+
+  const candidates = [
+    (v as any).output_text,
+    (v as any).text,
+    (v as any).delta,
+    (v as any).content,
+    (v as any).output,
+    (v as any).response,
+    (v as any).message,
+    (v as any).item,
+  ];
+  let out = "";
+  for (const c of candidates) out += extractResponsesTextFromAny(c, depth + 1);
+  return out;
+}
+
+function extractResponsesTextDelta(ev: any): string {
+  if (!ev || typeof ev !== "object") return "";
+  const type = String(ev.type ?? "").trim().toLowerCase();
+  if (type === "response.output_text.delta") {
+    return String(ev.delta ?? "");
+  }
+  if (type.endsWith(".delta")) {
+    const d = coerceOpenAiContentToText(ev.delta);
+    if (d) return d;
+  }
+  return "";
 }
 
 // OpenAI-compatible：部分上游会把 content 返回为“content parts”（array/object），不是 string。
@@ -105,6 +229,156 @@ async function* readLines(stream: ReadableStream<Uint8Array>) {
   if (buf.length > 0) yield buf.replace(/\r$/, "");
 }
 
+async function* streamResponses(args: {
+  config: OpenAiCompatConfig;
+  model: string;
+  messages: OpenAiChatMessage[];
+  temperature?: number;
+  maxTokens?: number | null;
+  signal?: AbortSignal;
+  endpoint?: string;
+}): AsyncGenerator<StreamDeltaEvent> {
+  const url = openAiCompatUrl(args.config.baseUrl, args.endpoint || "/responses");
+  const body: Record<string, unknown> = {
+    model: args.model,
+    input: chatMessagesToResponsesInput(args.messages),
+    stream: true,
+  };
+  if (Number.isFinite(Number(args.maxTokens)) && Number(args.maxTokens) > 0) {
+    body.max_output_tokens = Math.floor(Number(args.maxTokens));
+  }
+  if (typeof args.temperature === "number" && Number.isFinite(args.temperature)) {
+    body.temperature = args.temperature;
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${args.config.apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: args.signal,
+    });
+  } catch (e: any) {
+    yield { type: "error", error: String(e?.message ?? e) };
+    return;
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    yield { type: "error", error: text || `UPSTREAM_${res.status}` };
+    return;
+  }
+
+  const contentType = String(res.headers.get("content-type") ?? "").toLowerCase();
+  if (!res.body) {
+    yield { type: "error", error: "UPSTREAM_EMPTY_BODY" };
+    return;
+  }
+
+  const isEventStream = contentType.includes("text/event-stream");
+  const isJson = contentType.includes("application/json");
+  if (!isEventStream && isJson) {
+    const text = await res.text().catch(() => "");
+    let json: any = null;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      yield { type: "error", error: text || "UPSTREAM_INVALID_JSON" };
+      return;
+    }
+    const content = extractResponsesTextFromAny(json).trim();
+    if (content) yield { type: "delta", delta: content };
+    const usage = coerceUsageLike(json?.usage ?? json?.response?.usage);
+    if (usage) yield { type: "usage", usage, raw: json };
+    yield { type: "done" };
+    return;
+  }
+
+  let emittedChars = 0;
+  let emittedUsage = false;
+  let completedPayload: any = null;
+  for await (const line0 of readLines(res.body)) {
+    const line = String(line0 ?? "");
+    if (!line) continue;
+    if (line.startsWith(":") || line.startsWith("event:") || line.startsWith("id:") || line.startsWith("retry:")) continue;
+    const raw = line.startsWith("data:") ? line.slice("data:".length).trim() : line.trim();
+    if (!raw) continue;
+    if (raw === "[DONE]") break;
+
+    let json: any = null;
+    try {
+      json = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+
+    const delta = extractResponsesTextDelta(json);
+    if (delta) {
+      emittedChars += delta.length;
+      yield { type: "delta", delta };
+    }
+
+    const usage = coerceUsageLike(json?.usage ?? json?.response?.usage);
+    if (usage) {
+      emittedUsage = true;
+      yield { type: "usage", usage, raw: json };
+    }
+
+    const t = String(json?.type ?? "").trim().toLowerCase();
+    if (t === "response.completed") {
+      completedPayload = json;
+      const finalUsage = coerceUsageLike(json?.response?.usage ?? json?.usage);
+      if (finalUsage && !emittedUsage) {
+        emittedUsage = true;
+        yield { type: "usage", usage: finalUsage, raw: json };
+      }
+      break;
+    }
+    if (t === "response.failed" || t === "error") {
+      const err =
+        String(json?.error?.message ?? "") ||
+        String(json?.message ?? "") ||
+        "UPSTREAM_ERROR";
+      yield { type: "error", error: err };
+      return;
+    }
+  }
+
+  if (emittedChars === 0 && completedPayload) {
+    const fallback = extractResponsesTextFromAny(completedPayload?.response ?? completedPayload).trim();
+    if (fallback) {
+      emittedChars += fallback.length;
+      yield { type: "delta", delta: fallback };
+    }
+  }
+
+  if (emittedChars === 0 && !args.signal?.aborted) {
+    const once = await chatCompletionOnce({
+      config: args.config,
+      model: args.model,
+      messages: args.messages,
+      temperature: args.temperature,
+      maxTokens: args.maxTokens,
+      signal: args.signal,
+      endpoint: args.endpoint,
+    });
+    if (once.ok && once.content.trim().length > 0) {
+      yield { type: "delta", delta: once.content };
+      if (once.usage) yield { type: "usage", usage: once.usage, raw: once.raw };
+      yield { type: "done" };
+      return;
+    }
+    yield { type: "error", error: "UPSTREAM_EMPTY_CONTENT" };
+    return;
+  }
+
+  yield { type: "done" };
+}
+
 export async function* streamChatCompletions(args: {
   config: OpenAiCompatConfig;
   model: string;
@@ -116,6 +390,11 @@ export async function* streamChatCompletions(args: {
   /** OpenAI-compatible endpoint（支持 /chat/completions 或 /v1/chat/completions） */
   endpoint?: string;
 }): AsyncGenerator<StreamDeltaEvent> {
+  if (isResponsesEndpoint(args.endpoint)) {
+    yield* streamResponses(args);
+    return;
+  }
+
   const url = openAiCompatUrl(args.config.baseUrl, args.endpoint || "/chat/completions");
 
   const wantsUsage = Boolean(args.includeUsage);
@@ -441,17 +720,24 @@ export async function chatCompletionOnce(args: {
   /** OpenAI-compatible endpoint（支持 /chat/completions 或 /v1/chat/completions） */
   endpoint?: string;
 }): Promise<ChatCompletionOnceResult> {
-  const url = openAiCompatUrl(args.config.baseUrl, args.endpoint || "/chat/completions");
+  const endpoint = args.endpoint || "/chat/completions";
+  const isResponses = isResponsesEndpoint(endpoint);
+  const url = openAiCompatUrl(args.config.baseUrl, endpoint);
 
   let res: Response;
-  try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${args.config.apiKey}`,
-      },
-      body: JSON.stringify({
+  const body = isResponses
+    ? {
+        model: args.model,
+        input: chatMessagesToResponsesInput(args.messages),
+        ...(typeof args.temperature === "number" && Number.isFinite(args.temperature)
+          ? { temperature: args.temperature }
+          : {}),
+        ...(Number.isFinite(Number(args.maxTokens)) && Number(args.maxTokens) > 0
+          ? { max_output_tokens: Math.floor(Number(args.maxTokens)) }
+          : {}),
+        stream: false,
+      }
+    : {
         model: args.model,
         messages: args.messages,
         temperature: args.temperature,
@@ -459,7 +745,15 @@ export async function chatCompletionOnce(args: {
           ? { max_tokens: Math.floor(Number(args.maxTokens)) }
           : {}),
         stream: false,
-      }),
+      };
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${args.config.apiKey}`,
+      },
+      body: JSON.stringify(body),
       signal: args.signal,
     });
   } catch (e: any) {
@@ -479,27 +773,16 @@ export async function chatCompletionOnce(args: {
     return { ok: false, error: "UPSTREAM_INVALID_JSON", status: res.status, rawText: text };
   }
 
-  const contentLike =
-    json?.choices?.[0]?.message?.content ??
-    (json?.choices?.[0] as any)?.text ??
-    json?.choices?.[0]?.delta?.content;
-  const content = coerceOpenAiContentToText(contentLike);
+  const content = isResponses
+    ? extractResponsesTextFromAny(json).trim()
+    : coerceOpenAiContentToText(
+        json?.choices?.[0]?.message?.content ??
+          (json?.choices?.[0] as any)?.text ??
+          json?.choices?.[0]?.delta?.content,
+      );
   if (typeof content !== "string" || content.trim().length === 0) {
     return { ok: false, error: "UPSTREAM_EMPTY_CONTENT", status: res.status, rawText: JSON.stringify(json) };
   }
-  const u = json?.usage;
-  const pt = Number(u?.prompt_tokens ?? u?.promptTokens);
-  const ct = Number(u?.completion_tokens ?? u?.completionTokens);
-  const tt = Number(u?.total_tokens ?? u?.totalTokens);
-  const usage =
-    (Number.isFinite(pt) || Number.isFinite(ct) || Number.isFinite(tt))
-      ? {
-          promptTokens: Number.isFinite(pt) ? Math.max(0, Math.floor(pt)) : 0,
-          completionTokens: Number.isFinite(ct) ? Math.max(0, Math.floor(ct)) : 0,
-          ...(Number.isFinite(tt) ? { totalTokens: Math.max(0, Math.floor(tt)) } : {}),
-        }
-      : undefined;
+  const usage = coerceUsageLike(json?.usage ?? json?.response?.usage);
   return usage ? { ok: true, content, raw: json, usage } : { ok: true, content, raw: json };
 }
-
-
