@@ -541,6 +541,30 @@ function pickCommandFromReadme(readme: string): { command: string; reason: strin
   return { command: picked, reason: "README 命令推断" };
 }
 
+function detectReadmeCommandForPackage(readme: string, pkgName: string): { command: string; hasModeArg: boolean } | null {
+  const text = String(readme ?? "");
+  const pkg = String(pkgName ?? "").trim();
+  if (!text.trim() || !pkg) return null;
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const escapedPkg = pkg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const patterns = [
+    new RegExp(`^uvx\\s+${escapedPkg}(?:\\s+(.+))?$`, "i"),
+    new RegExp(`^npx(?:\\s+-y)?\\s+${escapedPkg}(?:\\s+(.+))?$`, "i"),
+    new RegExp(`^python\\s+-m\\s+${escapedPkg}(?:\\s+(.+))?$`, "i"),
+  ];
+
+  for (const line of lines) {
+    for (const re of patterns) {
+      const m = line.match(re);
+      if (!m) continue;
+      const rest = String(m[1] ?? "").trim();
+      const hasModeArg = /\b(stdio|sse|http|streamable-http)\b/i.test(rest);
+      return { command: line, hasModeArg };
+    }
+  }
+  return null;
+}
+
 const CONFIDENCE_META: Record<DraftConfidence, { label: string; className: string }> = {
   high: {
     label: "高置信度",
@@ -589,18 +613,28 @@ async function buildMcpDraftFromGithubUrl(repoUrl: string): Promise<McpDraft> {
       const pkg = JSON.parse(pkgText);
       const pkgName = String(pkg?.name ?? "").trim();
       if (pkgName) {
+        const readmeCmd = detectReadmeCommandForPackage(readme, pkgName);
+        const preferred = readmeCmd?.command
+          ? tokenizeCommandLine(readmeCmd.command)
+          : ["npx", "-y", pkgName];
+        const [cmd, ...cmdArgs] = preferred;
         draft = {
           name: prettyName,
           transport: "stdio",
-          command: "npx",
-          args: ["-y", pkgName],
+          command: cmd || "npx",
+          args: cmdArgs.length > 0 ? cmdArgs : ["-y", pkgName],
           sourceRepo,
-          notes: [`根据 package.json 推断 npm 包：${pkgName}`],
-          confidence: "high",
-          confidenceReason: "命令来自 package.json 结构化元数据",
+          notes: [
+            `根据 package.json 推断 npm 包：${pkgName}`,
+            ...(readmeCmd?.command ? [`已按 README 命令补全：${readmeCmd.command}`] : []),
+          ],
+          confidence: readmeCmd?.hasModeArg ? "high" : "medium",
+          confidenceReason: readmeCmd?.hasModeArg
+            ? "结合 package.json 与 README（含 stdio/sse/http 模式参数）"
+            : "命令来自 package.json 结构化元数据",
         };
-        confidence = "high";
-        confidenceReason = "命令来自 package.json 结构化元数据";
+        confidence = draft.confidence;
+        confidenceReason = draft.confidenceReason;
       }
     } catch {
       // ignore
@@ -611,18 +645,28 @@ async function buildMcpDraftFromGithubUrl(repoUrl: string): Promise<McpDraft> {
     const m = pyText.match(/\[project\][\s\S]*?\nname\s*=\s*["']([^"']+)["']/i) || pyText.match(/\nname\s*=\s*["']([^"']+)["']/i);
     const pyName = String(m?.[1] ?? "").trim();
     if (pyName) {
+      const readmeCmd = detectReadmeCommandForPackage(readme, pyName);
+      const preferred = readmeCmd?.command
+        ? tokenizeCommandLine(readmeCmd.command)
+        : ["uvx", pyName];
+      const [cmd, ...cmdArgs] = preferred;
       draft = {
         name: prettyName,
         transport: "stdio",
-        command: "uvx",
-        args: [pyName],
+        command: cmd || "uvx",
+        args: cmdArgs.length > 0 ? cmdArgs : [pyName],
         sourceRepo,
-        notes: [`根据 pyproject.toml 推断 Python 包：${pyName}`],
-        confidence: "high",
-        confidenceReason: "命令来自 pyproject.toml 结构化元数据",
+        notes: [
+          `根据 pyproject.toml 推断 Python 包：${pyName}`,
+          ...(readmeCmd?.command ? [`已按 README 命令补全：${readmeCmd.command}`] : []),
+        ],
+        confidence: readmeCmd?.hasModeArg ? "high" : "medium",
+        confidenceReason: readmeCmd?.hasModeArg
+          ? "结合 pyproject.toml 与 README（含 stdio/sse/http 模式参数）"
+          : "命令来自 pyproject.toml 结构化元数据",
       };
-      confidence = "high";
-      confidenceReason = "命令来自 pyproject.toml 结构化元数据";
+      confidence = draft.confidence;
+      confidenceReason = draft.confidenceReason;
     }
   }
 
