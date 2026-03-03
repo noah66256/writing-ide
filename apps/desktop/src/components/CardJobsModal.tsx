@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useKbStore, type KbCardJob, type KbLibraryFingerprintSnapshot, type KbTextSpanRefV1 } from "../state/kbStore";
+import { useKbStore, type KbCardJob, type KbCardJobArticle, type KbLibraryFingerprintSnapshot, type KbTextSpanRefV1 } from "../state/kbStore";
 import { useDialogStore } from "../state/dialogStore";
 import { FACET_PACKS, facetPackLabel, getFacetPack } from "../kb/facets";
 import { RichText } from "./RichText";
@@ -33,6 +33,23 @@ function formatDuration(ms: number) {
   const pad2 = (n: number) => String(n).padStart(2, "0");
   if (h > 0) return `${h}:${pad2(m)}:${pad2(s)}`;
   return `${m}:${pad2(s)}`;
+}
+
+function articleStatusIcon(status: KbCardJobArticle["status"]) {
+  if (status === "done") return "text-green-600";
+  if (status === "running") return "text-blue-600";
+  if (status === "failed") return "text-red-600";
+  return "text-text-faint";
+}
+
+function articleStatusText(a: KbCardJobArticle) {
+  if (a.status === "done") return "已完成";
+  if (a.status === "failed") return "失败";
+  if (a.status === "running") {
+    if (a.chunks > 1) return `处理中（块 ${Math.min(a.chunksDone + 1, a.chunks)}/${a.chunks}）`;
+    return "处理中";
+  }
+  return "等待中";
 }
 
 export function CardJobsModal() {
@@ -211,7 +228,8 @@ export function CardJobsModal() {
     const runningLabel = runningCard?.docTitle ?? (runningPlaybook ? `【风格手册】${runningPlaybook.libraryName ?? runningPlaybook.libraryId}` : null);
     const chunksDone = runningCard?.chunksDone;
     const chunksTotal = runningCard?.chunksTotal;
-    return { total, done, failed, cancelled, runningLabel, chunksDone, chunksTotal };
+    const runningArticles = runningCard?.articles;
+    return { total, done, failed, cancelled, runningLabel, chunksDone, chunksTotal, runningArticles };
   }, [jobs, playbookJobs]);
 
   const progress = useMemo(() => {
@@ -2156,6 +2174,20 @@ export function CardJobsModal() {
                 <div className="text-xs text-text-muted">
                   估算：{progress.doneUnits}/{progress.totalUnits} · 已用 {formatDuration(progress.elapsedMs)}
                   {progress.etaMs ? ` · 预计剩余 ~${formatDuration(progress.etaMs)}` : ""}
+                </div>
+              </div>
+            ) : null}
+
+            {summary.runningArticles && summary.runningArticles.length > 0 ? (
+              <div className="mb-2.5 rounded-lg border border-border-soft bg-surface-alt/40 px-3 py-2">
+                <div className="text-[11px] text-text-faint mb-1">分篇进度</div>
+                <div className="flex flex-wrap gap-x-4 gap-y-0.5">
+                  {summary.runningArticles.map((a) => (
+                    <div key={a.label} className={cn("text-xs", articleStatusIcon(a.status))}>
+                      <span className="font-medium">{a.label}</span>
+                      <span className="ml-1">{articleStatusText(a)}</span>
+                    </div>
+                  ))}
                 </div>
               </div>
             ) : null}
