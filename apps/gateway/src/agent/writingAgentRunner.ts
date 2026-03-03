@@ -7,6 +7,8 @@ import {
   type ContentBlockToolUse,
   type MsgStreamEvent,
 } from "../llm/anthropicMessages.js";
+import { buildInjectedToolResultMessages, streamChatCompletionViaProvider } from "../llm/providerAdapter.js";
+import type { OpenAiChatMessage } from "../llm/openaiCompat.js";
 
 import {
   analyzeAutoRetryText,
@@ -26,7 +28,7 @@ import {
   type SubAgentDefinition,
 } from "@writing-ide/agent-core";
 
-import { TOOL_LIST, encodeToolName } from "@writing-ide/tools";
+import { TOOL_LIST, encodeToolName, validateToolCallArgs } from "@writing-ide/tools";
 
 import {
   decideServerToolExecution,
@@ -60,6 +62,8 @@ export type RunContext = {
   modelId: string;
   apiKey: string;
   baseUrl?: string;
+  endpoint?: string;
+  toolResultFormat?: "xml" | "text";
   styleLibIds: string[];
   writeEvent: SseWriter;
   waiters: WaiterMap;
@@ -70,7 +74,7 @@ export type RunContext = {
   /** 子 Agent 模型解析回调：按候选列表顺序尝试解析，命中即返回；全部失败返回 null（回退父 agent 配置） */
   resolveSubAgentModel?: (
     candidates: string[],
-  ) => Promise<{ modelId: string; apiKey: string; baseUrl: string } | null>;
+  ) => Promise<{ modelId: string; apiKey: string; baseUrl: string; endpoint?: string; toolResultFormat?: "xml" | "text" } | null>;
   /** 初始运行状态：由 gateway 从 contextPack 预初始化（hasTodoList、multiWrite 等），供 runner 继承。 */
   initialRunState?: RunState;
   /** 用户通过 @mention 指定的目标子 Agent ID 列表 */
@@ -136,6 +140,126 @@ function parseObjectJson(jsonText: string): Record<string, unknown> {
     // ignore
   }
   return {};
+}
+
+function isAnthropicMessagesEndpoint(endpoint?: string): boolean {
+  const ep = String(endpoint ?? "/v1/messages").trim().toLowerCase();
+  return ep.endsWith("/messages") || ep === "/messages";
+}
+
+function stripCdata(raw: string): string {
+  const m = String(raw ?? "").match(/^<!\[CDATA\[([\s\S]*?)\]\]>$/);
+  return m?.[1] !== undefined ? String(m[1]) : String(raw ?? "");
+}
+
+function parseXmlArgValue(raw: string): unknown {
+  const t = stripCdata(String(raw ?? "").trim());
+  if (!t) return "";
+  if ((t.startsWith("{") && t.endsWith("}")) || (t.startsWith("[") && t.endsWith("]"))) {
+    try {
+      return JSON.parse(t);
+    } catch {
+      return t;
+    }
+  }
+  if (t === "true") return true;
+  if (t === "false") return false;
+  if (/^-?\d+(\.\d+)?$/.test(t) && t.length < 32) return Number(t);
+  return t;
+}
+
+function xmlEscapeAttr(raw: string): string {
+  return String(raw ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function xmlCdataSafe(raw: string): string {
+  return String(raw ?? "").replace(/\]\]>/g, "]]]]><![CDATA[>");
+}
+
+function parseToolCallsXml(text: string): {
+  calls: Array<{ id: string; name: string; args: Record<string, unknown> }>;
+  plainText: string;
+  wrapperCount: number;
+  hasToolCallMarker: boolean;
+  mixedOutput: boolean;
+} {
+  const source = String(text ?? "");
+  const calls: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
+  const wrappers = Array.from(source.matchAll(/<tool_calls[\s\S]*?<\/tool_calls>/gi));
+  if (wrappers.length === 0) {
+    return {
+      calls: [],
+      plainText: source.trim(),
+      wrapperCount: 0,
+      hasToolCallMarker: /<\s*\/?\s*tool_calls\b/i.test(source),
+      mixedOutput: false,
+    };
+  }
+
+  const plainParts: string[] = [];
+  let lastEnd = 0;
+  let callIndex = 0;
+  for (const wrapper of wrappers) {
+    const xml = String(wrapper[0] ?? "");
+    const start = typeof wrapper.index === "number" ? wrapper.index : source.indexOf(xml, lastEnd);
+    const safeStart = start >= 0 ? start : lastEnd;
+    plainParts.push(source.slice(lastEnd, safeStart));
+    lastEnd = safeStart + xml.length;
+
+    const toolCallRe = /<tool_call\b([^>]*)>([\s\S]*?)<\/tool_call>/gi;
+    let m: RegExpExecArray | null = null;
+    while ((m = toolCallRe.exec(xml)) !== null) {
+      callIndex += 1;
+      const attrs = String(m[1] ?? "");
+      const body = String(m[2] ?? "");
+      const nameM = attrs.match(/\bname\s*=\s*"([^"]+)"/i) ?? attrs.match(/\bname\s*=\s*'([^']+)'/i);
+      const idM = attrs.match(/\bid\s*=\s*"([^"]+)"/i) ?? attrs.match(/\bid\s*=\s*'([^']+)'/i);
+      const name = String(nameM?.[1] ?? "").trim();
+      if (!name) continue;
+      const id = String(idM?.[1] ?? "").trim() || `xml_tool_${Date.now()}_${callIndex}`;
+      const args: Record<string, unknown> = {};
+      const argRe = /<arg\b([^>]*)>([\s\S]*?)<\/arg>/gi;
+      let a: RegExpExecArray | null = null;
+      while ((a = argRe.exec(body)) !== null) {
+        const aAttrs = String(a[1] ?? "");
+        const aNameM = aAttrs.match(/\bname\s*=\s*"([^"]+)"/i) ?? aAttrs.match(/\bname\s*=\s*'([^']+)'/i);
+        const aName = String(aNameM?.[1] ?? "").trim();
+        if (!aName) continue;
+        args[aName] = parseXmlArgValue(String(a[2] ?? ""));
+      }
+      calls.push({ id, name, args });
+    }
+  }
+  plainParts.push(source.slice(lastEnd));
+  const plainText = plainParts.join("").trim();
+  return {
+    calls,
+    plainText,
+    wrapperCount: wrappers.length,
+    hasToolCallMarker: true,
+    mixedOutput: plainText.length > 0,
+  };
+}
+
+function buildToolCallsXml(calls: Array<{ name: string; args: Record<string, unknown> }>): string {
+  const blocks = (Array.isArray(calls) ? calls : [])
+    .map((c) => {
+      const name = String(c?.name ?? "").trim();
+      if (!name) return "";
+      const args = c?.args && typeof c.args === "object" ? c.args : {};
+      const argXml = Object.entries(args).map(([k, v]) => {
+        const encoded = typeof v === "string" ? v : JSON.stringify(v ?? null);
+        return `<arg name="${xmlEscapeAttr(k)}"><![CDATA[${xmlCdataSafe(encoded)}]]></arg>`;
+      }).join("");
+      return `<tool_call name="${xmlEscapeAttr(name)}">${argXml}</tool_call>`;
+    })
+    .filter(Boolean)
+    .join("");
+  return `<tool_calls>${blocks}</tool_calls>`;
 }
 
 
@@ -278,12 +402,61 @@ function buildSubAgentContextHint(args: {
   return lines.join("\n");
 }
 
+function normalizeDelegationTask(rawTask: string): string {
+  const text = String(rawTask ?? "").trim();
+  if (!text) return "";
+  const noMentions = text.replace(/^(?:@\S+\s*)+/g, "").trim();
+  return noMentions || text;
+}
+
+function shouldInjectSubAgentMemory(args: {
+  task: string;
+  inputArtifactsCount: number;
+  acceptanceCriteria: string;
+  rawArgs: Record<string, unknown>;
+}): boolean {
+  const level = String(args.rawArgs.contextLevel ?? "").trim().toLowerCase();
+  if (level === "full") return true;
+  if (level === "minimal") return false;
+  if (typeof args.rawArgs.includeMemory === "boolean") return Boolean(args.rawArgs.includeMemory);
+  if (args.inputArtifactsCount > 0) return true;
+  if (args.acceptanceCriteria.trim()) return true;
+
+  const task = String(args.task ?? "").trim();
+  if (!task) return false;
+  if (task.length > 48) return true;
+  if (/\n/.test(task)) return true;
+  if (/^(继续|现在呢|然后|报个数|总结下|再来一次|好|行|ok|OK|收到)\b/i.test(task)) return false;
+  return false;
+}
+
+function cleanSubAgentArtifactText(raw: string): string {
+  let text = String(raw ?? "").trim();
+  if (!text) return "";
+  text = text.replace(/<tool_calls[\s\S]*?<\/tool_calls>/gi, " ");
+  text = text
+    .replace(/^\s*<\/?tool_calls[^>]*>\s*$/gim, "")
+    .replace(/^\s*<\/?tool_call[^>]*>\s*$/gim, "")
+    .replace(/^\s*<\/?arg[^>]*>\s*$/gim, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (!text) return "";
+  const paragraphs = text.split(/\n{2,}/g).map((x) => x.trim()).filter(Boolean);
+  if (paragraphs.length <= 1) return text;
+  const deduped: string[] = [];
+  for (const p of paragraphs) {
+    if (deduped.length > 0 && deduped[deduped.length - 1] === p) continue;
+    deduped.push(p);
+  }
+  return deduped.join("\n\n").trim();
+}
+
 function extractLastAssistantText(messages: AnthropicMessage[]): string {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const msg = messages[i];
     if (msg.role !== "assistant") continue;
     if (typeof msg.content === "string") {
-      const text = msg.content.trim();
+      const text = cleanSubAgentArtifactText(msg.content);
       if (text) return text;
       continue;
     }
@@ -291,7 +464,7 @@ function extractLastAssistantText(messages: AnthropicMessage[]): string {
     for (let j = (msg.content as any[]).length - 1; j >= 0; j -= 1) {
       const block = (msg.content as any[])[j];
       if (block.type !== "text") continue;
-      const text = String(block.text ?? "").trim();
+      const text = cleanSubAgentArtifactText(String(block.text ?? ""));
       if (text) return text;
     }
   }
@@ -310,6 +483,7 @@ function countAssistantToolUses(messages: AnthropicMessage[]): number {
 export class WritingAgentRunner {
   private readonly ctx: RunContext;
   private readonly messages: AnthropicMessage[] = [];
+  private readonly providerMessages: OpenAiChatMessage[] = [];
   private readonly runState: RunState;
   private turn = 0;
   private readonly maxTurns: number;
@@ -343,6 +517,17 @@ export class WritingAgentRunner {
       : userMessage;
     this.messages.push({ role: "user", content: userContent });
 
+    const providerContent: OpenAiChatMessage["content"] = images?.length
+      ? [
+          ...images.map((img) => ({
+            type: "image_url" as const,
+            image_url: { url: `data:${img.mediaType};base64,${img.data}` },
+          })),
+          { type: "text" as const, text: userMessage },
+        ]
+      : userMessage;
+    this.providerMessages.push({ role: "user", content: providerContent });
+
     // If user @mentioned specific agents, auto-delegate before main loop
     if (this.ctx.targetAgentIds?.length) {
       await this._bootstrapTargetDelegation(userMessage);
@@ -352,7 +537,9 @@ export class WritingAgentRunner {
     while (this.turn < this.maxTurns) {
       if (this.ctx.abortSignal.aborted) return;
       this.turn += 1;
-      const shouldContinue = await this._runOneTurn();
+      const shouldContinue = isAnthropicMessagesEndpoint(this.ctx.endpoint)
+        ? await this._runOneTurn()
+        : await this._runOneTurnViaProvider();
       if (!shouldContinue) return;
     }
 
@@ -388,7 +575,9 @@ export class WritingAgentRunner {
       while (this.turn < this.maxTurns) {
         if (this.ctx.abortSignal.aborted) return;
         this.turn += 1;
-        const shouldContinue = await this._runOneTurn();
+        const shouldContinue = isAnthropicMessagesEndpoint(this.ctx.endpoint)
+          ? await this._runOneTurn()
+          : await this._runOneTurnViaProvider();
         if (!shouldContinue) return;
       }
       return;
@@ -404,6 +593,14 @@ export class WritingAgentRunner {
 
     // Push synthetic assistant message with delegation calls
     this.messages.push({ role: "assistant", content: toolUses });
+    if (!isAnthropicMessagesEndpoint(this.ctx.endpoint)) {
+      this.providerMessages.push({
+        role: "assistant",
+        content: buildToolCallsXml(
+          toolUses.map((t) => ({ name: t.name, args: t.input as Record<string, unknown> })),
+        ),
+      });
+    }
 
     // Execute all delegations in parallel
     const results = await Promise.all(
@@ -437,15 +634,385 @@ export class WritingAgentRunner {
 
     if (toolResultBlocks.length > 0) {
       this.messages.push({ role: "user", content: toolResultBlocks });
+      if (!isAnthropicMessagesEndpoint(this.ctx.endpoint)) {
+        const toolResultXml = results
+          .map(({ toolUse, result }) => {
+            const raw = typeof result.output === "string" ? result.output : JSON.stringify(result.output ?? null);
+            return `<tool_result name="${xmlEscapeAttr(toolUse.name)}"><![CDATA[${xmlCdataSafe(raw)}]]></tool_result>`;
+          })
+          .join("\n");
+        const toolResultText = results
+          .map(({ toolUse, result }) => {
+            const raw = typeof result.output === "string" ? result.output : JSON.stringify(result.output ?? null);
+            return `[tool_result name="${toolUse.name}"]\n${raw}\n[/tool_result]`;
+          })
+          .join("\n");
+        this.providerMessages.push(
+          ...buildInjectedToolResultMessages({
+            toolResultFormat: this.ctx.toolResultFormat === "text" ? "text" : "xml",
+            toolResultXml,
+            toolResultText,
+          }),
+        );
+      }
     }
 
     // After delegation, let main agent continue normally to summarize
     while (this.turn < this.maxTurns) {
       if (this.ctx.abortSignal.aborted) return;
       this.turn += 1;
-      const shouldContinue = await this._runOneTurn();
+      const shouldContinue = isAnthropicMessagesEndpoint(this.ctx.endpoint)
+        ? await this._runOneTurn()
+        : await this._runOneTurnViaProvider();
       if (!shouldContinue) return;
     }
+  }
+
+  private _buildXmlToolProtocolPrompt(allowed: Set<string>): string {
+    const builtins = TOOL_LIST.filter((tool) => {
+      if (!allowed.has(tool.name)) return false;
+      if (!tool.modes || tool.modes.length === 0) return true;
+      return tool.modes.includes(this.ctx.mode);
+    });
+
+    const lines: string[] = [];
+    for (const tool of builtins) {
+      const args = (tool.args ?? []).map((a) => a.name).join(", ");
+      lines.push(`- ${tool.name}${args ? `(${args})` : "()"}`);
+    }
+
+    const mcpNames = Array.from(
+      new Set(
+        (((this.ctx as any).mcpTools ?? []) as any[])
+          .map((t: any) => String(t?.name ?? "").trim())
+          .filter((name) => name && allowed.has(name)),
+      ),
+    );
+    for (const name of mcpNames) lines.push(`- ${name}(...)`);
+
+    const toolListText = lines.length ? lines.join("\n") : "- （无可用工具）";
+    return (
+      "【工具调用协议（XML）】\n" +
+      "当需要调用工具时，整条回复必须只包含 XML，不得混入自然语言。\n" +
+      "若调用工具，只允许一个 <tool_calls> 包裹，禁止输出多个 <tool_calls> 段。\n" +
+      "禁止在 XML 前后追加解释文本（包括“我将调用…”之类语句）。\n" +
+      "格式：\n" +
+      "<tool_calls>\n" +
+      '  <tool_call name="tool.name">\n' +
+      '    <arg name="param"><![CDATA[value_or_json]]></arg>\n' +
+      "  </tool_call>\n" +
+      "</tool_calls>\n" +
+      "收敛规则：\n" +
+      "- 任务完成后必须调用 run.done（可带 note），不要继续空转。\n" +
+      "- 上一轮同名同参工具调用已成功时，禁止重复调用同一工具；应改为下一步或 run.done。\n" +
+      "当不需要工具时，直接输出 Markdown。\n\n" +
+      "本轮可用工具：\n" +
+      `${toolListText}`
+    );
+  }
+
+  private async _processCompletedToolUses(
+    completedToolUses: ContentBlockToolUse[],
+    opts?: { presetResults?: Map<string, ToolExecResult> },
+  ): Promise<{ shouldContinue: boolean; injectedToolMessages: OpenAiChatMessage[] }> {
+    const parsedToolCalls: ParsedToolCall[] = completedToolUses.map((toolUse) => ({
+      name: toolUse.name,
+      args: toolUse.input ?? {},
+    }));
+
+    const batch = analyzeStyleWorkflowBatch({
+      mode: this.ctx.mode,
+      intent: this.ctx.intent,
+      gates: this.ctx.gates,
+      state: this.runState,
+      lintMaxRework: LINT_MAX_REWORK,
+      toolCalls: parsedToolCalls,
+    });
+
+    if (batch.violation) {
+      this.ctx.writeEvent("run.notice", {
+        turn: this.turn,
+        kind: "info",
+        title: "StyleWorkflow",
+        message: `工具调用顺序提示（${batch.violation}），已放行，由 LLM 自行判断。`,
+      });
+    }
+
+    const toolResultMessages = [] as AnthropicMessage[];
+    const toolResultXmlParts: string[] = [];
+    const toolResultTextParts: string[] = [];
+    let hasRunDone = false;
+
+    const delegateCalls: { index: number; toolUse: ContentBlockToolUse }[] = [];
+    const regularCalls: { index: number; toolUse: ContentBlockToolUse }[] = [];
+    completedToolUses.forEach((toolUse, i) => {
+      if (toolUse.name === "agent.delegate") delegateCalls.push({ index: i, toolUse });
+      else regularCalls.push({ index: i, toolUse });
+    });
+
+    const orderedResults: { index: number; toolUse: ContentBlockToolUse; result: ToolExecResult }[] = [];
+    const presetResults = opts?.presetResults ?? new Map<string, ToolExecResult>();
+
+    if (delegateCalls.length > 0) {
+      const delegateResults = await Promise.all(
+        delegateCalls.map(async ({ index, toolUse }) => {
+          const preset = presetResults.get(toolUse.id);
+          const result = preset ?? (await this._executeTool(toolUse));
+          return { index, toolUse, result };
+        }),
+      );
+      orderedResults.push(...delegateResults);
+    }
+
+    for (const { index, toolUse } of regularCalls) {
+      if (this.ctx.abortSignal.aborted) break;
+      const preset = presetResults.get(toolUse.id);
+      const result = preset ?? (await this._executeTool(toolUse));
+      orderedResults.push({ index, toolUse, result });
+    }
+
+    orderedResults.sort((a, b) => a.index - b.index);
+    for (const { toolUse, result } of orderedResults) {
+      this._updateRunState(toolUse, { ok: result.ok, output: result.output });
+
+      this.ctx.writeEvent("tool.result", {
+        toolCallId: toolUse.id,
+        name: toolUse.name,
+        ok: result.ok,
+        output: result.output,
+        meta: result.meta ?? null,
+        turn: this.turn,
+      });
+
+      const MAX_TOOL_RESULT_CHARS = 60_000;
+      const rawOutput = typeof result.output === "string" ? result.output : JSON.stringify(result.output ?? null);
+      const cappedOutput = rawOutput.length > MAX_TOOL_RESULT_CHARS
+        ? rawOutput.slice(0, MAX_TOOL_RESULT_CHARS) + `\n...[工具结果已截断，共 ${rawOutput.length} 字符]`
+        : rawOutput;
+      toolResultMessages.push(buildToolResultMessage(toolUse.id, cappedOutput, !result.ok));
+      toolResultXmlParts.push(
+        `<tool_result name="${xmlEscapeAttr(toolUse.name)}"><![CDATA[${xmlCdataSafe(cappedOutput)}]]></tool_result>`,
+      );
+      toolResultTextParts.push(
+        `[tool_result name="${toolUse.name}"]\n${cappedOutput}\n[/tool_result]`,
+      );
+
+      if (toolUse.name === "run.done") hasRunDone = true;
+    }
+
+    let mainDocLoopWarning: string | null = null;
+    const isMainDocOnlyTurn =
+      orderedResults.length > 0 &&
+      orderedResults.every(({ toolUse }) =>
+        toolUse.name === "run.mainDoc.update" || toolUse.name === "run.mainDoc.get",
+      );
+
+    if (isMainDocOnlyTurn) this.consecutiveMainDocOnlyTurns += 1;
+    else this.consecutiveMainDocOnlyTurns = 0;
+
+    if (
+      isMainDocOnlyTurn &&
+      this.consecutiveMainDocOnlyTurns >= MAIN_DOC_UPDATE_SOFT_LIMIT &&
+      this.consecutiveMainDocOnlyTurns < MAIN_DOC_UPDATE_HARD_LIMIT
+    ) {
+      this.ctx.writeEvent("run.notice", {
+        turn: this.turn,
+        kind: "warn",
+        title: "MainDocLoopGuard",
+        message: `连续 ${this.consecutiveMainDocOnlyTurns} 轮仅更新 mainDoc，请立即改用 lint.copy 或 doc.write。`,
+      });
+      mainDocLoopWarning =
+        "【系统约束】你已连续更新 mainDoc 多轮且未推进实质步骤。请立即调用 lint.copy 完成检查，或调用 doc.write 输出最终稿。禁止继续将正文/改写记录写入 mainDoc。";
+    }
+
+    if (isMainDocOnlyTurn && this.consecutiveMainDocOnlyTurns >= MAIN_DOC_UPDATE_HARD_LIMIT) {
+      this.blockMainDocUpdate = true;
+      this.ctx.writeEvent("run.notice", {
+        turn: this.turn,
+        kind: "error",
+        title: "MainDocLoopGuard",
+        message: `run.mainDoc.update 熔断（连续 ${this.consecutiveMainDocOnlyTurns} 轮）。`,
+      });
+    }
+
+    if (toolResultMessages.length > 0) {
+      const mergedBlocks = toolResultMessages.flatMap((msg) =>
+        Array.isArray(msg.content) ? msg.content : [],
+      );
+      if (mainDocLoopWarning) mergedBlocks.push({ type: "text", text: mainDocLoopWarning });
+      if (mergedBlocks.length > 0) this.messages.push({ role: "user", content: mergedBlocks });
+    } else if (mainDocLoopWarning) {
+      this.ctx.writeEvent("run.notice", {
+        turn: this.turn,
+        kind: "warn",
+        title: "MainDocLoopGuard",
+        message: `[fallback] ${mainDocLoopWarning}`,
+      });
+    }
+
+    const injectedToolMessages =
+      toolResultXmlParts.length > 0
+        ? buildInjectedToolResultMessages({
+            toolResultFormat: this.ctx.toolResultFormat === "text" ? "text" : "xml",
+            toolResultXml: toolResultXmlParts.join("\n"),
+            toolResultText: toolResultTextParts.join("\n"),
+          })
+        : [];
+    if (mainDocLoopWarning) {
+      injectedToolMessages.push({ role: "user", content: mainDocLoopWarning });
+    }
+
+    if (this.ctx.abortSignal.aborted) return { shouldContinue: false, injectedToolMessages };
+    if (hasRunDone) return { shouldContinue: false, injectedToolMessages };
+    return { shouldContinue: true, injectedToolMessages };
+  }
+
+  private async _runOneTurnViaProvider(): Promise<boolean> {
+    const perTurnCaps = this.ctx.computePerTurnAllowed?.(this.runState) ?? null;
+    const effectiveAllowed = perTurnCaps?.allowed ?? this.ctx.allowedToolNames;
+    const turnSystemPrompt = perTurnCaps?.hint
+      ? `${this.ctx.systemPrompt}\n\n${perTurnCaps.hint}`
+      : this.ctx.systemPrompt;
+    const xmlToolPrompt = this._buildXmlToolProtocolPrompt(effectiveAllowed);
+
+    this.ctx.writeEvent("assistant.start", { turn: this.turn });
+
+    let assistantRaw = "";
+    let streamErrored = false;
+    let lastStreamError = "";
+    let promptTokens = 0;
+    let completionTokens = 0;
+
+    const STREAM_RETRY_MAX = 2;
+    const STREAM_RETRY_BASE_MS = 600;
+
+    for (let attempt = 0; attempt <= STREAM_RETRY_MAX; attempt++) {
+      if (this.ctx.abortSignal.aborted) break;
+
+      assistantRaw = "";
+      streamErrored = false;
+      lastStreamError = "";
+      promptTokens = 0;
+      completionTokens = 0;
+
+      const stream = streamChatCompletionViaProvider({
+        baseUrl: String(this.ctx.baseUrl ?? ""),
+        endpoint: this.ctx.endpoint || "/v1/responses",
+        apiKey: this.ctx.apiKey,
+        model: this.ctx.modelId,
+        messages: [
+          { role: "system", content: turnSystemPrompt },
+          { role: "system", content: xmlToolPrompt },
+          ...this.providerMessages,
+        ],
+        temperature: undefined,
+        maxTokens: undefined,
+        includeUsage: true,
+        signal: this.ctx.abortSignal,
+      });
+
+      for await (const ev of stream) {
+        if (this.ctx.abortSignal.aborted) break;
+        if (ev.type === "delta") assistantRaw += String(ev.delta ?? "");
+        else if (ev.type === "usage") {
+          promptTokens = Math.max(promptTokens, Math.max(0, Math.floor(Number((ev as any)?.usage?.promptTokens ?? 0))));
+          completionTokens = Math.max(completionTokens, Math.max(0, Math.floor(Number((ev as any)?.usage?.completionTokens ?? 0))));
+        } else if (ev.type === "error") {
+          streamErrored = true;
+          lastStreamError = String((ev as any)?.error ?? "UPSTREAM_ERROR");
+          break;
+        } else if (ev.type === "done") {
+          break;
+        }
+      }
+
+      const hasContent = assistantRaw.trim().length > 0;
+      if (!streamErrored && !hasContent) {
+        streamErrored = true;
+        lastStreamError = "模型服务返回了空响应，正在重试...";
+      }
+      if (!streamErrored) break;
+      if (hasContent || attempt >= STREAM_RETRY_MAX) break;
+
+      const jitter = Math.floor(Math.random() * 180);
+      const waitMs = STREAM_RETRY_BASE_MS * Math.pow(2, attempt) + jitter;
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+
+    if (streamErrored) this.ctx.writeEvent("error", { error: lastStreamError, turn: this.turn });
+    if (this.ctx.onTurnUsage && (promptTokens > 0 || completionTokens > 0)) {
+      this.ctx.onTurnUsage(promptTokens, completionTokens);
+    }
+
+    const { calls, plainText, wrapperCount, hasToolCallMarker } = parseToolCallsXml(assistantRaw);
+    const completedToolUses: ContentBlockToolUse[] = [];
+    const presetResults = new Map<string, ToolExecResult>();
+    for (const c of calls) {
+      const input = c.args && typeof c.args === "object" && !Array.isArray(c.args) ? c.args : {};
+      const v = validateToolCallArgs({ name: c.name, toolArgs: input });
+      if (!v.ok) {
+        presetResults.set(c.id, {
+          ok: false,
+          output: { ok: false, error: "TOOL_ARGS_INVALID", detail: v.error?.message ?? "参数不符合 schema", field: v.error?.field ?? null },
+        });
+      }
+      completedToolUses.push({
+        type: "tool_use",
+        id: c.id,
+        name: c.name,
+        input,
+      });
+      this.ctx.writeEvent("tool.call.args_ready", {
+        toolCallId: c.id,
+        name: c.name,
+        args: input,
+        turn: this.turn,
+      });
+    }
+
+    const hasProtocolViolation = hasToolCallMarker && calls.length === 0;
+    const suppressMixedPlainText = completedToolUses.length > 0 && plainText.length > 0;
+    if (hasProtocolViolation) {
+      this.ctx.writeEvent("run.notice", {
+        turn: this.turn,
+        kind: "warn",
+        title: "XmlProtocol",
+        message: "检测到无效的 <tool_calls> XML，已注入重试提醒。",
+      });
+    } else if (suppressMixedPlainText) {
+      this.ctx.writeEvent("run.notice", {
+        turn: this.turn,
+        kind: "info",
+        title: "XmlProtocol",
+        message: `检测到 XML 混输（wrapper=${wrapperCount}），已忽略自然语言文本，仅执行工具调用。`,
+      });
+    }
+
+    const assistantBlocks: Array<{ type: "text"; text: string } | ContentBlockToolUse> = [];
+    if (plainText && !suppressMixedPlainText && !hasProtocolViolation) {
+      assistantBlocks.push({ type: "text", text: plainText });
+      this.ctx.writeEvent("assistant.delta", { delta: plainText, turn: this.turn });
+    }
+    if (completedToolUses.length > 0) assistantBlocks.push(...completedToolUses);
+    if (assistantBlocks.length > 0) this.messages.push({ role: "assistant", content: assistantBlocks });
+    this.providerMessages.push({ role: "assistant", content: assistantRaw });
+
+    this.ctx.writeEvent("assistant.done", { turn: this.turn });
+    if (this.ctx.abortSignal.aborted || streamErrored) return false;
+    if (hasProtocolViolation) {
+      const retryHint =
+        "你的工具调用 XML 无效。若需调用工具，请只输出一个合法的 <tool_calls>...</tool_calls>；否则输出纯 Markdown。现在请按协议重试。";
+      this.messages.push({ role: "user", content: retryHint });
+      this.providerMessages.push({ role: "user", content: retryHint });
+      return true;
+    }
+    if (completedToolUses.length === 0) return this._checkAutoRetry(plainText || assistantRaw);
+
+    const processed = await this._processCompletedToolUses(completedToolUses, { presetResults });
+    if (processed.injectedToolMessages.length > 0) {
+      this.providerMessages.push(...processed.injectedToolMessages);
+    }
+    return processed.shouldContinue;
   }
 
     private async _runOneTurn(): Promise<boolean> {
@@ -578,160 +1145,8 @@ export class WritingAgentRunner {
     if (completedToolUses.length === 0) {
       return this._checkAutoRetry(assistantText);
     }
-
-    const parsedToolCalls: ParsedToolCall[] = completedToolUses.map((toolUse) => ({
-      name: toolUse.name,
-      args: toolUse.input ?? {},
-    }));
-
-    // Batch analysis: still track state for observability, but no longer block tool execution.
-    // Workflow ordering is guided by skill promptFragments, not enforced by code.
-    const batch = analyzeStyleWorkflowBatch({
-      mode: this.ctx.mode,
-      intent: this.ctx.intent,
-      gates: this.ctx.gates,
-      state: this.runState,
-      lintMaxRework: LINT_MAX_REWORK,
-      toolCalls: parsedToolCalls,
-    });
-
-    if (batch.violation) {
-      // Log for observability but don't block execution
-      this.ctx.writeEvent("run.notice", {
-        turn: this.turn,
-        kind: "info",
-        title: "StyleWorkflow",
-        message: `工具调用顺序提示（${batch.violation}），已放行，由 LLM 自行判断。`,
-      });
-    }
-
-    const toolResultMessages = [] as AnthropicMessage[];
-    let hasRunDone = false;
-
-    // 将工具调用拆分为子 Agent 委托调用与常规调用，委托调用可并行执行
-    const delegateCalls: { index: number; toolUse: ContentBlockToolUse }[] = [];
-    const regularCalls: { index: number; toolUse: ContentBlockToolUse }[] = [];
-    completedToolUses.forEach((toolUse, i) => {
-      if (toolUse.name === "agent.delegate") {
-        delegateCalls.push({ index: i, toolUse });
-      } else {
-        regularCalls.push({ index: i, toolUse });
-      }
-    });
-
-    // 收集按原始顺序排列的结果
-    const orderedResults: { index: number; toolUse: ContentBlockToolUse; result: ToolExecResult }[] = [];
-
-    // 1) 并行执行所有 agent.delegate 调用
-    if (delegateCalls.length > 0) {
-      const delegateResults = await Promise.all(
-        delegateCalls.map(async ({ index, toolUse }) => {
-          const result = await this._executeTool(toolUse);
-          return { index, toolUse, result };
-        }),
-      );
-      orderedResults.push(...delegateResults);
-    }
-
-    // 2) 顺序执行常规工具调用
-    for (const { index, toolUse } of regularCalls) {
-      if (this.ctx.abortSignal.aborted) break;
-      const result = await this._executeTool(toolUse);
-      orderedResults.push({ index, toolUse, result });
-    }
-
-    // 3) 按原始顺序合并结果，发送事件
-    orderedResults.sort((a, b) => a.index - b.index);
-    for (const { toolUse, result } of orderedResults) {
-      this._updateRunState(toolUse, { ok: result.ok, output: result.output });
-
-      this.ctx.writeEvent("tool.result", {
-        toolCallId: toolUse.id,
-        name: toolUse.name,
-        ok: result.ok,
-        output: result.output,
-        meta: result.meta ?? null,
-        turn: this.turn,
-      });
-
-      const MAX_TOOL_RESULT_CHARS = 60_000;
-      const rawOutput = typeof result.output === "string" ? result.output : JSON.stringify(result.output ?? null);
-      const cappedOutput = rawOutput.length > MAX_TOOL_RESULT_CHARS
-        ? rawOutput.slice(0, MAX_TOOL_RESULT_CHARS) + `\n...[工具结果已截断，共 ${rawOutput.length} 字符]`
-        : rawOutput;
-      toolResultMessages.push(buildToolResultMessage(toolUse.id, cappedOutput, !result.ok));
-
-      if (toolUse.name === "run.done") {
-        hasRunDone = true;
-      }
-    }
-
-    // ── mainDoc 连续更新熔断（防止把 mainDoc 当写字板循环） ──────────────
-    let mainDocLoopWarning: string | null = null;
-    const isMainDocOnlyTurn =
-      orderedResults.length > 0 &&
-      orderedResults.every(({ toolUse }) =>
-        toolUse.name === "run.mainDoc.update" || toolUse.name === "run.mainDoc.get",
-      );
-
-    if (isMainDocOnlyTurn) {
-      this.consecutiveMainDocOnlyTurns += 1;
-    } else {
-      this.consecutiveMainDocOnlyTurns = 0;
-    }
-
-    if (
-      isMainDocOnlyTurn &&
-      this.consecutiveMainDocOnlyTurns >= MAIN_DOC_UPDATE_SOFT_LIMIT &&
-      this.consecutiveMainDocOnlyTurns < MAIN_DOC_UPDATE_HARD_LIMIT
-    ) {
-      this.ctx.writeEvent("run.notice", {
-        turn: this.turn,
-        kind: "warn",
-        title: "MainDocLoopGuard",
-        message: `连续 ${this.consecutiveMainDocOnlyTurns} 轮仅更新 mainDoc，请立即改用 lint.copy 或 doc.write。`,
-      });
-      // 注入普通 user text 而非伪造 tool_result（后者因缺少对应 tool_use 会触发 API 400）
-      // 延迟到 tool results 合并后再 push，见下方 mainDocLoopWarning 变量
-      mainDocLoopWarning =
-        "【系统约束】你已连续更新 mainDoc 多轮且未推进实质步骤。请立即调用 lint.copy 完成检查，或调用 doc.write 输出最终稿。禁止继续将正文/改写记录写入 mainDoc。";
-    }
-
-    if (isMainDocOnlyTurn && this.consecutiveMainDocOnlyTurns >= MAIN_DOC_UPDATE_HARD_LIMIT) {
-      this.blockMainDocUpdate = true;
-      this.ctx.writeEvent("run.notice", {
-        turn: this.turn,
-        kind: "error",
-        title: "MainDocLoopGuard",
-        message: `run.mainDoc.update 熔断（连续 ${this.consecutiveMainDocOnlyTurns} 轮）。`,
-      });
-    }
-
-    if (toolResultMessages.length > 0) {
-      const mergedBlocks = toolResultMessages.flatMap((msg) =>
-        Array.isArray(msg.content) ? msg.content : [],
-      );
-      // 软提示作为 text block 追加到同一条 user 消息（避免连续 user 消息触发 API 错误）
-      if (mainDocLoopWarning) {
-        mergedBlocks.push({ type: "text", text: mainDocLoopWarning });
-      }
-      if (mergedBlocks.length > 0) {
-        this.messages.push({ role: "user", content: mergedBlocks });
-      }
-    } else if (mainDocLoopWarning) {
-      // 理论上不可达：mainDoc 更新必有 tool result。
-      // 若因重构导致此分支被触发，仅记录日志，不注入消息（避免破坏 user/assistant 交替）
-      this.ctx.writeEvent("run.notice", {
-        turn: this.turn,
-        kind: "warn",
-        title: "MainDocLoopGuard",
-        message: `[fallback] ${mainDocLoopWarning}`,
-      });
-    }
-
-    if (this.ctx.abortSignal.aborted) return false;
-    if (hasRunDone) return false;
-    return true;
+    const processed = await this._processCompletedToolUses(completedToolUses);
+    return processed.shouldContinue;
   }
 
   private _handleStreamEvent(
@@ -1024,7 +1439,9 @@ export class WritingAgentRunner {
       ...((subAgent.fallbackModels ?? []).map((m) => String(m ?? "").trim())),
     ].filter(Boolean);
 
-    let resolvedSubModel: { modelId: string; apiKey: string; baseUrl: string } | null = null;
+    let resolvedSubModel:
+      | { modelId: string; apiKey: string; baseUrl: string; endpoint?: string; toolResultFormat?: "xml" | "text" }
+      | null = null;
     if (this.ctx.resolveSubAgentModel && subModelCandidates.length > 0) {
       try {
         resolvedSubModel = await this.ctx.resolveSubAgentModel(subModelCandidates);
@@ -1036,6 +1453,8 @@ export class WritingAgentRunner {
     const subModelId = resolvedSubModel?.modelId ?? this.ctx.modelId;
     const subApiKey = resolvedSubModel?.apiKey ?? this.ctx.apiKey;
     const subBaseUrl = resolvedSubModel?.baseUrl ?? this.ctx.baseUrl;
+    const subEndpoint = resolvedSubModel?.endpoint ?? this.ctx.endpoint;
+    const subToolResultFormat = resolvedSubModel?.toolResultFormat ?? this.ctx.toolResultFormat;
 
     // Sub-agent tools: from definition, exclude agent.delegate (prevent nesting)
     const subAllowedToolNames = new Set(
@@ -1119,6 +1538,8 @@ export class WritingAgentRunner {
       modelId: subModelId,
       apiKey: subApiKey,
       baseUrl: subBaseUrl,
+      endpoint: subEndpoint,
+      toolResultFormat: subToolResultFormat,
       styleLibIds: this.ctx.styleLibIds,
       writeEvent: subWriteEvent,
       waiters: this.ctx.waiters,
@@ -1167,14 +1588,15 @@ export class WritingAgentRunner {
     })();
     const acceptanceCriteria = String(rawArgs.acceptanceCriteria ?? "").trim();
 
-    let taskMessage = task;
+    const normalizedTask = normalizeDelegationTask(task);
+    let taskMessage = normalizedTask || task;
 
     // 大文本外置到 blob pool —— 避免 LLM 回显巨量文本导致 SSE 超时
     if (needsTextBlob && this.ctx.textBlobPool) {
       const blobId = `blob_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      this.ctx.textBlobPool.set(blobId, task);
-      const charCount = task.length;
-      const preview = task.slice(0, 150).replace(/\n/g, " ") + "...";
+      this.ctx.textBlobPool.set(blobId, normalizedTask || task);
+      const charCount = (normalizedTask || task).length;
+      const preview = (normalizedTask || task).slice(0, 150).replace(/\n/g, " ") + "...";
       taskMessage = [
         `用户提交了约${charCount}字的文本，内容预览：「${preview}」`,
         "",
@@ -1183,14 +1605,21 @@ export class WritingAgentRunner {
       ].join("\n");
     }
 
+    const injectMemory = shouldInjectSubAgentMemory({
+      task: taskMessage,
+      inputArtifactsCount: inputArtifacts.length,
+      acceptanceCriteria,
+      rawArgs,
+    });
+
     // 自动注入精简上下文到 taskMessage（风格库 ID + mainDoc 目标/约束 + 记忆/摘要）
     const contextHint = buildSubAgentContextHint({
       styleLibIds: this.ctx.styleLibIds,
       mainDoc: this.ctx.mainDoc,
       styleLibIdSet: this.ctx.gates.styleLibIdSet,
-      l1Memory: this.ctx.l1Memory ?? "",
-      l2Memory: this.ctx.l2Memory ?? "",
-      ctxDialogueSummary: this.ctx.ctxDialogueSummary ?? "",
+      l1Memory: injectMemory ? (this.ctx.l1Memory ?? "") : "",
+      l2Memory: injectMemory ? (this.ctx.l2Memory ?? "") : "",
+      ctxDialogueSummary: injectMemory ? (this.ctx.ctxDialogueSummary ?? "") : "",
     });
     if (contextHint) {
       taskMessage += `\n\n${contextHint}`;
