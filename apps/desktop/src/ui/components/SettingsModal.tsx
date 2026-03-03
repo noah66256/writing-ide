@@ -862,10 +862,10 @@ function McpTabContent() {
         </div>
       </div>
 
-      {showAdd && (
+      {showAdd && editingId === null && (
         <McpAddDialog
-          key={`mcp-edit-${editingId ?? "new"}-${draft?.sourceRepo ?? ""}`}
-          editId={editingId}
+          key={`mcp-edit-new-${draft?.sourceRepo ?? ""}`}
+          editId={null}
           initialDraft={draft}
           onClose={() => { setShowAdd(false); setEditingId(null); }}
         />
@@ -880,13 +880,22 @@ function McpTabContent() {
       ) : (
         <div className="flex flex-col gap-2">
           {servers.map((server) => (
-            <McpServerCard
-              key={server.id}
-              server={server}
-              expanded={expandedId === server.id}
-              onExpand={() => setExpandedId(expandedId === server.id ? null : server.id)}
-              onEdit={() => { setEditingId(server.id); setShowAdd(true); }}
-            />
+            <div key={server.id} className="flex flex-col gap-2">
+              <McpServerCard
+                server={server}
+                expanded={expandedId === server.id}
+                onExpand={() => setExpandedId(expandedId === server.id ? null : server.id)}
+                onEdit={() => { setEditingId(server.id); setShowAdd(true); }}
+              />
+              {showAdd && editingId === server.id && (
+                <McpAddDialog
+                  key={`mcp-edit-${server.id}`}
+                  editId={server.id}
+                  initialDraft={null}
+                  onClose={() => { setShowAdd(false); setEditingId(null); }}
+                />
+              )}
+            </div>
           ))}
         </div>
       )}
