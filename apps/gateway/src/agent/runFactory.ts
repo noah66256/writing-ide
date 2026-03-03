@@ -2103,6 +2103,18 @@ export async function executeAgentRun(args: {
       toolSidecar: {
         styleLinterLibraries: styleLinterLibraries.length,
         projectFiles: projectFilesCount,
+        mcpTools: mcpToolsFromSidecar.length,
+        mcpServers: Array.from(
+          new Set(
+            mcpToolsFromSidecar
+              .map((t: any) => String(t?.serverId ?? "").trim())
+              .filter(Boolean),
+          ),
+        ).length,
+        mcpToolNamesSample: mcpToolsFromSidecar
+          .map((t: any) => String(t?.name ?? "").trim())
+          .filter(Boolean)
+          .slice(0, 20),
       },
     }),
   };
@@ -2177,6 +2189,31 @@ export async function executeAgentRun(args: {
 
   try {
   writeEvent("run.start", { runId, model, mode });
+
+  // MCP sidecar 快照审计：用于定位 TOOL_NOT_ALLOWED 是否由白名单缺失导致。
+  const mcpToolNamesSample = mcpToolsFromSidecar
+    .map((t: any) => String(t?.name ?? "").trim())
+    .filter(Boolean)
+    .slice(0, 20);
+  const mcpServerIds = Array.from(
+    new Set(
+      mcpToolsFromSidecar
+        .map((t: any) => String(t?.serverId ?? "").trim())
+        .filter(Boolean),
+    ),
+  );
+  writeEvent("run.notice", {
+    turn: 0,
+    kind: "info",
+    title: "McpSidecarSnapshot",
+    message: `MCP sidecar snapshot: tools=${mcpToolsFromSidecar.length}, servers=${mcpServerIds.length}`,
+    detail: {
+      mcpToolsCount: mcpToolsFromSidecar.length,
+      mcpServerCount: mcpServerIds.length,
+      mcpServerIds: mcpServerIds.slice(0, 20),
+      mcpToolNamesSample,
+    },
+  });
 
   const stateSnapshot = () => ({
     protocolRetryBudget: runState.protocolRetryBudget,
