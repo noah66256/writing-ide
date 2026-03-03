@@ -434,6 +434,7 @@ function SkillTabContent() {
 /* ─── MCP Tab ─── */
 
 type TransportType = "stdio" | "streamable-http" | "sse";
+type DraftConfidence = "high" | "medium" | "low";
 type McpDraft = {
   name: string;
   transport: TransportType;
@@ -443,6 +444,8 @@ type McpDraft = {
   env?: Record<string, string>;
   sourceRepo: string;
   notes: string[];
+  confidence: DraftConfidence;
+  confidenceReason: string;
 };
 
 const STATUS_COLORS: Record<string, string> = {
@@ -538,6 +541,21 @@ function pickCommandFromReadme(readme: string): { command: string; reason: strin
   return { command: picked, reason: "README 命令推断" };
 }
 
+const CONFIDENCE_META: Record<DraftConfidence, { label: string; className: string }> = {
+  high: {
+    label: "高置信度",
+    className: "bg-green-500/12 text-green-600 dark:text-green-400 border-green-500/30",
+  },
+  medium: {
+    label: "中置信度",
+    className: "bg-amber-500/12 text-amber-600 dark:text-amber-400 border-amber-500/30",
+  },
+  low: {
+    label: "低置信度",
+    className: "bg-red-500/12 text-red-600 dark:text-red-400 border-red-500/30",
+  },
+};
+
 function extractEnvKeysFromText(text: string): string[] {
   const s = String(text ?? "");
   const keys = Array.from(new Set(s.match(/\b[A-Z][A-Z0-9_]{2,}(?:KEY|TOKEN|SECRET)\b/g) ?? []));
@@ -553,6 +571,8 @@ async function buildMcpDraftFromGithubUrl(repoUrl: string): Promise<McpDraft> {
   const prettyName = String(repoInfo?.name ?? repo).trim() || repo;
   const notes: string[] = [];
   const sourceRepo = `https://github.com/${owner}/${repo}`;
+  let confidence: DraftConfidence = "low";
+  let confidenceReason = "仅基于 README 启发式推断，建议人工核对命令";
 
   const [pkgText, pyText, readmeText, readmeAltText] = await Promise.all([
     fetchGithubRepoText(owner, repo, branch, "package.json"),
@@ -576,7 +596,11 @@ async function buildMcpDraftFromGithubUrl(repoUrl: string): Promise<McpDraft> {
           args: ["-y", pkgName],
           sourceRepo,
           notes: [`根据 package.json 推断 npm 包：${pkgName}`],
+          confidence: "high",
+          confidenceReason: "命令来自 package.json 结构化元数据",
         };
+        confidence = "high";
+        confidenceReason = "命令来自 package.json 结构化元数据";
       }
     } catch {
       // ignore
@@ -594,7 +618,11 @@ async function buildMcpDraftFromGithubUrl(repoUrl: string): Promise<McpDraft> {
         args: [pyName],
         sourceRepo,
         notes: [`根据 pyproject.toml 推断 Python 包：${pyName}`],
+        confidence: "high",
+        confidenceReason: "命令来自 pyproject.toml 结构化元数据",
       };
+      confidence = "high";
+      confidenceReason = "命令来自 pyproject.toml 结构化元数据";
     }
   }
 
@@ -604,6 +632,12 @@ async function buildMcpDraftFromGithubUrl(repoUrl: string): Promise<McpDraft> {
       const parts = tokenizeCommandLine(picked.command);
       const [command, ...args] = parts;
       if (command) {
+        const lc = picked.command.toLowerCase();
+        const conf: DraftConfidence = lc.includes("mcp") ? "medium" : "low";
+        const confReason =
+          conf === "medium"
+            ? "命令来自 README，且包含 mcp 关键词"
+            : "命令来自 README 启发式匹配，风险较高";
         draft = {
           name: prettyName,
           transport: "stdio",
@@ -611,7 +645,11 @@ async function buildMcpDraftFromGithubUrl(repoUrl: string): Promise<McpDraft> {
           args,
           sourceRepo,
           notes: [picked.reason, "请在保存前确认命令参数与环境变量"],
+          confidence: conf,
+          confidenceReason: confReason,
         };
+        confidence = conf;
+        confidenceReason = confReason;
       }
     }
   }
@@ -627,6 +665,8 @@ async function buildMcpDraftFromGithubUrl(repoUrl: string): Promise<McpDraft> {
   }
 
   draft.notes = [...draft.notes, ...notes];
+  draft.confidence = draft.confidence ?? confidence;
+  draft.confidenceReason = draft.confidenceReason ?? confidenceReason;
   return draft;
 }
 
@@ -1056,6 +1096,17 @@ function McpGithubImportDialog({
       )}
       {draft && (
         <div className="border border-border rounded-lg bg-surface-alt/40 p-3 flex flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <span
+              className={cn(
+                "inline-flex items-center px-2 py-0.5 rounded-md border text-[11px] font-medium",
+                CONFIDENCE_META[draft.confidence].className,
+              )}
+            >
+              {CONFIDENCE_META[draft.confidence].label}
+            </span>
+            <span className="text-[11px] text-text-muted">{draft.confidenceReason}</span>
+          </div>
           <div className="text-[12px] text-text"><span className="text-text-faint">名称：</span>{draft.name}</div>
           <div className="text-[12px] text-text"><span className="text-text-faint">传输：</span>{TRANSPORT_LABELS[draft.transport]}</div>
           {draft.command && (
@@ -1199,14 +1250,27 @@ function McpAddDialog({
         {editId ? "编辑 Server" : "添加 MCP Server"}
       </div>
       {!editId && initialDraft?.sourceRepo && (
-        <div className="text-[11px] text-text-muted">
-          草案来源：
-          <button
-            className="ml-1 text-accent hover:underline"
-            onClick={() => (window as any).desktop?.shell?.openExternal?.(initialDraft.sourceRepo)}
-          >
-            {initialDraft.sourceRepo}
-          </button>
+        <div className="text-[11px] text-text-muted flex flex-col gap-1">
+          <div>
+            草案来源：
+            <button
+              className="ml-1 text-accent hover:underline"
+              onClick={() => (window as any).desktop?.shell?.openExternal?.(initialDraft.sourceRepo)}
+            >
+              {initialDraft.sourceRepo}
+            </button>
+          </div>
+          <div className="flex items-center gap-2">
+            <span
+              className={cn(
+                "inline-flex items-center px-2 py-0.5 rounded-md border text-[10px] font-medium",
+                CONFIDENCE_META[initialDraft.confidence].className,
+              )}
+            >
+              {CONFIDENCE_META[initialDraft.confidence].label}
+            </span>
+            <span>{initialDraft.confidenceReason}</span>
+          </div>
         </div>
       )}
 
