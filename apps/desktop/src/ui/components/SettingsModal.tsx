@@ -850,21 +850,49 @@ function McpRuntimeStatusBar() {
   const [busy, setBusy] = useState(false);
   const [repairing, setRepairing] = useState(false);
   const [payload, setPayload] = useState<RuntimeHealthPayload | null>(null);
+  const [statusText, setStatusText] = useState("");
+  const [statusTone, setStatusTone] = useState<"normal" | "success" | "warn" | "error">("normal");
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (opts?: { silent?: boolean }) => {
+    const startedAt = Date.now();
     setBusy(true);
     try {
       const ret = await getRuntimeHealth();
-      setPayload((ret && typeof ret === "object") ? (ret as RuntimeHealthPayload) : { ok: false, error: "INVALID_PAYLOAD" });
+      const normalized = (ret && typeof ret === "object")
+        ? (ret as RuntimeHealthPayload)
+        : { ok: false, error: "INVALID_PAYLOAD" };
+      setPayload(normalized);
+      if (!opts?.silent) {
+        const cost = Math.max(1, Date.now() - startedAt);
+        if (normalized.ok) {
+          const checks = Array.isArray(normalized.checks) ? normalized.checks : [];
+          const miss = checks.filter((x) => !x.ok).map((x) => x.command);
+          if (miss.length > 0) {
+            setStatusTone("warn");
+            setStatusText(`检查完成（${cost}ms）：缺少 ${miss.join(", ")}`);
+          } else {
+            setStatusTone("success");
+            setStatusText(`检查完成（${cost}ms）：运行时正常`);
+          }
+        } else {
+          setStatusTone("error");
+          setStatusText(`检查失败：${normalized.error ?? "UNKNOWN_ERROR"}`);
+        }
+      }
     } catch (e: any) {
-      setPayload({ ok: false, error: String(e?.message ?? e) });
+      const msg = String(e?.message ?? e);
+      setPayload({ ok: false, error: msg });
+      if (!opts?.silent) {
+        setStatusTone("error");
+        setStatusText(`检查失败：${msg}`);
+      }
     } finally {
       setBusy(false);
     }
   }, [getRuntimeHealth]);
 
   useEffect(() => {
-    void load();
+    void load({ silent: true });
   }, [load]);
 
   const checks = Array.isArray(payload?.checks) ? payload!.checks! : [];
@@ -888,27 +916,62 @@ function McpRuntimeStatusBar() {
           <button
             onClick={() => { void load(); }}
             disabled={busy || repairing}
-            className="text-accent hover:underline disabled:opacity-50"
+            className="inline-flex items-center gap-1 text-accent hover:underline disabled:opacity-50"
           >
+            <RefreshCw size={12} className={busy ? "animate-spin" : ""} />
             {busy ? "检查中..." : "刷新检查"}
           </button>
           <button
             onClick={async () => {
               setRepairing(true);
               try {
-                await repairRuntime();
-                await load();
+                setStatusTone("normal");
+                setStatusText("正在执行修复...");
+                const ret = await repairRuntime();
+                if (ret?.health && typeof ret.health === "object") {
+                  setPayload(ret.health as RuntimeHealthPayload);
+                } else {
+                  await load({ silent: true });
+                }
+                const unsupported = Array.isArray(ret?.unsupportedMissing)
+                  ? ret.unsupportedMissing.filter(Boolean)
+                  : [];
+                const installs = Array.isArray(ret?.installs) ? ret.installs : [];
+                const okInstalls = installs.filter((x: any) => x?.ok).length;
+                const failedInstalls = installs.filter((x: any) => !x?.ok).length;
+                const detail: string[] = [];
+                if (okInstalls > 0) detail.push(`成功 ${okInstalls} 项`);
+                if (failedInstalls > 0) detail.push(`失败 ${failedInstalls} 项`);
+                if (unsupported.length > 0) detail.push(`暂不支持自动修复：${unsupported.join(", ")}`);
+                if (detail.length === 0) detail.push("无需修复");
+                setStatusTone(failedInstalls > 0 ? "error" : (unsupported.length > 0 ? "warn" : "success"));
+                setStatusText(`修复完成：${detail.join("；")}`);
               } finally {
                 setRepairing(false);
               }
             }}
             disabled={busy || repairing}
-            className="text-accent hover:underline disabled:opacity-50"
+            className="inline-flex items-center gap-1 text-accent hover:underline disabled:opacity-50"
           >
+            <RefreshCw size={12} className={repairing ? "animate-spin" : ""} />
             {repairing ? "修复中..." : "一键修复"}
           </button>
         </div>
       </div>
+
+      {!!statusText && (
+        <div
+          className={cn(
+            "ml-[22px] text-[11px]",
+            statusTone === "success" ? "text-green-600 dark:text-green-400" : "",
+            statusTone === "warn" ? "text-yellow-600 dark:text-yellow-400" : "",
+            statusTone === "error" ? "text-red-600 dark:text-red-400" : "",
+            statusTone === "normal" ? "text-text-faint" : "",
+          )}
+        >
+          {statusText}
+        </div>
+      )}
 
       {!payload?.ok && (
         <div className="text-text-faint ml-[22px]">
