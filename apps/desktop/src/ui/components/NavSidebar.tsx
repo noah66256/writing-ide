@@ -4,14 +4,12 @@ import {
   Settings,
   Trash2,
   Sun,
-  Moon,
-  Monitor,
+  Type,
   LogOut,
   LogIn,
   ChevronRight,
   Check,
   Cpu,
-  Users,
   MoreHorizontal,
   Pin,
   PinOff,
@@ -24,9 +22,9 @@ import { useRunRegistry } from "@/state/runRegistry";
 import { cancelConvRun } from "@/state/runRegistry";
 import { useProjectStore } from "@/state/projectStore";
 import { useAuthStore } from "@/state/authStore";
-import { useThemeStore, THEME_OPTIONS, type ThemeId } from "@/state/themeStore";
+import { useThemeStore, THEME_OPTIONS } from "@/state/themeStore";
+import { DEFAULT_FONT_SCALE, MAX_FONT_SCALE, MIN_FONT_SCALE, useFontScaleStore } from "@/state/fontScaleStore";
 import { useModelStore } from "@/state/modelStore";
-import { TeamModal } from "@/components/TeamModal";
 import { SettingsModal } from "./SettingsModal";
 import { useKbStore } from "@/state/kbStore";
 import { authHeader } from "@/agent/gatewayAgent";
@@ -415,6 +413,8 @@ function SettingsPopover({
 }) {
   const theme = useThemeStore((s) => s.theme);
   const setTheme = useThemeStore((s) => s.setTheme);
+  const fontScale = useFontScaleStore((s) => s.fontScale);
+  const setFontScale = useFontScaleStore((s) => s.setFontScale);
   const model = useRunStore((s) => s.model);
   const setModel = useRunStore((s) => s.setModel);
   const availableModels = useModelStore((s) => s.availableModels);
@@ -422,6 +422,7 @@ function SettingsPopover({
   // 当前主题/模型的显示名
   const themeName = THEME_OPTIONS.find((o) => o.id === theme)?.label ?? "";
   const modelName = availableModels.find((m) => m.id === model)?.label || model || "未选择";
+  const fontScalePct = Math.round(fontScale * 100);
 
   return (
     <div
@@ -469,6 +470,33 @@ function SettingsPopover({
           ))
         )}
       </SubMenu>
+
+      <div className="px-3 py-2">
+        <div className="flex items-center gap-2.5">
+          <span className="shrink-0 text-text-muted"><Type size={15} /></span>
+          <span className="flex-1 text-left text-[13px] text-text">字体大小</span>
+          <span className="text-[11px] text-text-faint">{fontScalePct}%</span>
+        </div>
+        <input
+          type="range"
+          min={MIN_FONT_SCALE}
+          max={MAX_FONT_SCALE}
+          step={0.05}
+          value={fontScale}
+          onChange={(e) => setFontScale(Number(e.target.value))}
+          className="mt-2 w-full accent-[var(--color-accent)] cursor-pointer"
+        />
+        <div className="mt-1 flex items-center justify-between text-[11px] text-text-faint">
+          <span>{Math.round(MIN_FONT_SCALE * 100)}%</span>
+          <button
+            onClick={() => setFontScale(DEFAULT_FONT_SCALE)}
+            className="text-accent hover:underline"
+          >
+            重置
+          </button>
+          <span>{Math.round(MAX_FONT_SCALE * 100)}%</span>
+        </div>
+      </div>
 
       <div className="mx-2 my-1 border-t border-border-soft" />
 

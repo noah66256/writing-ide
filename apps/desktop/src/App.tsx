@@ -13,6 +13,7 @@ import { useSkillStore } from "./state/skillStore";
 import { getUpdateBaseUrl } from "./agent/updateBaseUrl";
 import { Loader2 } from "lucide-react";
 import "./state/themeStore"; // side-effect: apply theme on load
+import "./state/fontScaleStore"; // side-effect: apply font scale on load
 
 export default function App() {
   const setUpdateCheckResult = useUpdateStore((s) => s.setCheckResult);

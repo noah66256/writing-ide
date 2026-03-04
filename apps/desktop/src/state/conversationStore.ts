@@ -198,6 +198,9 @@ export const useConversationStore = create<ConversationState>()(
 
         try {
           const res = await api.loadConversations();
+          if ((res as any)?.ok === false) {
+            throw new Error(String((res as any)?.error || (res as any)?.detail || "history_load_failed"));
+          }
           const list = Array.isArray((res as any)?.conversations) ? ((res as any).conversations as any[]) : [];
           const diskDraft = ((res as any)?.draftSnapshot ?? null) as any;
           const diskActiveConvId = ((res as any)?.activeConvId ?? null) as string | null;
@@ -207,8 +210,9 @@ export const useConversationStore = create<ConversationState>()(
           const curDraft = get().draftSnapshot ?? null;
 
           const patch: Partial<ConversationState> = {};
-          if (!curConvs.length && list.length) patch.conversations = capConversations(list as any);
-          if (!curDraft && diskDraft && typeof diskDraft === "object") patch.draftSnapshot = diskDraft as any;
+          // Electron 模式下磁盘是单一真实来源：只要磁盘有数据，就覆盖内存态（避免旧 localStorage 残留挡住历史恢复）
+          if (list.length) patch.conversations = capConversations(list as any);
+          if (diskDraft && typeof diskDraft === "object") patch.draftSnapshot = diskDraft as any;
 
           // 恢复 activeConvId（仅当对话仍存在时）
           const finalConvs = (patch.conversations ?? curConvs) as Conversation[];
@@ -336,7 +340,6 @@ export const useConversationStore = create<ConversationState>()(
     },
   ),
 );
-
 
 
 
