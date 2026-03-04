@@ -35,6 +35,11 @@ import { ensureRunAuditEnded, persistRunAudit, recordRunAuditEvent, sanitizeForA
 import {
   SKILL_MANIFESTS_V1,
 } from "@writing-ide/agent-core";
+import {
+  getMarketplaceManifest,
+  getMarketplacePayload,
+  listMarketplaceCatalogItems,
+} from "./marketplaceCatalog.js";
 
 // 允许使用项目根目录的 .env（你可以用 env.example 复制出来），也支持 apps/gateway/.env 覆盖
 const __filename = fileURLToPath(import.meta.url);
@@ -665,6 +670,47 @@ fastify.get("/downloads/desktop/stable/:file", async (request, reply) => {
     if (code === "ENOENT") return reply.code(404).send({ error: "NOT_FOUND" });
     return reply.code(500).send({ error: "READ_FAILED", detail: String(e?.message ?? e) });
   }
+});
+
+// ======== Marketplace（v0.1：官方精选，供 Desktop 设置页安装） ========
+fastify.get("/api/marketplace/catalog", async (_request, reply) => {
+  const items = listMarketplaceCatalogItems().map((item) => {
+    const id = encodeURIComponent(item.id);
+    const ver = encodeURIComponent(item.version);
+    return {
+      ...item,
+      manifestUrl: `/api/marketplace/items/${id}/versions/${ver}/manifest`,
+      downloadUrl: `/api/marketplace/items/${id}/versions/${ver}/download`,
+    };
+  });
+  reply.header("Cache-Control", "no-store");
+  return { channel: "official", items };
+});
+
+function safeDecodeURIComponent(v: string) {
+  try {
+    return decodeURIComponent(v);
+  } catch {
+    return v;
+  }
+}
+
+fastify.get("/api/marketplace/items/:id/versions/:version/manifest", async (request, reply) => {
+  const paramsSchema = z.object({ id: z.string().min(1).max(200), version: z.string().min(1).max(50) });
+  const { id, version } = paramsSchema.parse((request as any).params);
+  const hit = getMarketplaceManifest(safeDecodeURIComponent(id), safeDecodeURIComponent(version));
+  if (!hit) return reply.code(404).send({ error: "NOT_FOUND" });
+  reply.header("Cache-Control", "no-store");
+  return hit;
+});
+
+fastify.get("/api/marketplace/items/:id/versions/:version/download", async (request, reply) => {
+  const paramsSchema = z.object({ id: z.string().min(1).max(200), version: z.string().min(1).max(50) });
+  const { id, version } = paramsSchema.parse((request as any).params);
+  const payload = getMarketplacePayload(safeDecodeURIComponent(id), safeDecodeURIComponent(version));
+  if (!payload) return reply.code(404).send({ error: "NOT_FOUND" });
+  reply.header("Cache-Control", "no-store");
+  return payload;
 });
 
 // ======== 使用说明视频（临时对外分享链接；下个版本再集成 Desktop） ========

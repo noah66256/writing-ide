@@ -198,6 +198,20 @@ contextBridge.exposeInMainWorld("desktop", {
       return () => ipcRenderer.removeListener("mcp.statusChange", listener);
     },
   },
+  marketplace: {
+    getInstalled() {
+      return ipcRenderer.invoke("marketplace.getInstalled");
+    },
+    getLogs() {
+      return ipcRenderer.invoke("marketplace.getLogs");
+    },
+    install(pkg) {
+      return ipcRenderer.invoke("marketplace.install", pkg);
+    },
+    uninstall(itemId) {
+      return ipcRenderer.invoke("marketplace.uninstall", itemId);
+    },
+  },
   skills: {
     list() {
       return ipcRenderer.invoke("skills.list");

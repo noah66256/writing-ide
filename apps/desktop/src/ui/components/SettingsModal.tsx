@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import {
   X, Users, Plug, Sparkles, ChevronDown, ChevronRight, Plus,
   Bot, BookOpen, FolderOpen, RefreshCw, Pencil, Trash2, Terminal, Globe, Radio,
-  Eye, EyeOff, Monitor, ExternalLink, Package, Link2, Wrench,
+  Eye, EyeOff, Monitor, ExternalLink, Package, Link2, Wrench, Store,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TeamModal } from "@/components/TeamModal";
@@ -13,8 +13,9 @@ import { usePersonaStore } from "@/state/personaStore";
 import { useKbStore } from "@/state/kbStore";
 import { useDialogStore } from "@/state/dialogStore";
 import { useMcpStore, type McpServerState } from "@/state/mcpStore";
+import { useMarketplaceStore, type MarketplaceCatalogItem } from "@/state/marketplaceStore";
 
-type Tab = "persona" | "team" | "mcp" | "skill" | "kb";
+type Tab = "persona" | "team" | "mcp" | "skill" | "kb" | "marketplace";
 
 const TABS: { id: Tab; label: string; icon: typeof Users }[] = [
   { id: "persona", label: "负责人", icon: Bot },
@@ -22,6 +23,7 @@ const TABS: { id: Tab; label: string; icon: typeof Users }[] = [
   { id: "team", label: "团队管理", icon: Users },
   { id: "mcp", label: "MCP", icon: Plug },
   { id: "skill", label: "技能", icon: Sparkles },
+  { id: "marketplace", label: "市场", icon: Store },
 ];
 
 export function SettingsModal({ onClose, initialTab, kbSelectMode }: {
@@ -86,11 +88,201 @@ export function SettingsModal({ onClose, initialTab, kbSelectMode }: {
             {tab === "team" && <TeamTabContent />}
             {tab === "mcp" && <McpTabContent />}
             {tab === "skill" && <SkillTabContent />}
+            {tab === "marketplace" && <MarketplaceTabContent />}
           </div>
         </div>
       </div>
     </div>,
     document.body,
+  );
+}
+
+/* ─── Marketplace Tab ─── */
+
+function MarketplaceTabContent() {
+  const items = useMarketplaceStore((s) => s.items);
+  const installedMap = useMarketplaceStore((s) => s.installedMap);
+  const logs = useMarketplaceStore((s) => s.logs);
+  const loadingCatalog = useMarketplaceStore((s) => s.loadingCatalog);
+  const loadingInstalled = useMarketplaceStore((s) => s.loadingInstalled);
+  const loadingLogs = useMarketplaceStore((s) => s.loadingLogs);
+  const installingIds = useMarketplaceStore((s) => s.installingIds);
+  const error = useMarketplaceStore((s) => s.error);
+  const refreshAll = useMarketplaceStore((s) => s.refreshAll);
+  const installItem = useMarketplaceStore((s) => s.installItem);
+  const uninstallItem = useMarketplaceStore((s) => s.uninstallItem);
+  const [typeFilter, setTypeFilter] = useState<"all" | "skill" | "mcp_server" | "sub_agent">("all");
+
+  useEffect(() => {
+    void refreshAll();
+  }, [refreshAll]);
+
+  const filteredItems = items.filter((x) => typeFilter === "all" || x.type === typeFilter);
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="text-[12px] text-text-muted leading-relaxed">
+        官方精选能力市场。支持 Skill / MCP 一键安装并即时生效；安装失败会自动回滚。
+      </div>
+
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5">
+          {([
+            ["all", "全部"],
+            ["skill", "Skill"],
+            ["mcp_server", "MCP"],
+            ["sub_agent", "Sub-Agent"],
+          ] as const).map(([v, label]) => (
+            <button
+              key={v}
+              onClick={() => setTypeFilter(v)}
+              className={cn(
+                "px-2.5 py-1 rounded-md text-[11px] border transition-colors",
+                typeFilter === v
+                  ? "border-accent bg-accent-soft text-accent"
+                  : "border-border text-text-muted hover:bg-surface-alt",
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <button
+          onClick={() => { void refreshAll(); }}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] border border-border text-text-muted hover:bg-surface-alt transition-colors"
+        >
+          <RefreshCw size={12} className={loadingCatalog || loadingInstalled || loadingLogs ? "animate-spin" : ""} />
+          刷新
+        </button>
+      </div>
+
+      {error ? (
+        <div className="text-[12px] text-red-500 bg-red-500/10 border border-red-500/20 rounded-lg px-2.5 py-2">
+          {error}
+        </div>
+      ) : null}
+
+      {loadingCatalog && items.length === 0 ? (
+        <div className="text-[12px] text-text-faint">正在加载市场列表...</div>
+      ) : null}
+
+      {!loadingCatalog && filteredItems.length === 0 ? (
+        <div className="text-[12px] text-text-faint">当前筛选条件下暂无可用扩展。</div>
+      ) : null}
+
+      {filteredItems.length > 0 && (
+        <div className="flex flex-col gap-2">
+          {filteredItems.map((item) => (
+            <MarketplaceItemCard
+              key={`${item.id}@${item.version}`}
+              item={item}
+              installed={installedMap[item.id]}
+              busy={installingIds.includes(item.id)}
+              onInstall={async () => { await installItem(item); }}
+              onUninstall={async () => { await uninstallItem(item.id); }}
+            />
+          ))}
+        </div>
+      )}
+
+      <div className="border-t border-border pt-3">
+        <div className="text-[12px] font-medium text-text mb-2">最近安装日志</div>
+        {logs.length === 0 ? (
+          <div className="text-[11px] text-text-faint">暂无记录</div>
+        ) : (
+          <div className="flex flex-col gap-1">
+            {logs.slice(0, 8).map((row) => (
+              <div key={row.id} className="text-[11px] text-text-muted flex items-center gap-2">
+                <span className={row.ok ? "text-green-600 dark:text-green-400" : "text-red-500"}>
+                  {row.ok ? "✓" : "✕"}
+                </span>
+                <span>{row.action === "install" ? "安装" : "卸载"}</span>
+                <span className="font-mono">{row.itemId}</span>
+                <span className="text-text-faint">v{row.version}</span>
+                {!row.ok && row.error ? <span className="text-red-500 truncate">{row.error}</span> : null}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MarketplaceItemCard({
+  item,
+  installed,
+  busy,
+  onInstall,
+  onUninstall,
+}: {
+  item: MarketplaceCatalogItem;
+  installed?: { version?: string; installedAt?: string } | null;
+  busy: boolean;
+  onInstall: () => Promise<void>;
+  onUninstall: () => Promise<void>;
+}) {
+  const isInstalled = Boolean(installed);
+  const typeLabel =
+    item.type === "skill" ? "Skill" :
+    item.type === "mcp_server" ? "MCP" :
+    "Sub-Agent";
+  return (
+    <div className="border border-border rounded-lg p-3 bg-surface">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="text-[13px] font-medium text-text truncate">{item.name}</span>
+            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] border border-border text-text-muted">
+              {typeLabel}
+            </span>
+            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] border border-accent/30 text-accent bg-accent-soft/40">
+              {item.source === "official" ? "官方" : "审核"}
+            </span>
+            <span className="text-[10px] text-text-faint">v{item.version}</span>
+          </div>
+          <div className="text-[11px] text-text-muted mt-1 leading-relaxed">{item.description}</div>
+          <div className="text-[10px] text-text-faint mt-1">
+            {item.publisher} · 最低版本 {item.minAppVersion}
+          </div>
+          {isInstalled ? (
+            <div className="text-[10px] text-green-600 dark:text-green-400 mt-1">
+              已安装 {installed?.version ? `v${installed.version}` : ""} {installed?.installedAt ? `· ${installed.installedAt}` : ""}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="shrink-0">
+          {isInstalled ? (
+            <button
+              onClick={() => { void onUninstall(); }}
+              disabled={busy}
+              className={cn(
+                "px-3 py-1.5 rounded-md text-[11px] border transition-colors",
+                busy
+                  ? "border-border text-text-faint cursor-not-allowed"
+                  : "border-red-500/30 text-red-600 dark:text-red-400 hover:bg-red-500/10",
+              )}
+            >
+              {busy ? "处理中..." : "卸载"}
+            </button>
+          ) : (
+            <button
+              onClick={() => { void onInstall(); }}
+              disabled={busy}
+              className={cn(
+                "px-3 py-1.5 rounded-md text-[11px] border transition-colors",
+                busy
+                  ? "border-border text-text-faint cursor-not-allowed"
+                  : "border-accent text-accent hover:bg-accent-soft",
+              )}
+            >
+              {busy ? "安装中..." : "一键安装"}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 

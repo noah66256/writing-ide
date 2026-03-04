@@ -63,6 +63,7 @@ let watchTimer = null;
 let watchChanged = new Set();
 let mcpManager = null;
 let skillLoader = null;  // Skill 扩展包加载器
+let marketplaceManager = null;  // Marketplace 安装管理器
 let appSettings = {};  // 应用级设置（含浏览器路径等）
 let appSettingsModules = null;  // { loadSettings, saveSettings, detectBrowser }
 let codeExecManager = null;  // 代码执行管理器（Python 沙箱执行）
@@ -115,6 +116,24 @@ async function _doReconcile(skills) {
     await mcpManager.addSkillServer(cfg).catch((e) =>
       console.warn(`[electron] skill MCP reconcile addSkillServer failed: ${id}`, e)
     );
+  }
+}
+
+async function reloadSkillsAndBroadcast() {
+  if (!skillLoader) return;
+  const skills = await skillLoader.reload();
+  try {
+    await reconcileSkillMcpServers(skills);
+  } catch (e) {
+    console.error("[electron] skill MCP reconcile error:", e);
+  }
+  try {
+    mainWindow?.webContents?.send("skills.changed", {
+      manifests: skills.map((s) => s.manifest),
+      errors: skillLoader.getErrors(),
+    });
+  } catch {
+    // ignore
   }
 }
 
@@ -376,25 +395,70 @@ async function fileExists(p) {
   }
 }
 
-async function tryMigrateConversationHistory(userData, appData) {
-  if (!userData || !appData) return;
-  const targetDir = path.join(userData, HISTORY_DIRNAME);
-  const targetFile = path.join(targetDir, HISTORY_FILENAME);
-  if (await fileExists(targetFile)) return; // 已存在，跳过
-  const legacyCandidates = ["Electron", "写作IDE", "writing-ide"];
-  for (const name of legacyCandidates) {
-    const legacyFile = path.join(appData, name, HISTORY_DIRNAME, HISTORY_FILENAME);
+function getLegacyAppDataProductNames() {
+  // 兼容历史产品名/包名（含最新 ASCII 名），避免 dev/packaged 切换后“看不到历史与记忆”
+  return ["WritingIDE", "writing-ide", "写作IDE", "@writing-ide/desktop", "Electron"];
+}
+
+async function tryMigrateUserDataFile(args) {
+  const userData = String(args?.userData ?? "");
+  const appData = String(args?.appData ?? "");
+  const relDir = String(args?.relDir ?? "");
+  const filename = String(args?.filename ?? "");
+  const label = String(args?.label ?? "文件");
+  const validate = typeof args?.validate === "function" ? args.validate : null;
+  if (!userData || !appData || !relDir || !filename) return false;
+
+  const targetDir = path.join(userData, relDir);
+  const targetFile = path.join(targetDir, filename);
+  if (await fileExists(targetFile)) return false;
+
+  const candidates = getLegacyAppDataProductNames();
+  for (const name of candidates) {
+    const legacyFile = path.join(appData, name, relDir, filename);
     try {
       const raw = await fsp.readFile(legacyFile, "utf-8");
-      JSON.parse(raw); // 验证 JSON 格式，解析失败则跳过
+      if (validate) {
+        try {
+          if (!validate(raw)) continue;
+        } catch {
+          continue;
+        }
+      }
       await fsp.mkdir(targetDir, { recursive: true });
       await fsp.writeFile(targetFile, raw, "utf-8");
-      console.log(`[electron] 已迁移对话历史：${legacyFile} → ${targetFile}`);
-      return;
+      console.log(`[electron] 已迁移${label}：${legacyFile} → ${targetFile}`);
+      return true;
     } catch {
       // 路径不存在或格式错误，继续尝试下一个
     }
   }
+  return false;
+}
+
+async function tryMigrateConversationHistory(userData, appData) {
+  await tryMigrateUserDataFile({
+    userData,
+    appData,
+    relDir: HISTORY_DIRNAME,
+    filename: HISTORY_FILENAME,
+    label: "对话历史",
+    validate: (raw) => {
+      JSON.parse(String(raw ?? ""));
+      return true;
+    },
+  });
+}
+
+async function tryMigrateGlobalMemory(userData, appData) {
+  await tryMigrateUserDataFile({
+    userData,
+    appData,
+    relDir: "memory",
+    filename: "global.md",
+    label: "全局记忆",
+    validate: (raw) => String(raw ?? "").trim().length > 0,
+  });
 }
 
 async function resolveHistoryFileForRead() {
@@ -1500,19 +1564,85 @@ function registerIpc() {
 
   ipcMain.handle("history.loadConversations", async () => {
     try {
-      const { file, used } = await resolveHistoryFileForRead();
-      try {
-        const raw = await fsp.readFile(file, "utf-8");
-        const parsed = JSON.parse(String(raw ?? ""));
-        const list = Array.isArray(parsed?.conversations) ? parsed.conversations : Array.isArray(parsed) ? parsed : [];
-        const draftSnapshot = parsed && typeof parsed === "object" ? (parsed.draftSnapshot ?? null) : null;
-        const activeConvId = parsed && typeof parsed === "object" ? (parsed.activeConvId ?? null) : null;
-        return { ok: true, conversations: list, draftSnapshot, activeConvId, used, file };
-      } catch (e) {
-        const msg = String(e?.code ?? e?.message ?? e);
-        if (msg.includes("ENOENT")) return { ok: true, conversations: [], draftSnapshot: null, used, file };
-        return { ok: false, error: "READ_OR_PARSE_FAILED", detail: String(e?.message ?? e) };
+      const { primary, fallback } = historyCandidateDirs();
+      const candidates = [];
+      if (primary) candidates.push({ used: "primary", file: path.join(primary, HISTORY_FILENAME) });
+      if (fallback) candidates.push({ used: "fallback", file: path.join(fallback, HISTORY_FILENAME) });
+
+      const seen = new Set();
+      const unique = candidates.filter((x) => {
+        if (!x?.file || seen.has(x.file)) return false;
+        seen.add(x.file);
+        return true;
+      });
+
+      const parsedList = [];
+      let parseErr = null;
+      for (const c of unique) {
+        try {
+          const raw = await fsp.readFile(c.file, "utf-8");
+          const parsed = JSON.parse(String(raw ?? ""));
+          const list = Array.isArray(parsed?.conversations) ? parsed.conversations : Array.isArray(parsed) ? parsed : [];
+          const draftSnapshot = parsed && typeof parsed === "object" ? (parsed.draftSnapshot ?? null) : null;
+          const activeConvId = parsed && typeof parsed === "object" ? (parsed.activeConvId ?? null) : null;
+          const updatedAt = parsed && typeof parsed === "object" ? Number(parsed.updatedAt ?? 0) || 0 : 0;
+          parsedList.push({
+            ...c,
+            raw,
+            conversations: Array.isArray(list) ? list : [],
+            draftSnapshot: draftSnapshot && typeof draftSnapshot === "object" ? draftSnapshot : null,
+            activeConvId: typeof activeConvId === "string" ? activeConvId : null,
+            updatedAt,
+          });
+        } catch (e) {
+          const msg = String(e?.code ?? e?.message ?? e);
+          if (!msg.includes("ENOENT")) parseErr = String(e?.message ?? e);
+        }
       }
+
+      if (parsedList.length === 0) {
+        if (parseErr) return { ok: false, error: "READ_OR_PARSE_FAILED", detail: parseErr };
+        const fallbackRead = await resolveHistoryFileForRead().catch(() => null);
+        return {
+          ok: true,
+          conversations: [],
+          draftSnapshot: null,
+          activeConvId: null,
+          used: fallbackRead?.used ?? "primary",
+          file: fallbackRead?.file ?? null,
+        };
+      }
+
+      // 多路径并存时，优先选择“会话更多”的文件；数量相同则选 updatedAt 更新的。
+      parsedList.sort((a, b) => {
+        const c1 = Number(a.conversations?.length ?? 0);
+        const c2 = Number(b.conversations?.length ?? 0);
+        if (c2 !== c1) return c2 - c1;
+        return Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0);
+      });
+      const picked = parsedList[0];
+
+      // 自愈：若最佳来源不是 primary，则回写一份到 primary，避免下次继续读到旧文件。
+      if (primary) {
+        const primaryFile = path.join(primary, HISTORY_FILENAME);
+        if (picked.file !== primaryFile) {
+          try {
+            await fsp.mkdir(primary, { recursive: true });
+            await fsp.writeFile(primaryFile, String(picked.raw ?? ""), "utf-8");
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      return {
+        ok: true,
+        conversations: picked.conversations,
+        draftSnapshot: picked.draftSnapshot,
+        activeConvId: picked.activeConvId,
+        used: picked.used,
+        file: picked.file,
+      };
     } catch (e) {
       return { ok: false, error: String(e?.message ?? e) };
     }
@@ -1697,6 +1827,24 @@ function registerIpc() {
     try { await shell.openPath(skillLoader.rootDir); return { ok: true }; } catch { return { ok: false }; }
   });
 
+  // ── Marketplace（设置页能力市场） ──────────────────────────
+  ipcMain.handle("marketplace.getInstalled", async () => {
+    if (!marketplaceManager) return { ok: true, installed: [] };
+    return marketplaceManager.getInstalled();
+  });
+  ipcMain.handle("marketplace.getLogs", async () => {
+    if (!marketplaceManager) return { ok: true, logs: [] };
+    return marketplaceManager.getLogs();
+  });
+  ipcMain.handle("marketplace.install", async (_event, pkg) => {
+    if (!marketplaceManager) return { ok: false, error: "MARKETPLACE_NOT_READY" };
+    return marketplaceManager.install(pkg);
+  });
+  ipcMain.handle("marketplace.uninstall", async (_event, itemId) => {
+    if (!marketplaceManager) return { ok: false, error: "MARKETPLACE_NOT_READY" };
+    return marketplaceManager.uninstall(itemId);
+  });
+
   // ── 浏览器检测 ──────────────────────────
   ipcMain.handle("app.getBrowserInfo", async () => ({
     path: appSettings.browserPath || null,
@@ -1860,6 +2008,12 @@ app.whenReady().then(async () => {
   } catch (e) {
     console.warn("[electron] 对话历史迁移失败:", e);
   }
+  // ======== 全局记忆迁移（与历史同源路径变化问题） ========
+  try {
+    await tryMigrateGlobalMemory(app.getPath("userData"), app.getPath("appData"));
+  } catch (e) {
+    console.warn("[electron] 全局记忆迁移失败:", e);
+  }
 
   createWindow();
 
@@ -1966,7 +2120,7 @@ app.whenReady().then(async () => {
 
   // ======== Skill 扩展包加载器初始化 ========
   try {
-    const { SkillLoader, toMcpServerConfig } = await import("./skill-loader.mjs");
+    const { SkillLoader } = await import("./skill-loader.mjs");
     skillLoader = new SkillLoader(app.getPath("userData"));
 
     // 热更新回调：差量更新 skill-managed MCP Server + 通知 renderer
@@ -1989,6 +2143,21 @@ app.whenReady().then(async () => {
     console.log(`[electron] SkillLoader started: ${loaded.length} skill(s) from ${skillLoader.rootDir}`);
   } catch (e) {
     console.error("[electron] SkillLoader 初始化失败:", e);
+  }
+
+  // ======== Marketplace Manager 初始化 ========
+  try {
+    const { MarketplaceManager } = await import("./marketplace-manager.mjs");
+    marketplaceManager = new MarketplaceManager({
+      userDataPath: app.getPath("userData"),
+      getMcpManager: () => mcpManager,
+      getSkillLoader: () => skillLoader,
+      reloadSkillsAndBroadcast,
+    });
+    console.log("[electron] MarketplaceManager initialized");
+  } catch (e) {
+    marketplaceManager = null;
+    console.error("[electron] MarketplaceManager 初始化失败:", e);
   }
 
   app.on("activate", () => {
@@ -2039,4 +2208,3 @@ app.on("will-quit", () => {
     try { spawn(launchPath, ["/S"], { detached: true, stdio: "ignore" }).unref(); } catch { /* ignore */ }
   }
 });
-

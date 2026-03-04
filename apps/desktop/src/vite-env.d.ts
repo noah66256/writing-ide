@@ -171,9 +171,14 @@ declare global {
         repairRuntime?: (opts?: { commands?: string[] }) => Promise<any>;
         onStatusChange: (handler: (payload: any) => void) => () => void;
       };
+      marketplace?: {
+        getInstalled: () => Promise<{ ok: boolean; installed?: any[]; error?: string }>;
+        getLogs: () => Promise<{ ok: boolean; logs?: any[]; error?: string }>;
+        install: (pkg: { manifest: any; payload: any }) => Promise<{ ok: boolean; installed?: any; error?: string }>;
+        uninstall: (itemId: string) => Promise<{ ok: boolean; removed?: boolean; error?: string }>;
+      };
     };
   }
 }
 
 export {};
-
