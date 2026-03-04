@@ -15,6 +15,7 @@ import { getGatewayBaseUrl } from "../agent/gatewayUrl";
 import { useAuthStore } from "../state/authStore";
 import { useSkillStore } from "../state/skillStore";
 import { useDialogStore } from "../state/dialogStore";
+import { resolveInlineFileOpConfirm } from "../state/inlineFileOpConfirm";
 
 type RunController = { cancel: (reason?: string) => void; done: Promise<void> };
 
@@ -1260,6 +1261,36 @@ export function AgentPane() {
                         我已完成抽卡
                       </button>
                     ) : null}
+                    {quickActions.includes("file_op_deny") ? (
+                      <button
+                        className="btn"
+                        type="button"
+                        onClick={() => resolveInlineFileOpConfirm("deny")}
+                        disabled={isRunning}
+                      >
+                        拒绝
+                      </button>
+                    ) : null}
+                    {quickActions.includes("file_op_allow_once") ? (
+                      <button
+                        className="btn btnPrimary"
+                        type="button"
+                        onClick={() => resolveInlineFileOpConfirm("allow_once")}
+                        disabled={isRunning}
+                      >
+                        允许
+                      </button>
+                    ) : null}
+                    {quickActions.includes("file_op_always_allow") ? (
+                      <button
+                        className="btn"
+                        type="button"
+                        onClick={() => resolveInlineFileOpConfirm("always_allow")}
+                        disabled={isRunning}
+                      >
+                        总是允许
+                      </button>
+                    ) : null}
                   </div>
                 ) : null}
               </div>
@@ -1666,4 +1697,3 @@ export function AgentPane() {
     </>
   );
 }
-

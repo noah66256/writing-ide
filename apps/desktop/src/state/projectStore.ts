@@ -51,7 +51,7 @@ type ProjectState = {
   saveActiveNow: () => Promise<void>;
   createFile: (path: string, content: string) => void;
   deleteFile: (path: string) => void;
-  deletePath: (path: string) => Promise<void>;
+  deletePath: (path: string) => Promise<{ ok: boolean; error?: string; detail?: string }>;
   getFileByPath: (path: string) => ProjectFile | undefined;
 
   loadProjectFromDisk: (rootDir: string) => Promise<void>;
@@ -301,17 +301,17 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
   deletePath: async (path) => {
     const rel = normalizeRel(path);
-    if (!rel) return;
+    if (!rel) return { ok: false, error: "INVALID_PATH" };
     const api = window.desktop?.fs;
     const rootDir = get().rootDir;
-    if (!api || !rootDir) return;
+    if (!api || !rootDir) return { ok: false, error: "FS_NOT_READY" };
 
     const snap = get().snapshot();
     const st0 = get();
     const isDir = st0.dirs.includes(rel);
     const isFile = !!st0.files.find((f) => f.path === rel);
     const prefix = `${rel}/`;
-    if (!isDir && !isFile) return;
+    if (!isDir && !isFile) return { ok: false, error: "PATH_NOT_FOUND" };
 
     // 先更新内存（避免 UI 卡住），失败再回滚
     set((s) => {
@@ -336,16 +336,26 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     });
 
     try {
+      let ret: any = null;
       if (api.deletePath) {
-        await api.deletePath(rootDir, rel);
+        ret = await api.deletePath(rootDir, rel);
       } else {
         // 兼容旧实现：只能删文件
-        if (!isDir) await api.deleteFile(rootDir, rel);
+        if (isDir) throw new Error("DELETE_DIR_UNSUPPORTED");
+        ret = await api.deleteFile(rootDir, rel);
+      }
+      if (!ret?.ok) {
+        throw new Error(
+          String(ret?.detail ?? ret?.error ?? "DELETE_FAILED"),
+        );
       }
       await get().refreshFromDisk("deletePath");
+      return { ok: true };
     } catch (e: any) {
       get().restore(snap as any);
-      useRunStore.getState().log("error", "delete.failed", { path: rel, message: String(e?.message ?? e) });
+      const message = String(e?.message ?? e);
+      useRunStore.getState().log("error", "delete.failed", { path: rel, message });
+      return { ok: false, error: "DELETE_FAILED", detail: message };
     }
   },
   getFileByPath: (path) => get().files.find((f) => f.path === path),
@@ -768,5 +778,3 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     });
   },
 }));
-
-

@@ -26,6 +26,7 @@ import { useProjectStore } from "@/state/projectStore";
 import { useAuthStore } from "@/state/authStore";
 import { useKbStore } from "@/state/kbStore";
 import { useConversationStore, buildCurrentSnapshot } from "@/state/conversationStore";
+import { resolveInlineFileOpConfirm } from "@/state/inlineFileOpConfirm";
 import { startGatewayRun } from "@/agent/gatewayAgent";
 import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
 import { WelcomePage } from "./WelcomePage";
@@ -222,13 +223,32 @@ export function ChatArea() {
   );
 
   const handleAssistantQuickAction = useCallback(
-    (action: "open_kb_manager" | "kb_done_continue") => {
+    (
+      action:
+        | "open_kb_manager"
+        | "kb_done_continue"
+        | "file_op_deny"
+        | "file_op_allow_once"
+        | "file_op_always_allow",
+    ) => {
       if (action === "open_kb_manager") {
         useKbStore.getState().openKbManager();
         return;
       }
       if (action === "kb_done_continue") {
         void handleSend("我已完成抽卡，请继续刚才的任务。");
+        return;
+      }
+      if (action === "file_op_deny") {
+        resolveInlineFileOpConfirm("deny");
+        return;
+      }
+      if (action === "file_op_allow_once") {
+        resolveInlineFileOpConfirm("allow_once");
+        return;
+      }
+      if (action === "file_op_always_allow") {
+        resolveInlineFileOpConfirm("always_allow");
       }
     },
     [handleSend],
@@ -286,7 +306,14 @@ function StepRenderer({
   onAssistantQuickAction,
 }: {
   step: Step;
-  onAssistantQuickAction: (action: "open_kb_manager" | "kb_done_continue") => void;
+  onAssistantQuickAction: (
+    action:
+      | "open_kb_manager"
+      | "kb_done_continue"
+      | "file_op_deny"
+      | "file_op_allow_once"
+      | "file_op_always_allow",
+  ) => void;
 }) {
   switch (step.type) {
     case "user":
@@ -354,7 +381,14 @@ function AssistantMessage({
   onQuickAction,
 }: {
   step: AssistantStep;
-  onQuickAction: (action: "open_kb_manager" | "kb_done_continue") => void;
+  onQuickAction: (
+    action:
+      | "open_kb_manager"
+      | "kb_done_continue"
+      | "file_op_deny"
+      | "file_op_allow_once"
+      | "file_op_always_allow",
+  ) => void;
 }) {
   if (step.hidden) return null;
 
@@ -468,6 +502,33 @@ function AssistantMessage({
                 type="button"
               >
                 我已完成抽卡
+              </button>
+            )}
+            {step.quickActions.includes("file_op_deny") && (
+              <button
+                className="px-2.5 py-1 rounded-md text-[12px] border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
+                onClick={() => onQuickAction("file_op_deny")}
+                type="button"
+              >
+                拒绝
+              </button>
+            )}
+            {step.quickActions.includes("file_op_allow_once") && (
+              <button
+                className="px-2.5 py-1 rounded-md text-[12px] bg-accent text-white hover:opacity-90 transition-opacity"
+                onClick={() => onQuickAction("file_op_allow_once")}
+                type="button"
+              >
+                允许
+              </button>
+            )}
+            {step.quickActions.includes("file_op_always_allow") && (
+              <button
+                className="px-2.5 py-1 rounded-md text-[12px] border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
+                onClick={() => onQuickAction("file_op_always_allow")}
+                type="button"
+              >
+                总是允许
               </button>
             )}
           </div>

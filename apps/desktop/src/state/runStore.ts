@@ -68,7 +68,13 @@ export type AssistantStep = {
   text: string;
   streaming?: boolean;
   hidden?: boolean;
-  quickActions?: Array<"open_kb_manager" | "kb_done_continue">;
+  quickActions?: Array<
+    | "open_kb_manager"
+    | "kb_done_continue"
+    | "file_op_deny"
+    | "file_op_allow_once"
+    | "file_op_always_allow"
+  >;
   /** Sub-agent ID (if this message is from a sub-agent) */
   agentId?: string;
   /** Sub-agent display name */
@@ -89,7 +95,7 @@ export type ToolBlockStep = {
   applied: boolean;
 
   // proposal-first: Keep apply then mark applied/undoable
-  apply?: () => void | { undo?: () => void };
+  apply?: () => void | { undo?: () => void } | Promise<void | { undo?: () => void }>;
 
   undoable: boolean;
   undo?: () => void;
@@ -573,21 +579,48 @@ export const useRunStore = create<RunState>()(
     // proposal-first：Keep 时执行 apply（并补齐 undo）
     if (step.applyPolicy === "proposal" && !step.applied && step.apply) {
       try {
+        const finalize = (ret: void | { undo?: () => void }) => {
+          const undo = (ret as any)?.undo as (() => void) | undefined;
+          set((s) => ({
+            steps: s.steps.map((x) =>
+              x.id === stepId && x.type === "tool"
+                ? {
+                    ...x,
+                    status: "success",
+                    kept: true,
+                    applied: true,
+                    undoable: Boolean(undo) || x.undoable,
+                    undo: undo ?? x.undo,
+                  }
+                : x,
+            ),
+          }));
+        };
+
+        const fail = (e: any) => {
+          const msg = e?.message ? String(e.message) : String(e);
+          set((s) => ({
+            steps: s.steps.map((x) =>
+              x.id === stepId && x.type === "tool"
+                ? { ...x, status: "failed", output: { ok: false, error: msg } }
+                : x,
+            ),
+          }));
+        };
+
         const ret = step.apply();
-        const undo = (ret as any)?.undo as (() => void) | undefined;
-        set((s) => ({
-          steps: s.steps.map((x) =>
-            x.id === stepId && x.type === "tool"
-              ? {
-                  ...x,
-                  kept: true,
-                  applied: true,
-                  undoable: Boolean(undo) || x.undoable,
-                  undo: undo ?? x.undo,
-                }
-              : x,
-          ),
-        }));
+        if (ret && typeof (ret as Promise<any>).then === "function") {
+          set((s) => ({
+            steps: s.steps.map((x) =>
+              x.id === stepId && x.type === "tool"
+                ? { ...x, status: "running" }
+                : x,
+            ),
+          }));
+          void (ret as Promise<void | { undo?: () => void }>).then(finalize).catch(fail);
+          return;
+        }
+        finalize(ret as void | { undo?: () => void });
       } catch (e: any) {
         const msg = e?.message ? String(e.message) : String(e);
         set((s) => ({
@@ -694,4 +727,3 @@ export const useRunStore = create<RunState>()(
     },
   ),
 );
-

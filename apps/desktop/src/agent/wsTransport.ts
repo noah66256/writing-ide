@@ -12,6 +12,7 @@ import { useProjectIndexStore } from "../state/projectIndexStore";
 import { useKbStore } from "../state/kbStore";
 import { useAuthStore } from "../state/authStore";
 import { useRunStore } from "../state/runStore";
+import { cancelInlineFileOpConfirm } from "../state/inlineFileOpConfirm";
 import { activateSkills } from "@writing-ide/agent-core";
 import { buildStyleLinterLibrariesSidecar, executeToolCall, getTool } from "./toolRegistry";
 import { createRunTarget } from "./runTarget";
@@ -125,6 +126,8 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
 
   let currentAssistantId: string | null = null;
   const subAgentBubbles = new Map<string, string>();
+  const runStartStepCount = (rt.getSteps() ?? []).length;
+  let runDoneNote = "";
 
   // Watchdog
   let lastProgressAt = Date.now();
@@ -523,6 +526,22 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
         return id;
       };
 
+      const maybeAppendRunEndFeedback = () => {
+        const stepsNow = rt.getSteps() ?? [];
+        const runSteps = stepsNow.slice(runStartStepCount);
+        const hasAssistantText = runSteps.some(
+          (s: any) => s && s.type === "assistant" && !s.hidden && String(s.text ?? "").trim().length > 0,
+        );
+        if (hasAssistantText) return;
+        const failedTools = runSteps.filter((s: any) => s && s.type === "tool" && s.status === "failed").length;
+        if (failedTools > 0) {
+          addAssistant(`本轮已结束，但有 ${failedTools} 个步骤失败。请展开失败项查看原因。`, false, false);
+          return;
+        }
+        const note = String(runDoneNote ?? "").trim();
+        addAssistant(note ? `本轮已结束。\n${note}` : "本轮已结束。", false, false);
+      };
+
       const submitToolResult = (payload: any) => {
         if (socket.readyState !== WebSocket.OPEN) {
           log("warn", "ws.tool_result.not_open", { readyState: socket.readyState });
@@ -622,6 +641,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           if (event === "run.end") {
             log("info", "agent.run.end", data);
             setRunning(false); setActivity(null);
+            maybeAppendRunEndFeedback();
 
             // 兜底记忆提取（异步，不阻塞 UI）：
             // 从 memoryCursor 到对话末尾，提取本轮 run 中尚未被滚动提取覆盖的所有完整回合
@@ -939,6 +959,10 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                     ? { applyPolicy: (meta as any).applyPolicy ?? st.applyPolicy, riskLevel: (meta as any).riskLevel ?? st.riskLevel }
                     : {}),
                 });
+                if (ok0 && st.toolName === "run.done" && out && typeof out === "object") {
+                  const note = String((out as any).note ?? "").trim();
+                  if (note) runDoneNote = note.slice(0, 200);
+                }
 
                 // lint.style patch 增强
                 try {
@@ -1044,6 +1068,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
 
       if (aborted) {
         log("info", "ws.run.aborted", { message: msg, cancelReason });
+        cancelInlineFileOpConfirm();
         setRunning(false); setActivity(null);
         if (currentAssistantId) { finishAssistant(currentAssistantId); currentAssistantId = null; }
         for (const [, bid] of subAgentBubbles) finishAssistant(bid);
@@ -1082,6 +1107,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       cancelReason = r;
       if (args.convId) setConvRunCancel(args.convId, null);
       log("warn", "ws.run.cancel", { reason: r });
+      cancelInlineFileOpConfirm();
       try { (abort as any).abort(r); } catch { abort.abort(); }
       setRunning(false); setActivity(null);
       if (currentAssistantId) { finishAssistant(currentAssistantId); currentAssistantId = null; }

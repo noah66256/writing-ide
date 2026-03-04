@@ -4,8 +4,8 @@ import { useKbStore } from "../state/kbStore";
 import { useAuthStore } from "../state/authStore";
 import { useWritingBatchStore } from "../state/writingBatchStore";
 import { useTeamStore, getEffectiveAgents, validateCustomAgent, generateCustomAgentId } from "../state/teamStore";
-import { useDialogStore } from "../state/dialogStore";
 import { useFileOpPermissionStore } from "../state/fileOpPermissionStore";
+import { requestInlineFileOpConfirm } from "../state/inlineFileOpConfirm";
 import { TOOL_LIST } from "@writing-ide/tools";
 import { getGatewayBaseUrl } from "./gatewayUrl";
 
@@ -39,7 +39,7 @@ export type ToolExecOk = {
   riskLevel?: ToolRiskLevel;
   applyPolicy?: ToolApplyPolicy;
   // proposal-first：返回 apply 供 Keep 执行（apply 返回 undo 供 Undo 回滚）
-  apply?: () => void | { undo?: () => void };
+  apply?: () => void | { undo?: () => void } | Promise<void | { undo?: () => void }>;
   undoable: boolean;
   undo?: () => void;
 };
@@ -88,19 +88,13 @@ async function ensureHighRiskFileOpPermission(toolName: string, args: Record<str
 
   const targetPath = getFileOpTargetPath(toolName, args);
   const action = getFileOpActionLabel(toolName);
-  const choice = await useDialogStore.getState().openChoice({
-    title: "文件操作授权",
-    message:
-      `当前请求将执行高风险文件操作：${action}` +
-      (targetPath ? `\n目标：${targetPath}` : "") +
-      "\n\n建议先检查 diff，再点击 Keep 生效。",
-    options: [
-      { id: "deny", label: "拒绝", danger: true },
-      { id: "allow_once", label: "允许" },
-      { id: "always_allow", label: "总是允许" },
-    ],
-    cancelText: "取消",
+  const run = useRunStore.getState();
+  const prompt = `确定进行【${action}】操作么？${targetPath ? `\n目标：${targetPath}` : ""}`;
+  const stepId = run.addAssistant(prompt, false, false, {
+    quickActions: ["file_op_deny", "file_op_allow_once", "file_op_always_allow"],
   });
+  const choice = await requestInlineFileOpConfirm(180_000);
+  useRunStore.getState().patchAssistant(stepId, { quickActions: [] });
 
   if (choice === "always_allow") {
     useFileOpPermissionStore.getState().setMode("always_allow");
@@ -1857,15 +1851,17 @@ const tools: ToolDefinition[] = [
     applyPolicy: "proposal",
     reversible: false,
     run: async () => {
-      // 优先使用全量索引
+      const projFiles = useProjectStore.getState().files.map((f) => ({ path: f.path }));
+      // projectStore 是 doc.* 的真实执行对象，优先保持同一数据源，避免“能看到但删不到”。
       const { useProjectIndexStore } = await import("../state/projectIndexStore");
       const idxFiles = useProjectIndexStore.getState().index?.files;
-      if (idxFiles?.length) {
-        const files = idxFiles.map((f) => ({ path: f.path, type: f.type, size: f.size }));
+      if (projFiles.length) {
+        const metaByPath = new Map((idxFiles ?? []).map((f) => [f.path, { type: f.type, size: f.size }]));
+        const files = projFiles.map((f) => ({ path: f.path, ...(metaByPath.get(f.path) ?? {}) }));
         return { ok: true, output: { ok: true, files }, undoable: false };
       }
-      // 回退到 projectStore
-      const files = useProjectStore.getState().files.map((f) => ({ path: f.path }));
+      // 回退：项目尚未加载完成时，使用索引内容兜底
+      const files = (idxFiles ?? []).map((f) => ({ path: f.path, type: f.type, size: f.size }));
       return { ok: true, output: { ok: true, files }, undoable: false };
     },
   },
@@ -2437,7 +2433,18 @@ const tools: ToolDefinition[] = [
       const proj = useProjectStore.getState();
       const isFile = !!proj.files.find((f) => f.path === fromPath);
       const isDir = proj.dirs.includes(fromPath);
-      if (!isFile && !isDir) return { ok: false, error: "PATH_NOT_FOUND" };
+      if (!isFile && !isDir) {
+        return {
+          ok: false,
+          error: "PATH_NOT_FOUND",
+          output: {
+            ok: false,
+            path: path0,
+            rootDir: useProjectStore.getState().rootDir ?? "",
+            message: "未在当前项目找到该路径。请确认已打开正确目录后重试。",
+          },
+        };
+      }
 
       const previewMappings = (() => {
         if (isFile) return [{ from: fromPath, to: toPath }];
@@ -2489,9 +2496,15 @@ const tools: ToolDefinition[] = [
       if (!useProjectStore.getState().rootDir) {
         return { ok: false, error: "NO_PROJECT", output: { ok: false, message: "当前未打开项目文件夹，无法执行删除操作。请先让用户打开一个项目文件夹。" } };
       }
-      const proj = useProjectStore.getState();
-      const isFile = !!proj.files.find((f) => f.path === path0);
-      const isDir = proj.dirs.includes(path0);
+      let proj = useProjectStore.getState();
+      let isFile = !!proj.files.find((f) => f.path === path0);
+      let isDir = proj.dirs.includes(path0);
+      if (!isFile && !isDir) {
+        await proj.refreshFromDisk("doc.deletePath.precheck");
+        proj = useProjectStore.getState();
+        isFile = !!proj.files.find((f) => f.path === path0);
+        isDir = proj.dirs.includes(path0);
+      }
       if (!isFile && !isDir) return { ok: false, error: "PATH_NOT_FOUND" };
 
       const affectedFiles = (() => {
@@ -2514,9 +2527,13 @@ const tools: ToolDefinition[] = [
       })();
 
       const previewResolved = preview ? await preview.catch(() => null) : null;
-      const apply = () => {
+      const apply = async () => {
         const snap = useProjectStore.getState().snapshot();
-        void useProjectStore.getState().deletePath(path0);
+        const ret = await useProjectStore.getState().deletePath(path0);
+        if (!ret?.ok) {
+          const reason = String(ret?.detail ?? ret?.error ?? "DELETE_FAILED");
+          throw new Error(`删除失败：${reason}`);
+        }
         return { undo: () => useProjectStore.getState().restore(snap) };
       };
 
