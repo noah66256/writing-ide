@@ -188,6 +188,11 @@ export function getDefaultStageDefinitionsFromEnv(): AiStageDefinition[] {
     .filter(Boolean);
   const embedModel = embedModels[0] || "text-embedding-3-large";
   const cardModel = String(process.env.LLM_CARD_MODEL ?? "").trim() || llmModel;
+  const splitModel =
+    String(process.env.LLM_SPLIT_MODEL ?? "").trim() ||
+    String(process.env.LLM_HAIKU_MODEL ?? "").trim() ||
+    cardModel ||
+    llmModel;
   const toolRepairModel =
     String(process.env.LLM_TOOL_REPAIR_MODEL ?? "").trim() ||
     String(process.env.LLM_CARD_MODEL ?? "").trim() ||
@@ -275,6 +280,15 @@ export function getDefaultStageDefinitionsFromEnv(): AiStageDefinition[] {
       defaultTemperature: null,
       defaultMaxTokens: null,
       defaultEndpoint: "/v1/embeddings",
+    },
+    {
+      key: "rag.ingest.split_articles",
+      name: "KB：篇级切分",
+      description: "长文档篇级边界识别（优先便宜模型，失败可回退字符分块）",
+      defaultModel: splitModel,
+      defaultTemperature: 0,
+      defaultMaxTokens: 1200,
+      defaultEndpoint: "/v1/chat/completions",
     },
     {
       key: "rag.ingest.extract_cards",
@@ -390,6 +404,16 @@ export function createAiConfigService(args: {
       normalizeBaseURL(String(process.env.LLM_CARD_BASE_URL ?? "")) || envBase;
     const envCardKey =
       normalizeApiKeyInput(String(process.env.LLM_CARD_API_KEY ?? "")) || envKey;
+    const envSplitBase =
+      normalizeBaseURL(String(process.env.LLM_SPLIT_BASE_URL ?? "")) ||
+      normalizeBaseURL(String(process.env.LLM_HAIKU_BASE_URL ?? "")) ||
+      envCardBase ||
+      envBase;
+    const envSplitKey =
+      normalizeApiKeyInput(String(process.env.LLM_SPLIT_API_KEY ?? "")) ||
+      normalizeApiKeyInput(String(process.env.LLM_HAIKU_API_KEY ?? "")) ||
+      envCardKey ||
+      envKey;
     const envLinterBase =
       normalizeBaseURL(String(process.env.LLM_LINTER_BASE_URL ?? "")) || envCardBase || envBase;
     const envLinterKey =
@@ -413,6 +437,7 @@ export function createAiConfigService(args: {
 
     const pickCredsForStage = (stageKey: string) => {
       if (stageKey === "embedding") return { baseURL: envEmbedBase || envBase, apiKey: envEmbedKey || envKey };
+      if (stageKey === "rag.ingest.split_articles") return { baseURL: envSplitBase || envBase, apiKey: envSplitKey || envKey };
       if (stageKey.startsWith("rag.ingest.")) return { baseURL: envCardBase || envBase, apiKey: envCardKey || envKey };
       if (stageKey === "lint.style") return { baseURL: envLinterBase || envBase, apiKey: envLinterKey || envKey };
       if (stageKey === "agent.tool_call_repair") return { baseURL: envToolRepairBase || envBase, apiKey: envToolRepairKey || envKey };

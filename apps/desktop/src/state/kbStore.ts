@@ -202,6 +202,8 @@ export type KbCardJob = {
   chunksTotal?: number;
   chunksDone?: number;
   articles?: KbCardJobArticle[];
+  progressPhase?: "split" | "extract";
+  progressNote?: string;
   error?: string;
   updatedAt: string;
 };
@@ -345,7 +347,12 @@ type KbState = {
   importRawText: (text: string, title?: string) => Promise<{ imported: number; skipped: number; docIds: string[] }>;
   extractCardsForDocs: (
     docIds: string[],
-    opts?: { signal?: AbortSignal; onProgress?: (chunk: number, totalChunks: number, articles?: KbCardJobArticle[]) => void; force?: boolean },
+    opts?: {
+      signal?: AbortSignal;
+      onProgress?: (chunk: number, totalChunks: number, articles?: KbCardJobArticle[]) => void;
+      onStatus?: (phase: "split" | "extract", note: string) => void;
+      force?: boolean;
+    },
   ) => Promise<{
     ok: boolean;
     extracted: number;
@@ -1626,7 +1633,32 @@ function gatewayBaseUrl() {
 async function postSplitArticles(args: {
   paragraphs: Array<{ index: number; text: string }>;
   signal?: AbortSignal;
-}): Promise<{ ok: true; splits: number[] } | { ok: false; error: string }> {
+}): Promise<
+  | {
+      ok: true;
+      splits: number[];
+      reason?: string;
+      meta?: {
+        model?: string;
+        endpoint?: string;
+        sampledParagraphs?: number;
+        totalParagraphs?: number;
+        latencyMs?: number;
+      };
+    }
+  | {
+      ok: false;
+      error: string;
+      reason?: string;
+      meta?: {
+        model?: string;
+        endpoint?: string;
+        sampledParagraphs?: number;
+        totalParagraphs?: number;
+        latencyMs?: number;
+      };
+    }
+> {
   const base = gatewayBaseUrl();
   const url = base ? `${base}/api/kb/dev/split_articles` : "/api/kb/dev/split_articles";
   if (!ensureLoginForKbLlm("篇级分块")) return { ok: false, error: "AUTH_REQUIRED" };
@@ -1641,12 +1673,26 @@ async function postSplitArticles(args: {
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       let msg = `HTTP_${res.status}`;
-      try { const j = JSON.parse(text); msg = j?.error ?? j?.message ?? msg; } catch { /* ignore */ }
-      return { ok: false, error: msg };
+      let reason = "";
+      let meta: any = undefined;
+      try {
+        const j = JSON.parse(text);
+        msg = j?.error ?? j?.message ?? msg;
+        reason = String(j?.reason ?? "").trim();
+        meta = j?.meta;
+      } catch {
+        // ignore
+      }
+      return { ok: false, error: msg, ...(reason ? { reason } : {}), ...(meta && typeof meta === "object" ? { meta } : {}) };
     }
     const json = await res.json().catch(() => null);
     if (!json?.ok || !Array.isArray(json?.splits)) return { ok: false, error: "INVALID_RESPONSE" };
-    return { ok: true, splits: json.splits.map((n: any) => Math.floor(Number(n))).filter((n: number) => Number.isFinite(n) && n >= 0) };
+    return {
+      ok: true,
+      splits: json.splits.map((n: any) => Math.floor(Number(n))).filter((n: number) => Number.isFinite(n) && n >= 0),
+      ...(typeof json?.reason === "string" ? { reason: String(json.reason) } : {}),
+      ...(json?.meta && typeof json.meta === "object" ? { meta: json.meta } : {}),
+    };
   } catch (e: any) {
     return { ok: false, error: String(e?.message ?? e) };
   }
@@ -2599,7 +2645,18 @@ export const useKbStore = create<KbState>()(
             if (opts?.force) {
               // 强制重抽：已有 job 则重置为 pending+force，否则新建
               if (existingIdx >= 0) {
-                nextJobs[existingIdx] = { ...nextJobs[existingIdx]!, status: "pending", force: true, updatedAt: now, error: undefined, chunksTotal: undefined, chunksDone: undefined, articles: undefined };
+                nextJobs[existingIdx] = {
+                  ...nextJobs[existingIdx]!,
+                  status: "pending",
+                  force: true,
+                  updatedAt: now,
+                  error: undefined,
+                  chunksTotal: undefined,
+                  chunksDone: undefined,
+                  articles: undefined,
+                  progressPhase: undefined,
+                  progressNote: undefined,
+                };
               } else {
                 const lib = libByDocId.get(id);
                 nextJobs.push({ id: makeId("kb_card_job"), docId: id, docTitle: titleById.get(id) ?? id, libraryId: lib?.libraryId, libraryName: lib?.libraryName, status: "pending", force: true, updatedAt: now });
@@ -2790,7 +2847,15 @@ export const useKbStore = create<KbState>()(
 
             if (nextCard) {
               const next = nextCard;
-              markCardJob(next.id, { status: "running", error: undefined, chunksTotal: undefined, chunksDone: undefined, articles: undefined });
+              markCardJob(next.id, {
+                status: "running",
+                error: undefined,
+                chunksTotal: undefined,
+                chunksDone: undefined,
+                articles: undefined,
+                progressPhase: undefined,
+                progressNote: undefined,
+              });
 
               try {
                 const baseDir = get().baseDir!;
@@ -2820,7 +2885,18 @@ export const useKbStore = create<KbState>()(
                   signal,
                   force: next.force,
                   onProgress: (chunk, total, articles) => {
-                    markCardJob(next.id, { chunksTotal: total, chunksDone: chunk, articles });
+                    const safeTotal = Math.max(1, Number(total) || 1);
+                    const safeDone = Math.max(0, Math.min(safeTotal, Number(chunk) || 0));
+                    markCardJob(next.id, {
+                      chunksTotal: safeTotal,
+                      chunksDone: safeDone,
+                      articles,
+                      progressPhase: "extract",
+                      progressNote: `抽卡进度：${safeDone}/${safeTotal}`,
+                    });
+                  },
+                  onStatus: (phase, note) => {
+                    markCardJob(next.id, { progressPhase: phase, progressNote: note });
                   },
                 });
                 const aborted = Boolean(signal.aborted);
@@ -3023,7 +3099,21 @@ export const useKbStore = create<KbState>()(
         set((s) => {
           const now = nowIso();
           return {
-            cardJobs: s.cardJobs.map((j) => (j.status === "failed" ? { ...j, status: "pending", error: undefined, chunksTotal: undefined, chunksDone: undefined, articles: undefined, updatedAt: now } : j)),
+            cardJobs: s.cardJobs.map((j) => (
+              j.status === "failed"
+                ? {
+                    ...j,
+                    status: "pending",
+                    error: undefined,
+                    chunksTotal: undefined,
+                    chunksDone: undefined,
+                    articles: undefined,
+                    progressPhase: undefined,
+                    progressNote: undefined,
+                    updatedAt: now,
+                  }
+                : j
+            )),
             playbookJobs: s.playbookJobs.map((j) => (j.status === "failed" ? { ...j, status: "pending", error: undefined, updatedAt: now } : j)),
           };
         });
@@ -3035,7 +3125,18 @@ export const useKbStore = create<KbState>()(
           return {
             cardJobs: s.cardJobs.map((j) =>
               j.status === "skipped"
-                ? { ...j, status: "pending", force: true, error: undefined, chunksTotal: undefined, chunksDone: undefined, articles: undefined, updatedAt: now }
+                ? {
+                    ...j,
+                    status: "pending",
+                    force: true,
+                    error: undefined,
+                    chunksTotal: undefined,
+                    chunksDone: undefined,
+                    articles: undefined,
+                    progressPhase: undefined,
+                    progressNote: undefined,
+                    updatedAt: now,
+                  }
                 : j,
             ),
           };
@@ -3610,6 +3711,7 @@ export const useKbStore = create<KbState>()(
 
             const allCharsTotal = allParas.reduce((s, p) => s + String(p.text ?? "").length, 0);
             console.log(`[kbStore] 抽卡开始: docId=${id}, title=${doc?.title ?? "?"}, paragraphs=${allParas.length}, chars=${allCharsTotal}, isStyleLib=${isStyleLib}, signalAborted=${Boolean(opts?.signal?.aborted)}`);
+            opts?.onStatus?.("split", `准备分块：${allParas.length} 段`);
 
             if (!allParas.length) {
               console.log(`[kbStore] 跳过（无段落）: docId=${id}`);
@@ -3628,9 +3730,16 @@ export const useKbStore = create<KbState>()(
 
             // 篇级切分：段落 > 10 且总字符 > 8000 才触发（小文档不需要）
             if (allParas.length > 10 && allCharsTotal > 8000) {
+              opts?.onStatus?.("split", "正在篇级切分（Haiku）…");
               const splitRet = await postSplitArticles({ paragraphs: allParas, signal: opts?.signal });
               if (splitRet.ok && splitRet.splits.length > 1) {
+                const sampled = Number(splitRet.meta?.sampledParagraphs ?? 0);
+                const total = Number(splitRet.meta?.totalParagraphs ?? allParas.length);
                 console.log(`[kbStore] 篇级切分成功：${splitRet.splits.length} 篇，splits=`, splitRet.splits);
+                opts?.onStatus?.(
+                  "split",
+                  `篇级切分成功：${splitRet.splits.length} 篇${sampled > 0 && total > 0 ? `（采样 ${sampled}/${total}）` : ""}`,
+                );
                 const splits = splitRet.splits.sort((a, b) => a - b);
                 const paraIdxMap = new Map(allParas.map((p, i) => [p.index, i]));
                 // 将 splits（段落 index）映射为 allParas 数组的 position
@@ -3661,6 +3770,11 @@ export const useKbStore = create<KbState>()(
                     }
                   }
                 }
+              } else if (splitRet.ok) {
+                opts?.onStatus?.("split", "篇级切分判定为单篇，回退字符分块");
+              } else {
+                const reason = String(splitRet.reason ?? "").trim();
+                opts?.onStatus?.("split", `篇级切分失败，回退字符分块${reason ? `（${reason}）` : ""}`);
               }
             }
 
@@ -3672,6 +3786,7 @@ export const useKbStore = create<KbState>()(
             }
 
             console.log(`[kbStore] 分块计划: docId=${id}, chunks=${chunks.length}, articles=${articleChunkMap.length}, paragraphs=${allParas.length}, chars=${allCharsTotal}`);
+            opts?.onStatus?.("extract", `分块计划：共 ${chunks.length} 块`);
 
             // 根据已完成的 chunk 数计算各篇进度
             const buildArticleProgress = (doneChunks: number, failedChunkIdx?: number): KbCardJobArticle[] | undefined => {
@@ -3708,6 +3823,7 @@ export const useKbStore = create<KbState>()(
               const maxCards = isStyleLib ? (ci === 0 ? 16 : 12) : 24;
               const chunkChars = chunk.reduce((s, p) => s + String(p.text ?? "").length, 0);
               console.log(`[kbStore] 抽卡chunk ${ci + 1}/${chunks.length}: docId=${id}, paras=${chunk.length}, chars=${chunkChars}, maxCards=${maxCards}`);
+              opts?.onStatus?.("extract", `抽卡中：块 ${ci + 1}/${chunks.length}`);
               const chunkT0 = Date.now();
               const ret = await postExtractCards({ paragraphs: chunk, maxCards, facetIds: packFacetIds, mode: "doc_v2", signal: opts?.signal });
               if (!ret.ok) {
@@ -6045,4 +6161,3 @@ export const useKbStore = create<KbState>()(
     },
   ),
 );
-

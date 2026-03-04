@@ -473,6 +473,54 @@ async function getCardEnv(db?: Db) {
   return { baseUrl, endpoint: "/v1/chat/completions", apiKey, defaultModel, ok: Boolean(baseUrl && apiKey && defaultModel) };
 }
 
+async function getSplitEnv(db?: Db) {
+  try {
+    const r = await aiConfig.resolveStage("rag.ingest.split_articles");
+    return {
+      baseUrl: r.baseURL,
+      endpoint: r.endpoint || "/v1/chat/completions",
+      apiKey: r.apiKey,
+      defaultModel: r.model,
+      ok: Boolean(r.baseURL && r.apiKey && r.model),
+    };
+  } catch {
+    // ignore
+  }
+
+  const d = db ?? (await loadDb());
+  const cfg = d.llmConfig as LlmConfig | undefined;
+  const baseUrl =
+    normUrl(process.env.LLM_SPLIT_BASE_URL ?? "") ||
+    normUrl(process.env.LLM_HAIKU_BASE_URL ?? "") ||
+    normUrl(cfg?.card?.baseUrl) ||
+    normUrl(process.env.LLM_CARD_BASE_URL ?? "") ||
+    normUrl(cfg?.llm?.baseUrl) ||
+    normUrl(process.env.LLM_BASE_URL ?? "");
+  const apiKey =
+    normStr(process.env.LLM_SPLIT_API_KEY ?? "") ||
+    normStr(process.env.LLM_HAIKU_API_KEY ?? "") ||
+    normStr(cfg?.card?.apiKey) ||
+    normStr(process.env.LLM_CARD_API_KEY ?? "") ||
+    normStr(cfg?.llm?.apiKey) ||
+    normStr(process.env.LLM_API_KEY ?? "");
+  const defaultModel =
+    normStr(process.env.LLM_SPLIT_MODEL ?? "") ||
+    normStr(process.env.LLM_HAIKU_MODEL ?? "") ||
+    normStr(cfg?.card?.defaultModel) ||
+    normStr(process.env.LLM_CARD_MODEL ?? "") ||
+    normStr(cfg?.llm?.defaultModel) ||
+    normStr(process.env.LLM_MODEL ?? "");
+  return { baseUrl, endpoint: "/v1/chat/completions", apiKey, defaultModel, ok: Boolean(baseUrl && apiKey && defaultModel) };
+}
+
+function isKbTextLlmEndpoint(endpoint: string) {
+  const ep = String(endpoint ?? "").trim();
+  if (!ep) return false;
+  if (isGeminiLikeEndpoint(ep)) return true;
+  if (/\/responses(?:\?|$)/i.test(ep)) return true;
+  return /chat\/completions/i.test(ep);
+}
+
 async function getPlaybookEnv(db?: Db) {
   try {
     const r = await aiConfig.resolveStage("rag.ingest.build_library_playbook");
@@ -3384,21 +3432,21 @@ fastify.post(
     });
     const body = bodySchema.parse((request as any).body);
 
-    const cardEnv = await getCardEnv();
-    if (!cardEnv.ok) {
+    const splitEnv = await getSplitEnv();
+    if (!splitEnv.ok) {
       return reply.code(500).send({ error: "LLM_NOT_CONFIGURED" });
     }
 
-    let model = cardEnv.defaultModel;
-    let baseUrl = cardEnv.baseUrl;
-    let endpoint = (cardEnv as any).endpoint || "/v1/chat/completions";
-    let apiKey = cardEnv.apiKey;
+    let model = splitEnv.defaultModel;
+    let baseUrl = splitEnv.baseUrl;
+    let endpoint = (splitEnv as any).endpoint || "/v1/chat/completions";
+    let apiKey = splitEnv.apiKey;
 
     if (body.model) {
       try {
         const m = await aiConfig.resolveModel(body.model);
         const ep = String(m.endpoint || "").trim();
-        if (ep && (/chat\/completions/i.test(ep) || isGeminiLikeEndpoint(ep))) {
+        if (ep && isKbTextLlmEndpoint(ep)) {
           model = m.model;
           baseUrl = m.baseURL;
           apiKey = m.apiKey;
@@ -3407,10 +3455,28 @@ fastify.post(
       } catch { /* ignore */ }
     }
 
-    // 构建提示词：每段只取前80字，让模型快速判断边界
+    // 构建提示词：每段只取前80字；超长文档先采样，避免 split 阶段本身超时。
     const ordered = (body.paragraphs as Array<{ index: number; text: string }>)
       .slice()
       .sort((a, b) => a.index - b.index);
+    const splitMaxParasCfg = Number(String(process.env.LLM_SPLIT_MAX_PARAGRAPHS ?? "").trim());
+    const splitMaxParas = Number.isFinite(splitMaxParasCfg) && splitMaxParasCfg > 0
+      ? Math.max(24, Math.min(400, Math.floor(splitMaxParasCfg)))
+      : 220;
+    const sampleParagraphs = (paras: Array<{ index: number; text: string }>, maxCount: number) => {
+      if (paras.length <= maxCount) return paras;
+      const pick = new Set<number>();
+      pick.add(0);
+      pick.add(paras.length - 1);
+      const slots = Math.max(2, maxCount);
+      for (let i = 1; i < slots - 1; i += 1) {
+        const idx = Math.round((i * (paras.length - 1)) / (slots - 1));
+        pick.add(Math.max(0, Math.min(paras.length - 1, idx)));
+      }
+      const idxs = Array.from(pick).sort((a, b) => a - b).slice(0, maxCount);
+      return idxs.map((i) => paras[i]!).filter(Boolean);
+    };
+    const sampled = sampleParagraphs(ordered, splitMaxParas);
     const brief = (s: string) => {
       const t = String(s ?? "").replace(/\s+/g, " ").trim();
       return t.length > 80 ? `${t.slice(0, 80)}…` : t;
@@ -3431,10 +3497,11 @@ fastify.post(
 
     const user = [
       "请判断以下段落是否由多篇独立文章组成，并返回每篇起始段落号：",
-      ...ordered.map((p) => `[#${p.index}] ${brief(p.text)}`),
+      ...sampled.map((p) => `[#${p.index}] ${brief(p.text)}`),
     ].join("\n");
 
     const timeoutMs = 90_000;
+    const t0 = Date.now();
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), timeoutMs);
     let ret: any = null;
@@ -3455,7 +3522,19 @@ fastify.post(
     if (!ret?.ok) {
       const err = String(ret?.error ?? "UPSTREAM_ERROR");
       const status = ret?.status === 429 ? 503 : /aborted|AbortError|timeout/i.test(err) ? 504 : 502;
-      return reply.code(status).send({ ok: false, error: err });
+      return reply.code(status).send({
+        ok: false,
+        error: err,
+        reason: "upstream_error",
+        meta: {
+          model,
+          endpoint,
+          timeoutMs,
+          sampledParagraphs: sampled.length,
+          totalParagraphs: ordered.length,
+          latencyMs: Date.now() - t0,
+        },
+      });
     }
 
     // 解析模型返回的 JSON 数组
@@ -3469,7 +3548,19 @@ fastify.post(
       if (arrMatch) parsed = tryParse(arrMatch[0]);
     }
     if (!Array.isArray(parsed)) {
-      return reply.code(502).send({ ok: false, error: "INVALID_MODEL_OUTPUT" });
+      return reply.code(502).send({
+        ok: false,
+        error: "INVALID_MODEL_OUTPUT",
+        reason: "invalid_output",
+        meta: {
+          model,
+          endpoint,
+          timeoutMs,
+          sampledParagraphs: sampled.length,
+          totalParagraphs: ordered.length,
+          latencyMs: Date.now() - t0,
+        },
+      });
     }
 
     const paraIndices = new Set(ordered.map((p) => p.index));
@@ -3500,7 +3591,35 @@ fastify.post(
       }
     } catch { /* ignore */ }
 
-    return reply.send({ ok: true, splits });
+    const splitReason = splits.length > 1 ? "applied" : "single_article";
+    try {
+      fastify.log.info({
+        route: "kb.split_articles",
+        reason: splitReason,
+        model,
+        endpoint,
+        totalParagraphs: ordered.length,
+        sampledParagraphs: sampled.length,
+        splits: splits.length,
+        latencyMs: Date.now() - t0,
+      }, "kb.split_articles.result");
+    } catch {
+      // ignore
+    }
+
+    return reply.send({
+      ok: true,
+      splits,
+      reason: splitReason,
+      meta: {
+        model,
+        endpoint,
+        timeoutMs,
+        sampledParagraphs: sampled.length,
+        totalParagraphs: ordered.length,
+        latencyMs: Date.now() - t0,
+      },
+    });
   },
 );
 
@@ -3563,7 +3682,7 @@ fastify.post(
     try {
       const m = await aiConfig.resolveModel(body.model);
       const ep = String(m.endpoint || "").trim();
-      if (ep && (/chat\/completions/i.test(ep) || isGeminiLikeEndpoint(ep))) {
+      if (ep && isKbTextLlmEndpoint(ep)) {
         model = m.model;
         baseUrl = m.baseURL;
         apiKey = m.apiKey;
