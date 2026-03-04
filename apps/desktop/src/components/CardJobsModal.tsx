@@ -277,6 +277,11 @@ export function CardJobsModal() {
     if (!id) return null;
     return libraries.find((l) => l.id === id) ?? null;
   }, [libraries, currentLibraryId]);
+  const currentLibraryIsStyle = String((currentLibrary as any)?.purpose ?? "material").trim() === "style";
+  const pendingJobsInCurrentLibrary = useMemo(() => {
+    if (!currentLibrary?.id) return 0;
+    return jobs.filter((j) => j.libraryId === currentLibrary.id && (j.status === "pending" || j.status === "running")).length;
+  }, [jobs, currentLibrary?.id]);
 
   // 库内卡片浏览（轻量）
   const [viewLibId, setViewLibId] = useState<string | null>(null);
@@ -294,6 +299,7 @@ export function CardJobsModal() {
   const [fp, setFp] = useState<KbLibraryFingerprintSnapshot | null>(null);
   const [fpAdvanced, setFpAdvanced] = useState(false);
   const [fpCompare, setFpCompare] = useState<null | { diff: any; olderAt: string; newerAt: string }>(null);
+  const [deepCloneLoading, setDeepCloneLoading] = useState(false);
 
   // M1：anchors（黄金样本，仅风格库）
   const [anchorsLoading, setAnchorsLoading] = useState(false);
@@ -353,6 +359,18 @@ export function CardJobsModal() {
   const fpClusters = useMemo(() => {
     const list = Array.isArray((fp as any)?.clustersV1) ? ((fp as any).clustersV1 as any[]) : [];
     return list.filter(Boolean);
+  }, [fp]);
+  const genreNeedsRefresh = useMemo(() => {
+    const label = String((fp as any)?.genres?.primary?.label ?? "").trim().toLowerCase();
+    const why = String((fp as any)?.genres?.primary?.why ?? "").trim().toLowerCase();
+    if (!label) return false;
+    return (
+      label === "unknown_open_set" ||
+      label === "unknown" ||
+      why.includes("invalid_model_output") ||
+      why.includes("未识别") ||
+      why.includes("未返回合法 json")
+    );
   }, [fp]);
 
   const fpSegmentById = useMemo(() => {
@@ -741,7 +759,7 @@ export function CardJobsModal() {
     setRulesEvidenceTarget("values.principles");
     setRulesEvidenceIndex("0");
     setRulesEvidenceFilter("");
-    setRulesEditor({ clusterId: cid, title: `规则卡（${label || cid}）`, value: initial });
+    setRulesEditor({ clusterId: cid, title: `规则手册（${label || cid}）`, value: initial });
   };
 
   const rulesEvidenceCandidates = useMemo(() => {
@@ -802,7 +820,7 @@ export function CardJobsModal() {
         return prev;
       }
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        setRulesEditorErr("规则卡必须是 JSON object（不能是数组/字符串）。");
+        setRulesEditorErr("规则手册必须是 JSON object（不能是数组/字符串）。");
         return prev;
       }
 
@@ -856,6 +874,134 @@ export function CardJobsModal() {
       setRulesEditorErr(null);
       return { ...prev, value: JSON.stringify(parsed, null, 2) };
     });
+  };
+
+  const queuePlaybookForLibrary = async (libraryId: string, opts?: { source?: "libraries" | "jobs" }) => {
+    const libId = String(libraryId ?? "").trim();
+    const lib = libraries.find((x) => x.id === libId);
+    if (!lib || !libId) return;
+    const ok = await uiConfirm({
+      title: "确认入队生成风格手册？",
+      message:
+        `为库「${lib.name}」入队生成风格手册（22+1）？\n\n` +
+        "- 会读取该库已抽出的单篇要素卡（hook/thesis/ending/one_liner/outline）\n" +
+        "- 并生成 1 张 Style Profile + 每个维度 1 张写法手册卡\n" +
+        "- 产物会落到一个「【仿写手册】」虚拟文档下，可被右侧 Agent 直接使用\n\n" +
+        "提示：生成手册是异步队列任务，需到「抽卡任务」Tab 点击 ▶ 执行。",
+      confirmText: "入队",
+      cancelText: "取消",
+    });
+    if (!ok) return;
+    const r = await enqueuePlaybookJob(libId, { open: true });
+    if (!r.ok) void uiAlert({ title: "入队失败", message: `入队失败：${r.error ?? "unknown"}` });
+    else {
+      const note =
+        opts?.source === "jobs"
+          ? "已入队：风格手册（第二步）。执行完成后可点「第三步：深度克隆」。"
+          : "已入队：风格手册（第二步）。请点击 ▶ 开始执行。";
+      openKbManager("jobs", note);
+    }
+  };
+
+  const computeFingerprintForLibrary = async (libraryId: string) => {
+    const libId = String(libraryId ?? "").trim();
+    if (!libId) return false;
+    const syncView = viewLibId === libId;
+    setFpLoading(true);
+    if (syncView) {
+      setFpErr(null);
+      setFpCompare(null);
+    }
+    await refreshLibraries().catch(() => void 0);
+    const latestLibs = useKbStore.getState().libraries ?? [];
+    const exists = latestLibs.some((x: any) => String(x?.id ?? "").trim() === libId);
+    if (!exists) {
+      if (syncView) {
+        setFp(null);
+        setFpErr(null);
+        setFpCompare(null);
+      }
+      setFpLoading(false);
+      if (syncView) setViewLibId(null);
+      openKbManager("libraries", "该库已不存在或已进入回收站，无法生成指纹：请先恢复/重新选择库。");
+      return false;
+    }
+
+    const r = await computeLibraryFingerprint({ libraryId: libId, useLlm: true });
+    if (!r.ok) {
+      const msg = humanizeKbErr(r.error ?? "COMPUTE_FAILED");
+      if (r.error === "LIBRARY_IN_TRASH" || r.error === "LIBRARY_NOT_FOUND") {
+        if (syncView) setViewLibId(null);
+        openKbManager("libraries", msg || "该库已不可用：请先恢复/重新选择库。");
+      } else {
+        if (syncView) setFpErr(msg || "COMPUTE_FAILED");
+        else void uiAlert({ title: "声音指纹更新失败", message: msg || "COMPUTE_FAILED" });
+      }
+      setFpLoading(false);
+      return false;
+    }
+    if (syncView) setFp(r.snapshot ?? null);
+    setFpLoading(false);
+    return true;
+  };
+
+  const runDeepCloneForLibrary = async (libraryId: string) => {
+    const libId = String(libraryId ?? "").trim();
+    if (!libId) return;
+    const lib = libraries.find((x) => x.id === libId);
+    if (!lib) return;
+    const isStylePurpose = String((lib as any)?.purpose ?? "material").trim() === "style";
+    const ok = await uiConfirm({
+      title: "确认执行深度克隆（第三步）？",
+      message:
+        `为库「${lib.name}」执行深度克隆？\n\n` +
+        "- 步骤 A：生成/更新声音指纹（数字版）\n" +
+        "- 步骤 B：基于指纹簇自动生成规则手册（cluster rules，仅风格库）\n\n" +
+        "说明：如果某些簇证据不足，会只更新已满足条件的簇。",
+      confirmText: "执行",
+      cancelText: "取消",
+    });
+    if (!ok) return;
+    setDeepCloneLoading(true);
+    setAnchorsErr(null);
+    try {
+      const fpOk = await computeFingerprintForLibrary(libId);
+      if (!fpOk) return;
+      if (!isStylePurpose) {
+        void uiAlert({ title: "执行完成", message: "当前是非风格库，已完成声音指纹更新。" });
+        return;
+      }
+      const genRet = await generateLibraryClusterRulesV1({ libraryId: libId });
+      if (!genRet.ok) {
+        setAnchorsErr(`深度克隆失败：${genRet.error ?? "GENERATE_FAILED"}`);
+        return;
+      }
+      const cfg = await getLibraryStyleConfig(libId);
+      if (cfg?.ok && viewLibId === libId) {
+        setClusterRules(cfg.clusterRulesV1 && typeof cfg.clusterRulesV1 === "object" ? (cfg.clusterRulesV1 as any) : null);
+      }
+      void uiAlert({
+        title: "深度克隆完成",
+        message: `声音指纹已更新，规则手册更新 ${Number(genRet.updated ?? 0)} 个簇。`,
+      });
+    } finally {
+      setDeepCloneLoading(false);
+    }
+  };
+
+  const queuePlaybookForViewLib = async () => {
+    if (!viewLibId) return;
+    await queuePlaybookForLibrary(viewLibId, { source: "libraries" });
+  };
+
+  const computeFingerprintForViewLib = async () => {
+    if (!viewLibId) return false;
+    return computeFingerprintForLibrary(viewLibId);
+  };
+
+  const runDeepCloneForViewLib = async () => {
+    if (!viewLibId) return;
+    await runDeepCloneForLibrary(viewLibId);
   };
 
   if (!open) return null;
@@ -1254,90 +1400,101 @@ export function CardJobsModal() {
 
                 {viewTab === "health" ? (
                   <>
+                    {isStyleLib ? (
+                      <div className="border border-border rounded-xl bg-surface-alt p-2.5 grid gap-2.5">
+                        <div className="font-bold">推荐流程（同一 UI）</div>
+                        <div className="text-xs text-text-muted">抽卡完成后按 2 → 3 执行：先产出风格手册，再做深度克隆（声音指纹 + 规则手册）。</div>
+                        <div className="grid gap-2.5 md:grid-cols-3">
+                          <div className="border border-border rounded-xl bg-surface p-2.5">
+                            <div className="text-xs text-text-faint">步骤 1</div>
+                            <div className="mt-1 text-sm font-bold">抽卡</div>
+                            <div className="mt-1 text-xs text-text-muted">把文档转成可复用要素卡。</div>
+                            <button
+                              className="mt-2 px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
+                              type="button"
+                              onClick={() => openKbManager("jobs")}
+                            >
+                              前往抽卡任务
+                            </button>
+                          </div>
+                          <div className="border border-border rounded-xl bg-surface p-2.5">
+                            <div className="text-xs text-text-faint">步骤 2</div>
+                            <div className="mt-1 text-sm font-bold">风格手册</div>
+                            <div className="mt-1 text-xs text-text-muted">生成 22+1 维度手册卡。</div>
+                            <button
+                              className="mt-2 px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors disabled:opacity-50"
+                              type="button"
+                              disabled={fpLoading || deepCloneLoading}
+                              onClick={() => void queuePlaybookForViewLib()}
+                            >
+                              入队风格手册
+                            </button>
+                          </div>
+                          <div className="border border-accent/35 rounded-xl bg-surface p-2.5">
+                            <div className="text-xs text-text-faint">步骤 3</div>
+                            <div className="mt-1 text-sm font-bold">深度克隆</div>
+                            <div className="mt-1 text-xs text-text-muted">一键执行声音指纹 + 规则手册。</div>
+                            <button
+                              className="mt-2 px-3 py-1.5 text-xs rounded-lg border border-accent bg-accent text-white hover:bg-accent-hover transition-colors disabled:opacity-50"
+                              type="button"
+                              disabled={fpLoading || deepCloneLoading || anchorsLoading}
+                              onClick={() => void runDeepCloneForViewLib()}
+                            >
+                              {deepCloneLoading ? "深度克隆执行中…" : "执行深度克隆"}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+
                     <div className="flex gap-2 flex-wrap items-center justify-between">
                       <div className="flex gap-2 flex-wrap items-center">
+                        {isStyleLib ? (
+                          <button
+                            className="px-3 py-1.5 text-xs rounded-lg border border-accent bg-accent text-white hover:bg-accent-hover transition-colors disabled:opacity-50"
+                            type="button"
+                            disabled={fpLoading || deepCloneLoading || anchorsLoading}
+                            onClick={() => void runDeepCloneForViewLib()}
+                          >
+                            {deepCloneLoading ? "深度克隆中…" : "深度克隆（第三步）"}
+                          </button>
+                        ) : null}
+                        {isStyleLib ? (
+                          <button
+                            className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors disabled:opacity-50"
+                            type="button"
+                            disabled={fpLoading || deepCloneLoading}
+                            onClick={() => void queuePlaybookForViewLib()}
+                          >
+                            入队：风格手册（第二步）
+                          </button>
+                        ) : null}
                         <button
                           className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors disabled:opacity-50"
                           type="button"
-                          disabled={fpLoading}
+                          disabled={fpLoading || deepCloneLoading}
                           onClick={() => {
                             void (async () => {
                               const ok = await uiConfirm({
-                                title: "确认生成声音指纹？",
+                                title: "确认仅更新声音指纹？",
                                 message:
-                                  "生成/更新该库的「声音指纹（数字版）」？\n\n" +
+                                  "仅执行声音指纹（数字版）更新，不生成规则手册。\n\n" +
                                   "- 会统计「率/分布/n-gram」，并尝试用 Gateway 做开集体裁识别\n" +
                                   "- 产物只写入本地 KB，不会改动原文\n",
-                                confirmText: "生成",
+                                confirmText: "更新",
                                 cancelText: "取消",
                               });
                               if (!ok) return;
-                              setFpLoading(true);
-                              setFpErr(null);
-                              setFpCompare(null);
-                              await refreshLibraries().catch(() => void 0);
-                              const latestLibs = useKbStore.getState().libraries ?? [];
-                              const exists = latestLibs.some((x: any) => String(x?.id ?? "").trim() === String(viewLibId ?? "").trim());
-                              if (!exists) {
-                                setFp(null);
-                                setFpErr(null);
-                                setFpCompare(null);
-                                setFpLoading(false);
-                                setViewLibId(null);
-                                openKbManager("libraries", "该库已不存在或已进入回收站，无法生成指纹：请先恢复/重新选择库。");
-                                return;
-                              }
-
-                              const r = await computeLibraryFingerprint({ libraryId: viewLibId, useLlm: true });
-                              if (!r.ok) {
-                                const msg = humanizeKbErr(r.error ?? "COMPUTE_FAILED");
-                                // 若库已不可用，自动收起并把提示放到 notice
-                                if (r.error === "LIBRARY_IN_TRASH" || r.error === "LIBRARY_NOT_FOUND") {
-                                  setViewLibId(null);
-                                  openKbManager("libraries", msg || "该库已不可用：请先恢复/重新选择库。");
-                                } else {
-                                  setFpErr(msg || "COMPUTE_FAILED");
-                                }
-                              } else {
-                                setFp(r.snapshot ?? null);
-                              }
-                              setFpLoading(false);
+                              await computeFingerprintForViewLib();
                             })();
                           }}
                         >
-                          生成：声音指纹（数字版）{fpLoading ? "…" : ""}
+                          仅更新：声音指纹{fpLoading ? "…" : ""}
                         </button>
                         <button
                           className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
                           type="button"
-                          onClick={() => {
-                            const lib = libraries.find((x) => x.id === viewLibId);
-                            if (!lib) return;
-                            void (async () => {
-                              const ok = await uiConfirm({
-                                title: "确认入队生成风格手册？",
-                                message:
-                                  `为库「${lib.name}」入队生成风格手册（22+1）？\n\n` +
-                                  "- 会读取该库已抽出的单篇要素卡（hook/thesis/ending/one_liner/outline）\n" +
-                                  "- 并生成 1 张 Style Profile + 每个维度 1 张写法手册卡\n" +
-                                  "- 产物会落到一个「【仿写手册】」虚拟文档下，可被右侧 Agent 直接使用\n\n" +
-                                  "提示：生成手册是异步队列任务，需到「抽卡任务」Tab 点击 ▶ 执行。",
-                                confirmText: "入队",
-                                cancelText: "取消",
-                              });
-                              if (!ok) return;
-                              const r = await enqueuePlaybookJob(viewLibId, { open: true });
-                              if (!r.ok) void uiAlert({ title: "入队失败", message: `入队失败：${r.error ?? "unknown"}` });
-                              else openKbManager("jobs", "已入队：风格手册。请点击 ▶ 开始执行。");
-                            })();
-                          }}
-                        >
-                          生成/更新：风格手册（推荐）
-                        </button>
-                        <button
-                          className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
-                          type="button"
-                          disabled={fpLoading}
+                          disabled={fpLoading || deepCloneLoading}
                           onClick={() => {
                             void (async () => {
                               setFpLoading(true);
@@ -1345,7 +1502,7 @@ export function CardJobsModal() {
                               const r = await compareLatestLibraryFingerprints(viewLibId);
                               if (!r.ok) {
                                 setFpCompare(null);
-                                setFpErr(r.error === "NOT_ENOUGH_HISTORY" ? "不足两次体检历史：先点两次「生成：声音指纹」" : r.error ?? "COMPARE_FAILED");
+                                setFpErr(r.error === "NOT_ENOUGH_HISTORY" ? "不足两次体检历史：先更新两次声音指纹" : r.error ?? "COMPARE_FAILED");
                               } else {
                                 setFpCompare({
                                   diff: r.diff,
@@ -1366,14 +1523,32 @@ export function CardJobsModal() {
                     </div>
 
                     {!fpLoading && !fp ? (
-                      <div className="text-xs text-text-faint">还没有体检数据。点「生成：声音指纹（数字版）」开始。</div>
+                      <div className="text-xs text-text-faint">还没有体检数据。点「深度克隆（第三步）」或「仅更新：声音指纹」开始。</div>
                     ) : null}
 
                     {fp ? (
                       <div className="grid gap-2.5">
                         <div className="grid gap-2.5 grid-cols-[repeat(auto-fit,minmax(240px,1fr))]">
                           <div className="border border-border rounded-xl bg-surface-alt p-2.5">
-                            <div className="font-bold">像什么（最重要）</div>
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="font-bold">像什么（最重要）</div>
+                              {genreNeedsRefresh ? (
+                                <button
+                                  className="h-7 w-7 inline-flex items-center justify-center rounded-md border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors disabled:opacity-50"
+                                  type="button"
+                                  title="刷新体裁识别"
+                                  disabled={fpLoading || deepCloneLoading}
+                                  onClick={() => {
+                                    void computeFingerprintForViewLib();
+                                  }}
+                                >
+                                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
+                                    <path d="M20 12a8 8 0 1 1-2.34-5.66" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                                    <path d="M20 4v4h-4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                                  </svg>
+                                </button>
+                              ) : null}
+                            </div>
                             <div className="mt-1.5 text-base font-black">
                               {fp.genres?.primary?.label ?? "unknown"}（{Math.round((fp.genres?.primary?.confidence ?? 0) * 100)}%）
                             </div>
@@ -1407,7 +1582,7 @@ export function CardJobsModal() {
                           <div className="border border-border rounded-xl bg-surface-alt p-2.5">
                             <div className="font-bold">怎么修（只给按钮）</div>
                             <div className="mt-2 text-xs text-text-muted whitespace-pre-wrap">
-                              - 想让右侧 Agent "像本人写的"：优先生成风格手册 + 终稿润色清单\n- 想先确认这库到底偏哪：先生成声音指纹（数字版）\n- 如果稳定性低：建议分库或先补同体裁语料
+                              - 推荐流程：抽卡 → 风格手册（第二步）→ 深度克隆（第三步）\n- 深度克隆会同时更新声音指纹 + 规则手册\n- 如果稳定性低：建议分库或先补同体裁语料
                             </div>
                           </div>
                         </div>
@@ -1416,7 +1591,7 @@ export function CardJobsModal() {
                           <>
                             <div className="border border-border rounded-xl bg-surface-alt p-2.5 grid gap-2.5">
                               <div className="flex items-center justify-between gap-2.5">
-                                <div className="font-bold">写法候选（子簇）</div>
+                                <div className="font-bold">深度克隆结果（声音指纹 + 规则手册）</div>
                                 <div className="flex gap-2 flex-wrap justify-end">
                                   {defaultClusterId ? (
                                     <button
@@ -1481,13 +1656,13 @@ export function CardJobsModal() {
                                               {isRec ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">Recommended</span> : null}
                                               {isDefault ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">默认写法</span> : null}
                                               {st ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">稳定：{st === "high" ? "高" : st === "medium" ? "中" : "低"}</span> : null}
-                                              {isTinyCluster ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft" title="样本很少：建议不要设为默认；规则卡也可能无法自动生成">小簇</span> : null}
+                                              {isTinyCluster ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft" title="样本很少：建议不要设为默认；规则手册也可能无法自动生成">小簇</span> : null}
                                               <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">
                                                 覆盖 {docCovCount}/{Number(fp?.corpus?.docs ?? 0) || 0} 篇 · {Math.round(docCovRate * 100)}%
                                               </span>
                                               {anchorN ? <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft">anchors：{anchorN}</span> : null}
-                                              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft" title="该簇规则卡（clusterRulesV1）是否已生成">
-                                                {gen ? `规则卡：已生成${genUpdatedAt ? `（${genUpdatedAt}）` : ""}` : "规则卡：未生成"}
+                                              <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-md bg-surface-alt text-text-muted border border-border-soft" title="该簇规则手册（clusterRulesV1）是否已生成">
+                                                {gen ? `规则手册：已生成${genUpdatedAt ? `（${genUpdatedAt}）` : ""}` : "规则手册：未生成"}
                                               </span>
                                             </div>
                                             <div className="mt-1.5 text-sm font-black text-text">{label}</div>
@@ -1533,10 +1708,10 @@ export function CardJobsModal() {
                                               className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
                                               type="button"
                                               disabled={anchorsLoading}
-                                              title="编辑该写法簇的 V2 规则卡（values / analysis lenses 等），写作时会注入 styleContractV1"
+                                              title="编辑该写法簇的 V2 规则手册（values / analysis lenses 等），写作时会注入 styleContractV1"
                                               onClick={() => openRulesEditor(cid, label)}
                                             >
-                                              规则卡
+                                              规则手册
                                             </button>
                                             <button
                                               className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
@@ -1544,8 +1719,8 @@ export function CardJobsModal() {
                                               disabled={anchorsLoading || isGenLoading || !canAutoGenerate}
                                               title={
                                                 canAutoGenerate
-                                                  ? "自动生成该簇规则卡（values/lens/templates），并绑定证据（来自本簇 anchors/代表样例）"
-                                                  : `样本不足：该簇当前证据=${evidenceN}，anchors=${anchorN}（至少需要 2 条才能生成规则卡）`
+                                                  ? "自动生成该簇规则手册（values/lens/templates），并绑定证据（来自本簇 anchors/代表样例）"
+                                                  : `样本不足：该簇当前证据=${evidenceN}，anchors=${anchorN}（至少需要 2 条才能生成规则手册）`
                                               }
                                               onClick={() => {
                                                 if (!viewLibId) return;
@@ -1567,7 +1742,7 @@ export function CardJobsModal() {
                                                 })();
                                               }}
                                             >
-                                              {isGenLoading ? "生成中…" : anyGenLoading ? "等待…" : "自动生成"}
+                                              {isGenLoading ? "生成中…" : anyGenLoading ? "等待…" : "自动生成规则手册"}
                                             </button>
                                             <button
                                               className={cn("px-3 py-1.5 text-xs rounded-lg border transition-colors", isDefault ? "border-accent bg-accent text-white hover:bg-accent-hover" : "border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text")}
@@ -1621,12 +1796,12 @@ export function CardJobsModal() {
                                         ) : null}
                                         {!canAutoGenerate && !genErr ? (
                                           <div className="mt-2 text-xs text-text-muted whitespace-pre-wrap">
-                                            样本偏少：该簇当前证据={evidenceN}，anchors={anchorN}（至少需要 2 条）——建议先点「采纳 anchors（本簇）」或补更多同体裁样本后再生成规则卡。
+                                            样本偏少：该簇当前证据={evidenceN}，anchors={anchorN}（至少需要 2 条）——建议先点「采纳 anchors（本簇）」或补更多同体裁样本后再生成规则手册。
                                           </div>
                                         ) : null}
                                         {genErr ? (
                                           <div className="mt-2 text-xs text-red-600 whitespace-pre-wrap">
-                                            规则卡生成失败：{genErr}
+                                            规则手册生成失败：{genErr}
                                           </div>
                                         ) : null}
                                       </div>
@@ -2185,6 +2360,41 @@ export function CardJobsModal() {
               </div>
             ) : null}
 
+            {currentLibrary && status === "idle" ? (
+              <div className="mb-2.5 border border-border rounded-xl bg-surface-alt p-2.5 grid gap-2">
+                <div className="font-bold text-sm">下一步</div>
+                <div className="text-xs text-text-muted">
+                  推荐顺序：抽卡完成后先做第二步风格手册，再做第三步深度克隆（声音指纹 + 规则手册）。
+                </div>
+                <div className="flex gap-2 flex-wrap">
+                  <button
+                    className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors disabled:opacity-50"
+                    type="button"
+                    disabled={!currentLibraryIsStyle || deepCloneLoading || fpLoading}
+                    title={
+                      !currentLibraryIsStyle
+                        ? "仅风格库支持风格手册"
+                        : pendingJobsInCurrentLibrary > 0
+                          ? `该库还有 ${pendingJobsInCurrentLibrary} 个抽卡任务未完成，手册可能不完整`
+                          : "入队第二步：风格手册"
+                    }
+                    onClick={() => void queuePlaybookForLibrary(currentLibrary.id, { source: "jobs" })}
+                  >
+                    第二步：入队风格手册
+                  </button>
+                  <button
+                    className="px-3 py-1.5 text-xs rounded-lg border border-accent bg-accent text-white hover:bg-accent-hover transition-colors disabled:opacity-50"
+                    type="button"
+                    disabled={!currentLibraryIsStyle || deepCloneLoading || fpLoading}
+                    title={!currentLibraryIsStyle ? "仅风格库支持第三步深度克隆" : "执行第三步：声音指纹 + 规则手册"}
+                    onClick={() => void runDeepCloneForLibrary(currentLibrary.id)}
+                  >
+                    {deepCloneLoading ? "第三步执行中…" : "第三步：深度克隆"}
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
             {summary.runningArticles && summary.runningArticles.length > 0 ? (
               <div className="mb-2.5 rounded-lg border border-border-soft bg-surface-alt/40 px-3 py-2">
                 <div className="text-[11px] text-text-faint mb-1">分篇进度</div>
@@ -2322,43 +2532,48 @@ export function CardJobsModal() {
                   ■
                 </button>
                 <button
-                  className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
+                  className="px-3 py-1.5 text-xs rounded-lg border border-accent bg-accent text-white hover:bg-accent-hover transition-colors disabled:opacity-50"
                   type="button"
-                  disabled={!currentLibrary || status !== "idle" || (currentLibrary?.docCount ?? 0) <= 0}
+                  disabled={!currentLibrary || !currentLibraryIsStyle || status !== "idle" || deepCloneLoading || fpLoading}
                   title={
                     !currentLibrary
                       ? "请先选择当前库"
-                      : status !== "idle"
-                        ? "请先停止/暂停抽卡任务"
-                        : (currentLibrary.docCount ?? 0) <= 0
-                          ? "该库暂无文档"
-                          : "生成库级风格手册（Style Profile + 22+1）"
+                      : !currentLibraryIsStyle
+                        ? "仅风格库支持第三步深度克隆"
+                        : status !== "idle"
+                          ? "请先停止/暂停抽卡任务"
+                          : "第三步：声音指纹 + 规则手册"
                   }
                   onClick={() => {
                     const lib = currentLibrary;
                     if (!lib) return;
-                    const pendingInLib = jobs.filter((j) => j.libraryId === lib.id && (j.status === "pending" || j.status === "running")).length;
-                    const msg =
-                      `为当前库「${lib.name}」入队生成风格手册（22+1）？\n\n` +
-                      "- 会读取该库已抽出的单篇要素卡（hook/thesis/ending/one_liner/outline）\n" +
-                      "- 并生成 1 张 Style Profile + 每个维度 1 张写法手册卡\n" +
-                      "- 产物会落到一个「【仿写手册】」虚拟文档下，可被右侧 Agent 直接使用\n" +
-                      "- 点击「确定」只会入队，不会自动开始；需要你点击 ▶ 执行\n\n" +
-                      (pendingInLib > 0 ? `提示：该库还有 ${pendingInLib} 个抽卡任务未完成，生成的手册可能不完整。\n\n` : "");
-                    void (async () => {
-                      const ok = await uiConfirm({
-                        title: "确认入队生成风格手册？",
-                        message: msg,
-                        confirmText: "入队",
-                        cancelText: "取消",
-                      });
-                      if (!ok) return;
-                      const r = await enqueuePlaybookJob(lib.id, { open: true });
-                      if (!r.ok) void uiAlert({ title: "入队失败", message: `入队失败：${r.error ?? "unknown"}` });
-                    })();
+                    void runDeepCloneForLibrary(lib.id);
                   }}
                 >
-                  生成风格手册
+                  {deepCloneLoading ? "深度克隆中…" : "第三步：深度克隆"}
+                </button>
+                <button
+                  className="px-3 py-1.5 text-xs rounded-lg border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
+                  type="button"
+                  disabled={!currentLibrary || !currentLibraryIsStyle || status !== "idle" || (currentLibrary?.docCount ?? 0) <= 0 || deepCloneLoading || fpLoading}
+                  title={
+                    !currentLibrary
+                      ? "请先选择当前库"
+                      : !currentLibraryIsStyle
+                        ? "仅风格库支持风格手册"
+                      : status !== "idle"
+                        ? "请先停止/暂停抽卡任务"
+                        : (currentLibrary.docCount ?? 0) <= 0
+                          ? "该库暂无文档"
+                          : "第二步：生成库级风格手册（Style Profile + 22+1）"
+                  }
+                  onClick={() => {
+                    const lib = currentLibrary;
+                    if (!lib) return;
+                    void queuePlaybookForLibrary(lib.id, { source: "jobs" });
+                  }}
+                >
+                  第二步：风格手册
                 </button>
               </div>
             </div>
@@ -2451,7 +2666,7 @@ export function CardJobsModal() {
           <div className="w-[860px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-4rem)] bg-surface rounded-2xl border border-border shadow-2xl p-5 flex flex-col overflow-hidden" onMouseDown={(e) => e.stopPropagation()}>
             <div className="text-base font-semibold text-text">{rulesEditor.title}</div>
             <div className="text-sm text-text-muted mt-2.5 whitespace-pre-wrap">
-              - 这是"仅对该库生效"的写法簇规则卡（建议放 values / analysisLenses / must/avoid/templates/checks 等）。{"\n"}
+              - 这是"仅对该库生效"的写法簇规则手册（建议放 values / analysisLenses / must/avoid/templates/checks 等）。{"\n"}
               - 写作时会随 `mainDoc.styleContractV1` 注入，影响模型"站队/归因/战场"。{"\n"}
               - 当前先做最小闭环：手动编辑保存；后续再补"从 anchors/segments 自动抽取"。
             </div>
@@ -2571,8 +2786,8 @@ export function CardJobsModal() {
                   if (!cid) return;
                   void (async () => {
                     const ok = await uiConfirm({
-                      title: "确认清空该簇规则卡？",
-                      message: `清空该簇规则卡？\n\nclusterId=${cid}\n\n（仅删除本库 prefs，不影响体检快照）`,
+                      title: "确认清空该簇规则手册？",
+                      message: `清空该簇规则手册？\n\nclusterId=${cid}\n\n（仅删除本库 prefs，不影响体检快照）`,
                       confirmText: "清空",
                       cancelText: "取消",
                       danger: true,
@@ -2614,7 +2829,7 @@ export function CardJobsModal() {
                       return;
                     }
                     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-                      setRulesEditorErr("规则卡必须是 JSON object（不能是数组/字符串）。");
+                      setRulesEditorErr("规则手册必须是 JSON object（不能是数组/字符串）。");
                       return;
                     }
                     parsed.updatedAt = new Date().toISOString();
@@ -2640,6 +2855,3 @@ export function CardJobsModal() {
     </div>
   );
 }
-
-
-
