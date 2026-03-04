@@ -4075,7 +4075,7 @@ fastify.post(
     try {
       const m = await aiConfig.resolveModel(body.model);
       const ep = String(m.endpoint || "").trim();
-      if (ep && (/chat\/completions/i.test(ep) || isGeminiLikeEndpoint(ep))) {
+      if (ep && isKbTextLlmEndpoint(ep)) {
         model = m.model;
         baseUrl = m.baseURL;
         apiKey = m.apiKey;
@@ -4244,6 +4244,129 @@ fastify.post(
     return { message, requestId };
   };
 
+  const evSchema = z.object({
+    docId: z.string().min(1),
+    docTitle: z.string().min(1),
+    paragraphIndex: z.number().int().min(0),
+    quote: z.string().min(1).max(120)
+  });
+  const evListSchema = z.array(evSchema).max(24).default([]);
+  const outSchema = z.object({
+    styleProfile: z.object({
+      title: z.string().min(1).max(120),
+      content: z.string().min(1),
+      evidence: evListSchema
+    }),
+    playbookFacets: z
+      .array(
+        z.object({
+          facetId: z.string().min(1),
+          title: z.string().min(1).max(160),
+          content: z.string().min(1),
+          evidence: evListSchema
+        })
+      )
+      .min(1)
+      .max(120)
+  });
+
+  const toStr = (v: any) => (typeof v === "string" ? v.trim() : "");
+  const pickStr = (obj: any, keys: string[]) => {
+    for (const k of keys) {
+      const s = toStr(obj?.[k]);
+      if (s) return s;
+    }
+    return "";
+  };
+  const toEvidenceList = (input: any) => {
+    const arr = Array.isArray(input) ? input : [];
+    return arr
+      .map((x: any) => {
+        const docId = pickStr(x, ["docId", "doc_id", "sourceDocId", "source_doc_id"]);
+        const docTitle = pickStr(x, ["docTitle", "doc_title", "sourceDocTitle", "source_doc_title"]);
+        const quote = pickStr(x, ["quote", "text", "snippet"]);
+        const piRaw = x?.paragraphIndex ?? x?.paragraph_index ?? x?.index ?? x?.paragraph;
+        const paragraphIndex = Number(piRaw);
+        return {
+          docId,
+          docTitle,
+          paragraphIndex: Number.isFinite(paragraphIndex) && paragraphIndex >= 0 ? Math.floor(paragraphIndex) : 0,
+          quote: quote.slice(0, 120)
+        };
+      })
+      .filter((x: any) => x.docId && x.docTitle && x.quote)
+      .slice(0, 24);
+  };
+  const buildFacetContent = (x: any) => {
+    const lines: string[] = [];
+    const pushLines = (label: string, val: any, limit: number) => {
+      if (Array.isArray(val) && val.length) {
+        const list = val.map((it: any) => toStr(it)).filter(Boolean).slice(0, limit);
+        if (list.length) lines.push(`- ${label}：${list.join("；")}`);
+      }
+    };
+    pushLines("信号", x?.signals, 3);
+    pushLines("模板", x?.templates, 3);
+    pushLines("自检", x?.checklist, 3);
+    pushLines("禁忌", x?.pitfalls, 3);
+    return lines.join("\n");
+  };
+  const normalizePlaybookOutput = (parsedRaw: any) => {
+    let root = parsedRaw;
+    for (let i = 0; i < 4; i += 1) {
+      if (!root || typeof root !== "object" || Array.isArray(root)) break;
+      if (
+        root.styleProfile ||
+        root.style_profile ||
+        root.playbookFacets ||
+        root.playbook_facets ||
+        root.facets
+      ) {
+        break;
+      }
+      const nested = root.data ?? root.result ?? root.output;
+      if (!nested || typeof nested !== "object") break;
+      root = nested;
+    }
+
+    const spRaw = (root as any)?.styleProfile ?? (root as any)?.style_profile ?? {};
+    const spContent =
+      pickStr(spRaw, ["content", "body", "text", "markdown", "summary"]) ||
+      (part === "facets" ? "（占位）本次仅生成 facets，styleProfile 省略。" : "");
+    const spTitle = pickStr(spRaw, ["title", "name", "label"]) || "整体写法画像";
+    const spEvidence = toEvidenceList((spRaw as any)?.evidence);
+
+    const facetsRaw = (root as any)?.playbookFacets ?? (root as any)?.playbook_facets ?? (root as any)?.facets;
+    const facetsArr = Array.isArray(facetsRaw)
+      ? facetsRaw
+      : facetsRaw && typeof facetsRaw === "object"
+        ? Object.entries(facetsRaw).map(([k, v]) =>
+            v && typeof v === "object" && !Array.isArray(v) ? { facetId: k, ...(v as any) } : { facetId: k, content: String(v ?? "") }
+          )
+        : [];
+    const playbookFacets = facetsArr
+      .map((x: any) => {
+        const facetId = pickStr(x, ["facetId", "facet_id", "id", "key"]);
+        const title = pickStr(x, ["title", "name", "label"]) || (facetId ? `维度：${facetId}` : "未命名维度");
+        const content =
+          pickStr(x, ["content", "body", "text", "markdown"]) ||
+          buildFacetContent(x) ||
+          "- （待补齐：该维度暂无足够样本）";
+        const evidence = toEvidenceList(x?.evidence);
+        return { facetId, title, content, evidence };
+      })
+      .filter((x: any) => x.facetId);
+
+    return {
+      styleProfile: {
+        title: spTitle.slice(0, 120),
+        content: spContent,
+        evidence: spEvidence.length ? spEvidence : fallbackEvidence.slice(0, 1)
+      },
+      playbookFacets
+    };
+  };
+
   let lastErr: any = null;
   let lastStatus: number | undefined = undefined;
   let lastDetail: string | undefined = undefined;
@@ -4331,8 +4454,26 @@ fastify.post(
       parsed = extractFirstCompleteJsonObject(stripped2) ?? extractFirstCompleteJsonObject(raw);
     }
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      parsedResult = parsed;
-      break;
+      const normalized = normalizePlaybookOutput(parsed);
+      const checked = outSchema.safeParse(normalized);
+      if (checked.success) {
+        parsedResult = checked.data;
+        break;
+      }
+      console.warn(
+        `[build_library_playbook] INVALID_MODEL_OUTPUT attempt=${attempt} mode=${usedMode} schema=${checked.error.issues
+          .map((it) => `${it.path.join(".") || "<root>"}:${it.code}`)
+          .join(",")
+          .slice(0, 300)}`
+      );
+      lastErr = { is429: false, isTimeout: false, detail: "INVALID_MODEL_OUTPUT", status: 500 };
+      lastDetail = "INVALID_MODEL_OUTPUT";
+      lastStatus = 500;
+      if (attempt >= retryMax) break;
+      const jitter = Math.floor(Math.random() * 200);
+      const wait = retryBaseMs * Math.pow(2, attempt) + jitter;
+      await sleep(wait);
+      continue;
     }
 
     // JSON 解析失败：视为可重试
@@ -4347,7 +4488,7 @@ fastify.post(
     await sleep(wait);
   }
 
-  if (!ret?.ok && !parsedResult) {
+  if (!parsedResult) {
     const is429 = Boolean(lastErr?.is429);
     const isTimeout = Boolean(lastErr?.isTimeout);
     const isInvalidOutput = String(lastDetail ?? "") === "INVALID_MODEL_OUTPUT";
@@ -4364,44 +4505,7 @@ fastify.post(
       retry: { attempts: retryMax + 1, retryMax, retryBaseMs },
     });
   }
-
-  if (!parsedResult) {
-    return reply.code(500).send({ error: "INVALID_MODEL_OUTPUT", hint: "模型未返回合法 JSON 对象" });
-  }
-  const parsed = parsedResult;
-
-  const evSchema = z.object({
-    docId: z.string().min(1),
-    docTitle: z.string().min(1),
-    paragraphIndex: z.number().int().min(0),
-    quote: z.string().min(1).max(120)
-  });
-  const evListSchema = z.array(evSchema).max(24).default([]);
-  const outSchema = z.object({
-    styleProfile: z.object({
-      title: z.string().min(1).max(120),
-      content: z.string().min(1),
-      evidence: evListSchema
-    }),
-    playbookFacets: z
-      .array(
-        z.object({
-          facetId: z.string().min(1),
-          title: z.string().min(1).max(160),
-          content: z.string().min(1),
-          evidence: evListSchema
-        })
-      )
-      .min(1)
-      .max(120)
-  });
-
-  let out: any = null;
-  try {
-    out = outSchema.parse(parsed);
-  } catch (e) {
-    return reply.code(500).send({ error: "INVALID_MODEL_OUTPUT", hint: "输出 schema 不符合预期", detail: String((e as any)?.message ?? e) });
-  }
+  const out = parsedResult;
 
   // 只保留 facetIds 内的 facet；并补齐缺失（缺的用空壳兜底）
   const spEvidence = out.styleProfile.evidence?.length ? out.styleProfile.evidence : fallbackEvidence.slice(0, 1);
