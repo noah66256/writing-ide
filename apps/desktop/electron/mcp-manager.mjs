@@ -241,6 +241,37 @@ export class McpManager {
     return null;
   }
 
+  _commandAliasCandidates(command) {
+    const raw = String(command ?? "").trim();
+    if (!raw) return [];
+    const lower = raw.toLowerCase();
+    const out = [raw];
+    const push = (v) => {
+      const cmd = String(v ?? "").trim();
+      if (!cmd) return;
+      if (!out.some((x) => String(x).toLowerCase() === cmd.toLowerCase())) out.push(cmd);
+    };
+    if (lower === "python") {
+      push("python3");
+      if (this._isWindows()) push("py");
+    } else if (lower === "python3") {
+      push("python");
+      if (this._isWindows()) push("py");
+    } else if (lower === "py" && this._isWindows()) {
+      push("python");
+      push("python3");
+    } else if (lower === "pip") {
+      push("pip3");
+    } else if (lower === "pip3") {
+      push("pip");
+    } else if (lower === "node") {
+      push("nodejs");
+    } else if (lower === "nodejs") {
+      push("node");
+    }
+    return out;
+  }
+
   async _resolveStdioCommand(command, extraPathDirs, systemPathRaw = process.env.PATH ?? "") {
     const raw = String(command ?? "").trim();
     if (!raw) return null;
@@ -254,14 +285,20 @@ export class McpManager {
       return null;
     }
 
+    const candidates = this._commandAliasCandidates(raw);
+
     // 优先：内置/用户 runtime bin
-    const runtimeResolved = await this._resolveCommandInDirs(raw, extraPathDirs);
-    if (runtimeResolved) return { resolved: runtimeResolved, source: "bundled" };
+    for (const cmd of candidates) {
+      const runtimeResolved = await this._resolveCommandInDirs(cmd, extraPathDirs);
+      if (runtimeResolved) return { resolved: runtimeResolved, source: "bundled", matched: cmd };
+    }
 
     // 次选：系统 PATH
     const systemDirs = this._splitPathList(systemPathRaw);
-    const systemResolved = await this._resolveCommandInDirs(raw, systemDirs);
-    if (systemResolved) return { resolved: systemResolved, source: "system" };
+    for (const cmd of candidates) {
+      const systemResolved = await this._resolveCommandInDirs(cmd, systemDirs);
+      if (systemResolved) return { resolved: systemResolved, source: "system", matched: cmd };
+    }
 
     return null;
   }
@@ -302,7 +339,7 @@ export class McpManager {
         .map((cfg) => this._extractCommandHead(String(cfg?.command ?? "")))
         .filter(Boolean),
     )];
-    const baseline = requested.length > 0 ? [] : ["uv", "uvx", "node", "npm", "npx", "python", "python3"];
+    const baseline = requested.length > 0 ? [] : ["uv", "uvx", "node", "npm", "npx", "python"];
     const commands = [...new Set([...requested, ...baseline, ...stdioCommands])];
     const checks = [];
     for (const cmd of commands) {
