@@ -97,7 +97,27 @@ const BUILTIN_SERVERS = [
 
 /** 参数别名组（按规范名聚类，运行时用于 MCP 工具参数兜底映射） */
 const ARG_ALIAS_GROUPS = [
-  ["filename", "file_name", "fileName", "path", "filepath", "filePath", "file"],
+  [
+    "filename",
+    "file_name",
+    "fileName",
+    "path",
+    "filepath",
+    "filePath",
+    "file",
+    "workbook_path",
+    "workbookPath",
+    "document_path",
+    "documentPath",
+    "doc_path",
+    "docPath",
+    "input_file",
+    "inputFile",
+    "target_file",
+    "targetFile",
+  ],
+  ["sheet_name", "sheetName", "sheet", "worksheet", "worksheet_name", "worksheetName", "tab", "tab_name", "tabName"],
+  ["range", "cell_range", "cellRange", "address_range", "addressRange", "cells_range", "cellsRange"],
   ["query", "q", "keyword", "keywords"],
   ["url", "uri", "link", "href"],
 ];
@@ -116,6 +136,46 @@ function normalizeArgKey(key) {
   return String(key ?? "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 }
 
+function splitArgKeyTokens(key) {
+  const raw = String(key ?? "")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/[^a-zA-Z0-9]+/g, " ")
+    .trim()
+    .toLowerCase();
+  if (!raw) return [];
+  return raw.split(/\s+/g).filter(Boolean);
+}
+
+function detectArgSemanticGroup(key) {
+  const tokens = splitArgKeyTokens(key);
+  if (tokens.length === 0) return "";
+  const has = (x) => tokens.includes(x);
+  if (tokens.some((t) => t.includes("path")) || has("file") || has("filename") || has("filepath") || has("document") || has("doc") || has("workbook") || has("excel")) return "path";
+  if (has("sheet") || has("worksheet") || has("tab")) return "sheet";
+  if (has("range") || has("cell") || has("address")) return "range";
+  if (has("query") || has("keyword") || has("keywords") || has("q")) return "query";
+  if (has("url") || has("uri") || has("link") || has("href") || has("endpoint")) return "url";
+  return "";
+}
+
+function normalizePathArgValue(value) {
+  if (typeof value !== "string") return value;
+  let raw = String(value ?? "").trim();
+  if (!raw) return raw;
+  raw = raw.replace(/^['"]|['"]$/g, "");
+  if (/^file:\/\//i.test(raw)) {
+    try {
+      raw = decodeURI(new URL(raw).pathname || raw);
+    } catch {
+      // ignore
+    }
+  }
+  if (process.platform !== "win32") {
+    raw = raw.replace(/\\/g, "/");
+  }
+  return raw;
+}
+
 /**
  * 从参数校验错误文本中提取“缺失参数/未知参数”线索。
  * 兼容常见 pydantic 文本格式。
@@ -126,11 +186,23 @@ function extractArgValidationSignals(text) {
   const raw = String(text ?? "");
   const missing = [];
   const unexpected = [];
-  const missRe = /(?:^|\n)([A-Za-z_][A-Za-z0-9_]*)\n\s+Missing required argument/gi;
-  const unexpRe = /(?:^|\n)([A-Za-z_][A-Za-z0-9_]*)\n\s+Unexpected keyword argument/gi;
+  const missPatterns = [
+    /(?:^|\n)([A-Za-z_][A-Za-z0-9_]*)\n\s+Missing required argument/gi,
+    /(?:^|\n)([A-Za-z_][A-Za-z0-9_]*)\n\s+Field required\b/gi,
+    /['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s+Field required\b/gi,
+  ];
+  const unexpPatterns = [
+    /(?:^|\n)([A-Za-z_][A-Za-z0-9_]*)\n\s+Unexpected keyword argument/gi,
+    /(?:^|\n)([A-Za-z_][A-Za-z0-9_]*)\n\s+Extra inputs are not permitted\b/gi,
+    /['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s+Extra inputs are not permitted\b/gi,
+  ];
   let m = null;
-  while ((m = missRe.exec(raw)) !== null) missing.push(String(m[1] ?? ""));
-  while ((m = unexpRe.exec(raw)) !== null) unexpected.push(String(m[1] ?? ""));
+  for (const re of missPatterns) {
+    while ((m = re.exec(raw)) !== null) missing.push(String(m[1] ?? ""));
+  }
+  for (const re of unexpPatterns) {
+    while ((m = re.exec(raw)) !== null) unexpected.push(String(m[1] ?? ""));
+  }
   return {
     missing: [...new Set(missing.filter(Boolean))],
     unexpected: [...new Set(unexpected.filter(Boolean))],
@@ -158,6 +230,8 @@ export class McpManager {
     this._listeners = new Set();
     /** @type {Record<string, string>} 全局环境变量，自动注入到所有 stdio MCP Server */
     this._globalEnv = {};
+    /** @type {Map<string, Array<{to:string,fromNorm:string,seenAt:number}>>} 按 schema 学习到的参数映射缓存 */
+    this._toolArgRewriteCache = new Map();
   }
 
   _isWindows() {
@@ -926,13 +1000,51 @@ export class McpManager {
     return { schemaKeys, orderedTargets };
   }
 
+  _buildArgCacheKey(serverId, toolName, schemaKeys) {
+    const sid = String(serverId ?? "").trim();
+    const tname = String(toolName ?? "").trim();
+    const schemaSig = Array.from(schemaKeys ?? []).map((x) => String(x ?? "").trim()).filter(Boolean).sort().join("|");
+    return `${sid}::${tname}::${schemaSig}`;
+  }
+
+  _getCachedArgMappings(serverId, toolName, schemaKeys) {
+    const key = this._buildArgCacheKey(serverId, toolName, schemaKeys);
+    const rows = this._toolArgRewriteCache.get(key);
+    return Array.isArray(rows) ? rows : [];
+  }
+
+  _rememberArgMappings(serverId, toolName, schemaKeys, rewrites) {
+    if (!Array.isArray(rewrites) || rewrites.length === 0) return;
+    const key = this._buildArgCacheKey(serverId, toolName, schemaKeys);
+    const prev = this._toolArgRewriteCache.get(key) ?? [];
+    const merged = [...prev];
+    const now = Date.now();
+    for (const rw of rewrites) {
+      const from = String(rw?.from ?? "").trim();
+      const to = String(rw?.to ?? "").trim();
+      if (!from || !to) continue;
+      if (!schemaKeys.has(to)) continue;
+      const fromNorm = normalizeArgKey(from);
+      if (!fromNorm) continue;
+      if (fromNorm === normalizeArgKey(to)) continue;
+      const existedIdx = merged.findIndex((x) => x.to === to && x.fromNorm === fromNorm);
+      if (existedIdx >= 0) {
+        merged[existedIdx] = { ...merged[existedIdx], seenAt: now };
+      } else {
+        merged.push({ to, fromNorm, seenAt: now });
+      }
+    }
+    merged.sort((a, b) => Number(b?.seenAt ?? 0) - Number(a?.seenAt ?? 0));
+    this._toolArgRewriteCache.set(key, merged.slice(0, 32));
+  }
+
   /**
    * 依据工具 schema 做参数兜底映射（如 path -> filename）。
    * 默认优先 required；若 required 为空则回退到 properties。
    * @param {{tools:any[]}} entry
    * @param {string} toolName
    * @param {any} rawArgs
-   * @param {{preferredTargets?: string[]}} [opts]
+   * @param {{preferredTargets?: string[], serverId?: string}} [opts]
    * @returns {{args: Record<string, any>, rewrites: Array<{from:string,to:string,reason:string}>, schemaKeys: Set<string>}}
    */
   _normalizeToolArgs(entry, toolName, rawArgs, opts = {}) {
@@ -953,6 +1065,27 @@ export class McpManager {
     const argKeyByNorm = new Map();
     for (const key of Object.keys(args)) argKeyByNorm.set(normalizeArgKey(key), key);
 
+    // 先应用该工具学到的历史映射（按 schema 维度隔离）。
+    const cachedMappings = this._getCachedArgMappings(opts.serverId, toolName, meta.schemaKeys);
+    for (const m of cachedMappings) {
+      const target = String(m?.to ?? "").trim();
+      const fromNorm = String(m?.fromNorm ?? "").trim();
+      if (!target || !fromNorm || !meta.schemaKeys.has(target)) continue;
+      if (Object.prototype.hasOwnProperty.call(args, target)) continue;
+      const sourceKey = argKeyByNorm.get(fromNorm);
+      if (!sourceKey) continue;
+      const value = args[sourceKey];
+      if (value === undefined || value === null || String(value).trim() === "") continue;
+      args[target] = detectArgSemanticGroup(target) === "path" ? normalizePathArgValue(value) : value;
+      rewrites.push({ from: sourceKey, to: target, reason: "cached_mapping_fallback" });
+      argKeyByNorm.set(normalizeArgKey(target), target);
+      if (!meta.schemaKeys.has(sourceKey)) {
+        delete args[sourceKey];
+        rewrites.push({ from: sourceKey, to: target, reason: "drop_non_schema_source" });
+        argKeyByNorm.delete(fromNorm);
+      }
+    }
+
     for (const reqKey of orderedTargets) {
       const hasReq = Object.prototype.hasOwnProperty.call(args, reqKey);
       if (hasReq) continue;
@@ -972,7 +1105,7 @@ export class McpManager {
       const value = args[sourceKey];
       if (value === undefined || value === null || String(value).trim() === "") continue;
 
-      args[reqKey] = value;
+      args[reqKey] = detectArgSemanticGroup(reqKey) === "path" ? normalizePathArgValue(value) : value;
       rewrites.push({ from: sourceKey, to: reqKey, reason: "required_alias_fallback" });
       argKeyByNorm.set(reqNorm, reqKey);
 
@@ -984,22 +1117,58 @@ export class McpManager {
       }
     }
 
+    // 语义兜底：对未命中的 required/properties，按“同语义组”尝试映射（不依赖固定别名字典）。
+    for (const reqKey of orderedTargets) {
+      if (Object.prototype.hasOwnProperty.call(args, reqKey)) continue;
+      const reqGroup = detectArgSemanticGroup(reqKey);
+      if (!reqGroup) continue;
+      const candidate = Object.keys(args).find((k) => {
+        if (k === reqKey) return false;
+        if (!args[k] && args[k] !== 0 && args[k] !== false) return false;
+        return detectArgSemanticGroup(k) === reqGroup;
+      });
+      if (!candidate) continue;
+      const value = args[candidate];
+      if (value === undefined || value === null || String(value).trim() === "") continue;
+      args[reqKey] = reqGroup === "path" ? normalizePathArgValue(value) : value;
+      rewrites.push({ from: candidate, to: reqKey, reason: "semantic_group_fallback" });
+      argKeyByNorm.set(normalizeArgKey(reqKey), reqKey);
+      if (!meta.schemaKeys.has(candidate)) {
+        delete args[candidate];
+        rewrites.push({ from: candidate, to: reqKey, reason: "drop_non_schema_source" });
+        argKeyByNorm.delete(normalizeArgKey(candidate));
+      }
+    }
+
+    // 已命中 path-like 参数时，统一做路径值归一，兼容 file://、引号、分隔符。
+    for (const reqKey of orderedTargets) {
+      if (!Object.prototype.hasOwnProperty.call(args, reqKey)) continue;
+      if (detectArgSemanticGroup(reqKey) !== "path") continue;
+      const v = args[reqKey];
+      const next = normalizePathArgValue(v);
+      if (next === v) continue;
+      args[reqKey] = next;
+      rewrites.push({ from: reqKey, to: reqKey, reason: "normalize_path_value" });
+    }
+
     return { args, rewrites, schemaKeys: meta.schemaKeys };
   }
 
   /**
    * 基于错误文本进行一次性重试参数修复。
    * @param {{tools:any[]}} entry
+   * @param {string} serverId
    * @param {string} toolName
    * @param {Record<string, any>} attemptedArgs
    * @param {string} errorText
    */
-  _buildRetryArgsFromError(entry, toolName, attemptedArgs, errorText) {
+  _buildRetryArgsFromError(entry, serverId, toolName, attemptedArgs, errorText) {
     const signals = extractArgValidationSignals(errorText);
     if (!signals.missing.length && !signals.unexpected.length) return null;
 
     const normalized = this._normalizeToolArgs(entry, toolName, attemptedArgs, {
       preferredTargets: signals.missing,
+      serverId,
     });
     const args = { ...normalized.args };
     const rewrites = [...normalized.rewrites];
@@ -1039,12 +1208,23 @@ export class McpManager {
   }
 
   async callTool(serverId, toolName, args) {
+    const startedAt = Date.now();
     const entry = this._servers.get(serverId);
     if (!entry?.client) {
       return { ok: false, error: `MCP_NOT_CONNECTED:${serverId}` };
     }
+    const knownToolNames = Array.isArray(entry?.tools)
+      ? entry.tools.map((t) => String(t?.name ?? "").trim()).filter(Boolean)
+      : [];
+    if (knownToolNames.length > 0 && !knownToolNames.includes(String(toolName ?? ""))) {
+      return {
+        ok: false,
+        error: `MCP_TOOL_NOT_FOUND:${toolName}`,
+        availableTools: knownToolNames.slice(0, 80),
+      };
+    }
     try {
-      const normalized = this._normalizeToolArgs(entry, toolName, args);
+      const normalized = this._normalizeToolArgs(entry, toolName, args, { serverId });
       if (normalized.rewrites.length > 0) {
         console.info("[McpManager] tool args normalized", {
           serverId,
@@ -1052,44 +1232,78 @@ export class McpManager {
           rewrites: normalized.rewrites,
         });
       }
-      const first = await this._callToolOnce(entry, toolName, normalized.args);
-      if (first.ok) {
+      let attemptArgs = normalized.args;
+      let last = await this._callToolOnce(entry, toolName, attemptArgs);
+      if (last.ok) {
+        this._rememberArgMappings(serverId, toolName, normalized.schemaKeys, normalized.rewrites);
         return {
-          ...first,
+          ...last,
+          diag: {
+            serverId,
+            toolName,
+            durationMs: Math.max(0, Date.now() - startedAt),
+            normalizedCount: normalized.rewrites.length,
+            retryCount: 0,
+          },
           ...(normalized.rewrites.length > 0 ? { normalizedArgs: normalized.rewrites } : {}),
         };
       }
 
-      // 单次重试：仅在检测到参数校验问题时触发。
-      const retryPlan = this._buildRetryArgsFromError(
-        entry,
-        toolName,
-        normalized.args,
-        String(first.output ?? ""),
-      );
-      if (!retryPlan) {
-        return {
-          ...first,
-          ...(normalized.rewrites.length > 0 ? { normalizedArgs: normalized.rewrites } : {}),
-        };
+      const allRewrites = [...normalized.rewrites];
+      let retrySignals = null;
+      let retryCount = 0;
+      const MAX_ARG_RETRY = 2;
+      for (let i = 0; i < MAX_ARG_RETRY; i += 1) {
+        const retryPlan = this._buildRetryArgsFromError(
+          entry,
+          serverId,
+          toolName,
+          attemptArgs,
+          String(last.output ?? ""),
+        );
+        if (!retryPlan) break;
+        retrySignals = retryPlan.signals;
+        retryCount += 1;
+        allRewrites.push(...retryPlan.rewrites);
+        console.info("[McpManager] tool args retry-normalized", {
+          serverId,
+          toolName,
+          attempt: retryCount,
+          signals: retryPlan.signals,
+          rewrites: retryPlan.rewrites,
+        });
+        attemptArgs = retryPlan.args;
+        last = await this._callToolOnce(entry, toolName, attemptArgs);
+        if (last.ok) break;
       }
-
-      console.info("[McpManager] tool args retry-normalized", {
-        serverId,
-        toolName,
-        signals: retryPlan.signals,
-        rewrites: retryPlan.rewrites,
-      });
-      const second = await this._callToolOnce(entry, toolName, retryPlan.args);
-      const allRewrites = [...normalized.rewrites, ...retryPlan.rewrites];
+      if (last.ok) {
+        this._rememberArgMappings(serverId, toolName, normalized.schemaKeys, allRewrites);
+      }
       return {
-        ...second,
-        retried: true,
-        retrySignals: retryPlan.signals,
+        ...last,
+        diag: {
+          serverId,
+          toolName,
+          durationMs: Math.max(0, Date.now() - startedAt),
+          normalizedCount: allRewrites.length,
+          retryCount,
+          success: Boolean(last?.ok),
+        },
+        retried: retryCount > 0,
+        retryCount,
+        ...(retrySignals ? { retrySignals } : {}),
         ...(allRewrites.length > 0 ? { normalizedArgs: allRewrites } : {}),
       };
     } catch (e) {
-      return { ok: false, error: String(e?.message ?? e) };
+      return {
+        ok: false,
+        error: String(e?.message ?? e),
+        diag: {
+          serverId,
+          toolName,
+          durationMs: Math.max(0, Date.now() - startedAt),
+        },
+      };
     }
   }
 

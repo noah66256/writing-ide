@@ -1,7 +1,7 @@
 {
   "name": "@writing-ide/desktop",
   "private": true,
-  "version": "0.0.9",
+  "version": "0.1.0",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -17,7 +17,10 @@
     "dist:win:all": "npm run mcp:prepare-runtime && npm run build && electron-builder --win nsis portable --x64",
     "dist:mac": "npm run mcp:prepare-runtime && npm run build && electron-builder --mac dmg zip --arm64",
     "dist:mac:x64": "npm run mcp:prepare-runtime && npm run build && electron-builder --mac dmg zip --x64",
-    "dist:mac:universal": "npm run mcp:prepare-runtime && npm run build && electron-builder --mac dmg zip --universal"
+    "dist:mac:universal": "npm run mcp:prepare-runtime && npm run build && electron-builder --mac dmg zip --universal",
+    "dist:mac:pkg": "npm run mcp:prepare-runtime && npm run build && electron-builder --mac pkg --arm64",
+    "dist:mac:pkg:x64": "npm run mcp:prepare-runtime && npm run build && electron-builder --mac pkg --x64",
+    "dist:mac:pkg:universal": "npm run mcp:prepare-runtime && npm run build && electron-builder --mac pkg --universal"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",

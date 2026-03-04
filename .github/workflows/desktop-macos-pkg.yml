@@ -1,0 +1,83 @@
+name: Desktop macOS PKG
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "Build arch"
+        required: true
+        default: "arm64"
+        type: choice
+        options:
+          - arm64
+          - x64
+          - universal
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install
+        run: npm ci
+
+      - name: Fix npm optional deps (rollup/esbuild native for macOS)
+        run: |
+          set -euo pipefail
+          node -e "const lock=require('./package-lock.json'); const v=lock?.packages?.['node_modules/rollup']?.version||''; console.log(v||'');" > /tmp/rollup_ver.txt
+          node -e "const lock=require('./package-lock.json'); const v=lock?.packages?.['node_modules/esbuild']?.version||''; console.log(v||'');" > /tmp/esbuild_ver.txt
+          ROLLUP_VER="$(cat /tmp/rollup_ver.txt | tr -d '\r' | head -n 1)"
+          ESBUILD_VER="$(cat /tmp/esbuild_ver.txt | tr -d '\r' | head -n 1)"
+          npm i --no-save --no-package-lock \
+            "@rollup/rollup-darwin-arm64@${ROLLUP_VER:-latest}" \
+            "@esbuild/darwin-arm64@${ESBUILD_VER:-latest}" \
+            --no-audit --no-fund
+
+      - name: Clean output
+        run: rm -rf apps/desktop/out
+
+      - name: Build PKG
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          set -euo pipefail
+          echo "arch=${{ inputs.arch }}"
+          if [ "${{ inputs.arch }}" = "arm64" ]; then
+            npm run dist:desktop:mac:pkg
+          elif [ "${{ inputs.arch }}" = "x64" ]; then
+            npm run dist:desktop:mac:pkg:x64
+          elif [ "${{ inputs.arch }}" = "universal" ]; then
+            npm run dist:desktop:mac:pkg:universal
+          else
+            echo "Unknown arch: ${{ inputs.arch }}"
+            exit 2
+          fi
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VER="$(node -p "require('./apps/desktop/package.json').version")"
+          TAG="desktop-v${VER}"
+          TITLE="Desktop v${VER}"
+          PKG_PATH="$(find apps/desktop/out -maxdepth 2 -name '*.pkg' -print | head -n 1 || true)"
+          if [ -z "${PKG_PATH:-}" ]; then
+            echo "PKG not found under apps/desktop/out"
+            exit 3
+          fi
+          gh release view "${TAG}" >/dev/null 2>&1 || gh release create "${TAG}" -t "${TITLE}" -n "" --latest=false
+          gh release upload "${TAG}" "${PKG_PATH}" --clobber

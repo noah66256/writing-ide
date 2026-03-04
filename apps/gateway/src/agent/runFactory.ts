@@ -331,6 +331,28 @@ export function parseAgentPersonaFromContextPack(ctx?: string): AgentPersonaFrom
   }
 }
 
+function detectBinaryReadIntent(prompt: string): boolean {
+  const text = String(prompt ?? "");
+  if (!text) return false;
+  const hasBinaryExt = /\.(docx?|xlsx?|xlsm|pptx?|pdf|numbers|pages|key)\b/i.test(text);
+  if (!hasBinaryExt) return false;
+  // 只在“读取/解析/提取”类意图下启用 MCP-first，避免误伤普通代码任务。
+  return /(读|读取|解析|提取|摘要|总结|内容|看看|打开|read|extract|parse|summari[sz]e|inspect)/i.test(text);
+}
+
+function isLikelyBinaryReadMcpTool(tool: { name?: string; originalName?: string; description?: string } | null | undefined): boolean {
+  const raw = [
+    String(tool?.name ?? ""),
+    String(tool?.originalName ?? ""),
+    String(tool?.description ?? ""),
+  ].join(" ").toLowerCase();
+  if (!raw) return false;
+  const domainHit = /(excel|workbook|sheet|word|docx?|document|pdf|pptx?|powerpoint|office|file)/i.test(raw);
+  const readHit = /(read|get|extract|parse|metadata|list|text|content|info)/i.test(raw);
+  const writeLike = /(write|update|delete|remove|create|append|save)/i.test(raw);
+  return domainHit && readHit && !writeLike;
+}
+
 export function buildAgentProtocolPrompt(args: {
   mode: AgentMode;
   allowedToolNames?: Set<string> | null;
@@ -1692,6 +1714,14 @@ export async function prepareAgentRun(args: {
       baseAllowedToolNames.add(t.name);
     }
   }
+  const binaryReadIntent = detectBinaryReadIntent(userPrompt);
+  const binaryReadMcpToolNames = new Set(
+    mcpToolsFromSidecar
+      .filter((t) => isLikelyBinaryReadMcpTool(t))
+      .map((t) => String(t?.name ?? "").trim())
+      .filter(Boolean),
+  );
+  const enforceMcpFirstForBinaryRead = binaryReadIntent && binaryReadMcpToolNames.size > 0;
 
   // 已激活 Skill 声明的 toolCaps.allowTools：即使 toolPolicy=deny 也应放行
   // 这确保 corpus_ingest 等 Skill 激活后其必要工具可用
@@ -1888,8 +1918,24 @@ export async function prepareAgentRun(args: {
   // Previous implementation dynamically removed tools per-turn based on run state
   // (todo_required, web gate, style gate, lint gate, etc.), which caused KV-cache
   // thrashing and deadlocks with the AutoRetry mechanism.
-  const computePerTurnAllowed = (_state: RunState): { allowed: Set<string>; hint: string } | null => {
-    return null;
+  const computePerTurnAllowed = (state: RunState): { allowed: Set<string>; hint: string } | null => {
+    if (!enforceMcpFirstForBinaryRead) return null;
+    const mcpCalls = Math.max(0, Math.floor(Number((state as any)?.mcpToolCallCount ?? 0)));
+    const mcpOk = Math.max(0, Math.floor(Number((state as any)?.mcpToolSuccessCount ?? 0)));
+    const mcpFail = Math.max(0, Math.floor(Number((state as any)?.mcpToolFailCount ?? 0)));
+
+    // MCP-first 护栏：二进制读取场景下，先完成至少两次 MCP 尝试（或一次成功）再放开 code.exec。
+    const shouldBlockCodeExec = mcpOk === 0 && (mcpCalls < 2 || mcpFail < 2);
+    if (!shouldBlockCodeExec) return null;
+
+    const allowed = new Set(baseAllowedToolNames);
+    allowed.delete("code.exec");
+    const toolHint = Array.from(binaryReadMcpToolNames).slice(0, 4).join(" / ");
+    const hint =
+      "当前任务包含 Office/PDF 等二进制文档读取，请先使用 MCP 文档工具完成读取，不要直接使用 code.exec。\n" +
+      `已启用 MCP-first 护栏（当前 mcpCalls=${mcpCalls}, mcpOk=${mcpOk}, mcpFail=${mcpFail}）。` +
+      (toolHint ? `\n优先工具：${toolHint}` : "");
+    return { allowed, hint };
   };
 
   const runnerStyleLibIds = parseKbSelectedLibrariesFromContextPack(body.contextPack ?? "")

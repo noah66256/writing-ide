@@ -1755,10 +1755,28 @@ export class WritingAgentRunner {
     result: { ok: boolean; output: unknown },
   ): void {
     this.runState.hasAnyToolCall = true;
+    const name = toolUse.name;
+
+    if (name.startsWith("mcp.")) {
+      this.runState.hasMcpToolCall = true;
+      this.runState.mcpToolCallCount = Math.max(
+        0,
+        Math.floor(Number(this.runState.mcpToolCallCount ?? 0)),
+      ) + 1;
+      if (result.ok) {
+        this.runState.mcpToolSuccessCount = Math.max(
+          0,
+          Math.floor(Number(this.runState.mcpToolSuccessCount ?? 0)),
+        ) + 1;
+      } else {
+        this.runState.mcpToolFailCount = Math.max(
+          0,
+          Math.floor(Number(this.runState.mcpToolFailCount ?? 0)),
+        ) + 1;
+      }
+    }
 
     if (!result.ok) return;
-
-    const name = toolUse.name;
 
     if (name === "time.now") {
       this.runState.hasTimeNow = true;

@@ -68,6 +68,10 @@ export type RunState = {
   hasTodoList: boolean;
   hasWriteOps: boolean;
   hasAnyToolCall: boolean;
+  hasMcpToolCall: boolean;
+  mcpToolCallCount: number;
+  mcpToolSuccessCount: number;
+  mcpToolFailCount: number;
   hasKbSearch: boolean;
   // 时间上下文：用于”时间敏感”工具调用前的门禁（避免模型用错年份/日期）
   hasTimeNow: boolean;
@@ -149,6 +153,10 @@ export function createInitialRunState(args?: { protocolRetryBudget?: number; wor
     hasTodoList: false,
     hasWriteOps: false,
     hasAnyToolCall: false,
+    hasMcpToolCall: false,
+    mcpToolCallCount: 0,
+    mcpToolSuccessCount: 0,
+    mcpToolFailCount: 0,
     hasKbSearch: false,
     hasTimeNow: false,
     lastTimeNowIso: null,
@@ -731,5 +739,4 @@ export function isProposalWaitingMeta(meta: any): boolean {
   const m: any = meta && typeof meta === "object" ? meta : null;
   return Boolean(m && String(m.applyPolicy ?? "") === "proposal" && m.hasApply === true);
 }
-
 

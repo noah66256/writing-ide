@@ -745,6 +745,20 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                   const result = mcpApi
                     ? await mcpApi.callTool(serverId, mcpToolName, rawArgs)
                     : { ok: false, error: "MCP_API_NOT_AVAILABLE" };
+                  const mcpDiag = {
+                    retried: Boolean((result as any)?.retried),
+                    retryCount: Number((result as any)?.retryCount ?? 0),
+                    retrySignals: (result as any)?.retrySignals ?? null,
+                    normalizedArgs: Array.isArray((result as any)?.normalizedArgs) ? (result as any).normalizedArgs : [],
+                    diag: (result as any)?.diag ?? null,
+                  };
+                  if (mcpDiag.retryCount > 0 || mcpDiag.normalizedArgs.length > 0) {
+                    log("info", "tool.result.subagent.mcp.diag", {
+                      toolCallId, serverId, mcpToolName,
+                      retryCount: mcpDiag.retryCount,
+                      normalizedArgs: mcpDiag.normalizedArgs.slice(0, 8),
+                    });
+                  }
                   const failureOutput =
                     result?.output !== undefined
                       ? result.output
@@ -753,7 +767,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                     toolCallId, name,
                     ok: result.ok,
                     output: result.ok ? result.output : failureOutput,
-                    meta: { applyPolicy: "auto", riskLevel: "low", hasApply: false },
+                    meta: { applyPolicy: "auto", riskLevel: "low", hasApply: false, mcpDiag },
                   });
                 } catch (e: any) {
                   submitToolResult({
@@ -795,6 +809,20 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                 const result = mcpApi
                   ? await mcpApi.callTool(serverId, mcpToolName, rawArgs)
                   : { ok: false, error: "MCP_API_NOT_AVAILABLE" };
+                const mcpDiag = {
+                  retried: Boolean((result as any)?.retried),
+                  retryCount: Number((result as any)?.retryCount ?? 0),
+                  retrySignals: (result as any)?.retrySignals ?? null,
+                  normalizedArgs: Array.isArray((result as any)?.normalizedArgs) ? (result as any).normalizedArgs : [],
+                  diag: (result as any)?.diag ?? null,
+                };
+                if (mcpDiag.retryCount > 0 || mcpDiag.normalizedArgs.length > 0) {
+                  log("info", "tool.result.mcp.diag", {
+                    toolCallId, serverId, mcpToolName,
+                    retryCount: mcpDiag.retryCount,
+                    normalizedArgs: mcpDiag.normalizedArgs.slice(0, 8),
+                  });
+                }
                 const failureOutput =
                   result?.output !== undefined
                     ? result.output
@@ -803,7 +831,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                   toolCallId, name,
                   ok: result.ok,
                   output: result.ok ? result.output : failureOutput,
-                  meta: { applyPolicy: "auto", riskLevel: "low", hasApply: false },
+                  meta: { applyPolicy: "auto", riskLevel: "low", hasApply: false, mcpDiag },
                 });
               } catch (e: any) {
                 submitToolResult({
