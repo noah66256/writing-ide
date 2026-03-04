@@ -231,9 +231,9 @@ export const BUILTIN_SUB_AGENTS: SubAgentDefinition[] = [
       maxToolCalls: 10,
       timeoutMs: 180_000,
     },
-    triggerPatterns: ["学风格", "抽卡", "导入语料", "学习风格", "分析文风", "导入素材", "学习写法", "入库"],
+    triggerPatterns: [],
     priority: 95,
     enabled: true,
-    version: "0.3.0",
+    version: "0.4.0",
   },
 ];

@@ -386,7 +386,6 @@ export function buildAgentProtocolPrompt(args: {
         `   - 写作/改写/润色/仿写 → 委派文案写手（copywriter）；\n` +
         `   - 热点调研/选题/竞品分析 → 委派选题策划（topic_planner）；\n` +
         `   - SEO 关键词/标签优化 → 委派 SEO 专员（seo_specialist）；\n` +
-        `   - 语料导入/抽卡/学风格/分析文风 → 委派学习专员（learning_specialist）；\n` +
         `   - 委派时在 task 中写清目标、约束、验收标准；子 agent 会自行搜索素材和执行，你不需要提前帮它搜。\n` +
         `   - 子 agent 返回结果后：审核质量 → 必要时要求返工或自行润色 → 交付用户。\n` +
         `   上下文传递规则（agent.delegate 的 inputArtifacts / task 参数）：\n` +
@@ -436,7 +435,7 @@ export function buildAgentProtocolPrompt(args: {
         `你的团队成员（通过 agent.delegate 调度）：\n${teamLines}\n没有列出的角色你不具备，不要虚构。\n\n` +
         `管理者准则（有团队成员时优先遵守）：\n` +
         `- 你拥有所有工具的完整权限，但作为管理者，应优先委派给合适的团队成员执行。\n` +
-        `- 优先委派：写稿、调研、SEO 优化、语料导入/抽卡等属于团队成员专长的工作，优先通过 agent.delegate 委派。\n` +
+        `- 优先委派：写稿、调研、SEO 优化等属于团队成员专长的工作，优先通过 agent.delegate 委派。\n` +
         `- 亲自执行：当任务简单（如快速读取文档、记录决策、小幅修改）、不在任何成员职责范围内、或用户明确要求你亲自处理时，直接使用工具执行。\n` +
         `- 审核整合：子 agent 返回的结果由你审核、润色、整合后交付用户。\n\n`
       : `你目前没有团队成员，所有任务由你独立执行。\n\n`) +
@@ -605,7 +604,7 @@ export function looksLikeFileOpsIntent(text: string): boolean {
   return hasTargetHint;
 }
 
-// KB/语料操作关键词（抽卡、导入、学风格等）——复用于意图路由 + 自动委派
+// KB/语料操作关键词（抽卡、导入、学风格等）——用于意图路由
 const KB_OPS_PROMPT_RE =
   /(抽卡|入库|导入语料|导入素材|学.{0,4}风格|学.{0,4}写法|学.{0,4}文风|分析.{0,4}文风|分析.{0,4}风格|提取.{0,4}风格|语料|素材.{0,6}入库|新建.{0,6}风格库|新建.{0,6}知识库|kb\.ingest)/;
 
@@ -2554,27 +2553,10 @@ export async function executeAgentRun(args: {
     .filter(Boolean)
     .join("\n\n");
 
-  // ── 代码级自动委派：KB ops → learning_specialist ──────────────
-  // 当用户提示词匹配 KB 操作（抽卡/入库/学风格）且未显式 @mention 任何 agent 时，
-  // 自动路由到 learning_specialist，绕过主 LLM 循环的不确定性。
-  // 混合意图保护：如果同时包含写作意图，交给主 Agent 按正常流程编排。
   const explicitTargetAgentIds = Array.isArray(body.targetAgentIds)
     ? (body.targetAgentIds as string[]).map((id) => String(id ?? "").trim()).filter(Boolean)
     : [];
-  const autoKbOps =
-    mode === "agent" &&
-    explicitTargetAgentIds.length === 0 &&
-    looksLikeKbOpsIntent(userPrompt) &&
-    !intent.isWritingTask;
-  const runTargetAgentIds = autoKbOps
-    ? ["learning_specialist"]
-    : explicitTargetAgentIds.length > 0
-      ? explicitTargetAgentIds
-      : undefined;
-
-  if (autoKbOps) {
-    services.fastify?.log?.info?.({ runId, trigger: "auto_kb_ops_delegate" }, "KB ops detected → auto-delegate to learning_specialist");
-  }
+  const runTargetAgentIds = explicitTargetAgentIds.length > 0 ? explicitTargetAgentIds : undefined;
 
   const runCtx: RunContext = {
     runId,
