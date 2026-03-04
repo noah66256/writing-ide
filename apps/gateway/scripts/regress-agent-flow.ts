@@ -204,23 +204,23 @@ async function main() {
   }
   {
     // web_topic_radar 已移除，此场景下 style_imitate 不应被激活（因为是搜索场景，不是写作）
-    const mode = “agent” as const;
-    const userPrompt = “查一查全网和github，看看这种问题怎么解决”;
+    const mode = "agent" as const;
+    const userPrompt = "查一查全网和github，看看这种问题怎么解决";
     const runTodo = [
-      { id: “vs”, text: “确认需求：形式（视频脚本vs文章）与素材扩充边界”, status: “blocked”, note: “等待用户回复” },
-      { id: “t2”, text: “检索风格素材：拉取直男财经样例”, status: “todo” },
-      { id: “lint_style”, text: “风格自检：使用 lint.style”, status: “todo” },
+      { id: "vs", text: "确认需求：形式（视频脚本vs文章）与素材扩充边界", status: "blocked", note: "等待用户回复" },
+      { id: "t2", text: "检索风格素材：拉取直男财经样例", status: "todo" },
+      { id: "lint_style", text: "风格自检：使用 lint.style", status: "todo" },
     ];
-    const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: “auto”, runTodo });
+    const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: "auto", runTodo });
     assert.equal(intent.isWritingTask, false);
     const skills = activateSkills({
       mode,
       userPrompt,
-      mainDocRunIntent: “auto”,
-      kbSelected: [{ id: “style-1”, purpose: “style” }],
+      mainDocRunIntent: "auto",
+      kbSelected: [{ id: "style-1", purpose: "style" }],
       intent,
     });
-    assert.equal(skills.some((s) => s.id === “style_imitate”), false);
+    assert.equal(skills.some((s) => s.id === "style_imitate"), false);
   }
   {
     const mode = "agent" as const;
@@ -245,7 +245,7 @@ async function main() {
   }
   ok("autoRetry.analyzeAutoRetryText");
 
-  // ======== 3.0.1) AutoRetry：初稿后二次检索（补金句/收束） ========
+  // ======== 3.0.1) AutoRetry：不再承担 workflow 强约束（仅错误恢复） ========
   {
     const mode = "agent" as const;
     const userPrompt = "按风格库仿写一段";
@@ -260,10 +260,11 @@ async function main() {
     state.copyLintPassed = false;
     state.lastCopyLint = null;
     const a = analyzeAutoRetryText({ assistantText: "继续", intent, gates, state, lintMaxRework: 2, targetChars: 1200 });
-    assert.equal(a.needPostDraftKbSearch, true);
-    assert.equal(a.shouldRetry, true);
+    assert.equal(a.isEmpty, false);
+    assert.equal(a.needTodo, false);
+    assert.equal(a.shouldRetry, false);
   }
-  ok("autoRetry.postDraftKbSearch");
+  ok("autoRetry.error_only_policy");
 
   // ======== 3.1) Lint parse / proposal meta ========
   {
@@ -317,31 +318,32 @@ async function main() {
   // ======== 5) 静态回归：关键链路仍存在（防止“未来重构时删掉关键保护”） ========
   {
     const gw = await readRepoFile("apps/gateway/src/index.ts");
+    const runFactory = await readRepoFile("apps/gateway/src/agent/runFactory.ts");
     const runner = await readRepoFile("apps/gateway/src/agent/writingAgentRunner.ts");
-    const gwAll = gw + "\n" + runner;
+    const gwAll = gw + "\n" + runFactory + "\n" + runner;
     assert.ok(gw.includes("\"policy.decision\""), "Gateway 缺少 policy.decision SSE（可观测性回退）");
-    assert.ok(gw.includes("SkillPolicy"), "Gateway 缺少 SkillPolicy 决策记录（Skills 可解释性回退）");
-    assert.ok(gw.includes("SkillToolCapsPolicy"), "Gateway 缺少 SkillToolCapsPolicy（skills toolCaps/阶段门禁可能回退）");
-    assert.ok(gw.includes("reasonCodes"), "Gateway run.end 未携带 reasonCodes（可解释性回退）");
+    assert.ok(gwAll.includes("SkillPolicy"), "Gateway 缺少 SkillPolicy 决策记录（Skills 可解释性回退）");
+    assert.ok(gwAll.includes("SkillToolCapsPolicy") || gwAll.includes("toolCaps"), "Gateway 缺少 SkillToolCapsPolicy/toolCaps（skills toolCaps/阶段门禁可能回退）");
+    assert.ok(gwAll.includes("reasonCodes"), "Gateway run.end 未携带 reasonCodes（可解释性回退）");
     assert.ok(gwAll.includes("style_kb_zero_hit") || gwAll.includes("styleKbDegraded"), "Gateway 缺少 kb 0 命中降级标记（可能再次卡死）");
-    assert.ok(gw.includes("reason: \"clarify_waiting\""), "Gateway 缺少 clarify_waiting 分支（可能再次“问你但仍继续跑”）");
+    assert.ok(gwAll.includes("reason: \"clarify_waiting\""), "Gateway 缺少 clarify_waiting 分支（可能再次“问你但仍继续跑”）");
     assert.ok(gwAll.includes("assistant.done"), "Gateway/Runner 未发送 assistant.done（assistant 边界回退）");
-    assert.ok(gw.includes("\"assistant.start\""), "Gateway 缺少 assistant.start SSE（turn 边界可能回退）");
-    assert.ok(gw.includes("protocolRetryBudget"), "Gateway 缺少 protocolRetryBudget（预算拆分可能回退）");
-    assert.ok(gw.includes("workflowRetryBudget"), "Gateway 缺少 workflowRetryBudget（预算拆分可能回退）");
-    assert.ok(gw.includes("hasWriteProposed"), "Gateway 缺少 hasWriteProposed（proposal 语义可解释性可能回退）");
+    assert.ok(gwAll.includes("assistant.start"), "Gateway 缺少 assistant.start SSE（turn 边界可能回退）");
+    assert.ok(gwAll.includes("protocolRetryBudget"), "Gateway 缺少 protocolRetryBudget（预算拆分可能回退）");
+    assert.ok(gwAll.includes("workflowRetryBudget"), "Gateway 缺少 workflowRetryBudget（预算拆分可能回退）");
+    assert.ok(gwAll.includes("hasWriteProposed"), "Gateway 缺少 hasWriteProposed（proposal 语义可解释性可能回退）");
     assert.ok(gwAll.includes("executedBy"), "Gateway tool.call 未携带 executedBy（无法逐步迁回 Gateway）");
-    assert.ok(gw.includes("styleLinterLibraries"), "Gateway 未读取 toolSidecar.styleLinterLibraries（server-side lint.style 无法落地）");
-    assert.ok(gw.includes("completionOnceViaProvider"), "Gateway 未使用 completionOnceViaProvider（ProviderAdapter one-shot 可能回退）");
-    assert.ok(!gw.includes("chatCompletionOnce("), "Gateway 仍直接调用 chatCompletionOnce（ProviderAdapter 统一回退）");
+    assert.ok(gwAll.includes("styleLinterLibraries"), "Gateway 未读取 toolSidecar.styleLinterLibraries（server-side lint.style 无法落地）");
+    assert.ok(gwAll.includes("completionOnceViaProvider"), "Gateway 未使用 completionOnceViaProvider（ProviderAdapter one-shot 可能回退）");
+    assert.ok(!gwAll.includes("chatCompletionOnce("), "Gateway 仍直接调用 chatCompletionOnce（ProviderAdapter 统一回退）");
     // lint.style：调用上游模型的 server-side 工具，必须计费（否则白嫖强模型）。
-    assert.ok(gw.includes("source: \"tool.lint.style\"") || gw.includes("tool.lint.style"), "Gateway 未对 lint.style 扣费入账（工具计费回退）");
-    assert.ok(gw.includes("projectFiles"), "Gateway 未接收 toolSidecar.projectFiles（server-side project.listFiles 无法落地）");
+    assert.ok(gwAll.includes("source: \"tool.lint.style\"") || gwAll.includes("tool.lint.style"), "Gateway 未对 lint.style 扣费入账（工具计费回退）");
+    assert.ok(gwAll.includes("projectFiles"), "Gateway 未接收 toolSidecar.projectFiles（server-side project.listFiles 无法落地）");
     assert.ok(gw.includes("/api/admin/audit/runs"), "Gateway 未暴露审计查询接口 /api/admin/audit/runs（审计落库回退）");
-    assert.ok(gw.includes("需确认") || gw.includes("澄清"), "Gateway ClarifyPolicy 未覆盖 需确认/澄清（可能再次自说自话继续跑）");
+    assert.ok(gwAll.includes("需确认") || gwAll.includes("澄清"), "Gateway ClarifyPolicy 未覆盖 需确认/澄清（可能再次自说自话继续跑）");
     // Selector v1：写法候选不应再用 clarify_waiting 强制用户先选（默认自动选并继续）
-    assert.ok(gw.includes("policy: \"StyleClusterSelectPolicy\""), "Gateway 缺少 StyleClusterSelectPolicy（Selector v1 回退）");
-    assert.ok(gw.includes("decision: \"auto_selected\""), "StyleClusterSelectPolicy 未默认 auto_selected（Selector v1 回退）");
+    assert.ok(gwAll.includes("policy: \"StyleClusterSelectPolicy\""), "Gateway 缺少 StyleClusterSelectPolicy（Selector v1 回退）");
+    assert.ok(gwAll.includes("decision: \"auto_selected\""), "StyleClusterSelectPolicy 未默认 auto_selected（Selector v1 回退）");
   }
   {
     const desk = await readRepoFile("apps/desktop/src/agent/toolRegistry.ts");
@@ -349,15 +351,17 @@ async function main() {
     assert.ok(desk.includes("doc.splitToDir(proposal)"), "Desktop 虚拟 workspace 未覆盖 doc.splitToDir");
   }
   {
-    const desk = await readRepoFile("apps/desktop/src/agent/gatewayAgent.ts");
-    assert.ok(desk.includes("toolSidecar"), "Desktop 未向 /api/agent/run/stream 发送 toolSidecar（server-side lint.style 无法落地）");
-    assert.ok(desk.includes("projectFiles"), "Desktop 未在 toolSidecar 携带 projectFiles（server-side project.listFiles 无法落地）");
-    assert.ok(desk.includes("assistant.start"), "Desktop 未处理 assistant.start（turn 边界可能回退）");
-    assert.ok(desk.includes("ACTIVE_SKILLS(JSON)"), "Desktop 未注入 ACTIVE_SKILLS(JSON)（Skills 可见性回退）");
-    assert.ok(desk.includes("KB_STYLE_CLUSTERS(JSON)"), "Desktop 未注入 KB_STYLE_CLUSTERS(JSON)（M3 写法候选回退）");
-    assert.ok(desk.includes("STYLE_SELECTOR(JSON)"), "Desktop 未注入 STYLE_SELECTOR(JSON)（Selector v1 回退）");
-    assert.ok(desk.includes("STYLE_DIMENSIONS"), "Desktop 未注入 STYLE_DIMENSIONS（维度结构化注入回退）");
-    assert.ok(desk.includes("styleContractV1"), "Desktop 未落地 styleContractV1（M3 主文档风格契约回退）");
+    const gatewayAgent = await readRepoFile("apps/desktop/src/agent/gatewayAgent.ts");
+    const wsTransport = await readRepoFile("apps/desktop/src/agent/wsTransport.ts");
+    const deskAll = gatewayAgent + "\n" + wsTransport;
+    assert.ok(deskAll.includes("toolSidecar"), "Desktop 未向 /api/agent/run/stream 发送 toolSidecar（server-side lint.style 无法落地）");
+    assert.ok(deskAll.includes("projectFiles"), "Desktop 未在 toolSidecar 携带 projectFiles（server-side project.listFiles 无法落地）");
+    assert.ok(deskAll.includes("assistant.start"), "Desktop 未处理 assistant.start（turn 边界可能回退）");
+    assert.ok(gatewayAgent.includes("ACTIVE_SKILLS(JSON)"), "Desktop 未注入 ACTIVE_SKILLS(JSON)（Skills 可见性回退）");
+    assert.ok(gatewayAgent.includes("KB_STYLE_CLUSTERS(JSON)"), "Desktop 未注入 KB_STYLE_CLUSTERS(JSON)（M3 写法候选回退）");
+    assert.ok(gatewayAgent.includes("STYLE_SELECTOR(JSON)"), "Desktop 未注入 STYLE_SELECTOR(JSON)（Selector v1 回退）");
+    assert.ok(gatewayAgent.includes("STYLE_DIMENSIONS"), "Desktop 未注入 STYLE_DIMENSIONS（维度结构化注入回退）");
+    assert.ok(gatewayAgent.includes("styleContractV1"), "Desktop 未落地 styleContractV1（M3 主文档风格契约回退）");
   }
   {
     const run = await readRepoFile("apps/desktop/src/state/runStore.ts");
@@ -432,7 +436,7 @@ async function main() {
   }
   ok("lint.missingDimensions.blockPass");
 
-  // ======== 7) targetChars 参数传递：needLength 生效 ========
+  // ======== 7) targetChars 参数传递：AutoRetry 不做长度强约束 ========
   {
     const mode = "agent" as const;
     const intent = detectRunIntent({ mode, userPrompt: "按风格库仿写一段1200字" });
@@ -448,14 +452,14 @@ async function main() {
     // 模拟：lint 已通过，但输出字数远超目标
     const longText = "这是一段非常长的候选正文。" + "此处省略大量文字。".repeat(200);
     const a = analyzeAutoRetryText({ assistantText: longText, intent, gates, state, lintMaxRework: 2, targetChars: 1200 });
-    assert.equal(a.needLength, true, "字数偏离 ±20% 应触发 needLength");
-    assert.equal(a.shouldRetry, true, "字数偏离时应触发 shouldRetry");
+    assert.equal(a.isEmpty, false, "非空文本不应被当作空输出");
+    assert.equal(a.shouldRetry, false, "长度偏差不再由 AutoRetry 强制重试");
 
-    // 不传 targetChars => needLength 为 false（兼容旧路径）
+    // 不传 targetChars 同样不影响 AutoRetry 的错误恢复判断
     const b = analyzeAutoRetryText({ assistantText: longText, intent, gates, state, lintMaxRework: 2 });
-    assert.equal(b.needLength, false, "不传 targetChars 时 needLength 应为 false");
+    assert.equal(b.shouldRetry, false, "不传 targetChars 时保持错误恢复逻辑一致");
   }
-  ok("autoRetry.targetChars.needLength");
+  ok("autoRetry.targetChars.error_only_policy");
 
   // eslint-disable-next-line no-console
   console.log("[regress-agent-flow] ALL OK");
@@ -465,5 +469,3 @@ main().catch((e) => {
   console.error("[regress-agent-flow] FAILED:", e);
   process.exit(1);
 });
-
-
