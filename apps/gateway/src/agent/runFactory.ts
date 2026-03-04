@@ -2017,6 +2017,15 @@ export async function prepareAgentRun(args: {
     "run.todo.remove",
     "run.todo.clear",
   ]);
+  const DELETE_ONLY_ALLOWED_TOOL_NAMES = new Set<string>([
+    ...Array.from(ALWAYS_ALLOW_TOOL_NAMES),
+    "run.done",
+    "project.listFiles",
+    "doc.commitSnapshot",
+    "doc.listSnapshots",
+    "doc.restoreSnapshot",
+    "doc.deletePath",
+  ]);
 
   // Phase gates disabled — provide all tools, let LLM decide when to call each.
   // Previous implementation dynamically removed tools per-turn based on run state
@@ -2029,9 +2038,16 @@ export async function prepareAgentRun(args: {
     const hints: string[] = [];
 
     if (isDeleteOnlyRoute) {
-      allowed = new Set(baseAllowedToolNames);
-      allowed.delete("doc.read");
-      hints.push("当前任务为删除/清理（file_delete_only）：默认禁止 doc.read，优先 project.listFiles / doc.deletePath。");
+      allowed = new Set(Array.from(baseAllowedToolNames).filter((name) => DELETE_ONLY_ALLOWED_TOOL_NAMES.has(name)));
+      // 兜底确保关键链路可用（受 mode/toolPolicy 影响时仍保留）。
+      allowed.add("project.listFiles");
+      allowed.add("doc.deletePath");
+      allowed.add("run.done");
+      hints.push(
+        "当前任务为删除/清理（file_delete_only）：已启用最小工具集。\n" +
+          "- 仅允许 project.listFiles / doc.deletePath / 快照回滚 / run.*\n" +
+          "- 默认禁止 doc.read、project.search、code.exec 等非必要工具。",
+      );
     }
 
     if (!enforceMcpFirstForBinaryRead) {

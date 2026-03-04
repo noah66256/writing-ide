@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { detectRunIntent } from "@writing-ide/agent-core";
-import { completionOnceViaProvider } from "../src/llm/providerAdapter.js";
+import { completionOnceViaProvider, streamChatCompletionViaProvider } from "../src/llm/providerAdapter.js";
 import { computeIntentRouteDecisionPhase0 } from "../src/agent/runFactory.js";
 
 function ok(name: string) {
@@ -26,10 +26,30 @@ async function smokeRouteDeleteOnly() {
 
 async function smokeProviderEndpoints() {
   const realFetch = globalThis.fetch;
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input);
+    const bodyTextFromInit = typeof init?.body === "string" ? init.body : "";
 
     if (url.endsWith("/v1/responses") || url.endsWith("/responses")) {
+      const req = input instanceof Request ? input : null;
+      const bodyText = req ? await req.text().catch(() => "") : bodyTextFromInit;
+      const bodyJson = bodyText ? JSON.parse(bodyText) : {};
+      if (String(bodyJson?.model ?? "").includes("toolcall")) {
+        return new Response(
+          JSON.stringify({
+            output: [
+              {
+                type: "function_call",
+                id: "fc_resp_1",
+                name: "project_dot_listFiles",
+                arguments: "{}",
+              },
+            ],
+            usage: { input_tokens: 3, output_tokens: 5 },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
       return new Response(
         JSON.stringify({
           output: [{ content: [{ type: "output_text", text: "ok responses" }] }],
@@ -40,6 +60,33 @@ async function smokeProviderEndpoints() {
     }
 
     if (url.endsWith("/v1/chat/completions") || url.endsWith("/chat/completions")) {
+      const req = input instanceof Request ? input : null;
+      const bodyText = req ? await req.text().catch(() => "") : bodyTextFromInit;
+      const bodyJson = bodyText ? JSON.parse(bodyText) : {};
+      if (String(bodyJson?.model ?? "").includes("toolcall")) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  tool_calls: [
+                    {
+                      id: "fc_chat_1",
+                      type: "function",
+                      function: {
+                        name: "project_dot_listFiles",
+                        arguments: "{}",
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+            usage: { prompt_tokens: 2, completion_tokens: 4 },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
       return new Response(
         JSON.stringify({
           choices: [{ message: { content: "ok chat completions" } }],
@@ -87,6 +134,68 @@ async function smokeProviderEndpoints() {
     assert.equal((r2 as any).content, "ok chat completions");
     ok("provider.chat_completions");
 
+    const r4 = await completionOnceViaProvider({
+      baseUrl: "https://mock.local",
+      endpoint: "/v1/responses",
+      apiKey: "k",
+      model: "gpt-4o-mini-toolcall",
+      messages,
+      tools: [{ name: "project_dot_listFiles", description: "list files", inputSchema: { type: "object", properties: {} } }],
+      toolChoice: { type: "any" },
+      parallelToolCalls: false,
+    });
+    assert.equal(r4.ok, true);
+    assert.match(String((r4 as any).content ?? ""), /<tool_calls>/);
+    ok("provider.responses.tool_call_bridge");
+
+    const r5 = await completionOnceViaProvider({
+      baseUrl: "https://mock.local",
+      endpoint: "/v1/chat/completions",
+      apiKey: "k",
+      model: "gpt-4o-mini-toolcall",
+      messages,
+      tools: [{ name: "project_dot_listFiles", description: "list files", inputSchema: { type: "object", properties: {} } }],
+      toolChoice: { type: "any" },
+      parallelToolCalls: false,
+    });
+    assert.equal(r5.ok, true);
+    assert.match(String((r5 as any).content ?? ""), /<tool_calls>/);
+    ok("provider.chat_completions.tool_call_bridge");
+
+    const streamResPieces: string[] = [];
+    for await (const ev of streamChatCompletionViaProvider({
+      baseUrl: "https://mock.local",
+      endpoint: "/v1/responses",
+      apiKey: "k",
+      model: "gpt-4o-mini-toolcall",
+      messages,
+      tools: [{ name: "project_dot_listFiles", description: "list files", inputSchema: { type: "object", properties: {} } }],
+      toolChoice: { type: "any" },
+      parallelToolCalls: false,
+    })) {
+      if (ev.type === "delta") streamResPieces.push(String(ev.delta ?? ""));
+      if (ev.type === "error") throw new Error(String((ev as any).error ?? "stream responses failed"));
+    }
+    assert.match(streamResPieces.join(""), /<tool_calls>/);
+    ok("provider.responses.stream_tool_call_bridge");
+
+    const streamChatPieces: string[] = [];
+    for await (const ev of streamChatCompletionViaProvider({
+      baseUrl: "https://mock.local",
+      endpoint: "/v1/chat/completions",
+      apiKey: "k",
+      model: "gpt-4o-mini-toolcall",
+      messages,
+      tools: [{ name: "project_dot_listFiles", description: "list files", inputSchema: { type: "object", properties: {} } }],
+      toolChoice: { type: "any" },
+      parallelToolCalls: false,
+    })) {
+      if (ev.type === "delta") streamChatPieces.push(String(ev.delta ?? ""));
+      if (ev.type === "error") throw new Error(String((ev as any).error ?? "stream chat failed"));
+    }
+    assert.match(streamChatPieces.join(""), /<tool_calls>/);
+    ok("provider.chat_completions.stream_tool_call_bridge");
+
     const r3 = await completionOnceViaProvider({
       baseUrl: "https://mock.local",
       endpoint: "/v1/messages",
@@ -114,4 +223,3 @@ main().catch((e) => {
   console.error("[smoke-messages-responses] FAIL", e);
   process.exit(1);
 });
-

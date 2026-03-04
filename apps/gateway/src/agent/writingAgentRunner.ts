@@ -8,7 +8,7 @@ import {
   type MsgStreamEvent,
 } from "../llm/anthropicMessages.js";
 import { buildInjectedToolResultMessages, streamChatCompletionViaProvider } from "../llm/providerAdapter.js";
-import type { OpenAiChatMessage } from "../llm/openaiCompat.js";
+import type { OpenAiChatMessage, OpenAiCompatTool } from "../llm/openaiCompat.js";
 
 import {
   analyzeAutoRetryText,
@@ -28,7 +28,7 @@ import {
   type SubAgentDefinition,
 } from "@writing-ide/agent-core";
 
-import { TOOL_LIST, encodeToolName, validateToolCallArgs } from "@writing-ide/tools";
+import { TOOL_LIST, decodeToolName, encodeToolName, validateToolCallArgs } from "@writing-ide/tools";
 
 import {
   decideServerToolExecution,
@@ -275,6 +275,131 @@ function buildToolCallsXml(calls: Array<{ name: string; args: Record<string, unk
     .filter(Boolean)
     .join("");
   return `<tool_calls>${blocks}</tool_calls>`;
+}
+
+function toOpenAiCompatToolDefs(args: { allowed: Set<string>; mode: "agent" | "chat"; mcpTools: any[] }): OpenAiCompatTool[] {
+  const builtins = TOOL_LIST.filter((tool) => {
+    if (!args.allowed.has(tool.name)) return false;
+    if (!tool.modes || tool.modes.length === 0) return true;
+    return tool.modes.includes(args.mode);
+  }).map((tool) => ({
+    name: encodeToolName(tool.name),
+    description: String(tool.description ?? ""),
+    inputSchema:
+      tool.inputSchema && typeof tool.inputSchema === "object"
+        ? (tool.inputSchema as Record<string, unknown>)
+        : { type: "object", properties: {}, additionalProperties: true },
+  }));
+
+  const mcpDefs = (Array.isArray(args.mcpTools) ? args.mcpTools : [])
+    .filter((t: any) => args.allowed.has(String(t?.name ?? "").trim()))
+    .map((t: any) => ({
+      name: encodeToolName(String(t?.name ?? "")),
+      description: String(t?.description ?? ""),
+      inputSchema:
+        t?.inputSchema && typeof t.inputSchema === "object"
+          ? (t.inputSchema as Record<string, unknown>)
+          : { type: "object", properties: {}, additionalProperties: true },
+    }));
+
+  return [...builtins, ...mcpDefs].filter((t) => String(t.name ?? "").trim().length > 0);
+}
+
+function coerceToolArgByType(value: unknown, type: string | undefined): unknown {
+  const expected = String(type ?? "").trim().toLowerCase();
+  if (!expected) return value;
+
+  if (expected === "array") {
+    if (Array.isArray(value)) return value;
+    if (typeof value === "string") {
+      const s = value.trim();
+      if (!s) return [];
+      if (s.startsWith("[") && s.endsWith("]")) {
+        try {
+          const parsed = JSON.parse(s);
+          if (Array.isArray(parsed)) return parsed;
+        } catch {
+          // ignore
+        }
+      }
+      return [value];
+    }
+    return [value];
+  }
+
+  if (expected === "number") {
+    if (typeof value === "number") return value;
+    if (typeof value === "string" && value.trim()) {
+      const n = Number(value);
+      if (Number.isFinite(n)) return n;
+    }
+    return value;
+  }
+
+  if (expected === "boolean") {
+    if (typeof value === "boolean") return value;
+    if (typeof value === "string") {
+      const s = value.trim().toLowerCase();
+      if (s === "true") return true;
+      if (s === "false") return false;
+    }
+    return value;
+  }
+
+  if (expected === "object") {
+    if (value && typeof value === "object" && !Array.isArray(value)) return value;
+    if (typeof value === "string") {
+      const s = value.trim();
+      if (!s) return {};
+      if (s.startsWith("{") && s.endsWith("}")) {
+        try {
+          const parsed = JSON.parse(s);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            return parsed;
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+    return value;
+  }
+
+  return value;
+}
+
+function normalizeToolCallForValidation(nameRaw: string, argsRaw: Record<string, unknown>): {
+  name: string;
+  args: Record<string, unknown>;
+  sanitized: boolean;
+} {
+  const name = decodeToolName(String(nameRaw ?? "").trim());
+  const meta = TOOL_LIST.find((t) => t.name === name);
+  const baseArgs = argsRaw && typeof argsRaw === "object" && !Array.isArray(argsRaw) ? argsRaw : {};
+  if (!meta) return { name, args: baseArgs, sanitized: false };
+
+  const metaArgs = Array.isArray(meta.args) ? meta.args : [];
+  if (metaArgs.length === 0) {
+    return {
+      name,
+      args: {},
+      sanitized: Object.keys(baseArgs).length > 0,
+    };
+  }
+
+  const normalizedInput: Record<string, unknown> = { ...baseArgs };
+  if (name === "project.search" && normalizedInput.path !== undefined && normalizedInput.paths === undefined) {
+    normalizedInput.paths = Array.isArray(normalizedInput.path) ? normalizedInput.path : [normalizedInput.path];
+  }
+
+  const allowed = new Map(metaArgs.map((a) => [String(a.name), String(a.type ?? "string").toLowerCase()]));
+  const sanitizedArgs: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(normalizedInput)) {
+    if (!allowed.has(k)) continue;
+    sanitizedArgs[k] = coerceToolArgByType(v, allowed.get(k));
+  }
+  const sanitized = Object.keys(sanitizedArgs).length !== Object.keys(baseArgs).length;
+  return { name, args: sanitizedArgs, sanitized };
 }
 
 
@@ -710,6 +835,7 @@ export class WritingAgentRunner {
     const toolListText = lines.length ? lines.join("\n") : "- （无可用工具）";
     return (
       "【工具调用协议（XML）】\n" +
+      "优先使用模型原生工具调用（function/tool calling）；仅当上游不支持时，才输出 XML。\n" +
       "当需要调用工具时，整条回复必须只包含 XML，不得混入自然语言。\n" +
       "若调用工具，只允许一个 <tool_calls> 包裹，禁止输出多个 <tool_calls> 段。\n" +
       "禁止在 XML 前后追加解释文本（包括“我将调用…”之类语句）。\n" +
@@ -894,6 +1020,17 @@ export class WritingAgentRunner {
       ? `${this.ctx.systemPrompt}\n\n${perTurnCaps.hint}`
       : this.ctx.systemPrompt;
     const xmlToolPrompt = this._buildXmlToolProtocolPrompt(effectiveAllowed);
+    const nativeTools = toOpenAiCompatToolDefs({
+      allowed: effectiveAllowed,
+      mode: this.ctx.mode,
+      mcpTools: ((this.ctx as any).mcpTools ?? []) as any[],
+    });
+    const firstTurnToolChoice =
+      this.turn === 1 && nativeTools.length > 0 && this.ctx.toolChoiceFirstTurn
+        ? this.ctx.toolChoiceFirstTurn.type === "tool"
+          ? { type: "tool" as const, name: encodeToolName(String(this.ctx.toolChoiceFirstTurn.name ?? "")) }
+          : this.ctx.toolChoiceFirstTurn
+        : undefined;
 
     this.ctx.writeEvent("assistant.start", { turn: this.turn });
 
@@ -928,6 +1065,9 @@ export class WritingAgentRunner {
         temperature: undefined,
         maxTokens: undefined,
         includeUsage: true,
+        tools: nativeTools,
+        toolChoice: firstTurnToolChoice,
+        parallelToolCalls: false,
         signal: this.ctx.abortSignal,
       });
 
@@ -968,8 +1108,11 @@ export class WritingAgentRunner {
     const completedToolUses: ContentBlockToolUse[] = [];
     const presetResults = new Map<string, ToolExecResult>();
     for (const c of calls) {
-      const input = c.args && typeof c.args === "object" && !Array.isArray(c.args) ? c.args : {};
-      const v = validateToolCallArgs({ name: c.name, toolArgs: input });
+      const rawInput = c.args && typeof c.args === "object" && !Array.isArray(c.args) ? c.args : {};
+      const normalized = normalizeToolCallForValidation(c.name, rawInput);
+      const input = normalized.args;
+      const normalizedName = normalized.name;
+      const v = validateToolCallArgs({ name: normalizedName, toolArgs: input });
       if (!v.ok) {
         presetResults.set(c.id, {
           ok: false,
@@ -985,14 +1128,15 @@ export class WritingAgentRunner {
       completedToolUses.push({
         type: "tool_use",
         id: c.id,
-        name: c.name,
+        name: normalizedName,
         input,
       });
       this.ctx.writeEvent("tool.call.args_ready", {
         toolCallId: c.id,
-        name: c.name,
+        name: normalizedName,
         args: input,
         turn: this.turn,
+        ...(normalized.sanitized ? { note: "args_sanitized_against_schema" } : {}),
       });
     }
 

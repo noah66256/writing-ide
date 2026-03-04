@@ -1,4 +1,10 @@
-import type { ChatCompletionOnceResult, OpenAiChatMessage, StreamDeltaEvent } from "./openaiCompat.js";
+import type {
+  ChatCompletionOnceResult,
+  OpenAiChatMessage,
+  OpenAiCompatTool,
+  OpenAiCompatToolChoice,
+  StreamDeltaEvent,
+} from "./openaiCompat.js";
 import { chatCompletionOnce, streamChatCompletions } from "./openaiCompat.js";
 import { isGeminiEndpoint, streamGeminiGenerateContent } from "./gemini.js";
 import { completionOnceAnthropicMessages } from "./anthropicMessages.js";
@@ -12,6 +18,9 @@ export type ProviderStreamArgs = {
   temperature?: number;
   maxTokens?: number | null;
   includeUsage?: boolean;
+  tools?: OpenAiCompatTool[];
+  toolChoice?: OpenAiCompatToolChoice;
+  parallelToolCalls?: boolean;
   signal?: AbortSignal;
 };
 
@@ -44,6 +53,9 @@ export async function* streamChatCompletionViaProvider(args: ProviderStreamArgs)
     temperature: args.temperature,
     maxTokens: args.maxTokens,
     includeUsage: args.includeUsage,
+    tools: args.tools,
+    toolChoice: args.toolChoice,
+    parallelToolCalls: args.parallelToolCalls,
     signal: args.signal,
   });
 }
@@ -126,6 +138,9 @@ export async function completionOnceViaProvider(args: ProviderStreamArgs): Promi
       messages: args.messages,
       temperature: args.temperature,
       maxTokens: args.maxTokens,
+      tools: args.tools,
+      toolChoice: args.toolChoice,
+      parallelToolCalls: args.parallelToolCalls,
       signal: args.signal,
     });
   }
@@ -164,4 +179,3 @@ export async function completionOnceViaProvider(args: ProviderStreamArgs): Promi
     ? { ok: true, content, raw: { provider: "gemini", usage: lastUsage }, usage: lastUsage }
     : { ok: true, content, raw: { provider: "gemini", usage: null } };
 }
-

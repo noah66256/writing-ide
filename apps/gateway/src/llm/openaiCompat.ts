@@ -10,6 +10,18 @@ export type OpenAiChatMessage = {
       >;
 };
 
+export type OpenAiCompatTool = {
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+};
+
+export type OpenAiCompatToolChoice =
+  | { type: "auto" }
+  | { type: "any" }
+  | { type: "none" }
+  | { type: "tool"; name: string };
+
 export type OpenAiCompatConfig = {
   baseUrl: string;
   apiKey: string;
@@ -44,6 +56,198 @@ function normalizeEndpointPath(endpoint?: string) {
 function isResponsesEndpoint(endpoint?: string) {
   const p = normalizeEndpointPath(endpoint);
   return p.endsWith("/responses") || p === "/responses";
+}
+
+function xmlEscapeAttr(raw: string): string {
+  return String(raw ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function xmlCdataSafe(raw: string): string {
+  return String(raw ?? "").replace(/\]\]>/g, "]]]]><![CDATA[>");
+}
+
+type NormalizedToolCall = {
+  id: string;
+  name: string;
+  argsRaw: string;
+};
+
+function safeJsonStringify(v: unknown): string {
+  try {
+    return JSON.stringify(v ?? null);
+  } catch {
+    return String(v ?? "");
+  }
+}
+
+function parseToolArgsRaw(argsRaw: string): Record<string, unknown> {
+  const s = String(argsRaw ?? "").trim();
+  if (!s) return {};
+  try {
+    const parsed = JSON.parse(s);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    return { input: parsed };
+  } catch {
+    return { input: s };
+  }
+}
+
+function toolCallsToXml(calls: NormalizedToolCall[]): string {
+  if (!Array.isArray(calls) || calls.length === 0) return "";
+  const blocks = calls
+    .map((call) => {
+      const name = String(call?.name ?? "").trim();
+      if (!name) return "";
+      const argsObj = parseToolArgsRaw(String(call?.argsRaw ?? ""));
+      const argEntries = Object.entries(argsObj);
+      const argXml = argEntries.length
+        ? argEntries
+            .map(([k, v]) => {
+              const encoded = typeof v === "string" ? v : safeJsonStringify(v);
+              return `<arg name="${xmlEscapeAttr(String(k))}"><![CDATA[${xmlCdataSafe(encoded)}]]></arg>`;
+            })
+            .join("")
+        : "";
+      const idAttr = String(call?.id ?? "").trim() ? ` id="${xmlEscapeAttr(String(call.id))}"` : "";
+      return `<tool_call${idAttr} name="${xmlEscapeAttr(name)}">${argXml}</tool_call>`;
+    })
+    .filter(Boolean)
+    .join("");
+  return blocks ? `<tool_calls>${blocks}</tool_calls>` : "";
+}
+
+function mergeToolCall(target: Map<string, NormalizedToolCall>, incoming: NormalizedToolCall) {
+  const name = String(incoming?.name ?? "").trim();
+  if (!name) return;
+  const key = String(incoming.id ?? "").trim() || `${name}#${target.size + 1}`;
+  const prev = target.get(key);
+  if (!prev) {
+    target.set(key, { id: key, name, argsRaw: String(incoming.argsRaw ?? "") });
+    return;
+  }
+
+  const nextRaw = String(incoming.argsRaw ?? "");
+  if (!prev.argsRaw) prev.argsRaw = nextRaw;
+  else if (nextRaw && nextRaw.startsWith(prev.argsRaw)) prev.argsRaw = nextRaw;
+  else if (nextRaw && !prev.argsRaw.includes(nextRaw)) prev.argsRaw += nextRaw;
+  if (!prev.name) prev.name = name;
+}
+
+function collectChatToolCallsFromChoice(choice: any): NormalizedToolCall[] {
+  const out: NormalizedToolCall[] = [];
+  const append = (rawCalls: any[]) => {
+    for (let i = 0; i < rawCalls.length; i++) {
+      const c = rawCalls[i] ?? {};
+      const fn = c?.function ?? c?.tool ?? {};
+      const name = String(fn?.name ?? c?.name ?? "").trim();
+      if (!name) continue;
+      const id = String(c?.id ?? c?.tool_call_id ?? `${name}_${i + 1}`).trim();
+      const argsRaw = (() => {
+        const raw =
+          fn?.arguments ??
+          c?.arguments ??
+          c?.input ??
+          c?.args ??
+          c?.parameters;
+        return typeof raw === "string" ? raw : safeJsonStringify(raw ?? {});
+      })();
+      out.push({ id, name, argsRaw });
+    }
+  };
+
+  if (Array.isArray(choice?.delta?.tool_calls)) append(choice.delta.tool_calls);
+  if (Array.isArray(choice?.message?.tool_calls)) append(choice.message.tool_calls);
+  if (Array.isArray(choice?.tool_calls)) append(choice.tool_calls);
+  return out;
+}
+
+function collectToolCallsFromAny(node: any, out: NormalizedToolCall[], depth = 0) {
+  if (depth > 6 || node === null || node === undefined) return;
+  if (Array.isArray(node)) {
+    for (const item of node) collectToolCallsFromAny(item, out, depth + 1);
+    return;
+  }
+  if (typeof node !== "object") return;
+
+  const type = String((node as any).type ?? "").trim().toLowerCase();
+  const directName = String((node as any).name ?? (node as any)?.function?.name ?? "").trim();
+  const directArgs =
+    (node as any).arguments ??
+    (node as any)?.function?.arguments ??
+    (node as any).input ??
+    (node as any).args ??
+    (node as any).parameters;
+  const looksLikeTool =
+    type.includes("function_call") ||
+    type.includes("tool_call") ||
+    (Array.isArray((node as any)?.tool_calls) && (node as any).tool_calls.length > 0);
+  if (directName && (looksLikeTool || directArgs !== undefined)) {
+    out.push({
+      id: String((node as any).id ?? (node as any).tool_call_id ?? `${directName}_${out.length + 1}`),
+      name: directName,
+      argsRaw: typeof directArgs === "string" ? directArgs : safeJsonStringify(directArgs ?? {}),
+    });
+  }
+
+  if (Array.isArray((node as any).tool_calls)) {
+    for (const tc of (node as any).tool_calls) {
+      const choiceCalls = collectChatToolCallsFromChoice({ message: { tool_calls: [tc] } });
+      for (const c of choiceCalls) out.push(c);
+    }
+  }
+
+  const scanKeys = ["output", "response", "item", "items", "message", "content", "choices", "delta", "data"];
+  for (const key of scanKeys) {
+    if ((node as any)[key] !== undefined) collectToolCallsFromAny((node as any)[key], out, depth + 1);
+  }
+}
+
+function extractToolCallsFromAny(node: any): NormalizedToolCall[] {
+  const raw: NormalizedToolCall[] = [];
+  collectToolCallsFromAny(node, raw, 0);
+  const merged = new Map<string, NormalizedToolCall>();
+  for (const call of raw) mergeToolCall(merged, call);
+  return Array.from(merged.values()).filter((c) => String(c.name ?? "").trim().length > 0);
+}
+
+function toOpenAiToolsPayload(tools?: OpenAiCompatTool[]) {
+  if (!Array.isArray(tools) || tools.length === 0) return undefined;
+  return tools.map((tool) => ({
+    type: "function" as const,
+    function: {
+      name: String(tool.name ?? "").trim(),
+      ...(String(tool.description ?? "").trim() ? { description: String(tool.description ?? "").trim() } : {}),
+      parameters:
+        tool.inputSchema && typeof tool.inputSchema === "object"
+          ? tool.inputSchema
+          : { type: "object", properties: {}, additionalProperties: true },
+    },
+  }));
+}
+
+function toOpenAiToolChoicePayload(choice?: OpenAiCompatToolChoice) {
+  if (!choice) return undefined;
+  if (choice.type === "auto") return "auto";
+  if (choice.type === "none") return "none";
+  if (choice.type === "any") return "required";
+  if (choice.type === "tool") {
+    const name = String(choice.name ?? "").trim();
+    if (!name) return undefined;
+    return { type: "function" as const, function: { name } };
+  }
+  return undefined;
+}
+
+function shouldRetryWithoutNativeTools(errorText: string) {
+  const s = String(errorText ?? "").toLowerCase();
+  if (!s) return false;
+  return /(tool_choice|parallel_tool_calls|tools|function call|function_call|unknown field|unsupported)/.test(s);
 }
 
 export type StreamDeltaEvent =
@@ -237,29 +441,43 @@ async function* streamResponses(args: {
   maxTokens?: number | null;
   signal?: AbortSignal;
   endpoint?: string;
+  tools?: OpenAiCompatTool[];
+  toolChoice?: OpenAiCompatToolChoice;
+  parallelToolCalls?: boolean;
 }): AsyncGenerator<StreamDeltaEvent> {
   const url = openAiCompatUrl(args.config.baseUrl, args.endpoint || "/responses");
-  const body: Record<string, unknown> = {
+  const bodyBase: Record<string, unknown> = {
     model: args.model,
     input: chatMessagesToResponsesInput(args.messages),
     stream: true,
   };
   if (Number.isFinite(Number(args.maxTokens)) && Number(args.maxTokens) > 0) {
-    body.max_output_tokens = Math.floor(Number(args.maxTokens));
+    bodyBase.max_output_tokens = Math.floor(Number(args.maxTokens));
   }
   if (typeof args.temperature === "number" && Number.isFinite(args.temperature)) {
-    body.temperature = args.temperature;
+    bodyBase.temperature = args.temperature;
   }
+  const openAiTools = toOpenAiToolsPayload(args.tools);
+  const openAiToolChoice = toOpenAiToolChoicePayload(args.toolChoice);
+  const wantsNativeTools = Boolean(openAiTools?.length);
+
+  const withNativeToolsBody = (): Record<string, unknown> => ({
+    ...bodyBase,
+    ...(openAiTools?.length ? { tools: openAiTools } : {}),
+    ...(openAiToolChoice ? { tool_choice: openAiToolChoice } : {}),
+    ...(typeof args.parallelToolCalls === "boolean" ? { parallel_tool_calls: args.parallelToolCalls } : {}),
+  });
 
   let res: Response;
   try {
+    const bodyFirst = wantsNativeTools ? withNativeToolsBody() : bodyBase;
     res = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${args.config.apiKey}`,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(bodyFirst),
       signal: args.signal,
     });
   } catch (e: any) {
@@ -269,8 +487,30 @@ async function* streamResponses(args: {
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    yield { type: "error", error: text || `UPSTREAM_${res.status}` };
-    return;
+    if (wantsNativeTools && res.status === 400 && shouldRetryWithoutNativeTools(text)) {
+      try {
+        res = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${args.config.apiKey}`,
+          },
+          body: JSON.stringify(bodyBase),
+          signal: args.signal,
+        });
+      } catch (e: any) {
+        yield { type: "error", error: String(e?.message ?? e) };
+        return;
+      }
+      if (!res.ok) {
+        const text2 = await res.text().catch(() => "");
+        yield { type: "error", error: text2 || `UPSTREAM_${res.status}` };
+        return;
+      }
+    } else {
+      yield { type: "error", error: text || `UPSTREAM_${res.status}` };
+      return;
+    }
   }
 
   const contentType = String(res.headers.get("content-type") ?? "").toLowerCase();
@@ -291,7 +531,13 @@ async function* streamResponses(args: {
       return;
     }
     const content = extractResponsesTextFromAny(json).trim();
-    if (content) yield { type: "delta", delta: content };
+    if (content) {
+      yield { type: "delta", delta: content };
+    } else {
+      const toolCalls = extractToolCallsFromAny(json);
+      const xml = toolCallsToXml(toolCalls);
+      if (xml) yield { type: "delta", delta: xml };
+    }
     const usage = coerceUsageLike(json?.usage ?? json?.response?.usage);
     if (usage) yield { type: "usage", usage, raw: json };
     yield { type: "done" };
@@ -301,6 +547,7 @@ async function* streamResponses(args: {
   let emittedChars = 0;
   let emittedUsage = false;
   let completedPayload: any = null;
+  const streamedToolCalls = new Map<string, NormalizedToolCall>();
   for await (const line0 of readLines(res.body)) {
     const line = String(line0 ?? "");
     if (!line) continue;
@@ -321,6 +568,8 @@ async function* streamResponses(args: {
       emittedChars += delta.length;
       yield { type: "delta", delta };
     }
+    const calls = extractToolCallsFromAny(json);
+    for (const call of calls) mergeToolCall(streamedToolCalls, call);
 
     const usage = coerceUsageLike(json?.usage ?? json?.response?.usage);
     if (usage) {
@@ -353,6 +602,12 @@ async function* streamResponses(args: {
     if (fallback) {
       emittedChars += fallback.length;
       yield { type: "delta", delta: fallback };
+    } else {
+      const xml = toolCallsToXml(Array.from(streamedToolCalls.values()));
+      if (xml) {
+        emittedChars += xml.length;
+        yield { type: "delta", delta: xml };
+      }
     }
   }
 
@@ -365,6 +620,9 @@ async function* streamResponses(args: {
       maxTokens: args.maxTokens,
       signal: args.signal,
       endpoint: args.endpoint,
+      tools: args.tools,
+      toolChoice: args.toolChoice,
+      parallelToolCalls: args.parallelToolCalls,
     });
     if (once.ok && once.content.trim().length > 0) {
       yield { type: "delta", delta: once.content };
@@ -389,6 +647,9 @@ export async function* streamChatCompletions(args: {
   includeUsage?: boolean;
   /** OpenAI-compatible endpoint（支持 /chat/completions 或 /v1/chat/completions） */
   endpoint?: string;
+  tools?: OpenAiCompatTool[];
+  toolChoice?: OpenAiCompatToolChoice;
+  parallelToolCalls?: boolean;
 }): AsyncGenerator<StreamDeltaEvent> {
   if (isResponsesEndpoint(args.endpoint)) {
     yield* streamResponses(args);
@@ -398,6 +659,9 @@ export async function* streamChatCompletions(args: {
   const url = openAiCompatUrl(args.config.baseUrl, args.endpoint || "/chat/completions");
 
   const wantsUsage = Boolean(args.includeUsage);
+  const openAiTools = toOpenAiToolsPayload(args.tools);
+  const openAiToolChoice = toOpenAiToolChoicePayload(args.toolChoice);
+  const wantsNativeTools = Boolean(openAiTools?.length);
 
   // 诊断：用于定位“上游返回了东西，但我们解析不到 delta（例如字段不兼容 / 非 SSE data: 格式）”的根因。
   // 仅在“整段流结束后 deltaChars==0”时输出少量信息（pm2 logs 可见），避免污染正常日志。
@@ -431,7 +695,7 @@ export async function* streamChatCompletions(args: {
     endedBy: "" as string,
   };
 
-  const doFetch = async (withUsage: boolean) => {
+  const doFetch = async (withUsage: boolean, withNativeTools: boolean) => {
     const body: any = {
       model: args.model,
       messages: args.messages,
@@ -441,6 +705,11 @@ export async function* streamChatCompletions(args: {
     const mt = Number(args.maxTokens);
     if (Number.isFinite(mt) && mt > 0) body.max_tokens = Math.floor(mt);
     if (withUsage) body.stream_options = { include_usage: true };
+    if (withNativeTools && openAiTools?.length) {
+      body.tools = openAiTools;
+      if (openAiToolChoice) body.tool_choice = openAiToolChoice;
+      if (typeof args.parallelToolCalls === "boolean") body.parallel_tool_calls = args.parallelToolCalls;
+    }
     return fetch(url, {
       method: "POST",
       headers: {
@@ -454,12 +723,14 @@ export async function* streamChatCompletions(args: {
 
   let res: Response;
   try {
-    res = await doFetch(wantsUsage);
+    res = await doFetch(wantsUsage, wantsNativeTools);
     if (!res.ok && wantsUsage) {
       const text = await res.text().catch(() => "");
       // 兼容性兜底：有些 OpenAI-compatible 不接受 stream_options/include_usage
       if (res.status === 400 && /stream_options|include_usage/i.test(text)) {
-        res = await doFetch(false);
+        res = await doFetch(false, wantsNativeTools);
+      } else if (wantsNativeTools && res.status === 400 && shouldRetryWithoutNativeTools(text)) {
+        res = await doFetch(wantsUsage, false);
       } else {
         // 复用已读到的错误文本
         yield { type: "error", error: text || `UPSTREAM_${res.status}` };
@@ -508,6 +779,10 @@ export async function* streamChatCompletions(args: {
       const contentText = coerceOpenAiContentToText(contentLike);
       if (typeof contentText === "string" && contentText.trim().length > 0) {
         yield { type: "delta", delta: contentText };
+      } else {
+        const calls = extractToolCallsFromAny(json);
+        const xml = toolCallsToXml(calls);
+        if (xml) yield { type: "delta", delta: xml };
       }
 
       const u = json?.usage;
@@ -535,6 +810,7 @@ export async function* streamChatCompletions(args: {
   let lastMessageContent = "";
   let lastTextContent = "";
   let lastDeltaContentCoerced = "";
+  const streamedToolCalls = new Map<string, NormalizedToolCall>();
   for await (const line0 of readLines(res.body)) {
     const line = String(line0 ?? "");
     if (!line) continue;
@@ -611,6 +887,9 @@ export async function* streamChatCompletions(args: {
     }
 
     const choice = json?.choices?.[0];
+    for (const call of collectChatToolCallsFromChoice(choice)) {
+      mergeToolCall(streamedToolCalls, call);
+    }
     let emitted = false;
     const deltaText = coerceOpenAiContentToText(choice?.delta?.content);
     if (typeof deltaText === "string" && deltaText.length > 0) {
@@ -670,6 +949,13 @@ export async function* streamChatCompletions(args: {
     (diag.sawPayloadLine || diag.sawDataLine || diag.sawDone || sawFinishReason) &&
     !args.signal?.aborted
   ) {
+    const toolCallsXml = toolCallsToXml(Array.from(streamedToolCalls.values()));
+    if (toolCallsXml) {
+      yield { type: "delta", delta: toolCallsXml };
+      yield { type: "done" };
+      return;
+    }
+
     const once = await chatCompletionOnce({
       config: args.config,
       model: args.model,
@@ -678,6 +964,9 @@ export async function* streamChatCompletions(args: {
       maxTokens: args.maxTokens,
       signal: args.signal,
       endpoint: args.endpoint,
+      tools: args.tools,
+      toolChoice: args.toolChoice,
+      parallelToolCalls: args.parallelToolCalls,
     });
     if (once.ok && once.content.trim().length > 0) {
       // eslint-disable-next-line no-console
@@ -719,33 +1008,49 @@ export async function chatCompletionOnce(args: {
   signal?: AbortSignal;
   /** OpenAI-compatible endpoint（支持 /chat/completions 或 /v1/chat/completions） */
   endpoint?: string;
+  tools?: OpenAiCompatTool[];
+  toolChoice?: OpenAiCompatToolChoice;
+  parallelToolCalls?: boolean;
 }): Promise<ChatCompletionOnceResult> {
   const endpoint = args.endpoint || "/chat/completions";
   const isResponses = isResponsesEndpoint(endpoint);
   const url = openAiCompatUrl(args.config.baseUrl, endpoint);
 
+  const openAiTools = toOpenAiToolsPayload(args.tools);
+  const openAiToolChoice = toOpenAiToolChoicePayload(args.toolChoice);
+  const wantsNativeTools = Boolean(openAiTools?.length);
+
+  const buildBody = (withNativeTools: boolean) =>
+    isResponses
+      ? {
+          model: args.model,
+          input: chatMessagesToResponsesInput(args.messages),
+          ...(typeof args.temperature === "number" && Number.isFinite(args.temperature)
+            ? { temperature: args.temperature }
+            : {}),
+          ...(Number.isFinite(Number(args.maxTokens)) && Number(args.maxTokens) > 0
+            ? { max_output_tokens: Math.floor(Number(args.maxTokens)) }
+            : {}),
+          ...(withNativeTools && openAiTools?.length ? { tools: openAiTools } : {}),
+          ...(withNativeTools && openAiToolChoice ? { tool_choice: openAiToolChoice } : {}),
+          ...(withNativeTools && typeof args.parallelToolCalls === "boolean" ? { parallel_tool_calls: args.parallelToolCalls } : {}),
+          stream: false,
+        }
+      : {
+          model: args.model,
+          messages: args.messages,
+          temperature: args.temperature,
+          ...(Number.isFinite(Number(args.maxTokens)) && Number(args.maxTokens) > 0
+            ? { max_tokens: Math.floor(Number(args.maxTokens)) }
+            : {}),
+          ...(withNativeTools && openAiTools?.length ? { tools: openAiTools } : {}),
+          ...(withNativeTools && openAiToolChoice ? { tool_choice: openAiToolChoice } : {}),
+          ...(withNativeTools && typeof args.parallelToolCalls === "boolean" ? { parallel_tool_calls: args.parallelToolCalls } : {}),
+          stream: false,
+        };
+
   let res: Response;
-  const body = isResponses
-    ? {
-        model: args.model,
-        input: chatMessagesToResponsesInput(args.messages),
-        ...(typeof args.temperature === "number" && Number.isFinite(args.temperature)
-          ? { temperature: args.temperature }
-          : {}),
-        ...(Number.isFinite(Number(args.maxTokens)) && Number(args.maxTokens) > 0
-          ? { max_output_tokens: Math.floor(Number(args.maxTokens)) }
-          : {}),
-        stream: false,
-      }
-    : {
-        model: args.model,
-        messages: args.messages,
-        temperature: args.temperature,
-        ...(Number.isFinite(Number(args.maxTokens)) && Number(args.maxTokens) > 0
-          ? { max_tokens: Math.floor(Number(args.maxTokens)) }
-          : {}),
-        stream: false,
-      };
+  const body = buildBody(wantsNativeTools);
   try {
     res = await fetch(url, {
       method: "POST",
@@ -762,7 +1067,27 @@ export async function chatCompletionOnce(args: {
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    return { ok: false, error: text || `UPSTREAM_${res.status}`, status: res.status, rawText: text };
+    if (wantsNativeTools && res.status === 400 && shouldRetryWithoutNativeTools(text)) {
+      try {
+        res = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${args.config.apiKey}`,
+          },
+          body: JSON.stringify(buildBody(false)),
+          signal: args.signal,
+        });
+      } catch (e: any) {
+        return { ok: false, error: String(e?.message ?? e) };
+      }
+      if (!res.ok) {
+        const text2 = await res.text().catch(() => "");
+        return { ok: false, error: text2 || `UPSTREAM_${res.status}`, status: res.status, rawText: text2 };
+      }
+    } else {
+      return { ok: false, error: text || `UPSTREAM_${res.status}`, status: res.status, rawText: text };
+    }
   }
 
   let json: any = null;
@@ -781,6 +1106,12 @@ export async function chatCompletionOnce(args: {
           json?.choices?.[0]?.delta?.content,
       );
   if (typeof content !== "string" || content.trim().length === 0) {
+    const toolCalls = extractToolCallsFromAny(json);
+    const xml = toolCallsToXml(toolCalls);
+    if (xml) {
+      const usage2 = coerceUsageLike(json?.usage ?? json?.response?.usage);
+      return usage2 ? { ok: true, content: xml, raw: json, usage: usage2 } : { ok: true, content: xml, raw: json };
+    }
     return { ok: false, error: "UPSTREAM_EMPTY_CONTENT", status: res.status, rawText: JSON.stringify(json) };
   }
   const usage = coerceUsageLike(json?.usage ?? json?.response?.usage);

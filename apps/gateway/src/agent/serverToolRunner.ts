@@ -24,7 +24,7 @@ function getServerToolAllowlist(): Set<string> {
   const cfg = String(process.env.GATEWAY_SERVER_TOOL_ALLOWLIST ?? "").trim();
   const list = cfg
     ? parseCsv(cfg)
-    : ["lint.style", "project.listFiles", "time.now",
+    : ["lint.style", "time.now",
        "run.done", "run.setTodoList", "run.todo.upsertMany", "run.todo.update", "run.mainDoc.update", "run.mainDoc.get",
        "agent.delegate"];
   return new Set(list.map((x) => String(x ?? "").trim()).filter(Boolean));
@@ -82,10 +82,9 @@ export function decideServerToolExecution(args: {
     return { executedBy: "desktop", reasonCodes: ["server_tool_condition_not_met"] };
   }
 
+  // project.listFiles 统一回到 Desktop 权威源，避免 sidecar 快照滞后导致“能看到但删不到/读不到”。
   if (name === "project.listFiles") {
-    const files = Array.isArray(sidecar?.projectFiles) ? (sidecar.projectFiles as any[]) : [];
-    if (files.length > 0) return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "project_files_from_sidecar"] };
-    return { executedBy: "desktop", reasonCodes: ["server_tool_condition_not_met"] };
+    return { executedBy: "desktop", reasonCodes: ["project_list_desktop_source_of_truth"] };
   }
 
   return { executedBy: "desktop", reasonCodes: ["server_tool_not_supported"] };
@@ -539,5 +538,4 @@ function executeTimeNowOnGateway() {
     },
   };
 }
-
 
