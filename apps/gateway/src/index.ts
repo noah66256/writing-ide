@@ -4909,13 +4909,29 @@ fastify.post(
     return reply.code(500).send({ error: "LLM_NOT_CONFIGURED", hint: "请配置 LLM_BASE_URL/LLM_MODEL/LLM_API_KEY" });
   }
 
-  const model = body.model ?? llmEnv.defaultModel;
-  const baseUrl = llmEnv.baseUrl;
-  const endpoint = (llmEnv as any).endpoint || "/v1/chat/completions";
-  const apiKey = llmEnv.apiKey;
+  let model = body.model ?? llmEnv.defaultModel;
+  let baseUrl = llmEnv.baseUrl;
+  let endpoint = (llmEnv as any).endpoint || "/v1/chat/completions";
+  let apiKey = llmEnv.apiKey;
+  if (body.model) {
+    try {
+      const m = await aiConfig.resolveModel(body.model);
+      const ep = String(m.endpoint || "").trim();
+      if (ep && isKbTextLlmEndpoint(ep)) {
+        model = m.model;
+        baseUrl = m.baseURL;
+        apiKey = m.apiKey;
+        endpoint = ep;
+      }
+    } catch {
+      // ignore
+    }
+  }
   const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 3);
   const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const timeoutMsCfg = Number(String(process.env.LLM_GENRE_TIMEOUT_MS ?? "").trim());
+  const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 45_000;
 
   const sys = [
     "你是写作 IDE 的「体裁/声音识别器」（开集分类，不要穷举）。",
@@ -4954,56 +4970,19 @@ fastify.post(
     2
   );
 
-  let ret: any = null;
-  for (let attempt = 0; attempt <= retryMax; attempt += 1) {
-    ret = await completionOnceViaProvider({
-      baseUrl,
-      endpoint,
-      apiKey,
-      model,
-      messages: [
-        { role: "system", content: sys },
-        { role: "user", content: user }
-      ],
-      temperature: 0.2
-    });
-    if (ret.ok) break;
-
-    const errText = String(ret.error ?? "");
-    const is429 =
-      ret.status === 429 || errText.includes("Too Many Requests") || errText.includes("负载已饱和");
-    const isNetErr = /fetch failed|Timeout|ECONNREFUSED|ECONNRESET|ETIMEDOUT/i.test(errText)
-      || ret.status === 502 || ret.status === 503;
-    const isRetryable = is429 || isNetErr;
-    if (!isRetryable || attempt >= retryMax) break;
-    const jitter = Math.floor(Math.random() * 200);
-    const wait = retryBaseMs * Math.pow(2, attempt) + jitter;
-    await sleep(wait);
-  }
-
-  if (!ret?.ok) {
-    const errText = String(ret?.error ?? "");
-    const is429 = ret?.status === 429 || errText.includes("Too Many Requests") || errText.includes("负载已饱和");
-    return reply.code(is429 ? 503 : 502).send({
-      error: is429 ? "UPSTREAM_BUSY" : "UPSTREAM_ERROR",
-      message: errText || "upstream error",
-      status: ret?.status ?? null
-    });
-  }
-
-  const raw = String(ret.content ?? "").trim();
-  const tryParse = (s: string) => {
+  const parseUpstream = (text: string) => {
+    let message = String(text ?? "");
     try {
-      return JSON.parse(s);
+      const j = JSON.parse(message);
+      if (typeof j?.error?.message === "string") message = j.error.message;
+      else if (typeof j?.message === "string") message = j.message;
     } catch {
-      return null;
+      // ignore
     }
+    const m = message.match(/request id:\s*([^)]+)\)/i);
+    const requestId = m?.[1] ? String(m[1]) : undefined;
+    return { message, requestId };
   };
-  let parsed: any = tryParse(raw);
-  if (!parsed) {
-    const m = raw.match(/\{[\s\S]*\}/);
-    if (m?.[0]) parsed = tryParse(m[0]);
-  }
 
   const outSchema = z.object({
     primary: z.object({
@@ -5033,8 +5012,256 @@ fastify.post(
       .max(8)
   });
 
+  const firstSample = Array.isArray(body.samples) && body.samples.length ? body.samples[0] : null;
+  const sampleDocId = String(firstSample?.docId ?? "").trim();
+  const sampleParagraphIndex = typeof firstSample?.paragraphIndex === "number" ? firstSample.paragraphIndex : null;
+  const toStr = (v: any) => (typeof v === "string" ? v.trim() : "");
+  const pickStr = (obj: any, keys: string[]) => {
+    for (const k of keys) {
+      const s = toStr(obj?.[k]);
+      if (s) return s;
+    }
+    return "";
+  };
+  const toConfidence = (v: any) => {
+    if (typeof v === "number" && Number.isFinite(v)) return Math.max(0, Math.min(1, v));
+    if (typeof v === "string") {
+      const raw = v.trim();
+      if (!raw) return 0;
+      const n = Number(raw.replace(/%/g, ""));
+      if (Number.isFinite(n)) {
+        if (raw.includes("%")) return Math.max(0, Math.min(1, n / 100));
+        if (n > 1 && n <= 100) return Math.max(0, Math.min(1, n / 100));
+        return Math.max(0, Math.min(1, n));
+      }
+    }
+    return 0;
+  };
+  const toParagraphIndex = (v: any) => {
+    if (v === null || v === undefined || String(v).trim() === "") return null;
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 0) return null;
+    return Math.floor(n);
+  };
+  const toEvidenceList = (input: any) => {
+    const arr = Array.isArray(input) ? input : [];
+    return arr
+      .map((x: any) => {
+        if (typeof x === "string") {
+          const quote = x.trim().slice(0, 120);
+          if (!quote) return null;
+          return {
+            docId: sampleDocId || "sample_doc",
+            paragraphIndex: sampleParagraphIndex,
+            quote
+          };
+        }
+        if (!x || typeof x !== "object") return null;
+        const quote = pickStr(x, ["quote", "text", "snippet"]).slice(0, 120);
+        if (!quote) return null;
+        const docId = pickStr(x, ["docId", "doc_id", "sourceDocId", "source_doc_id"]) || sampleDocId || "sample_doc";
+        const paragraphIndex = toParagraphIndex(x?.paragraphIndex ?? x?.paragraph_index ?? x?.index ?? x?.paragraph);
+        return { docId, paragraphIndex, quote };
+      })
+      .filter(Boolean)
+      .slice(0, 8) as Array<{ docId: string; paragraphIndex: number | null; quote: string }>;
+  };
+  const normalizeGenreOutput = (parsedRaw: any) => {
+    let root = parsedRaw;
+    for (let i = 0; i < 4; i += 1) {
+      if (!root || typeof root !== "object" || Array.isArray(root)) break;
+      if (root.primary || root.candidates || root.genres || root.labels || root.options) break;
+      const nested = root.data ?? root.result ?? root.output;
+      if (!nested || typeof nested !== "object") break;
+      root = nested;
+    }
+
+    const rawCandidates = root?.candidates ?? root?.genres ?? root?.labels ?? root?.options ?? root?.items;
+    const candidatesArr = Array.isArray(rawCandidates)
+      ? rawCandidates
+      : rawCandidates && typeof rawCandidates === "object"
+        ? Object.entries(rawCandidates).map(([k, v]) =>
+            v && typeof v === "object" && !Array.isArray(v) ? { label: k, ...(v as any) } : { label: k, confidence: 0, why: "", evidence: [] }
+          )
+        : [];
+
+    const candidates = candidatesArr
+      .map((x: any) => {
+        if (typeof x === "string") {
+          const label = x.trim();
+          return label ? { label, confidence: 0.5, why: `样例整体更像「${label}」`, evidence: [] } : null;
+        }
+        if (!x || typeof x !== "object") return null;
+        const label = pickStr(x, ["label", "name", "genre", "type"]);
+        if (!label) return null;
+        const confidence = toConfidence(x?.confidence ?? x?.score ?? x?.probability ?? x?.prob);
+        const why = pickStr(x, ["why", "reason", "analysis", "note", "desc", "description"]) || `样例整体更像「${label}」`;
+        const evidence = toEvidenceList(x?.evidence ?? x?.examples ?? x?.quotes ?? x?.refs);
+        return { label, confidence, why, evidence };
+      })
+      .filter(Boolean) as Array<{ label: string; confidence: number; why: string; evidence: any[] }>;
+
+    const sorted = [...candidates].sort((a, b) => b.confidence - a.confidence);
+    const primaryRaw = root?.primary ?? root?.top ?? root?.best ?? root?.genre;
+    let primaryLabel =
+      (typeof primaryRaw === "string" ? primaryRaw.trim() : pickStr(primaryRaw, ["label", "name", "genre", "type"])) ||
+      sorted[0]?.label ||
+      "unknown_open_set";
+    if (!primaryLabel) primaryLabel = "unknown_open_set";
+    const primaryConfidence = toConfidence(
+      (typeof primaryRaw === "object" && primaryRaw !== null
+        ? primaryRaw?.confidence ?? primaryRaw?.score ?? primaryRaw?.probability ?? primaryRaw?.prob
+        : null) ?? sorted[0]?.confidence ?? 0
+    );
+    const primaryWhy =
+      (typeof primaryRaw === "object" && primaryRaw !== null
+        ? pickStr(primaryRaw, ["why", "reason", "analysis", "note", "desc", "description"])
+        : "") || sorted[0]?.why || `样例整体更像「${primaryLabel}」`;
+
+    const baseCandidates = sorted.length
+      ? sorted
+      : [{ label: primaryLabel, confidence: Math.max(0.2, primaryConfidence || 0.5), why: primaryWhy, evidence: [] }];
+
+    return {
+      primary: {
+        label: primaryLabel.slice(0, 120),
+        confidence: Math.max(0, Math.min(1, primaryConfidence)),
+        why: primaryWhy
+      },
+      candidates: baseCandidates.slice(0, 8).map((c) => ({
+        label: String(c.label ?? "").trim().slice(0, 120),
+        confidence: Math.max(0, Math.min(1, Number(c.confidence ?? 0))),
+        why: String(c.why ?? "").trim() || `样例整体更像「${String(c.label ?? "").trim()}」`,
+        evidence: Array.isArray(c.evidence) && c.evidence.length ? c.evidence : undefined,
+      })),
+    };
+  };
+
+  let lastErr: any = null;
+  let lastStatus: number | undefined = undefined;
+  let lastDetail: string | undefined = undefined;
+  let ret: any = null;
+  let parsedResult: any = null;
+  for (let attempt = 0; attempt <= retryMax; attempt += 1) {
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), timeoutMs);
+    try {
+      ret = await completionOnceViaProvider({
+        baseUrl,
+        endpoint,
+        apiKey,
+        model,
+        messages: [
+          { role: "system", content: sys },
+          { role: "user", content: user }
+        ],
+        temperature: 0.2,
+        signal: abort.signal
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!ret.ok) {
+      lastStatus = ret.status;
+      lastDetail = ret.error;
+      const errText = String(ret.error ?? "");
+      const is429 = ret.status === 429 || errText.includes("Too Many Requests") || errText.includes("负载已饱和");
+      const isTimeout = /Headers Timeout Error|timeout|超时|aborted|AbortError/i.test(errText) || /fetch failed/i.test(errText);
+      const isNetErr = /ECONNREFUSED|ECONNRESET|ETIMEDOUT/i.test(errText) || ret.status === 502 || ret.status === 503;
+      const isRetryable = is429 || isTimeout || isNetErr;
+      lastErr = { is429, isTimeout, detail: ret.error, status: ret.status };
+      if (!isRetryable || attempt >= retryMax) break;
+      const jitter = Math.floor(Math.random() * 200);
+      const wait = retryBaseMs * Math.pow(2, attempt) + jitter;
+      await sleep(wait);
+      continue;
+    }
+
+    const raw = String(ret.content ?? "").trim();
+    const tryParse = (s: string) => {
+      try {
+        return JSON.parse(s);
+      } catch {
+        return null;
+      }
+    };
+    const stripFence = (s: string): string => {
+      const m = s.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```\s*$/);
+      return m ? m[1].trim() : s;
+    };
+    const extractFirstCompleteJsonObject = (s: string): any => {
+      for (let start = 0; start < s.length; start++) {
+        if (s[start] !== "{") continue;
+        let depth = 0;
+        let inString = false;
+        let escape = false;
+        let end = -1;
+        for (let i = start; i < s.length; i++) {
+          const ch = s[i];
+          if (escape) { escape = false; continue; }
+          if (ch === "\\" && inString) { escape = true; continue; }
+          if (ch === '"') { inString = !inString; continue; }
+          if (inString) continue;
+          if (ch === "{") depth++;
+          else if (ch === "}") {
+            depth--;
+            if (depth === 0) { end = i; break; }
+          }
+        }
+        if (end === -1) continue;
+        const result = tryParse(s.slice(start, end + 1));
+        if (result !== null) return result;
+      }
+      return null;
+    };
+
+    const stripped = stripFence(raw);
+    let parsed: any = tryParse(stripped);
+    if (!parsed) {
+      parsed = extractFirstCompleteJsonObject(stripped) ?? extractFirstCompleteJsonObject(raw);
+    }
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const normalized = normalizeGenreOutput(parsed);
+      const checked = outSchema.safeParse(normalized);
+      if (checked.success) {
+        parsedResult = checked.data;
+        break;
+      }
+      console.warn(
+        `[classify_genre] INVALID_MODEL_OUTPUT attempt=${attempt} schema=${checked.error.issues
+          .map((it) => `${it.path.join(".") || "<root>"}:${it.code}`)
+          .join(",")
+          .slice(0, 300)}`
+      );
+    } else {
+      console.warn(`[classify_genre] INVALID_MODEL_OUTPUT attempt=${attempt} raw=${raw.slice(0, 500)}`);
+    }
+    lastErr = { is429: false, isTimeout: false, detail: "INVALID_MODEL_OUTPUT", status: 500 };
+    lastDetail = "INVALID_MODEL_OUTPUT";
+    lastStatus = 500;
+    if (attempt >= retryMax) break;
+    const jitter = Math.floor(Math.random() * 200);
+    const wait = retryBaseMs * Math.pow(2, attempt) + jitter;
+    await sleep(wait);
+  }
+
+  if (!parsedResult) {
+    const is429 = Boolean(lastErr?.is429);
+    const isTimeout = Boolean(lastErr?.isTimeout);
+    const isInvalidOutput = String(lastDetail ?? "") === "INVALID_MODEL_OUTPUT";
+    const parsed = parseUpstream(String(lastDetail ?? ""));
+    return reply.code(is429 ? 503 : isInvalidOutput ? 500 : 502).send({
+      error: is429 ? "UPSTREAM_BUSY" : isTimeout ? "UPSTREAM_TIMEOUT" : isInvalidOutput ? "INVALID_MODEL_OUTPUT" : "UPSTREAM_ERROR",
+      message: isInvalidOutput ? "模型未返回合法 JSON（已自动重试）" : parsed.message || "upstream error",
+      requestId: parsed.requestId ?? null,
+      status: lastStatus ?? null,
+      retry: { attempts: retryMax + 1, retryMax, retryBaseMs },
+    });
+  }
+
   try {
-    const out = outSchema.parse(parsed);
+    const out = parsedResult;
     const sorted = [...out.candidates].sort((a, b) => b.confidence - a.confidence).slice(0, 8);
     const primary = sorted[0]!;
 
