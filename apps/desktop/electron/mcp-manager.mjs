@@ -302,7 +302,7 @@ export class McpManager {
         .map((cfg) => this._extractCommandHead(String(cfg?.command ?? "")))
         .filter(Boolean),
     )];
-    const baseline = requested.length > 0 ? [] : ["uv", "uvx", "node", "npx", "python", "python3"];
+    const baseline = requested.length > 0 ? [] : ["uv", "uvx", "node", "npm", "npx", "python", "python3"];
     const commands = [...new Set([...requested, ...baseline, ...stdioCommands])];
     const checks = [];
     for (const cmd of commands) {

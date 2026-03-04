@@ -937,7 +937,7 @@ function McpRuntimeStatusBar() {
           </div>
           {missing.length > 0 ? (
             <div className="text-text-faint ml-[22px]">
-              缺少命令：{missing.join(", ")}。当前一键修复优先支持 uv/uvx，其它命令请手动安装。
+              缺少命令：{missing.join(", ")}。安装包会预置 uv/uvx/node/npx；一键修复当前优先补 uv/uvx。
             </div>
           ) : (
             <div className="text-text-faint ml-[22px]">
@@ -1076,9 +1076,9 @@ function McpServerCard({
       title: "运行时缺失",
       message:
         `命令「${head}」仍不可用。` +
-        (unsupported ? "当前版本不支持自动安装该运行时。\n\n" : "已尝试自动修复但未成功。\n\n") +
+        (unsupported ? "当前版本不支持自动安装该运行时（node/npx 理应随安装包内置）。\n\n" : "已尝试自动修复但未成功。\n\n") +
         (installErr ? `错误：${installErr}\n\n` : "") +
-        "请在 MCP 设置页顶部点「一键修复」，或手动安装对应运行时后重试。",
+        "请先尝试 MCP 设置页顶部「一键修复」，若仍失败请升级到最新安装包后重试。",
     });
     return false;
   };
@@ -1445,9 +1445,9 @@ function McpAddDialog({
               title: "保存失败：运行时缺失",
               message:
                 `当前命令「${head}」不可用。` +
-                (unsupported ? "当前版本不支持自动安装该运行时。\n\n" : "自动修复未完成。\n\n") +
+                (unsupported ? "当前版本不支持自动安装该运行时（node/npx 理应随安装包内置）。\n\n" : "自动修复未完成。\n\n") +
                 (installErr ? `错误：${installErr}\n\n` : "") +
-                "请先在 MCP 设置页顶部点「一键修复」后再保存。",
+                "请先尝试 MCP 设置页顶部「一键修复」，若仍失败请升级到最新安装包后再保存。",
             });
             setSaving(false);
             return;

@@ -41,7 +41,7 @@ async function main() {
   const mgr = new McpManager(userData, appBase, false, null);
   await mgr.loadConfig();
 
-  const commands = args.commands.length > 0 ? args.commands : ["uv", "uvx", "node", "npx", "python", "python3"];
+  const commands = args.commands.length > 0 ? args.commands : ["uv", "uvx", "node", "npm", "npx", "python", "python3"];
   const before = await mgr.getRuntimeHealth({ commands });
   console.log("[mcp-runtime-smoke] health(before):");
   console.log(JSON.stringify(before, null, 2));
