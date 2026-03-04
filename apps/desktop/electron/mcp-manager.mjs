@@ -481,14 +481,31 @@ export class McpManager {
 
     const attempts = [];
     if (process.platform === "win32") {
+      const psScript = [
+        "$ErrorActionPreference = 'Stop'",
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+        "try {",
+        "  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls",
+        "  $script = (New-Object System.Net.WebClient).DownloadString('https://astral.sh/uv/install.ps1')",
+        "  if (-not $script) { throw 'EMPTY_INSTALL_SCRIPT' }",
+        "  & ([ScriptBlock]::Create($script))",
+        "} catch {",
+        "  Write-Error ('UV_INSTALL_FAILED: ' + $_.Exception.Message)",
+        "  exit 1",
+        "}",
+      ].join("; ");
       const psArgs = [
         "-NoProfile",
+        "-NonInteractive",
         "-ExecutionPolicy",
         "Bypass",
         "-Command",
-        "irm https://astral.sh/uv/install.ps1 | iex",
+        psScript,
       ];
+      const systemRoot = String(process.env.SystemRoot || "C:\\Windows").trim();
+      const psAbsolute = path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
       attempts.push(
+        { command: psAbsolute, args: psArgs },
         { command: "powershell.exe", args: psArgs },
         { command: "powershell", args: psArgs },
         { command: "pwsh.exe", args: psArgs },
@@ -504,7 +521,25 @@ export class McpManager {
     let last = { ok: false, code: -1, stdout: "", stderr: "INSTALL_NOT_ATTEMPTED", timedOut: false };
     const errors = [];
     for (const step of attempts) {
-      const runRet = await this._runProcess(step.command, step.args, { timeoutMs: 180000, env: baseEnv });
+      const command = String(step?.command ?? "").trim();
+      if (!command) continue;
+      let commandToRun = command;
+      const commandIsPathLike = command.includes("/") || command.includes("\\");
+      if (path.isAbsolute(command)) {
+        if (!(await this._pathExists(command))) {
+          errors.push(`${command}: COMMAND_NOT_FOUND`);
+          continue;
+        }
+      } else if (!commandIsPathLike) {
+        const resolved = await this._resolveCommandInDirs(command, this._splitPathList(baseEnv.PATH ?? process.env.PATH ?? ""));
+        if (!resolved) {
+          errors.push(`${command}: COMMAND_NOT_FOUND`);
+          continue;
+        }
+        commandToRun = resolved;
+      }
+
+      const runRet = await this._runProcess(commandToRun, step.args, { timeoutMs: 180000, env: baseEnv });
       if (runRet?.ok) {
         const normalizeRet = await this._normalizeUvInstallLayout(userRuntimeRoot);
         if (!normalizeRet?.ok) {
@@ -525,14 +560,14 @@ export class McpManager {
         };
       }
       last = runRet;
-      errors.push(`${step.command}: ${String(runRet?.stderr ?? runRet?.stdout ?? `exit=${runRet?.code ?? -1}`)}`);
+      const detail = String(runRet?.stderr ?? runRet?.stdout ?? `exit=${runRet?.code ?? -1}`).trim();
+      errors.push(`${command}: ${detail || `exit=${runRet?.code ?? -1}`}`);
     }
 
+    const summary = errors.length > 0 ? errors.join("\n---\n") : String(last?.stderr ?? "");
     return {
       ...last,
-      stderr: errors.length > 0
-        ? `${String(last?.stderr ?? "")}\n${errors.join("\n---\n")}`
-        : String(last?.stderr ?? ""),
+      stderr: summary || "UV_INSTALL_FAILED",
     };
   }
 
@@ -545,6 +580,7 @@ export class McpManager {
       root,
       userRuntimeBinDir,
       path.join(root, "Scripts"),
+      ...this._knownUserBinDirs(),
     ])];
 
     const extCandidates = this._isWindows() ? [".exe", ".cmd", ".bat", ""] : [""];
