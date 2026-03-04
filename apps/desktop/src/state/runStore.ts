@@ -68,6 +68,7 @@ export type AssistantStep = {
   text: string;
   streaming?: boolean;
   hidden?: boolean;
+  quickActions?: Array<"open_kb_manager" | "kb_done_continue">;
   /** Sub-agent ID (if this message is from a sub-agent) */
   agentId?: string;
   /** Sub-agent display name */
@@ -186,7 +187,12 @@ type RunState = {
   truncateAfter: (stepId: string) => void; // 保留 stepId（包含它），清除其后
   truncateFrom: (stepId: string) => void; // 清除 stepId（包含它）及其后
 
-  addAssistant: (initialText?: string, streaming?: boolean, hidden?: boolean, opts?: { agentId?: string; agentName?: string }) => string;
+  addAssistant: (
+    initialText?: string,
+    streaming?: boolean,
+    hidden?: boolean,
+    opts?: { agentId?: string; agentName?: string; quickActions?: AssistantStep["quickActions"] },
+  ) => string;
   appendAssistantDelta: (stepId: string, delta: string) => void;
   finishAssistant: (stepId: string) => void;
   patchAssistant: (stepId: string, patch: Partial<AssistantStep>) => void;
@@ -486,10 +492,26 @@ export const useRunStore = create<RunState>()(
       return { steps: s.steps.slice(0, idx) };
     }),
 
-  addAssistant: (initialText = "", streaming = false, hidden = false, opts?: { agentId?: string; agentName?: string }) => {
+  addAssistant: (
+    initialText = "",
+    streaming = false,
+    hidden = false,
+    opts?: { agentId?: string; agentName?: string; quickActions?: AssistantStep["quickActions"] },
+  ) => {
     const id = makeId("a");
     set((s) => ({
-      steps: [...s.steps, { id, type: "assistant" as const, text: initialText, streaming, hidden, ...(opts?.agentId ? { agentId: opts.agentId, agentName: opts.agentName } : {}) }],
+      steps: [
+        ...s.steps,
+        {
+          id,
+          type: "assistant" as const,
+          text: initialText,
+          streaming,
+          hidden,
+          ...(opts?.agentId ? { agentId: opts.agentId, agentName: opts.agentName } : {}),
+          ...(Array.isArray(opts?.quickActions) && opts!.quickActions!.length ? { quickActions: opts!.quickActions } : {}),
+        },
+      ],
     }));
     return id;
   },
@@ -672,5 +694,4 @@ export const useRunStore = create<RunState>()(
     },
   ),
 );
-
 

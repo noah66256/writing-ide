@@ -81,6 +81,17 @@ function removeOneRefTokenFromText(text: string, item: RefItem) {
   return next;
 }
 
+function looksLikeKbPanelOnlyIntent(text: string) {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  const hasKbOpVerb =
+    /(抽卡|入库|导入语料|导入素材|学.{0,4}风格|学.{0,4}写法|学习.{0,4}风格|分析.{0,4}文风|生成.{0,4}手册|风格手册)/.test(t);
+  if (!hasKbOpVerb) return false;
+  const looksLikeDebug = /(问题|bug|报错|失败|修复|检查|日志|代码|实现|排查|原因|为什么)/i.test(t);
+  if (looksLikeDebug) return false;
+  return true;
+}
+
 export function AgentPane() {
   const mode = useRunStore((s) => s.mode);
   const model = useRunStore((s) => s.model);
@@ -405,7 +416,17 @@ export function AgentPane() {
     return { agentId: agent.id, agentName: agent.name, cleanText: text.slice(m[0].length) };
   }
 
-  const startTurn = (text: string) => {
+  const appendUserStepWithBaseline = (text: string) => {
+    const baseline = {
+      project: useProjectStore.getState().snapshot(),
+      mainDoc: JSON.parse(JSON.stringify(useRunStore.getState().mainDoc ?? {})),
+      todoList: JSON.parse(JSON.stringify(useRunStore.getState().todoList ?? [])),
+      ctxRefs: JSON.parse(JSON.stringify(useRunStore.getState().ctxRefs ?? [])),
+    };
+    useRunStore.getState().addUser(text, baseline as any);
+  };
+
+  const startTurn = (text: string, opts?: { bypassKbGuide?: boolean }) => {
     if (!text) return;
     // 允许“运行中发送”：先中断当前 run，再启动新一轮（human-in-the-loop / 用户确认用）
     if (controllerRef.current) {
@@ -417,6 +438,17 @@ export function AgentPane() {
       return;
     }
 
+    if (!opts?.bypassKbGuide && mode === "agent" && looksLikeKbPanelOnlyIntent(text)) {
+      appendUserStepWithBaseline(text);
+      useRunStore.getState().addAssistant(
+        "抽卡/语料学习已改为面板操作：请到知识库里选择目标库后执行抽卡。完成后点击下方“我已完成抽卡”，我再继续后续写作或分析。",
+        false,
+        false,
+        { quickActions: ["open_kb_manager", "kb_done_continue"] },
+      );
+      return;
+    }
+
     // 真实积分：要求先登录再使用 AI（离线写作不受影响）
     const me = useAuthStore.getState().user;
     if (!me) {
@@ -425,13 +457,7 @@ export function AgentPane() {
     }
 
     // 记录用户消息 + baseline（用于“从历史消息提交/回滚”）
-    const baseline = {
-      project: useProjectStore.getState().snapshot(),
-      mainDoc: JSON.parse(JSON.stringify(useRunStore.getState().mainDoc ?? {})),
-      todoList: JSON.parse(JSON.stringify(useRunStore.getState().todoList ?? [])),
-      ctxRefs: JSON.parse(JSON.stringify(useRunStore.getState().ctxRefs ?? [])),
-    };
-    useRunStore.getState().addUser(text, baseline as any);
+    appendUserStepWithBaseline(text);
 
     const atMention = parseAtMention(text);
     const c = startGatewayRun({ gatewayUrl, mode, model, prompt: atMention ? atMention.cleanText : text, ...(atMention ? { targetAgentId: atMention.agentId } : {}) });
@@ -1177,6 +1203,7 @@ export function AgentPane() {
             const looksLikeDraft = text.length >= 480 || lineCount >= 10;
             const isSubAgent = !!step.agentId;
             const agentLabel = step.agentName || step.agentId || "";
+            const quickActions = Array.isArray(step.quickActions) ? step.quickActions : [];
             return (
               <div key={step.id} className={`msgAssistant${isSubAgent ? " msgSubAgent" : ""}`}>
                 <div className="assistantMsgHeader">
@@ -1216,6 +1243,25 @@ export function AgentPane() {
                 ) : (
                   <RichText text={raw} />
                 )}
+                {quickActions.length ? (
+                  <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+                    {quickActions.includes("open_kb_manager") ? (
+                      <button className="btn" type="button" onClick={() => openKbManager()} disabled={isRunning}>
+                        打开知识库
+                      </button>
+                    ) : null}
+                    {quickActions.includes("kb_done_continue") ? (
+                      <button
+                        className="btn btnPrimary"
+                        type="button"
+                        onClick={() => startTurn("我已完成抽卡，请继续刚才的任务。", { bypassKbGuide: true })}
+                        disabled={isRunning}
+                      >
+                        我已完成抽卡
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             );
           }
@@ -1620,5 +1666,4 @@ export function AgentPane() {
     </>
   );
 }
-
 
