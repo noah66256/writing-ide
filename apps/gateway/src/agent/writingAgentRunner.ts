@@ -189,13 +189,16 @@ function parseToolCallsXml(text: string): {
 } {
   const source = String(text ?? "");
   const calls: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
-  const wrappers = Array.from(source.matchAll(/<tool_calls[\s\S]*?<\/tool_calls>/gi));
+  // 兼容两套 XML 协议：
+  // - 现行：<tool_calls><tool_call><arg>...</arg></tool_call></tool_calls>
+  // - 旧式：<function_calls><invoke><parameter>...</parameter></invoke></function_calls>
+  const wrappers = Array.from(source.matchAll(/<(tool_calls|function_calls)\b[\s\S]*?<\/\1>/gi));
   if (wrappers.length === 0) {
     return {
       calls: [],
       plainText: source.trim(),
       wrapperCount: 0,
-      hasToolCallMarker: /<\s*\/?\s*tool_calls\b/i.test(source),
+      hasToolCallMarker: /<\s*\/?\s*(tool_calls|function_calls|tool_call|invoke|arg|parameter)\b/i.test(source),
       mixedOutput: false,
     };
   }
@@ -210,26 +213,26 @@ function parseToolCallsXml(text: string): {
     plainParts.push(source.slice(lastEnd, safeStart));
     lastEnd = safeStart + xml.length;
 
-    const toolCallRe = /<tool_call\b([^>]*)>([\s\S]*?)<\/tool_call>/gi;
+    const toolCallRe = /<(tool_call|invoke)\b([^>]*)>([\s\S]*?)<\/\1>/gi;
     let m: RegExpExecArray | null = null;
     while ((m = toolCallRe.exec(xml)) !== null) {
       callIndex += 1;
-      const attrs = String(m[1] ?? "");
-      const body = String(m[2] ?? "");
+      const attrs = String(m[2] ?? "");
+      const body = String(m[3] ?? "");
       const nameM = attrs.match(/\bname\s*=\s*"([^"]+)"/i) ?? attrs.match(/\bname\s*=\s*'([^']+)'/i);
       const idM = attrs.match(/\bid\s*=\s*"([^"]+)"/i) ?? attrs.match(/\bid\s*=\s*'([^']+)'/i);
       const name = String(nameM?.[1] ?? "").trim();
       if (!name) continue;
       const id = String(idM?.[1] ?? "").trim() || `xml_tool_${Date.now()}_${callIndex}`;
       const args: Record<string, unknown> = {};
-      const argRe = /<arg\b([^>]*)>([\s\S]*?)<\/arg>/gi;
+      const argRe = /<(arg|parameter)\b([^>]*)>([\s\S]*?)<\/\1>/gi;
       let a: RegExpExecArray | null = null;
       while ((a = argRe.exec(body)) !== null) {
-        const aAttrs = String(a[1] ?? "");
+        const aAttrs = String(a[2] ?? "");
         const aNameM = aAttrs.match(/\bname\s*=\s*"([^"]+)"/i) ?? aAttrs.match(/\bname\s*=\s*'([^']+)'/i);
         const aName = String(aNameM?.[1] ?? "").trim();
         if (!aName) continue;
-        args[aName] = parseXmlArgValue(String(a[2] ?? ""));
+        args[aName] = parseXmlArgValue(String(a[3] ?? ""));
       }
       calls.push({ id, name, args });
     }
@@ -433,11 +436,11 @@ function shouldInjectSubAgentMemory(args: {
 function cleanSubAgentArtifactText(raw: string): string {
   let text = String(raw ?? "").trim();
   if (!text) return "";
-  text = text.replace(/<tool_calls[\s\S]*?<\/tool_calls>/gi, " ");
+  text = text.replace(/<(tool_calls|function_calls)\b[\s\S]*?<\/\1>/gi, " ");
   text = text
-    .replace(/^\s*<\/?tool_calls[^>]*>\s*$/gim, "")
-    .replace(/^\s*<\/?tool_call[^>]*>\s*$/gim, "")
-    .replace(/^\s*<\/?arg[^>]*>\s*$/gim, "")
+    .replace(/^\s*<\/?(tool_calls|function_calls)[^>]*>\s*$/gim, "")
+    .replace(/^\s*<\/?(tool_call|invoke)[^>]*>\s*$/gim, "")
+    .replace(/^\s*<\/?(arg|parameter)[^>]*>\s*$/gim, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
   if (!text) return "";

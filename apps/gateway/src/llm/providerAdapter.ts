@@ -62,7 +62,7 @@ export function buildInjectedToolResultMessages(args: {
   out.push({
     role: "user",
     content:
-      "继续。请基于以上 tool_result 推进下一步。若需要调用工具，请按协议输出 <tool_calls>...</tool_calls>（整条消息只含 XML，不夹杂自然语言）。",
+      "继续。请基于以上 tool_result 推进下一步。若需要调用工具，请按协议输出 XML（优先 <tool_calls>...</tool_calls>；旧式 <function_calls>...</function_calls> 也可被兼容解析），整条消息不要夹杂自然语言。",
   });
   return out;
 }
@@ -164,5 +164,4 @@ export async function completionOnceViaProvider(args: ProviderStreamArgs): Promi
     ? { ok: true, content, raw: { provider: "gemini", usage: lastUsage }, usage: lastUsage }
     : { ok: true, content, raw: { provider: "gemini", usage: null } };
 }
-
 

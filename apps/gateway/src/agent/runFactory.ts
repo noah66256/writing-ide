@@ -897,7 +897,12 @@ export function stripCodeFencesOne(text: string) {
 export function extractJsonObject(text: string): string | null {
   const t0 = stripCodeFencesOne(String(text ?? "").trim());
   if (!t0) return null;
-  if (t0.includes("<tool_calls") || t0.includes("<tool_call")) return null;
+  if (
+    t0.includes("<tool_calls") ||
+    t0.includes("<tool_call") ||
+    t0.includes("<function_calls") ||
+    t0.includes("<invoke")
+  ) return null;
   const first = t0.indexOf("{");
   const last = t0.lastIndexOf("}");
   if (first < 0 || last < 0 || last <= first) return null;
