@@ -115,6 +115,42 @@ export async function adminGetAuditRun(args: { runId: string }) {
   return apiFetchJson<{ run: RunAuditDto }>(`/api/admin/audit/runs/${encodeURIComponent(args.runId)}`);
 }
 
+// ======== Marketplace（只读展示） ========
+
+export type MarketplaceManifestDto = {
+  id: string;
+  type: "skill" | "mcp_server" | "sub_agent" | string;
+  name: string;
+  version: string;
+  publisher: string;
+  source: "official" | "reviewed" | string;
+  description: string;
+  minAppVersion: string;
+  platforms: string[];
+  tags: string[];
+  permissions?: {
+    network?: string[];
+    fs?: string[];
+    exec?: string[];
+  };
+  changelog?: string[];
+};
+
+export type MarketplaceRecordViewDto = {
+  manifest: MarketplaceManifestDto;
+  payloadKind: string;
+  payloadSummary?: Record<string, unknown>;
+};
+
+export async function adminListMarketplaceRecords() {
+  return apiFetchJson<{
+    ok: true;
+    source: "db" | "seeded";
+    updatedAt: string;
+    records: MarketplaceRecordViewDto[];
+  }>("/api/admin/marketplace/records");
+}
+
 // ======== AI Config（对齐「锦李2.0」：模型管理 + stage 路由） ========
 
 export type AiModelTestResultDto = {

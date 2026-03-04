@@ -36,9 +36,11 @@ import {
   SKILL_MANIFESTS_V1,
 } from "@writing-ide/agent-core";
 import {
+  getDefaultMarketplaceRecords,
   getMarketplaceManifest,
   getMarketplacePayload,
   listMarketplaceCatalogItems,
+  type MarketplaceRecord,
 } from "./marketplaceCatalog.js";
 
 // 允许使用项目根目录的 .env（你可以用 env.example 复制出来），也支持 apps/gateway/.env 覆盖
@@ -673,8 +675,42 @@ fastify.get("/downloads/desktop/stable/:file", async (request, reply) => {
 });
 
 // ======== Marketplace（v0.1：官方精选，供 Desktop 设置页安装） ========
+async function loadMarketplaceRecordsFromDb(): Promise<{
+  source: "db" | "seeded";
+  updatedAt: string;
+  records: MarketplaceRecord[];
+}> {
+  const db = await loadDb();
+  const records = Array.isArray((db as any)?.marketplaceCatalog?.records)
+    ? (((db as any).marketplaceCatalog.records as MarketplaceRecord[]) ?? [])
+    : [];
+  const updatedAtRaw = String((db as any)?.marketplaceCatalog?.updatedAt ?? "").trim();
+  if (records.length > 0) {
+    return {
+      source: "db",
+      updatedAt: updatedAtRaw || new Date().toISOString(),
+      records: JSON.parse(JSON.stringify(records)),
+    };
+  }
+
+  const seeded = getDefaultMarketplaceRecords();
+  const nowIso = new Date().toISOString();
+  await updateDb((draft) => {
+    const has = Array.isArray((draft as any)?.marketplaceCatalog?.records) && (draft as any).marketplaceCatalog.records.length > 0;
+    if (!has) {
+      (draft as any).marketplaceCatalog = { updatedAt: nowIso, records: JSON.parse(JSON.stringify(seeded)) };
+    }
+  });
+  return {
+    source: "seeded",
+    updatedAt: nowIso,
+    records: seeded,
+  };
+}
+
 fastify.get("/api/marketplace/catalog", async (_request, reply) => {
-  const items = listMarketplaceCatalogItems().map((item) => {
+  const { records } = await loadMarketplaceRecordsFromDb();
+  const items = listMarketplaceCatalogItems(records).map((item) => {
     const id = encodeURIComponent(item.id);
     const ver = encodeURIComponent(item.version);
     return {
@@ -698,7 +734,8 @@ function safeDecodeURIComponent(v: string) {
 fastify.get("/api/marketplace/items/:id/versions/:version/manifest", async (request, reply) => {
   const paramsSchema = z.object({ id: z.string().min(1).max(200), version: z.string().min(1).max(50) });
   const { id, version } = paramsSchema.parse((request as any).params);
-  const hit = getMarketplaceManifest(safeDecodeURIComponent(id), safeDecodeURIComponent(version));
+  const { records } = await loadMarketplaceRecordsFromDb();
+  const hit = getMarketplaceManifest(safeDecodeURIComponent(id), safeDecodeURIComponent(version), records);
   if (!hit) return reply.code(404).send({ error: "NOT_FOUND" });
   reply.header("Cache-Control", "no-store");
   return hit;
@@ -707,11 +744,42 @@ fastify.get("/api/marketplace/items/:id/versions/:version/manifest", async (requ
 fastify.get("/api/marketplace/items/:id/versions/:version/download", async (request, reply) => {
   const paramsSchema = z.object({ id: z.string().min(1).max(200), version: z.string().min(1).max(50) });
   const { id, version } = paramsSchema.parse((request as any).params);
-  const payload = getMarketplacePayload(safeDecodeURIComponent(id), safeDecodeURIComponent(version));
+  const { records } = await loadMarketplaceRecordsFromDb();
+  const payload = getMarketplacePayload(safeDecodeURIComponent(id), safeDecodeURIComponent(version), records);
   if (!payload) return reply.code(404).send({ error: "NOT_FOUND" });
   reply.header("Cache-Control", "no-store");
   return payload;
 });
+
+// ======== Admin：Marketplace（v0.1 只读展示） ========
+fastify.get(
+  "/api/admin/marketplace/records",
+  { preHandler: [(fastify as any).authenticate, requireAdmin] },
+  async (_request, reply) => {
+    const { source, updatedAt, records } = await loadMarketplaceRecordsFromDb();
+    const view = records.map((r) => ({
+      manifest: r.manifest,
+      payloadKind: (r.payload as any)?.kind ?? "unknown",
+      payloadSummary:
+        (r.payload as any)?.kind === "skill"
+          ? { files: Object.keys(((r.payload as any)?.files ?? {})).length }
+          : (r.payload as any)?.kind === "mcp_server"
+            ? {
+                transport: (r.payload as any)?.config?.transport ?? "",
+                command: (r.payload as any)?.config?.command ?? "",
+                endpoint: (r.payload as any)?.config?.endpoint ?? "",
+              }
+            : (r.payload as any)?.kind === "sub_agent"
+              ? {
+                  agentId: (r.payload as any)?.agent?.id ?? "",
+                  model: (r.payload as any)?.agent?.model ?? "",
+                }
+              : {},
+    }));
+    reply.header("Cache-Control", "no-store");
+    return { ok: true, source, updatedAt, records: view };
+  },
+);
 
 // ======== 使用说明视频（临时对外分享链接；下个版本再集成 Desktop） ========
 const TUTORIAL_VIDEO_PATH = (() => {

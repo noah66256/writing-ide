@@ -9,6 +9,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { ToolsPage } from "./pages/ToolsPage";
 import { UsersPage } from "./pages/UsersPage";
 import { SystemPage } from "./pages/SystemPage";
+import { MarketplacePage } from "./pages/MarketplacePage";
 
 type Me = { id: string; email: string; role: "admin" | "user"; pointsBalance: number };
 
@@ -121,6 +122,7 @@ function App() {
       {page === "users" ? <UsersPage /> : null}
       {page === "llm" ? <LlmPage /> : null}
       {page === "tools" ? <ToolsPage /> : null}
+      {page === "marketplace" ? <MarketplacePage /> : null}
       {page === "audit" ? <AuditRunsPage /> : null}
       {page === "system" ? <SystemPage /> : null}
     </AdminLayout>

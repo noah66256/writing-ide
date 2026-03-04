@@ -1,6 +1,7 @@
 import { copyFile, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import type { MarketplaceRecord } from "./marketplaceCatalog.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -291,6 +292,10 @@ export type Db = {
   llmConfig?: LlmConfig;
   aiConfig?: AiConfig;
   toolConfig?: ToolConfig;
+  marketplaceCatalog?: {
+    updatedAt: string;
+    records: MarketplaceRecord[];
+  };
   /** Run 审计（开发期先落本地 JSON；后续可迁 Postgres） */
   runAudits?: RunAudit[];
 };
@@ -329,6 +334,7 @@ const DEFAULT_DB: Db = {
   llmConfig: undefined,
   aiConfig: undefined,
   toolConfig: undefined,
+  marketplaceCatalog: undefined,
   runAudits: [],
 };
 
@@ -860,6 +866,18 @@ export async function loadDb(): Promise<Db> {
       return out;
     })();
 
+    const marketplaceCatalog: Db["marketplaceCatalog"] = (() => {
+      const raw = (parsed as any)?.marketplaceCatalog;
+      if (!raw || typeof raw !== "object") return undefined;
+      const updatedAt = typeof (raw as any)?.updatedAt === "string" ? String((raw as any).updatedAt) : nowIso;
+      const recordsRaw = Array.isArray((raw as any)?.records) ? (((raw as any).records as any[]) ?? []) : [];
+      const records = recordsRaw
+        .filter((x) => x && typeof x === "object" && x.manifest && x.payload)
+        .map((x) => JSON.parse(JSON.stringify(x)) as MarketplaceRecord);
+      if (!records.length) return undefined;
+      return { updatedAt, records };
+    })();
+
     const runAuditsRaw = Array.isArray((parsed as any).runAudits) ? (((parsed as any).runAudits as any[]) ?? []) : [];
     const runAudits = runAuditsRaw
       .map((r) => {
@@ -901,7 +919,7 @@ export async function loadDb(): Promise<Db> {
       })
       .filter((x): x is RunAudit => Boolean(x));
 
-    return { users, pointsTransactions, rechargeConfig, rechargeProducts, rechargeOrders, llmConfig, aiConfig, toolConfig, runAudits };
+    return { users, pointsTransactions, rechargeConfig, rechargeProducts, rechargeOrders, llmConfig, aiConfig, toolConfig, marketplaceCatalog, runAudits };
 }
 
 export async function saveDb(db: Db): Promise<void> {

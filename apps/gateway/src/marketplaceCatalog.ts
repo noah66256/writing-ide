@@ -65,7 +65,7 @@ export type MarketplaceDownloadPayload =
   | MarketplaceMcpPayload
   | MarketplaceSubAgentPayload;
 
-type MarketplaceRecord = {
+export type MarketplaceRecord = {
   manifest: MarketplaceManifest;
   payload: MarketplaceDownloadPayload;
 };
@@ -224,12 +224,22 @@ const RECORDS: MarketplaceRecord[] = [
   },
 ];
 
-const RECORD_INDEX = new Map<string, MarketplaceRecord>(
-  RECORDS.map((r) => [`${r.manifest.id}@${r.manifest.version}`, r]),
-);
+function buildRecordIndex(records: MarketplaceRecord[]) {
+  return new Map<string, MarketplaceRecord>(
+    records.map((r) => [`${r.manifest.id}@${r.manifest.version}`, r]),
+  );
+}
 
-export function listMarketplaceCatalogItems(): MarketplaceCatalogItem[] {
-  return RECORDS.map((r) => ({
+function cloneRecords<T>(v: T): T {
+  return JSON.parse(JSON.stringify(v)) as T;
+}
+
+export function getDefaultMarketplaceRecords(): MarketplaceRecord[] {
+  return cloneRecords(RECORDS);
+}
+
+export function listMarketplaceCatalogItems(records: MarketplaceRecord[] = RECORDS): MarketplaceCatalogItem[] {
+  return records.map((r) => ({
     id: r.manifest.id,
     type: r.manifest.type,
     name: r.manifest.name,
@@ -243,15 +253,15 @@ export function listMarketplaceCatalogItems(): MarketplaceCatalogItem[] {
   }));
 }
 
-export function getMarketplaceManifest(id: string, version: string): MarketplaceManifest | null {
+export function getMarketplaceManifest(id: string, version: string, records: MarketplaceRecord[] = RECORDS): MarketplaceManifest | null {
   const key = `${String(id ?? "").trim()}@${String(version ?? "").trim()}`;
-  const hit = RECORD_INDEX.get(key);
+  const hit = buildRecordIndex(records).get(key);
   return hit ? { ...hit.manifest } : null;
 }
 
-export function getMarketplacePayload(id: string, version: string): MarketplaceDownloadPayload | null {
+export function getMarketplacePayload(id: string, version: string, records: MarketplaceRecord[] = RECORDS): MarketplaceDownloadPayload | null {
   const key = `${String(id ?? "").trim()}@${String(version ?? "").trim()}`;
-  const hit = RECORD_INDEX.get(key);
+  const hit = buildRecordIndex(records).get(key);
   if (!hit) return null;
-  return JSON.parse(JSON.stringify(hit.payload)) as MarketplaceDownloadPayload;
+  return cloneRecords(hit.payload) as MarketplaceDownloadPayload;
 }
