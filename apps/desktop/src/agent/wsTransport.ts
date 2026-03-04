@@ -526,16 +526,54 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
         return id;
       };
 
-      const maybeAppendRunEndFeedback = () => {
+      const summarizeStepFailure = (step: any) => {
+        const toolName = String(step?.toolName ?? "unknown");
+        const input = step?.input && typeof step.input === "object" ? (step.input as any) : null;
+        const output = step?.output && typeof step.output === "object" ? (step.output as any) : null;
+        const errorCode = String(output?.error ?? "").trim() || "UNKNOWN_ERROR";
+        const message = String(output?.message ?? output?.detail ?? "").trim();
+        const path = String(output?.path ?? input?.path ?? input?.fromPath ?? "").trim();
+        const nextAction = Array.isArray(output?.next_actions)
+          ? String(output.next_actions[0] ?? "").trim()
+          : "";
+        const core = `${toolName}: ${errorCode}`;
+        const msgPart = message ? `（${message.slice(0, 80)}）` : "";
+        const pathPart = path ? ` [path=${path}]` : "";
+        const actionPart = nextAction ? `；建议：${nextAction}` : "";
+        return `${core}${msgPart}${pathPart}${actionPart}`;
+      };
+
+      const maybeAppendRunEndFeedback = (runEndData?: any) => {
         const stepsNow = rt.getSteps() ?? [];
         const runSteps = stepsNow.slice(runStartStepCount);
         const hasAssistantText = runSteps.some(
           (s: any) => s && s.type === "assistant" && !s.hidden && String(s.text ?? "").trim().length > 0,
         );
         if (hasAssistantText) return;
-        const failedTools = runSteps.filter((s: any) => s && s.type === "tool" && s.status === "failed").length;
-        if (failedTools > 0) {
-          addAssistant(`本轮已结束，但有 ${failedTools} 个步骤失败。请展开失败项查看原因。`, false, false);
+        const failedToolSteps = runSteps.filter((s: any) => s && s.type === "tool" && s.status === "failed");
+        const stepFailures = failedToolSteps.map((s: any) => summarizeStepFailure(s)).filter(Boolean);
+        const digestFailures = Array.isArray(runEndData?.failureDigest?.failedTools)
+          ? (runEndData.failureDigest.failedTools as any[])
+              .map((x: any) => {
+                const name = String(x?.name ?? "").trim() || "unknown";
+                const error = String(x?.error ?? "").trim() || "UNKNOWN_ERROR";
+                const path = String(x?.path ?? "").trim();
+                const action = Array.isArray(x?.next_actions) ? String(x.next_actions[0] ?? "").trim() : "";
+                const base = `${name}: ${error}${path ? ` [path=${path}]` : ""}`;
+                return action ? `${base}；建议：${action}` : base;
+              })
+              .filter(Boolean)
+          : [];
+
+        const failures = stepFailures.length ? stepFailures : digestFailures;
+        const failedCount = stepFailures.length || Number(runEndData?.failureDigest?.failedCount ?? 0) || 0;
+        if (failedCount > 0) {
+          const lines = failures.slice(0, 3).map((x) => `- ${x}`);
+          const more = failedCount > 3 ? `\n还有 ${failedCount - 3} 项失败，可展开工具步骤查看完整原因。` : "";
+          const body = lines.length
+            ? `本轮已结束，但有 ${failedCount} 个步骤失败：\n${lines.join("\n")}${more}`
+            : `本轮已结束，但有 ${failedCount} 个步骤失败。请展开失败项查看原因。`;
+          addAssistant(body, false, false);
           return;
         }
         const note = String(runDoneNote ?? "").trim();
@@ -641,7 +679,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           if (event === "run.end") {
             log("info", "agent.run.end", data);
             setRunning(false); setActivity(null);
-            maybeAppendRunEndFeedback();
+            maybeAppendRunEndFeedback(data);
 
             // 兜底记忆提取（异步，不阻塞 UI）：
             // 从 memoryCursor 到对话末尾，提取本轮 run 中尚未被滚动提取覆盖的所有完整回合
@@ -802,10 +840,14 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               // Desktop-executed tool for sub-agent: run & send result, skip UI
               log("info", "tool.call.subagent.exec", { toolCallId, name, agentId: toolAgentId });
               const exec = await executeToolCall({ toolName: name, rawArgs, mode: args.mode });
+              const failedOutput =
+                !exec.result.ok && exec.result.output !== undefined
+                  ? exec.result.output
+                  : { ok: false, error: exec.result.error };
               submitToolResult({
                 toolCallId, name,
                 ok: exec.result.ok,
-                output: exec.result.ok ? exec.result.output : { ok: false, error: exec.result.error },
+                output: exec.result.ok ? exec.result.output : failedOutput,
                 meta: {
                   applyPolicy: exec.result.ok ? exec.result.applyPolicy ?? exec.def?.applyPolicy ?? "proposal" : exec.def?.applyPolicy ?? "proposal",
                   riskLevel: exec.result.ok ? exec.result.riskLevel ?? exec.def?.riskLevel ?? "high" : exec.def?.riskLevel ?? "high",
@@ -910,12 +952,16 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             const stepApplyPolicy = exec.result.ok ? exec.result.applyPolicy ?? def?.applyPolicy ?? "proposal" : def?.applyPolicy ?? "proposal";
             const stepRiskLevel = exec.result.ok ? exec.result.riskLevel ?? def?.riskLevel ?? "high" : def?.riskLevel ?? "high";
             const initialKept = stepApplyPolicy === "auto_apply";
+            const failedOutput =
+              !exec.result.ok && exec.result.output !== undefined
+                ? exec.result.output
+                : { ok: false, error: exec.result.error };
 
             addTool({
               toolName: name,
               status: exec.result.ok ? "success" : "failed",
               input: exec.parsedArgs,
-              output: exec.result.ok ? exec.result.output : { ok: false, error: exec.result.error },
+              output: exec.result.ok ? exec.result.output : failedOutput,
               riskLevel: stepRiskLevel, applyPolicy: stepApplyPolicy,
               undoable: exec.result.ok ? exec.result.undoable : false,
               undo: exec.result.ok ? exec.result.undo : undefined,
@@ -926,7 +972,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             submitToolResult({
               toolCallId, name,
               ok: exec.result.ok,
-              output: exec.result.ok ? exec.result.output : { ok: false, error: exec.result.error },
+              output: exec.result.ok ? exec.result.output : failedOutput,
               meta: {
                 applyPolicy: stepApplyPolicy, riskLevel: stepRiskLevel,
                 hasApply: exec.result.ok ? typeof exec.result.apply === "function" : false,

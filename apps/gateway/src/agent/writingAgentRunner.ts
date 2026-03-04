@@ -97,6 +97,8 @@ export type RunContext = {
   l2Memory?: string;
   /** 注入给子 Agent 的对话摘要 */
   ctxDialogueSummary?: string;
+  /** 当前 Run 的路由 ID（来自 intent router） */
+  intentRouteId?: string;
   /** 大文本 blob 池：避免大文本经过 LLM 回显。key=blobId, value=原始文本 */
   textBlobPool?: Map<string, string>;
   /** 首轮图片附件（base64，Anthropic image block 格式） */
@@ -107,6 +109,16 @@ type ToolExecResult = {
   ok: boolean;
   output: unknown;
   meta?: Record<string, unknown> | null;
+};
+
+type ToolFailureDigest = {
+  toolCallId: string;
+  name: string;
+  error: string;
+  message?: string;
+  path?: string;
+  next_actions?: string[];
+  turn: number;
 };
 
 type PendingToolUse = {
@@ -492,6 +504,8 @@ export class WritingAgentRunner {
   private readonly maxTurns: number;
   private consecutiveMainDocOnlyTurns = 0;
   private blockMainDocUpdate = false;
+  private turnAllowedToolNames: Set<string> | null = null;
+  private readonly failedToolDigests: ToolFailureDigest[] = [];
 
   constructor(ctx: RunContext) {
     // 若设置了 agentId，包装 writeEvent 自动注入到每条 SSE 事件
@@ -800,6 +814,8 @@ export class WritingAgentRunner {
         `[tool_result name="${toolUse.name}"]\n${cappedOutput}\n[/tool_result]`,
       );
 
+      if (!result.ok) this._recordToolFailure(toolUse, result);
+
       if (toolUse.name === "run.done") hasRunDone = true;
     }
 
@@ -873,6 +889,7 @@ export class WritingAgentRunner {
   private async _runOneTurnViaProvider(): Promise<boolean> {
     const perTurnCaps = this.ctx.computePerTurnAllowed?.(this.runState) ?? null;
     const effectiveAllowed = perTurnCaps?.allowed ?? this.ctx.allowedToolNames;
+    this.turnAllowedToolNames = effectiveAllowed;
     const turnSystemPrompt = perTurnCaps?.hint
       ? `${this.ctx.systemPrompt}\n\n${perTurnCaps.hint}`
       : this.ctx.systemPrompt;
@@ -956,7 +973,13 @@ export class WritingAgentRunner {
       if (!v.ok) {
         presetResults.set(c.id, {
           ok: false,
-          output: { ok: false, error: "TOOL_ARGS_INVALID", detail: v.error?.message ?? "参数不符合 schema", field: v.error?.field ?? null },
+          output: {
+            ok: false,
+            error: "ERR_PARAM_SCHEMA_MISMATCH",
+            message: v.error?.message ?? "工具参数不符合 schema",
+            detail: v.error?.field ? { field: v.error.field } : null,
+            next_actions: ["按该工具 schema 重新组织参数", "缺参时先补齐必填字段后重试"],
+          },
         });
       }
       completedToolUses.push({
@@ -1022,6 +1045,7 @@ export class WritingAgentRunner {
     // per-turn 阶段门禁：动态计算本轮可用工具集和 hint
     const perTurnCaps = this.ctx.computePerTurnAllowed?.(this.runState) ?? null;
     const effectiveAllowed = perTurnCaps?.allowed ?? this.ctx.allowedToolNames;
+    this.turnAllowedToolNames = effectiveAllowed;
 
     const tools = TOOL_LIST.filter((tool) => {
       if (!effectiveAllowed.has(tool.name)) return false;
@@ -1246,8 +1270,12 @@ export class WritingAgentRunner {
       return this._executeSubAgent(toolUse, rawInput);
     }
 
+    const allowedForTurn = this.turnAllowedToolNames ?? this.ctx.allowedToolNames;
+
     // Tool allowlist enforcement: prevent hallucinated tool calls for sub-agents
-    if (this.ctx.allowedToolNames.size > 0 && !this.ctx.allowedToolNames.has(toolUse.name)) {
+    if (allowedForTurn.size > 0 && !allowedForTurn.has(toolUse.name)) {
+      const routeId = String(this.ctx.intentRouteId ?? "").trim().toLowerCase();
+      const isDeleteOnlyReadBlocked = routeId === "file_delete_only" && toolUse.name === "doc.read";
       this.ctx.writeEvent("tool.call", {
         toolCallId: toolUse.id,
         name: toolUse.name,
@@ -1255,9 +1283,30 @@ export class WritingAgentRunner {
         executedBy: "gateway",
         turn: this.turn,
       });
+      if (isDeleteOnlyReadBlocked) {
+        this.ctx.writeEvent("intent.delete_only.guard", {
+          runId: this.ctx.runId,
+          turn: this.turn,
+          blockedToolName: toolUse.name,
+          routeId,
+          reason: "delete_only_forbid_doc_read",
+        });
+      }
       return {
         ok: false as const,
-        output: { ok: false, error: "TOOL_NOT_ALLOWED", detail: `Tool "${toolUse.name}" is not available for this agent.` },
+        output: {
+          ok: false,
+          error: "ERR_TOOL_POLICY_DENIED",
+          message: isDeleteOnlyReadBlocked
+            ? "当前是删除/清理任务，已禁止 doc.read。"
+            : `工具 "${toolUse.name}" 不在当前回合允许列表中。`,
+          detail: isDeleteOnlyReadBlocked
+            ? "file_delete_only 路由下禁止先读文件，除非用户明确要求“先看内容再删”。"
+            : `Tool "${toolUse.name}" is not available for this agent.`,
+          next_actions: isDeleteOnlyReadBlocked
+            ? ["先 project.listFiles 确认目标", "再调用 doc.deletePath 删除目标路径"]
+            : ["改用当前回合允许的工具", "或先调整任务意图后重试"],
+        },
       };
     }
 
@@ -1938,6 +1987,36 @@ export class WritingAgentRunner {
     });
 
     return true;
+  }
+
+  private _recordToolFailure(toolUse: ContentBlockToolUse, result: ToolExecResult): void {
+    const out = result.output && typeof result.output === "object"
+      ? (result.output as Record<string, unknown>)
+      : {};
+    const error = String((out as any)?.error ?? "").trim() || "UNKNOWN_ERROR";
+    const message = String((out as any)?.message ?? (out as any)?.detail ?? "").trim();
+    const path = String((out as any)?.path ?? (toolUse.input as any)?.path ?? (toolUse.input as any)?.fromPath ?? "").trim();
+    const nextActions = Array.isArray((out as any)?.next_actions)
+      ? ((out as any).next_actions as any[]).map((x) => String(x ?? "").trim()).filter(Boolean).slice(0, 3)
+      : [];
+
+    this.failedToolDigests.push({
+      toolCallId: String(toolUse.id ?? ""),
+      name: String(toolUse.name ?? ""),
+      error,
+      ...(message ? { message } : {}),
+      ...(path ? { path } : {}),
+      ...(nextActions.length ? { next_actions: nextActions } : {}),
+      turn: this.turn,
+    });
+    if (this.failedToolDigests.length > 40) {
+      this.failedToolDigests.splice(0, this.failedToolDigests.length - 40);
+    }
+  }
+
+  getFailureDigest(): { failedCount: number; failedTools: ToolFailureDigest[] } {
+    const failedTools = this.failedToolDigests.slice(0, 12);
+    return { failedCount: this.failedToolDigests.length, failedTools };
   }
 
   getMessages(): AnthropicMessage[] {

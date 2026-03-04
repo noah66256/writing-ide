@@ -88,6 +88,7 @@ async function ensureHighRiskFileOpPermission(toolName: string, args: Record<str
 
   const targetPath = getFileOpTargetPath(toolName, args);
   const action = getFileOpActionLabel(toolName);
+  useRunStore.getState().log("info", "file_op.permission.requested", { toolName, action, targetPath });
   const run = useRunStore.getState();
   const prompt = `确定进行【${action}】操作么？${targetPath ? `\n目标：${targetPath}` : ""}`;
   const stepId = run.addAssistant(prompt, false, false, {
@@ -481,6 +482,118 @@ function normalizeRelPath(p: string) {
   s = s.replace(/\/+/g, "/");
   s = s.replace(/^\/+/, "");
   return s;
+}
+
+function normalizeAbsPath(p: string) {
+  let s = String(p ?? "").trim().replaceAll("\\", "/");
+  s = s.replace(/\/+/g, "/");
+  // 仅去掉尾斜杠，保留根路径语义
+  if (s.length > 1) s = s.replace(/\/+$/g, "");
+  return s;
+}
+
+function isAbsoluteLikePath(p: string) {
+  const s = String(p ?? "").trim();
+  return /^([A-Za-z]:[\\/]|\/|\\\\)/.test(s);
+}
+
+function resolveProjectPathArg(rawPath: unknown): { ok: true; path: string; fromAbsolute: boolean } | { ok: false; error: string; detail?: string } {
+  const src = String(rawPath ?? "").trim();
+  if (!src) return { ok: false, error: "MISSING_PATH" };
+  if (!isAbsoluteLikePath(src)) {
+    const rel = normalizeRelPath(src);
+    if (!rel) return { ok: false, error: "INVALID_PATH" };
+    return { ok: true, path: rel, fromAbsolute: false };
+  }
+
+  const rootDir = String(useProjectStore.getState().rootDir ?? "").trim();
+  if (!rootDir) return { ok: false, error: "NO_PROJECT" };
+  const absNorm = normalizeAbsPath(src);
+  const rootNorm = normalizeAbsPath(rootDir);
+  const absLower = absNorm.toLowerCase();
+  const rootLower = rootNorm.toLowerCase();
+  const inRoot = absLower === rootLower || absLower.startsWith(`${rootLower}/`);
+  if (!inRoot) {
+    return {
+      ok: false,
+      error: "PATH_OUTSIDE_PROJECT",
+      detail: `path=${absNorm}; rootDir=${rootNorm}`,
+    };
+  }
+  const rel = absNorm.slice(rootNorm.length).replace(/^\/+/g, "");
+  if (!rel) return { ok: false, error: "INVALID_PATH" };
+  return { ok: true, path: rel, fromAbsolute: true };
+}
+
+function looksBinaryDocPath(path: string) {
+  const p = String(path ?? "").toLowerCase();
+  return /\.(doc|docx|xls|xlsx|xlsm|ppt|pptx|pdf|jpg|jpeg|png|gif|webp|mp3|mp4|m4a|wav|zip|rar|7z)$/i.test(p);
+}
+
+type PathResolveResult = ReturnType<typeof resolveProjectPathArg>;
+
+function failToolResult(args: {
+  code: string;
+  message: string;
+  detail?: unknown;
+  nextActions?: string[];
+  extra?: Record<string, unknown>;
+}): ToolExecErr {
+  const nextActions = Array.isArray(args.nextActions)
+    ? args.nextActions.map((x) => String(x ?? "").trim()).filter(Boolean).slice(0, 3)
+    : [];
+  return {
+    ok: false,
+    error: args.code,
+    output: {
+      ok: false,
+      error: args.code,
+      message: args.message,
+      ...(args.detail !== undefined ? { detail: args.detail } : {}),
+      ...(nextActions.length ? { next_actions: nextActions } : {}),
+      ...(args.extra && typeof args.extra === "object" ? args.extra : {}),
+    },
+  };
+}
+
+function failPathResolve(args: { rawPath: unknown; resolved: PathResolveResult; actionLabel: string }): ToolExecErr {
+  const rawPath = String(args.rawPath ?? "").trim();
+  const resolved = args.resolved;
+  if (resolved.ok) {
+    return failToolResult({
+      code: "INVALID_PATH",
+      message: `无法${args.actionLabel}：路径参数无效。`,
+    });
+  }
+  if (resolved.error === "MISSING_PATH" || resolved.error === "INVALID_PATH") {
+    return failToolResult({
+      code: resolved.error,
+      message: `无法${args.actionLabel}：缺少有效路径参数。`,
+      detail: { rawPath },
+      nextActions: ["传入目标文件的项目相对路径，例如 drafts/a.md", "或传入当前项目内的绝对路径"],
+    });
+  }
+  if (resolved.error === "NO_PROJECT") {
+    return failToolResult({
+      code: "NO_PROJECT",
+      message: `无法${args.actionLabel}：当前未打开项目文件夹。`,
+      nextActions: ["先在桌面端打开项目文件夹", "再重试本次文件操作"],
+    });
+  }
+  if (resolved.error === "PATH_OUTSIDE_PROJECT") {
+    return failToolResult({
+      code: "PATH_OUTSIDE_PROJECT",
+      message: `无法${args.actionLabel}：目标路径不在当前项目目录内。`,
+      detail: resolved.detail ?? { rawPath },
+      nextActions: ["改用当前项目内路径", "或先把目标目录作为项目打开后再执行"],
+      extra: { rawPath },
+    });
+  }
+  return failToolResult({
+    code: resolved.error || "INVALID_PATH",
+    message: `无法${args.actionLabel}：路径参数不合法。`,
+    detail: resolved.detail ?? { rawPath },
+  });
 }
 
 function extractTitleFromContent(content: string) {
@@ -2363,14 +2476,37 @@ const tools: ToolDefinition[] = [
     applyPolicy: "proposal",
     reversible: false,
     run: async (args) => {
-      const path = normalizeRelPath(String(args.path ?? ""));
-      if (!path) return { ok: false, error: "MISSING_PATH" };
+      const rPath = resolveProjectPathArg(args.path);
+      if (!rPath.ok) return failPathResolve({ rawPath: args.path, resolved: rPath, actionLabel: "读取文件" });
+      const path = rPath.path;
+      if (looksBinaryDocPath(path)) {
+        return failToolResult({
+          code: "ERR_BINARY_NOT_TEXT_READABLE",
+          message: "该文件是二进制格式，doc.read 仅支持文本文件读取。",
+          nextActions: ["改用对应的 MCP 文档工具读取（如 Word/Excel/PDF MCP）", "若只想删除该文件，请直接调用 doc.deletePath"],
+          extra: { path },
+        });
+      }
       const s = useProjectStore.getState();
       const file = s.getFileByPath(path);
       const diskContent = file ? await s.ensureLoaded(file.path) : "";
       const virt = getVirtualFileContentFromPendingProposals({ path, baseExists: Boolean(file), baseContent: diskContent });
-      if (!file && (!virt || !virt.exists)) return { ok: false, error: "FILE_NOT_FOUND" };
-      if (virt && !virt.exists) return { ok: false, error: "FILE_NOT_FOUND" };
+      if (!file && (!virt || !virt.exists)) {
+        return failToolResult({
+          code: "FILE_NOT_FOUND",
+          message: "未找到目标文件。",
+          nextActions: ["确认路径是否正确", "如果刚创建了提案文件，请先 Keep 再读取"],
+          extra: { path },
+        });
+      }
+      if (virt && !virt.exists) {
+        return failToolResult({
+          code: "FILE_NOT_FOUND",
+          message: "该文件在待应用提案中已被删除，当前无法读取。",
+          nextActions: ["撤销删除提案后重试", "或改为读取其他文件"],
+          extra: { path },
+        });
+      }
       const fullContent = virt && virt.exists ? virt.content : diskContent;
       const MAX_READ_CHARS = 40_000;
       const truncated = fullContent.length > MAX_READ_CHARS;
@@ -2400,11 +2536,16 @@ const tools: ToolDefinition[] = [
     applyPolicy: "auto_apply",
     reversible: true,
     run: async (args) => {
-      const dir = normalizeRelPath(String(args.path ?? ""));
-      if (!dir) return { ok: false, error: "MISSING_PATH" };
+      const rPath = resolveProjectPathArg(args.path);
+      if (!rPath.ok) return failPathResolve({ rawPath: args.path, resolved: rPath, actionLabel: "创建目录" });
+      const dir = rPath.path;
       // 没有项目目录时阻止创建目录
       if (!useProjectStore.getState().rootDir) {
-        return { ok: false, error: "NO_PROJECT", output: { ok: false, message: "当前未打开项目文件夹，无法创建目录。请先让用户打开一个项目文件夹。" } };
+        return failToolResult({
+          code: "NO_PROJECT",
+          message: "当前未打开项目文件夹，无法创建目录。",
+          nextActions: ["先打开项目文件夹", "再重试创建目录"],
+        });
       }
       const snap = useProjectStore.getState().snapshot();
       const s = useProjectStore.getState();
@@ -2425,25 +2566,23 @@ const tools: ToolDefinition[] = [
     applyPolicy: "auto_apply",
     reversible: true,
     run: async (args) => {
-      const fromPath = normalizeRelPath(String((args as any).fromPath ?? ""));
-      const toPath = normalizeRelPath(String((args as any).toPath ?? ""));
-      if (!fromPath) return { ok: false, error: "MISSING_FROM_PATH" };
-      if (!toPath) return { ok: false, error: "MISSING_TO_PATH" };
+      const fromR = resolveProjectPathArg((args as any).fromPath);
+      if (!fromR.ok) return failPathResolve({ rawPath: (args as any).fromPath, resolved: fromR, actionLabel: "重命名路径" });
+      const toR = resolveProjectPathArg((args as any).toPath);
+      if (!toR.ok) return failPathResolve({ rawPath: (args as any).toPath, resolved: toR, actionLabel: "重命名路径" });
+      const fromPath = fromR.path;
+      const toPath = toR.path;
 
       const proj = useProjectStore.getState();
       const isFile = !!proj.files.find((f) => f.path === fromPath);
       const isDir = proj.dirs.includes(fromPath);
       if (!isFile && !isDir) {
-        return {
-          ok: false,
-          error: "PATH_NOT_FOUND",
-          output: {
-            ok: false,
-            path: path0,
-            rootDir: useProjectStore.getState().rootDir ?? "",
-            message: "未在当前项目找到该路径。请确认已打开正确目录后重试。",
-          },
-        };
+        return failToolResult({
+          code: "PATH_NOT_FOUND",
+          message: "未在当前项目找到要重命名的路径。",
+          nextActions: ["先用 project.listFiles 确认路径", "再重试重命名"],
+          extra: { path: fromPath, rootDir: useProjectStore.getState().rootDir ?? "" },
+        });
       }
 
       const previewMappings = (() => {
@@ -2462,7 +2601,15 @@ const tools: ToolDefinition[] = [
 
       const snap = useProjectStore.getState().snapshot();
       const r = await useProjectStore.getState().renamePath(fromPath, toPath);
-      if (!r.ok) return { ok: false, error: r.error ?? "RENAME_FAILED", detail: r.detail };
+      if (!r.ok) {
+        return failToolResult({
+          code: String(r.error ?? "RENAME_FAILED"),
+          message: "重命名/移动失败。",
+          detail: r.detail,
+          nextActions: ["确认源路径存在且目标路径未冲突", "必要时先创建目标目录"],
+          extra: { fromPath, toPath },
+        });
+      }
       const undo = () => useProjectStore.getState().restore(snap);
       return {
         ok: true,
@@ -2490,11 +2637,16 @@ const tools: ToolDefinition[] = [
     applyPolicy: "proposal",
     reversible: true,
     run: async (args) => {
-      const path0 = normalizeRelPath(String(args.path ?? ""));
-      if (!path0) return { ok: false, error: "MISSING_PATH" };
+      const rPath = resolveProjectPathArg(args.path);
+      if (!rPath.ok) return failPathResolve({ rawPath: args.path, resolved: rPath, actionLabel: "删除路径" });
+      const path0 = rPath.path;
       // 没有项目目录时阻止删除操作
       if (!useProjectStore.getState().rootDir) {
-        return { ok: false, error: "NO_PROJECT", output: { ok: false, message: "当前未打开项目文件夹，无法执行删除操作。请先让用户打开一个项目文件夹。" } };
+        return failToolResult({
+          code: "NO_PROJECT",
+          message: "当前未打开项目文件夹，无法执行删除操作。",
+          nextActions: ["先打开项目文件夹", "再重试删除"],
+        });
       }
       let proj = useProjectStore.getState();
       let isFile = !!proj.files.find((f) => f.path === path0);
@@ -2505,7 +2657,14 @@ const tools: ToolDefinition[] = [
         isFile = !!proj.files.find((f) => f.path === path0);
         isDir = proj.dirs.includes(path0);
       }
-      if (!isFile && !isDir) return { ok: false, error: "PATH_NOT_FOUND" };
+      if (!isFile && !isDir) {
+        return failToolResult({
+          code: "PATH_NOT_FOUND",
+          message: "未找到要删除的目标路径。",
+          nextActions: ["先调用 project.listFiles 确认目标路径", "再重新执行删除"],
+          extra: { path: path0 },
+        });
+      }
 
       const affectedFiles = (() => {
         if (isFile) return [path0];
@@ -2570,8 +2729,9 @@ const tools: ToolDefinition[] = [
     applyPolicy: "proposal",
     reversible: false,
     run: async (args) => {
-      const pathRaw = normalizeRelPath(String(args.path ?? ""));
-      if (!pathRaw) return { ok: false, error: "MISSING_PATH" };
+      const rPath = resolveProjectPathArg(args.path);
+      if (!rPath.ok) return failPathResolve({ rawPath: args.path, resolved: rPath, actionLabel: "预览文件差异" });
+      const pathRaw = rPath.path;
       const s = useProjectStore.getState();
       const file = s.getFileByPath(pathRaw);
       // 允许预览“新文件写入”（file 不存在时 before 视为空字符串）
@@ -2601,7 +2761,12 @@ const tools: ToolDefinition[] = [
         existingPaths,
       });
       if ((resolved as any).error === "PATH_EXISTS") {
-        return { ok: false, error: "PATH_EXISTS", output: { ok: false, path: pathRaw } };
+        return failToolResult({
+          code: "PATH_EXISTS",
+          message: "目标路径已存在且 ifExists=error，无法继续。",
+          nextActions: ["改用 ifExists=rename 自动改名", "或明确设置 ifExists=overwrite 覆盖"],
+          extra: { path: pathRaw },
+        });
       }
       const finalPath = resolved.path;
       const diffBefore = resolved.renamedFrom ? "" : before;
@@ -2762,13 +2927,18 @@ const tools: ToolDefinition[] = [
     applyPolicy: "proposal",
     reversible: true,
     run: async (args) => {
-      const pathRaw = normalizeRelPath(String(args.path ?? ""));
+      const rPath = resolveProjectPathArg(args.path);
+      if (!rPath.ok) return failPathResolve({ rawPath: args.path, resolved: rPath, actionLabel: "写入文件" });
+      const pathRaw = rPath.path;
       const content = String(args.content ?? "");
       // 没有项目目录时阻止写入——文件无法持久化到磁盘
       if (!useProjectStore.getState().rootDir) {
-        return { ok: false, error: "NO_PROJECT", output: { ok: false, message: "当前未打开项目文件夹，文件无法保存到磁盘。请先让用户通过「打开项目」按钮选择一个项目文件夹。" } };
+        return failToolResult({
+          code: "NO_PROJECT",
+          message: "当前未打开项目文件夹，文件无法保存到磁盘。",
+          nextActions: ["先打开项目文件夹", "再执行写入"],
+        });
       }
-      if (!pathRaw) return { ok: false, error: "MISSING_PATH" };
       const ifExistsRaw = String((args as any).ifExists ?? "").trim().toLowerCase();
       const ifExists = ifExistsRaw === "overwrite" ? "overwrite" : ifExistsRaw === "error" ? "error" : "rename";
       const suggestedName = String((args as any).suggestedName ?? "").trim();
@@ -2782,7 +2952,12 @@ const tools: ToolDefinition[] = [
         existingPaths,
       });
       if ((resolved as any).error === "PATH_EXISTS") {
-        return { ok: false, error: "PATH_EXISTS", output: { ok: false, path: pathRaw } };
+        return failToolResult({
+          code: "PATH_EXISTS",
+          message: "目标路径已存在且 ifExists=error，未执行写入。",
+          nextActions: ["改用 ifExists=rename 自动改名", "或设置 ifExists=overwrite 覆盖"],
+          extra: { path: pathRaw },
+        });
       }
       const path = resolved.path;
       const exists = !!useProjectStore.getState().getFileByPath(path);
@@ -2874,24 +3049,58 @@ const tools: ToolDefinition[] = [
     applyPolicy: "proposal",
     reversible: true,
     run: async (args) => {
-      const srcPath = normalizeRelPath(String(args.path ?? ""));
-      const dirRaw = normalizeRelPath(String(args.targetDir ?? ""));
+      const srcR = resolveProjectPathArg(args.path);
+      if (!srcR.ok) return failPathResolve({ rawPath: args.path, resolved: srcR, actionLabel: "分割源文件" });
+      const srcPath = srcR.path;
+      const dirR = resolveProjectPathArg(args.targetDir);
+      if (!dirR.ok) return failPathResolve({ rawPath: args.targetDir, resolved: dirR, actionLabel: "写入目标目录" });
+      const dirRaw = dirR.path;
       const targetDir = dirRaw.replace(/\/+$/g, "");
       // 没有项目目录时阻止分割写入
       if (!useProjectStore.getState().rootDir) {
-        return { ok: false, error: "NO_PROJECT", output: { ok: false, message: "当前未打开项目文件夹，文件无法保存到磁盘。请先让用户通过「打开项目」按钮选择一个项目文件夹。" } };
+        return failToolResult({
+          code: "NO_PROJECT",
+          message: "当前未打开项目文件夹，无法执行分割写入。",
+          nextActions: ["先打开项目文件夹", "再执行分割写入"],
+        });
       }
-      if (!srcPath) return { ok: false, error: "MISSING_PATH" };
-      if (!targetDir) return { ok: false, error: "MISSING_TARGET_DIR" };
+      if (!targetDir) {
+        return failToolResult({
+          code: "MISSING_TARGET_DIR",
+          message: "缺少目标目录，无法执行分割。",
+          nextActions: ["传入 targetDir（项目内目录）", "例如 targetDir=drafts/split_out"],
+        });
+      }
 
       const proj = useProjectStore.getState();
       const file = proj.getFileByPath(srcPath);
-      if (!file) return { ok: false, error: "FILE_NOT_FOUND" };
+      if (!file) {
+        return failToolResult({
+          code: "FILE_NOT_FOUND",
+          message: "未找到要分割的源文件。",
+          nextActions: ["先用 project.listFiles 确认源文件路径", "再重试分割"],
+          extra: { path: srcPath },
+        });
+      }
 
       const content = await proj.ensureLoaded(file.path);
       const blocks = splitTitleBlocks(content);
-      if (!blocks.length) return { ok: false, error: "NO_TITLE_BLOCKS" };
-      if (blocks.length > 300) return { ok: false, error: "TOO_MANY_BLOCKS" };
+      if (!blocks.length) {
+        return failToolResult({
+          code: "NO_TITLE_BLOCKS",
+          message: "源文件未检测到“标题：”分块，无法自动分割。",
+          nextActions: ["检查文件是否为“标题：... 文案：...”结构", "或改用手动拆分方式"],
+          extra: { path: srcPath },
+        });
+      }
+      if (blocks.length > 300) {
+        return failToolResult({
+          code: "TOO_MANY_BLOCKS",
+          message: "分块数量过多（>300），已拒绝本次操作。",
+          nextActions: ["缩小输入范围后重试", "或分批处理"],
+          extra: { path: srcPath, blocks: blocks.length },
+        });
+      }
 
       const existing = new Set(proj.files.map((f) => f.path));
       const used = new Set<string>();
@@ -3061,13 +3270,29 @@ const tools: ToolDefinition[] = [
     run: async (args) => {
       const s = useProjectStore.getState();
       const ed = s.editorRef;
-      const path = String(args.path ?? s.activePath ?? "");
-      if (!path) return { ok: false, error: "MISSING_PATH" };
+      const inputPath = args.path !== undefined ? args.path : s.activePath;
+      const rPath = resolveProjectPathArg(inputPath);
+      if (!rPath.ok) return failPathResolve({ rawPath: inputPath, resolved: rPath, actionLabel: "应用文本编辑" });
+      const path = rPath.path;
       const file = s.getFileByPath(path);
-      if (!file) return { ok: false, error: "FILE_NOT_FOUND" };
+      if (!file) {
+        return failToolResult({
+          code: "FILE_NOT_FOUND",
+          message: "未找到要修改的文件。",
+          nextActions: ["确认 path 是否正确", "必要时先 doc.read 确认目标文件存在"],
+          extra: { path },
+        });
+      }
 
       const edits = args.edits as any;
-      if (!Array.isArray(edits) || edits.length === 0) return { ok: false, error: "EMPTY_EDITS" };
+      if (!Array.isArray(edits) || edits.length === 0) {
+        return failToolResult({
+          code: "EMPTY_EDITS",
+          message: "edits 为空，无法应用修改。",
+          nextActions: ["传入至少 1 条 Monaco range 编辑", "或改用 doc.write 直接写入全文"],
+          extra: { path },
+        });
+      }
 
       type One = {
         startLineNumber: number;
@@ -3086,14 +3311,13 @@ const tools: ToolDefinition[] = [
         // Monaco range 是 1-based。部分模型会给 0-based（尤其 column=0）。
         // 为了减少无意义失败：允许 0，并把 0 纠正为 1（其余数字取 floor）。
         if (![sl0, sc0, el0, ec0].every((n) => Number.isFinite(n) && n >= 0)) {
-          return {
-            ok: false,
-            error: "INVALID_RANGE",
-            detail: {
-              hint: "Monaco range 必须是 1-based（line/column 从 1 开始）。",
-              got: { startLineNumber: sl0, startColumn: sc0, endLineNumber: el0, endColumn: ec0 },
-            },
-          };
+          return failToolResult({
+            code: "INVALID_RANGE",
+            message: "Monaco range 非法（line/column 必须是 1-based）。",
+            detail: { got: { startLineNumber: sl0, startColumn: sc0, endLineNumber: el0, endColumn: ec0 } },
+            nextActions: ["把所有 line/column 调整为从 1 开始", "再重试 doc.applyEdits"],
+            extra: { path },
+          });
         }
         const sl = Math.max(1, Math.floor(sl0 || 1));
         const sc = Math.max(1, Math.floor(sc0 || 1));
@@ -3624,17 +3848,39 @@ export async function executeToolCall(args: {
 
   // Chat 模式：纯对话，不允许调用任何工具（双保险；Gateway 侧也会做 allowlist）。
   if (args.mode === "chat") {
-    return { def, parsedArgs, result: { ok: false, error: "TOOL_NOT_ALLOWED_IN_CHAT_MODE" } };
+    return {
+      def,
+      parsedArgs,
+      result: failToolResult({
+        code: "ERR_TOOL_POLICY_DENIED",
+        message: "当前是对话模式，不允许执行工具。",
+        nextActions: ["切换到创作模式后再执行工具任务"],
+      }),
+    };
   }
   if (!def) {
-    return { parsedArgs, result: { ok: false, error: "UNKNOWN_TOOL" } };
+    return {
+      parsedArgs,
+      result: failToolResult({
+        code: "UNKNOWN_TOOL",
+        message: `未知工具：${args.toolName}`,
+      }),
+    };
   }
 
   // required check
   for (const a of def.args) {
     if (!a.required) continue;
     if (parsedArgs[a.name] === undefined || parsedArgs[a.name] === null || String(parsedArgs[a.name]).length === 0) {
-      return { def, parsedArgs, result: { ok: false, error: `MISSING_ARG:${a.name}` } };
+      return {
+        def,
+        parsedArgs,
+        result: failToolResult({
+          code: `MISSING_ARG:${a.name}`,
+          message: `缺少必填参数：${a.name}`,
+          nextActions: [`补充参数 ${a.name} 后重试`],
+        }),
+      };
     }
   }
 
@@ -3643,14 +3889,11 @@ export async function executeToolCall(args: {
     return {
       def,
       parsedArgs,
-      result: {
-        ok: false,
-        error: "FILE_OP_PERMISSION_DENIED",
-        output: {
-          ok: false,
-          message: "用户拒绝了本次高风险文件操作授权。",
-        },
-      },
+      result: failToolResult({
+        code: "FILE_OP_PERMISSION_DENIED",
+        message: "用户拒绝了本次高风险文件操作授权。",
+        nextActions: ["如需继续，请重新发起该文件操作并选择“允许”"],
+      }),
     };
   }
 
@@ -3659,6 +3902,14 @@ export async function executeToolCall(args: {
     return { def, parsedArgs, result };
   } catch (e: any) {
     const msg = e?.message ? String(e.message) : String(e);
-    return { def, parsedArgs, result: { ok: false, error: msg } };
+    return {
+      def,
+      parsedArgs,
+      result: failToolResult({
+        code: "TOOL_EXEC_THROWN",
+        message: "工具执行异常。",
+        detail: msg,
+      }),
+    };
   }
 }

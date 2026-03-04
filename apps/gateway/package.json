@@ -7,7 +7,8 @@
     "dev": "npm run -w @writing-ide/kb-core build && npm run -w @writing-ide/tools build && npm run -w @writing-ide/agent-core build && tsx watch src/index.ts",
     "build": "npm run -w @writing-ide/kb-core build && npm run -w @writing-ide/tools build && npm run -w @writing-ide/agent-core build && tsc -p tsconfig.json",
     "audit:ai": "tsx scripts/audit-ai-stages.ts",
-    "regress:agent": "npm run -w @writing-ide/agent-core build && tsx scripts/regress-agent-flow.ts"
+    "regress:agent": "npm run -w @writing-ide/agent-core build && tsx scripts/regress-agent-flow.ts",
+    "smoke:endpoints": "npm run -w @writing-ide/agent-core build && tsx scripts/smoke-messages-responses.ts"
   },
   "dependencies": {
     "@alicloud/dypnsapi20170525": "^2.0.0",
