@@ -24,6 +24,7 @@ import {
 import { cancelConvRun } from "@/state/runRegistry";
 import { useProjectStore } from "@/state/projectStore";
 import { useAuthStore } from "@/state/authStore";
+import { useKbStore } from "@/state/kbStore";
 import { useConversationStore, buildCurrentSnapshot } from "@/state/conversationStore";
 import { startGatewayRun } from "@/agent/gatewayAgent";
 import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
@@ -45,6 +46,18 @@ function parseAtMention(text: string): { agentId: string; cleanText: string } | 
   const agent = BUILTIN_SUB_AGENTS.find(a => a.enabled && (a.id === mention || a.name === mention));
   if (!agent) return null;
   return { agentId: agent.id, cleanText: text.slice(m[0].length) };
+}
+
+function looksLikeKbPanelOnlyIntent(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  if (/^(我已完成抽卡|抽卡已完成|已经完成抽卡)/.test(t)) return false;
+  const hasKbOpVerb =
+    /(抽卡|入库|导入语料|导入素材|学.{0,4}风格|学.{0,4}写法|学习.{0,4}风格|分析.{0,4}文风|生成.{0,4}手册|风格手册)/.test(t);
+  if (!hasKbOpVerb) return false;
+  const looksLikeDebug = /(问题|bug|报错|失败|修复|检查|日志|代码|实现|排查|原因|为什么)/i.test(t);
+  if (looksLikeDebug) return false;
+  return true;
 }
 
 function fileToImageAttachment(file: File): Promise<ImageAttachment | null> {
@@ -160,6 +173,16 @@ export function ChatArea() {
         convStore.setActiveConvId(convId);
       }
 
+      if (mode === "agent" && looksLikeKbPanelOnlyIntent(text)) {
+        useRunStore.getState().addAssistant(
+          "抽卡/语料学习已改为面板操作：请到知识库里选择目标库后执行抽卡。完成后点击下方“我已完成抽卡”，我再继续后续写作或分析。",
+          false,
+          false,
+          { quickActions: ["open_kb_manager", "kb_done_continue"] },
+        );
+        return;
+      }
+
       if (!model) {
         useRunStore.getState().addAssistant("（未选择模型：请先启动 Gateway 并选择一个模型）");
         return;
@@ -198,6 +221,19 @@ export function ChatArea() {
     [mode, model],
   );
 
+  const handleAssistantQuickAction = useCallback(
+    (action: "open_kb_manager" | "kb_done_continue") => {
+      if (action === "open_kb_manager") {
+        useKbStore.getState().openKbManager();
+        return;
+      }
+      if (action === "kb_done_continue") {
+        void handleSend("我已完成抽卡，请继续刚才的任务。");
+      }
+    },
+    [handleSend],
+  );
+
   const handleStop = useCallback(() => {
     cancelActiveRun("stop_button");
     controllerRef.current = null;
@@ -220,7 +256,7 @@ export function ChatArea() {
           <div className="flex-1 min-h-6" />
           <div className="max-w-[var(--chat-max-width)] mx-auto w-full px-6 pb-4 space-y-1">
             {steps.map((step) => (
-              <StepRenderer key={step.id} step={step} />
+              <StepRenderer key={step.id} step={step} onAssistantQuickAction={handleAssistantQuickAction} />
             ))}
             <div ref={bottomRef} />
           </div>
@@ -245,12 +281,18 @@ export function ChatArea() {
 
 /* ─── Step 渲染分发 ─── */
 
-function StepRenderer({ step }: { step: Step }) {
+function StepRenderer({
+  step,
+  onAssistantQuickAction,
+}: {
+  step: Step;
+  onAssistantQuickAction: (action: "open_kb_manager" | "kb_done_continue") => void;
+}) {
   switch (step.type) {
     case "user":
       return <UserMessage step={step} />;
     case "assistant":
-      return <AssistantMessage step={step} />;
+      return <AssistantMessage step={step} onQuickAction={onAssistantQuickAction} />;
     case "tool":
       return <ToolCallCard step={step} />;
     default:
@@ -307,7 +349,13 @@ function UserMessage({ step }: { step: UserStep }) {
 
 /* ─── 助手消息 ─── */
 
-function AssistantMessage({ step }: { step: AssistantStep }) {
+function AssistantMessage({
+  step,
+  onQuickAction,
+}: {
+  step: AssistantStep;
+  onQuickAction: (action: "open_kb_manager" | "kb_done_continue") => void;
+}) {
   if (step.hidden) return null;
 
   const subAgent = step.agentId
@@ -399,6 +447,29 @@ function AssistantMessage({ step }: { step: AssistantStep }) {
               <Copy size={12} />
               复制
             </button>
+          </div>
+        )}
+
+        {Array.isArray(step.quickActions) && step.quickActions.length > 0 && (
+          <div className="flex items-center gap-2 mt-2">
+            {step.quickActions.includes("open_kb_manager") && (
+              <button
+                className="px-2.5 py-1 rounded-md text-[12px] border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
+                onClick={() => onQuickAction("open_kb_manager")}
+                type="button"
+              >
+                打开知识库
+              </button>
+            )}
+            {step.quickActions.includes("kb_done_continue") && (
+              <button
+                className="px-2.5 py-1 rounded-md text-[12px] bg-accent text-white hover:opacity-90 transition-opacity"
+                onClick={() => onQuickAction("kb_done_continue")}
+                type="button"
+              >
+                我已完成抽卡
+              </button>
+            )}
           </div>
         )}
       </div>
