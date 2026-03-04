@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("desktop", {
     return "pong";
   },
   platform: process.platform,
+  arch: process.arch,
   window: {
     focusMain() {
       return ipcRenderer.invoke("window.focusMain");

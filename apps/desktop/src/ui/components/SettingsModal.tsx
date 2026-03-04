@@ -102,31 +102,46 @@ export function SettingsModal({ onClose, initialTab, kbSelectMode }: {
 function MarketplaceTabContent() {
   const items = useMarketplaceStore((s) => s.items);
   const installedMap = useMarketplaceStore((s) => s.installedMap);
+  const manifestMap = useMarketplaceStore((s) => s.manifestMap);
   const logs = useMarketplaceStore((s) => s.logs);
   const loadingCatalog = useMarketplaceStore((s) => s.loadingCatalog);
   const loadingInstalled = useMarketplaceStore((s) => s.loadingInstalled);
   const loadingLogs = useMarketplaceStore((s) => s.loadingLogs);
+  const loadingManifestIds = useMarketplaceStore((s) => s.loadingManifestIds);
   const installingIds = useMarketplaceStore((s) => s.installingIds);
   const error = useMarketplaceStore((s) => s.error);
   const refreshAll = useMarketplaceStore((s) => s.refreshAll);
+  const fetchManifest = useMarketplaceStore((s) => s.fetchManifest);
   const installItem = useMarketplaceStore((s) => s.installItem);
   const uninstallItem = useMarketplaceStore((s) => s.uninstallItem);
   const [typeFilter, setTypeFilter] = useState<"all" | "skill" | "mcp_server" | "sub_agent">("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "not_installed" | "installed" | "upgradable">("all");
+  const [selectedItemId, setSelectedItemId] = useState("");
 
   useEffect(() => {
     void refreshAll();
   }, [refreshAll]);
 
-  const filteredItems = items.filter((x) => typeFilter === "all" || x.type === typeFilter);
+  const filteredItems = items.filter((x) => {
+    if (typeFilter !== "all" && x.type !== typeFilter) return false;
+    const installed = installedMap[x.id];
+    const upgradable = isUpgradableVersion(x.version, installed?.version);
+    if (statusFilter === "not_installed") return !installed;
+    if (statusFilter === "installed") return Boolean(installed) && !upgradable;
+    if (statusFilter === "upgradable") return Boolean(installed) && upgradable;
+    return true;
+  });
+  const selectedItem = items.find((x) => x.id === selectedItemId) ?? null;
+  const selectedManifest = selectedItem ? manifestMap[selectedItem.id] : null;
 
   return (
     <div className="flex flex-col gap-4">
       <div className="text-[12px] text-text-muted leading-relaxed">
-        官方精选能力市场。支持 Skill / MCP 一键安装并即时生效；安装失败会自动回滚。
+        官方精选能力市场。支持 Skill / MCP / Sub-Agent 一键安装并即时生效；安装失败会自动回滚。
       </div>
 
       <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 flex-wrap">
           {([
             ["all", "全部"],
             ["skill", "Skill"],
@@ -139,6 +154,26 @@ function MarketplaceTabContent() {
               className={cn(
                 "px-2.5 py-1 rounded-md text-[11px] border transition-colors",
                 typeFilter === v
+                  ? "border-accent bg-accent-soft text-accent"
+                  : "border-border text-text-muted hover:bg-surface-alt",
+              )}
+            >
+              {label}
+            </button>
+          ))}
+          <span className="mx-1 text-[11px] text-text-faint">|</span>
+          {([
+            ["all", "全部状态"],
+            ["not_installed", "未安装"],
+            ["installed", "已安装"],
+            ["upgradable", "可升级"],
+          ] as const).map(([v, label]) => (
+            <button
+              key={v}
+              onClick={() => setStatusFilter(v)}
+              className={cn(
+                "px-2.5 py-1 rounded-md text-[11px] border transition-colors",
+                statusFilter === v
                   ? "border-accent bg-accent-soft text-accent"
                   : "border-border text-text-muted hover:bg-surface-alt",
               )}
@@ -177,13 +212,30 @@ function MarketplaceTabContent() {
               key={`${item.id}@${item.version}`}
               item={item}
               installed={installedMap[item.id]}
+              upgradable={isUpgradableVersion(item.version, installedMap[item.id]?.version)}
+              detailLoaded={Boolean(manifestMap[item.id])}
+              detailBusy={loadingManifestIds.includes(item.id)}
               busy={installingIds.includes(item.id)}
               onInstall={async () => { await installItem(item); }}
+              onUpgrade={async () => { await installItem(item); }}
               onUninstall={async () => { await uninstallItem(item.id); }}
+              onOpenDetail={async () => {
+                setSelectedItemId(item.id);
+                await fetchManifest(item);
+              }}
             />
           ))}
         </div>
       )}
+
+      {selectedItem ? (
+        <MarketplaceDetailPanel
+          item={selectedItem}
+          manifest={selectedManifest}
+          loading={loadingManifestIds.includes(selectedItem.id)}
+          onClose={() => setSelectedItemId("")}
+        />
+      ) : null}
 
       <div className="border-t border-border pt-3">
         <div className="text-[12px] font-medium text-text mb-2">最近安装日志</div>
@@ -212,15 +264,25 @@ function MarketplaceTabContent() {
 function MarketplaceItemCard({
   item,
   installed,
+  upgradable,
+  detailLoaded,
+  detailBusy,
   busy,
   onInstall,
+  onUpgrade,
   onUninstall,
+  onOpenDetail,
 }: {
   item: MarketplaceCatalogItem;
   installed?: { version?: string; installedAt?: string } | null;
+  upgradable: boolean;
+  detailLoaded: boolean;
+  detailBusy: boolean;
   busy: boolean;
   onInstall: () => Promise<void>;
+  onUpgrade: () => Promise<void>;
   onUninstall: () => Promise<void>;
+  onOpenDetail: () => Promise<void>;
 }) {
   const isInstalled = Boolean(installed);
   const typeLabel =
@@ -247,25 +309,57 @@ function MarketplaceItemCard({
           </div>
           {isInstalled ? (
             <div className="text-[10px] text-green-600 dark:text-green-400 mt-1">
-              已安装 {installed?.version ? `v${installed.version}` : ""} {installed?.installedAt ? `· ${installed.installedAt}` : ""}
+              已安装 {installed?.version ? `v${installed.version}` : ""} {installed?.installedAt ? `· ${formatIsoTime(installed.installedAt)}` : ""}
+            </div>
+          ) : null}
+          {upgradable ? (
+            <div className="text-[10px] text-amber-600 dark:text-amber-400 mt-1">
+              可升级：v{installed?.version ?? "?"} → v{item.version}
             </div>
           ) : null}
         </div>
 
-        <div className="shrink-0">
+        <div className="shrink-0 flex flex-col gap-1.5">
+          <button
+            onClick={() => { void onOpenDetail(); }}
+            disabled={detailBusy}
+            className={cn(
+              "px-3 py-1.5 rounded-md text-[11px] border transition-colors",
+              "border-border text-text-muted hover:bg-surface-alt",
+              detailBusy ? "cursor-wait opacity-70" : "",
+            )}
+          >
+            {detailBusy ? "加载中..." : detailLoaded ? "详情（已缓存）" : "详情"}
+          </button>
           {isInstalled ? (
-            <button
-              onClick={() => { void onUninstall(); }}
-              disabled={busy}
-              className={cn(
-                "px-3 py-1.5 rounded-md text-[11px] border transition-colors",
-                busy
-                  ? "border-border text-text-faint cursor-not-allowed"
-                  : "border-red-500/30 text-red-600 dark:text-red-400 hover:bg-red-500/10",
-              )}
-            >
-              {busy ? "处理中..." : "卸载"}
-            </button>
+            <div className="flex items-center gap-1.5">
+              {upgradable ? (
+                <button
+                  onClick={() => { void onUpgrade(); }}
+                  disabled={busy}
+                  className={cn(
+                    "px-2.5 py-1.5 rounded-md text-[11px] border transition-colors",
+                    busy
+                      ? "border-border text-text-faint cursor-not-allowed"
+                      : "border-accent text-accent hover:bg-accent-soft",
+                  )}
+                >
+                  {busy ? "处理中..." : "升级"}
+                </button>
+              ) : null}
+              <button
+                onClick={() => { void onUninstall(); }}
+                disabled={busy}
+                className={cn(
+                  "px-2.5 py-1.5 rounded-md text-[11px] border transition-colors",
+                  busy
+                    ? "border-border text-text-faint cursor-not-allowed"
+                    : "border-red-500/30 text-red-600 dark:text-red-400 hover:bg-red-500/10",
+                )}
+              >
+                {busy ? "处理中..." : "卸载"}
+              </button>
+            </div>
           ) : (
             <button
               onClick={() => { void onInstall(); }}
@@ -284,6 +378,115 @@ function MarketplaceItemCard({
       </div>
     </div>
   );
+}
+
+function MarketplaceDetailPanel({
+  item,
+  manifest,
+  loading,
+  onClose,
+}: {
+  item: MarketplaceCatalogItem;
+  manifest: any;
+  loading: boolean;
+  onClose: () => void;
+}) {
+  const permissions = manifest?.permissions ?? {};
+  const changelog = Array.isArray(manifest?.changelog) ? manifest.changelog : [];
+  const hasPermission =
+    (Array.isArray(permissions?.network) && permissions.network.length > 0) ||
+    (Array.isArray(permissions?.fs) && permissions.fs.length > 0) ||
+    (Array.isArray(permissions?.exec) && permissions.exec.length > 0);
+  return (
+    <div className="border border-border rounded-lg p-3 bg-surface-alt">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[12px] font-medium text-text">
+          {item.name} · 详情
+        </div>
+        <button
+          onClick={onClose}
+          className="px-2 py-1 rounded-md text-[11px] border border-border text-text-muted hover:bg-surface"
+        >
+          关闭
+        </button>
+      </div>
+
+      {loading ? (
+        <div className="text-[11px] text-text-faint mt-2">正在加载详情...</div>
+      ) : (
+        <div className="mt-2 space-y-2">
+          <div className="text-[11px] text-text-muted">
+            {item.description}
+          </div>
+          <div>
+            <div className="text-[11px] font-medium text-text">权限</div>
+            {!hasPermission ? (
+              <div className="text-[11px] text-text-faint mt-1">无额外权限</div>
+            ) : (
+              <div className="text-[11px] text-text-muted mt-1 space-y-1">
+                {Array.isArray(permissions?.exec) && permissions.exec.length > 0 ? (
+                  <div>执行命令：{permissions.exec.join(", ")}</div>
+                ) : null}
+                {Array.isArray(permissions?.network) && permissions.network.length > 0 ? (
+                  <div>网络访问：{permissions.network.join(", ")}</div>
+                ) : null}
+                {Array.isArray(permissions?.fs) && permissions.fs.length > 0 ? (
+                  <div>文件访问：{permissions.fs.join(", ")}</div>
+                ) : null}
+              </div>
+            )}
+          </div>
+          <div>
+            <div className="text-[11px] font-medium text-text">变更日志</div>
+            {changelog.length === 0 ? (
+              <div className="text-[11px] text-text-faint mt-1">暂无</div>
+            ) : (
+              <div className="text-[11px] text-text-muted mt-1 space-y-1">
+                {changelog.map((line: string, idx: number) => (
+                  <div key={`${idx}-${line}`}>- {line}</div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function toVersionParts(raw: string): number[] {
+  return String(raw ?? "")
+    .trim()
+    .split(/[^\d]+/g)
+    .filter(Boolean)
+    .map((x) => Number.parseInt(x, 10))
+    .filter((x) => Number.isFinite(x));
+}
+
+function compareVersionLike(aRaw?: string, bRaw?: string): number {
+  const a = toVersionParts(String(aRaw ?? ""));
+  const b = toVersionParts(String(bRaw ?? ""));
+  const n = Math.max(a.length, b.length);
+  for (let i = 0; i < n; i += 1) {
+    const av = a[i] ?? 0;
+    const bv = b[i] ?? 0;
+    if (av > bv) return 1;
+    if (av < bv) return -1;
+  }
+  return 0;
+}
+
+function isUpgradableVersion(catalogVersion?: string, installedVersion?: string): boolean {
+  if (!catalogVersion || !installedVersion) return false;
+  return compareVersionLike(catalogVersion, installedVersion) > 0;
+}
+
+function formatIsoTime(raw?: string): string {
+  const iso = String(raw ?? "").trim();
+  if (!iso) return "";
+  const t = new Date(iso);
+  if (Number.isNaN(t.getTime())) return iso;
+  return t.toLocaleString();
 }
 
 /* ─── Persona Tab ─── */

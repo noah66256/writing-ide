@@ -5,6 +5,7 @@ declare global {
     desktop?: {
       ping: () => string;
       platform?: "darwin" | "win32" | "linux" | string;
+      arch?: string;
       window?: {
         focusMain: () => Promise<{ ok: boolean; error?: string }>;
       };

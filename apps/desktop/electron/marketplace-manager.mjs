@@ -77,6 +77,8 @@ export class MarketplaceManager {
         meta = await this._installSkill(manifest, payload);
       } else if (itemType === "mcp_server") {
         meta = await this._installMcpServer(manifest, payload);
+      } else if (itemType === "sub_agent") {
+        meta = await this._installSubAgent(manifest, payload);
       } else {
         throw new Error(`UNSUPPORTED_ITEM_TYPE:${itemType}`);
       }
@@ -127,6 +129,8 @@ export class MarketplaceManager {
         await this._uninstallSkill(installed);
       } else if (installed.type === "mcp_server") {
         await this._uninstallMcpServer(installed);
+      } else if (installed.type === "sub_agent") {
+        await this._uninstallSubAgent(installed);
       }
       delete state.installed[itemId];
       this._appendLog(state, {
@@ -268,6 +272,59 @@ export class MarketplaceManager {
     if (ret?.ok === false) throw new Error(String(ret.error ?? "MCP_REMOVE_FAILED"));
   }
 
+  async _installSubAgent(manifest, payload) {
+    const p = payload && typeof payload === "object" ? payload : null;
+    if (!p || p.kind !== "sub_agent" || !p.agent || typeof p.agent !== "object") {
+      throw new Error("SUB_AGENT_PAYLOAD_INVALID");
+    }
+    const raw = p.agent;
+    const rawId = String(raw.id ?? "").trim();
+    const agentId = rawId || `custom_market_${toSafeSlug(manifest.id)}`;
+    const agentDef = {
+      ...deepClone(raw),
+      id: agentId,
+      name: String(raw.name ?? manifest.name ?? agentId).trim() || agentId,
+      description: String(raw.description ?? "").trim() || `${String(raw.name ?? manifest.name ?? "市场子 Agent")}（由 Marketplace 安装）`,
+      systemPrompt:
+        String(raw.systemPrompt ?? "").trim() ||
+        `你是「${String(raw.name ?? manifest.name ?? "子 Agent")}」，请在你的职责范围内完成任务，并严格基于可用工具执行。`,
+      tools: Array.isArray(raw.tools) ? raw.tools.map((x) => String(x ?? "").trim()).filter(Boolean) : [],
+      skills: Array.isArray(raw.skills) ? raw.skills.map((x) => String(x ?? "").trim()).filter(Boolean) : [],
+      mcpServers: Array.isArray(raw.mcpServers) ? raw.mcpServers.map((x) => String(x ?? "").trim()).filter(Boolean) : [],
+      model: String(raw.model ?? "").trim() || "haiku",
+      fallbackModels: Array.isArray(raw.fallbackModels)
+        ? raw.fallbackModels.map((x) => String(x ?? "").trim()).filter(Boolean)
+        : [],
+      toolPolicy: ["readonly", "proposal_first", "auto_apply"].includes(String(raw.toolPolicy ?? ""))
+        ? String(raw.toolPolicy)
+        : "readonly",
+      budget: raw.budget && typeof raw.budget === "object"
+        ? {
+            maxTurns: Number.isFinite(Number(raw.budget.maxTurns))
+              ? Math.max(1, Math.min(30, Math.floor(Number(raw.budget.maxTurns))))
+              : 8,
+            maxToolCalls: Number.isFinite(Number(raw.budget.maxToolCalls))
+              ? Math.max(1, Math.min(100, Math.floor(Number(raw.budget.maxToolCalls))))
+              : 16,
+            timeoutMs: Number.isFinite(Number(raw.budget.timeoutMs))
+              ? Math.max(5000, Math.min(300000, Math.floor(Number(raw.budget.timeoutMs))))
+              : 180000,
+          }
+        : { maxTurns: 8, maxToolCalls: 16, timeoutMs: 180000 },
+      triggerPatterns: Array.isArray(raw.triggerPatterns)
+        ? raw.triggerPatterns.map((x) => String(x ?? "").trim()).filter(Boolean)
+        : [],
+      priority: Number.isFinite(Number(raw.priority)) ? Number(raw.priority) : 50,
+      enabled: Boolean(raw.enabled ?? true),
+      version: String(raw.version ?? manifest.version ?? "1.0.0"),
+    };
+    return { agentId, agentDef };
+  }
+
+  async _uninstallSubAgent(_installed) {
+    return;
+  }
+
   _serverStateToConfig(server) {
     return {
       id: String(server?.id ?? ""),
@@ -338,4 +395,3 @@ export class MarketplaceManager {
     await fs.rename(tmpPath, this._statePath);
   }
 }
-
