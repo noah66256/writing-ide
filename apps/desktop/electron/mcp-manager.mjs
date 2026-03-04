@@ -474,22 +474,112 @@ export class McpManager {
   async _installUvRuntime() {
     const userRuntimeRoot = this._userDataPath ? path.join(this._userDataPath, "mcp-runtime") : "";
     if (!userRuntimeRoot) return { ok: false, error: "USER_DATA_PATH_MISSING" };
+    const userRuntimeBinDir = path.join(userRuntimeRoot, "bin");
     await fs.mkdir(userRuntimeRoot, { recursive: true }).catch(() => void 0);
-    const baseEnv = { ...process.env, UV_INSTALL_DIR: userRuntimeRoot };
+    await fs.mkdir(userRuntimeBinDir, { recursive: true }).catch(() => void 0);
+    const baseEnv = { ...process.env, UV_INSTALL_DIR: userRuntimeBinDir };
 
+    const attempts = [];
     if (process.platform === "win32") {
-      return await this._runProcess(
-        "powershell.exe",
-        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm https://astral.sh/uv/install.ps1 | iex"],
-        { timeoutMs: 180000, env: baseEnv },
+      const psArgs = [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "irm https://astral.sh/uv/install.ps1 | iex",
+      ];
+      attempts.push(
+        { command: "powershell.exe", args: psArgs },
+        { command: "powershell", args: psArgs },
+        { command: "pwsh.exe", args: psArgs },
+        { command: "pwsh", args: psArgs },
+      );
+    } else {
+      attempts.push(
+        { command: "sh", args: ["-lc", "curl -fsSL https://astral.sh/uv/install.sh | sh"] },
+        { command: "bash", args: ["-lc", "curl -fsSL https://astral.sh/uv/install.sh | sh"] },
       );
     }
 
-    return await this._runProcess(
-      "sh",
-      ["-lc", "curl -fsSL https://astral.sh/uv/install.sh | sh"],
-      { timeoutMs: 180000, env: baseEnv },
-    );
+    let last = { ok: false, code: -1, stdout: "", stderr: "INSTALL_NOT_ATTEMPTED", timedOut: false };
+    const errors = [];
+    for (const step of attempts) {
+      const runRet = await this._runProcess(step.command, step.args, { timeoutMs: 180000, env: baseEnv });
+      if (runRet?.ok) {
+        const normalizeRet = await this._normalizeUvInstallLayout(userRuntimeRoot);
+        if (!normalizeRet?.ok) {
+          return {
+            ok: false,
+            code: runRet.code ?? 1,
+            stdout: String(runRet.stdout ?? ""),
+            stderr: `${String(runRet.stderr ?? "")}\n${String(normalizeRet?.error ?? "NORMALIZE_FAILED")}`,
+            timedOut: false,
+          };
+        }
+        return {
+          ok: true,
+          code: runRet.code ?? 0,
+          stdout: String(runRet.stdout ?? ""),
+          stderr: String(runRet.stderr ?? ""),
+          timedOut: false,
+        };
+      }
+      last = runRet;
+      errors.push(`${step.command}: ${String(runRet?.stderr ?? runRet?.stdout ?? `exit=${runRet?.code ?? -1}`)}`);
+    }
+
+    return {
+      ...last,
+      stderr: errors.length > 0
+        ? `${String(last?.stderr ?? "")}\n${errors.join("\n---\n")}`
+        : String(last?.stderr ?? ""),
+    };
+  }
+
+  async _normalizeUvInstallLayout(userRuntimeRoot) {
+    const root = String(userRuntimeRoot ?? "").trim();
+    if (!root) return { ok: false, error: "USER_RUNTIME_ROOT_REQUIRED" };
+    const userRuntimeBinDir = path.join(root, "bin");
+    await fs.mkdir(userRuntimeBinDir, { recursive: true }).catch(() => void 0);
+    const searchDirs = [...new Set([
+      root,
+      userRuntimeBinDir,
+      path.join(root, "Scripts"),
+    ])];
+
+    const extCandidates = this._isWindows() ? [".exe", ".cmd", ".bat", ""] : [""];
+    const copied = [];
+    for (const cmd of ["uv", "uvx"]) {
+      let source = null;
+      for (const dir of searchDirs) {
+        for (const ext of extCandidates) {
+          const candidate = path.join(dir, `${cmd}${ext}`);
+          if (await this._pathExists(candidate)) {
+            source = candidate;
+            break;
+          }
+        }
+        if (source) break;
+      }
+      if (!source) continue;
+      const targetName = this._isWindows() ? `${cmd}.exe` : cmd;
+      const target = path.join(userRuntimeBinDir, targetName);
+      if (path.normalize(source) !== path.normalize(target)) {
+        await fs.copyFile(source, target).catch(() => void 0);
+        if (!this._isWindows()) await fs.chmod(target, 0o755).catch(() => void 0);
+        copied.push({ cmd, from: source, to: target });
+      }
+    }
+
+    const uvResolved = await this._resolveCommandInDirs("uv", [userRuntimeBinDir]);
+    if (!uvResolved) {
+      return {
+        ok: false,
+        error: `UV_BINARY_NOT_FOUND_AFTER_INSTALL(searchDirs=${searchDirs.join(",")})`,
+        copied,
+      };
+    }
+    return { ok: true, copied };
   }
 
   async _installRuntimeByPlan(planId) {

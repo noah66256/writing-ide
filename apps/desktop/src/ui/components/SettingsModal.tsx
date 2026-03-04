@@ -1334,11 +1334,16 @@ function McpRuntimeStatusBar() {
                 const installs = Array.isArray(ret?.installs) ? ret.installs : [];
                 const okInstalls = installs.filter((x: any) => x?.ok).length;
                 const failedInstalls = installs.filter((x: any) => !x?.ok).length;
+                const firstInstallErr = installs
+                  .filter((x: any) => !x?.ok)
+                  .map((x: any) => String(x?.error ?? "").trim())
+                  .find(Boolean);
                 const detail: string[] = [];
                 if (okInstalls > 0) detail.push(`成功 ${okInstalls} 项`);
                 if (failedInstalls > 0) detail.push(`失败 ${failedInstalls} 项`);
                 if (unsupported.length > 0) detail.push(`暂不支持自动修复：${unsupported.join(", ")}`);
                 if (detail.length === 0) detail.push("无需修复");
+                if (firstInstallErr) detail.push(`原因：${firstInstallErr.slice(0, 180)}`);
                 setStatusTone(failedInstalls > 0 ? "error" : (unsupported.length > 0 ? "warn" : "success"));
                 setStatusText(`修复完成：${detail.join("；")}`);
               } finally {
