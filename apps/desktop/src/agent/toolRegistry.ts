@@ -4,6 +4,8 @@ import { useKbStore } from "../state/kbStore";
 import { useAuthStore } from "../state/authStore";
 import { useWritingBatchStore } from "../state/writingBatchStore";
 import { useTeamStore, getEffectiveAgents, validateCustomAgent, generateCustomAgentId } from "../state/teamStore";
+import { useDialogStore } from "../state/dialogStore";
+import { useFileOpPermissionStore } from "../state/fileOpPermissionStore";
 import { TOOL_LIST } from "@writing-ide/tools";
 import { getGatewayBaseUrl } from "./gatewayUrl";
 
@@ -62,6 +64,56 @@ export type ToolDefinition = {
 
 function gatewayBaseUrl() {
   return getGatewayBaseUrl();
+}
+
+const HIGH_RISK_FILE_OP_TOOL_NAMES = new Set(["doc.write", "doc.applyEdits", "doc.deletePath"]);
+
+function getFileOpTargetPath(toolName: string, args: Record<string, unknown>) {
+  if (toolName === "doc.deletePath" || toolName === "doc.write" || toolName === "doc.applyEdits") {
+    const p = String(args.path ?? "").trim();
+    if (p) return p;
+  }
+  return "";
+}
+
+function getFileOpActionLabel(toolName: string) {
+  if (toolName === "doc.deletePath") return "删除文件";
+  if (toolName === "doc.applyEdits") return "修改文件";
+  return "写入文件";
+}
+
+async function ensureHighRiskFileOpPermission(toolName: string, args: Record<string, unknown>) {
+  if (!HIGH_RISK_FILE_OP_TOOL_NAMES.has(toolName)) return true;
+  if (useFileOpPermissionStore.getState().mode === "always_allow") return true;
+
+  const targetPath = getFileOpTargetPath(toolName, args);
+  const action = getFileOpActionLabel(toolName);
+  const choice = await useDialogStore.getState().openChoice({
+    title: "文件操作授权",
+    message:
+      `当前请求将执行高风险文件操作：${action}` +
+      (targetPath ? `\n目标：${targetPath}` : "") +
+      "\n\n建议先检查 diff，再点击 Keep 生效。",
+    options: [
+      { id: "deny", label: "拒绝", danger: true },
+      { id: "allow_once", label: "允许" },
+      { id: "always_allow", label: "总是允许" },
+    ],
+    cancelText: "取消",
+  });
+
+  if (choice === "always_allow") {
+    useFileOpPermissionStore.getState().setMode("always_allow");
+    useRunStore.getState().log("warn", "file_op.permission", { toolName, action: "always_allow", targetPath });
+    return true;
+  }
+  if (choice === "allow_once") {
+    useRunStore.getState().log("info", "file_op.permission", { toolName, action: "allow_once", targetPath });
+    return true;
+  }
+
+  useRunStore.getState().log("warn", "file_op.permission", { toolName, action: "deny", targetPath });
+  return false;
 }
 
 function normalizeTextForStats(text: string) {
@@ -1448,7 +1500,12 @@ const tools: ToolDefinition[] = [
       const topDocs = typeof args.topDocs === "number" ? Math.max(1, Math.floor(args.topDocs)) : 12;
       const explicitLibs = Array.isArray(args.libraryIds) ? (args.libraryIds as any[]).map((x) => String(x ?? "").trim()).filter(Boolean) : [];
       const attached = useRunStore.getState().kbAttachedLibraryIds ?? [];
-      const libraryIds = explicitLibs.length ? explicitLibs : attached;
+      const md: any = useRunStore.getState().mainDoc ?? {};
+      const libFromMainDoc = [
+        String(md?.styleContractV1?.libraryId ?? "").trim(),
+        String(md?.stylePlanV1?.libraryId ?? "").trim(),
+      ].filter(Boolean);
+      const libraryIds = explicitLibs.length ? explicitLibs : attached.length ? attached : libFromMainDoc;
       if (!libraryIds.length) return { ok: false, error: "NO_LIBRARY_SELECTED" };
 
       const ret = await useKbStore.getState().searchForAgent({ query, kind, facetIds, cardTypes, anchorParagraphIndexMax, anchorFromEndMax, debug, libraryIds, perDocTopN, topDocs });
@@ -2420,10 +2477,10 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "doc.deletePath",
-    description: "删除文件或目录（path）。真删磁盘内容；默认自动执行（可 Undo 回滚）。",
+    description: "删除文件或目录（path）。proposal-first：先预览，Keep 后才会真正删除；Undo 可回滚。",
     args: [{ name: "path", required: true, desc: "文件或目录路径" }],
     riskLevel: "high",
-    applyPolicy: "auto_apply",
+    applyPolicy: "proposal",
     reversible: true,
     run: async (args) => {
       const path0 = normalizeRelPath(String(args.path ?? ""));
@@ -2457,10 +2514,11 @@ const tools: ToolDefinition[] = [
       })();
 
       const previewResolved = preview ? await preview.catch(() => null) : null;
-
-      const snap = useProjectStore.getState().snapshot();
-      await useProjectStore.getState().deletePath(path0);
-      const undo = () => useProjectStore.getState().restore(snap);
+      const apply = () => {
+        const snap = useProjectStore.getState().snapshot();
+        void useProjectStore.getState().deletePath(path0);
+        return { undo: () => useProjectStore.getState().restore(snap) };
+      };
 
       return {
         ok: true,
@@ -2471,12 +2529,12 @@ const tools: ToolDefinition[] = [
           filesCount,
           previewFiles,
           ...(previewResolved ? { preview: previewResolved } : {}),
-          note: "已执行删除（可 Undo 回滚）。",
+          note: "这是删除提案。点击 Keep 才会真正删除；Undo 可回滚。",
         },
         riskLevel: "high",
-        applyPolicy: "auto_apply",
-        undoable: true,
-        undo,
+        applyPolicy: "proposal",
+        apply,
+        undoable: false,
       };
     },
   },
@@ -2676,15 +2734,15 @@ const tools: ToolDefinition[] = [
   {
     name: "doc.write",
     description:
-      "写入文件（path, content）。新建可自动落盘；覆盖已有文件会走 proposal-first（Keep 才覆盖，Undo 可回滚）。",
+      "写入文件（path, content）。统一 proposal-first：先看 diff，Keep 后才会真正写入；Undo 可回滚。",
     args: [
       { name: "path", required: true, desc: "新文件路径（如 drafts/run-xxx.md）" },
       { name: "content", required: true, desc: "文件全文内容" },
       { name: "ifExists", required: false, desc: "当文件已存在时的策略：rename(默认)/overwrite/error" },
       { name: "suggestedName", required: false, desc: "建议的新文件名（仅 ifExists=rename 时使用）" },
     ],
-    riskLevel: "low",
-    applyPolicy: "auto_apply",
+    riskLevel: "high",
+    applyPolicy: "proposal",
     reversible: true,
     run: async (args) => {
       const pathRaw = normalizeRelPath(String(args.path ?? ""));
@@ -2712,15 +2770,20 @@ const tools: ToolDefinition[] = [
       const path = resolved.path;
       const exists = !!useProjectStore.getState().getFileByPath(path);
       if (!exists) {
-        const snap = useProjectStore.getState().snapshot();
-        useProjectStore.getState().createFile(path, content);
-        const undo = () => useProjectStore.getState().restore(snap);
         const d = unifiedDiff({ path, before: "", after: content, maxCells: 400_000 });
         const rootDir = useProjectStore.getState().rootDir!;
         const sep = rootDir.includes("\\") ? "\\" : "/";
         const absPath = rootDir.replace(/[/\\]+$/, "") + sep + path.replaceAll("/", sep);
         const fileName = path.split("/").pop() || path;
         const ext = fileName.includes(".") ? fileName.split(".").pop()!.toLowerCase() : "";
+        const note = resolved.renamedFrom
+          ? "已自动改名新建，避免覆盖原文件。这是新建文件提案。点击 Keep 才会真正写入文件；Undo 可回滚。"
+          : "这是新建文件提案。点击 Keep 才会真正写入文件；Undo 可回滚。";
+        const apply = () => {
+          const snap = useProjectStore.getState().snapshot();
+          useProjectStore.getState().createFile(path, content);
+          return { undo: () => useProjectStore.getState().restore(snap) };
+        };
         return {
           ok: true,
           output: {
@@ -2731,13 +2794,14 @@ const tools: ToolDefinition[] = [
             truncated: d.truncated,
             stats: d.stats ?? null,
             ifExists,
+            note,
             artifact: { absPath, relPath: path, name: fileName, ext, sizeBytes: new Blob([content]).size },
-            ...(resolved.renamedFrom ? { renamedFrom: resolved.renamedFrom, note: "已自动改名新建，避免覆盖原文件。" } : {}),
+            ...(resolved.renamedFrom ? { renamedFrom: resolved.renamedFrom } : {}),
           },
-          applyPolicy: "auto_apply",
-          riskLevel: "low",
-          undoable: true,
-          undo,
+          applyPolicy: "proposal",
+          riskLevel: "high",
+          apply,
+          undoable: false,
         };
       }
 
@@ -2775,7 +2839,7 @@ const tools: ToolDefinition[] = [
           artifact: { absPath: absPath2, relPath: path, name: fileName2, ext: ext2, sizeBytes: new Blob([content]).size },
         },
         applyPolicy: "proposal",
-        riskLevel: "medium",
+        riskLevel: "high",
         apply,
         undoable: false,
       };
@@ -3557,6 +3621,22 @@ export async function executeToolCall(args: {
     }
   }
 
+  const allowed = await ensureHighRiskFileOpPermission(def.name, parsedArgs);
+  if (!allowed) {
+    return {
+      def,
+      parsedArgs,
+      result: {
+        ok: false,
+        error: "FILE_OP_PERMISSION_DENIED",
+        output: {
+          ok: false,
+          message: "用户拒绝了本次高风险文件操作授权。",
+        },
+      },
+    };
+  }
+
   try {
     const result = await def.run(parsedArgs, { mode: args.mode });
     return { def, parsedArgs, result };
@@ -3565,5 +3645,3 @@ export async function executeToolCall(args: {
     return { def, parsedArgs, result: { ok: false, error: msg } };
   }
 }
-
-

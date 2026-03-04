@@ -878,7 +878,7 @@ export const TOOL_LIST: ToolMeta[] = [
   },
   {
     name: "doc.deletePath",
-    description: "删除文件或目录（path）。真删磁盘内容；默认自动执行（可 Undo 回滚）。",
+    description: "删除文件或目录（path）。proposal-first：先预览，Keep 后才会真正删除；Undo 可回滚。",
     args: [{ name: "path", required: true, desc: "文件或目录路径", type: "string" }],
     modes: ["agent"],
     inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: true },
@@ -930,7 +930,7 @@ export const TOOL_LIST: ToolMeta[] = [
   },
   {
     name: "doc.write",
-    description: "写入文件（path, content）。新建可自动落盘；覆盖会走提案确认（Keep）。ifExists 默认 rename。",
+    description: "写入文件（path, content）。统一 proposal-first：先看 diff，Keep 后才会真正写入；Undo 可回滚。",
     args: [
       { name: "path", required: true, desc: "文件路径", type: "string" },
       { name: "content", required: true, desc: "文件全文内容", type: "string" },
@@ -1395,7 +1395,6 @@ export function validateToolCallArgs(args: { name: string; toolArgs: Record<stri
 
   return { ok: true as const };
 }
-
 
 
 

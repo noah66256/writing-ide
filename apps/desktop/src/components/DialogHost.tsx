@@ -44,6 +44,15 @@ export function DialogHost() {
           e.preventDefault();
           resolveOk?.();
           close();
+          return;
+        }
+        if (cur.kind === "choice") {
+          const options = Array.isArray((cur as any).options) ? ((cur as any).options as any[]) : [];
+          const firstId = String(options[0]?.id ?? "").trim();
+          if (!firstId) return;
+          e.preventDefault();
+          resolveOk?.(firstId);
+          close();
         }
       }
     };
@@ -74,8 +83,9 @@ export function DialogHost() {
   const message = String((cur as any).message ?? "");
 
   const okText = cur.kind === "alert" ? String(cur.okText ?? "确定") : String((cur as any).confirmText ?? "确定");
-  const cancelText = cur.kind === "confirm" || cur.kind === "prompt" ? String((cur as any).cancelText ?? "取消") : "";
+  const cancelText = cur.kind === "confirm" || cur.kind === "prompt" || cur.kind === "choice" ? String((cur as any).cancelText ?? "取消") : "";
   const danger = Boolean((cur as any).danger);
+  const choiceOptions = cur.kind === "choice" && Array.isArray((cur as any).options) ? ((cur as any).options as any[]) : [];
 
   return (
     <div className="modalMask" role="dialog" aria-modal="true">
@@ -113,7 +123,7 @@ export function DialogHost() {
         ) : null}
 
         <div className="modalBtns" style={{ marginTop: 12 }}>
-          {cur.kind === "confirm" || cur.kind === "prompt" ? (
+          {cur.kind === "confirm" || cur.kind === "prompt" || cur.kind === "choice" ? (
             <button
               ref={cancelBtnRef}
               className="btn"
@@ -126,18 +136,36 @@ export function DialogHost() {
               {cancelText}
             </button>
           ) : null}
-          <button
-            ref={okBtnRef}
-            className={`btn ${danger ? "btnDanger" : "btnPrimary"}`}
-            type="button"
-            onClick={() => {
-              if (cur.kind === "prompt") resolveOk?.(String(cur.value ?? ""));
-              else resolveOk?.();
-              close();
-            }}
-          >
-            {okText}
-          </button>
+          {cur.kind === "choice" ? (
+            choiceOptions.map((opt, idx) => (
+              <button
+                key={String(opt?.id ?? idx)}
+                ref={idx === 0 ? okBtnRef : null}
+                className={`btn ${opt?.danger ? "btnDanger" : "btnPrimary"}`}
+                type="button"
+                onClick={() => {
+                  const id = String(opt?.id ?? "").trim();
+                  resolveOk?.(id);
+                  close();
+                }}
+              >
+                {String(opt?.label ?? `选项${idx + 1}`)}
+              </button>
+            ))
+          ) : (
+            <button
+              ref={okBtnRef}
+              className={`btn ${danger ? "btnDanger" : "btnPrimary"}`}
+              type="button"
+              onClick={() => {
+                if (cur.kind === "prompt") resolveOk?.(String(cur.value ?? ""));
+                else resolveOk?.();
+                close();
+              }}
+            >
+              {okText}
+            </button>
+          )}
         </div>
 
         {cur.kind === "prompt" && cur.multiline ? (
@@ -149,4 +177,3 @@ export function DialogHost() {
     </div>
   );
 }
-

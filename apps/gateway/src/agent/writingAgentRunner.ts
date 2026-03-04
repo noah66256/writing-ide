@@ -1276,32 +1276,6 @@ export class WritingAgentRunner {
       };
     }
 
-    // 子 agent 写文件拦截：暂存为 artifact，不直接写入（防止并行冲突）
-    // 只拦截 doc.write / doc.applyEdits（不拦截 replaceSelection/restoreSnapshot 等）
-    if (this.ctx.agentId && (toolUse.name === "doc.write" || toolUse.name === "doc.applyEdits")) {
-      const path = String(rawInput.path ?? rawInput.file ?? "").trim();
-      const content = String(rawInput.content ?? rawInput.text ?? "").trim();
-      this.ctx.writeEvent("tool.call", {
-        toolCallId: toolUse.id,
-        name: toolUse.name,
-        args: rawInput,
-        executedBy: "gateway",
-        turn: this.turn,
-      });
-      return {
-        ok: true,
-        output: {
-          ok: true,
-          redirected: true,
-          path,
-          content,
-          chars: content.length,
-          message: "内容已暂存为 artifact，等待负责人审核后决定是否写入。",
-        },
-        meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
-      };
-    }
-
     // MCP 工具：直接路由到 Desktop 执行
     if (toolUse.name.startsWith("mcp.")) {
       this.ctx.writeEvent("tool.call", {

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type DialogKind = "alert" | "confirm" | "prompt";
+export type DialogKind = "alert" | "confirm" | "prompt" | "choice";
 
 export type AlertDialogReq = {
   kind: "alert";
@@ -29,7 +29,21 @@ export type PromptDialogReq = {
   multiline?: boolean;
 };
 
-type DialogReq = (AlertDialogReq | ConfirmDialogReq | PromptDialogReq) & {
+export type ChoiceDialogOption = {
+  id: string;
+  label: string;
+  danger?: boolean;
+};
+
+export type ChoiceDialogReq = {
+  kind: "choice";
+  title?: string;
+  message?: string;
+  options: ChoiceDialogOption[];
+  cancelText?: string;
+};
+
+type DialogReq = (AlertDialogReq | ConfirmDialogReq | PromptDialogReq | ChoiceDialogReq) & {
   id: string;
   // 只有 prompt 会用到 value（由 host 控制）
   value?: string;
@@ -40,6 +54,7 @@ type DialogStore = {
   openAlert: (req: Omit<AlertDialogReq, "kind">) => Promise<void>;
   openConfirm: (req: Omit<ConfirmDialogReq, "kind">) => Promise<boolean>;
   openPrompt: (req: Omit<PromptDialogReq, "kind">) => Promise<string | null>;
+  openChoice: (req: Omit<ChoiceDialogReq, "kind">) => Promise<string | null>;
   close: () => void;
   // host 回调
   _resolveOk?: (value?: any) => void;
@@ -111,5 +126,26 @@ export const useDialogStore = create<DialogStore>((set, get) => ({
       });
     }).finally(() => get().close());
   },
-}));
 
+  openChoice: async (req) => {
+    return await new Promise<string | null>((resolve) => {
+      const options = Array.isArray(req.options) ? req.options.filter((x) => String(x?.id ?? "").trim() && String(x?.label ?? "").trim()) : [];
+      if (!options.length) {
+        resolve(null);
+        return;
+      }
+      set({
+        current: {
+          id: uid(),
+          kind: "choice",
+          title: req.title,
+          message: req.message,
+          options,
+          cancelText: req.cancelText ?? "取消",
+        } as DialogReq,
+        _resolveOk: (value?: any) => resolve(typeof value === "string" ? value : null),
+        _resolveCancel: () => resolve(null),
+      });
+    }).finally(() => get().close());
+  },
+}));
