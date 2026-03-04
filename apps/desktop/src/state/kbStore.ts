@@ -3619,8 +3619,8 @@ export const useKbStore = create<KbState>()(
 
             // 分块抽卡：先尝试篇级切分（LLM 识别文章边界），失败则回退字符分块
             const chunkCfg = isStyleLib
-              ? { maxChunks: Infinity, maxParasPerChunk: 60, maxCharsPerChunk: 12000, overlapParas: 2 }
-              : { maxChunks: Infinity, maxParasPerChunk: 80, maxCharsPerChunk: 15000, overlapParas: 0 };
+              ? { maxChunks: 8, maxParasPerChunk: 60, maxCharsPerChunk: 12000, overlapParas: 2 }
+              : { maxChunks: 3, maxParasPerChunk: 80, maxCharsPerChunk: 15000, overlapParas: 0 };
 
             let chunks: Array<Array<{ index: number; text: string; headingPath?: string[] }>> = [];
             // 篇→块映射，用于向 UI 报告分篇级进度
@@ -6045,5 +6045,4 @@ export const useKbStore = create<KbState>()(
     },
   ),
 );
-
 

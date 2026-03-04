@@ -3574,10 +3574,10 @@ fastify.post(
     }
   }
   const maxCards = body.maxCards ?? 18;
-  const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 3);
+  const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 1);
   const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
   const timeoutMsCfg = Number(String(process.env.LLM_CARD_TIMEOUT_MS ?? "").trim());
-  const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 90_000;
+  const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 45_000;
   const defaultFacetIds = [
     "intro",
     "opening_design",
