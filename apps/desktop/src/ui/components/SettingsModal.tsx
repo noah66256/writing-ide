@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import {
   X, Users, Plug, Sparkles, ChevronDown, ChevronRight, Plus,
   Bot, BookOpen, FolderOpen, RefreshCw, Pencil, Trash2, Terminal, Globe, Radio,
-  Eye, EyeOff, Monitor, ExternalLink, Package, Link2,
+  Eye, EyeOff, Monitor, ExternalLink, Package, Link2, Wrench,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TeamModal } from "@/components/TeamModal";
@@ -518,6 +518,11 @@ function tokenizeCommandLine(line: string): string[] {
     .filter(Boolean);
 }
 
+function extractCommandHead(line: string): string {
+  const tokens = tokenizeCommandLine(line);
+  return String(tokens[0] ?? "").trim();
+}
+
 function pickCommandFromReadme(readme: string): { command: string; reason: string } | null {
   const text = String(readme ?? "");
   if (!text.trim()) return null;
@@ -826,6 +831,125 @@ function BrowserStatusBar() {
   );
 }
 
+type RuntimeHealthPayload = {
+  ok: boolean;
+  platform?: string;
+  runtimeDirs?: string[];
+  checks?: Array<{
+    command: string;
+    ok: boolean;
+    source: "bundled" | "system" | "explicit" | "missing" | string;
+    path?: string | null;
+  }>;
+  error?: string;
+};
+
+function McpRuntimeStatusBar() {
+  const getRuntimeHealth = useMcpStore((s) => s.getRuntimeHealth);
+  const repairRuntime = useMcpStore((s) => s.repairRuntime);
+  const [busy, setBusy] = useState(false);
+  const [repairing, setRepairing] = useState(false);
+  const [payload, setPayload] = useState<RuntimeHealthPayload | null>(null);
+
+  const load = useCallback(async () => {
+    setBusy(true);
+    try {
+      const ret = await getRuntimeHealth();
+      setPayload((ret && typeof ret === "object") ? (ret as RuntimeHealthPayload) : { ok: false, error: "INVALID_PAYLOAD" });
+    } catch (e: any) {
+      setPayload({ ok: false, error: String(e?.message ?? e) });
+    } finally {
+      setBusy(false);
+    }
+  }, [getRuntimeHealth]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const checks = Array.isArray(payload?.checks) ? payload!.checks! : [];
+  const missing = checks.filter((c) => !c.ok).map((c) => c.command);
+
+  return (
+    <div className={cn(
+      "flex flex-col gap-2 px-3 py-2.5 rounded-lg border text-[12px]",
+      missing.length > 0 || !payload?.ok
+        ? "border-yellow-500/30 bg-yellow-500/5"
+        : "border-border bg-surface",
+    )}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Wrench size={14} className={missing.length > 0 ? "text-yellow-500" : "text-green-500"} />
+          <span className="font-medium text-text">
+            MCP 运行时环境 {payload?.platform ? `(${payload.platform})` : ""}
+          </span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => { void load(); }}
+            disabled={busy || repairing}
+            className="text-accent hover:underline disabled:opacity-50"
+          >
+            {busy ? "检查中..." : "刷新检查"}
+          </button>
+          <button
+            onClick={async () => {
+              setRepairing(true);
+              try {
+                await repairRuntime();
+                await load();
+              } finally {
+                setRepairing(false);
+              }
+            }}
+            disabled={busy || repairing}
+            className="text-accent hover:underline disabled:opacity-50"
+          >
+            {repairing ? "修复中..." : "一键修复"}
+          </button>
+        </div>
+      </div>
+
+      {!payload?.ok && (
+        <div className="text-text-faint ml-[22px]">
+          环境检查失败：{payload?.error ?? "UNKNOWN_ERROR"}
+        </div>
+      )}
+
+      {payload?.ok && (
+        <>
+          <div className="flex flex-wrap gap-1.5 ml-[22px]">
+            {checks.map((c) => (
+              <span
+                key={c.command}
+                className={cn(
+                  "inline-flex items-center gap-1 px-2 py-0.5 rounded-md border",
+                  c.ok
+                    ? "border-green-500/30 text-green-600 dark:text-green-400 bg-green-500/10"
+                    : "border-red-500/30 text-red-600 dark:text-red-400 bg-red-500/10",
+                )}
+                title={c.path ?? ""}
+              >
+                <span className="font-mono">{c.command}</span>
+                <span className="text-[10px] opacity-80">{c.ok ? c.source : "missing"}</span>
+              </span>
+            ))}
+          </div>
+          {missing.length > 0 ? (
+            <div className="text-text-faint ml-[22px]">
+              缺少命令：{missing.join(", ")}。当前一键修复优先支持 uv/uvx，其它命令请手动安装。
+            </div>
+          ) : (
+            <div className="text-text-faint ml-[22px]">
+              stdio 启动会优先使用内置 runtime，再回退系统 PATH。
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function McpTabContent() {
   const servers = useMcpStore((s) => s.servers);
   const refresh = useMcpStore((s) => s.refresh);
@@ -841,6 +965,7 @@ function McpTabContent() {
     <div className="flex flex-col gap-4">
       {/* 浏览器状态栏 */}
       <BrowserStatusBar />
+      <McpRuntimeStatusBar />
 
       <div className="flex items-center justify-between">
         <div className="text-[13px] font-semibold text-text">MCP Server</div>
@@ -928,11 +1053,35 @@ function McpServerCard({
   const removeServer = useMcpStore((s) => s.removeServer);
   const connect = useMcpStore((s) => s.connect);
   const disconnect = useMcpStore((s) => s.disconnect);
+  const repairRuntime = useMcpStore((s) => s.repairRuntime);
   const refresh = useMcpStore((s) => s.refresh);
   const [busy, setBusy] = useState(false);
 
   const TIcon = TRANSPORT_ICONS[server.transport] ?? Terminal;
   const statusColor = STATUS_COLORS[server.status] ?? STATUS_COLORS.disconnected;
+
+  const ensureRuntimeReady = async () => {
+    if (server.transport !== "stdio" || server.bundled) return true;
+    const head = extractCommandHead(server.config?.command ?? "");
+    if (!head) return true;
+    const ret = await repairRuntime({ commands: [head] });
+    const checks = Array.isArray(ret?.health?.checks) ? ret.health.checks : [];
+    const check = checks.find((c: any) => String(c?.command ?? "").toLowerCase() === head.toLowerCase()) ?? checks[0];
+    if (check?.ok) return true;
+    const unsupported = Array.isArray(ret?.unsupportedMissing) && ret.unsupportedMissing.includes(head);
+    const installErr = Array.isArray(ret?.installs)
+      ? ret.installs.filter((x: any) => x && x.ok === false).map((x: any) => String(x?.error ?? "")).filter(Boolean)[0]
+      : "";
+    await useDialogStore.getState().openAlert({
+      title: "运行时缺失",
+      message:
+        `命令「${head}」仍不可用。` +
+        (unsupported ? "当前版本不支持自动安装该运行时。\n\n" : "已尝试自动修复但未成功。\n\n") +
+        (installErr ? `错误：${installErr}\n\n` : "") +
+        "请在 MCP 设置页顶部点「一键修复」，或手动安装对应运行时后重试。",
+    });
+    return false;
+  };
 
   const handleToggle = async (enable: boolean) => {
     setBusy(true);
@@ -940,6 +1089,8 @@ function McpServerCard({
       if (enable) {
         const api = (window as any).desktop?.mcp;
         if (api) {
+          const ok = await ensureRuntimeReady();
+          if (!ok) return;
           await api.updateServer(server.id, { enabled: true });
           await api.connect(server.id);
         }
@@ -952,14 +1103,20 @@ function McpServerCard({
       }
       await refresh();
     } catch { /* ignore */ }
-    setBusy(false);
+    finally { setBusy(false); }
   };
 
   const handleRetry = async () => {
     setBusy(true);
-    try { await connect(server.id); } catch { /* ignore */ }
-    await refresh();
-    setBusy(false);
+    try {
+      const ok = await ensureRuntimeReady();
+      if (!ok) return;
+      await connect(server.id);
+    } catch { /* ignore */ }
+    finally {
+      await refresh();
+      setBusy(false);
+    }
   };
 
   const handleDelete = async () => {
@@ -1223,6 +1380,7 @@ function McpAddDialog({
   const servers = useMcpStore((s) => s.servers);
   const addServer = useMcpStore((s) => s.addServer);
   const updateServer = useMcpStore((s) => s.updateServer);
+  const repairRuntime = useMcpStore((s) => s.repairRuntime);
 
   const existing = editId ? servers.find((s) => s.id === editId) : null;
   const isBundled = existing?.bundled === true;
@@ -1273,6 +1431,28 @@ function McpAddDialog({
     if (transport === "stdio") {
       if (!isBundled) {
         config.command = command.trim();
+        const head = extractCommandHead(config.command);
+        if (head) {
+          const ret = await repairRuntime({ commands: [head] });
+          const checks = Array.isArray(ret?.health?.checks) ? ret.health.checks : [];
+          const check = checks.find((c: any) => String(c?.command ?? "").toLowerCase() === head.toLowerCase()) ?? checks[0];
+          if (!check?.ok) {
+            const unsupported = Array.isArray(ret?.unsupportedMissing) && ret.unsupportedMissing.includes(head);
+            const installErr = Array.isArray(ret?.installs)
+              ? ret.installs.filter((x: any) => x && x.ok === false).map((x: any) => String(x?.error ?? "")).filter(Boolean)[0]
+              : "";
+            await useDialogStore.getState().openAlert({
+              title: "保存失败：运行时缺失",
+              message:
+                `当前命令「${head}」不可用。` +
+                (unsupported ? "当前版本不支持自动安装该运行时。\n\n" : "自动修复未完成。\n\n") +
+                (installErr ? `错误：${installErr}\n\n` : "") +
+                "请先在 MCP 设置页顶部点「一键修复」后再保存。",
+            });
+            setSaving(false);
+            return;
+          }
+        }
       }
       config.args = args.trim() ? args.trim().split(/\s+/) : [];
     } else {
@@ -1370,6 +1550,11 @@ function McpAddDialog({
       {/* Transport-specific fields */}
       {transport === "stdio" && (
         <>
+          {!isBundled && (
+            <div className="text-[11px] text-text-faint">
+              保存时会自动检测并修复运行时环境（例如 uv/uvx）；若修复失败会阻止保存并提示。
+            </div>
+          )}
           {!isBundled && (
             <div className="flex flex-col gap-1">
               <label className="text-[12px] font-medium text-text">命令</label>

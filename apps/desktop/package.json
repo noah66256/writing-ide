@@ -8,14 +8,15 @@
     "dev": "npm run -w @writing-ide/agent-core build && npm run -w @writing-ide/tools build && concurrently -n renderer,electron -c auto \"npm:dev:renderer\" \"npm:dev:electron\"",
     "dev:renderer": "vite",
     "dev:electron": "node scripts/dev-electron.cjs",
+    "mcp:prepare-runtime": "node scripts/prepare-mcp-runtime.cjs",
     "build": "npm run -w @writing-ide/agent-core build && npm run -w @writing-ide/tools build && vite build",
     "preview": "vite preview",
-    "dist:win": "npm run build && electron-builder --win nsis --x64",
-    "dist:win:portable": "npm run build && electron-builder --win portable --x64",
-    "dist:win:all": "npm run build && electron-builder --win nsis portable --x64",
-    "dist:mac": "npm run build && electron-builder --mac dmg zip --arm64",
-    "dist:mac:x64": "npm run build && electron-builder --mac dmg zip --x64",
-    "dist:mac:universal": "npm run build && electron-builder --mac dmg zip --universal"
+    "dist:win": "npm run mcp:prepare-runtime && npm run build && electron-builder --win nsis --x64",
+    "dist:win:portable": "npm run mcp:prepare-runtime && npm run build && electron-builder --win portable --x64",
+    "dist:win:all": "npm run mcp:prepare-runtime && npm run build && electron-builder --win nsis portable --x64",
+    "dist:mac": "npm run mcp:prepare-runtime && npm run build && electron-builder --mac dmg zip --arm64",
+    "dist:mac:x64": "npm run mcp:prepare-runtime && npm run build && electron-builder --mac dmg zip --x64",
+    "dist:mac:universal": "npm run mcp:prepare-runtime && npm run build && electron-builder --mac dmg zip --universal"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
@@ -65,6 +66,7 @@
       "node_modules/playwright/**",
       "node_modules/playwright-core/**",
       "electron/mcp-servers/**",
+      "electron/mcp-runtime/**",
       "electron/bundled-skills/**"
     ],
     "npmRebuild": false,
@@ -75,6 +77,7 @@
       "!**/*.map",
       "!**/*.md",
       "electron/bundled-skills/**",
+      "electron/mcp-runtime/**",
       "!**/.env*",
       "!**/writing-ide-data/**",
       "!**/node_modules/.cache/**",

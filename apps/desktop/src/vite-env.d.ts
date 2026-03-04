@@ -158,10 +158,22 @@ declare global {
         openDir: () => Promise<{ ok: boolean }>;
         onChange: (handler: (payload: { manifests: any[]; errors: Array<{ dirName: string; error: string; ts: number }> } | any[]) => void) => () => void;
       };
+      mcp?: {
+        getServers: () => Promise<any[]>;
+        addServer: (config: any) => Promise<{ ok: boolean; id?: string; error?: string }>;
+        updateServer: (id: string, config: any) => Promise<{ ok: boolean; error?: string }>;
+        removeServer: (id: string) => Promise<{ ok: boolean; error?: string }>;
+        connect: (id: string) => Promise<{ ok: boolean; error?: string }>;
+        disconnect: (id: string) => Promise<{ ok: boolean; error?: string }>;
+        getTools: (id: string) => Promise<any[]>;
+        callTool: (serverId: string, toolName: string, args?: any) => Promise<any>;
+        getRuntimeHealth?: (opts?: { commands?: string[] }) => Promise<any>;
+        repairRuntime?: (opts?: { commands?: string[] }) => Promise<any>;
+        onStatusChange: (handler: (payload: any) => void) => () => void;
+      };
     };
   }
 }
 
 export {};
-
 

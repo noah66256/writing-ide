@@ -185,6 +185,12 @@ contextBridge.exposeInMainWorld("desktop", {
     callTool(serverId, toolName, args) {
       return ipcRenderer.invoke("mcp.callTool", serverId, toolName, args);
     },
+    getRuntimeHealth(opts) {
+      return ipcRenderer.invoke("mcp.getRuntimeHealth", opts);
+    },
+    repairRuntime(opts) {
+      return ipcRenderer.invoke("mcp.repairRuntime", opts);
+    },
     onStatusChange(handler) {
       if (typeof handler !== "function") return () => {};
       const listener = (_event, payload) => handler(payload);
@@ -227,5 +233,3 @@ contextBridge.exposeInMainWorld("desktop", {
     },
   },
 });
-
-

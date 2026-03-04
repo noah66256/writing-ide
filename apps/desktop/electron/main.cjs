@@ -1661,6 +1661,22 @@ function registerIpc() {
     if (!mcpManager) return { ok: false, error: "MCP_NOT_READY" };
     return mcpManager.callTool(serverId, toolName, toolArgs);
   });
+  ipcMain.handle("mcp.getRuntimeHealth", async (_event, opts) => {
+    if (!mcpManager) return { ok: false, error: "MCP_NOT_READY" };
+    try {
+      return await mcpManager.getRuntimeHealth(opts ?? {});
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+  ipcMain.handle("mcp.repairRuntime", async (_event, opts) => {
+    if (!mcpManager) return { ok: false, error: "MCP_NOT_READY" };
+    try {
+      return await mcpManager.repairRuntime(opts ?? {});
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
 
   // ── Skill 扩展包 ──────────────────────────
   ipcMain.handle("skills.list", async () => {
@@ -2023,5 +2039,4 @@ app.on("will-quit", () => {
     try { spawn(launchPath, ["/S"], { detached: true, stdio: "ignore" }).unref(); } catch { /* ignore */ }
   }
 });
-
 

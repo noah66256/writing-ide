@@ -102,6 +102,11 @@ const ARG_ALIAS_GROUPS = [
   ["url", "uri", "link", "href"],
 ];
 
+const RUNTIME_INSTALL_PLAN_BY_COMMAND = {
+  uv: { id: "uv", label: "uv/uvx", commands: ["uv", "uvx"] },
+  uvx: { id: "uv", label: "uv/uvx", commands: ["uv", "uvx"] },
+};
+
 /**
  * 归一化参数键名：仅用于匹配，不改变原始键名。
  * @param {string} key
@@ -142,6 +147,7 @@ export class McpManager {
   constructor(userDataPath, appBasePath = process.cwd(), isPackaged = false, appDataPath = null) {
     /** @type {string} */
     this._configPath = path.join(userDataPath, "mcp-servers.json");
+    this._userDataPath = String(userDataPath || "");
     this._appBasePath = String(appBasePath || process.cwd());
     this._isPackaged = Boolean(isPackaged);
     /** @type {string|null} app.getPath('appData') 父目录，用于迁移 */
@@ -152,6 +158,304 @@ export class McpManager {
     this._listeners = new Set();
     /** @type {Record<string, string>} 全局环境变量，自动注入到所有 stdio MCP Server */
     this._globalEnv = {};
+  }
+
+  _isWindows() {
+    return process.platform === "win32";
+  }
+
+  _runtimePlatformArchKey() {
+    return `${process.platform}-${process.arch}`;
+  }
+
+  _runtimeBinDirs() {
+    const key = this._runtimePlatformArchKey();
+    const dirs = [];
+
+    // 用户可写 runtime（用于一键修复脚本落盘）
+    if (this._userDataPath) {
+      dirs.push(path.join(this._userDataPath, "mcp-runtime", "bin"));
+    }
+
+    // 开发模式：项目内 runtime
+    dirs.push(path.join(this._appBasePath, "electron", "mcp-runtime", key, "bin"));
+
+    // 打包模式：app.asar.unpacked runtime
+    const unpackedBase = this._replaceAsarWithUnpacked(this._appBasePath);
+    dirs.push(path.join(unpackedBase, "electron", "mcp-runtime", key, "bin"));
+
+    // 打包模式兜底（某些场景 appBase 在 Resources/app.asar）
+    const resourcesDir = path.resolve(this._appBasePath, "..");
+    const resourcesUnpacked = this._replaceAsarWithUnpacked(resourcesDir);
+    dirs.push(path.join(resourcesUnpacked, "electron", "mcp-runtime", key, "bin"));
+
+    return [...new Set(dirs.map((d) => path.normalize(String(d || ""))).filter(Boolean))];
+  }
+
+  _knownUserBinDirs() {
+    const home = String(process.env.HOME || process.env.USERPROFILE || "").trim();
+    const out = [];
+    if (home) {
+      out.push(path.join(home, ".local", "bin"));
+      out.push(path.join(home, ".cargo", "bin"));
+    }
+    return [...new Set(out.map((d) => path.normalize(String(d || ""))).filter(Boolean))];
+  }
+
+  _managedPathDirs() {
+    return [...new Set([...this._runtimeBinDirs(), ...this._knownUserBinDirs()])];
+  }
+
+  _splitPathList(rawPath) {
+    return String(rawPath ?? "")
+      .split(path.delimiter)
+      .map((p) => p.trim())
+      .filter(Boolean);
+  }
+
+  async _resolveCommandInDirs(command, dirs) {
+    const cmd = String(command ?? "").trim();
+    if (!cmd) return null;
+
+    const extCandidates = this._isWindows()
+      ? (() => {
+          const pathext = String(process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD");
+          const list = pathext
+            .split(";")
+            .map((x) => x.trim())
+            .filter(Boolean);
+          return ["", ...list];
+        })()
+      : [""];
+
+    for (const dir of dirs) {
+      const base = String(dir ?? "").trim();
+      if (!base) continue;
+      for (const ext of extCandidates) {
+        const candidate = path.join(base, `${cmd}${ext}`);
+        if (await this._pathExists(candidate)) {
+          return candidate;
+        }
+      }
+    }
+    return null;
+  }
+
+  async _resolveStdioCommand(command, extraPathDirs, systemPathRaw = process.env.PATH ?? "") {
+    const raw = String(command ?? "").trim();
+    if (!raw) return null;
+
+    // 绝对/相对路径直接按文件判断
+    const looksLikePath = raw.includes(path.sep) || raw.includes("/") || raw.includes("\\");
+    if (looksLikePath) {
+      const abs = path.resolve(raw);
+      if (await this._pathExists(abs)) return { resolved: abs, source: "explicit" };
+      if (await this._pathExists(raw)) return { resolved: raw, source: "explicit" };
+      return null;
+    }
+
+    // 优先：内置/用户 runtime bin
+    const runtimeResolved = await this._resolveCommandInDirs(raw, extraPathDirs);
+    if (runtimeResolved) return { resolved: runtimeResolved, source: "bundled" };
+
+    // 次选：系统 PATH
+    const systemDirs = this._splitPathList(systemPathRaw);
+    const systemResolved = await this._resolveCommandInDirs(raw, systemDirs);
+    if (systemResolved) return { resolved: systemResolved, source: "system" };
+
+    return null;
+  }
+
+  _composePathWithRuntime(basePath, runtimeDirs) {
+    const exists = new Set();
+    const merged = [];
+    const push = (p) => {
+      const v = String(p ?? "").trim();
+      if (!v) return;
+      if (exists.has(v)) return;
+      exists.add(v);
+      merged.push(v);
+    };
+    for (const d of runtimeDirs) push(d);
+    for (const d of this._splitPathList(basePath)) push(d);
+    return merged.join(path.delimiter);
+  }
+
+  _extractCommandHead(command) {
+    const raw = String(command ?? "").trim();
+    if (!raw) return "";
+    const m = raw.match(/"[^"]*"|'[^']*'|[^\s]+/);
+    if (!m?.[0]) return "";
+    return m[0].replace(/^['"]|['"]$/g, "").trim();
+  }
+
+  async getRuntimeHealth(opts = {}) {
+    const runtimeDirs = this._runtimeBinDirs();
+    const managedPath = this._composePathWithRuntime(process.env.PATH ?? "", this._managedPathDirs());
+    const requested = Array.isArray(opts?.commands)
+      ? opts.commands.map((x) => this._extractCommandHead(String(x ?? ""))).filter(Boolean)
+      : [];
+    const stdioCommands = [...new Set(
+      [...this._servers.values()]
+        .map((entry) => entry?.config)
+        .filter((cfg) => cfg?.transport === "stdio" && cfg?.bundled !== true)
+        .map((cfg) => this._extractCommandHead(String(cfg?.command ?? "")))
+        .filter(Boolean),
+    )];
+    const baseline = requested.length > 0 ? [] : ["uv", "uvx", "node", "npx", "python", "python3"];
+    const commands = [...new Set([...requested, ...baseline, ...stdioCommands])];
+    const checks = [];
+    for (const cmd of commands) {
+      const resolved = await this._resolveStdioCommand(cmd, runtimeDirs, managedPath);
+      const plan = RUNTIME_INSTALL_PLAN_BY_COMMAND[String(cmd ?? "").toLowerCase()] ?? null;
+      checks.push({
+        command: cmd,
+        ok: Boolean(resolved?.resolved),
+        source: resolved?.source ?? "missing",
+        path: resolved?.resolved ?? null,
+        installable: Boolean(plan),
+        planId: plan?.id ?? null,
+      });
+    }
+    return {
+      ok: true,
+      platform: `${process.platform}-${process.arch}`,
+      runtimeDirs,
+      managedPathDirs: this._managedPathDirs(),
+      checks,
+    };
+  }
+
+  _installPlanForCommand(command) {
+    const key = String(command ?? "").trim().toLowerCase();
+    return RUNTIME_INSTALL_PLAN_BY_COMMAND[key] ?? null;
+  }
+
+  async _runProcess(command, args, opts = {}) {
+    const timeoutMs = Number(opts?.timeoutMs ?? 180000);
+    const env = opts?.env && typeof opts.env === "object" ? opts.env : process.env;
+    return await new Promise((resolve) => {
+      const child = spawn(command, Array.isArray(args) ? args : [], {
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      });
+      let stdout = "";
+      let stderr = "";
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        try { child.kill("SIGKILL"); } catch { /* ignore */ }
+      }, Math.max(1000, timeoutMs));
+      child.stdout?.on("data", (d) => { stdout += String(d ?? ""); });
+      child.stderr?.on("data", (d) => { stderr += String(d ?? ""); });
+      child.on("error", (e) => {
+        clearTimeout(timer);
+        resolve({ ok: false, code: -1, stdout, stderr: `${stderr}\n${String(e?.message ?? e)}`, timedOut });
+      });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        resolve({ ok: !timedOut && Number(code) === 0, code: Number(code ?? -1), stdout, stderr, timedOut });
+      });
+    });
+  }
+
+  async _installUvRuntime() {
+    const userRuntimeRoot = this._userDataPath ? path.join(this._userDataPath, "mcp-runtime") : "";
+    if (!userRuntimeRoot) return { ok: false, error: "USER_DATA_PATH_MISSING" };
+    await fs.mkdir(userRuntimeRoot, { recursive: true }).catch(() => void 0);
+    const baseEnv = { ...process.env, UV_INSTALL_DIR: userRuntimeRoot };
+
+    if (process.platform === "win32") {
+      return await this._runProcess(
+        "powershell.exe",
+        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm https://astral.sh/uv/install.ps1 | iex"],
+        { timeoutMs: 180000, env: baseEnv },
+      );
+    }
+
+    return await this._runProcess(
+      "sh",
+      ["-lc", "curl -fsSL https://astral.sh/uv/install.sh | sh"],
+      { timeoutMs: 180000, env: baseEnv },
+    );
+  }
+
+  async _installRuntimeByPlan(planId) {
+    if (planId === "uv") return this._installUvRuntime();
+    return { ok: false, error: `UNSUPPORTED_INSTALL_PLAN:${planId}` };
+  }
+
+  async repairRuntime(opts = {}) {
+    const ret = {
+      ok: true,
+      changed: false,
+      actions: [],
+      installs: [],
+      unsupportedMissing: [],
+      health: null,
+    };
+    const requested = Array.isArray(opts?.commands)
+      ? opts.commands.map((x) => this._extractCommandHead(String(x ?? ""))).filter(Boolean)
+      : [];
+    const initial = await this.getRuntimeHealth({ commands: requested });
+    const missing = (Array.isArray(initial?.checks) ? initial.checks : []).filter((c) => !c.ok);
+    const attemptedPlanIds = new Set();
+    for (const miss of missing) {
+      const plan = this._installPlanForCommand(miss.command);
+      if (!plan) {
+        ret.unsupportedMissing.push(miss.command);
+        continue;
+      }
+      if (attemptedPlanIds.has(plan.id)) continue;
+      attemptedPlanIds.add(plan.id);
+      const startedAt = Date.now();
+      const installRet = await this._installRuntimeByPlan(plan.id);
+      ret.installs.push({
+        planId: plan.id,
+        label: plan.label,
+        ok: Boolean(installRet?.ok),
+        timedOut: Boolean(installRet?.timedOut),
+        durationMs: Math.max(0, Date.now() - startedAt),
+        error: installRet?.ok ? null : String(installRet?.error ?? installRet?.stderr ?? `exit=${installRet?.code ?? -1}`),
+      });
+      if (installRet?.ok) {
+        ret.changed = true;
+        ret.actions.push(`installed_${plan.id}`);
+      }
+    }
+
+    const userRuntimeDir = this._userDataPath ? path.join(this._userDataPath, "mcp-runtime", "bin") : "";
+    if (userRuntimeDir) {
+      await fs.mkdir(userRuntimeDir, { recursive: true }).catch(() => void 0);
+    }
+
+    // 在 user runtime 下补一个 uvx shim（仅当 uv 可用且 uvx 缺失）
+    if (userRuntimeDir) {
+      const runtimeDirs = this._runtimeBinDirs();
+      const managedPath = this._composePathWithRuntime(process.env.PATH ?? "", this._managedPathDirs());
+      const uv = await this._resolveStdioCommand("uv", runtimeDirs, managedPath);
+      const uvx = await this._resolveStdioCommand("uvx", runtimeDirs, managedPath);
+      if (uv?.resolved && !uvx?.resolved) {
+        if (this._isWindows()) {
+          const uvxCmd = path.join(userRuntimeDir, "uvx.cmd");
+          const content = "@echo off\r\nuv tool run %*\r\n";
+          await fs.writeFile(uvxCmd, content, "utf-8");
+          ret.changed = true;
+          ret.actions.push("created_uvx_cmd_shim");
+        } else {
+          const uvxSh = path.join(userRuntimeDir, "uvx");
+          const content = "#!/usr/bin/env sh\nexec uv tool run \"$@\"\n";
+          await fs.writeFile(uvxSh, content, "utf-8");
+          await fs.chmod(uvxSh, 0o755).catch(() => void 0);
+          ret.changed = true;
+          ret.actions.push("created_uvx_shim");
+        }
+      }
+    }
+
+    ret.health = await this.getRuntimeHealth({ commands: requested });
+    return ret;
   }
 
   /**
@@ -395,6 +699,8 @@ export class McpManager {
         baseEnv.BROWSER_PATH ??= browserPath;
       }
       const userEnv = config.env && typeof config.env === "object" ? config.env : {};
+      const runtimeDirs = this._runtimeBinDirs();
+      baseEnv.PATH = this._composePathWithRuntime(baseEnv.PATH ?? "", this._managedPathDirs());
       const env = { ...baseEnv, ...userEnv };
 
       // ── bundled server：通过 ELECTRON_RUN_AS_NODE 用 Electron 自身的 Node 运行 ──
@@ -413,7 +719,11 @@ export class McpManager {
       // ── 普通 stdio server：用户指定 command ──
       const command = String(config.command ?? "").trim();
       if (!command) throw new Error("STDIO_COMMAND_REQUIRED");
-      return new StdioClientTransport({ command, args, env });
+      const resolved = await this._resolveStdioCommand(command, runtimeDirs, env.PATH ?? "");
+      if (!resolved?.resolved) {
+        throw new Error(`STDIO_COMMAND_NOT_FOUND:${command}`);
+      }
+      return new StdioClientTransport({ command: resolved.resolved, args, env });
     }
 
     if (type === "streamable-http") {

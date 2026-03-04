@@ -47,6 +47,8 @@ type McpState = {
   connect: (id: string) => Promise<void>;
   disconnect: (id: string) => Promise<void>;
   callTool: (serverId: string, toolName: string, args?: any) => Promise<any>;
+  getRuntimeHealth: (opts?: { commands?: string[] }) => Promise<any>;
+  repairRuntime: (opts?: { commands?: string[] }) => Promise<any>;
 };
 
 export const useMcpStore = create<McpState>((set, get) => ({
@@ -108,6 +110,18 @@ export const useMcpStore = create<McpState>((set, get) => ({
     const api = (window as any).desktop?.mcp;
     if (!api) return { ok: false, error: "NO_API" };
     return api.callTool(serverId, toolName, args);
+  },
+
+  async getRuntimeHealth(opts) {
+    const api = (window as any).desktop?.mcp;
+    if (!api?.getRuntimeHealth) return { ok: false, error: "NO_API" };
+    return api.getRuntimeHealth(opts);
+  },
+
+  async repairRuntime(opts) {
+    const api = (window as any).desktop?.mcp;
+    if (!api?.repairRuntime) return { ok: false, error: "NO_API" };
+    return api.repairRuntime(opts);
   },
 }));
 

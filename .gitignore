@@ -40,11 +40,11 @@ apps/gateway/data/
 # local build artifacts (downloaded from CI / packaging outputs)
 artifacts/
 desktop-updates/
+apps/desktop/electron/mcp-runtime/
 
 # local temp artifacts (do not commit)
 _test_*
 _quick_test_*
 _tmp_*
 _VERIFICATION_RESULT.md
-
 
