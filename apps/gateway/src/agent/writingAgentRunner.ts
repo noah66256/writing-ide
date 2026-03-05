@@ -278,6 +278,38 @@ function buildToolCallsXml(calls: Array<{ name: string; args: Record<string, unk
 }
 
 function toOpenAiCompatToolDefs(args: { allowed: Set<string>; mode: "agent" | "chat"; mcpTools: any[] }): OpenAiCompatTool[] {
+  const normalizeSchema = (raw: unknown): Record<string, unknown> => {
+    const fallback = { type: "object", properties: {}, additionalProperties: true } as Record<string, unknown>;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fallback;
+    const walk = (node: unknown, top = false): unknown => {
+      if (Array.isArray(node)) return node.map((x) => walk(x, false));
+      if (!node || typeof node !== "object") return node;
+      const src = node as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(src)) {
+        if (k === "oneOfRequired") continue;
+        if (top && (k === "oneOf" || k === "anyOf" || k === "allOf" || k === "enum" || k === "not")) continue;
+        out[k] = walk(v, false);
+      }
+      if (String(out.type ?? "") === "array") {
+        if (out.items === undefined || out.items === null) out.items = {};
+      }
+      if (out.properties && typeof out.properties === "object" && !Array.isArray(out.properties)) {
+        const next: Record<string, unknown> = {};
+        for (const [pk, pv] of Object.entries(out.properties as Record<string, unknown>)) next[pk] = walk(pv, false);
+        out.properties = next;
+      }
+      return out;
+    };
+    const norm = walk(raw, true);
+    if (!norm || typeof norm !== "object" || Array.isArray(norm)) return fallback;
+    const top = norm as Record<string, unknown>;
+    if (String(top.type ?? "") !== "object") top.type = "object";
+    if (!top.properties || typeof top.properties !== "object" || Array.isArray(top.properties)) top.properties = {};
+    if (top.additionalProperties === undefined) top.additionalProperties = true;
+    return top;
+  };
+
   const builtins = TOOL_LIST.filter((tool) => {
     if (!args.allowed.has(tool.name)) return false;
     if (!tool.modes || tool.modes.length === 0) return true;
@@ -285,10 +317,7 @@ function toOpenAiCompatToolDefs(args: { allowed: Set<string>; mode: "agent" | "c
   }).map((tool) => ({
     name: encodeToolName(tool.name),
     description: String(tool.description ?? ""),
-    inputSchema:
-      tool.inputSchema && typeof tool.inputSchema === "object"
-        ? (tool.inputSchema as Record<string, unknown>)
-        : { type: "object", properties: {}, additionalProperties: true },
+    inputSchema: normalizeSchema(tool.inputSchema),
   }));
 
   const mcpDefs = (Array.isArray(args.mcpTools) ? args.mcpTools : [])
@@ -296,10 +325,7 @@ function toOpenAiCompatToolDefs(args: { allowed: Set<string>; mode: "agent" | "c
     .map((t: any) => ({
       name: encodeToolName(String(t?.name ?? "")),
       description: String(t?.description ?? ""),
-      inputSchema:
-        t?.inputSchema && typeof t.inputSchema === "object"
-          ? (t.inputSchema as Record<string, unknown>)
-          : { type: "object", properties: {}, additionalProperties: true },
+      inputSchema: normalizeSchema(t?.inputSchema),
     }));
 
   return [...builtins, ...mcpDefs].filter((t) => String(t.name ?? "").trim().length > 0);
@@ -1203,7 +1229,24 @@ export class WritingAgentRunner {
       .map((t: any) => ({
         name: encodeToolName(String(t.name ?? "")),
         description: String(t.description ?? ""),
-        input_schema: t.inputSchema ?? { type: "object" as const, properties: {} },
+        input_schema: {
+          type: "object" as const,
+          ...(t?.inputSchema && typeof t.inputSchema === "object" && !Array.isArray(t.inputSchema)
+            ? (() => {
+                const src = t.inputSchema as Record<string, unknown>;
+                const out: Record<string, unknown> = {};
+                for (const [k, v] of Object.entries(src)) {
+                  if (k === "oneOfRequired") continue;
+                  if (k === "oneOf" || k === "anyOf" || k === "allOf" || k === "enum" || k === "not") continue;
+                  out[k] = v;
+                }
+                if (!out.properties || typeof out.properties !== "object" || Array.isArray(out.properties)) {
+                  out.properties = {};
+                }
+                return out;
+              })()
+            : { properties: {} }),
+        },
       }));
     tools.push(...mcpToolDefs);
 

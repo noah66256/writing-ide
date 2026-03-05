@@ -106,7 +106,9 @@ function toErrorString(err: unknown): string {
 // ToolArgType 与 JSON Schema type 一一对应（string/number/boolean/object/array）。
 function toolArgToJsonSchemaProp(arg: ToolMeta["args"][number]): Record<string, unknown> {
   const type = arg.type ?? "string";
-  return arg.desc ? { type, description: arg.desc } : { type };
+  const base: Record<string, unknown> = arg.desc ? { type, description: arg.desc } : { type };
+  if (type === "array" && base.items === undefined) base.items = {};
+  return base;
 }
 
 // ──────────────────────────────────────────────
