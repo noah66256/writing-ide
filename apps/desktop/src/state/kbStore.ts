@@ -17,6 +17,15 @@ function kbLog(level: "info" | "warn" | "error", message: string, data?: unknown
   }
 }
 
+function preferredKbModelId(): string {
+  const run = useRunStore.getState();
+  const mode = run.mode === "chat" ? "chat" : "agent";
+  if (mode === "chat") {
+    return String(run.chatModel || run.model || run.agentModel || "").trim();
+  }
+  return String(run.agentModel || run.model || run.chatModel || "").trim();
+}
+
 type KbFormat = "md" | "mdx" | "txt" | "docx" | "pdf" | "unknown";
 type KbArtifactKind = "outline" | "paragraph" | "card";
 
@@ -1664,11 +1673,12 @@ async function postSplitArticles(args: {
   if (!ensureLoginForKbLlm("篇级分块")) return { ok: false, error: "AUTH_REQUIRED" };
   const auth = authHeader();
   try {
+    const model = preferredKbModelId();
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...auth },
       signal: args.signal,
-      body: JSON.stringify({ paragraphs: args.paragraphs }),
+      body: JSON.stringify({ model: model || undefined, paragraphs: args.paragraphs }),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
@@ -1713,12 +1723,13 @@ async function postExtractCards(args: {
   const t0 = Date.now();
   console.log(`[kbStore] postExtractCards 请求: paragraphs=${args.paragraphs.length}, maxCards=${args.maxCards}, mode=${args.mode}, signalAborted=${Boolean(args.signal?.aborted)}`);
   try {
+    const model = String(args.model ?? "").trim() || preferredKbModelId();
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...auth },
       signal: args.signal,
       body: JSON.stringify({
-        model: args.model,
+        model: model || undefined,
         maxCards: args.maxCards,
         mode: args.mode,
         facetIds: Array.isArray(args.facetIds) ? args.facetIds : undefined,
@@ -1772,12 +1783,13 @@ async function postBuildLibraryPlaybook(args: {
   if (!ensureLoginForKbLlm("生成风格手册/仿写手册")) return { ok: false, error: "AUTH_REQUIRED" };
   const auth = authHeader();
   try {
+    const model = String(args.model ?? "").trim() || preferredKbModelId();
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...auth },
       signal: args.signal,
       body: JSON.stringify({
-        model: args.model,
+        model: model || undefined,
         mode: args.mode,
         part: args.part,
         facetIds: args.facetIds,
@@ -1882,12 +1894,13 @@ async function postBuildClusterRules(args: {
   if (!ensureLoginForKbLlm("生成写法簇规则卡（values/lens）")) return { ok: false, error: "AUTH_REQUIRED" };
   const auth = authHeader();
   try {
+    const model = String(args.model ?? "").trim() || preferredKbModelId();
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...auth },
       signal: args.signal,
       body: JSON.stringify({
-        model: args.model,
+        model: model || undefined,
         libraryName: args.libraryName,
         clusters: (args.clusters ?? []).slice(0, 3),
       }),
