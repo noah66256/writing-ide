@@ -3734,14 +3734,14 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "memory.update",
-    description: "更新记忆内容（proposal-first：先给 diff，Keep 后才写入；Undo 可回滚）。",
+    description: "更新记忆内容（中低风险默认自动写入，可 Undo 回滚）。",
     args: [
       { name: "level", required: true, desc: "'global' 或 'project'" },
       { name: "section", required: true, desc: "section 标题（如'项目决策'、'用户画像'）" },
       { name: "content", required: true, desc: "要追加的 Markdown 内容" },
     ],
     riskLevel: "medium" as ToolRiskLevel,
-    applyPolicy: "proposal" as ToolApplyPolicy,
+    applyPolicy: "auto_apply" as ToolApplyPolicy,
     reversible: true,
     run: async (args: Record<string, unknown>) => {
       const level = String(args.level ?? "").trim().toLowerCase();
@@ -3780,55 +3780,32 @@ const tools: ToolDefinition[] = [
       }
 
       const before = existing;
-      const previewPath =
-        level === "global"
-          ? "memory/global.md"
-          : ".writing-ide/project-memory.md";
-      const d = unifiedDiff({ path: previewPath, before, after: updated });
+      const latest = useMemoryStore.getState();
+      const rootDir = latest._projectRootDir;
+      if (level === "global") {
+        await latest.saveGlobalMemory(updated);
+      } else {
+        if (!rootDir) return { ok: false, error: "未打开项目，无法更新项目记忆" };
+        await latest.saveProjectMemory(rootDir, updated);
+      }
 
-      const apply = async () => {
-        const latest = useMemoryStore.getState();
-        const prevGlobal = latest.globalMemory;
-        const prevProject = latest.projectMemory;
-        const rootDir = latest._projectRootDir;
+      const undo = async () => {
+        const cur = useMemoryStore.getState();
         if (level === "global") {
-          await latest.saveGlobalMemory(updated);
+          await cur.saveGlobalMemory(before);
         } else {
-          if (!rootDir) throw new Error("未打开项目，无法更新项目记忆");
-          await latest.saveProjectMemory(rootDir, updated);
+          if (!rootDir) return;
+          await cur.saveProjectMemory(rootDir, before);
         }
-        return {
-          undo: async () => {
-            if (level === "global") {
-              await useMemoryStore.getState().saveGlobalMemory(prevGlobal);
-            } else {
-              if (!rootDir) return;
-              // 回滚时优先恢复执行时捕获的内容，避免被后续内存状态覆盖
-              await useMemoryStore.getState().saveProjectMemory(rootDir, prevProject);
-            }
-          },
-        };
       };
 
       return {
         ok: true,
-        output: {
-          ok: true,
-          level,
-          section,
-          updated: true,
-          preview: {
-            note: "记忆更新提案：点击 Keep 才会写入记忆文件；Undo 可回滚。",
-            diffUnified: d.diff,
-            truncated: d.truncated,
-            stats: d.stats ?? null,
-            path: previewPath,
-          },
-        },
-        applyPolicy: "proposal",
+        output: { ok: true, level, section, updated: true, note: "记忆已自动更新（可 Undo 回滚）。" },
+        applyPolicy: "auto_apply",
         riskLevel: "medium",
-        apply,
-        undoable: false,
+        undoable: true,
+        undo,
       };
     },
   },

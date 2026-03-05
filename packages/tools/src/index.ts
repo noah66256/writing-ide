@@ -1236,7 +1236,7 @@ export const TOOL_LIST: ToolMeta[] = [
     name: "memory.update",
     description:
       "更新记忆内容。将新的事实或决策追加到指定记忆层级的指定 section。\n" +
-      "执行策略为 proposal-first：先产出差异提案，用户 Keep 后才会真正写入。\n" +
+      "默认自动写入；若写错可用 Undo 回滚。\n" +
       "全局记忆 section：用户画像、决策偏好、跨项目进展。\n" +
       "项目记忆 section：项目概况、项目决策、重要约定、当前进展。\n" +
       "只应记录值得跨对话持久化的重要信息，不要记录临时讨论内容。",
@@ -1396,7 +1396,6 @@ export function validateToolCallArgs(args: { name: string; toolArgs: Record<stri
 
   return { ok: true as const };
 }
-
 
 
 
