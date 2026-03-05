@@ -7,8 +7,17 @@ import {
   type ContentBlockToolUse,
   type MsgStreamEvent,
 } from "../llm/anthropicMessages.js";
-import { buildInjectedToolResultMessages, streamChatCompletionViaProvider } from "../llm/providerAdapter.js";
+import {
+  buildInjectedToolResultMessages,
+  getAdapterByEndpoint,
+} from "../llm/providerAdapter.js";
 import type { OpenAiChatMessage, OpenAiCompatTool } from "../llm/openaiCompat.js";
+import { normalizeToolParametersSchema } from "../llm/toolSchema.js";
+import {
+  buildToolCallsXml,
+  xmlCdataSafe,
+  xmlEscapeAttr,
+} from "../llm/toolXmlProtocol.js";
 
 import {
   analyzeAutoRetryText,
@@ -34,6 +43,7 @@ import {
   decideServerToolExecution,
   executeServerToolOnGateway,
 } from "./serverToolRunner.js";
+import { TurnEngine, type RunOutcome } from "./turnEngine.js";
 
 export type SseWriter = (event: string, data: unknown) => void;
 
@@ -131,13 +141,6 @@ type ToolFailureDigest = {
   turn: number;
 };
 
-type RunOutcome = {
-  status: "completed" | "failed" | "aborted";
-  reason: string;
-  reasonCodes: string[];
-  detail?: Record<string, unknown> | null;
-};
-
 type PendingToolUse = {
   name: string;
   inputJson: string;
@@ -225,157 +228,7 @@ function isAnthropicMessagesEndpoint(endpoint?: string): boolean {
   return ep.endsWith("/messages") || ep === "/messages";
 }
 
-function stripCdata(raw: string): string {
-  const m = String(raw ?? "").match(/^<!\[CDATA\[([\s\S]*?)\]\]>$/);
-  return m?.[1] !== undefined ? String(m[1]) : String(raw ?? "");
-}
-
-function parseXmlArgValue(raw: string): unknown {
-  const t = stripCdata(String(raw ?? "").trim());
-  if (!t) return "";
-  if ((t.startsWith("{") && t.endsWith("}")) || (t.startsWith("[") && t.endsWith("]"))) {
-    try {
-      return JSON.parse(t);
-    } catch {
-      return t;
-    }
-  }
-  if (t === "true") return true;
-  if (t === "false") return false;
-  if (/^-?\d+(\.\d+)?$/.test(t) && t.length < 32) return Number(t);
-  return t;
-}
-
-function xmlEscapeAttr(raw: string): string {
-  return String(raw ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function xmlCdataSafe(raw: string): string {
-  return String(raw ?? "").replace(/\]\]>/g, "]]]]><![CDATA[>");
-}
-
-function parseToolCallsXml(text: string): {
-  calls: Array<{ id: string; name: string; args: Record<string, unknown> }>;
-  plainText: string;
-  wrapperCount: number;
-  hasToolCallMarker: boolean;
-  mixedOutput: boolean;
-} {
-  const source = String(text ?? "");
-  const calls: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
-  // 兼容两套 XML 协议：
-  // - 现行：<tool_calls><tool_call><arg>...</arg></tool_call></tool_calls>
-  // - 旧式：<function_calls><invoke><parameter>...</parameter></invoke></function_calls>
-  const wrappers = Array.from(source.matchAll(/<(tool_calls|function_calls)\b[\s\S]*?<\/\1>/gi));
-  if (wrappers.length === 0) {
-    return {
-      calls: [],
-      plainText: source.trim(),
-      wrapperCount: 0,
-      hasToolCallMarker: /<\s*\/?\s*(tool_calls|function_calls|tool_call|invoke|arg|parameter)\b/i.test(source),
-      mixedOutput: false,
-    };
-  }
-
-  const plainParts: string[] = [];
-  let lastEnd = 0;
-  let callIndex = 0;
-  for (const wrapper of wrappers) {
-    const xml = String(wrapper[0] ?? "");
-    const start = typeof wrapper.index === "number" ? wrapper.index : source.indexOf(xml, lastEnd);
-    const safeStart = start >= 0 ? start : lastEnd;
-    plainParts.push(source.slice(lastEnd, safeStart));
-    lastEnd = safeStart + xml.length;
-
-    const toolCallRe = /<(tool_call|invoke)\b([^>]*)>([\s\S]*?)<\/\1>/gi;
-    let m: RegExpExecArray | null = null;
-    while ((m = toolCallRe.exec(xml)) !== null) {
-      callIndex += 1;
-      const attrs = String(m[2] ?? "");
-      const body = String(m[3] ?? "");
-      const nameM = attrs.match(/\bname\s*=\s*"([^"]+)"/i) ?? attrs.match(/\bname\s*=\s*'([^']+)'/i);
-      const idM = attrs.match(/\bid\s*=\s*"([^"]+)"/i) ?? attrs.match(/\bid\s*=\s*'([^']+)'/i);
-      const name = String(nameM?.[1] ?? "").trim();
-      if (!name) continue;
-      const id = String(idM?.[1] ?? "").trim() || `xml_tool_${Date.now()}_${callIndex}`;
-      const args: Record<string, unknown> = {};
-      const argRe = /<(arg|parameter)\b([^>]*)>([\s\S]*?)<\/\1>/gi;
-      let a: RegExpExecArray | null = null;
-      while ((a = argRe.exec(body)) !== null) {
-        const aAttrs = String(a[2] ?? "");
-        const aNameM = aAttrs.match(/\bname\s*=\s*"([^"]+)"/i) ?? aAttrs.match(/\bname\s*=\s*'([^']+)'/i);
-        const aName = String(aNameM?.[1] ?? "").trim();
-        if (!aName) continue;
-        args[aName] = parseXmlArgValue(String(a[3] ?? ""));
-      }
-      calls.push({ id, name, args });
-    }
-  }
-  plainParts.push(source.slice(lastEnd));
-  const plainText = plainParts.join("").trim();
-  return {
-    calls,
-    plainText,
-    wrapperCount: wrappers.length,
-    hasToolCallMarker: true,
-    mixedOutput: plainText.length > 0,
-  };
-}
-
-function buildToolCallsXml(calls: Array<{ name: string; args: Record<string, unknown> }>): string {
-  const blocks = (Array.isArray(calls) ? calls : [])
-    .map((c) => {
-      const name = String(c?.name ?? "").trim();
-      if (!name) return "";
-      const args = c?.args && typeof c.args === "object" ? c.args : {};
-      const argXml = Object.entries(args).map(([k, v]) => {
-        const encoded = typeof v === "string" ? v : JSON.stringify(v ?? null);
-        return `<arg name="${xmlEscapeAttr(k)}"><![CDATA[${xmlCdataSafe(encoded)}]]></arg>`;
-      }).join("");
-      return `<tool_call name="${xmlEscapeAttr(name)}">${argXml}</tool_call>`;
-    })
-    .filter(Boolean)
-    .join("");
-  return `<tool_calls>${blocks}</tool_calls>`;
-}
-
 function toOpenAiCompatToolDefs(args: { allowed: Set<string>; mode: "agent" | "chat"; mcpTools: any[] }): OpenAiCompatTool[] {
-  const normalizeSchema = (raw: unknown): Record<string, unknown> => {
-    const fallback = { type: "object", properties: {}, additionalProperties: true } as Record<string, unknown>;
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fallback;
-    const walk = (node: unknown, top = false): unknown => {
-      if (Array.isArray(node)) return node.map((x) => walk(x, false));
-      if (!node || typeof node !== "object") return node;
-      const src = node as Record<string, unknown>;
-      const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(src)) {
-        if (k === "oneOfRequired") continue;
-        if (top && (k === "oneOf" || k === "anyOf" || k === "allOf" || k === "enum" || k === "not")) continue;
-        out[k] = walk(v, false);
-      }
-      if (String(out.type ?? "") === "array") {
-        if (out.items === undefined || out.items === null) out.items = {};
-      }
-      if (out.properties && typeof out.properties === "object" && !Array.isArray(out.properties)) {
-        const next: Record<string, unknown> = {};
-        for (const [pk, pv] of Object.entries(out.properties as Record<string, unknown>)) next[pk] = walk(pv, false);
-        out.properties = next;
-      }
-      return out;
-    };
-    const norm = walk(raw, true);
-    if (!norm || typeof norm !== "object" || Array.isArray(norm)) return fallback;
-    const top = norm as Record<string, unknown>;
-    if (String(top.type ?? "") !== "object") top.type = "object";
-    if (!top.properties || typeof top.properties !== "object" || Array.isArray(top.properties)) top.properties = {};
-    if (top.additionalProperties === undefined) top.additionalProperties = true;
-    return top;
-  };
-
   const builtins = TOOL_LIST.filter((tool) => {
     if (!args.allowed.has(tool.name)) return false;
     if (!tool.modes || tool.modes.length === 0) return true;
@@ -383,7 +236,7 @@ function toOpenAiCompatToolDefs(args: { allowed: Set<string>; mode: "agent" | "c
   }).map((tool) => ({
     name: encodeToolName(tool.name),
     description: String(tool.description ?? ""),
-    inputSchema: normalizeSchema(tool.inputSchema),
+    inputSchema: normalizeToolParametersSchema(tool.inputSchema),
   }));
 
   const mcpDefs = (Array.isArray(args.mcpTools) ? args.mcpTools : [])
@@ -391,7 +244,7 @@ function toOpenAiCompatToolDefs(args: { allowed: Set<string>; mode: "agent" | "c
     .map((t: any) => ({
       name: encodeToolName(String(t?.name ?? "")),
       description: String(t?.description ?? ""),
-      inputSchema: normalizeSchema(t?.inputSchema),
+      inputSchema: normalizeToolParametersSchema(t?.inputSchema),
     }));
 
   return [...builtins, ...mcpDefs].filter((t) => String(t.name ?? "").trim().length > 0);
@@ -726,7 +579,7 @@ export class WritingAgentRunner {
   private executionNoToolTurns = 0;
   private totalToolCalls = 0;
   private forcedToolChoice: ForcedToolChoice | null = null;
-  private outcome: RunOutcome = { status: "completed", reason: "completed", reasonCodes: ["completed"] };
+  private readonly turnEngine = new TurnEngine();
   private readonly recentToolAttempts: ToolAttemptSnapshot[] = [];
 
   constructor(ctx: RunContext) {
@@ -934,26 +787,40 @@ export class WritingAgentRunner {
     const recent = this.recentToolAttempts.slice(-6);
     if (recent.length < 4) return { blocked: false };
     const sameName = recent.every((x) => x.name === recent[0].name);
-    const failCount = recent.filter((x) => !x.ok).length;
-    if (!sameName || failCount < 4) return { blocked: false };
+    if (!sameName) return { blocked: false };
 
-    const sameArgsAndError = recent
-      .filter((x) => !x.ok)
-      .every((x) => x.argsSig === recent[0].argsSig && x.resultSig === recent.filter((y) => !y.ok)[0]?.resultSig);
-    if (sameArgsAndError) {
-      return { blocked: true, name: recent[0].name, reason: "同一工具同参同错连续重试" };
+    const failAttempts = recent.filter((x) => !x.ok);
+    const failCount = failAttempts.length;
+    if (failCount >= 4) {
+      const firstFail = failAttempts[0];
+      const sameArgsAndError = failAttempts.every((x) => x.argsSig === firstFail.argsSig && x.resultSig === firstFail.resultSig);
+      if (sameArgsAndError) {
+        return { blocked: true, name: recent[0].name, reason: "同一工具同参同错连续重试" };
+      }
     }
     if (failCount >= 5 && recent.every((x) => !x.ok)) {
       return { blocked: true, name: recent[0].name, reason: "同一工具连续失败，未发生有效状态变化" };
     }
+
+    const successAttempts = recent.filter((x) => x.ok);
+    const successCount = successAttempts.length;
+    if (successCount >= 4) {
+      const firstOk = successAttempts[0];
+      const sameArgsAndResult = successAttempts.every((x) => x.argsSig === firstOk.argsSig && x.resultSig === firstOk.resultSig);
+      if (sameArgsAndResult) {
+        return { blocked: true, name: recent[0].name, reason: "同一工具同参同结果重复执行，未推进新步骤" };
+      }
+    }
+
     return { blocked: false };
   }
 
   private _setOutcome(next: RunOutcome): void {
-    this.outcome = next;
+    this.turnEngine.setOutcome(next);
   }
 
   async run(userMessage: string, images?: Array<{ mediaType: string; data: string }>): Promise<void> {
+    this.turnEngine.reset();
     this._setOutcome({ status: "completed", reason: "completed", reasonCodes: ["completed"] });
     const userContent: AnthropicMessage["content"] = images?.length
       ? [
@@ -982,7 +849,7 @@ export class WritingAgentRunner {
       await this._bootstrapTargetDelegation(userMessage);
       if (this.ctx.abortSignal.aborted) {
         this._setOutcome({ status: "aborted", reason: "aborted", reasonCodes: ["aborted"] });
-      } else if (this.outcome.reason === "completed") {
+      } else if (this.turnEngine.getOutcome().reason === "completed") {
         this._setOutcome({ status: "completed", reason: "delegation_completed", reasonCodes: ["delegation_completed"] });
       }
       return;
@@ -994,6 +861,7 @@ export class WritingAgentRunner {
         return;
       }
       this.turn += 1;
+      this.turnEngine.setTurn(this.turn);
       const shouldContinue = isAnthropicMessagesEndpoint(this.ctx.endpoint)
         ? await this._runOneTurn()
         : await this._runOneTurnViaProvider();
@@ -1032,6 +900,7 @@ export class WritingAgentRunner {
       while (this.turn < this.maxTurns) {
         if (this.ctx.abortSignal.aborted) return;
         this.turn += 1;
+        this.turnEngine.setTurn(this.turn);
         const shouldContinue = isAnthropicMessagesEndpoint(this.ctx.endpoint)
           ? await this._runOneTurn()
           : await this._runOneTurnViaProvider();
@@ -1078,6 +947,15 @@ export class WritingAgentRunner {
         ok: result.ok,
         output,
       });
+      const outObj = output && typeof output === "object" ? (output as Record<string, unknown>) : null;
+      this.turnEngine.record({
+        type: "tool_result",
+        callId: String(toolUse.id ?? ""),
+        name: String(toolUse.name ?? ""),
+        ok: result.ok,
+        output,
+        error: result.ok ? undefined : String(outObj?.error ?? "UNKNOWN_ERROR"),
+      });
       const rawContent = typeof output === "string" ? output : JSON.stringify(output);
       const content = rawContent.length > MAX_TOOL_RESULT_CHARS
         ? rawContent.slice(0, MAX_TOOL_RESULT_CHARS) + `\n...[工具结果已截断，共 ${rawContent.length} 字符]`
@@ -1118,6 +996,7 @@ export class WritingAgentRunner {
     while (this.turn < this.maxTurns) {
       if (this.ctx.abortSignal.aborted) return;
       this.turn += 1;
+      this.turnEngine.setTurn(this.turn);
       const shouldContinue = isAnthropicMessagesEndpoint(this.ctx.endpoint)
         ? await this._runOneTurn()
         : await this._runOneTurnViaProvider();
@@ -1242,6 +1121,17 @@ export class WritingAgentRunner {
         meta: result.meta ?? null,
         turn: this.turn,
       });
+      const outObj = result.output && typeof result.output === "object"
+        ? (result.output as Record<string, unknown>)
+        : null;
+      this.turnEngine.record({
+        type: "tool_result",
+        callId: String(toolUse.id ?? ""),
+        name: String(toolUse.name ?? ""),
+        ok: result.ok,
+        output: result.output,
+        error: result.ok ? undefined : String(outObj?.error ?? "UNKNOWN_ERROR"),
+      });
 
       const MAX_TOOL_RESULT_CHARS = 60_000;
       const rawOutput = typeof result.output === "string" ? result.output : JSON.stringify(result.output ?? null);
@@ -1329,6 +1219,17 @@ export class WritingAgentRunner {
     }
     const loopGuard = this._detectToolLoopGuard();
     if (loopGuard.blocked) {
+      this.failedToolDigests.push({
+        toolCallId: `tool_loop_guard_turn_${this.turn}`,
+        name: loopGuard.name || "unknown",
+        error: "TOOL_LOOP_DETECTED",
+        message: loopGuard.reason || "检测到工具循环",
+        next_actions: ["读取上一条工具结果后再决定下一步", "不要重复同一工具同参数，改为新动作或 run.done"],
+        turn: this.turn,
+      });
+      if (this.failedToolDigests.length > 40) {
+        this.failedToolDigests.splice(0, this.failedToolDigests.length - 40);
+      }
       this.ctx.writeEvent("run.notice", {
         turn: this.turn,
         kind: "error",
@@ -1348,6 +1249,7 @@ export class WritingAgentRunner {
       return { shouldContinue: false, injectedToolMessages };
     }
     if (hasRunDone) {
+      this.turnEngine.record({ type: "model_done", finishReason: "run_done" });
       this._setOutcome({ status: "completed", reason: "run_done", reasonCodes: ["run_done"] });
       return { shouldContinue: false, injectedToolMessages };
     }
@@ -1370,10 +1272,16 @@ export class WritingAgentRunner {
     const turnToolChoice = this._resolveTurnToolChoice(
       new Set(nativeTools.map((t) => String(t?.name ?? "").trim()).filter(Boolean)),
     );
+    const endpoint = this.ctx.endpoint || "/v1/responses";
+    const providerAdapter = getAdapterByEndpoint(endpoint);
 
     this.ctx.writeEvent("assistant.start", { turn: this.turn });
 
     let assistantRaw = "";
+    let plainText = "";
+    let wrapperCount = 0;
+    let hasToolCallMarker = false;
+    const parsedCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
     let streamErrored = false;
     let lastStreamError = "";
     let promptTokens = 0;
@@ -1386,14 +1294,18 @@ export class WritingAgentRunner {
       if (this.ctx.abortSignal.aborted) break;
 
       assistantRaw = "";
+      plainText = "";
+      wrapperCount = 0;
+      hasToolCallMarker = false;
+      parsedCalls.splice(0, parsedCalls.length);
       streamErrored = false;
       lastStreamError = "";
       promptTokens = 0;
       completionTokens = 0;
 
-      const stream = streamChatCompletionViaProvider({
+      const stream = providerAdapter.streamTurn({
         baseUrl: String(this.ctx.baseUrl ?? ""),
-        endpoint: this.ctx.endpoint || "/v1/responses",
+        endpoint,
         apiKey: this.ctx.apiKey,
         model: this.ctx.modelId,
         messages: [
@@ -1410,18 +1322,44 @@ export class WritingAgentRunner {
         signal: this.ctx.abortSignal,
       });
 
+      const rawEvents: Array<any> = [];
       for await (const ev of stream) {
         if (this.ctx.abortSignal.aborted) break;
-        if (ev.type === "delta") assistantRaw += String(ev.delta ?? "");
-        else if (ev.type === "usage") {
-          promptTokens = Math.max(promptTokens, Math.max(0, Math.floor(Number((ev as any)?.usage?.promptTokens ?? 0))));
-          completionTokens = Math.max(completionTokens, Math.max(0, Math.floor(Number((ev as any)?.usage?.completionTokens ?? 0))));
-        } else if (ev.type === "error") {
+        rawEvents.push(ev);
+      }
+
+      const canonicalEvents = providerAdapter.toCanonicalEvents(rawEvents);
+      for (const ev of canonicalEvents) {
+        if (ev.type === "usage") {
+          promptTokens = Math.max(promptTokens, Math.max(0, Math.floor(Number(ev.promptTokens ?? 0))));
+          completionTokens = Math.max(completionTokens, Math.max(0, Math.floor(Number(ev.completionTokens ?? 0))));
+          continue;
+        }
+        if (ev.type === "error") {
           streamErrored = true;
-          lastStreamError = String((ev as any)?.error ?? "UPSTREAM_ERROR");
+          lastStreamError = String(ev.error ?? "UPSTREAM_ERROR");
+          this.turnEngine.record({ type: "model_error", error: lastStreamError });
           break;
-        } else if (ev.type === "done") {
-          break;
+        }
+        if (ev.type === "tool_call") {
+          parsedCalls.push({
+            id: String(ev.id ?? "").trim(),
+            name: String(ev.name ?? "").trim(),
+            args: ev.args && typeof ev.args === "object" && !Array.isArray(ev.args) ? ev.args : {},
+          });
+          continue;
+        }
+        if (ev.type === "text_delta") {
+          // provider adapter 已在 done 里给完整 plainText，这里不重复拼接，避免重复文本。
+          continue;
+        }
+        if (ev.type === "done") {
+          assistantRaw = String(ev.assistantRaw ?? "");
+          plainText = String(ev.plainText ?? "");
+          hasToolCallMarker = Boolean(ev.hasToolCallMarker);
+          wrapperCount = Math.max(0, Math.floor(Number(ev.wrapperCount ?? 0)));
+          if (plainText) this.turnEngine.record({ type: "model_text_delta", text: plainText });
+          this.turnEngine.record({ type: "model_done", finishReason: "stream_done" });
         }
       }
 
@@ -1429,6 +1367,7 @@ export class WritingAgentRunner {
       if (!streamErrored && !hasContent) {
         streamErrored = true;
         lastStreamError = "模型服务返回了空响应，正在重试...";
+        this.turnEngine.record({ type: "model_error", error: lastStreamError });
       }
       if (!streamErrored) break;
       if (hasContent || attempt >= STREAM_RETRY_MAX) break;
@@ -1443,10 +1382,9 @@ export class WritingAgentRunner {
       this.ctx.onTurnUsage(promptTokens, completionTokens);
     }
 
-    const { calls, plainText, wrapperCount, hasToolCallMarker } = parseToolCallsXml(assistantRaw);
     const completedToolUses: ContentBlockToolUse[] = [];
     const presetResults = new Map<string, ToolExecResult>();
-    for (const c of calls) {
+    for (const c of parsedCalls) {
       const rawInput = c.args && typeof c.args === "object" && !Array.isArray(c.args) ? c.args : {};
       const normalized = normalizeToolCallForValidation(c.name, rawInput);
       const input = normalized.args;
@@ -1470,6 +1408,12 @@ export class WritingAgentRunner {
         name: normalizedName,
         input,
       });
+      this.turnEngine.record({
+        type: "model_tool_call",
+        callId: String(c.id ?? ""),
+        name: normalizedName,
+        args: input,
+      });
       this.ctx.writeEvent("tool.call.args_ready", {
         toolCallId: c.id,
         name: normalizedName,
@@ -1481,10 +1425,20 @@ export class WritingAgentRunner {
 
     if (completedToolUses.length === 0) {
       const fallbackToolUse = this._trySynthesizeToolUseFromJsonText(plainText || assistantRaw);
-      if (fallbackToolUse) completedToolUses.push(fallbackToolUse);
+      if (fallbackToolUse) {
+        completedToolUses.push(fallbackToolUse);
+        this.turnEngine.record({
+          type: "model_tool_call",
+          callId: String(fallbackToolUse.id ?? ""),
+          name: String(fallbackToolUse.name ?? ""),
+          args: fallbackToolUse.input && typeof fallbackToolUse.input === "object"
+            ? (fallbackToolUse.input as Record<string, unknown>)
+            : {},
+        });
+      }
     }
 
-    const hasProtocolViolation = hasToolCallMarker && calls.length === 0;
+    const hasProtocolViolation = hasToolCallMarker && parsedCalls.length === 0;
     const suppressMixedPlainText = completedToolUses.length > 0 && plainText.length > 0;
     if (hasProtocolViolation) {
       this.ctx.writeEvent("run.notice", {
@@ -1521,6 +1475,7 @@ export class WritingAgentRunner {
 
     this.ctx.writeEvent("assistant.done", { turn: this.turn });
     if (this.ctx.abortSignal.aborted) {
+      this.turnEngine.record({ type: "model_error", error: "ABORTED" });
       this._setOutcome({ status: "aborted", reason: "aborted", reasonCodes: ["aborted"] });
       return false;
     }
@@ -1543,10 +1498,16 @@ export class WritingAgentRunner {
     if (completedToolUses.length === 0) {
       const shouldRetry = this._checkAutoRetry(plainText || assistantRaw);
       if (shouldRetry) return true;
-      if (plainText && !hasProtocolViolation && this.outcome.status === "completed" && this.outcome.reason === "completed") {
+      if (
+        plainText &&
+        !hasProtocolViolation &&
+        this.turnEngine.getOutcome().status === "completed" &&
+        this.turnEngine.getOutcome().reason === "completed"
+      ) {
         this.ctx.writeEvent("assistant.delta", { delta: plainText, turn: this.turn });
       }
-      if (this.outcome.status === "completed" && this.outcome.reason === "completed") {
+      if (this.turnEngine.getOutcome().status === "completed" && this.turnEngine.getOutcome().reason === "completed") {
+        this.turnEngine.record({ type: "model_done", finishReason: "assistant_text" });
         this._setOutcome({ status: "completed", reason: "assistant_text", reasonCodes: ["assistant_text"] });
       }
       return false;
@@ -1581,24 +1542,7 @@ export class WritingAgentRunner {
       .map((t: any) => ({
         name: encodeToolName(String(t.name ?? "")),
         description: String(t.description ?? ""),
-        input_schema: {
-          type: "object" as const,
-          ...(t?.inputSchema && typeof t.inputSchema === "object" && !Array.isArray(t.inputSchema)
-            ? (() => {
-                const src = t.inputSchema as Record<string, unknown>;
-                const out: Record<string, unknown> = {};
-                for (const [k, v] of Object.entries(src)) {
-                  if (k === "oneOfRequired") continue;
-                  if (k === "oneOf" || k === "anyOf" || k === "allOf" || k === "enum" || k === "not") continue;
-                  out[k] = v;
-                }
-                if (!out.properties || typeof out.properties !== "object" || Array.isArray(out.properties)) {
-                  out.properties = {};
-                }
-                return out;
-              })()
-            : { properties: {} }),
-        },
+        input_schema: normalizeToolParametersSchema(t?.inputSchema),
       }));
     tools.push(...mcpToolDefs);
     const turnToolChoice = this._resolveTurnToolChoice(
@@ -1678,6 +1622,7 @@ export class WritingAgentRunner {
       if (!streamErrored && !hasContent) {
         streamErrored = true;
         lastStreamError = "模型服务返回了空响应，正在重试...";
+        this.turnEngine.record({ type: "model_error", error: lastStreamError });
       }
 
       if (!streamErrored) break;
@@ -1704,7 +1649,17 @@ export class WritingAgentRunner {
 
     if (completedToolUses.length === 0) {
       const fallbackToolUse = this._trySynthesizeToolUseFromJsonText(assistantText);
-      if (fallbackToolUse) completedToolUses.push(fallbackToolUse);
+      if (fallbackToolUse) {
+        completedToolUses.push(fallbackToolUse);
+        this.turnEngine.record({
+          type: "model_tool_call",
+          callId: String(fallbackToolUse.id ?? ""),
+          name: String(fallbackToolUse.name ?? ""),
+          args: fallbackToolUse.input && typeof fallbackToolUse.input === "object"
+            ? (fallbackToolUse.input as Record<string, unknown>)
+            : {},
+        });
+      }
     }
 
     const suppressMixedAssistantText = completedToolUses.length > 0 && assistantText.trim().length > 0;
@@ -1726,6 +1681,7 @@ export class WritingAgentRunner {
     this.ctx.writeEvent("assistant.done", { turn: this.turn });
 
     if (this.ctx.abortSignal.aborted) {
+      this.turnEngine.record({ type: "model_error", error: "ABORTED" });
       this._setOutcome({ status: "aborted", reason: "aborted", reasonCodes: ["aborted"] });
       return false;
     }
@@ -1742,10 +1698,19 @@ export class WritingAgentRunner {
     if (completedToolUses.length === 0) {
       const shouldRetry = this._checkAutoRetry(assistantText);
       if (shouldRetry) return true;
-      if (holdAssistantDelta && assistantText && this.outcome.status === "completed" && this.outcome.reason === "completed") {
+      if (
+        holdAssistantDelta &&
+        assistantText &&
+        this.turnEngine.getOutcome().status === "completed" &&
+        this.turnEngine.getOutcome().reason === "completed"
+      ) {
         this.ctx.writeEvent("assistant.delta", { delta: assistantText, turn: this.turn });
       }
-      if (this.outcome.status === "completed" && this.outcome.reason === "completed") {
+      if (
+        this.turnEngine.getOutcome().status === "completed" &&
+        this.turnEngine.getOutcome().reason === "completed"
+      ) {
+        this.turnEngine.record({ type: "model_done", finishReason: "assistant_text" });
         this._setOutcome({ status: "completed", reason: "assistant_text", reasonCodes: ["assistant_text"] });
       }
       return false;
@@ -1771,6 +1736,7 @@ export class WritingAgentRunner {
     switch (ev.type) {
       case "text_delta": {
         handlers.onTextDelta(ev.delta);
+        this.turnEngine.record({ type: "model_text_delta", text: ev.delta });
         if (handlers.emitTextDelta) {
           this.ctx.writeEvent("assistant.delta", { delta: ev.delta, turn: this.turn });
         }
@@ -1807,6 +1773,12 @@ export class WritingAgentRunner {
         };
 
         handlers.completedToolUses.push(block);
+        this.turnEngine.record({
+          type: "model_tool_call",
+          callId: String(ev.id ?? ""),
+          name: String(name ?? ""),
+          args: input && typeof input === "object" ? input : {},
+        });
 
         this.ctx.writeEvent("tool.call.args_ready", {
           toolCallId: ev.id,
@@ -1829,11 +1801,13 @@ export class WritingAgentRunner {
       }
 
       case "error": {
+        this.turnEngine.record({ type: "model_error", error: ev.error });
         handlers.onError(ev.error);
         return;
       }
 
       case "done": {
+        this.turnEngine.record({ type: "model_done", finishReason: "stream_done" });
         return;
       }
     }
@@ -2690,7 +2664,17 @@ export class WritingAgentRunner {
     return this.turn;
   }
 
+  getExecutionReport(): Record<string, unknown> {
+    const snapshot = this.turnEngine.getSnapshot();
+    return {
+      ...snapshot,
+      totalToolCalls: this.totalToolCalls,
+      executionNoToolTurns: this.executionNoToolTurns,
+      failedToolCount: this.failedToolDigests.length,
+    };
+  }
+
   getOutcome(): RunOutcome {
-    return this.outcome;
+    return this.turnEngine.getOutcome();
   }
 }

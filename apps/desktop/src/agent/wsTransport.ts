@@ -736,6 +736,11 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             }
           }
 
+          // ---- run.execution.report ----
+          if (event === "run.execution.report") {
+            log("info", "run.execution.report", data);
+          }
+
           // ---- assistant.start ----
           if (event === "assistant.start") {
             const evtAgentId = data?.agentId ? String(data.agentId) : null;

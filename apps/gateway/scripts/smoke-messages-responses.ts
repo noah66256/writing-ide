@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { detectRunIntent } from "@writing-ide/agent-core";
 import { completionOnceViaProvider, streamChatCompletionViaProvider } from "../src/llm/providerAdapter.js";
+import { getAdapterByEndpoint } from "../src/llm/providerAdapter.js";
 import { computeIntentRouteDecisionPhase0 } from "../src/agent/runFactory.js";
 
 function ok(name: string) {
@@ -163,6 +164,7 @@ async function smokeProviderEndpoints() {
     ok("provider.chat_completions.tool_call_bridge");
 
     const streamResPieces: string[] = [];
+    const streamResEvents: any[] = [];
     for await (const ev of streamChatCompletionViaProvider({
       baseUrl: "https://mock.local",
       endpoint: "/v1/responses",
@@ -173,6 +175,7 @@ async function smokeProviderEndpoints() {
       toolChoice: { type: "any" },
       parallelToolCalls: false,
     })) {
+      streamResEvents.push(ev);
       if (ev.type === "delta") streamResPieces.push(String(ev.delta ?? ""));
       if (ev.type === "error") throw new Error(String((ev as any).error ?? "stream responses failed"));
     }
@@ -195,6 +198,12 @@ async function smokeProviderEndpoints() {
     }
     assert.match(streamChatPieces.join(""), /<tool_calls>/);
     ok("provider.chat_completions.stream_tool_call_bridge");
+
+    const responsesAdapter = getAdapterByEndpoint("/v1/responses");
+    assert.equal(responsesAdapter.id, "responses");
+    const canonical = responsesAdapter.toCanonicalEvents(streamResEvents as any);
+    assert.ok(canonical.some((ev) => ev.type === "tool_call"));
+    ok("provider.responses.adapter.canonical");
 
     const r3 = await completionOnceViaProvider({
       baseUrl: "https://mock.local",

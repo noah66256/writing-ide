@@ -29,12 +29,16 @@ import {
   type RunState,
   type SubAgentDefinition,
 } from "@writing-ide/agent-core";
+import { collectToolSchemaIssues } from "@writing-ide/tools";
 import {
   WritingAgentRunner,
   type RunContext,
   type SseWriter,
   type WaiterMap,
 } from "./writingAgentRunner.js";
+
+const TOOL_SCHEMA_ISSUES = collectToolSchemaIssues();
+let TOOL_SCHEMA_NOTICE_EMITTED = false;
 
 export type AgentRunBody = z.infer<typeof agentRunBodySchema>;
 
@@ -220,6 +224,108 @@ const DELETE_ROUTE_PINNED_TOOL_NAMES = [
   "doc.restoreSnapshot",
   "doc.deletePath",
 ] as const;
+
+type ToolLayer = "L0_CONTROL" | "L1_LOCAL" | "L2_MCP" | "L3_SUB_AGENT";
+
+function classifyToolLayer(name: string): ToolLayer {
+  const n = String(name ?? "").trim();
+  if (!n) return "L1_LOCAL";
+  if (n === "agent.delegate") return "L3_SUB_AGENT";
+  if (n.startsWith("mcp.")) return "L2_MCP";
+  if (n.startsWith("run.") || n === "time.now") return "L0_CONTROL";
+  return "L1_LOCAL";
+}
+
+type RouteDecisionV1 = {
+  routeIdLower: string;
+  isExecutionRoute: boolean;
+  directOpenWebIntent: boolean;
+  allowBrowserTools: boolean;
+  executionPreferred: string[];
+  executionContract: ExecutionContract;
+  preserveToolNames: Set<string>;
+};
+
+function buildRouteDecisionV1(args: {
+  routeId: string;
+  nextAction: NextAction;
+  effectiveToolPolicy: ToolPolicy;
+  userPrompt: string;
+  baseAllowedToolNames: Set<string>;
+  mcpToolsFromSidecar: Array<{ name: string }>;
+  skillPinnedToolNames: Set<string>;
+}): RouteDecisionV1 {
+  const routeIdLower = String(args.routeId ?? "").trim().toLowerCase();
+  const isExecutionRoute = args.nextAction === "enter_workflow" && args.effectiveToolPolicy !== "deny";
+  const executionPreferredRaw: string[] = [];
+
+  if (routeIdLower === "file_delete_only") {
+    executionPreferredRaw.push("doc.deletePath", "project.listFiles");
+  } else if (routeIdLower === "project_search") {
+    executionPreferredRaw.push("project.search", "project.listFiles", "doc.read", "kb.search");
+  } else if (routeIdLower === "web_radar") {
+    executionPreferredRaw.push("web.search", "web.fetch");
+  } else if (routeIdLower === "file_ops") {
+    executionPreferredRaw.push("project.listFiles", "run.setTodoList", "run.todo.upsertMany");
+  } else if (routeIdLower === "kb_ops") {
+    executionPreferredRaw.push("kb.search", "run.mainDoc.get", "run.setTodoList");
+  } else if (routeIdLower === "task_execution") {
+    executionPreferredRaw.push("run.setTodoList", "run.todo.upsertMany", "run.mainDoc.get", "kb.search");
+  }
+
+  const directOpenWebIntent = looksLikeDirectOpenWebIntent(args.userPrompt);
+  const allowBrowserTools = routeIdLower === "web_radar" || directOpenWebIntent;
+  if (allowBrowserTools) {
+    const mcpNavTool = args.mcpToolsFromSidecar
+      .map((t) => String(t?.name ?? "").trim())
+      .find((n) => /^mcp\./i.test(n) && /(browser_navigate|navigate|open_url|openurl|goto|go_to)/i.test(n));
+    if (mcpNavTool) executionPreferredRaw.unshift(mcpNavTool);
+  }
+
+  const executionPreferred = Array.from(
+    new Set(
+      executionPreferredRaw
+        .map((name) => String(name ?? "").trim())
+        .filter((name) => name && args.baseAllowedToolNames.has(name)),
+    ),
+  );
+  if (isExecutionRoute && executionPreferred.length === 0) {
+    for (const name of ["run.mainDoc.get", "run.setTodoList", "run.todo.upsertMany", "project.listFiles", "kb.search"]) {
+      if (args.baseAllowedToolNames.has(name)) executionPreferred.push(name);
+    }
+  }
+
+  const executionContract: ExecutionContract = {
+    required: isExecutionRoute,
+    minToolCalls: isExecutionRoute ? 1 : 0,
+    maxNoToolTurns: isExecutionRoute ? 2 : 0,
+    reason: isExecutionRoute ? `route:${routeIdLower || "unknown"}` : "route:non_execution",
+    preferredToolNames: executionPreferred,
+  };
+
+  const alwaysAllowToolNames = new Set(
+    CORE_WORKFLOW_TOOL_NAMES.filter((name) => args.baseAllowedToolNames.has(name)),
+  );
+  const deleteRoutePinnedToolNames = new Set(
+    DELETE_ROUTE_PINNED_TOOL_NAMES.filter((name) => args.baseAllowedToolNames.has(name)),
+  );
+  const preserveToolNames = new Set<string>([
+    ...Array.from(alwaysAllowToolNames),
+    ...Array.from(args.skillPinnedToolNames),
+    ...executionPreferred,
+    ...(routeIdLower === "file_delete_only" ? Array.from(deleteRoutePinnedToolNames) : []),
+  ]);
+
+  return {
+    routeIdLower,
+    isExecutionRoute,
+    directOpenWebIntent,
+    allowBrowserTools,
+    executionPreferred,
+    executionContract,
+    preserveToolNames,
+  };
+}
 
 /** 从 contextPack 中提取 Markdown 格式的段落（如 L1_GLOBAL_MEMORY、L2_PROJECT_MEMORY、DIALOGUE_SUMMARY）。
  *  格式：`SEGMENT_NAME(Markdown):\ncontent\n\n`。解析失败返回空字符串。 */
@@ -1902,62 +2008,22 @@ export async function prepareAgentRun(args: {
     }
   }
 
-  const routeIdLower = String(intentRoute.routeId ?? "").trim().toLowerCase();
-  const isExecutionRoute = intentRoute.nextAction === "enter_workflow" && effectiveToolPolicy !== "deny";
-  const executionPreferredRaw: string[] = [];
-  if (routeIdLower === "file_delete_only") {
-    executionPreferredRaw.push("doc.deletePath", "project.listFiles");
-  } else if (routeIdLower === "project_search") {
-    executionPreferredRaw.push("project.search", "project.listFiles", "doc.read", "kb.search");
-  } else if (routeIdLower === "web_radar") {
-    executionPreferredRaw.push("web.search", "web.fetch");
-  } else if (routeIdLower === "file_ops") {
-    executionPreferredRaw.push("project.listFiles", "run.setTodoList", "run.todo.upsertMany");
-  } else if (routeIdLower === "kb_ops") {
-    executionPreferredRaw.push("kb.search", "run.mainDoc.get", "run.setTodoList");
-  } else if (routeIdLower === "task_execution") {
-    executionPreferredRaw.push("run.setTodoList", "run.todo.upsertMany", "run.mainDoc.get", "kb.search");
-  }
-  const directOpenWebIntent = looksLikeDirectOpenWebIntent(userPrompt);
-  const allowBrowserTools = routeIdLower === "web_radar" || directOpenWebIntent;
-  if (allowBrowserTools) {
-    const mcpNavTool = mcpToolsFromSidecar
-      .map((t) => String(t?.name ?? "").trim())
-      .find((n) => /^mcp\./i.test(n) && /(browser_navigate|navigate|open_url|openurl|goto|go_to)/i.test(n));
-    if (mcpNavTool) executionPreferredRaw.unshift(mcpNavTool);
-  }
-  const executionPreferred = Array.from(
-    new Set(
-      executionPreferredRaw
-        .map((name) => String(name ?? "").trim())
-        .filter((name) => name && baseAllowedToolNames.has(name)),
-    ),
-  );
-  if (isExecutionRoute && executionPreferred.length === 0) {
-    for (const name of ["run.mainDoc.get", "run.setTodoList", "run.todo.upsertMany", "project.listFiles", "kb.search"]) {
-      if (baseAllowedToolNames.has(name)) executionPreferred.push(name);
-    }
-  }
-  const executionContract: ExecutionContract = {
-    required: isExecutionRoute,
-    minToolCalls: isExecutionRoute ? 1 : 0,
-    maxNoToolTurns: isExecutionRoute ? 2 : 0,
-    reason: isExecutionRoute ? `route:${routeIdLower || "unknown"}` : "route:non_execution",
-    preferredToolNames: executionPreferred,
-  };
-
-  const alwaysAllowToolNames = new Set(
-    CORE_WORKFLOW_TOOL_NAMES.filter((name) => baseAllowedToolNames.has(name)),
-  );
-  const deleteRoutePinnedToolNames = new Set(
-    DELETE_ROUTE_PINNED_TOOL_NAMES.filter((name) => baseAllowedToolNames.has(name)),
-  );
-  const preserveToolNames = new Set<string>([
-    ...Array.from(alwaysAllowToolNames),
-    ...Array.from(skillPinnedToolNames),
-    ...executionPreferred,
-    ...(routeIdLower === "file_delete_only" ? Array.from(deleteRoutePinnedToolNames) : []),
-  ]);
+  const routeDecision = buildRouteDecisionV1({
+    routeId: intentRoute.routeId ?? "",
+    nextAction: intentRoute.nextAction,
+    effectiveToolPolicy,
+    userPrompt,
+    baseAllowedToolNames,
+    mcpToolsFromSidecar: mcpToolsFromSidecar.map((x) => ({ name: String(x?.name ?? "").trim() })),
+    skillPinnedToolNames,
+  });
+  const routeIdLower = routeDecision.routeIdLower;
+  const isExecutionRoute = routeDecision.isExecutionRoute;
+  const directOpenWebIntent = routeDecision.directOpenWebIntent;
+  const allowBrowserTools = routeDecision.allowBrowserTools;
+  const executionPreferred = routeDecision.executionPreferred;
+  const executionContract = routeDecision.executionContract;
+  const preserveToolNames = routeDecision.preserveToolNames;
   const toolCatalog = buildToolCatalog({
     mode,
     allowedToolNames: baseAllowedToolNames,
@@ -2214,13 +2280,34 @@ export async function prepareAgentRun(args: {
               "project.listFiles",
               "kb.search",
             ];
-      const boot = new Set(
+      const boot = new Set<string>(
         Array.from(new Set(bootCandidates.map((x) => String(x ?? "").trim()).filter(Boolean))).filter((n) => allowedNow.has(n)),
       );
+      for (const name of Array.from(boot)) {
+        const layer = classifyToolLayer(name);
+        if (layer === "L3_SUB_AGENT") {
+          boot.delete(name);
+          continue;
+        }
+        if (!allowBrowserTools && layer === "L2_MCP") {
+          boot.delete(name);
+          continue;
+        }
+      }
+      if (boot.size === 0) {
+        for (const name of allowedNow) {
+          const layer = classifyToolLayer(name);
+          if (layer === "L0_CONTROL" || layer === "L1_LOCAL" || (allowBrowserTools && layer === "L2_MCP")) {
+            boot.add(name);
+          }
+        }
+        // 启动阶段默认不先委派子 agent，先做一次本地/受控动作建立上下文。
+        boot.delete("agent.delegate");
+      }
       if (boot.size > 0) {
         allowed = boot;
         hints.push(
-          "执行启动阶段：请先调用首工具（优先 executionPreferred），完成一次有效工具调用后再进入全工具阶段。",
+          "执行启动阶段：请先调用首工具（优先 executionPreferred；默认先用 L0/L1，本轮不优先 L3 委派），完成一次有效工具调用后再进入全工具阶段。",
         );
       }
     }
@@ -2560,6 +2647,19 @@ export async function executeAgentRun(args: {
 
   try {
   writeEvent("run.start", { runId, model, mode });
+  if (!TOOL_SCHEMA_NOTICE_EMITTED && TOOL_SCHEMA_ISSUES.length > 0) {
+    TOOL_SCHEMA_NOTICE_EMITTED = true;
+    writeEvent("run.notice", {
+      turn: 0,
+      kind: "warn",
+      title: "ToolSchemaCheck",
+      message: `检测到 ${TOOL_SCHEMA_ISSUES.length} 条工具 schema 规范问题（已启用适配层兜底，不阻断运行）。`,
+      detail: {
+        totalIssues: TOOL_SCHEMA_ISSUES.length,
+        sample: TOOL_SCHEMA_ISSUES.slice(0, 5),
+      },
+    });
+  }
 
   // MCP sidecar 快照审计：用于定位 TOOL_NOT_ALLOWED 是否由白名单缺失导致。
   const mcpToolNamesSample = mcpToolsFromSidecar
@@ -2598,6 +2698,10 @@ export async function executeAgentRun(args: {
       maxNoToolTurns: executionContract.maxNoToolTurns,
       reason: executionContract.reason,
       preferredToolNames: executionContract.preferredToolNames.slice(0, 12),
+      routeDecision: {
+        routeId: prepared.intentRoute?.routeId ?? "unknown",
+        isExecutionRoute: executionContract.required,
+      },
     },
   });
   writeEvent("run.notice", {
@@ -2998,6 +3102,11 @@ export async function executeAgentRun(args: {
   }
 
   const failureDigest = runner.getFailureDigest();
+  const executionReport = runner.getExecutionReport();
+  writeEvent("run.execution.report", {
+    runId,
+    ...executionReport,
+  });
   if (failureDigest.failedCount > 0) {
     writeEvent("run.end.failure_digest", {
       runId,
@@ -3056,6 +3165,7 @@ export async function executeAgentRun(args: {
     reasonCodes: outcomeReasonCodes,
     status: runnerOutcome.status,
     turn: runner.getTurn(),
+    executionReport,
     ...(runnerOutcome.detail ? { detail: runnerOutcome.detail } : {}),
     ...(failureDigest.failedCount > 0 ? { failureDigest } : {}),
   });

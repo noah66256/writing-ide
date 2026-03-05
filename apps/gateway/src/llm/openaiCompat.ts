@@ -1,3 +1,6 @@
+import { normalizeToolParametersSchema } from "./toolSchema.js";
+import { buildToolCallsXml } from "./toolXmlProtocol.js";
+
 export type OpenAiChatRole = "system" | "user" | "assistant" | "tool";
 
 export type OpenAiChatMessage = {
@@ -58,18 +61,6 @@ function isResponsesEndpoint(endpoint?: string) {
   return p.endsWith("/responses") || p === "/responses";
 }
 
-function xmlEscapeAttr(raw: string): string {
-  return String(raw ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function xmlCdataSafe(raw: string): string {
-  return String(raw ?? "").replace(/\]\]>/g, "]]]]><![CDATA[>");
-}
-
 type NormalizedToolCall = {
   id: string;
   name: string;
@@ -100,26 +91,13 @@ function parseToolArgsRaw(argsRaw: string): Record<string, unknown> {
 
 function toolCallsToXml(calls: NormalizedToolCall[]): string {
   if (!Array.isArray(calls) || calls.length === 0) return "";
-  const blocks = calls
-    .map((call) => {
-      const name = String(call?.name ?? "").trim();
-      if (!name) return "";
-      const argsObj = parseToolArgsRaw(String(call?.argsRaw ?? ""));
-      const argEntries = Object.entries(argsObj);
-      const argXml = argEntries.length
-        ? argEntries
-            .map(([k, v]) => {
-              const encoded = typeof v === "string" ? v : safeJsonStringify(v);
-              return `<arg name="${xmlEscapeAttr(String(k))}"><![CDATA[${xmlCdataSafe(encoded)}]]></arg>`;
-            })
-            .join("")
-        : "";
-      const idAttr = String(call?.id ?? "").trim() ? ` id="${xmlEscapeAttr(String(call.id))}"` : "";
-      return `<tool_call${idAttr} name="${xmlEscapeAttr(name)}">${argXml}</tool_call>`;
-    })
-    .filter(Boolean)
-    .join("");
-  return blocks ? `<tool_calls>${blocks}</tool_calls>` : "";
+  return buildToolCallsXml(
+    calls.map((call) => ({
+      id: String(call?.id ?? "").trim() || undefined,
+      name: String(call?.name ?? "").trim(),
+      args: parseToolArgsRaw(String(call?.argsRaw ?? "")),
+    })),
+  );
 }
 
 function mergeToolCall(target: Map<string, NormalizedToolCall>, incoming: NormalizedToolCall) {
@@ -214,53 +192,6 @@ function extractToolCallsFromAny(node: any): NormalizedToolCall[] {
   const merged = new Map<string, NormalizedToolCall>();
   for (const call of raw) mergeToolCall(merged, call);
   return Array.from(merged.values()).filter((c) => String(c.name ?? "").trim().length > 0);
-}
-
-function normalizeToolParametersSchema(raw: unknown): Record<string, unknown> {
-  const fallback = { type: "object", properties: {}, additionalProperties: true } as Record<string, unknown>;
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fallback;
-
-  const walk = (node: unknown, topLevel = false): unknown => {
-    if (Array.isArray(node)) return node.map((x) => walk(x));
-    if (!node || typeof node !== "object") return node;
-
-    const src = node as Record<string, unknown>;
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(src)) {
-      if (topLevel && (k === "oneOf" || k === "anyOf" || k === "allOf" || k === "enum" || k === "not")) {
-        // 兼容严格上游：tools[*].parameters 顶层禁止出现组合/约束关键字
-        continue;
-      }
-      if (k === "oneOfRequired") {
-        // oneOfRequired 是本项目私有扩展，仅用于本地参数校验；不要下发给上游模型
-        continue;
-      }
-      out[k] = walk(v, false);
-    }
-
-    if (String(out.type ?? "") === "array") {
-      if (out.items === undefined || out.items === null) out.items = {};
-      else out.items = walk(out.items, false);
-    }
-    if (out.properties && typeof out.properties === "object" && !Array.isArray(out.properties)) {
-      const props = out.properties as Record<string, unknown>;
-      const nextProps: Record<string, unknown> = {};
-      for (const [pk, pv] of Object.entries(props)) nextProps[pk] = walk(pv, false);
-      out.properties = nextProps;
-    }
-    if (Array.isArray(out.required)) {
-      out.required = (out.required as unknown[]).map((s) => String(s ?? "").trim()).filter(Boolean);
-    }
-    return out;
-  };
-
-  const normalized = walk(raw, true);
-  if (!normalized || typeof normalized !== "object" || Array.isArray(normalized)) return fallback;
-  const top = normalized as Record<string, unknown>;
-  if (String(top.type ?? "") !== "object") top.type = "object";
-  if (!top.properties || typeof top.properties !== "object" || Array.isArray(top.properties)) top.properties = {};
-  if (top.additionalProperties === undefined) top.additionalProperties = true;
-  return top;
 }
 
 function toOpenAiToolsPayload(tools?: OpenAiCompatTool[]) {

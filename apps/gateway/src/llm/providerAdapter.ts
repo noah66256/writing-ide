@@ -8,6 +8,7 @@ import type {
 import { chatCompletionOnce, streamChatCompletions } from "./openaiCompat.js";
 import { isGeminiEndpoint, streamGeminiGenerateContent } from "./gemini.js";
 import { completionOnceAnthropicMessages } from "./anthropicMessages.js";
+import { parseToolCallsXml } from "./toolXmlProtocol.js";
 
 export type ProviderStreamArgs = {
   baseUrl: string;
@@ -25,6 +26,37 @@ export type ProviderStreamArgs = {
 };
 
 export type ToolResultFormat = "xml" | "text";
+
+export type ProviderCanonicalEvent =
+  | { type: "text_delta"; delta: string }
+  | { type: "tool_call"; id: string; name: string; args: Record<string, unknown> }
+  | { type: "usage"; promptTokens: number; completionTokens: number }
+  | { type: "error"; error: string }
+  | {
+      type: "done";
+      assistantRaw: string;
+      plainText: string;
+      hasToolCallMarker: boolean;
+      wrapperCount: number;
+    };
+
+export type EndpointAdapter = {
+  id: "chat" | "responses";
+  sendTurn: (args: ProviderStreamArgs) => Promise<ChatCompletionOnceResult>;
+  streamTurn: (args: ProviderStreamArgs) => AsyncGenerator<StreamDeltaEvent>;
+  toCanonicalEvents: (events: StreamDeltaEvent[]) => ProviderCanonicalEvent[];
+};
+
+function normalizeEndpointPath(endpoint?: string): string {
+  const raw = String(endpoint ?? "").trim().toLowerCase();
+  if (!raw) return "";
+  return raw.startsWith("/") ? raw : `/${raw}`;
+}
+
+function isResponsesEndpoint(endpoint?: string): boolean {
+  const p = normalizeEndpointPath(endpoint);
+  return p.endsWith("/responses") || p === "/responses";
+}
 
 export function isGeminiLikeEndpoint(endpoint: string) {
   return isGeminiEndpoint(endpoint);
@@ -58,6 +90,89 @@ export async function* streamChatCompletionViaProvider(args: ProviderStreamArgs)
     parallelToolCalls: args.parallelToolCalls,
     signal: args.signal,
   });
+}
+
+// Adapter v1: streamTurn / sendTurn / toCanonicalEvents
+export async function* streamTurn(args: ProviderStreamArgs): AsyncGenerator<StreamDeltaEvent> {
+  yield* streamChatCompletionViaProvider(args);
+}
+
+export async function sendTurn(args: ProviderStreamArgs): Promise<ChatCompletionOnceResult> {
+  return completionOnceViaProvider(args);
+}
+
+export function toCanonicalEvents(events: StreamDeltaEvent[]): ProviderCanonicalEvent[] {
+  const out: ProviderCanonicalEvent[] = [];
+  const raw = Array.isArray(events) ? events : [];
+  let assistantRaw = "";
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let streamError = "";
+
+  for (const ev of raw) {
+    if (!ev || typeof ev !== "object") continue;
+    if (ev.type === "delta") {
+      assistantRaw += String(ev.delta ?? "");
+      continue;
+    }
+    if (ev.type === "usage") {
+      const p = Math.max(0, Math.floor(Number((ev as any)?.usage?.promptTokens ?? 0)));
+      const c = Math.max(0, Math.floor(Number((ev as any)?.usage?.completionTokens ?? 0)));
+      promptTokens = Math.max(promptTokens, p);
+      completionTokens = Math.max(completionTokens, c);
+      continue;
+    }
+    if (ev.type === "error") {
+      streamError = String((ev as any)?.error ?? "UPSTREAM_ERROR");
+      break;
+    }
+    if (ev.type === "done") break;
+  }
+
+  if (promptTokens > 0 || completionTokens > 0) {
+    out.push({ type: "usage", promptTokens, completionTokens });
+  }
+  if (streamError) {
+    out.push({ type: "error", error: streamError });
+    return out;
+  }
+
+  const parsed = parseToolCallsXml(assistantRaw);
+  for (const c of parsed.calls) {
+    out.push({
+      type: "tool_call",
+      id: String(c.id ?? "").trim(),
+      name: String(c.name ?? "").trim(),
+      args: c.args && typeof c.args === "object" && !Array.isArray(c.args) ? c.args : {},
+    });
+  }
+  if (parsed.plainText) out.push({ type: "text_delta", delta: parsed.plainText });
+  out.push({
+    type: "done",
+    assistantRaw,
+    plainText: parsed.plainText,
+    hasToolCallMarker: parsed.hasToolCallMarker,
+    wrapperCount: parsed.wrapperCount,
+  });
+  return out;
+}
+
+export const ChatAdapter: EndpointAdapter = {
+  id: "chat",
+  sendTurn: (args) => sendTurn({ ...args, endpoint: "/v1/chat/completions" }),
+  streamTurn: (args) => streamTurn({ ...args, endpoint: "/v1/chat/completions" }),
+  toCanonicalEvents,
+};
+
+export const ResponsesAdapter: EndpointAdapter = {
+  id: "responses",
+  sendTurn: (args) => sendTurn({ ...args, endpoint: "/v1/responses" }),
+  streamTurn: (args) => streamTurn({ ...args, endpoint: "/v1/responses" }),
+  toCanonicalEvents,
+};
+
+export function getAdapterByEndpoint(endpoint?: string): EndpointAdapter {
+  return isResponsesEndpoint(endpoint) ? ResponsesAdapter : ChatAdapter;
 }
 
 export function buildInjectedToolResultMessages(args: {

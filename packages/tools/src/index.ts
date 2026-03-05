@@ -13,7 +13,15 @@ export type ToolArgSpec = {
 
 export type ToolJsonSchema = {
   type: "object";
-  properties: Record<string, { type: ToolArgType }>;
+  properties: Record<
+    string,
+    {
+      type: ToolArgType;
+      // 对 array/object 保留可选结构，便于上游严格 schema 校验（如 OpenAI strict tools）
+      items?: { type: ToolArgType };
+      properties?: Record<string, { type: ToolArgType }>;
+    }
+  >;
   required?: string[];
   additionalProperties?: boolean;
   oneOfRequired?: Array<{ required: string[] }>;
@@ -1397,6 +1405,85 @@ export function validateToolCallArgs(args: { name: string; toolArgs: Record<stri
   return { ok: true as const };
 }
 
+export type ToolSchemaIssue = {
+  toolName: string;
+  code:
+    | "TOP_LEVEL_NOT_OBJECT"
+    | "TOP_LEVEL_COMBINATOR_FORBIDDEN"
+    | "PROPERTIES_NOT_OBJECT"
+    | "ARRAY_ITEMS_MISSING"
+    | "ONE_OF_REQUIRED_FIELD_NOT_DEFINED";
+  message: string;
+  path?: string;
+};
+
+export function collectToolSchemaIssues(toolList: ToolMeta[] = TOOL_LIST): ToolSchemaIssue[] {
+  const out: ToolSchemaIssue[] = [];
+  for (const tool of toolList) {
+    const schema = tool?.inputSchema as any;
+    if (!schema) continue;
+    const toolName = String(tool?.name ?? "").trim() || "unknown";
+    if (String(schema?.type ?? "") !== "object") {
+      out.push({
+        toolName,
+        code: "TOP_LEVEL_NOT_OBJECT",
+        message: "inputSchema 顶层必须是 type=object。",
+        path: "inputSchema.type",
+      });
+      continue;
+    }
+    for (const k of ["oneOf", "anyOf", "allOf", "enum", "not"]) {
+      if (schema?.[k] !== undefined) {
+        out.push({
+          toolName,
+          code: "TOP_LEVEL_COMBINATOR_FORBIDDEN",
+          message: `inputSchema 顶层禁止包含 ${k}。`,
+          path: `inputSchema.${k}`,
+        });
+      }
+    }
+
+    const properties = schema?.properties;
+    if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
+      out.push({
+        toolName,
+        code: "PROPERTIES_NOT_OBJECT",
+        message: "inputSchema.properties 必须是对象。",
+        path: "inputSchema.properties",
+      });
+      continue;
+    }
+
+    for (const [propName, propRule] of Object.entries(properties as Record<string, any>)) {
+      if (String(propRule?.type ?? "") === "array" && (propRule?.items === undefined || propRule?.items === null)) {
+        out.push({
+          toolName,
+          code: "ARRAY_ITEMS_MISSING",
+          message: `数组字段 ${propName} 缺少 items 定义（会被适配层自动兜底为 {}，建议补齐）。`,
+          path: `inputSchema.properties.${propName}.items`,
+        });
+      }
+    }
+
+    const oneOf = Array.isArray(schema?.oneOfRequired) ? schema.oneOfRequired : [];
+    if (oneOf.length > 0) {
+      for (const group of oneOf) {
+        const req = Array.isArray(group?.required) ? group.required : [];
+        for (const field of req) {
+          if (!Object.prototype.hasOwnProperty.call(properties, field)) {
+            out.push({
+              toolName,
+              code: "ONE_OF_REQUIRED_FIELD_NOT_DEFINED",
+              message: `oneOfRequired 引用了未定义字段：${field}`,
+              path: "inputSchema.oneOfRequired",
+            });
+          }
+        }
+      }
+    }
+  }
+  return out;
+}
 
 
 
