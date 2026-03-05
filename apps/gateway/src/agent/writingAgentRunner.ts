@@ -145,6 +145,14 @@ type PendingToolUse = {
 
 type ForcedToolChoice = { type: "any" } | { type: "tool"; name: string };
 
+type ToolAttemptSnapshot = {
+  name: string;
+  argsSig: string;
+  ok: boolean;
+  resultSig: string;
+  turn: number;
+};
+
 const MAX_TURNS = 30;
 const TOOL_RESULT_TIMEOUT_MS = 180_000;
 const LINT_MAX_REWORK = 2;
@@ -193,6 +201,23 @@ function parseJsonObjectFromFreeText(raw: string): Record<string, unknown> | nul
 function hasNonEmptyStringField(obj: Record<string, unknown>, key: string): boolean {
   const v = obj[key];
   return typeof v === "string" && v.trim().length > 0;
+}
+
+function stableStringify(value: unknown): string {
+  const walk = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map((x) => walk(x));
+    if (!v || typeof v !== "object") return v;
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+      out[k] = walk((v as Record<string, unknown>)[k]);
+    }
+    return out;
+  };
+  try {
+    return JSON.stringify(walk(value));
+  } catch {
+    return String(value ?? "");
+  }
 }
 
 function isAnthropicMessagesEndpoint(endpoint?: string): boolean {
@@ -702,6 +727,7 @@ export class WritingAgentRunner {
   private totalToolCalls = 0;
   private forcedToolChoice: ForcedToolChoice | null = null;
   private outcome: RunOutcome = { status: "completed", reason: "completed", reasonCodes: ["completed"] };
+  private readonly recentToolAttempts: ToolAttemptSnapshot[] = [];
 
   constructor(ctx: RunContext) {
     // 若设置了 agentId，包装 writeEvent 自动注入到每条 SSE 事件
@@ -858,6 +884,50 @@ export class WritingAgentRunner {
       name: normalized.name,
       input: normalized.args,
     };
+  }
+
+  private _recordToolAttempt(toolUse: ContentBlockToolUse, result: ToolExecResult): void {
+    const argsSig = stableStringify(toolUse.input ?? {});
+    const outputObj = result.output && typeof result.output === "object"
+      ? (result.output as Record<string, unknown>)
+      : null;
+    const resultSig = result.ok
+      ? `ok:${String(outputObj?.ok ?? true)}`
+      : stableStringify({
+          error: outputObj?.error ?? "ERR",
+          message: outputObj?.message ?? outputObj?.detail ?? "",
+          code: outputObj?.code ?? "",
+          path: outputObj?.path ?? "",
+        });
+    this.recentToolAttempts.push({
+      name: String(toolUse.name ?? ""),
+      argsSig,
+      ok: result.ok,
+      resultSig: String(resultSig).slice(0, 500),
+      turn: this.turn,
+    });
+    if (this.recentToolAttempts.length > 30) {
+      this.recentToolAttempts.splice(0, this.recentToolAttempts.length - 30);
+    }
+  }
+
+  private _detectToolLoopGuard(): { blocked: boolean; name?: string; reason?: string } {
+    const recent = this.recentToolAttempts.slice(-6);
+    if (recent.length < 4) return { blocked: false };
+    const sameName = recent.every((x) => x.name === recent[0].name);
+    const failCount = recent.filter((x) => !x.ok).length;
+    if (!sameName || failCount < 4) return { blocked: false };
+
+    const sameArgsAndError = recent
+      .filter((x) => !x.ok)
+      .every((x) => x.argsSig === recent[0].argsSig && x.resultSig === recent.filter((y) => !y.ok)[0]?.resultSig);
+    if (sameArgsAndError) {
+      return { blocked: true, name: recent[0].name, reason: "同一工具同参同错连续重试" };
+    }
+    if (failCount >= 5 && recent.every((x) => !x.ok)) {
+      return { blocked: true, name: recent[0].name, reason: "同一工具连续失败，未发生有效状态变化" };
+    }
+    return { blocked: false };
   }
 
   private _setOutcome(next: RunOutcome): void {
@@ -1143,6 +1213,7 @@ export class WritingAgentRunner {
     orderedResults.sort((a, b) => a.index - b.index);
     for (const { toolUse, result } of orderedResults) {
       this._updateRunState(toolUse, { ok: result.ok, output: result.output });
+      this._recordToolAttempt(toolUse, result);
 
       this.ctx.writeEvent("tool.result", {
         toolCallId: toolUse.id,
@@ -1235,6 +1306,26 @@ export class WritingAgentRunner {
 
     if (this.ctx.abortSignal.aborted) {
       this._setOutcome({ status: "aborted", reason: "aborted", reasonCodes: ["aborted"] });
+      return { shouldContinue: false, injectedToolMessages };
+    }
+    const loopGuard = this._detectToolLoopGuard();
+    if (loopGuard.blocked) {
+      this.ctx.writeEvent("run.notice", {
+        turn: this.turn,
+        kind: "error",
+        title: "ToolLoopGuard",
+        message: `检测到工具循环：${loopGuard.name || "unknown"}（${loopGuard.reason || "重复失败"}）。`,
+      });
+      this._setOutcome({
+        status: "failed",
+        reason: "tool_loop_detected",
+        reasonCodes: ["tool_loop_detected"],
+        detail: {
+          toolName: loopGuard.name || null,
+          reason: loopGuard.reason || "",
+          recentAttempts: this.recentToolAttempts.slice(-6),
+        },
+      });
       return { shouldContinue: false, injectedToolMessages };
     }
     if (hasRunDone) {
