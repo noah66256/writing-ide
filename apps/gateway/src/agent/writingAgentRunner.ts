@@ -719,42 +719,69 @@ export class WritingAgentRunner {
     const contract = this._getExecutionContract();
     if (!contract.required) return null;
     const allowed = this.turnAllowedToolNames ?? this.ctx.allowedToolNames;
-    const preferred = contract.preferredToolNames.find((name) => allowed.has(String(name ?? "").trim()));
-    const preferredName = String(preferred ?? "").trim();
-    if (!preferredName) return null;
-
     const parsed = parseJsonObjectFromFreeText(rawText);
     if (!parsed) return null;
     if (Object.keys(parsed).length === 0) return null;
+    const preferredOrdered = contract.preferredToolNames
+      .map((name) => String(name ?? "").trim())
+      .filter((name) => name && allowed.has(name));
+    const allCandidates = Array.from(allowed.values())
+      .map((name) => String(name ?? "").trim())
+      .filter(Boolean);
+    const candidateNames = Array.from(new Set([...preferredOrdered, ...allCandidates]));
 
-    let toolName = preferredName;
-    if (preferredName.startsWith("mcp.")) {
-      const mcpPicked = this._pickFallbackMcpToolName(parsed, preferredName);
-      if (!mcpPicked) return null;
-      toolName = mcpPicked;
-    }
-    if (!toolName) return null;
+    let picked: { name: string; args: Record<string, unknown>; score: number } | null = null;
+    for (let i = 0; i < candidateNames.length; i += 1) {
+      const candidate = candidateNames[i];
+      if (!candidate) continue;
 
-    const normalized = normalizeToolCallForValidation(toolName, parsed);
-    if (toolName.startsWith("mcp.")) {
-      if (!this._mcpRequiredArgsSatisfied(toolName, normalized.args)) return null;
-    } else {
-      const v = validateToolCallArgs({ name: normalized.name, toolArgs: normalized.args });
-      if (!v.ok) return null;
+      let toolName = candidate;
+      if (candidate.startsWith("mcp.")) {
+        const mcpPicked = this._pickFallbackMcpToolName(parsed, candidate);
+        if (!mcpPicked) continue;
+        toolName = mcpPicked;
+      }
+
+      const normalized = normalizeToolCallForValidation(toolName, parsed);
+      if (!normalized.name) continue;
+      const argCount = Object.keys(normalized.args ?? {}).length;
+      if (argCount <= 0) continue;
+
+      if (normalized.name.startsWith("mcp.")) {
+        if (!this._mcpRequiredArgsSatisfied(normalized.name, normalized.args)) continue;
+      } else {
+        const v = validateToolCallArgs({ name: normalized.name, toolArgs: normalized.args });
+        if (!v.ok) continue;
+      }
+
+      const meta = TOOL_LIST.find((t) => t.name === normalized.name);
+      const argNames = new Set((meta?.args ?? []).map((a) => String(a?.name ?? "").trim()).filter(Boolean));
+      let matchedKeys = 0;
+      for (const k of Object.keys(parsed)) {
+        if (argNames.has(String(k ?? "").trim())) matchedKeys += 1;
+      }
+      const preferredIdx = preferredOrdered.indexOf(candidate);
+      const preferredBoost = preferredIdx >= 0 ? Math.max(0, 50 - preferredIdx) : 0;
+      const score = preferredBoost + matchedKeys * 10 + argCount;
+
+      if (!picked || score > picked.score) {
+        picked = { name: normalized.name, args: normalized.args, score };
+      }
     }
+    if (!picked) return null;
 
     this.ctx.writeEvent("run.notice", {
       turn: this.turn,
       kind: "info",
       title: "JsonToolFallback",
-      message: `检测到参数 JSON，已按工具调用执行：${normalized.name}`,
+      message: `检测到参数 JSON，已按工具调用执行：${picked.name}`,
     });
 
     return {
       type: "tool_use",
       id: `json_fallback_${this.turn}_${Date.now()}`,
-      name: normalized.name,
-      input: normalized.args,
+      name: picked.name,
+      input: picked.args,
     };
   }
 
