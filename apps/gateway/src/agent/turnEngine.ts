@@ -19,6 +19,9 @@ type TurnEngineSnapshot = {
   totalModelErrors: number;
   totalModelTextDeltas: number;
   canonicalEventCount: number;
+  pendingToolCallCount: number;
+  unmatchedToolResultCount: number;
+  pendingToolCalls: Array<{ callId: string; name: string }>;
 };
 
 const DEFAULT_OUTCOME: RunOutcome = {
@@ -37,6 +40,8 @@ export class TurnEngine {
   private totalModelErrors = 0;
   private totalModelTextDeltas = 0;
   private readonly canonicalEvents: CanonicalTurnEvent[] = [];
+  private readonly pendingToolCalls = new Map<string, { callId: string; name: string }>();
+  private unmatchedToolResults = 0;
 
   reset(): void {
     this.outcome = { ...DEFAULT_OUTCOME };
@@ -46,6 +51,8 @@ export class TurnEngine {
     this.totalModelErrors = 0;
     this.totalModelTextDeltas = 0;
     this.canonicalEvents.splice(0, this.canonicalEvents.length);
+    this.pendingToolCalls.clear();
+    this.unmatchedToolResults = 0;
   }
 
   setTurn(turn: number): void {
@@ -73,8 +80,23 @@ export class TurnEngine {
       this.canonicalEvents.splice(0, this.canonicalEvents.length - MAX_CANONICAL_EVENTS);
     }
 
-    if (event.type === "model_tool_call") this.totalToolCalls += 1;
-    if (event.type === "tool_result") this.totalToolResults += 1;
+    if (event.type === "model_tool_call") {
+      this.totalToolCalls += 1;
+      const callId = String(event.callId ?? "").trim();
+      if (callId) {
+        this.pendingToolCalls.set(callId, { callId, name: String(event.name ?? "").trim() });
+      }
+    }
+    if (event.type === "tool_result") {
+      this.totalToolResults += 1;
+      const callId = String(event.callId ?? "").trim();
+      if (callId) {
+        if (this.pendingToolCalls.has(callId)) this.pendingToolCalls.delete(callId);
+        else this.unmatchedToolResults += 1;
+      } else {
+        this.unmatchedToolResults += 1;
+      }
+    }
     if (event.type === "model_error") this.totalModelErrors += 1;
     if (event.type === "model_text_delta") this.totalModelTextDeltas += 1;
   }
@@ -87,6 +109,9 @@ export class TurnEngine {
       totalModelErrors: this.totalModelErrors,
       totalModelTextDeltas: this.totalModelTextDeltas,
       canonicalEventCount: this.canonicalEvents.length,
+      pendingToolCallCount: this.pendingToolCalls.size,
+      unmatchedToolResultCount: this.unmatchedToolResults,
+      pendingToolCalls: Array.from(this.pendingToolCalls.values()).slice(0, 20),
     };
   }
 }

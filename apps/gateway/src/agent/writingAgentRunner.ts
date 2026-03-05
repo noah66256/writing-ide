@@ -18,6 +18,7 @@ import {
   xmlCdataSafe,
   xmlEscapeAttr,
 } from "../llm/toolXmlProtocol.js";
+import { sanitizeAssistantUserFacingText } from "./userFacingText.js";
 
 import {
   analyzeAutoRetryText,
@@ -119,6 +120,8 @@ export type RunContext = {
   intentRouteId?: string;
   /** 路由层下发的执行达成约束（要求本轮至少触发工具） */
   executionContract?: ExecutionContract;
+  /** 是否启用“从纯 JSON 文本反推工具调用”兜底（默认关闭，避免 JSON 泄漏）。 */
+  jsonToolFallbackEnabled?: boolean;
   /** 大文本 blob 池：避免大文本经过 LLM 回显。key=blobId, value=原始文本 */
   textBlobPool?: Map<string, string>;
   /** 首轮图片附件（base64，Anthropic image block 格式） */
@@ -718,6 +721,7 @@ export class WritingAgentRunner {
   private _trySynthesizeToolUseFromJsonText(rawText: string): ContentBlockToolUse | null {
     const contract = this._getExecutionContract();
     if (!contract.required) return null;
+    if (!this.ctx.jsonToolFallbackEnabled) return null;
     const allowed = this.turnAllowedToolNames ?? this.ctx.allowedToolNames;
     const parsed = parseJsonObjectFromFreeText(rawText);
     if (!parsed) return null;
@@ -846,6 +850,62 @@ export class WritingAgentRunner {
     this.turnEngine.setOutcome(next);
   }
 
+  private _emitAssistantDeltaSafe(raw: string, opts?: { dropPureJsonPayload?: boolean }): void {
+    const sanitized = sanitizeAssistantUserFacingText(raw, {
+      dropPureJsonPayload: Boolean(opts?.dropPureJsonPayload),
+    });
+    if (sanitized.text) {
+      this.ctx.writeEvent("assistant.delta", { delta: sanitized.text, turn: this.turn });
+      return;
+    }
+    if (!String(raw ?? "").trim()) return;
+    this.ctx.writeEvent("run.notice", {
+      turn: this.turn,
+      kind: "info",
+      title: "AssistantTextSanitized",
+      message:
+        sanitized.reason === "pure_json_payload"
+          ? "检测到结构化 JSON 文本输出，已过滤并等待工具结果/下一步。"
+          : "检测到非用户可读的系统文本，已过滤。",
+    });
+  }
+
+  private _finalizeOutcomeBeforeReturn(): void {
+    const snapshot = this.turnEngine.getSnapshot();
+    const outcome = this.turnEngine.getOutcome();
+    if (outcome.status !== "completed") return;
+    if (snapshot.pendingToolCallCount <= 0) return;
+
+    for (const pending of snapshot.pendingToolCalls.slice(0, 12)) {
+      this.failedToolDigests.push({
+        toolCallId: String(pending.callId ?? ""),
+        name: String(pending.name ?? "unknown"),
+        error: "TOOL_RESULT_MISSING",
+        message: "工具调用后未收到对应 tool_result。",
+        next_actions: ["检查该工具是否真正执行并回传了结果", "如为执行任务，请继续重试并完成该步骤"],
+        turn: this.turn,
+      });
+    }
+    if (this.failedToolDigests.length > 40) {
+      this.failedToolDigests.splice(0, this.failedToolDigests.length - 40);
+    }
+    this._setOutcome({
+      status: "failed",
+      reason: "tool_result_unpaired",
+      reasonCodes: ["tool_result_unpaired"],
+      detail: {
+        pendingToolCallCount: snapshot.pendingToolCallCount,
+        pendingToolCalls: snapshot.pendingToolCalls,
+      },
+    });
+    this.ctx.writeEvent("run.notice", {
+      turn: this.turn,
+      kind: "error",
+      title: "ToolResultGuard",
+      message: `检测到 ${snapshot.pendingToolCallCount} 个工具调用缺少结果，已按失败结束本轮。`,
+    });
+  }
+
   async run(userMessage: string, images?: Array<{ mediaType: string; data: string }>): Promise<void> {
     this.turnEngine.reset();
     this._setOutcome({ status: "completed", reason: "completed", reasonCodes: ["completed"] });
@@ -879,6 +939,7 @@ export class WritingAgentRunner {
       } else if (this.turnEngine.getOutcome().reason === "completed") {
         this._setOutcome({ status: "completed", reason: "delegation_completed", reasonCodes: ["delegation_completed"] });
       }
+      this._finalizeOutcomeBeforeReturn();
       return;
     }
 
@@ -896,6 +957,7 @@ export class WritingAgentRunner {
         if (this.ctx.abortSignal.aborted) {
           this._setOutcome({ status: "aborted", reason: "aborted", reasonCodes: ["aborted"] });
         }
+        this._finalizeOutcomeBeforeReturn();
         return;
       }
     }
@@ -1299,6 +1361,7 @@ export class WritingAgentRunner {
     const turnToolChoice = this._resolveTurnToolChoice(
       new Set(nativeTools.map((t) => String(t?.name ?? "").trim()).filter(Boolean)),
     );
+    const executionContract = this._getExecutionContract();
     const endpoint = this.ctx.endpoint || "/v1/responses";
     const providerAdapter = getAdapterByEndpoint(endpoint);
 
@@ -1531,7 +1594,7 @@ export class WritingAgentRunner {
         this.turnEngine.getOutcome().status === "completed" &&
         this.turnEngine.getOutcome().reason === "completed"
       ) {
-        this.ctx.writeEvent("assistant.delta", { delta: plainText, turn: this.turn });
+        this._emitAssistantDeltaSafe(plainText, { dropPureJsonPayload: executionContract.required });
       }
       if (this.turnEngine.getOutcome().status === "completed" && this.turnEngine.getOutcome().reason === "completed") {
         this.turnEngine.record({ type: "model_done", finishReason: "assistant_text" });
@@ -1731,7 +1794,7 @@ export class WritingAgentRunner {
         this.turnEngine.getOutcome().status === "completed" &&
         this.turnEngine.getOutcome().reason === "completed"
       ) {
-        this.ctx.writeEvent("assistant.delta", { delta: assistantText, turn: this.turn });
+        this._emitAssistantDeltaSafe(assistantText, { dropPureJsonPayload: executionContract.required });
       }
       if (
         this.turnEngine.getOutcome().status === "completed" &&
@@ -1765,7 +1828,7 @@ export class WritingAgentRunner {
         handlers.onTextDelta(ev.delta);
         this.turnEngine.record({ type: "model_text_delta", text: ev.delta });
         if (handlers.emitTextDelta) {
-          this.ctx.writeEvent("assistant.delta", { delta: ev.delta, turn: this.turn });
+          this._emitAssistantDeltaSafe(ev.delta, { dropPureJsonPayload: false });
         }
         return;
       }

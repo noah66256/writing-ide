@@ -3025,6 +3025,7 @@ export async function executeAgentRun(args: {
     ? (body.targetAgentIds as string[]).map((id) => String(id ?? "").trim()).filter(Boolean)
     : [];
   const runTargetAgentIds = explicitTargetAgentIds.length > 0 ? explicitTargetAgentIds : undefined;
+  const jsonToolFallbackEnabled = String(process.env.WRITING_IDE_ENABLE_JSON_TOOL_FALLBACK ?? "").trim() === "1";
 
   const runCtx: RunContext = {
     runId,
@@ -3076,6 +3077,7 @@ export async function executeAgentRun(args: {
     l2Memory: l2MemoryFromPack || "",
     ctxDialogueSummary: ctxDialogueSummaryFromPack || "",
     executionContract,
+    jsonToolFallbackEnabled,
   };
 
   // 将 MCP 工具传递给 runner（用于生成 tool definitions）

@@ -3,6 +3,8 @@ import { detectRunIntent } from "@writing-ide/agent-core";
 import { completionOnceViaProvider, streamChatCompletionViaProvider } from "../src/llm/providerAdapter.js";
 import { getAdapterByEndpoint } from "../src/llm/providerAdapter.js";
 import { computeIntentRouteDecisionPhase0 } from "../src/agent/runFactory.js";
+import { sanitizeAssistantUserFacingText } from "../src/agent/userFacingText.js";
+import { TurnEngine } from "../src/agent/turnEngine.js";
 
 function ok(name: string) {
   // eslint-disable-next-line no-console
@@ -220,9 +222,38 @@ async function smokeProviderEndpoints() {
   }
 }
 
+async function smokeOutputGuards() {
+  {
+    const s = sanitizeAssistantUserFacingText('{\"id\":\"todo\",\"status\":\"done\"}', {
+      dropPureJsonPayload: true,
+    });
+    assert.equal(s.text, "");
+    assert.equal(s.dropped, true);
+  }
+  {
+    const s = sanitizeAssistantUserFacingText(
+      "Before\\n[Tool Call: exec (ID: call_1)]\\nArguments: {\"cmd\":\"ls\"}\\nAfter",
+      { dropPureJsonPayload: false },
+    );
+    assert.match(s.text, /Before/);
+    assert.match(s.text, /After/);
+    assert.doesNotMatch(s.text, /Tool Call/i);
+  }
+  {
+    const te = new TurnEngine();
+    te.record({ type: "model_tool_call", callId: "call_1", name: "project.listFiles", args: {} });
+    te.record({ type: "tool_result", callId: "call_2", name: "project.listFiles", ok: true, output: { ok: true } });
+    const snapshot = te.getSnapshot();
+    assert.equal(snapshot.pendingToolCallCount, 1);
+    assert.equal(snapshot.unmatchedToolResultCount, 1);
+  }
+  ok("output.guards");
+}
+
 async function main() {
   await smokeRouteDeleteOnly();
   await smokeProviderEndpoints();
+  await smokeOutputGuards();
   // eslint-disable-next-line no-console
   console.log("[smoke-messages-responses] DONE");
 }
