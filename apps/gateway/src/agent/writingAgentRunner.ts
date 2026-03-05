@@ -1298,7 +1298,9 @@ export class WritingAgentRunner {
       if (plainText && !hasProtocolViolation) {
         this.ctx.writeEvent("assistant.delta", { delta: plainText, turn: this.turn });
       }
-      this._setOutcome({ status: "completed", reason: "assistant_text", reasonCodes: ["assistant_text"] });
+      if (this.outcome.status === "completed" && this.outcome.reason === "completed") {
+        this._setOutcome({ status: "completed", reason: "assistant_text", reasonCodes: ["assistant_text"] });
+      }
       return false;
     }
 
@@ -1490,7 +1492,9 @@ export class WritingAgentRunner {
       if (holdAssistantDelta && assistantText) {
         this.ctx.writeEvent("assistant.delta", { delta: assistantText, turn: this.turn });
       }
-      this._setOutcome({ status: "completed", reason: "assistant_text", reasonCodes: ["assistant_text"] });
+      if (this.outcome.status === "completed" && this.outcome.reason === "completed") {
+        this._setOutcome({ status: "completed", reason: "assistant_text", reasonCodes: ["assistant_text"] });
+      }
       return false;
     }
     this.totalToolCalls += completedToolUses.length;
