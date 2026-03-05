@@ -1042,8 +1042,10 @@ export async function chatCompletionOnce(args: {
   const isResponses = isResponsesEndpoint(endpoint);
   const url = openAiCompatUrl(args.config.baseUrl, endpoint);
 
-  const openAiTools = toOpenAiToolsPayload(args.tools);
-  const openAiToolChoice = toOpenAiToolChoicePayload(args.toolChoice);
+  const openAiTools = isResponses ? toResponsesToolsPayload(args.tools) : toOpenAiToolsPayload(args.tools);
+  const openAiToolChoice = isResponses
+    ? toResponsesToolChoicePayload(args.toolChoice)
+    : toOpenAiToolChoicePayload(args.toolChoice);
   const wantsNativeTools = Boolean(openAiTools?.length);
 
   const buildBody = (withNativeTools: boolean) =>
