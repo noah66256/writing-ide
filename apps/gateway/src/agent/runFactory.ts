@@ -393,6 +393,19 @@ function isLikelyBinaryReadMcpTool(tool: { name?: string; originalName?: string;
   return domainHit && readHit && !writeLike;
 }
 
+function isLikelyBrowserMcpTool(tool: { name?: string; originalName?: string; description?: string } | null | undefined): boolean {
+  const raw = [
+    String(tool?.name ?? ""),
+    String(tool?.originalName ?? ""),
+    String(tool?.description ?? ""),
+  ].join(" ").toLowerCase();
+  if (!raw) return false;
+  const strong =
+    /(playwright|browser|chrom(e|ium)|firefox|webkit|browser_navigate|open_url|openurl|goto|go_to)/i.test(raw);
+  const action = /(navigate|new[_\s-]?tab|click|type|fill|screenshot|page)/i.test(raw);
+  return strong || action;
+}
+
 export function buildAgentProtocolPrompt(args: {
   mode: AgentMode;
   allowedToolNames?: Set<string> | null;
@@ -718,6 +731,19 @@ const KB_OPS_PROMPT_RE =
 
 export function looksLikeKbOpsIntent(text: string): boolean {
   return KB_OPS_PROMPT_RE.test(String(text ?? "").trim());
+}
+
+export function looksLikeDirectOpenWebIntent(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  const hasAction = /(打开|访问|进入|前往|导航|go\s*to|open|navigate|visit)/i.test(t);
+  if (!hasAction) return false;
+  const hasTarget =
+    /(https?:\/\/|www\.|百度|google|bing|github|官网|官方网站|网站|浏览器|url\b)/i.test(t);
+  if (!hasTarget) return false;
+  // 排除“写作页面/落地页文案”等非网页导航语义
+  if (/(落地页|详情页|页面文案|页面结构|开场|脚本|文案|仿写|改写|润色)/.test(t)) return false;
+  return true;
 }
 
 export function buildClarifyQuestionSlotBased(args: {
@@ -1849,6 +1875,12 @@ export async function prepareAgentRun(args: {
       .map((t) => String(t?.name ?? "").trim())
       .filter(Boolean),
   );
+  const browserMcpToolNames = new Set(
+    mcpToolsFromSidecar
+      .filter((t) => isLikelyBrowserMcpTool(t))
+      .map((t) => String(t?.name ?? "").trim())
+      .filter(Boolean),
+  );
   const enforceMcpFirstForBinaryRead = binaryReadIntent && binaryReadMcpToolNames.size > 0;
 
   // 已激活 Skill 声明的 toolCaps.allowTools：即使 toolPolicy=deny 也应放行
@@ -1879,12 +1911,19 @@ export async function prepareAgentRun(args: {
     executionPreferredRaw.push("project.search", "project.listFiles", "doc.read", "kb.search");
   } else if (routeIdLower === "web_radar") {
     executionPreferredRaw.push("web.search", "web.fetch");
+  } else if (routeIdLower === "file_ops") {
+    executionPreferredRaw.push("project.listFiles", "run.setTodoList", "run.todo.upsertMany");
+  } else if (routeIdLower === "kb_ops") {
+    executionPreferredRaw.push("kb.search", "run.mainDoc.get", "run.setTodoList");
+  } else if (routeIdLower === "task_execution") {
+    executionPreferredRaw.push("run.setTodoList", "run.todo.upsertMany", "run.mainDoc.get", "kb.search");
   }
-  const looksLikeOpenWebIntent = /(打开|访问|网页|页面|链接|url|open|navigate|browser)/i.test(userPrompt);
-  if (looksLikeOpenWebIntent) {
+  const directOpenWebIntent = looksLikeDirectOpenWebIntent(userPrompt);
+  const allowBrowserTools = routeIdLower === "web_radar" || directOpenWebIntent;
+  if (allowBrowserTools) {
     const mcpNavTool = mcpToolsFromSidecar
       .map((t) => String(t?.name ?? "").trim())
-      .find((n) => /^mcp\./i.test(n) && /(browser_navigate|navigate|open_url|openurl|open)/i.test(n));
+      .find((n) => /^mcp\./i.test(n) && /(browser_navigate|navigate|open_url|openurl|goto|go_to)/i.test(n));
     if (mcpNavTool) executionPreferredRaw.unshift(mcpNavTool);
   }
   const executionPreferred = Array.from(
@@ -1894,6 +1933,11 @@ export async function prepareAgentRun(args: {
         .filter((name) => name && baseAllowedToolNames.has(name)),
     ),
   );
+  if (isExecutionRoute && executionPreferred.length === 0) {
+    for (const name of ["run.mainDoc.get", "run.setTodoList", "run.todo.upsertMany", "project.listFiles", "kb.search"]) {
+      if (baseAllowedToolNames.has(name)) executionPreferred.push(name);
+    }
+  }
   const executionContract: ExecutionContract = {
     required: isExecutionRoute,
     minToolCalls: isExecutionRoute ? 1 : 0,
@@ -2143,6 +2187,42 @@ export async function prepareAgentRun(args: {
 
     if (!allowed) {
       allowed = new Set(selectedAllowedToolNames);
+    }
+
+    // 非网页导航场景：默认屏蔽浏览器类 MCP 工具，避免“执行约束”把写作/文件任务导向 browser。
+    if (!allowBrowserTools && browserMcpToolNames.size > 0) {
+      let removed = 0;
+      for (const n of browserMcpToolNames) {
+        if (allowed.delete(n)) removed += 1;
+      }
+      if (removed > 0) {
+        hints.push(`当前任务非网页导航：已临时屏蔽 ${removed} 个浏览器工具。`);
+      }
+    }
+
+    // 执行启动阶段（首个工具调用前）：收敛到“任务首工具”集合，减少模型盲选和偏航。
+    if (executionContract.required && !state.hasAnyToolCall) {
+      const allowedNow = allowed ?? new Set<string>();
+      const bootCandidates =
+        routeIdLower === "web_radar" || directOpenWebIntent
+          ? executionPreferred
+          : [
+              ...executionPreferred,
+              "run.mainDoc.get",
+              "run.setTodoList",
+              "run.todo.upsertMany",
+              "project.listFiles",
+              "kb.search",
+            ];
+      const boot = new Set(
+        Array.from(new Set(bootCandidates.map((x) => String(x ?? "").trim()).filter(Boolean))).filter((n) => allowedNow.has(n)),
+      );
+      if (boot.size > 0) {
+        allowed = boot;
+        hints.push(
+          "执行启动阶段：请先调用首工具（优先 executionPreferred），完成一次有效工具调用后再进入全工具阶段。",
+        );
+      }
     }
 
     if (!enforceMcpFirstForBinaryRead) {

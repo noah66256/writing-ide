@@ -762,6 +762,25 @@ export class WritingAgentRunner {
     return { required, minToolCalls, maxNoToolTurns, reason, preferredToolNames };
   }
 
+  private _pickExecutionFallbackToolName(): string | null {
+    const allowed = this.turnAllowedToolNames ?? this.ctx.allowedToolNames;
+    const deterministic = [
+      "run.mainDoc.get",
+      "run.setTodoList",
+      "run.todo.upsertMany",
+      "run.mainDoc.update",
+      "project.listFiles",
+      "kb.search",
+    ];
+    for (const name of deterministic) {
+      if (allowed.has(name)) return name;
+    }
+    for (const name of allowed) {
+      if (!String(name ?? "").startsWith("mcp.")) return String(name);
+    }
+    return null;
+  }
+
   private _resolveTurnToolChoice(availableToolNames: Set<string>) {
     if (availableToolNames.size <= 0) return undefined;
 
@@ -824,8 +843,8 @@ export class WritingAgentRunner {
 
     if (hasUrl) {
       return (
-        this._findAllowedMcpToolName(/(browser_navigate|navigate|open_url|openurl|open)$/i) ||
-        this._findAllowedMcpToolName(/navigate|open_url|openurl|open/i) ||
+        this._findAllowedMcpToolName(/(browser_navigate|navigate|open_url|openurl|goto|go_to)$/i) ||
+        this._findAllowedMcpToolName(/browser|playwright|navigate|open_url|openurl|goto|go_to/i) ||
         preferredName
       );
     }
@@ -2532,7 +2551,12 @@ export class WritingAgentRunner {
       const preferredToolName = executionContract.preferredToolNames.find((name) =>
         this.ctx.allowedToolNames.has(String(name ?? "").trim()),
       );
-      this.forcedToolChoice = preferredToolName ? { type: "tool", name: preferredToolName } : { type: "any" };
+      const fallbackToolName = preferredToolName ? null : this._pickExecutionFallbackToolName();
+      this.forcedToolChoice = preferredToolName
+        ? { type: "tool", name: preferredToolName }
+        : fallbackToolName
+          ? { type: "tool", name: fallbackToolName }
+          : { type: "any" };
 
       if (this.executionNoToolTurns <= executionContract.maxNoToolTurns) {
         pushRetryUserMessage(
@@ -2545,7 +2569,11 @@ export class WritingAgentRunner {
           title: "ExecutionContractRetry",
           message:
             `执行达成约束未满足，已触发重试（${this.executionNoToolTurns}/${executionContract.maxNoToolTurns}）` +
-            (preferredToolName ? `，优先工具：${preferredToolName}` : "，优先策略：任意工具调用"),
+            (preferredToolName
+              ? `，优先工具：${preferredToolName}`
+              : fallbackToolName
+                ? `，回退工具：${fallbackToolName}`
+                : "，优先策略：任意工具调用"),
           detail: {
             minToolCalls: executionContract.minToolCalls,
             currentToolCalls: this.totalToolCalls,

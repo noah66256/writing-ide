@@ -73,7 +73,10 @@ function inferCapabilities(name: string, description: string, source: ToolCatalo
 
   if (source === "mcp") {
     caps.add("mcp");
-    if (/(browser|navigate|open_url|openurl|open)/i.test(n) || /(浏览器|navigate|open url)/i.test(d)) {
+    if (
+      /(playwright|browser|chrom(e|ium)|firefox|webkit|navigate|browser_navigate|open_url|openurl|goto|go_to)/i.test(n) ||
+      /(浏览器|navigate|open url|网页自动化|web automation)/i.test(d)
+    ) {
       caps.add("browser_open");
       caps.add("web_fetch");
     }
