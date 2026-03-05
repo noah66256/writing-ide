@@ -365,10 +365,14 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               .map((f: any) => ({ path: String(f?.path ?? "").trim() }))
               .filter((f: any) => f.path).slice(0, 5000);
 
+        const mentionLibIds = Array.isArray(args.kbMentionIds)
+          ? Array.from(new Set(args.kbMentionIds.map((x) => String(x ?? "").trim()).filter(Boolean)))
+          : [];
         const att = rt.getKbAttachedLibraryIds() ?? [];
+        const sidecarLibraryIds = mentionLibIds.length ? mentionLibIds : att;
         let styleLinterLibraries: any[] | undefined;
-        if (Array.isArray(att) && att.length) {
-          const ret = await buildStyleLinterLibrariesSidecar({ maxLibraries: 6 }).catch(() => ({ ok: false } as any));
+        if (Array.isArray(sidecarLibraryIds) && sidecarLibraryIds.length) {
+          const ret = await buildStyleLinterLibrariesSidecar({ libraryIds: sidecarLibraryIds, maxLibraries: 6 }).catch(() => ({ ok: false } as any));
           if (ret?.ok && Array.isArray(ret.libraries) && ret.libraries.length) styleLinterLibraries = ret.libraries;
         }
 

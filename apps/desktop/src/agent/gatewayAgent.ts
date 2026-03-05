@@ -1668,7 +1668,16 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
 
   const styleDimensionsSection = (() => {
     if (!allowInjectStyleContext) return "";
-    const contract: any = (mainDoc as any)?.styleContractV1 ?? null;
+    const contractRaw: any = (mainDoc as any)?.styleContractV1 ?? null;
+    const styleLibIdSet = new Set(
+      kbSelected
+        .filter((l: any) => String(l?.purpose ?? "").trim() === "style")
+        .map((l: any) => String(l?.id ?? "").trim())
+        .filter(Boolean),
+    );
+    const contractLibId = String(contractRaw?.libraryId ?? "").trim();
+    const useContractFallback = Boolean(contractRaw) && (!styleLibIdSet.size || (contractLibId && styleLibIdSet.has(contractLibId)));
+    const contract: any = useContractFallback ? contractRaw : null;
     const libId = String(styleSelectorPayload?.libraryId ?? contract?.libraryId ?? "").trim();
     if (!libId) return "";
     const libName = String(styleSelectorPayload?.libraryName ?? contract?.libraryName ?? libId).trim();

@@ -66,6 +66,21 @@ function gatewayBaseUrl() {
   return getGatewayBaseUrl();
 }
 
+function getKbMentionLibraryIdsFromLatestUserStep(): string[] {
+  const steps = Array.isArray(useRunStore.getState().steps) ? (useRunStore.getState().steps as any[]) : [];
+  for (let i = steps.length - 1; i >= 0; i -= 1) {
+    const st = steps[i];
+    if (!st || st.type !== "user") continue;
+    const mentions = Array.isArray(st.mentions) ? st.mentions : [];
+    const ids = mentions
+      .filter((m: any) => String(m?.type ?? "").trim() === "kb")
+      .map((m: any) => String(m?.id ?? "").trim())
+      .filter(Boolean);
+    return Array.from(new Set(ids));
+  }
+  return [];
+}
+
 const HIGH_RISK_FILE_OP_TOOL_NAMES = new Set(["doc.write", "doc.deletePath", "doc.restoreSnapshot"]);
 
 function getFileOpTargetPath(toolName: string, args: Record<string, unknown>) {
@@ -367,13 +382,14 @@ export async function buildStyleLinterLibrariesSidecar(args?: {
 }) {
   const maxLibraries = typeof args?.maxLibraries === "number" ? Math.max(1, Math.min(6, Math.floor(args!.maxLibraries))) : 6;
   const explicit = Array.isArray(args?.libraryIds) ? args!.libraryIds.map((x) => String(x ?? "").trim()).filter(Boolean) : [];
+  const mentioned = getKbMentionLibraryIdsFromLatestUserStep();
   const attached = useRunStore.getState().kbAttachedLibraryIds ?? [];
 
   await useKbStore.getState().refreshLibraries().catch(() => void 0);
   const libsMeta = useKbStore.getState().libraries ?? [];
   const metaById = new Map(libsMeta.map((l: any) => [String(l.id ?? ""), l]));
 
-  const candidates = (explicit.length ? explicit : attached).map((x: any) => String(x ?? "").trim()).filter(Boolean);
+  const candidates = (explicit.length ? explicit : mentioned.length ? mentioned : attached).map((x: any) => String(x ?? "").trim()).filter(Boolean);
   const styleLibIds = candidates.filter((id: string) => String(metaById.get(id)?.purpose ?? "") === "style");
   const libraryIds = (styleLibIds.length ? styleLibIds : []).slice(0, maxLibraries);
   if (!libraryIds.length) return { ok: false as const, error: "NO_STYLE_LIBRARY_SELECTED" as const };
@@ -1610,13 +1626,14 @@ const tools: ToolDefinition[] = [
       const perDocTopN = typeof args.perDocTopN === "number" ? Math.max(1, Math.floor(args.perDocTopN)) : 3;
       const topDocs = typeof args.topDocs === "number" ? Math.max(1, Math.floor(args.topDocs)) : 12;
       const explicitLibs = Array.isArray(args.libraryIds) ? (args.libraryIds as any[]).map((x) => String(x ?? "").trim()).filter(Boolean) : [];
+      const mentioned = getKbMentionLibraryIdsFromLatestUserStep();
       const attached = useRunStore.getState().kbAttachedLibraryIds ?? [];
       const md: any = useRunStore.getState().mainDoc ?? {};
       const libFromMainDoc = [
         String(md?.styleContractV1?.libraryId ?? "").trim(),
         String(md?.stylePlanV1?.libraryId ?? "").trim(),
       ].filter(Boolean);
-      const libraryIds = explicitLibs.length ? explicitLibs : attached.length ? attached : libFromMainDoc;
+      const libraryIds = explicitLibs.length ? explicitLibs : mentioned.length ? mentioned : attached.length ? attached : libFromMainDoc;
       if (!libraryIds.length) return { ok: false, error: "NO_LIBRARY_SELECTED" };
 
       const ret = await useKbStore.getState().searchForAgent({ query, kind, facetIds, cardTypes, anchorParagraphIndexMax, anchorFromEndMax, debug, libraryIds, perDocTopN, topDocs });
@@ -1770,6 +1787,8 @@ const tools: ToolDefinition[] = [
       const anchorSamples = (() => {
         const main: any = useRunStore.getState().mainDoc ?? {};
         const contract: any = main?.styleContractV1 ?? null;
+        const contractLibId = String(contract?.libraryId ?? "").trim();
+        if (contractLibId && !libraryIds.includes(contractLibId)) return [];
         const anchors = Array.isArray(contract?.anchors) ? contract.anchors : [];
         const quotes = anchors
           .map((a: any) => String(a?.quote ?? "").trim())
