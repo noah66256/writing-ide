@@ -1489,7 +1489,16 @@ export class WritingAgentRunner {
     }
     if (completedToolUses.length > 0) assistantBlocks.push(...completedToolUses);
     if (assistantBlocks.length > 0) this.messages.push({ role: "assistant", content: assistantBlocks });
-    this.providerMessages.push({ role: "assistant", content: assistantRaw });
+    const canonicalAssistantForHistory =
+      completedToolUses.length > 0
+        ? buildToolCallsXml(
+            completedToolUses.map((toolUse) => ({
+              name: String(toolUse.name ?? ""),
+              args: toolUse.input && typeof toolUse.input === "object" ? (toolUse.input as Record<string, unknown>) : {},
+            })),
+          )
+        : assistantRaw;
+    this.providerMessages.push({ role: "assistant", content: canonicalAssistantForHistory });
 
     this.ctx.writeEvent("assistant.done", { turn: this.turn });
     if (this.ctx.abortSignal.aborted) {
