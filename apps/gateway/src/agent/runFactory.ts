@@ -99,6 +99,14 @@ type ClarifyPayload = {
   options?: string[];
 };
 
+type ExecutionContract = {
+  required: boolean;
+  minToolCalls: number;
+  maxNoToolTurns: number;
+  reason: string;
+  preferredToolNames: string[];
+};
+
 export type IntentRouteDecision = {
   intentType: IntentType;
   confidence: number;
@@ -1206,6 +1214,7 @@ export type PreparedRun = {
   resolveSubAgentModel: NonNullable<RunContext["resolveSubAgentModel"]>;
   runnerStyleLibIds: string[];
   mcpToolsFromSidecar: Array<{ name: string; description: string; inputSchema?: any; serverId: string; serverName: string; originalName: string }>;
+  executionContract: ExecutionContract;
   authorization: string;
   l1MemoryFromPack: string;
   l2MemoryFromPack: string;
@@ -1832,9 +1841,41 @@ export async function prepareAgentRun(args: {
     }
   }
 
+  const routeIdLower = String(intentRoute.routeId ?? "").trim().toLowerCase();
+  const isExecutionRoute = intentRoute.nextAction === "enter_workflow" && effectiveToolPolicy !== "deny";
+  const executionPreferredRaw: string[] = [];
+  if (routeIdLower === "file_delete_only") {
+    executionPreferredRaw.push("doc.deletePath", "project.listFiles");
+  } else if (routeIdLower === "project_search") {
+    executionPreferredRaw.push("project.search", "project.listFiles", "doc.read", "kb.search");
+  } else if (routeIdLower === "web_radar") {
+    executionPreferredRaw.push("web.search", "web.fetch");
+  }
+  const looksLikeOpenWebIntent = /(打开|访问|网页|页面|链接|url|open|navigate|browser)/i.test(userPrompt);
+  if (looksLikeOpenWebIntent) {
+    const mcpNavTool = mcpToolsFromSidecar
+      .map((t) => String(t?.name ?? "").trim())
+      .find((n) => /^mcp\./i.test(n) && /(browser_navigate|navigate|open_url|openurl|open)/i.test(n));
+    if (mcpNavTool) executionPreferredRaw.unshift(mcpNavTool);
+  }
+  const executionPreferred = Array.from(
+    new Set(
+      executionPreferredRaw
+        .map((name) => String(name ?? "").trim())
+        .filter((name) => name && baseAllowedToolNames.has(name)),
+    ),
+  );
+  const executionContract: ExecutionContract = {
+    required: isExecutionRoute,
+    minToolCalls: isExecutionRoute ? 1 : 0,
+    maxNoToolTurns: isExecutionRoute ? 2 : 0,
+    reason: isExecutionRoute ? `route:${routeIdLower || "unknown"}` : "route:non_execution",
+    preferredToolNames: executionPreferred,
+  };
+
   const projectDirFromSidecar = coerceNonEmptyString(ideSummaryFromSidecar?.projectDir);
   const deleteTargetsHint =
-    String(intentRoute.routeId ?? "").trim().toLowerCase() === "file_delete_only"
+    routeIdLower === "file_delete_only"
       ? extractDeleteTargetsHint(userPrompt)
       : "";
 
@@ -2031,7 +2072,6 @@ export async function prepareAgentRun(args: {
   // Previous implementation dynamically removed tools per-turn based on run state
   // (todo_required, web gate, style gate, lint gate, etc.), which caused KV-cache
   // thrashing and deadlocks with the AutoRetry mechanism.
-  const routeIdLower = String(intentRoute.routeId ?? "").trim().toLowerCase();
   const isDeleteOnlyRoute = routeIdLower === "file_delete_only";
   const computePerTurnAllowed = (state: RunState): { allowed: Set<string>; hint: string } | null => {
     let allowed: Set<string> | null = null;
@@ -2179,6 +2219,7 @@ export async function prepareAgentRun(args: {
       resolveSubAgentModel,
       runnerStyleLibIds,
       mcpToolsFromSidecar,
+      executionContract,
       authorization: String((request as any)?.headers?.authorization ?? ""),
       l1MemoryFromPack,
       l2MemoryFromPack,
@@ -2230,6 +2271,7 @@ export async function executeAgentRun(args: {
     mainDocFromPack,
     personaFromPack,
     mcpToolsFromSidecar,
+    executionContract,
     l1MemoryFromPack,
     l2MemoryFromPack,
     ctxDialogueSummaryFromPack,
@@ -2283,6 +2325,7 @@ export async function executeAgentRun(args: {
       toolResultFormat,
       pickedId,
       requestedIdRaw,
+      executionContract,
       toolSidecar: {
         styleLinterLibraries: styleLinterLibraries.length,
         projectFiles: projectFilesCount,
@@ -2395,6 +2438,21 @@ export async function executeAgentRun(args: {
       mcpServerCount: mcpServerIds.length,
       mcpServerIds: mcpServerIds.slice(0, 20),
       mcpToolNamesSample,
+    },
+  });
+  writeEvent("run.notice", {
+    turn: 0,
+    kind: executionContract.required ? "info" : "debug",
+    title: "ExecutionContract",
+    message: executionContract.required
+      ? `执行达成约束已启用：至少 ${executionContract.minToolCalls} 次工具调用`
+      : "执行达成约束未启用（当前为讨论/非执行回合）",
+    detail: {
+      required: executionContract.required,
+      minToolCalls: executionContract.minToolCalls,
+      maxNoToolTurns: executionContract.maxNoToolTurns,
+      reason: executionContract.reason,
+      preferredToolNames: executionContract.preferredToolNames.slice(0, 12),
     },
   });
 
@@ -2749,6 +2807,7 @@ export async function executeAgentRun(args: {
     l1Memory: l1MemoryFromPack || "",
     l2Memory: l2MemoryFromPack || "",
     ctxDialogueSummary: ctxDialogueSummaryFromPack || "",
+    executionContract,
   };
 
   // 将 MCP 工具传递给 runner（用于生成 tool definitions）

@@ -45,6 +45,14 @@ export type ToolResultPayload = {
   meta?: Record<string, unknown> | null;
 };
 
+type ExecutionContract = {
+  required: boolean;
+  minToolCalls?: number;
+  maxNoToolTurns?: number;
+  reason?: string;
+  preferredToolNames?: string[];
+};
+
 export type WaiterMap = Map<string, (payload: ToolResultPayload) => void>;
 
 export type RunContext = {
@@ -99,6 +107,8 @@ export type RunContext = {
   ctxDialogueSummary?: string;
   /** 当前 Run 的路由 ID（来自 intent router） */
   intentRouteId?: string;
+  /** 路由层下发的执行达成约束（要求本轮至少触发工具） */
+  executionContract?: ExecutionContract;
   /** 大文本 blob 池：避免大文本经过 LLM 回显。key=blobId, value=原始文本 */
   textBlobPool?: Map<string, string>;
   /** 首轮图片附件（base64，Anthropic image block 格式） */
@@ -125,6 +135,8 @@ type PendingToolUse = {
   name: string;
   inputJson: string;
 };
+
+type ForcedToolChoice = { type: "any" } | { type: "tool"; name: string };
 
 const MAX_TURNS = 30;
 const TOOL_RESULT_TIMEOUT_MS = 180_000;
@@ -657,6 +669,9 @@ export class WritingAgentRunner {
   private blockMainDocUpdate = false;
   private turnAllowedToolNames: Set<string> | null = null;
   private readonly failedToolDigests: ToolFailureDigest[] = [];
+  private executionNoToolTurns = 0;
+  private totalToolCalls = 0;
+  private forcedToolChoice: ForcedToolChoice | null = null;
 
   constructor(ctx: RunContext) {
     // 若设置了 agentId，包装 writeEvent 自动注入到每条 SSE 事件
@@ -671,6 +686,46 @@ export class WritingAgentRunner {
     this.ctx = ctx;
     this.maxTurns = Math.min(ctx.maxTurns ?? MAX_TURNS, MAX_TURNS);
     this.runState = ctx.initialRunState ? { ...ctx.initialRunState } : createInitialRunState();
+  }
+
+  private _getExecutionContract(): {
+    required: boolean;
+    minToolCalls: number;
+    maxNoToolTurns: number;
+    reason: string;
+    preferredToolNames: string[];
+  } {
+    const raw = (this.ctx.executionContract ?? {}) as ExecutionContract;
+    const required = Boolean(raw.required);
+    const minToolCalls = required ? Math.max(1, Math.floor(Number(raw.minToolCalls ?? 1) || 1)) : 0;
+    const maxNoToolTurns = required ? Math.max(1, Math.min(3, Math.floor(Number(raw.maxNoToolTurns ?? 2) || 2))) : 0;
+    const reason = String(raw.reason ?? "").trim();
+    const preferredToolNames = Array.isArray(raw.preferredToolNames)
+      ? raw.preferredToolNames.map((n) => String(n ?? "").trim()).filter(Boolean).slice(0, 8)
+      : [];
+    return { required, minToolCalls, maxNoToolTurns, reason, preferredToolNames };
+  }
+
+  private _resolveTurnToolChoice(availableToolNames: Set<string>) {
+    if (availableToolNames.size <= 0) return undefined;
+
+    if (this.forcedToolChoice) {
+      if (this.forcedToolChoice.type === "any") return { type: "any" as const };
+      const encoded = encodeToolName(String(this.forcedToolChoice.name ?? "").trim());
+      if (encoded && availableToolNames.has(encoded)) return { type: "tool" as const, name: encoded };
+      return { type: "any" as const };
+    }
+
+    if (this.turn === 1 && this.ctx.toolChoiceFirstTurn) {
+      if (this.ctx.toolChoiceFirstTurn.type === "tool") {
+        const encoded = encodeToolName(String(this.ctx.toolChoiceFirstTurn.name ?? "").trim());
+        if (encoded && availableToolNames.has(encoded)) return { type: "tool" as const, name: encoded };
+        return { type: "any" as const };
+      }
+      return this.ctx.toolChoiceFirstTurn;
+    }
+
+    return undefined;
   }
 
   async run(userMessage: string, images?: Array<{ mediaType: string; data: string }>): Promise<void> {
@@ -1051,12 +1106,9 @@ export class WritingAgentRunner {
       mode: this.ctx.mode,
       mcpTools: ((this.ctx as any).mcpTools ?? []) as any[],
     });
-    const firstTurnToolChoice =
-      this.turn === 1 && nativeTools.length > 0 && this.ctx.toolChoiceFirstTurn
-        ? this.ctx.toolChoiceFirstTurn.type === "tool"
-          ? { type: "tool" as const, name: encodeToolName(String(this.ctx.toolChoiceFirstTurn.name ?? "")) }
-          : this.ctx.toolChoiceFirstTurn
-        : undefined;
+    const turnToolChoice = this._resolveTurnToolChoice(
+      new Set(nativeTools.map((t) => String(t?.name ?? "").trim()).filter(Boolean)),
+    );
 
     this.ctx.writeEvent("assistant.start", { turn: this.turn });
 
@@ -1092,7 +1144,7 @@ export class WritingAgentRunner {
         maxTokens: undefined,
         includeUsage: true,
         tools: nativeTools,
-        toolChoice: firstTurnToolChoice,
+        toolChoice: turnToolChoice,
         parallelToolCalls: false,
         signal: this.ctx.abortSignal,
       });
@@ -1204,6 +1256,10 @@ export class WritingAgentRunner {
     }
     if (completedToolUses.length === 0) return this._checkAutoRetry(plainText || assistantRaw);
 
+    this.totalToolCalls += completedToolUses.length;
+    this.executionNoToolTurns = 0;
+    this.forcedToolChoice = null;
+
     const processed = await this._processCompletedToolUses(completedToolUses, { presetResults });
     if (processed.injectedToolMessages.length > 0) {
       this.providerMessages.push(...processed.injectedToolMessages);
@@ -1249,6 +1305,9 @@ export class WritingAgentRunner {
         },
       }));
     tools.push(...mcpToolDefs);
+    const turnToolChoice = this._resolveTurnToolChoice(
+      new Set(tools.map((t: any) => String(t?.name ?? "").trim()).filter(Boolean)),
+    );
 
     // hint 追加到本轮 system prompt（不修改 ctx.systemPrompt 本身）
     const turnSystemPrompt = perTurnCaps?.hint
@@ -1288,7 +1347,7 @@ export class WritingAgentRunner {
         system: turnSystemPrompt,
         messages: this.messages,
         tools,
-        tool_choice: this.turn === 1 && tools.length > 0 ? this.ctx.toolChoiceFirstTurn : undefined,
+        tool_choice: turnToolChoice,
         signal: this.ctx.abortSignal,
       });
 
@@ -1359,6 +1418,9 @@ export class WritingAgentRunner {
     if (completedToolUses.length === 0) {
       return this._checkAutoRetry(assistantText);
     }
+    this.totalToolCalls += completedToolUses.length;
+    this.executionNoToolTurns = 0;
+    this.forcedToolChoice = null;
     const processed = await this._processCompletedToolUses(completedToolUses);
     return processed.shouldContinue;
   }
@@ -2125,14 +2187,16 @@ export class WritingAgentRunner {
   }
 
   private _checkAutoRetry(assistantText: string): boolean {
+    const pushRetryUserMessage = (content: string) => {
+      this.messages.push({ role: "user", content });
+      this.providerMessages.push({ role: "user", content });
+    };
+
     // Sub-agent tool nudge: if a sub-agent's early turns produce text without
     // calling any tools (and tools are available), inject a nudge message.
     // This handles API proxies that strip tool_choice: "any" from the request.
     if (this.ctx.agentId && this.turn <= 2 && this.ctx.allowedToolNames.size > 0) {
-      this.messages.push({
-        role: "user",
-        content: "请立即调用工具执行任务。不要输出分析或计划——直接调用第一个需要的工具。",
-      });
+      pushRetryUserMessage("请立即调用工具执行任务。不要输出分析或计划——直接调用第一个需要的工具。");
       this.ctx.writeEvent("run.notice", {
         turn: this.turn,
         kind: "info",
@@ -2140,6 +2204,62 @@ export class WritingAgentRunner {
         message: "子 Agent 未调用工具，已注入工具调用提醒并继续下一轮。",
       });
       return true;
+    }
+
+    const executionContract = this._getExecutionContract();
+    if (
+      executionContract.required &&
+      this.totalToolCalls < executionContract.minToolCalls &&
+      this.ctx.allowedToolNames.size > 0
+    ) {
+      this.executionNoToolTurns += 1;
+      const preferredToolName = executionContract.preferredToolNames.find((name) =>
+        this.ctx.allowedToolNames.has(String(name ?? "").trim()),
+      );
+      this.forcedToolChoice = preferredToolName ? { type: "tool", name: preferredToolName } : { type: "any" };
+
+      if (this.executionNoToolTurns <= executionContract.maxNoToolTurns) {
+        pushRetryUserMessage(
+          `你还没有执行任何工具调用（第 ${this.executionNoToolTurns} 次重试）。` +
+            "本轮必须先调用工具完成动作，再输出说明。禁止只回复文本/JSON。",
+        );
+        this.ctx.writeEvent("run.notice", {
+          turn: this.turn,
+          kind: "warn",
+          title: "ExecutionContractRetry",
+          message:
+            `执行达成约束未满足，已触发重试（${this.executionNoToolTurns}/${executionContract.maxNoToolTurns}）` +
+            (preferredToolName ? `，优先工具：${preferredToolName}` : "，优先策略：任意工具调用"),
+          detail: {
+            minToolCalls: executionContract.minToolCalls,
+            currentToolCalls: this.totalToolCalls,
+            reason: executionContract.reason ?? "",
+          },
+        });
+        return true;
+      }
+
+      this.failedToolDigests.push({
+        toolCallId: `execution_contract_turn_${this.turn}`,
+        name: preferredToolName || "execution.contract",
+        error: "EXECUTION_CONTRACT_UNSATISFIED",
+        message: `执行型回合未触发工具调用（要求至少 ${executionContract.minToolCalls} 次）。`,
+        next_actions: [
+          "检查路由是否应为 discussion 而非 task_execution",
+          "检查工具协议（native tools/XML）是否被模型正确遵循",
+        ],
+        turn: this.turn,
+      });
+      if (this.failedToolDigests.length > 40) {
+        this.failedToolDigests.splice(0, this.failedToolDigests.length - 40);
+      }
+      this.ctx.writeEvent("run.notice", {
+        turn: this.turn,
+        kind: "error",
+        title: "ExecutionContractFailed",
+        message: "执行达成约束失败：连续重试后仍未触发工具调用，已结束本轮。",
+      });
+      return false;
     }
 
     if (!this.ctx.intent.isWritingTask) return false;
@@ -2161,10 +2281,7 @@ export class WritingAgentRunner {
 
     const reasonText = reasons.length ? reasons.join("、") : "仍有未完成步骤";
 
-    this.messages.push({
-      role: "user",
-      content: `继续推进。当前缺少：${reasonText}。请基于上下文完成未完成的步骤。`,
-    });
+    pushRetryUserMessage(`继续推进。当前缺少：${reasonText}。请基于上下文完成未完成的步骤。`);
 
     this.ctx.writeEvent("run.notice", {
       turn: this.turn,
