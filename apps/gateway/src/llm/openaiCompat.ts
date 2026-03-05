@@ -220,36 +220,32 @@ function normalizeToolParametersSchema(raw: unknown): Record<string, unknown> {
   const fallback = { type: "object", properties: {}, additionalProperties: true } as Record<string, unknown>;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fallback;
 
-  const walk = (node: unknown): unknown => {
+  const walk = (node: unknown, topLevel = false): unknown => {
     if (Array.isArray(node)) return node.map((x) => walk(x));
     if (!node || typeof node !== "object") return node;
 
     const src = node as Record<string, unknown>;
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(src)) {
-      if (k === "oneOfRequired") {
-        const oneOf = (Array.isArray(v) ? v : [])
-          .map((x) => {
-            const req = Array.isArray((x as any)?.required)
-              ? ((x as any).required as unknown[]).map((s) => String(s ?? "").trim()).filter(Boolean)
-              : [];
-            return req.length ? { required: req } : null;
-          })
-          .filter(Boolean);
-        if (oneOf.length) out.oneOf = oneOf;
+      if (topLevel && (k === "oneOf" || k === "anyOf" || k === "allOf" || k === "enum" || k === "not")) {
+        // 兼容严格上游：tools[*].parameters 顶层禁止出现组合/约束关键字
         continue;
       }
-      out[k] = walk(v);
+      if (k === "oneOfRequired") {
+        // oneOfRequired 是本项目私有扩展，仅用于本地参数校验；不要下发给上游模型
+        continue;
+      }
+      out[k] = walk(v, false);
     }
 
     if (String(out.type ?? "") === "array") {
       if (out.items === undefined || out.items === null) out.items = {};
-      else out.items = walk(out.items);
+      else out.items = walk(out.items, false);
     }
     if (out.properties && typeof out.properties === "object" && !Array.isArray(out.properties)) {
       const props = out.properties as Record<string, unknown>;
       const nextProps: Record<string, unknown> = {};
-      for (const [pk, pv] of Object.entries(props)) nextProps[pk] = walk(pv);
+      for (const [pk, pv] of Object.entries(props)) nextProps[pk] = walk(pv, false);
       out.properties = nextProps;
     }
     if (Array.isArray(out.required)) {
@@ -258,9 +254,13 @@ function normalizeToolParametersSchema(raw: unknown): Record<string, unknown> {
     return out;
   };
 
-  const normalized = walk(raw);
+  const normalized = walk(raw, true);
   if (!normalized || typeof normalized !== "object" || Array.isArray(normalized)) return fallback;
-  return normalized as Record<string, unknown>;
+  const top = normalized as Record<string, unknown>;
+  if (String(top.type ?? "") !== "object") top.type = "object";
+  if (!top.properties || typeof top.properties !== "object" || Array.isArray(top.properties)) top.properties = {};
+  if (top.additionalProperties === undefined) top.additionalProperties = true;
+  return top;
 }
 
 function toOpenAiToolsPayload(tools?: OpenAiCompatTool[]) {
