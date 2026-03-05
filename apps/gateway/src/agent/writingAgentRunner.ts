@@ -1,7 +1,6 @@
 import {
   streamAnthropicMessages,
   toolMetaToAnthropicDef,
-  buildToolResultMessage,
   type AnthropicMessage,
   type ContentBlockImage,
   type ContentBlockToolUse,
@@ -166,6 +165,110 @@ type ToolAttemptSnapshot = {
   resultSig: string;
   turn: number;
 };
+
+// ---------------------------------------------------------------------------
+// Phase C: canonical 消息存储类型
+// ---------------------------------------------------------------------------
+type CanonicalToolResult = {
+  toolUseId: string;
+  toolName: string;
+  content: string;
+  isError?: boolean;
+};
+
+type CanonicalHistoryEntry =
+  | {
+      role: "user";
+      text: string;
+      images?: Array<{ mediaType: string; data: string }>;
+    }
+  | {
+      role: "assistant";
+      blocks: Array<{ type: "text"; text: string } | ContentBlockToolUse>;
+      /** 原始流输出文本（provider 路径无 tool_use 时用作历史文本） */
+      rawStreamText?: string;
+    }
+  | {
+      role: "tool_result";
+      results: CanonicalToolResult[];
+      /** 附加系统约束文本（如 mainDocLoopWarning） */
+      noteText?: string;
+    }
+  | {
+      role: "user_hint";
+      text: string;
+    };
+
+// ---------------------------------------------------------------------------
+// Phase D: TurnAdapter 抽象
+// ---------------------------------------------------------------------------
+
+/**
+ * 统一 turn 函数消费流后的结果。
+ * Anthropic 和 Provider 两个 adapter 产出相同的结构，供统一 _runOneTurn 使用。
+ */
+type StreamConsumeResult = {
+  /** 用户可见文本（Anthropic = assistantText，Provider = plainText，已去除 XML wrapper） */
+  displayText: string;
+  /** 原始流文本（仅 Provider 路径有意义，Anthropic 为 undefined） */
+  rawStreamText: string | undefined;
+  /** 已完成的 tool_use block 列表 */
+  completedToolUses: ContentBlockToolUse[];
+  /** 流是否出错 */
+  streamErrored: boolean;
+  /** 最后一次流错误信息 */
+  lastStreamError: string;
+  /** prompt token 用量 */
+  promptTokens: number;
+  /** completion token 用量 */
+  completionTokens: number;
+  /** 是否检测到 <tool_calls> 标记（Provider 特有） */
+  hasToolCallMarker: boolean;
+  /** XML wrapper 计数（Provider 特有） */
+  wrapperCount: number;
+  /** Provider 路径中 schema 验证失败的预设结果 */
+  presetResults: Map<string, ToolExecResult>;
+};
+
+/**
+ * TurnAdapter 抽象：封装 Anthropic 与 Provider 两条路径的差异。
+ * 统一的 _runOneTurn 通过 adapter 方法调用，不再做端点类型判断。
+ */
+interface TurnAdapter {
+  /** 重试策略 */
+  retryPolicy: { maxRetries: number; baseDelayMs: number; jitterMs: number };
+  /** 是否需要检测 XML 协议违规（Provider 路径需要，Anthropic 不需要） */
+  detectsProtocolViolation: boolean;
+
+  /** 构建工具定义列表，返回定义数组和工具名集合 */
+  buildToolDefs(effectiveAllowed: Set<string>): {
+    defs: unknown[];
+    toolNameSet: Set<string>;
+  };
+
+  /** 消费一次模型流，返回统一结果 */
+  consumeStream(args: {
+    toolDefs: unknown[];
+    turnSystemPrompt: string;
+    effectiveAllowed: Set<string>;
+    turnToolChoice: any;
+    emitTextDelta: boolean;
+    signal: AbortSignal;
+  }): Promise<StreamConsumeResult>;
+
+  /** 判断流结果是否有实质内容（用于空响应重试判断） */
+  hasContent(result: StreamConsumeResult): boolean;
+
+  /** 获取用于 autoRetry 判断的文本 */
+  getAutoRetryText(result: StreamConsumeResult): string;
+
+  /** 构建历史条目 */
+  buildHistoryEntry(args: {
+    result: StreamConsumeResult;
+    suppressText: boolean;
+    hasProtocolViolation: boolean;
+  }): { entry: CanonicalHistoryEntry; shouldPush: boolean };
+}
 
 const MAX_TURNS = 30;
 const TOOL_RESULT_TIMEOUT_MS = 180_000;
@@ -581,8 +684,7 @@ function countAssistantToolUses(messages: AnthropicMessage[]): number {
 
 export class WritingAgentRunner {
   private readonly ctx: RunContext;
-  private readonly messages: AnthropicMessage[] = [];
-  private readonly providerMessages: OpenAiChatMessage[] = [];
+  private readonly history: CanonicalHistoryEntry[] = [];
   private readonly runState: RunState;
   private turn = 0;
   private readonly maxTurns: number;
@@ -595,8 +697,12 @@ export class WritingAgentRunner {
   private readonly supportsNativeToolUse: boolean;
   /** 端点是否支持 OpenAI function calling（tools 参数） */
   private readonly supportsNativeFunctionCalling: boolean;
+  /** 是否以 XML 工具协议为主协议（Gemini 或无原生工具支持的端点） */
+  private readonly preferXmlProtocol: boolean;
   /** 端点是否真正尊重 tool_choice: any/tool（Anthropic 支持，GPT 代理多数会剥离） */
   private readonly supportsForcedToolChoice: boolean;
+  /** Phase D: 统一 turn 适配器 */
+  private readonly turnAdapter: TurnAdapter;
   private consecutiveMainDocOnlyTurns = 0;
   private blockMainDocUpdate = false;
   private turnAllowedToolNames: Set<string> | null = null;
@@ -627,7 +733,439 @@ export class WritingAgentRunner {
     this.supportsNativeToolUse = this.isAnthropicApi;
     this.supportsNativeFunctionCalling =
       this.apiType === "openai-completions" || this.apiType === "openai-responses";
+    this.preferXmlProtocol =
+      this.apiType === "gemini" || (!this.supportsNativeToolUse && !this.supportsNativeFunctionCalling);
     this.supportsForcedToolChoice = this.isAnthropicApi;
+    this.turnAdapter = this._createTurnAdapter();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase C: 统一消息写入
+  // ---------------------------------------------------------------------------
+  private _pushHistory(entry: CanonicalHistoryEntry): void {
+    this.history.push(entry);
+  }
+
+  /**
+   * 将 canonical history 转为 Anthropic Messages API 格式。
+   * 在 _runOneTurn 和 getMessages() 中按需调用。
+   */
+  private _toAnthropicMessages(): AnthropicMessage[] {
+    const msgs: AnthropicMessage[] = [];
+    for (const entry of this.history) {
+      switch (entry.role) {
+        case "user": {
+          const content: AnthropicMessage["content"] = entry.images?.length
+            ? [
+                ...entry.images.map((img): ContentBlockImage => ({
+                  type: "image",
+                  source: { type: "base64", media_type: img.mediaType, data: img.data },
+                })),
+                { type: "text", text: entry.text },
+              ]
+            : entry.text;
+          msgs.push({ role: "user", content });
+          break;
+        }
+        case "assistant": {
+          if (entry.blocks.length > 0) {
+            msgs.push({ role: "assistant", content: entry.blocks });
+          }
+          break;
+        }
+        case "tool_result": {
+          const blocks: any[] = entry.results.map((r) => ({
+            type: "tool_result",
+            tool_use_id: r.toolUseId,
+            content: r.content,
+            ...(r.isError ? { is_error: true } : {}),
+          }));
+          if (entry.noteText) blocks.push({ type: "text", text: entry.noteText });
+          if (blocks.length > 0) msgs.push({ role: "user", content: blocks });
+          break;
+        }
+        case "user_hint": {
+          msgs.push({ role: "user", content: entry.text });
+          break;
+        }
+      }
+    }
+    return msgs;
+  }
+
+  /**
+   * 将 canonical history 转为 OpenAI Chat 格式。
+   * 在 _runOneTurn（Provider 路径）中按需调用。
+   */
+  private _toProviderMessages(): OpenAiChatMessage[] {
+    const msgs: OpenAiChatMessage[] = [];
+    for (const entry of this.history) {
+      switch (entry.role) {
+        case "user": {
+          const content: OpenAiChatMessage["content"] = entry.images?.length
+            ? [
+                ...entry.images.map((img) => ({
+                  type: "image_url" as const,
+                  image_url: { url: `data:${img.mediaType};base64,${img.data}` },
+                })),
+                { type: "text" as const, text: entry.text },
+              ]
+            : entry.text;
+          msgs.push({ role: "user", content });
+          break;
+        }
+        case "assistant": {
+          const toolUses = entry.blocks.filter(
+            (b): b is ContentBlockToolUse => b.type === "tool_use",
+          );
+          if (toolUses.length > 0) {
+            msgs.push({
+              role: "assistant",
+              content: buildToolCallsXml(
+                toolUses.map((t) => ({
+                  name: String(t.name ?? ""),
+                  args: t.input && typeof t.input === "object"
+                    ? (t.input as Record<string, unknown>)
+                    : {},
+                })),
+              ),
+            });
+          } else if (entry.rawStreamText !== undefined) {
+            msgs.push({ role: "assistant", content: entry.rawStreamText });
+          } else {
+            const text = entry.blocks
+              .filter((b): b is { type: "text"; text: string } => b.type === "text")
+              .map((b) => b.text)
+              .join("\n");
+            if (text) msgs.push({ role: "assistant", content: text });
+          }
+          break;
+        }
+        case "tool_result": {
+          const xmlParts = entry.results.map(
+            (r) => `<tool_result name="${xmlEscapeAttr(r.toolName)}"><![CDATA[${xmlCdataSafe(r.content)}]]></tool_result>`,
+          );
+          const textParts = entry.results.map(
+            (r) => `[tool_result name="${r.toolName}"]\n${r.content}\n[/tool_result]`,
+          );
+          if (xmlParts.length > 0) {
+            msgs.push(
+              ...buildInjectedToolResultMessages({
+                toolResultFormat: this.ctx.toolResultFormat === "text" ? "text" : "xml",
+                toolResultXml: xmlParts.join("\n"),
+                toolResultText: textParts.join("\n"),
+                preferNativeToolCall: this.supportsNativeFunctionCalling,
+              }),
+            );
+          }
+          if (entry.noteText) msgs.push({ role: "user", content: entry.noteText });
+          break;
+        }
+        case "user_hint": {
+          msgs.push({ role: "user", content: entry.text });
+          break;
+        }
+      }
+    }
+    return msgs;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase D: TurnAdapter 工厂
+  // ---------------------------------------------------------------------------
+
+  private _createTurnAdapter(): TurnAdapter {
+    if (this.supportsNativeToolUse) {
+      return this._createAnthropicAdapter();
+    }
+    return this._createProviderAdapter();
+  }
+
+  /** Anthropic Messages API 适配器 */
+  private _createAnthropicAdapter(): TurnAdapter {
+    return {
+      retryPolicy: { maxRetries: 3, baseDelayMs: 800, jitterMs: 200 },
+      detectsProtocolViolation: false,
+
+      buildToolDefs: (effectiveAllowed) => {
+        const tools = TOOL_LIST.filter((tool) => {
+          if (!effectiveAllowed.has(tool.name)) return false;
+          if (!tool.modes || tool.modes.length === 0) return true;
+          return tool.modes.includes(this.ctx.mode);
+        }).map(toolMetaToAnthropicDef);
+
+        const mcpToolDefs = ((this.ctx as any).mcpTools ?? [])
+          .filter((t: any) => effectiveAllowed.has(t.name))
+          .map((t: any) => ({
+            name: encodeToolName(String(t.name ?? "")),
+            description: String(t.description ?? ""),
+            input_schema: normalizeToolParametersSchema(t?.inputSchema),
+          }));
+        tools.push(...mcpToolDefs);
+
+        const toolNameSet = new Set(
+          tools.map((t: any) => String(t?.name ?? "").trim()).filter(Boolean),
+        );
+        return { defs: tools, toolNameSet };
+      },
+
+      consumeStream: async (args) => {
+        const pendingToolUses = new Map<string, PendingToolUse>();
+        const completedToolUses: ContentBlockToolUse[] = [];
+        let displayText = "";
+        let streamErrored = false;
+        let lastStreamError = "";
+        let promptTokens = 0;
+        let completionTokens = 0;
+
+        const stream = streamAnthropicMessages({
+          apiKey: this.ctx.apiKey,
+          model: this.ctx.modelId,
+          baseUrl: this.ctx.baseUrl,
+          system: args.turnSystemPrompt,
+          messages: this._toAnthropicMessages(),
+          tools: args.toolDefs as any,
+          tool_choice: args.turnToolChoice,
+          signal: args.signal,
+        });
+
+        for await (const ev of stream) {
+          if (args.signal.aborted) break;
+          this._handleStreamEvent(ev, {
+            pendingToolUses,
+            completedToolUses,
+            emitTextDelta: args.emitTextDelta,
+            onTextDelta: (delta) => { displayText += delta; },
+            onUsage: (p, c) => {
+              promptTokens = Math.max(promptTokens, p);
+              completionTokens = Math.max(completionTokens, c);
+            },
+            onError: (error) => {
+              streamErrored = true;
+              lastStreamError = error;
+            },
+          });
+          if (streamErrored) break;
+        }
+
+        return {
+          displayText,
+          rawStreamText: undefined,
+          completedToolUses,
+          streamErrored,
+          lastStreamError,
+          promptTokens,
+          completionTokens,
+          hasToolCallMarker: false,
+          wrapperCount: 0,
+          presetResults: new Map(),
+        };
+      },
+
+      hasContent: (result) =>
+        result.displayText.length > 0 || result.completedToolUses.length > 0,
+
+      getAutoRetryText: (result) => result.displayText,
+
+      buildHistoryEntry: (args) => {
+        const blocks: Array<{ type: "text"; text: string } | ContentBlockToolUse> = [];
+        if (args.result.displayText && !args.suppressText) {
+          blocks.push({ type: "text", text: args.result.displayText });
+        }
+        if (args.result.completedToolUses.length > 0) {
+          blocks.push(...args.result.completedToolUses);
+        }
+        return {
+          entry: { role: "assistant" as const, blocks },
+          shouldPush: blocks.length > 0,
+        };
+      },
+    };
+  }
+
+  /** OpenAI/Gemini Provider 适配器 */
+  private _createProviderAdapter(): TurnAdapter {
+    return {
+      retryPolicy: { maxRetries: 2, baseDelayMs: 600, jitterMs: 180 },
+      detectsProtocolViolation: true,
+
+      buildToolDefs: (effectiveAllowed) => {
+        const nativeTools = toOpenAiCompatToolDefs({
+          allowed: effectiveAllowed,
+          mode: this.ctx.mode,
+          mcpTools: ((this.ctx as any).mcpTools ?? []) as any[],
+        });
+        const toolNameSet = new Set(
+          nativeTools.map((t) => String(t?.name ?? "").trim()).filter(Boolean),
+        );
+        return { defs: nativeTools, toolNameSet };
+      },
+
+      consumeStream: async (args) => {
+        const endpoint = this.ctx.endpoint || "/v1/responses";
+        const providerAdapter = getAdapterByEndpoint(endpoint);
+        const nativeTools = args.toolDefs as OpenAiCompatTool[];
+        const hasNativeTools = nativeTools.length > 0;
+
+        // 系统消息构建
+        const systemMessages: OpenAiChatMessage[] = [
+          { role: "system", content: args.turnSystemPrompt },
+        ];
+        if (hasNativeTools) {
+          const xmlToolPrompt = this._buildXmlToolProtocolPrompt(args.effectiveAllowed);
+          systemMessages.push({
+            role: "system",
+            content:
+              "工具调用说明：请优先使用 function/tool calling 进行工具调用。\n" +
+              "如果 function calling 不可用，可退而使用下方 XML 格式调用工具。\n" +
+              "收敛规则：任务完成后必须调用 run.done（可带 note），不要继续空转。\n" +
+              "上一轮同名同参工具调用已成功时，禁止重复调用；应改为下一步或 run.done。\n" +
+              "当不需要工具时，直接输出 Markdown。\n\n" +
+              xmlToolPrompt,
+          });
+        } else {
+          const xmlToolPrompt = this._buildXmlToolProtocolPrompt(args.effectiveAllowed);
+          systemMessages.push({ role: "system", content: xmlToolPrompt });
+        }
+
+        let assistantRaw = "";
+        let plainText = "";
+        let wrapperCount = 0;
+        let hasToolCallMarker = false;
+        const parsedCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
+        let streamErrored = false;
+        let lastStreamError = "";
+        let promptTokens = 0;
+        let completionTokens = 0;
+
+        const stream = providerAdapter.streamTurn({
+          baseUrl: String(this.ctx.baseUrl ?? ""),
+          endpoint,
+          apiKey: this.ctx.apiKey,
+          model: this.ctx.modelId,
+          messages: [...systemMessages, ...this._toProviderMessages()],
+          temperature: undefined,
+          maxTokens: undefined,
+          includeUsage: true,
+          tools: hasNativeTools ? nativeTools : undefined,
+          toolChoice: args.turnToolChoice,
+          parallelToolCalls: false,
+          signal: args.signal,
+        });
+
+        const rawEvents: Array<any> = [];
+        for await (const ev of stream) {
+          if (args.signal.aborted) break;
+          rawEvents.push(ev);
+        }
+
+        const canonicalEvents = providerAdapter.toCanonicalEvents(rawEvents);
+        for (const ev of canonicalEvents) {
+          if (ev.type === "usage") {
+            promptTokens = Math.max(promptTokens, Math.max(0, Math.floor(Number(ev.promptTokens ?? 0))));
+            completionTokens = Math.max(completionTokens, Math.max(0, Math.floor(Number(ev.completionTokens ?? 0))));
+            continue;
+          }
+          if (ev.type === "error") {
+            streamErrored = true;
+            lastStreamError = String(ev.error ?? "UPSTREAM_ERROR");
+            this.turnEngine.record({ type: "model_error", error: lastStreamError });
+            break;
+          }
+          if (ev.type === "tool_call") {
+            parsedCalls.push({
+              id: String(ev.id ?? "").trim(),
+              name: String(ev.name ?? "").trim(),
+              args: ev.args && typeof ev.args === "object" && !Array.isArray(ev.args) ? ev.args : {},
+            });
+            continue;
+          }
+          if (ev.type === "text_delta") continue;
+          if (ev.type === "done") {
+            assistantRaw = String(ev.assistantRaw ?? "");
+            plainText = String(ev.plainText ?? "");
+            hasToolCallMarker = Boolean(ev.hasToolCallMarker);
+            wrapperCount = Math.max(0, Math.floor(Number(ev.wrapperCount ?? 0)));
+            if (plainText) this.turnEngine.record({ type: "model_text_delta", text: plainText });
+            this.turnEngine.record({ type: "model_done", finishReason: "stream_done" });
+          }
+        }
+
+        // Provider 工具调用验证 + presetResults
+        const completedToolUses: ContentBlockToolUse[] = [];
+        const presetResults = new Map<string, ToolExecResult>();
+        for (const c of parsedCalls) {
+          const rawInput = c.args && typeof c.args === "object" && !Array.isArray(c.args) ? c.args : {};
+          const normalized = normalizeToolCallForValidation(c.name, rawInput);
+          const input = normalized.args;
+          const normalizedName = normalized.name;
+          const v = validateToolCallArgs({ name: normalizedName, toolArgs: input });
+          if (!v.ok) {
+            presetResults.set(c.id, {
+              ok: false,
+              output: {
+                ok: false,
+                error: "ERR_PARAM_SCHEMA_MISMATCH",
+                message: v.error?.message ?? "工具参数不符合 schema",
+                detail: v.error?.field ? { field: v.error.field } : null,
+                next_actions: ["按该工具 schema 重新组织参数", "缺参时先补齐必填字段后重试"],
+              },
+            });
+          }
+          completedToolUses.push({ type: "tool_use", id: c.id, name: normalizedName, input });
+          this.turnEngine.record({
+            type: "model_tool_call",
+            callId: String(c.id ?? ""),
+            name: normalizedName,
+            args: input,
+          });
+          this.ctx.writeEvent("tool.call.args_ready", {
+            toolCallId: c.id,
+            name: normalizedName,
+            args: input,
+            turn: this.turn,
+            ...(normalized.sanitized ? { note: "args_sanitized_against_schema" } : {}),
+          });
+        }
+
+        return {
+          displayText: plainText,
+          rawStreamText: assistantRaw,
+          completedToolUses,
+          streamErrored,
+          lastStreamError,
+          promptTokens,
+          completionTokens,
+          hasToolCallMarker,
+          wrapperCount,
+          presetResults,
+        };
+      },
+
+      hasContent: (result) =>
+        (result.rawStreamText ?? "").trim().length > 0,
+
+      getAutoRetryText: (result) =>
+        result.displayText || (result.rawStreamText ?? ""),
+
+      buildHistoryEntry: (args) => {
+        const blocks: Array<{ type: "text"; text: string } | ContentBlockToolUse> = [];
+        if (args.result.displayText && !args.suppressText && !args.hasProtocolViolation) {
+          blocks.push({ type: "text", text: args.result.displayText });
+        }
+        if (args.result.completedToolUses.length > 0) {
+          blocks.push(...args.result.completedToolUses);
+        }
+        return {
+          entry: {
+            role: "assistant" as const,
+            blocks,
+            rawStreamText: args.result.rawStreamText,
+          },
+          shouldPush: true, // Provider 路径始终 push（即使 blocks 为空也保留 rawStreamText）
+        };
+      },
+    };
   }
 
   private _getExecutionContract(): {
@@ -939,27 +1477,7 @@ export class WritingAgentRunner {
   async run(userMessage: string, images?: Array<{ mediaType: string; data: string }>): Promise<void> {
     this.turnEngine.reset();
     this._setOutcome({ status: "completed", reason: "completed", reasonCodes: ["completed"] });
-    const userContent: AnthropicMessage["content"] = images?.length
-      ? [
-          ...images.map((img): ContentBlockImage => ({
-            type: "image",
-            source: { type: "base64", media_type: img.mediaType, data: img.data },
-          })),
-          { type: "text", text: userMessage },
-        ]
-      : userMessage;
-    this.messages.push({ role: "user", content: userContent });
-
-    const providerContent: OpenAiChatMessage["content"] = images?.length
-      ? [
-          ...images.map((img) => ({
-            type: "image_url" as const,
-            image_url: { url: `data:${img.mediaType};base64,${img.data}` },
-          })),
-          { type: "text" as const, text: userMessage },
-        ]
-      : userMessage;
-    this.providerMessages.push({ role: "user", content: providerContent });
+    this._pushHistory({ role: "user", text: userMessage, images });
 
     // If user @mentioned specific agents, auto-delegate before main loop
     if (this.ctx.targetAgentIds?.length) {
@@ -980,9 +1498,7 @@ export class WritingAgentRunner {
       }
       this.turn += 1;
       this.turnEngine.setTurn(this.turn);
-      const shouldContinue = this.supportsNativeToolUse
-        ? await this._runOneTurn()
-        : await this._runOneTurnViaProvider();
+      const shouldContinue = await this._runOneTurn();
       if (!shouldContinue) {
         if (this.ctx.abortSignal.aborted) {
           this._setOutcome({ status: "aborted", reason: "aborted", reasonCodes: ["aborted"] });
@@ -1020,9 +1536,7 @@ export class WritingAgentRunner {
         if (this.ctx.abortSignal.aborted) return;
         this.turn += 1;
         this.turnEngine.setTurn(this.turn);
-        const shouldContinue = this.supportsNativeToolUse
-          ? await this._runOneTurn()
-          : await this._runOneTurnViaProvider();
+        const shouldContinue = await this._runOneTurn();
         if (!shouldContinue) return;
       }
       return;
@@ -1037,15 +1551,10 @@ export class WritingAgentRunner {
     }));
 
     // Push synthetic assistant message with delegation calls
-    this.messages.push({ role: "assistant", content: toolUses });
-    if (!this.supportsNativeToolUse) {
-      this.providerMessages.push({
-        role: "assistant",
-        content: buildToolCallsXml(
-          toolUses.map((t) => ({ name: t.name, args: t.input as Record<string, unknown> })),
-        ),
-      });
-    }
+    this._pushHistory({
+      role: "assistant",
+      blocks: toolUses,
+    });
 
     // Execute all delegations in parallel
     const results = await Promise.all(
@@ -1055,8 +1564,8 @@ export class WritingAgentRunner {
       }),
     );
 
-    // Build tool_result messages and emit events
-    const toolResultBlocks: any[] = [];
+    // Build canonical tool results and emit events
+    const canonicalResults: CanonicalToolResult[] = [];
     const MAX_TOOL_RESULT_CHARS = 60_000;
     for (const { toolUse, result } of results) {
       const output = result.output;
@@ -1079,37 +1588,19 @@ export class WritingAgentRunner {
       const content = rawContent.length > MAX_TOOL_RESULT_CHARS
         ? rawContent.slice(0, MAX_TOOL_RESULT_CHARS) + `\n...[工具结果已截断，共 ${rawContent.length} 字符]`
         : rawContent;
-      toolResultBlocks.push({
-        type: "tool_result",
-        tool_use_id: toolUse.id,
+      canonicalResults.push({
+        toolUseId: toolUse.id,
+        toolName: toolUse.name,
         content,
+        isError: result.ok ? undefined : true,
       });
     }
 
-    if (toolResultBlocks.length > 0) {
-      this.messages.push({ role: "user", content: toolResultBlocks });
-      if (!this.supportsNativeToolUse) {
-        const toolResultXml = results
-          .map(({ toolUse, result }) => {
-            const raw = typeof result.output === "string" ? result.output : JSON.stringify(result.output ?? null);
-            return `<tool_result name="${xmlEscapeAttr(toolUse.name)}"><![CDATA[${xmlCdataSafe(raw)}]]></tool_result>`;
-          })
-          .join("\n");
-        const toolResultText = results
-          .map(({ toolUse, result }) => {
-            const raw = typeof result.output === "string" ? result.output : JSON.stringify(result.output ?? null);
-            return `[tool_result name="${toolUse.name}"]\n${raw}\n[/tool_result]`;
-          })
-          .join("\n");
-        this.providerMessages.push(
-          ...buildInjectedToolResultMessages({
-            toolResultFormat: this.ctx.toolResultFormat === "text" ? "text" : "xml",
-            toolResultXml,
-            toolResultText,
-            preferNativeToolCall: this.supportsNativeFunctionCalling,
-          }),
-        );
-      }
+    if (canonicalResults.length > 0) {
+      this._pushHistory({
+        role: "tool_result",
+        results: canonicalResults,
+      });
     }
 
     // After delegation, let main agent continue normally to summarize
@@ -1117,9 +1608,7 @@ export class WritingAgentRunner {
       if (this.ctx.abortSignal.aborted) return;
       this.turn += 1;
       this.turnEngine.setTurn(this.turn);
-      const shouldContinue = this.supportsNativeToolUse
-        ? await this._runOneTurn()
-        : await this._runOneTurnViaProvider();
+      const shouldContinue = await this._runOneTurn();
       if (!shouldContinue) return;
     }
   }
@@ -1171,7 +1660,7 @@ export class WritingAgentRunner {
   private async _processCompletedToolUses(
     completedToolUses: ContentBlockToolUse[],
     opts?: { presetResults?: Map<string, ToolExecResult> },
-  ): Promise<{ shouldContinue: boolean; injectedToolMessages: OpenAiChatMessage[] }> {
+  ): Promise<boolean> {
     const parsedToolCalls: ParsedToolCall[] = completedToolUses.map((toolUse) => ({
       name: toolUse.name,
       args: toolUse.input ?? {},
@@ -1195,9 +1684,7 @@ export class WritingAgentRunner {
       });
     }
 
-    const toolResultMessages = [] as AnthropicMessage[];
-    const toolResultXmlParts: string[] = [];
-    const toolResultTextParts: string[] = [];
+    const canonicalResults: CanonicalToolResult[] = [];
     let hasRunDone = false;
 
     const delegateCalls: { index: number; toolUse: ContentBlockToolUse }[] = [];
@@ -1258,13 +1745,12 @@ export class WritingAgentRunner {
       const cappedOutput = rawOutput.length > MAX_TOOL_RESULT_CHARS
         ? rawOutput.slice(0, MAX_TOOL_RESULT_CHARS) + `\n...[工具结果已截断，共 ${rawOutput.length} 字符]`
         : rawOutput;
-      toolResultMessages.push(buildToolResultMessage(toolUse.id, cappedOutput, !result.ok));
-      toolResultXmlParts.push(
-        `<tool_result name="${xmlEscapeAttr(toolUse.name)}"><![CDATA[${xmlCdataSafe(cappedOutput)}]]></tool_result>`,
-      );
-      toolResultTextParts.push(
-        `[tool_result name="${toolUse.name}"]\n${cappedOutput}\n[/tool_result]`,
-      );
+      canonicalResults.push({
+        toolUseId: toolUse.id,
+        toolName: toolUse.name,
+        content: cappedOutput,
+        isError: result.ok ? undefined : true,
+      });
 
       if (!result.ok) this._recordToolFailure(toolUse, result);
 
@@ -1306,12 +1792,12 @@ export class WritingAgentRunner {
       });
     }
 
-    if (toolResultMessages.length > 0) {
-      const mergedBlocks = toolResultMessages.flatMap((msg) =>
-        Array.isArray(msg.content) ? msg.content : [],
-      );
-      if (mainDocLoopWarning) mergedBlocks.push({ type: "text", text: mainDocLoopWarning });
-      if (mergedBlocks.length > 0) this.messages.push({ role: "user", content: mergedBlocks });
+    if (canonicalResults.length > 0) {
+      this._pushHistory({
+        role: "tool_result",
+        results: canonicalResults,
+        noteText: mainDocLoopWarning ?? undefined,
+      });
     } else if (mainDocLoopWarning) {
       this.ctx.writeEvent("run.notice", {
         turn: this.turn,
@@ -1321,22 +1807,9 @@ export class WritingAgentRunner {
       });
     }
 
-    const injectedToolMessages =
-      toolResultXmlParts.length > 0
-        ? buildInjectedToolResultMessages({
-            toolResultFormat: this.ctx.toolResultFormat === "text" ? "text" : "xml",
-            toolResultXml: toolResultXmlParts.join("\n"),
-            toolResultText: toolResultTextParts.join("\n"),
-            preferNativeToolCall: this.supportsNativeFunctionCalling,
-          })
-        : [];
-    if (mainDocLoopWarning) {
-      injectedToolMessages.push({ role: "user", content: mainDocLoopWarning });
-    }
-
     if (this.ctx.abortSignal.aborted) {
       this._setOutcome({ status: "aborted", reason: "aborted", reasonCodes: ["aborted"] });
-      return { shouldContinue: false, injectedToolMessages };
+      return false;
     }
     const loopGuard = this._detectToolLoopGuard();
     if (loopGuard.blocked) {
@@ -1367,212 +1840,108 @@ export class WritingAgentRunner {
           recentAttempts: this.recentToolAttempts.slice(-6),
         },
       });
-      return { shouldContinue: false, injectedToolMessages };
+      return false;
     }
     if (hasRunDone) {
       this.turnEngine.record({ type: "model_done", finishReason: "run_done" });
       this._setOutcome({ status: "completed", reason: "run_done", reasonCodes: ["run_done"] });
-      return { shouldContinue: false, injectedToolMessages };
+      return false;
     }
-    return { shouldContinue: true, injectedToolMessages };
+    return true;
   }
 
-  private async _runOneTurnViaProvider(): Promise<boolean> {
+  // ---------------------------------------------------------------------------
+  // Phase D: 统一 turn 函数
+  // ---------------------------------------------------------------------------
+
+  private async _runOneTurn(): Promise<boolean> {
+    const adapter = this.turnAdapter;
+
+    // [1] perTurnCaps + effectiveAllowed + turnSystemPrompt
     const perTurnCaps = this.ctx.computePerTurnAllowed?.(this.runState) ?? null;
     const effectiveAllowed = perTurnCaps?.allowed ?? this.ctx.allowedToolNames;
     this.turnAllowedToolNames = effectiveAllowed;
     const turnSystemPrompt = perTurnCaps?.hint
       ? `${this.ctx.systemPrompt}\n\n${perTurnCaps.hint}`
       : this.ctx.systemPrompt;
-    const nativeTools = toOpenAiCompatToolDefs({
-      allowed: effectiveAllowed,
-      mode: this.ctx.mode,
-      mcpTools: ((this.ctx as any).mcpTools ?? []) as any[],
-    });
-    const turnToolChoice = this._resolveTurnToolChoice(
-      new Set(nativeTools.map((t) => String(t?.name ?? "").trim()).filter(Boolean)),
-    );
+
+    // [2] adapter.buildToolDefs
+    const { defs: toolDefs, toolNameSet } = adapter.buildToolDefs(effectiveAllowed);
+
+    // [3] _resolveTurnToolChoice
+    const turnToolChoice = this._resolveTurnToolChoice(toolNameSet);
+
+    // [4] executionContract + holdAssistantDelta
     const executionContract = this._getExecutionContract();
-    const endpoint = this.ctx.endpoint || "/v1/responses";
-    const providerAdapter = getAdapterByEndpoint(endpoint);
+    const holdAssistantDelta =
+      executionContract.required && this.totalToolCalls < executionContract.minToolCalls;
 
-    // 协议选择：当 native tools 可用时，不注入完整 XML 协议（避免双指令混淆）；
-    // 仅在无 native tools 时使用 XML 协议作为唯一工具调用方式。
-    const hasNativeTools = nativeTools.length > 0;
-    const systemMessages: OpenAiChatMessage[] = [
-      { role: "system", content: turnSystemPrompt },
-    ];
-    if (hasNativeTools) {
-      // native tools 可用——以 native function calling 为主协议，
-      // 同时附加精简 XML 备注，确保代理剥离 native tools 后模型仍有工具名称参考。
-      const xmlToolPrompt = this._buildXmlToolProtocolPrompt(effectiveAllowed);
-      systemMessages.push({
-        role: "system",
-        content:
-          "工具调用说明：请优先使用 function/tool calling 进行工具调用。\n" +
-          "如果 function calling 不可用，可退而使用下方 XML 格式调用工具。\n" +
-          "收敛规则：任务完成后必须调用 run.done（可带 note），不要继续空转。\n" +
-          "上一轮同名同参工具调用已成功时，禁止重复调用；应改为下一步或 run.done。\n" +
-          "当不需要工具时，直接输出 Markdown。\n\n" +
-          xmlToolPrompt,
-      });
-    } else {
-      // 无 native tools——注入完整 XML 协议
-      const xmlToolPrompt = this._buildXmlToolProtocolPrompt(effectiveAllowed);
-      systemMessages.push({ role: "system", content: xmlToolPrompt });
-    }
-
+    // [5] writeEvent("assistant.start")
     this.ctx.writeEvent("assistant.start", { turn: this.turn });
 
-    let assistantRaw = "";
-    let plainText = "";
-    let wrapperCount = 0;
-    let hasToolCallMarker = false;
-    const parsedCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
-    let streamErrored = false;
-    let lastStreamError = "";
-    let promptTokens = 0;
-    let completionTokens = 0;
+    // [6-8] 重试循环: adapter.consumeStream + 空响应检测 + 退避
+    let result: StreamConsumeResult = {
+      displayText: "",
+      rawStreamText: undefined,
+      completedToolUses: [],
+      streamErrored: false,
+      lastStreamError: "",
+      promptTokens: 0,
+      completionTokens: 0,
+      hasToolCallMarker: false,
+      wrapperCount: 0,
+      presetResults: new Map(),
+    };
+    const { maxRetries, baseDelayMs, jitterMs } = adapter.retryPolicy;
 
-    const STREAM_RETRY_MAX = 2;
-    const STREAM_RETRY_BASE_MS = 600;
-
-    for (let attempt = 0; attempt <= STREAM_RETRY_MAX; attempt++) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
       if (this.ctx.abortSignal.aborted) break;
 
-      assistantRaw = "";
-      plainText = "";
-      wrapperCount = 0;
-      hasToolCallMarker = false;
-      parsedCalls.splice(0, parsedCalls.length);
-      streamErrored = false;
-      lastStreamError = "";
-      promptTokens = 0;
-      completionTokens = 0;
-
-      const stream = providerAdapter.streamTurn({
-        baseUrl: String(this.ctx.baseUrl ?? ""),
-        endpoint,
-        apiKey: this.ctx.apiKey,
-        model: this.ctx.modelId,
-        messages: [
-          ...systemMessages,
-          ...this.providerMessages,
-        ],
-        temperature: undefined,
-        maxTokens: undefined,
-        includeUsage: true,
-        tools: hasNativeTools ? nativeTools : undefined,
-        toolChoice: turnToolChoice,
-        parallelToolCalls: false,
+      result = await adapter.consumeStream({
+        toolDefs,
+        turnSystemPrompt,
+        effectiveAllowed,
+        turnToolChoice,
+        emitTextDelta: !holdAssistantDelta,
         signal: this.ctx.abortSignal,
       });
 
-      const rawEvents: Array<any> = [];
-      for await (const ev of stream) {
-        if (this.ctx.abortSignal.aborted) break;
-        rawEvents.push(ev);
+      // 空响应检测
+      if (!result.streamErrored && !adapter.hasContent(result)) {
+        result.streamErrored = true;
+        result.lastStreamError = "模型服务返回了空响应，正在重试...";
+        this.turnEngine.record({ type: "model_error", error: result.lastStreamError });
       }
 
-      const canonicalEvents = providerAdapter.toCanonicalEvents(rawEvents);
-      for (const ev of canonicalEvents) {
-        if (ev.type === "usage") {
-          promptTokens = Math.max(promptTokens, Math.max(0, Math.floor(Number(ev.promptTokens ?? 0))));
-          completionTokens = Math.max(completionTokens, Math.max(0, Math.floor(Number(ev.completionTokens ?? 0))));
-          continue;
-        }
-        if (ev.type === "error") {
-          streamErrored = true;
-          lastStreamError = String(ev.error ?? "UPSTREAM_ERROR");
-          this.turnEngine.record({ type: "model_error", error: lastStreamError });
-          break;
-        }
-        if (ev.type === "tool_call") {
-          parsedCalls.push({
-            id: String(ev.id ?? "").trim(),
-            name: String(ev.name ?? "").trim(),
-            args: ev.args && typeof ev.args === "object" && !Array.isArray(ev.args) ? ev.args : {},
-          });
-          continue;
-        }
-        if (ev.type === "text_delta") {
-          // provider adapter 已在 done 里给完整 plainText，这里不重复拼接，避免重复文本。
-          continue;
-        }
-        if (ev.type === "done") {
-          assistantRaw = String(ev.assistantRaw ?? "");
-          plainText = String(ev.plainText ?? "");
-          hasToolCallMarker = Boolean(ev.hasToolCallMarker);
-          wrapperCount = Math.max(0, Math.floor(Number(ev.wrapperCount ?? 0)));
-          if (plainText) this.turnEngine.record({ type: "model_text_delta", text: plainText });
-          this.turnEngine.record({ type: "model_done", finishReason: "stream_done" });
-        }
-      }
+      if (!result.streamErrored) break;
+      if (adapter.hasContent(result) || attempt >= maxRetries) break;
 
-      const hasContent = assistantRaw.trim().length > 0;
-      if (!streamErrored && !hasContent) {
-        streamErrored = true;
-        lastStreamError = "模型服务返回了空响应，正在重试...";
-        this.turnEngine.record({ type: "model_error", error: lastStreamError });
-      }
-      if (!streamErrored) break;
-      if (hasContent || attempt >= STREAM_RETRY_MAX) break;
-
-      const jitter = Math.floor(Math.random() * 180);
-      const waitMs = STREAM_RETRY_BASE_MS * Math.pow(2, attempt) + jitter;
+      const jitter = Math.floor(Math.random() * jitterMs);
+      const waitMs = baseDelayMs * Math.pow(2, attempt) + jitter;
+      console.warn(
+        `[agent-stream] retry ${attempt + 1}/${maxRetries} after ${waitMs}ms — ${result.lastStreamError}`,
+      );
       await new Promise((r) => setTimeout(r, waitMs));
     }
 
-    if (streamErrored) this.ctx.writeEvent("error", { error: lastStreamError, turn: this.turn });
-    if (this.ctx.onTurnUsage && (promptTokens > 0 || completionTokens > 0)) {
-      this.ctx.onTurnUsage(promptTokens, completionTokens);
+    // [9] writeEvent("error") if streamErrored
+    if (result.streamErrored) {
+      this.ctx.writeEvent("error", { error: result.lastStreamError, turn: this.turn });
     }
 
-    const completedToolUses: ContentBlockToolUse[] = [];
-    const presetResults = new Map<string, ToolExecResult>();
-    for (const c of parsedCalls) {
-      const rawInput = c.args && typeof c.args === "object" && !Array.isArray(c.args) ? c.args : {};
-      const normalized = normalizeToolCallForValidation(c.name, rawInput);
-      const input = normalized.args;
-      const normalizedName = normalized.name;
-      const v = validateToolCallArgs({ name: normalizedName, toolArgs: input });
-      if (!v.ok) {
-        presetResults.set(c.id, {
-          ok: false,
-          output: {
-            ok: false,
-            error: "ERR_PARAM_SCHEMA_MISMATCH",
-            message: v.error?.message ?? "工具参数不符合 schema",
-            detail: v.error?.field ? { field: v.error.field } : null,
-            next_actions: ["按该工具 schema 重新组织参数", "缺参时先补齐必填字段后重试"],
-          },
-        });
-      }
-      completedToolUses.push({
-        type: "tool_use",
-        id: c.id,
-        name: normalizedName,
-        input,
-      });
-      this.turnEngine.record({
-        type: "model_tool_call",
-        callId: String(c.id ?? ""),
-        name: normalizedName,
-        args: input,
-      });
-      this.ctx.writeEvent("tool.call.args_ready", {
-        toolCallId: c.id,
-        name: normalizedName,
-        args: input,
-        turn: this.turn,
-        ...(normalized.sanitized ? { note: "args_sanitized_against_schema" } : {}),
-      });
+    // [10] onTurnUsage 回调
+    if (this.ctx.onTurnUsage && (result.promptTokens > 0 || result.completionTokens > 0)) {
+      this.ctx.onTurnUsage(result.promptTokens, result.completionTokens);
     }
 
-    if (completedToolUses.length === 0) {
-      const fallbackToolUse = this._trySynthesizeToolUseFromJsonText(plainText || assistantRaw);
+    // [11] JSON 工具回退
+    // 在 fallback 前记录流解析的工具数量，用于 protocolViolation 判断
+    const streamParsedToolCount = result.completedToolUses.length;
+    if (result.completedToolUses.length === 0) {
+      const autoRetryText = adapter.getAutoRetryText(result);
+      const fallbackToolUse = this._trySynthesizeToolUseFromJsonText(autoRetryText);
       if (fallbackToolUse) {
-        completedToolUses.push(fallbackToolUse);
+        result.completedToolUses.push(fallbackToolUse);
         this.turnEngine.record({
           type: "model_tool_call",
           callId: String(fallbackToolUse.id ?? ""),
@@ -1584,8 +1953,13 @@ export class WritingAgentRunner {
       }
     }
 
-    const hasProtocolViolation = hasToolCallMarker && parsedCalls.length === 0;
-    const suppressMixedPlainText = completedToolUses.length > 0 && plainText.length > 0;
+    // [12-13] 协议违规检测 + 混输压制
+    // 使用流解析的工具数量而非 fallback 后的数量，与旧逻辑保持一致
+    const hasProtocolViolation = adapter.detectsProtocolViolation &&
+      result.hasToolCallMarker && streamParsedToolCount === 0;
+    const suppressMixedText = result.completedToolUses.length > 0 &&
+      result.displayText.length > 0;
+
     if (hasProtocolViolation) {
       this.ctx.writeEvent("run.notice", {
         turn: this.turn,
@@ -1593,279 +1967,94 @@ export class WritingAgentRunner {
         title: "XmlProtocol",
         message: "检测到无效的 <tool_calls> XML，已注入重试提醒。",
       });
-    } else if (suppressMixedPlainText) {
+    } else if (suppressMixedText) {
       this.ctx.writeEvent("run.notice", {
         turn: this.turn,
         kind: "info",
-        title: "XmlProtocol",
-        message: `检测到 XML 混输（wrapper=${wrapperCount}），已忽略自然语言文本，仅执行工具调用。`,
+        title: adapter.detectsProtocolViolation ? "XmlProtocol" : "MixedOutputSuppressed",
+        message: adapter.detectsProtocolViolation
+          ? `检测到 XML 混输（wrapper=${result.wrapperCount}），已忽略自然语言文本，仅执行工具调用。`
+          : "检测到文本与工具混输，已忽略文本，仅执行工具调用。",
       });
     }
 
-    const assistantBlocks: Array<{ type: "text"; text: string } | ContentBlockToolUse> = [];
-    if (plainText && !suppressMixedPlainText && !hasProtocolViolation) {
-      assistantBlocks.push({ type: "text", text: plainText });
-    }
-    if (completedToolUses.length > 0) assistantBlocks.push(...completedToolUses);
-    if (assistantBlocks.length > 0) this.messages.push({ role: "assistant", content: assistantBlocks });
-    const canonicalAssistantForHistory =
-      completedToolUses.length > 0
-        ? buildToolCallsXml(
-            completedToolUses.map((toolUse) => ({
-              name: String(toolUse.name ?? ""),
-              args: toolUse.input && typeof toolUse.input === "object" ? (toolUse.input as Record<string, unknown>) : {},
-            })),
-          )
-        : assistantRaw;
-    this.providerMessages.push({ role: "assistant", content: canonicalAssistantForHistory });
+    // [14] adapter.buildHistoryEntry → _pushHistory
+    const { entry, shouldPush } = adapter.buildHistoryEntry({
+      result,
+      suppressText: suppressMixedText,
+      hasProtocolViolation,
+    });
+    if (shouldPush) this._pushHistory(entry);
 
+    // [15] writeEvent("assistant.done")
     this.ctx.writeEvent("assistant.done", { turn: this.turn });
+
+    // [16] abort/error → _setOutcome → return false
     if (this.ctx.abortSignal.aborted) {
       this.turnEngine.record({ type: "model_error", error: "ABORTED" });
       this._setOutcome({ status: "aborted", reason: "aborted", reasonCodes: ["aborted"] });
       return false;
     }
-    if (streamErrored) {
+    if (result.streamErrored) {
       this._setOutcome({
         status: "failed",
         reason: "upstream_error",
         reasonCodes: ["upstream_error"],
-        detail: { turn: this.turn, error: lastStreamError || "UPSTREAM_ERROR" },
+        detail: { turn: this.turn, error: result.lastStreamError || "UPSTREAM_ERROR" },
       });
       return false;
     }
+
+    // [17] protocolViolation → _pushHistory(user_hint) → return true
     if (hasProtocolViolation) {
       const retryHint =
         "你的工具调用 XML 无效。若需调用工具，请只输出一个合法的 <tool_calls>...</tool_calls>；否则输出纯 Markdown。现在请按协议重试。";
-      this.messages.push({ role: "user", content: retryHint });
-      this.providerMessages.push({ role: "user", content: retryHint });
+      this._pushHistory({ role: "user_hint", text: retryHint });
       return true;
     }
-    if (completedToolUses.length === 0) {
-      const shouldRetry = this._checkAutoRetry(plainText || assistantRaw);
+
+    // [18] 无工具分支: _checkAutoRetry + 延迟 delta 发送 + _setOutcome
+    if (result.completedToolUses.length === 0) {
+      const autoRetryText = adapter.getAutoRetryText(result);
+      const shouldRetry = this._checkAutoRetry(autoRetryText);
       if (shouldRetry) return true;
-      if (
-        plainText &&
-        !hasProtocolViolation &&
+
+      // 延迟 delta 发送：Anthropic 路径在 emitTextDelta=true 时已实时发送，
+      // 只有 holdAssistantDelta 时才需延迟发送。
+      // Provider 路径从不实时发送，但 detectsProtocolViolation=true 时 hasProtocolViolation
+      // 已在上面处理，此处只需判断 holdAssistantDelta。
+      const outcomeCompleted =
         this.turnEngine.getOutcome().status === "completed" &&
-        this.turnEngine.getOutcome().reason === "completed"
-      ) {
-        this._emitAssistantDeltaSafe(plainText, { dropPureJsonPayload: executionContract.required });
+        this.turnEngine.getOutcome().reason === "completed";
+
+      if (holdAssistantDelta && result.displayText && outcomeCompleted) {
+        this._emitAssistantDeltaSafe(result.displayText, {
+          dropPureJsonPayload: executionContract.required,
+        });
       }
-      if (this.turnEngine.getOutcome().status === "completed" && this.turnEngine.getOutcome().reason === "completed") {
+      // Provider 路径不实时发送文本，需在此补发
+      if (!holdAssistantDelta && adapter.detectsProtocolViolation &&
+          result.displayText && !hasProtocolViolation && outcomeCompleted) {
+        this._emitAssistantDeltaSafe(result.displayText, {
+          dropPureJsonPayload: executionContract.required,
+        });
+      }
+
+      if (outcomeCompleted) {
         this.turnEngine.record({ type: "model_done", finishReason: "assistant_text" });
         this._setOutcome({ status: "completed", reason: "assistant_text", reasonCodes: ["assistant_text"] });
       }
       return false;
     }
 
-    this.totalToolCalls += completedToolUses.length;
+    // [19] totalToolCalls++ → _processCompletedToolUses
+    this.totalToolCalls += result.completedToolUses.length;
     this.executionNoToolTurns = 0;
     this.forcedToolChoice = null;
-
-    const processed = await this._processCompletedToolUses(completedToolUses, { presetResults });
-    if (processed.injectedToolMessages.length > 0) {
-      this.providerMessages.push(...processed.injectedToolMessages);
-    }
-    return processed.shouldContinue;
-  }
-
-  private async _runOneTurn(): Promise<boolean> {
-    // per-turn 阶段门禁：动态计算本轮可用工具集和 hint
-    const perTurnCaps = this.ctx.computePerTurnAllowed?.(this.runState) ?? null;
-    const effectiveAllowed = perTurnCaps?.allowed ?? this.ctx.allowedToolNames;
-    this.turnAllowedToolNames = effectiveAllowed;
-
-    const tools = TOOL_LIST.filter((tool) => {
-      if (!effectiveAllowed.has(tool.name)) return false;
-      if (!tool.modes || tool.modes.length === 0) return true;
-      return tool.modes.includes(this.ctx.mode);
-    }).map(toolMetaToAnthropicDef);
-
-    // MCP 工具：从 context 的 mcpTools 生成 tool definitions（需编码 name，与内置工具一致）
-    const mcpToolDefs = ((this.ctx as any).mcpTools ?? [])
-      .filter((t: any) => effectiveAllowed.has(t.name))
-      .map((t: any) => ({
-        name: encodeToolName(String(t.name ?? "")),
-        description: String(t.description ?? ""),
-        input_schema: normalizeToolParametersSchema(t?.inputSchema),
-      }));
-    tools.push(...mcpToolDefs);
-    const turnToolChoice = this._resolveTurnToolChoice(
-      new Set(tools.map((t: any) => String(t?.name ?? "").trim()).filter(Boolean)),
+    return this._processCompletedToolUses(
+      result.completedToolUses,
+      result.presetResults.size > 0 ? { presetResults: result.presetResults } : undefined,
     );
-
-    // hint 追加到本轮 system prompt（不修改 ctx.systemPrompt 本身）
-    const turnSystemPrompt = perTurnCaps?.hint
-      ? `${this.ctx.systemPrompt}\n\n${perTurnCaps.hint}`
-      : this.ctx.systemPrompt;
-    const executionContract = this._getExecutionContract();
-    const holdAssistantDelta =
-      executionContract.required && this.totalToolCalls < executionContract.minToolCalls;
-
-    this.ctx.writeEvent("assistant.start", { turn: this.turn });
-
-    let assistantText = "";
-    let streamErrored = false;
-    let lastStreamError = "";
-    let promptTokens = 0;
-    let completionTokens = 0;
-
-    const pendingToolUses = new Map<string, PendingToolUse>();
-    const completedToolUses: ContentBlockToolUse[] = [];
-
-    const STREAM_RETRY_MAX = 3;
-    const STREAM_RETRY_BASE_MS = 800;
-
-    for (let attempt = 0; attempt <= STREAM_RETRY_MAX; attempt++) {
-      if (this.ctx.abortSignal.aborted) break;
-
-      // Reset per-attempt state
-      assistantText = "";
-      streamErrored = false;
-      lastStreamError = "";
-      promptTokens = 0;
-      completionTokens = 0;
-      pendingToolUses.clear();
-      completedToolUses.length = 0;
-
-      const stream = streamAnthropicMessages({
-        apiKey: this.ctx.apiKey,
-        model: this.ctx.modelId,
-        baseUrl: this.ctx.baseUrl,
-        system: turnSystemPrompt,
-        messages: this.messages,
-        tools,
-        tool_choice: turnToolChoice,
-        signal: this.ctx.abortSignal,
-      });
-
-      for await (const ev of stream) {
-        if (this.ctx.abortSignal.aborted) break;
-
-        this._handleStreamEvent(ev, {
-          pendingToolUses,
-          completedToolUses,
-          emitTextDelta: !holdAssistantDelta,
-          onTextDelta: (delta) => {
-            assistantText += delta;
-          },
-          onUsage: (p, c) => {
-            promptTokens = Math.max(promptTokens, p);
-            completionTokens = Math.max(completionTokens, c);
-          },
-          onError: (error) => {
-            streamErrored = true;
-            lastStreamError = error;
-          },
-        });
-
-        if (streamErrored) break;
-      }
-
-      // HTTP 200 但 body 为空（代理/上游异常）：视为可重试错误
-      const hasContent = assistantText.length > 0 || completedToolUses.length > 0;
-      if (!streamErrored && !hasContent) {
-        streamErrored = true;
-        lastStreamError = "模型服务返回了空响应，正在重试...";
-        this.turnEngine.record({ type: "model_error", error: lastStreamError });
-      }
-
-      if (!streamErrored) break;
-
-      // Only retry if no content was produced (connection failed before model responded)
-      if (hasContent || attempt >= STREAM_RETRY_MAX) break;
-
-      const jitter = Math.floor(Math.random() * 200);
-      const waitMs = STREAM_RETRY_BASE_MS * Math.pow(2, attempt) + jitter;
-      console.warn(
-        `[agent-stream] retry ${attempt + 1}/${STREAM_RETRY_MAX} after ${waitMs}ms — ${lastStreamError}`,
-      );
-      await new Promise((r) => setTimeout(r, waitMs));
-    }
-
-    // After all retries exhausted, emit error to client
-    if (streamErrored) {
-      this.ctx.writeEvent("error", { error: lastStreamError, turn: this.turn });
-    }
-
-    if (this.ctx.onTurnUsage && (promptTokens > 0 || completionTokens > 0)) {
-      this.ctx.onTurnUsage(promptTokens, completionTokens);
-    }
-
-    if (completedToolUses.length === 0) {
-      const fallbackToolUse = this._trySynthesizeToolUseFromJsonText(assistantText);
-      if (fallbackToolUse) {
-        completedToolUses.push(fallbackToolUse);
-        this.turnEngine.record({
-          type: "model_tool_call",
-          callId: String(fallbackToolUse.id ?? ""),
-          name: String(fallbackToolUse.name ?? ""),
-          args: fallbackToolUse.input && typeof fallbackToolUse.input === "object"
-            ? (fallbackToolUse.input as Record<string, unknown>)
-            : {},
-        });
-      }
-    }
-
-    const suppressMixedAssistantText = completedToolUses.length > 0 && assistantText.trim().length > 0;
-    if (suppressMixedAssistantText) {
-      this.ctx.writeEvent("run.notice", {
-        turn: this.turn,
-        kind: "info",
-        title: "MixedOutputSuppressed",
-        message: "检测到文本与工具混输，已忽略文本，仅执行工具调用。",
-      });
-    }
-    const assistantBlocks: Array<{ type: "text"; text: string } | ContentBlockToolUse> = [];
-    if (assistantText && !suppressMixedAssistantText) assistantBlocks.push({ type: "text", text: assistantText });
-    if (completedToolUses.length > 0) assistantBlocks.push(...completedToolUses);
-    if (assistantBlocks.length > 0) {
-      this.messages.push({ role: "assistant", content: assistantBlocks });
-    }
-
-    this.ctx.writeEvent("assistant.done", { turn: this.turn });
-
-    if (this.ctx.abortSignal.aborted) {
-      this.turnEngine.record({ type: "model_error", error: "ABORTED" });
-      this._setOutcome({ status: "aborted", reason: "aborted", reasonCodes: ["aborted"] });
-      return false;
-    }
-    if (streamErrored) {
-      this._setOutcome({
-        status: "failed",
-        reason: "upstream_error",
-        reasonCodes: ["upstream_error"],
-        detail: { turn: this.turn, error: lastStreamError || "UPSTREAM_ERROR" },
-      });
-      return false;
-    }
-
-    if (completedToolUses.length === 0) {
-      const shouldRetry = this._checkAutoRetry(assistantText);
-      if (shouldRetry) return true;
-      if (
-        holdAssistantDelta &&
-        assistantText &&
-        this.turnEngine.getOutcome().status === "completed" &&
-        this.turnEngine.getOutcome().reason === "completed"
-      ) {
-        this._emitAssistantDeltaSafe(assistantText, { dropPureJsonPayload: executionContract.required });
-      }
-      if (
-        this.turnEngine.getOutcome().status === "completed" &&
-        this.turnEngine.getOutcome().reason === "completed"
-      ) {
-        this.turnEngine.record({ type: "model_done", finishReason: "assistant_text" });
-        this._setOutcome({ status: "completed", reason: "assistant_text", reasonCodes: ["assistant_text"] });
-      }
-      return false;
-    }
-    this.totalToolCalls += completedToolUses.length;
-    this.executionNoToolTurns = 0;
-    this.forcedToolChoice = null;
-    const processed = await this._processCompletedToolUses(completedToolUses);
-    return processed.shouldContinue;
   }
 
   private _handleStreamEvent(
@@ -2643,8 +2832,7 @@ export class WritingAgentRunner {
 
   private _checkAutoRetry(assistantText: string): boolean {
     const pushRetryUserMessage = (content: string) => {
-      this.messages.push({ role: "user", content });
-      this.providerMessages.push({ role: "user", content });
+      this._pushHistory({ role: "user_hint", text: content });
     };
 
     const canForceToolChoice = this.supportsForcedToolChoice;
@@ -2849,7 +3037,7 @@ export class WritingAgentRunner {
   }
 
   getMessages(): AnthropicMessage[] {
-    return this.messages;
+    return this._toAnthropicMessages();
   }
 
   getRunState(): RunState {
