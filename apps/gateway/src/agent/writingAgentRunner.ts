@@ -190,6 +190,11 @@ function parseJsonObjectFromFreeText(raw: string): Record<string, unknown> | nul
   return null;
 }
 
+function hasNonEmptyStringField(obj: Record<string, unknown>, key: string): boolean {
+  const v = obj[key];
+  return typeof v === "string" && v.trim().length > 0;
+}
+
 function isAnthropicMessagesEndpoint(endpoint?: string): boolean {
   const ep = String(endpoint ?? "/v1/messages").trim().toLowerCase();
   return ep.endsWith("/messages") || ep === "/messages";
@@ -753,20 +758,89 @@ export class WritingAgentRunner {
     return undefined;
   }
 
+  private _findAllowedMcpToolName(pattern: RegExp): string | null {
+    const allowed = this.turnAllowedToolNames ?? this.ctx.allowedToolNames;
+    const mcpTools = Array.isArray((this.ctx as any).mcpTools) ? ((this.ctx as any).mcpTools as any[]) : [];
+    for (const t of mcpTools) {
+      const name = String(t?.name ?? "").trim();
+      if (!name || !allowed.has(name)) continue;
+      if (pattern.test(name)) return name;
+    }
+    return null;
+  }
+
+  private _mcpRequiredArgsSatisfied(toolName: string, args: Record<string, unknown>): boolean {
+    const mcpTools = Array.isArray((this.ctx as any).mcpTools) ? ((this.ctx as any).mcpTools as any[]) : [];
+    const meta = mcpTools.find((t) => String(t?.name ?? "").trim() === toolName);
+    const required = Array.isArray(meta?.inputSchema?.required)
+      ? (meta.inputSchema.required as any[]).map((x) => String(x ?? "").trim()).filter(Boolean)
+      : [];
+    for (const k of required) {
+      const v = (args as Record<string, unknown>)[k];
+      if (typeof v === "string") {
+        if (!v.trim()) return false;
+        continue;
+      }
+      if (v === undefined || v === null) return false;
+    }
+    return true;
+  }
+
+  private _pickFallbackMcpToolName(parsed: Record<string, unknown>, preferredName: string): string | null {
+    const hasUrl = hasNonEmptyStringField(parsed, "url");
+    const hasRef = hasNonEmptyStringField(parsed, "ref");
+    const hasElement = hasNonEmptyStringField(parsed, "element");
+    const hasText = hasNonEmptyStringField(parsed, "text");
+    const hasNoteOnly =
+      Object.keys(parsed).every((k) => ["note", "message", "status"].includes(String(k).trim())) &&
+      Object.keys(parsed).length > 0;
+    if (hasNoteOnly) return null;
+
+    if (hasUrl) {
+      return (
+        this._findAllowedMcpToolName(/(browser_navigate|navigate|open_url|openurl|open)$/i) ||
+        this._findAllowedMcpToolName(/navigate|open_url|openurl|open/i) ||
+        preferredName
+      );
+    }
+    if (hasRef || hasElement) {
+      if (hasText) {
+        const typeTool =
+          this._findAllowedMcpToolName(/(browser_type|browser_fill|type|fill|input)/i);
+        if (typeTool) return typeTool;
+      }
+      return this._findAllowedMcpToolName(/(browser_click|click)/i);
+    }
+    if (hasText) {
+      return this._findAllowedMcpToolName(/(browser_type|browser_fill|type|fill|input)/i);
+    }
+    return null;
+  }
+
   private _trySynthesizeToolUseFromJsonText(rawText: string): ContentBlockToolUse | null {
     const contract = this._getExecutionContract();
     if (!contract.required) return null;
     const allowed = this.turnAllowedToolNames ?? this.ctx.allowedToolNames;
     const preferred = contract.preferredToolNames.find((name) => allowed.has(String(name ?? "").trim()));
-    const toolName = String(preferred ?? "").trim();
-    if (!toolName) return null;
+    const preferredName = String(preferred ?? "").trim();
+    if (!preferredName) return null;
 
     const parsed = parseJsonObjectFromFreeText(rawText);
     if (!parsed) return null;
     if (Object.keys(parsed).length === 0) return null;
 
+    let toolName = preferredName;
+    if (preferredName.startsWith("mcp.")) {
+      const mcpPicked = this._pickFallbackMcpToolName(parsed, preferredName);
+      if (!mcpPicked) return null;
+      toolName = mcpPicked;
+    }
+    if (!toolName) return null;
+
     const normalized = normalizeToolCallForValidation(toolName, parsed);
-    if (!toolName.startsWith("mcp.")) {
+    if (toolName.startsWith("mcp.")) {
+      if (!this._mcpRequiredArgsSatisfied(toolName, normalized.args)) return null;
+    } else {
       const v = validateToolCallArgs({ name: normalized.name, toolArgs: normalized.args });
       if (!v.ok) return null;
     }
