@@ -173,6 +173,23 @@ function parseObjectJson(jsonText: string): Record<string, unknown> {
   return {};
 }
 
+function parseJsonObjectFromFreeText(raw: string): Record<string, unknown> | null {
+  const text = String(raw ?? "").trim();
+  if (!text) return null;
+  const fenced = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  const candidate = fenced?.[1] ? String(fenced[1]).trim() : text;
+  if (!(candidate.startsWith("{") && candidate.endsWith("}"))) return null;
+  try {
+    const parsed = JSON.parse(candidate);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
 function isAnthropicMessagesEndpoint(endpoint?: string): boolean {
   const ep = String(endpoint ?? "/v1/messages").trim().toLowerCase();
   return ep.endsWith("/messages") || ep === "/messages";
@@ -736,6 +753,39 @@ export class WritingAgentRunner {
     return undefined;
   }
 
+  private _trySynthesizeToolUseFromJsonText(rawText: string): ContentBlockToolUse | null {
+    const contract = this._getExecutionContract();
+    if (!contract.required) return null;
+    const allowed = this.turnAllowedToolNames ?? this.ctx.allowedToolNames;
+    const preferred = contract.preferredToolNames.find((name) => allowed.has(String(name ?? "").trim()));
+    const toolName = String(preferred ?? "").trim();
+    if (!toolName) return null;
+
+    const parsed = parseJsonObjectFromFreeText(rawText);
+    if (!parsed) return null;
+    if (Object.keys(parsed).length === 0) return null;
+
+    const normalized = normalizeToolCallForValidation(toolName, parsed);
+    if (!toolName.startsWith("mcp.")) {
+      const v = validateToolCallArgs({ name: normalized.name, toolArgs: normalized.args });
+      if (!v.ok) return null;
+    }
+
+    this.ctx.writeEvent("run.notice", {
+      turn: this.turn,
+      kind: "info",
+      title: "JsonToolFallback",
+      message: `检测到参数 JSON，已按工具调用执行：${normalized.name}`,
+    });
+
+    return {
+      type: "tool_use",
+      id: `json_fallback_${this.turn}_${Date.now()}`,
+      name: normalized.name,
+      input: normalized.args,
+    };
+  }
+
   private _setOutcome(next: RunOutcome): void {
     this.outcome = next;
   }
@@ -1245,6 +1295,11 @@ export class WritingAgentRunner {
       });
     }
 
+    if (completedToolUses.length === 0) {
+      const fallbackToolUse = this._trySynthesizeToolUseFromJsonText(plainText || assistantRaw);
+      if (fallbackToolUse) completedToolUses.push(fallbackToolUse);
+    }
+
     const hasProtocolViolation = hasToolCallMarker && calls.length === 0;
     const suppressMixedPlainText = completedToolUses.length > 0 && plainText.length > 0;
     if (hasProtocolViolation) {
@@ -1295,7 +1350,7 @@ export class WritingAgentRunner {
     if (completedToolUses.length === 0) {
       const shouldRetry = this._checkAutoRetry(plainText || assistantRaw);
       if (shouldRetry) return true;
-      if (plainText && !hasProtocolViolation) {
+      if (plainText && !hasProtocolViolation && this.outcome.status === "completed" && this.outcome.reason === "completed") {
         this.ctx.writeEvent("assistant.delta", { delta: plainText, turn: this.turn });
       }
       if (this.outcome.status === "completed" && this.outcome.reason === "completed") {
@@ -1454,6 +1509,11 @@ export class WritingAgentRunner {
       this.ctx.onTurnUsage(promptTokens, completionTokens);
     }
 
+    if (completedToolUses.length === 0) {
+      const fallbackToolUse = this._trySynthesizeToolUseFromJsonText(assistantText);
+      if (fallbackToolUse) completedToolUses.push(fallbackToolUse);
+    }
+
     const suppressMixedAssistantText = completedToolUses.length > 0 && assistantText.trim().length > 0;
     if (suppressMixedAssistantText) {
       this.ctx.writeEvent("run.notice", {
@@ -1489,7 +1549,7 @@ export class WritingAgentRunner {
     if (completedToolUses.length === 0) {
       const shouldRetry = this._checkAutoRetry(assistantText);
       if (shouldRetry) return true;
-      if (holdAssistantDelta && assistantText) {
+      if (holdAssistantDelta && assistantText && this.outcome.status === "completed" && this.outcome.reason === "completed") {
         this.ctx.writeEvent("assistant.delta", { delta: assistantText, turn: this.turn });
       }
       if (this.outcome.status === "completed" && this.outcome.reason === "completed") {
