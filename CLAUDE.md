@@ -44,6 +44,57 @@ packages/kb-core   — KB 检索/评分的纯 TS 核心
 
 Desktop 在每次 WS 连接时预打包 sidecar 数据（styleLinterLibraries、projectFiles、docRules）发给 Gateway。Gateway 对 lint.style / project.listFiles / project.docRules.get 做条件路由：sidecar 中有数据时可在 Gateway 直接返回，否则回传 Desktop 执行。这是优化，不改变"工具在本地执行"的大原则。
 
+### Gateway Agent Runner 扩展指南
+
+> 详细设计文档：`docs/specs/multi-endpoint-refactor-v0.1.md`
+
+`writingAgentRunner.ts` 是 Agent 编排的核心。经过多端点重构（Phase A-D），它的扩展点已经标准化。**新增功能时必须走已有抽象，禁止在 turn 函数中加 if/else 判断端点类型。**
+
+#### 新增 LLM 端点/Provider
+
+只需在 `_createTurnAdapter()` 中新增一个 adapter 对象，实现 `TurnAdapter` 接口：
+
+```
+_createTurnAdapter()          — 根据 this.supportsNativeToolUse 分发
+  ├─ _createAnthropicAdapter()  — Anthropic Messages API
+  ├─ _createProviderAdapter()   — OpenAI/Gemini 兼容
+  └─ 新端点？新增一个 _createXxxAdapter()
+```
+
+每个 adapter 需实现 5 个方法：`buildToolDefs`、`consumeStream`、`hasContent`、`getAutoRetryText`、`buildHistoryEntry`。统一的 `_runOneTurn()` 19 步骤骨架不需要改。
+
+同时在 `inferApiType()` 中添加对应的 endpoint → `ModelApiType` 映射。
+
+#### 新增工具
+
+1. 在 `packages/tools/src/toolList.ts` 的 `TOOL_LIST` 中添加工具元数据
+2. 工具自动流经 adapter 的 `buildToolDefs()`，无需改 runner
+3. 工具执行走 Desktop WS 路由（非编排类）或 `serverToolRunner.ts`（编排类）
+4. 如果需要 per-turn 动态控制可用工具，走 `computePerTurnAllowed` 回调
+
+#### 新增 MCP 工具
+
+MCP 工具通过 `RunContext.mcpTools` 传入，两个 adapter 的 `buildToolDefs` 已自动处理 MCP 工具定义。不需要改 runner。
+
+#### 新增 Skill
+
+Skill 是数据配置，不是代码改动：
+1. 在 `packages/agent-core/src/skills/` 的 `SKILL_MANIFESTS` 中注册
+2. 配置 `triggers`（自动激活规则）、`requiredTools`（需要的工具）、`stagePrompt`（注入的提示词）
+3. 框架自动处理激活检测、工具白名单扩展、提示词注入
+
+#### 消息历史格式
+
+所有历史消息使用 `CanonicalHistoryEntry`（4 种角色：user/assistant/tool_result/user_hint）。写入用 `_pushHistory()`，读取时按需转换：
+- `_toAnthropicMessages()` → Anthropic content block 格式
+- `_toProviderMessages()` → OpenAI chat message 格式（tool_use 自动转 XML）
+
+**禁止直接操作 `this.history` 数组或维护第二套消息队列。**
+
+#### 回归测试
+
+改动 runner 后必须运行：`npm -w @writing-ide/gateway run test:runner-turn`（6 场景覆盖双路径）
+
 ---
 
 ## Agent 架构
