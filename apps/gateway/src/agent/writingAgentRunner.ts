@@ -2647,6 +2647,24 @@ export class WritingAgentRunner {
         return true;
       }
 
+      // 软降级：若已有可读文本，则不直接失败，避免“只因未调工具而整轮失败”。
+      if (String(assistantText ?? "").trim()) {
+        this.ctx.writeEvent("run.notice", {
+          turn: this.turn,
+          kind: "warn",
+          title: "ExecutionContractSoftDegrade",
+          message: "本轮未触发工具调用，已按文本回复返回；如需实际执行，请明确要求继续执行工具步骤。",
+          detail: {
+            minToolCalls: executionContract.minToolCalls,
+            currentToolCalls: this.totalToolCalls,
+            reason: executionContract.reason ?? "",
+            retries: this.executionNoToolTurns,
+          },
+        });
+        return false;
+      }
+
+      // 无文本可回显时，保留失败分支，避免用户看起来“没结果却成功”。
       this.failedToolDigests.push({
         toolCallId: `execution_contract_turn_${this.turn}`,
         name: preferredToolName || "execution.contract",
@@ -2665,7 +2683,7 @@ export class WritingAgentRunner {
         turn: this.turn,
         kind: "error",
         title: "ExecutionContractFailed",
-        message: "执行达成约束失败：连续重试后仍未触发工具调用，已结束本轮。",
+        message: "执行达成约束失败：连续重试后仍未触发工具调用，且无可读回复，已结束本轮。",
       });
       this._setOutcome({
         status: "failed",

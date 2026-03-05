@@ -257,6 +257,14 @@ function buildRouteDecisionV1(args: {
 }): RouteDecisionV1 {
   const routeIdLower = String(args.routeId ?? "").trim().toLowerCase();
   const isExecutionRoute = args.nextAction === "enter_workflow" && args.effectiveToolPolicy !== "deny";
+  // 仅对高确定性执行路由启用“必须触发工具调用”硬约束，避免泛任务路由误触发强制调工具。
+  const strictExecutionRoutes = new Set([
+    "file_delete_only",
+    "file_ops",
+    "project_search",
+    "web_radar",
+    "kb_ops",
+  ]);
   const executionPreferredRaw: string[] = [];
 
   if (routeIdLower === "file_delete_only") {
@@ -295,11 +303,13 @@ function buildRouteDecisionV1(args: {
     }
   }
 
+  const requiresToolExecution =
+    isExecutionRoute && (strictExecutionRoutes.has(routeIdLower) || directOpenWebIntent);
   const executionContract: ExecutionContract = {
-    required: isExecutionRoute,
-    minToolCalls: isExecutionRoute ? 1 : 0,
-    maxNoToolTurns: isExecutionRoute ? 2 : 0,
-    reason: isExecutionRoute ? `route:${routeIdLower || "unknown"}` : "route:non_execution",
+    required: requiresToolExecution,
+    minToolCalls: requiresToolExecution ? 1 : 0,
+    maxNoToolTurns: requiresToolExecution ? 2 : 0,
+    reason: requiresToolExecution ? `route:${routeIdLower || "unknown"}` : "route:non_execution",
     preferredToolNames: executionPreferred,
   };
 
