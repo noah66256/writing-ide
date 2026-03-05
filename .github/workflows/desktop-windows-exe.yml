@@ -80,21 +80,19 @@ jobs:
           TITLE="Desktop v${VER}"
           echo "version=${VER}  tag=${TAG}"
 
-          # 收集产物（只找 out/ 根目录的 exe，排除 win-unpacked/ 子目录）
-          # NSIS 安装包含 "Setup"，portable 不含；两种都支持
-          EXES="$(find apps/desktop/out -maxdepth 1 -name '*.exe' -print || true)"
-          BLOCKMAP="$(find apps/desktop/out -maxdepth 1 -name '*.exe.blockmap' -print | head -n 1 || true)"
-
-          if [ -z "${EXES:-}" ]; then
-            echo "EXE not found under apps/desktop/out"
+          # 仅上传 NSIS 安装包（IDE.Setup.*.exe），不上传 portable exe
+          SETUP_EXE="$(find apps/desktop/out -maxdepth 1 -name '*Setup*.exe' -print | head -n 1 || true)"
+          if [ -z "${SETUP_EXE:-}" ]; then
+            echo "NSIS setup exe not found under apps/desktop/out"
+            find apps/desktop/out -maxdepth 1 -name '*.exe' -print || true
             exit 3
           fi
+          BLOCKMAP="${SETUP_EXE}.blockmap"
 
           # 创建或复用 release
           gh release view "${TAG}" >/dev/null 2>&1 || gh release create "${TAG}" -t "${TITLE}" -n "" --latest=false
-          echo "${EXES}" | while IFS= read -r f; do
-            [ -n "$f" ] && echo "uploading: $f" && gh release upload "${TAG}" "$f" --clobber
-          done
-          if [ -n "${BLOCKMAP:-}" ]; then
+          echo "uploading: ${SETUP_EXE}"
+          gh release upload "${TAG}" "${SETUP_EXE}" --clobber
+          if [ -f "${BLOCKMAP}" ]; then
             gh release upload "${TAG}" "${BLOCKMAP}" --clobber
           fi
