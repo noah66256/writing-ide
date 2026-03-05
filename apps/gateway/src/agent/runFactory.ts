@@ -6,6 +6,7 @@ import { type LlmTokenUsage } from "../billing.js";
 import { type OpenAiChatMessage } from "../llm/openaiCompat.js";
 import { completionOnceViaProvider } from "../llm/providerAdapter.js";
 import { toolNamesForMode, type AgentMode } from "./toolRegistry.js";
+import { buildToolCatalog, selectToolSubset, type ToolCatalogSummary } from "./toolCatalog.js";
 import {
   ensureRunAuditEnded,
   persistRunAudit,
@@ -197,6 +198,28 @@ export const ROUTE_REGISTRY_V1 = [
 
 type RouteId = (typeof ROUTE_REGISTRY_V1)[number]["routeId"];
 const RouteIdSchema = z.enum(ROUTE_REGISTRY_V1.map((r) => r.routeId) as [RouteId, ...RouteId[]]);
+
+const CORE_WORKFLOW_TOOL_NAMES = [
+  "time.now",
+  "run.mainDoc.get",
+  "run.mainDoc.update",
+  "run.setTodoList",
+  "run.updateTodo",
+  "run.todo.upsertMany",
+  "run.todo.update",
+  "run.todo.remove",
+  "run.todo.clear",
+  "run.done",
+] as const;
+
+const DELETE_ROUTE_PINNED_TOOL_NAMES = [
+  ...CORE_WORKFLOW_TOOL_NAMES,
+  "project.listFiles",
+  "doc.commitSnapshot",
+  "doc.listSnapshots",
+  "doc.restoreSnapshot",
+  "doc.deletePath",
+] as const;
 
 /** 从 contextPack 中提取 Markdown 格式的段落（如 L1_GLOBAL_MEMORY、L2_PROJECT_MEMORY、DIALOGUE_SUMMARY）。
  *  格式：`SEGMENT_NAME(Markdown):\ncontent\n\n`。解析失败返回空字符串。 */
@@ -396,7 +419,7 @@ export function buildAgentProtocolPrompt(args: {
       : `当前模式：Agent（直接执行）。\n` +
         `工作流程：\n` +
         `- 收到任务后：分析需求 → 拆解子任务 → 制定 Todo（管理者视角）→ 逐项委派 → 审核 → 整合交付。\n` +
-        `- 仅在会产生现实后果时才先确认：发布到平台、花钱/投流、群发消息、删除用户已有文件。确认用自然语言一句话，不要用结构化选项菜单。\n` +
+        `- 仅在会产生现实后果时才先确认：发布到平台、花钱/投流、群发消息、删除用户已有文件。确认用自然语言一句话（例如“确定进行删除操作吗？”），不要提 Keep/Diff，不要弹窗。\n` +
         `- 用户若明确要求只回一句/只回 OK/只答是或否，且不需要工具，严格短答并结束。\n` +
         `- 上下文优先级：优先使用 Context Pack 的 REFERENCES 与已关联 KB（KB_SELECTED_LIBRARIES/KB_LIBRARY_PLAYBOOK/KB_STYLE_CLUSTERS）。信息不足再读项目文件或遍历目录。\n` +
         `- 风格库优先：当 KB_SELECTED_LIBRARIES 含 purpose=style 且任务为写作/仿写/改写/润色时，口吻/节奏/结构以风格库为第一优先（除非用户明确覆盖）。\n` +
@@ -1186,6 +1209,8 @@ export type PreparedRun = {
   };
   jwtUser: JwtUserLike | null;
   baseAllowedToolNames: Set<string>;
+  selectedAllowedToolNames: Set<string>;
+  toolCatalogSummary: ToolCatalogSummary;
   styleLinterLibraries: any[];
   projectFilesCount: number;
   messages: OpenAiChatMessage[];
@@ -1802,7 +1827,7 @@ export async function prepareAgentRun(args: {
       ? new Set<string>()
       : effectiveToolPolicy === "allow_readonly"
         ? new Set(Array.from(allToolNamesForModeEffective).filter((n) => !isWriteLikeTool(n)))
-        : allToolNamesForModeEffective;
+        : new Set(allToolNamesForModeEffective);
 
   const runId = randomUUID();
   const styleLinterLibraries = Array.isArray(toolSidecar?.styleLinterLibraries) ? (toolSidecar.styleLinterLibraries as any[]) : [];
@@ -1828,6 +1853,7 @@ export async function prepareAgentRun(args: {
 
   // 已激活 Skill 声明的 toolCaps.allowTools：即使 toolPolicy=deny 也应放行
   // 这确保 corpus_ingest 等 Skill 激活后其必要工具可用
+  const skillPinnedToolNames = new Set<string>();
   if (activeSkillIds.length) {
     for (const sid of activeSkillIds) {
       const manifest = skillManifestById.get(sid);
@@ -1835,7 +1861,10 @@ export async function prepareAgentRun(args: {
       if (Array.isArray(allowTools)) {
         for (const tn of allowTools) {
           const name = String(tn ?? "").trim();
-          if (name && allToolNamesForMode.has(name)) baseAllowedToolNames.add(name);
+          if (name && allToolNamesForMode.has(name)) {
+            baseAllowedToolNames.add(name);
+            skillPinnedToolNames.add(name);
+          }
         }
       }
     }
@@ -1873,6 +1902,42 @@ export async function prepareAgentRun(args: {
     preferredToolNames: executionPreferred,
   };
 
+  const alwaysAllowToolNames = new Set(
+    CORE_WORKFLOW_TOOL_NAMES.filter((name) => baseAllowedToolNames.has(name)),
+  );
+  const deleteRoutePinnedToolNames = new Set(
+    DELETE_ROUTE_PINNED_TOOL_NAMES.filter((name) => baseAllowedToolNames.has(name)),
+  );
+  const preserveToolNames = new Set<string>([
+    ...Array.from(alwaysAllowToolNames),
+    ...Array.from(skillPinnedToolNames),
+    ...executionPreferred,
+    ...(routeIdLower === "file_delete_only" ? Array.from(deleteRoutePinnedToolNames) : []),
+  ]);
+  const toolCatalog = buildToolCatalog({
+    mode,
+    allowedToolNames: baseAllowedToolNames,
+    mcpTools: mcpToolsFromSidecar,
+  });
+  const toolSelection = selectToolSubset({
+    catalog: toolCatalog,
+    routeId: routeIdLower || intentRoute.routeId,
+    userPrompt,
+    preferredToolNames: executionPreferred,
+    preserveToolNames: Array.from(preserveToolNames),
+    maxTools: mode === "agent" ? 30 : 20,
+  });
+  const selectedAllowedToolNames =
+    toolSelection.selectedToolNames.size > 0
+      ? toolSelection.selectedToolNames
+      : new Set(baseAllowedToolNames);
+  for (const name of preserveToolNames) {
+    if (baseAllowedToolNames.has(name)) selectedAllowedToolNames.add(name);
+  }
+  for (const name of executionPreferred) {
+    if (baseAllowedToolNames.has(name)) selectedAllowedToolNames.add(name);
+  }
+
   const projectDirFromSidecar = coerceNonEmptyString(ideSummaryFromSidecar?.projectDir);
   const deleteTargetsHint =
     routeIdLower === "file_delete_only"
@@ -1884,7 +1949,7 @@ export async function prepareAgentRun(args: {
       role: "system",
       content: buildAgentProtocolPrompt({
         mode,
-        allowedToolNames: baseAllowedToolNames as any,
+        allowedToolNames: selectedAllowedToolNames as any,
         persona: personaFromPack,
         routeId: intentRoute.routeId ?? null,
         deleteTargetsHint,
@@ -2047,25 +2112,11 @@ export async function prepareAgentRun(args: {
     },
   };
 
-  const ALWAYS_ALLOW_TOOL_NAMES = new Set<string>([
-    "time.now",
-    "run.mainDoc.get",
-    "run.mainDoc.update",
-    "run.setTodoList",
-    "run.updateTodo",
-    "run.todo.upsertMany",
-    "run.todo.update",
-    "run.todo.remove",
-    "run.todo.clear",
-  ]);
+  const ALWAYS_ALLOW_TOOL_NAMES = new Set<string>(
+    CORE_WORKFLOW_TOOL_NAMES.filter((name) => selectedAllowedToolNames.has(name)),
+  );
   const DELETE_ONLY_ALLOWED_TOOL_NAMES = new Set<string>([
-    ...Array.from(ALWAYS_ALLOW_TOOL_NAMES),
-    "run.done",
-    "project.listFiles",
-    "doc.commitSnapshot",
-    "doc.listSnapshots",
-    "doc.restoreSnapshot",
-    "doc.deletePath",
+    ...DELETE_ROUTE_PINNED_TOOL_NAMES,
   ]);
 
   // Phase gates disabled — provide all tools, let LLM decide when to call each.
@@ -2078,11 +2129,11 @@ export async function prepareAgentRun(args: {
     const hints: string[] = [];
 
     if (isDeleteOnlyRoute) {
-      allowed = new Set(Array.from(baseAllowedToolNames).filter((name) => DELETE_ONLY_ALLOWED_TOOL_NAMES.has(name)));
+      allowed = new Set(Array.from(selectedAllowedToolNames).filter((name) => DELETE_ONLY_ALLOWED_TOOL_NAMES.has(name)));
       // 兜底确保关键链路可用（受 mode/toolPolicy 影响时仍保留）。
-      allowed.add("project.listFiles");
-      allowed.add("doc.deletePath");
-      allowed.add("run.done");
+      if (baseAllowedToolNames.has("project.listFiles")) allowed.add("project.listFiles");
+      if (baseAllowedToolNames.has("doc.deletePath")) allowed.add("doc.deletePath");
+      if (baseAllowedToolNames.has("run.done")) allowed.add("run.done");
       hints.push(
         "当前任务为删除/清理（file_delete_only）：已启用最小工具集。\n" +
           "- 仅允许 project.listFiles / doc.deletePath / 快照回滚 / run.*\n" +
@@ -2090,8 +2141,12 @@ export async function prepareAgentRun(args: {
       );
     }
 
+    if (!allowed) {
+      allowed = new Set(selectedAllowedToolNames);
+    }
+
     if (!enforceMcpFirstForBinaryRead) {
-      return allowed ? { allowed, hint: hints.join("\n\n") } : null;
+      return { allowed, hint: hints.join("\n\n") };
     }
     const mcpCalls = Math.max(0, Math.floor(Number((state as any)?.mcpToolCallCount ?? 0)));
     const mcpOk = Math.max(0, Math.floor(Number((state as any)?.mcpToolSuccessCount ?? 0)));
@@ -2100,10 +2155,9 @@ export async function prepareAgentRun(args: {
     // MCP-first 护栏：二进制读取场景下，先完成至少两次 MCP 尝试（或一次成功）再放开 code.exec。
     const shouldBlockCodeExec = mcpOk === 0 && (mcpCalls < 2 || mcpFail < 2);
     if (!shouldBlockCodeExec) {
-      return allowed ? { allowed, hint: hints.join("\n\n") } : null;
+      return { allowed, hint: hints.join("\n\n") };
     }
 
-    if (!allowed) allowed = new Set(baseAllowedToolNames);
     allowed.delete("code.exec");
     const toolHint = Array.from(binaryReadMcpToolNames).slice(0, 4).join(" / ");
     hints.push(
@@ -2201,6 +2255,8 @@ export async function prepareAgentRun(args: {
       env,
       jwtUser,
       baseAllowedToolNames,
+      selectedAllowedToolNames,
+      toolCatalogSummary: toolSelection.summary,
       styleLinterLibraries,
       projectFilesCount,
       messages,
@@ -2255,6 +2311,8 @@ export async function executeAgentRun(args: {
     pickedId,
     requestedIdRaw,
     baseAllowedToolNames,
+    selectedAllowedToolNames,
+    toolCatalogSummary,
     styleLinterLibraries,
     projectFilesCount,
     contextManifestFromPack,
@@ -2326,6 +2384,13 @@ export async function executeAgentRun(args: {
       pickedId,
       requestedIdRaw,
       executionContract,
+      toolSelection: {
+        routeId: intentRoute.routeId ?? "unknown",
+        allowedPoolSize: baseAllowedToolNames.size,
+        selectedPoolSize: selectedAllowedToolNames.size,
+        selectedToolNames: Array.from(selectedAllowedToolNames).slice(0, 36),
+        summary: toolCatalogSummary,
+      },
       toolSidecar: {
         styleLinterLibraries: styleLinterLibraries.length,
         projectFiles: projectFilesCount,
@@ -2453,6 +2518,25 @@ export async function executeAgentRun(args: {
       maxNoToolTurns: executionContract.maxNoToolTurns,
       reason: executionContract.reason,
       preferredToolNames: executionContract.preferredToolNames.slice(0, 12),
+    },
+  });
+  writeEvent("run.notice", {
+    turn: 0,
+    kind: "info",
+    title: "ToolSelection",
+    message:
+      toolCatalogSummary.pruned > 0
+        ? `本轮已筛选工具：${toolCatalogSummary.selected}/${toolCatalogSummary.total}（已收敛，避免误选）`
+        : `本轮工具池：${toolCatalogSummary.selected}/${toolCatalogSummary.total}`,
+    detail: {
+      routeId: intentRoute.routeId ?? "unknown",
+      selected: toolCatalogSummary.selected,
+      total: toolCatalogSummary.total,
+      builtin: toolCatalogSummary.builtin,
+      mcp: toolCatalogSummary.mcp,
+      selectedToolNames: toolCatalogSummary.selectedToolNames.slice(0, 32),
+      prunedToolNames: toolCatalogSummary.prunedToolNames.slice(0, 24),
+      rankingSample: toolCatalogSummary.rankingSample.slice(0, 12),
     },
   });
 
@@ -2765,7 +2849,7 @@ export async function executeAgentRun(args: {
     intentRouteId: intentRoute.routeId ?? undefined,
     gates,
     activeSkills,
-    allowedToolNames: baseAllowedToolNames,
+    allowedToolNames: selectedAllowedToolNames,
     systemPrompt: fullSystemPrompt,
     targetAgentIds: runTargetAgentIds,
     toolSidecar,
@@ -2818,11 +2902,19 @@ export async function executeAgentRun(args: {
   (runState as any).mainDocLatest = runCtx.mainDoc;
 
   const runner = new WritingAgentRunner(runCtx);
+  let runnerOutcome = runner.getOutcome();
   try {
     await runner.run(userPrompt, body.images?.length ? body.images : undefined);
+    runnerOutcome = runner.getOutcome();
   } catch (err: any) {
     const msg = String(err?.message ?? err ?? "RUNNER_ERROR");
     writeEvent("error", { error: msg });
+    runnerOutcome = {
+      status: "failed",
+      reason: "runner_exception",
+      reasonCodes: ["runner_exception"],
+      detail: { message: msg },
+    };
   }
 
   const failureDigest = runner.getFailureDigest();
@@ -2833,16 +2925,61 @@ export async function executeAgentRun(args: {
       failedTools: failureDigest.failedTools,
     });
   }
-  const completedReasonCodes = failureDigest.failedCount > 0 ? ["completed", "has_failures"] : ["completed"];
+  const outcomeReasonCodes = Array.from(
+    new Set([
+      ...(Array.isArray(runnerOutcome.reasonCodes) ? runnerOutcome.reasonCodes : []),
+      ...(failureDigest.failedCount > 0 ? ["has_failures"] : []),
+      ...(runnerOutcome.status === "failed" ? ["failed"] : []),
+      ...(runnerOutcome.status === "aborted" ? ["aborted"] : []),
+    ]),
+  );
+  if (!outcomeReasonCodes.length) {
+    outcomeReasonCodes.push(runnerOutcome.status === "completed" ? "completed" : "failed");
+  }
+  const runEndReason = String(runnerOutcome.reason ?? "").trim() || (
+    runnerOutcome.status === "completed" ? "completed" : runnerOutcome.status
+  );
+  if (runnerOutcome.status !== "completed") {
+    const failedLines = failureDigest.failedTools
+      .slice(0, 3)
+      .map((item, idx) => {
+        const msg = item.message || item.error;
+        const path = item.path ? `（${item.path}）` : "";
+        return `${idx + 1}. ${item.name}${path}: ${msg}`;
+      });
+    const fallbackText = (
+      failedLines.length
+        ? `这次没有完成，失败步骤如下：\n${failedLines.join("\n")}\n\n你可以让我“继续重试”，我会从失败步骤接着处理。`
+        : "这次没有完成。你可以让我“继续重试”，我会从失败处接着处理。"
+    );
+    writeEvent("run.notice", {
+      turn: runner.getTurn(),
+      kind: "error",
+      title: "RunOutcome",
+      message: runnerOutcome.status === "aborted"
+        ? "本轮已中断。"
+        : "本轮未完成，请查看失败步骤后重试。",
+      detail: {
+        status: runnerOutcome.status,
+        reason: runEndReason,
+        reasonCodes: outcomeReasonCodes,
+        detail: runnerOutcome.detail ?? null,
+        failedCount: failureDigest.failedCount,
+      },
+    });
+    writeEvent("assistant.delta", { delta: fallbackText, turn: runner.getTurn() });
+  }
 
   writeEvent("run.end", {
     runId,
-    reason: "completed",
-    reasonCodes: completedReasonCodes,
+    reason: runEndReason,
+    reasonCodes: outcomeReasonCodes,
+    status: runnerOutcome.status,
     turn: runner.getTurn(),
+    ...(runnerOutcome.detail ? { detail: runnerOutcome.detail } : {}),
     ...(failureDigest.failedCount > 0 ? { failureDigest } : {}),
   });
-  writeEvent("assistant.done", { reason: "completed" });
+  writeEvent("assistant.done", { reason: runEndReason, status: runnerOutcome.status, turn: runner.getTurn() });
 
   await persistOnce();
   } finally {

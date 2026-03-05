@@ -131,6 +131,13 @@ type ToolFailureDigest = {
   turn: number;
 };
 
+type RunOutcome = {
+  status: "completed" | "failed" | "aborted";
+  reason: string;
+  reasonCodes: string[];
+  detail?: Record<string, unknown> | null;
+};
+
 type PendingToolUse = {
   name: string;
   inputJson: string;
@@ -672,6 +679,7 @@ export class WritingAgentRunner {
   private executionNoToolTurns = 0;
   private totalToolCalls = 0;
   private forcedToolChoice: ForcedToolChoice | null = null;
+  private outcome: RunOutcome = { status: "completed", reason: "completed", reasonCodes: ["completed"] };
 
   constructor(ctx: RunContext) {
     // 若设置了 agentId，包装 writeEvent 自动注入到每条 SSE 事件
@@ -728,7 +736,12 @@ export class WritingAgentRunner {
     return undefined;
   }
 
+  private _setOutcome(next: RunOutcome): void {
+    this.outcome = next;
+  }
+
   async run(userMessage: string, images?: Array<{ mediaType: string; data: string }>): Promise<void> {
+    this._setOutcome({ status: "completed", reason: "completed", reasonCodes: ["completed"] });
     const userContent: AnthropicMessage["content"] = images?.length
       ? [
           ...images.map((img): ContentBlockImage => ({
@@ -754,28 +767,36 @@ export class WritingAgentRunner {
     // If user @mentioned specific agents, auto-delegate before main loop
     if (this.ctx.targetAgentIds?.length) {
       await this._bootstrapTargetDelegation(userMessage);
+      if (this.ctx.abortSignal.aborted) {
+        this._setOutcome({ status: "aborted", reason: "aborted", reasonCodes: ["aborted"] });
+      } else if (this.outcome.reason === "completed") {
+        this._setOutcome({ status: "completed", reason: "delegation_completed", reasonCodes: ["delegation_completed"] });
+      }
       return;
     }
 
     while (this.turn < this.maxTurns) {
-      if (this.ctx.abortSignal.aborted) return;
+      if (this.ctx.abortSignal.aborted) {
+        this._setOutcome({ status: "aborted", reason: "aborted", reasonCodes: ["aborted"] });
+        return;
+      }
       this.turn += 1;
       const shouldContinue = isAnthropicMessagesEndpoint(this.ctx.endpoint)
         ? await this._runOneTurn()
         : await this._runOneTurnViaProvider();
-      if (!shouldContinue) return;
+      if (!shouldContinue) {
+        if (this.ctx.abortSignal.aborted) {
+          this._setOutcome({ status: "aborted", reason: "aborted", reasonCodes: ["aborted"] });
+        }
+        return;
+      }
     }
 
-    this.ctx.writeEvent("run.end", {
-      runId: this.ctx.runId,
+    this._setOutcome({
+      status: "failed",
       reason: "max_turns",
       reasonCodes: ["max_turns"],
-      turn: this.turn,
-      maxTurns: this.maxTurns,
-    });
-    this.ctx.writeEvent("assistant.done", {
-      reason: "max_turns",
-      turn: this.turn,
+      detail: { turn: this.turn, maxTurns: this.maxTurns },
     });
   }
 
@@ -1088,8 +1109,14 @@ export class WritingAgentRunner {
       injectedToolMessages.push({ role: "user", content: mainDocLoopWarning });
     }
 
-    if (this.ctx.abortSignal.aborted) return { shouldContinue: false, injectedToolMessages };
-    if (hasRunDone) return { shouldContinue: false, injectedToolMessages };
+    if (this.ctx.abortSignal.aborted) {
+      this._setOutcome({ status: "aborted", reason: "aborted", reasonCodes: ["aborted"] });
+      return { shouldContinue: false, injectedToolMessages };
+    }
+    if (hasRunDone) {
+      this._setOutcome({ status: "completed", reason: "run_done", reasonCodes: ["run_done"] });
+      return { shouldContinue: false, injectedToolMessages };
+    }
     return { shouldContinue: true, injectedToolMessages };
   }
 
@@ -1239,14 +1266,25 @@ export class WritingAgentRunner {
     const assistantBlocks: Array<{ type: "text"; text: string } | ContentBlockToolUse> = [];
     if (plainText && !suppressMixedPlainText && !hasProtocolViolation) {
       assistantBlocks.push({ type: "text", text: plainText });
-      this.ctx.writeEvent("assistant.delta", { delta: plainText, turn: this.turn });
     }
     if (completedToolUses.length > 0) assistantBlocks.push(...completedToolUses);
     if (assistantBlocks.length > 0) this.messages.push({ role: "assistant", content: assistantBlocks });
     this.providerMessages.push({ role: "assistant", content: assistantRaw });
 
     this.ctx.writeEvent("assistant.done", { turn: this.turn });
-    if (this.ctx.abortSignal.aborted || streamErrored) return false;
+    if (this.ctx.abortSignal.aborted) {
+      this._setOutcome({ status: "aborted", reason: "aborted", reasonCodes: ["aborted"] });
+      return false;
+    }
+    if (streamErrored) {
+      this._setOutcome({
+        status: "failed",
+        reason: "upstream_error",
+        reasonCodes: ["upstream_error"],
+        detail: { turn: this.turn, error: lastStreamError || "UPSTREAM_ERROR" },
+      });
+      return false;
+    }
     if (hasProtocolViolation) {
       const retryHint =
         "你的工具调用 XML 无效。若需调用工具，请只输出一个合法的 <tool_calls>...</tool_calls>；否则输出纯 Markdown。现在请按协议重试。";
@@ -1254,7 +1292,15 @@ export class WritingAgentRunner {
       this.providerMessages.push({ role: "user", content: retryHint });
       return true;
     }
-    if (completedToolUses.length === 0) return this._checkAutoRetry(plainText || assistantRaw);
+    if (completedToolUses.length === 0) {
+      const shouldRetry = this._checkAutoRetry(plainText || assistantRaw);
+      if (shouldRetry) return true;
+      if (plainText && !hasProtocolViolation) {
+        this.ctx.writeEvent("assistant.delta", { delta: plainText, turn: this.turn });
+      }
+      this._setOutcome({ status: "completed", reason: "assistant_text", reasonCodes: ["assistant_text"] });
+      return false;
+    }
 
     this.totalToolCalls += completedToolUses.length;
     this.executionNoToolTurns = 0;
@@ -1267,7 +1313,7 @@ export class WritingAgentRunner {
     return processed.shouldContinue;
   }
 
-    private async _runOneTurn(): Promise<boolean> {
+  private async _runOneTurn(): Promise<boolean> {
     // per-turn 阶段门禁：动态计算本轮可用工具集和 hint
     const perTurnCaps = this.ctx.computePerTurnAllowed?.(this.runState) ?? null;
     const effectiveAllowed = perTurnCaps?.allowed ?? this.ctx.allowedToolNames;
@@ -1313,6 +1359,9 @@ export class WritingAgentRunner {
     const turnSystemPrompt = perTurnCaps?.hint
       ? `${this.ctx.systemPrompt}\n\n${perTurnCaps.hint}`
       : this.ctx.systemPrompt;
+    const executionContract = this._getExecutionContract();
+    const holdAssistantDelta =
+      executionContract.required && this.totalToolCalls < executionContract.minToolCalls;
 
     this.ctx.writeEvent("assistant.start", { turn: this.turn });
 
@@ -1357,6 +1406,7 @@ export class WritingAgentRunner {
         this._handleStreamEvent(ev, {
           pendingToolUses,
           completedToolUses,
+          emitTextDelta: !holdAssistantDelta,
           onTextDelta: (delta) => {
             assistantText += delta;
           },
@@ -1402,8 +1452,17 @@ export class WritingAgentRunner {
       this.ctx.onTurnUsage(promptTokens, completionTokens);
     }
 
+    const suppressMixedAssistantText = completedToolUses.length > 0 && assistantText.trim().length > 0;
+    if (suppressMixedAssistantText) {
+      this.ctx.writeEvent("run.notice", {
+        turn: this.turn,
+        kind: "info",
+        title: "MixedOutputSuppressed",
+        message: "检测到文本与工具混输，已忽略文本，仅执行工具调用。",
+      });
+    }
     const assistantBlocks: Array<{ type: "text"; text: string } | ContentBlockToolUse> = [];
-    if (assistantText) assistantBlocks.push({ type: "text", text: assistantText });
+    if (assistantText && !suppressMixedAssistantText) assistantBlocks.push({ type: "text", text: assistantText });
     if (completedToolUses.length > 0) assistantBlocks.push(...completedToolUses);
     if (assistantBlocks.length > 0) {
       this.messages.push({ role: "assistant", content: assistantBlocks });
@@ -1411,12 +1470,28 @@ export class WritingAgentRunner {
 
     this.ctx.writeEvent("assistant.done", { turn: this.turn });
 
-    if (this.ctx.abortSignal.aborted || streamErrored) {
+    if (this.ctx.abortSignal.aborted) {
+      this._setOutcome({ status: "aborted", reason: "aborted", reasonCodes: ["aborted"] });
+      return false;
+    }
+    if (streamErrored) {
+      this._setOutcome({
+        status: "failed",
+        reason: "upstream_error",
+        reasonCodes: ["upstream_error"],
+        detail: { turn: this.turn, error: lastStreamError || "UPSTREAM_ERROR" },
+      });
       return false;
     }
 
     if (completedToolUses.length === 0) {
-      return this._checkAutoRetry(assistantText);
+      const shouldRetry = this._checkAutoRetry(assistantText);
+      if (shouldRetry) return true;
+      if (holdAssistantDelta && assistantText) {
+        this.ctx.writeEvent("assistant.delta", { delta: assistantText, turn: this.turn });
+      }
+      this._setOutcome({ status: "completed", reason: "assistant_text", reasonCodes: ["assistant_text"] });
+      return false;
     }
     this.totalToolCalls += completedToolUses.length;
     this.executionNoToolTurns = 0;
@@ -1430,6 +1505,7 @@ export class WritingAgentRunner {
     handlers: {
       pendingToolUses: Map<string, PendingToolUse>;
       completedToolUses: ContentBlockToolUse[];
+      emitTextDelta: boolean;
       onTextDelta: (delta: string) => void;
       onUsage: (promptTokens: number, completionTokens: number) => void;
       onError: (error: string) => void;
@@ -1438,7 +1514,9 @@ export class WritingAgentRunner {
     switch (ev.type) {
       case "text_delta": {
         handlers.onTextDelta(ev.delta);
-        this.ctx.writeEvent("assistant.delta", { delta: ev.delta, turn: this.turn });
+        if (handlers.emitTextDelta) {
+          this.ctx.writeEvent("assistant.delta", { delta: ev.delta, turn: this.turn });
+        }
         return;
       }
 
@@ -2259,6 +2337,17 @@ export class WritingAgentRunner {
         title: "ExecutionContractFailed",
         message: "执行达成约束失败：连续重试后仍未触发工具调用，已结束本轮。",
       });
+      this._setOutcome({
+        status: "failed",
+        reason: "execution_contract_unsatisfied",
+        reasonCodes: ["execution_contract_unsatisfied"],
+        detail: {
+          minToolCalls: executionContract.minToolCalls,
+          currentToolCalls: this.totalToolCalls,
+          reason: executionContract.reason ?? "",
+          turn: this.turn,
+        },
+      });
       return false;
     }
 
@@ -2333,5 +2422,9 @@ export class WritingAgentRunner {
 
   getTurn(): number {
     return this.turn;
+  }
+
+  getOutcome(): RunOutcome {
+    return this.outcome;
   }
 }
