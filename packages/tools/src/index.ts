@@ -878,7 +878,7 @@ export const TOOL_LIST: ToolMeta[] = [
   },
   {
     name: "doc.deletePath",
-    description: "删除文件或目录（path）。proposal-first：先预览，Keep 后才会真正删除；Undo 可回滚。",
+    description: "删除文件或目录（path）。高风险操作会先在对话中确认，确认后自动删除；支持 Undo 回滚。",
     args: [{ name: "path", required: true, desc: "文件或目录路径", type: "string" }],
     modes: ["agent"],
     inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: true },
@@ -899,7 +899,7 @@ export const TOOL_LIST: ToolMeta[] = [
   },
   {
     name: "doc.restoreSnapshot",
-    description: "恢复到指定快照（proposal-first：Keep 才会真正恢复；Undo 可回滚）。",
+    description: "恢复到指定快照。高风险操作会先在对话中确认，确认后自动恢复；支持 Undo 回滚。",
     args: [{ name: "snapshotId", required: true, desc: "快照 ID（doc.commitSnapshot 的返回）", type: "string" }],
     modes: ["agent"],
     inputSchema: { type: "object", properties: { snapshotId: { type: "string" } }, required: ["snapshotId"], additionalProperties: true },
@@ -930,7 +930,7 @@ export const TOOL_LIST: ToolMeta[] = [
   },
   {
     name: "doc.write",
-    description: "写入文件（path, content）。统一 proposal-first：先看 diff，Keep 后才会真正写入；Undo 可回滚。",
+    description: "写入文件（path, content）。高风险写入会先在对话中确认，确认后自动执行；支持 Undo 回滚。",
     args: [
       { name: "path", required: true, desc: "文件路径", type: "string" },
       { name: "content", required: true, desc: "文件全文内容", type: "string" },
@@ -981,7 +981,7 @@ export const TOOL_LIST: ToolMeta[] = [
   },
   {
     name: "doc.splitToDir",
-    description: "\u5c06\u4e00\u4e2a\u5927\u6587\u6863\u6309\u201c\u6807\u9898/\u6587\u6848(\u6b63\u6587)\u201d\u5757\u5206\u5272\u6210\u591a\u7bc7\uff0c\u5e76\u5199\u5165\u76ee\u6807\u6587\u4ef6\u5939\uff08proposal-first\uff1aKeep \u624d\u4f1a\u771f\u6b63\u5199\u5165\uff1bUndo \u53ef\u56de\u6eda\uff09\u3002",
+    description: "\u5c06\u4e00\u4e2a\u5927\u6587\u6863\u6309\u201c\u6807\u9898/\u6587\u6848(\u6b63\u6587)\u201d\u5757\u5206\u5272\u6210\u591a\u7bc7\uff0c\u5e76\u5199\u5165\u76ee\u6807\u6587\u4ef6\u5939\uff08\u4e2d\u98ce\u9669\u9ed8\u8ba4\u81ea\u52a8\u5199\u5165\uff0c\u652f\u6301 Undo \u56de\u6eda\uff09\u3002",
     args: [
       { name: "path", required: true, desc: "源文件路径（如 直男财经.md）", type: "string" },
       { name: "targetDir", required: true, desc: "目标目录（如 直男财经/）", type: "string" },
@@ -1005,7 +1005,7 @@ export const TOOL_LIST: ToolMeta[] = [
   },
   {
     name: "doc.applyEdits",
-    description: "对指定文件应用一组 TextEdit（默认提案，Keep 才 apply）。",
+    description: "对指定文件应用一组 TextEdit（中风险默认自动写入，支持 Undo 回滚）。",
     args: [
       { name: "path", required: false, desc: "文件路径（默认 activePath）", type: "string" },
       { name: "edits", required: true, desc: "JSON 数组：TextEdit[]", type: "array" },
@@ -1396,7 +1396,6 @@ export function validateToolCallArgs(args: { name: string; toolArgs: Record<stri
 
   return { ok: true as const };
 }
-
 
 
 

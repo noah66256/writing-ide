@@ -66,19 +66,23 @@ function gatewayBaseUrl() {
   return getGatewayBaseUrl();
 }
 
-const HIGH_RISK_FILE_OP_TOOL_NAMES = new Set(["doc.write", "doc.applyEdits", "doc.deletePath"]);
+const HIGH_RISK_FILE_OP_TOOL_NAMES = new Set(["doc.write", "doc.deletePath", "doc.restoreSnapshot"]);
 
 function getFileOpTargetPath(toolName: string, args: Record<string, unknown>) {
-  if (toolName === "doc.deletePath" || toolName === "doc.write" || toolName === "doc.applyEdits") {
+  if (toolName === "doc.deletePath" || toolName === "doc.write") {
     const p = String(args.path ?? "").trim();
     if (p) return p;
+  }
+  if (toolName === "doc.restoreSnapshot") {
+    const snapshotId = String(args.snapshotId ?? "").trim();
+    if (snapshotId) return snapshotId;
   }
   return "";
 }
 
 function getFileOpActionLabel(toolName: string) {
   if (toolName === "doc.deletePath") return "删除文件";
-  if (toolName === "doc.applyEdits") return "修改文件";
+  if (toolName === "doc.restoreSnapshot") return "恢复快照";
   return "写入文件";
 }
 
@@ -2631,10 +2635,10 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "doc.deletePath",
-    description: "删除文件或目录（path）。proposal-first：先预览，Keep 后才会真正删除；Undo 可回滚。",
+    description: "删除文件或目录（path）。执行前会在对话中确认，确认后自动删除；支持 Undo 回滚。",
     args: [{ name: "path", required: true, desc: "文件或目录路径" }],
     riskLevel: "high",
-    applyPolicy: "proposal",
+    applyPolicy: "auto_apply",
     reversible: true,
     run: async (args) => {
       const rPath = resolveProjectPathArg(args.path);
@@ -2696,6 +2700,8 @@ const tools: ToolDefinition[] = [
         return { undo: () => useProjectStore.getState().restore(snap) };
       };
 
+      const applied = await apply();
+      const undo = typeof (applied as any)?.undo === "function" ? (applied as any).undo : undefined;
       return {
         ok: true,
         output: {
@@ -2705,12 +2711,12 @@ const tools: ToolDefinition[] = [
           filesCount,
           previewFiles,
           ...(previewResolved ? { preview: previewResolved } : {}),
-          note: "这是删除提案。点击 Keep 才会真正删除；Undo 可回滚。",
+          note: "已执行删除；可用 Undo 回滚。",
         },
         riskLevel: "high",
-        applyPolicy: "proposal",
-        apply,
-        undoable: false,
+        applyPolicy: "auto_apply",
+        undoable: Boolean(undo),
+        ...(undo ? { undo } : {}),
       };
     },
   },
@@ -2858,10 +2864,10 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "doc.restoreSnapshot",
-    description: "恢复到指定快照（proposal-first：Keep 才会真正恢复；Undo 可回滚）。",
+    description: "恢复到指定快照。执行前会在对话中确认，确认后自动恢复；支持 Undo 回滚。",
     args: [{ name: "snapshotId", required: true, desc: "快照 ID（doc.commitSnapshot 的返回）" }],
     riskLevel: "high",
-    applyPolicy: "proposal",
+    applyPolicy: "auto_apply",
     reversible: true,
     run: async (args) => {
       const snapshotId = String(args.snapshotId ?? "");
@@ -2889,6 +2895,8 @@ const tools: ToolDefinition[] = [
         return { undo: () => useProjectStore.getState().restore(snapBefore) };
       };
 
+      const applied = apply();
+      const undo = typeof (applied as any)?.undo === "function" ? (applied as any).undo : undefined;
       return {
         ok: true,
         output: {
@@ -2897,7 +2905,7 @@ const tools: ToolDefinition[] = [
           label: rec.label,
           createdAt: rec.createdAt,
           filesCount: rec.snap.files.length,
-          note: "这是恢复提案。点击 Keep 才会恢复到该快照；Undo 可回滚。",
+          note: "已恢复到指定快照；可用 Undo 回滚。",
           changedFiles,
           preview: {
             path: previewPath,
@@ -2907,16 +2915,16 @@ const tools: ToolDefinition[] = [
           },
         },
         riskLevel: "high",
-        applyPolicy: "proposal",
-        apply,
-        undoable: false,
+        applyPolicy: "auto_apply",
+        undoable: Boolean(undo),
+        ...(undo ? { undo } : {}),
       };
     },
   },
   {
     name: "doc.write",
     description:
-      "写入文件（path, content）。统一 proposal-first：先看 diff，Keep 后才会真正写入；Undo 可回滚。",
+      "写入文件（path, content）。高风险写入会先在对话中确认，确认后自动执行；支持 Undo 回滚。",
     args: [
       { name: "path", required: true, desc: "新文件路径（如 drafts/run-xxx.md）" },
       { name: "content", required: true, desc: "文件全文内容" },
@@ -2924,7 +2932,7 @@ const tools: ToolDefinition[] = [
       { name: "suggestedName", required: false, desc: "建议的新文件名（仅 ifExists=rename 时使用）" },
     ],
     riskLevel: "high",
-    applyPolicy: "proposal",
+    applyPolicy: "auto_apply",
     reversible: true,
     run: async (args) => {
       const rPath = resolveProjectPathArg(args.path);
@@ -2969,13 +2977,15 @@ const tools: ToolDefinition[] = [
         const fileName = path.split("/").pop() || path;
         const ext = fileName.includes(".") ? fileName.split(".").pop()!.toLowerCase() : "";
         const note = resolved.renamedFrom
-          ? "已自动改名新建，避免覆盖原文件。这是新建文件提案。点击 Keep 才会真正写入文件；Undo 可回滚。"
-          : "这是新建文件提案。点击 Keep 才会真正写入文件；Undo 可回滚。";
+          ? "已自动改名并写入新文件（避免覆盖原文件）；可用 Undo 回滚。"
+          : "已写入新文件；可用 Undo 回滚。";
         const apply = () => {
           const snap = useProjectStore.getState().snapshot();
           useProjectStore.getState().createFile(path, content);
           return { undo: () => useProjectStore.getState().restore(snap) };
         };
+        const applied = apply();
+        const undo = typeof (applied as any)?.undo === "function" ? (applied as any).undo : undefined;
         return {
           ok: true,
           output: {
@@ -2990,14 +3000,14 @@ const tools: ToolDefinition[] = [
             artifact: { absPath, relPath: path, name: fileName, ext, sizeBytes: new Blob([content]).size },
             ...(resolved.renamedFrom ? { renamedFrom: resolved.renamedFrom } : {}),
           },
-          applyPolicy: "proposal",
+          applyPolicy: "auto_apply",
           riskLevel: "high",
-          apply,
-          undoable: false,
+          undoable: Boolean(undo),
+          ...(undo ? { undo } : {}),
         };
       }
 
-      // 覆盖：proposal-first
+      // 覆盖写入
       const prev = useProjectStore.getState().getFileByPath(path)?.content ?? "";
       const d = unifiedDiff({ path, before: prev, after: content });
       const apply = () => {
@@ -3020,6 +3030,8 @@ const tools: ToolDefinition[] = [
       const absPath2 = rootDir2.replace(/[/\\]+$/, "") + sep2 + path.replaceAll("/", sep2);
       const fileName2 = path.split("/").pop() || path;
       const ext2 = fileName2.includes(".") ? fileName2.split(".").pop()!.toLowerCase() : "";
+      const applied = apply();
+      const undo = typeof (applied as any)?.undo === "function" ? (applied as any).undo : undefined;
 
       return {
         ok: true,
@@ -3027,26 +3039,26 @@ const tools: ToolDefinition[] = [
           ok: true,
           path,
           created: false,
-          preview: { note: "覆盖写入为提案：点击 Keep 才会覆盖文件；Undo 可回滚。", diffUnified: d.diff, truncated: d.truncated, stats: d.stats ?? null },
+          preview: { note: "已覆盖写入文件；可用 Undo 回滚。", diffUnified: d.diff, truncated: d.truncated, stats: d.stats ?? null },
           artifact: { absPath: absPath2, relPath: path, name: fileName2, ext: ext2, sizeBytes: new Blob([content]).size },
         },
-        applyPolicy: "proposal",
+        applyPolicy: "auto_apply",
         riskLevel: "high",
-        apply,
-        undoable: false,
+        undoable: Boolean(undo),
+        ...(undo ? { undo } : {}),
       };
     },
   },
   {
     name: "doc.splitToDir",
     description:
-      "将一个大文档按“标题/文案(正文)”块分割成多篇，并写入目标文件夹（proposal-first：Keep 才会真正写入；Undo 可回滚）。",
+      "将一个大文档按“标题/文案(正文)”块分割成多篇，并写入目标文件夹（中风险默认自动写入，支持 Undo 回滚）。",
     args: [
       { name: "path", required: true, desc: "源文件路径（如 直男财经.md）" },
       { name: "targetDir", required: true, desc: "目标目录（如 直男财经/）" },
     ],
     riskLevel: "medium",
-    applyPolicy: "proposal",
+    applyPolicy: "auto_apply",
     reversible: true,
     run: async (args) => {
       const srcR = resolveProjectPathArg(args.path);
@@ -3133,7 +3145,7 @@ const tools: ToolDefinition[] = [
         sourcePath: srcPath,
         targetDir: `${targetDir}/`,
         count: out.length,
-        note: `这是分割提案：点击 Keep 才会写入 ${out.length} 个新文件到 ${targetDir}/；Undo 可回滚。`,
+        note: `已写入 ${out.length} 个新文件到 ${targetDir}/；可用 Undo 回滚。`,
         files: out.map((f) => ({
           path: f.path,
           title: f.title,
@@ -3175,13 +3187,15 @@ const tools: ToolDefinition[] = [
         return { undo: () => useProjectStore.getState().restore(snap) };
       };
 
+      const applied = apply();
+      const undo = typeof (applied as any)?.undo === "function" ? (applied as any).undo : undefined;
       return {
         ok: true,
         output: preview,
-        applyPolicy: "proposal",
+        applyPolicy: "auto_apply",
         riskLevel: "medium",
-        apply,
-        undoable: false,
+        undoable: Boolean(undo),
+        ...(undo ? { undo } : {}),
       };
     },
   },
@@ -3190,7 +3204,7 @@ const tools: ToolDefinition[] = [
     description: "获取编辑器当前选中内容（用于段落改写/润色）。",
     args: [],
     riskLevel: "low",
-    applyPolicy: "proposal",
+    applyPolicy: "auto_apply",
     reversible: false,
     run: async () => {
       const s = useProjectStore.getState();
@@ -3254,7 +3268,7 @@ const tools: ToolDefinition[] = [
   {
     name: "doc.applyEdits",
     description:
-      "对当前活动文件应用一组文本编辑（edits）。默认先生成预览（proposal-first），点击 Keep 才真正写入；Undo 可回滚。",
+      "对当前活动文件应用一组文本编辑（edits）。中风险默认自动写入，支持 Undo 回滚。",
     args: [
       { name: "path", required: false, desc: "文件路径（默认 activePath；MVP 仅支持 activePath）" },
       {
@@ -3265,7 +3279,7 @@ const tools: ToolDefinition[] = [
       },
     ],
     riskLevel: "medium",
-    applyPolicy: "proposal",
+    applyPolicy: "auto_apply",
     reversible: true,
     run: async (args) => {
       const s = useProjectStore.getState();
@@ -3357,6 +3371,8 @@ const tools: ToolDefinition[] = [
         return { undo: () => useProjectStore.getState().restore(snap) };
       };
 
+      const applied = apply();
+      const undo = typeof (applied as any)?.undo === "function" ? (applied as any).undo : undefined;
       return {
         ok: true,
         output: {
@@ -3364,14 +3380,16 @@ const tools: ToolDefinition[] = [
           path,
           editsCount: normalized.length,
           preview: {
-            note: "这是修改提案。点击 Keep 才会应用到编辑器；Undo 可回滚。",
+            note: "已应用到编辑器；可用 Undo 回滚。",
             diffUnified: d.diff,
             truncated: d.truncated,
             stats: d.stats ?? null,
           },
         },
-        apply,
-        undoable: false,
+        applyPolicy: "auto_apply",
+        riskLevel: "medium",
+        undoable: Boolean(undo),
+        ...(undo ? { undo } : {}),
       };
     },
   },
@@ -3918,6 +3936,14 @@ export async function executeToolCall(args: {
 
   try {
     const result = await def.run(parsedArgs, { mode: args.mode });
+    if (result.ok) {
+      const stepRisk = result.riskLevel ?? def.riskLevel;
+      const stepApplyPolicy = result.applyPolicy ?? def.applyPolicy;
+      // 低/中风险且无 apply 回调时，不应进入 proposal 待 Keep 状态（减少“空提案”噪音）。
+      if (stepApplyPolicy === "proposal" && stepRisk !== "high" && typeof result.apply !== "function") {
+        return { def, parsedArgs, result: { ...result, applyPolicy: "auto_apply" } };
+      }
+    }
     return { def, parsedArgs, result };
   } catch (e: any) {
     const msg = e?.message ? String(e.message) : String(e);
