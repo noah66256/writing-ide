@@ -10,6 +10,7 @@ import {
 import {
   buildInjectedToolResultMessages,
   getAdapterByEndpoint,
+  isGeminiLikeEndpoint,
 } from "../llm/providerAdapter.js";
 import type { OpenAiChatMessage, OpenAiCompatTool } from "../llm/openaiCompat.js";
 import { normalizeToolParametersSchema } from "../llm/toolSchema.js";
@@ -66,6 +67,12 @@ type ExecutionContract = {
 
 export type WaiterMap = Map<string, (payload: ToolResultPayload) => void>;
 
+export type ModelApiType =
+  | "anthropic-messages"
+  | "openai-completions"
+  | "openai-responses"
+  | "gemini";
+
 export type RunContext = {
   runId: string;
   mode: "agent" | "chat";
@@ -82,6 +89,7 @@ export type RunContext = {
   apiKey: string;
   baseUrl?: string;
   endpoint?: string;
+  apiType?: ModelApiType;
   toolResultFormat?: "xml" | "text";
   styleLibIds: string[];
   writeEvent: SseWriter;
@@ -226,10 +234,12 @@ function stableStringify(value: unknown): string {
   }
 }
 
-function isAnthropicMessagesEndpoint(endpoint?: string): boolean {
+function inferApiType(endpoint?: string): ModelApiType {
   const ep = String(endpoint ?? "").trim().toLowerCase();
-  if (!ep) return false;
-  return ep.endsWith("/messages") || ep === "/messages";
+  if (ep.endsWith("/messages") || ep === "/messages") return "anthropic-messages";
+  if (isGeminiLikeEndpoint(ep)) return "gemini";
+  if (ep.endsWith("/responses") || ep === "/responses") return "openai-responses";
+  return "openai-completions";
 }
 
 function toOpenAiCompatToolDefs(args: { allowed: Set<string>; mode: "agent" | "chat"; mcpTools: any[] }): OpenAiCompatTool[] {
@@ -576,6 +586,17 @@ export class WritingAgentRunner {
   private readonly runState: RunState;
   private turn = 0;
   private readonly maxTurns: number;
+
+  // ---- 端点能力标记（Phase B）----
+  private readonly apiType: ModelApiType;
+  /** 是否为 Anthropic Messages API */
+  private readonly isAnthropicApi: boolean;
+  /** 端点是否支持 Anthropic 结构化 tool_use（content block 级别） */
+  private readonly supportsNativeToolUse: boolean;
+  /** 端点是否支持 OpenAI function calling（tools 参数） */
+  private readonly supportsNativeFunctionCalling: boolean;
+  /** 端点是否真正尊重 tool_choice: any/tool（Anthropic 支持，GPT 代理多数会剥离） */
+  private readonly supportsForcedToolChoice: boolean;
   private consecutiveMainDocOnlyTurns = 0;
   private blockMainDocUpdate = false;
   private turnAllowedToolNames: Set<string> | null = null;
@@ -599,6 +620,14 @@ export class WritingAgentRunner {
     this.ctx = ctx;
     this.maxTurns = Math.min(ctx.maxTurns ?? MAX_TURNS, MAX_TURNS);
     this.runState = ctx.initialRunState ? { ...ctx.initialRunState } : createInitialRunState();
+
+    // 端点能力推导
+    this.apiType = ctx.apiType ?? inferApiType(ctx.endpoint);
+    this.isAnthropicApi = this.apiType === "anthropic-messages";
+    this.supportsNativeToolUse = this.isAnthropicApi;
+    this.supportsNativeFunctionCalling =
+      this.apiType === "openai-completions" || this.apiType === "openai-responses";
+    this.supportsForcedToolChoice = this.isAnthropicApi;
   }
 
   private _getExecutionContract(): {
@@ -951,7 +980,7 @@ export class WritingAgentRunner {
       }
       this.turn += 1;
       this.turnEngine.setTurn(this.turn);
-      const shouldContinue = isAnthropicMessagesEndpoint(this.ctx.endpoint)
+      const shouldContinue = this.supportsNativeToolUse
         ? await this._runOneTurn()
         : await this._runOneTurnViaProvider();
       if (!shouldContinue) {
@@ -991,7 +1020,7 @@ export class WritingAgentRunner {
         if (this.ctx.abortSignal.aborted) return;
         this.turn += 1;
         this.turnEngine.setTurn(this.turn);
-        const shouldContinue = isAnthropicMessagesEndpoint(this.ctx.endpoint)
+        const shouldContinue = this.supportsNativeToolUse
           ? await this._runOneTurn()
           : await this._runOneTurnViaProvider();
         if (!shouldContinue) return;
@@ -1009,7 +1038,7 @@ export class WritingAgentRunner {
 
     // Push synthetic assistant message with delegation calls
     this.messages.push({ role: "assistant", content: toolUses });
-    if (!isAnthropicMessagesEndpoint(this.ctx.endpoint)) {
+    if (!this.supportsNativeToolUse) {
       this.providerMessages.push({
         role: "assistant",
         content: buildToolCallsXml(
@@ -1059,7 +1088,7 @@ export class WritingAgentRunner {
 
     if (toolResultBlocks.length > 0) {
       this.messages.push({ role: "user", content: toolResultBlocks });
-      if (!isAnthropicMessagesEndpoint(this.ctx.endpoint)) {
+      if (!this.supportsNativeToolUse) {
         const toolResultXml = results
           .map(({ toolUse, result }) => {
             const raw = typeof result.output === "string" ? result.output : JSON.stringify(result.output ?? null);
@@ -1077,7 +1106,7 @@ export class WritingAgentRunner {
             toolResultFormat: this.ctx.toolResultFormat === "text" ? "text" : "xml",
             toolResultXml,
             toolResultText,
-            preferNativeToolCall: !isAnthropicMessagesEndpoint(this.ctx.endpoint),
+            preferNativeToolCall: this.supportsNativeFunctionCalling,
           }),
         );
       }
@@ -1088,7 +1117,7 @@ export class WritingAgentRunner {
       if (this.ctx.abortSignal.aborted) return;
       this.turn += 1;
       this.turnEngine.setTurn(this.turn);
-      const shouldContinue = isAnthropicMessagesEndpoint(this.ctx.endpoint)
+      const shouldContinue = this.supportsNativeToolUse
         ? await this._runOneTurn()
         : await this._runOneTurnViaProvider();
       if (!shouldContinue) return;
@@ -1298,7 +1327,7 @@ export class WritingAgentRunner {
             toolResultFormat: this.ctx.toolResultFormat === "text" ? "text" : "xml",
             toolResultXml: toolResultXmlParts.join("\n"),
             toolResultText: toolResultTextParts.join("\n"),
-            preferNativeToolCall: !isAnthropicMessagesEndpoint(this.ctx.endpoint),
+            preferNativeToolCall: this.supportsNativeFunctionCalling,
           })
         : [];
     if (mainDocLoopWarning) {
@@ -2618,7 +2647,7 @@ export class WritingAgentRunner {
       this.providerMessages.push({ role: "user", content });
     };
 
-    const isAnthropicPath = isAnthropicMessagesEndpoint(this.ctx.endpoint);
+    const canForceToolChoice = this.supportsForcedToolChoice;
     const assistantHasText = String(assistantText ?? "").trim().length > 0;
     const executionContract = this._getExecutionContract();
 
@@ -2647,7 +2676,7 @@ export class WritingAgentRunner {
       // 仅对 task_execution 路由生效；file_delete_only/web_radar/project_search 等 strict 路由仍强制调工具。
       const isNonStrictRoute = (this.ctx.intentRouteId ?? "") === "task_execution" ||
         (this.ctx.intentRouteId ?? "") === "kb_ops";
-      if (!isAnthropicPath && assistantHasText && isNonStrictRoute) {
+      if (!canForceToolChoice && assistantHasText && isNonStrictRoute) {
         this.ctx.writeEvent("run.notice", {
           turn: this.turn,
           kind: "warn",
@@ -2671,7 +2700,7 @@ export class WritingAgentRunner {
 
       // Anthropic 端点使用 forcedToolChoice 强制调工具；非 Anthropic 端点仅靠文本提醒，
       // 因为很多代理会剥离 tool_choice 参数。
-      this.forcedToolChoice = isAnthropicPath
+      this.forcedToolChoice = canForceToolChoice
         ? (preferredToolName
             ? { type: "tool", name: preferredToolName }
             : fallbackToolName
@@ -2694,7 +2723,7 @@ export class WritingAgentRunner {
               ? `，优先工具：${preferredToolName}`
               : fallbackToolName
                 ? `，回退工具：${fallbackToolName}`
-                : isAnthropicPath
+                : canForceToolChoice
                   ? "，优先策略：任意工具调用"
                   : "，兼容端点：仅文本提醒（不强制 tool_choice）"),
           detail: {

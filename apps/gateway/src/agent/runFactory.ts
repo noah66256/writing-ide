@@ -4,7 +4,7 @@ import { z } from "zod";
 import { type Db, type RunAudit } from "../db.js";
 import { type LlmTokenUsage } from "../billing.js";
 import { type OpenAiChatMessage } from "../llm/openaiCompat.js";
-import { completionOnceViaProvider } from "../llm/providerAdapter.js";
+import { completionOnceViaProvider, isGeminiLikeEndpoint } from "../llm/providerAdapter.js";
 import { toolNamesForMode, type AgentMode } from "./toolRegistry.js";
 import { buildToolCatalog, selectToolSubset, type ToolCatalogSummary } from "./toolCatalog.js";
 import {
@@ -35,6 +35,7 @@ import {
   type RunContext,
   type SseWriter,
   type WaiterMap,
+  type ModelApiType,
 } from "./writingAgentRunner.js";
 
 const TOOL_SCHEMA_ISSUES = collectToolSchemaIssues();
@@ -246,6 +247,14 @@ type RouteDecisionV1 = {
   preserveToolNames: Set<string>;
 };
 
+function inferApiType(endpoint?: string): ModelApiType {
+  const ep = String(endpoint ?? "").trim().toLowerCase();
+  if (ep.endsWith("/messages") || ep === "/messages") return "anthropic-messages";
+  if (isGeminiLikeEndpoint(ep)) return "gemini";
+  if (ep.endsWith("/responses") || ep === "/responses") return "openai-responses";
+  return "openai-completions";
+}
+
 function buildRouteDecisionV1(args: {
   routeId: string;
   nextAction: NextAction;
@@ -254,12 +263,11 @@ function buildRouteDecisionV1(args: {
   baseAllowedToolNames: Set<string>;
   mcpToolsFromSidecar: Array<{ name: string }>;
   skillPinnedToolNames: Set<string>;
-  /** 当前使用的 LLM 端点（用于端点感知的策略调整） */
-  endpoint?: string;
+  /** 当前使用的 API 类型（用于端点感知的策略调整） */
+  apiType: ModelApiType;
 }): RouteDecisionV1 {
   const routeIdLower = String(args.routeId ?? "").trim().toLowerCase();
-  const epLower = String(args.endpoint ?? "").trim().toLowerCase();
-  const isAnthropicLike = epLower.endsWith("/messages") || epLower === "/messages";
+  const isAnthropicLike = args.apiType === "anthropic-messages";
   const isExecutionRoute = args.nextAction === "enter_workflow" && args.effectiveToolPolicy !== "deny";
   // 仅对高确定性执行路由启用“必须触发工具调用”硬约束，避免泛任务路由误触发强制调工具。
   const strictExecutionRoutes = new Set([
@@ -1347,6 +1355,7 @@ export type PreparedRun = {
   baseUrl: string;
   apiKey: string;
   endpoint: string;
+  apiType: ModelApiType;
   toolResultFormat: "xml" | "text";
   modelIdUsed: string;
   pickedId: string;
@@ -1951,6 +1960,7 @@ export async function prepareAgentRun(args: {
   if (isResponsesEndpoint(endpoint) && toolResultFormat !== "text") {
     toolResultFormat = "text";
   }
+  const apiType = inferApiType(endpoint);
 
   const allToolNamesForMode = toolNamesForMode(mode);
   const capsForTools = await services.toolConfig.resolveCapabilitiesRuntime().catch(() => null as any);
@@ -2036,7 +2046,7 @@ export async function prepareAgentRun(args: {
     baseAllowedToolNames,
     mcpToolsFromSidecar: mcpToolsFromSidecar.map((x) => ({ name: String(x?.name ?? "").trim() })),
     skillPinnedToolNames,
-    endpoint,
+    apiType,
   });
   const routeIdLower = routeDecision.routeIdLower;
   const isExecutionRoute = routeDecision.isExecutionRoute;
@@ -2436,6 +2446,7 @@ export async function prepareAgentRun(args: {
       baseUrl,
       apiKey,
       endpoint,
+      apiType,
       toolResultFormat,
       modelIdUsed,
       pickedId,
@@ -2495,6 +2506,7 @@ export async function executeAgentRun(args: {
     stageKeyForRun,
     model,
     endpoint,
+    apiType,
     toolResultFormat,
     pickedId,
     requestedIdRaw,
@@ -3066,6 +3078,7 @@ export async function executeAgentRun(args: {
     apiKey: String(prepared.apiKey ?? ""),
     baseUrl: prepared.baseUrl ?? undefined,
     endpoint: prepared.endpoint || "/v1/chat/completions",
+    apiType,
     toolResultFormat: prepared.toolResultFormat === "text" ? "text" : "xml",
     styleLibIds: prepared.runnerStyleLibIds,
     // 统一通过本地 writeEvent 透传，确保 runner 事件也进入 runAudit（便于排查工具链问题）
