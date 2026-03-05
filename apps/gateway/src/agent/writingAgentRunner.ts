@@ -120,7 +120,7 @@ export type RunContext = {
   intentRouteId?: string;
   /** 路由层下发的执行达成约束（要求本轮至少触发工具） */
   executionContract?: ExecutionContract;
-  /** 是否启用“从纯 JSON 文本反推工具调用”兜底（默认关闭，避免 JSON 泄漏）。 */
+  /** 是否启用"从纯 JSON 文本反推工具调用"兜底（默认关闭，避免 JSON 泄漏）。 */
   jsonToolFallbackEnabled?: boolean;
   /** 大文本 blob 池：避免大文本经过 LLM 回显。key=blobId, value=原始文本 */
   textBlobPool?: Map<string, string>;
@@ -227,7 +227,8 @@ function stableStringify(value: unknown): string {
 }
 
 function isAnthropicMessagesEndpoint(endpoint?: string): boolean {
-  const ep = String(endpoint ?? "/v1/messages").trim().toLowerCase();
+  const ep = String(endpoint ?? "").trim().toLowerCase();
+  if (!ep) return false;
   return ep.endsWith("/messages") || ep === "/messages";
 }
 
@@ -1076,6 +1077,7 @@ export class WritingAgentRunner {
             toolResultFormat: this.ctx.toolResultFormat === "text" ? "text" : "xml",
             toolResultXml,
             toolResultText,
+            preferNativeToolCall: !isAnthropicMessagesEndpoint(this.ctx.endpoint),
           }),
         );
       }
@@ -1121,7 +1123,7 @@ export class WritingAgentRunner {
       "优先使用模型原生工具调用（function/tool calling）；仅当上游不支持时，才输出 XML。\n" +
       "当需要调用工具时，整条回复必须只包含 XML，不得混入自然语言。\n" +
       "若调用工具，只允许一个 <tool_calls> 包裹，禁止输出多个 <tool_calls> 段。\n" +
-      "禁止在 XML 前后追加解释文本（包括“我将调用…”之类语句）。\n" +
+      "禁止在 XML 前后追加解释文本（包括\u201c我将调用\u2026\u201d之类语句）。\n" +
       "格式：\n" +
       "<tool_calls>\n" +
       '  <tool_call name="tool.name">\n' +
@@ -1296,6 +1298,7 @@ export class WritingAgentRunner {
             toolResultFormat: this.ctx.toolResultFormat === "text" ? "text" : "xml",
             toolResultXml: toolResultXmlParts.join("\n"),
             toolResultText: toolResultTextParts.join("\n"),
+            preferNativeToolCall: !isAnthropicMessagesEndpoint(this.ctx.endpoint),
           })
         : [];
     if (mainDocLoopWarning) {
@@ -1352,7 +1355,6 @@ export class WritingAgentRunner {
     const turnSystemPrompt = perTurnCaps?.hint
       ? `${this.ctx.systemPrompt}\n\n${perTurnCaps.hint}`
       : this.ctx.systemPrompt;
-    const xmlToolPrompt = this._buildXmlToolProtocolPrompt(effectiveAllowed);
     const nativeTools = toOpenAiCompatToolDefs({
       allowed: effectiveAllowed,
       mode: this.ctx.mode,
@@ -1364,6 +1366,32 @@ export class WritingAgentRunner {
     const executionContract = this._getExecutionContract();
     const endpoint = this.ctx.endpoint || "/v1/responses";
     const providerAdapter = getAdapterByEndpoint(endpoint);
+
+    // 协议选择：当 native tools 可用时，不注入完整 XML 协议（避免双指令混淆）；
+    // 仅在无 native tools 时使用 XML 协议作为唯一工具调用方式。
+    const hasNativeTools = nativeTools.length > 0;
+    const systemMessages: OpenAiChatMessage[] = [
+      { role: "system", content: turnSystemPrompt },
+    ];
+    if (hasNativeTools) {
+      // native tools 可用——以 native function calling 为主协议，
+      // 同时附加精简 XML 备注，确保代理剥离 native tools 后模型仍有工具名称参考。
+      const xmlToolPrompt = this._buildXmlToolProtocolPrompt(effectiveAllowed);
+      systemMessages.push({
+        role: "system",
+        content:
+          "工具调用说明：请优先使用 function/tool calling 进行工具调用。\n" +
+          "如果 function calling 不可用，可退而使用下方 XML 格式调用工具。\n" +
+          "收敛规则：任务完成后必须调用 run.done（可带 note），不要继续空转。\n" +
+          "上一轮同名同参工具调用已成功时，禁止重复调用；应改为下一步或 run.done。\n" +
+          "当不需要工具时，直接输出 Markdown。\n\n" +
+          xmlToolPrompt,
+      });
+    } else {
+      // 无 native tools——注入完整 XML 协议
+      const xmlToolPrompt = this._buildXmlToolProtocolPrompt(effectiveAllowed);
+      systemMessages.push({ role: "system", content: xmlToolPrompt });
+    }
 
     this.ctx.writeEvent("assistant.start", { turn: this.turn });
 
@@ -1399,14 +1427,13 @@ export class WritingAgentRunner {
         apiKey: this.ctx.apiKey,
         model: this.ctx.modelId,
         messages: [
-          { role: "system", content: turnSystemPrompt },
-          { role: "system", content: xmlToolPrompt },
+          ...systemMessages,
           ...this.providerMessages,
         ],
         temperature: undefined,
         maxTokens: undefined,
         includeUsage: true,
-        tools: nativeTools,
+        tools: hasNativeTools ? nativeTools : undefined,
         toolChoice: turnToolChoice,
         parallelToolCalls: false,
         signal: this.ctx.abortSignal,
@@ -1949,7 +1976,7 @@ export class WritingAgentRunner {
             ? "当前是删除/清理任务，已禁止 doc.read。"
             : `工具 "${toolUse.name}" 不在当前回合允许列表中。`,
           detail: isDeleteOnlyReadBlocked
-            ? "file_delete_only 路由下禁止先读文件，除非用户明确要求“先看内容再删”。"
+            ? "file_delete_only 路由下禁止先读文件，除非用户明确要求\u201c先看内容再删\u201d。"
             : `Tool "${toolUse.name}" is not available for this agent.`,
           next_actions: isDeleteOnlyReadBlocked
             ? ["先 project.listFiles 确认目标", "再调用 doc.deletePath 删除目标路径"]
@@ -2591,10 +2618,15 @@ export class WritingAgentRunner {
       this.providerMessages.push({ role: "user", content });
     };
 
+    const isAnthropicPath = isAnthropicMessagesEndpoint(this.ctx.endpoint);
+    const assistantHasText = String(assistantText ?? "").trim().length > 0;
+    const executionContract = this._getExecutionContract();
+
     // Sub-agent tool nudge: if a sub-agent's early turns produce text without
     // calling any tools (and tools are available), inject a nudge message.
     // This handles API proxies that strip tool_choice: "any" from the request.
-    if (this.ctx.agentId && this.turn <= 2 && this.ctx.allowedToolNames.size > 0) {
+    // 仅在 executionContract.required 时启用，避免误伤写作型子任务。
+    if (this.ctx.agentId && this.turn <= 2 && this.ctx.allowedToolNames.size > 0 && executionContract.required) {
       pushRetryUserMessage("请立即调用工具执行任务。不要输出分析或计划——直接调用第一个需要的工具。");
       this.ctx.writeEvent("run.notice", {
         turn: this.turn,
@@ -2605,22 +2637,47 @@ export class WritingAgentRunner {
       return true;
     }
 
-    const executionContract = this._getExecutionContract();
     if (
       executionContract.required &&
       this.totalToolCalls < executionContract.minToolCalls &&
       this.ctx.allowedToolNames.size > 0
     ) {
+      // 非 Anthropic 端点 + 非 strict 路由（task_execution）+ 已有可读文本：直接软降级。
+      // GPT 等模型对 tool_choice 强制的遵循度低，反复重试会浪费 token 且最终仍失败。
+      // 仅对 task_execution 路由生效；file_delete_only/web_radar/project_search 等 strict 路由仍强制调工具。
+      const isNonStrictRoute = (this.ctx.intentRouteId ?? "") === "task_execution" ||
+        (this.ctx.intentRouteId ?? "") === "kb_ops";
+      if (!isAnthropicPath && assistantHasText && isNonStrictRoute) {
+        this.ctx.writeEvent("run.notice", {
+          turn: this.turn,
+          kind: "warn",
+          title: "ExecutionContractBypass",
+          message: "兼容端点：检测到可读文本输出，跳过强制工具重试，按文本回复交付。",
+          detail: {
+            endpoint: this.ctx.endpoint ?? "(default)",
+            minToolCalls: executionContract.minToolCalls,
+            reason: executionContract.reason ?? "",
+          },
+        });
+        this.forcedToolChoice = null;
+        return false;
+      }
+
       this.executionNoToolTurns += 1;
       const preferredToolName = executionContract.preferredToolNames.find((name) =>
         this.ctx.allowedToolNames.has(String(name ?? "").trim()),
       );
       const fallbackToolName = preferredToolName ? null : this._pickExecutionFallbackToolName();
-      this.forcedToolChoice = preferredToolName
-        ? { type: "tool", name: preferredToolName }
-        : fallbackToolName
-          ? { type: "tool", name: fallbackToolName }
-          : { type: "any" };
+
+      // Anthropic 端点使用 forcedToolChoice 强制调工具；非 Anthropic 端点仅靠文本提醒，
+      // 因为很多代理会剥离 tool_choice 参数。
+      this.forcedToolChoice = isAnthropicPath
+        ? (preferredToolName
+            ? { type: "tool", name: preferredToolName }
+            : fallbackToolName
+              ? { type: "tool", name: fallbackToolName }
+              : { type: "any" })
+        : null;
 
       if (this.executionNoToolTurns <= executionContract.maxNoToolTurns) {
         pushRetryUserMessage(
@@ -2637,7 +2694,9 @@ export class WritingAgentRunner {
               ? `，优先工具：${preferredToolName}`
               : fallbackToolName
                 ? `，回退工具：${fallbackToolName}`
-                : "，优先策略：任意工具调用"),
+                : isAnthropicPath
+                  ? "，优先策略：任意工具调用"
+                  : "，兼容端点：仅文本提醒（不强制 tool_choice）"),
           detail: {
             minToolCalls: executionContract.minToolCalls,
             currentToolCalls: this.totalToolCalls,
@@ -2647,8 +2706,8 @@ export class WritingAgentRunner {
         return true;
       }
 
-      // 软降级：若已有可读文本，则不直接失败，避免“只因未调工具而整轮失败”。
-      if (String(assistantText ?? "").trim()) {
+      // 软降级：若已有可读文本，则不直接失败，避免"只因未调工具而整轮失败"。
+      if (assistantHasText) {
         this.ctx.writeEvent("run.notice", {
           turn: this.turn,
           kind: "warn",
@@ -2664,7 +2723,7 @@ export class WritingAgentRunner {
         return false;
       }
 
-      // 无文本可回显时，保留失败分支，避免用户看起来“没结果却成功”。
+      // 无文本可回显时，保留失败分支，避免用户看起来"没结果却成功"。
       this.failedToolDigests.push({
         toolCallId: `execution_contract_turn_${this.turn}`,
         name: preferredToolName || "execution.contract",

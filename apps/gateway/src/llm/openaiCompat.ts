@@ -595,6 +595,16 @@ async function* streamResponses(args: {
     }
   }
 
+  // 当文本和 native tool_calls 同时存在时，tool_calls 不会进入文本 delta，
+  // 需要额外追加 XML 格式的工具调用，确保上层 parseToolCallsXml 能统一解析。
+  if (emittedChars > 0 && streamedToolCalls.size > 0) {
+    const xml = toolCallsToXml(Array.from(streamedToolCalls.values()));
+    if (xml) {
+      emittedChars += xml.length;
+      yield { type: "delta", delta: xml };
+    }
+  }
+
   if (emittedChars === 0 && completedPayload) {
     const fallback = extractResponsesTextFromAny(completedPayload?.response ?? completedPayload).trim();
     if (fallback) {
@@ -939,6 +949,16 @@ export async function* streamChatCompletions(args: {
         diag.endedBy = `finish_reason:${String(finishReason)}`;
         break;
       }
+    }
+  }
+
+  // 当文本和 native tool_calls 同时存在时（模型既输出了自然语言，又调用了 function），
+  // 需要追加 XML 格式的工具调用，确保上层统一解析。
+  if (diag.deltaChars > 0 && streamedToolCalls.size > 0) {
+    const toolCallsXml = toolCallsToXml(Array.from(streamedToolCalls.values()));
+    if (toolCallsXml) {
+      diag.deltaChars += toolCallsXml.length;
+      yield { type: "delta", delta: toolCallsXml };
     }
   }
 

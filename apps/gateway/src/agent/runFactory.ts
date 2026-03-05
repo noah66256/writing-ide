@@ -254,8 +254,12 @@ function buildRouteDecisionV1(args: {
   baseAllowedToolNames: Set<string>;
   mcpToolsFromSidecar: Array<{ name: string }>;
   skillPinnedToolNames: Set<string>;
+  /** 当前使用的 LLM 端点（用于端点感知的策略调整） */
+  endpoint?: string;
 }): RouteDecisionV1 {
   const routeIdLower = String(args.routeId ?? "").trim().toLowerCase();
+  const epLower = String(args.endpoint ?? "").trim().toLowerCase();
+  const isAnthropicLike = epLower.endsWith("/messages") || epLower === "/messages";
   const isExecutionRoute = args.nextAction === "enter_workflow" && args.effectiveToolPolicy !== "deny";
   // 仅对高确定性执行路由启用“必须触发工具调用”硬约束，避免泛任务路由误触发强制调工具。
   const strictExecutionRoutes = new Set([
@@ -278,7 +282,13 @@ function buildRouteDecisionV1(args: {
   } else if (routeIdLower === "kb_ops") {
     executionPreferredRaw.push("kb.search", "run.mainDoc.get", "run.setTodoList");
   } else if (routeIdLower === "task_execution") {
-    executionPreferredRaw.push("run.setTodoList", "run.todo.upsertMany", "run.mainDoc.get", "kb.search");
+    // Anthropic 端点工具遵循度高，推荐先建 Todo 再执行；
+    // 非 Anthropic 端点（GPT 等）对复杂工具链遵循度低，推荐先读取再决策。
+    if (isAnthropicLike) {
+      executionPreferredRaw.push("run.setTodoList", "run.todo.upsertMany", "run.mainDoc.get", "kb.search");
+    } else {
+      executionPreferredRaw.push("run.mainDoc.get", "kb.search", "run.setTodoList");
+    }
   }
 
   const directOpenWebIntent = looksLikeDirectOpenWebIntent(args.userPrompt);
@@ -2026,6 +2036,7 @@ export async function prepareAgentRun(args: {
     baseAllowedToolNames,
     mcpToolsFromSidecar: mcpToolsFromSidecar.map((x) => ({ name: String(x?.name ?? "").trim() })),
     skillPinnedToolNames,
+    endpoint,
   });
   const routeIdLower = routeDecision.routeIdLower;
   const isExecutionRoute = routeDecision.isExecutionRoute;

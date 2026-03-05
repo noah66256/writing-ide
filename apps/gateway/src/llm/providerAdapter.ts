@@ -179,17 +179,23 @@ export function buildInjectedToolResultMessages(args: {
   toolResultFormat: ToolResultFormat;
   toolResultXml: string;
   toolResultText: string;
+  /** 当使用 native function calling（非 XML 协议）时设为 true，续写提示不再催促 XML 输出 */
+  preferNativeToolCall?: boolean;
 }): OpenAiChatMessage[] {
   const useText = args.toolResultFormat === "text";
   const out: OpenAiChatMessage[] = [
     { role: useText ? "user" : "system", content: useText ? args.toolResultText : args.toolResultXml },
   ];
-  // 兼容部分代理：当 tool_result 作为最后一条消息时，可能会出现“choices 为空不续写”。
-  // 这里额外补一条普通 user 消息，让模型明确“继续推进下一步”（XML/text 都加，避免空输出）。
+  // 兼容部分代理：当 tool_result 作为最后一条消息时，可能会出现"choices 为空不续写"。
+  // 这里额外补一条普通 user 消息，让模型明确"继续推进下一步"（XML/text 都加，避免空输出）。
+  const continuation = args.preferNativeToolCall
+    ? "继续。请基于以上 tool_result 推进任务。" +
+      "只有在确有必要时再调用工具；若信息已足够，直接给出可交付文本。"
+    : "继续。请基于以上 tool_result 推进下一步。" +
+      "若需要调用工具，请按协议输出 XML（优先 <tool_calls>...</tool_calls>；旧式 <function_calls>...</function_calls> 也可被兼容解析），整条消息不要夹杂自然语言。";
   out.push({
     role: "user",
-    content:
-      "继续。请基于以上 tool_result 推进下一步。若需要调用工具，请按协议输出 XML（优先 <tool_calls>...</tool_calls>；旧式 <function_calls>...</function_calls> 也可被兼容解析），整条消息不要夹杂自然语言。",
+    content: continuation,
   });
   return out;
 }
