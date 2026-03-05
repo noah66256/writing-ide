@@ -3734,15 +3734,15 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "memory.update",
-    description: "更新记忆内容（向指定 section 追加信息）。",
+    description: "更新记忆内容（proposal-first：先给 diff，Keep 后才写入；Undo 可回滚）。",
     args: [
       { name: "level", required: true, desc: "'global' 或 'project'" },
       { name: "section", required: true, desc: "section 标题（如'项目决策'、'用户画像'）" },
       { name: "content", required: true, desc: "要追加的 Markdown 内容" },
     ],
     riskLevel: "medium" as ToolRiskLevel,
-    applyPolicy: "auto_apply" as ToolApplyPolicy,
-    reversible: false,
+    applyPolicy: "proposal" as ToolApplyPolicy,
+    reversible: true,
     run: async (args: Record<string, unknown>) => {
       const level = String(args.level ?? "").trim().toLowerCase();
       if (level !== "global" && level !== "project") {
@@ -3779,15 +3779,57 @@ const tools: ToolDefinition[] = [
         updated = `${existing.trimEnd()}\n\n${sectionHeader}\n${content}\n`;
       }
 
-      if (level === "global") {
-        await state.saveGlobalMemory(updated);
-      } else {
-        const rootDir = state._projectRootDir;
-        if (!rootDir) return { ok: false, error: "未打开项目，无法更新项目记忆" };
-        await state.saveProjectMemory(rootDir, updated);
-      }
+      const before = existing;
+      const previewPath =
+        level === "global"
+          ? "memory/global.md"
+          : ".writing-ide/project-memory.md";
+      const d = unifiedDiff({ path: previewPath, before, after: updated });
 
-      return { ok: true, output: { ok: true, level, section, updated: true }, undoable: false };
+      const apply = async () => {
+        const latest = useMemoryStore.getState();
+        const prevGlobal = latest.globalMemory;
+        const prevProject = latest.projectMemory;
+        const rootDir = latest._projectRootDir;
+        if (level === "global") {
+          await latest.saveGlobalMemory(updated);
+        } else {
+          if (!rootDir) throw new Error("未打开项目，无法更新项目记忆");
+          await latest.saveProjectMemory(rootDir, updated);
+        }
+        return {
+          undo: async () => {
+            if (level === "global") {
+              await useMemoryStore.getState().saveGlobalMemory(prevGlobal);
+            } else {
+              if (!rootDir) return;
+              // 回滚时优先恢复执行时捕获的内容，避免被后续内存状态覆盖
+              await useMemoryStore.getState().saveProjectMemory(rootDir, prevProject);
+            }
+          },
+        };
+      };
+
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          level,
+          section,
+          updated: true,
+          preview: {
+            note: "记忆更新提案：点击 Keep 才会写入记忆文件；Undo 可回滚。",
+            diffUnified: d.diff,
+            truncated: d.truncated,
+            stats: d.stats ?? null,
+            path: previewPath,
+          },
+        },
+        applyPolicy: "proposal",
+        riskLevel: "medium",
+        apply,
+        undoable: false,
+      };
     },
   },
   // ── file.open: 用系统默认应用打开文件 ──

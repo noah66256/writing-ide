@@ -889,6 +889,14 @@ type DialogueTurn = { user: string; assistant: string };
 
 /** 每次向 Gateway 发送的"原文保留"回合数（不进入摘要压缩） */
 const RAW_KEEP_TURNS = 5;
+const MEMORY_SHORT_INJECT_THRESHOLD_CHARS = 2000;
+const MEMORY_AGENT_ANCHOR_GLOBAL = new Set(["用户画像", "决策偏好"]);
+const MEMORY_AGENT_ANCHOR_PROJECT = new Set(["项目决策"]);
+const MEMORY_CHAT_ANCHOR_GLOBAL = new Set(["用户画像", "决策偏好"]);
+const MEMORY_CHAT_ANCHOR_PROJECT = new Set<string>([]);
+const MEMORY_RETRIEVAL_GLOBAL = new Set(["跨项目进展"]);
+const MEMORY_RETRIEVAL_PROJECT = new Set(["项目概况", "重要约定", "当前进展"]);
+const MEMORY_RECALL_TOPK = 3;
 
 /**
  * 外部基线（2026-03）：
@@ -899,6 +907,186 @@ const RAW_KEEP_TURNS = 5;
 const CLAUDE_CODE_AUTO_COMPACT_TOKENS = Math.floor(200_000 * 0.95);
 const CODEX_AUTO_COMPACT_TOKENS = Math.floor(272_000 * 0.9);
 const DIALOGUE_COMPACT_TRIGGER_TOKENS = Math.min(CLAUDE_CODE_AUTO_COMPACT_TOKENS, CODEX_AUTO_COMPACT_TOKENS);
+type MemoryTopLevelSection = { heading: string; content: string };
+
+function parseTopLevelMemorySections(text: string): MemoryTopLevelSection[] {
+  const raw = String(text ?? "");
+  if (!raw.trim()) return [];
+  const lines = raw.split("\n");
+  const out: MemoryTopLevelSection[] = [];
+  let current: MemoryTopLevelSection | null = null;
+  const flush = () => {
+    if (!current) return;
+    out.push({ heading: current.heading, content: current.content.trimEnd() });
+    current = null;
+  };
+  for (const line of lines) {
+    const m = line.match(/^# (.+)$/);
+    if (m) {
+      flush();
+      current = { heading: String(m[1] ?? "").trim(), content: "" };
+      continue;
+    }
+    if (current) current.content += `${line}\n`;
+  }
+  flush();
+  return out;
+}
+
+function renderTopLevelMemorySections(sections: MemoryTopLevelSection[]): string {
+  const blocks = (Array.isArray(sections) ? sections : [])
+    .filter((s) => String(s?.heading ?? "").trim())
+    .map((s) => `# ${String(s.heading).trim()}\n${String(s.content ?? "").trimEnd()}`);
+  return blocks.length ? `${blocks.join("\n\n").trim()}\n` : "";
+}
+
+function tokenizeMemoryRecallQuery(text: string): string[] {
+  const src = String(text ?? "").toLowerCase();
+  if (!src.trim()) return [];
+  const stop = new Set([
+    "的", "了", "吗", "呢", "啊", "呀", "吧", "和", "与", "及", "就", "都", "在", "是", "要", "我", "你", "他", "她",
+    "它", "我们", "你们", "他们", "这个", "那个", "这些", "那些", "一下", "一个", "一些", "什么", "怎么", "如何", "请",
+    "帮我", "继续", "然后", "现在", "今天", "已经", "还是", "以及",
+  ]);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (token: string) => {
+    const t = String(token ?? "").trim().toLowerCase();
+    if (!t || t.length < 2) return;
+    if (stop.has(t)) return;
+    if (seen.has(t)) return;
+    seen.add(t);
+    out.push(t);
+  };
+
+  const latin = src.match(/[a-z0-9_]{2,}/g) ?? [];
+  for (const t of latin) push(t);
+
+  const hanRuns = src.match(/[\u4e00-\u9fa5]{2,}/g) ?? [];
+  for (const run of hanRuns) {
+    if (run.length <= 8) {
+      push(run);
+      continue;
+    }
+    for (let i = 0; i < run.length - 1; i += 1) {
+      push(run.slice(i, i + 2));
+      if (i + 3 <= run.length) push(run.slice(i, i + 3));
+    }
+  }
+  return out.slice(0, 48);
+}
+
+function computeMemorySectionRecallScore(args: {
+  section: MemoryTopLevelSection;
+  tokens: string[];
+  allSections: MemoryTopLevelSection[];
+}): { score: number; hits: string[] } {
+  const tokens = Array.isArray(args.tokens) ? args.tokens : [];
+  if (!tokens.length) return { score: 0, hits: [] };
+  const sectionText = `${args.section.heading}\n${args.section.content}`.toLowerCase();
+  const bodyText = String(args.section.content ?? "").toLowerCase();
+  const N = Math.max(1, args.allSections.length);
+  let score = 0;
+  const hits: string[] = [];
+  for (const token of tokens) {
+    const t = String(token ?? "").trim().toLowerCase();
+    if (!t) continue;
+    const tf = sectionText.split(t).length - 1;
+    if (tf <= 0) continue;
+    let df = 0;
+    for (const sec of args.allSections) {
+      const secText = `${sec.heading}\n${sec.content}`.toLowerCase();
+      if (secText.includes(t)) df += 1;
+    }
+    const idf = Math.log(1 + (N - df + 0.5) / (df + 0.5));
+    const tfWeight = Math.min(3, tf);
+    const titleBoost = String(args.section.heading ?? "").toLowerCase().includes(t) ? 1.2 : 0;
+    const denseBoost = bodyText.includes(t) ? 0.3 : 0;
+    score += idf * (tfWeight + titleBoost + denseBoost);
+    if (hits.length < 8) hits.push(t);
+  }
+  return { score, hits };
+}
+
+function selectMemorySectionsForContext(args: {
+  mode: "agent" | "chat";
+  globalMemory: string;
+  projectMemory: string;
+  queryText: string;
+}) {
+  const globalSections = parseTopLevelMemorySections(args.globalMemory);
+  const projectSections = parseTopLevelMemorySections(args.projectMemory);
+  const totalChars = String(args.globalMemory ?? "").trim().length + String(args.projectMemory ?? "").trim().length;
+  const isShortMemory = totalChars > 0 && totalChars <= MEMORY_SHORT_INJECT_THRESHOLD_CHARS;
+
+  // Chat 模式默认只注入最稳定的偏好锚点，避免快问快答上下文被记忆噪声占满
+  if (args.mode === "chat") {
+    const globalPicked = globalSections.filter((s) => MEMORY_CHAT_ANCHOR_GLOBAL.has(s.heading));
+    const projectPicked = projectSections.filter((s) => MEMORY_CHAT_ANCHOR_PROJECT.has(s.heading));
+    return {
+      globalMemory: renderTopLevelMemorySections(globalPicked),
+      projectMemory: renderTopLevelMemorySections(projectPicked),
+      recallNote: "chat_anchor_only",
+      selectedHeadings: {
+        global: globalPicked.map((s) => s.heading),
+        project: projectPicked.map((s) => s.heading),
+      },
+    };
+  }
+
+  if (isShortMemory) {
+    return {
+      globalMemory: args.globalMemory.trim() ? `${args.globalMemory.trim()}\n` : "",
+      projectMemory: args.projectMemory.trim() ? `${args.projectMemory.trim()}\n` : "",
+      recallNote: `fallback_full_short_memory(totalChars=${totalChars})`,
+      selectedHeadings: {
+        global: globalSections.map((s) => s.heading),
+        project: projectSections.map((s) => s.heading),
+      },
+    };
+  }
+
+  const globalPicked = globalSections.filter((s) => MEMORY_AGENT_ANCHOR_GLOBAL.has(s.heading));
+  const projectPicked = projectSections.filter((s) => MEMORY_AGENT_ANCHOR_PROJECT.has(s.heading));
+  const selectedGlobal = new Set(globalPicked.map((s) => s.heading));
+  const selectedProject = new Set(projectPicked.map((s) => s.heading));
+
+  const tokens = tokenizeMemoryRecallQuery(args.queryText);
+  const scored: Array<{ level: "global" | "project"; heading: string; score: number; hits: string[] }> = [];
+  if (tokens.length) {
+    for (const sec of globalSections) {
+      if (!MEMORY_RETRIEVAL_GLOBAL.has(sec.heading)) continue;
+      const fit = computeMemorySectionRecallScore({ section: sec, tokens, allSections: globalSections });
+      if (fit.score > 0) scored.push({ level: "global", heading: sec.heading, score: fit.score, hits: fit.hits });
+    }
+    for (const sec of projectSections) {
+      if (!MEMORY_RETRIEVAL_PROJECT.has(sec.heading)) continue;
+      const fit = computeMemorySectionRecallScore({ section: sec, tokens, allSections: projectSections });
+      if (fit.score > 0) scored.push({ level: "project", heading: sec.heading, score: fit.score, hits: fit.hits });
+    }
+  }
+  scored.sort((a, b) => b.score - a.score);
+  for (const row of scored.slice(0, MEMORY_RECALL_TOPK)) {
+    if (row.level === "global") selectedGlobal.add(row.heading);
+    else selectedProject.add(row.heading);
+  }
+
+  const globalOut = globalSections.filter((s) => selectedGlobal.has(s.heading));
+  const projectOut = projectSections.filter((s) => selectedProject.has(s.heading));
+  const trace = scored
+    .slice(0, MEMORY_RECALL_TOPK)
+    .map((s) => `${s.level}.${s.heading}:${Number(s.score.toFixed(3))}`)
+    .join(", ");
+  return {
+    globalMemory: renderTopLevelMemorySections(globalOut),
+    projectMemory: renderTopLevelMemorySections(projectOut),
+    recallNote: trace ? `anchor_plus_recall(${trace})` : "anchor_only",
+    selectedHeadings: {
+      global: globalOut.map((s) => s.heading),
+      project: projectOut.map((s) => s.heading),
+    },
+  };
+}
 
 type BuildDialogueTurnOptions = {
   includeToolSummaries?: boolean;
@@ -1645,29 +1833,36 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     source: "desktop",
   });
 
-  // L1: 全局记忆（跨项目持久化）
-  const globalMemory = useMemoryStore.getState().globalMemory;
-  if (globalMemory.trim()) {
+  const rawGlobalMemory = useMemoryStore.getState().globalMemory;
+  const rawProjectMemory = useMemoryStore.getState().projectMemory;
+  const selectedMemory = selectMemorySectionsForContext({
+    mode: "agent",
+    globalMemory: rawGlobalMemory,
+    projectMemory: rawProjectMemory,
+    queryText: userPrompt,
+  });
+
+  // L1: 全局记忆（锚点 + 按需召回）
+  if (selectedMemory.globalMemory.trim()) {
     pushSeg({
       name: "L1_GLOBAL_MEMORY",
-      content: `L1_GLOBAL_MEMORY(Markdown):\n${globalMemory}\n\n`,
+      content: `L1_GLOBAL_MEMORY(Markdown):\n${selectedMemory.globalMemory}\n\n`,
       priority: "p0",
       trusted: true,
       source: "desktop",
-      note: "全局记忆（跨项目持久化）",
+      note: `全局记忆（锚点+按需召回）| ${selectedMemory.recallNote} | selected=${selectedMemory.selectedHeadings.global.join(",") || "none"}`,
     });
   }
 
-  // L2: 项目记忆（跟随项目目录持久化）
-  const projectMemory = useMemoryStore.getState().projectMemory;
-  if (projectMemory.trim()) {
+  // L2: 项目记忆（锚点 + 按需召回）
+  if (selectedMemory.projectMemory.trim()) {
     pushSeg({
       name: "L2_PROJECT_MEMORY",
-      content: `L2_PROJECT_MEMORY(Markdown):\n${projectMemory}\n\n`,
+      content: `L2_PROJECT_MEMORY(Markdown):\n${selectedMemory.projectMemory}\n\n`,
       priority: "p0",
       trusted: true,
       source: "desktop",
-      note: "项目级长期记忆（跟随项目目录持久化）",
+      note: `项目记忆（锚点+按需召回）| ${selectedMemory.recallNote} | selected=${selectedMemory.selectedHeadings.project.join(",") || "none"}`,
     });
   }
 
@@ -1744,7 +1939,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   return manifest + parts.join("");
 }
 
-export function buildChatContextPack(extra?: { referencesText?: string }) {
+export function buildChatContextPack(extra?: { referencesText?: string; userPrompt?: string }) {
   const proj = useProjectStore.getState();
   const selection = (() => {
     const ed = proj.editorRef;
@@ -1774,6 +1969,12 @@ export function buildChatContextPack(extra?: { referencesText?: string }) {
     };
   })();
   const refs = extra?.referencesText ? `${extra.referencesText}\n\n` : "";
+  const chatMemory = selectMemorySectionsForContext({
+    mode: "chat",
+    globalMemory: useMemoryStore.getState().globalMemory,
+    projectMemory: useMemoryStore.getState().projectMemory,
+    queryText: String(extra?.userPrompt ?? ""),
+  });
   const segments: ContextManifestSegmentV1[] = [];
   const parts: string[] = [];
   const pushSeg = (seg: {
@@ -1812,6 +2013,27 @@ export function buildChatContextPack(extra?: { referencesText?: string }) {
   if (chatSummary) pushSeg({ name: "DIALOGUE_SUMMARY", content: chatSummary, priority: "p1", trusted: true, source: "desktop" });
   if (chatRecentDialogue)
     pushSeg({ name: "RECENT_DIALOGUE", content: chatRecentDialogue, priority: "p1", trusted: true, source: "desktop" });
+
+  if (chatMemory.globalMemory.trim()) {
+    pushSeg({
+      name: "L1_GLOBAL_MEMORY",
+      content: `L1_GLOBAL_MEMORY(Markdown):\n${chatMemory.globalMemory}\n\n`,
+      priority: "p1",
+      trusted: true,
+      source: "desktop",
+      note: `chat 锚点记忆 | selected=${chatMemory.selectedHeadings.global.join(",") || "none"}`,
+    });
+  }
+  if (chatMemory.projectMemory.trim()) {
+    pushSeg({
+      name: "L2_PROJECT_MEMORY",
+      content: `L2_PROJECT_MEMORY(Markdown):\n${chatMemory.projectMemory}\n\n`,
+      priority: "p1",
+      trusted: true,
+      source: "desktop",
+      note: `chat 锚点记忆 | selected=${chatMemory.selectedHeadings.project.join(",") || "none"}`,
+    });
+  }
 
   if (refs) pushSeg({ name: "REFERENCES", content: refs, priority: "p1", trusted: false, source: "desktop" });
   pushSeg({

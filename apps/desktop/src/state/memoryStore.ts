@@ -61,6 +61,16 @@ const KNOWN_MEMORY_HEADINGS = new Set([
 ]);
 
 type TopLevelSection = { heading: string; content: string };
+type MemoryExtractOp = {
+  action?: "upsert" | "replace" | "ignore" | string;
+  section?: string;
+  factKey?: string;
+  content?: string;
+  confidence?: number;
+  source?: "user" | "assistant" | "consensus" | string;
+  reason?: string;
+};
+const MEMORY_OP_AUTO_APPLY_CONFIDENCE = 0.5;
 
 /** 解析 `# Heading` 顶级段落，返回 null 表示无法解析（无任何 # 标题） */
 function parseTopLevelSections(text: string): TopLevelSection[] | null {
@@ -95,6 +105,167 @@ function renderTopLevelSections(sections: TopLevelSection[]): string {
     .map((s) => `# ${s.heading}\n${s.content}`)
     .join("\n\n")
     .trim() + "\n";
+}
+
+function normalizeLooseText(raw: string): string {
+  return String(raw ?? "").toLowerCase().replace(/\s+/g, "").replace(/[，。！？、,.!?:：;；'"`~\-_/\\|()[\]{}<>]/g, "");
+}
+
+function normalizeFactKey(raw: string): string {
+  return normalizeLooseText(String(raw ?? "").trim().replace(/^#+\s*/, "")).slice(0, 64);
+}
+
+function normalizeMemoryOps(raw: unknown): Array<{
+  action: "upsert" | "replace" | "ignore";
+  section: string;
+  factKey: string;
+  content: string;
+  confidence: number;
+  source: "user" | "assistant" | "consensus" | "";
+  reason: string;
+}> {
+  const list = Array.isArray(raw) ? raw : [];
+  const out: Array<{
+    action: "upsert" | "replace" | "ignore";
+    section: string;
+    factKey: string;
+    content: string;
+    confidence: number;
+    source: "user" | "assistant" | "consensus" | "";
+    reason: string;
+  }> = [];
+  for (const one of list as MemoryExtractOp[]) {
+    const actionRaw = String(one?.action ?? "ignore").trim().toLowerCase();
+    const action =
+      actionRaw === "upsert" || actionRaw === "replace" || actionRaw === "ignore"
+        ? (actionRaw as "upsert" | "replace" | "ignore")
+        : "ignore";
+    const section = String(one?.section ?? "").trim();
+    const factKey = String(one?.factKey ?? "").trim();
+    const content = String(one?.content ?? "").trim();
+    const confidenceRaw = Number(one?.confidence);
+    const confidence = Number.isFinite(confidenceRaw) ? Math.max(0, Math.min(1, confidenceRaw)) : 1;
+    const sourceRaw = String(one?.source ?? "").trim();
+    const source =
+      sourceRaw === "user" || sourceRaw === "assistant" || sourceRaw === "consensus"
+        ? (sourceRaw as "user" | "assistant" | "consensus")
+        : "";
+    const reason = String(one?.reason ?? "").trim();
+    if (action !== "ignore" && (!section || !content)) continue;
+    if (action !== "ignore" && !KNOWN_MEMORY_HEADINGS.has(section)) continue;
+    out.push({ action, section, factKey, content, confidence, source, reason });
+  }
+  return out;
+}
+
+function opsToPatchMarkdown(ops: Array<{ section: string; factKey: string; content: string }>): string {
+  const bySection = new Map<string, Array<{ factKey: string; content: string }>>();
+  for (const op of ops) {
+    const section = String(op.section ?? "").trim();
+    const content = String(op.content ?? "").trim();
+    if (!section || !content) continue;
+    const arr = bySection.get(section) ?? [];
+    arr.push({ factKey: String(op.factKey ?? "").trim(), content });
+    bySection.set(section, arr);
+  }
+  const blocks: string[] = [];
+  for (const [section, rows] of bySection.entries()) {
+    const body = rows
+      .map((r) => (r.factKey ? `- [${r.factKey}] ${r.content}` : `- ${r.content}`))
+      .join("\n");
+    blocks.push(`# ${section}\n${body}`);
+  }
+  return blocks.join("\n\n");
+}
+
+function applyMemoryOpToSectionContent(
+  sectionContent: string,
+  op: { action: "upsert" | "replace"; factKey: string; content: string },
+): string {
+  const content = String(op.content ?? "").trim();
+  if (!content) return sectionContent;
+  const factKey = String(op.factKey ?? "").trim();
+  const keyedLine = factKey ? `- [${factKey}] ${content}` : "";
+  const lines = String(sectionContent ?? "").split("\n");
+  const sectionNorm = normalizeLooseText(sectionContent);
+  const contentNorm = normalizeLooseText(content);
+  if (!contentNorm) return sectionContent;
+  // 无 factKey：按内容去重（避免同义近义重复仍需后续迭代，这里先做轻量守门）
+  if (!factKey) {
+    if (sectionNorm.includes(contentNorm)) return sectionContent;
+    const base = String(sectionContent ?? "").trimEnd();
+    return base ? `${base}\n- ${content}\n` : `- ${content}\n`;
+  }
+
+  const targetKey = normalizeFactKey(factKey);
+  let firstIdx = -1;
+  const keepLines: string[] = [];
+  for (const line of lines) {
+    const m = line.match(/^\s*-\s*\[(.+?)\]\s*(.*)$/);
+    if (!m) {
+      keepLines.push(line);
+      continue;
+    }
+    const lineKey = normalizeFactKey(String(m[1] ?? ""));
+    if (lineKey !== targetKey) {
+      keepLines.push(line);
+      continue;
+    }
+    if (firstIdx < 0) {
+      firstIdx = keepLines.length;
+      keepLines.push(line);
+    }
+    // 同 factKey 的重复行会被丢弃，只保留首条并替换
+  }
+
+  if (firstIdx >= 0) {
+    const prevNorm = normalizeLooseText(String(keepLines[firstIdx] ?? ""));
+    const nextNorm = normalizeLooseText(keyedLine);
+    if (prevNorm === nextNorm) return sectionContent;
+    keepLines[firstIdx] = keyedLine;
+    return keepLines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+  }
+
+  if (sectionNorm.includes(contentNorm)) return sectionContent;
+  const base = String(sectionContent ?? "").trimEnd();
+  return base ? `${base}\n${keyedLine}\n` : `${keyedLine}\n`;
+}
+
+function mergeMemoryOps(existing: string, rawOps: unknown): string {
+  const ops = normalizeMemoryOps(rawOps)
+    .filter((op) => op.action !== "ignore")
+    .filter((op) => op.confidence >= MEMORY_OP_AUTO_APPLY_CONFIDENCE)
+    .map((op) => ({ action: op.action as "upsert" | "replace", section: op.section, factKey: op.factKey, content: op.content }));
+  if (!ops.length) return existing;
+
+  const existingSections = parseTopLevelSections(existing);
+  if (!existingSections || existingSections.length === 0) {
+    const fallbackPatch = opsToPatchMarkdown(ops);
+    return appendOnlyMergeMemoryPatch(existing, fallbackPatch);
+  }
+
+  const merged = [...existingSections];
+  const idxByHeading = new Map<string, number>();
+  for (let i = 0; i < merged.length; i += 1) idxByHeading.set(merged[i].heading, i);
+
+  for (const op of ops) {
+    const idx = idxByHeading.get(op.section);
+    if (idx === undefined) {
+      const initial = op.factKey ? `- [${op.factKey}] ${op.content}\n` : `- ${op.content}\n`;
+      merged.push({ heading: op.section, content: initial });
+      idxByHeading.set(op.section, merged.length - 1);
+      continue;
+    }
+    merged[idx] = {
+      heading: merged[idx].heading,
+      content: applyMemoryOpToSectionContent(merged[idx].content, {
+        action: op.action,
+        factKey: op.factKey,
+        content: op.content,
+      }),
+    };
+  }
+  return renderTopLevelSections(merged);
 }
 
 /** 降级策略：无法按 section 合并时，直接追加 */
@@ -353,22 +524,33 @@ export const useMemoryStore = create<MemoryState>((set, get) => ({
         return;
       }
 
-      const { globalPatches, projectPatches } = json;
+      const { globalPatches, projectPatches, globalOps, projectOps } = json;
 
       // 合并全局记忆
-      if (globalPatches?.trim()) {
+      const normalizedGlobalOps = normalizeMemoryOps(globalOps);
+      const normalizedProjectOps = normalizeMemoryOps(projectOps);
+      if (normalizedGlobalOps.length > 0) {
+        const merged = mergeMemoryOps(get().globalMemory, normalizedGlobalOps);
+        await get().saveGlobalMemory(merged);
+        console.log("[MemoryStore] L1 global memory updated via ops");
+      } else if (globalPatches?.trim()) {
         const merged = mergeMemoryPatch(get().globalMemory, globalPatches);
         await get().saveGlobalMemory(merged);
-        console.log("[MemoryStore] L1 global memory updated");
+        console.log("[MemoryStore] L1 global memory updated via patch fallback");
       }
 
       // 合并项目记忆（使用捕获的 rootDir，而非当前的 _projectRootDir）
-      if (projectPatches?.trim() && capturedRootDir) {
+      const hasProjectUpdate = normalizedProjectOps.length > 0 || Boolean(projectPatches?.trim());
+      if (hasProjectUpdate && capturedRootDir) {
         // 校验：当前项目未切换才写入
         if (get()._projectRootDir === capturedRootDir) {
-          const merged = mergeMemoryPatch(get().projectMemory, projectPatches);
+          const merged = normalizedProjectOps.length > 0
+            ? mergeMemoryOps(get().projectMemory, normalizedProjectOps)
+            : mergeMemoryPatch(get().projectMemory, projectPatches);
           await get().saveProjectMemory(capturedRootDir, merged);
-          console.log("[MemoryStore] L2 project memory updated");
+          console.log(
+            `[MemoryStore] L2 project memory updated via ${normalizedProjectOps.length > 0 ? "ops" : "patch fallback"}`,
+          );
         } else {
           // 项目已切换：先从磁盘读取旧内容，再合并写入（不更新 store state）
           const oldRes = await window.desktop?.memory?.readProject(capturedRootDir).catch(() => null);
@@ -377,9 +559,12 @@ export const useMemoryStore = create<MemoryState>((set, get) => ({
             console.warn("[MemoryStore] L2 read failed for switched project, skipping write");
           } else {
             const oldContent = oldRes.content ?? "";
+            const merged = normalizedProjectOps.length > 0
+              ? mergeMemoryOps(oldContent, normalizedProjectOps)
+              : mergeMemoryPatch(oldContent, projectPatches);
             await window.desktop?.memory?.writeProject(
               capturedRootDir,
-              mergeMemoryPatch(oldContent, projectPatches),
+              merged,
             ).catch(() => void 0);
             console.log("[MemoryStore] L2 project memory written to disk (project switched)");
           }

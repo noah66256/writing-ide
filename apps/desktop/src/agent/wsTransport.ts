@@ -439,7 +439,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       // -- context pack ---
       const contextPack =
         args.mode === "chat"
-          ? buildChatContextPack({ referencesText })
+          ? buildChatContextPack({ referencesText, userPrompt: promptForGateway })
           : await buildContextPack({ referencesText, userPrompt: promptForGateway, kbMentionIds: args.kbMentionIds });
 
       // ====================================================================
