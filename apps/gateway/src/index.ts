@@ -1234,8 +1234,8 @@ fastify.post(
   }
 
   const requestedIdRaw = body.model ? String(body.model).trim() : "";
-  const requestedId =
-    requestedIdRaw && stageAllowedIds?.length ? (stageAllowedIds.includes(requestedIdRaw) ? requestedIdRaw : "") : requestedIdRaw;
+  // 用户显式选择的模型优先使用，不再被 stage allowlist 覆盖
+  const requestedId = requestedIdRaw;
   const pickedId =
     requestedId || stageDefaultId || (stageAllowedIds?.length ? stageAllowedIds[0] : "") || env.defaultModel || "";
 
@@ -1349,8 +1349,8 @@ fastify.post(
     }
 
     const requestedIdRaw = body.model ? String(body.model).trim() : "";
-    const requestedId =
-      requestedIdRaw && stageAllowedIds.length ? (stageAllowedIds.includes(requestedIdRaw) ? requestedIdRaw : "") : requestedIdRaw;
+    // 用户显式选择的模型优先使用，不再被 stage allowlist 覆盖
+    const requestedId = requestedIdRaw;
     const pickedId =
       requestedId || stageDefaultId || (stageAllowedIds.length ? stageAllowedIds[0] : "") || env.defaultModel || "";
 
@@ -1599,8 +1599,8 @@ fastify.post(
   if (!env.ok) return reply.code(500).send({ error: "LLM_NOT_CONFIGURED" });
 
   const requestedIdRaw = body.preferModelId ? String(body.preferModelId).trim() : "";
-  const requestedId =
-    requestedIdRaw && stageAllowedIds?.length ? (stageAllowedIds.includes(requestedIdRaw) ? requestedIdRaw : "") : requestedIdRaw;
+  // 用户显式选择的模型优先使用，不再被 stage allowlist 覆盖
+  const requestedId = requestedIdRaw;
   const pickedId =
     requestedId || stageDefaultId || (stageAllowedIds?.length ? stageAllowedIds[0] : "") || env.defaultModel || "";
 
@@ -1755,8 +1755,8 @@ fastify.post(
   if (!env.ok) return reply.code(500).send({ error: "LLM_NOT_CONFIGURED" });
 
   const requestedIdRaw = body.preferModelId ? String(body.preferModelId).trim() : "";
-  const requestedId =
-    requestedIdRaw && stageAllowedIds?.length ? (stageAllowedIds.includes(requestedIdRaw) ? requestedIdRaw : "") : requestedIdRaw;
+  // 用户显式选择的模型优先使用，不再被 stage allowlist 覆盖
+  const requestedId = requestedIdRaw;
   const pickedId =
     requestedId || stageDefaultId || (stageAllowedIds?.length ? stageAllowedIds[0] : "") || env.defaultModel || "";
 
