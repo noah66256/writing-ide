@@ -216,6 +216,53 @@ function extractToolCallsFromAny(node: any): NormalizedToolCall[] {
   return Array.from(merged.values()).filter((c) => String(c.name ?? "").trim().length > 0);
 }
 
+function normalizeToolParametersSchema(raw: unknown): Record<string, unknown> {
+  const fallback = { type: "object", properties: {}, additionalProperties: true } as Record<string, unknown>;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fallback;
+
+  const walk = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map((x) => walk(x));
+    if (!node || typeof node !== "object") return node;
+
+    const src = node as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(src)) {
+      if (k === "oneOfRequired") {
+        const oneOf = (Array.isArray(v) ? v : [])
+          .map((x) => {
+            const req = Array.isArray((x as any)?.required)
+              ? ((x as any).required as unknown[]).map((s) => String(s ?? "").trim()).filter(Boolean)
+              : [];
+            return req.length ? { required: req } : null;
+          })
+          .filter(Boolean);
+        if (oneOf.length) out.oneOf = oneOf;
+        continue;
+      }
+      out[k] = walk(v);
+    }
+
+    if (String(out.type ?? "") === "array") {
+      if (out.items === undefined || out.items === null) out.items = {};
+      else out.items = walk(out.items);
+    }
+    if (out.properties && typeof out.properties === "object" && !Array.isArray(out.properties)) {
+      const props = out.properties as Record<string, unknown>;
+      const nextProps: Record<string, unknown> = {};
+      for (const [pk, pv] of Object.entries(props)) nextProps[pk] = walk(pv);
+      out.properties = nextProps;
+    }
+    if (Array.isArray(out.required)) {
+      out.required = (out.required as unknown[]).map((s) => String(s ?? "").trim()).filter(Boolean);
+    }
+    return out;
+  };
+
+  const normalized = walk(raw);
+  if (!normalized || typeof normalized !== "object" || Array.isArray(normalized)) return fallback;
+  return normalized as Record<string, unknown>;
+}
+
 function toOpenAiToolsPayload(tools?: OpenAiCompatTool[]) {
   if (!Array.isArray(tools) || tools.length === 0) return undefined;
   return tools.map((tool) => ({
@@ -223,10 +270,7 @@ function toOpenAiToolsPayload(tools?: OpenAiCompatTool[]) {
     function: {
       name: String(tool.name ?? "").trim(),
       ...(String(tool.description ?? "").trim() ? { description: String(tool.description ?? "").trim() } : {}),
-      parameters:
-        tool.inputSchema && typeof tool.inputSchema === "object"
-          ? tool.inputSchema
-          : { type: "object", properties: {}, additionalProperties: true },
+      parameters: normalizeToolParametersSchema(tool.inputSchema),
     },
   }));
 }
@@ -237,10 +281,7 @@ function toResponsesToolsPayload(tools?: OpenAiCompatTool[]) {
     type: "function" as const,
     name: String(tool.name ?? "").trim(),
     ...(String(tool.description ?? "").trim() ? { description: String(tool.description ?? "").trim() } : {}),
-    parameters:
-      tool.inputSchema && typeof tool.inputSchema === "object"
-        ? tool.inputSchema
-        : { type: "object", properties: {}, additionalProperties: true },
+    parameters: normalizeToolParametersSchema(tool.inputSchema),
   }));
 }
 
