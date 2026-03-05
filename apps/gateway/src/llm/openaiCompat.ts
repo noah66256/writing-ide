@@ -231,6 +231,19 @@ function toOpenAiToolsPayload(tools?: OpenAiCompatTool[]) {
   }));
 }
 
+function toResponsesToolsPayload(tools?: OpenAiCompatTool[]) {
+  if (!Array.isArray(tools) || tools.length === 0) return undefined;
+  return tools.map((tool) => ({
+    type: "function" as const,
+    name: String(tool.name ?? "").trim(),
+    ...(String(tool.description ?? "").trim() ? { description: String(tool.description ?? "").trim() } : {}),
+    parameters:
+      tool.inputSchema && typeof tool.inputSchema === "object"
+        ? tool.inputSchema
+        : { type: "object", properties: {}, additionalProperties: true },
+  }));
+}
+
 function toOpenAiToolChoicePayload(choice?: OpenAiCompatToolChoice) {
   if (!choice) return undefined;
   if (choice.type === "auto") return "auto";
@@ -240,6 +253,19 @@ function toOpenAiToolChoicePayload(choice?: OpenAiCompatToolChoice) {
     const name = String(choice.name ?? "").trim();
     if (!name) return undefined;
     return { type: "function" as const, function: { name } };
+  }
+  return undefined;
+}
+
+function toResponsesToolChoicePayload(choice?: OpenAiCompatToolChoice) {
+  if (!choice) return undefined;
+  if (choice.type === "auto") return "auto";
+  if (choice.type === "none") return "none";
+  if (choice.type === "any") return "required";
+  if (choice.type === "tool") {
+    const name = String(choice.name ?? "").trim();
+    if (!name) return undefined;
+    return { type: "function" as const, name };
   }
   return undefined;
 }
@@ -457,8 +483,8 @@ async function* streamResponses(args: {
   if (typeof args.temperature === "number" && Number.isFinite(args.temperature)) {
     bodyBase.temperature = args.temperature;
   }
-  const openAiTools = toOpenAiToolsPayload(args.tools);
-  const openAiToolChoice = toOpenAiToolChoicePayload(args.toolChoice);
+  const openAiTools = toResponsesToolsPayload(args.tools);
+  const openAiToolChoice = toResponsesToolChoicePayload(args.toolChoice);
   const wantsNativeTools = Boolean(openAiTools?.length);
 
   const withNativeToolsBody = (): Record<string, unknown> => ({
