@@ -1953,6 +1953,48 @@ export class WritingAgentRunner {
       }
     }
 
+    // [11.5] 统一参数预验证
+    // Provider 路径仅对验证失败的调用填充 presetResults，有效调用会在此被幂等地
+    // 重复 normalize+validate（纯函数，无副作用）。Anthropic 路径则首次在此校验。
+    for (const toolUse of result.completedToolUses) {
+      const toolUseId = String(toolUse.id ?? "");
+      if (result.presetResults.has(toolUseId)) continue;
+
+      const rawInput = toolUse.input && typeof toolUse.input === "object" && !Array.isArray(toolUse.input)
+        ? (toolUse.input as Record<string, unknown>)
+        : {};
+      const normalized = normalizeToolCallForValidation(toolUse.name, rawInput);
+      const normalizedName = normalized.name;
+      const normalizedInput = normalized.args;
+      const nameChanged = normalizedName !== String(toolUse.name ?? "");
+
+      toolUse.name = normalizedName;
+      toolUse.input = normalizedInput;
+
+      if (nameChanged) {
+        this.turnEngine.record({
+          type: "model_tool_call",
+          callId: toolUseId,
+          name: normalizedName,
+          args: normalizedInput,
+        });
+      }
+
+      const v = validateToolCallArgs({ name: normalizedName, toolArgs: normalizedInput });
+      if (!v.ok) {
+        result.presetResults.set(toolUseId, {
+          ok: false,
+          output: {
+            ok: false,
+            error: "ERR_PARAM_SCHEMA_MISMATCH",
+            message: v.error?.message ?? "工具参数不符合 schema",
+            detail: v.error?.field ? { field: v.error.field } : null,
+            next_actions: ["按该工具 schema 重新组织参数", "缺参时先补齐必填字段后重试"],
+          },
+        });
+      }
+    }
+
     // [12-13] 协议违规检测 + 混输压制
     // 使用流解析的工具数量而非 fallback 后的数量，与旧逻辑保持一致
     const hasProtocolViolation = adapter.detectsProtocolViolation &&

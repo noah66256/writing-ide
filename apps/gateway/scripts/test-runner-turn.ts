@@ -343,6 +343,49 @@ async function scenario6_toolResultInjectionFormat() {
 }
 
 // ---------------------------------------------------------------------------
+// 场景 7: Anthropic 路径 - 缺参工具调用触发预验证拦截
+// ---------------------------------------------------------------------------
+async function scenario7_anthropicMissingParamPreValidation() {
+  // 模型返回 kb.search({})，缺少 required 参数 query
+  // 预期：Gateway 在 step 11.5 预验证拦截，presetResults 命中，
+  //       _executeTool 不被调用（不下发到 Desktop），
+  //       但 tool.result 事件包含 ERR_PARAM_SCHEMA_MISMATCH
+  await withMockFetch(async (input) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.endsWith("/messages")) return anthropicToolUseSse("kb.search", "{}");
+    return new Response("unexpected", { status: 500 });
+  }, async () => {
+    const { runner, events } = buildRunner({
+      apiType: "anthropic-messages",
+      endpoint: "/v1/messages",
+      allowedToolNames: ["kb.search", "run.done"],
+      maxTurns: 1,
+    });
+
+    await runner.run("搜索知识库");
+
+    // presetResults 命中 → _executeTool 未被调用 → 不应有 tool.call 事件
+    assert.equal(
+      hasToolCallEvent(events, "kb.search"), false,
+      "should NOT emit tool.call for kb.search (preset intercept, not sent to Desktop)",
+    );
+
+    // tool.result 事件应包含 ERR_PARAM_SCHEMA_MISMATCH
+    const toolResultEvent = events.find(
+      (e) => e.event === "tool.result" && String(e.data?.name ?? "") === "kb.search",
+    );
+    assert.ok(toolResultEvent, "should have tool.result event for kb.search");
+    const resultOutput = toolResultEvent!.data?.output;
+    assert.equal(
+      String(resultOutput?.error ?? ""),
+      "ERR_PARAM_SCHEMA_MISMATCH",
+      `tool.result should contain ERR_PARAM_SCHEMA_MISMATCH, got: ${JSON.stringify(resultOutput)}`,
+    );
+  });
+  ok("scenario7.anthropic.missing_param_pre_validation");
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 async function main() {
@@ -352,6 +395,7 @@ async function main() {
   await scenario4_openAiXmlToolCall();
   await scenario5_openAiEmptyRetry();
   await scenario6_toolResultInjectionFormat();
+  await scenario7_anthropicMissingParamPreValidation();
   console.log("[test-runner-turn] ALL PASSED");
 }
 
