@@ -2060,6 +2060,14 @@ export async function prepareAgentRun(args: {
   const executionPreferred = routeDecision.executionPreferred;
   const executionContract = routeDecision.executionContract;
   const preserveToolNames = routeDecision.preserveToolNames;
+
+  // 当 Desktop 传入了可委派的团队成员时，强制保留 agent.delegate，
+  // 避免在 selectToolSubset 的 30 工具裁剪中被丢弃（该工具默认得分为 0）。
+  const hasTeamRoster = (personaFromPack?.teamRoster?.length ?? 0) > 0;
+  if (hasTeamRoster && baseAllowedToolNames.has("agent.delegate")) {
+    preserveToolNames.add("agent.delegate");
+  }
+
   const toolCatalog = buildToolCatalog({
     mode,
     allowedToolNames: baseAllowedToolNames,
@@ -2594,6 +2602,8 @@ export async function executeAgentRun(args: {
         allowedPoolSize: baseAllowedToolNames.size,
         selectedPoolSize: selectedAllowedToolNames.size,
         selectedToolNames: Array.from(selectedAllowedToolNames).slice(0, 36),
+        hasTeamRoster: (personaFromPack?.teamRoster?.length ?? 0) > 0,
+        teamRosterCount: personaFromPack?.teamRoster?.length ?? 0,
         summary: toolCatalogSummary,
       },
       toolSidecar: {

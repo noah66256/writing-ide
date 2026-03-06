@@ -47,6 +47,7 @@ const CAPABILITY_KEYWORDS: Array<{ capability: string; re: RegExp }> = [
   { capability: "web_fetch", re: /(网页|url|链接|fetch|抓取|访问|打开百度|open\s+.*https?)/i },
   { capability: "kb_search", re: /(知识库|kb|风格库|语料|检索|抽卡|learn|ingest)/i },
   { capability: "code_exec", re: /(运行|执行脚本|命令|shell|打包|构建|部署|code\.exec)/i },
+  { capability: "delegate", re: /(委派|分派|指派|派给|delegate|sub[\s_-]?agent|agent\s*delegate)/i },
   { capability: "browser_open", re: /(打开网页|打开网站|浏览器|navigate|open\s+.*(baidu|google|url))/i },
 ];
 
