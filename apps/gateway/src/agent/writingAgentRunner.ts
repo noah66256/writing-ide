@@ -45,6 +45,7 @@ import {
   decideServerToolExecution,
   executeServerToolOnGateway,
 } from "./serverToolRunner.js";
+import { inferCapabilities } from "./toolCatalog.js";
 import { TurnEngine, type RunOutcome } from "./turnEngine.js";
 
 export type SseWriter = (event: string, data: unknown) => void;
@@ -481,6 +482,69 @@ function resolveSubAgentBudget(baseBudget: SubAgentBudget, budgetOverride: unkno
     maxToolCalls: clampIntLocal(override.maxToolCalls, 1, 100, Math.max(1, Math.floor(baseBudget.maxToolCalls))),
     timeoutMs: clampIntLocal(override.timeoutMs, 5_000, 300_000, Math.max(5_000, Math.floor(baseBudget.timeoutMs))),
   };
+}
+
+// ── 子 Agent MCP 作用域：按角色能力匹配 ──
+
+/** 从子 agent 的内置工具列表推导出所需能力集 */
+function inferAgentNeededCapabilities(toolNames: Iterable<string>): Set<string> {
+  const needed = new Set<string>();
+  for (const rawName of toolNames) {
+    const name = String(rawName ?? "").trim();
+    if (!name || name === "agent.delegate") continue;
+    const meta = TOOL_LIST.find((t) => t.name === name);
+    const caps = inferCapabilities(name, String(meta?.description ?? ""), "builtin");
+    for (const cap of caps) {
+      if (cap === "generic" || cap === "mcp" || cap === "delegate") continue;
+      needed.add(cap);
+    }
+  }
+  return needed;
+}
+
+/** 判断 MCP 工具是否与子 agent 的能力需求匹配 */
+function isMcpToolRelevantForAgent(mcpTool: any, agentNeededCaps: Set<string>): boolean {
+  if (agentNeededCaps.size === 0) return false;
+  const name = String(mcpTool?.name ?? "").trim();
+  if (!name) return false;
+  const description = String(mcpTool?.description ?? "");
+  const mcpCaps = inferCapabilities(name, description, "mcp");
+  return mcpCaps.some((cap) => agentNeededCaps.has(cap));
+}
+
+/** 根据实际 allowedToolNames 动态生成子 agent 的工具清单文本 */
+function buildDynamicToolList(args: {
+  allowedToolNames: Set<string>;
+  mcpTools: any[];
+}): string {
+  const lines: string[] = [];
+  // 内置工具
+  for (const tool of TOOL_LIST) {
+    if (!args.allowedToolNames.has(tool.name)) continue;
+    const desc = String(tool.description ?? "").split("\n")[0].trim();
+    lines.push(`- ${tool.name}：${desc || "(…)"}`);
+  }
+  // MCP 工具
+  const mcpSeen = new Set<string>();
+  for (const t of Array.isArray(args.mcpTools) ? args.mcpTools : []) {
+    const name = String(t?.name ?? "").trim();
+    if (!name || !args.allowedToolNames.has(name) || mcpSeen.has(name)) continue;
+    mcpSeen.add(name);
+    const rawDesc = String(t?.description ?? "").split("\n")[0].trim();
+    lines.push(`- ${name}：${rawDesc ? `[MCP] ${rawDesc}` : "[MCP]"}`);
+  }
+  return lines.length > 0 ? lines.join("\n") : "- （无可用工具）";
+}
+
+/** 替换子 agent systemPrompt 中硬编码的工具清单部分 */
+function replaceHardcodedToolList(prompt: string, dynamicToolList: string): string {
+  // 匹配 "可用工具（仅此列表...）：\n" 到 "规则：/标准执行流程：/..." 之间的内容
+  const sectionRe = /(可用工具（仅此列表[^）]*）[：:]\s*\n)([\s\S]*?)(\n(?:规则：|标准执行流程：|执行流程：|注意：))/;
+  if (!sectionRe.test(prompt)) return prompt;
+  return prompt.replace(
+    sectionRe,
+    (_m, header: string, _oldBody: string, tail: string) => `${header}${dynamicToolList}\n${tail}`,
+  );
 }
 
 /** 从 Markdown 文档中按 heading 标题筛选 section。
@@ -2429,10 +2493,22 @@ export class WritingAgentRunner {
     );
     subAllowedToolNames.delete("agent.delegate");
 
-    // 方案 A：自动注入 MCP 工具到子 Agent（与负责人共享 MCP 工具池）
-    const mcpTools: any[] = (this.ctx as any).mcpTools ?? [];
-    for (const t of mcpTools) {
+    // 仅注入与子 Agent 角色能力匹配的 MCP 工具，避免全量注入导致上下文膨胀
+    const mcpTools: any[] = Array.isArray((this.ctx as any).mcpTools) ? (this.ctx as any).mcpTools : [];
+    const neededCaps = inferAgentNeededCapabilities(subAgent.tools ?? []);
+    const scopedMcpTools = mcpTools.filter((t) => isMcpToolRelevantForAgent(t, neededCaps));
+    for (const t of scopedMcpTools) {
       if (t.name) subAllowedToolNames.add(t.name);
+    }
+    console.log("[sub-agent.mcp-scope]", {
+      agentId,
+      neededCaps: Array.from(neededCaps),
+      totalMcp: mcpTools.length,
+      scopedMcp: scopedMcpTools.length,
+    });
+    if (mcpTools.length > 0 && scopedMcpTools.length === 0) {
+      console.warn("[sub-agent.mcp-scope] WARN: all MCP tools filtered out for", agentId,
+        "— neededCaps may not match any MCP capability");
     }
 
     // Abort control: chain parent abort + budget timeout
@@ -2511,6 +2587,15 @@ export class WritingAgentRunner {
       }
     }
 
+    // 动态替换子 Agent prompt 中硬编码的工具清单，确保与实际 allowed + scoped MCP 一致
+    if (/可用工具（仅此列表/.test(subSystemPrompt)) {
+      const dynamicToolList = buildDynamicToolList({
+        allowedToolNames: subAllowedToolNames,
+        mcpTools: scopedMcpTools,
+      });
+      subSystemPrompt = replaceHardcodedToolList(subSystemPrompt, dynamicToolList);
+    }
+
     const subActiveSkills: ActiveSkill[] = shouldInjectStyleImitate
       ? this.ctx.activeSkills.filter((s) => s.id === "style_imitate")
       : [];
@@ -2562,9 +2647,9 @@ export class WritingAgentRunner {
       },
     };
 
-    // 将 MCP 工具传递给子 Agent context
-    if (mcpTools.length) {
-      (subCtx as any).mcpTools = mcpTools;
+    // 将能力匹配后的 MCP 工具传递给子 Agent context
+    if (scopedMcpTools.length) {
+      (subCtx as any).mcpTools = scopedMcpTools;
     }
 
     const subRunner = new WritingAgentRunner(subCtx);

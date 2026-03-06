@@ -40,7 +40,7 @@ const ROUTE_CAPABILITY_MAP: Record<string, string[]> = {
 const CAPABILITY_KEYWORDS: Array<{ capability: string; re: RegExp }> = [
   { capability: "file_delete", re: /(删|删除|清理|清空|remove|delete|rm\b|del\b)/i },
   { capability: "file_list", re: /(列出|列表|list\s*files|listfiles|文件列表|目录)/i },
-  { capability: "file_read", re: /(读取|查看|读|read|open|解析|提取|总结|摘要)/i },
+  { capability: "file_read", re: /(读取|查看|读|read|open|解析|提取|总结|摘要|读.*excel|读.*word|打开.*文档|解析.*pdf)/i },
   { capability: "file_write", re: /(写入|改写|创建|新建|保存|rename|move|apply|落盘)/i },
   { capability: "project_search", re: /(搜索|查找|find|grep|rg|全项目|项目内)/i },
   { capability: "web_search", re: /(全网|联网|上网|搜索网页|新闻|热点|最新|today|latest)/i },
@@ -48,10 +48,10 @@ const CAPABILITY_KEYWORDS: Array<{ capability: string; re: RegExp }> = [
   { capability: "kb_search", re: /(知识库|kb|风格库|语料|检索|抽卡|learn|ingest)/i },
   { capability: "code_exec", re: /(运行|执行脚本|命令|shell|打包|构建|部署|code\.exec)/i },
   { capability: "delegate", re: /(委派|分派|指派|派给|delegate|sub[\s_-]?agent|agent\s*delegate)/i },
-  { capability: "browser_open", re: /(打开网页|打开网站|浏览器|navigate|open\s+.*(baidu|google|url))/i },
+  { capability: "browser_open", re: /(打开.*网页|打开网站|浏览器|网站|navigate|open\s+.*(baidu|google|url))/i },
 ];
 
-function inferCapabilities(name: string, description: string, source: ToolCatalogSource): string[] {
+export function inferCapabilities(name: string, description: string, source: ToolCatalogSource): string[] {
   const n = String(name ?? "").trim().toLowerCase();
   const d = String(description ?? "").toLowerCase();
   const caps = new Set<string>();
@@ -85,7 +85,17 @@ function inferCapabilities(name: string, description: string, source: ToolCatalo
       caps.add("browser_open");
       caps.add("web_fetch");
     }
-    if (/(excel|word|pdf|office|document|read|get|parse|extract)/i.test(`${n} ${d}`)) {
+    // 文档类 MCP 工具：精细分类替代粗糙的全匹配
+    const mcpText = `${n} ${d}`;
+    if (/(excel|workbook|worksheet|sheet|spreadsheet)/i.test(mcpText)) {
+      caps.add("file_read");
+      if (/(write|update|create|insert|delete|format)/i.test(mcpText)) caps.add("file_write");
+    }
+    if (/(word|docx|document)/i.test(mcpText)) {
+      caps.add("file_read");
+      if (/(write|update|create|convert)/i.test(mcpText)) caps.add("file_write");
+    }
+    if (/(pdf|extract|parse)/i.test(mcpText)) {
       caps.add("file_read");
     }
   }
