@@ -33,6 +33,7 @@ import {
   type RunState,
   type ActiveSkill,
   type ParsedToolCall,
+  STYLE_IMITATE_SKILL,
   BUILTIN_SUB_AGENTS,
   type SubAgentBudget,
   type SubAgentDefinition,
@@ -2506,15 +2507,32 @@ export class WritingAgentRunner {
       (this.ctx as any).textBlobPool = new Map<string, string>();
     }
 
+    // ── 子 agent skill 继承：若父 agent 激活了 style_imitate 且子 agent 可 lint，
+    //    将仿写闭环指引注入子 agent 的 systemPrompt ──
+    const parentStyleSkillActive = this.ctx.activeSkills.some((s) => s.id === "style_imitate");
+    const shouldInjectStyleImitate = parentStyleSkillActive && subCanLint && inheritStyleGates;
+
+    let subSystemPrompt = String(subAgent.systemPrompt ?? "").trim() || this.ctx.systemPrompt;
+    if (shouldInjectStyleImitate) {
+      const styleFragment = String(STYLE_IMITATE_SKILL.promptFragments?.system ?? "").trim();
+      if (styleFragment) {
+        subSystemPrompt += `\n\n【Active Skills】style_imitate\n- ${styleFragment}`;
+      }
+    }
+
+    const subActiveSkills: ActiveSkill[] = shouldInjectStyleImitate
+      ? this.ctx.activeSkills.filter((s) => s.id === "style_imitate")
+      : [];
+
     // Build sub-agent RunContext
     const subCtx: RunContext = {
       runId: subRunId,
       mode: "agent",
       intent: subIntent,
       gates: subGates,
-      activeSkills: [],
+      activeSkills: subActiveSkills,
       allowedToolNames: subAllowedToolNames,
-      systemPrompt: String(subAgent.systemPrompt ?? "").trim() || this.ctx.systemPrompt,
+      systemPrompt: subSystemPrompt,
       toolSidecar: this.ctx.toolSidecar,
       styleLinterLibraries: this.ctx.styleLinterLibraries,
       fastify: this.ctx.fastify,
