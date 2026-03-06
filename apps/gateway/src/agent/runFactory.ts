@@ -61,6 +61,7 @@ export type RunServices = {
   };
   toolConfig: {
     resolveCapabilitiesRuntime: () => Promise<any>;
+    resolveWebSearchRuntime: () => Promise<{ isEnabled: boolean; apiKey: string; [k: string]: unknown }>;
   };
   getLlmEnv: (db?: Db) => Promise<{
     baseUrl: string;
@@ -209,20 +210,14 @@ const CORE_WORKFLOW_TOOL_NAMES = [
   "run.mainDoc.get",
   "run.mainDoc.update",
   "run.setTodoList",
-  "run.updateTodo",
-  "run.todo.upsertMany",
-  "run.todo.update",
-  "run.todo.remove",
-  "run.todo.clear",
+  "run.todo",
   "run.done",
 ] as const;
 
 const DELETE_ROUTE_PINNED_TOOL_NAMES = [
   ...CORE_WORKFLOW_TOOL_NAMES,
   "project.listFiles",
-  "doc.commitSnapshot",
-  "doc.listSnapshots",
-  "doc.restoreSnapshot",
+  "doc.snapshot",
   "doc.deletePath",
 ] as const;
 
@@ -286,14 +281,14 @@ function buildRouteDecisionV1(args: {
   } else if (routeIdLower === "web_radar") {
     executionPreferredRaw.push("web.search", "web.fetch");
   } else if (routeIdLower === "file_ops") {
-    executionPreferredRaw.push("project.listFiles", "run.setTodoList", "run.todo.upsertMany");
+    executionPreferredRaw.push("project.listFiles", "run.setTodoList", "run.todo");
   } else if (routeIdLower === "kb_ops") {
     executionPreferredRaw.push("kb.search", "run.mainDoc.get", "run.setTodoList");
   } else if (routeIdLower === "task_execution") {
     // Anthropic 端点工具遵循度高，推荐先建 Todo 再执行；
     // 非 Anthropic 端点（GPT 等）对复杂工具链遵循度低，推荐先读取再决策。
     if (isAnthropicLike) {
-      executionPreferredRaw.push("run.setTodoList", "run.todo.upsertMany", "run.mainDoc.get", "kb.search");
+      executionPreferredRaw.push("run.setTodoList", "run.todo", "run.mainDoc.get", "kb.search");
     } else {
       executionPreferredRaw.push("run.mainDoc.get", "kb.search", "run.setTodoList");
     }
@@ -316,7 +311,7 @@ function buildRouteDecisionV1(args: {
     ),
   );
   if (isExecutionRoute && executionPreferred.length === 0) {
-    for (const name of ["run.mainDoc.get", "run.setTodoList", "run.todo.upsertMany", "project.listFiles", "kb.search"]) {
+    for (const name of ["run.mainDoc.get", "run.setTodoList", "run.todo", "project.listFiles", "kb.search"]) {
       if (args.baseAllowedToolNames.has(name)) executionPreferred.push(name);
     }
   }
@@ -546,6 +541,7 @@ export function buildAgentProtocolPrompt(args: {
   persona?: AgentPersonaFromPack | null;
   routeId?: string | null;
   deleteTargetsHint?: string;
+  webSearchHint?: string;
 }) {
   const mode = args.mode;
   const deleteRoutePolicy =
@@ -575,7 +571,7 @@ export function buildAgentProtocolPrompt(args: {
         `1) Todo（任务清单）：进入执行流后默认维护 Todo。\n` +
         `   - 有团队成员时：Todo 必须体现管理者视角，例如"① 委派文案写手撰写初稿 ② 审核稿件质量 ③ 交付用户"。\n` +
         `     禁止写成执行者视角，例如"① 搜索素材 ② 撰写初稿 ③ 风格检查"——那是子 agent 内部该做的事。\n` +
-        `   - 首次可用 run.setTodoList；已有 Todo 时优先 run.todo.upsertMany / run.todo.update / run.todo.remove，不重复覆盖。\n` +
+        `   - 首次可用 run.setTodoList；已有 Todo 时优先 run.todo（action=upsert/update/remove），不重复覆盖。\n` +
         `2) 任务工作台（mainDoc）：关键决策/约束/假设及时写入 run.mainDoc.update。这是你和团队共享的结构化工作记忆。\n` +
         `   ⚠ mainDoc 禁止存储：草稿全文、lint 对比结果全文、逐句改写记录、任何超过 3 段的长文本。\n` +
         `   ✓ mainDoc 只允许：目标、平台、受众、约束、大纲摘要、当前步骤状态。\n` +
@@ -598,10 +594,10 @@ export function buildAgentProtocolPrompt(args: {
         `      - 系统已注入记忆，无需在 task 重复；仅补充本次任务特有的约束或用户在对话中新提出的要求。\n` +
         `4) 续跑契约（workflowV1）：当你提出"请选择/请确认"并准备结束本轮等待用户时，先写入 mainDoc.workflowV1=waiting_user；用户回复后更新为 running/done。\n` +
         `5) 团队配置（agent.config 工具）：\n` +
-        `   - 查看团队：agent.config.list\n` +
-        `   - 添加成员：agent.config.create（必填 name、description、systemPrompt）\n` +
-        `   - 修改配置：agent.config.update（传 agentId + 要改的字段）\n` +
-        `   - 移除成员：agent.config.remove（仅限 custom_ 开头的自定义成员）\n` +
+        `   - 查看团队：agent.config（action=list）\n` +
+        `   - 添加成员：agent.config（action=create，必填 name、description、systemPrompt）\n` +
+        `   - 修改配置：agent.config（action=update，传 agentId + 要改的字段）\n` +
+        `   - 移除成员：agent.config（action=remove，仅限 custom_ 开头的自定义成员）\n` +
         `   - 内置成员不可删除，只能启用/禁用。\n` +
         `输出约束：\n` +
         `- 给用户看的文字输出必须是 Markdown，不要输出 JSON。\n` +
@@ -643,7 +639,7 @@ export function buildAgentProtocolPrompt(args: {
     personaLine +
     `能力边界（非常重要）：\n` +
     `- 你只能使用"下方列出的工具"。工具就是能力边界；列表里没有的能力你不具备。\n` +
-    `- 没有联网工具时不得声称已联网或引用网络信息。\n` +
+    `${args.webSearchHint ? `- ${args.webSearchHint}\n` : `- 没有联网工具时不得声称已联网或引用网络信息。\n`}` +
     `- 知识库（KB）只能通过 kb.search 等工具结果来引用；不得凭空说"KB 里有/KB 显示"。\n` +
     `- MCP Server 的新增/修改/删除只能在设置页「MCP」执行；对话里用户贴 GitHub 链接时，你只能给安装建议，绝不能声称“已安装/已连接”。\n` +
     `- 用户界面是对话驱动的极简布局（导航栏 + 全宽对话区 + 按需展开的工作面板），没有文件树、编辑器面板或 Dock Panel。不要引导用户去"左侧文件树""编辑器"等不存在的 UI 元素；产出文件在对话中列出路径即可，用户点击即可打开。\n\n` +
@@ -2101,6 +2097,30 @@ export async function prepareAgentRun(args: {
       ? extractDeleteTargetsHint(userPrompt)
       : "";
 
+  // 检测联网搜索可用状态，注入到 systemPrompt
+  const hasWebToolSelected = selectedAllowedToolNames.has("web.search");
+  let webSearchHint = "";
+  if (hasWebToolSelected) {
+    // 检测 Bocha API 是否已配置（Gateway 侧直接执行）
+    const webSearchRuntime = await services.toolConfig.resolveWebSearchRuntime().catch(() => null);
+    const hasBochaApi = !!webSearchRuntime?.isEnabled && !!webSearchRuntime?.apiKey;
+
+    const hasDedicatedSearchMcp = mcpToolsFromSidecar.some((t) =>
+      /^mcp\.(bocha-search|web-search)\./i.test(String(t?.name ?? "")) &&
+      /(search|web_search|bocha_web_search)/i.test(String(t?.originalName ?? t?.name ?? "")),
+    );
+    const hasPlaywrightMcp = mcpToolsFromSidecar.some((t) =>
+      /^mcp\.playwright\./i.test(String(t?.name ?? "")),
+    );
+    if (hasBochaApi || hasDedicatedSearchMcp) {
+      webSearchHint = "联网搜索已就绪（搜索服务已连接）。需要搜索时使用 web.search / web.fetch。";
+    } else if (hasPlaywrightMcp) {
+      webSearchHint = "联网搜索可用（通过浏览器，速度较慢）。需要搜索时使用 web.search / web.fetch，系统自动通过浏览器执行。建议用户在设置页启用专用搜索服务以获得更快体验。";
+    } else {
+      webSearchHint = "联网搜索当前不可用（未配置搜索服务且浏览器 MCP 未连接）。不得声称已联网或引用网络信息。";
+    }
+  }
+
   const messages: OpenAiChatMessage[] = [
     {
       role: "system",
@@ -2110,6 +2130,7 @@ export async function prepareAgentRun(args: {
         persona: personaFromPack,
         routeId: intentRoute.routeId ?? null,
         deleteTargetsHint,
+        webSearchHint: webSearchHint || undefined,
       }),
     },
     ...(skillsSystemPrompt ? ([{ role: "system", content: skillsSystemPrompt }] as OpenAiChatMessage[]) : []),
@@ -2216,10 +2237,10 @@ export async function prepareAgentRun(args: {
   const PHASE_CONTRACTS_V1: Partial<Record<SkillToolCapsPhase, PhaseContractV1>> = {
     todo_required: {
       phase: "todo_required",
-      allowTools: ["run.setTodoList", "run.todo.upsertMany", "run.mainDoc.update", "run.mainDoc.get"],
+      allowTools: ["run.setTodoList", "run.todo", "run.mainDoc.update", "run.mainDoc.get"],
       hint:
         "【Todo Gate】当前阶段：todo_required（先立计划，再行动）。\n" +
-        "- 你必须先设置 Todo（run.setTodoList 或 run.todo.upsertMany；建议 5–12 条，全部可执行）。\n" +
+        "- 你必须先设置 Todo（run.setTodoList 或 run.todo action=upsert；建议 5–12 条，全部可执行）。\n" +
         "- 默认不要创建 status=blocked/等待确认 条目；如有不确定点：写成 todo，并在 note 写明“默认假设”，继续推进（不要硬等用户）。\n" +
         "- 本回合不要调用 kb.search / lint.* / doc.* / project.* 等其它工具；不要输出最终正文。\n",
       autoRetry: ({ runState, toolCapsPhase }) => {
@@ -2231,7 +2252,7 @@ export async function prepareAgentRun(args: {
           reasonCodes: ["need_todo"],
           reasons: ["Todo 未设置"],
           systemMessage:
-            "你还没有设置 Todo。请立刻调用 run.setTodoList（或 run.todo.upsertMany）写入可执行 Todo，再继续下一步。\n" +
+            "你还没有设置 Todo。请立刻调用 run.setTodoList（或 run.todo action=upsert）写入可执行 Todo，再继续下一步。\n" +
             "- 建议：先写 5–12 条，包含：检索模板 → 产候选稿 → 二次检索金句/收束 → lint.style → 写入。\n" +
             "- 默认不要创建 status=blocked/等待确认 条目；如有不确定点：写明默认假设继续推进。\n",
         };
@@ -2239,7 +2260,7 @@ export async function prepareAgentRun(args: {
     },
     style_need_catalog_pick: {
       phase: "style_need_catalog_pick",
-      allowTools: ["run.mainDoc.update", "run.mainDoc.get", "run.setTodoList", "run.todo.upsertMany", "run.todo.update", "kb.search"],
+      allowTools: ["run.mainDoc.update", "run.mainDoc.get", "run.setTodoList", "run.todo", "kb.search"],
       hint:
         "【Skill: style_imitate】当前阶段：need_catalog_pick（目录先挑，工业化 v0.1）。\n" +
         "- 你必须先基于 Context Pack 里的 STYLE_CATALOG(JSON) 选择维度与子套路选项，并写入 Main Doc：run.mainDoc.update。\n" +
@@ -2323,7 +2344,7 @@ export async function prepareAgentRun(args: {
               ...executionPreferred,
               "run.mainDoc.get",
               "run.setTodoList",
-              "run.todo.upsertMany",
+              "run.todo",
               "project.listFiles",
               "kb.search",
             ];

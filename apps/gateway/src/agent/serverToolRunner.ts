@@ -25,7 +25,8 @@ function getServerToolAllowlist(): Set<string> {
   const list = cfg
     ? parseCsv(cfg)
     : ["lint.style", "time.now",
-       "run.done", "run.setTodoList", "run.todo.upsertMany", "run.todo.update", "run.mainDoc.update", "run.mainDoc.get",
+       "web.search", "web.fetch",
+       "run.done", "run.setTodoList", "run.todo", "run.mainDoc.update", "run.mainDoc.get",
        "agent.delegate"];
   return new Set(list.map((x) => String(x ?? "").trim()).filter(Boolean));
 }
@@ -64,6 +65,8 @@ export function decideServerToolExecution(args: {
 
   // time.*：完全 server-side（只读时间）；不依赖 Desktop sidecar
   if (name === "time.now") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "time_now_server_side"] };
+  // web.*：优先 Gateway 执行（Bocha API / 直接 HTTP）；若不可用，Runner 层回退到 MCP
+  if (name === "web.search" || name === "web.fetch") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "web_gateway_first"] };
   // run.*：系统编排类工具（无副作用，但会影响 run 生命周期），应 server-side 执行
   if (name === "run.done") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "run_done_server_side"] };
   if (name === "agent.delegate") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "agent_delegate_server_side"] };
@@ -371,6 +374,7 @@ export async function executeLintStyleOnGateway(args: {
   call: any;
   styleLinterLibraries: any[];
   authorization?: string | null;
+  llmOverride?: { baseUrl: string; endpoint?: string; apiKey: string; model: string } | null;
 }) {
   const call = args.call;
   const text = typeof (call?.args as any)?.text === "string" ? String((call.args as any).text) : "";
@@ -401,6 +405,7 @@ export async function executeLintStyleOnGateway(args: {
     },
     payload: {
       ...(modelArg ? { model: modelArg } : {}),
+      ...(args.llmOverride ? { llmOverride: args.llmOverride } : {}),
       maxIssues,
       draft: { text, chars: fp.chars, sentences: fp.sentences, stats: fp.stats },
       libraries,
@@ -445,6 +450,7 @@ export async function executeServerToolOnGateway(args: {
   styleLinterLibraries: any[];
   authorization?: string | null;
   mainDoc: Record<string, unknown>;
+  llmOverride?: { baseUrl: string; endpoint?: string; apiKey: string; model: string } | null;
 }) {
   const name = String(args.call?.name ?? "").trim();
   if (name === "run.done") return { ok: true as const, output: { ok: true } };
@@ -453,6 +459,24 @@ export async function executeServerToolOnGateway(args: {
   if (name === "run.setTodoList" || name === "run.todo.upsertMany" || name === "run.todo.update") {
     const items = args.call?.args?.items ?? args.call?.args?.todos ?? [];
     return { ok: true as const, output: { ok: true, items } };
+  }
+  // 合并后的 run.todo（通过 action 分发）
+  if (name === "run.todo") {
+    const action = String(args.call?.args?.action ?? "").trim().toLowerCase();
+    if (action === "upsert") {
+      const items = args.call?.args?.items ?? [];
+      return { ok: true as const, output: { ok: true, items } };
+    }
+    if (action === "update") {
+      return { ok: true as const, output: { ok: true } };
+    }
+    if (action === "remove") {
+      return { ok: true as const, output: { ok: true } };
+    }
+    if (action === "clear") {
+      return { ok: true as const, output: { ok: true } };
+    }
+    return { ok: false as const, error: `INVALID_TODO_ACTION: action="${action}" 不合法，请使用 upsert|update|remove|clear。` };
   }
   if (name === "run.mainDoc.update") {
     const patchRaw = args.call?.args?.patch;
@@ -499,12 +523,24 @@ export async function executeServerToolOnGateway(args: {
     return { ok: true as const, output: { ok: true, mainDoc: args.mainDoc } };
   }
   if (name === "time.now") return executeTimeNowOnGateway();
+  if (name === "web.search") {
+    const ret = await executeWebSearchOnGateway({ call: args.call });
+    if (ret.ok) return ret;
+    // Bocha API 不可用（未配置/超时/错误）→ 标记需回退到 MCP
+    return { ok: false as const, error: "WEB_SEARCH_FALLBACK_TO_MCP", detail: ret };
+  }
+  if (name === "web.fetch") {
+    const ret = await executeWebFetchOnGateway({ call: args.call });
+    if (ret.ok) return ret;
+    return { ok: false as const, error: "WEB_FETCH_FALLBACK_TO_MCP", detail: ret };
+  }
   if (name === "lint.style") {
     return executeLintStyleOnGateway({
       fastify: args.fastify,
       call: args.call,
       styleLinterLibraries: args.styleLinterLibraries,
       authorization: args.authorization ?? null,
+      llmOverride: args.llmOverride ?? null,
     });
   }
   if (name === "project.listFiles") return executeProjectListFilesOnGateway({ toolSidecar: args.toolSidecar });

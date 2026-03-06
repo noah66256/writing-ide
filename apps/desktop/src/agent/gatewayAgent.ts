@@ -244,7 +244,7 @@ export function humanizeToolActivity(name: string, args: Record<string, unknown>
   const tool = String(name ?? "");
   if (!tool) return "正在执行工具…";
   if (tool === "time.now") return "正在读取时间…";
-  if (tool === "run.setTodoList" || tool.startsWith("run.todo.")) return "正在更新 To-dos…";
+  if (tool === "run.setTodoList" || tool === "run.todo" || tool.startsWith("run.todo.")) return "正在更新 To-dos…";
   if (tool === "run.done") return "正在结束本次运行…";
   if (tool === "kb.search") return "正在检索知识库…";
   if (tool === "doc.read") return "正在读取文件…";

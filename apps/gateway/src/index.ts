@@ -5542,6 +5542,13 @@ fastify.post(
   const bodySchema = z.object({
     model: z.string().optional(),
     maxIssues: z.number().int().min(3).max(24).optional(),
+    // 主 Agent 的 LLM 配置透传（agent runner server-side 调用时传入）
+    llmOverride: z.object({
+      baseUrl: z.string().min(1),
+      endpoint: z.string().optional(),
+      apiKey: z.string().min(1),
+      model: z.string().min(1),
+    }).optional(),
     // P1：维度覆盖/缺失（可选，由 Desktop 计算后随 lint.style 一起带来）
     expect: z
       .object({
@@ -5572,19 +5579,21 @@ fastify.post(
   });
   const body = bodySchema.parse((request as any).body);
 
-  // 运行时：按 stage=lint.style 绑定的模型执行（并按该模型单价计费）
+  // 运行时：优先使用主 Agent 透传的 LLM 配置（与主 agent 共用模型，避免独立端点挂了 lint 不可用）
+  // 若无透传，则回退到 stage=lint.style 绑定的模型
   const st = await aiConfig.resolveStage("lint.style");
-  let model = st.model;
-  let baseUrl = st.baseURL;
-  let endpoint = st.endpoint || "/v1/chat/completions";
-  let apiKey = st.apiKey;
+  const hasLlmOverride = !!(body.llmOverride && body.llmOverride.baseUrl && body.llmOverride.apiKey && body.llmOverride.model);
+  let model = hasLlmOverride ? body.llmOverride!.model : st.model;
+  let baseUrl = hasLlmOverride ? body.llmOverride!.baseUrl : st.baseURL;
+  let endpoint = hasLlmOverride ? (body.llmOverride!.endpoint || "/v1/chat/completions") : (st.endpoint || "/v1/chat/completions");
+  let apiKey = hasLlmOverride ? body.llmOverride!.apiKey : st.apiKey;
   const stageMaxTokens = st.maxTokens ?? null;
   const temperature = st.temperature ?? 0.2;
 
-  // 备用模型（按优先级）：来自 B 端 stage.modelIds（第 1 位默认模型；第 2 位起备用）
-  // - 目的：某些模型可能偶发“非 JSON/不遵守 schema/超时/空输出”，允许在同一次 lint.style 调用内自动切换备用模型。
-  // - 计费：仅对最终成功且通过 schema 校验的那次 attempt 扣费（按实际使用的 modelId）。
-  const candidateModelIds = await (async () => {
+  // 备用模型：使用透传时不走备用模型池（主 agent 模型已确定）
+  const candidateModelIds = hasLlmOverride
+    ? [body.llmOverride!.model]
+    : await (async () => {
     try {
       const stages = await aiConfig.listStages();
       const s = Array.isArray(stages) ? stages.find((x: any) => String(x?.stage ?? "") === "lint.style") : null;
@@ -5599,8 +5608,8 @@ fastify.post(
     }
   })();
 
-  // 可选：管理员调试时允许传 model 覆盖（否则容易引发“按 stage 扣费但实际用别的模型”的错觉）
-  if (body.model && request.user?.role === "admin") {
+  // 可选：管理员调试时允许传 model 覆盖（仅在无 llmOverride 时生效）
+  if (!hasLlmOverride && body.model && request.user?.role === "admin") {
     try {
       const m = await aiConfig.resolveModel(body.model);
       const ep = String(m.endpoint || "").trim();

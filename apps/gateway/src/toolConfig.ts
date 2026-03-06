@@ -190,6 +190,8 @@ const LOCKED_TOOL_NAMES_V1: string[] = [
   "run.mainDoc.get",
   "run.mainDoc.update",
   "run.setTodoList",
+  "run.todo",
+  // legacy names（兼容旧 Run 中的工具名）
   "run.updateTodo",
   "run.todo.upsertMany",
   "run.todo.update",

@@ -69,6 +69,10 @@ export function inferCapabilities(name: string, description: string, source: Too
   if (n.startsWith("project.list") || /listfiles|list_files|目录/.test(d)) caps.add("file_list");
   if (n.startsWith("doc.read") || n.startsWith("project.read") || /\bread\b|\bparse\b/.test(n)) caps.add("file_read");
   if (isWriteLikeTool(name)) caps.add("file_write");
+  // 合并工具的能力映射
+  if (n === "doc.snapshot") { caps.add("file_read"); caps.add("file_write"); }
+  if (n === "memory") caps.add("kb_search");
+  if (n === "agent.config") caps.add("delegate");
   if (n.startsWith("project.search") || n.startsWith("project.find")) caps.add("project_search");
   if (n.startsWith("web.search")) caps.add("web_search");
   if (n.startsWith("web.fetch")) caps.add("web_fetch");

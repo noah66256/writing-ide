@@ -134,6 +134,52 @@ export const TOOL_LIST: ToolMeta[] = [
 
   },
   {
+    name: "web.search",
+    description:
+      "联网搜索。用于热点追踪、关键词研究、竞品分析、实时信息获取。\n" +
+      "返回 title/url/snippet/summary 列表。\n" +
+      "系统自动选择可用后端（博查 API → 搜索 MCP → Playwright 浏览器）。",
+    args: [
+      { name: "query", required: true, desc: "搜索关键词", type: "string" as const },
+      { name: "freshness", desc: "时效过滤：noLimit(默认)/day/week/month", type: "string" as const },
+      { name: "count", desc: "返回数量（1-50，默认10）", type: "number" as const },
+      { name: "summary", desc: "是否返回摘要（默认true）", type: "boolean" as const },
+    ],
+    modes: ["agent"] as ToolMode[],
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        query: { type: "string" as const },
+        freshness: { type: "string" as const },
+        count: { type: "number" as const },
+        summary: { type: "boolean" as const },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "web.fetch",
+    description:
+      "抓取指定 URL 网页内容并提取文本。\n" +
+      "用于阅读搜索结果详情、获取参考资料原文。自动去除脚本/样式。\n" +
+      "系统自动选择可用后端（直接抓取 → 搜索 MCP → Playwright 浏览器）。",
+    args: [
+      { name: "url", required: true, desc: "要抓取的 URL", type: "string" as const },
+      { name: "format", desc: "返回格式：markdown（默认）或 text", type: "string" as const },
+      { name: "maxChars", desc: "最大字符数（默认12000）", type: "number" as const },
+    ],
+    modes: ["agent"] as ToolMode[],
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        url: { type: "string" as const },
+        format: { type: "string" as const },
+        maxChars: { type: "number" as const },
+      },
+      required: ["url"],
+    },
+  },
+  {
     name: "kb.listLibraries",
     description:
       "列出本地知识库中的所有库（只读）。返回 id/name/purpose/docCount 列表。\n" +
@@ -682,89 +728,35 @@ export const TOOL_LIST: ToolMeta[] = [
     inputSchema: { type: "object", properties: { items: { type: "array" } }, required: ["items"], additionalProperties: true },
   },
   {
-    name: "run.updateTodo",
+    name: "run.todo",
     description:
-      "更新某一条 Todo 的状态/备注（用于记录进度；legacy）。\n" +
-      "- 推荐优先用 run.todo.update（扁平参数版，LLM 更不容易漏 patch）。\n" +
-      "- 本工具兼容两种入参：\n" +
-      "  A) patch(JSON)：{ status?, note?, text? }\n" +
-      "  B) 顶层字段：status/note/text（Gateway 会自动封装成 patch）",
+      "管理本次 Run 的待办事项（增删改清）。\n" +
+      "action=upsert：批量新增或更新（传 items 数组；id 命中则 patch，不命中或无 id 则新增）。\n" +
+      "action=update：更新单条（传 id + status/note/text）。todoList 仅 1 条时可省略 id。\n" +
+      "action=remove：删除单条（传 id）。\n" +
+      "action=clear：清空全部。",
     args: [
-      { name: "id", required: false, desc: "Todo ID（来自 run.setTodoList 的返回）。若当前仅有 1 条 todo，可省略。", type: "string" },
-      { name: "patch", required: false, desc: "JSON 对象：{ status?, note?, text? }（推荐写法）", type: "object" },
-      { name: "status", required: false, desc: '可选：状态（"todo"|"in_progress"|"done"|"blocked"|"skipped"）', type: "string" },
-      { name: "note", required: false, desc: "可选：备注/阻塞原因", type: "string" },
-      { name: "text", required: false, desc: "可选：更新文本", type: "string" },
+      { name: "action", required: true, desc: "操作类型: upsert|update|remove|clear", type: "string" },
+      { name: "items", desc: 'upsert 时的 todo 列表：Array<{ id?, text?, status?, note? }>', type: "array" },
+      { name: "id", desc: "update/remove 时的 todo ID", type: "string" },
+      { name: "status", desc: 'update 时的新状态（"todo"|"in_progress"|"done"|"blocked"|"skipped"）', type: "string" },
+      { name: "note", desc: "update 时的备注", type: "string" },
+      { name: "text", desc: "update 时的新文本", type: "string" },
     ],
     modes: ["agent"],
     inputSchema: {
       type: "object",
       properties: {
+        action: { type: "string" },
+        items: { type: "array" },
         id: { type: "string" },
-        patch: { type: "object" },
         status: { type: "string" },
         note: { type: "string" },
         text: { type: "string" },
       },
-      // patch 或任意一个扁平字段必须存在（避免空调用浪费协议重试预算）
-      oneOfRequired: [{ required: ["patch"] }, { required: ["status"] }, { required: ["note"] }, { required: ["text"] }],
+      required: ["action"],
       additionalProperties: true,
     },
-  },
-  {
-    name: "run.todo.upsertMany",
-    description:
-      "批量 upsert Todo（新增或更新）。\n" +
-      "- 若传入 id 且命中现有 todo：按提供字段 patch（未提供的不改）。\n" +
-      "- 若 id 不命中或未传 id：视为新增（需要 text），自动生成稳定 id 并追加到列表末尾。\n" +
-      "用于避免模型反复 run.setTodoList 覆盖进度。",
-    args: [
-      {
-        name: "items",
-        required: true,
-        desc: 'JSON 数组：Array<{ id?: string; text?: string; status?: "todo"|"in_progress"|"done"|"blocked"|"skipped"; note?: string }>',
-        type: "array",
-      },
-    ],
-    modes: ["agent"],
-    inputSchema: { type: "object", properties: { items: { type: "array" } }, required: ["items"], additionalProperties: true },
-  },
-  {
-    name: "run.todo.update",
-    description:
-      "更新某一条 Todo（扁平参数版，LLM 更不容易漏 patch）。\n" +
-      "- 当 todoList 只有 1 条时可省略 id；否则必须传 id。",
-    args: [
-      { name: "id", required: false, desc: "Todo ID（可省略：仅当当前 todoList 只有 1 条）", type: "string" },
-      { name: "text", required: false, desc: "可选：更新文本", type: "string" },
-      { name: "status", required: false, desc: '可选：状态（"todo"|"in_progress"|"done"|"blocked"|"skipped"）', type: "string" },
-      { name: "note", required: false, desc: "可选：备注/阻塞原因", type: "string" },
-    ],
-    modes: ["agent"],
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: { type: "string" },
-        text: { type: "string" },
-        status: { type: "string" },
-        note: { type: "string" },
-      },
-      additionalProperties: true,
-    },
-  },
-  {
-    name: "run.todo.remove",
-    description: "删除一条 Todo（按 id）。",
-    args: [{ name: "id", required: true, desc: "Todo ID", type: "string" }],
-    modes: ["agent"],
-    inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"], additionalProperties: true },
-  },
-  {
-    name: "run.todo.clear",
-    description: "清空本次 Run 的 Todo List。",
-    args: [],
-    modes: ["agent"],
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "run.done",
@@ -892,25 +884,28 @@ export const TOOL_LIST: ToolMeta[] = [
     inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: true },
   },
   {
-    name: "doc.commitSnapshot",
-    description: "创建一个项目快照（用于回滚/Undo）。",
-    args: [{ name: "label", required: false, desc: "快照备注（可选）", type: "string" }],
+    name: "doc.snapshot",
+    description:
+      "管理项目快照（用于回滚/Undo）。\n" +
+      "action=create：创建快照（可选 label 备注）。\n" +
+      "action=list：列出快照列表（只读）。\n" +
+      "action=restore：恢复到指定快照（传 snapshotId）。高风险操作会先确认。",
+    args: [
+      { name: "action", required: true, desc: "操作类型: create|list|restore", type: "string" },
+      { name: "label", desc: "create 时的快照备注（可选）", type: "string" },
+      { name: "snapshotId", desc: "restore 时的快照 ID", type: "string" },
+    ],
     modes: ["agent"],
-    inputSchema: { type: "object", properties: { label: { type: "string" } }, additionalProperties: true },
-  },
-  {
-    name: "doc.listSnapshots",
-    description: "列出当前项目的快照列表（只读）。",
-    args: [],
-    modes: ["agent"],
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-  },
-  {
-    name: "doc.restoreSnapshot",
-    description: "恢复到指定快照。高风险操作会先在对话中确认，确认后自动恢复；支持 Undo 回滚。",
-    args: [{ name: "snapshotId", required: true, desc: "快照 ID（doc.commitSnapshot 的返回）", type: "string" }],
-    modes: ["agent"],
-    inputSchema: { type: "object", properties: { snapshotId: { type: "string" } }, required: ["snapshotId"], additionalProperties: true },
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string" },
+        label: { type: "string" },
+        snapshotId: { type: "string" },
+      },
+      required: ["action"],
+      additionalProperties: true,
+    },
   },
   {
     name: "doc.previewDiff",
@@ -1063,28 +1058,36 @@ export const TOOL_LIST: ToolMeta[] = [
       },
     },
   },
-  // ── agent.config.* ─────────────────────────────
+  // ── agent.config ─────────────────────────────
   {
-    name: "agent.config.create",
+    name: "agent.config",
     description:
-      "创建一个自定义子 Agent（团队成员）。\n" +
-      "创建后立即生效，负责人可通过 agent.delegate 委托任务给它。",
+      "管理子 Agent（团队成员）配置。\n" +
+      "action=list：列出所有子 Agent（内置+自定义），含启用状态、工具列表、模型等。\n" +
+      "action=create：创建自定义子 Agent（必填 name/description/systemPrompt）。\n" +
+      "action=update：更新配置（必填 agentId；自定义可改全部字段，内置只能改 enabled）。\n" +
+      "action=remove：删除自定义子 Agent（必填 agentId，必须 custom_ 开头；内置不可删除）。",
     args: [
-      { name: "name", required: true, desc: "显示名称（最长 32 字符）", type: "string" },
-      { name: "description", required: true, desc: "一句话职责描述（最长 200 字符）", type: "string" },
-      { name: "systemPrompt", required: true, desc: "完整的 system prompt（指导子 Agent 的行为）", type: "string" },
-      { name: "tools", required: false, desc: "工具白名单（JSON 字符串数组；不传则为空）", type: "array" },
-      { name: "model", required: false, desc: "偏好模型（如 sonnet / haiku；默认 haiku）", type: "string" },
-      { name: "toolPolicy", required: false, desc: "工具策略：readonly / proposal_first / auto_apply（默认 proposal_first）", type: "string" },
-      { name: "budget", required: false, desc: "执行预算 JSON 对象", type: "object" },
-      { name: "triggerPatterns", required: false, desc: "触发关键词数组", type: "array" },
-      { name: "avatar", required: false, desc: "头像（emoji 或图片 URL）", type: "string" },
-      { name: "priority", required: false, desc: "优先级（默认 50）", type: "number" },
+      { name: "action", required: true, desc: "操作类型: list|create|update|remove", type: "string" },
+      { name: "agentId", desc: "update/remove 时必填的 Agent ID", type: "string" },
+      { name: "name", desc: "显示名称（create 必填，update 可选）", type: "string" },
+      { name: "description", desc: "一句话职责描述（create 必填，update 可选）", type: "string" },
+      { name: "systemPrompt", desc: "完整 system prompt（create 必填，update 可选）", type: "string" },
+      { name: "tools", desc: "工具白名单（JSON 字符串数组）", type: "array" },
+      { name: "model", desc: "偏好模型（如 sonnet / haiku）", type: "string" },
+      { name: "toolPolicy", desc: "工具策略：readonly / proposal_first / auto_apply", type: "string" },
+      { name: "budget", desc: "执行预算 JSON 对象", type: "object" },
+      { name: "triggerPatterns", desc: "触发关键词数组", type: "array" },
+      { name: "avatar", desc: "头像（emoji 或图片 URL）", type: "string" },
+      { name: "priority", desc: "优先级", type: "number" },
+      { name: "enabled", desc: "启用/禁用（update 时可选）", type: "boolean" },
     ],
     modes: ["agent"],
     inputSchema: {
       type: "object",
       properties: {
+        action: { type: "string" },
+        agentId: { type: "string" },
         name: { type: "string" },
         description: { type: "string" },
         systemPrompt: { type: "string" },
@@ -1095,69 +1098,9 @@ export const TOOL_LIST: ToolMeta[] = [
         triggerPatterns: { type: "array" },
         avatar: { type: "string" },
         priority: { type: "number" },
-      },
-      required: ["name", "description", "systemPrompt"],
-    },
-  },
-  {
-    name: "agent.config.list",
-    description: "列出所有子 Agent（内置 + 自定义），包含各自的启用状态、工具列表、模型等配置。",
-    args: [],
-    modes: ["agent"],
-    inputSchema: { type: "object", properties: {} },
-  },
-  {
-    name: "agent.config.update",
-    description:
-      "更新子 Agent 配置。\n" +
-      "自定义 Agent（custom_ 开头）可修改全部字段；内置 Agent 只能修改 enabled 状态。",
-    args: [
-      { name: "agentId", required: true, desc: "要更新的 Agent ID", type: "string" },
-      { name: "enabled", required: false, desc: "启用/禁用", type: "boolean" },
-      { name: "name", required: false, desc: "新的显示名称", type: "string" },
-      { name: "description", required: false, desc: "新的职责描述", type: "string" },
-      { name: "systemPrompt", required: false, desc: "新的 system prompt", type: "string" },
-      { name: "tools", required: false, desc: "新的工具白名单", type: "array" },
-      { name: "model", required: false, desc: "新的偏好模型", type: "string" },
-      { name: "toolPolicy", required: false, desc: "新的工具策略", type: "string" },
-      { name: "budget", required: false, desc: "新的执行预算", type: "object" },
-      { name: "triggerPatterns", required: false, desc: "新的触发关键词", type: "array" },
-      { name: "avatar", required: false, desc: "新的头像", type: "string" },
-      { name: "priority", required: false, desc: "新的优先级", type: "number" },
-    ],
-    modes: ["agent"],
-    inputSchema: {
-      type: "object",
-      properties: {
-        agentId: { type: "string" },
         enabled: { type: "boolean" },
-        name: { type: "string" },
-        description: { type: "string" },
-        systemPrompt: { type: "string" },
-        tools: { type: "array" },
-        model: { type: "string" },
-        toolPolicy: { type: "string" },
-        budget: { type: "object" },
-        triggerPatterns: { type: "array" },
-        avatar: { type: "string" },
-        priority: { type: "number" },
       },
-      required: ["agentId"],
-    },
-  },
-  {
-    name: "agent.config.remove",
-    description: "删除一个自定义子 Agent。内置 Agent 不可删除（只能通过 agent.config.update 禁用）。",
-    args: [
-      { name: "agentId", required: true, desc: "要删除的自定义 Agent ID（必须以 custom_ 开头）", type: "string" },
-    ],
-    modes: ["agent"],
-    inputSchema: {
-      type: "object",
-      properties: {
-        agentId: { type: "string" },
-      },
-      required: ["agentId"],
+      required: ["action"],
     },
   },
   // ── 代码执行 ──────────────────────────────────────
@@ -1223,45 +1166,30 @@ export const TOOL_LIST: ToolMeta[] = [
   },
   // ── 记忆系统 ──────────────────────────────────────
   {
-    name: "memory.read",
+    name: "memory",
     description:
-      "读取记忆内容。支持读取 L1（全局记忆）或 L2（项目记忆）。\n" +
-      "全局记忆包含用户画像、决策偏好、跨项目进展。\n" +
-      "项目记忆包含项目概况、项目决策、重要约定、当前进展。",
+      "管理跨对话持久记忆（读取或更新）。\n" +
+      "action=read：读取记忆内容（传 level）。\n" +
+      "action=update：追加新事实/决策到指定 section（传 level + section + content）。\n" +
+      "level='global'（L1 全局：用户画像/决策偏好/跨项目进展）。\n" +
+      "level='project'（L2 项目：项目概况/项目决策/重要约定/当前进展）。\n" +
+      "只应记录值得跨对话持久化的重要信息。",
     args: [
+      { name: "action", required: true, desc: "操作类型: read|update", type: "string" as ToolArgType },
       { name: "level", required: true, desc: "记忆层级：'global'（L1 全局）或 'project'（L2 项目）", type: "string" as ToolArgType },
+      { name: "section", desc: "update 时必填的 section 标题（如 项目决策、用户画像 等）", type: "string" as ToolArgType },
+      { name: "content", desc: "update 时必填的追加内容（Markdown 格式）", type: "string" as ToolArgType },
     ],
     modes: ["agent" as ToolMode],
     inputSchema: {
       type: "object" as const,
       properties: {
-        level: { type: "string" as ToolArgType },
-      },
-      required: ["level"],
-    },
-  },
-  {
-    name: "memory.update",
-    description:
-      "更新记忆内容。将新的事实或决策追加到指定记忆层级的指定 section。\n" +
-      "默认自动写入；若写错可用 Undo 回滚。\n" +
-      "全局记忆 section：用户画像、决策偏好、跨项目进展。\n" +
-      "项目记忆 section：项目概况、项目决策、重要约定、当前进展。\n" +
-      "只应记录值得跨对话持久化的重要信息，不要记录临时讨论内容。",
-    args: [
-      { name: "level", required: true, desc: "记忆层级：'global'（L1 全局）或 'project'（L2 项目）", type: "string" as ToolArgType },
-      { name: "section", required: true, desc: "要更新的 section 标题（如 项目决策、用户画像 等）", type: "string" as ToolArgType },
-      { name: "content", required: true, desc: "要追加的内容（Markdown 格式）", type: "string" as ToolArgType },
-    ],
-    modes: ["agent" as ToolMode],
-    inputSchema: {
-      type: "object" as const,
-      properties: {
+        action: { type: "string" as ToolArgType },
         level: { type: "string" as ToolArgType },
         section: { type: "string" as ToolArgType },
         content: { type: "string" as ToolArgType },
       },
-      required: ["level", "section", "content"],
+      required: ["action", "level"],
     },
   },
 ];

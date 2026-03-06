@@ -473,6 +473,40 @@ function clampIntLocal(value: unknown, min: number, max: number, fallback: numbe
   return Math.max(min, Math.min(max, Math.floor(n)));
 }
 
+/**
+ * 合并工具 → Desktop 原名翻译表。
+ * LLM 看到一个合并工具（如 agent.config），Desktop 仍处理原名（如 agent.config.create）。
+ */
+const MERGED_TOOL_MAP: Record<string, Record<string, string>> = {
+  "agent.config": {
+    list: "agent.config.list",
+    create: "agent.config.create",
+    update: "agent.config.update",
+    remove: "agent.config.remove",
+  },
+  "doc.snapshot": {
+    create: "doc.commitSnapshot",
+    list: "doc.listSnapshots",
+    restore: "doc.restoreSnapshot",
+  },
+  "memory": {
+    read: "memory.read",
+    update: "memory.update",
+  },
+};
+
+function expandMergedToolName(name: string, args: Record<string, unknown>): string {
+  const map = MERGED_TOOL_MAP[name];
+  if (!map) return name;
+  const action = String(args?.action ?? "").trim().toLowerCase();
+  return map[action] ?? name;
+}
+
+function stripActionField(args: Record<string, unknown>): Record<string, unknown> {
+  const { action: _, ...rest } = args;
+  return rest;
+}
+
 function resolveSubAgentBudget(baseBudget: SubAgentBudget, budgetOverride: unknown): SubAgentBudget {
   const override = (typeof budgetOverride === "object" && budgetOverride !== null)
     ? budgetOverride as Record<string, unknown>
@@ -1256,7 +1290,7 @@ export class WritingAgentRunner {
     const deterministic = [
       "run.mainDoc.get",
       "run.setTodoList",
-      "run.todo.upsertMany",
+      "run.todo",
       "run.mainDoc.update",
       "project.listFiles",
       "kb.search",
@@ -2412,6 +2446,10 @@ export class WritingAgentRunner {
           styleLinterLibraries: this.ctx.styleLinterLibraries,
           authorization: this.ctx.authorization ?? null,
           mainDoc: this.ctx.mainDoc,
+          // lint.style 共用主 Agent 的 LLM 配置，避免独立端点挂了导致 lint 不可用
+          llmOverride: this.ctx.baseUrl && this.ctx.apiKey && this.ctx.modelId
+            ? { baseUrl: this.ctx.baseUrl, endpoint: this.ctx.endpoint, apiKey: this.ctx.apiKey, model: this.ctx.modelId }
+            : null,
         });
 
         if (ret.ok) {
@@ -2420,6 +2458,13 @@ export class WritingAgentRunner {
             output: (ret as { output: unknown }).output,
             meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
           };
+        }
+
+        // web 工具 Gateway 执行失败 → 回退到 MCP（搜索 MCP → Playwright）
+        const retError = String((ret as { error?: unknown }).error ?? "");
+        if (retError.includes("FALLBACK_TO_MCP")) {
+          const fallbackResult = await this._tryWebFallbackViaMcp(toolUse, rawInput);
+          if (fallbackResult) return fallbackResult;
         }
 
         return {
@@ -2439,7 +2484,114 @@ export class WritingAgentRunner {
       }
     }
 
-    return this._waitForDesktopToolResult(toolUse.id, toolUse.name);
+    // 合并工具翻译：将 LLM 调用的合并名翻译回 Desktop 识别的原名
+    const desktopToolName = expandMergedToolName(toolUse.name, rawInput as Record<string, unknown>);
+    const desktopArgs = desktopToolName !== toolUse.name
+      ? stripActionField(rawInput as Record<string, unknown>)
+      : rawInput;
+
+    this.ctx.writeEvent("tool.call", {
+      toolCallId: toolUse.id,
+      name: desktopToolName,
+      args: desktopArgs,
+      executedBy: "desktop",
+      turn: this.turn,
+      ...(desktopToolName !== toolUse.name ? { mergedFrom: toolUse.name } : {}),
+    });
+    return this._waitForDesktopToolResult(toolUse.id, desktopToolName);
+  }
+
+  /**
+   * web.search / web.fetch 的 MCP 回退链：
+   * 搜索：bocha-search MCP → web-search MCP → Playwright (百度)
+   * 抓取：web-search MCP (get_page_content) → Playwright (navigate)
+   */
+  private async _tryWebFallbackViaMcp(
+    toolUse: ContentBlockToolUse,
+    rawInput: unknown,
+  ): Promise<ToolExecResult | null> {
+    const mcpTools: any[] = Array.isArray((this.ctx as any).mcpTools) ? (this.ctx as any).mcpTools : [];
+    if (!mcpTools.length) return null;
+
+    const isSearch = toolUse.name === "web.search";
+
+    if (isSearch) {
+      // 策略 1：找博查搜索 MCP
+      const bochaMcp = mcpTools.find((t) =>
+        /^mcp\.bocha-search\./i.test(String(t?.name ?? "")) &&
+        /bocha_web_search/i.test(String(t?.originalName ?? t?.name ?? "")),
+      );
+      if (bochaMcp) {
+        const query = String((rawInput as any)?.query ?? "").trim();
+        const count = (rawInput as any)?.count;
+        const freshness = (rawInput as any)?.freshness;
+        return this._dispatchMcpFallback(toolUse, bochaMcp, { query, ...(count != null ? { count } : {}), ...(freshness ? { freshness } : {}) });
+      }
+
+      // 策略 2：找 web-search MCP
+      const webSearchMcp = mcpTools.find((t) =>
+        /^mcp\.web-search\./i.test(String(t?.name ?? "")) &&
+        /web_search/i.test(String(t?.originalName ?? t?.name ?? "")),
+      );
+      if (webSearchMcp) {
+        const query = String((rawInput as any)?.query ?? "").trim();
+        const numResults = (rawInput as any)?.count;
+        return this._dispatchMcpFallback(toolUse, webSearchMcp, { query, ...(numResults != null ? { num_results: numResults } : {}) });
+      }
+
+      // 策略 3：Playwright 保底 → 导航到百度搜索
+      const playwrightNav = mcpTools.find((t) =>
+        /^mcp\.playwright\./i.test(String(t?.name ?? "")) &&
+        /browser_navigate/i.test(String(t?.originalName ?? t?.name ?? "")),
+      );
+      if (playwrightNav) {
+        const query = String((rawInput as any)?.query ?? "").trim();
+        if (!query) return null;
+        const url = `https://www.baidu.com/s?wd=${encodeURIComponent(query)}`;
+        return this._dispatchMcpFallback(toolUse, playwrightNav, { url });
+      }
+    } else {
+      // web.fetch 回退
+      const url = String((rawInput as any)?.url ?? "").trim();
+      if (!url) return null;
+
+      // 策略 1：web-search MCP 的 get_page_content
+      const getPageMcp = mcpTools.find((t) =>
+        /^mcp\.web-search\./i.test(String(t?.name ?? "")) &&
+        /get_page_content/i.test(String(t?.originalName ?? t?.name ?? "")),
+      );
+      if (getPageMcp) {
+        return this._dispatchMcpFallback(toolUse, getPageMcp, { url });
+      }
+
+      // 策略 2：Playwright 保底 → navigate 到目标 URL
+      const playwrightNav = mcpTools.find((t) =>
+        /^mcp\.playwright\./i.test(String(t?.name ?? "")) &&
+        /browser_navigate/i.test(String(t?.originalName ?? t?.name ?? "")),
+      );
+      if (playwrightNav) {
+        return this._dispatchMcpFallback(toolUse, playwrightNav, { url });
+      }
+    }
+
+    return null;
+  }
+
+  private async _dispatchMcpFallback(
+    originalToolUse: ContentBlockToolUse,
+    mcpTool: any,
+    args: unknown,
+  ): Promise<ToolExecResult> {
+    const mcpName = String(mcpTool?.name ?? "").trim();
+    this.ctx.writeEvent("tool.call", {
+      toolCallId: originalToolUse.id,
+      name: mcpName,
+      args,
+      executedBy: "desktop",
+      turn: this.turn,
+      fallbackFrom: originalToolUse.name,
+    });
+    return this._waitForDesktopToolResult(originalToolUse.id, mcpName);
   }
 
 
@@ -2863,7 +3015,11 @@ export class WritingAgentRunner {
       return;
     }
 
-    if (name === "run.setTodoList" || name === "run.todo.upsertMany") {
+    if (
+      name === "run.setTodoList" ||
+      name === "run.todo.upsertMany" ||
+      (name === "run.todo" && String((toolUse.input as any)?.action ?? "").trim().toLowerCase() === "upsert")
+    ) {
       this.runState.hasTodoList = true;
       return;
     }
@@ -2979,11 +3135,15 @@ export class WritingAgentRunner {
       return;
     }
 
-    if (isWriteLikeTool(name)) {
+    // 合并工具 doc.snapshot 的 restore action 等同于 doc.restoreSnapshot（写操作）
+    const isSnapshotRestore =
+      name === "doc.snapshot" && String((toolUse.input as any)?.action ?? "").trim().toLowerCase() === "restore";
+
+    if (isWriteLikeTool(name) || isSnapshotRestore) {
       this.runState.hasWriteOps = true;
     }
 
-    if (isContentWriteTool(name)) {
+    if (isContentWriteTool(name) || isSnapshotRestore) {
       this.runState.hasWriteOps = true;
       this.runState.hasWriteApplied = true;
     }

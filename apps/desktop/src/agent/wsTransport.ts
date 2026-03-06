@@ -918,7 +918,16 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             // -- Gateway-executed tools --
             if (executedBy === "gateway") {
               if (name.startsWith("run.") && name !== "run.done") {
-                const def = getTool(name);
+                // 合并工具 run.todo：展开为原始工具名以匹配 Desktop 工具注册
+                let localToolName = name;
+                if (name === "run.todo") {
+                  const action = String(parsedArgsPreview?.action ?? "").trim().toLowerCase();
+                  if (action === "upsert") localToolName = "run.todo.upsertMany";
+                  else if (action === "update") localToolName = "run.todo.update";
+                  else if (action === "remove") localToolName = "run.todo.remove";
+                  else if (action === "clear") localToolName = "run.todo.clear";
+                }
+                const def = getTool(localToolName);
                 let localResult: any = null;
                 try { if (def) localResult = await def.run(parsedArgsPreview, { mode: args.mode }); } catch {}
                 const stepId = addTool({
