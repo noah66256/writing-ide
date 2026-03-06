@@ -1622,18 +1622,34 @@ export class WritingAgentRunner {
 
     const lines: string[] = [];
     for (const tool of builtins) {
-      const args = (tool.args ?? []).map((a) => a.name).join(", ");
-      lines.push(`- ${tool.name}${args ? `(${args})` : "()"}`);
+      const toolArgs = tool.args ?? [];
+      const required = toolArgs.filter((a) => a.required);
+      const optional = toolArgs.filter((a) => !a.required);
+      const reqSig = required.map((a) => `${a.name}: ${a.type ?? "string"}${a.desc ? ` — ${a.desc}` : ""}`).join("; ");
+      const optNames = optional.map((a) => a.name).join(", ");
+      const briefDesc = (tool.description ?? "").split("\n")[0].trim();
+      let line = `- ${tool.name}`;
+      if (briefDesc) line += `：${briefDesc}`;
+      if (reqSig) line += `\n  必填：${reqSig}`;
+      if (optNames) line += `\n  可选：${optNames}`;
+      if (!reqSig && !optNames) line += "()";
+      lines.push(line);
     }
 
-    const mcpNames = Array.from(
-      new Set(
-        (((this.ctx as any).mcpTools ?? []) as any[])
-          .map((t: any) => String(t?.name ?? "").trim())
-          .filter((name) => name && allowed.has(name)),
-      ),
+    const mcpToolsList = (((this.ctx as any).mcpTools ?? []) as any[]).filter(
+      (t: any) => {
+        const name = String(t?.name ?? "").trim();
+        return name && allowed.has(name);
+      },
     );
-    for (const name of mcpNames) lines.push(`- ${name}(...)`);
+    const mcpSeen = new Set<string>();
+    for (const t of mcpToolsList) {
+      const name = String(t?.name ?? "").trim();
+      if (mcpSeen.has(name)) continue;
+      mcpSeen.add(name);
+      const desc = String(t?.description ?? "").split("\n")[0].trim();
+      lines.push(`- ${name}${desc ? `：${desc}` : "(...)"}`);
+    }
 
     const toolListText = lines.length ? lines.join("\n") : "- （无可用工具）";
     return (
