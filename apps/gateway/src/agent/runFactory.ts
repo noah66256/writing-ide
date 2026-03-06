@@ -2334,11 +2334,12 @@ export async function prepareAgentRun(args: {
       }
     }
 
-    // ---- 委派优先 boot（独立于 executionContract）：有团队 + 执行路由 + 首轮 → 只给编排/只读工具 ----
+    // ---- 委派优先 boot（独立于 executionContract）：有团队 + 执行路由 + 未提交计划 → 只给编排/只读工具 ----
     // 对齐业界（LangGraph Supervisor / OpenAI Agents SDK）：Orchestrator 物理上不持有执行工具，只有 handoff/planning 工具。
     // 条件使用动态信号 isExecutionRoute（由路由器实时判定），不穷举具体场景。
+    // 退出条件：hasPlanCommitment（调用 agent.delegate 或 run.setTodoList），而非 hasAnyToolCall（time.now 等只读工具不退出）。
     let delegateBootActive = false;
-    if (!state.hasAnyToolCall && hasTeamRoster && isExecutionRoute && allowed.has("agent.delegate")) {
+    if (!state.hasPlanCommitment && hasTeamRoster && isExecutionRoute && allowed.has("agent.delegate")) {
       const DELEGATE_BOOT_ALLOW = new Set([
         "agent.delegate",
         "run.setTodoList", "run.todo", "run.mainDoc.update", "run.mainDoc.get", "run.done",
@@ -2353,12 +2354,23 @@ export async function prepareAgentRun(args: {
       if (delegateBootTools.size > 0) {
         allowed = delegateBootTools;
         delegateBootActive = true;
+        // 生成工具目录（名称 + 一行描述），供 LLM 在规划阶段参考
+        const catalogLines = toolCatalog
+          .filter((e) => selectedAllowedToolNames.has(e.name) && !DELEGATE_BOOT_ALLOW.has(e.name))
+          .map((e) => `- ${e.name}: ${(e.description ?? "").split("\n")[0].trim() || "..."}`)
+          .join("\n");
         hints.push(
           "执行启动阶段（委派优先）：你有团队成员可以委派任务。\n" +
           "- 请先制定 Todo（管理者视角），然后通过 agent.delegate 委派给合适的团队成员。\n" +
           "- 本阶段不提供执行类工具（doc.write/kb.search/lint.*/web.search 等）——这些由子 Agent 使用。\n" +
-          "- 完成首次工具调用后进入全工具阶段（可审稿、润色、补充委派等）。",
+          "- 提交 Todo 或委派后进入执行阶段（仅注入你在计划中提及的工具）。",
         );
+        if (catalogLines) {
+          hints.push(
+            "以下是所有可用工具目录（本阶段不可直接调用，仅供规划参考）：\n" + catalogLines +
+            "\n\n请在 Todo 计划中标注每步需要的工具名。",
+          );
+        }
         // Skill 联动：style_imitate 激活时追加仿写提示
         if (activeSkillIds.includes("style_imitate")) {
           hints.push(
@@ -2369,9 +2381,40 @@ export async function prepareAgentRun(args: {
       }
     }
 
+    // ---- Post-plan 工具过滤：LLM 提交计划后，只注入计划中提及的工具 + 编排工具 ----
+    // 仅限"有团队 + 执行路由"场景（与委派优先 boot 对称），避免单 Agent 流程被误收缩。
+    let postPlanActive = false;
+    const planMentioned = Array.isArray(state.planMentionedTools) ? state.planMentionedTools : [];
+    if (state.hasPlanCommitment && planMentioned.length > 0 && hasTeamRoster && isExecutionRoute) {
+      const ORCHESTRATOR_MANDATORY = new Set([
+        "agent.delegate",
+        "run.setTodoList", "run.todo", "run.mainDoc.update", "run.mainDoc.get", "run.done",
+        "time.now",
+      ]);
+      const planTools = new Set(planMentioned);
+      const postPlanAllowed = new Set<string>();
+      let hasNonOrchestrator = false;
+      for (const name of allowed) {
+        if (ORCHESTRATOR_MANDATORY.has(name) || planTools.has(name)) {
+          postPlanAllowed.add(name);
+          if (!ORCHESTRATOR_MANDATORY.has(name) && planTools.has(name)) {
+            hasNonOrchestrator = true;
+          }
+        }
+      }
+      // 确实从计划中找到了至少一个非编排工具才启用过滤，否则回退全量
+      if (hasNonOrchestrator) {
+        allowed = postPlanAllowed;
+        postPlanActive = true;
+        hints.push(
+          `已根据计划选择 ${postPlanAllowed.size} 个工具（含编排工具 + 计划中提及的工具）。`,
+        );
+      }
+    }
+
     // 执行启动阶段（首个工具调用前）：收敛到"任务首工具"集合，减少模型盲选和偏航。
-    // 当委派优先 boot 已激活时跳过，避免执行合约 boot 删掉 agent.delegate（L3_SUB_AGENT）导致委派失效。
-    if (executionContract.required && !state.hasAnyToolCall && !delegateBootActive) {
+    // 当委派优先 boot 或 post-plan 过滤已激活时跳过，避免执行合约 boot 覆盖上游过滤结果。
+    if (executionContract.required && !state.hasAnyToolCall && !delegateBootActive && !postPlanActive) {
       const allowedNow = allowed ?? new Set<string>();
 
       const bootCandidates =

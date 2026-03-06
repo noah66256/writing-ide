@@ -2925,6 +2925,8 @@ export class WritingAgentRunner {
       error: errorDetail ?? undefined,
     });
 
+    this.runState.hasPlanCommitment = true;
+
     return {
       ok: true,
       output: {
@@ -3015,12 +3017,29 @@ export class WritingAgentRunner {
       return;
     }
 
+    if (name === "agent.delegate") {
+      this.runState.hasPlanCommitment = true;
+      return;
+    }
+
     if (
       name === "run.setTodoList" ||
       name === "run.todo.upsertMany" ||
       (name === "run.todo" && String((toolUse.input as any)?.action ?? "").trim().toLowerCase() === "upsert")
     ) {
       this.runState.hasTodoList = true;
+      this.runState.hasPlanCommitment = true;
+      // 扫描 todo payload 提取工具名引用
+      const todoPayloadText = (() => {
+        try { return JSON.stringify(toolUse.input ?? {}); } catch { return String(toolUse.input ?? ""); }
+      })();
+      const mentioned = Array.from(this.ctx.allowedToolNames)
+        .map((n) => String(n ?? "").trim())
+        .filter((n) => n.length > 0 && todoPayloadText.includes(n));
+      if (mentioned.length > 0) {
+        const existing = Array.isArray(this.runState.planMentionedTools) ? this.runState.planMentionedTools : [];
+        this.runState.planMentionedTools = Array.from(new Set([...existing, ...mentioned]));
+      }
       return;
     }
 

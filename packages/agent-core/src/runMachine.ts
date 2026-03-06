@@ -66,6 +66,8 @@ export type DraftCandidateV1 = {
 
 export type RunState = {
   hasTodoList: boolean;
+  hasPlanCommitment: boolean;
+  planMentionedTools: string[];
   hasWriteOps: boolean;
   hasAnyToolCall: boolean;
   hasMcpToolCall: boolean;
@@ -151,6 +153,8 @@ export type RunState = {
 export function createInitialRunState(args?: { protocolRetryBudget?: number; workflowRetryBudget?: number; lintReworkBudget?: number }): RunState {
   return {
     hasTodoList: false,
+    hasPlanCommitment: false,
+    planMentionedTools: [],
     hasWriteOps: false,
     hasAnyToolCall: false,
     hasMcpToolCall: false,
