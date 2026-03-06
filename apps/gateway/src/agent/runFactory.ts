@@ -615,7 +615,7 @@ export function buildAgentProtocolPrompt(args: {
   const teamLines = (p?.teamRoster ?? [])
     .map((a) => {
       const av = a.avatar ? `${a.avatar} ` : "";
-      return `- ${av}${a.name}${a.description ? `：${a.description}` : ""}`;
+      return `- ${av}${a.name}（id: ${a.id}）${a.description ? `：${a.description}` : ""}`;
     })
     .join("\n");
   const personaLine = p?.personaPrompt?.trim() ? `\n用户对你的个性化设定：${p.personaPrompt.trim()}\n\n` : "";
