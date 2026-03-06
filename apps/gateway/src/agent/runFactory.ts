@@ -2334,83 +2334,86 @@ export async function prepareAgentRun(args: {
       }
     }
 
-    // 执行启动阶段（首个工具调用前）：收敛到”任务首工具”集合，减少模型盲选和偏航。
-    if (executionContract.required && !state.hasAnyToolCall) {
-      const allowedNow = allowed ?? new Set<string>();
-      const isWritingTask = intent.isWritingTask;
+    // ---- 委派优先 boot（独立于 executionContract）：有团队 + 执行路由 + 首轮 → 只给编排/只读工具 ----
+    // 对齐业界（LangGraph Supervisor / OpenAI Agents SDK）：Orchestrator 物理上不持有执行工具，只有 handoff/planning 工具。
+    // 条件使用动态信号 isExecutionRoute（由路由器实时判定），不穷举具体场景。
+    let delegateBootActive = false;
+    if (!state.hasAnyToolCall && hasTeamRoster && isExecutionRoute && allowed.has("agent.delegate")) {
+      const DELEGATE_BOOT_ALLOW = new Set([
+        "agent.delegate",
+        "run.setTodoList", "run.todo", "run.mainDoc.update", "run.mainDoc.get", "run.done",
+        "doc.read",          // 只读：审稿
+        "project.listFiles", // 只读：了解项目结构
+        "project.search",    // 只读：搜文件
+        "time.now",
+      ]);
+      const delegateBootTools = new Set<string>(
+        Array.from(allowed).filter((n) => DELEGATE_BOOT_ALLOW.has(n)),
+      );
+      if (delegateBootTools.size > 0) {
+        allowed = delegateBootTools;
+        delegateBootActive = true;
+        hints.push(
+          "执行启动阶段（委派优先）：你有团队成员可以委派任务。\n" +
+          "- 请先制定 Todo（管理者视角），然后通过 agent.delegate 委派给合适的团队成员。\n" +
+          "- 本阶段不提供执行类工具（doc.write/kb.search/lint.*/web.search 等）——这些由子 Agent 使用。\n" +
+          "- 完成首次工具调用后进入全工具阶段（可审稿、润色、补充委派等）。",
+        );
+        // Skill 联动：style_imitate 激活时追加仿写提示
+        if (activeSkillIds.includes("style_imitate")) {
+          hints.push(
+            "【风格仿写已激活】委派给 copywriter 时，请在 task 中注明按风格库仿写，" +
+            "子 Agent 会自动检索风格库样例并执行 lint.style 检查。",
+          );
+        }
+      }
+    }
 
-      // ---- 委派优先 boot：有团队成员 + 写作意图 + agent.delegate 可用 → 只给编排/只读工具 ----
-      if (hasTeamRoster && isWritingTask && allowedNow.has("agent.delegate")) {
-        const DELEGATE_BOOT_ALLOW = new Set([
-          "agent.delegate",
-          "run.setTodoList", "run.todo", "run.mainDoc.update", "run.mainDoc.get", "run.done",
-          "doc.read",          // 只读：审稿
-          "project.listFiles", // 只读：了解项目结构
-          "project.search",    // 只读：搜文件
-          "time.now",
-        ]);
-        const delegateBootTools = new Set<string>(
-          Array.from(allowedNow).filter((n) => DELEGATE_BOOT_ALLOW.has(n)),
-        );
-        if (delegateBootTools.size > 0 && delegateBootTools.has("agent.delegate")) {
-          allowed = delegateBootTools;
-          hints.push(
-            "执行启动阶段（委派优先）：你有团队成员可以委派写作任务。\n" +
-            "- 请先制定 Todo（管理者视角），然后通过 agent.delegate 委派给合适的团队成员。\n" +
-            "- 本阶段不提供 kb.search/doc.write/lint.*/doc.applyEdits 等执行类工具——这些由子 Agent 使用。\n" +
-            "- 完成首次工具调用后进入全工具阶段（可审稿、润色、补充委派等）。",
-          );
-          // Skill 联动：style_imitate 激活时追加仿写提示
-          if (activeSkillIds.includes("style_imitate")) {
-            hints.push(
-              "【风格仿写已激活】委派给 copywriter 时，请在 task 中注明按风格库仿写，" +
-              "子 Agent 会自动检索风格库样例并执行 lint.style 检查。",
-            );
-          }
+    // 执行启动阶段（首个工具调用前）：收敛到"任务首工具"集合，减少模型盲选和偏航。
+    // 当委派优先 boot 已激活时跳过，避免执行合约 boot 删掉 agent.delegate（L3_SUB_AGENT）导致委派失效。
+    if (executionContract.required && !state.hasAnyToolCall && !delegateBootActive) {
+      const allowedNow = allowed ?? new Set<string>();
+
+      const bootCandidates =
+        routeIdLower === "web_radar" || directOpenWebIntent
+          ? executionPreferred
+          : [
+              ...executionPreferred,
+              "run.mainDoc.get",
+              "run.setTodoList",
+              "run.todo",
+              "project.listFiles",
+              "kb.search",
+            ];
+      const boot = new Set<string>(
+        Array.from(new Set(bootCandidates.map((x) => String(x ?? "").trim()).filter(Boolean))).filter((n) => allowedNow.has(n)),
+      );
+      for (const name of Array.from(boot)) {
+        const layer = classifyToolLayer(name);
+        if (layer === "L3_SUB_AGENT") {
+          boot.delete(name);
+          continue;
         }
-      } else {
-        // ---- 常规 boot：无团队或非写作意图 → 原有逻辑 ----
-        const bootCandidates =
-          routeIdLower === "web_radar" || directOpenWebIntent
-            ? executionPreferred
-            : [
-                ...executionPreferred,
-                "run.mainDoc.get",
-                "run.setTodoList",
-                "run.todo",
-                "project.listFiles",
-                "kb.search",
-              ];
-        const boot = new Set<string>(
-          Array.from(new Set(bootCandidates.map((x) => String(x ?? "").trim()).filter(Boolean))).filter((n) => allowedNow.has(n)),
-        );
-        for (const name of Array.from(boot)) {
+        if (!allowBrowserTools && layer === "L2_MCP") {
+          boot.delete(name);
+          continue;
+        }
+      }
+      if (boot.size === 0) {
+        for (const name of allowedNow) {
           const layer = classifyToolLayer(name);
-          if (layer === "L3_SUB_AGENT") {
-            boot.delete(name);
-            continue;
-          }
-          if (!allowBrowserTools && layer === "L2_MCP") {
-            boot.delete(name);
-            continue;
+          if (layer === "L0_CONTROL" || layer === "L1_LOCAL" || (allowBrowserTools && layer === "L2_MCP")) {
+            boot.add(name);
           }
         }
-        if (boot.size === 0) {
-          for (const name of allowedNow) {
-            const layer = classifyToolLayer(name);
-            if (layer === "L0_CONTROL" || layer === "L1_LOCAL" || (allowBrowserTools && layer === "L2_MCP")) {
-              boot.add(name);
-            }
-          }
-          // 启动阶段默认不先委派子 agent，先做一次本地/受控动作建立上下文。
-          boot.delete("agent.delegate");
-        }
-        if (boot.size > 0) {
-          allowed = boot;
-          hints.push(
-            "执行启动阶段：请先调用首工具（优先 executionPreferred；默认先用 L0/L1，本轮不优先 L3 委派），完成一次有效工具调用后再进入全工具阶段。",
-          );
-        }
+        // 启动阶段默认不先委派子 agent，先做一次本地/受控动作建立上下文。
+        boot.delete("agent.delegate");
+      }
+      if (boot.size > 0) {
+        allowed = boot;
+        hints.push(
+          "执行启动阶段：请先调用首工具（优先 executionPreferred；默认先用 L0/L1，本轮不优先 L3 委派），完成一次有效工具调用后再进入全工具阶段。",
+        );
       }
     }
 
