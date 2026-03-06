@@ -826,6 +826,10 @@ export class WritingAgentRunner {
     this.ctx = ctx;
     this.maxTurns = Math.min(ctx.maxTurns ?? MAX_TURNS, MAX_TURNS);
     this.runState = ctx.initialRunState ? { ...ctx.initialRunState } : createInitialRunState();
+    // 兼容旧 runState 无 delegationCounts 字段
+    if (!this.runState.delegationCounts || typeof this.runState.delegationCounts !== "object" || Array.isArray(this.runState.delegationCounts)) {
+      this.runState.delegationCounts = {};
+    }
 
     // 端点能力推导
     this.apiType = ctx.apiType ?? inferApiType(ctx.endpoint);
@@ -1669,6 +1673,7 @@ export class WritingAgentRunner {
     const MAX_TOOL_RESULT_CHARS = 60_000;
     for (const { toolUse, result } of results) {
       const output = result.output;
+      this._updateRunState(toolUse, { ok: result.ok, output });
       this.ctx.writeEvent("tool.result", {
         toolCallId: toolUse.id,
         name: toolUse.name,
@@ -2186,8 +2191,8 @@ export class WritingAgentRunner {
         this._pushHistory({
           role: "user_hint",
           text:
-            "你是编排者（负责人），禁止直接输出长文内容。请通过 agent.delegate 委派给团队成员（如 copywriter）执行。" +
-            "你的回复仅保留简短管理性说明，然后调用 agent.delegate。",
+            "你是编排者（负责人），禁止直接输出长文内容。请根据任务类型委派给合适成员（联网搜索→topic_planner，写作→copywriter）。" +
+            "若任务同时需要搜索和写作，先委派 topic_planner 搜索，再把搜索结果通过 inputArtifacts 传给 copywriter。",
         });
         this.ctx.writeEvent("run.notice", {
           turn: this.turn,
@@ -3129,6 +3134,13 @@ export class WritingAgentRunner {
 
     if (name === "agent.delegate") {
       this.runState.hasPlanCommitment = true;
+      // 累加委派计数
+      const agentId = String((toolUse.input as any)?.agentId ?? "").trim();
+      if (agentId) {
+        const counts = this.runState.delegationCounts ?? {};
+        counts[agentId] = (counts[agentId] ?? 0) + 1;
+        this.runState.delegationCounts = counts;
+      }
       return;
     }
 

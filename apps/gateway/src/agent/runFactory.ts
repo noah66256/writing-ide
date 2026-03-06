@@ -569,7 +569,7 @@ export function buildAgentProtocolPrompt(args: {
         `- 完成即停：本轮目标达成后立刻停止，不追加新任务或开启下一段流程。\n\n` +
         `执行机制：\n` +
         `1) Todo（任务清单）：进入执行流后默认维护 Todo。\n` +
-        `   - 有团队成员时：Todo 必须体现管理者视角，例如"① 委派文案写手撰写初稿 ② 审核稿件质量 ③ 交付用户"。\n` +
+        `   - 有团队成员时：Todo 必须体现管理者视角，例如"① 委派 topic_planner 调研素材 ② 委派 copywriter 撰写初稿 ③ 审核稿件质量 ④ 交付用户"。\n` +
         `     禁止写成执行者视角，例如"① 搜索素材 ② 撰写初稿 ③ 风格检查"——那是子 agent 内部该做的事。\n` +
         `   - 首次可用 run.setTodoList；已有 Todo 时优先 run.todo（action=upsert/update/remove），不重复覆盖。\n` +
         `2) 任务工作台（mainDoc）：关键决策/约束/假设及时写入 run.mainDoc.update。这是你和团队共享的结构化工作记忆。\n` +
@@ -577,11 +577,13 @@ export function buildAgentProtocolPrompt(args: {
         `   ✓ mainDoc 只允许：目标、平台、受众、约束、大纲摘要、当前步骤状态。\n` +
         `   如需暂存草稿或 lint 结果，请使用 doc.write 写入文件。\n` +
         `3) 委派调度（agent.delegate）：\n` +
+        `   - 联网搜索/信息收集/上网查找/查最新资料 → 委派选题策划（topic_planner）；\n` +
         `   - 写作/改写/润色/仿写 → 委派文案写手（copywriter）；\n` +
-        `   - 热点调研/选题/竞品分析 → 委派选题策划（topic_planner）；\n` +
         `   - SEO 关键词/标签优化 → 委派 SEO 专员（seo_specialist）；\n` +
-        `   - 委派时在 task 中写清目标、约束、验收标准；子 agent 会自行搜索素材和执行，你不需要提前帮它搜。\n` +
-        `   - 子 agent 返回结果后：审核质量 → 必要时要求返工或自行润色 → 交付用户。\n` +
+        `   - ⚠ copywriter 不具备 web.search/web.fetch，不能承担"上网搜一下"类任务。\n` +
+        `   - 组合任务（先搜再写）：先委派 topic_planner 搜索/汇总 → 再把搜索结论通过 inputArtifacts 传给 copywriter 写作。\n` +
+        `   - 委派时在 task 中写清目标、约束、验收标准；不要只写"搜一下/写一下"这类模糊指令。\n` +
+        `   - 子 agent 返回结果后：审核质量 → 必要时要求返工或改派其他成员 → 整合后交付用户。\n` +
         `   上下文传递规则（agent.delegate 的 inputArtifacts / task 参数）：\n` +
         `   A) 新任务（首次写作）：task 中写清目标、平台、字数、语气等约束即可，不需要 inputArtifacts。\n` +
         `   B) 修改/延续任务（"改得更口语""加个结尾"等）：\n` +
@@ -2363,16 +2365,18 @@ export async function prepareAgentRun(args: {
             "你是编排者（管理者），有团队成员可以委派任务。\n" +
             "- 请先制定 Todo（管理者视角），然后通过 agent.delegate 委派给合适的团队成员执行。\n" +
             "- 你不持有执行类工具（doc.write/kb.search/lint.*/web.search 等）——这些由子 Agent 使用。\n" +
+            "- copywriter 不具备 web.search/web.fetch；遇到「上网搜/联网查资料」必须先委派 topic_planner。\n" +
+            "- 组合任务请按顺序委派：topic_planner（搜索/整理）→ copywriter（写作），并把搜索结果放入 inputArtifacts 传给 copywriter。\n" +
             "- 你只能委派、审核、整合交付，不能亲自写稿/搜索/检索。\n" +
-            "- 严禁在你的回复中直接输出稿件/文案/文章等长文内容。任何内容创作都必须通过 agent.delegate 委派给团队成员完成。你的回复应仅包含管理性文字。\n" +
-            "- 需要联网搜索时，委派给 topic_planner；需要写稿时，委派给 copywriter。",
+            "- 严禁在你的回复中直接输出稿件/文案/文章等长文内容。任何内容创作都必须通过 agent.delegate 委派给团队成员完成。你的回复应仅包含管理性文字。",
           );
         } else {
           hints.push(
             "你是编排者（管理者），请继续通过 agent.delegate 委派任务或审核子 Agent 返回的结果。\n" +
             "- 你不持有执行类工具——需要搜索/写作/检索等操作时，请委派给团队成员。\n" +
+            "- copywriter 不具备 web.search/web.fetch；需要联网时先委派 topic_planner。\n" +
+            "- 组合任务请按顺序委派：topic_planner（搜索/整理）→ copywriter（写作），并通过 inputArtifacts 传递搜索结果。\n" +
             "- 严禁在你的回复中直接输出稿件/文案/文章等长文内容。所有内容产出必须通过委派完成。\n" +
-            "- 需要联网搜索时，委派给 topic_planner；需要写稿时，委派给 copywriter。\n" +
             "- 审核完成后调用 run.done 交付。",
           );
         }
@@ -2387,6 +2391,20 @@ export async function prepareAgentRun(args: {
             "【风格仿写已激活】委派给 copywriter 时，请在 task 中注明按风格库仿写，" +
             "子 Agent 会自动检索风格库样例并执行 lint.style 检查。",
           );
+        }
+        // 重复委派预警：同一子 Agent 被委派超过 2 次时提醒编排者
+        const dc = state.delegationCounts;
+        if (dc && typeof dc === "object") {
+          const repeated = Object.entries(dc)
+            .filter(([, count]) => (count as number) > 2)
+            .sort(([, a], [, b]) => (b as number) - (a as number));
+          if (repeated.length > 0) {
+            const detail = repeated.slice(0, 3).map(([id, c]) => `${id}×${c}`).join("，");
+            hints.push(
+              `⚠ 重复委派预警：${detail}。同一成员超过 2 次通常意味着：委派对象不匹配（如需联网却派了 copywriter）、` +
+              `task 描述不够具体、或缺少 inputArtifacts。请核查后改派合适成员或补充输入再继续。`,
+            );
+          }
         }
       }
     }
