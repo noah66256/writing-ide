@@ -98,7 +98,7 @@ export type RunContext = {
   abortSignal: AbortSignal;
   onTurnUsage?: (promptTokens: number, completionTokens: number) => void;
   /** 每轮回调：根据当前运行状态动态计算本轮可用工具集和 hint。返回 null 表示无阶段限制。 */
-  computePerTurnAllowed?: (state: RunState) => { allowed: Set<string>; hint: string } | null;
+  computePerTurnAllowed?: (state: RunState) => { allowed: Set<string>; hint: string; orchestratorMode?: boolean } | null;
   /** 子 Agent 模型解析回调：按候选列表顺序尝试解析，命中即返回；全部失败返回 null（回退父 agent 配置） */
   resolveSubAgentModel?: (
     candidates: string[],
@@ -807,6 +807,7 @@ export class WritingAgentRunner {
   private turnAllowedToolNames: Set<string> | null = null;
   private readonly failedToolDigests: ToolFailureDigest[] = [];
   private executionNoToolTurns = 0;
+  private orchestratorTextRetries = 0;
   private totalToolCalls = 0;
   private forcedToolChoice: ForcedToolChoice | null = null;
   private readonly turnEngine = new TurnEngine();
@@ -1976,6 +1977,7 @@ export class WritingAgentRunner {
     const perTurnCaps = this.ctx.computePerTurnAllowed?.(this.runState) ?? null;
     const effectiveAllowed = perTurnCaps?.allowed ?? this.ctx.allowedToolNames;
     this.turnAllowedToolNames = effectiveAllowed;
+    const orchestratorMode = perTurnCaps?.orchestratorMode === true;
     const turnSystemPrompt = perTurnCaps?.hint
       ? `${this.ctx.systemPrompt}\n\n${perTurnCaps.hint}`
       : this.ctx.systemPrompt;
@@ -1989,7 +1991,8 @@ export class WritingAgentRunner {
     // [4] executionContract + holdAssistantDelta
     const executionContract = this._getExecutionContract();
     const holdAssistantDelta =
-      executionContract.required && this.totalToolCalls < executionContract.minToolCalls;
+      orchestratorMode ||
+      (executionContract.required && this.totalToolCalls < executionContract.minToolCalls);
 
     // [5] writeEvent("assistant.start")
     this.ctx.writeEvent("assistant.start", { turn: this.turn });
@@ -2173,8 +2176,46 @@ export class WritingAgentRunner {
     // [18] 无工具分支: _checkAutoRetry + 延迟 delta 发送 + _setOutcome
     if (result.completedToolUses.length === 0) {
       const autoRetryText = adapter.getAutoRetryText(result);
+
+      // ---- Orchestrator 长文本硬性拦截 ----
+      // 编排者不持有执行工具，若无工具轮输出超 300 字符的长文，大概率是绕开委派直接写稿。
+      // holdAssistantDelta 已确保文本未实时发送给客户端，此处拦截并重试。
+      const orchestratorTextLen = String(result.displayText || autoRetryText || "").trim().length;
+      if (orchestratorMode && orchestratorTextLen > 300 && this.orchestratorTextRetries < 2) {
+        this.orchestratorTextRetries += 1;
+        this._pushHistory({
+          role: "user_hint",
+          text:
+            "你是编排者（负责人），禁止直接输出长文内容。请通过 agent.delegate 委派给团队成员（如 copywriter）执行。" +
+            "你的回复仅保留简短管理性说明，然后调用 agent.delegate。",
+        });
+        this.ctx.writeEvent("run.notice", {
+          turn: this.turn,
+          kind: "warn",
+          title: "OrchestratorLongTextBlocked",
+          message:
+            `检测到编排者无工具轮长文本输出（${orchestratorTextLen} 字符），` +
+            `已拦截并重试（${this.orchestratorTextRetries}/2）。`,
+        });
+        return true;
+      }
+      // 未触发拦截（短文本或非 orchestrator）→ 重置连续违规计数
+      if (orchestratorMode && orchestratorTextLen <= 300) {
+        this.orchestratorTextRetries = 0;
+      }
+
       const shouldRetry = this._checkAutoRetry(autoRetryText);
       if (shouldRetry) return true;
+
+      // 编排者长文本拦截重试耗尽后，放行但发出警告
+      if (orchestratorMode && orchestratorTextLen > 300) {
+        this.ctx.writeEvent("run.notice", {
+          turn: this.turn,
+          kind: "warn",
+          title: "OrchestratorLongTextBypass",
+          message: "编排者长文本拦截已达重试上限（2），本轮放行文本输出。",
+        });
+      }
 
       // 延迟 delta 发送：Anthropic 路径在 emitTextDelta=true 时已实时发送，
       // 只有 holdAssistantDelta 时才需延迟发送。
@@ -2207,6 +2248,7 @@ export class WritingAgentRunner {
     // [19] totalToolCalls++ → _processCompletedToolUses
     this.totalToolCalls += result.completedToolUses.length;
     this.executionNoToolTurns = 0;
+    this.orchestratorTextRetries = 0;
     this.forcedToolChoice = null;
     return this._processCompletedToolUses(
       result.completedToolUses,

@@ -1397,7 +1397,7 @@ export type PreparedRun = {
   PHASE_CONTRACTS_V1: Partial<Record<SkillToolCapsPhase, PhaseContractV1>>;
   ALWAYS_ALLOW_TOOL_NAMES: Set<string>;
   runState: RunState;
-  computePerTurnAllowed: (state: RunState) => { allowed: Set<string>; hint: string } | null;
+  computePerTurnAllowed: (state: RunState) => { allowed: Set<string>; hint: string; orchestratorMode?: boolean } | null;
   resolveSubAgentModel: NonNullable<RunContext["resolveSubAgentModel"]>;
   runnerStyleLibIds: string[];
   mcpToolsFromSidecar: Array<{ name: string; description: string; inputSchema?: any; serverId: string; serverName: string; originalName: string }>;
@@ -2302,7 +2302,7 @@ export async function prepareAgentRun(args: {
   // (todo_required, web gate, style gate, lint gate, etc.), which caused KV-cache
   // thrashing and deadlocks with the AutoRetry mechanism.
   const isDeleteOnlyRoute = routeIdLower === "file_delete_only";
-  const computePerTurnAllowed = (state: RunState): { allowed: Set<string>; hint: string } | null => {
+  const computePerTurnAllowed = (state: RunState): { allowed: Set<string>; hint: string; orchestratorMode?: boolean } | null => {
     let allowed: Set<string> | null = null;
     const hints: string[] = [];
 
@@ -2439,8 +2439,14 @@ export async function prepareAgentRun(args: {
       }
     }
 
+    // 构建返回值：delegateBootActive 时标记 orchestratorMode，runner 据此拦截长文本输出
+    const perTurnResult = () => {
+      const base = { allowed: allowed as Set<string>, hint: hints.join("\n\n") };
+      return delegateBootActive ? { ...base, orchestratorMode: true as const } : base;
+    };
+
     if (!enforceMcpFirstForBinaryRead) {
-      return { allowed, hint: hints.join("\n\n") };
+      return perTurnResult();
     }
     const mcpCalls = Math.max(0, Math.floor(Number((state as any)?.mcpToolCallCount ?? 0)));
     const mcpOk = Math.max(0, Math.floor(Number((state as any)?.mcpToolSuccessCount ?? 0)));
@@ -2449,7 +2455,7 @@ export async function prepareAgentRun(args: {
     // MCP-first 护栏：二进制读取场景下，先完成至少两次 MCP 尝试（或一次成功）再放开 code.exec。
     const shouldBlockCodeExec = mcpOk === 0 && (mcpCalls < 2 || mcpFail < 2);
     if (!shouldBlockCodeExec) {
-      return { allowed, hint: hints.join("\n\n") };
+      return perTurnResult();
     }
 
     allowed.delete("code.exec");
@@ -2459,7 +2465,7 @@ export async function prepareAgentRun(args: {
         `已启用 MCP-first 护栏（当前 mcpCalls=${mcpCalls}, mcpOk=${mcpOk}, mcpFail=${mcpFail}）。` +
         (toolHint ? `\n优先工具：${toolHint}` : ""),
     );
-    return { allowed, hint: hints.join("\n\n") };
+    return perTurnResult();
   };
 
   const runnerStyleLibIds = parseKbSelectedLibrariesFromContextPack(body.contextPack ?? "")

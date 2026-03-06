@@ -5581,14 +5581,21 @@ fastify.post(
 
   // 运行时：优先使用主 Agent 透传的 LLM 配置（与主 agent 共用模型，避免独立端点挂了 lint 不可用）
   // 若无透传，则回退到 stage=lint.style 绑定的模型
-  const st = await aiConfig.resolveStage("lint.style");
   const hasLlmOverride = !!(body.llmOverride && body.llmOverride.baseUrl && body.llmOverride.apiKey && body.llmOverride.model);
-  let model = hasLlmOverride ? body.llmOverride!.model : st.model;
-  let baseUrl = hasLlmOverride ? body.llmOverride!.baseUrl : st.baseURL;
-  let endpoint = hasLlmOverride ? (body.llmOverride!.endpoint || "/v1/chat/completions") : (st.endpoint || "/v1/chat/completions");
-  let apiKey = hasLlmOverride ? body.llmOverride!.apiKey : st.apiKey;
-  const stageMaxTokens = st.maxTokens ?? null;
-  const temperature = st.temperature ?? 0.2;
+  let st: Awaited<ReturnType<typeof aiConfig.resolveStage>> | null = null;
+  try {
+    st = await aiConfig.resolveStage("lint.style");
+  } catch (e) {
+    // resolveStage 可能因 API Key 解密失败等原因抛异常。
+    // 若有 llmOverride 则无需 stage 配置，继续执行；否则上抛。
+    if (!hasLlmOverride) throw e;
+  }
+  let model = hasLlmOverride ? body.llmOverride!.model : st!.model;
+  let baseUrl = hasLlmOverride ? body.llmOverride!.baseUrl : st!.baseURL;
+  let endpoint = hasLlmOverride ? (body.llmOverride!.endpoint || "/v1/chat/completions") : (st!.endpoint || "/v1/chat/completions");
+  let apiKey = hasLlmOverride ? body.llmOverride!.apiKey : st!.apiKey;
+  const stageMaxTokens = st?.maxTokens ?? null;
+  const temperature = st?.temperature ?? 0.2;
 
   // 备用模型：使用透传时不走备用模型池（主 agent 模型已确定）
   const candidateModelIds = hasLlmOverride
@@ -5598,13 +5605,13 @@ fastify.post(
       const stages = await aiConfig.listStages();
       const s = Array.isArray(stages) ? stages.find((x: any) => String(x?.stage ?? "") === "lint.style") : null;
       const ids = Array.isArray((s as any)?.modelIds) ? (((s as any).modelIds as any[]).map((x) => String(x ?? "").trim()).filter(Boolean) as string[]) : [];
-      const primary = String((s as any)?.modelId ?? st.modelId ?? "").trim();
+      const primary = String((s as any)?.modelId ?? st?.modelId ?? "").trim();
       const all = [primary, ...ids].filter(Boolean);
       const uniq: string[] = [];
       for (const x of all) if (!uniq.includes(x)) uniq.push(x);
       return uniq.slice(0, 12);
     } catch {
-      return [String(st.modelId ?? "").trim()].filter(Boolean);
+      return [String(st?.modelId ?? "").trim()].filter(Boolean);
     }
   })();
 
@@ -6152,7 +6159,7 @@ fastify.post(
 
   let lastErr: any = null;
   let ret: any = null;
-  let usedModelId = String(st.modelId ?? "").trim();
+  let usedModelId = String(st?.modelId ?? "").trim();
   let usedModelName = model;
 
   const MAX_FALLBACK = 2; // 最多切换 2 次（主 + 2 备）
