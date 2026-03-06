@@ -793,12 +793,20 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
 
             log("info", "tool.call", { toolCallId, name });
 
-            // Sub-agent tool calls: skip UI but still execute Desktop-side tools
+            // Sub-agent tool calls: execute + show ToolCallCard in UI for progress visibility
             const toolAgentId = data?.agentId ? String(data.agentId) : null;
             if (toolAgentId) {
+              // 更新 activity 文本，让用户看到子 Agent 正在做什么
+              setActivity(humanizeToolActivity(name, parsedArgsPreview), { resetTimer: true });
+
               if (executedBy === "gateway") {
-                // Gateway already handled this tool — nothing to do on Desktop
+                // Gateway already handled this tool — show completed card
                 log("info", "tool.call.subagent.skip", { toolCallId, name, agentId: toolAgentId });
+                addTool({
+                  toolName: name, status: "success", input: parsedArgsPreview, output: null,
+                  riskLevel: "low", applyPolicy: "auto_apply", undoable: false, kept: true, applied: true,
+                  agentId: toolAgentId,
+                });
                 return;
               }
               // MCP 工具路由（子 Agent 也走 MCP 通道）
@@ -807,6 +815,11 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                 const serverId = parts[1] ?? "";
                 const mcpToolName = parts.slice(2).join(".");
                 log("info", "tool.call.subagent.mcp", { toolCallId, serverId, mcpToolName, agentId: toolAgentId });
+                const stepId = addTool({
+                  toolName: name, status: "running", input: parsedArgsPreview, output: null,
+                  riskLevel: "low", applyPolicy: "auto_apply", undoable: false, kept: true, applied: true,
+                  agentId: toolAgentId,
+                });
                 try {
                   const mcpApi = (window as any).desktop?.mcp;
                   const result = mcpApi
@@ -826,6 +839,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                       normalizedArgs: mcpDiag.normalizedArgs.slice(0, 8),
                     });
                   }
+                  patchTool(stepId, { status: result.ok ? "success" : "failed", output: result.ok ? result.output : null });
                   const failureOutput =
                     result?.output !== undefined
                       ? result.output
@@ -837,6 +851,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                     meta: { applyPolicy: "auto", riskLevel: "low", hasApply: false, mcpDiag },
                   });
                 } catch (e: any) {
+                  patchTool(stepId, { status: "failed" });
                   submitToolResult({
                     toolCallId, name,
                     ok: false,
@@ -846,13 +861,19 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                 }
                 return;
               }
-              // Desktop-executed tool for sub-agent: run & send result, skip UI
+              // Desktop-executed tool for sub-agent
               log("info", "tool.call.subagent.exec", { toolCallId, name, agentId: toolAgentId });
+              const stepId = addTool({
+                toolName: name, status: "running", input: parsedArgsPreview, output: null,
+                riskLevel: "low", applyPolicy: "auto_apply", undoable: false, kept: true, applied: true,
+                agentId: toolAgentId,
+              });
               const exec = await executeToolCall({ toolName: name, rawArgs, mode: args.mode });
+              patchTool(stepId, { status: exec.result.ok ? "success" : "failed", output: exec.result.ok ? exec.result.output : null });
               const failedOutput =
                 !exec.result.ok && exec.result.output !== undefined
                   ? exec.result.output
-                  : { ok: false, error: exec.result.error };
+                  : { ok: false, error: (exec.result as any).error };
               submitToolResult({
                 toolCallId, name,
                 ok: exec.result.ok,

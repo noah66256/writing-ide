@@ -560,6 +560,7 @@ export const useRunStore = create<RunState>()(
       apply: tool.apply,
       undoable: tool.undoable,
       undo: tool.undo,
+      ...(tool.agentId ? { agentId: tool.agentId } : {}),
     };
     set((s) => ({ steps: [...s.steps, step] }));
     return id;
