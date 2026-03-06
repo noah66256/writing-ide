@@ -2411,34 +2411,16 @@ export class WritingAgentRunner {
     const budget = resolveSubAgentBudget(subAgent.budget, rawArgs.budget);
     const subRunId = `${this.ctx.runId}:sub:${toolUse.id}`;
 
-    // 解析子 agent 偏好模型：model -> fallbackModels -> 父 agent 配置
-    const subModelCandidates = [
-      String(subAgent.model ?? "").trim(),
-      ...((subAgent.fallbackModels ?? []).map((m) => String(m ?? "").trim())),
-    ].filter(Boolean);
-
-    let resolvedSubModel:
-      | { modelId: string; apiKey: string; baseUrl: string; endpoint?: string; toolResultFormat?: "xml" | "text" }
-      | null = null;
-    if (this.ctx.resolveSubAgentModel && subModelCandidates.length > 0) {
-      try {
-        resolvedSubModel = await this.ctx.resolveSubAgentModel(subModelCandidates);
-      } catch {
-        resolvedSubModel = null;
-      }
-    }
-
-    const subModelId = resolvedSubModel?.modelId ?? this.ctx.modelId;
-    const subApiKey = resolvedSubModel?.apiKey ?? this.ctx.apiKey;
-    const subBaseUrl = resolvedSubModel?.baseUrl ?? this.ctx.baseUrl;
-    const subEndpoint = resolvedSubModel?.endpoint ?? this.ctx.endpoint;
-    const subToolResultFormat = resolvedSubModel?.toolResultFormat ?? this.ctx.toolResultFormat;
+    // 子 agent 直接继承父 agent 的 LLM 配置（用户选的模型即子 agent 用的模型）
+    const subModelId = this.ctx.modelId;
+    const subApiKey = this.ctx.apiKey;
+    const subBaseUrl = this.ctx.baseUrl;
+    const subEndpoint = this.ctx.endpoint;
+    const subToolResultFormat = this.ctx.toolResultFormat;
 
     console.log("[sub-agent.model]", {
       agentId,
-      candidates: subModelCandidates,
-      resolved: resolvedSubModel ? { modelId: resolvedSubModel.modelId, endpoint: resolvedSubModel.endpoint } : null,
-      effective: { modelId: subModelId, endpoint: subEndpoint, apiType: inferApiType(subEndpoint) },
+      inherited: { modelId: subModelId, endpoint: subEndpoint, apiType: inferApiType(subEndpoint) },
     });
 
     // Sub-agent tools: from definition, exclude agent.delegate (prevent nesting)
