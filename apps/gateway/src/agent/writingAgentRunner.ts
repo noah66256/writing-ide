@@ -2609,9 +2609,42 @@ export class WritingAgentRunner {
       return { ok: false, output: { ok: false, error: "VALIDATION_ERROR", detail: "task is required" } };
     }
 
-    const subAgent: SubAgentDefinition | undefined =
+    let subAgent: SubAgentDefinition | undefined =
       BUILTIN_SUB_AGENTS.find((a) => a.id === agentId && a.enabled)
       ?? (this.ctx.customAgentDefinitions ?? []).find((a) => a.id === agentId && a.enabled);
+
+    // 别名兜底：模型可能用中文名、自然语言名或缩写调用 agent
+    if (!subAgent) {
+      const AGENT_ALIASES: Record<string, string> = {
+        // 模型常见幻觉名 → 正确 agentId
+        researcher: "topic_planner",
+        research: "topic_planner",
+        planner: "topic_planner",
+        search: "topic_planner",
+        searcher: "topic_planner",
+        writer: "copywriter",
+        copy: "copywriter",
+        editor: "copywriter",
+        seo: "seo_specialist",
+      };
+      const allAgents = [
+        ...BUILTIN_SUB_AGENTS.filter((a) => a.enabled),
+        ...(this.ctx.customAgentDefinitions ?? []).filter((a) => a.enabled),
+      ];
+      const lower = agentId.toLowerCase();
+      // 先查别名表
+      const aliasId = AGENT_ALIASES[lower];
+      if (aliasId) subAgent = allAgents.find((a) => a.id === aliasId);
+      // 再试中文名/描述模糊匹配
+      if (!subAgent) {
+        subAgent = allAgents.find((a) =>
+          a.name === agentId ||
+          a.name.includes(agentId) ||
+          a.id.includes(lower) || lower.includes(a.id),
+        );
+      }
+    }
+
     if (!subAgent) {
       const allAgents = [
         ...BUILTIN_SUB_AGENTS.filter((a) => a.enabled),
