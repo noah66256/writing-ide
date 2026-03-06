@@ -794,6 +794,9 @@ export function looksLikeDeleteOnlyIntent(text: string): boolean {
   if (!t) return false;
   if (/(删减|精简|压缩|删到\d{2,6}字|删成\d{2,6}字)/.test(t)) return false;
 
+  // 写作/仿写/改写类意图不是删除任务（即使 Context Pack 展开后的引用文章含"删"字）
+  if (/(写一篇|仿写|改写|润色|续写|扩写|撰写|写作|写稿|草拟|起草|文案|按.*风格.*写|按.*口吻.*写)/.test(t)) return false;
+
   const hasDeleteVerb = /(删除|删掉|删|移除|清理|清空|rm\b|del\b)/i.test(t);
   if (!hasDeleteVerb) return false;
 
