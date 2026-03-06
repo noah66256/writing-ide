@@ -2363,12 +2363,16 @@ export async function prepareAgentRun(args: {
             "你是编排者（管理者），有团队成员可以委派任务。\n" +
             "- 请先制定 Todo（管理者视角），然后通过 agent.delegate 委派给合适的团队成员执行。\n" +
             "- 你不持有执行类工具（doc.write/kb.search/lint.*/web.search 等）——这些由子 Agent 使用。\n" +
-            "- 你只能委派、审核、整合交付，不能亲自写稿/搜索/检索。",
+            "- 你只能委派、审核、整合交付，不能亲自写稿/搜索/检索。\n" +
+            "- 严禁在你的回复中直接输出稿件/文案/文章等长文内容。任何内容创作都必须通过 agent.delegate 委派给团队成员完成。你的回复应仅包含管理性文字。\n" +
+            "- 需要联网搜索时，委派给 topic_planner；需要写稿时，委派给 copywriter。",
           );
         } else {
           hints.push(
             "你是编排者（管理者），请继续通过 agent.delegate 委派任务或审核子 Agent 返回的结果。\n" +
             "- 你不持有执行类工具——需要搜索/写作/检索等操作时，请委派给团队成员。\n" +
+            "- 严禁在你的回复中直接输出稿件/文案/文章等长文内容。所有内容产出必须通过委派完成。\n" +
+            "- 需要联网搜索时，委派给 topic_planner；需要写稿时，委派给 copywriter。\n" +
             "- 审核完成后调用 run.done 交付。",
           );
         }
@@ -3122,24 +3126,8 @@ export async function executeAgentRun(args: {
           },
         });
 
-        const lines = ordered
-          .map((c: any, idx: number) => {
-            const id = String(c?.id ?? "").trim();
-            const label = String(c?.label ?? `写法${idx + 1}`).trim();
-            const ev = Array.isArray(c?.evidence) ? String(c.evidence?.[0] ?? "").trim() : "";
-            const mark = selectedId && id === selectedId ? "（本次默认）" : rec && id === rec ? "（推荐）" : "";
-            return `- ${label}${mark}：${id}${ev ? `｜证据：${ev.slice(0, 80)}${ev.length > 80 ? "…" : ""}` : ""}`;
-          })
-          .join("\n");
-
         writeEvent("assistant.delta", {
-          delta:
-            `\n\n[写法候选（已自动选择）]\n已绑定风格库「${libName}」，检测到多个“写法候选（子簇）”。本次默认采用：${
-              selectedLabel || "推荐写法"
-            }（${selectedId || rec || "cluster_0"}）。你可随时改口切换：\n` +
-            `${lines}\n\n` +
-            `如需切换请回复：\n- 直接回复某个 clusterId（例如：${selectedId || rec || "cluster_0"}）\n- 或直接回复“写法A/写法B/写法C”（与上面候选 label 对应）\n\n` +
-            "提示：这里的“写法C”是写作风格候选编号，不是“C语言/编程”。",
+          delta: `\n\n已选用「${libName}」风格的${selectedLabel || "默认写法"}开始创作。如需切换写法，直接回复即可。`,
         });
       }
     }

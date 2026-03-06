@@ -664,7 +664,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             const agName = String(data?.agentName ?? data?.agentId ?? "");
             log("info", "subagent.start", data);
             if (rt.getIsRunning()) {
-              setActivity(agName ? `${agName} 正在处理…` : "子 Agent 正在处理…", { resetTimer: true });
+              setActivity(agName ? `${agName} 正在执行任务…` : "子 Agent 正在执行任务…", { resetTimer: true });
             }
           }
 
@@ -676,7 +676,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               if (bid) { finishAssistant(bid); subAgentBubbles.delete(doneAgId); }
             }
             log("info", "subagent.done", data);
-            if (rt.getIsRunning()) setActivity("正在继续…");
+            if (rt.getIsRunning()) setActivity("正在汇总结果…");
           }
 
           // ---- run.end ----
@@ -780,7 +780,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               if (assistantId) finishAssistant(assistantId);
               assistantId = null;
             }
-            if (rt.getIsRunning()) setActivity("正在继续…");
+            if (rt.getIsRunning()) setActivity("正在汇总结果…");
           }
 
           // ---- tool.call ----

@@ -266,12 +266,13 @@ export function humanizeToolActivity(name: string, args: Record<string, unknown>
   if (tool === "lint.style") return "正在做风格校验…";
   if (tool === "lint.copy") return "正在做抄袭/复述风险检查…";
   if (tool === "agent.delegate") {
-    const agentId = String((args as any)?.agentId ?? "");
-    return agentId ? `正在委托给：${agentId}…` : "正在委托子 Agent…";
+    const agentId = String((args as any)?.agentId ?? (args as any)?.targetAgentId ?? "").trim();
+    const agentName = BUILTIN_SUB_AGENTS.find((a) => a.id === agentId)?.name ?? agentId;
+    return agentName ? `正在委派${agentName}…` : "正在委派子 Agent…";
   }
   if (tool === "agent.config.create") return "正在创建团队成员…";
-  if (tool === "agent.config.list") return "正在查看团队配置…";
-  if (tool === "agent.config.update") return "正在更新团队成员…";
+  if (tool === "agent.config.list") return "正在查看团队成员列表…";
+  if (tool === "agent.config.update") return "正在更新团队成员配置…";
   if (tool === "agent.config.remove") return "正在移除团队成员…";
   return `正在执行：${tool}…`;
 }

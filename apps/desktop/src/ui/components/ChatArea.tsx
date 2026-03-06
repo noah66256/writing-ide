@@ -3,8 +3,6 @@ import {
   CheckCircle2,
   XCircle,
   Loader2,
-  ChevronDown,
-  ChevronUp,
   Copy,
   Bot,
 } from "lucide-react";
@@ -27,7 +25,7 @@ import { useAuthStore } from "@/state/authStore";
 import { useKbStore } from "@/state/kbStore";
 import { useConversationStore, buildCurrentSnapshot } from "@/state/conversationStore";
 import { resolveInlineFileOpConfirm } from "@/state/inlineFileOpConfirm";
-import { startGatewayRun } from "@/agent/gatewayAgent";
+import { startGatewayRun, humanizeToolActivity } from "@/agent/gatewayAgent";
 import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
 import { WelcomePage } from "./WelcomePage";
 import { InputBar } from "./InputBar";
@@ -538,83 +536,158 @@ function AssistantMessage({
   );
 }
 
-/* ─── 工具调用卡片 ─── */
+/* ─── 工具调用卡片（轻量状态行） ─── */
 
 function ToolCallCard({ step }: { step: ToolBlockStep }) {
-  const [expanded, setExpanded] = useState(false);
-
   const statusIcon = {
     running: <Loader2 size={13} className="animate-spin text-accent" />,
     success: <CheckCircle2 size={13} className="text-success" />,
     failed: <XCircle size={13} className="text-error" />,
     undone: <XCircle size={13} className="text-text-faint" />,
   }[step.status];
-
   const statusColor = {
-    running: "border-accent/20 bg-accent-soft/30",
-    success: "border-success/10 bg-surface",
-    failed: "border-error/10 bg-error/5",
-    undone: "border-border-soft bg-surface",
+    running: "border-accent/20 bg-accent-soft/20",
+    success: "border-border-soft bg-surface/70",
+    failed: "border-error/20 bg-error/5",
+    undone: "border-border-soft bg-surface/60",
   }[step.status];
 
-  const summary = formatToolSummary(step);
+  const line = formatToolStatusLine(step);
 
   return (
-    <div className={cn("rounded-lg border px-3 py-2 my-1 ml-10", statusColor)}>
-      <button
-        className="flex items-center gap-2 w-full text-left"
-        onClick={() => setExpanded(!expanded)}
-      >
+    <div className={cn("rounded-md border px-3 py-1.5 my-1 ml-10", statusColor)}>
+      <div className="flex items-center gap-2 w-full">
         {statusIcon}
-        <span className="text-[12px] font-mono text-text-muted truncate flex-1">
-          {step.toolName}
-          {summary && <span className="text-text-faint ml-1.5">— {summary}</span>}
-        </span>
-        {expanded ? (
-          <ChevronUp size={12} className="text-text-faint shrink-0" />
-        ) : (
-          <ChevronDown size={12} className="text-text-faint shrink-0" />
-        )}
-      </button>
-
-      {expanded && (
-        <div className="mt-2 pt-2 border-t border-border-soft">
-          {step.input != null && (
-            <div className="mb-2">
-              <div className="text-[10px] uppercase tracking-wider text-text-faint mb-1">
-                Input
-              </div>
-              <pre className="text-[11px] text-text-muted font-mono whitespace-pre-wrap break-words bg-surface-alt rounded-md p-2 max-h-[160px] overflow-auto">
-                {typeof step.input === "string"
-                  ? step.input
-                  : JSON.stringify(step.input, null, 2)}
-              </pre>
-            </div>
-          )}
-          {step.output != null && (
-            <div>
-              <div className="text-[10px] uppercase tracking-wider text-text-faint mb-1">
-                Output
-              </div>
-              <pre className="text-[11px] text-text-muted font-mono whitespace-pre-wrap break-words bg-surface-alt rounded-md p-2 max-h-[160px] overflow-auto">
-                {typeof step.output === "string"
-                  ? step.output
-                  : JSON.stringify(step.output, null, 2)}
-              </pre>
-            </div>
-          )}
-        </div>
-      )}
+        <span className="text-[12px] text-text-muted truncate flex-1">{line}</span>
+      </div>
     </div>
   );
 }
 
-function formatToolSummary(step: ToolBlockStep): string {
-  const out = step.output;
-  if (step.status === "running") return "";
-  if (typeof out === "string" && out.length < 80) return out;
-  if (out && typeof out === "object" && "message" in (out as any)) {
-    return String((out as any).message ?? "").slice(0, 80);
+/* ─── 工具状态行格式化 ─── */
+
+function _trunc(v: unknown, max = 48): string {
+  const t = String(v ?? "").replace(/\s+/g, " ").trim();
+  return !t ? "" : t.length <= max ? t : t.slice(0, max) + "…";
+}
+
+function _asRecord(v: unknown): Record<string, unknown> {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+}
+
+const TOOL_DISPLAY_NAMES: Record<string, string> = {
+  "time.now": "读取时间",
+  "kb.search": "检索知识库",
+  "kb.cite": "引用知识片段",
+  "kb.listLibraries": "查看知识库列表",
+  "kb.ingest": "录入知识库",
+  "kb.learn": "学习素材",
+  "kb.import": "导入知识",
+  "kb.extract": "提取知识片段",
+  "kb.jobStatus": "查看任务进度",
+  "web.search": "全网搜索",
+  "web.fetch": "读取网页",
+  "doc.read": "读取文件",
+  "doc.write": "写入文件",
+  "doc.previewDiff": "生成修改提案",
+  "doc.splitToDir": "拆分并写入文件",
+  "doc.applyEdits": "编辑文件",
+  "doc.mkdir": "创建目录",
+  "doc.renamePath": "重命名文件",
+  "doc.deletePath": "删除文件",
+  "doc.snapshot": "创建快照",
+  "doc.getSelection": "读取选区",
+  "doc.replaceSelection": "替换选区",
+  "lint.style": "风格校验",
+  "lint.copy": "复述风险检查",
+  "run.setTodoList": "更新待办事项",
+  "run.done": "结束本次任务",
+  "run.mainDoc.update": "更新主文档",
+  "run.mainDoc.get": "读取主文档",
+  "project.listFiles": "浏览项目文件",
+  "project.search": "搜索项目文件",
+  "project.docRules.get": "读取文档规范",
+  "file.open": "打开文件",
+  "code.exec": "执行代码",
+  "memory": "读写记忆",
+  "agent.config": "管理团队配置",
+  "agent.config.create": "创建团队成员",
+  "agent.config.list": "查看团队成员",
+  "agent.config.update": "更新成员配置",
+  "agent.config.remove": "移除团队成员",
+};
+
+function toolDisplayName(toolName: string, input: unknown): string {
+  if (toolName === "agent.delegate") {
+    const args = _asRecord(input);
+    const agentId = String(args.agentId ?? args.targetAgentId ?? "").trim();
+    const agent = BUILTIN_SUB_AGENTS.find((a) => a.id === agentId);
+    return agent ? `委派${agent.name}` : agentId ? `委派 ${agentId}` : "委派子 Agent";
   }
-  return step.status === "success" ? "完成" : step.status === "failed" ? "失败" : "";
+  if (toolName === "run.todo" || toolName.startsWith("run.todo.")) return "更新待办事项";
+  return TOOL_DISPLAY_NAMES[toolName] ?? toolName;
+}
+
+function summarizeToolInput(toolName: string, input: unknown): string {
+  const args = _asRecord(input);
+  if (toolName === "kb.search" || toolName === "web.search") {
+    const q = _trunc(args.query ?? args.q ?? args.keyword, 28);
+    return q ? `"${q}"` : "";
+  }
+  if (toolName === "web.fetch") {
+    const raw = String(args.url ?? "").trim();
+    if (!raw) return "";
+    try { return new URL(raw).hostname; } catch { return _trunc(raw, 28); }
+  }
+  if (toolName === "doc.read" || toolName === "doc.write" || toolName === "doc.previewDiff" || toolName === "doc.splitToDir" || toolName === "doc.applyEdits") {
+    return _trunc(args.path ?? args.filePath ?? args.targetPath, 40);
+  }
+  if (toolName === "run.setTodoList") {
+    const n = Array.isArray(args.items) ? args.items.length : 0;
+    return n > 0 ? `${n} 项` : "";
+  }
+  if (toolName === "agent.config.create") {
+    return _trunc(args.name, 20);
+  }
+  if (toolName === "agent.config.update" || toolName === "agent.config.remove") {
+    const agentId = String(args.agentId ?? "").trim();
+    const agent = BUILTIN_SUB_AGENTS.find((a) => a.id === agentId);
+    return agent?.name ?? agentId;
+  }
+  return "";
+}
+
+function summarizeToolOutput(output: unknown): string {
+  if (output == null) return "";
+  if (typeof output === "string") return _trunc(output, 60);
+  if (Array.isArray(output)) return output.length ? `返回 ${output.length} 项` : "";
+  const out = _asRecord(output);
+  if (out.error) return _trunc(out.error, 60);
+  const msg = out.message ?? out.note ?? out.summary;
+  if (msg) return _trunc(msg, 60);
+  if (Array.isArray(out.groups)) {
+    let hits = 0;
+    for (const g of out.groups) {
+      if (g && typeof g === "object" && Array.isArray((g as any).hits)) hits += (g as any).hits.length;
+    }
+    return hits > 0 ? `命中 ${hits} 条` : `${out.groups.length} 组结果`;
+  }
+  if (Array.isArray(out.results)) return `${out.results.length} 条结果`;
+  if (Array.isArray(out.todoList)) return `${out.todoList.length} 项待办`;
+  if (Array.isArray(out.agents)) return `${out.agents.length} 位成员`;
+  // 兜底：截取 JSON 摘要
+  try { return _trunc(JSON.stringify(out), 60); } catch { return ""; }
+}
+
+function formatToolStatusLine(step: ToolBlockStep): string {
+  const args = _asRecord(step.input);
+  if (step.status === "running") {
+    return humanizeToolActivity(step.toolName, args);
+  }
+  const label = toolDisplayName(step.toolName, step.input);
+  const inputHint = summarizeToolInput(step.toolName, step.input);
+  const action = inputHint ? `${label} — ${inputHint}` : label;
+  const statusTag = step.status === "success" ? "已完成" : step.status === "failed" ? "失败" : "已撤销";
+  const outputHint = summarizeToolOutput(step.output);
+  return outputHint ? `${action} · ${statusTag}：${outputHint}` : `${action} · ${statusTag}`;
 }
