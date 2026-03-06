@@ -2068,6 +2068,13 @@ export async function prepareAgentRun(args: {
     preserveToolNames.add("agent.delegate");
   }
 
+  // MCP 工具是用户主动配置的外部能力，始终保留在选择集中
+  for (const t of mcpToolsFromSidecar) {
+    if (t.name && baseAllowedToolNames.has(t.name)) {
+      preserveToolNames.add(t.name);
+    }
+  }
+
   const toolCatalog = buildToolCatalog({
     mode,
     allowedToolNames: baseAllowedToolNames,

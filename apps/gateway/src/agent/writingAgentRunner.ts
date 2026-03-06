@@ -2511,6 +2511,15 @@ export class WritingAgentRunner {
     //    将仿写闭环指引注入子 agent 的 systemPrompt ──
     const parentStyleSkillActive = this.ctx.activeSkills.some((s) => s.id === "style_imitate");
     const shouldInjectStyleImitate = parentStyleSkillActive && subCanLint && inheritStyleGates;
+    console.log("[sub-agent.style]", {
+      agentId,
+      parentStyleSkillActive,
+      subCanLint,
+      inheritStyleGates,
+      shouldInjectStyleImitate,
+      parentLintGateEnabled: this.ctx.gates.lintGateEnabled,
+      parentActiveSkillIds: this.ctx.activeSkills.map((s) => s.id),
+    });
 
     let subSystemPrompt = String(subAgent.systemPrompt ?? "").trim() || this.ctx.systemPrompt;
     if (shouldInjectStyleImitate) {

@@ -74,6 +74,10 @@ function inferCapabilities(name: string, description: string, source: ToolCatalo
 
   if (source === "mcp") {
     caps.add("mcp");
+    // 搜索类 MCP 工具
+    if (/(search|搜索|web_search|bochasearch|tavily|serp|bing|google)/i.test(`${n} ${d}`)) {
+      caps.add("web_search");
+    }
     if (
       /(playwright|browser|chrom(e|ium)|firefox|webkit|navigate|browser_navigate|open_url|openurl|goto|go_to)/i.test(n) ||
       /(浏览器|navigate|open url|网页自动化|web automation)/i.test(d)
