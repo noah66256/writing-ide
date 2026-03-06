@@ -2433,6 +2433,13 @@ export class WritingAgentRunner {
     const subEndpoint = resolvedSubModel?.endpoint ?? this.ctx.endpoint;
     const subToolResultFormat = resolvedSubModel?.toolResultFormat ?? this.ctx.toolResultFormat;
 
+    console.log("[sub-agent.model]", {
+      agentId,
+      candidates: subModelCandidates,
+      resolved: resolvedSubModel ? { modelId: resolvedSubModel.modelId, endpoint: resolvedSubModel.endpoint } : null,
+      effective: { modelId: subModelId, endpoint: subEndpoint, apiType: inferApiType(subEndpoint) },
+    });
+
     // Sub-agent tools: from definition, exclude agent.delegate (prevent nesting)
     const subAllowedToolNames = new Set(
       (subAgent.tools ?? []).map((n) => String(n ?? "").trim()).filter(Boolean),

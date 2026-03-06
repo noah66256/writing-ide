@@ -1113,7 +1113,7 @@ fastify.post(
       });
     }
 
-    const raw = String((ret as any).text ?? "").trim();
+    const raw = String((ret as any).content ?? (ret as any).text ?? "").trim();
 
     // \u89E3\u6790 JSON \u8FD4\u56DE\uFF08\u591A\u79CD\u5BB9\u9519\u7B56\u7565\uFF09
     let parsed: any[] | null = null;
@@ -1131,6 +1131,7 @@ fastify.post(
     }
 
     if (!Array.isArray(parsed)) {
+      console.error("[kb.llm_search] JSON parse failed", { model, rawLen: raw.length, rawPreview: raw.slice(0, 800) });
       return reply.code(502).send({
         error: "KB_LLM_SEARCH_PARSE_FAILED",
         detail: "\u65E0\u6CD5\u89E3\u6790 LLM \u8FD4\u56DE\u7684 JSON",
