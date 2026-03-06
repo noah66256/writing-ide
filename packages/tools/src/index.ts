@@ -1030,6 +1030,7 @@ export const TOOL_LIST: ToolMeta[] = [
     args: [
       { name: "agentId", required: true, desc: "目标子 Agent ID（如 copywriter、seo_specialist）", type: "string" },
       { name: "task", required: true, desc: "任务描述（自然语言，尽量具体）", type: "string" },
+      { name: "context", required: false, desc: "补充上下文（可选）：{ briefing?: 背景分析, references?: 参考资料数组 }", type: "object" },
       { name: "inputArtifacts", required: false, desc: "上游产物引用（JSON 数组：串联场景传入前一个 Agent 的产出）", type: "array" },
       { name: "acceptanceCriteria", required: false, desc: "验收标准（可选）", type: "string" },
       { name: "budget", required: false, desc: "覆盖默认预算（JSON 对象：{ maxTurns?, maxToolCalls?, timeoutMs? }）", type: "object" },
@@ -1040,6 +1041,13 @@ export const TOOL_LIST: ToolMeta[] = [
       properties: {
         agentId: { type: "string" },
         task: { type: "string" },
+        context: {
+          type: "object",
+          properties: {
+            briefing: { type: "string" },
+            references: { type: "array" },
+          },
+        },
         inputArtifacts: { type: "array" },
         acceptanceCriteria: { type: "string" },
         budget: { type: "object" },

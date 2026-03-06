@@ -2835,12 +2835,47 @@ export class WritingAgentRunner {
       ].join("\n");
     }
 
+    // 先用原始 taskMessage 判断记忆注入（在结构化包装之前，避免包装后文本膨胀导致触发条件失真）
     const injectMemory = shouldInjectSubAgentMemory({
       task: taskMessage,
       inputArtifactsCount: inputArtifacts.length,
       acceptanceCriteria,
       rawArgs,
     });
+
+    // ── 结构化任务传递（A2A 启发）：自动注入用户原始消息，防止"传声游戏" ──
+    // orchestrator 对用户意图的重述可能失真，sub-agent 需同时看到用户原话和负责人指令
+    if (!needsTextBlob) {
+      const firstUserEntry = this.history.find(
+        (e) => e.role === "user" && typeof (e as any).text === "string" && (e as any).text.trim().length > 0,
+      );
+      const originalUserMessage = firstUserEntry ? String((firstUserEntry as any).text).trim() : "";
+      if (originalUserMessage) {
+        // 解析 orchestrator 提供的补充上下文（可选 briefing / references）
+        const rawContext = rawArgs.context;
+        const delegationCtx = (rawContext && typeof rawContext === "object" && !Array.isArray(rawContext))
+          ? rawContext as Record<string, unknown>
+          : {};
+        const briefing = typeof delegationCtx.briefing === "string" ? delegationCtx.briefing.trim() : "";
+        const references = Array.isArray(delegationCtx.references)
+          ? (delegationCtx.references as unknown[]).map((r) => String(r ?? "").trim()).filter(Boolean)
+          : [];
+
+        // 用户原始消息限长：避免极端长文膨胀子 agent 上下文
+        const MAX_USER_MSG_INJECT = 2000;
+        const userMsgTruncated = originalUserMessage.length > MAX_USER_MSG_INJECT
+          ? originalUserMessage.slice(0, MAX_USER_MSG_INJECT) + "…（已截断）"
+          : originalUserMessage;
+
+        const sections: string[] = [
+          `【用户原始需求】\n${userMsgTruncated}`,
+          `【负责人指令】\n${taskMessage}`,
+        ];
+        if (briefing) sections.push(`【背景说明】\n${briefing}`);
+        if (references.length > 0) sections.push(`【参考资料】\n${references.join("\n")}`);
+        taskMessage = sections.join("\n\n");
+      }
+    }
 
     // 自动注入精简上下文到 taskMessage（风格库 ID + mainDoc 目标/约束 + 记忆/摘要）
     const contextHint = buildSubAgentContextHint({
