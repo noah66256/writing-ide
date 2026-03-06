@@ -386,6 +386,82 @@ async function scenario7_anthropicMissingParamPreValidation() {
 }
 
 // ---------------------------------------------------------------------------
+// 场景 8: OpenAI 路径 - 原生 tool_calls 流式分块 arguments
+// ---------------------------------------------------------------------------
+async function scenario8_openAiNativeToolCallsStreaming() {
+  // 模拟 OpenAI 流式格式：首个 delta 含 name/id，后续 delta 仅含 index + arguments 片段
+  const argsJson = JSON.stringify({ note: "task complete" });
+  const chunk1 = argsJson.slice(0, 10);
+  const chunk2 = argsJson.slice(10);
+
+  const streamLines = [
+    // Delta 1: name + id + 空 arguments
+    `data: ${JSON.stringify({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            id: "call_test_native_1",
+            type: "function",
+            function: { name: "run.done", arguments: "" },
+          }],
+        },
+      }],
+    })}`,
+    // Delta 2: 仅 index + arguments 片段 1
+    `data: ${JSON.stringify({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            function: { arguments: chunk1 },
+          }],
+        },
+      }],
+    })}`,
+    // Delta 3: 仅 index + arguments 片段 2
+    `data: ${JSON.stringify({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            function: { arguments: chunk2 },
+          }],
+        },
+      }],
+    })}`,
+    `data: ${JSON.stringify({ choices: [{ finish_reason: "tool_calls" }] })}`,
+    "data: [DONE]",
+  ];
+
+  await withMockFetch(async (input) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.includes("/chat/completions")) return sseResponse(streamLines);
+    return new Response("unexpected", { status: 500 });
+  }, async () => {
+    const { runner, events } = buildRunner({
+      apiType: "openai-completions",
+      endpoint: "/v1/chat/completions",
+      allowedToolNames: ["run.done"],
+    });
+    await runner.run("finish the task");
+    const outcome = runner.getOutcome();
+    assert.equal(outcome.status, "completed");
+    assert.equal(outcome.reason, "run_done", `expected run_done, got ${outcome.reason}`);
+    assert.equal(hasToolCallEvent(events, "run.done"), true, "should emit tool.call for run.done");
+
+    // 验证参数被正确合并
+    const toolCallEvent = events.find(
+      (e) => e.event === "tool.call" && String((e.data as any)?.name ?? "") === "run.done",
+    );
+    assert.ok(toolCallEvent, "should have tool.call event");
+    const callArgs = (toolCallEvent!.data as any)?.args ?? {};
+    assert.equal(callArgs.note, "task complete", `args.note should be "task complete", got: ${JSON.stringify(callArgs)}`);
+  });
+  ok("scenario8.openai.native_tool_calls_streaming");
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 async function main() {
@@ -396,6 +472,7 @@ async function main() {
   await scenario5_openAiEmptyRetry();
   await scenario6_toolResultInjectionFormat();
   await scenario7_anthropicMissingParamPreValidation();
+  await scenario8_openAiNativeToolCallsStreaming();
   console.log("[test-runner-turn] ALL PASSED");
 }
 

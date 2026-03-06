@@ -819,6 +819,7 @@ export async function* streamChatCompletions(args: {
   let lastTextContent = "";
   let lastDeltaContentCoerced = "";
   const streamedToolCalls = new Map<string, NormalizedToolCall>();
+  const streamToolCallIdByIndex = new Map<number, string>();
   for await (const line0 of readLines(res.body)) {
     const line = String(line0 ?? "");
     if (!line) continue;
@@ -895,8 +896,46 @@ export async function* streamChatCompletions(args: {
     }
 
     const choice = json?.choices?.[0];
-    for (const call of collectChatToolCallsFromChoice(choice)) {
-      mergeToolCall(streamedToolCalls, call);
+
+    // 流式 tool_calls 收集：OpenAI 标准流格式中，首个 delta 含 name/id，
+    // 后续 delta 仅含 index + function.arguments。必须按 index 追踪。
+    const deltaToolCalls = Array.isArray(choice?.delta?.tool_calls) ? choice.delta.tool_calls : [];
+    if (deltaToolCalls.length > 0) {
+      for (let i = 0; i < deltaToolCalls.length; i++) {
+        const tc = deltaToolCalls[i] ?? {};
+        const fn = tc?.function ?? tc?.tool ?? {};
+        const name = String(fn?.name ?? tc?.name ?? "").trim();
+        const indexRaw = Number(tc?.index);
+        const hasIndex = Number.isFinite(indexRaw);
+        const index = hasIndex ? Math.floor(indexRaw) : i;
+        const rawArgs = fn?.arguments ?? tc?.arguments ?? tc?.input ?? tc?.args ?? tc?.parameters;
+        const argsChunk = typeof rawArgs === "string" ? rawArgs : rawArgs === undefined ? "" : safeJsonStringify(rawArgs);
+
+        if (name) {
+          // 首个 delta：有 name（通常也有 id），创建条目 + 建立 index→id 映射
+          const existingId = hasIndex ? streamToolCallIdByIndex.get(index) : undefined;
+          const id = existingId || String(tc?.id ?? tc?.tool_call_id ?? "").trim() || `${name}_${index + 1}`;
+          mergeToolCall(streamedToolCalls, { id, name, argsRaw: argsChunk });
+          if (hasIndex) streamToolCallIdByIndex.set(index, id);
+        } else if (hasIndex && argsChunk) {
+          // 后续 delta：仅 index + arguments，通过 index→id 找到已创建条目并追加参数
+          // 注意：不用 includes 去重（可能误丢合法分片），仅检测累积格式
+          const id = streamToolCallIdByIndex.get(index);
+          if (id) {
+            const prev = streamedToolCalls.get(id);
+            if (prev) {
+              if (!prev.argsRaw) prev.argsRaw = argsChunk;
+              else if (argsChunk.startsWith(prev.argsRaw)) prev.argsRaw = argsChunk;
+              else prev.argsRaw += argsChunk;
+            }
+          }
+        }
+      }
+    } else {
+      // 非 streaming delta 路径（如 message.tool_calls），沿用 collectChatToolCallsFromChoice
+      for (const call of collectChatToolCallsFromChoice(choice)) {
+        mergeToolCall(streamedToolCalls, call);
+      }
     }
     let emitted = false;
     const deltaText = coerceOpenAiContentToText(choice?.delta?.content);
