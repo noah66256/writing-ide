@@ -2728,6 +2728,11 @@ export async function executeAgentRun(args: {
         .filter(Boolean),
     ),
   );
+  console.log("[mcp.sidecar]", {
+    toolsCount: mcpToolsFromSidecar.length,
+    serverIds: mcpServerIds,
+    toolNamesSample: mcpToolNamesSample,
+  });
   writeEvent("run.notice", {
     turn: 0,
     kind: "info",
