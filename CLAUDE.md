@@ -167,6 +167,57 @@ Claude Code 与 Codex 组成双引擎协作：
 
 ---
 
+## API Key 加密与故障排查
+
+### 加密机制
+
+DB 中模型的 `apiKeyEnc` 字段使用 AES-256-GCM 加密，密钥派生链：
+
+```
+getEncKey() → SHA-256(secret) → 32 bytes AES key
+
+secret 优先级：
+  1. process.env.AI_CONFIG_SECRET
+  2. process.env.JWT_SECRET
+  3. "dev-ai-config-secret"（默认值）
+```
+
+代码位置：`apps/gateway/src/aiConfig.ts` 的 `getEncKey()` / `encryptApiKey()` / `decryptApiKey()`。
+
+### env 兜底链
+
+当 DB 中加密的 API key 解密失败（密钥不匹配）时，系统按以下链路兜底：
+
+```
+resolveModel(pickedId)
+  ├─ decryptApiKey(m.apiKeyEnc) → 失败返回 ""
+  └─ apiKey = m.apiKey || apiKey  ← 保留 env 兜底值
+
+getLlmEnv()
+  ├─ resolveStage("llm.chat") → apiKey 可能为 ""
+  └─ apiKey = r.apiKey || process.env.LLM_API_KEY  ← env 兜底
+```
+
+### 常见故障：服务器 JWT_SECRET 与 DB 加密密钥不匹配
+
+**症状**：Pi 运行时零事件输出，`provider: openai-completions`（应为 `anthropic-messages`），日志中出现 `[aiConfig] decryptApiKey failed (key mismatch?)`。
+
+**根因**：DB 中的 API key 用旧的 `JWT_SECRET` 加密，服务器 `.env` 中的 `JWT_SECRET` 已更换。
+
+**排查**：
+1. 查服务器日志：`pm2 logs ohmycrab-gateway --lines 50 | grep decryptApiKey`
+2. 如果有 `key mismatch` 警告，说明解密失败，系统已自动降级到 env `LLM_API_KEY`
+
+**修复**：
+- 短期：确保 `.env` 中 `LLM_API_KEY` 配置正确（作为兜底）
+- 长期：用当前 `JWT_SECRET` 重新加密 DB 中的 API key（通过 admin 面板重新设置模型 API key）
+
+### 本地参考
+
+服务器密钥和 env 配置保存在 `.env.server-ref`（gitignore 排除），调试时直接查看该文件。
+
+---
+
 ## 部署与运维
 
 ### 服务器信息
@@ -310,3 +361,9 @@ rsync -avz --delete \
 - 已在 `main.cjs` 添加 `tryMigrateConversationHistory()`，在 `createWindow()` **之前**一次性迁移对话历史。`getLegacyAppDataProductNames()` 覆盖 `OhMyCrab`、`WritingIDE`、`写作IDE`、`writing-ide`、`@ohmycrab/desktop`、`@writing-ide/desktop`、`Electron` 等所有历史路径。
 - MCP 配置迁移（`mcp-manager.mjs::_tryMigrateLegacyConfig`）已覆盖 `WritingIDE`、`写作IDE`、`writing-ide`、`Electron` 四条旧路径。
 - 打包前须确认：`node --check apps/desktop/electron/mcp-manager.mjs`（曾发生 `_saveConfig` 方法声明丢失导致语法错误，commit 1c62815 修复）。
+
+**HISTORY_DIRNAME 改名（writing-ide-data → ohmycrab-data）导致 dev 端聊天记录丢失（2026-03）**
+
+- 根因：`tryMigrateUserDataFile` 只遍历旧 productName 目录，但 `relDir` 固定用当前值 `ohmycrab-data`。旧数据在 `Electron/writing-ide-data/` 下，永远匹配不到。
+- 已修复：`tryMigrateUserDataFile` 新增 `legacyRelDirs` 参数，`tryMigrateConversationHistory` 传入 `["writing-ide-data"]`，同时搜索旧子目录名。
+- 教训：**改任何数据目录名时，必须在迁移函数中同时兜底旧目录名**，不能只兜底旧 productName。

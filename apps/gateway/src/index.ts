@@ -965,7 +965,7 @@ fastify.post(
       if (/\/embeddings/i.test(String(m.endpoint || ""))) {
         model = m.model;
         base = m.baseURL.replace(/\/+$/g, "");
-        apiKey = m.apiKey;
+        apiKey = m.apiKey || apiKey;
         endpoint = m.endpoint || endpoint;
       }
     } catch {
@@ -1251,7 +1251,7 @@ fastify.post(
       const m = await aiConfig.resolveModel(pickedId);
       model = m.model;
       baseUrl = m.baseURL;
-      apiKey = m.apiKey;
+      apiKey = m.apiKey || apiKey;
       endpoint = m.endpoint || endpoint;
     } catch {
       // ignore
@@ -1521,7 +1521,7 @@ fastify.post(
       const m = await aiConfig.resolveModel(pickedId);
       model = m.model;
       baseUrl = m.baseURL;
-      apiKey = m.apiKey;
+      apiKey = m.apiKey || apiKey;
       endpoint = m.endpoint || endpoint;
     } catch { /* fallback env */ }
   }
@@ -1617,7 +1617,7 @@ fastify.post(
       const m = await aiConfig.resolveModel(pickedId);
       model = m.model;
       baseUrl = m.baseURL;
-      apiKey = m.apiKey;
+      apiKey = m.apiKey || apiKey;
       endpoint = m.endpoint || endpoint;
       modelIdUsed = m.modelId;
     } catch {
@@ -1773,7 +1773,7 @@ fastify.post(
       const m = await aiConfig.resolveModel(pickedId);
       model = m.model;
       baseUrl = m.baseURL;
-      apiKey = m.apiKey;
+      apiKey = m.apiKey || apiKey;
       endpoint = m.endpoint || endpoint;
       modelIdUsed = m.modelId;
     } catch {
@@ -3653,7 +3653,7 @@ fastify.post(
         if (ep && isKbTextLlmEndpoint(ep)) {
           model = m.model;
           baseUrl = m.baseURL;
-          apiKey = m.apiKey;
+          apiKey = m.apiKey || apiKey;
           endpoint = ep;
         }
       } catch { /* ignore */ }
@@ -3889,7 +3889,7 @@ fastify.post(
       if (ep && isKbTextLlmEndpoint(ep)) {
         model = m.model;
         baseUrl = m.baseURL;
-        apiKey = m.apiKey;
+        apiKey = m.apiKey || apiKey;
         endpoint = ep;
       }
     } catch {
@@ -4282,7 +4282,7 @@ fastify.post(
       if (ep && isKbTextLlmEndpoint(ep)) {
         model = m.model;
         baseUrl = m.baseURL;
-        apiKey = m.apiKey;
+        apiKey = m.apiKey || apiKey;
         endpoint = ep;
       }
     } catch {
@@ -4833,7 +4833,7 @@ fastify.post(
         if (ep && (/chat\/completions/i.test(ep) || isGeminiLikeEndpoint(ep))) {
           model = m.model;
           baseUrl = m.baseURL;
-          apiKey = m.apiKey;
+          apiKey = m.apiKey || apiKey;
           endpoint = ep;
         }
       } catch {
@@ -5124,7 +5124,7 @@ fastify.post(
       if (ep && isKbTextLlmEndpoint(ep)) {
         model = m.model;
         baseUrl = m.baseURL;
-        apiKey = m.apiKey;
+        apiKey = m.apiKey || apiKey;
         endpoint = ep;
       }
     } catch {
@@ -5625,7 +5625,7 @@ fastify.post(
       if (ep && (/chat\/completions/i.test(ep) || isGeminiLikeEndpoint(ep))) {
         model = m.model;
         baseUrl = m.baseURL;
-        apiKey = m.apiKey;
+        apiKey = m.apiKey || apiKey;
         endpoint = ep;
       }
     } catch {
@@ -6176,7 +6176,7 @@ fastify.post(
           usedModelId = m.modelId;
           usedModelName = m.model;
           baseUrl = m.baseURL;
-          apiKey = m.apiKey;
+          apiKey = m.apiKey || apiKey;
           endpoint = ep;
           model = m.model;
         }

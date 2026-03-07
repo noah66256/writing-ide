@@ -407,30 +407,35 @@ async function tryMigrateUserDataFile(args) {
   const filename = String(args?.filename ?? "");
   const label = String(args?.label ?? "文件");
   const validate = typeof args?.validate === "function" ? args.validate : null;
+  const legacyRelDirs = Array.isArray(args?.legacyRelDirs) ? args.legacyRelDirs : [];
   if (!userData || !appData || !relDir || !filename) return false;
 
   const targetDir = path.join(userData, relDir);
   const targetFile = path.join(targetDir, filename);
   if (await fileExists(targetFile)) return false;
 
+  // 遍历旧产品名 × (当前 relDir + 旧 relDir)
   const candidates = getLegacyAppDataProductNames();
+  const relDirs = [relDir, ...legacyRelDirs.filter((d) => d && d !== relDir)];
   for (const name of candidates) {
-    const legacyFile = path.join(appData, name, relDir, filename);
-    try {
-      const raw = await fsp.readFile(legacyFile, "utf-8");
-      if (validate) {
-        try {
-          if (!validate(raw)) continue;
-        } catch {
-          continue;
+    for (const rd of relDirs) {
+      const legacyFile = path.join(appData, name, rd, filename);
+      try {
+        const raw = await fsp.readFile(legacyFile, "utf-8");
+        if (validate) {
+          try {
+            if (!validate(raw)) continue;
+          } catch {
+            continue;
+          }
         }
+        await fsp.mkdir(targetDir, { recursive: true });
+        await fsp.writeFile(targetFile, raw, "utf-8");
+        console.log(`[electron] 已迁移${label}：${legacyFile} → ${targetFile}`);
+        return true;
+      } catch {
+        // 路径不存在或格式错误，继续尝试下一个
       }
-      await fsp.mkdir(targetDir, { recursive: true });
-      await fsp.writeFile(targetFile, raw, "utf-8");
-      console.log(`[electron] 已迁移${label}：${legacyFile} → ${targetFile}`);
-      return true;
-    } catch {
-      // 路径不存在或格式错误，继续尝试下一个
     }
   }
   return false;
@@ -441,6 +446,7 @@ async function tryMigrateConversationHistory(userData, appData) {
     userData,
     appData,
     relDir: HISTORY_DIRNAME,
+    legacyRelDirs: ["writing-ide-data"],
     filename: HISTORY_FILENAME,
     label: "对话历史",
     validate: (raw) => {
