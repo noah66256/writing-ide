@@ -8,7 +8,7 @@ set -euo pipefail
 # - Download Qwen2.5-1.5B-Instruct GGUF (q4_k_m)
 # - Start it on 127.0.0.1:${REPAIR_PORT} via pm2 (name: tool-call-repair)
 # - Enable Gateway feature flag + point Gateway to local repair server
-# - Rebuild + restart Gateway pm2 app (writing-gateway)
+# - Rebuild + restart Gateway pm2 app (ohmycrab-gateway)
 #
 # Run on server (as root):
 #   bash scripts/deploy-tool-call-repair.sh
@@ -16,7 +16,7 @@ set -euo pipefail
 
 ROOT_DIR="${ROOT_DIR:-/www/wwwroot/writing-ide}"
 NODE_BIN="${DEPLOY_NODE_BIN:-/www/server/nvm/versions/node/v22.21.1/bin}"
-GATEWAY_PM2_APP="${DEPLOY_PM2_APP:-writing-gateway}"
+GATEWAY_PM2_APP="${DEPLOY_PM2_APP:-ohmycrab-gateway}"
 GATEWAY_PORT="${DEPLOY_PORT:-8000}"
 
 REPAIR_PM2_APP="tool-call-repair"
@@ -159,7 +159,7 @@ echo "[gateway] npm install"
 npm install --no-audit --no-fund
 
 echo "[gateway] build"
-npm -w @writing-ide/gateway run build
+npm -w @ohmycrab/gateway run build
 
 echo "[gateway] pm2 restart ${GATEWAY_PM2_APP}"
 pm2 restart "${GATEWAY_PM2_APP}" --update-env
