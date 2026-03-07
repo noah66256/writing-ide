@@ -2,9 +2,9 @@
  * RuntimeFactory — 运行时工厂
  *
  * 根据 AGENT_RUNTIME_MODE 环境变量选择运行时实现：
- * - legacy：现有 AgentRunner（默认）
+ * - pi：GatewayRuntime（默认，基于 pi-agent-core）
+ * - legacy：旧版 AgentRunner（兜底/回退）
  * - hybrid：legacy 正常跑 + GatewayRuntime shadow 对比
- * - pi：完全走 GatewayRuntime（Phase 1 暂返回 NOT_IMPLEMENTED）
  *
  * 环境变量：
  * - AGENT_RUNTIME_MODE=legacy|hybrid|pi
@@ -30,9 +30,10 @@ import type { RunOutcome } from "../turnEngine.js";
 // ── 辅助函数 ─────────────────────────────────────
 
 function normalizeMode(raw?: string | null): RuntimeMode {
-  const mode = String(raw ?? "legacy").trim().toLowerCase();
+  const mode = String(raw ?? "pi").trim().toLowerCase();
   if (mode === "pi" || mode === "hybrid") return mode;
-  return "legacy";
+  if (mode === "legacy") return "legacy";
+  return "pi";
 }
 
 function parseShadowEnabled(raw?: string): boolean {
@@ -215,6 +216,6 @@ export function createRuntime(config: RuntimeConfig): AgentRuntime {
     return new HybridAgentRuntime(config);
   }
 
-  // legacy — 默认
+  // legacy — 显式指定时才走
   return new LegacyAgentRuntime({ ...config, mode: "legacy" });
 }

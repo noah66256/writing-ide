@@ -177,7 +177,7 @@ function normalizePathArgValue(value) {
 }
 
 /**
- * 从参数校验错误文本中提取“缺失参数/未知参数”线索。
+ * 从参数校验错误文本中提取"缺失参数/未知参数"线索。
  * 兼容常见 pydantic 文本格式。
  * @param {string} text
  * @returns {{missing:string[], unexpected:string[]}}
@@ -1243,7 +1243,7 @@ export class McpManager {
       }
     }
 
-    // 语义兜底：对未命中的 required/properties，按“同语义组”尝试映射（不依赖固定别名字典）。
+    // 语义兜底：对未命中的 required/properties，按"同语义组"尝试映射（不依赖固定别名字典）。
     for (const reqKey of orderedTargets) {
       if (Object.prototype.hasOwnProperty.call(args, reqKey)) continue;
       const reqGroup = detectArgSemanticGroup(reqKey);

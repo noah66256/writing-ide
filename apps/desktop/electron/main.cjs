@@ -9,7 +9,7 @@ const { spawn, exec } = require("node:child_process");
 
 // ======== Custom protocol（避免 packaged(file://) 环境下 fetch/XHR 跨域受限） ========
 // 说明：
-// - Electron 打包后默认 loadFile -> file://，Chromium 对 file:// 发起网络请求有额外限制，容易导致“Failed to fetch / 模型列表为空”。
+// - Electron 打包后默认 loadFile -> file://，Chromium 对 file:// 发起网络请求有额外限制，容易导致"Failed to fetch / 模型列表为空"。
 // - 使用 app://-/... 作为 renderer origin，并启用 corsEnabled/supportFetchAPI，使其像 http(s) 一样可进行跨域请求（由 Gateway CORS 放行）。
 try {
   protocol.registerSchemesAsPrivileged([
@@ -396,8 +396,8 @@ async function fileExists(p) {
 }
 
 function getLegacyAppDataProductNames() {
-  // 兼容历史产品名/包名（含最新 ASCII 名），避免 dev/packaged 切换后”看不到历史与记忆”
-  return [“OhMyCrab”, “WritingIDE”, “writing-ide”, “写作IDE”, “@writing-ide/desktop”, “@ohmycrab/desktop”, “Electron”];
+  // 兼容历史产品名/包名（含最新 ASCII 名），避免 dev/packaged 切换后"看不到历史与记忆"
+  return ["OhMyCrab", "WritingIDE", "writing-ide", "写作IDE", "@writing-ide/desktop", "@ohmycrab/desktop", "Electron"];
 }
 
 async function tryMigrateUserDataFile(args) {
@@ -503,7 +503,7 @@ function startWatch(rootDir) {
     watcher = fs.watch(root, { recursive: true }, (_eventType, filename) => {
       const rel = String(filename ?? "").replaceAll("\\", "/");
       if (!rel) {
-        // 无 filename：退化为“刷新一次”
+        // 无 filename：退化为"刷新一次"
         watchChanged.add("__all__");
       } else if (!shouldIgnoreRel(rel)) {
         watchChanged.add(rel);
@@ -793,7 +793,7 @@ function escapeForPsSingleQuoted(s) {
 
 async function runPowershellForInstallerLaunchWin(exePath) {
   const p = escapeForPsSingleQuoted(exePath);
-  // - PassThru：拿到 Process 对象，输出 PID 作为“已启动”的证据
+  // - PassThru：拿到 Process 对象，输出 PID 作为"已启动"的证据
   // - ErrorActionPreference=Stop：确保失败会走 catch 并以非 0 退出码返回
   const ps =
     "$ErrorActionPreference='Stop';" +
@@ -958,7 +958,7 @@ async function interactiveUpdateFlow(args) {
 
   // 注意：nsisUrl 通常是 percent-encoded（例如 写作IDE -> %E5%86%99...）
   // - 如果直接用 URL.pathname 做 basename，会得到包含 '%' 的文件名
-  // - 而 cmd.exe 会把 '%' 当环境变量展开，导致 start 时路径被破坏 -> “下载了但安装器没弹出”
+  // - 而 cmd.exe 会把 '%' 当环境变量展开，导致 start 时路径被破坏 -> "下载了但安装器没弹出"
   // 因此：这里对 pathname 做 decodeURIComponent，并在后续启动逻辑里避免使用 cmd.exe（改用 PowerShell Start-Process）
   const nsisUrlObj = new URL(info.nsisUrl);
   const decodedPathname = (() => {
@@ -1050,8 +1050,8 @@ async function interactiveUpdateFlow(args) {
     : cachePath;
 
   try {
-    // 关键：我们必须“确认安装器已启动”，再退出当前进程。
-    // 过去的实现是 detached fire-and-forget：如果 PowerShell/Start-Process 失败，用户会只看到“下载完就闪退”。
+    // 关键：我们必须"确认安装器已启动"，再退出当前进程。
+    // 过去的实现是 detached fire-and-forget：如果 PowerShell/Start-Process 失败，用户会只看到"下载完就闪退"。
     const launched = await runPowershellForInstallerLaunchWin(finalLaunchPath);
     if (!launched.ok) {
       // 兜底：尝试用 Electron shell 打开（有时 PowerShell 被策略禁用）
@@ -1069,7 +1069,7 @@ async function interactiveUpdateFlow(args) {
       return { ok: false, error: launched.error, detail: launched.detail, installer: finalLaunchPath };
     }
 
-    // 给用户一个明确反馈，避免误以为“闪退”
+    // 给用户一个明确反馈，避免误以为"闪退"
     await dialog.showMessageBox(mainWindow ?? undefined, {
       type: "info",
       title: "已启动安装程序",
@@ -1096,7 +1096,7 @@ async function interactiveUpdateFlow(args) {
     // ignore
   }
 
-  // 退出当前进程，让安装器替换文件（并设置一个硬退出兜底，避免“卡住导致安装器仍认为在运行”）
+  // 退出当前进程，让安装器替换文件（并设置一个硬退出兜底，避免"卡住导致安装器仍认为在运行"）
   try {
     try {
       mainWindow?.hide?.();
@@ -1613,7 +1613,7 @@ function registerIpc() {
         };
       }
 
-      // 多路径并存时，优先选择“会话更多”的文件；数量相同则选 updatedAt 更新的。
+      // 多路径并存时，优先选择"会话更多"的文件；数量相同则选 updatedAt 更新的。
       parsedList.sort((a, b) => {
         const c1 = Number(a.conversations?.length ?? 0);
         const c2 = Number(b.conversations?.length ?? 0);
@@ -1947,7 +1947,7 @@ function createWindow() {
   mainWindow = win;
   updateMenu();
 
-  // 诊断：避免”白屏但不知道加载失败/渲染进程崩溃”
+  // 诊断：避免"白屏但不知道加载失败/渲染进程崩溃"
   try {
     win.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
       console.error("[electron] did-fail-load", { errorCode, errorDescription, validatedURL });

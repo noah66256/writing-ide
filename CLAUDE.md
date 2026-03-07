@@ -21,8 +21,8 @@ packages/kb-core   — KB 检索/评分的纯 TS 核心
 
 ### Gateway 职责（服务端、无状态）
 - **模型调用**：所有 LLM 请求经 Gateway 发出（统一计费/审计/路由）
-- **Agent 编排**：ReAct 循环、意图路由、子 Agent 委派（agent.delegate）
-- **系统编排工具**：run.done / run.setTodoList / run.todo.* / run.mainDoc.* / agent.delegate
+- **Agent 编排**：ReAct 循环（pi-agent-core agentLoop）、意图路由
+- **系统编排工具**：run.done / run.setTodoList / run.todo.* / run.mainDoc.*
 - **联网工具**：web.search / web.fetch / time.now
 - **Auth / 计费 / 审计**
 
@@ -46,35 +46,18 @@ Desktop 在每次 WS 连接时预打包 sidecar 数据（styleLinterLibraries、
 
 ### Gateway Agent Runner 扩展指南
 
-> 详细设计文档：`docs/specs/multi-endpoint-refactor-v0.1.md`
-
-`writingAgentRunner.ts` 是 Agent 编排的核心。经过多端点重构（Phase A-D），它的扩展点已经标准化。**新增功能时必须走已有抽象，禁止在 turn 函数中加 if/else 判断端点类型。**
-
-#### 新增 LLM 端点/Provider
-
-只需在 `_createTurnAdapter()` 中新增一个 adapter 对象，实现 `TurnAdapter` 接口：
-
-```
-_createTurnAdapter()          — 根据 this.supportsNativeToolUse 分发
-  ├─ _createAnthropicAdapter()  — Anthropic Messages API
-  ├─ _createProviderAdapter()   — OpenAI/Gemini 兼容
-  └─ 新端点？新增一个 _createXxxAdapter()
-```
-
-每个 adapter 需实现 5 个方法：`buildToolDefs`、`consumeStream`、`hasContent`、`getAutoRetryText`、`buildHistoryEntry`。统一的 `_runOneTurn()` 19 步骤骨架不需要改。
-
-同时在 `inferApiType()` 中添加对应的 endpoint → `ModelApiType` 映射。
+> 运行时已切换到 GatewayRuntime（`apps/gateway/src/agent/runtime/GatewayRuntime.ts`），基于 pi-agent-core 的 `agentLoop()`。
+> 旧版 `writingAgentRunner.ts` 保留作为 legacy 回退。
 
 #### 新增工具
 
-1. 在 `packages/tools/src/toolList.ts` 的 `TOOL_LIST` 中添加工具元数据
-2. 工具自动流经 adapter 的 `buildToolDefs()`，无需改 runner
-3. 工具执行走 Desktop WS 路由（非编排类）或 `serverToolRunner.ts`（编排类）
-4. 如果需要 per-turn 动态控制可用工具，走 `computePerTurnAllowed` 回调
+1. 在 `packages/tools/src/index.ts` 的 `TOOL_LIST` 中添加工具元数据
+2. 工具执行走 Desktop WS 路由（非编排类）或 `serverToolRunner.ts`（编排类）
+3. 如果需要 per-turn 动态控制可用工具，走 `computePerTurnAllowed` 回调
 
 #### 新增 MCP 工具
 
-MCP 工具通过 `RunContext.mcpTools` 传入，两个 adapter 的 `buildToolDefs` 已自动处理 MCP 工具定义。不需要改 runner。
+MCP 工具通过 `RunContext.mcpTools` 传入，自动处理工具定义。不需要改 runner。
 
 #### 新增 Skill
 
@@ -82,14 +65,6 @@ Skill 是数据配置，不是代码改动：
 1. 在 `packages/agent-core/src/skills/` 的 `SKILL_MANIFESTS` 中注册
 2. 配置 `triggers`（自动激活规则）、`requiredTools`（需要的工具）、`stagePrompt`（注入的提示词）
 3. 框架自动处理激活检测、工具白名单扩展、提示词注入
-
-#### 消息历史格式
-
-所有历史消息使用 `CanonicalHistoryEntry`（4 种角色：user/assistant/tool_result/user_hint）。写入用 `_pushHistory()`，读取时按需转换：
-- `_toAnthropicMessages()` → Anthropic content block 格式
-- `_toProviderMessages()` → OpenAI chat message 格式（tool_use 自动转 XML）
-
-**禁止直接操作 `this.history` 数组或维护第二套消息队列。**
 
 #### 回归测试
 
@@ -99,15 +74,17 @@ Skill 是数据配置，不是代码改动：
 
 ## Agent 架构
 
-### 负责人（总指挥）
-负责人是用户的 AI 团队总指挥——项目经理角色。
-- **做的事**：分析需求、制定计划（Todo）、委派任务、审核结果、整合交付
-- **不做的事**：自己写稿、自己搜素材、自己做风格检查——这些委派给子 Agent
+### 当前模式：单 Agent + pi-agent-core
 
-### 子 Agent
-通过 `agent.delegate` 工具委派，每个子 Agent 有独立的 systemPrompt、工具白名单、budget。
-- 内置：copywriter（文案写手）、topic_planner（选题策划）、seo_specialist（SEO 优化）
-- 自定义：通过 teamStore + agent.config.* 工具动态创建
+运行时已切换到 GatewayRuntime（基于 pi-agent-core 的 `agentLoop()`），默认模式 `pi`。Agent 定位为全能 AI 助手，能力由工具 + MCP + Skill 组合决定，不限于写作场景。
+
+旧版 `writingAgentRunner.ts`（AgentRunner）保留作为 `legacy` 回退，通过 `AGENT_RUNTIME_MODE=legacy` 启用。
+
+### 子 Agent（暂停开发）
+
+`agent.delegate` / `agent.config` 工具已从 TOOL_LIST 移除。后续子 Agent 架构方向：临时会话 spawn + 共享 Todo/MainDoc + Agent 间通信（类似 OpenClaw 的 sessions.spawn 模型），不急于实现。
+
+相关代码（LegacySubAgentBridge、subAgent.ts 定义）保留但不启用。
 
 ---
 
