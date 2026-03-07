@@ -724,7 +724,16 @@ export class GatewayRuntime implements AgentRuntime {
 
     // Gateway 工具
     if (decision.executedBy === "gateway") {
-      return this._executeGatewayTool(toolCallId, toolName, toolArgs);
+      const ret = await this._executeGatewayTool(toolCallId, toolName, toolArgs);
+      // web.search/web.fetch 的 MCP 回退：bocha 不可用时尝试 sidecar 中的搜索 MCP
+      if (!ret.ok) {
+        const errCode = String((ret.output as any)?.error ?? "");
+        if (errCode === "WEB_SEARCH_FALLBACK_TO_MCP" || errCode === "WEB_FETCH_FALLBACK_TO_MCP") {
+          const mcpResult = await this._fallbackWebToolViaMcp(toolCallId, toolName, toolArgs);
+          if (mcpResult) return mcpResult;
+        }
+      }
+      return ret;
     }
 
     // Desktop 工具
@@ -794,6 +803,53 @@ export class GatewayRuntime implements AgentRuntime {
         executedBy: "gateway",
       };
     }
+  }
+
+  /**
+   * web.search / web.fetch 的 MCP 回退：bocha 不可用时找 sidecar 中的专用搜索工具，
+   * 通过 Desktop WS 执行。
+   */
+  private async _fallbackWebToolViaMcp(
+    toolCallId: string,
+    toolName: string,
+    toolArgs: Record<string, unknown>,
+  ): Promise<GatewayToolExecResult | null> {
+    const mcpTools: Array<{ name: string; originalName?: string }> =
+      Array.isArray(this.config.runCtx.toolSidecar?.mcpTools)
+        ? (this.config.runCtx.toolSidecar.mcpTools as any[])
+        : [];
+    if (!mcpTools.length) return null;
+
+    let mcpToolName: string | null = null;
+    let mcpArgs: Record<string, unknown> = {};
+
+    if (toolName === "web.search") {
+      const query = String(toolArgs.query ?? "").trim();
+      if (!query) return null;
+      // 优先 bocha-search，其次 web-search
+      const bochaSearch = mcpTools.find((t) =>
+        /^mcp\.bocha-search\./i.test(t.name) && /web_search/i.test(t.originalName ?? t.name),
+      );
+      const webSearch = mcpTools.find((t) =>
+        /^mcp\.web-search\./i.test(t.name) && /web_search/i.test(t.originalName ?? t.name),
+      );
+      const chosen = bochaSearch ?? webSearch;
+      if (!chosen) return null;
+      mcpToolName = chosen.name;
+      mcpArgs = { query, ...(toolArgs.count != null ? { num_results: toolArgs.count } : {}) };
+    } else if (toolName === "web.fetch") {
+      const url = String(toolArgs.url ?? "").trim();
+      if (!url) return null;
+      const getPage = mcpTools.find((t) =>
+        /^mcp\.web-search\./i.test(t.name) && /get_page_content/i.test(t.originalName ?? t.name),
+      );
+      if (!getPage) return null;
+      mcpToolName = getPage.name;
+      mcpArgs = { url };
+    }
+
+    if (!mcpToolName) return null;
+    return this._waitForDesktopToolResult(toolCallId, mcpToolName, mcpArgs);
   }
 
   /**

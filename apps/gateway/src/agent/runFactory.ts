@@ -523,15 +523,18 @@ function isLikelyBinaryReadMcpTool(tool: { name?: string; originalName?: string;
 }
 
 function isLikelyBrowserMcpTool(tool: { name?: string; originalName?: string; description?: string } | null | undefined): boolean {
+  const name = String(tool?.name ?? "").trim();
+  // 专用搜索 MCP 不是浏览器自动化工具，排除误判
+  if (/^mcp\.(bocha-search|web-search)\./i.test(name)) return false;
   const raw = [
-    String(tool?.name ?? ""),
+    name,
     String(tool?.originalName ?? ""),
     String(tool?.description ?? ""),
   ].join(" ").toLowerCase();
   if (!raw) return false;
   const strong =
     /(playwright|browser|chrom(e|ium)|firefox|webkit|browser_navigate|open_url|openurl|goto|go_to)/i.test(raw);
-  const action = /(navigate|new[_\s-]?tab|click|type|fill|screenshot|page)/i.test(raw);
+  const action = /(navigate|new[_\s-]?tab|click|type|fill|screenshot)/i.test(raw);
   return strong || action;
 }
 
