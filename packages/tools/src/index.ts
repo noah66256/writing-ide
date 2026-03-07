@@ -352,7 +352,7 @@ export const TOOL_LIST: ToolMeta[] = [
     inputSchema: {
       type: "object",
       properties: {
-        docIds: { type: "array" },
+        docIds: { type: "array", items: { type: "string" } },
         autoPlaybook: { type: "boolean" },
         autoAttach: { type: "boolean" },
       },
@@ -381,7 +381,7 @@ export const TOOL_LIST: ToolMeta[] = [
     inputSchema: {
       type: "object",
       properties: {
-        docIds: { type: "array" },
+        docIds: { type: "array", items: { type: "string" } },
       },
       additionalProperties: true,
     },
@@ -474,9 +474,9 @@ export const TOOL_LIST: ToolMeta[] = [
       properties: {
         query: { type: "string" },
         kind: { type: "string" },
-        libraryIds: { type: "array" },
-        facetIds: { type: "array" },
-        cardTypes: { type: "array" },
+        libraryIds: { type: "array", items: { type: "string" } },
+        facetIds: { type: "array", items: { type: "string" } },
+        cardTypes: { type: "array", items: { type: "string" } },
         anchorParagraphIndexMax: { type: "number" },
         anchorFromEndMax: { type: "number" },
         debug: { type: "boolean" },
@@ -576,7 +576,7 @@ export const TOOL_LIST: ToolMeta[] = [
       properties: {
         text: { type: "string" },
         path: { type: "string" },
-        libraryIds: { type: "array" },
+        libraryIds: { type: "array", items: { type: "string" } },
         maxSources: { type: "number" },
       },
       oneOfRequired: [{ required: ["text"] }, { required: ["path"] }],
@@ -646,7 +646,7 @@ export const TOOL_LIST: ToolMeta[] = [
       properties: {
         text: { type: "string" },
         path: { type: "string" },
-        libraryIds: { type: "array" },
+        libraryIds: { type: "array", items: { type: "string" } },
         model: { type: "string" },
         maxIssues: { type: "number" },
       },
@@ -725,7 +725,7 @@ export const TOOL_LIST: ToolMeta[] = [
     description: "设置本次 Run 的 Todo List（用于进度追踪与防跑偏）。",
     args: [{ name: "items", required: true, desc: 'JSON 数组：TodoItem[]（{ id?, text, status?, note? }）', type: "array" }],
     modes: ["agent"],
-    inputSchema: { type: "object", properties: { items: { type: "array" } }, required: ["items"], additionalProperties: true },
+    inputSchema: { type: "object", properties: { items: { type: "array", items: { type: "object" } } }, required: ["items"], additionalProperties: true },
   },
   {
     name: "run.todo",
@@ -748,7 +748,7 @@ export const TOOL_LIST: ToolMeta[] = [
       type: "object",
       properties: {
         action: { type: "string" },
-        items: { type: "array" },
+        items: { type: "array", items: { type: "object" } },
         id: { type: "string" },
         status: { type: "string" },
         note: { type: "string" },
@@ -803,7 +803,7 @@ export const TOOL_LIST: ToolMeta[] = [
         query: { type: "string" },
         useRegex: { type: "boolean" },
         caseSensitive: { type: "boolean" },
-        paths: { type: "array" },
+        paths: { type: "array", items: { type: "string" } },
         maxResults: { type: "number" },
         maxPerFile: { type: "number" },
       },
@@ -923,7 +923,7 @@ export const TOOL_LIST: ToolMeta[] = [
       properties: {
         path: { type: "string" },
         newContent: { type: "string" },
-        edits: { type: "array" },
+        edits: { type: "array", items: { type: "object" } },
         ifExists: { type: "string" },
         suggestedName: { type: "string" },
       },
@@ -1016,7 +1016,7 @@ export const TOOL_LIST: ToolMeta[] = [
     modes: ["agent"],
     inputSchema: {
       type: "object",
-      properties: { path: { type: "string" }, edits: { type: "array" } },
+      properties: { path: { type: "string" }, edits: { type: "array", items: { type: "object" } } },
       required: ["edits"],
       additionalProperties: true,
     },
@@ -1046,10 +1046,10 @@ export const TOOL_LIST: ToolMeta[] = [
         runtime: { type: "string" as ToolArgType },
         code: { type: "string" as ToolArgType },
         entryFile: { type: "string" as ToolArgType },
-        args: { type: "array" as ToolArgType },
-        requirements: { type: "array" as ToolArgType },
+        args: { type: "array" as ToolArgType, items: { type: "string" } },
+        requirements: { type: "array" as ToolArgType, items: { type: "string" } },
         timeoutMs: { type: "number" as ToolArgType },
-        artifactGlobs: { type: "array" as ToolArgType },
+        artifactGlobs: { type: "array" as ToolArgType, items: { type: "string" } },
       },
       oneOfRequired: [{ required: ["code"] }, { required: ["entryFile"] }],
       additionalProperties: true,
