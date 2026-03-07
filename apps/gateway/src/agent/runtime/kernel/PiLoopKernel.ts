@@ -72,15 +72,26 @@ function normalizePiBaseUrl(
   // Anthropic：SDK 自己拼路径，baseUrl 保持裸根即可
   if (apiType === "anthropic-messages") return base.replace(/\/v1$/i, "");
 
-  // OpenAI / Gemini：需要版本前缀
-  // 从 endpoint（如 /v1/responses）提取前缀（/v1）
-  const ep = String(endpoint ?? "").trim();
-  if (ep) {
-    const idx = ep.lastIndexOf("/");
-    const prefix = idx > 0 ? ep.slice(0, idx) : "";
-    if (prefix && !base.endsWith(prefix)) {
-      return base + prefix;
-    }
+  // 从 endpoint 提取 pi-ai 期望的版本前缀（显式后缀匹配，不用通用规则）
+  const ep = String(endpoint ?? "").trim().toLowerCase();
+  let versionPrefix = "";
+  if (ep.endsWith("/responses")) {
+    // /v1/responses → /v1
+    versionPrefix = ep.replace(/\/responses$/, "");
+  } else if (ep.endsWith("/chat/completions")) {
+    // /v1/chat/completions → /v1
+    versionPrefix = ep.replace(/\/chat\/completions$/, "");
+  } else if (ep.endsWith("/completions")) {
+    // /v1/completions → /v1
+    versionPrefix = ep.replace(/\/completions$/, "");
+  } else if (ep.includes("/models/")) {
+    // Gemini: /v1beta/models/gemini-...:streamGenerateContent → /v1beta
+    const modelsIdx = ep.indexOf("/models/");
+    versionPrefix = modelsIdx > 0 ? ep.slice(0, modelsIdx) : "";
+  }
+
+  if (versionPrefix && !base.endsWith(versionPrefix)) {
+    return base + versionPrefix;
   }
   return base;
 }
