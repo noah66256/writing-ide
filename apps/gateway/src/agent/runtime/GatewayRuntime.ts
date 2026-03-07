@@ -293,6 +293,7 @@ export class GatewayRuntime implements AgentRuntime {
           providerApi,
           modelId: this.config.runCtx.modelId,
           baseUrl: this.config.runCtx.baseUrl,
+          endpoint: this.config.runCtx.endpoint,
           apiKey: this.config.runCtx.apiKey,
         },
         tools: this._buildAgentTools(),
@@ -1177,7 +1178,7 @@ export class GatewayRuntime implements AgentRuntime {
           assistantParts.push({
             type: "toolCall",
             id: item.callId,
-            name: item.toolName,
+            name: encodeToolName(item.toolName),
             arguments: item.args ?? {},
           } as ToolCall);
           break;
@@ -1187,7 +1188,7 @@ export class GatewayRuntime implements AgentRuntime {
           out.push({
             role: "toolResult",
             toolCallId: item.callId,
-            toolName: item.toolName,
+            toolName: encodeToolName(item.toolName),
             content: buildTextContent(
               item.normalizedText || normalizeToolOutputText(item.output),
             ),

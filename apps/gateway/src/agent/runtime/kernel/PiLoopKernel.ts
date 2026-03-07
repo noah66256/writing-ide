@@ -53,6 +53,39 @@ function splitTranscript(
 // ── 内部：模型解析 ──────────────────────────────
 
 /**
+ * 归一化 pi-ai 所需的 model.baseUrl。
+ *
+ * Anthropic SDK 的 baseURL 语义是"根地址"，SDK 自己追加 /v1/messages。
+ * OpenAI SDK 的 baseURL 语义是"API 基址"，需已包含版本前缀（如 /v1）。
+ *
+ * 我们的 gateway 把 baseUrl（如 https://api.vectorengine.ai）和
+ * endpoint（如 /v1/responses）分开存；需要在这里合成为 pi-ai 期望的格式。
+ */
+function normalizePiBaseUrl(
+  apiType: string,
+  baseUrl?: string,
+  endpoint?: string,
+): string | undefined {
+  if (!baseUrl) return undefined;
+  const base = baseUrl.replace(/\/+$/, "");
+
+  // Anthropic：SDK 自己拼路径，baseUrl 保持裸根即可
+  if (apiType === "anthropic-messages") return base.replace(/\/v1$/i, "");
+
+  // OpenAI / Gemini：需要版本前缀
+  // 从 endpoint（如 /v1/responses）提取前缀（/v1）
+  const ep = String(endpoint ?? "").trim();
+  if (ep) {
+    const idx = ep.lastIndexOf("/");
+    const prefix = idx > 0 ? ep.slice(0, idx) : "";
+    if (prefix && !base.endsWith(prefix)) {
+      return base + prefix;
+    }
+  }
+  return base;
+}
+
+/**
  * 解析 pi-ai Model 对象。
  * 1. 优先从 pi-ai 的 model registry 查找
  * 2. 找不到时构造合成模型（支持代理端点 / 自定义 modelId）
@@ -64,6 +97,7 @@ function resolveModel(args: LoopKernelRunArgs): Model<Api> {
   });
   const capabilities = getProviderCapabilities(apiType);
   const expectedPiApi = toPiApi(apiType);
+  const normalizedBaseUrl = normalizePiBaseUrl(apiType, args.model.baseUrl, args.model.endpoint);
 
   // 尝试从 registry 获取（浅拷贝，避免污染共享对象）
   try {
@@ -75,7 +109,7 @@ function resolveModel(args: LoopKernelRunArgs): Model<Api> {
     // 但我们请求的是 openai-completions。API 类型不匹配时走合成模型。
     if (registryModel && String(registryModel.api) === expectedPiApi) {
       const model = { ...registryModel } as Model<Api>;
-      if (args.model.baseUrl) model.baseUrl = args.model.baseUrl;
+      if (normalizedBaseUrl) model.baseUrl = normalizedBaseUrl;
       return model;
     }
   } catch {
@@ -88,7 +122,7 @@ function resolveModel(args: LoopKernelRunArgs): Model<Api> {
     name: args.model.modelId,
     api: expectedPiApi as Api,
     provider: capabilities.providerKey,
-    baseUrl: args.model.baseUrl ?? "",
+    baseUrl: normalizedBaseUrl ?? args.model.baseUrl ?? "",
     reasoning: false,
     input: ["text"] as ("text" | "image")[],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -103,6 +137,7 @@ export class PiLoopKernel implements LoopKernel {
   run(args: LoopKernelRunArgs) {
     const { history, prompts } = splitTranscript(args.transcript);
     const model = resolveModel(args);
+    console.log("[PiLoopKernel] model resolved:", { api: model.api, provider: model.provider, baseUrl: model.baseUrl, id: model.id });
 
     const config: AgentLoopConfig = {
       model,

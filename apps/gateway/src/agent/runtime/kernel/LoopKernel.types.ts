@@ -18,6 +18,8 @@ export type LoopKernelModelConfig = {
   providerApi: string;
   modelId: string;
   baseUrl?: string;
+  /** 原始 endpoint（如 /v1/responses），用于推导 pi-ai model.baseUrl 的版本前缀 */
+  endpoint?: string;
   apiKey: string;
 };
 
