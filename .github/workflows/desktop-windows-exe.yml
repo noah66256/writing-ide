@@ -44,9 +44,9 @@ jobs:
         shell: bash
         run: |
           # 所有 workspace 包都需要 tsc 编译出 dist/，desktop build 只自动编译 agent-core
-          npm run -w @writing-ide/shared build || true
-          npm run -w @writing-ide/tools build || true
-          npm run -w @writing-ide/kb-core build || true
+          npm run -w @ohmycrab/shared build || true
+          npm run -w @ohmycrab/tools build || true
+          npm run -w @ohmycrab/kb-core build || true
 
       - name: Build EXE
         shell: bash

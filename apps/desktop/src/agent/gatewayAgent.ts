@@ -3,7 +3,7 @@ import { useRunStore, type ImageAttachment, type Mode } from "../state/runStore"
 import { useKbStore } from "../state/kbStore";
 import { useAuthStore } from "../state/authStore";
 import { facetLabel, getFacetPack } from "../kb/facets";
-import { activateSkills, detectRunIntent, listRegisteredSkills, BUILTIN_SUB_AGENTS } from "@writing-ide/agent-core";
+import { activateSkills, detectRunIntent, listRegisteredSkills, BUILTIN_SUB_AGENTS } from "@ohmycrab/agent-core";
 import { usePersonaStore } from "../state/personaStore";
 import { useTeamStore, getEffectiveAgents } from "../state/teamStore";
 import { useSkillStore } from "../state/skillStore";

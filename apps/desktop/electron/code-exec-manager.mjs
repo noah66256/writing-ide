@@ -200,7 +200,7 @@ export class CodeExecManager {
     const root = path.resolve(String(projectDir ?? "").trim());
     if (!root) throw new Error("MISSING_PROJECT_DIR");
 
-    const venvDir = path.join(root, ".writing-ide", "runtime", "venv");
+    const venvDir = path.join(root, ".ohmycrab", "runtime", "venv");
     const existing = await this._findVenvPython(venvDir);
     if (existing) return { venvDir, pythonPath: existing, created: false };
 
@@ -230,7 +230,7 @@ export class CodeExecManager {
     const { pythonPath, created } = await this.ensureVenv(root);
 
     // venv 刚新建，清理旧的依赖缓存（旧 marker 已失效）
-    const cacheDir = path.join(root, ".writing-ide", "runtime", "req-cache");
+    const cacheDir = path.join(root, ".ohmycrab", "runtime", "req-cache");
     if (created) {
       console.log(`[CodeExec] Venv recreated, clearing req-cache`);
       await fsp.rm(cacheDir, { recursive: true, force: true }).catch(() => {});
@@ -328,7 +328,7 @@ export class CodeExecManager {
         : DEFAULT_ARTIFACT_GLOBS;
 
     // 准备运行目录
-    const runDir = path.join(projectDir, ".writing-ide", "exec", runId);
+    const runDir = path.join(projectDir, ".ohmycrab", "exec", runId);
     await fsp.mkdir(runDir, { recursive: true });
 
     // 准备入口文件

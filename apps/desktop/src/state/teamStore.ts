@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { BUILTIN_SUB_AGENTS, type SubAgentDefinition } from "@writing-ide/agent-core";
+import { BUILTIN_SUB_AGENTS, type SubAgentDefinition } from "@ohmycrab/agent-core";
 
 export type CommunicationMode = "relay" | "broadcast";
 

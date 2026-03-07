@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
 import { useAuthStore } from "@/state/authStore";
 import { useTeamStore } from "@/state/teamStore";
-import type { SubAgentDefinition } from "@writing-ide/agent-core";
+import type { SubAgentDefinition } from "@ohmycrab/agent-core";
 
 export type MarketplaceItemType = "skill" | "mcp_server" | "sub_agent";
 

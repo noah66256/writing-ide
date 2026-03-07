@@ -1,5 +1,5 @@
 import { Fragment, useState, useEffect, useCallback, useMemo } from "react";
-import { listRegisteredSkills } from "@writing-ide/agent-core";
+import { listRegisteredSkills } from "@ohmycrab/agent-core";
 import { BookOpen, ChevronLeft, ChevronRight, FileText, Folder, FolderOpen, Sparkles, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useKbStore } from "@/state/kbStore";

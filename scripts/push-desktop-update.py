@@ -119,7 +119,7 @@ def main() -> int:
     nsis_url = f"{gateway_base}/downloads/desktop/stable/{quote(file_name)}"
 
     print("=" * 60)
-    print("写作 IDE - Desktop 更新推送脚本（v0.2）")
+    print("Oh My Crab - Desktop 更新推送脚本（v0.2）")
     print("=" * 60)
     print(f"[i] ssh: {args.ssh}")
     print(f"[i] remoteDir: {args.remote_dir}")

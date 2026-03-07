@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { BookOpen, Sparkles } from "lucide-react";
-import { listRegisteredSkills } from "@writing-ide/agent-core";
+import { listRegisteredSkills } from "@ohmycrab/agent-core";
 import { cn } from "@/lib/utils";
 import { useKbStore } from "@/state/kbStore";
 import { useSkillStore } from "@/state/skillStore";

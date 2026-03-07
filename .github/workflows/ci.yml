@@ -25,18 +25,18 @@ jobs:
         run: npm ci
 
       - name: Build gateway
-        run: npm run -w @writing-ide/gateway build
+        run: npm run -w @ohmycrab/gateway build
 
       - name: Regress agent flow (styleGate / clarify_waiting / proposal / xml protocol)
-        run: npm run -w @writing-ide/gateway regress:agent
+        run: npm run -w @ohmycrab/gateway regress:agent
 
       - name: Audit AI stages (resolveStage coverage)
-        run: npm run -w @writing-ide/gateway audit:ai
+        run: npm run -w @ohmycrab/gateway audit:ai
 
       - name: Build desktop (renderer)
-        run: npm run -w @writing-ide/desktop build
+        run: npm run -w @ohmycrab/desktop build
 
       - name: Build admin-web
-        run: npm run -w @writing-ide/admin-web build
+        run: npm run -w @ohmycrab/admin-web build
 
 

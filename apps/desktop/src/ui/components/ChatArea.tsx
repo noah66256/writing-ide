@@ -30,7 +30,7 @@ import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
 import { WelcomePage } from "./WelcomePage";
 import { InputBar } from "./InputBar";
 import { usePersonaStore } from "@/state/personaStore";
-import { BUILTIN_SUB_AGENTS } from "@writing-ide/agent-core";
+import { BUILTIN_SUB_AGENTS } from "@ohmycrab/agent-core";
 import {
   injectFileRefLinksInMarkdown,
   parseFileRefHref,

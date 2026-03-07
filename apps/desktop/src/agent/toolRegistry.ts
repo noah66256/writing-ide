@@ -6,7 +6,7 @@ import { useWritingBatchStore } from "../state/writingBatchStore";
 import { useTeamStore, getEffectiveAgents, validateCustomAgent, generateCustomAgentId } from "../state/teamStore";
 import { useFileOpPermissionStore } from "../state/fileOpPermissionStore";
 import { requestInlineFileOpConfirm } from "../state/inlineFileOpConfirm";
-import { TOOL_LIST } from "@writing-ide/tools";
+import { TOOL_LIST } from "@ohmycrab/tools";
 import { getGatewayBaseUrl } from "./gatewayUrl";
 
 function authHeader(): Record<string, string> {

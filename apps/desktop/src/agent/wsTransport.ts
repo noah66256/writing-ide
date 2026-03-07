@@ -13,7 +13,7 @@ import { useKbStore } from "../state/kbStore";
 import { useAuthStore } from "../state/authStore";
 import { useRunStore } from "../state/runStore";
 import { cancelInlineFileOpConfirm } from "../state/inlineFileOpConfirm";
-import { activateSkills } from "@writing-ide/agent-core";
+import { activateSkills } from "@ohmycrab/agent-core";
 import { buildStyleLinterLibrariesSidecar, executeToolCall, getTool } from "./toolRegistry";
 import { createRunTarget } from "./runTarget";
 import { cancelConvRun, setConvRunCancel } from "../state/runRegistry";

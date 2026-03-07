@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
-import { type SubAgentDefinition } from "@writing-ide/agent-core";
-import { TOOL_LIST } from "@writing-ide/tools";
+import { type SubAgentDefinition } from "@ohmycrab/agent-core";
+import { TOOL_LIST } from "@ohmycrab/tools";
 import {
   useTeamStore,
   getEffectiveAgents,

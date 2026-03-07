@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TeamModal } from "@/components/TeamModal";
-import { listRegisteredSkills, type SkillManifest } from "@writing-ide/agent-core";
+import { listRegisteredSkills, type SkillManifest } from "@ohmycrab/agent-core";
 import { useSkillStore } from "@/state/skillStore";
 import { usePersonaStore } from "@/state/personaStore";
 import { useKbStore } from "@/state/kbStore";

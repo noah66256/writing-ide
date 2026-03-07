@@ -4,7 +4,7 @@
 
 ## 产品定位
 
-"一个人的内容团队"——对话驱动的 AI 内容团队，通过专业角色替代内容创业者需要雇的岗位。
+"Oh My Crab"——你的桌面 AI 智能体，对话驱动的 AI 团队平台，拥有无限可能。
 
 ## 代码组织
 
@@ -93,14 +93,14 @@ Skill 是数据配置，不是代码改动：
 
 #### 回归测试
 
-改动 runner 后必须运行：`npm -w @writing-ide/gateway run test:runner-turn`（6 场景覆盖双路径）
+改动 runner 后必须运行：`npm -w @ohmycrab/gateway run test:runner-turn`（6 场景覆盖双路径）
 
 ---
 
 ## Agent 架构
 
 ### 负责人（总指挥）
-负责人是用户的 AI 内容团队总指挥——项目经理角色。
+负责人是用户的 AI 团队总指挥——项目经理角色。
 - **做的事**：分析需求、制定计划（Todo）、委派任务、审核结果、整合交付
 - **不做的事**：自己写稿、自己搜素材、自己做风格检查——这些委派给子 Agent
 
@@ -197,13 +197,13 @@ Claude Code 与 Codex 组成双引擎协作：
 - 地址：`120.26.6.147`（SSH 别名 `writing`）
 - Node 路径：`/www/server/nvm/versions/node/v22.21.1/bin`
 - 部署目录：`/www/wwwroot/writing-ide`
-- PM2 应用：`writing-gateway`（端口 8000）、`writing-admin-web`（端口 8001）
+- PM2 应用：`ohmycrab-gateway`（端口 8000）、`ohmycrab-admin-web`（端口 8001）
 
 ### Gateway 部署
 
 **标准方式**：`bash scripts/deploy-gateway.sh`
 
-流程：git push → SSH 到服务器 → `git pull --rebase --autostash` → `npm install` → `npm -w @writing-ide/gateway run build` → `pm2 restart` → health check
+流程：git push → SSH 到服务器 → `git pull --rebase --autostash` → `npm install` → `npm -w @ohmycrab/gateway run build` → `pm2 restart` → health check
 
 安全性：使用 git pull 更新代码，`apps/gateway/data/` 在 `.gitignore` 中，**不会被 git 操作触碰**。
 
@@ -214,7 +214,7 @@ Claude Code 与 Codex 组成双引擎协作：
 - 本地有未跟踪文件（如 `.playwright-mcp/`、`drafts/`、打包产物）时脚本会拒绝执行，需设 `DEPLOY_ALLOW_DIRTY=1`
 - Gateway 没有 `/health` 路由，health check 固定 404 不影响服务；验证时用 `/api/llm/selector` 等业务接口
 - 服务端 `npm install` 会因 `@rollup/rollup-darwin-arm64`（Desktop 的 macOS 专用 optional dep）报 `EBADPLATFORM`，可跳过 install 直接 build（依赖已在服务端 node_modules 中）
-- 脚本报错时的手动部署命令：`ssh root@120.26.6.147 'export PATH=/www/server/nvm/versions/node/v22.21.1/bin:$PATH && cd /www/wwwroot/writing-ide && git pull --rebase --autostash && npm -w @writing-ide/agent-core run build && npm -w @writing-ide/gateway run build && pm2 restart writing-gateway'`
+- 脚本报错时的手动部署命令：`ssh root@120.26.6.147 'export PATH=/www/server/nvm/versions/node/v22.21.1/bin:$PATH && cd /www/wwwroot/writing-ide && git pull --rebase --autostash && npm -w @ohmycrab/agent-core run build && npm -w @ohmycrab/gateway run build && pm2 restart ohmycrab-gateway'`
 
 ### Desktop 打包与分发
 
@@ -244,14 +244,14 @@ gh release view desktop-v{version}
 
 可选 `build_type`：`nsis`（安装版）、`portable`（便携版）、`all`（两者）。
 
-**重要：`productName` 为 ASCII `"WritingIDE"`**（避免 Windows CJK 路径导致 Chromium `icudtl.dat` 加载失败）。中文显示名通过 `nsis.shortcutName: "写作IDE"` 和 `artifactName` 保持。**不要改回 CJK productName。**
+**重要：`productName` 为 ASCII `"OhMyCrab"`**（避免 Windows CJK 路径导致 Chromium `icudtl.dat` 加载失败）。中文显示名通过 `nsis.shortcutName: "Oh My Crab"` 和 `artifactName` 保持。**不要改回 CJK productName。**
 
-**前置条件**：`npm run build` 会自动先编译 `@writing-ide/agent-core`，再 Vite 构建 renderer。
+**前置条件**：`npm run build` 会自动先编译 `@ohmycrab/agent-core`，再 Vite 构建 renderer。
 
 **产物位置**：`apps/desktop/out/`，命名规则：
-- Win NSIS：`写作IDE Setup {version}.exe`（注意：GitHub Actions 产物会被截断为 `IDE.Setup.{version}.exe`，下载后需手动重命名）
-- Mac DMG：`写作IDE-{version}-arm64.dmg`
-- Mac ZIP：`写作IDE-{version}-arm64-mac.zip`
+- Win NSIS：`Oh My Crab Setup {version}.exe`
+- Mac DMG：`OhMyCrab-{version}-arm64.dmg`
+- Mac ZIP：`OhMyCrab-{version}-arm64-mac.zip`
 
 **内置 MCP Server**：通过 `asarUnpack` 配置保证 Playwright、博查搜索、Web Search 三个 bundled MCP server 在打包后可用（从 `app.asar.unpacked/` 目录加载）。
 
@@ -260,8 +260,8 @@ gh release view desktop-v{version}
 | 环境 | userData 路径 |
 |------|--------------|
 | dev（`npm run dev`） | `~/Library/Application Support/Electron/` |
-| 打包后 Mac（productName=WritingIDE） | `~/Library/Application Support/WritingIDE/` |
-| 打包后 Win（productName=WritingIDE） | `%APPDATA%/WritingIDE/` |
+| 打包后 Mac（productName=OhMyCrab） | `~/Library/Application Support/OhMyCrab/` |
+| 打包后 Win（productName=OhMyCrab） | `%APPDATA%/OhMyCrab/` |
 
 注意 dev 模式下 Electron 未设 `name` 时 userData 默认走 `Electron/`，与打包后不同。扩展包放到对应环境的 `skills/` 子目录下即可热加载。
 
@@ -274,8 +274,8 @@ python scripts/push-desktop-update.py \
   --ssh root@120.26.6.147 \
   --remote-dir /opt/writing-ide/desktop-updates/stable \
   --gateway-base http://120.26.6.147:8000 \
-  --installer "apps/写作IDE Setup {version}.exe" \
-  --mac-installer "apps/写作IDE-{version}-arm64.dmg" \
+  --installer "apps/Oh My Crab Setup {version}.exe" \
+  --mac-installer "apps/OhMyCrab-{version}-arm64.dmg" \
   --version {version} \
   --notes "更新说明"
 ```
@@ -287,9 +287,9 @@ python scripts/push-desktop-update.py \
 ### Admin-web 部署
 
 ```bash
-npm -w @writing-ide/admin-web run build
+npm -w @ohmycrab/admin-web run build
 # 服务器上用 pm2 serve 托管 SPA
-pm2 serve dist 8001 --name writing-admin-web --spa
+pm2 serve dist 8001 --name ohmycrab-admin-web --spa
 ```
 
 ### 数据备份
@@ -327,9 +327,9 @@ rsync -avz --delete \
 - 已发生的数据丢失不可恢复（`draftSnapshot` 保留，`conversations` 数组为空）。
 - 教训：**conversations.v1.json 目前没有自动备份**，写入时应保留上一版本 `.bak`。
 
-**productName 变更（写作IDE → WritingIDE）导致 userData 路径孤岛（2026-03）**
+**productName 变更（写作IDE → WritingIDE → OhMyCrab）导致 userData 路径孤岛（2026-03）**
 
-- 变更后 `userData` 从 `~/Library/Application Support/写作IDE/` 变为 `~/Library/Application Support/WritingIDE/`；开发模式数据在 `~/Library/Application Support/Electron/`（Electron 默认）。
-- 已在 `main.cjs` 添加 `tryMigrateConversationHistory()`，在 `createWindow()` **之前**一次性迁移对话历史。
-- MCP 配置迁移（`mcp-manager.mjs::_tryMigrateLegacyConfig`）已覆盖 `写作IDE`、`writing-ide`、`Electron` 三条旧路径。
+- 变更后 `userData` 从 `~/Library/Application Support/写作IDE/` → `~/Library/Application Support/WritingIDE/` → `~/Library/Application Support/OhMyCrab/`；开发模式数据在 `~/Library/Application Support/Electron/`（Electron 默认）。
+- 已在 `main.cjs` 添加 `tryMigrateConversationHistory()`，在 `createWindow()` **之前**一次性迁移对话历史。`getLegacyAppDataProductNames()` 覆盖 `OhMyCrab`、`WritingIDE`、`写作IDE`、`writing-ide`、`@ohmycrab/desktop`、`@writing-ide/desktop`、`Electron` 等所有历史路径。
+- MCP 配置迁移（`mcp-manager.mjs::_tryMigrateLegacyConfig`）已覆盖 `WritingIDE`、`写作IDE`、`writing-ide`、`Electron` 四条旧路径。
 - 打包前须确认：`node --check apps/desktop/electron/mcp-manager.mjs`（曾发生 `_saveConfig` 方法声明丢失导致语法错误，commit 1c62815 修复）。

@@ -229,7 +229,7 @@ export const TOOL_LIST: ToolMeta[] = [
       "- path：项目内文件路径（相对路径）或绝对路径\n" +
       "- url：网页 URL（自动抓取正文）\n" +
       "【输出】返回 libraryId、docId、抽取的卡片数量（按 cardType 分类）。\n" +
-      "抽卡完成后库自动 attach，后续写作请求可直接通过 kb.search 检索使用。",
+      "抽卡完成后库自动 attach，后续可直接通过 kb.search 检索使用。",
     args: [
       { name: "text", required: false, desc: "要导入的文本内容（text/path/url 三选一）", type: "string" },
       { name: "path", required: false, desc: "文件路径（项目相对路径或绝对路径；text/path/url 三选一）", type: "string" },

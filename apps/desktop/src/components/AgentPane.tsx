@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { activateSkills, listRegisteredSkills, type ActiveSkill, BUILTIN_SUB_AGENTS } from "@writing-ide/agent-core";
+import { activateSkills, listRegisteredSkills, type ActiveSkill, BUILTIN_SUB_AGENTS } from "@ohmycrab/agent-core";
 import { startGatewayRun } from "../agent/gatewayAgent";
 import { useRunStore, type MainDoc } from "../state/runStore";
 import { useProjectStore } from "../state/projectStore";

@@ -1,5 +1,5 @@
 {
-  "name": "writing-ide",
+  "name": "ohmycrab",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -8,19 +8,19 @@
     "packages/*"
   ],
   "scripts": {
-    "dev:gateway": "npm run -w @writing-ide/gateway dev",
-    "dev:desktop": "npm run -w @writing-ide/desktop dev",
-    "dev:admin": "npm run -w @writing-ide/admin-web dev",
-    "build:desktop": "npm run -w @writing-ide/desktop build",
-    "dist:desktop:win": "npm run -w @writing-ide/desktop dist:win",
-    "dist:desktop:win:portable": "npm run -w @writing-ide/desktop dist:win:portable",
-    "dist:desktop:win:all": "npm run -w @writing-ide/desktop dist:win:all",
-    "dist:desktop:mac": "npm run -w @writing-ide/desktop dist:mac",
-    "dist:desktop:mac:x64": "npm run -w @writing-ide/desktop dist:mac:x64",
-    "dist:desktop:mac:universal": "npm run -w @writing-ide/desktop dist:mac:universal",
-    "dist:desktop:mac:pkg": "npm run -w @writing-ide/desktop dist:mac:pkg",
-    "dist:desktop:mac:pkg:x64": "npm run -w @writing-ide/desktop dist:mac:pkg:x64",
-    "dist:desktop:mac:pkg:universal": "npm run -w @writing-ide/desktop dist:mac:pkg:universal"
+    "dev:gateway": "npm run -w @ohmycrab/gateway dev",
+    "dev:desktop": "npm run -w @ohmycrab/desktop dev",
+    "dev:admin": "npm run -w @ohmycrab/admin-web dev",
+    "build:desktop": "npm run -w @ohmycrab/desktop build",
+    "dist:desktop:win": "npm run -w @ohmycrab/desktop dist:win",
+    "dist:desktop:win:portable": "npm run -w @ohmycrab/desktop dist:win:portable",
+    "dist:desktop:win:all": "npm run -w @ohmycrab/desktop dist:win:all",
+    "dist:desktop:mac": "npm run -w @ohmycrab/desktop dist:mac",
+    "dist:desktop:mac:x64": "npm run -w @ohmycrab/desktop dist:mac:x64",
+    "dist:desktop:mac:universal": "npm run -w @ohmycrab/desktop dist:mac:universal",
+    "dist:desktop:mac:pkg": "npm run -w @ohmycrab/desktop dist:mac:pkg",
+    "dist:desktop:mac:pkg:x64": "npm run -w @ohmycrab/desktop dist:mac:pkg:x64",
+    "dist:desktop:mac:pkg:universal": "npm run -w @ohmycrab/desktop dist:mac:pkg:universal"
   }
 }
 

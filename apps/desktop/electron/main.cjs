@@ -30,8 +30,8 @@ try {
   // ignore
 }
 
-const IGNORE_DIRS = new Set(["node_modules", ".git", "dist", "out", "build", ".next", ".writing-ide"]);
-const IGNORE_ALL_DIRS = new Set([...IGNORE_DIRS, ".writing-ide"]);
+const IGNORE_DIRS = new Set(["node_modules", ".git", "dist", "out", "build", ".next", ".ohmycrab"]);
+const IGNORE_ALL_DIRS = new Set([...IGNORE_DIRS, ".ohmycrab"]);
 const TEXT_EXT = new Set([".md", ".mdx", ".txt"]);
 
 // 全量索引用的文件类型分类
@@ -52,7 +52,7 @@ const INDEX_BINARY_EXT = new Set([
 ]);
 const MAX_INDEX_FILES = 10000;
 
-const HISTORY_DIRNAME = "writing-ide-data";
+const HISTORY_DIRNAME = "ohmycrab-data";
 const HISTORY_FILENAME = "conversations.v1.json";
 
 let mainWindow = null;
@@ -396,8 +396,8 @@ async function fileExists(p) {
 }
 
 function getLegacyAppDataProductNames() {
-  // 兼容历史产品名/包名（含最新 ASCII 名），避免 dev/packaged 切换后“看不到历史与记忆”
-  return ["WritingIDE", "writing-ide", "写作IDE", "@writing-ide/desktop", "Electron"];
+  // 兼容历史产品名/包名（含最新 ASCII 名），避免 dev/packaged 切换后”看不到历史与记忆”
+  return [“OhMyCrab”, “WritingIDE”, “writing-ide”, “写作IDE”, “@writing-ide/desktop”, “@ohmycrab/desktop”, “Electron”];
 }
 
 async function tryMigrateUserDataFile(args) {
@@ -632,7 +632,7 @@ function buildMenuTemplate() {
         },
         {
           label: "项目主页",
-          click: () => shell.openExternal("https://github.com/noah66256/writing-ide"),
+          click: () => shell.openExternal("https://github.com/noah66256/ohmycrab"),
         },
       ],
     },
@@ -676,7 +676,7 @@ async function fetchJson(url, timeoutMs = 12_000) {
   return await new Promise((resolve) => {
     const req = lib.request(
       u,
-      { method: "GET", headers: { "User-Agent": "writing-ide-desktop" } },
+      { method: "GET", headers: { "User-Agent": "ohmycrab-desktop" } },
       (res) => {
         const code = Number(res.statusCode ?? 0);
         const loc = res.headers?.location ? String(res.headers.location) : "";
@@ -969,10 +969,10 @@ async function interactiveUpdateFlow(args) {
     }
   })();
   const fileName = path.basename(decodedPathname || "");
-  const safeName = sanitizeFileName(fileName, `writing-ide-setup-${info.latestVersion}.exe`);
+  const safeName = sanitizeFileName(fileName, `ohmycrab-setup-${info.latestVersion}.exe`);
   const cachePath = path.join(app.getPath("userData"), "updates", safeName);
   // Launch from a temp dir to avoid cmd/unicode/path edge cases (userData may contain Chinese appName).
-  const launchPath = path.join(app.getPath("temp"), "writing-ide-updates", safeName);
+  const launchPath = path.join(app.getPath("temp"), "ohmycrab-updates", safeName);
 
   try {
     mainWindow?.webContents?.send("update.event", { type: "download.start", version: info.latestVersion, target: cachePath });
@@ -1141,9 +1141,9 @@ async function silentDownloadUpdate(args) {
     try { return decodeURIComponent(String(nsisUrlObj.pathname ?? "")); } catch { return String(nsisUrlObj.pathname ?? ""); }
   })();
   const fileName = path.basename(decodedPathname || "");
-  const safeName = sanitizeFileName(fileName, `writing-ide-setup-${info.latestVersion}.exe`);
+  const safeName = sanitizeFileName(fileName, `ohmycrab-setup-${info.latestVersion}.exe`);
   const cachePath = path.join(app.getPath("userData"), "updates", safeName);
-  const launchPath = path.join(app.getPath("temp"), "writing-ide-updates", safeName);
+  const launchPath = path.join(app.getPath("temp"), "ohmycrab-updates", safeName);
 
   // sha256 缓存检查
   const expectedSha = String(info.sha256 ?? "").trim().toLowerCase();
@@ -1369,7 +1369,7 @@ function registerIpc() {
   ipcMain.handle("project.readIndex", async (_event, rootDir) => {
     const root = String(rootDir ?? "");
     if (!root) return { ok: false, error: "MISSING_ROOT" };
-    const indexPath = path.join(root, ".writing-ide", "project-index.json");
+    const indexPath = path.join(root, ".ohmycrab", "project-index.json");
     try {
       const raw = await fsp.readFile(indexPath, "utf-8");
       const data = JSON.parse(raw);
@@ -1384,7 +1384,7 @@ function registerIpc() {
   ipcMain.handle("project.writeIndex", async (_event, rootDir, data) => {
     const root = String(rootDir ?? "");
     if (!root) return { ok: false, error: "MISSING_ROOT" };
-    const indexDir = path.join(root, ".writing-ide");
+    const indexDir = path.join(root, ".ohmycrab");
     await fsp.mkdir(indexDir, { recursive: true });
     const indexPath = path.join(indexDir, "project-index.json");
     await fsp.writeFile(indexPath, JSON.stringify(data, null, 2), "utf-8");
@@ -1397,7 +1397,7 @@ function registerIpc() {
   ipcMain.handle("memory.readProject", async (_event, rootDir) => {
     const root = String(rootDir ?? "");
     if (!root) return { ok: false, error: "MISSING_ROOT" };
-    const memPath = path.join(root, ".writing-ide", "project-memory.md");
+    const memPath = path.join(root, ".ohmycrab", "project-memory.md");
     try {
       const content = await fsp.readFile(memPath, "utf-8");
       return { ok: true, content };
@@ -1410,7 +1410,7 @@ function registerIpc() {
   ipcMain.handle("memory.writeProject", async (_event, rootDir, content) => {
     const root = String(rootDir ?? "");
     if (!root) return { ok: false, error: "MISSING_ROOT" };
-    const memDir = path.join(root, ".writing-ide");
+    const memDir = path.join(root, ".ohmycrab");
     await fsp.mkdir(memDir, { recursive: true });
     await fsp.writeFile(path.join(memDir, "project-memory.md"), String(content ?? ""), "utf-8");
     return { ok: true };
@@ -1680,7 +1680,7 @@ function registerIpc() {
       if (!stat.isFile()) return false;
       // .writing-ide/exec/ 内的文件始终允许
       const normalized = real.replace(/\\/g, "/");
-      if (/\/.writing-ide\/exec\//.test(normalized)) return true;
+      if (/\/.ohmycrab\/exec\//.test(normalized)) return true;
       // 其他路径：必须是常规文件且不在敏感目录
       const sensitivePatterns = [/\/\.ssh\//i, /\/\.gnupg\//i, /\/\.aws\//i, /\/\.env$/i];
       if (sensitivePatterns.some((p) => p.test(normalized))) return false;
@@ -1925,7 +1925,7 @@ function createWindow() {
     height: 840,
     minWidth: 640,
     minHeight: 480,
-    title: "写作 IDE",
+    title: "Oh My Crab",
 
     // macOS 原生感：隐藏标题栏但保留 traffic lights
     ...(isMac
@@ -2185,6 +2185,7 @@ app.on("will-quit", () => {
     const localAppData = String(process.env.LOCALAPPDATA ?? "").trim();
     for (const base of [appData, localAppData]) {
       if (!base) continue;
+      lockDirs.add(path.join(base, "OhMyCrab"));
       lockDirs.add(path.join(base, "WritingIDE"));
       lockDirs.add(path.join(base, "写作IDE"));
     }

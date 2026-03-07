@@ -1,6 +1,6 @@
-# 写作IDE — 一个人的内容团队
+# Oh My Crab — 你的桌面 AI 智能体
 
-对话驱动的 AI 内容团队桌面应用，通过专业角色替代内容创业者需要雇的岗位。
+桌面智能体平台，通过对话驱动 AI 团队完成各类任务，拥有无限可能。
 
 ## 产品定位
 
@@ -137,7 +137,7 @@ gh workflow run "Desktop Windows EXE" --ref master -f build_type=nsis
 ### 服务器
 
 - 地址：`120.26.6.147`（SSH 别名 `writing`）
-- PM2 应用：`writing-gateway`（端口 8000）、`writing-admin-web`（端口 8001）
+- PM2 应用：`ohmycrab-gateway`（端口 8000）、`ohmycrab-admin-web`（端口 8001）
 
 ## 文档导航
 

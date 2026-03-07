@@ -750,7 +750,7 @@ export class McpManager {
   async _tryMigrateLegacyConfig() {
     if (!this._appDataPath) return;
     // 历史 productName 列表，按优先级排列
-    const legacyNames = ["写作IDE", "writing-ide", "Electron"];
+    const legacyNames = ["WritingIDE", "写作IDE", "writing-ide", "Electron"];
     for (const name of legacyNames) {
       const legacyPath = path.join(this._appDataPath, name, "mcp-servers.json");
       try {
@@ -865,7 +865,7 @@ export class McpManager {
     try {
       const transport = await this._createTransport(entry.config);
       const client = new Client(
-        { name: "writing-ide-desktop", version: "1.0.0" },
+        { name: "ohmycrab-desktop", version: "1.0.0" },
         { capabilities: {} },
       );
 

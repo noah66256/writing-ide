@@ -9,8 +9,8 @@ type Props = {
 const capabilities = [
   {
     icon: PenLine,
-    title: "\u5199\u4f5c",
-    desc: "\u98ce\u683c\u4eff\u5199\u3001\u6539\u7a3f\u6da6\u8272",
+    title: "\u521b\u4f5c",
+    desc: "\u5199\u4f5c\u3001\u6539\u7a3f\u3001\u98ce\u683c\u4eff\u5199",
     color: "text-accent",
     bg: "bg-accent-soft",
   },
@@ -23,7 +23,7 @@ const capabilities = [
   },
   {
     icon: BookOpen,
-    title: "\u5b66\u98ce\u683c",
+    title: "\u77e5\u8bc6\u5e93",
     desc: "\u8bed\u6599\u5206\u6790\u3001\u62bd\u5361\u5efa\u5e93",
     color: "text-amber-600 dark:text-amber-400",
     bg: "bg-amber-50 dark:bg-amber-950/40",
@@ -48,7 +48,7 @@ export function WelcomePage({ onSuggest }: Props) {
           {"\u6211\u662f "}{displayName}
         </div>
         <div className="text-[14px] text-text-muted leading-relaxed max-w-[360px]">
-          {"\u4f60\u7684\u4e00\u4eba\u5185\u5bb9\u56e2\u961f"}
+          {"\u4f60\u7684\u684c\u9762 AI \u667a\u80fd\u4f53"}
         </div>
       </div>
 

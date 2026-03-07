@@ -34,7 +34,7 @@ HOST="${DEPLOY_SSH_HOST:-writing}"
 BRANCH="${DEPLOY_BRANCH:-master}"
 DIR="${DEPLOY_DIR:-/www/wwwroot/writing-ide}"
 NODE_BIN="${DEPLOY_NODE_BIN:-/www/server/nvm/versions/node/v22.21.1/bin}"
-PM2_APP="${DEPLOY_PM2_APP:-writing-gateway}"
+PM2_APP="${DEPLOY_PM2_APP:-ohmycrab-gateway}"
 PORT="${DEPLOY_PORT:-8000}"
 DEPLOY_PUSH="${DEPLOY_PUSH:-1}"
 ALLOW_DIRTY="${DEPLOY_ALLOW_DIRTY:-0}"
@@ -76,7 +76,7 @@ echo "[remote] after=\$(git rev-parse --short HEAD)"
 
 # ── npm install（仅 gateway + admin-web workspace，跳过 desktop/electron 的平台限制） ──
 echo "[remote] npm install (workspace-scoped)"
-npm install -w @writing-ide/gateway -w @writing-ide/admin-web --no-audit --no-fund --force 2>&1 | tail -5
+npm install -w @ohmycrab/gateway -w @ohmycrab/admin-web --no-audit --no-fund --force 2>&1 | tail -5
 
 # ── 确保 Linux native 包存在（rollup/esbuild 可选依赖在 lock 中可能只有 darwin 版本） ──
 echo "[remote] ensure linux native deps"
@@ -87,7 +87,7 @@ node -e 'try{require("@rollup/rollup-linux-x64-gnu")}catch{process.exit(1)}' 2>/
 
 # ── 构建 Gateway ──
 echo "[remote] build gateway"
-npm -w @writing-ide/gateway run build
+npm -w @ohmycrab/gateway run build
 
 # ── 重启 Gateway ──
 pm2 restart ${PM2_APP} --update-env
@@ -101,8 +101,8 @@ if [[ "${ADMIN_WEB}" == "1" ]]; then
   cd ${DIR}
 
   echo "[remote] redeploy admin-web"
-  pm2 delete writing-admin-web 2>/dev/null || true
-  pm2 serve apps/admin-web/dist 8001 --name writing-admin-web --spa
+  pm2 delete ohmycrab-admin-web 2>/dev/null || true
+  pm2 serve apps/admin-web/dist 8001 --name ohmycrab-admin-web --spa
 fi
 
 # ── Health check ──

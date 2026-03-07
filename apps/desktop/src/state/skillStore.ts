@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { SkillManifest } from "@writing-ide/agent-core";
+import type { SkillManifest } from "@ohmycrab/agent-core";
 
 type SkillOverride = {
   enabled?: boolean;

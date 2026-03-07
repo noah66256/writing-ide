@@ -1,16 +1,16 @@
 {
-  "name": "@writing-ide/desktop",
+  "name": "@ohmycrab/desktop",
   "private": true,
   "version": "0.1.1",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
-    "dev": "npm run -w @writing-ide/agent-core build && npm run -w @writing-ide/tools build && concurrently -n renderer,electron -c auto \"npm:dev:renderer\" \"npm:dev:electron\"",
+    "dev": "npm run -w @ohmycrab/agent-core build && npm run -w @ohmycrab/tools build && concurrently -n renderer,electron -c auto \"npm:dev:renderer\" \"npm:dev:electron\"",
     "dev:renderer": "vite",
     "dev:electron": "node scripts/dev-electron.cjs",
     "mcp:prepare-runtime": "node scripts/prepare-mcp-runtime.cjs",
     "mcp:smoke-runtime": "node scripts/mcp-runtime-smoke.cjs --commands uv,uvx,node,npm,npx,python,python3",
-    "build": "npm run -w @writing-ide/agent-core build && npm run -w @writing-ide/tools build && vite build",
+    "build": "npm run -w @ohmycrab/agent-core build && npm run -w @ohmycrab/tools build && vite build",
     "preview": "vite preview",
     "dist:win": "npm run mcp:prepare-runtime && npm run build && electron-builder --win nsis --x64",
     "dist:win:portable": "npm run mcp:prepare-runtime && npm run build && electron-builder --win portable --x64",
@@ -26,7 +26,7 @@
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@monaco-editor/react": "^4.7.0",
     "@playwright/mcp": "^0.0.68",
-    "@writing-ide/agent-core": "0.0.0",
+    "@ohmycrab/agent-core": "0.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.575.0",
@@ -59,8 +59,8 @@
     "wait-on": "^8.0.3"
   },
   "build": {
-    "appId": "com.writing-ide.desktop",
-    "productName": "WritingIDE",
+    "appId": "com.ohmycrab.desktop",
+    "productName": "OhMyCrab",
     "directories": {
       "output": "out"
     },
@@ -83,7 +83,7 @@
       "electron/bundled-skills/**",
       "electron/mcp-runtime/**",
       "!**/.env*",
-      "!**/writing-ide-data/**",
+      "!**/ohmycrab-data/**",
       "!**/node_modules/.cache/**",
       "!tsconfig.json",
       "!vite.config.ts",
@@ -110,7 +110,7 @@
         "dmg",
         "zip"
       ],
-      "artifactName": "写作IDE-${version}-${arch}.${ext}"
+      "artifactName": "OhMyCrab-${version}-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -119,8 +119,8 @@
       "allowElevation": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "写作IDE",
-      "artifactName": "写作IDE Setup ${version}.${ext}",
+      "shortcutName": "Oh My Crab",
+      "artifactName": "Oh My Crab Setup ${version}.${ext}",
       "include": "build/installer.nsh"
     }
   }
