@@ -105,16 +105,21 @@ function encryptApiKey(apiKey: string): { enc: string; last4: string } {
 
 function decryptApiKey(enc: string): string {
   if (!enc) return "";
-  const key = getEncKey();
-  const payload = JSON.parse(enc) as { v: number; iv: string; tag: string; ct: string };
-  const iv = Buffer.from(payload.iv, "base64");
-  const tag = Buffer.from(payload.tag, "base64");
-  const ct = Buffer.from(payload.ct, "base64");
-  const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
-  decipher.setAuthTag(tag);
-  let plaintext = decipher.update(ct, undefined, "utf8");
-  plaintext += decipher.final("utf8");
-  return plaintext;
+  try {
+    const key = getEncKey();
+    const payload = JSON.parse(enc) as { v: number; iv: string; tag: string; ct: string };
+    const iv = Buffer.from(payload.iv, "base64");
+    const tag = Buffer.from(payload.tag, "base64");
+    const ct = Buffer.from(payload.ct, "base64");
+    const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+    decipher.setAuthTag(tag);
+    let plaintext = decipher.update(ct, undefined, "utf8");
+    plaintext += decipher.final("utf8");
+    return plaintext;
+  } catch (err) {
+    console.error("[aiConfig] decryptApiKey failed (key mismatch?):", err instanceof Error ? err.message : err);
+    return "";
+  }
 }
 
 function clampList<T>(arr: T[], max: number) {

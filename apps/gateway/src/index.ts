@@ -385,13 +385,15 @@ async function getLlmEnv(db?: Db) {
       .map((m) => m.model)
       .filter(Boolean);
     const defaultModel = r.model || models[0] || "";
+    // apiKey 解密失败时兜底到 env LLM_API_KEY
+    const apiKey = r.apiKey || normStr(process.env.LLM_API_KEY ?? "");
     return {
       baseUrl: r.baseURL,
       endpoint: r.endpoint || "/v1/chat/completions",
-      apiKey: r.apiKey,
+      apiKey,
       models: models.length ? models : defaultModel ? [defaultModel] : [],
       defaultModel,
-      ok: Boolean(r.baseURL && r.apiKey && defaultModel),
+      ok: Boolean(r.baseURL && apiKey && defaultModel),
     };
   } catch {
     // ignore

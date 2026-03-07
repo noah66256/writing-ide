@@ -1912,7 +1912,7 @@ export async function prepareAgentRun(args: {
       const m = await services.aiConfig.resolveModel(pickedId);
       model = m.model;
       baseUrl = m.baseURL;
-      apiKey = m.apiKey;
+      apiKey = m.apiKey || apiKey; // 解密失败时 apiKey 为空，保留 env 兜底
       endpoint = m.endpoint || endpoint;
       toolResultFormat = m.toolResultFormat;
       modelIdUsed = m.modelId;
