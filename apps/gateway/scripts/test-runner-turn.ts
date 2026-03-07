@@ -1,5 +1,5 @@
 /**
- * WritingAgentRunner 双路径回归测试（Phase C 安全网）
+ * AgentRunner 双路径回归测试（Phase C 安全网）
  *
  * 覆盖场景：
  *   1. Anthropic 路径 - 纯文本回复
@@ -9,11 +9,11 @@
  *   5. OpenAI 路径 - 空响应重试
  *   6. tool_result 注入格式（preferNativeToolCall 分支）
  *
- * 运行：npm -w @writing-ide/gateway run test:runner-turn
+ * 运行：npm -w @ohmycrab/gateway run test:runner-turn
  */
 import assert from "node:assert/strict";
-import { encodeToolName } from "@writing-ide/tools";
-import { WritingAgentRunner, type ModelApiType, type RunContext } from "../src/agent/writingAgentRunner.js";
+import { encodeToolName } from "@ohmycrab/tools";
+import { AgentRunner, type ModelApiType, type RunContext } from "../src/agent/writingAgentRunner.js";
 import { buildInjectedToolResultMessages } from "../src/llm/providerAdapter.js";
 
 // ---------------------------------------------------------------------------
@@ -149,7 +149,7 @@ function buildRunner(args: {
     maxTurns: args.maxTurns ?? 3,
     jsonToolFallbackEnabled: false,
   };
-  return { runner: new WritingAgentRunner(ctx), events, abort };
+  return { runner: new AgentRunner(ctx), events, abort };
 }
 
 function hasEvent(events: Emitted[], eventName: string): boolean {

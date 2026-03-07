@@ -1,6 +1,6 @@
-export type AgentMode = import("@writing-ide/tools").ToolMode;
-export type ToolMeta = import("@writing-ide/tools").ToolMeta;
+export type AgentMode = import("@ohmycrab/tools").ToolMode;
+export type ToolMeta = import("@ohmycrab/tools").ToolMeta;
 
-export { TOOL_LIST, getToolsForMode, toolsPrompt, toolNamesForMode } from "@writing-ide/tools";
+export { TOOL_LIST, getToolsForMode, toolsPrompt, toolNamesForMode } from "@ohmycrab/tools";
 
 

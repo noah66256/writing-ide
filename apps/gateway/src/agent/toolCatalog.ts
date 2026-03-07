@@ -1,5 +1,5 @@
-import { isWriteLikeTool } from "@writing-ide/agent-core";
-import { TOOL_LIST, type ToolMeta, type ToolMode } from "@writing-ide/tools";
+import { isWriteLikeTool } from "@ohmycrab/agent-core";
+import { TOOL_LIST, type ToolMeta, type ToolMode } from "@ohmycrab/tools";
 
 export type ToolCatalogSource = "builtin" | "mcp";
 

@@ -1,4 +1,4 @@
-import type { KbCard } from "@writing-ide/kb-core";
+import type { KbCard } from "@ohmycrab/kb-core";
 import { randomUUID } from "node:crypto";
 
 /**

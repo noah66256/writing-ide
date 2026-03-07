@@ -11,7 +11,7 @@ import type { WebSocket } from "ws";
 import { z } from "zod";
 import dotenv from "dotenv";
 import { loadDb, saveDb, updateDb, listBackups, createBackup, restoreBackup, getBackupFilePath, type Db, type LlmConfig, type LlmModelPrice, type RunAudit, type User } from "./db.js";
-import { kbSearch, type KbCard } from "@writing-ide/kb-core";
+import { kbSearch, type KbCard } from "@ohmycrab/kb-core";
 import { MemoryKbStore } from "./kb/memoryStore.js";
 import { adjustUserPoints, calculateCostPoints, listUserTransactions, type LlmTokenUsage } from "./billing.js";
 import { openAiCompatUrl, type OpenAiChatMessage } from "./llm/openaiCompat.js";
@@ -24,7 +24,7 @@ import { prepareAgentRun, executeAgentRun, type RunServices, type TransportAdapt
 import { createAiConfigService } from "./aiConfig.js";
 import { toolConfig } from "./toolConfig.js";
 import { checkSmsVerifyCode, normalizeCnPhone, sendSmsVerifyCode } from "./smsVerify.js";
-import { TOOL_LIST, validateToolCallArgs } from "@writing-ide/tools";
+import { TOOL_LIST, validateToolCallArgs } from "@ohmycrab/tools";
 import { registerRechargeRoutes } from "./recharge.js";
 import {
   decideServerToolExecution,
@@ -34,7 +34,7 @@ import {
 import { ensureRunAuditEnded, persistRunAudit, recordRunAuditEvent, sanitizeForAudit } from "./audit/runAudit.js";
 import {
   SKILL_MANIFESTS_V1,
-} from "@writing-ide/agent-core";
+} from "@ohmycrab/agent-core";
 import {
   getDefaultMarketplaceRecords,
   getMarketplaceManifest,

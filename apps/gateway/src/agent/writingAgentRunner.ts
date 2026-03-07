@@ -37,9 +37,9 @@ import {
   BUILTIN_SUB_AGENTS,
   type SubAgentBudget,
   type SubAgentDefinition,
-} from "@writing-ide/agent-core";
+} from "@ohmycrab/agent-core";
 
-import { TOOL_LIST, decodeToolName, encodeToolName, validateToolCallArgs } from "@writing-ide/tools";
+import { TOOL_LIST, decodeToolName, encodeToolName, validateToolCallArgs } from "@ohmycrab/tools";
 
 import {
   decideServerToolExecution,
@@ -781,7 +781,7 @@ function countAssistantToolUses(messages: AnthropicMessage[]): number {
   return total;
 }
 
-export class WritingAgentRunner {
+export class AgentRunner {
   private readonly ctx: RunContext;
   private readonly history: CanonicalHistoryEntry[] = [];
   private readonly runState: RunState;
@@ -2884,7 +2884,7 @@ export class WritingAgentRunner {
       (subCtx as any).mcpTools = scopedMcpTools;
     }
 
-    const subRunner = new WritingAgentRunner(subCtx);
+    const subRunner = new AgentRunner(subCtx);
     const startedAt = Date.now();
 
     // Build task message with inputArtifacts and acceptanceCriteria

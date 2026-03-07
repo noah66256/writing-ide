@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { detectRunIntent } from "@writing-ide/agent-core";
+import { detectRunIntent } from "@ohmycrab/agent-core";
 import { completionOnceViaProvider, streamChatCompletionViaProvider } from "../src/llm/providerAdapter.js";
 import { getAdapterByEndpoint } from "../src/llm/providerAdapter.js";
 import { computeIntentRouteDecisionPhase0 } from "../src/agent/runFactory.js";

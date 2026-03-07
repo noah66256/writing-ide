@@ -1,24 +1,27 @@
 {
-  "name": "@writing-ide/gateway",
+  "name": "@ohmycrab/gateway",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "npm run -w @writing-ide/kb-core build && npm run -w @writing-ide/tools build && npm run -w @writing-ide/agent-core build && tsx watch src/index.ts",
-    "build": "npm run -w @writing-ide/kb-core build && npm run -w @writing-ide/tools build && npm run -w @writing-ide/agent-core build && tsc -p tsconfig.json",
+    "dev": "npm run -w @ohmycrab/kb-core build && npm run -w @ohmycrab/tools build && npm run -w @ohmycrab/agent-core build && tsx watch src/index.ts",
+    "build": "npm run -w @ohmycrab/kb-core build && npm run -w @ohmycrab/tools build && npm run -w @ohmycrab/agent-core build && tsc -p tsconfig.json",
     "audit:ai": "tsx scripts/audit-ai-stages.ts",
-    "regress:agent": "npm run -w @writing-ide/agent-core build && tsx scripts/regress-agent-flow.ts",
-    "smoke:endpoints": "npm run -w @writing-ide/tools build && npm run -w @writing-ide/agent-core build && tsx scripts/smoke-messages-responses.ts",
-    "test:runner-turn": "tsx scripts/test-runner-turn.ts"
+    "regress:agent": "npm run -w @ohmycrab/agent-core build && tsx scripts/regress-agent-flow.ts",
+    "smoke:endpoints": "npm run -w @ohmycrab/tools build && npm run -w @ohmycrab/agent-core build && tsx scripts/smoke-messages-responses.ts",
+    "test:runner-turn": "tsx scripts/test-runner-turn.ts",
+    "smoke:runtime-parity": "tsx scripts/smoke-runtime-parity.ts"
   },
   "dependencies": {
     "@alicloud/dypnsapi20170525": "^2.0.0",
     "@fastify/cors": "^8.5.0",
     "@fastify/jwt": "^8.0.0",
     "@fastify/websocket": "^10.0.1",
-    "@writing-ide/agent-core": "0.0.0",
-    "@writing-ide/kb-core": "0.0.0",
-    "@writing-ide/tools": "0.0.0",
+    "@mariozechner/pi-agent-core": "^0.56.3",
+    "@mariozechner/pi-ai": "^0.56.3",
+    "@ohmycrab/agent-core": "0.0.0",
+    "@ohmycrab/kb-core": "0.0.0",
+    "@ohmycrab/tools": "0.0.0",
     "dotenv": "^16.6.1",
     "fastify": "^4.29.0",
     "zod": "^4.2.1"

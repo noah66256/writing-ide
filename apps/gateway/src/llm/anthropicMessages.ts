@@ -1,8 +1,8 @@
 // Anthropic Messages API 规范类型 + SSE 流适配器
 // 内部规范格式：所有工具协议统一以此表示，取代原 XML ReAct 协议
 
-import type { ToolMeta } from "@writing-ide/tools";
-import { encodeToolName, decodeToolName } from "@writing-ide/tools";
+import type { ToolMeta } from "@ohmycrab/tools";
+import { encodeToolName, decodeToolName } from "@ohmycrab/tools";
 
 // ──────────────────────────────────────────────
 // 核心类型（对齐 Anthropic Messages API v1）

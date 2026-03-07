@@ -28,15 +28,15 @@ import {
   parseRunTodoFromContextPack,
   type RunState,
   type SubAgentDefinition,
-} from "@writing-ide/agent-core";
-import { collectToolSchemaIssues } from "@writing-ide/tools";
+} from "@ohmycrab/agent-core";
+import { collectToolSchemaIssues } from "@ohmycrab/tools";
 import {
-  WritingAgentRunner,
   type RunContext,
   type SseWriter,
   type WaiterMap,
   type ModelApiType,
 } from "./writingAgentRunner.js";
+import { createRuntime } from "./runtime/RuntimeFactory.js";
 
 const TOOL_SCHEMA_ISSUES = collectToolSchemaIssues();
 let TOOL_SCHEMA_NOTICE_EMITTED = false;
@@ -3232,11 +3232,11 @@ export async function executeAgentRun(args: {
 
   (runState as any).mainDocLatest = runCtx.mainDoc;
 
-  const runner = new WritingAgentRunner(runCtx);
-  let runnerOutcome = runner.getOutcome();
+  const runtime = createRuntime({ runCtx });
+  let runnerOutcome = runtime.getOutcome();
   try {
-    await runner.run(userPrompt, body.images?.length ? body.images : undefined);
-    runnerOutcome = runner.getOutcome();
+    await runtime.run(userPrompt, body.images?.length ? body.images : undefined);
+    runnerOutcome = runtime.getOutcome();
   } catch (err: any) {
     const msg = String(err?.message ?? err ?? "RUNNER_ERROR");
     writeEvent("error", { error: msg });
@@ -3248,8 +3248,8 @@ export async function executeAgentRun(args: {
     };
   }
 
-  const failureDigest = runner.getFailureDigest();
-  const executionReport = runner.getExecutionReport();
+  const failureDigest = runtime.getFailureDigest();
+  const executionReport = runtime.getExecutionReport();
   writeEvent("run.execution.report", {
     runId,
     ...executionReport,
@@ -3289,7 +3289,7 @@ export async function executeAgentRun(args: {
         : "这次没有完成。你可以让我“继续重试”，我会从失败处接着处理。"
     );
     writeEvent("run.notice", {
-      turn: runner.getTurn(),
+      turn: runtime.getTurn(),
       kind: "error",
       title: "RunOutcome",
       message: runnerOutcome.status === "aborted"
@@ -3303,7 +3303,7 @@ export async function executeAgentRun(args: {
         failedCount: failureDigest.failedCount,
       },
     });
-    writeEvent("assistant.delta", { delta: fallbackText, turn: runner.getTurn() });
+    writeEvent("assistant.delta", { delta: fallbackText, turn: runtime.getTurn() });
   }
 
   writeEvent("run.end", {
@@ -3311,12 +3311,12 @@ export async function executeAgentRun(args: {
     reason: runEndReason,
     reasonCodes: outcomeReasonCodes,
     status: runnerOutcome.status,
-    turn: runner.getTurn(),
+    turn: runtime.getTurn(),
     executionReport,
     ...(runnerOutcome.detail ? { detail: runnerOutcome.detail } : {}),
     ...(failureDigest.failedCount > 0 ? { failureDigest } : {}),
   });
-  writeEvent("assistant.done", { reason: runEndReason, status: runnerOutcome.status, turn: runner.getTurn() });
+  writeEvent("assistant.done", { reason: runEndReason, status: runnerOutcome.status, turn: runtime.getTurn() });
 
   await persistOnce();
   } finally {

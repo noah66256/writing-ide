@@ -15,7 +15,7 @@ import {
   parseStyleLintResult,
   isWriteLikeTool,
   type ParsedToolCall,
-} from "@writing-ide/agent-core";
+} from "@ohmycrab/agent-core";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
