@@ -10,7 +10,9 @@
     "regress:agent": "npm run -w @ohmycrab/agent-core build && tsx scripts/regress-agent-flow.ts",
     "smoke:endpoints": "npm run -w @ohmycrab/tools build && npm run -w @ohmycrab/agent-core build && tsx scripts/smoke-messages-responses.ts",
     "test:runner-turn": "tsx scripts/test-runner-turn.ts",
-    "smoke:runtime-parity": "tsx scripts/smoke-runtime-parity.ts"
+    "smoke:runtime-parity": "tsx scripts/smoke-runtime-parity.ts",
+    "test:mcp-selection": "tsx scripts/validate-mcp-selection.ts",
+    "smoke:mcp-server-first": "tsx scripts/smoke-mcp-server-first.ts"
   },
   "dependencies": {
     "@alicloud/dypnsapi20170525": "^2.0.0",

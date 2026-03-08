@@ -6,7 +6,16 @@ import { type LlmTokenUsage } from "../billing.js";
 import { type OpenAiChatMessage } from "../llm/openaiCompat.js";
 import { completionOnceViaProvider, isGeminiLikeEndpoint } from "../llm/providerAdapter.js";
 import { toolNamesForMode, type AgentMode } from "./toolRegistry.js";
-import { buildToolCatalog, selectToolSubset, type ToolCatalogSummary } from "./toolCatalog.js";
+import {
+  buildMcpServerCatalog,
+  buildToolCatalog,
+  filterMcpToolsByServerIds,
+  selectMcpServerSubset,
+  selectToolSubset,
+  type McpServerSelectionSummary,
+  type McpSidecarServer,
+  type ToolCatalogSummary,
+} from "./toolCatalog.js";
 import {
   ensureRunAuditEnded,
   persistRunAudit,
@@ -849,8 +858,10 @@ export function looksLikeDirectOpenWebIntent(text: string): boolean {
   if (!t) return false;
   const hasAction = /(打开|访问|进入|前往|导航|go\s*to|open|navigate|visit)/i.test(t);
   if (!hasAction) return false;
-  const hasTarget =
-    /(https?:\/\/|www\.|百度|google|bing|github|官网|官方网站|网站|浏览器|url\b)/i.test(t);
+  const hasUrlLikeTarget = /(https?:\/\/|www\.|[a-z0-9-]+\.(?:com|cn|net|org|io|ai|app|dev|co)(?:\b|\/))/i.test(t);
+  const hasKnownSiteTarget =
+    /(百度|google|bing|github|知乎|微博|小红书|抖音|b站|哔哩|淘宝|天猫|京东|拼多多|微信公众号|公众号|微信|官网|官方网站|网站|浏览器|网页登录|登录页|url\b)/i.test(t);
+  const hasTarget = hasUrlLikeTarget || hasKnownSiteTarget;
   if (!hasTarget) return false;
   // 排除“写作页面/落地页文案”等非网页导航语义
   if (/(落地页|详情页|页面文案|页面结构|开场|脚本|文案|仿写|改写|润色)/.test(t)) return false;
@@ -1280,6 +1291,13 @@ const agentRunBodySchema = z.object({
           selectionChars: z.number().int().nonnegative().optional(),
         })
         .optional(),
+      mcpServers: z.array(z.object({
+        serverId: z.string().min(1).max(200),
+        serverName: z.string().optional().default(""),
+        status: z.string().optional().default("connected"),
+        toolCount: z.number().int().nonnegative().optional(),
+        toolNamesSample: z.array(z.string().min(1).max(500)).max(20).optional(),
+      })).max(50).optional(),
       mcpTools: z.array(z.object({
         name: z.string().min(1).max(500),
         description: z.string().optional().default(""),
@@ -1287,7 +1305,7 @@ const agentRunBodySchema = z.object({
         serverId: z.string().min(1).max(200),
         serverName: z.string().optional().default(""),
         originalName: z.string().optional().default(""),
-      })).max(200).optional(),
+      })).max(400).optional(),
     })
     .optional(),
 });
@@ -1396,7 +1414,10 @@ export type PreparedRun = {
   computePerTurnAllowed: (state: RunState) => { allowed: Set<string>; hint: string; orchestratorMode?: boolean } | null;
   resolveSubAgentModel: NonNullable<RunContext["resolveSubAgentModel"]>;
   runnerStyleLibIds: string[];
+  mcpServersFromSidecar: McpSidecarServer[];
   mcpToolsFromSidecar: Array<{ name: string; description: string; inputSchema?: any; serverId: string; serverName: string; originalName: string }>;
+  mcpToolsForRun: Array<{ name: string; description: string; inputSchema?: any; serverId: string; serverName: string; originalName: string }>;
+  mcpServerSelectionSummary: McpServerSelectionSummary;
   executionContract: ExecutionContract;
   authorization: string;
   l1MemoryFromPack: string;
@@ -1991,6 +2012,8 @@ export async function prepareAgentRun(args: {
   const runId = randomUUID();
   const styleLinterLibraries = Array.isArray(toolSidecar?.styleLinterLibraries) ? (toolSidecar.styleLinterLibraries as any[]) : [];
   const projectFilesCount = Array.isArray(toolSidecar?.projectFiles) ? (toolSidecar.projectFiles as any[]).length : 0;
+  const mcpServersFromSidecar: McpSidecarServer[] =
+    Array.isArray(toolSidecar?.mcpServers) ? (toolSidecar.mcpServers as any[]) : [];
 
   // MCP 工具：从 sidecar 提取，标记为 Desktop 执行
   // MCP 工具是用户主动配置的外部能力，始终加入允许列表（不受 toolPolicy 限制）
@@ -2054,12 +2077,36 @@ export async function prepareAgentRun(args: {
   const preserveToolNames = routeDecision.preserveToolNames;
 
   // MCP 工具参与正常相关性评分，不再全量 preserve（+500）；
-  // inferCapabilities 已识别搜索/浏览器/文档类 MCP，按 route/prompt 匹配竞争入选。
+  // 但在进入工具级排序前，先做一轮 server-first 收敛：先挑 MCP server，再只展开已选 server 的 tools。
+  const mcpServerCatalog = buildMcpServerCatalog({
+    servers: mcpServersFromSidecar,
+    tools: mcpToolsFromSidecar,
+  });
+  const mcpServerSelection = selectMcpServerSubset({
+    servers: mcpServerCatalog,
+    routeId: routeIdLower || intentRoute.routeId,
+    userPrompt,
+    preferBrowser: allowBrowserTools,
+  });
+  const mcpToolsForRun: Array<{ name: string; description: string; inputSchema?: any; serverId: string; serverName: string; originalName: string }> =
+    (mcpServerSelection.selectedServerIds.size > 0
+      ? filterMcpToolsByServerIds({
+          tools: mcpToolsFromSidecar,
+          selectedServerIds: mcpServerSelection.selectedServerIds,
+        })
+      : mcpToolsFromSidecar).map((tool: any) => ({
+        name: String(tool?.name ?? "").trim(),
+        description: String(tool?.description ?? ""),
+        inputSchema: tool?.inputSchema,
+        serverId: String(tool?.serverId ?? "").trim(),
+        serverName: String(tool?.serverName ?? "").trim(),
+        originalName: String(tool?.originalName ?? "").trim(),
+      }));
 
   const toolCatalog = buildToolCatalog({
     mode,
     allowedToolNames: baseAllowedToolNames,
-    mcpTools: mcpToolsFromSidecar,
+    mcpTools: mcpToolsForRun,
   });
   const toolSelection = selectToolSubset({
     catalog: toolCatalog,
@@ -2515,7 +2562,10 @@ export async function prepareAgentRun(args: {
       computePerTurnAllowed,
       resolveSubAgentModel,
       runnerStyleLibIds,
+      mcpServersFromSidecar,
       mcpToolsFromSidecar,
+      mcpToolsForRun,
+      mcpServerSelectionSummary: mcpServerSelection.summary,
       executionContract,
       authorization: String((request as any)?.headers?.authorization ?? ""),
       l1MemoryFromPack,
@@ -2570,7 +2620,10 @@ export async function executeAgentRun(args: {
     resolveSubAgentModel,
     mainDocFromPack,
     personaFromPack,
+    mcpServersFromSidecar,
     mcpToolsFromSidecar,
+    mcpToolsForRun,
+    mcpServerSelectionSummary,
     executionContract,
     l1MemoryFromPack,
     l2MemoryFromPack,
@@ -2646,6 +2699,8 @@ export async function executeAgentRun(args: {
               .filter(Boolean),
           ),
         ).length,
+        selectedMcpServers: mcpServerSelectionSummary.selectedServerIds,
+        selectedMcpTools: mcpToolsForRun.length,
         mcpToolNamesSample: mcpToolsFromSidecar
           .map((t: any) => String(t?.name ?? "").trim())
           .filter(Boolean)
@@ -2765,6 +2820,29 @@ export async function executeAgentRun(args: {
       mcpServerCount: mcpServerIds.length,
       mcpServerIds: mcpServerIds.slice(0, 20),
       mcpToolNamesSample,
+    },
+  });
+  writeEvent("run.notice", {
+    turn: 0,
+    kind: mcpServerSelectionSummary.selectedServerIds.length > 0 ? "info" : "debug",
+    title: "McpServerSelection",
+    message:
+      mcpServerSelectionSummary.selectedServerIds.length > 0
+        ? `本轮已先筛 MCP servers：${mcpServerSelectionSummary.selectedServerIds.join(", ")}`
+        : "本轮未命中明确 MCP server，回退为保留全部 sidecar MCP tools",
+    detail: {
+      totalServers: mcpServerSelectionSummary.totalServers,
+      selectedServerIds: mcpServerSelectionSummary.selectedServerIds,
+      prunedServerIds: mcpServerSelectionSummary.prunedServerIds,
+      rankingSample: mcpServerSelectionSummary.rankingSample,
+      rawMcpServers: mcpServersFromSidecar.map((server: any) => ({
+        serverId: String(server?.serverId ?? "").trim(),
+        serverName: String(server?.serverName ?? "").trim(),
+        status: String(server?.status ?? "connected").trim() || "connected",
+        toolCount: Math.max(0, Math.floor(Number(server?.toolCount ?? 0) || 0)),
+      })),
+      mcpToolsForRunCount: mcpToolsForRun.length,
+      mcpToolsPrunedCount: Math.max(0, mcpToolsFromSidecar.length - mcpToolsForRun.length),
     },
   });
   writeEvent("run.notice", {
@@ -3093,6 +3171,25 @@ export async function executeAgentRun(args: {
   const runTargetAgentIds = explicitTargetAgentIds.length > 0 ? explicitTargetAgentIds : undefined;
   const jsonToolFallbackEnabled = String(process.env.WRITING_IDE_ENABLE_JSON_TOOL_FALLBACK ?? "").trim() === "1";
 
+  const runtimeMcpServerIdSet = new Set(
+    mcpServerSelectionSummary.selectedServerIds.length > 0
+      ? mcpServerSelectionSummary.selectedServerIds
+      : mcpServersFromSidecar
+          .map((server: any) => String(server?.serverId ?? "").trim())
+          .filter(Boolean),
+  );
+  const runtimeMcpServers = mcpServersFromSidecar.filter((server: any) =>
+    runtimeMcpServerIdSet.has(String(server?.serverId ?? "").trim()),
+  );
+  const runtimeToolSidecar =
+    toolSidecar && typeof toolSidecar === "object"
+      ? {
+          ...(toolSidecar as Record<string, unknown>),
+          ...(runtimeMcpServers.length ? { mcpServers: runtimeMcpServers } : {}),
+          ...(mcpToolsForRun.length ? { mcpTools: mcpToolsForRun } : { mcpTools: [] }),
+        }
+      : toolSidecar;
+
   const runCtx: RunContext = {
     runId,
     mode: mode as "agent" | "chat",
@@ -3103,7 +3200,7 @@ export async function executeAgentRun(args: {
     allowedToolNames: selectedAllowedToolNames,
     systemPrompt: fullSystemPrompt,
     targetAgentIds: runTargetAgentIds,
-    toolSidecar,
+    toolSidecar: runtimeToolSidecar,
     styleLinterLibraries,
     fastify: services.fastify,
     authorization: prepared.authorization,
@@ -3148,8 +3245,11 @@ export async function executeAgentRun(args: {
   };
 
   // 将 MCP 工具传递给 runner（用于生成 tool definitions）
-  if (mcpToolsFromSidecar.length) {
-    (runCtx as any).mcpTools = mcpToolsFromSidecar;
+  if (mcpToolsForRun.length) {
+    (runCtx as any).mcpTools = mcpToolsForRun;
+  }
+  if (runtimeMcpServers.length) {
+    (runCtx as any).mcpServers = runtimeMcpServers;
   }
 
   (runState as any).mainDocLatest = runCtx.mainDoc;

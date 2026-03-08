@@ -20,7 +20,9 @@
     "dist:desktop:mac:universal": "npm run -w @ohmycrab/desktop dist:mac:universal",
     "dist:desktop:mac:pkg": "npm run -w @ohmycrab/desktop dist:mac:pkg",
     "dist:desktop:mac:pkg:x64": "npm run -w @ohmycrab/desktop dist:mac:pkg:x64",
-    "dist:desktop:mac:pkg:universal": "npm run -w @ohmycrab/desktop dist:mac:pkg:universal"
+    "dist:desktop:mac:pkg:universal": "npm run -w @ohmycrab/desktop dist:mac:pkg:universal",
+    "validate:mcp": "bash scripts/validate-mcp-stack.sh quick",
+    "validate:mcp:full": "bash scripts/validate-mcp-stack.sh full"
   }
 }
 

@@ -26,6 +26,42 @@ export type ToolCatalogSummary = {
   rankingSample: Array<{ name: string; score: number; reasons: string[] }>;
 };
 
+export type McpSidecarTool = {
+  name: string;
+  description?: string;
+  inputSchema?: any;
+  serverId?: string;
+  serverName?: string;
+  originalName?: string;
+};
+
+export type McpSidecarServer = {
+  serverId: string;
+  serverName?: string;
+  status?: string;
+  toolCount?: number;
+  toolNamesSample?: string[];
+};
+
+export type McpServerFamily = "browser" | "search" | "word" | "spreadsheet" | "pdf" | "custom";
+
+export type McpServerCatalogEntry = {
+  serverId: string;
+  serverName: string;
+  family: McpServerFamily;
+  status: string;
+  toolCount: number;
+  capabilities: string[];
+  entryToolNames: string[];
+};
+
+export type McpServerSelectionSummary = {
+  totalServers: number;
+  selectedServerIds: string[];
+  prunedServerIds: string[];
+  rankingSample: Array<{ serverId: string; family: McpServerFamily; score: number; reasons: string[] }>;
+};
+
 const ROUTE_CAPABILITY_MAP: Record<string, string[]> = {
   file_delete_only: ["run_control", "todo", "file_delete", "file_list"],
   project_search: ["run_control", "project_search", "file_read", "kb_search"],
@@ -49,11 +85,20 @@ const CAPABILITY_KEYWORDS: Array<{ capability: string; re: RegExp }> = [
   { capability: "code_exec", re: /(运行|执行脚本|命令|shell|打包|构建|部署|code\.exec)/i },
   { capability: "delegate", re: /(委派|分派|指派|派给|delegate|sub[\s_-]?agent|agent\s*delegate)/i },
   { capability: "browser_open", re: /(打开.*网页|打开网站|浏览器|网站|navigate|open\s+.*(baidu|google|url))/i },
-  // MCP 文档类：仅用户明确提到时才激活
   { capability: "mcp_spreadsheet", re: /(excel|xlsx|表格|电子表格|spreadsheet|工作表)/i },
   { capability: "mcp_word_doc", re: /(word文档|docx|word\s*文件|写.*word|导出.*word|word.*版|生成.*word)/i },
   { capability: "mcp_pdf", re: /(pdf|转.*pdf|导出.*pdf)/i },
 ];
+
+function detectPromptCapabilities(prompt: string): Set<string> {
+  const text = String(prompt ?? "").trim();
+  const out = new Set<string>();
+  if (!text) return out;
+  for (const rule of CAPABILITY_KEYWORDS) {
+    if (rule.re.test(text)) out.add(rule.capability);
+  }
+  return out;
+}
 
 export function inferCapabilities(name: string, description: string, source: ToolCatalogSource): string[] {
   const n = String(name ?? "").trim().toLowerCase();
@@ -69,8 +114,10 @@ export function inferCapabilities(name: string, description: string, source: Too
   if (n.startsWith("project.list") || /listfiles|list_files|目录/.test(d)) caps.add("file_list");
   if (n.startsWith("doc.read") || n.startsWith("project.read") || /\bread\b|\bparse\b/.test(n)) caps.add("file_read");
   if (isWriteLikeTool(name)) caps.add("file_write");
-  // 合并工具的能力映射
-  if (n === "doc.snapshot") { caps.add("file_read"); caps.add("file_write"); }
+  if (n === "doc.snapshot") {
+    caps.add("file_read");
+    caps.add("file_write");
+  }
   if (n === "memory") caps.add("kb_search");
   if (n === "agent.config") caps.add("delegate");
   if (n.startsWith("project.search") || n.startsWith("project.find")) caps.add("project_search");
@@ -82,7 +129,6 @@ export function inferCapabilities(name: string, description: string, source: Too
 
   if (source === "mcp") {
     caps.add("mcp");
-    // 搜索类 MCP 工具
     if (/(search|搜索|web_search|bochasearch|tavily|serp|bing|google)/i.test(`${n} ${d}`)) {
       caps.add("web_search");
     }
@@ -93,8 +139,6 @@ export function inferCapabilities(name: string, description: string, source: Too
       caps.add("browser_open");
       caps.add("web_fetch");
     }
-    // 文档类 MCP 工具：使用 MCP 专属能力名，避免与 builtin file_read/file_write 混淆
-    // （builtin doc.write 是本地编辑器写入，MCP 是外部文档处理，不应同权重竞争）
     const mcpText = `${n} ${d}`;
     if (/(excel|workbook|worksheet|sheet|spreadsheet)/i.test(mcpText)) {
       caps.add("mcp_spreadsheet");
@@ -131,7 +175,7 @@ function toBuiltinEntry(meta: ToolMeta): ToolCatalogEntry {
   };
 }
 
-function toMcpEntry(meta: any, mode: ToolMode): ToolCatalogEntry | null {
+function toMcpEntry(meta: McpSidecarTool, mode: ToolMode): ToolCatalogEntry | null {
   const name = String(meta?.name ?? "").trim();
   if (!name) return null;
   const description = String(meta?.description ?? "").trim();
@@ -148,10 +192,186 @@ function toMcpEntry(meta: any, mode: ToolMode): ToolCatalogEntry | null {
   };
 }
 
+function inferMcpServerFamily(capabilities: string[]): McpServerFamily {
+  const caps = new Set((capabilities ?? []).map((x) => String(x ?? "").trim()));
+  if (caps.has("browser_open")) return "browser";
+  if (caps.has("mcp_word_doc")) return "word";
+  if (caps.has("mcp_spreadsheet")) return "spreadsheet";
+  if (caps.has("mcp_pdf")) return "pdf";
+  if (caps.has("web_search") || caps.has("web_fetch")) return "search";
+  return "custom";
+}
+
+function isLikelyEntryToolName(name: string): boolean {
+  const n = String(name ?? "").trim().toLowerCase();
+  return /(^|\.)(browser_navigate|navigate|open|open_url|openurl|goto|go_to|create|new|save|export|get_doc|read_doc|search|fetch|get_page|browser_snapshot)$/.test(n);
+}
+
+export function buildMcpServerCatalog(args: {
+  servers?: McpSidecarServer[];
+  tools?: McpSidecarTool[];
+}): McpServerCatalogEntry[] {
+  const tools = Array.isArray(args.tools) ? args.tools : [];
+  const serverMap = new Map<string, McpServerCatalogEntry>();
+
+  for (const server of Array.isArray(args.servers) ? args.servers : []) {
+    const serverId = String(server?.serverId ?? "").trim();
+    if (!serverId) continue;
+    serverMap.set(serverId, {
+      serverId,
+      serverName: String(server?.serverName ?? "").trim() || serverId,
+      family: "custom",
+      status: String(server?.status ?? "connected").trim() || "connected",
+      toolCount: Math.max(0, Math.floor(Number(server?.toolCount ?? 0) || 0)),
+      capabilities: [],
+      entryToolNames: [],
+    });
+  }
+
+  for (const tool of tools) {
+    const serverId = String(tool?.serverId ?? "").trim();
+    if (!serverId) continue;
+    const serverName = String(tool?.serverName ?? "").trim() || serverId;
+    const existing = serverMap.get(serverId) ?? {
+      serverId,
+      serverName,
+      family: "custom" as McpServerFamily,
+      status: "connected",
+      toolCount: 0,
+      capabilities: [] as string[],
+      entryToolNames: [] as string[],
+    };
+    const description = String(tool?.description ?? "");
+    const caps = inferCapabilities(String(tool?.name ?? ""), description, "mcp");
+    existing.toolCount += 1;
+    existing.capabilities = Array.from(new Set([...existing.capabilities, ...caps]));
+    const toolName = String(tool?.name ?? "").trim();
+    const originalName = String(tool?.originalName ?? "").trim();
+    const entryCandidate = originalName || toolName;
+    if (isLikelyEntryToolName(entryCandidate)) {
+      existing.entryToolNames = Array.from(new Set([...existing.entryToolNames, toolName]));
+    }
+    existing.family = inferMcpServerFamily(existing.capabilities);
+    serverMap.set(serverId, existing);
+  }
+
+  return Array.from(serverMap.values())
+    .map((entry) => ({
+      ...entry,
+      toolCount: entry.toolCount || entry.entryToolNames.length,
+      capabilities: Array.from(new Set(entry.capabilities)),
+      entryToolNames: Array.from(new Set(entry.entryToolNames)).slice(0, 24),
+    }))
+    .sort((a, b) => a.serverId.localeCompare(b.serverId));
+}
+
+export function selectMcpServerSubset(args: {
+  servers?: McpServerCatalogEntry[];
+  routeId?: string | null;
+  userPrompt: string;
+  maxServers?: number;
+  preferBrowser?: boolean;
+}): { selectedServerIds: Set<string>; summary: McpServerSelectionSummary } {
+  const servers = Array.isArray(args.servers) ? args.servers : [];
+  const routeId = String(args.routeId ?? "").trim().toLowerCase();
+  const routeCaps = new Set(ROUTE_CAPABILITY_MAP[routeId] ?? []);
+  const promptCaps = detectPromptCapabilities(args.userPrompt);
+  const maxServers = Math.max(1, Math.min(4, Math.floor(Number(args.maxServers ?? 2) || 2)));
+
+  const rank = servers.map((server) => {
+    let score = 0;
+    const reasons: string[] = [];
+    if (server.status === "connected") {
+      score += 20;
+      reasons.push("connected");
+    }
+    if (server.entryToolNames.length > 0) {
+      score += 10;
+      reasons.push("entry_tools");
+    }
+    if (server.family === "browser") {
+      if (args.preferBrowser || promptCaps.has("browser_open")) {
+        score += 260;
+        reasons.push("browser_open");
+      }
+      if (routeId === "web_radar") {
+        score += 120;
+        reasons.push("route:web_radar");
+      }
+    }
+    if (server.family === "search") {
+      if (promptCaps.has("web_search") || routeCaps.has("web_search")) {
+        score += 220;
+        reasons.push("search_needed");
+      }
+      if (promptCaps.has("web_fetch") || routeCaps.has("web_fetch")) {
+        score += 80;
+        reasons.push("fetch_needed");
+      }
+    }
+    if (server.family === "word" && promptCaps.has("mcp_word_doc")) {
+      score += 240;
+      reasons.push("word_doc");
+    }
+    if (server.family === "spreadsheet" && promptCaps.has("mcp_spreadsheet")) {
+      score += 240;
+      reasons.push("spreadsheet");
+    }
+    if (server.family === "pdf" && promptCaps.has("mcp_pdf")) {
+      score += 220;
+      reasons.push("pdf");
+    }
+    if (server.family === "custom" && promptCaps.size === 0) {
+      score += 5;
+      reasons.push("custom_fallback");
+    }
+    const matchedIntent = reasons.some((reason) => !["connected", "entry_tools", "custom_fallback"].includes(reason));
+    if (!matchedIntent && server.family !== "custom") {
+      score = 0;
+      reasons.push(promptCaps.size > 0 ? "irrelevant_for_prompt" : "no_server_signal");
+    }
+    return { serverId: server.serverId, family: server.family, score, reasons };
+  });
+
+  rank.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return a.serverId.localeCompare(b.serverId);
+  });
+
+  const selected = new Set<string>();
+  for (const item of rank) {
+    if (selected.size >= maxServers) break;
+    if (item.score <= 0) continue;
+    selected.add(item.serverId);
+  }
+
+  const selectedServerIds = Array.from(selected);
+  const prunedServerIds = servers.map((x) => x.serverId).filter((id) => !selected.has(id));
+  return {
+    selectedServerIds: selected,
+    summary: {
+      totalServers: servers.length,
+      selectedServerIds: selectedServerIds.slice(0, 12),
+      prunedServerIds: prunedServerIds.slice(0, 24),
+      rankingSample: rank.slice(0, 12),
+    },
+  };
+}
+
+export function filterMcpToolsByServerIds(args: {
+  tools?: McpSidecarTool[];
+  selectedServerIds?: Set<string>;
+}): McpSidecarTool[] {
+  const tools = Array.isArray(args.tools) ? args.tools : [];
+  const selected = args.selectedServerIds ?? new Set<string>();
+  if (selected.size === 0) return tools;
+  return tools.filter((tool) => selected.has(String(tool?.serverId ?? "").trim()));
+}
+
 export function buildToolCatalog(args: {
   mode: ToolMode;
   allowedToolNames: Set<string>;
-  mcpTools?: Array<{ name: string; description?: string; inputSchema?: any; serverId?: string; serverName?: string }>;
+  mcpTools?: McpSidecarTool[];
 }): ToolCatalogEntry[] {
   const out: ToolCatalogEntry[] = [];
   for (const tool of TOOL_LIST) {
@@ -168,16 +388,6 @@ export function buildToolCatalog(args: {
     if (entry) out.push(entry);
   }
 
-  return out;
-}
-
-function detectPromptCapabilities(prompt: string): Set<string> {
-  const text = String(prompt ?? "").trim();
-  const out = new Set<string>();
-  if (!text) return out;
-  for (const rule of CAPABILITY_KEYWORDS) {
-    if (rule.re.test(text)) out.add(rule.capability);
-  }
   return out;
 }
 
@@ -222,7 +432,6 @@ export function selectToolSubset(args: {
       score += 80;
       reasons.push("mcp_browser_boost");
     }
-    // MCP 生命周期加权：仅当 prompt 命中相关 Office/文档能力时，入口工具（create/open/save/export）加分
     if (entry.source === "mcp") {
       const hasRelevantCap = entry.capabilities.some((c) =>
         (c === "mcp_word_doc" && promptCaps.has("mcp_word_doc")) ||

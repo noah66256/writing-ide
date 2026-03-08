@@ -400,6 +400,13 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             const servers = await mcpApi.getServers();
             const serverList = Array.isArray(servers) ? servers : [];
             const connectedWithTools = serverList.filter((s: any) => s.status === "connected" && Array.isArray(s.tools) && s.tools.length);
+            const mcpServers = connectedWithTools.map((s: any) => ({
+              serverId: s.id,
+              serverName: s.name,
+              status: s.status,
+              toolCount: Array.isArray(s.tools) ? s.tools.length : 0,
+              toolNamesSample: Array.isArray(s.tools) ? s.tools.slice(0, 12).map((t: any) => String(t?.name ?? "")).filter(Boolean) : [],
+            }));
             const mcpTools = connectedWithTools
               .flatMap((s: any) => s.tools.map((t: any) => ({
                 name: `mcp.${s.id}.${t.name}`,
@@ -409,11 +416,13 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                 serverName: s.name,
                 originalName: t.name,
               })));
+            if (mcpServers.length) out.mcpServers = mcpServers;
             if (mcpTools.length) out.mcpTools = mcpTools;
             log("info", "sidecar.mcp", {
               mcpApiAvailable: true,
               servers: serverList.length,
               connected: connectedWithTools.length,
+              selectedServers: mcpServers.map((s: any) => s.serverId),
               tools: mcpTools.length,
             });
           } else {

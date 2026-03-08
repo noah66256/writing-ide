@@ -47,7 +47,7 @@
   - 登录鉴权（邮箱验证码、手机号验证码）
   - 积分余额/流水/扣费（真实积分来源）
   - 模型代理（OpenAI-compatible、SSE 流式）
-  - Agent 编排入口：`/api/agent/run/stream`
+  - Agent 编排主入口：`/ws/agent/run`（历史兼容：`/api/agent/run/stream`）
   - ToolConfig（热生效）：Web Search、SMS Verify、Capabilities Registry（Tools/Skills enable/disable）
 - **Admin-Web（静态站点 + 轻量 Node server 反代 /api）**：负责 B 端配置与管理。
 
@@ -55,10 +55,10 @@
 
 我们采用“**Gateway 编排 + Desktop 执行工具**”的开发期形态：
 
-- Desktop 发送：`POST /api/agent/run/stream`（SSE）到 Gateway
-- Gateway 选择模型、输出流式文本/或 `<tool_calls>`（XML）
+- Desktop 发送：`GET /ws/agent/run`（WebSocket，全双工）到 Gateway
+- Gateway 选择模型、通过 WS 下发事件（`assistant.delta` / `tool.call` 等）或 `<tool_calls>`（XML）
 - Desktop 收到 `tool.call` 后执行本地工具（文件读写、编辑器选区、KB 查询等）并回传：
-  - `POST /api/agent/run/:runId/tool_result`
+  - WebSocket `tool_result` 消息（历史兼容：`POST /api/agent/run/:runId/tool_result`）
 - Gateway 把工具结果注入后续回合，直到 `run.end`
 
 > 这条链路的好处：Desktop 能做丰富的本地交互（选区改写、diff、撤销），同时网关能做审计与计费。
@@ -380,10 +380,10 @@ Admin-Web 是静态资源 + 轻量 server：
 
 #### 11.2 想“看懂代码怎么跑”的人（再加 1 小时）
 
-- Gateway：`apps/gateway/src/index.ts`（重点看 `/api/agent/run/stream`、`policy.decision`、auth/billing/tool-config）
+- Gateway：`apps/gateway/src/index.ts`（重点看 `/ws/agent/run`（以及历史兼容的 `/api/agent/run/stream`）、`policy.decision`、auth/billing/tool-config）
 - Tool Registry：`packages/tools/src/index.ts`（工具单一来源）
 - Skills：`packages/agent-core/src/skills.ts`
-- Desktop：`apps/desktop/src/components/AgentPane.tsx`（UI + SSE + tool blocks）、`apps/desktop/src/agent/gatewayAgent.ts`（调用 Gateway）
+- Desktop：`apps/desktop/src/components/AgentPane.tsx`（UI + tool blocks）、`apps/desktop/src/agent/wsTransport.ts`（WS 主链路）、`apps/desktop/src/agent/gatewayAgent.ts`（历史/兼容入口）
 
 #### 11.3 推荐给 LLM 的“理解提示词”（可复制）
 
