@@ -33,6 +33,7 @@ import { usePersonaStore } from "@/state/personaStore";
 import { BUILTIN_SUB_AGENTS } from "@ohmycrab/agent-core";
 import {
   injectFileRefLinksInMarkdown,
+  wrapBareUrlsInMarkdown,
   parseFileRefHref,
   resolveProjectAbsPath,
 } from "@/utils/fileRefLink";
@@ -399,7 +400,7 @@ function AssistantMessage({
   const rootDir = useProjectStore((s) => s.rootDir);
 
   const markdownText = useMemo(
-    () => injectFileRefLinksInMarkdown(step.text),
+    () => injectFileRefLinksInMarkdown(wrapBareUrlsInMarkdown(step.text)),
     [step.text],
   );
 

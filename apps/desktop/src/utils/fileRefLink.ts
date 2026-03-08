@@ -136,3 +136,34 @@ export function injectFileRefLinksInMarkdown(text: string): string {
     })
     .join("");
 }
+
+/**
+ * 将裸 URL 转为 markdown 链接 `[url](url)`。
+ * 解决 remark-gfm autolink 对 CJK 字符边界处理不当导致后续中文被吞入链接的问题。
+ * URL 字符限定为 ASCII 可打印范围，自动排除 CJK 字符。
+ * 必须在 injectFileRefLinksInMarkdown 之前调用。
+ */
+export function wrapBareUrlsInMarkdown(text: string): string {
+  const src = String(text ?? "");
+  return src
+    .split(MD_LINK_OR_CODE_RE)
+    .map((chunk) => {
+      if (!chunk) return chunk;
+      // 跳过代码块、行内代码、已有 markdown 链接
+      if (chunk.startsWith("```")) return chunk;
+      if (chunk.startsWith("`") && chunk.endsWith("`")) return chunk;
+      if (/^\[.*\]\(.*\)$/.test(chunk)) return chunk;
+
+      // 裸 URL → markdown 链接（URL 字符限定为 ASCII 范围，自然排除 CJK）
+      return chunk.replace(
+        /https?:\/\/[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+/g,
+        (url) => {
+          // 去掉末尾可能被误包含的 ASCII 标点（句号、逗号、分号等）
+          const cleaned = url.replace(/[.,;:!?)}\]]+$/, "");
+          if (!cleaned || cleaned.length <= 8) return url;
+          return `[${cleaned}](${cleaned})`;
+        },
+      );
+    })
+    .join("");
+}
