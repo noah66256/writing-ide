@@ -3,7 +3,6 @@ import { persist } from "zustand/middleware";
 import { useWorkspaceStore } from "./workspaceStore";
 import { getGatewayBaseUrl } from "../agent/gatewayUrl";
 import { useProjectStore } from "./projectStore";
-import { useLayoutStore } from "./layoutStore";
 import { useRunStore } from "./runStore";
 import { useAuthStore } from "./authStore";
 import { useDialogStore } from "./dialogStore";
@@ -1632,7 +1631,7 @@ function buildArtifacts(args: { format: KbFormat; sourceDocId: string; text: str
 }
 
 function gatewayBaseUrl() {
-  // 与 AgentPane 的策略一致：
+  // 与当前对话主界面的请求策略一致：
   // - dev：返回 ""，让 fetch 走相对 /api（Vite proxy）
   // - packaged(app://)：必须走绝对地址，否则会变成 app://-/api/... → net::ERR_FILE_NOT_FOUND
   // - 支持 localStorage 覆盖（writing-ide.gatewayUrl）
@@ -2322,16 +2321,12 @@ export const useKbStore = create<KbState>()(
         const res = await api.pickDirectory();
         if (!res?.ok || !res.dir) return;
         get().setBaseDir(res.dir);
-        // 展开左侧 KB，给用户反馈
-        useLayoutStore.getState().openSection("kb");
         await get().refreshLibraries().catch(() => void 0);
       },
 
       ensureReady: async () => {
         const dir = get().baseDir;
         if (dir) return true;
-        // 引导用户选择目录
-        useLayoutStore.getState().openSection("kb");
         return false;
       },
 

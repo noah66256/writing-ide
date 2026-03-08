@@ -549,7 +549,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const prefix = `${fromRel}/`;
     let toRel = toRel0;
 
-    // 文件：如果用户没写后缀，自动继承原后缀（否则刷新后会“看起来像丢了”，因为 Explorer 只展示 .md/.mdx/.txt）
+    // 文件：如果用户没写后缀，自动继承原后缀，避免重命名后在当前项目视图里看起来像“丢了”。
     if (isFile) {
       const fromExt = extnameLower(fromRel);
       if (fromExt && !hasExtInBaseName(toRel)) {
