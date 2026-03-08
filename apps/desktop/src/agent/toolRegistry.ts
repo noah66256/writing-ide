@@ -6,6 +6,7 @@ import { useWritingBatchStore } from "../state/writingBatchStore";
 import { useTeamStore, getEffectiveAgents, validateCustomAgent, generateCustomAgentId } from "../state/teamStore";
 import { useFileOpPermissionStore } from "../state/fileOpPermissionStore";
 import { requestInlineFileOpConfirm } from "../state/inlineFileOpConfirm";
+import { buildCurrentSnapshot, useConversationStore } from "../state/conversationStore";
 import { TOOL_LIST } from "@ohmycrab/tools";
 import { getGatewayBaseUrl } from "./gatewayUrl";
 
@@ -3022,6 +3023,9 @@ const tools: ToolDefinition[] = [
               updatedAt: new Date().toISOString(),
             },
           });
+          try {
+            await useConversationStore.getState().flushDraftSnapshotNow(buildCurrentSnapshot());
+          } catch {}
         } catch {}
         return failToolResult({
           code: "NO_PROJECT",
@@ -3077,6 +3081,9 @@ const tools: ToolDefinition[] = [
           if (wf && String(wf.kind ?? "").trim().toLowerCase() === "project_open_resume_write") {
             rs.updateMainDoc({ workflowV1: { status: "done", lastEndReason: "resumed_write_done", updatedAt: new Date().toISOString() } });
           }
+          try {
+            await useConversationStore.getState().flushDraftSnapshotNow(buildCurrentSnapshot());
+          } catch {}
         } catch {}
         return {
           ok: true,
@@ -3132,6 +3139,9 @@ const tools: ToolDefinition[] = [
         if (wf && String(wf.kind ?? "").trim().toLowerCase() === "project_open_resume_write") {
           rs.updateMainDoc({ workflowV1: { status: "done", lastEndReason: "resumed_write_done", updatedAt: new Date().toISOString() } });
         }
+        try {
+          await useConversationStore.getState().flushDraftSnapshotNow(buildCurrentSnapshot());
+        } catch {}
       } catch {}
 
       return {

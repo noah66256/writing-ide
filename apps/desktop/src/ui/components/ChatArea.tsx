@@ -199,6 +199,10 @@ export function ChatArea() {
   const steps = useRunStore((s) => s.steps);
   const isRunning = useRunStore((s) => s.isRunning);
   const todoList = useRunStore((s) => s.todoList);
+  const mainDoc = useRunStore((s) => s.mainDoc);
+  const kbAttachedLibraryIds = useRunStore((s) => s.kbAttachedLibraryIds);
+  const ctxRefs = useRunStore((s) => s.ctxRefs);
+  const pendingArtifacts = useRunStore((s) => s.pendingArtifacts);
   const mode = useRunStore((s) => s.mode);
   const model = useRunStore((s) => s.model);
 
@@ -235,7 +239,19 @@ export function ChatArea() {
 
   // 自动保存草稿到 conversationStore，同时更新活跃对话
   useEffect(() => {
-    if (steps.length === 0) return;
+    const hasDraftState =
+      steps.length > 0 ||
+      todoList.length > 0 ||
+      pendingArtifacts.length > 0 ||
+      ctxRefs.length > 0 ||
+      kbAttachedLibraryIds.length > 0 ||
+      Object.values(mainDoc ?? {}).some((v) => {
+        if (v == null) return false;
+        if (typeof v === "string") return Boolean(v.trim());
+        if (typeof v === "object") return Object.keys(v as Record<string, unknown>).length > 0;
+        return true;
+      });
+    if (!hasDraftState) return;
     const timer = setTimeout(() => {
       const snap = buildCurrentSnapshot();
       useConversationStore.getState().setDraftSnapshot(snap);
@@ -245,7 +261,7 @@ export function ChatArea() {
       }
     }, 2000);
     return () => clearTimeout(timer);
-  }, [steps]);
+  }, [steps, mainDoc, todoList, kbAttachedLibraryIds, ctxRefs, pendingArtifacts, mode, model]);
 
   // 卸载时取消运行
   useEffect(() => {

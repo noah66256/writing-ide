@@ -245,3 +245,82 @@
 - typed fragments
 - sidecar state
 - initial baseline + incremental updates
+
+---
+
+## 11. P2：跨 app 重启恢复（本轮新增）
+
+### 11.1 目标
+
+在以下场景里，也能继续恢复上轮未落盘写入：
+
+1. `doc.write` 因未打开项目目录失败
+2. 系统已经生成并缓存了 pending artifact
+3. 用户还没来得及继续操作，桌面应用被关闭 / 崩溃 / 更新重启
+4. 用户重新打开应用，再打开项目目录并回复“保存吧/继续”
+5. 系统仍能恢复到上轮待执行的 `doc.write`
+
+### 11.2 本轮判断
+
+这层不需要新造一套 `pending-artifacts.json`。
+
+原因：仓库里已经有现成的磁盘持久化链路：
+
+- `conversationStore` 会把 `draftSnapshot` 落到桌面端历史存储
+- `RunSnapshot` 已经包含：
+  - `mainDoc`
+  - `todoList`
+  - `ctxRefs`
+  - `pendingArtifacts`
+  - `projectDir`
+
+所以本轮真正的问题不是“没有磁盘层”，而是：
+
+- 草稿快照的落盘时机太晚（主要靠对话 `steps` 的 2 秒防抖）
+- 关键状态变化（如 `workflowV1` / `pendingArtifacts`）不一定会立刻触发持久化
+
+### 11.3 本轮 P2 最小实现
+
+#### 做
+
+- 在 `conversationStore` 增加“立即刷盘当前草稿快照”的能力
+- 在 `doc.write -> NO_PROJECT` 挂起时，立即把最新 snapshot 刷到磁盘
+- 在恢复写入成功、清理 pending artifact 后，再立即刷一次磁盘
+- `ChatArea` 草稿自动保存不再只盯 `steps`，同时关注：
+  - `mainDoc`
+  - `todoList`
+  - `ctxRefs`
+  - `pendingArtifacts`
+  - `kbAttachedLibraryIds`
+
+#### 不做
+
+- 不新增独立 DB / service
+- 不新建 artifact 专用文件格式
+- 不做所有工具的跨重启恢复，只继续覆盖 `doc.write + no_project`
+
+### 11.4 验收用例（新增）
+
+#### Case D：挂起后关闭 app，再打开继续保存
+
+1. 用户要求生成并保存文档
+2. `doc.write` 因 `NO_PROJECT` 失败
+3. 系统已写入：
+   - `pendingArtifacts`
+   - `workflowV1.resumeAction`
+   - `draftSnapshot`（磁盘）
+4. 用户关闭整个桌面应用
+5. 重新打开应用
+6. 草稿快照从磁盘恢复
+7. 用户打开项目目录并回复“保存吧”
+8. 系统直接恢复 `doc.write`
+9. 不重新生成正文
+
+### 11.5 后续真正的大一层
+
+如果后面还要继续做更强恢复，再升级到：
+
+- per-conversation artifact journal
+- artifact checksum / size 校验
+- 启动时恢复提示条（告诉用户“有 1 个未完成写入可继续”）
+- 通用 resume engine（不只 `doc.write`）

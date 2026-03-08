@@ -95,6 +95,7 @@ type ConversationState = {
   updateConversation: (id: string, patch: { snapshot?: RunSnapshot; title?: string }) => void;
   setActiveConvId: (id: string | null) => void;
   setDraftSnapshot: (snap: RunSnapshot | null) => void;
+  flushDraftSnapshotNow: (snap?: RunSnapshot | null) => Promise<void>;
   clearAll: () => void;
 };
 
@@ -320,6 +321,38 @@ export const useConversationStore = create<ConversationState>()(
           schedulePersistToDisk({ conversations, draftSnapshot: next });
           return { draftSnapshot: next };
         });
+      },
+      flushDraftSnapshotNow: async (snap) => {
+        const next = snap && typeof snap === "object" ? (snap as any) : snap === null ? null : buildCurrentSnapshot();
+        const activeConvId = get().activeConvId;
+        const prevConversations = get().conversations ?? [];
+        const conversations = activeConvId
+          ? prevConversations.map((x) => (x.id === activeConvId ? { ...x, snapshot: next as any, updatedAt: Date.now() } : x))
+          : prevConversations;
+        set({ draftSnapshot: next as any, conversations });
+
+        const api = window.desktop?.history;
+        if (!api?.saveConversations || !diskWriteAllowed) {
+          schedulePersistToDisk({ conversations, draftSnapshot: next as any });
+          return;
+        }
+
+        if (persistTimer) {
+          clearTimeout(persistTimer);
+          persistTimer = null;
+        }
+        pendingPayload = null;
+        try {
+          await api.saveConversations({
+            version: 1,
+            updatedAt: Date.now(),
+            conversations: capConversations(conversations),
+            draftSnapshot: next as any,
+            activeConvId: activeConvId ?? null,
+          });
+        } catch {
+          schedulePersistToDisk({ conversations, draftSnapshot: next as any });
+        }
       },
       clearAll: () =>
         set(() => {
