@@ -1191,7 +1191,7 @@ export function buildDialogueTurnsFromSteps(steps: any[], opts?: BuildDialogueTu
       continue;
     }
     if (st.type === "assistant") {
-      if (st.hidden) continue;
+      if (st.hidden || st.variant === "progress") continue;
       if (!curUser) continue;
       const t = String(st.text ?? "").trim();
       if (!t) continue;

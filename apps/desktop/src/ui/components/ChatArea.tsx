@@ -626,6 +626,20 @@ function AssistantMessage({
 }) {
   if (step.hidden) return null;
 
+  if (step.variant === "progress") {
+    return (
+      <div className="flex gap-3 py-1.5">
+        <div className="shrink-0 w-7" />
+        <div className="flex-1 min-w-0">
+          <div className="inline-flex items-center gap-2 rounded-md border border-border/60 bg-surface-alt/60 px-3 py-1.5 text-[12px] text-text-muted">
+            <Bot size={12} className="text-accent" />
+            <span className="leading-5">{step.text}</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const subAgent = step.agentId
     ? BUILTIN_SUB_AGENTS.find((a) => a.id === step.agentId)
     : null;
@@ -705,7 +719,7 @@ function AssistantMessage({
         </div>
 
         {/* 消息操作栏 */}
-        {!step.streaming && step.text && (
+        {step.variant !== "progress" && !step.streaming && step.text && (
           <div className="flex items-center gap-1 mt-3 opacity-0 hover:opacity-100 transition-opacity duration-fast">
             <button
               className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-text-faint hover:text-text-muted hover:bg-surface-alt transition-colors duration-fast"

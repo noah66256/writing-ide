@@ -131,6 +131,53 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
   const runStartStepCount = (rt.getSteps() ?? []).length;
   let runDoneNote = "";
   let sawMaxTurnsExceeded = false;
+  let lastProgressPhase: string | null = null;
+  let lastProgressText = "";
+  let lastProgressCheckpointAt = 0;
+  let sawExternalToolPhase = false;
+
+  const isInternalToolName = (name: string) => {
+    const tool = String(name ?? "").trim();
+    return !tool || tool === "time.now" || tool === "run.setTodoList" || tool === "run.done" || tool === "run.mainDoc.get" || tool === "run.mainDoc.update" || tool === "run.todo" || tool.startsWith("run.todo.");
+  };
+
+  const finishMainAssistantBubble = () => {
+    if (!currentAssistantId) return;
+    finishAssistant(currentAssistantId);
+    if (assistantId === currentAssistantId) assistantId = null;
+    currentAssistantId = null;
+  };
+
+  const emitProgressCheckpoint = (phase: string, text: string, opts?: { force?: boolean }) => {
+    const now = Date.now();
+    const label = String(text ?? "").trim();
+    if (!rt.getIsRunning() || !label) return;
+    if (!opts?.force) {
+      if (phase && lastProgressPhase === phase && now - lastProgressCheckpointAt < 1200) return;
+      if (label === lastProgressText && now - lastProgressCheckpointAt < 2500) return;
+    }
+    finishMainAssistantBubble();
+    addAssistant(label, false, false, { variant: "progress" });
+    lastProgressPhase = phase || null;
+    lastProgressText = label;
+    lastProgressCheckpointAt = now;
+  };
+
+  const progressTextForTool = (name: string, args: Record<string, unknown>) => {
+    const tool = String(name ?? "").trim();
+    if (isInternalToolName(tool)) return null;
+    if (tool === "kb.search") return { phase: "kb", text: "我先翻一下知识库里的相关资料。" };
+    if (tool === "web.search" || tool === "web.fetch") return { phase: "search", text: "我先补几条资料，再继续。" };
+    if (tool === "doc.write" || tool === "doc.previewDiff" || tool === "doc.splitToDir") return { phase: "delivery", text: "我在整理结果，准备交付。" };
+    if (tool.startsWith("mcp.")) {
+      const lower = tool.toLowerCase();
+      if (/(browser_|navigate|goto|snapshot|click|fill|type|wait_for|run_code)/.test(lower)) return { phase: "browser", text: "我先看一下当前网页状态。" };
+      if (/(search|web_search|fetch|get_page)/.test(lower)) return { phase: "search", text: "我先补几条资料，再继续。" };
+      if (/(create_document|docx|word|create_workbook|sheet|excel)/.test(lower)) return { phase: "delivery", text: "我在整理结果，准备交付。" };
+      return { phase: "tool", text: humanizeToolActivity(tool, args).includes("网页") ? "我先处理一下网页任务。" : "我先处理一下这一步。" };
+    }
+    return null;
+  };
   const updateWorkflowSticky = (patch: Record<string, unknown>) => {
     try {
       const main = (rt.getMainDoc() ?? {}) as any;
@@ -207,7 +254,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
   const deriveWaitingWorkflowPatchFromAssistant = () => {
     try {
       const steps = (rt.getSteps() ?? []).slice(runStartStepCount) as any[];
-      const lastAssistant = [...steps].reverse().find((step) => step && step.type === "assistant" && String(step.text ?? "").trim());
+      const lastAssistant = [...steps].reverse().find((step) => step && step.type === "assistant" && step.variant !== "progress" && String(step.text ?? "").trim());
       const lastText = String(lastAssistant?.text ?? "").trim();
       if (!lastText) return null;
       const main = (rt.getMainDoc() ?? {}) as any;
@@ -726,7 +773,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
         const stepsNow = rt.getSteps() ?? [];
         const runSteps = stepsNow.slice(runStartStepCount);
         const hasAssistantText = runSteps.some(
-          (s: any) => s && s.type === "assistant" && !s.hidden && String(s.text ?? "").trim().length > 0,
+          (s: any) => s && s.type === "assistant" && s.variant !== "progress" && !s.hidden && String(s.text ?? "").trim().length > 0,
         );
         if (hasAssistantText) return;
         const failedToolSteps = runSteps.filter((s: any) => s && s.type === "tool" && s.status === "failed");
@@ -832,12 +879,14 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           if (event === "run.start") {
             runId = data?.runId ? String(data.runId) : runId;
             log("info", "agent.run.start", data);
+            emitProgressCheckpoint("planning", "我先梳理一下任务。", { force: true });
           }
 
           // ---- subagent.start ----
           if (event === "subagent.start") {
             const agName = String(data?.agentName ?? data?.agentId ?? "");
             log("info", "subagent.start", data);
+            emitProgressCheckpoint("subagent", agName ? `我先让${agName}去处理这一段。` : "我先分一段给子 Agent 处理。");
             if (rt.getIsRunning()) {
               setActivity(agName ? `${agName} 正在执行任务…` : "子 Agent 正在执行任务…", { resetTimer: true });
             }
@@ -960,6 +1009,9 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               updateWorkflowSticky({ status: "waiting_user", lastEndReason: "max_turns" });
               markCompositeTaskWaitingOnMaxTurns();
             }
+            if (title === "ExecutionContract" || title === "McpServerSelection" || title === "CompositeTaskPlan") {
+              emitProgressCheckpoint("planning", "我先把执行路径梳理一下。");
+            }
             if (rt.getIsRunning() && title) {
               setActivity(`系统：${title}`, { resetTimer: true });
             }
@@ -974,6 +1026,10 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           if (event === "assistant.start") {
             const evtAgentId = data?.agentId ? String(data.agentId) : null;
             log("info", "assistant.start", data);
+            if (!evtAgentId && sawExternalToolPhase) {
+              emitProgressCheckpoint("synthesis", "我先把拿到的信息整理一下。");
+              sawExternalToolPhase = false;
+            }
             if (evtAgentId) {
               const prev = subAgentBubbles.get(evtAgentId);
               if (prev) { finishAssistant(prev); subAgentBubbles.delete(evtAgentId); }
@@ -1019,6 +1075,11 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             const rawArgs = (data?.args ?? {}) as Record<string, unknown>;
             const executedBy = String(data?.executedBy ?? "desktop");
             const parsedArgsPreview = parseSseToolArgs(rawArgs);
+            const progressHint = progressTextForTool(name, parsedArgsPreview);
+            if (progressHint) {
+              emitProgressCheckpoint(progressHint.phase, progressHint.text);
+              sawExternalToolPhase = true;
+            }
 
             log("info", "tool.call", { toolCallId, name });
 

@@ -149,7 +149,7 @@ export function NavSidebar() {
     // 找第一条用户消息 + 已完成的助手回复
     const allSteps = useRunStore.getState().steps ?? [];
     const firstUser = allSteps.find((s: any) => s.type === "user") as any;
-    const hasCompletedAssistant = allSteps.some((s: any) => s.type === "assistant" && !s.streaming && String(s.text ?? "").trim());
+    const hasCompletedAssistant = allSteps.some((s: any) => s.type === "assistant" && s.variant !== "progress" && !s.streaming && String(s.text ?? "").trim());
     if (!firstUser || !hasCompletedAssistant) return;
 
     const firstMsg = String(firstUser.text ?? "").trim().slice(0, 300);

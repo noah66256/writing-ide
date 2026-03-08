@@ -316,6 +316,7 @@ export function createRunTarget(convId: string) {
         text: initialText,
         streaming,
         hidden,
+        variant: opts?.variant === "progress" ? "progress" : "default",
         ...(opts?.agentId ? { agentId: opts.agentId, agentName: opts.agentName } : {}),
       };
       if (isActive()) {

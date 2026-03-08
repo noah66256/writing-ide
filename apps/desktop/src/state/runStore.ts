@@ -71,6 +71,7 @@ export type AssistantStep = {
   text: string;
   streaming?: boolean;
   hidden?: boolean;
+  variant?: "default" | "progress";
   quickActions?: Array<
     | "open_kb_manager"
     | "kb_done_continue"
@@ -222,7 +223,7 @@ type RunState = {
     initialText?: string,
     streaming?: boolean,
     hidden?: boolean,
-    opts?: { agentId?: string; agentName?: string; quickActions?: AssistantStep["quickActions"] },
+    opts?: { agentId?: string; agentName?: string; quickActions?: AssistantStep["quickActions"]; variant?: AssistantStep["variant"] },
   ) => string;
   appendAssistantDelta: (stepId: string, delta: string) => void;
   finishAssistant: (stepId: string) => void;
@@ -612,7 +613,7 @@ export const useRunStore = create<RunState>()(
     initialText = "",
     streaming = false,
     hidden = false,
-    opts?: { agentId?: string; agentName?: string; quickActions?: AssistantStep["quickActions"] },
+    opts?: { agentId?: string; agentName?: string; quickActions?: AssistantStep["quickActions"]; variant?: AssistantStep["variant"] },
   ) => {
     const id = makeId("a");
     set((s) => ({
@@ -624,6 +625,7 @@ export const useRunStore = create<RunState>()(
           text: initialText,
           streaming,
           hidden,
+          variant: opts?.variant === "progress" ? "progress" : "default",
           ...(opts?.agentId ? { agentId: opts.agentId, agentName: opts.agentName } : {}),
           ...(Array.isArray(opts?.quickActions) && opts!.quickActions!.length ? { quickActions: opts!.quickActions } : {}),
         },
