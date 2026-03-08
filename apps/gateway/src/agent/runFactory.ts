@@ -2090,11 +2090,11 @@ export async function prepareAgentRun(args: {
   const hasWebToolSelected = selectedAllowedToolNames.has("web.search");
   // 也检查 MCP 搜索/浏览器工具是否被选入最终工具列表
   // 用宽松模式匹配 serverId，兼容 playwright-local、tavily-search 等变体
-  const hasSelectedMcpSearch = Array.from(selectedAllowedToolNames).some((n) =>
+  const hasSelectedMcpWebTool = Array.from(selectedAllowedToolNames).some((n) =>
     /^mcp\.[^.]*(?:search|bocha|playwright|browser|tavily)[^.]*\./i.test(n),
   );
   let webSearchHint = "";
-  if (hasWebToolSelected || hasSelectedMcpSearch) {
+  if (hasWebToolSelected || hasSelectedMcpWebTool) {
     // 检测 Bocha API 是否已配置（Gateway 侧直接执行）
     const webSearchRuntime = await services.toolConfig.resolveWebSearchRuntime().catch(() => null);
     const hasBochaApi = !!webSearchRuntime?.isEnabled && !!webSearchRuntime?.apiKey;
@@ -2106,9 +2106,12 @@ export async function prepareAgentRun(args: {
       /^mcp\.[^.]*(?:playwright|browser)[^.]*\./i.test(n),
     );
     if (hasBochaApi || hasDedicatedSearchMcp) {
-      webSearchHint = "联网搜索已就绪（搜索服务已连接）。需要搜索时使用 web.search / web.fetch。";
+      webSearchHint = "联网搜索已就绪（搜索服务已连接）。需要搜索信息时使用 web.search / web.fetch。";
+      if (hasPlaywrightMcp) {
+        webSearchHint += " 浏览器 MCP 也可用——用户要求「打开/访问/导航到」某网站时，直接用浏览器 MCP 工具（如 browser_navigate），不要先调 web.search。";
+      }
     } else if (hasPlaywrightMcp) {
-      webSearchHint = "联网能力可用（浏览器 MCP 已连接）。可直接使用已列出的浏览器 MCP 工具打开网页和获取内容。如果 web.search / web.fetch 可用也可使用。";
+      webSearchHint = "网页访问/浏览器自动化可用（浏览器 MCP 已连接）。用户要求打开/访问网站时直接使用浏览器 MCP 工具导航，不要先调 web.search。搜索信息时 web.search / web.fetch 如可用也可使用。";
     } else if (hasWebToolSelected) {
       webSearchHint = "web.search / web.fetch 工具已就绪但搜索后端未配置，实际调用可能失败。建议提醒用户在设置页配置搜索服务。";
     } else {

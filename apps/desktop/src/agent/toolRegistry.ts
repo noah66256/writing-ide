@@ -2779,17 +2779,18 @@ const tools: ToolDefinition[] = [
       const suggestedName = String((args as any).suggestedName ?? "").trim();
       const existingPaths = new Set(s.files.map((f) => f.path));
 
-      // 二进制格式拦截：.docx/.pptx/.xlsx/.pdf 等无法用纯文本写入，必须用 code.exec 生成
+      // 二进制格式拦截：.docx/.pptx/.xlsx/.pdf 等无法用纯文本写入
       if (/\.(doc|docx|ppt|pptx|xls|xlsx|xlsm|pdf)$/i.test(pathRaw)) {
         const ext = (pathRaw.split(".").pop() ?? "").toUpperCase();
         return failToolResult({
-          code: "BINARY_FORMAT_REQUIRES_CODE_EXEC",
+          code: "BINARY_FORMAT_REQUIRES_SPECIALIZED_TOOL",
           message: `目标文件 "${pathRaw}" 是 ${ext} 二进制格式，doc.write 只能写纯文本，写入后 Office 无法打开。`,
           nextActions: [
-            "改用 code.exec 配合 python-docx/python-pptx/openpyxl 生成真实 Office 文件",
+            "优先使用对应 MCP 工具（Word MCP / Excel MCP）创建真实 Office 文件",
+            "若无对应 MCP，改用 code.exec 配合 python-docx/python-pptx/openpyxl 生成",
             "如果只需要文本草稿，请把路径改为 .md 或 .txt",
           ],
-          extra: { path: pathRaw, suggestedTool: "code.exec" },
+          extra: { path: pathRaw },
         });
       }
 
