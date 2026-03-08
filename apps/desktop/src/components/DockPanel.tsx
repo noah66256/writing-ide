@@ -8,6 +8,48 @@ import { DiffEditor } from "@monaco-editor/react";
 import { useDialogStore } from "../state/dialogStore";
 import { ToolBlock } from "./ToolBlock";
 
+type McpServerSelectionView = {
+  title: string;
+  selectedServerIds: string[];
+  prunedServerIds: string[];
+  totalServers: number;
+  selectedToolsCount: number | null;
+  prunedToolsCount: number | null;
+  rankingSample: Array<{ serverId: string; score: number; reasons: string[] }>;
+};
+
+function parseMcpServerSelectionLog(message: string, data: any): McpServerSelectionView | null {
+  if (String(message ?? "") !== "run.notice") return null;
+  if (!data || typeof data !== "object") return null;
+  if (String(data?.title ?? "") !== "McpServerSelection") return null;
+  const detail = data?.detail && typeof data.detail === "object" ? data.detail : {};
+  const rankingRaw = Array.isArray((detail as any)?.rankingSample) ? (detail as any).rankingSample : [];
+  return {
+    title: String(data?.message ?? "").trim() || "MCP Server Selection",
+    selectedServerIds: Array.isArray((detail as any)?.selectedServerIds)
+      ? (detail as any).selectedServerIds.map((x: any) => String(x ?? "").trim()).filter(Boolean)
+      : [],
+    prunedServerIds: Array.isArray((detail as any)?.prunedServerIds)
+      ? (detail as any).prunedServerIds.map((x: any) => String(x ?? "").trim()).filter(Boolean)
+      : [],
+    totalServers: Math.max(0, Math.floor(Number((detail as any)?.totalServers ?? 0) || 0)),
+    selectedToolsCount: Number.isFinite(Number((detail as any)?.mcpToolsForRunCount))
+      ? Math.max(0, Math.floor(Number((detail as any)?.mcpToolsForRunCount) || 0))
+      : null,
+    prunedToolsCount: Number.isFinite(Number((detail as any)?.mcpToolsPrunedCount))
+      ? Math.max(0, Math.floor(Number((detail as any)?.mcpToolsPrunedCount) || 0))
+      : null,
+    rankingSample: rankingRaw
+      .map((item: any) => ({
+        serverId: String(item?.serverId ?? "").trim(),
+        score: Number.isFinite(Number(item?.score)) ? Number(item.score) : 0,
+        reasons: Array.isArray(item?.reasons) ? item.reasons.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [],
+      }))
+      .filter((item: any) => item.serverId)
+      .slice(0, 4),
+  };
+}
+
 export function DockPanel() {
   const tab = useUiStore((s) => s.dockTab);
   const setTab = useUiStore((s) => s.setDockTab);
@@ -152,6 +194,18 @@ export function DockPanel() {
 
   const summarizeLog = (msg: string, data: any) => {
     const m = String(msg ?? "");
+    const mcpSelection = parseMcpServerSelectionLog(m, data);
+    if (mcpSelection) {
+      const selected = mcpSelection.selectedServerIds.length ? mcpSelection.selectedServerIds.join(",") : "none";
+      const pruned = mcpSelection.prunedServerIds.length ? mcpSelection.prunedServerIds.join(",") : "none";
+      const tools = mcpSelection.selectedToolsCount != null ? ` tools=${mcpSelection.selectedToolsCount}` : "";
+      return `selected=${selected} pruned=${pruned}${tools}`;
+    }
+    if (m === "run.notice" && data && typeof data === "object") {
+      const title = String(data?.title ?? "").trim();
+      const msgText = String(data?.message ?? "").trim();
+      if (title) return msgText ? `${title} · ${msgText}` : title;
+    }
     if (m === "context.pack.summary" && data && typeof data === "object") {
       const mode = String(data?.mode ?? "");
       const model = String(data?.model ?? "");
@@ -474,6 +528,7 @@ export function DockPanel() {
                     const hasData = l.data !== undefined;
                     const isOpen = Boolean(logOpenById[l.id]);
                     const summary = hasData ? summarizeLog(l.message, l.data as any) : "";
+                    const mcpSelection = hasData ? parseMcpServerSelectionLog(l.message, l.data as any) : null;
                     return (
                       <div key={l.id} style={{ marginBottom: 10 }}>
                         <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline" }}>
@@ -493,6 +548,42 @@ export function DockPanel() {
                             </button>
                           ) : null}
                         </div>
+                        {mcpSelection ? (
+                          <div
+                            style={{
+                              marginTop: 6,
+                              padding: 8,
+                              borderRadius: 10,
+                              border: "1px solid rgba(37,99,235,0.25)",
+                              background: "rgba(37,99,235,0.06)",
+                              display: "grid",
+                              gap: 6,
+                            }}
+                          >
+                            <div style={{ color: "var(--text)", fontWeight: 600 }}>{mcpSelection.title}</div>
+                            <div style={{ color: "var(--muted)" }}>
+                              servers={mcpSelection.selectedServerIds.length}/{mcpSelection.totalServers}
+                              {mcpSelection.selectedToolsCount != null ? ` · tools=${mcpSelection.selectedToolsCount}` : ""}
+                              {mcpSelection.prunedToolsCount != null ? ` · prunedTools=${mcpSelection.prunedToolsCount}` : ""}
+                            </div>
+                            <div style={{ color: "var(--text)", wordBreak: "break-word" }}>
+                              <strong>已选</strong>：{mcpSelection.selectedServerIds.length ? mcpSelection.selectedServerIds.join(", ") : "无"}
+                            </div>
+                            {mcpSelection.prunedServerIds.length ? (
+                              <div style={{ color: "var(--muted)", wordBreak: "break-word" }}>
+                                <strong>裁掉</strong>：{mcpSelection.prunedServerIds.join(", ")}
+                              </div>
+                            ) : null}
+                            {mcpSelection.rankingSample.length ? (
+                              <div style={{ color: "var(--muted)", wordBreak: "break-word" }}>
+                                <strong>排序</strong>：
+                                {mcpSelection.rankingSample
+                                  .map((item) => `${item.serverId}(${item.score}${item.reasons.length ? `: ${item.reasons.join("/")}` : ""})`)
+                                  .join(" · ")}
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
                         {hasData && isOpen ? (
                           <pre style={{ margin: "6px 0 0", whiteSpace: "pre-wrap" }}>{JSON.stringify(l.data, null, 2)}</pre>
                         ) : null}

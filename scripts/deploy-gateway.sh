@@ -101,6 +101,7 @@ if [[ "${ADMIN_WEB}" == "1" ]]; then
   cd ${DIR}
 
   echo "[remote] redeploy admin-web"
+  pm2 delete writing-admin-web 2>/dev/null || true
   pm2 delete ohmycrab-admin-web 2>/dev/null || true
   pm2 serve apps/admin-web/dist 8001 --name ohmycrab-admin-web --spa
 fi
