@@ -16,6 +16,7 @@ import {
   type AssistantStep,
   type ToolBlockStep,
   type ImageAttachment,
+  type TodoItem,
   setActiveRunCancel,
   cancelActiveRun,
 } from "@/state/runStore";
@@ -81,6 +82,7 @@ function fileToImageAttachment(file: File): Promise<ImageAttachment | null> {
 export function ChatArea() {
   const steps = useRunStore((s) => s.steps);
   const isRunning = useRunStore((s) => s.isRunning);
+  const todoList = useRunStore((s) => s.todoList);
   const mode = useRunStore((s) => s.mode);
   const model = useRunStore((s) => s.model);
 
@@ -93,6 +95,11 @@ export function ChatArea() {
 
   const activeConvId = useConversationStore((s) => s.activeConvId);
   const hasMessages = steps.length > 0;
+  const hasPendingTodo = useMemo(
+    () => todoList.some((item) => item.status !== "done" && item.status !== "skipped"),
+    [todoList],
+  );
+  const showWorkflowTodoPanel = todoList.length > 0 && (isRunning || hasPendingTodo);
 
   // 自动滚动到底部
   useEffect(() => {
@@ -285,6 +292,8 @@ export function ChatArea() {
         <WelcomePage onSuggest={handleSuggest} />
       )}
 
+      {showWorkflowTodoPanel && <WorkflowTodoPanel items={todoList} isRunning={isRunning} />}
+
       {/* 输入栏（始终可见） */}
       <InputBar
         onSend={handleSend}
@@ -294,6 +303,56 @@ export function ChatArea() {
         onExternalValueConsumed={() => setSuggestText("")}
         conversationId={activeConvId}
       />
+    </div>
+  );
+}
+
+function WorkflowTodoPanel({ items, isRunning }: { items: TodoItem[]; isRunning: boolean }) {
+  const total = items.length;
+  const done = items.filter((item) => item.status === "done" || item.status === "skipped").length;
+
+  return (
+    <div className="w-full max-w-[var(--chat-max-width)] mx-auto px-4 pb-2">
+      <div className="rounded-2xl border border-border bg-surface shadow-sm">
+        <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-border/60">
+          <div className="text-[13px] font-semibold text-text">任务清单</div>
+          <div className="text-[12px] text-text-muted whitespace-nowrap">
+            {done >= total ? ("已完成 " + done + "/" + total + (isRunning ? " · 收尾中" : "")) : ("已完成 " + done + "/" + total)}
+          </div>
+        </div>
+        <div className="max-h-[220px] overflow-y-auto px-4 py-3 space-y-2.5">
+          {items.map((item, index) => {
+            const isDone = item.status === "done" || item.status === "skipped";
+            const isRunningNow = item.status === "in_progress";
+            const isBlocked = item.status === "blocked";
+            const icon = isDone ? (
+              <CheckCircle2 size={16} className="text-success shrink-0 mt-0.5" />
+            ) : isRunningNow ? (
+              <Loader2 size={16} className="text-accent shrink-0 mt-0.5 animate-spin" />
+            ) : isBlocked ? (
+              <XCircle size={16} className="text-error shrink-0 mt-0.5" />
+            ) : (
+              <span className="shrink-0 mt-[2px] inline-flex items-center justify-center w-4 h-4 rounded-full border border-border text-[10px] text-text-faint">○</span>
+            );
+            return (
+              <div key={item.id || String(index)} className="flex items-start gap-3">
+                {icon}
+                <div className="min-w-0 flex-1">
+                  <div className={cn(
+                    "text-[13px] leading-6 break-words",
+                    isDone ? "text-text-muted line-through" : isBlocked ? "text-error" : "text-text",
+                  )}>
+                    {index + 1}. {item.text}
+                  </div>
+                  {item.note ? (
+                    <div className="mt-0.5 text-[12px] leading-5 text-text-faint break-words">{item.note}</div>
+                  ) : null}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }

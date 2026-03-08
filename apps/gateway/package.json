@@ -12,7 +12,8 @@
     "test:runner-turn": "tsx scripts/test-runner-turn.ts",
     "smoke:runtime-parity": "tsx scripts/smoke-runtime-parity.ts",
     "test:mcp-selection": "tsx scripts/validate-mcp-selection.ts",
-    "smoke:mcp-server-first": "tsx scripts/smoke-mcp-server-first.ts"
+    "smoke:mcp-server-first": "tsx scripts/smoke-mcp-server-first.ts",
+    "smoke:workflow-sticky": "tsx scripts/smoke-workflow-sticky.ts"
   },
   "dependencies": {
     "@alicloud/dypnsapi20170525": "^2.0.0",

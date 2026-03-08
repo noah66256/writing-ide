@@ -128,6 +128,36 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
   const subAgentBubbles = new Map<string, string>();
   const runStartStepCount = (rt.getSteps() ?? []).length;
   let runDoneNote = "";
+  const updateWorkflowSticky = (patch: Record<string, unknown>) => {
+    try {
+      const main = (rt.getMainDoc() ?? {}) as any;
+      const prev = main?.workflowV1 && typeof main.workflowV1 === "object" && !Array.isArray(main.workflowV1)
+        ? (main.workflowV1 as any)
+        : {};
+      const nextSelectedServerIds = Array.isArray((patch as any)?.selectedServerIds)
+        ? Array.from(new Set(((patch as any).selectedServerIds as any[]).map((id) => String(id ?? "").trim()).filter(Boolean))).slice(0, 8)
+        : Array.isArray(prev?.selectedServerIds)
+          ? (prev.selectedServerIds as any[]).map((id) => String(id ?? "").trim()).filter(Boolean).slice(0, 8)
+          : [];
+      const nextPreferredToolNames = Array.isArray((patch as any)?.preferredToolNames)
+        ? Array.from(new Set(((patch as any).preferredToolNames as any[]).map((name) => String(name ?? "").trim()).filter(Boolean))).slice(0, 16)
+        : Array.isArray(prev?.preferredToolNames)
+          ? (prev.preferredToolNames as any[]).map((name) => String(name ?? "").trim()).filter(Boolean).slice(0, 16)
+          : [];
+      updateMainDoc({
+        workflowV1: {
+          ...prev,
+          ...patch,
+          v: 1,
+          selectedServerIds: nextSelectedServerIds,
+          preferredToolNames: nextPreferredToolNames,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+    } catch {
+      // noop
+    }
+  };
 
   // Watchdog
   let lastProgressAt = Date.now();
@@ -693,6 +723,12 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             log("info", "agent.run.end", data);
             setRunning(false); setActivity(null);
             maybeAppendRunEndFeedback(data);
+            const endReason = String(data?.reason ?? "").trim().toLowerCase();
+            if (endReason === "clarify_waiting" || endReason === "proposal_waiting") {
+              updateWorkflowSticky({ status: "waiting_user", lastEndReason: endReason });
+            } else if (endReason) {
+              updateWorkflowSticky({ lastEndReason: endReason });
+            }
 
             // 兜底记忆提取（异步，不阻塞 UI）：
             // 从 memoryCursor 到对话末尾，提取本轮 run 中尚未被滚动提取覆盖的所有完整回合
@@ -740,6 +776,29 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             const level = kind0 === "error" ? "error" : kind0 === "warn" ? "warn" : "info";
             log(level as any, "run.notice", data);
             const title = String(data?.title ?? "").trim();
+            const detail = data?.detail ?? null;
+            if (title === "ExecutionContract") {
+              const routeId = String((detail as any)?.routeDecision?.routeId ?? "").trim().toLowerCase();
+              const required = Boolean((detail as any)?.required);
+              if (routeId && required) {
+                const runIntent = String((rt.getMainDoc() as any)?.runIntent ?? "").trim().toLowerCase();
+                updateWorkflowSticky({
+                  status: "running",
+                  routeId,
+                  kind: routeId === "web_radar" ? "browser_session" : "task_workflow",
+                  intentHint: ["writing", "rewrite", "polish", "analysis", "ops"].includes(runIntent) ? runIntent : "ops",
+                  preferredToolNames: Array.isArray((detail as any)?.preferredToolNames) ? (detail as any).preferredToolNames : [],
+                });
+              }
+            }
+            if (title === "McpServerSelection") {
+              const selectedServerIds = Array.isArray((detail as any)?.selectedServerIds)
+                ? ((detail as any).selectedServerIds as any[]).map((id) => String(id ?? "").trim()).filter(Boolean)
+                : [];
+              if (selectedServerIds.length > 0) {
+                updateWorkflowSticky({ status: "running", selectedServerIds });
+              }
+            }
             if (rt.getIsRunning() && title) {
               setActivity(`系统：${title}`, { resetTimer: true });
             }
@@ -1056,6 +1115,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                 if (ok0 && st.toolName === "run.done" && out && typeof out === "object") {
                   const note = String((out as any).note ?? "").trim();
                   if (note) runDoneNote = note.slice(0, 200);
+                  updateWorkflowSticky({ status: "done", lastEndReason: "run_done" });
                 }
 
                 // lint.style patch 增强

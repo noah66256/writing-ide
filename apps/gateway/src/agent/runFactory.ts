@@ -735,6 +735,92 @@ export function looksLikeShortFollowUp(text: string): boolean {
   return /^(现在呢|那呢|这样呢|这下呢|然后呢|继续|行吗|可以吗|可以了|可以|好|行|没问题|确认)\s*[?？]?$/.test(t);
 }
 
+const WORKFLOW_STICKY_MAX_AGE_MS = 45 * 60 * 1000;
+
+export type WorkflowStickyState = {
+  routeId: string;
+  intentHint: string;
+  kind: string;
+  status: string;
+  selectedServerIds: string[];
+  preferredToolNames: string[];
+  updatedAtMs: number | null;
+  isFresh: boolean;
+  lastEndReason: string;
+};
+
+export function looksLikeResearchOnlyPrompt(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  return /(查(一下)?|查询|搜索|检索|全网|上网|联网|web\.search|web\.fetch|github|资料|来源|链接|引用|证据|大搜|调研|研究|方案|最佳实践|best\s*practice|怎么解决|如何解决)/i.test(
+    t,
+  ) && !/(写|仿写|改写|润色|生成|写入|保存|落盘|打包|安装包|exe|nsis|portable)/.test(t);
+}
+
+export function looksLikeExplicitNonTaskPrompt(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  return /(只讨论|先讨论|先聊|只聊|别执行|不要执行|别动手|先别做|不需要你做|不用动手)/.test(t);
+}
+
+export function looksLikeWorkflowContinuationPrompt(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  if (looksLikeShortFollowUp(t)) return true;
+  if (t.length > 120) return false;
+  if (/^(已经|我已经|已|好了|可以了|完成了|登好了|登录了|登陆了|搞定了|弄好了)/.test(t)) return true;
+  return /(继续|下一步|接着|然后|按这个来|照这个来|写吧|开始吧|往下|进去|进入|打开|点开|多开|切到|看看|看下|看一眼|汇报|统计|截图|抓一下|抓取|读一下|读取|浏览|试一下|跑一下)/.test(
+    t,
+  );
+}
+
+export function readWorkflowStickyState(mainDoc: unknown): WorkflowStickyState {
+  const doc = mainDoc && typeof mainDoc === "object" && !Array.isArray(mainDoc) ? (mainDoc as any) : null;
+  const wf = doc?.workflowV1 && typeof doc.workflowV1 === "object" && !Array.isArray(doc.workflowV1)
+    ? (doc.workflowV1 as any)
+    : null;
+  const routeId = String(wf?.routeId ?? "").trim().toLowerCase();
+  const intentHint = String(wf?.intentHint ?? wf?.stickyIntent ?? "").trim().toLowerCase();
+  const kind = String(wf?.kind ?? "").trim().toLowerCase();
+  const status = String(wf?.status ?? "").trim().toLowerCase();
+  const selectedServerIds: string[] = Array.from(new Set(
+    (Array.isArray(wf?.selectedServerIds) ? wf.selectedServerIds : [])
+      .map((id: unknown) => String(id ?? "").trim())
+      .filter(Boolean),
+  )).slice(0, 8) as string[];
+  const preferredToolNames: string[] = Array.from(new Set(
+    (Array.isArray(wf?.preferredToolNames) ? wf.preferredToolNames : [])
+      .map((name: unknown) => String(name ?? "").trim())
+      .filter(Boolean),
+  )).slice(0, 16) as string[];
+  const updatedAtRaw = String(wf?.updatedAt ?? "").trim();
+  const updatedAtMs0 = updatedAtRaw ? Date.parse(updatedAtRaw) : Number.NaN;
+  const updatedAtMs = Number.isFinite(updatedAtMs0) ? updatedAtMs0 : null;
+  const ageMs = updatedAtMs == null ? Number.POSITIVE_INFINITY : Date.now() - updatedAtMs;
+  const isFresh = Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= WORKFLOW_STICKY_MAX_AGE_MS;
+  const lastEndReason = String(wf?.lastEndReason ?? "").trim().toLowerCase();
+  return { routeId, intentHint, kind, status, selectedServerIds, preferredToolNames, updatedAtMs, isFresh, lastEndReason };
+}
+
+export function resolveStickyMcpServerIds(args: {
+  mainDoc?: unknown;
+  availableServerIds?: string[];
+  userPrompt: string;
+  routeId?: string | null;
+  maxServers?: number;
+}): string[] {
+  const wf = readWorkflowStickyState(args.mainDoc);
+  if (!wf.isFresh || !wf.selectedServerIds.length) return [];
+  const prompt = String(args.userPrompt ?? "").trim();
+  if (!looksLikeWorkflowContinuationPrompt(prompt)) return [];
+  if (looksLikeResearchOnlyPrompt(prompt) || looksLikeExplicitNonTaskPrompt(prompt)) return [];
+  const currentRouteId = String(args.routeId ?? "").trim().toLowerCase();
+  if (currentRouteId && wf.routeId && currentRouteId !== wf.routeId && currentRouteId !== "web_radar" && wf.routeId !== "web_radar") return [];
+  const available = new Set((Array.isArray(args.availableServerIds) ? args.availableServerIds : []).map((id) => String(id ?? "").trim()).filter(Boolean));
+  const maxServers = Math.max(1, Math.min(4, Math.floor(Number(args.maxServers ?? 2) || 2)));
+  return wf.selectedServerIds.filter((id) => available.has(id)).slice(0, maxServers);
+}
+
 export function looksLikeExecuteOrWriteIntent(text: string): boolean {
   const t = String(text ?? "").trim();
   if (!t) return false;
@@ -911,6 +997,7 @@ export function computeIntentRouteDecisionPhase0(args: {
   mode: AgentMode;
   userPrompt: string;
   mainDocRunIntent?: unknown;
+  mainDoc?: unknown;
   runTodo?: any[];
   intent: any;
   ideSummary?: any;
@@ -1047,10 +1134,7 @@ export function computeIntentRouteDecisionPhase0(args: {
     /^(?:\d{1,2}|[一二三四五六七八九十]{1,3})\s*(?:号|#)\s*(?:吧|呢)?$/.test(pTrim) ||
     /^(?:\d{1,2}|[一二三四五六七八九十]{1,3})\s*(?:吧|呢)$/.test(pTrim);
   const looksLikeFormatSwitch = pTrim.length <= 24 && /(视频脚本|脚本|文案|口播|小红书|公众号|B站|抖音|标题|大纲|提纲|终稿)/.test(pTrim);
-  const looksLikeResearchOnly =
-    /(查(一下)?|查询|搜索|检索|全网|上网|联网|web\.search|web\.fetch|github|资料|来源|链接|引用|证据|大搜|调研|研究|方案|最佳实践|best\s*practice|怎么解决|如何解决)/i.test(
-      pTrim,
-    ) && !/(写|仿写|改写|润色|生成|写入|保存|落盘|打包|安装包|exe|nsis|portable)/.test(pTrim);
+  const looksLikeResearchOnly = looksLikeResearchOnlyPrompt(pTrim);
 
   // web_radar：用户明确要联网搜索/打开网页/浏览网站
   const looksLikeWebSearchIntent =
@@ -1071,6 +1155,44 @@ export function computeIntentRouteDecisionPhase0(args: {
     };
   }
 
+  const workflowSticky = readWorkflowStickyState(args.mainDoc);
+  const stickyFollowUp =
+    !looksLikeResearchOnly &&
+    !looksLikeExplicitNonTaskPrompt(pTrim) &&
+    looksLikeWorkflowContinuationPrompt(pTrim);
+  if (workflowSticky.isFresh && stickyFollowUp) {
+    const workflowRouteId = workflowSticky.routeId;
+    const stickyRoute = ROUTE_REGISTRY_V1.find((r) => r.routeId === workflowRouteId);
+    const stickyLooksBrowser =
+      workflowRouteId === "web_radar" ||
+      workflowSticky.kind === "browser_session" ||
+      workflowSticky.selectedServerIds.some((id) => /playwright|browser/i.test(id));
+    if (stickyLooksBrowser) {
+      return {
+        intentType: "task_execution",
+        confidence: 0.88,
+        nextAction: "enter_workflow",
+        todoPolicy: "required",
+        toolPolicy: "allow_readonly",
+        reason: "sticky：继承 workflowV1 浏览器/网页执行上下文",
+        derivedFrom: ["workflowV1:web_radar", ...derivedFrom],
+        routeId: "web_radar",
+      };
+    }
+    if (stickyRoute && stickyRoute.nextAction === "enter_workflow") {
+      return {
+        intentType: stickyRoute.intentType,
+        confidence: 0.84,
+        nextAction: stickyRoute.nextAction,
+        todoPolicy: stickyRoute.todoPolicy,
+        toolPolicy: stickyRoute.toolPolicy,
+        reason: "sticky：继承 workflowV1 执行上下文（" + stickyRoute.routeId + "）",
+        derivedFrom: ["workflowV1:" + stickyRoute.routeId, ...derivedFrom],
+        routeId: stickyRoute.routeId,
+      };
+    }
+  }
+
   const hasWaiting = todo.some((t: any) => {
     const status = String(t?.status ?? "").trim().toLowerCase();
     const note = String(t?.note ?? "").trim();
@@ -1082,7 +1204,7 @@ export function computeIntentRouteDecisionPhase0(args: {
   const shortOrContinue =
     !looksLikeResearchOnly &&
     (looksLikeShortFollowUp(pTrim) || looksLikeExplicitContinue || looksLikeChoice || looksLikeFormatSwitch || (hasWaiting && pTrim.length <= 24));
-  const looksExplicitNonTask = /(只讨论|先讨论|先聊|只聊|别执行|不要执行|别动手|先别做|不需要你做|不用动手)/.test(pTrim);
+  const looksExplicitNonTask = looksLikeExplicitNonTaskPrompt(pTrim);
   if (todo.length && shortOrContinue && !looksExplicitNonTask) {
     return {
       intentType: "task_execution",
@@ -1418,6 +1540,8 @@ export type PreparedRun = {
   mcpToolsFromSidecar: Array<{ name: string; description: string; inputSchema?: any; serverId: string; serverName: string; originalName: string }>;
   mcpToolsForRun: Array<{ name: string; description: string; inputSchema?: any; serverId: string; serverName: string; originalName: string }>;
   mcpServerSelectionSummary: McpServerSelectionSummary;
+  mcpServerStickyFallbackUsed: boolean;
+  mcpServerStickyFallbackIds: string[];
   executionContract: ExecutionContract;
   authorization: string;
   l1MemoryFromPack: string;
@@ -1466,6 +1590,7 @@ export async function prepareAgentRun(args: {
     mode,
     userPrompt,
     mainDocRunIntent: (mainDocFromPack as any)?.runIntent,
+    mainDoc: mainDocFromPack,
     runTodo: runTodoFromPack,
     intent,
     ideSummary: ideSummaryFromSidecar,
@@ -2082,12 +2207,36 @@ export async function prepareAgentRun(args: {
     servers: mcpServersFromSidecar,
     tools: mcpToolsFromSidecar,
   });
-  const mcpServerSelection = selectMcpServerSubset({
+  let mcpServerSelection = selectMcpServerSubset({
     servers: mcpServerCatalog,
     routeId: routeIdLower || intentRoute.routeId,
     userPrompt,
     preferBrowser: allowBrowserTools,
   });
+  let mcpServerSelectionUsedStickyFallback = false;
+  const stickyServerIds = resolveStickyMcpServerIds({
+    mainDoc: mainDocFromPack,
+    availableServerIds: mcpServerCatalog.map((server) => String(server?.serverId ?? "").trim()).filter(Boolean),
+    userPrompt,
+    routeId: routeIdLower || intentRoute.routeId,
+    maxServers: 2,
+  });
+  if (mcpServerSelection.selectedServerIds.size === 0 && stickyServerIds.length > 0) {
+    mcpServerSelectionUsedStickyFallback = true;
+    const stickySet = new Set(stickyServerIds);
+    const prunedServerIds = mcpServerCatalog
+      .map((server) => String(server?.serverId ?? "").trim())
+      .filter((id) => id && !stickySet.has(id));
+    mcpServerSelection = {
+      selectedServerIds: stickySet,
+      summary: {
+        totalServers: mcpServerCatalog.length,
+        selectedServerIds: stickyServerIds.slice(0, 12),
+        prunedServerIds: prunedServerIds.slice(0, 24),
+        rankingSample: mcpServerSelection.summary.rankingSample,
+      },
+    };
+  }
   const mcpToolsForRun: Array<{ name: string; description: string; inputSchema?: any; serverId: string; serverName: string; originalName: string }> =
     (mcpServerSelection.selectedServerIds.size > 0
       ? filterMcpToolsByServerIds({
@@ -2566,6 +2715,8 @@ export async function prepareAgentRun(args: {
       mcpToolsFromSidecar,
       mcpToolsForRun,
       mcpServerSelectionSummary: mcpServerSelection.summary,
+      mcpServerStickyFallbackUsed: mcpServerSelectionUsedStickyFallback,
+      mcpServerStickyFallbackIds: mcpServerSelectionUsedStickyFallback ? mcpServerSelection.summary.selectedServerIds.slice(0, 12) : [],
       executionContract,
       authorization: String((request as any)?.headers?.authorization ?? ""),
       l1MemoryFromPack,
@@ -2624,6 +2775,8 @@ export async function executeAgentRun(args: {
     mcpToolsFromSidecar,
     mcpToolsForRun,
     mcpServerSelectionSummary,
+    mcpServerStickyFallbackUsed,
+    mcpServerStickyFallbackIds,
     executionContract,
     l1MemoryFromPack,
     l2MemoryFromPack,
@@ -2843,6 +2996,8 @@ export async function executeAgentRun(args: {
       })),
       mcpToolsForRunCount: mcpToolsForRun.length,
       mcpToolsPrunedCount: Math.max(0, mcpToolsFromSidecar.length - mcpToolsForRun.length),
+      stickyFallbackUsed: mcpServerStickyFallbackUsed,
+      stickyFallbackServerIds: mcpServerStickyFallbackIds,
     },
   });
   writeEvent("run.notice", {
