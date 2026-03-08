@@ -78,6 +78,7 @@ function buildSnapshotFromBuffer(base: RunSnapshot, buffer: import("@/state/runR
     steps: merged as RunSnapshot["steps"],
     logs: deepClone(buffer.logs?.length ? buffer.logs : (base.logs ?? [])),
     ctxRefs: deepClone(buffer.ctxRefs ?? base.ctxRefs ?? []),
+    pendingArtifacts: deepClone((buffer as any).pendingArtifacts ?? (base as any).pendingArtifacts ?? []),
   };
 }
 

@@ -2976,10 +2976,58 @@ const tools: ToolDefinition[] = [
       const content = String(args.content ?? "");
       // 没有项目目录时阻止写入——文件无法持久化到磁盘
       if (!useProjectStore.getState().rootDir) {
+        const ext0 = pathRaw.includes(".") ? pathRaw.split(".").pop()!.toLowerCase() : "";
+        const format = ext0 === "md" || ext0 === "txt" || ext0 === "json" ? ext0 : "unknown";
+        const artifactId = `artifact_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+        try {
+          (useRunStore.getState() as any).upsertPendingArtifact({
+            id: artifactId,
+            kind: "doc_write",
+            status: "pending",
+            pathHint: pathRaw,
+            format,
+            content,
+            ifExists: (String((args as any).ifExists ?? "").trim().toLowerCase() === "overwrite"
+              ? "overwrite"
+              : String((args as any).ifExists ?? "").trim().toLowerCase() === "error"
+                ? "error"
+                : "rename"),
+            suggestedName: String((args as any).suggestedName ?? "").trim() || undefined,
+            sourceTool: "doc.write",
+            sourceTask: String(((useRunStore.getState().mainDoc as any)?.goal ?? "")).trim() || undefined,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          });
+          (useRunStore.getState() as any).updateMainDoc({
+            workflowV1: {
+              v: 1,
+              kind: "project_open_resume_write",
+              status: "waiting_user",
+              waiting: {
+                kind: "open_project",
+                message: "请先打开项目文件夹，之后我会继续保存上轮结果。",
+              },
+              resumeAction: {
+                type: "doc.write",
+                artifactId,
+                pathHint: pathRaw,
+                ifExists: (String((args as any).ifExists ?? "").trim().toLowerCase() === "overwrite"
+                  ? "overwrite"
+                  : String((args as any).ifExists ?? "").trim().toLowerCase() === "error"
+                    ? "error"
+                    : "rename"),
+                suggestedName: String((args as any).suggestedName ?? "").trim() || undefined,
+              },
+              lastEndReason: "no_project",
+              updatedAt: new Date().toISOString(),
+            },
+          });
+        } catch {}
         return failToolResult({
           code: "NO_PROJECT",
-          message: "当前未打开项目文件夹，文件无法保存到磁盘。",
-          nextActions: ["先打开项目文件夹", "再执行写入"],
+          message: "当前未打开项目文件夹，文件无法保存到磁盘；我已缓存待写入正文，打开项目后可直接继续保存。",
+          nextActions: ["先打开项目文件夹", "打开后回复“保存吧/继续保存”"],
+          extra: { pending_artifact_id: artifactId, path: pathRaw, resume_hint: "打开项目目录后直接回复“保存吧”即可继续落盘。" },
         });
       }
       const ifExistsRaw = String((args as any).ifExists ?? "").trim().toLowerCase();
@@ -3021,6 +3069,15 @@ const tools: ToolDefinition[] = [
         };
         const applied = apply();
         const undo = typeof (applied as any)?.undo === "function" ? (applied as any).undo : undefined;
+        try {
+          const rs: any = useRunStore.getState();
+          const matched = Array.isArray(rs.pendingArtifacts) ? rs.pendingArtifacts.find((x: any) => x && (x.pathHint === path || x.pathHint === pathRaw)) : null;
+          if (matched?.id) rs.removePendingArtifact(matched.id);
+          const wf: any = rs.mainDoc?.workflowV1 ?? null;
+          if (wf && String(wf.kind ?? "").trim().toLowerCase() === "project_open_resume_write") {
+            rs.updateMainDoc({ workflowV1: { status: "done", lastEndReason: "resumed_write_done", updatedAt: new Date().toISOString() } });
+          }
+        } catch {}
         return {
           ok: true,
           output: {
@@ -3067,6 +3124,15 @@ const tools: ToolDefinition[] = [
       const ext2 = fileName2.includes(".") ? fileName2.split(".").pop()!.toLowerCase() : "";
       const applied = apply();
       const undo = typeof (applied as any)?.undo === "function" ? (applied as any).undo : undefined;
+      try {
+        const rs: any = useRunStore.getState();
+        const matched = Array.isArray(rs.pendingArtifacts) ? rs.pendingArtifacts.find((x: any) => x && (x.pathHint === path || x.pathHint === pathRaw)) : null;
+        if (matched?.id) rs.removePendingArtifact(matched.id);
+        const wf: any = rs.mainDoc?.workflowV1 ?? null;
+        if (wf && String(wf.kind ?? "").trim().toLowerCase() === "project_open_resume_write") {
+          rs.updateMainDoc({ workflowV1: { status: "done", lastEndReason: "resumed_write_done", updatedAt: new Date().toISOString() } });
+        }
+      } catch {}
 
       return {
         ok: true,

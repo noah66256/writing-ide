@@ -122,6 +122,21 @@ export type RunActivity = {
   startedAt: number; // 用于 UI 显示耗时
 };
 
+export type PendingArtifact = {
+  id: string;
+  kind: "doc_write";
+  status: "pending" | "used" | "discarded";
+  pathHint: string;
+  format: "md" | "txt" | "json" | "unknown";
+  content: string;
+  ifExists?: "rename" | "overwrite" | "error";
+  suggestedName?: string;
+  sourceTool?: "doc.write";
+  sourceTask?: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
 // ─── 全局 Run 取消句柄（不放 store state，避免序列化问题） ─────────────────
 let _activeRunCancel: ((reason?: string) => void) | null = null;
 
@@ -165,10 +180,15 @@ type RunState = {
 
   // Context：常驻“引用文件/目录”列表（用于构建 REFERENCES；不随输入框清空而丢失）
   ctxRefs: CtxRefItem[];
+  pendingArtifacts: PendingArtifact[];
   setCtxRefs: (items: CtxRefItem[]) => void;
   addCtxRef: (item: CtxRefItem) => void;
   removeCtxRef: (item: CtxRefItem) => void;
   clearCtxRefs: () => void;
+  upsertPendingArtifact: (artifact: PendingArtifact) => void;
+  removePendingArtifact: (artifactId: string) => void;
+  markPendingArtifactUsed: (artifactId: string) => void;
+  clearPendingArtifacts: () => void;
 
   setMode: (mode: Mode) => void;
   setModel: (model: string) => void;
@@ -189,6 +209,7 @@ type RunState = {
     logs: LogEntry[];
     kbAttachedLibraryIds: string[];
     ctxRefs?: CtxRefItem[];
+    pendingArtifacts?: PendingArtifact[];
   }) => void;
 
   addUser: (text: string, baseline?: UserStep["baseline"], mentions?: UserMention[], images?: ImageAttachment[]) => string;
@@ -262,6 +283,49 @@ function dedupeCtxRefs(items: CtxRefItem[]) {
   return out;
 }
 
+
+function normalizePendingArtifact(item: PendingArtifact | null | undefined): PendingArtifact | null {
+  const it = item && typeof item === "object" ? item : null;
+  const id = String((it as any)?.id ?? "").trim() || makeId("artifact");
+  const pathHint = normalizeRefPath(String((it as any)?.pathHint ?? ""));
+  const content = String((it as any)?.content ?? "");
+  if (!pathHint || !content) return null;
+  const status0 = String((it as any)?.status ?? "pending").trim().toLowerCase();
+  const status = status0 === "used" || status0 === "discarded" ? status0 : "pending";
+  const format0 = String((it as any)?.format ?? "unknown").trim().toLowerCase();
+  const format = format0 === "md" || format0 === "txt" || format0 === "json" ? format0 : "unknown";
+  const createdAt = Number.isFinite(Number((it as any)?.createdAt)) ? Math.max(0, Math.floor(Number((it as any).createdAt))) : Date.now();
+  const updatedAt = Number.isFinite(Number((it as any)?.updatedAt)) ? Math.max(createdAt, Math.floor(Number((it as any).updatedAt))) : Date.now();
+  const ifExists0 = String((it as any)?.ifExists ?? "").trim().toLowerCase();
+  const ifExists = ifExists0 === "overwrite" || ifExists0 === "error" ? ifExists0 : ifExists0 === "rename" ? "rename" : undefined;
+  const suggestedName = String((it as any)?.suggestedName ?? "").trim() || undefined;
+  const sourceTask = String((it as any)?.sourceTask ?? "").trim() || undefined;
+  return {
+    id,
+    kind: "doc_write",
+    status: status as any,
+    pathHint,
+    format: format as any,
+    content,
+    ...(ifExists ? { ifExists: ifExists as any } : {}),
+    ...(suggestedName ? { suggestedName } : {}),
+    sourceTool: "doc.write",
+    ...(sourceTask ? { sourceTask } : {}),
+    createdAt,
+    updatedAt,
+  };
+}
+
+function dedupePendingArtifacts(items: PendingArtifact[]) {
+  const map = new Map<string, PendingArtifact>();
+  for (const it of items ?? []) {
+    const norm = normalizePendingArtifact(it);
+    if (!norm) continue;
+    map.set(norm.id, norm);
+  }
+  return Array.from(map.values()).sort((a, b) => a.updatedAt - b.updatedAt).slice(-3);
+}
+
 export const useRunStore = create<RunState>()(
   persist(
     (set, get) => ({
@@ -279,6 +343,7 @@ export const useRunStore = create<RunState>()(
   isRunning: false,
   activity: null,
   ctxRefs: [],
+  pendingArtifacts: [],
   kbAttachedLibraryIds: [],
 
   setMode: (mode) =>
@@ -350,6 +415,7 @@ export const useRunStore = create<RunState>()(
       mainDoc: { goal: "" },
       todoList: [],
       ctxRefs: [],
+      pendingArtifacts: [],
       dialogueSummaryByMode: { agent: "", chat: "" },
       dialogueSummaryTurnCursorByMode: { agent: 0, chat: 0 },
       memoryExtractTurnCursorByMode: { agent: 0, chat: 0 },
@@ -435,6 +501,7 @@ export const useRunStore = create<RunState>()(
       logs: Array.isArray(s.logs) ? (s.logs as LogEntry[]) : [],
       kbAttachedLibraryIds: [],
       ctxRefs: Array.isArray((s as any).ctxRefs) ? dedupeCtxRefs((s as any).ctxRefs as any) : [],
+      pendingArtifacts: Array.isArray((s as any).pendingArtifacts) ? dedupePendingArtifacts((s as any).pendingArtifacts as any) : [],
       isRunning: false,
       activity: null,
     });
@@ -471,6 +538,25 @@ export const useRunStore = create<RunState>()(
       return { ctxRefs: cur.filter((x) => !(x.kind === norm.kind && x.path === norm.path)) };
     }),
   clearCtxRefs: () => set({ ctxRefs: [] }),
+  upsertPendingArtifact: (artifact) =>
+    set((s) => {
+      const norm = normalizePendingArtifact(artifact as any);
+      if (!norm) return {};
+      const cur = Array.isArray(s.pendingArtifacts) ? s.pendingArtifacts : [];
+      const next = dedupePendingArtifacts([...cur.filter((x) => x.id !== norm.id), norm]);
+      return { pendingArtifacts: next };
+    }),
+  removePendingArtifact: (artifactId) =>
+    set((s) => ({
+      pendingArtifacts: (Array.isArray(s.pendingArtifacts) ? s.pendingArtifacts : []).filter((x) => x.id !== String(artifactId ?? "").trim()),
+    })),
+  markPendingArtifactUsed: (artifactId) =>
+    set((s) => ({
+      pendingArtifacts: (Array.isArray(s.pendingArtifacts) ? s.pendingArtifacts : []).map((x) =>
+        x.id === String(artifactId ?? "").trim() ? { ...x, status: "used", updatedAt: Date.now() } : x,
+      ),
+    })),
+  clearPendingArtifacts: () => set({ pendingArtifacts: [] }),
 
   addUser: (text, baseline, mentions, images) => {
     const id = makeId("u");

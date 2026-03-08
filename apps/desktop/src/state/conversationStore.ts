@@ -10,6 +10,7 @@ import {
   type Mode,
   type ToolBlockStep,
   type CtxRefItem,
+  type PendingArtifact,
 } from "./runStore";
 
 export type SerializableToolStep = Omit<ToolBlockStep, "apply" | "undo"> & {
@@ -30,6 +31,7 @@ export type RunSnapshot = {
   logs: LogEntry[];
   kbAttachedLibraryIds: string[];
   ctxRefs?: CtxRefItem[];
+  pendingArtifacts?: PendingArtifact[];
   projectDir?: string | null;
   dialogueSummaryByMode?: Record<Mode, string>;
   dialogueSummaryTurnCursorByMode?: Record<Mode, number>;
@@ -63,6 +65,7 @@ export function buildCurrentSnapshot(): RunSnapshot {
     logs: deepClone(s.logs ?? []),
     kbAttachedLibraryIds: deepClone(s.kbAttachedLibraryIds ?? []),
     ctxRefs: deepClone(s.ctxRefs ?? []),
+    pendingArtifacts: deepClone((s as any).pendingArtifacts ?? []),
     projectDir,
     dialogueSummaryByMode: deepClone(s.dialogueSummaryByMode ?? { agent: "", chat: "" }),
     dialogueSummaryTurnCursorByMode: deepClone(s.dialogueSummaryTurnCursorByMode ?? { agent: 0, chat: 0 }),

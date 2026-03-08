@@ -406,6 +406,20 @@ export function parseContextManifestFromContextPack(ctx?: string): any | null {
   }
 }
 
+export function parsePendingArtifactsFromContextPack(ctx?: string): any[] | null {
+  const text = String(ctx ?? "");
+  if (!text) return null;
+  const m = text.match(/PENDING_ARTIFACTS\(JSON\):\n([\s\S]*?)(?:\n\n|$)/);
+  const raw = m?.[1] ? String(m[1]).trim() : "";
+  if (!raw) return null;
+  try {
+    const j = JSON.parse(raw);
+    return Array.isArray(j) ? j : null;
+  } catch {
+    return null;
+  }
+}
+
 export function parseRecentDialogueFromContextPack(
   ctx?: string,
 ): Array<{ role: "user" | "assistant"; text: string }> | null {
@@ -742,7 +756,7 @@ export function looksLikeShortFollowUp(text: string): boolean {
   const t = String(text ?? "").trim();
   if (!t) return false;
   if (t.length > 12) return false;
-  return /^(现在呢|那呢|这样呢|这下呢|然后呢|继续|行吗|可以吗|可以了|可以|好|行|没问题|确认)\s*[?？]?$/.test(t);
+  return /^(现在呢|那呢|这样呢|这下呢|然后呢|继续|继续吧|继续做|开始|开始吧|保存吧|写吧|行吗|可以吗|可以了|可以|好|行|没问题|确认)\s*[?？]?$/.test(t);
 }
 
 const WORKFLOW_STICKY_MAX_AGE_MS = 45 * 60 * 1000;
@@ -781,7 +795,7 @@ export function looksLikeWorkflowContinuationPrompt(text: string): boolean {
   if (/^(A|B|C|D)\s*：/i.test(t)) return true;
   if (t.length > 120) return false;
   if (/^(已经|我已经|已|好了|可以了|完成了|登好了|登录了|登陆了|搞定了|弄好了|我已登录|已登录|A|B|C|D)\b/i.test(t)) return true;
-  return /(继续|下一步|接着|然后|按这个来|照这个来|写吧|开始吧|往下|进去|进入|打开|点开|多开|切到|看看|看下|看一眼|汇报|统计|截图|抓一下|抓取|读一下|读取|浏览|试一下|跑一下)/.test(
+  return /(继续|下一步|接着|然后|按这个来|照这个来|保存吧|写吧|开始吧|往下|进去|进入|打开|点开|多开|切到|看看|看下|看一眼|汇报|统计|截图|抓一下|抓取|读一下|读取|浏览|试一下|跑一下)/.test(
     t,
   );
 }
@@ -1626,6 +1640,7 @@ export async function prepareAgentRun(args: {
   const runTodoFromPack = parseRunTodoFromContextPack(body.contextPack);
   const recentDialogueFromPack = parseRecentDialogueFromContextPack(body.contextPack);
   const contextManifestFromPack = parseContextManifestFromContextPack(body.contextPack);
+  const pendingArtifactsFromPack = parsePendingArtifactsFromContextPack(body.contextPack);
   const personaFromPack = parseAgentPersonaFromContextPack(body.contextPack);
   const l1MemoryFromPack = parseMarkdownSegmentFromContextPack(body.contextPack, "L1_GLOBAL_MEMORY");
   const l2MemoryFromPack = parseMarkdownSegmentFromContextPack(body.contextPack, "L2_PROJECT_MEMORY");
@@ -2477,6 +2492,17 @@ export async function prepareAgentRun(args: {
   }
 
   const compositeTaskSummary = summarizeCompositeTaskPlan(compositeTaskPlan);
+  const workflowFromPack = mainDocFromPack && typeof mainDocFromPack === "object" ? (mainDocFromPack as any)?.workflowV1 ?? null : null;
+  const pendingResumeArtifact = Array.isArray(pendingArtifactsFromPack)
+    ? pendingArtifactsFromPack.find((x: any) => x && typeof x === "object" && String(x?.status ?? "pending").trim().toLowerCase() === "pending")
+    : null;
+  const shouldResumePendingWrite = Boolean(
+    projectDirFromSidecar &&
+    pendingResumeArtifact &&
+    String((workflowFromPack as any)?.status ?? "").trim().toLowerCase() === "waiting_user" &&
+    String((workflowFromPack as any)?.kind ?? "").trim().toLowerCase() === "project_open_resume_write" &&
+    looksLikeWorkflowContinuationPrompt(userPrompt),
+  );
 
   const messages: OpenAiChatMessage[] = [
     {
@@ -2494,6 +2520,9 @@ export async function prepareAgentRun(args: {
     ...(projectDirFromSidecar
       ? ([{ role: "system", content: `用户当前已打开项目目录：${projectDirFromSidecar}\n项目内的文件操作（doc.read/doc.write/project.search 等）均基于此目录。` }] as OpenAiChatMessage[])
       : ([{ role: "system", content: `当前没有打开项目文件夹。文件写入工具（doc.write/doc.splitToDir/doc.mkdir 等）和代码执行工具（code.exec）需要项目目录才能正常工作。\n如果任务需要写入文件或执行代码，请在第一步提醒用户点击输入框左下角的文件夹按钮选择或创建一个项目文件夹。` }] as OpenAiChatMessage[])),
+    ...(shouldResumePendingWrite
+      ? ([{ role: "system", content: `检测到这是一次“恢复上轮未落盘写入”的续跑：上轮因未打开项目目录而阻塞，现在项目目录已可用。\n你必须优先复用 Context Pack 中的 PENDING_ARTIFACTS 里的现成正文，直接调用 doc.write 保存到 workflowV1.resumeAction.pathHint；不要重新调研，不要重新生成正文。\n写入成功后，把 workflowV1.status 更新为 done。` }] as OpenAiChatMessage[])
+      : []),
     ...(body.contextPack ? ([{ role: "system", content: body.contextPack }] as OpenAiChatMessage[]) : []),
     { role: "user", content: body.prompt },
   ];

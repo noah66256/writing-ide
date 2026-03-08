@@ -1809,6 +1809,24 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
       `提示：存在未 Keep 的"文件提案"。后续若调用 doc.read 读取对应文件，系统会优先返回"提案态最新内容"（不要求先 Keep）。\n\n`
     : "";
 
+  const pendingArtifactsRaw = (((useRunStore.getState() as any).pendingArtifacts ?? []) as any[])
+    .filter((x) => x && typeof x === "object" && String((x as any).status ?? "pending").trim().toLowerCase() === "pending")
+    .slice(-2);
+  const pendingArtifactsForPack = pendingArtifactsRaw.map((item) => {
+    const full = String((item as any).content ?? "");
+    const maxChars = 30000;
+    const truncated = full.length > maxChars;
+    return {
+      ...item,
+      content: truncated ? full.slice(0, maxChars) + "\n\n...[artifact content truncated]" : full,
+      truncated,
+    };
+  });
+  const pendingArtifactsSection = pendingArtifactsForPack.length
+    ? `PENDING_ARTIFACTS(JSON):\n${JSON.stringify(pendingArtifactsForPack, null, 2)}\n\n` +
+      `提示：这些是“上一轮已经生成但尚未落盘”的待恢复产物。若用户本轮是在继续/保存/恢复，请优先复用这些产物，不要重新生成。\n\n`
+    : "";
+
   const segments: ContextManifestSegmentV1[] = [];
   const parts: string[] = [];
   const pushSeg = (seg: {
@@ -1931,6 +1949,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
 
   // p2: 提案态提示（可信）
   if (pendingSection) pushSeg({ name: "PENDING_FILE_PROPOSALS", content: pendingSection, priority: "p2", trusted: true, source: "desktop" });
+  if (pendingArtifactsSection) pushSeg({ name: "PENDING_ARTIFACTS", content: pendingArtifactsSection, priority: "p0", trusted: true, source: "desktop" });
 
   // p2: 选区（可信，但可能截断）
   pushSeg({
@@ -2002,6 +2021,24 @@ export function buildChatContextPack(extra?: { referencesText?: string; userProm
     projectMemory: useMemoryStore.getState().projectMemory,
     queryText: String(extra?.userPrompt ?? ""),
   });
+  const pendingArtifactsRaw = (((useRunStore.getState() as any).pendingArtifacts ?? []) as any[])
+    .filter((x) => x && typeof x === "object" && String((x as any).status ?? "pending").trim().toLowerCase() === "pending")
+    .slice(-2);
+  const pendingArtifactsForPack = pendingArtifactsRaw.map((item) => {
+    const full = String((item as any).content ?? "");
+    const maxChars = 30000;
+    const truncated = full.length > maxChars;
+    return {
+      ...item,
+      content: truncated ? full.slice(0, maxChars) + "\n\n...[artifact content truncated]" : full,
+      truncated,
+    };
+  });
+  const pendingArtifactsSection = pendingArtifactsForPack.length
+    ? `PENDING_ARTIFACTS(JSON):\n${JSON.stringify(pendingArtifactsForPack, null, 2)}\n\n` +
+      `提示：这些是“上一轮已经生成但尚未落盘”的待恢复产物。若用户本轮是在继续/保存/恢复，请优先复用这些产物，不要重新生成。\n\n`
+    : "";
+
   const segments: ContextManifestSegmentV1[] = [];
   const parts: string[] = [];
   const pushSeg = (seg: {

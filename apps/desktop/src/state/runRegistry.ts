@@ -9,7 +9,7 @@
  */
 
 import { create } from "zustand";
-import type { CtxRefItem, LogEntry, MainDoc, RunActivity, Step, TodoItem } from "./runStore";
+import type { CtxRefItem, LogEntry, MainDoc, PendingArtifact, RunActivity, Step, TodoItem } from "./runStore";
 
 // ─── 类型 ─────────────────────────────────────────────────────────────────────
 
@@ -19,6 +19,7 @@ export type RunBuffer = {
   mainDoc: MainDoc;
   todoList: TodoItem[];
   ctxRefs: CtxRefItem[];
+  pendingArtifacts: PendingArtifact[];
   activity: RunActivity | null;
 };
 
@@ -52,6 +53,7 @@ function emptyBuffer(): RunBuffer {
     mainDoc: {},
     todoList: [],
     ctxRefs: [],
+    pendingArtifacts: [],
     activity: null,
   };
 }
@@ -63,6 +65,7 @@ function cloneBuffer(seed?: Partial<RunBuffer>): RunBuffer {
     mainDoc: seed?.mainDoc ? { ...seed.mainDoc } : {},
     todoList: Array.isArray(seed?.todoList) ? [...seed!.todoList] : [],
     ctxRefs: Array.isArray(seed?.ctxRefs) ? [...seed!.ctxRefs] : [],
+    pendingArtifacts: Array.isArray((seed as any)?.pendingArtifacts) ? [...((seed as any).pendingArtifacts)] : [],
     activity: seed?.activity ? { ...seed.activity } : null,
   };
 }
@@ -165,6 +168,7 @@ export const useRunRegistry = create<RunRegistryState>()((set) => ({
         mainDoc: hasOwn(patch, "mainDoc") ? { ...(patch.mainDoc ?? {}) } : cur.mainDoc,
         todoList: hasOwn(patch, "todoList") ? [...(patch.todoList ?? [])] : cur.todoList,
         ctxRefs: hasOwn(patch, "ctxRefs") ? [...(patch.ctxRefs ?? [])] : cur.ctxRefs,
+        pendingArtifacts: hasOwn(patch, "pendingArtifacts") ? [...(((patch as any).pendingArtifacts) ?? [])] : cur.pendingArtifacts,
         activity: hasOwn(patch, "activity")
           ? patch.activity ? { ...patch.activity } : null
           : cur.activity,

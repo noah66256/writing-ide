@@ -149,6 +149,7 @@ export function createRunTarget(convId: string) {
         mainDoc: base ? { ...base.mainDoc } : { ...(snap?.mainDoc ?? {}) },
         todoList: base ? [...base.todoList] : [...(snap?.todoList ?? [])],
         ctxRefs: base ? [...base.ctxRefs] : [...(snap?.ctxRefs ?? [])],
+        pendingArtifacts: base ? [...((base as any).pendingArtifacts ?? [])] : [...((snap as any)?.pendingArtifacts ?? [])],
         activity: base ? (base.activity ? { ...base.activity } : null) : null,
       });
     }
@@ -173,6 +174,7 @@ export function createRunTarget(convId: string) {
         entry.buffer.logs?.length ? entry.buffer.logs : (base.logs ?? [])
       )),
       ctxRefs: JSON.parse(JSON.stringify(entry.buffer.ctxRefs ?? base.ctxRefs ?? [])),
+      pendingArtifacts: JSON.parse(JSON.stringify((entry.buffer as any).pendingArtifacts ?? (base as any).pendingArtifacts ?? [])),
     };
     useConversationStore.getState().updateConversation(cid, { snapshot: next });
   };
@@ -218,6 +220,11 @@ export function createRunTarget(convId: string) {
     return (getBuffer()?.ctxRefs ?? getConv()?.snapshot.ctxRefs ?? []) as CtxRefItem[];
   };
 
+  const getPendingArtifacts = (): any[] => {
+    if (isActive()) return (useRunStore.getState() as any).pendingArtifacts ?? [];
+    return ((getBuffer() as any)?.pendingArtifacts ?? (getConv()?.snapshot as any)?.pendingArtifacts ?? []) as any[];
+  };
+
   const getTodoList = (): TodoItem[] => {
     if (isActive()) return useRunStore.getState().todoList;
     return (getBuffer()?.todoList ?? getConv()?.snapshot.todoList ?? []) as TodoItem[];
@@ -255,6 +262,7 @@ export function createRunTarget(convId: string) {
     getMainDoc,
     getMode,
     getCtxRefs,
+    getPendingArtifacts,
     getTodoList,
     getDialogueSummaryByMode,
     getKbAttachedLibraryIds,
