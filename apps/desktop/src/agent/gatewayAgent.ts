@@ -1351,6 +1351,14 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     return out.length ? out : undefined;
   })();
 
+  const pendingArtifactsForResume = (((useRunStore.getState() as any).pendingArtifacts ?? []) as any[])
+    .filter((x) => x && typeof x === "object" && String(x?.status ?? "pending").trim().toLowerCase() === "pending");
+  const workflowV1 = mainDoc && typeof mainDoc === "object" ? (mainDoc as any)?.workflowV1 ?? null : null;
+  const resumeKind = String((workflowV1 as any)?.kind ?? "").trim().toLowerCase();
+  const resumeStatus = String((workflowV1 as any)?.status ?? "").trim().toLowerCase();
+  const pendingWriteResumeWaiting = resumeKind === "project_open_resume_write" && resumeStatus === "waiting_user" && pendingArtifactsForResume.length > 0;
+  const looksLikePendingResumeOverride = /(别存了|不要存了|不存了|不用存了|取消保存|先别保存|先别继续|不用继续|别继续|先别写入|别写了|重写|重新写|重来|改成|换成|换个主题|另写|重新生成)/.test(userPrompt);
+
   // 合并内置 + 外部扩展包的 skill manifests
   const allManifests = [...listRegisteredSkills(), ...useSkillStore.getState().externalSkills];
 
@@ -1372,7 +1380,9 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   });
   const idSetRaw = new Set((activeSkillsRaw ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean));
 
-  const activeSkills = activeSkillsRaw;
+  const activeSkills = pendingWriteResumeWaiting && !looksLikePendingResumeOverride
+    ? (activeSkillsRaw ?? []).filter((s: any) => String(s?.id ?? "").trim() !== "style_imitate")
+    : activeSkillsRaw;
 
   const skillsText = `ACTIVE_SKILLS(JSON):\n${JSON.stringify(activeSkills, null, 2)}\n\n`;
 
@@ -1383,7 +1393,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   const kbText = `KB_SELECTED_LIBRARIES(JSON):\n${JSON.stringify(kbSelected, null, 2)}\n\n` + kbHint;
 
   // 关键：风格 playbook/写法候选等"强引导"上下文，只在写作闭环真正激活时注入。
-  const allowInjectStyleContext = styleSkillActive;
+  const allowInjectStyleContext = styleSkillActive && !(pendingWriteResumeWaiting && !looksLikePendingResumeOverride);
 
   // v0.1：目录先挑（只给规则不给原文）。默认不再把 KB_LIBRARY_PLAYBOOK 全文注入模型上下文（容易导致贴原文）。
   // 可通过环境变量临时回滚：DESKTOP_STYLE_INJECT_PLAYBOOK=1

@@ -787,6 +787,50 @@ export function looksLikeExplicitNonTaskPrompt(text: string): boolean {
   return /(只讨论|先讨论|先聊|只聊|别执行|不要执行|别动手|先别做|不需要你做|不用动手)/.test(t);
 }
 
+export function looksLikePendingResumeOverridePrompt(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  return /(别存了|不要存了|不存了|不用存了|取消保存|先别保存|先别继续|不用继续|别继续|先别写入|别写了|重写|重新写|重来|改成|换成|换个主题|另写|重新生成)/.test(t);
+}
+
+export function readPendingWriteResumeState(args: { mainDoc?: unknown; pendingArtifacts?: any[] | null }) {
+  const doc = args.mainDoc && typeof args.mainDoc === "object" && !Array.isArray(args.mainDoc) ? (args.mainDoc as any) : null;
+  const wf = doc?.workflowV1 && typeof doc.workflowV1 === "object" && !Array.isArray(doc.workflowV1) ? (doc.workflowV1 as any) : null;
+  const kind = String(wf?.kind ?? "").trim().toLowerCase();
+  const status = String(wf?.status ?? "").trim().toLowerCase();
+  const resumeAction = wf?.resumeAction && typeof wf.resumeAction === "object" ? (wf.resumeAction as any) : null;
+  const artifactId = String(resumeAction?.artifactId ?? "").trim();
+  const pathHint = String(resumeAction?.pathHint ?? "").trim();
+  const pendingList = Array.isArray(args.pendingArtifacts) ? args.pendingArtifacts : [];
+  const artifact = artifactId
+    ? pendingList.find((x: any) => x && typeof x === "object" && String(x?.id ?? "").trim() === artifactId && String(x?.status ?? "pending").trim().toLowerCase() === "pending")
+    : pendingList.find((x: any) => x && typeof x === "object" && String(x?.status ?? "pending").trim().toLowerCase() === "pending" && (!pathHint || String(x?.pathHint ?? "").trim() === pathHint));
+  const waiting = kind === "project_open_resume_write" && status === "waiting_user";
+  return { waiting, kind, status, resumeAction, artifact: artifact ?? null, pathHint };
+}
+
+export function shouldPreferPendingWriteResume(args: {
+  mainDoc?: unknown;
+  pendingArtifacts?: any[] | null;
+  userPrompt: string;
+  projectDirAvailable: boolean;
+  intent?: any;
+}): boolean {
+  if (!args.projectDirAvailable) return false;
+  const state = readPendingWriteResumeState({ mainDoc: args.mainDoc, pendingArtifacts: args.pendingArtifacts });
+  if (!state.waiting || !state.artifact) return false;
+  const prompt = String(args.userPrompt ?? "").trim();
+  if (!prompt) return true;
+  if (looksLikeExplicitNonTaskPrompt(prompt)) return false;
+  if (looksLikePendingResumeOverridePrompt(prompt)) return false;
+  const looksLikeFreshTask =
+    !looksLikeWorkflowContinuationPrompt(prompt) &&
+    prompt.length >= 16 &&
+    Boolean(args.intent?.isWritingTask || args.intent?.wantsWrite || looksLikeResearchOnlyPrompt(prompt));
+  if (looksLikeFreshTask) return false;
+  return true;
+}
+
 export function looksLikeWorkflowContinuationPrompt(text: string): boolean {
   const t = String(text ?? "").trim();
   if (!t) return false;
@@ -1665,6 +1709,27 @@ export async function prepareAgentRun(args: {
     ideSummary: ideSummaryFromSidecar,
   });
 
+  const projectDirCandidate = normalizeIdeMeta({ ideSummary: ideSummaryFromSidecar, contextPack: body.contextPack, kbSelected: kbSelectedList }).projectDir;
+  const preferPendingWriteResume = shouldPreferPendingWriteResume({
+    mainDoc: mainDocFromPack,
+    pendingArtifacts: pendingArtifactsFromPack,
+    userPrompt,
+    projectDirAvailable: Boolean(projectDirCandidate),
+    intent,
+  });
+  if (preferPendingWriteResume) {
+    intentRoute = {
+      intentType: "task_execution",
+      confidence: 0.96,
+      nextAction: "enter_workflow",
+      todoPolicy: "required",
+      toolPolicy: "allow_tools",
+      reason: "state-first：存在待恢复 doc.write，优先恢复 pending action",
+      derivedFrom: ["state:pending_write_resume", "phase0_heuristic"],
+      routeId: "file_ops",
+    } as any;
+  }
+
   const capsForSkills = await services.toolConfig.resolveCapabilitiesRuntime().catch(() => null as any);
   const disabledSkillIds = new Set<string>(
     capsForSkills && capsForSkills.disabledSkillIds ? Array.from(capsForSkills.disabledSkillIds as Set<string>) : [],
@@ -2493,16 +2558,14 @@ export async function prepareAgentRun(args: {
 
   const compositeTaskSummary = summarizeCompositeTaskPlan(compositeTaskPlan);
   const workflowFromPack = mainDocFromPack && typeof mainDocFromPack === "object" ? (mainDocFromPack as any)?.workflowV1 ?? null : null;
-  const pendingResumeArtifact = Array.isArray(pendingArtifactsFromPack)
-    ? pendingArtifactsFromPack.find((x: any) => x && typeof x === "object" && String(x?.status ?? "pending").trim().toLowerCase() === "pending")
-    : null;
-  const shouldResumePendingWrite = Boolean(
-    projectDirFromSidecar &&
-    pendingResumeArtifact &&
-    String((workflowFromPack as any)?.status ?? "").trim().toLowerCase() === "waiting_user" &&
-    String((workflowFromPack as any)?.kind ?? "").trim().toLowerCase() === "project_open_resume_write" &&
-    looksLikeWorkflowContinuationPrompt(userPrompt),
-  );
+  const pendingResumeState = readPendingWriteResumeState({ mainDoc: mainDocFromPack, pendingArtifacts: pendingArtifactsFromPack });
+  const shouldResumePendingWrite = shouldPreferPendingWriteResume({
+    mainDoc: mainDocFromPack,
+    pendingArtifacts: pendingArtifactsFromPack,
+    userPrompt,
+    projectDirAvailable: Boolean(projectDirFromSidecar),
+    intent,
+  });
 
   const messages: OpenAiChatMessage[] = [
     {

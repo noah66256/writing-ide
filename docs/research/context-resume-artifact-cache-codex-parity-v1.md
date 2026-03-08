@@ -324,3 +324,92 @@
 - artifact checksum / size 校验
 - 启动时恢复提示条（告诉用户“有 1 个未完成写入可继续”）
 - 通用 resume engine（不只 `doc.write`）
+
+---
+
+## 12. P3：状态优先恢复（替代 continuation 关键词驱动）
+
+### 12.1 背景
+
+P0/P1/P2 已经补上了：
+
+- `pendingArtifacts`
+- `workflowV1.resumeAction`
+- `PENDING_ARTIFACTS(JSON)`
+- 跨 app 重启后的草稿恢复
+
+但当前恢复判定仍然存在一个核心缺陷：
+
+- 是否恢复，仍然强依赖用户本轮输入像不像“继续/保存吧/写吧”这类 continuation 话术
+- 这会导致：
+  - 用户明明已经完成前置操作（如打开项目目录），但只回复“我打开了/已选好/存吧”，系统仍可能被普通写作路由抢走
+  - Desktop 本地 `detectRunIntent + activateSkills` 也可能继续把这轮当成“继续写作”，从而注入风格/写法上下文，诱导模型重写而不是落盘
+
+### 12.2 对标 Codex 的结论
+
+从 `openai/codex` 可直接看到的范式不是“继续关键词表”，而是：
+
+- 结构化上下文 fragment
+- 程序状态与模型上下文分层
+- compaction 后重建上下文基线
+
+因此，这里更合理的做法不是继续补 continuation 关键词，而是：
+
+- **pending action 存在时，默认优先恢复**
+- **只有用户显式改题 / 取消 / 重写时，才打断恢复**
+
+### 12.3 本轮 P3 最小实现
+
+#### 做
+
+- 引入 `pending write resume` 的结构化判定 helper
+- 只要满足：
+  - `workflowV1.kind === project_open_resume_write`
+  - `workflowV1.status === waiting_user`
+  - 存在 `pendingArtifacts` 待恢复正文
+  - 当前项目目录已经可用
+- 则默认优先恢复，不再要求用户必须说中 continuation 关键词
+- 仅当用户本轮输入明显属于“取消/改题/重写/另起新任务”时，才放弃自动恢复
+- Desktop 构建 `contextPack` 时，若处于待恢复写入状态，则抑制写作强注入（如 `style_imitate` 相关上下文）
+
+#### 不做
+
+- 不做通用 workflow engine
+- 不做所有 pending action 的统一状态机
+- 不做 UI 层“待恢复条”
+
+### 12.4 判定原则
+
+#### 默认恢复（state-first）
+
+不是看用户有没有说“继续/保存吧”，而是看：
+
+- 程序状态里是否已经有一条明确待执行动作
+- 阻塞条件是否已经解除
+- 用户本轮是否没有明确要求取消/改题
+
+#### 显式打断（override-first）
+
+以下才视为真正打断恢复：
+
+- “别存了 / 不用存了 / 取消保存”
+- “先别继续 / 先别保存”
+- “改成公众号版 / 换个主题 / 重新写一篇 / 重写”
+- 明显的新任务请求，且语义上覆盖上一轮待恢复动作
+
+### 12.5 验收用例（新增）
+
+#### Case E：前置条件已满足，但用户不用 continuation 话术
+
+1. 上轮 `doc.write` 因 `NO_PROJECT` 挂起
+2. 用户打开项目目录
+3. 用户回复：“我打开了”
+4. 系统仍应优先恢复 `doc.write`
+5. 不重新检索、不重写正文
+
+#### Case F：用户显式改题
+
+1. 上轮 `doc.write` 因 `NO_PROJECT` 挂起
+2. 用户打开项目目录
+3. 用户回复：“别存了，改成公众号版重写”
+4. 系统应停止 pending write 恢复，转而进入新的写作任务
