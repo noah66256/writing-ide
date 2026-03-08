@@ -93,6 +93,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
     addTool,
     patchTool,
     updateMainDoc,
+    updateTodo,
     log,
   } = rt;
 
@@ -209,6 +210,32 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           selectedServerIds: Array.isArray(nextWorkflow?.selectedServerIds) ? nextWorkflow.selectedServerIds : [],
           preferredToolNames: Array.isArray(nextWorkflow?.preferredToolNames) ? nextWorkflow.preferredToolNames : [],
         },
+      });
+    } catch {
+      // noop
+    }
+  };
+
+
+  const syncTodoFailureStateFromRunEnd = (runEndData?: any) => {
+    try {
+      const failedCount = Number(runEndData?.failureDigest?.failedCount ?? 0) || 0;
+      if (failedCount <= 0) return;
+      const todos = Array.isArray((rt as any).getTodoList?.()) ? ((rt as any).getTodoList() as any[]) : [];
+      const runningTodo = todos.find((item: any) => String(item?.status ?? "") === "in_progress");
+      if (!runningTodo?.id) return;
+      const firstFailure = Array.isArray(runEndData?.failureDigest?.failedTools) ? runEndData.failureDigest.failedTools[0] : null;
+      const toolName = String(firstFailure?.name ?? "步骤").trim() || "步骤";
+      const error = String(firstFailure?.error ?? "执行失败").replace(/\s+/g, " ").trim() || "执行失败";
+      const note = `失败：${toolName} - ${error}`;
+      updateTodo(String(runningTodo.id), {
+        status: "blocked" as any,
+        note: note.length > 220 ? `${note.slice(0, 220).trimEnd()}…` : note,
+      });
+      log("warn", "workflow.todo.blocked_on_run_failure", {
+        todoId: String(runningTodo.id),
+        failedCount,
+        toolName,
       });
     } catch {
       // noop
@@ -780,6 +807,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             setRunning(false); setActivity(null);
             maybeAppendRunEndFeedback(data);
             const endReason = String(data?.reason ?? "").trim().toLowerCase();
+            syncTodoFailureStateFromRunEnd(data);
             if (endReason === "clarify_waiting" || endReason === "proposal_waiting") {
               updateWorkflowSticky({ status: "waiting_user", lastEndReason: endReason });
             } else if (endReason) {

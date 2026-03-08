@@ -218,6 +218,11 @@ export function createRunTarget(convId: string) {
     return (getBuffer()?.ctxRefs ?? getConv()?.snapshot.ctxRefs ?? []) as CtxRefItem[];
   };
 
+  const getTodoList = (): TodoItem[] => {
+    if (isActive()) return useRunStore.getState().todoList;
+    return (getBuffer()?.todoList ?? getConv()?.snapshot.todoList ?? []) as TodoItem[];
+  };
+
   const getMode = (): Mode => {
     if (isActive()) return useRunStore.getState().mode;
     return (getConv()?.snapshot.mode ?? frozenMode ?? "agent") as Mode;
@@ -250,6 +255,7 @@ export function createRunTarget(convId: string) {
     getMainDoc,
     getMode,
     getCtxRefs,
+    getTodoList,
     getDialogueSummaryByMode,
     getKbAttachedLibraryIds,
 
@@ -403,10 +409,34 @@ export function createRunTarget(convId: string) {
 
     // ---- setTodoList ----
     setTodoList: (items: TodoItem[]) => {
-      const prevList = [...(getBuffer()?.todoList ?? [])];
+      const prevList = [...getTodoList()];
       const nextList = Array.isArray(items) ? [...items] : [];
       if (isActive()) {
         const ret = useRunStore.getState().setTodoList(items);
+        mirrorUpdateBuffer({ todoList: nextList });
+        return {
+          undo: () => {
+            ret.undo();
+            mirrorUpdateBuffer({ todoList: prevList });
+          },
+        };
+      }
+      useRunRegistry.getState().updateBuffer(cid, { todoList: nextList });
+      return { undo: () => useRunRegistry.getState().updateBuffer(cid, { todoList: prevList }) };
+    },
+
+    // ---- updateTodo ----
+    updateTodo: (id: string, patch: Partial<TodoItem>) => {
+      const todoId = String(id ?? "").trim();
+      const prevList = [...getTodoList()];
+      const nextList = prevList.map((item) =>
+        String(item?.id ?? "") === todoId ? ({ ...item, ...patch, id: item.id } as TodoItem) : item,
+      );
+      if (!todoId || nextList.every((item, index) => item === prevList[index])) {
+        return { undo: () => {} };
+      }
+      if (isActive()) {
+        const ret = useRunStore.getState().updateTodo(todoId, patch);
         mirrorUpdateBuffer({ todoList: nextList });
         return {
           undo: () => {

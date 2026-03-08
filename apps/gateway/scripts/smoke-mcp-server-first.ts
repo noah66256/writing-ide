@@ -143,6 +143,7 @@ async function scenarioBrowserOpen() {
   assert.equal(prepared.mcpServerSelectionSummary.selectedServerIds.includes("word"), false, "browser scenario should prune word");
   assert.equal(prepared.mcpToolsForRun.every((tool) => tool.serverId !== "word"), true, "runtime MCP tools should exclude word server");
   assert.equal(prepared.selectedAllowedToolNames.has("mcp.playwright.browser_navigate"), true, "selected tools should include browser_navigate");
+  assert.equal(prepared.selectedAllowedToolNames.has("code.exec"), false, "browser scenario should suppress code.exec");
   ok("browser scenario");
 }
 
@@ -155,9 +156,23 @@ async function scenarioWordDoc() {
   ok("word scenario");
 }
 
+
+async function scenarioExplicitCodeExec() {
+  const prepared = await prepare(
+    "写一个 Python 脚本扫描项目里的 Markdown 文件并输出统计结果",
+    {
+      ...makeSidecar(),
+      ideSummary: { projectDir: "/tmp/mock-project", activePath: "/tmp/mock-project/README.md", openPaths: 1 },
+    },
+  );
+  assert.equal(prepared.selectedAllowedToolNames.has("code.exec"), true, "explicit code scenario should keep code.exec");
+  ok("explicit code scenario");
+}
+
 async function main() {
   await scenarioBrowserOpen();
   await scenarioWordDoc();
+  await scenarioExplicitCodeExec();
   console.log("[smoke-mcp-server-first] all scenarios passed");
 }
 

@@ -815,6 +815,24 @@ export function shouldSuppressSearchDuringBrowserContinuation(args: { mainDoc?: 
   return looksLikeWorkflowContinuationPrompt(prompt);
 }
 
+export function looksLikeExplicitCodeExecIntent(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  if (/(不要写代码|别写代码|不用写代码|不要脚本|别用脚本|不要code\.exec|别用code\.exec)/i.test(t)) return false;
+  return /(code\.exec|写(?:一个|一段)?(?:python|node|js|javascript|ts|typescript|bash|shell|sql)?脚本|执行(?:一段)?代码|运行(?:一段)?代码|跑脚本|python\b|node\b|npm run|pnpm |yarn |pytest\b|ts-node\b|命令行|终端脚本|shell脚本|bash脚本|调试代码|修复代码|改代码|仓库|repo|pull request|编译|构建|打包|部署)/i.test(t);
+}
+
+export function shouldAllowCodeExecForRun(args: {
+  userPrompt: string;
+  routeId: string;
+  projectDir?: string | null;
+}): boolean {
+  const routeId = String(args.routeId ?? "").trim().toLowerCase();
+  if (!String(args.projectDir ?? "").trim()) return false;
+  if (routeId === "web_radar") return false;
+  return looksLikeExplicitCodeExecIntent(args.userPrompt);
+}
+
 export function resolveStickyMcpServerIds(args: {
   mainDoc?: unknown;
   availableServerIds?: string[];
@@ -2300,6 +2318,16 @@ export async function prepareAgentRun(args: {
       }
     }
   }
+  const projectDirFromSidecar = coerceNonEmptyString(ideSummaryFromSidecar?.projectDir);
+  const allowCodeExecForRun = shouldAllowCodeExecForRun({
+    userPrompt,
+    routeId: routeIdLower || intentRoute.routeId || "",
+    projectDir: projectDirFromSidecar,
+  });
+  if (baseAllowedToolNames.has("code.exec")) {
+    if (allowCodeExecForRun) selectedAllowedToolNames.add("code.exec");
+    else selectedAllowedToolNames.delete("code.exec");
+  }
   const toolCatalogSummary: ToolCatalogSummary = (() => {
     const allNames = toolCatalog.map((entry) => String(entry.name ?? "").trim()).filter(Boolean);
     const selectedNames = Array.from(selectedAllowedToolNames).filter((name) => allNames.includes(name));
@@ -2312,8 +2340,6 @@ export async function prepareAgentRun(args: {
       prunedToolNames: prunedNames.slice(0, 48),
     };
   })();
-
-  const projectDirFromSidecar = coerceNonEmptyString(ideSummaryFromSidecar?.projectDir);
   const deleteTargetsHint =
     routeIdLower === "file_delete_only"
       ? extractDeleteTargetsHint(userPrompt)
