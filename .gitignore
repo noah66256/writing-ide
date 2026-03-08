@@ -48,3 +48,14 @@ _quick_test_*
 _tmp_*
 _VERIFICATION_RESULT.md
 
+
+# local runtime caches
+.playwright-mcp/
+.writing-ide/
+
+# desktop packaging outputs at repo root
+apps/*.dmg
+apps/*.pkg
+apps/*.exe
+apps/*.blockmap
+apps/*.zip
