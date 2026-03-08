@@ -155,6 +155,30 @@ function makeSidecar() {
   };
 }
 
+function makeSearchOnlySidecar() {
+  return {
+    mcpServers: [
+      { serverId: "web-search", serverName: "Web Search", status: "connected", toolCount: 2, agentToolCount: 2, familyHint: "search", toolProfile: "search_minimal" },
+    ],
+    mcpTools: [
+      {
+        name: "mcp.web-search.web_search",
+        description: "[MCP:Web Search] 全网搜索",
+        serverId: "web-search",
+        serverName: "Web Search",
+        originalName: "web_search",
+      },
+      {
+        name: "mcp.web-search.get_page_content",
+        description: "[MCP:Web Search] 获取网页内容",
+        serverId: "web-search",
+        serverName: "Web Search",
+        originalName: "get_page_content",
+      },
+    ],
+  };
+}
+
 function makeWordReadOnlySidecar() {
   return {
     mcpServers: [
@@ -224,6 +248,15 @@ async function scenarioCompositeBrowserToWord() {
   ok("composite browser to word scenario");
 }
 
+async function scenarioSearchWithoutBrowser() {
+  const prepared = await prepare("搜索一下 OpenClaw 的最新信息并整理来源", makeSearchOnlySidecar());
+  assert.equal(prepared.selectedAllowedToolNames.has("mcp.web-search.web_search"), true, "search-only scenario should keep search tool");
+  assert.equal(prepared.selectedAllowedToolNames.has("mcp.playwright.browser_navigate"), false, "search-only scenario should not require browser");
+  const systemPrompt = String(prepared.messages[0]?.content ?? "");
+  assert.equal(/web\.search \/ web\.fetch/.test(systemPrompt) && /无法联网搜索|浏览器 MCP/.test(systemPrompt), true, "system prompt should explicitly separate search from browser");
+  ok("search without browser scenario");
+}
+
 async function scenarioWordDeliveryFailFast() {
   const result = await prepareResult("帮我创建一个 Word 文档并导出 docx", makeWordReadOnlySidecar());
   assert.equal(!!result.error, true, "read-only word toolset should fail fast");
@@ -247,6 +280,7 @@ async function main() {
   await scenarioBrowserOpen();
   await scenarioWordDoc();
   await scenarioCompositeBrowserToWord();
+  await scenarioSearchWithoutBrowser();
   await scenarioWordDeliveryFailFast();
   await scenarioExplicitCodeExec();
   console.log("[smoke-mcp-server-first] all scenarios passed");

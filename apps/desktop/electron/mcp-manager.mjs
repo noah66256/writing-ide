@@ -961,16 +961,24 @@ export class McpManager {
   _inferServerFamily(config, tools) {
     const hinted = normalizeServerFamily(config?.familyHint);
     if (hinted) return hinted;
-    const haystack = [
-      String(config?.id ?? ""),
-      String(config?.name ?? ""),
-      ...((Array.isArray(tools) ? tools : []).flatMap((tool) => [String(tool?.name ?? ""), String(tool?.description ?? "")]))
-    ].join(" ").toLowerCase();
-    if (/(playwright|browser_|navigate|snapshot|click|press|fill|tab)/.test(haystack)) return "browser";
-    if (/(search|query|serper|tavily|bocha|fetch|crawler)/.test(haystack)) return "search";
-    if (/(word|docx|document|paragraph|get_xml|get_text|heading|footer|header)/.test(haystack)) return "word";
+    const idText = String(config?.id ?? "").trim().toLowerCase();
+    const nameText = String(config?.name ?? "").trim().toLowerCase();
+    const toolText = (Array.isArray(tools) ? tools : [])
+      .flatMap((tool) => [String(tool?.name ?? ""), String(tool?.description ?? "")])
+      .join(" ")
+      .toLowerCase();
+    const serverIdentity = `${idText} ${nameText}`;
+    if (/(^|)(office\s*word|word|docx|document)(|$)/.test(serverIdentity)) return "word";
+    if (/(^|)(excel|xlsx|spreadsheet|workbook|worksheet)(|$)/.test(serverIdentity)) return "spreadsheet";
+    if (/(^|)(pdf|acrobat)(|$)/.test(serverIdentity)) return "pdf";
+    if (/(^|)(web-search|search|serper|tavily|bocha)(|$)/.test(serverIdentity)) return "search";
+    if (/(^|)(playwright|browser)(|$)/.test(serverIdentity)) return "browser";
+    const haystack = `${serverIdentity} ${toolText}`;
+    if (/(word|docx|paragraph|get_xml|get_text|heading|footer|header)/.test(haystack)) return "word";
     if (/(excel|sheet|spreadsheet|workbook|worksheet|cell|column|row)/.test(haystack)) return "spreadsheet";
     if (/(pdf|acrobat|document_page)/.test(haystack)) return "pdf";
+    if (/(search|query|serper|tavily|bocha|fetch|crawler)/.test(haystack)) return "search";
+    if (/(playwright|browser_|navigate|snapshot|click|press|fill|tab)/.test(haystack)) return "browser";
     return "custom";
   }
 

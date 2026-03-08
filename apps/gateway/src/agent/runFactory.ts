@@ -2453,16 +2453,16 @@ export async function prepareAgentRun(args: {
       /^mcp\.[^.]*(?:playwright|browser)[^.]*\./i.test(n),
     );
     if (hasBochaApi || hasDedicatedSearchMcp) {
-      webSearchHint = "联网搜索已就绪（搜索服务已连接）。需要搜索信息时使用 web.search / web.fetch。";
+      webSearchHint = "联网搜索已就绪（搜索服务已连接）。搜索类任务必须直接使用 web.search / web.fetch 或对应 Search MCP。注意：浏览器是否可用，与能否联网搜索是两回事；即使没有浏览器 MCP，也不能声称“无法联网搜索”。";
       if (hasPlaywrightMcp) {
-        webSearchHint += " 浏览器 MCP 也可用——用户要求「打开/访问/导航到」某网站时，直接用浏览器 MCP 工具（如 browser_navigate），不要先调 web.search。";
+        webSearchHint += " 浏览器 MCP 也可用——用户要求「打开/访问/导航到」某网站时，直接用浏览器 MCP 工具（如 browser_navigate）；用户只是要求“搜索/收集资料/查最新信息”时，不要误切到浏览器路径。";
       }
     } else if (hasPlaywrightMcp) {
-      webSearchHint = "网页访问/浏览器自动化可用（浏览器 MCP 已连接）。用户要求打开/访问网站时直接使用浏览器 MCP 工具导航，不要先调 web.search。搜索信息时 web.search / web.fetch 如可用也可使用。";
+      webSearchHint = "网页访问/浏览器自动化可用（浏览器 MCP 已连接），但这不等于搜索后端可用。用户要求打开/访问网站时使用浏览器 MCP；若用户要求“搜索最新信息”，且没有 search 工具，则应明确说明“浏览器可用，但搜索工具不可用”，不要混说成“无法联网”。";
     } else if (hasWebToolSelected) {
-      webSearchHint = "web.search / web.fetch 工具已就绪但搜索后端未配置，实际调用可能失败。建议提醒用户在设置页配置搜索服务。";
+      webSearchHint = "web.search / web.fetch 工具已就绪但搜索后端未配置，实际调用可能失败。这里的问题只是搜索后端，不是浏览器；不要把“浏览器不可用”当作“无法联网搜索”的原因。";
     } else {
-      webSearchHint = "联网搜索当前不可用（未配置搜索服务且浏览器 MCP 未连接）。不得声称已联网或引用网络信息。";
+      webSearchHint = "联网搜索当前不可用：既没有搜索后端，也没有浏览器 MCP。不得声称已联网或引用网络信息。";
     }
   }
 
