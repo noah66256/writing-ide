@@ -33,8 +33,11 @@ function buildFixtures(): { servers: McpSidecarServer[]; tools: McpSidecarTool[]
       serverId: "word",
       serverName: "Word",
       status: "connected",
-      toolCount: 2,
-      toolNamesSample: ["create_document", "read_doc"],
+      toolCount: 4,
+      agentToolCount: 4,
+      familyHint: "word",
+      toolProfile: "word_delivery_minimal",
+      toolNamesSample: ["create_document", "add_paragraph", "save_document", "read_doc"],
     },
   ];
 
@@ -73,6 +76,20 @@ function buildFixtures(): { servers: McpSidecarServer[]; tools: McpSidecarTool[]
       serverId: "word",
       serverName: "Word",
       originalName: "create_document",
+    },
+    {
+      name: "mcp.word.add_paragraph",
+      description: "[MCP:Word] 向 Word 文档追加段落",
+      serverId: "word",
+      serverName: "Word",
+      originalName: "add_paragraph",
+    },
+    {
+      name: "mcp.word.save_document",
+      description: "[MCP:Word] 保存并导出 docx 文档",
+      serverId: "word",
+      serverName: "Word",
+      originalName: "save_document",
     },
     {
       name: "mcp.word.read_doc",
@@ -156,6 +173,7 @@ function scenarioWordFirst() {
   assert.equal(result.serverSelection.selectedServerIds.has("playwright"), false, "docx intent should prune playwright server");
   assert.equal(result.filteredTools.every((tool) => tool.serverId === "word"), true, "word intent should only retain word tools");
   assert.equal(result.toolSelection.selectedToolNames.has("mcp.word.create_document"), true, "create_document should be selected");
+  assert.equal(result.toolSelection.selectedToolNames.has("mcp.word.add_paragraph"), true, "word write tool should be selected");
   ok("word-first selection");
 }
 
@@ -166,7 +184,7 @@ function scenarioFallbackCompatibility() {
   });
 
   assert.equal(result.serverSelection.selectedServerIds.size, 0, "non-mcp prompt should not force a server");
-  assert.equal(result.filteredTools.length, 6, "when no server selected, should fall back to all tools for compatibility");
+  assert.equal(result.filteredTools.length, 8, "when no server selected, should fall back to all tools for compatibility");
   ok("fallback compatibility");
 }
 

@@ -32,6 +32,10 @@ import { shouldAttemptMcpSessionRecovery } from "./mcp-session-recovery.mjs";
  * @property {Record<string,string>} [env] - stdio 专用
  * @property {string} [endpoint]     - http/sse 专用
  * @property {Record<string,string>} [headers] - http/sse 专用
+ * @property {string[]} [enabledTools] - 仅对 Agent 暴露这些工具（server 级 allowlist）
+ * @property {string[]} [disabledTools] - 从 Agent 视图中剔除这些工具（server 级 denylist）
+ * @property {string} [toolProfile] - Agent 工具收敛 profile（如 browse_minimal / word_delivery_minimal）
+ * @property {string} [familyHint] - Server 家族提示（browser/search/word/spreadsheet/pdf/custom）
  */
 
 /** 内置 MCP Server 清单 */
@@ -175,6 +179,36 @@ function normalizePathArgValue(value) {
     raw = raw.replace(/\\/g, "/");
   }
   return raw;
+}
+
+const MCP_SERVER_FAMILIES = new Set(["browser", "search", "word", "spreadsheet", "pdf", "custom"]);
+const MCP_TOOL_PROFILES = new Set([
+  "full",
+  "browse_minimal",
+  "search_minimal",
+  "word_delivery_minimal",
+  "spreadsheet_delivery_minimal",
+  "pdf_read_minimal",
+]);
+
+function normalizeCsvToolList(value) {
+  if (Array.isArray(value)) {
+    return Array.from(new Set(value.map((item) => String(item ?? "").trim()).filter(Boolean)));
+  }
+  if (typeof value !== "string") return [];
+  return Array.from(new Set(String(value).split(/[\n,]/g).map((item) => item.trim()).filter(Boolean)));
+}
+
+function normalizeServerFamily(value) {
+  const family = String(value ?? "").trim().toLowerCase();
+  if (!family || family === "auto") return "";
+  return MCP_SERVER_FAMILIES.has(family) ? family : "";
+}
+
+function normalizeToolProfile(value) {
+  const profile = String(value ?? "").trim().toLowerCase();
+  if (!profile || profile === "auto") return "";
+  return MCP_TOOL_PROFILES.has(profile) ? profile : "";
 }
 
 /**
@@ -867,7 +901,26 @@ export class McpManager {
       const transport = await this._createTransport(entry.config);
       const client = new Client(
         { name: "ohmycrab-desktop", version: "1.0.0" },
-        { capabilities: {} },
+        {
+          capabilities: {},
+          listChanged: {
+            tools: {
+              autoRefresh: true,
+              debounceMs: 80,
+              onChanged: (error, tools) => {
+                if (error) {
+                  console.warn("[McpManager] tools list auto-refresh failed", {
+                    serverId,
+                    error: String(error?.message ?? error),
+                  });
+                  return;
+                }
+                entry.tools = this._normalizeListedTools(tools);
+                if (entry.status === "connected") this._notify();
+              },
+            },
+          },
+        },
       );
 
       await client.connect(transport);
@@ -876,11 +929,7 @@ export class McpManager {
       let tools = [];
       try {
         const result = await client.listTools();
-        tools = (result?.tools ?? []).map((t) => ({
-          name: t.name,
-          description: t.description ?? "",
-          inputSchema: t.inputSchema ?? null,
-        }));
+        tools = this._normalizeListedTools(result?.tools ?? []);
       } catch {
         // 某些 server 不支持 tools/list
       }
@@ -899,6 +948,97 @@ export class McpManager {
       this._notify();
       throw e;
     }
+  }
+
+  _normalizeListedTools(tools) {
+    return (Array.isArray(tools) ? tools : []).map((t) => ({
+      name: String(t?.name ?? "").trim(),
+      description: t?.description ?? "",
+      inputSchema: t?.inputSchema ?? null,
+    })).filter((t) => t.name);
+  }
+
+  _inferServerFamily(config, tools) {
+    const hinted = normalizeServerFamily(config?.familyHint);
+    if (hinted) return hinted;
+    const haystack = [
+      String(config?.id ?? ""),
+      String(config?.name ?? ""),
+      ...((Array.isArray(tools) ? tools : []).flatMap((tool) => [String(tool?.name ?? ""), String(tool?.description ?? "")]))
+    ].join(" ").toLowerCase();
+    if (/(playwright|browser_|navigate|snapshot|click|press|fill|tab)/.test(haystack)) return "browser";
+    if (/(search|query|serper|tavily|bocha|fetch|crawler)/.test(haystack)) return "search";
+    if (/(word|docx|document|paragraph|get_xml|get_text|heading|footer|header)/.test(haystack)) return "word";
+    if (/(excel|sheet|spreadsheet|workbook|worksheet|cell|column|row)/.test(haystack)) return "spreadsheet";
+    if (/(pdf|acrobat|document_page)/.test(haystack)) return "pdf";
+    return "custom";
+  }
+
+  _resolveToolProfile(config, family) {
+    const explicit = normalizeToolProfile(config?.toolProfile);
+    if (explicit) return explicit;
+    switch (family) {
+      case "browser":
+        return "browse_minimal";
+      case "search":
+        return "search_minimal";
+      case "word":
+        return "word_delivery_minimal";
+      case "spreadsheet":
+        return "spreadsheet_delivery_minimal";
+      case "pdf":
+        return "pdf_read_minimal";
+      default:
+        return "full";
+    }
+  }
+
+  _profileAllowsTool(profile, family, tool) {
+    if (!tool?.name) return false;
+    if (!profile || profile === "full") return true;
+    const toolName = String(tool.name ?? "").trim().toLowerCase();
+    const combined = `${toolName} ${String(tool.description ?? "").toLowerCase()}`;
+    const matches = (re) => re.test(combined);
+    if (profile === "browse_minimal") {
+      return matches(/(navigate|goto|open_url|snapshot|screenshot|click|press|fill|type|wait|tabs|tab|select|back|forward|run_code|scroll|hover)/);
+    }
+    if (profile === "search_minimal") {
+      return matches(/(search|query|fetch|get_page|read_page|content|crawl|extract|result)/);
+    }
+    if (profile === "word_delivery_minimal") {
+      return matches(/(create|open|new|read|get_text|get_xml|style|paragraph|text|heading|table|list|image|insert|add|append|replace|update|set|format|save|export|footer|header|page)/);
+    }
+    if (profile === "spreadsheet_delivery_minimal") {
+      return matches(/(create|open|read|get_|sheet|workbook|worksheet|cell|row|column|range|table|chart|append|insert|update|write|set|format|style|save|export)/);
+    }
+    if (profile === "pdf_read_minimal") {
+      return matches(/(open|read|get_|extract|page|search|outline|metadata|text)/);
+    }
+    if (family === "custom") return true;
+    return true;
+  }
+
+  _deriveAgentTools(entry) {
+    const tools = Array.isArray(entry?.tools) ? entry.tools : [];
+    const config = entry?.config ?? {};
+    const resolvedFamily = this._inferServerFamily(config, tools);
+    const resolvedToolProfile = this._resolveToolProfile(config, resolvedFamily);
+    const enabledTools = normalizeCsvToolList(config?.enabledTools);
+    const disabledTools = normalizeCsvToolList(config?.disabledTools);
+    const enabledSet = enabledTools.length ? new Set(enabledTools) : null;
+    const disabledSet = disabledTools.length ? new Set(disabledTools) : null;
+    let agentTools = tools.filter((tool) => this._profileAllowsTool(resolvedToolProfile, resolvedFamily, tool));
+    if (enabledSet) agentTools = agentTools.filter((tool) => enabledSet.has(String(tool?.name ?? "").trim()));
+    if (disabledSet) agentTools = agentTools.filter((tool) => !disabledSet.has(String(tool?.name ?? "").trim()));
+    if (agentTools.length === 0) agentTools = tools.slice();
+    return {
+      resolvedFamily,
+      resolvedToolProfile,
+      enabledTools,
+      disabledTools,
+      agentTools,
+      agentToolCount: agentTools.length,
+    };
   }
 
   async disconnect(serverId) {
@@ -1342,6 +1482,7 @@ export class McpManager {
       recoverySucceeded: false,
       recoveryDurationMs: 0,
     };
+    console.info("[McpManager] stateful recovery attempt", { serverId, toolName, strategy: meta.recoveryStrategy });
     try {
       await this.disconnect(serverId);
       await this.connect(serverId);
@@ -1356,7 +1497,7 @@ export class McpManager {
         };
       }
       const result = await this._callToolOnce(entry, toolName, callArgs);
-      return {
+      const outcome = {
         result,
         meta: {
           ...meta,
@@ -1364,8 +1505,16 @@ export class McpManager {
           recoveryDurationMs: Math.max(0, Date.now() - startedAt),
         },
       };
+      console.info("[McpManager] stateful recovery result", {
+        serverId,
+        toolName,
+        ok: Boolean(result?.ok),
+        recoverySucceeded: Boolean(outcome.meta.recoverySucceeded),
+        recoveryDurationMs: outcome.meta.recoveryDurationMs,
+      });
+      return outcome;
     } catch (e) {
-      return {
+      const failure = {
         result: { ok: false, error: String(e?.message ?? e) },
         meta: {
           ...meta,
@@ -1373,6 +1522,13 @@ export class McpManager {
           recoveryError: String(e?.message ?? e),
         },
       };
+      console.warn("[McpManager] stateful recovery failed", {
+        serverId,
+        toolName,
+        recoveryError: failure.meta.recoveryError,
+        recoveryDurationMs: failure.meta.recoveryDurationMs,
+      });
+      return failure;
     }
   }
 
@@ -1614,29 +1770,40 @@ export class McpManager {
   // ── 状态查询 ──────────────────────────
 
   getServers() {
-    return [...this._servers.values()].map((entry) => ({
-      id: entry.config.id,
-      name: entry.config.name,
-      transport: entry.config.transport,
-      enabled: entry.config.enabled,
-      bundled: entry.config.bundled === true,
-      builtin: entry.config.builtin === true,
-      skillManaged: entry.config.skillManaged === true,
-      skillId: entry.config.skillId || null,
-      status: entry.status,
-      tools: entry.tools,
-      error: entry.error,
-      config: {
-        command: entry.config.command,
-        args: entry.config.args,
-        modulePath: entry.config.modulePath,
-        endpoint: entry.config.endpoint,
-        headers: entry.config.headers,
-        env: entry.config.env ?? {},
-        skillDigest: entry.config.skillDigest || null,
-      },
-      ...(entry.config.configFields ? { configFields: entry.config.configFields } : {}),
-    }));
+    return [...this._servers.values()].map((entry) => {
+      const derived = this._deriveAgentTools(entry);
+      return {
+        id: entry.config.id,
+        name: entry.config.name,
+        transport: entry.config.transport,
+        enabled: entry.config.enabled,
+        bundled: entry.config.bundled === true,
+        builtin: entry.config.builtin === true,
+        skillManaged: entry.config.skillManaged === true,
+        skillId: entry.config.skillId || null,
+        status: entry.status,
+        tools: entry.tools,
+        agentTools: derived.agentTools,
+        agentToolCount: derived.agentToolCount,
+        resolvedFamily: derived.resolvedFamily,
+        resolvedToolProfile: derived.resolvedToolProfile,
+        error: entry.error,
+        config: {
+          command: entry.config.command,
+          args: entry.config.args,
+          modulePath: entry.config.modulePath,
+          endpoint: entry.config.endpoint,
+          headers: entry.config.headers,
+          env: entry.config.env ?? {},
+          enabledTools: derived.enabledTools,
+          disabledTools: derived.disabledTools,
+          toolProfile: entry.config.toolProfile ?? "",
+          familyHint: entry.config.familyHint ?? "",
+          skillDigest: entry.config.skillDigest || null,
+        },
+        ...(entry.config.configFields ? { configFields: entry.config.configFields } : {}),
+      };
+    });
   }
 
   // ── 事件通知 ──────────────────────────

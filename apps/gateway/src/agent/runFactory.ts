@@ -44,6 +44,7 @@ import {
   getCompositePreferredToolNames,
   getCompositeServerSelectionBudget,
   summarizeCompositeTaskPlan,
+  validateCompositePhaseCapabilities,
   type CompositeTaskPlanV1,
 } from "./compositeTask.js";
 import { collectToolSchemaIssues } from "@ohmycrab/tools";
@@ -1457,6 +1458,9 @@ const agentRunBodySchema = z.object({
         serverName: z.string().optional().default(""),
         status: z.string().optional().default("connected"),
         toolCount: z.number().int().nonnegative().optional(),
+        agentToolCount: z.number().int().nonnegative().optional(),
+        familyHint: z.string().max(100).optional(),
+        toolProfile: z.string().max(120).optional(),
         toolNamesSample: z.array(z.string().min(1).max(500)).max(20).optional(),
       })).max(50).optional(),
       mcpTools: z.array(z.object({
@@ -2257,15 +2261,6 @@ export async function prepareAgentRun(args: {
     tools: mcpToolsFromSidecar,
   });
   const compositeMaxServers = getCompositeServerSelectionBudget(compositeTaskPlan);
-  const compositePreferredToolNames = getCompositePreferredToolNames({
-    plan: compositeTaskPlan,
-    serverCatalog: mcpServerCatalog,
-  });
-  const executionPreferredWithComposite = Array.from(new Set([...compositePreferredToolNames, ...executionPreferred]));
-  const preserveToolNamesWithComposite = new Set<string>([
-    ...Array.from(preserveToolNames),
-    ...compositePreferredToolNames,
-  ]);
   let mcpServerSelection = selectMcpServerSubset({
     servers: mcpServerCatalog,
     routeId: routeIdLower || intentRoute.routeId,
@@ -2342,6 +2337,17 @@ export async function prepareAgentRun(args: {
         originalName: String(tool?.originalName ?? "").trim(),
       }));
 
+  const compositePreferredToolNames = getCompositePreferredToolNames({
+    plan: compositeTaskPlan,
+    serverCatalog: mcpServerCatalog,
+    tools: mcpToolsForRun,
+  });
+  const executionPreferredWithComposite = Array.from(new Set([...compositePreferredToolNames, ...executionPreferred]));
+  const preserveToolNamesWithComposite = new Set<string>([
+    ...Array.from(preserveToolNames),
+    ...compositePreferredToolNames,
+  ]);
+
   const toolCatalog = buildToolCatalog({
     mode,
     allowedToolNames: baseAllowedToolNames,
@@ -2386,6 +2392,30 @@ export async function prepareAgentRun(args: {
     if (allowCodeExecForRun) selectedAllowedToolNames.add("code.exec");
     else selectedAllowedToolNames.delete("code.exec");
   }
+
+  const compositeCapabilityIssue = validateCompositePhaseCapabilities({
+    plan: compositeTaskPlan,
+    serverCatalog: mcpServerCatalog,
+    tools: mcpToolsForRun,
+    selectedToolNames: selectedAllowedToolNames,
+  });
+  if (compositeCapabilityIssue) {
+    return {
+      error: {
+        statusCode: 400,
+        body: {
+          error: "MCP_PHASE_CAPABILITY_MISSING",
+          phaseId: compositeCapabilityIssue.phaseId,
+          phaseKind: compositeCapabilityIssue.phaseKind,
+          family: compositeCapabilityIssue.family,
+          reason: compositeCapabilityIssue.reason,
+          message: compositeCapabilityIssue.message,
+          hint: compositeCapabilityIssue.hint,
+        },
+      },
+    };
+  }
+
   const toolCatalogSummary: ToolCatalogSummary = (() => {
     const allNames = toolCatalog.map((entry) => String(entry.name ?? "").trim()).filter(Boolean);
     const selectedNames = Array.from(selectedAllowedToolNames).filter((name) => allNames.includes(name));

@@ -556,23 +556,32 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           if (mcpApi) {
             const servers = await mcpApi.getServers();
             const serverList = Array.isArray(servers) ? servers : [];
-            const connectedWithTools = serverList.filter((s: any) => s.status === "connected" && Array.isArray(s.tools) && s.tools.length);
-            const mcpServers = connectedWithTools.map((s: any) => ({
-              serverId: s.id,
-              serverName: s.name,
-              status: s.status,
-              toolCount: Array.isArray(s.tools) ? s.tools.length : 0,
-              toolNamesSample: Array.isArray(s.tools) ? s.tools.slice(0, 12).map((t: any) => String(t?.name ?? "")).filter(Boolean) : [],
-            }));
-            const mcpTools = connectedWithTools
-              .flatMap((s: any) => s.tools.map((t: any) => ({
-                name: `mcp.${s.id}.${t.name}`,
-                description: `[MCP:${s.name}] ${t.description ?? ""}`,
-                inputSchema: t.inputSchema ?? null,
+            const connectedWithTools = serverList.filter((s: any) => s.status === "connected" && Array.isArray((s.agentTools ?? s.tools)) && (s.agentTools ?? s.tools).length);
+            const mcpServers = connectedWithTools.map((s: any) => {
+              const agentTools = Array.isArray(s.agentTools) ? s.agentTools : (Array.isArray(s.tools) ? s.tools : []);
+              return {
                 serverId: s.id,
                 serverName: s.name,
-                originalName: t.name,
-              })));
+                status: s.status,
+                toolCount: Array.isArray(s.tools) ? s.tools.length : 0,
+                agentToolCount: Array.isArray(agentTools) ? agentTools.length : 0,
+                familyHint: String(s.resolvedFamily ?? s.config?.familyHint ?? ""),
+                toolProfile: String(s.resolvedToolProfile ?? s.config?.toolProfile ?? ""),
+                toolNamesSample: Array.isArray(agentTools) ? agentTools.slice(0, 12).map((t: any) => String(t?.name ?? "")).filter(Boolean) : [],
+              };
+            });
+            const mcpTools = connectedWithTools
+              .flatMap((s: any) => {
+                const agentTools = Array.isArray(s.agentTools) ? s.agentTools : (Array.isArray(s.tools) ? s.tools : []);
+                return agentTools.map((t: any) => ({
+                  name: `mcp.${s.id}.${t.name}`,
+                  description: `[MCP:${s.name}] ${t.description ?? ""}`,
+                  inputSchema: t.inputSchema ?? null,
+                  serverId: s.id,
+                  serverName: s.name,
+                  originalName: t.name,
+                }));
+              });
             if (mcpServers.length) out.mcpServers = mcpServers;
             if (mcpTools.length) out.mcpTools = mcpTools;
             log("info", "sidecar.mcp", {

@@ -62,11 +62,11 @@ function createServices(): RunServices {
   };
 }
 
-async function prepare(prompt: string, toolSidecar: any) {
+async function prepareResult(prompt: string, toolSidecar: any) {
   const prevRouterMode = process.env.INTENT_ROUTER_MODE;
   process.env.INTENT_ROUTER_MODE = "heuristic";
   try {
-    const result = await prepareAgentRun({
+    return await prepareAgentRun({
       request: { headers: {} },
       body: {
         mode: "agent",
@@ -75,12 +75,16 @@ async function prepare(prompt: string, toolSidecar: any) {
       },
       services: createServices(),
     });
-    assert.equal(!!result.error, false, `prepareAgentRun should succeed: ${JSON.stringify(result.error)}`);
-    return result.prepared!;
   } finally {
     if (prevRouterMode == null) delete process.env.INTENT_ROUTER_MODE;
     else process.env.INTENT_ROUTER_MODE = prevRouterMode;
   }
+}
+
+async function prepare(prompt: string, toolSidecar: any) {
+  const result = await prepareResult(prompt, toolSidecar);
+  assert.equal(!!result.error, false, `prepareAgentRun should succeed: ${JSON.stringify(result.error)}`);
+  return result.prepared!;
 }
 
 function makeSidecar() {
@@ -88,7 +92,7 @@ function makeSidecar() {
     mcpServers: [
       { serverId: "playwright", serverName: "Playwright", status: "connected", toolCount: 2 },
       { serverId: "web-search", serverName: "Web Search", status: "connected", toolCount: 2 },
-      { serverId: "word", serverName: "Word", status: "connected", toolCount: 2 },
+      { serverId: "word", serverName: "Word", status: "connected", toolCount: 4, agentToolCount: 4, familyHint: "word", toolProfile: "word_delivery_minimal" },
     ],
     mcpTools: [
       {
@@ -127,6 +131,44 @@ function makeSidecar() {
         originalName: "create_document",
       },
       {
+        name: "mcp.word.add_paragraph",
+        description: "[MCP:Word] 向 Word 文档追加段落",
+        serverId: "word",
+        serverName: "Word",
+        originalName: "add_paragraph",
+      },
+      {
+        name: "mcp.word.save_document",
+        description: "[MCP:Word] 保存并导出 docx 文档",
+        serverId: "word",
+        serverName: "Word",
+        originalName: "save_document",
+      },
+      {
+        name: "mcp.word.read_doc",
+        description: "[MCP:Word] 读取 docx 文档",
+        serverId: "word",
+        serverName: "Word",
+        originalName: "read_doc",
+      },
+    ],
+  };
+}
+
+function makeWordReadOnlySidecar() {
+  return {
+    mcpServers: [
+      { serverId: "word", serverName: "Word", status: "connected", toolCount: 2, agentToolCount: 2, familyHint: "word", toolProfile: "word_delivery_minimal" },
+    ],
+    mcpTools: [
+      {
+        name: "mcp.word.create_document",
+        description: "[MCP:Word] 创建 docx 文档",
+        serverId: "word",
+        serverName: "Word",
+        originalName: "create_document",
+      },
+      {
         name: "mcp.word.read_doc",
         description: "[MCP:Word] 读取 docx 文档",
         serverId: "word",
@@ -154,6 +196,11 @@ async function scenarioWordDoc() {
   assert.equal(prepared.mcpServerSelectionSummary.selectedServerIds.includes("playwright"), false, "docx scenario should prune playwright");
   assert.equal(prepared.mcpToolsForRun.every((tool) => tool.serverId === "word"), true, "runtime MCP tools should only keep word server");
   assert.equal(prepared.selectedAllowedToolNames.has("mcp.word.create_document"), true, "selected tools should include create_document");
+  assert.equal(
+    prepared.selectedAllowedToolNames.has("mcp.word.add_paragraph") || prepared.selectedAllowedToolNames.has("mcp.word.save_document"),
+    true,
+    "selected tools should include a write/export-capable word tool",
+  );
   ok("word scenario");
 }
 
@@ -169,7 +216,19 @@ async function scenarioCompositeBrowserToWord() {
   assert.equal(prepared.mcpServerSelectionSummary.selectedServerIds.includes("word"), true, "composite scenario should keep word");
   assert.equal(prepared.selectedAllowedToolNames.has("mcp.playwright.browser_navigate"), true, "composite scenario should include browser_navigate");
   assert.equal(prepared.selectedAllowedToolNames.has("mcp.word.create_document"), true, "composite scenario should include create_document");
+  assert.equal(
+    prepared.selectedAllowedToolNames.has("mcp.word.add_paragraph") || prepared.selectedAllowedToolNames.has("mcp.word.save_document"),
+    true,
+    "composite scenario should keep word write/export tools",
+  );
   ok("composite browser to word scenario");
+}
+
+async function scenarioWordDeliveryFailFast() {
+  const result = await prepareResult("帮我创建一个 Word 文档并导出 docx", makeWordReadOnlySidecar());
+  assert.equal(!!result.error, true, "read-only word toolset should fail fast");
+  assert.equal(result.error?.body?.error, "MCP_PHASE_CAPABILITY_MISSING", "should surface explicit capability error");
+  ok("word delivery fail-fast scenario");
 }
 
 async function scenarioExplicitCodeExec() {
@@ -188,6 +247,7 @@ async function main() {
   await scenarioBrowserOpen();
   await scenarioWordDoc();
   await scenarioCompositeBrowserToWord();
+  await scenarioWordDeliveryFailFast();
   await scenarioExplicitCodeExec();
   console.log("[smoke-mcp-server-first] all scenarios passed");
 }

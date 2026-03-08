@@ -24,6 +24,10 @@ export type McpServerState = {
   bundled?: boolean;
   builtin?: boolean;
   tools: McpToolInfo[];
+  agentTools?: McpToolInfo[];
+  agentToolCount?: number;
+  resolvedFamily?: string;
+  resolvedToolProfile?: string;
   error?: string | null;
   configFields?: McpConfigField[];
   config?: {
@@ -33,6 +37,10 @@ export type McpServerState = {
     endpoint?: string;
     headers?: Record<string, string>;
     env?: Record<string, string>;
+    enabledTools?: string[];
+    disabledTools?: string[];
+    toolProfile?: string;
+    familyHint?: string;
   };
 };
 

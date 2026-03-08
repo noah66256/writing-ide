@@ -1,4 +1,10 @@
-import { detectPromptCapabilities, type McpServerCatalogEntry } from "./toolCatalog.js";
+import {
+  detectPromptCapabilities,
+  inferMcpToolClass,
+  hasMcpWriteCapability,
+  type McpServerCatalogEntry,
+  type McpSidecarTool,
+} from "./toolCatalog.js";
 
 export type CompositeTaskPhaseKind =
   | "browser_collect"
@@ -252,7 +258,8 @@ export function deriveCompositeTaskPlanV1(args: {
     routeId,
     projectDir: args.projectDir,
   });
-  if (!existing && inferredKinds.length < 2) return null;
+  const standaloneDeliveryLike = inferredKinds.some((kind) => kind === "word_delivery" || kind === "spreadsheet_delivery");
+  if (!existing && inferredKinds.length < 2 && !standaloneDeliveryLike) return null;
 
   const mergedKinds: CompositeTaskPhaseKind[] = existing ? existing.phases.map((phase) => phase.kind) : [];
   for (const kind of inferredKinds) {
@@ -312,23 +319,140 @@ export function getCompositeServerSelectionBudget(plan: CompositeTaskPlanV1 | nu
 export function getCompositePreferredToolNames(args: {
   plan: CompositeTaskPlanV1 | null;
   serverCatalog: McpServerCatalogEntry[];
+  tools?: McpSidecarTool[];
 }): string[] {
   if (!args.plan) return [];
+  const unfinishedPhases = args.plan.phases.filter((phase) => phase.status !== "done" && phase.status !== "skipped");
   const unfinishedFamilies = new Set(
-    args.plan.phases
-      .filter((phase) => phase.status !== "done" && phase.status !== "skipped")
+    unfinishedPhases
       .flatMap((phase) => phase.allowedServerFamilies)
       .map((family) => String(family ?? "").trim())
       .filter(Boolean),
   );
   const names: string[] = [];
+  const push = (toolName: string) => {
+    const normalized = String(toolName ?? "").trim();
+    if (normalized && !names.includes(normalized)) names.push(normalized);
+  };
   for (const server of args.serverCatalog) {
     if (!unfinishedFamilies.has(String(server.family ?? "").trim())) continue;
-    for (const toolName of server.entryToolNames.slice(0, 2)) {
-      if (!names.includes(toolName)) names.push(toolName);
+    for (const toolName of server.entryToolNames.slice(0, 2)) push(toolName);
+  }
+
+  const tools = Array.isArray(args.tools) ? args.tools : [];
+  if (tools.length > 0) {
+    const familyByServerId = new Map(args.serverCatalog.map((server) => [String(server.serverId ?? "").trim(), String(server.family ?? "custom").trim()] as const));
+    const phasePriority = (phaseKind: CompositeTaskPhaseKind) => {
+      if (phaseKind === "word_delivery" || phaseKind === "spreadsheet_delivery") return 500;
+      if (phaseKind === "browser_collect") return 320;
+      return 120;
+    };
+    const scored = tools
+      .map((tool) => {
+        const name = String(tool?.name ?? "").trim();
+        const serverId = String(tool?.serverId ?? "").trim();
+        const family = familyByServerId.get(serverId) ?? "custom";
+        let score = 0;
+        for (const phase of unfinishedPhases) {
+          if (!phase.allowedServerFamilies.includes(family)) continue;
+          score = Math.max(score, phasePriority(phase.kind));
+          const toolClass = inferMcpToolClass({
+            toolName: String(tool?.originalName ?? name),
+            description: String(tool?.description ?? ""),
+            serverFamily: family,
+          });
+          if (phase.kind === "word_delivery" || phase.kind === "spreadsheet_delivery") {
+            if (toolClass === "write") score += 220;
+            else if (toolClass === "export") score += 180;
+            else if (toolClass === "entry") score += 120;
+            else if (toolClass === "read") score += 40;
+          } else if (phase.kind === "browser_collect") {
+            if (toolClass === "entry") score += 140;
+            else if (toolClass === "inspect" || toolClass === "read") score += 120;
+            else if (toolClass === "write") score += 100;
+          }
+        }
+        return { name, score };
+      })
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score || left.name.localeCompare(right.name));
+    for (const item of scored.slice(0, 12)) push(item.name);
+  }
+
+  return names.slice(0, 16);
+}
+
+export type CompositePhaseCapabilityIssue = {
+  phaseId: string;
+  phaseKind: CompositeTaskPhaseKind;
+  family: string;
+  reason: "missing_server" | "missing_write_tool";
+  message: string;
+  hint: string;
+};
+
+export function validateCompositePhaseCapabilities(args: {
+  plan: CompositeTaskPlanV1 | null;
+  serverCatalog: McpServerCatalogEntry[];
+  tools: McpSidecarTool[];
+  selectedToolNames: Set<string>;
+}): CompositePhaseCapabilityIssue | null {
+  if (!args.plan) return null;
+  const unfinishedPhases = args.plan.phases.filter((phase) => phase.status !== "done" && phase.status !== "skipped");
+  if (!unfinishedPhases.length) return null;
+  const familyByServerId = new Map(args.serverCatalog.map((server) => [String(server.serverId ?? "").trim(), String(server.family ?? "custom").trim()] as const));
+  for (const phase of unfinishedPhases) {
+    const family = phase.kind === "word_delivery"
+      ? "word"
+      : phase.kind === "spreadsheet_delivery"
+        ? "spreadsheet"
+        : "";
+    if (!family) continue;
+    const familyServers = args.serverCatalog.filter((server) => String(server.family ?? "").trim() === family);
+    if (familyServers.length === 0) {
+      return {
+        phaseId: phase.id,
+        phaseKind: phase.kind,
+        family,
+        reason: "missing_server",
+        message: family === "word" ? "当前任务需要 Word 交付，但未检测到可用的 Word MCP Server。" : "当前任务需要表格交付，但未检测到可用的 Spreadsheet MCP Server。",
+        hint: family === "word" ? "请在 MCP 设置中连接 Word 类 Server，或改为项目内 Markdown/文本交付。" : "请在 MCP 设置中连接 Excel/Spreadsheet 类 Server，或改为项目内 CSV/Markdown 交付。",
+      };
+    }
+    const selectedTools = args.tools.filter((tool) => {
+      const serverFamily = familyByServerId.get(String(tool?.serverId ?? "").trim()) ?? "custom";
+      return serverFamily === family && args.selectedToolNames.has(String(tool?.name ?? "").trim());
+    });
+    if (selectedTools.length === 0) {
+      return {
+        phaseId: phase.id,
+        phaseKind: phase.kind,
+        family,
+        reason: "missing_write_tool",
+        message: family === "word" ? "已选中 Word MCP Server，但当前对 Agent 暴露的工具为空，无法完成文档交付。" : "已选中 Spreadsheet MCP Server，但当前对 Agent 暴露的工具为空，无法完成表格交付。",
+        hint: "请检查 MCP 设置中的 tool profile / enabledTools / disabledTools，确认交付工具没有被裁掉。",
+      };
+    }
+    const hasWrite = selectedTools.some((tool) => hasMcpWriteCapability({
+      toolName: String(tool?.originalName ?? tool?.name ?? ""),
+      description: String(tool?.description ?? ""),
+      serverFamily: family,
+    }));
+    if (!hasWrite) {
+      const sample = selectedTools.map((tool) => String(tool?.originalName ?? tool?.name ?? "").trim()).filter(Boolean).slice(0, 6).join("、");
+      return {
+        phaseId: phase.id,
+        phaseKind: phase.kind,
+        family,
+        reason: "missing_write_tool",
+        message: family === "word"
+          ? `当前 Word MCP 已连接，但对 Agent 暴露的工具缺少正文写入/导出能力（当前可见：${sample || "无"}）。`
+          : `当前 Spreadsheet MCP 已连接，但对 Agent 暴露的工具缺少写入/导出能力（当前可见：${sample || "无"}）。`,
+        hint: "请在 MCP 设置中切换为更完整的交付 profile，或手动把写入类工具加入 enabledTools。",
+      };
     }
   }
-  return names.slice(0, 12);
+  return null;
 }
 
 export function getCompositePreferredServerIds(args: {

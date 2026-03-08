@@ -837,6 +837,10 @@ type McpDraft = {
   args?: string[];
   endpoint?: string;
   env?: Record<string, string>;
+  enabledTools?: string[];
+  disabledTools?: string[];
+  toolProfile?: string;
+  familyHint?: string;
   sourceRepo: string;
   notes: string[];
   confidence: DraftConfidence;
@@ -861,6 +865,34 @@ const TRANSPORT_LABELS: Record<TransportType, string> = {
   "streamable-http": "HTTP",
   sse: "SSE",
 };
+
+const MCP_FAMILY_OPTIONS = [
+  { value: "", label: "自动" },
+  { value: "browser", label: "browser" },
+  { value: "search", label: "search" },
+  { value: "word", label: "word" },
+  { value: "spreadsheet", label: "spreadsheet" },
+  { value: "pdf", label: "pdf" },
+  { value: "custom", label: "custom" },
+] as const;
+
+const MCP_PROFILE_OPTIONS = [
+  { value: "", label: "自动" },
+  { value: "full", label: "full" },
+  { value: "browse_minimal", label: "browse_minimal" },
+  { value: "search_minimal", label: "search_minimal" },
+  { value: "word_delivery_minimal", label: "word_delivery_minimal" },
+  { value: "spreadsheet_delivery_minimal", label: "spreadsheet_delivery_minimal" },
+  { value: "pdf_read_minimal", label: "pdf_read_minimal" },
+] as const;
+
+function formatToolListInput(list?: string[] | null): string {
+  return Array.isArray(list) ? list.map((item) => String(item ?? "").trim()).filter(Boolean).join("\n") : "";
+}
+
+function parseToolListInput(value: string): string[] {
+  return Array.from(new Set(String(value ?? "").split(/[\n,]/g).map((item) => item.trim()).filter(Boolean)));
+}
 
 function parseGithubRepoUrl(input: string): { owner: string; repo: string } | null {
   const raw = String(input ?? "").trim();
@@ -1611,7 +1643,10 @@ function McpServerCard({
           </div>
           {server.status === "connected" && server.tools.length > 0 && (
             <div className="text-[11px] text-text-muted mt-0.5">
-              {server.tools.length} 个可用工具
+              {typeof server.agentToolCount === "number" && server.agentToolCount !== server.tools.length
+                ? `Agent ${server.agentToolCount} / 全量 ${server.tools.length} 个工具`
+                : `${server.tools.length} 个可用工具`}
+              {server.resolvedToolProfile ? ` · ${server.resolvedToolProfile}` : ""}
             </div>
           )}
           {server.status === "error" && server.error && (
@@ -1669,9 +1704,25 @@ function McpServerCard({
       {expanded && (
         <div className="px-3 pb-3 pt-1 border-t border-border bg-surface-alt/30">
           {/* Tools list */}
+          {Array.isArray(server.agentTools) && server.agentTools.length > 0 && (
+            <div className="mb-2">
+              <div className="text-[11px] text-text-faint mb-1">Agent 暴露工具</div>
+              <div className="flex flex-wrap gap-1">
+                {server.agentTools.map((tool) => (
+                  <span
+                    key={`agent-${tool.name}`}
+                    className="inline-flex items-center px-2 py-0.5 rounded-md bg-accent-soft/40 text-[11px] text-accent font-mono border border-accent/20"
+                    title={tool.description}
+                  >
+                    {tool.name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           {server.tools.length > 0 && (
             <div className="mb-2">
-              <div className="text-[11px] text-text-faint mb-1">可用工具</div>
+              <div className="text-[11px] text-text-faint mb-1">全量工具</div>
               <div className="flex flex-wrap gap-1">
                 {server.tools.map((tool) => (
                   <span
@@ -1855,6 +1906,10 @@ function McpAddDialog({
   const [command, setCommand] = useState(existing?.config?.command ?? initialDraft?.command ?? "");
   const [args, setArgs] = useState(existing?.config?.args?.join(" ") ?? initialDraft?.args?.join(" ") ?? "");
   const [endpoint, setEndpoint] = useState(existing?.config?.endpoint ?? initialDraft?.endpoint ?? "");
+  const [familyHint, setFamilyHint] = useState(existing?.config?.familyHint ?? initialDraft?.familyHint ?? "");
+  const [toolProfile, setToolProfile] = useState(existing?.config?.toolProfile ?? initialDraft?.toolProfile ?? "");
+  const [enabledToolsText, setEnabledToolsText] = useState(formatToolListInput(existing?.config?.enabledTools ?? initialDraft?.enabledTools ?? []));
+  const [disabledToolsText, setDisabledToolsText] = useState(formatToolListInput(existing?.config?.disabledTools ?? initialDraft?.disabledTools ?? []));
   const [envPairs, setEnvPairs] = useState<Array<{ key: string; value: string; visible: boolean }>>(
     () => {
       const env = existing?.config?.env;
@@ -1931,6 +1986,12 @@ function McpAddDialog({
     if (Object.keys(envObj).length > 0) {
       config.env = envObj;
     }
+    const enabledTools = parseToolListInput(enabledToolsText);
+    const disabledTools = parseToolListInput(disabledToolsText);
+    if (enabledTools.length > 0) config.enabledTools = enabledTools;
+    if (disabledTools.length > 0) config.disabledTools = disabledTools;
+    if (toolProfile.trim()) config.toolProfile = toolProfile.trim();
+    if (familyHint.trim()) config.familyHint = familyHint.trim();
 
     if (editId) {
       await updateServer(editId, config);
@@ -2062,6 +2123,59 @@ function McpAddDialog({
           />
         </div>
       )}
+
+      <div className="rounded-lg border border-border bg-surface-alt/40 p-3 flex flex-col gap-3">
+        <div className="text-[12px] font-medium text-text">高级配置（Agent 暴露）</div>
+        <div className="grid grid-cols-2 gap-2">
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-text-muted">Family Hint</label>
+            <select
+              value={familyHint}
+              onChange={(e) => setFamilyHint(e.target.value)}
+              className="w-full px-3 py-1.5 rounded-lg border border-border bg-surface text-[12px] text-text focus:outline-none focus:border-accent transition-colors"
+            >
+              {MCP_FAMILY_OPTIONS.map((item) => (
+                <option key={item.value || "auto"} value={item.value}>{item.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-text-muted">Tool Profile</label>
+            <select
+              value={toolProfile}
+              onChange={(e) => setToolProfile(e.target.value)}
+              className="w-full px-3 py-1.5 rounded-lg border border-border bg-surface text-[12px] text-text focus:outline-none focus:border-accent transition-colors"
+            >
+              {MCP_PROFILE_OPTIONS.map((item) => (
+                <option key={item.value || "auto"} value={item.value}>{item.label}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-text-muted">Enabled Tools</label>
+            <textarea
+              value={enabledToolsText}
+              onChange={(e) => setEnabledToolsText(e.target.value)}
+              placeholder={"每行一个工具名，可选\n例如：add_paragraph"}
+              className="min-h-[88px] w-full px-3 py-2 rounded-lg border border-border bg-surface text-[12px] text-text font-mono placeholder:text-text-faint focus:outline-none focus:border-accent transition-colors resize-y"
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] text-text-muted">Disabled Tools</label>
+            <textarea
+              value={disabledToolsText}
+              onChange={(e) => setDisabledToolsText(e.target.value)}
+              placeholder={"每行一个工具名，可选\n例如：debug_dump"}
+              className="min-h-[88px] w-full px-3 py-2 rounded-lg border border-border bg-surface text-[12px] text-text font-mono placeholder:text-text-faint focus:outline-none focus:border-accent transition-colors resize-y"
+            />
+          </div>
+        </div>
+        <div className="text-[11px] text-text-faint">
+          UI 仍显示全量工具；这里控制的是对 Agent 暴露的工具子集。保存后下一轮任务直接热生效。
+        </div>
+      </div>
 
       {/* 环境变量 / API Key 配置 */}
       {hasConfigFields ? (

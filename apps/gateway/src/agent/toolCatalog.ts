@@ -40,7 +40,10 @@ export type McpSidecarServer = {
   serverName?: string;
   status?: string;
   toolCount?: number;
+  agentToolCount?: number;
   toolNamesSample?: string[];
+  familyHint?: string;
+  toolProfile?: string;
 };
 
 export type McpServerFamily = "browser" | "search" | "word" | "spreadsheet" | "pdf" | "custom";
@@ -53,6 +56,8 @@ export type McpServerCatalogEntry = {
   sessionMode: McpServerSessionMode;
   status: string;
   toolCount: number;
+  agentToolCount?: number;
+  toolProfile?: string;
   capabilities: string[];
   entryToolNames: string[];
 };
@@ -215,6 +220,41 @@ function isLikelyEntryToolName(name: string): boolean {
   return /(^|\.)(browser_navigate|navigate|open|open_url|openurl|goto|go_to|create|create_document|create_doc|new|new_document|save|export|create_workbook|new_workbook|get_doc|read_doc|search|fetch|get_page|browser_snapshot)$/.test(n);
 }
 
+function normalizeMcpToolVerb(name: string): string {
+  const n = String(name ?? "").trim().toLowerCase();
+  const parts = n.split(".");
+  return parts.length >= 3 ? parts.slice(2).join(".") : n;
+}
+
+export type McpToolClass = "entry" | "read" | "write" | "export" | "inspect" | "admin";
+
+export function inferMcpToolClass(args: {
+  toolName: string;
+  description?: string;
+  serverFamily?: McpServerFamily | string | null;
+}): McpToolClass {
+  const verb = normalizeMcpToolVerb(args.toolName);
+  const family = String(args.serverFamily ?? "").trim().toLowerCase();
+  const combined = `${verb} ${String(args.description ?? "").toLowerCase()}`;
+  if (/(^|[._-])(export|save|download|render|convert|print)(?:$|[._-])/.test(combined)) return "export";
+  if (/(^|[._-])(add|append|insert|write|update|replace|set|fill|type|click|press|merge|annotate|comment)(?:$|[._-])/.test(combined)) return "write";
+  if ((family === "word" || family === "spreadsheet") && /(paragraph|text|table|image|header|footer|cell|row|column|range|worksheet|sheet|chart)/.test(combined)) return "write";
+  if (/(^|[._-])(inspect|snapshot|extract|parse|analyze)(?:$|[._-])/.test(combined)) return "inspect";
+  if (/(^|[._-])(read|get|list|search|query|fetch|view)(?:$|[._-])/.test(combined)) return "read";
+  if (/(^|[._-])(delete|remove|close|clear|reset|stop|cancel)(?:$|[._-])/.test(combined)) return "admin";
+  if (/(^|[._-])(create|new|open|launch|goto|navigate|start|init)(?:$|[._-])/.test(combined)) return "entry";
+  return "inspect";
+}
+
+export function hasMcpWriteCapability(args: {
+  toolName: string;
+  description?: string;
+  serverFamily?: McpServerFamily | string | null;
+}): boolean {
+  const klass = inferMcpToolClass(args);
+  return klass === "write" || klass === "export";
+}
+
 export function buildMcpServerCatalog(args: {
   servers?: McpSidecarServer[];
   tools?: McpSidecarTool[];
@@ -225,13 +265,16 @@ export function buildMcpServerCatalog(args: {
   for (const server of Array.isArray(args.servers) ? args.servers : []) {
     const serverId = String(server?.serverId ?? "").trim();
     if (!serverId) continue;
+    const hintedFamily = String(server?.familyHint ?? "").trim().toLowerCase();
     serverMap.set(serverId, {
       serverId,
       serverName: String(server?.serverName ?? "").trim() || serverId,
-      family: "custom",
+      family: (["browser", "search", "word", "spreadsheet", "pdf", "custom"] as string[]).includes(hintedFamily) ? (hintedFamily as McpServerFamily) : "custom",
       sessionMode: "unknown",
       status: String(server?.status ?? "connected").trim() || "connected",
       toolCount: Math.max(0, Math.floor(Number(server?.toolCount ?? 0) || 0)),
+      agentToolCount: Math.max(0, Math.floor(Number(server?.agentToolCount ?? 0) || 0)) || undefined,
+      toolProfile: String(server?.toolProfile ?? "").trim() || undefined,
       capabilities: [],
       entryToolNames: [],
     });
@@ -248,6 +291,8 @@ export function buildMcpServerCatalog(args: {
       sessionMode: "unknown" as McpServerSessionMode,
       status: "connected",
       toolCount: 0,
+      agentToolCount: undefined,
+      toolProfile: undefined,
       capabilities: [] as string[],
       entryToolNames: [] as string[],
     };
@@ -270,6 +315,8 @@ export function buildMcpServerCatalog(args: {
     .map((entry) => ({
       ...entry,
       toolCount: entry.toolCount || entry.entryToolNames.length,
+      agentToolCount: entry.agentToolCount ?? entry.toolCount ?? entry.entryToolNames.length,
+      toolProfile: entry.toolProfile,
       capabilities: Array.from(new Set(entry.capabilities)),
       entryToolNames: Array.from(new Set(entry.entryToolNames)).slice(0, 24),
       sessionMode: inferMcpServerSessionMode(entry.family),
@@ -451,11 +498,30 @@ export function selectToolSubset(args: {
         (c === "mcp_pdf" && promptCaps.has("mcp_pdf")),
       );
       if (hasRelevantCap) {
-        const mcpParts = entry.name.split(".");
-        const toolName = (mcpParts.length >= 3 ? mcpParts.slice(2).join(".") : entry.name).toLowerCase();
-        if (/^(create|open|new|save|export|get_doc|read_doc)/.test(toolName)) {
+        const family: McpServerFamily = entry.capabilities.includes("mcp_word_doc")
+          ? "word"
+          : entry.capabilities.includes("mcp_spreadsheet")
+            ? "spreadsheet"
+            : entry.capabilities.includes("mcp_pdf")
+              ? "pdf"
+              : "custom";
+        const toolClass = inferMcpToolClass({
+          toolName: entry.name,
+          description: entry.description,
+          serverFamily: family,
+        });
+        if (toolClass === "write") {
+          score += 140;
+          reasons.push("mcp_write_priority");
+        } else if (toolClass === "export") {
+          score += 120;
+          reasons.push("mcp_export_priority");
+        } else if (toolClass === "entry") {
           score += 60;
           reasons.push("mcp_lifecycle_entry");
+        } else if (toolClass === "read") {
+          score += 20;
+          reasons.push("mcp_read_support");
         }
       }
     }
