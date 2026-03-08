@@ -297,6 +297,9 @@ function buildRouteDecisionV1(args: {
   const directOpenWebIntent = looksLikeDirectOpenWebIntent(args.userPrompt);
   const allowBrowserTools = routeIdLower === "web_radar" || directOpenWebIntent;
   if (allowBrowserTools) {
+    // 确保 web.search/web.fetch 也加入 preferred，LLM 才能知道有联网能力
+    if (!executionPreferredRaw.includes("web.search")) executionPreferredRaw.push("web.search");
+    if (!executionPreferredRaw.includes("web.fetch")) executionPreferredRaw.push("web.fetch");
     const mcpNavTool = args.mcpToolsFromSidecar
       .map((t) => String(t?.name ?? "").trim())
       .find((n) => /^mcp\./i.test(n) && /(browser_navigate|navigate|open_url|openurl|goto|go_to)/i.test(n));
@@ -1032,6 +1035,26 @@ export function computeIntentRouteDecisionPhase0(args: {
     /(查(一下)?|查询|搜索|检索|全网|上网|联网|web\.search|web\.fetch|github|资料|来源|链接|引用|证据|大搜|调研|研究|方案|最佳实践|best\s*practice|怎么解决|如何解决)/i.test(
       pTrim,
     ) && !/(写|仿写|改写|润色|生成|写入|保存|落盘|打包|安装包|exe|nsis|portable)/.test(pTrim);
+
+  // web_radar：用户明确要联网搜索/打开网页/浏览网站
+  const looksLikeWebSearchIntent =
+    looksLikeDirectOpenWebIntent(pTrim) ||
+    (/(全网|联网|上网|搜索网页|网上搜|web\.search|大搜|打开.*搜|搜.*东西|百度一下|google一下)/.test(pTrim) &&
+      !/(写|仿写|改写|润色|生成|写入|保存|落盘)/.test(pTrim) &&
+      !/(项目|仓库|代码|文件|全文|全局|本地|报错|错误|bug)/.test(pTrim));
+  if (looksLikeWebSearchIntent) {
+    return {
+      intentType: "task_execution",
+      confidence: 0.9,
+      nextAction: "enter_workflow",
+      todoPolicy: "required",
+      toolPolicy: "allow_readonly",
+      reason: "用户明确要联网搜索/打开网页：路由到 web_radar",
+      derivedFrom: ["regex:web_radar", ...derivedFrom],
+      routeId: "web_radar",
+    };
+  }
+
   const hasWaiting = todo.some((t: any) => {
     const status = String(t?.status ?? "").trim().toLowerCase();
     const note = String(t?.note ?? "").trim();
@@ -2060,23 +2083,29 @@ export async function prepareAgentRun(args: {
 
   // 检测联网搜索可用状态，注入到 systemPrompt
   const hasWebToolSelected = selectedAllowedToolNames.has("web.search");
+  // 也检查 MCP 搜索/浏览器工具是否被选入最终工具列表
+  // 用宽松模式匹配 serverId，兼容 playwright-local、tavily-search 等变体
+  const hasSelectedMcpSearch = Array.from(selectedAllowedToolNames).some((n) =>
+    /^mcp\.[^.]*(?:search|bocha|playwright|browser|tavily)[^.]*\./i.test(n),
+  );
   let webSearchHint = "";
-  if (hasWebToolSelected) {
+  if (hasWebToolSelected || hasSelectedMcpSearch) {
     // 检测 Bocha API 是否已配置（Gateway 侧直接执行）
     const webSearchRuntime = await services.toolConfig.resolveWebSearchRuntime().catch(() => null);
     const hasBochaApi = !!webSearchRuntime?.isEnabled && !!webSearchRuntime?.apiKey;
 
-    const hasDedicatedSearchMcp = mcpToolsFromSidecar.some((t) =>
-      /^mcp\.(bocha-search|web-search)\./i.test(String(t?.name ?? "")) &&
-      /(search|web_search|bocha_web_search)/i.test(String(t?.originalName ?? t?.name ?? "")),
+    const hasDedicatedSearchMcp = Array.from(selectedAllowedToolNames).some((n) =>
+      /^mcp\.[^.]*(?:search|bocha|tavily)[^.]*\./i.test(n),
     );
-    const hasPlaywrightMcp = mcpToolsFromSidecar.some((t) =>
-      /^mcp\.playwright\./i.test(String(t?.name ?? "")),
+    const hasPlaywrightMcp = Array.from(selectedAllowedToolNames).some((n) =>
+      /^mcp\.[^.]*(?:playwright|browser)[^.]*\./i.test(n),
     );
     if (hasBochaApi || hasDedicatedSearchMcp) {
       webSearchHint = "联网搜索已就绪（搜索服务已连接）。需要搜索时使用 web.search / web.fetch。";
     } else if (hasPlaywrightMcp) {
-      webSearchHint = "联网搜索可用（通过浏览器，速度较慢）。需要搜索时使用 web.search / web.fetch，系统自动通过浏览器执行。建议用户在设置页启用专用搜索服务以获得更快体验。";
+      webSearchHint = "联网能力可用（浏览器 MCP 已连接）。可直接使用已列出的浏览器 MCP 工具打开网页和获取内容。如果 web.search / web.fetch 可用也可使用。";
+    } else if (hasWebToolSelected) {
+      webSearchHint = "web.search / web.fetch 工具已就绪但搜索后端未配置，实际调用可能失败。建议提醒用户在设置页配置搜索服务。";
     } else {
       webSearchHint = "联网搜索当前不可用（未配置搜索服务且浏览器 MCP 未连接）。不得声称已联网或引用网络信息。";
     }

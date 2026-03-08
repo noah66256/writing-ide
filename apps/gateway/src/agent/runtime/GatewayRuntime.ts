@@ -32,6 +32,7 @@ import {
   decideServerToolExecution,
   executeServerToolOnGateway,
 } from "../serverToolRunner.js";
+import { normalizeToolParametersSchema } from "../../llm/toolSchema.js";
 import { TurnEngine, type RunOutcome } from "../turnEngine.js";
 import type { ModelApiType, ToolResultPayload } from "../writingAgentRunner.js";
 import { sanitizeAssistantUserFacingText } from "../userFacingText.js";
@@ -595,13 +596,15 @@ export class GatewayRuntime implements AgentRuntime {
   // ── 工具构建 ───────────────────────────────────
 
   /**
-   * 将 TOOL_LIST 转为 pi-agent-core 的 AgentTool[]。
+   * 将 TOOL_LIST + sidecar MCP 工具转为 pi-agent-core 的 AgentTool[]。
    * 工具名经过 encodeToolName 编码（dot → _dot_），兼容 OpenAI / Gemini 的 function name 限制。
-   * execute 回调用原始名路由工具执行。
+   * execute 回调用原始名路由执行（MCP 工具走 _executeAgentTool → desktop）。
    */
   private _buildAgentTools(): AgentTool<any>[] {
     const allowed = this.config.runCtx.allowedToolNames;
-    return TOOL_LIST
+
+    // ── 内置工具 ──────────────────────────────────
+    const builtins = TOOL_LIST
       .filter((tool) => allowed.size === 0 || allowed.has(tool.name))
       .filter((tool) => !tool.modes || tool.modes.includes(this.config.runCtx.mode))
       .map((tool) => ({
@@ -636,6 +639,52 @@ export class GatewayRuntime implements AgentRuntime {
           };
         },
       }));
+
+    // ── Sidecar MCP 工具（playwright / web-search / bocha-search 等）──
+    // 路由：_executeAgentTool → decideServerToolExecution → executedBy: "desktop"
+    const seenMcpNames = new Set<string>();
+    const mcpRaw: any[] = Array.isArray(this.config.runCtx.toolSidecar?.mcpTools)
+      ? this.config.runCtx.toolSidecar.mcpTools
+      : [];
+    const mcpTools = mcpRaw
+      .filter((t: any) => {
+        const name = String(t?.name ?? "").trim();
+        if (!name) return false;
+        if (allowed.size > 0 && !allowed.has(name)) return false;
+        if (seenMcpNames.has(name)) return false;
+        seenMcpNames.add(name);
+        return true;
+      })
+      .map((t: any) => {
+        const toolName = String(t.name).trim();
+        return {
+          name: encodeToolName(toolName),
+          label: toolName,
+          description: String(t.description ?? ""),
+          parameters: normalizeToolParametersSchema(t.inputSchema) as any,
+          execute: async (
+            toolCallId: string,
+            params: Record<string, unknown>,
+          ): Promise<AgentToolResult<GatewayToolExecResult>> => {
+            const result = await this._executeAgentTool(toolCallId, toolName, params ?? {});
+            this.toolCallSnapshots.set(toolCallId, {
+              args: params ?? {},
+              executedBy: result.executedBy,
+              dryRun: result.dryRun,
+            });
+            if (!result.ok) {
+              const errorText = normalizeToolOutputText(result.output);
+              throw new Error(errorText);
+            }
+            return {
+              content: buildTextContent(normalizeToolOutputText(result.output)),
+              details: result,
+            };
+          },
+        };
+      });
+
+    return [...builtins, ...mcpTools];
   }
 
   // ── 工具执行 ───────────────────────────────────
