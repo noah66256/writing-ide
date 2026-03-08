@@ -17,6 +17,7 @@ import { activateSkills } from "@ohmycrab/agent-core";
 import { buildStyleLinterLibrariesSidecar, executeToolCall, getTool } from "./toolRegistry";
 import { createRunTarget } from "./runTarget";
 import { cancelConvRun, setConvRunCancel } from "../state/runRegistry";
+import { mergeWorkflowStickyFromMcpSuccess } from "./mcpWorkflowSticky";
 import {
   type GatewayRunController,
   type GatewayRunArgs,
@@ -153,6 +154,16 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           preferredToolNames: nextPreferredToolNames,
           updatedAt: new Date().toISOString(),
         },
+      });
+    } catch {
+      // noop
+    }
+  };
+  const noteSuccessfulMcpExecution = (serverId: string, toolName: string) => {
+    try {
+      const main = (rt.getMainDoc() ?? {}) as any;
+      updateMainDoc({
+        workflowV1: mergeWorkflowStickyFromMcpSuccess(main?.workflowV1, { serverId, toolName }),
       });
     } catch {
       // noop
@@ -907,11 +918,12 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                       normalizedArgs: mcpDiag.normalizedArgs.slice(0, 8),
                     });
                   }
-                  patchTool(stepId, { status: result.ok ? "success" : "failed", output: result.ok ? result.output : null });
                   const failureOutput =
                     result?.output !== undefined
                       ? result.output
                       : { ok: false, error: result?.error ?? "MCP_TOOL_FAILED" };
+                  patchTool(stepId, { status: result.ok ? "success" : "failed", output: result.ok ? result.output : failureOutput });
+                  if (result.ok) noteSuccessfulMcpExecution(serverId, name);
                   submitToolResult({
                     toolCallId, name,
                     ok: result.ok,
@@ -964,6 +976,17 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               const serverId = parts[1] ?? "";
               const mcpToolName = parts.slice(2).join(".");
               log("info", "tool.call.mcp", { toolCallId, serverId, mcpToolName });
+              const stepId = addTool({
+                toolName: name,
+                status: "running",
+                input: parsedArgsPreview,
+                output: null,
+                riskLevel: "low",
+                applyPolicy: "auto_apply",
+                undoable: false,
+                kept: true,
+                applied: true,
+              });
               try {
                 const mcpApi = (window as any).desktop?.mcp;
                 const result = mcpApi
@@ -987,6 +1010,11 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                   result?.output !== undefined
                     ? result.output
                     : { ok: false, error: result?.error ?? "MCP_TOOL_FAILED" };
+                patchTool(stepId, {
+                  status: result.ok ? "success" : "failed",
+                  output: result.ok ? result.output : failureOutput,
+                });
+                if (result.ok) noteSuccessfulMcpExecution(serverId, name);
                 submitToolResult({
                   toolCallId, name,
                   ok: result.ok,
@@ -994,10 +1022,12 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                   meta: { applyPolicy: "auto", riskLevel: "low", hasApply: false, mcpDiag },
                 });
               } catch (e: any) {
+                const failureOutput = { ok: false, error: String(e?.message ?? e) };
+                patchTool(stepId, { status: "failed", output: failureOutput });
                 submitToolResult({
                   toolCallId, name,
                   ok: false,
-                  output: { ok: false, error: String(e?.message ?? e) },
+                  output: failureOutput,
                   meta: { applyPolicy: "auto", riskLevel: "low", hasApply: false },
                 });
               }

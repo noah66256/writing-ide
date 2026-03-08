@@ -14,6 +14,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { createRequire } from "node:module";
+import { shouldAttemptMcpSessionRecovery } from "./mcp-session-recovery.mjs";
 
 /** @typedef {"disconnected"|"connecting"|"connected"|"error"} McpStatus */
 
@@ -1333,6 +1334,48 @@ export class McpManager {
     return { ok: !isError, output, raw: result };
   }
 
+  async _recoverStatefulToolCall(serverId, toolName, callArgs) {
+    const startedAt = Date.now();
+    const meta = {
+      recoveryAttempted: true,
+      recoveryStrategy: "reconnect_server",
+      recoverySucceeded: false,
+      recoveryDurationMs: 0,
+    };
+    try {
+      await this.disconnect(serverId);
+      await this.connect(serverId);
+      const entry = this._servers.get(serverId);
+      if (!entry?.client) {
+        return {
+          result: { ok: false, error: `MCP_RECOVERY_RECONNECT_FAILED:${serverId}` },
+          meta: {
+            ...meta,
+            recoveryDurationMs: Math.max(0, Date.now() - startedAt),
+          },
+        };
+      }
+      const result = await this._callToolOnce(entry, toolName, callArgs);
+      return {
+        result,
+        meta: {
+          ...meta,
+          recoverySucceeded: Boolean(result?.ok),
+          recoveryDurationMs: Math.max(0, Date.now() - startedAt),
+        },
+      };
+    } catch (e) {
+      return {
+        result: { ok: false, error: String(e?.message ?? e) },
+        meta: {
+          ...meta,
+          recoveryDurationMs: Math.max(0, Date.now() - startedAt),
+          recoveryError: String(e?.message ?? e),
+        },
+      };
+    }
+  }
+
   async callTool(serverId, toolName, args) {
     const startedAt = Date.now();
     const entry = this._servers.get(serverId);
@@ -1349,6 +1392,12 @@ export class McpManager {
         availableTools: knownToolNames.slice(0, 80),
       };
     }
+    const recoveryCtx = {
+      serverId,
+      serverName: String(entry?.config?.name ?? entry?.config?.id ?? "").trim(),
+      toolName,
+      toolNames: knownToolNames,
+    };
     try {
       const normalized = this._normalizeToolArgs(entry, toolName, args, { serverId });
       if (normalized.rewrites.length > 0) {
@@ -1370,6 +1419,7 @@ export class McpManager {
             durationMs: Math.max(0, Date.now() - startedAt),
             normalizedCount: normalized.rewrites.length,
             retryCount: 0,
+            recoveryAttempted: false,
           },
           ...(normalized.rewrites.length > 0 ? { normalizedArgs: normalized.rewrites } : {}),
         };
@@ -1402,6 +1452,12 @@ export class McpManager {
         last = await this._callToolOnce(entry, toolName, attemptArgs);
         if (last.ok) break;
       }
+      let recoveryMeta = { recoveryAttempted: false };
+      if (!last.ok && shouldAttemptMcpSessionRecovery({ ...recoveryCtx, errorText: String(last.output ?? last.error ?? "") })) {
+        const recovery = await this._recoverStatefulToolCall(serverId, toolName, attemptArgs);
+        last = recovery.result;
+        recoveryMeta = recovery.meta;
+      }
       if (last.ok) {
         this._rememberArgMappings(serverId, toolName, normalized.schemaKeys, allRewrites);
       }
@@ -1414,6 +1470,7 @@ export class McpManager {
           normalizedCount: allRewrites.length,
           retryCount,
           success: Boolean(last?.ok),
+          ...recoveryMeta,
         },
         retried: retryCount > 0,
         retryCount,
@@ -1421,13 +1478,24 @@ export class McpManager {
         ...(allRewrites.length > 0 ? { normalizedArgs: allRewrites } : {}),
       };
     } catch (e) {
-      return {
+      const errText = String(e?.message ?? e);
+      let recoveryMeta = { recoveryAttempted: false };
+      let failure = {
         ok: false,
-        error: String(e?.message ?? e),
+        error: errText,
+      };
+      if (shouldAttemptMcpSessionRecovery({ ...recoveryCtx, errorText: errText })) {
+        const recovery = await this._recoverStatefulToolCall(serverId, toolName, args ?? {});
+        failure = recovery.result;
+        recoveryMeta = recovery.meta;
+      }
+      return {
+        ...failure,
         diag: {
           serverId,
           toolName,
           durationMs: Math.max(0, Date.now() - startedAt),
+          ...recoveryMeta,
         },
       };
     }

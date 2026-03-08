@@ -2853,6 +2853,13 @@ export async function executeAgentRun(args: {
           ),
         ).length,
         selectedMcpServers: mcpServerSelectionSummary.selectedServerIds,
+        selectedMcpServerModes: mcpServerSelectionSummary.rankingSample
+          .filter((server) => mcpServerSelectionSummary.selectedServerIds.includes(String(server?.serverId ?? "").trim()))
+          .map((server) => ({
+            serverId: String(server?.serverId ?? "").trim(),
+            family: String(server?.family ?? "custom"),
+            sessionMode: String((server as any)?.sessionMode ?? "unknown"),
+          })),
         selectedMcpTools: mcpToolsForRun.length,
         mcpToolNamesSample: mcpToolsFromSidecar
           .map((t: any) => String(t?.name ?? "").trim())
@@ -2988,12 +2995,25 @@ export async function executeAgentRun(args: {
       selectedServerIds: mcpServerSelectionSummary.selectedServerIds,
       prunedServerIds: mcpServerSelectionSummary.prunedServerIds,
       rankingSample: mcpServerSelectionSummary.rankingSample,
-      rawMcpServers: mcpServersFromSidecar.map((server: any) => ({
-        serverId: String(server?.serverId ?? "").trim(),
-        serverName: String(server?.serverName ?? "").trim(),
-        status: String(server?.status ?? "connected").trim() || "connected",
-        toolCount: Math.max(0, Math.floor(Number(server?.toolCount ?? 0) || 0)),
-      })),
+      rawMcpServers: mcpServersFromSidecar.map((server: any) => {
+        const serverId = String(server?.serverId ?? "").trim();
+        const rankingHit = mcpServerSelectionSummary.rankingSample.find((item) => String(item?.serverId ?? "").trim() === serverId);
+        return {
+          serverId,
+          serverName: String(server?.serverName ?? "").trim(),
+          status: String(server?.status ?? "connected").trim() || "connected",
+          toolCount: Math.max(0, Math.floor(Number(server?.toolCount ?? 0) || 0)),
+          family: String(rankingHit?.family ?? "custom"),
+          sessionMode: String((rankingHit as any)?.sessionMode ?? "unknown"),
+        };
+      }),
+      selectedServerSessionModes: mcpServerSelectionSummary.rankingSample
+        .filter((server) => mcpServerSelectionSummary.selectedServerIds.includes(String(server?.serverId ?? "").trim()))
+        .map((server) => ({
+          serverId: String(server?.serverId ?? "").trim(),
+          family: String(server?.family ?? "custom"),
+          sessionMode: String((server as any)?.sessionMode ?? "unknown"),
+        })),
       mcpToolsForRunCount: mcpToolsForRun.length,
       mcpToolsPrunedCount: Math.max(0, mcpToolsFromSidecar.length - mcpToolsForRun.length),
       stickyFallbackUsed: mcpServerStickyFallbackUsed,

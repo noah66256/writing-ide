@@ -44,11 +44,13 @@ export type McpSidecarServer = {
 };
 
 export type McpServerFamily = "browser" | "search" | "word" | "spreadsheet" | "pdf" | "custom";
+export type McpServerSessionMode = "stateful" | "stateless" | "unknown";
 
 export type McpServerCatalogEntry = {
   serverId: string;
   serverName: string;
   family: McpServerFamily;
+  sessionMode: McpServerSessionMode;
   status: string;
   toolCount: number;
   capabilities: string[];
@@ -59,7 +61,7 @@ export type McpServerSelectionSummary = {
   totalServers: number;
   selectedServerIds: string[];
   prunedServerIds: string[];
-  rankingSample: Array<{ serverId: string; family: McpServerFamily; score: number; reasons: string[] }>;
+  rankingSample: Array<{ serverId: string; family: McpServerFamily; sessionMode: McpServerSessionMode; score: number; reasons: string[] }>;
 };
 
 const ROUTE_CAPABILITY_MAP: Record<string, string[]> = {
@@ -202,6 +204,12 @@ function inferMcpServerFamily(capabilities: string[]): McpServerFamily {
   return "custom";
 }
 
+function inferMcpServerSessionMode(family: McpServerFamily): McpServerSessionMode {
+  if (family === "browser" || family === "word" || family === "spreadsheet" || family === "pdf") return "stateful";
+  if (family === "search") return "stateless";
+  return "unknown";
+}
+
 function isLikelyEntryToolName(name: string): boolean {
   const n = String(name ?? "").trim().toLowerCase();
   return /(^|\.)(browser_navigate|navigate|open|open_url|openurl|goto|go_to|create|new|save|export|get_doc|read_doc|search|fetch|get_page|browser_snapshot)$/.test(n);
@@ -221,6 +229,7 @@ export function buildMcpServerCatalog(args: {
       serverId,
       serverName: String(server?.serverName ?? "").trim() || serverId,
       family: "custom",
+      sessionMode: "unknown",
       status: String(server?.status ?? "connected").trim() || "connected",
       toolCount: Math.max(0, Math.floor(Number(server?.toolCount ?? 0) || 0)),
       capabilities: [],
@@ -236,6 +245,7 @@ export function buildMcpServerCatalog(args: {
       serverId,
       serverName,
       family: "custom" as McpServerFamily,
+      sessionMode: "unknown" as McpServerSessionMode,
       status: "connected",
       toolCount: 0,
       capabilities: [] as string[],
@@ -252,6 +262,7 @@ export function buildMcpServerCatalog(args: {
       existing.entryToolNames = Array.from(new Set([...existing.entryToolNames, toolName]));
     }
     existing.family = inferMcpServerFamily(existing.capabilities);
+    existing.sessionMode = inferMcpServerSessionMode(existing.family);
     serverMap.set(serverId, existing);
   }
 
@@ -261,6 +272,7 @@ export function buildMcpServerCatalog(args: {
       toolCount: entry.toolCount || entry.entryToolNames.length,
       capabilities: Array.from(new Set(entry.capabilities)),
       entryToolNames: Array.from(new Set(entry.entryToolNames)).slice(0, 24),
+      sessionMode: inferMcpServerSessionMode(entry.family),
     }))
     .sort((a, b) => a.serverId.localeCompare(b.serverId));
 }
@@ -330,7 +342,7 @@ export function selectMcpServerSubset(args: {
       score = 0;
       reasons.push(promptCaps.size > 0 ? "irrelevant_for_prompt" : "no_server_signal");
     }
-    return { serverId: server.serverId, family: server.family, score, reasons };
+    return { serverId: server.serverId, family: server.family, sessionMode: server.sessionMode, score, reasons };
   });
 
   rank.sort((a, b) => {
