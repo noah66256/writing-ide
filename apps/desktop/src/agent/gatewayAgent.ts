@@ -3,7 +3,7 @@ import { useRunStore, type ImageAttachment, type Mode } from "../state/runStore"
 import { useKbStore } from "../state/kbStore";
 import { useAuthStore } from "../state/authStore";
 import { facetLabel, getFacetPack } from "../kb/facets";
-import { activateSkills, detectRunIntent, listRegisteredSkills, BUILTIN_SUB_AGENTS } from "@ohmycrab/agent-core";
+import { activateSkills, detectRunIntent, listRegisteredSkills, BUILTIN_SUB_AGENTS, looksLikeFreshWritingTaskPrompt } from "@ohmycrab/agent-core";
 import { usePersonaStore } from "../state/personaStore";
 import { useTeamStore, getEffectiveAgents } from "../state/teamStore";
 import { useSkillStore } from "../state/skillStore";
@@ -242,13 +242,14 @@ function oneLine(s: unknown, max = 48) {
 
 export function humanizeToolActivity(name: string, args: Record<string, unknown>) {
   const tool = String(name ?? "");
-  if (!tool) return "正在执行工具…";
-  if (tool === "time.now") return "正在读取时间…";
-  if (tool === "run.setTodoList" || tool === "run.todo" || tool.startsWith("run.todo.")) return "正在更新 To-dos…";
-  if (tool === "run.done") return "正在结束本次运行…";
-  if (tool === "kb.search") return "正在检索知识库…";
+  if (!tool) return "思考中…";
+  if (tool === "time.now") return "思考中…";
+  if (tool === "run.setTodoList" || tool === "run.todo" || tool.startsWith("run.todo.")) return "思考中…";
+  if (tool === "run.done") return "思考中…";
+  if (tool === "run.mainDoc.get" || tool === "run.mainDoc.update") return "思考中…";
+  if (tool === "kb.search") return "正在搜索资料…";
   if (tool === "doc.read") return "正在读取文件…";
-  if (tool === "doc.write" || tool === "doc.previewDiff" || tool === "doc.splitToDir") return "正在写入文件…";
+  if (tool === "doc.write" || tool === "doc.previewDiff" || tool === "doc.splitToDir") return "正在整理结果…";
   if (tool === "web.search") {
     const q = oneLine((args as any)?.query ?? (args as any)?.q ?? (args as any)?.keyword, 36);
     return q ? `正在全网搜索：${q}` : "正在全网搜索…";
@@ -1230,6 +1231,17 @@ function buildRecentDialogueJsonFromTurns(turns: DialogueTurn[], maxTurns: numbe
 
 export async function buildContextPack(extra?: { referencesText?: string; userPrompt?: string; kbMentionIds?: string[] }) {
   const mainDoc = useRunStore.getState().mainDoc;
+  const freshWritingBoundary = useRunStore.getState().mode === "agent" && looksLikeFreshWritingTaskPrompt(String(extra?.userPrompt ?? ""));
+  const sanitizeMainDocForFreshWriting = (raw: any) => ({
+    audience: raw?.audience,
+    persona: raw?.persona,
+    tone: raw?.tone,
+    platformType: raw?.platformType,
+    sourcesPolicy: raw?.sourcesPolicy,
+    styleLintFailPolicy: raw?.styleLintFailPolicy,
+    runIntent: "auto",
+  });
+  const mainDocForPack = freshWritingBoundary ? sanitizeMainDocForFreshWriting(mainDoc as any) : mainDoc;
   const todoList = useRunStore.getState().todoList;
   const proj = useProjectStore.getState();
   const kbLibraries = useKbStore.getState().libraries ?? [];
@@ -1274,6 +1286,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
 
   // RUN_TODO：注入给模型的 todo 要做裁剪（避免上下文膨胀）；UI 仍保留全量 todoList。
   const runTodoForPack = (() => {
+    if (freshWritingBoundary) return [];
     const normalizeOne = (t: any) => {
       const id = String(t?.id ?? "").trim();
       const text0 = String(t?.text ?? "").replace(/\s+/g, " ").trim();
@@ -1305,6 +1318,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
 
   // 最近对话片段（注入最后 RAW_KEEP_TURNS 个完整回合；关键决策仍应写入 Main Doc/Run Todo）
   const recentDialogue = (() => {
+    if (freshWritingBoundary) return undefined;
     const turnsAll = buildDialogueTurnsFromSteps(useRunStore.getState().steps ?? [], { includeToolSummaries: true });
     const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
     return buildRecentDialogueJsonFromTurns(completeTurns, RAW_KEEP_TURNS);
@@ -1338,6 +1352,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
 
   // recentDialogue（仅用于本地意图/skills 的"续跑判定"，不注入模型 messages）
   const recentDialogueForIntent = (() => {
+    if (freshWritingBoundary) return undefined;
     const turnsAll = buildDialogueTurnsFromSteps(useRunStore.getState().steps ?? [], { includeToolSummaries: true });
     const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
     const tail = completeTurns.slice(-3);
@@ -1353,7 +1368,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
 
   const pendingArtifactsForResume = (((useRunStore.getState() as any).pendingArtifacts ?? []) as any[])
     .filter((x) => x && typeof x === "object" && String(x?.status ?? "pending").trim().toLowerCase() === "pending");
-  const workflowV1 = mainDoc && typeof mainDoc === "object" ? (mainDoc as any)?.workflowV1 ?? null : null;
+  const workflowV1 = mainDocForPack && typeof mainDocForPack === "object" ? (mainDocForPack as any)?.workflowV1 ?? null : null;
   const resumeKind = String((workflowV1 as any)?.kind ?? "").trim().toLowerCase();
   const resumeStatus = String((workflowV1 as any)?.status ?? "").trim().toLowerCase();
   const pendingWriteResumeWaiting = resumeKind === "project_open_resume_write" && resumeStatus === "waiting_user" && pendingArtifactsForResume.length > 0;
@@ -1365,15 +1380,15 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   const activeSkillsRaw = activateSkills({
     mode: useRunStore.getState().mode as any,
     userPrompt,
-    mainDocRunIntent: (mainDoc as any)?.runIntent,
+    mainDocRunIntent: (mainDocForPack as any)?.runIntent,
     kbSelected: kbSelected as any,
     manifests: allManifests as any,
     // 关键：与 Gateway 对齐（detectRunIntent 会参考 RUN_TODO 做"续跑/短句"意图继承）
     intent: detectRunIntent({
       mode: useRunStore.getState().mode as any,
       userPrompt,
-      mainDocRunIntent: (mainDoc as any)?.runIntent,
-      mainDoc: mainDoc as any,
+      mainDocRunIntent: (mainDocForPack as any)?.runIntent,
+      mainDoc: mainDocForPack as any,
       runTodo: runTodoForPack,
       recentDialogue: recentDialogueForIntent as any,
     }),
@@ -1415,7 +1430,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     if (!allowInjectStyleContext) return "";
     const styleLibs = kbSelected.filter((l: any) => String(l?.purpose ?? "").trim() === "style").slice(0, 4);
     if (!styleLibs.length) return "";
-    const topicText = buildTopicTextForSelectorV1({ userPrompt, mainDoc });
+    const topicText = buildTopicTextForSelectorV1({ userPrompt, mainDoc: mainDocForPack });
 
     const payload: any[] = [];
     for (const lib of styleLibs) {
@@ -1604,7 +1619,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     const cfg = await useKbStore.getState().getLibraryStyleConfig(libId).catch(() => ({ ok: false, anchors: [] } as any));
     const defaultClusterId = cfg?.ok ? String((cfg as any).defaultClusterId ?? "").trim() : "";
 
-    const topicText = buildTopicTextForSelectorV1({ userPrompt, mainDoc });
+    const topicText = buildTopicTextForSelectorV1({ userPrompt, mainDoc: mainDocForPack });
     const topicBrief = topicBriefForKbQueryV1({ userPrompt, mainDoc });
     const autoPick = pickClusterSelectorV1({ clusters: clustersRaw, defaultClusterId, topicText });
 
@@ -1924,7 +1939,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   // p0: 任务主线/约束（可信）
   pushSeg({
     name: "MAIN_DOC",
-    content: `MAIN_DOC(JSON):\n${JSON.stringify(mainDoc, null, 2)}\n\n`,
+    content: `MAIN_DOC(JSON):\n${JSON.stringify(mainDocForPack, null, 2)}\n\n`,
     priority: "p0",
     trusted: true,
     source: "desktop",

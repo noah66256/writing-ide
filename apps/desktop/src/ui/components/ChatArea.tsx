@@ -33,7 +33,7 @@ import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
 import { WelcomePage } from "./WelcomePage";
 import { InputBar } from "./InputBar";
 import { usePersonaStore } from "@/state/personaStore";
-import { BUILTIN_SUB_AGENTS } from "@ohmycrab/agent-core";
+import { BUILTIN_SUB_AGENTS, looksLikeFreshWritingTaskPrompt } from "@ohmycrab/agent-core";
 import {
   injectFileRefLinksInMarkdown,
   wrapBareUrlsInMarkdown,
@@ -99,17 +99,25 @@ function getToolGroupKey(step: ToolBlockStep): string | null {
   return `${step.agentId ?? "main"}:${meta.serverId || meta.toolId}`;
 }
 
+function shouldHideInternalToolStep(step: ToolBlockStep): boolean {
+  const name = String(step.toolName ?? "").trim();
+  if (!name) return false;
+  if (step.status === "failed") return false;
+  return name === "time.now" || name === "run.setTodoList" || name === "run.done" || name === "run.mainDoc.get" || name === "run.mainDoc.update" || name === "run.todo" || name.startsWith("run.todo.");
+}
+
 function buildRenderRows(steps: Step[]): RenderRow[] {
+  const visibleSteps = (steps ?? []).filter((step) => step.type !== "tool" || !shouldHideInternalToolStep(step as ToolBlockStep));
   const rows: RenderRow[] = [];
-  for (let index = 0; index < steps.length;) {
-    const current = steps[index];
+  for (let index = 0; index < visibleSteps.length;) {
+    const current = visibleSteps[index];
     if (current.type === "tool") {
       const groupKey = getToolGroupKey(current);
       if (groupKey) {
         const group: ToolBlockStep[] = [current];
         let cursor = index + 1;
-        while (cursor < steps.length) {
-          const next = steps[cursor];
+        while (cursor < visibleSteps.length) {
+          const next = visibleSteps[cursor];
           if (next.type !== "tool") break;
           if (getToolGroupKey(next) !== groupKey) break;
           group.push(next);
@@ -289,16 +297,6 @@ export function ChatArea() {
 
       stickRef.current = true;
 
-      // 始终先记录用户消息
-      const baseline = {
-        project: useProjectStore.getState().snapshot(),
-        mainDoc: JSON.parse(JSON.stringify(useRunStore.getState().mainDoc ?? {})),
-        todoList: JSON.parse(JSON.stringify(useRunStore.getState().todoList ?? [])),
-        ctxRefs: JSON.parse(JSON.stringify(useRunStore.getState().ctxRefs ?? [])),
-      };
-      const userMentions = meta?.mentions?.length ? meta.mentions : undefined;
-      useRunStore.getState().addUser(text, baseline as any, userMentions, images.length ? images : undefined);
-
       // 首次发送：优先重命名预创建的"新任务"对话；兜底仍支持直接创建
       const convStore = useConversationStore.getState();
       const currentConvId = convStore.activeConvId;
@@ -333,6 +331,19 @@ export function ChatArea() {
       const parsed = parseAtMention(text);
       const targetAgentIds = meta?.targetAgentIds ?? (parsed ? [parsed.agentId] : undefined);
       const cleanPromptRaw = !meta?.targetAgentIds && parsed ? parsed.cleanText : text;
+      const shouldStartFreshWritingBoundary = mode === "agent" && looksLikeFreshWritingTaskPrompt(cleanPromptRaw);
+      if (shouldStartFreshWritingBoundary) {
+        useRunStore.getState().startFreshWritingTaskBoundary();
+      }
+
+      const baseline = {
+        project: useProjectStore.getState().snapshot(),
+        mainDoc: JSON.parse(JSON.stringify(useRunStore.getState().mainDoc ?? {})),
+        todoList: JSON.parse(JSON.stringify(useRunStore.getState().todoList ?? [])),
+        ctxRefs: JSON.parse(JSON.stringify(useRunStore.getState().ctxRefs ?? [])),
+      };
+      const userMentions = meta?.mentions?.length ? meta.mentions : undefined;
+      useRunStore.getState().addUser(text, baseline as any, userMentions, images.length ? images : undefined);
       // 纯图片消息时 prompt 不能为空（Gateway schema min(1)），用空格占位
       const cleanPrompt = cleanPromptRaw.trim().length > 0 ? cleanPromptRaw : images.length > 0 ? " " : cleanPromptRaw;
       const activeSkillIds = meta?.mentions?.filter((m) => m.type === "skill").map((m) => m.id);
@@ -499,7 +510,7 @@ function WorkflowTodoPanel({
                 <span className="shrink-0 mt-[2px] inline-flex items-center justify-center w-4 h-4 rounded-full border border-border text-[10px] text-text-faint">○</span>
               );
               return (
-                <div key={item.id || String(index)} className="flex items-start gap-3">
+                <div key={item.id || String(index)} className={cn("flex items-start gap-3 rounded-md", isRunningNow ? "bg-accent-soft/35 px-2 py-1.5" : isBlocked ? "bg-error/5 px-2 py-1.5" : "") }>
                   {icon}
                   <div className="min-w-0 flex-1">
                     <div className={cn(

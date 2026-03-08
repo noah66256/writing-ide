@@ -189,6 +189,7 @@ type RunState = {
   removePendingArtifact: (artifactId: string) => void;
   markPendingArtifactUsed: (artifactId: string) => void;
   clearPendingArtifacts: () => void;
+  startFreshWritingTaskBoundary: () => void;
 
   setMode: (mode: Mode) => void;
   setModel: (model: string) => void;
@@ -557,6 +558,26 @@ export const useRunStore = create<RunState>()(
       ),
     })),
   clearPendingArtifacts: () => set({ pendingArtifacts: [] }),
+  startFreshWritingTaskBoundary: () =>
+    set((s) => ({
+      todoList: [],
+      ctxRefs: [],
+      pendingArtifacts: [],
+      isRunning: false,
+      activity: null,
+      mainDoc: {
+        audience: s.mainDoc?.audience,
+        persona: s.mainDoc?.persona,
+        tone: s.mainDoc?.tone,
+        platformType: s.mainDoc?.platformType,
+        sourcesPolicy: s.mainDoc?.sourcesPolicy,
+        styleLintFailPolicy: s.mainDoc?.styleLintFailPolicy,
+        runIntent: "auto",
+      },
+      dialogueSummaryByMode: { agent: "", chat: "" },
+      dialogueSummaryTurnCursorByMode: { agent: 0, chat: 0 },
+      memoryExtractTurnCursorByMode: { agent: 0, chat: 0 },
+    })),
 
   addUser: (text, baseline, mentions, images) => {
     const id = makeId("u");

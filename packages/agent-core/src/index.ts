@@ -25,6 +25,7 @@ export {
   parseKbSelectedLibrariesFromContextPack,
   parseRunTodoFromContextPack,
   detectRunIntent,
+  looksLikeFreshWritingTaskPrompt,
   deriveStyleGate,
   looksLikeClarifyQuestions,
   looksLikeFIMLeak,

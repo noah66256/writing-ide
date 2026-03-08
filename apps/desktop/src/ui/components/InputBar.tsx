@@ -25,6 +25,17 @@ type Segment =
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
+function humanizeActivityLine(text: string | undefined, isRunning: boolean): string {
+  const t = String(text ?? "").trim();
+  if (!isRunning) return "";
+  if (!t) return "思考中…";
+  if (/(达到回合上限|等待你的下一步|需要你确认|等待用户)/.test(t)) return t;
+  if (/(网页任务|浏览器|网页)/.test(t)) return "正在执行网页任务…";
+  if (/(搜索|检索|抓取网页|搜索资料)/.test(t)) return "正在搜索资料…";
+  if (/(写入文件|整理结果|保存)/.test(t)) return "正在整理结果…";
+  return "思考中…";
+}
+
 type InputBarProps = {
   onSend: (text: string, meta?: { mentions?: MentionItem[]; files?: File[]; targetAgentIds?: string[] }) => void;
   onStop?: () => void;
@@ -401,6 +412,7 @@ export function InputBar({
     useSegments(editorRef);
   const mode = useRunStore((s) => s.mode);
   const setMode = useRunStore((s) => s.setMode);
+  const activity = useRunStore((s) => s.activity);
 
   const rootDir = useProjectStore((s) => s.rootDir);
   const projectName = useMemo(() => {
@@ -850,6 +862,12 @@ export function InputBar({
                 </button>
               </span>
             ))}
+          </div>
+        )}
+
+        {isRunning && (
+          <div className="px-4 pt-2 text-[12px] text-text-faint">
+            {humanizeActivityLine(activity?.text, isRunning)}
           </div>
         )}
 

@@ -240,6 +240,18 @@ export function parseRunTodoFromContextPack(ctx?: string): any[] {
   }
 }
 
+export function looksLikeFreshWritingTaskPrompt(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  if (t.length < 10) return false;
+  if (/^(继续|存吧|保存吧|写吧|开始吧|按这个来|照这个来|我打开了|打开了|好了|可以了|A|B|C|D|\d+)$/i.test(t)) return false;
+  if (/(别存了|不要存了|不存了|取消保存|先别保存)/.test(t)) return false;
+  const explicitWriting =
+    /(用@?[^\s]{1,20}风格写|按@?[^\s]{1,20}风格写|写一篇|再写一篇|重新写一篇|另写一篇|来一篇|给我一篇|帮我写一篇|写一条|写一段|写个口播稿|写口播稿|写脚本|写文案|写公众号|主题是|关于.+(?:写|口播稿|文章|文案|脚本)|生成一篇|生成一条)/.test(t);
+  const notFileOps = !/(删除|删掉|移除|重命名|改名|移动|迁移|mkdir|rename|move|rm\b|del\b|delete\b)/i.test(t);
+  return explicitWriting && notFileOps;
+}
+
 export function detectRunIntent(args: {
   mode: AgentMode;
   userPrompt: string;
