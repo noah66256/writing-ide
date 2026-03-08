@@ -1,0 +1,22 @@
+{
+  "id": "pdf",
+  "name": "PDF 处理与导出",
+  "description": "处理 PDF 阅读、信息抽取、扫描件/OCR 判断与 PDF 导出。触发词：PDF、.pdf、扫描件、导出 PDF、合并 PDF、拆分 PDF。",
+  "version": "1.0.0",
+  "priority": 55,
+  "autoEnable": true,
+  "triggers": [
+    {
+      "when": "text_regex",
+      "args": {
+        "pattern": "(?i)(\\.pdf|pdf|扫描件|扫描版|ocr|导出\\s*pdf|生成\\s*pdf|合并\\s*pdf|拆分\\s*pdf|表单\\s*pdf|水印\\s*pdf)"
+      }
+    }
+  ],
+  "toolCaps": {
+    "allowTools": ["doc.write", "code.exec", "web.fetch", "project.listFiles"]
+  },
+  "policies": [],
+  "builtin": true,
+  "ui": { "badge": "PDF", "color": "red" }
+}
