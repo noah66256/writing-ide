@@ -163,6 +163,27 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
     lastProgressCheckpointAt = now;
   };
 
+  const classifyNarrationDelta = (raw: string): { mode: "drop" | "progress"; phase?: string; text?: string } | null => {
+    const t = String(raw ?? "").replace(/\s+/g, " ").trim();
+    if (!t) return null;
+    if (/^已选用「.+」风格的.+开始创作。?如需切换写法，直接回复即可。?$/.test(t)) {
+      return { mode: "drop" };
+    }
+    if (/^同步启动资料搜索和风格检索[：:]?$/.test(t)) {
+      return { mode: "progress", phase: "search", text: "我先补几条资料，再继续。" };
+    }
+    if (/^kb\.search.*超时.*重试.*[：:]?$/.test(t)) {
+      return { mode: "progress", phase: "search", text: "知识库检索有点慢，我先换轻量方式继续。" };
+    }
+    if (/^kb\.search.*(?:持续超时|连续超时).*(?:跳过检索|直接写稿|直接落笔|输出文件).*$/.test(t)) {
+      return { mode: "progress", phase: "synthesis", text: "知识库检索较慢，我先基于现有资料继续。" };
+    }
+    if (/^OpenClaw 核心信息来自.+直接落笔。?$/.test(t)) {
+      return { mode: "progress", phase: "synthesis", text: "我先基于现有资料继续整理。" };
+    }
+    return null;
+  };
+
   const progressTextForTool = (name: string, args: Record<string, unknown>) => {
     const tool = String(name ?? "").trim();
     if (isInternalToolName(tool)) return null;
@@ -1046,6 +1067,15 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             const deltaAgentId = data?.agentId ? String(data.agentId) : null;
             const deltaAgentName = data?.agentName ? String(data.agentName) : null;
             if (typeof delta === "string" && delta.length) {
+              if (!deltaAgentId) {
+                const narration = classifyNarrationDelta(delta);
+                if (narration) {
+                  if (narration.mode === "progress" && narration.text) {
+                    emitProgressCheckpoint(String(narration.phase ?? "planning"), narration.text);
+                  }
+                  return;
+                }
+              }
               setActivity("正在生成…");
               if (deltaAgentId) {
                 appendAssistantDelta(ensureSubAgentBubble(deltaAgentId, deltaAgentName ?? undefined), delta);

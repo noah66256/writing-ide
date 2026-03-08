@@ -3594,10 +3594,6 @@ export async function executeAgentRun(args: {
             })),
           },
         });
-
-        writeEvent("assistant.delta", {
-          delta: `\n\n已选用「${libName}」风格的${selectedLabel || "默认写法"}开始创作。如需切换写法，直接回复即可。`,
-        });
       }
     }
   } catch {
