@@ -585,7 +585,12 @@ export function buildAgentProtocolPrompt(args: {
         `   - 你需要亲自使用工具完成用户任务。\n` +
         `   - 联网搜索/信息收集：web.search / web.fetch / time.now。\n` +
         `   - 内容创作/编辑/润色：kb.search / doc.read / doc.write / doc.applyEdits / lint.* 完成闭环。\n` +
-        `   - MCP 工具：按实际接入的 MCP Server 能力使用（如浏览器操作、命令执行等）。\n` +
+        `   - MCP 工具：工具名形如 mcp_dot_*（其中 _dot_ 等于 .），来自外部 MCP Server。\n` +
+        `     若当前工具列表中存在某类任务的专用 MCP 工具，优先使用 MCP 而非通用内置工具：\n` +
+        `     Word/docx → Word MCP；Excel/xlsx → Excel MCP；浏览器自动化 → Playwright MCP。\n` +
+        `     MCP 文档类工具的操作顺序：先 create/open → 再 add/insert/update → 最后 save/export。\n` +
+        `     若报 "Document does not exist"，说明漏了 create/open 步骤，不要改用 doc.write 伪造。\n` +
+        `     只要 Playwright/browser MCP 工具出现在工具列表中，就表示当前已授权可用，直接使用即可。\n` +
         `   - 组合任务：根据需要组合多种工具完成复杂流程，不要跳过必要步骤直接臆造。\n` +
         `   - 修改/延续任务：先读取当前内容，再按用户要求修改；如已有检查结果，一并纳入参考。\n` +
         `4) 续跑契约（workflowV1）：当你提出”请选择/请确认”并准备结束本轮等待用户时，先写入 mainDoc.workflowV1=waiting_user；用户回复后更新为 running/done。\n` +
@@ -598,7 +603,7 @@ export function buildAgentProtocolPrompt(args: {
         `- 如需更新多个 Todo/Main Doc：在同一轮中批量调用多个工具，减少回合。\n` +
         `- 写入类操作遵守系统的 proposal-first / Keep/Undo 机制。\n` +
         `- 交付文件导航：任务产出了文件（doc.write/code.exec 等写入的文件）时，在最终交付文字中列出所有产出文件的相对路径（如 output/report.md），供用户点击打开。路径直接写纯文本，不要用反引号或代码格式包裹。不要主动调用 file.open 自动打开文件，除非用户明确要求"打开"或"预览"。\n` +
-        `- 写作产出格式：写作类任务默认用 doc.write 输出 .md 文件（Markdown 省 token、可 diff、可 proposal-first）。仅当用户明确要求特定格式（Word/PPT/PDF 等）或内容必须富文本呈现时，才用 code.exec 生成对应格式。\n\n`;
+        `- 写作产出格式：写作类任务默认用 doc.write 输出 .md 文件（Markdown 省 token、可 diff、可 proposal-first）。doc.write 只能写纯文本文件（.md/.txt/.json 等），不能创建真实的 .docx/.xlsx/.pptx/.pdf。用户要求 Office/PDF 格式时，优先用对应 MCP 工具（Word MCP / Excel MCP）；仅当工具列表中无对应 MCP 时才退回 code.exec。\n\n`;
 
   const p = args.persona;
   const agentName = p?.agentName?.trim() || "Friday";

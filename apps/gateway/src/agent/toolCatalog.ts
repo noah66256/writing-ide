@@ -50,8 +50,8 @@ const CAPABILITY_KEYWORDS: Array<{ capability: string; re: RegExp }> = [
   { capability: "delegate", re: /(委派|分派|指派|派给|delegate|sub[\s_-]?agent|agent\s*delegate)/i },
   { capability: "browser_open", re: /(打开.*网页|打开网站|浏览器|网站|navigate|open\s+.*(baidu|google|url))/i },
   // MCP 文档类：仅用户明确提到时才激活
-  { capability: "mcp_spreadsheet", re: /(excel|表格|电子表格|spreadsheet|工作表)/i },
-  { capability: "mcp_word_doc", re: /(word文档|docx|word\s*文件|写.*word)/i },
+  { capability: "mcp_spreadsheet", re: /(excel|xlsx|表格|电子表格|spreadsheet|工作表)/i },
+  { capability: "mcp_word_doc", re: /(word文档|docx|word\s*文件|写.*word|导出.*word|word.*版|生成.*word)/i },
   { capability: "mcp_pdf", re: /(pdf|转.*pdf|导出.*pdf)/i },
 ];
 
@@ -221,6 +221,22 @@ export function selectToolSubset(args: {
     if (entry.source === "mcp" && promptCaps.has("browser_open") && entry.capabilities.includes("browser_open")) {
       score += 80;
       reasons.push("mcp_browser_boost");
+    }
+    // MCP 生命周期加权：仅当 prompt 命中相关 Office/文档能力时，入口工具（create/open/save/export）加分
+    if (entry.source === "mcp") {
+      const hasRelevantCap = entry.capabilities.some((c) =>
+        (c === "mcp_word_doc" && promptCaps.has("mcp_word_doc")) ||
+        (c === "mcp_spreadsheet" && promptCaps.has("mcp_spreadsheet")) ||
+        (c === "mcp_pdf" && promptCaps.has("mcp_pdf")),
+      );
+      if (hasRelevantCap) {
+        const mcpParts = entry.name.split(".");
+        const toolName = (mcpParts.length >= 3 ? mcpParts.slice(2).join(".") : entry.name).toLowerCase();
+        if (/^(create|open|new|save|export|get_doc|read_doc)/.test(toolName)) {
+          score += 60;
+          reasons.push("mcp_lifecycle_entry");
+        }
+      }
     }
     if ((routeId === "analysis_readonly" || routeId === "project_search") && entry.riskLevel === "high") {
       score -= 120;
