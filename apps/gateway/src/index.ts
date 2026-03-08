@@ -677,6 +677,21 @@ fastify.get("/downloads/desktop/stable/:file", async (request, reply) => {
 });
 
 // ======== Marketplace（v0.1：官方精选，供 Desktop 设置页安装） ========
+
+function mergeSeededMarketplaceRecords(existing: MarketplaceRecord[], seeded: MarketplaceRecord[]) {
+  const seen = new Set<string>();
+  const out: MarketplaceRecord[] = [];
+  const push = (row: MarketplaceRecord) => {
+    const key = `${String(row?.manifest?.id ?? "").trim()}@${String(row?.manifest?.version ?? "").trim()}`;
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    out.push(JSON.parse(JSON.stringify(row)) as MarketplaceRecord);
+  };
+  for (const row of existing) push(row);
+  for (const row of seeded) push(row);
+  return out;
+}
+
 async function loadMarketplaceRecordsFromDb(): Promise<{
   source: "db" | "seeded";
   updatedAt: string;
@@ -687,15 +702,26 @@ async function loadMarketplaceRecordsFromDb(): Promise<{
     ? (((db as any).marketplaceCatalog.records as MarketplaceRecord[]) ?? [])
     : [];
   const updatedAtRaw = String((db as any)?.marketplaceCatalog?.updatedAt ?? "").trim();
+  const seeded = getDefaultMarketplaceRecords();
   if (records.length > 0) {
+    const merged = mergeSeededMarketplaceRecords(records, seeded);
+    const changed = merged.length !== records.length;
+    const effectiveUpdatedAt = changed ? new Date().toISOString() : (updatedAtRaw || new Date().toISOString());
+    if (changed) {
+      await updateDb((draft) => {
+        (draft as any).marketplaceCatalog = {
+          updatedAt: effectiveUpdatedAt,
+          records: JSON.parse(JSON.stringify(merged)),
+        };
+      });
+    }
     return {
       source: "db",
-      updatedAt: updatedAtRaw || new Date().toISOString(),
-      records: JSON.parse(JSON.stringify(records)),
+      updatedAt: effectiveUpdatedAt,
+      records: JSON.parse(JSON.stringify(merged)),
     };
   }
 
-  const seeded = getDefaultMarketplaceRecords();
   const nowIso = new Date().toISOString();
   await updateDb((draft) => {
     const has = Array.isArray((draft as any)?.marketplaceCatalog?.records) && (draft as any).marketplaceCatalog.records.length > 0;
