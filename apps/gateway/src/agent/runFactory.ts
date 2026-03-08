@@ -767,8 +767,10 @@ export function looksLikeWorkflowContinuationPrompt(text: string): boolean {
   const t = String(text ?? "").trim();
   if (!t) return false;
   if (looksLikeShortFollowUp(t)) return true;
+  if (/^[A-Da-d]$/.test(t) || /^(?:\d{1,2}|[一二三四])$/.test(t)) return true;
+  if (/^(A|B|C|D)\s*：/i.test(t)) return true;
   if (t.length > 120) return false;
-  if (/^(已经|我已经|已|好了|可以了|完成了|登好了|登录了|登陆了|搞定了|弄好了)/.test(t)) return true;
+  if (/^(已经|我已经|已|好了|可以了|完成了|登好了|登录了|登陆了|搞定了|弄好了|我已登录|已登录|A|B|C|D)\b/i.test(t)) return true;
   return /(继续|下一步|接着|然后|按这个来|照这个来|写吧|开始吧|往下|进去|进入|打开|点开|多开|切到|看看|看下|看一眼|汇报|统计|截图|抓一下|抓取|读一下|读取|浏览|试一下|跑一下)/.test(
     t,
   );
@@ -800,6 +802,17 @@ export function readWorkflowStickyState(mainDoc: unknown): WorkflowStickyState {
   const isFresh = Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= WORKFLOW_STICKY_MAX_AGE_MS;
   const lastEndReason = String(wf?.lastEndReason ?? "").trim().toLowerCase();
   return { routeId, intentHint, kind, status, selectedServerIds, preferredToolNames, updatedAtMs, isFresh, lastEndReason };
+}
+
+export function shouldSuppressSearchDuringBrowserContinuation(args: { mainDoc?: unknown; userPrompt: string }): boolean {
+  const wf = readWorkflowStickyState(args.mainDoc);
+  if (!wf.isFresh) return false;
+  const prompt = String(args.userPrompt ?? "").trim();
+  if (!prompt) return false;
+  if (looksLikeResearchOnlyPrompt(prompt) || looksLikeExplicitNonTaskPrompt(prompt)) return false;
+  const browserLike = wf.routeId === "web_radar" || wf.kind === "browser_session" || wf.selectedServerIds.some((id) => /playwright|browser/i.test(id));
+  if (!browserLike) return false;
+  return looksLikeWorkflowContinuationPrompt(prompt);
 }
 
 export function resolveStickyMcpServerIds(args: {
@@ -2276,6 +2289,30 @@ export async function prepareAgentRun(args: {
     if (baseAllowedToolNames.has(name)) selectedAllowedToolNames.add(name);
   }
 
+  const suppressSearchDuringBrowserContinuation = shouldSuppressSearchDuringBrowserContinuation({
+    mainDoc: mainDocFromPack,
+    userPrompt,
+  });
+  if (suppressSearchDuringBrowserContinuation) {
+    for (const name of Array.from(selectedAllowedToolNames)) {
+      if (name === "web.search" || name === "web.fetch" || /^mcp\.[^.]*search[^.]*\./i.test(name) || /^mcp\.[^.]*bocha[^.]*\./i.test(name) || /^mcp\.[^.]*tavily[^.]*\./i.test(name)) {
+        selectedAllowedToolNames.delete(name);
+      }
+    }
+  }
+  const toolCatalogSummary: ToolCatalogSummary = (() => {
+    const allNames = toolCatalog.map((entry) => String(entry.name ?? "").trim()).filter(Boolean);
+    const selectedNames = Array.from(selectedAllowedToolNames).filter((name) => allNames.includes(name));
+    const prunedNames = allNames.filter((name) => !selectedAllowedToolNames.has(name));
+    return {
+      ...toolSelection.summary,
+      selected: selectedNames.length,
+      pruned: prunedNames.length,
+      selectedToolNames: selectedNames.slice(0, 48),
+      prunedToolNames: prunedNames.slice(0, 48),
+    };
+  })();
+
   const projectDirFromSidecar = coerceNonEmptyString(ideSummaryFromSidecar?.projectDir);
   const deleteTargetsHint =
     routeIdLower === "file_delete_only"
@@ -2693,7 +2730,7 @@ export async function prepareAgentRun(args: {
       jwtUser,
       baseAllowedToolNames,
       selectedAllowedToolNames,
-      toolCatalogSummary: toolSelection.summary,
+      toolCatalogSummary,
       styleLinterLibraries,
       projectFilesCount,
       messages,

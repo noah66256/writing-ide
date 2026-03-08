@@ -669,7 +669,20 @@ export const useRunStore = create<RunState>()(
 
   updateMainDoc: (patch) => {
     const prev = get().mainDoc;
-    set({ mainDoc: { ...prev, ...patch } });
+    const rawPatch = patch && typeof patch === "object" ? patch : {};
+    const nextWorkflow = rawPatch && Object.prototype.hasOwnProperty.call(rawPatch, "workflowV1")
+      ? {
+          ...(prev?.workflowV1 && typeof prev.workflowV1 === "object" && !Array.isArray(prev.workflowV1) ? prev.workflowV1 : {}),
+          ...(((rawPatch as any).workflowV1 && typeof (rawPatch as any).workflowV1 === "object" && !Array.isArray((rawPatch as any).workflowV1)) ? (rawPatch as any).workflowV1 : {}),
+        }
+      : prev?.workflowV1;
+    set({
+      mainDoc: {
+        ...prev,
+        ...rawPatch,
+        ...(Object.prototype.hasOwnProperty.call(rawPatch, "workflowV1") ? { workflowV1: nextWorkflow } : {}),
+      },
+    });
     return { undo: () => set({ mainDoc: prev }) };
   },
 

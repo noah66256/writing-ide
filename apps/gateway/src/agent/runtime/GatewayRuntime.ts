@@ -1043,15 +1043,17 @@ export class GatewayRuntime implements AgentRuntime {
 
           // 错误检测
           if (msg.stopReason === "error" || msg.stopReason === "aborted") {
-            const errText = String(msg.errorMessage ?? msg.stopReason).trim() || "MODEL_ERROR";
-            this.config.runCtx.writeEvent("error", { error: errText });
-            this.turnEngine.record({ type: "model_error", error: errText });
-            this._setOutcome({
-              status: msg.stopReason === "aborted" ? "aborted" : "failed",
-              reason: msg.stopReason === "aborted" ? "aborted" : "model_error",
-              reasonCodes: [msg.stopReason === "aborted" ? "aborted" : "model_error"],
-              detail: { error: errText },
-            });
+            if (!(msg.stopReason === "aborted" && this.outcome.reason === "run_done")) {
+              const errText = String(msg.errorMessage ?? msg.stopReason).trim() || "MODEL_ERROR";
+              this.config.runCtx.writeEvent("error", { error: errText });
+              this.turnEngine.record({ type: "model_error", error: errText });
+              this._setOutcome({
+                status: msg.stopReason === "aborted" ? "aborted" : "failed",
+                reason: msg.stopReason === "aborted" ? "aborted" : "model_error",
+                reasonCodes: [msg.stopReason === "aborted" ? "aborted" : "model_error"],
+                detail: { error: errText },
+              });
+            }
           }
           return;
         }

@@ -159,11 +159,56 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       // noop
     }
   };
+  const deriveWaitingWorkflowPatchFromAssistant = () => {
+    try {
+      const steps = (rt.getSteps() ?? []).slice(runStartStepCount) as any[];
+      const lastAssistant = [...steps].reverse().find((step) => step && step.type === "assistant" && String(step.text ?? "").trim());
+      const lastText = String(lastAssistant?.text ?? "").trim();
+      if (!lastText) return null;
+      const main = (rt.getMainDoc() ?? {}) as any;
+      const workflow = main?.workflowV1 && typeof main.workflowV1 === "object" ? main.workflowV1 : {};
+      const workflowKind = String(workflow?.kind ?? "").trim().toLowerCase();
+      const workflowRouteId = String(workflow?.routeId ?? "").trim().toLowerCase();
+      const browserLike = workflowRouteId === "web_radar" || workflowKind === "browser_session" || Array.isArray(workflow?.selectedServerIds) && workflow.selectedServerIds.some((id: any) => /playwright|browser/i.test(String(id ?? "")));
+      const asksForReply = /(请直接回复|回复我|回复[A-Da-d]|A：|B：|你回复|完成后告诉我|登录完成后告诉我|告诉我你下一步|选一个|请回我)/.test(lastText);
+      const asksForLoginFollowUp = /(你先登录|完成登录|登录成功后|已登录|创作中心后台|左侧菜单|数据看板)/.test(lastText);
+      if (!browserLike && !asksForReply && !asksForLoginFollowUp) return null;
+      if (!asksForReply && !asksForLoginFollowUp) return null;
+      return {
+        status: "waiting_user",
+        waiting: {
+          question: lastText.length > 500 ? `${lastText.slice(0, 500).trimEnd()}…` : lastText,
+          replyHint: asksForLoginFollowUp ? "login_or_choice" : "choice",
+        },
+      };
+    } catch {
+      return null;
+    }
+  };
+
   const noteSuccessfulMcpExecution = (serverId: string, toolName: string) => {
     try {
       const main = (rt.getMainDoc() ?? {}) as any;
-      updateMainDoc({
-        workflowV1: mergeWorkflowStickyFromMcpSuccess(main?.workflowV1, { serverId, toolName }),
+      const prevWorkflow = main?.workflowV1;
+      const nextWorkflow = mergeWorkflowStickyFromMcpSuccess(prevWorkflow, { serverId, toolName });
+      updateMainDoc({ workflowV1: nextWorkflow });
+      log("info", "workflow.sticky.mcp_success", {
+        serverId,
+        toolName,
+        prev: {
+          routeId: String(prevWorkflow?.routeId ?? ""),
+          kind: String(prevWorkflow?.kind ?? ""),
+          status: String(prevWorkflow?.status ?? ""),
+          selectedServerIds: Array.isArray(prevWorkflow?.selectedServerIds) ? prevWorkflow.selectedServerIds : [],
+          preferredToolNames: Array.isArray(prevWorkflow?.preferredToolNames) ? prevWorkflow.preferredToolNames : [],
+        },
+        next: {
+          routeId: String(nextWorkflow?.routeId ?? ""),
+          kind: String(nextWorkflow?.kind ?? ""),
+          status: String(nextWorkflow?.status ?? ""),
+          selectedServerIds: Array.isArray(nextWorkflow?.selectedServerIds) ? nextWorkflow.selectedServerIds : [],
+          preferredToolNames: Array.isArray(nextWorkflow?.preferredToolNames) ? nextWorkflow.preferredToolNames : [],
+        },
       });
     } catch {
       // noop
@@ -738,7 +783,13 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             if (endReason === "clarify_waiting" || endReason === "proposal_waiting") {
               updateWorkflowSticky({ status: "waiting_user", lastEndReason: endReason });
             } else if (endReason) {
-              updateWorkflowSticky({ lastEndReason: endReason });
+              const derivedWaitingPatch = endReason === "completed" ? deriveWaitingWorkflowPatchFromAssistant() : null;
+              if (derivedWaitingPatch) {
+                updateWorkflowSticky({ ...derivedWaitingPatch, lastEndReason: endReason });
+                log("info", "workflow.waiting.derived", derivedWaitingPatch);
+              } else {
+                updateWorkflowSticky({ lastEndReason: endReason });
+              }
             }
 
             // 兜底记忆提取（异步，不阻塞 UI）：
@@ -999,11 +1050,15 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                   normalizedArgs: Array.isArray((result as any)?.normalizedArgs) ? (result as any).normalizedArgs : [],
                   diag: (result as any)?.diag ?? null,
                 };
-                if (mcpDiag.retryCount > 0 || mcpDiag.normalizedArgs.length > 0) {
+                if (mcpDiag.retryCount > 0 || mcpDiag.normalizedArgs.length > 0 || (mcpDiag.diag && ((mcpDiag.diag as any).recoveryAttempted || (mcpDiag.diag as any).recoverySucceeded))) {
                   log("info", "tool.result.mcp.diag", {
                     toolCallId, serverId, mcpToolName,
                     retryCount: mcpDiag.retryCount,
                     normalizedArgs: mcpDiag.normalizedArgs.slice(0, 8),
+                    recoveryAttempted: Boolean((mcpDiag.diag as any)?.recoveryAttempted),
+                    recoverySucceeded: Boolean((mcpDiag.diag as any)?.recoverySucceeded),
+                    recoveryStrategy: String((mcpDiag.diag as any)?.recoveryStrategy ?? ""),
+                    recoveryDurationMs: Number((mcpDiag.diag as any)?.recoveryDurationMs ?? 0),
                   });
                 }
                 const failureOutput =
