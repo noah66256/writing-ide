@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Check } from "lucide-react";
+import { ProviderLogo, resolveProviderBrand } from "@/components/ProviderLogo";
 
 export type ModelPickerItem = {
   id: string;
@@ -7,12 +9,17 @@ export type ModelPickerItem = {
   providerId?: string | null;
 };
 
+function getBrand(item: ModelPickerItem) {
+  return resolveProviderBrand({
+    providerId: item.providerId,
+    providerName: item.providerName,
+    modelId: item.id,
+    label: item.label,
+  });
+}
+
 function groupName(m: ModelPickerItem): string {
-  const p = String(m.providerName ?? "").trim();
-  if (p) return p;
-  const pid = String(m.providerId ?? "").trim();
-  if (pid) return pid;
-  return "其它";
+  return getBrand(m).label;
 }
 
 export function ModelPickerModal(props: {
@@ -50,7 +57,8 @@ export function ModelPickerModal(props: {
       const a = String(m.label || "").toLowerCase();
       const b = String(m.providerName || "").toLowerCase();
       const c = String(m.providerId || "").toLowerCase();
-      return a.includes(qq) || b.includes(qq) || c.includes(qq);
+      const d = getBrand(m).label.toLowerCase();
+      return a.includes(qq) || b.includes(qq) || c.includes(qq) || d.includes(qq);
     });
   }, [items, q]);
 
@@ -67,7 +75,7 @@ export function ModelPickerModal(props: {
     return keys.map((k) => {
       const arr = map.get(k) || [];
       arr.sort((a, b) => a.label.localeCompare(b.label));
-      return { name: k, items: arr };
+      return { name: k, items: arr, brand: getBrand(arr[0] ?? { id: k, label: k }) };
     });
   }, [filtered]);
 
@@ -88,17 +96,21 @@ export function ModelPickerModal(props: {
           className="modalInput"
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="搜索模型…"
+          placeholder="搜索模型或厂商…"
         />
 
         <div style={{ marginTop: 10 }}>
           {groups.length ? (
             groups.map((g) => (
-              <div key={g.name} style={{ marginTop: 10 }}>
-                <div style={{ fontSize: 12, color: "var(--muted)", margin: "8px 0 6px" }}>{g.name}</div>
+              <div key={g.name} style={{ marginTop: 12 }}>
+                <div style={{ fontSize: 12, color: "var(--muted)", margin: "8px 0 6px", display: "flex", alignItems: "center", gap: 8 }}>
+                  <ProviderLogo brand={g.brand} size={18} />
+                  <span>{g.name}</span>
+                </div>
                 <div className="refList" style={{ maxHeight: 360 }}>
                   {g.items.map((m) => {
                     const active = m.id === value;
+                    const brand = getBrand(m);
                     return (
                       <button
                         key={m.id}
@@ -115,9 +127,17 @@ export function ModelPickerModal(props: {
                         }}
                         title={m.label}
                       >
-                        <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
-                          <div style={{ fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>{m.label}</div>
-                          <div style={{ fontSize: 12, color: "var(--muted)" }}>{m.id}</div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, width: "100%" }}>
+                          <ProviderLogo brand={brand} size={22} />
+                          <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0, flex: 1 }}>
+                            <div style={{ fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>{m.label}</div>
+                            <div style={{ fontSize: 12, color: "var(--muted)", display: "flex", alignItems: "center", gap: 6 }}>
+                              <span>{brand.label}</span>
+                              <span>·</span>
+                              <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{m.id}</span>
+                            </div>
+                          </div>
+                          {active ? <Check size={16} color="var(--color-accent, #2563eb)" /> : null}
                         </div>
                       </button>
                     );
@@ -135,8 +155,3 @@ export function ModelPickerModal(props: {
     </div>
   );
 }
-
-
-
-
-

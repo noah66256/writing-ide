@@ -164,6 +164,27 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
     lastProgressCheckpointAt = now;
   };
 
+  const isBenignInterruptedFailure = (value: unknown) => {
+    const text = String(value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+    if (!text) return false;
+    return /queued user message|skipped due to queued user message|request was aborted|\baborted\b|cancelled|canceled|stalled_timeout/.test(text);
+  };
+
+  const clearSettledTodoListIfNeeded = (opts?: { force?: boolean }) => {
+    try {
+      const todos = Array.isArray((rt as any).getTodoList?.()) ? ((rt as any).getTodoList() as any[]) : [];
+      if (!todos.length) return;
+      const hasPending = todos.some((item: any) => {
+        const status = String(item?.status ?? "").trim();
+        return status !== "done" && status !== "skipped";
+      });
+      if (hasPending && !opts?.force) return;
+      useRunStore.getState().setTodoList([] as any);
+    } catch {
+      // noop
+    }
+  };
+
   const classifyNarrationDelta = (raw: string): { mode: "drop" | "progress"; phase?: string; text?: string } | null => {
     const t = String(raw ?? "").replace(/\s+/g, " ").trim();
     if (!t) return null;
@@ -171,16 +192,16 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       return { mode: "drop" };
     }
     if (/^同步启动资料搜索和风格检索[：:]?$/.test(t)) {
-      return { mode: "progress", phase: "search", text: "我先补几条资料，再继续。" };
+      return { mode: "progress", phase: "search", text: "先补几条资料，再继续。" };
     }
     if (/^kb\.search.*超时.*重试.*[：:]?$/.test(t)) {
-      return { mode: "progress", phase: "search", text: "知识库检索有点慢，我先换轻量方式继续。" };
+      return { mode: "progress", phase: "search", text: "知识库检索有点慢，先换轻量方式继续。" };
     }
     if (/^kb\.search.*(?:持续超时|连续超时).*(?:跳过检索|直接写稿|直接落笔|输出文件).*$/.test(t)) {
-      return { mode: "progress", phase: "synthesis", text: "知识库检索较慢，我先基于现有资料继续。" };
+      return { mode: "progress", phase: "synthesis", text: "知识库检索较慢，先基于现有资料继续。" };
     }
     if (/^OpenClaw 核心信息来自.+直接落笔。?$/.test(t)) {
-      return { mode: "progress", phase: "synthesis", text: "我先基于现有资料继续整理。" };
+      return { mode: "progress", phase: "synthesis", text: "先基于现有资料继续整理。" };
     }
     return null;
   };
@@ -188,15 +209,15 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
   const progressTextForTool = (name: string, args: Record<string, unknown>) => {
     const tool = String(name ?? "").trim();
     if (isInternalToolName(tool)) return null;
-    if (tool === "kb.search") return { phase: "kb", text: "我先翻一下知识库里的相关资料。" };
-    if (tool === "web.search" || tool === "web.fetch") return { phase: "search", text: "我先补几条资料，再继续。" };
-    if (tool === "doc.write" || tool === "doc.previewDiff" || tool === "doc.splitToDir") return { phase: "delivery", text: "我在整理结果，准备交付。" };
+    if (tool === "kb.search") return { phase: "kb", text: "先翻一下知识库里的相关资料。" };
+    if (tool === "web.search" || tool === "web.fetch") return { phase: "search", text: "先补几条资料，再继续。" };
+    if (tool === "doc.write" || tool === "doc.previewDiff" || tool === "doc.splitToDir") return { phase: "delivery", text: "正在整理结果，准备交付。" };
     if (tool.startsWith("mcp.")) {
       const lower = tool.toLowerCase();
-      if (/(browser_|navigate|goto|snapshot|click|fill|type|wait_for|run_code)/.test(lower)) return { phase: "browser", text: "我先看一下当前网页状态。" };
-      if (/(search|web_search|fetch|get_page)/.test(lower)) return { phase: "search", text: "我先补几条资料，再继续。" };
-      if (/(create_document|docx|word|create_workbook|sheet|excel)/.test(lower)) return { phase: "delivery", text: "我在整理结果，准备交付。" };
-      return { phase: "tool", text: humanizeToolActivity(tool, args).includes("网页") ? "我先处理一下网页任务。" : "我先处理一下这一步。" };
+      if (/(browser_|navigate|goto|snapshot|click|fill|type|wait_for|run_code)/.test(lower)) return { phase: "browser", text: "先看一下当前网页状态。" };
+      if (/(search|web_search|fetch|get_page)/.test(lower)) return { phase: "search", text: "先补几条资料，再继续。" };
+      if (/(create_document|docx|word|create_workbook|sheet|excel)/.test(lower)) return { phase: "delivery", text: "正在整理结果，准备交付。" };
+      return { phase: "tool", text: humanizeToolActivity(tool, args).includes("网页") ? "先处理网页任务。" : "先处理这一步。" };
     }
     return null;
   };
@@ -340,6 +361,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       const firstFailure = Array.isArray(runEndData?.failureDigest?.failedTools) ? runEndData.failureDigest.failedTools[0] : null;
       const toolName = String(firstFailure?.name ?? "步骤").trim() || "步骤";
       const error = String(firstFailure?.error ?? "执行失败").replace(/\s+/g, " ").trim() || "执行失败";
+      if (isBenignInterruptedFailure(`${toolName} ${error}`)) return;
       const note = `失败：${toolName} - ${error}`;
       updateTodo(String(runningTodo.id), {
         status: "blocked" as any,
@@ -791,6 +813,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
         const nextAction = Array.isArray(output?.next_actions)
           ? String(output.next_actions[0] ?? "").trim()
           : "";
+        if (isBenignInterruptedFailure(`${errorCode} ${message} ${nextAction}`)) return "";
         const core = `${toolName}: ${errorCode}`;
         const msgPart = message ? `（${message.slice(0, 80)}）` : "";
         const pathPart = path ? ` [path=${path}]` : "";
@@ -814,6 +837,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                 const error = String(x?.error ?? "").trim() || "UNKNOWN_ERROR";
                 const path = String(x?.path ?? "").trim();
                 const action = Array.isArray(x?.next_actions) ? String(x.next_actions[0] ?? "").trim() : "";
+                if (isBenignInterruptedFailure(`${error} ${action}`)) return "";
                 const base = `${name}: ${error}${path ? ` [path=${path}]` : ""}`;
                 return action ? `${base}；建议：${action}` : base;
               })
@@ -821,7 +845,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           : [];
 
         const failures = stepFailures.length ? stepFailures : digestFailures;
-        const failedCount = stepFailures.length || Number(runEndData?.failureDigest?.failedCount ?? 0) || 0;
+        const failedCount = failures.length;
         if (failedCount > 0) {
           const lines = failures.slice(0, 3).map((x) => `- ${x}`);
           const more = failedCount > 3 ? `\n还有 ${failedCount - 3} 项失败，可展开工具步骤查看完整原因。` : "";
@@ -908,14 +932,14 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           if (event === "run.start") {
             runId = data?.runId ? String(data.runId) : runId;
             log("info", "agent.run.start", data);
-            emitProgressCheckpoint("planning", "我先梳理一下任务。", { force: true });
+            emitProgressCheckpoint("planning", "先梳理一下这轮任务。", { force: true });
           }
 
           // ---- subagent.start ----
           if (event === "subagent.start") {
             const agName = String(data?.agentName ?? data?.agentId ?? "");
             log("info", "subagent.start", data);
-            emitProgressCheckpoint("subagent", agName ? `我先让${agName}去处理这一段。` : "我先分一段给子 Agent 处理。");
+            emitProgressCheckpoint("subagent", agName ? `先让${agName}处理这一段。` : "先分一段给子 Agent 处理。");
             if (rt.getIsRunning()) {
               setActivity(agName ? `${agName} 正在执行任务…` : "子 Agent 正在执行任务…", { resetTimer: true });
             }
@@ -936,6 +960,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           if (event === "run.end") {
             log("info", "agent.run.end", data);
             setRunning(false); setActivity(null);
+            clearSettledTodoListIfNeeded();
             maybeAppendRunEndFeedback(data);
             const endReason = String(data?.reason ?? "").trim().toLowerCase();
             const endReasonCodes = Array.isArray(data?.reasonCodes)
@@ -1039,7 +1064,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               markCompositeTaskWaitingOnMaxTurns();
             }
             if (title === "ExecutionContract" || title === "McpServerSelection" || title === "CompositeTaskPlan") {
-              emitProgressCheckpoint("planning", "我先把执行路径梳理一下。");
+              emitProgressCheckpoint("planning", "先把执行路径梳理一下。");
             }
             if (rt.getIsRunning() && title) {
               setActivity(`系统：${title}`, { resetTimer: true });
@@ -1056,7 +1081,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             const evtAgentId = data?.agentId ? String(data.agentId) : null;
             log("info", "assistant.start", data);
             if (!evtAgentId && sawExternalToolPhase) {
-              emitProgressCheckpoint("synthesis", "我先把拿到的信息整理一下。");
+              emitProgressCheckpoint("synthesis", "先把拿到的信息整理一下。");
               sawExternalToolPhase = false;
             }
             if (evtAgentId) {

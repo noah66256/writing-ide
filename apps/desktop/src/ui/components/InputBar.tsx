@@ -9,13 +9,17 @@ import {
   type ClipboardEvent,
   type RefObject,
 } from "react";
-import { Mic, SendHorizontal, Square, Paperclip, Image, AtSign, X, FolderOpen } from "lucide-react";
+import { Mic, SendHorizontal, Square, Paperclip, Image, AtSign, X, FolderOpen, ChevronsUpDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/state/projectStore";
 import { useRunStore, type Mode } from "@/state/runStore";
+import { useModelStore } from "@/state/modelStore";
+import { buildCurrentSnapshot, useConversationStore } from "@/state/conversationStore";
 import { useWorkspaceStore } from "@/state/workspaceStore";
 import { MentionPopover, type MentionItem } from "./MentionPopover";
 import { SlashPopover } from "./SlashPopover";
+import { ModelPickerModal } from "@/components/ModelPickerModal";
+import { ProviderLogo, resolveProviderBrand } from "@/components/ProviderLogo";
 
 // ─── 内部 AST ────────────────────────────────────────────────────────────────
 
@@ -413,7 +417,10 @@ export function InputBar({
     useSegments(editorRef);
   const mode = useRunStore((s) => s.mode);
   const setMode = useRunStore((s) => s.setMode);
+  const model = useRunStore((s) => s.model);
+  const setModel = useRunStore((s) => s.setModel);
   const activity = useRunStore((s) => s.activity);
+  const availableModels = useModelStore((s) => s.availableModels);
 
   const rootDir = useProjectStore((s) => s.rootDir);
   const projectName = useMemo(() => {
@@ -430,6 +437,7 @@ export function InputBar({
   const [mentionQuery, setMentionQuery] = useState("");
   const [slashVisible, setSlashVisible] = useState(false);
   const [slashQuery, setSlashQuery] = useState("");
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const blurTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // @ 消抖：记录被放弃（弹出但未选择）的 @ 的文本前缀，用于抑制同一 @ 重复弹出
   const mentionDismissedPrefix = useRef<string | null>(null);
@@ -532,6 +540,20 @@ export function InputBar({
   const isEmpty = useMemo(
     () => segments.length === 0 || segments.every((s) => s.type === "text" && !s.text.trim()),
     [segments],
+  );
+
+  const currentModel = useMemo(
+    () => availableModels.find((item) => item.id === model) ?? null,
+    [availableModels, model],
+  );
+  const currentProviderBrand = useMemo(
+    () => resolveProviderBrand({
+      providerId: currentModel?.providerId,
+      providerName: currentModel?.providerName,
+      modelId: currentModel?.id,
+      label: currentModel?.label,
+    }),
+    [currentModel],
   );
 
   const buttonMode: "mic" | "send" | "stop" = useMemo(
@@ -797,6 +819,16 @@ export function InputBar({
     e.target.value = "";
   }, []);
 
+  const handleModelChange = useCallback((nextModelId: string) => {
+    setModel(nextModelId);
+    const snapshot = buildCurrentSnapshot();
+    const convStore = useConversationStore.getState();
+    convStore.setDraftSnapshot(snapshot);
+    if (convStore.activeConvId) {
+      convStore.updateConversation(convStore.activeConvId, { snapshot });
+    }
+  }, [setModel]);
+
   const removeFile = useCallback((idx: number) => {
     setDroppedFiles((prev) => prev.filter((_, i) => i !== idx));
   }, []);
@@ -970,6 +1002,19 @@ export function InputBar({
               onClick={handleAtButtonClick}
               onMouseDown={(e) => e.preventDefault()}
             />
+            <button
+              type="button"
+              onClick={() => setModelPickerOpen(true)}
+              className={cn(
+                "ml-1 inline-flex max-w-[220px] items-center gap-2 rounded-md border border-border bg-surface px-2.5 py-1.5",
+                "text-[12px] text-text-muted transition-colors duration-fast hover:bg-surface-alt hover:text-text",
+              )}
+              title={currentModel ? `当前模型：${currentModel.label}` : "选择模型"}
+            >
+              <ProviderLogo brand={currentProviderBrand} size={18} />
+              <span className="truncate">{currentModel?.label ?? "选择模型"}</span>
+              <ChevronsUpDown size={13} className="shrink-0 text-text-faint" />
+            </button>
           </div>
 
           <button
@@ -1003,6 +1048,15 @@ export function InputBar({
           accept="image/*"
           className="hidden"
           onChange={handleFileChange}
+        />
+
+        <ModelPickerModal
+          open={modelPickerOpen}
+          title="选择本会话模型"
+          items={availableModels}
+          value={model}
+          onChange={handleModelChange}
+          onClose={() => setModelPickerOpen(false)}
         />
       </div>
 

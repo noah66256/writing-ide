@@ -9,11 +9,11 @@ import {
   LogIn,
   ChevronRight,
   Check,
-  Cpu,
   MoreHorizontal,
   Pin,
   PinOff,
   Pencil,
+  ImagePlus,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { buildCurrentSnapshot, useConversationStore, type Conversation, type RunSnapshot } from "@/state/conversationStore";
@@ -22,9 +22,9 @@ import { useRunRegistry } from "@/state/runRegistry";
 import { cancelConvRun } from "@/state/runRegistry";
 import { useProjectStore } from "@/state/projectStore";
 import { useAuthStore } from "@/state/authStore";
+import { readImageFileAsDataUrl } from "@/utils/avatar";
 import { useThemeStore, THEME_OPTIONS } from "@/state/themeStore";
 import { DEFAULT_FONT_SCALE, MAX_FONT_SCALE, MIN_FONT_SCALE, useFontScaleStore } from "@/state/fontScaleStore";
-import { useModelStore } from "@/state/modelStore";
 import { SettingsModal } from "./SettingsModal";
 import { useKbStore } from "@/state/kbStore";
 import { authHeader } from "@/agent/gatewayAgent";
@@ -101,6 +101,8 @@ export function NavSidebar() {
   const loadSnapshot = useRunStore((s) => s.loadSnapshot);
   const steps = useRunStore((s) => s.steps);
   const user = useAuthStore((s) => s.user);
+  const userAvatarDataUrl = useAuthStore((s) => s.userAvatarDataUrl);
+  const setUserAvatarDataUrl = useAuthStore((s) => s.setUserAvatarDataUrl);
   const logout = useAuthStore((s) => s.logout);
   const openLoginModal = useAuthStore((s) => s.openLoginModal);
 
@@ -108,6 +110,7 @@ export function NavSidebar() {
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const settingsModalRequest = useKbStore((s) => s.settingsModalRequest);
   const settingsRef = useRef<HTMLDivElement>(null);
+  const avatarInputRef = useRef<HTMLInputElement | null>(null);
 
   // 运行注册表：用于 NavSidebar 标签的状态指示
   const convRuns = useRunRegistry((s) => s.runs);
@@ -279,6 +282,16 @@ export function NavSidebar() {
 
   const displayName = user?.email?.split("@")[0] ?? user?.phone ?? "未登录";
 
+  const handleUserAvatarChange = useCallback(async (file?: File | null) => {
+    if (!file) return;
+    try {
+      const dataUrl = await readImageFileAsDataUrl(file);
+      setUserAvatarDataUrl(dataUrl);
+    } catch (error: any) {
+      alert(String(error?.message ?? error ?? "头像上传失败"));
+    }
+  }, [setUserAvatarDataUrl]);
+
   return (
     <nav
       className={cn(
@@ -352,25 +365,49 @@ export function NavSidebar() {
           />
         )}
 
-        <button
-          onClick={() => setSettingsOpen((v) => !v)}
-          className={cn(
-            "flex items-center gap-3 w-full px-4 py-3.5",
-            "hover:bg-surface/60 transition-colors duration-fast",
-          )}
-        >
-          <div className="w-8 h-8 rounded-full bg-accent-soft flex items-center justify-center text-[13px] font-semibold text-accent shrink-0">
-            {(displayName[0] ?? "U").toUpperCase()}
-          </div>
-          <div className="flex-1 min-w-0 text-left">
+        <div className="flex items-center gap-3 px-4 py-3.5 transition-colors duration-fast hover:bg-surface/60">
+          <input
+            ref={avatarInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => {
+              void handleUserAvatarChange(e.target.files?.[0] ?? null);
+              e.currentTarget.value = "";
+            }}
+          />
+          <button
+            type="button"
+            className="relative flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border border-border bg-accent-soft text-[13px] font-semibold text-accent"
+            title="更换我的头像"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              avatarInputRef.current?.click();
+            }}
+          >
+            {userAvatarDataUrl ? (
+              <img src={userAvatarDataUrl} alt={displayName} className="h-full w-full object-cover" />
+            ) : (
+              <span>{(displayName[0] ?? "U").toUpperCase()}</span>
+            )}
+            <span className="absolute -right-0.5 -bottom-0.5 flex h-4 w-4 items-center justify-center rounded-full border border-surface bg-surface text-text-faint">
+              <ImagePlus size={10} />
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setSettingsOpen((v) => !v)}
+            className="min-w-0 flex-1 text-left"
+          >
             <div className="text-[13px] font-medium text-text truncate">{displayName}</div>
             {user && (
               <div className="text-[11px] text-text-faint truncate">
                 {user.pointsBalance.toLocaleString()} 积分
               </div>
             )}
-          </div>
-        </button>
+          </button>
+        </div>
       </div>
 
       {(settingsModalOpen || settingsModalRequest) && (
@@ -416,13 +453,7 @@ function SettingsPopover({
   const setTheme = useThemeStore((s) => s.setTheme);
   const fontScale = useFontScaleStore((s) => s.fontScale);
   const setFontScale = useFontScaleStore((s) => s.setFontScale);
-  const model = useRunStore((s) => s.model);
-  const setModel = useRunStore((s) => s.setModel);
-  const availableModels = useModelStore((s) => s.availableModels);
-
-  // 当前主题/模型的显示名
   const themeName = THEME_OPTIONS.find((o) => o.id === theme)?.label ?? "";
-  const modelName = availableModels.find((m) => m.id === model)?.label || model || "未选择";
   const fontScalePct = Math.round(fontScale * 100);
 
   return (
@@ -450,26 +481,6 @@ function SettingsPopover({
             onSelect={() => setTheme(opt.id)}
           />
         ))}
-      </SubMenu>
-
-      {/* 模型 — hover 展开 */}
-      <SubMenu
-        icon={<Cpu size={15} />}
-        label="模型"
-        hint={modelName}
-      >
-        {availableModels.length === 0 ? (
-          <div className="px-3 py-2 text-[12px] text-text-faint">暂无可用模型</div>
-        ) : (
-          availableModels.map((item) => (
-            <OptionItem
-              key={item.id}
-              label={item.label}
-              active={model === item.id}
-              onSelect={() => setModel(item.id)}
-            />
-          ))
-        )}
       </SubMenu>
 
       <div className="px-3 py-2">

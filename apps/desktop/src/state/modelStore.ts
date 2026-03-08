@@ -1,7 +1,13 @@
 import { create } from "zustand";
 import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
 
-export type AvailableModel = { id: string; label: string };
+export type AvailableModel = {
+  id: string;
+  label: string;
+  providerId?: string | null;
+  providerName?: string | null;
+  endpoint?: string | null;
+};
 
 export type ModelSyncPayload = {
   availableModels: AvailableModel[];
@@ -13,7 +19,14 @@ export type ModelSyncPayload = {
 
 type SelectorDto = {
   ok?: boolean;
-  models?: Array<{ id?: string; model?: string }>;
+  providers?: Array<{ id?: string; name?: string }>;
+  models?: Array<{
+    id?: string;
+    model?: string;
+    providerId?: string | null;
+    providerName?: string | null;
+    endpoint?: string | null;
+  }>;
   stages?: {
     chat?: { modelIds?: string[]; defaultModelId?: string };
     agent?: { modelIds?: string[]; defaultModelId?: string };
@@ -72,15 +85,30 @@ function parseSelector(data: SelectorDto | null): ModelSyncPayload | null {
   const chatDefaultModelId = String(data.stages?.chat?.defaultModelId ?? "").trim() || chatIds[0] || "";
   const agentDefaultModelId = String(data.stages?.agent?.defaultModelId ?? "").trim() || agentIds[0] || "";
 
-  const labelMap = new Map<string, string>();
+  const providerNameById = new Map<string, string>();
+  for (const item of data.providers ?? []) {
+    const id = String(item?.id ?? "").trim();
+    const name = String(item?.name ?? "").trim();
+    if (id && name) providerNameById.set(id, name);
+  }
+
+  const modelMap = new Map<string, AvailableModel>();
   for (const item of data.models ?? []) {
     const id = String(item?.id ?? "").trim();
     if (!id) continue;
-    labelMap.set(id, String(item?.model ?? "").trim() || id);
+    const providerId = item?.providerId ? String(item.providerId).trim() : null;
+    const providerName = item?.providerName ? String(item.providerName).trim() : (providerId ? providerNameById.get(providerId) ?? null : null);
+    modelMap.set(id, {
+      id,
+      label: String(item?.model ?? "").trim() || id,
+      providerId,
+      providerName,
+      endpoint: item?.endpoint ? String(item.endpoint).trim() : null,
+    });
   }
 
   const allIds = uniqIds([...chatIds, ...agentIds, chatDefaultModelId, agentDefaultModelId]);
-  const availableModels = allIds.map((id) => ({ id, label: labelMap.get(id) ?? id }));
+  const availableModels = allIds.map((id) => modelMap.get(id) ?? { id, label: id });
 
   return { availableModels, chatModelIds: chatIds, agentModelIds: agentIds, chatDefaultModelId, agentDefaultModelId };
 }

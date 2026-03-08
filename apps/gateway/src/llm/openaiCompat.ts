@@ -75,6 +75,76 @@ function safeJsonStringify(v: unknown): string {
   }
 }
 
+function isOfficialOpenAiBaseUrl(baseUrl: string): boolean {
+  const raw = String(baseUrl ?? "").trim().toLowerCase();
+  return /(^|\.)api\.openai\.com(?:\/|$)/.test(raw) || raw.includes("openai.com");
+}
+
+function mergeToolCallArgsChunk(target: Map<string, NormalizedToolCall>, toolId: string, argsChunk: string, fallbackName?: string) {
+  const id = String(toolId ?? "").trim();
+  if (!id) return;
+  const chunk = String(argsChunk ?? "");
+  const prev = target.get(id);
+  if (!prev) {
+    const name = String(fallbackName ?? "").trim();
+    if (!name) return;
+    target.set(id, { id, name, argsRaw: chunk });
+    return;
+  }
+  if (!prev.argsRaw) prev.argsRaw = chunk;
+  else if (chunk && chunk.startsWith(prev.argsRaw)) prev.argsRaw = chunk;
+  else if (chunk && !prev.argsRaw.includes(chunk)) prev.argsRaw += chunk;
+  if (!prev.name && fallbackName) prev.name = String(fallbackName).trim();
+}
+
+function mergeResponsesToolCallEvent(args: {
+  target: Map<string, NormalizedToolCall>;
+  byItemId: Map<string, string>;
+  byOutputIndex: Map<number, string>;
+  event: any;
+}) {
+  const event = args.event;
+  if (!event || typeof event !== "object") return;
+  const type = String(event.type ?? "").trim().toLowerCase();
+  const item = event.item ?? event.output_item ?? null;
+  const outputIndex = Number(event.output_index ?? item?.output_index);
+  const itemId = String(event.item_id ?? item?.id ?? "").trim();
+  const callId = String(event.call_id ?? item?.call_id ?? "").trim();
+  const directName = String(item?.name ?? event.name ?? "").trim();
+  const resolvedId = callId || itemId || (Number.isFinite(outputIndex) ? `response_tool_${Math.floor(outputIndex)}` : "");
+
+  const remember = (toolId: string) => {
+    const id = String(toolId ?? "").trim();
+    if (!id) return;
+    if (itemId) args.byItemId.set(itemId, id);
+    if (callId) args.byItemId.set(callId, id);
+    if (Number.isFinite(outputIndex)) args.byOutputIndex.set(Math.floor(outputIndex), id);
+  };
+
+  if ((type === 'response.output_item.added' || type === 'response.output_item.done') && item && typeof item === 'object') {
+    const itemType = String(item.type ?? "").trim().toLowerCase();
+    if (itemType.includes('function_call') || itemType.includes('tool_call')) {
+      const argsRawSource = item.arguments ?? item.input ?? item.args ?? item.parameters;
+      const argsRaw = typeof argsRawSource === 'string' ? argsRawSource : safeJsonStringify(argsRawSource ?? {});
+      if (directName) {
+        mergeToolCall(args.target, { id: resolvedId || `${directName}_${args.target.size + 1}`, name: directName, argsRaw });
+        remember(resolvedId || `${directName}_${args.target.size}`);
+      }
+    }
+    return;
+  }
+
+  if (type === 'response.function_call_arguments.delta' || type === 'response.function_call_arguments.done') {
+    const toolId = args.byItemId.get(itemId) || args.byItemId.get(callId) || (Number.isFinite(outputIndex) ? args.byOutputIndex.get(Math.floor(outputIndex)) : undefined) || resolvedId;
+    const chunkSource = event.delta ?? event.arguments ?? event.input ?? event.args;
+    const chunk = typeof chunkSource === 'string' ? chunkSource : safeJsonStringify(chunkSource ?? {});
+    if (toolId) {
+      mergeToolCallArgsChunk(args.target, toolId, chunk, directName || args.target.get(toolId)?.name || undefined);
+      remember(toolId);
+    }
+  }
+}
+
 function parseToolArgsRaw(argsRaw: string): Record<string, unknown> {
   const s = String(argsRaw ?? "").trim();
   if (!s) return {};
@@ -194,7 +264,7 @@ function extractToolCallsFromAny(node: any): NormalizedToolCall[] {
   return Array.from(merged.values()).filter((c) => String(c.name ?? "").trim().length > 0);
 }
 
-function toOpenAiToolsPayload(tools?: OpenAiCompatTool[]) {
+function toOpenAiToolsPayload(tools?: OpenAiCompatTool[], opts?: { strict?: boolean }) {
   if (!Array.isArray(tools) || tools.length === 0) return undefined;
   return tools.map((tool) => ({
     type: "function" as const,
@@ -202,11 +272,13 @@ function toOpenAiToolsPayload(tools?: OpenAiCompatTool[]) {
       name: String(tool.name ?? "").trim(),
       ...(String(tool.description ?? "").trim() ? { description: String(tool.description ?? "").trim() } : {}),
       parameters: normalizeToolParametersSchema(tool.inputSchema),
+    ...(opts?.strict ? { strict: true } : {}),
+      ...(opts?.strict ? { strict: true } : {}),
     },
   }));
 }
 
-function toResponsesToolsPayload(tools?: OpenAiCompatTool[]) {
+function toResponsesToolsPayload(tools?: OpenAiCompatTool[], opts?: { strict?: boolean }) {
   if (!Array.isArray(tools) || tools.length === 0) return undefined;
   return tools.map((tool) => ({
     type: "function" as const,
@@ -455,7 +527,8 @@ async function* streamResponses(args: {
   if (typeof args.temperature === "number" && Number.isFinite(args.temperature)) {
     bodyBase.temperature = args.temperature;
   }
-  const openAiTools = toResponsesToolsPayload(args.tools);
+  const strictTools = isOfficialOpenAiBaseUrl(args.config.baseUrl);
+  const openAiTools = toResponsesToolsPayload(args.tools, { strict: strictTools });
   const openAiToolChoice = toResponsesToolChoicePayload(args.toolChoice);
   const wantsNativeTools = Boolean(openAiTools?.length);
 
@@ -546,6 +619,8 @@ async function* streamResponses(args: {
   let emittedUsage = false;
   let completedPayload: any = null;
   const streamedToolCalls = new Map<string, NormalizedToolCall>();
+  const responseToolIdByItemId = new Map<string, string>();
+  const responseToolIdByOutputIndex = new Map<number, string>();
   for await (const line0 of readLines(res.body)) {
     const line = String(line0 ?? "");
     if (!line) continue;
@@ -566,6 +641,12 @@ async function* streamResponses(args: {
       emittedChars += delta.length;
       yield { type: "delta", delta };
     }
+    mergeResponsesToolCallEvent({
+      target: streamedToolCalls,
+      byItemId: responseToolIdByItemId,
+      byOutputIndex: responseToolIdByOutputIndex,
+      event: json,
+    });
     const calls = extractToolCallsFromAny(json);
     for (const call of calls) mergeToolCall(streamedToolCalls, call);
 
@@ -667,7 +748,8 @@ export async function* streamChatCompletions(args: {
   const url = openAiCompatUrl(args.config.baseUrl, args.endpoint || "/chat/completions");
 
   const wantsUsage = Boolean(args.includeUsage);
-  const openAiTools = toOpenAiToolsPayload(args.tools);
+  const strictTools = isOfficialOpenAiBaseUrl(args.config.baseUrl);
+  const openAiTools = toOpenAiToolsPayload(args.tools, { strict: strictTools });
   const openAiToolChoice = toOpenAiToolChoicePayload(args.toolChoice);
   const wantsNativeTools = Boolean(openAiTools?.length);
 
@@ -819,6 +901,8 @@ export async function* streamChatCompletions(args: {
   let lastTextContent = "";
   let lastDeltaContentCoerced = "";
   const streamedToolCalls = new Map<string, NormalizedToolCall>();
+  const responseToolIdByItemId = new Map<string, string>();
+  const responseToolIdByOutputIndex = new Map<number, string>();
   const streamToolCallIdByIndex = new Map<number, string>();
   for await (const line0 of readLines(res.body)) {
     const line = String(line0 ?? "");
@@ -1073,7 +1157,8 @@ export async function chatCompletionOnce(args: {
   const isResponses = isResponsesEndpoint(endpoint);
   const url = openAiCompatUrl(args.config.baseUrl, endpoint);
 
-  const openAiTools = isResponses ? toResponsesToolsPayload(args.tools) : toOpenAiToolsPayload(args.tools);
+  const strictTools = isOfficialOpenAiBaseUrl(args.config.baseUrl);
+  const openAiTools = isResponses ? toResponsesToolsPayload(args.tools, { strict: strictTools }) : toOpenAiToolsPayload(args.tools, { strict: strictTools });
   const openAiToolChoice = isResponses
     ? toResponsesToolChoicePayload(args.toolChoice)
     : toOpenAiToolChoicePayload(args.toolChoice);

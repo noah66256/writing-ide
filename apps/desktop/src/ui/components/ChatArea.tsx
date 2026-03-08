@@ -38,7 +38,7 @@ import {
   injectFileRefLinksInMarkdown,
   wrapBareUrlsInMarkdown,
   parseFileRefHref,
-  resolveProjectAbsPath,
+  resolveOpenableFileRef,
 } from "@/utils/fileRefLink";
 
 type RunController = { cancel: (reason?: string) => void; done: Promise<void> };
@@ -259,7 +259,8 @@ export function ChatArea() {
         if (typeof v === "object") return Object.keys(v as Record<string, unknown>).length > 0;
         return true;
       });
-    if (!hasDraftState) return;
+    const hasConversationContext = Boolean(activeConvId) || Boolean(model) || Boolean(mode);
+    if (!hasDraftState && !hasConversationContext) return;
     const timer = setTimeout(() => {
       const snap = buildCurrentSnapshot();
       useConversationStore.getState().setDraftSnapshot(snap);
@@ -285,6 +286,12 @@ export function ChatArea() {
       const images = (
         await Promise.all(imageFiles.map((f) => fileToImageAttachment(f)))
       ).filter((it): it is ImageAttachment => Boolean(it));
+
+      const currentTodos = useRunStore.getState().todoList ?? [];
+      const hasPendingTodoBeforeSend = currentTodos.some((item) => item.status !== "done" && item.status !== "skipped");
+      if (!hasPendingTodoBeforeSend && currentTodos.length > 0) {
+        useRunStore.getState().setTodoList([] as any);
+      }
 
       // 运行中发送：先中断当前对话的 run（不影响其他对话的后台 run）
       const preSendConvId = useConversationStore.getState().activeConvId;
@@ -564,16 +571,20 @@ function StepRenderer({
 /* ─── 用户消息 ─── */
 
 function UserMessage({ step }: { step: UserStep }) {
+  const user = useAuthStore((s) => s.user);
+  const userAvatarDataUrl = useAuthStore((s) => s.userAvatarDataUrl);
+  const displayName = user?.email?.split("@")[0] ?? user?.phone ?? "我";
+
   return (
-    <div className="flex justify-end py-3">
-      <div className="max-w-[85%] bg-accent-soft rounded-2xl rounded-tr-md px-4 py-2.5">
+    <div className="flex justify-end gap-3 py-3">
+      <div className="max-w-[85%] rounded-2xl rounded-tr-md bg-accent-soft px-4 py-2.5">
         {step.mentions && step.mentions.length > 0 && (
-          <div className="flex flex-wrap gap-1 mb-1.5">
+          <div className="mb-1.5 flex flex-wrap gap-1">
             {step.mentions.map((m) => (
               <span
                 key={m.id}
                 className={cn(
-                  "inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium",
+                  "inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium",
                   m.type === "agent"
                     ? "bg-emerald-100/80 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
                     : m.type === "skill"
@@ -587,21 +598,28 @@ function UserMessage({ step }: { step: UserStep }) {
           </div>
         )}
         {step.images && step.images.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mb-1.5">
+          <div className="mb-1.5 flex flex-wrap gap-1.5">
             {step.images.map((img, i) => (
               <img
                 key={`${step.id}-img-${i}`}
                 src={`data:${img.mediaType};base64,${img.data}`}
                 alt={img.name || `image-${i + 1}`}
-                className="h-8 w-8 object-cover rounded"
+                className="h-8 w-8 rounded object-cover"
               />
             ))}
           </div>
         )}
         {step.text.length > 0 && (
-        <div className="text-[14px] text-text leading-relaxed whitespace-pre-wrap break-words">
-          {step.text}
-        </div>
+          <div className="whitespace-pre-wrap break-words text-[14px] leading-relaxed text-text">
+            {step.text}
+          </div>
+        )}
+      </div>
+      <div className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border border-border bg-surface-alt text-[13px] font-semibold text-text-muted">
+        {userAvatarDataUrl ? (
+          <img src={userAvatarDataUrl} alt={displayName} className="h-full w-full object-cover" />
+        ) : (
+          <span>{(displayName[0] ?? "我").toUpperCase()}</span>
         )}
       </div>
     </div>
@@ -624,79 +642,92 @@ function AssistantMessage({
       | "file_op_always_allow",
   ) => void;
 }) {
-  if (step.hidden) return null;
-
-  if (step.variant === "progress") {
-    return (
-      <div className="flex gap-3 py-1.5">
-        <div className="shrink-0 w-7" />
-        <div className="flex-1 min-w-0">
-          <div className="inline-flex items-center gap-2 rounded-md border border-border/60 bg-surface-alt/60 px-3 py-1.5 text-[12px] text-text-muted">
-            <Bot size={12} className="text-accent" />
-            <span className="leading-5">{step.text}</span>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   const subAgent = step.agentId
     ? BUILTIN_SUB_AGENTS.find((a) => a.id === step.agentId)
     : null;
   const agentName = usePersonaStore((s) => s.agentName);
-  const avatar = subAgent?.avatar;
+  const agentAvatarDataUrl = usePersonaStore((s) => s.agentAvatarDataUrl);
   const displayName = (subAgent?.name ?? step.agentName ?? agentName) || "Friday";
   const rootDir = useProjectStore((s) => s.rootDir);
-
+  const avatar = subAgent?.avatar;
   const markdownText = useMemo(
     () => injectFileRefLinksInMarkdown(wrapBareUrlsInMarkdown(step.text)),
     [step.text],
   );
 
   const openFileRef = useCallback(
-    async (relPath: string) => {
-      const rd = useProjectStore.getState().rootDir;
-      if (!rd) return;
-      const absPath = resolveProjectAbsPath(rd, relPath);
-      const ret = await window.desktop?.exec?.openFile?.(absPath);
-      if (ret && !ret.ok) alert(ret.detail || `无法打开文件：${relPath}`);
+    async (filePath: string) => {
+      const targetPath = resolveOpenableFileRef(rootDir, filePath);
+      if (!targetPath) return;
+      const ret = await window.desktop?.exec?.openFile?.(targetPath);
+      if (ret && !ret.ok) alert(ret.detail || `无法打开文件：${filePath}`);
     },
     [rootDir],
   );
 
+  if (step.hidden) return null;
+
+  const avatarNode = avatar ? (
+    <span>{avatar}</span>
+  ) : agentAvatarDataUrl ? (
+    <img src={agentAvatarDataUrl} alt={displayName} className="h-full w-full object-cover" />
+  ) : (
+    <Bot size={18} className="text-accent" />
+  );
+
+  if (step.variant === "progress") {
+    return (
+      <div className="flex gap-3 py-2.5">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border border-border bg-accent-soft text-[16px]">
+          {avatarNode}
+        </div>
+        <div className="min-w-0 flex-1 pt-0.5">
+          <div className="mb-1.5 text-[11px] text-text-faint">{displayName}</div>
+          <div className="inline-flex max-w-full items-center gap-2 rounded-2xl rounded-tl-md border border-border/70 bg-surface-alt/80 px-4 py-2.5 text-[14px] leading-relaxed text-text">
+            <span>{step.text || "思考中..."}</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex gap-3 py-3">
-      <div className="shrink-0 w-7 h-7 rounded-full bg-accent-soft flex items-center justify-center text-[14px]">
-        {avatar ? <span>{avatar}</span> : <Bot size={14} className="text-accent" />}
+      <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border border-border bg-accent-soft text-[16px]">
+        {avatarNode}
       </div>
-      <div className="flex-1 min-w-0 pt-0.5">
-        <div className="text-[11px] text-text-faint mb-1.5">{displayName}</div>
-        <div className="text-[14px] text-text leading-relaxed">
+      <div className="min-w-0 flex-1 pt-0.5">
+        <div className="mb-1.5 text-[11px] text-text-faint">{displayName}</div>
+        <div className="text-[14px] leading-relaxed text-text">
           {step.streaming && !step.text ? (
             <span className="inline-flex items-center gap-1.5 text-text-faint">
               <Loader2 size={13} className="animate-spin" />
               思考中...
             </span>
           ) : (
-            <div className="whitespace-pre-wrap break-words max-w-none markdown-body">
+            <div className="markdown-body max-w-none whitespace-pre-wrap break-words">
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 urlTransform={(url) => url.startsWith("file-ref:") ? url : defaultUrlTransform(url)}
                 components={{
                   a: ({ href, children }) => {
-                    const relPath = parseFileRefHref(href);
-                    if (relPath) {
+                    const filePath = parseFileRefHref(href);
+                    if (filePath) {
+                      const canOpen = Boolean(resolveOpenableFileRef(rootDir, filePath));
                       return (
                         <span
-                          className={cn("rtFileRef", !rootDir && "rtFileRefDisabled")}
+                          className={cn("rtFileRef", !canOpen && "rtFileRefDisabled")}
                           role="button"
-                          tabIndex={rootDir ? 0 : -1}
-                          title={rootDir ? `打开文件：${relPath}` : "未打开项目目录"}
-                          onClick={(e) => { e.preventDefault(); void openFileRef(relPath); }}
+                          tabIndex={canOpen ? 0 : -1}
+                          title={canOpen ? `打开文件：${filePath}` : "当前无法打开该文件"}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            void openFileRef(filePath);
+                          }}
                           onKeyDown={(e) => {
                             if (e.key === "Enter" || e.key === " ") {
                               e.preventDefault();
-                              void openFileRef(relPath);
+                              void openFileRef(filePath);
                             }
                           }}
                         >
@@ -718,11 +749,10 @@ function AssistantMessage({
           )}
         </div>
 
-        {/* 消息操作栏 */}
         {step.variant !== "progress" && !step.streaming && step.text && (
-          <div className="flex items-center gap-1 mt-3 opacity-0 hover:opacity-100 transition-opacity duration-fast">
+          <div className="mt-3 flex items-center gap-1 opacity-0 transition-opacity duration-fast hover:opacity-100">
             <button
-              className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-text-faint hover:text-text-muted hover:bg-surface-alt transition-colors duration-fast"
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-faint transition-colors duration-fast hover:bg-surface-alt hover:text-text-muted"
               onClick={() => navigator.clipboard.writeText(step.text)}
               title="复制"
             >
@@ -733,10 +763,10 @@ function AssistantMessage({
         )}
 
         {Array.isArray(step.quickActions) && step.quickActions.length > 0 && (
-          <div className="flex items-center gap-2 mt-2">
+          <div className="mt-2 flex items-center gap-2">
             {step.quickActions.includes("open_kb_manager") && (
               <button
-                className="px-2.5 py-1 rounded-md text-[12px] border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
+                className="rounded-md border border-border bg-surface px-2.5 py-1 text-[12px] text-text-muted transition-colors hover:bg-surface-alt hover:text-text"
                 onClick={() => onQuickAction("open_kb_manager")}
                 type="button"
               >
@@ -745,7 +775,7 @@ function AssistantMessage({
             )}
             {step.quickActions.includes("kb_done_continue") && (
               <button
-                className="px-2.5 py-1 rounded-md text-[12px] bg-accent text-white hover:opacity-90 transition-opacity"
+                className="rounded-md bg-accent px-2.5 py-1 text-[12px] text-white transition-opacity hover:opacity-90"
                 onClick={() => onQuickAction("kb_done_continue")}
                 type="button"
               >
@@ -754,7 +784,7 @@ function AssistantMessage({
             )}
             {step.quickActions.includes("file_op_deny") && (
               <button
-                className="px-2.5 py-1 rounded-md text-[12px] border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
+                className="rounded-md border border-border bg-surface px-2.5 py-1 text-[12px] text-text-muted transition-colors hover:bg-surface-alt hover:text-text"
                 onClick={() => onQuickAction("file_op_deny")}
                 type="button"
               >
@@ -763,7 +793,7 @@ function AssistantMessage({
             )}
             {step.quickActions.includes("file_op_allow_once") && (
               <button
-                className="px-2.5 py-1 rounded-md text-[12px] bg-accent text-white hover:opacity-90 transition-opacity"
+                className="rounded-md bg-accent px-2.5 py-1 text-[12px] text-white transition-opacity hover:opacity-90"
                 onClick={() => onQuickAction("file_op_allow_once")}
                 type="button"
               >
@@ -772,7 +802,7 @@ function AssistantMessage({
             )}
             {step.quickActions.includes("file_op_always_allow") && (
               <button
-                className="px-2.5 py-1 rounded-md text-[12px] border border-border bg-surface hover:bg-surface-alt text-text-muted hover:text-text transition-colors"
+                className="rounded-md border border-border bg-surface px-2.5 py-1 text-[12px] text-text-muted transition-colors hover:bg-surface-alt hover:text-text"
                 onClick={() => onQuickAction("file_op_always_allow")}
                 type="button"
               >

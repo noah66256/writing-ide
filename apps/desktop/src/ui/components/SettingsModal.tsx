@@ -1,9 +1,9 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import {
   X, Users, Plug, Sparkles, ChevronDown, ChevronRight, Plus,
   Bot, BookOpen, FolderOpen, RefreshCw, Pencil, Trash2, Terminal, Globe, Radio,
-  Eye, EyeOff, Monitor, ExternalLink, Package, Link2, Wrench, Store,
+  Eye, EyeOff, Monitor, ExternalLink, Package, Link2, Wrench, Store, ImagePlus, Upload,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TeamModal } from "@/components/TeamModal";
@@ -14,6 +14,7 @@ import { useKbStore } from "@/state/kbStore";
 import { useDialogStore } from "@/state/dialogStore";
 import { useMcpStore, type McpServerState } from "@/state/mcpStore";
 import { useMarketplaceStore, type MarketplaceCatalogItem } from "@/state/marketplaceStore";
+import { readImageFileAsDataUrl } from "@/utils/avatar";
 
 type Tab = "persona" | "team" | "mcp" | "skill" | "kb" | "marketplace";
 
@@ -494,13 +495,95 @@ function formatIsoTime(raw?: string): string {
 function PersonaTabContent() {
   const agentName = usePersonaStore((s) => s.agentName);
   const personaPrompt = usePersonaStore((s) => s.personaPrompt);
+  const agentAvatarDataUrl = usePersonaStore((s) => s.agentAvatarDataUrl);
   const setAgentName = usePersonaStore((s) => s.setAgentName);
   const setPersonaPrompt = usePersonaStore((s) => s.setPersonaPrompt);
+  const setAgentAvatarDataUrl = usePersonaStore((s) => s.setAgentAvatarDataUrl);
+  const [dragActive, setDragActive] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleAvatarFile = useCallback(async (file?: File | null) => {
+    if (!file) return;
+    try {
+      const dataUrl = await readImageFileAsDataUrl(file);
+      setAgentAvatarDataUrl(dataUrl);
+    } catch (error: any) {
+      alert(String(error?.message ?? error ?? "头像上传失败"));
+    }
+  }, [setAgentAvatarDataUrl]);
 
   return (
     <div className="flex flex-col gap-5">
       <div className="text-[12px] text-text-muted leading-relaxed">
-        个性化你的 AI 负责人，设定它的名字和性格。这不会影响系统能力，只是让体验更亲切。
+        个性化你的 AI 负责人，设定它的名字、头像和性格。这不会影响系统能力，只是让体验更亲切。
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <label className="text-[13px] font-medium text-text">负责人头像</label>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={(e) => {
+            void handleAvatarFile(e.target.files?.[0] ?? null);
+            e.currentTarget.value = "";
+          }}
+        />
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() => fileInputRef.current?.click()}
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInputRef.current?.click(); } }}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragActive(true);
+          }}
+          onDragLeave={(e) => {
+            e.preventDefault();
+            setDragActive(false);
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragActive(false);
+            void handleAvatarFile(e.dataTransfer.files?.[0] ?? null);
+          }}
+          className={cn(
+            "flex items-center gap-4 rounded-xl border border-dashed px-4 py-4 text-left transition-colors",
+            dragActive ? "border-accent bg-accent-soft/30" : "border-border bg-surface-alt/40 hover:bg-surface-alt",
+          )}
+        >
+          <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-full border border-border bg-accent-soft text-[24px] text-accent">
+            {agentAvatarDataUrl ? (
+              <img src={agentAvatarDataUrl} alt={agentName || "Friday"} className="h-full w-full object-cover" />
+            ) : (
+              <Bot size={24} />
+            )}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 text-[13px] font-medium text-text">
+              <Upload size={14} />
+              点击上传或直接拖入图片
+            </div>
+            <div className="mt-1 text-[11px] leading-relaxed text-text-faint">
+              支持 PNG / JPG / WEBP，建议使用正方形头像。上传后会直接显示在对话区。
+            </div>
+          </div>
+          {agentAvatarDataUrl ? (
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 rounded-md border border-border bg-surface px-2 py-1 text-[11px] text-text-muted hover:bg-surface-alt hover:text-text"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setAgentAvatarDataUrl("");
+              }}
+            >
+              <ImagePlus size={12} />
+              清除
+            </button>
+          ) : null}
+        </div>
       </div>
 
       <div className="flex flex-col gap-1.5">

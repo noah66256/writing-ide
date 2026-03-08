@@ -20,8 +20,10 @@ type AuthState = {
   error: string;
   loginModalOpen: boolean;
   initStatus: "idle" | "checking" | "done";
+  userAvatarDataUrl: string;
 
   setAccessToken: (token: string) => void;
+  setUserAvatarDataUrl: (dataUrl: string) => void;
   logout: () => void;
   openLoginModal: () => void;
   closeLoginModal: () => void;
@@ -94,8 +96,10 @@ export const useAuthStore = create<AuthState>()(
       error: "",
       loginModalOpen: false,
       initStatus: "idle" as const,
+      userAvatarDataUrl: "",
 
       setAccessToken: (token) => set({ accessToken: String(token ?? "").trim() }),
+      setUserAvatarDataUrl: (dataUrl) => set({ userAvatarDataUrl: String(dataUrl ?? "") }),
       logout: () => set({ accessToken: "", user: null, error: "" }),
       openLoginModal: () => set({ loginModalOpen: true }),
       closeLoginModal: () => set({ loginModalOpen: false }),
@@ -245,7 +249,7 @@ export const useAuthStore = create<AuthState>()(
         };
       },
     }),
-    { name: "writing-ide.auth.v1", partialize: (s) => ({ accessToken: s.accessToken, user: s.user }) },
+    { name: "writing-ide.auth.v1", partialize: (s) => ({ accessToken: s.accessToken, user: s.user, userAvatarDataUrl: s.userAvatarDataUrl }) },
   ),
 );
 

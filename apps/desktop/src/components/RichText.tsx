@@ -1,9 +1,9 @@
 import { Fragment, useCallback, type ReactElement } from "react";
 import { useProjectStore } from "../state/projectStore";
-import { getFileRefMatches, resolveProjectAbsPath } from "../utils/fileRefLink";
+import { getFileRefMatches, resolveOpenableFileRef } from "../utils/fileRefLink";
 
 type InlineOptions = {
-  onOpenFileRef?: (relPath: string, raw: string) => void;
+  onOpenFileRef?: (path: string, raw: string) => void;
 };
 
 /** 将纯文本中的文件引用渲染为可点击 span */
@@ -88,10 +88,10 @@ export function RichText(props: { text: string; onHeadingClick?: (args: { level:
   const rootDir = useProjectStore((s) => s.rootDir);
 
   const openFileRef = useCallback(
-    async (relPath: string, raw: string) => {
-      if (!rootDir) return;
-      const absPath = resolveProjectAbsPath(rootDir, relPath);
-      const ret = await window.desktop?.exec?.openFile?.(absPath);
+    async (filePath: string, raw: string) => {
+      const targetPath = resolveOpenableFileRef(rootDir, filePath);
+      if (!targetPath) return;
+      const ret = await window.desktop?.exec?.openFile?.(targetPath);
       if (ret && !ret.ok) {
         alert(ret.detail || `无法打开文件：${raw}`);
       }
@@ -99,9 +99,7 @@ export function RichText(props: { text: string; onHeadingClick?: (args: { level:
     [rootDir],
   );
 
-  const inlineOpts: InlineOptions | undefined = rootDir
-    ? { onOpenFileRef: openFileRef }
-    : undefined;
+  const inlineOpts: InlineOptions = { onOpenFileRef: openFileRef };
 
   const lines = text.split("\n");
 

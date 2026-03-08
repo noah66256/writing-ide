@@ -37,6 +37,21 @@ async function smokeProviderEndpoints() {
       const req = input instanceof Request ? input : null;
       const bodyText = req ? await req.text().catch(() => "") : bodyTextFromInit;
       const bodyJson = bodyText ? JSON.parse(bodyText) : {};
+      if (String(bodyJson?.model ?? "").includes("toolcall-streamdelta")) {
+        const stream = new ReadableStream({
+          start(controller) {
+            const lines = [
+              `data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_resp_stream_1","call_id":"fc_resp_stream_1","name":"run_dot_setTodoList","arguments":""}}\n\n`,
+              `data: {"type":"response.function_call_arguments.delta","item_id":"fc_resp_stream_1","output_index":0,"delta":"{\\"items\\":[{\\"text\\":\\"第一步\\"}]}"}\n\n`,
+              `data: {"type":"response.completed","response":{"output":[],"usage":{"input_tokens":3,"output_tokens":5}}}\n\n`,
+              `data: [DONE]\n\n`,
+            ];
+            for (const line of lines) controller.enqueue(new TextEncoder().encode(line));
+            controller.close();
+          },
+        });
+        return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      }
       if (String(bodyJson?.model ?? "").includes("toolcall")) {
         return new Response(
           JSON.stringify({
@@ -183,6 +198,24 @@ async function smokeProviderEndpoints() {
     }
     assert.match(streamResPieces.join(""), /<tool_calls>/);
     ok("provider.responses.stream_tool_call_bridge");
+
+    const streamResDeltaPieces: string[] = [];
+    for await (const ev of streamChatCompletionViaProvider({
+      baseUrl: "https://mock.local",
+      endpoint: "/v1/responses",
+      apiKey: "k",
+      model: "gpt-4o-mini-toolcall-streamdelta",
+      messages,
+      tools: [{ name: "run_dot_setTodoList", description: "todo", inputSchema: { type: "object", properties: { items: { type: "array", items: { type: "object" } } }, required: ["items"] } }],
+      toolChoice: { type: "any" },
+      parallelToolCalls: false,
+    })) {
+      if (ev.type === "delta") streamResDeltaPieces.push(String(ev.delta ?? ""));
+      if (ev.type === "error") throw new Error(String((ev as any).error ?? "stream responses delta failed"));
+    }
+    assert.match(streamResDeltaPieces.join(""), /run_dot_setTodoList/);
+    assert.match(streamResDeltaPieces.join(""), /items/);
+    ok("provider.responses.stream_function_call_arguments_delta");
 
     const streamChatPieces: string[] = [];
     for await (const ev of streamChatCompletionViaProvider({
