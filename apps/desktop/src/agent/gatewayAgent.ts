@@ -274,6 +274,23 @@ export function humanizeToolActivity(name: string, args: Record<string, unknown>
   if (tool === "agent.config.list") return "正在查看团队成员列表…";
   if (tool === "agent.config.update") return "正在更新团队成员配置…";
   if (tool === "agent.config.remove") return "正在移除团队成员…";
+  if (tool.startsWith("mcp.")) {
+    const parts = tool.split(".");
+    const toolId = parts.slice(2).join(".").toLowerCase();
+    if (/(browser_|navigate|goto|go_to|open_url|openurl|snapshot|click|fill|type|wait_for|run_code)/.test(toolId)) {
+      return "正在执行网页任务…";
+    }
+    if (/(create_document|read_doc|document|docx|word)/.test(toolId)) {
+      return "正在处理 Word 文档…";
+    }
+    if (/(search|get_page|fetch)/.test(toolId)) {
+      return "正在执行搜索任务…";
+    }
+    if (/(create_workbook|spreadsheet|worksheet|sheet|excel)/.test(toolId)) {
+      return "正在处理表格任务…";
+    }
+    return "正在执行外部工具…";
+  }
   return `正在执行：${tool}…`;
 }
 

@@ -5,6 +5,8 @@ import {
   Loader2,
   Copy,
   Bot,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -78,6 +80,120 @@ function fileToImageAttachment(file: File): Promise<ImageAttachment | null> {
   });
 }
 
+type RenderRow =
+  | { kind: "step"; key: string; step: Step }
+  | { kind: "tool_group"; key: string; steps: ToolBlockStep[] };
+
+function parseMcpToolMeta(toolName: string): { serverId: string; toolId: string } | null {
+  const parts = String(toolName ?? "").trim().split(".");
+  if (parts.length < 3 || parts[0] !== "mcp") return null;
+  return {
+    serverId: String(parts[1] ?? "").trim(),
+    toolId: parts.slice(2).join(".").trim(),
+  };
+}
+
+function getToolGroupKey(step: ToolBlockStep): string | null {
+  const meta = parseMcpToolMeta(step.toolName);
+  if (!meta) return null;
+  return `${step.agentId ?? "main"}:${meta.serverId || meta.toolId}`;
+}
+
+function buildRenderRows(steps: Step[]): RenderRow[] {
+  const rows: RenderRow[] = [];
+  for (let index = 0; index < steps.length;) {
+    const current = steps[index];
+    if (current.type === "tool") {
+      const groupKey = getToolGroupKey(current);
+      if (groupKey) {
+        const group: ToolBlockStep[] = [current];
+        let cursor = index + 1;
+        while (cursor < steps.length) {
+          const next = steps[cursor];
+          if (next.type !== "tool") break;
+          if (getToolGroupKey(next) !== groupKey) break;
+          group.push(next);
+          cursor += 1;
+        }
+        if (group.length > 1) {
+          rows.push({ kind: "tool_group", key: `tool_group_${current.id}`, steps: group });
+          index = cursor;
+          continue;
+        }
+      }
+    }
+    rows.push({ kind: "step", key: current.id, step: current });
+    index += 1;
+  }
+  return rows;
+}
+
+function humanizeMcpToolDisplayName(toolName: string): string | null {
+  const meta = parseMcpToolMeta(toolName);
+  if (!meta) return null;
+  const toolId = meta.toolId.toLowerCase();
+  if (/(browser_navigate|navigate|goto|go_to|open_url|openurl)/.test(toolId)) return "打开网页";
+  if (/(browser_snapshot|snapshot|get_page_content|get_page|page_content)/.test(toolId)) return "读取页面内容";
+  if (/(browser_click|click)/.test(toolId)) return "点击页面元素";
+  if (/(browser_type|type|fill|input)/.test(toolId)) return "填写页面内容";
+  if (/(browser_wait_for|wait_for)/.test(toolId)) return "等待页面状态";
+  if (/(browser_run_code|run_code|evaluate|exec_js)/.test(toolId)) return "执行网页脚本";
+  if (/(create_document|new_document|document_create)/.test(toolId)) return "生成 Word 文档";
+  if (/(read_doc|get_doc|read_document)/.test(toolId)) return "读取 Word 文档";
+  if (/(search|web_search)/.test(toolId)) return "执行搜索";
+  if (/(get_page_content|fetch)/.test(toolId)) return "抓取网页内容";
+  if (/(create_workbook|spreadsheet|worksheet|sheet|excel)/.test(toolId)) return "生成表格文件";
+  return "调用外部工具";
+}
+
+function humanizeToolGroupLabel(toolName: string): string {
+  const meta = parseMcpToolMeta(toolName);
+  if (!meta) return "外部工具任务";
+  const toolId = meta.toolId.toLowerCase();
+  if (/(browser_|navigate|goto|snapshot|click|fill|type|wait_for|run_code)/.test(toolId)) return "网页任务";
+  if (/(create_document|read_doc|document|docx|word)/.test(toolId)) return "Word 文档任务";
+  if (/(search|get_page|fetch)/.test(toolId)) return "搜索任务";
+  if (/(create_workbook|spreadsheet|worksheet|sheet|excel)/.test(toolId)) return "表格任务";
+  return "外部工具任务";
+}
+
+function normalizeToolErrorText(raw: unknown): string {
+  const text = String(raw ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  const missingProp = text.match(/required property ['"]([^'"]+)['"]/i)?.[1];
+  if (/Validation failed for tool/i.test(text) && /setTodoList|run_dot_setTodoList|run\.setTodoList/i.test(text) && missingProp === "items") {
+    return "待办事项更新失败：缺少任务列表参数 items。";
+  }
+  if (/Validation failed for tool/i.test(text) && missingProp) {
+    return `参数校验失败：缺少 ${missingProp} 字段。`;
+  }
+  if (/PROJECT_NOT_OPENED/i.test(text)) {
+    return "当前没有打开项目文件夹，暂时不能把结果写入本地项目。";
+  }
+  if (/Another browser context is being closed/i.test(text)) {
+    return "浏览器会话正在关闭，请刷新页面后再继续。";
+  }
+  if (/Ref\s+\S+\s+not found in the current page snapshot/i.test(text)) {
+    return "页面快照已过期，需要先重新读取当前页面再继续点击。";
+  }
+  if (/Request was aborted/i.test(text) || /aborted/i.test(text)) {
+    return "本轮已中断，可继续刚才的任务。";
+  }
+  return text;
+}
+
+function formatTodoNote(note?: string): string {
+  const raw = String(note ?? "").trim();
+  if (!raw) return "";
+  const matched = raw.match(/^失败：\s*([^\-]+)\s*-\s*(.+)$/);
+  if (matched) {
+    const toolName = String(matched[1] ?? "").trim();
+    const detail = normalizeToolErrorText(matched[2]);
+    if (/setTodoList|run\.setTodoList/i.test(toolName)) return `待办同步失败：${detail}`;
+    return `${toolDisplayName(toolName, undefined)}失败：${detail}`;
+  }
+  return normalizeToolErrorText(raw);
+}
 
 export function ChatArea() {
   const steps = useRunStore((s) => s.steps);
@@ -87,6 +203,7 @@ export function ChatArea() {
   const model = useRunStore((s) => s.model);
 
   const [suggestText, setSuggestText] = useState<string>("");
+  const [todoPanelCollapsed, setTodoPanelCollapsed] = useState(false);
   const controllerRef = useRef<RunController | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -100,6 +217,7 @@ export function ChatArea() {
     [todoList],
   );
   const showWorkflowTodoPanel = todoList.length > 0 && (isRunning || hasPendingTodo);
+  const renderRows = useMemo(() => buildRenderRows(steps), [steps]);
 
   // 自动滚动到底部
   useEffect(() => {
@@ -281,8 +399,10 @@ export function ChatArea() {
           {/* spacer: 消息少时把内容推到底部 */}
           <div className="flex-1 min-h-6" />
           <div className="max-w-[var(--chat-max-width)] mx-auto w-full px-6 pb-4 space-y-1">
-            {steps.map((step) => (
-              <StepRenderer key={step.id} step={step} onAssistantQuickAction={handleAssistantQuickAction} />
+            {renderRows.map((row) => (
+              row.kind === "tool_group"
+                ? <ToolGroupCard key={row.key} steps={row.steps} />
+                : <StepRenderer key={row.key} step={row.step} onAssistantQuickAction={handleAssistantQuickAction} />
             ))}
             <div ref={bottomRef} />
           </div>
@@ -292,7 +412,14 @@ export function ChatArea() {
         <WelcomePage onSuggest={handleSuggest} />
       )}
 
-      {showWorkflowTodoPanel && <WorkflowTodoPanel items={todoList} isRunning={isRunning} />}
+      {showWorkflowTodoPanel && (
+        <WorkflowTodoPanel
+          items={todoList}
+          isRunning={isRunning}
+          collapsed={todoPanelCollapsed}
+          onToggle={() => setTodoPanelCollapsed((prev) => !prev)}
+        />
+      )}
 
       {/* 输入栏（始终可见） */}
       <InputBar
@@ -307,51 +434,73 @@ export function ChatArea() {
   );
 }
 
-function WorkflowTodoPanel({ items, isRunning }: { items: TodoItem[]; isRunning: boolean }) {
+function WorkflowTodoPanel({
+  items,
+  isRunning,
+  collapsed,
+  onToggle,
+}: {
+  items: TodoItem[];
+  isRunning: boolean;
+  collapsed: boolean;
+  onToggle: () => void;
+}) {
   const total = items.length;
   const done = items.filter((item) => item.status === "done" || item.status === "skipped").length;
 
   return (
     <div className="w-full max-w-[var(--chat-max-width)] mx-auto px-4 pb-2">
       <div className="rounded-2xl border border-border bg-surface shadow-sm">
-        <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-border/60">
-          <div className="text-[13px] font-semibold text-text">任务清单</div>
-          <div className="text-[12px] text-text-muted whitespace-nowrap">
-            {done >= total ? ("已完成 " + done + "/" + total + (isRunning ? " · 收尾中" : "")) : ("已完成 " + done + "/" + total)}
+        <button
+          type="button"
+          className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left"
+          onClick={onToggle}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            {collapsed ? <ChevronRight size={15} className="text-text-faint shrink-0" /> : <ChevronDown size={15} className="text-text-faint shrink-0" />}
+            <div className="text-[13px] font-semibold text-text">任务清单</div>
           </div>
-        </div>
-        <div className="max-h-[220px] overflow-y-auto px-4 py-3 space-y-2.5">
-          {items.map((item, index) => {
-            const isDone = item.status === "done" || item.status === "skipped";
-            const isRunningNow = item.status === "in_progress";
-            const isBlocked = item.status === "blocked";
-            const icon = isDone ? (
-              <CheckCircle2 size={16} className="text-success shrink-0 mt-0.5" />
-            ) : isRunningNow ? (
-              <Loader2 size={16} className="text-accent shrink-0 mt-0.5 animate-spin" />
-            ) : isBlocked ? (
-              <XCircle size={16} className="text-error shrink-0 mt-0.5" />
-            ) : (
-              <span className="shrink-0 mt-[2px] inline-flex items-center justify-center w-4 h-4 rounded-full border border-border text-[10px] text-text-faint">○</span>
-            );
-            return (
-              <div key={item.id || String(index)} className="flex items-start gap-3">
-                {icon}
-                <div className="min-w-0 flex-1">
-                  <div className={cn(
-                    "text-[13px] leading-6 break-words",
-                    isDone ? "text-text-muted line-through" : isBlocked ? "text-error" : "text-text",
-                  )}>
-                    {index + 1}. {item.text}
+          <div className="flex items-center gap-3 shrink-0">
+            <div className="text-[12px] text-text-muted whitespace-nowrap">
+              {done >= total ? ("已完成 " + done + "/" + total + (isRunning ? " · 收尾中" : "")) : ("已完成 " + done + "/" + total)}
+            </div>
+            <div className="text-[12px] text-text-faint whitespace-nowrap">{collapsed ? "展开" : "收起"}</div>
+          </div>
+        </button>
+        {!collapsed ? (
+          <div className="border-t border-border/60 max-h-[220px] overflow-y-auto px-4 py-3 space-y-2.5">
+            {items.map((item, index) => {
+              const isDone = item.status === "done" || item.status === "skipped";
+              const isRunningNow = item.status === "in_progress";
+              const isBlocked = item.status === "blocked";
+              const icon = isDone ? (
+                <CheckCircle2 size={16} className="text-success shrink-0 mt-0.5" />
+              ) : isRunningNow ? (
+                <Loader2 size={16} className="text-accent shrink-0 mt-0.5 animate-spin" />
+              ) : isBlocked ? (
+                <XCircle size={16} className="text-error shrink-0 mt-0.5" />
+              ) : (
+                <span className="shrink-0 mt-[2px] inline-flex items-center justify-center w-4 h-4 rounded-full border border-border text-[10px] text-text-faint">○</span>
+              );
+              return (
+                <div key={item.id || String(index)} className="flex items-start gap-3">
+                  {icon}
+                  <div className="min-w-0 flex-1">
+                    <div className={cn(
+                      "text-[13px] leading-6 break-words",
+                      isDone ? "text-text-muted line-through" : isBlocked ? "text-error" : "text-text",
+                    )}>
+                      {index + 1}. {item.text}
+                    </div>
+                    {item.note ? (
+                      <div className="mt-0.5 text-[12px] leading-5 text-text-faint break-words">{formatTodoNote(item.note)}</div>
+                    ) : null}
                   </div>
-                  {item.note ? (
-                    <div className="mt-0.5 text-[12px] leading-5 text-text-faint break-words">{item.note}</div>
-                  ) : null}
                 </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -624,6 +773,82 @@ function ToolCallCard({ step }: { step: ToolBlockStep }) {
   );
 }
 
+function ToolGroupCard({ steps }: { steps: ToolBlockStep[] }) {
+  const groupStatus: ToolBlockStep["status"] = steps.some((step) => step.status === "failed")
+    ? "failed"
+    : steps.some((step) => step.status === "running")
+      ? "running"
+      : steps.every((step) => step.status === "undone")
+        ? "undone"
+        : "success";
+  const [expanded, setExpanded] = useState(groupStatus !== "success");
+
+  useEffect(() => {
+    if (groupStatus !== "success") setExpanded(true);
+  }, [groupStatus]);
+
+  const statusIcon = {
+    running: <Loader2 size={13} className="animate-spin text-accent" />,
+    success: <CheckCircle2 size={13} className="text-success" />,
+    failed: <XCircle size={13} className="text-error" />,
+    undone: <XCircle size={13} className="text-text-faint" />,
+  }[groupStatus];
+  const statusColor = {
+    running: "border-accent/20 bg-accent-soft/20",
+    success: "border-border-soft bg-surface/70",
+    failed: "border-error/20 bg-error/5",
+    undone: "border-border-soft bg-surface/60",
+  }[groupStatus];
+
+  const groupLabel = humanizeToolGroupLabel(steps[0]?.toolName ?? "");
+  const lastLine = steps.length > 0 ? _trunc(formatToolStatusLine(steps[steps.length - 1]!), 80) : "";
+  const summaryLine = groupStatus === "running"
+    ? `正在执行${groupLabel}…`
+    : groupStatus === "failed"
+      ? `${groupLabel} · ${steps.length} 步，存在失败`
+      : groupStatus === "undone"
+        ? `${groupLabel} · 已撤销`
+        : `${groupLabel} · 已完成 ${steps.length} 步`;
+
+  return (
+    <div className={cn("rounded-md border px-3 py-2 my-1 ml-10", statusColor)}>
+      <div className="flex items-start gap-2 w-full">
+        <div className="pt-0.5">{statusIcon}</div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[12px] text-text-muted truncate">{summaryLine}</div>
+          {lastLine ? <div className="mt-0.5 text-[11px] text-text-faint truncate">最近：{lastLine}</div> : null}
+        </div>
+        <button
+          type="button"
+          className="shrink-0 mt-0.5 text-text-faint hover:text-text transition-colors"
+          onClick={() => setExpanded((prev) => !prev)}
+          aria-label={expanded ? "收起工具详情" : "展开工具详情"}
+        >
+          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        </button>
+      </div>
+      {expanded ? (
+        <div className="mt-2 pl-5 space-y-1.5">
+          {steps.map((step) => {
+            const detailIcon = {
+              running: <Loader2 size={12} className="animate-spin text-accent" />,
+              success: <CheckCircle2 size={12} className="text-success" />,
+              failed: <XCircle size={12} className="text-error" />,
+              undone: <XCircle size={12} className="text-text-faint" />,
+            }[step.status];
+            return (
+              <div key={step.id} className="flex items-center gap-2 min-w-0">
+                {detailIcon}
+                <div className="text-[11px] text-text-faint truncate flex-1">{formatToolStatusLine(step)}</div>
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /* ─── 工具状态行格式化 ─── */
 
 function _trunc(v: unknown, max = 48): string {
@@ -678,6 +903,8 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
 };
 
 function toolDisplayName(toolName: string, input: unknown): string {
+  const mcpLabel = humanizeMcpToolDisplayName(toolName);
+  if (mcpLabel) return mcpLabel;
   if (toolName === "agent.delegate") {
     const args = _asRecord(input);
     const agentId = String(args.agentId ?? args.targetAgentId ?? "").trim();
@@ -717,14 +944,21 @@ function summarizeToolInput(toolName: string, input: unknown): string {
   return "";
 }
 
-function summarizeToolOutput(output: unknown): string {
+function summarizeToolOutput(toolName: string, output: unknown): string {
   if (output == null) return "";
-  if (typeof output === "string") return _trunc(output, 60);
+  if (typeof output === "string") {
+    const docCreated = output.match(/^Document\s+(.+?)\s+created successfully\.?$/i)?.[1];
+    if (docCreated) return `已创建文档《${docCreated.trim()}》`;
+    return _trunc(normalizeToolErrorText(output), 60);
+  }
   if (Array.isArray(output)) return output.length ? `返回 ${output.length} 项` : "";
   const out = _asRecord(output);
-  if (out.error) return _trunc(out.error, 60);
+  if (toolName === "run.mainDoc.update" && out.ok === true) return "主文档已更新";
+  if (toolName === "run.setTodoList" && out.ok === true) return "任务清单已更新";
+  if (toolName === "time.now" && (out.nowIso || out.unixMs)) return "已读取当前时间";
+  if (out.error) return _trunc(normalizeToolErrorText(out.error), 60);
   const msg = out.message ?? out.note ?? out.summary;
-  if (msg) return _trunc(msg, 60);
+  if (msg) return _trunc(normalizeToolErrorText(msg), 60);
   if (Array.isArray(out.groups)) {
     let hits = 0;
     for (const g of out.groups) {
@@ -748,6 +982,6 @@ function formatToolStatusLine(step: ToolBlockStep): string {
   const inputHint = summarizeToolInput(step.toolName, step.input);
   const action = inputHint ? `${label} — ${inputHint}` : label;
   const statusTag = step.status === "success" ? "已完成" : step.status === "failed" ? "失败" : "已撤销";
-  const outputHint = summarizeToolOutput(step.output);
+  const outputHint = summarizeToolOutput(step.toolName, step.output);
   return outputHint ? `${action} · ${statusTag}：${outputHint}` : `${action} · ${statusTag}`;
 }
