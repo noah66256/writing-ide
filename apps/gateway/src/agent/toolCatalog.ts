@@ -92,7 +92,7 @@ const CAPABILITY_KEYWORDS: Array<{ capability: string; re: RegExp }> = [
   { capability: "mcp_pdf", re: /(pdf|转.*pdf|导出.*pdf)/i },
 ];
 
-function detectPromptCapabilities(prompt: string): Set<string> {
+export function detectPromptCapabilities(prompt: string): Set<string> {
   const text = String(prompt ?? "").trim();
   const out = new Set<string>();
   if (!text) return out;
@@ -212,7 +212,7 @@ function inferMcpServerSessionMode(family: McpServerFamily): McpServerSessionMod
 
 function isLikelyEntryToolName(name: string): boolean {
   const n = String(name ?? "").trim().toLowerCase();
-  return /(^|\.)(browser_navigate|navigate|open|open_url|openurl|goto|go_to|create|new|save|export|get_doc|read_doc|search|fetch|get_page|browser_snapshot)$/.test(n);
+  return /(^|\.)(browser_navigate|navigate|open|open_url|openurl|goto|go_to|create|create_document|create_doc|new|new_document|save|export|create_workbook|new_workbook|get_doc|read_doc|search|fetch|get_page|browser_snapshot)$/.test(n);
 }
 
 export function buildMcpServerCatalog(args: {

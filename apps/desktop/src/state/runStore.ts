@@ -32,6 +32,9 @@ export type MainDoc = {
   // 说明：用于修复短回复（OK/继续/选3/1..2..3..）导致的意图掉线；优先让 Router/skills 依据该字段保持工作流连续性。
   // 形态示例（建议，不强约束）：{ v:1, kind:"style_imitate", status:"waiting_user"|"running"|"done", waiting:{question,options?}, intentHint:"writing", updatedAt }
   workflowV1?: any;
+  // Composite Task Runtime（v0.1）：复合任务的阶段图、结构化中间产物、pending input 与排队续跑。
+  // 说明：用于把“浏览/检索/提取/交付”等多能力任务拆成阶段化执行，而不是压进单一 route。
+  compositeTaskV1?: any;
 };
 
 export type TodoStatus = "todo" | "in_progress" | "done" | "blocked" | "skipped";
@@ -670,17 +673,21 @@ export const useRunStore = create<RunState>()(
   updateMainDoc: (patch) => {
     const prev = get().mainDoc;
     const rawPatch = patch && typeof patch === "object" ? patch : {};
-    const nextWorkflow = rawPatch && Object.prototype.hasOwnProperty.call(rawPatch, "workflowV1")
-      ? {
-          ...(prev?.workflowV1 && typeof prev.workflowV1 === "object" && !Array.isArray(prev.workflowV1) ? prev.workflowV1 : {}),
-          ...(((rawPatch as any).workflowV1 && typeof (rawPatch as any).workflowV1 === "object" && !Array.isArray((rawPatch as any).workflowV1)) ? (rawPatch as any).workflowV1 : {}),
-        }
-      : prev?.workflowV1;
+    const mergeObjectField = (fieldName: "workflowV1" | "compositeTaskV1") =>
+      rawPatch && Object.prototype.hasOwnProperty.call(rawPatch, fieldName)
+        ? {
+            ...(prev?.[fieldName] && typeof prev[fieldName] === "object" && !Array.isArray(prev[fieldName]) ? prev[fieldName] : {}),
+            ...(((rawPatch as any)[fieldName] && typeof (rawPatch as any)[fieldName] === "object" && !Array.isArray((rawPatch as any)[fieldName])) ? (rawPatch as any)[fieldName] : {}),
+          }
+        : prev?.[fieldName];
+    const nextWorkflow = mergeObjectField("workflowV1");
+    const nextCompositeTask = mergeObjectField("compositeTaskV1");
     set({
       mainDoc: {
         ...prev,
         ...rawPatch,
         ...(Object.prototype.hasOwnProperty.call(rawPatch, "workflowV1") ? { workflowV1: nextWorkflow } : {}),
+        ...(Object.prototype.hasOwnProperty.call(rawPatch, "compositeTaskV1") ? { compositeTaskV1: nextCompositeTask } : {}),
       },
     });
     return { undo: () => set({ mainDoc: prev }) };

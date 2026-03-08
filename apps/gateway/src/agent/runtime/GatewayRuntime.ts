@@ -81,7 +81,7 @@ const COMPLETED_OUTCOME: RunOutcome = {
 };
 
 /** 默认最大回合数，防止无限循环 */
-const DEFAULT_MAX_TURNS = 30;
+const DEFAULT_MAX_TURNS = 48;
 
 // ── 内部类型 ─────────────────────────────────────
 

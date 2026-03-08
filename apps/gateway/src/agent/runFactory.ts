@@ -38,6 +38,14 @@ import {
   type RunState,
   type SubAgentDefinition,
 } from "@ohmycrab/agent-core";
+import {
+  deriveCompositeTaskPlanV1,
+  getCompositePreferredServerIds,
+  getCompositePreferredToolNames,
+  getCompositeServerSelectionBudget,
+  summarizeCompositeTaskPlan,
+  type CompositeTaskPlanV1,
+} from "./compositeTask.js";
 import { collectToolSchemaIssues } from "@ohmycrab/tools";
 import {
   type RunContext,
@@ -1578,6 +1586,7 @@ export type PreparedRun = {
   l1MemoryFromPack: string;
   l2MemoryFromPack: string;
   ctxDialogueSummaryFromPack: string;
+  compositeTaskPlan: CompositeTaskPlanV1 | null;
 };
 
 export type PrepareAgentRunResult =
@@ -2231,6 +2240,15 @@ export async function prepareAgentRun(args: {
   const executionPreferred = routeDecision.executionPreferred;
   const executionContract = routeDecision.executionContract;
   const preserveToolNames = routeDecision.preserveToolNames;
+  const projectDirFromSidecar = coerceNonEmptyString(ideSummaryFromSidecar?.projectDir);
+
+  // 复合任务规划：先识别 phase，再把 MCP server/tool 选择收敛到当前/后续阶段所需能力，避免 Word、Playwright 等互相挤掉。
+  const compositeTaskPlan = deriveCompositeTaskPlanV1({
+    userPrompt,
+    routeId: routeIdLower || intentRoute.routeId || "",
+    mainDoc: mainDocFromPack,
+    projectDir: projectDirFromSidecar,
+  });
 
   // MCP 工具参与正常相关性评分，不再全量 preserve（+500）；
   // 但在进入工具级排序前，先做一轮 server-first 收敛：先挑 MCP server，再只展开已选 server 的 tools。
@@ -2238,10 +2256,21 @@ export async function prepareAgentRun(args: {
     servers: mcpServersFromSidecar,
     tools: mcpToolsFromSidecar,
   });
+  const compositeMaxServers = getCompositeServerSelectionBudget(compositeTaskPlan);
+  const compositePreferredToolNames = getCompositePreferredToolNames({
+    plan: compositeTaskPlan,
+    serverCatalog: mcpServerCatalog,
+  });
+  const executionPreferredWithComposite = Array.from(new Set([...compositePreferredToolNames, ...executionPreferred]));
+  const preserveToolNamesWithComposite = new Set<string>([
+    ...Array.from(preserveToolNames),
+    ...compositePreferredToolNames,
+  ]);
   let mcpServerSelection = selectMcpServerSubset({
     servers: mcpServerCatalog,
     routeId: routeIdLower || intentRoute.routeId,
     userPrompt,
+    maxServers: compositeMaxServers,
     preferBrowser: allowBrowserTools,
   });
   let mcpServerSelectionUsedStickyFallback = false;
@@ -2250,7 +2279,7 @@ export async function prepareAgentRun(args: {
     availableServerIds: mcpServerCatalog.map((server) => String(server?.serverId ?? "").trim()).filter(Boolean),
     userPrompt,
     routeId: routeIdLower || intentRoute.routeId,
-    maxServers: 2,
+    maxServers: compositeMaxServers,
   });
   if (mcpServerSelection.selectedServerIds.size === 0 && stickyServerIds.length > 0) {
     mcpServerSelectionUsedStickyFallback = true;
@@ -2265,6 +2294,36 @@ export async function prepareAgentRun(args: {
         selectedServerIds: stickyServerIds.slice(0, 12),
         prunedServerIds: prunedServerIds.slice(0, 24),
         rankingSample: mcpServerSelection.summary.rankingSample,
+      },
+    };
+  }
+  const compositePreferredServerIds = getCompositePreferredServerIds({
+    plan: compositeTaskPlan,
+    serverCatalog: mcpServerCatalog,
+    rankingSample: mcpServerSelection.summary.rankingSample.map((item) => ({ serverId: item.serverId, score: item.score })),
+    maxServers: compositeMaxServers,
+  });
+  if (compositePreferredServerIds.length > 0) {
+    const mergedSelectedServerIds: string[] = [];
+    for (const serverId of compositePreferredServerIds) {
+      if (!mergedSelectedServerIds.includes(serverId)) mergedSelectedServerIds.push(serverId);
+    }
+    for (const item of mcpServerSelection.summary.rankingSample) {
+      if (mergedSelectedServerIds.length >= compositeMaxServers) break;
+      if (Number(item?.score ?? 0) <= 0) continue;
+      const serverId = String(item?.serverId ?? "").trim();
+      if (serverId && !mergedSelectedServerIds.includes(serverId)) mergedSelectedServerIds.push(serverId);
+    }
+    const mergedSelectedSet = new Set(mergedSelectedServerIds);
+    const prunedServerIds = mcpServerCatalog
+      .map((server) => String(server?.serverId ?? "").trim())
+      .filter((id) => id && !mergedSelectedSet.has(id));
+    mcpServerSelection = {
+      selectedServerIds: mergedSelectedSet,
+      summary: {
+        ...mcpServerSelection.summary,
+        selectedServerIds: mergedSelectedServerIds.slice(0, 12),
+        prunedServerIds: prunedServerIds.slice(0, 24),
       },
     };
   }
@@ -2292,18 +2351,18 @@ export async function prepareAgentRun(args: {
     catalog: toolCatalog,
     routeId: routeIdLower || intentRoute.routeId,
     userPrompt,
-    preferredToolNames: executionPreferred,
-    preserveToolNames: Array.from(preserveToolNames),
+    preferredToolNames: executionPreferredWithComposite,
+    preserveToolNames: Array.from(preserveToolNamesWithComposite),
     maxTools: mode === "agent" ? 30 : 20,
   });
   const selectedAllowedToolNames =
     toolSelection.selectedToolNames.size > 0
       ? toolSelection.selectedToolNames
       : new Set(baseAllowedToolNames);
-  for (const name of preserveToolNames) {
+  for (const name of preserveToolNamesWithComposite) {
     if (baseAllowedToolNames.has(name)) selectedAllowedToolNames.add(name);
   }
-  for (const name of executionPreferred) {
+  for (const name of executionPreferredWithComposite) {
     if (baseAllowedToolNames.has(name)) selectedAllowedToolNames.add(name);
   }
 
@@ -2318,7 +2377,6 @@ export async function prepareAgentRun(args: {
       }
     }
   }
-  const projectDirFromSidecar = coerceNonEmptyString(ideSummaryFromSidecar?.projectDir);
   const allowCodeExecForRun = shouldAllowCodeExecForRun({
     userPrompt,
     routeId: routeIdLower || intentRoute.routeId || "",
@@ -2377,6 +2435,8 @@ export async function prepareAgentRun(args: {
       webSearchHint = "联网搜索当前不可用（未配置搜索服务且浏览器 MCP 未连接）。不得声称已联网或引用网络信息。";
     }
   }
+
+  const compositeTaskSummary = summarizeCompositeTaskPlan(compositeTaskPlan);
 
   const messages: OpenAiChatMessage[] = [
     {
@@ -2597,9 +2657,9 @@ export async function prepareAgentRun(args: {
 
       const bootCandidates =
         routeIdLower === "web_radar" || directOpenWebIntent
-          ? executionPreferred
+          ? executionPreferredWithComposite
           : [
-              ...executionPreferred,
+              ...executionPreferredWithComposite,
               "run.mainDoc.get",
               "run.setTodoList",
               "run.todo",
@@ -2781,6 +2841,7 @@ export async function prepareAgentRun(args: {
       mcpServerStickyFallbackUsed: mcpServerSelectionUsedStickyFallback,
       mcpServerStickyFallbackIds: mcpServerSelectionUsedStickyFallback ? mcpServerSelection.summary.selectedServerIds.slice(0, 12) : [],
       executionContract,
+      compositeTaskPlan,
       authorization: String((request as any)?.headers?.authorization ?? ""),
       l1MemoryFromPack,
       l2MemoryFromPack,
@@ -2841,6 +2902,7 @@ export async function executeAgentRun(args: {
     mcpServerStickyFallbackUsed,
     mcpServerStickyFallbackIds,
     executionContract,
+    compositeTaskPlan,
     l1MemoryFromPack,
     l2MemoryFromPack,
     ctxDialogueSummaryFromPack,
@@ -3095,13 +3157,26 @@ export async function executeAgentRun(args: {
       minToolCalls: executionContract.minToolCalls,
       maxNoToolTurns: executionContract.maxNoToolTurns,
       reason: executionContract.reason,
-      preferredToolNames: executionContract.preferredToolNames.slice(0, 12),
+      preferredToolNames: Array.from(selectedAllowedToolNames).slice(0, 12),
       routeDecision: {
         routeId: prepared.intentRoute?.routeId ?? "unknown",
         isExecutionRoute: executionContract.required,
       },
     },
   });
+  if (compositeTaskPlan) {
+    const currentPhase = compositeTaskPlan.phases.find((phase) => phase.id === compositeTaskPlan.currentPhaseId) ?? compositeTaskPlan.phases[0] ?? null;
+    writeEvent("run.notice", {
+      turn: 0,
+      kind: "info",
+      title: "CompositeTaskPlan",
+      message: `复合任务已规划 ${compositeTaskPlan.phases.length} 个阶段，当前阶段：${currentPhase?.title ?? "未命名阶段"}`,
+      detail: {
+        plan: compositeTaskPlan,
+        currentPhase,
+      },
+    });
+  }
   writeEvent("run.notice", {
     turn: 0,
     kind: "info",

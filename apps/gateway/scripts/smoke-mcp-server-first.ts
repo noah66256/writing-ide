@@ -139,6 +139,7 @@ function makeSidecar() {
 
 async function scenarioBrowserOpen() {
   const prepared = await prepare("打开小红书登录页，等我登录后继续", makeSidecar());
+  assert.equal(prepared.compositeTaskPlan, null, "simple browser scenario should not create composite plan");
   assert.equal(prepared.mcpServerSelectionSummary.selectedServerIds.includes("playwright"), true, "browser scenario should select playwright");
   assert.equal(prepared.mcpServerSelectionSummary.selectedServerIds.includes("word"), false, "browser scenario should prune word");
   assert.equal(prepared.mcpToolsForRun.every((tool) => tool.serverId !== "word"), true, "runtime MCP tools should exclude word server");
@@ -157,6 +158,20 @@ async function scenarioWordDoc() {
 }
 
 
+async function scenarioCompositeBrowserToWord() {
+  const prepared = await prepare("打开小红书创作后台，拉取数据并生成 Word 报告导出 docx", makeSidecar());
+  assert.ok(prepared.compositeTaskPlan, "composite scenario should derive composite task plan");
+  const phaseKinds = prepared.compositeTaskPlan?.phases.map((phase) => phase.kind) ?? [];
+  assert.equal(phaseKinds.includes("browser_collect"), true, "composite plan should include browser_collect");
+  assert.equal(phaseKinds.includes("structured_extract"), true, "composite plan should include structured_extract");
+  assert.equal(phaseKinds.includes("word_delivery"), true, "composite plan should include word_delivery");
+  assert.equal(prepared.mcpServerSelectionSummary.selectedServerIds.includes("playwright"), true, "composite scenario should keep playwright");
+  assert.equal(prepared.mcpServerSelectionSummary.selectedServerIds.includes("word"), true, "composite scenario should keep word");
+  assert.equal(prepared.selectedAllowedToolNames.has("mcp.playwright.browser_navigate"), true, "composite scenario should include browser_navigate");
+  assert.equal(prepared.selectedAllowedToolNames.has("mcp.word.create_document"), true, "composite scenario should include create_document");
+  ok("composite browser to word scenario");
+}
+
 async function scenarioExplicitCodeExec() {
   const prepared = await prepare(
     "写一个 Python 脚本扫描项目里的 Markdown 文件并输出统计结果",
@@ -172,6 +187,7 @@ async function scenarioExplicitCodeExec() {
 async function main() {
   await scenarioBrowserOpen();
   await scenarioWordDoc();
+  await scenarioCompositeBrowserToWord();
   await scenarioExplicitCodeExec();
   console.log("[smoke-mcp-server-first] all scenarios passed");
 }

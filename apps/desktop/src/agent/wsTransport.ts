@@ -130,6 +130,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
   const subAgentBubbles = new Map<string, string>();
   const runStartStepCount = (rt.getSteps() ?? []).length;
   let runDoneNote = "";
+  let sawMaxTurnsExceeded = false;
   const updateWorkflowSticky = (patch: Record<string, unknown>) => {
     try {
       const main = (rt.getMainDoc() ?? {}) as any;
@@ -154,6 +155,49 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           selectedServerIds: nextSelectedServerIds,
           preferredToolNames: nextPreferredToolNames,
           updatedAt: new Date().toISOString(),
+        },
+      });
+    } catch {
+      // noop
+    }
+  };
+  const updateCompositeTask = (patch: Record<string, unknown>) => {
+    try {
+      const main = (rt.getMainDoc() ?? {}) as any;
+      const prev = main?.compositeTaskV1 && typeof main.compositeTaskV1 === "object" && !Array.isArray(main.compositeTaskV1)
+        ? (main.compositeTaskV1 as any)
+        : {};
+      updateMainDoc({
+        compositeTaskV1: {
+          ...prev,
+          ...patch,
+          v: 1,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+    } catch {
+      // noop
+    }
+  };
+  const markCompositeTaskWaitingOnMaxTurns = () => {
+    try {
+      const main = (rt.getMainDoc() ?? {}) as any;
+      const plan = main?.compositeTaskV1 && typeof main.compositeTaskV1 === "object" && !Array.isArray(main.compositeTaskV1)
+        ? (main.compositeTaskV1 as any)
+        : null;
+      if (!plan) return;
+      const phases = Array.isArray(plan?.phases) ? (plan.phases as any[]) : [];
+      const currentPhase = phases.find((phase: any) => String(phase?.id ?? "") === String(plan?.currentPhaseId ?? "")) ?? phases[0] ?? null;
+      const phaseId = String(currentPhase?.id ?? plan?.currentPhaseId ?? "phase_current").trim() || "phase_current";
+      const phaseTitle = String(currentPhase?.title ?? "当前阶段").trim() || "当前阶段";
+      updateCompositeTask({
+        status: "waiting_user",
+        pendingInput: {
+          id: `pending_${Date.now()}`,
+          phaseId,
+          kind: "resume_or_narrow",
+          question: `已达到${phaseTitle}的回合上限。请继续、缩小范围，或切换到交付阶段。`,
+          replyHint: "continue_or_narrow",
         },
       });
     } catch {
@@ -807,8 +851,15 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             setRunning(false); setActivity(null);
             maybeAppendRunEndFeedback(data);
             const endReason = String(data?.reason ?? "").trim().toLowerCase();
+            const endReasonCodes = Array.isArray(data?.reasonCodes)
+              ? (data.reasonCodes as any[]).map((item) => String(item ?? "").trim().toLowerCase()).filter(Boolean)
+              : [];
+            const hitMaxTurns = sawMaxTurnsExceeded || endReason === "max_turns" || endReasonCodes.includes("max_turns");
             syncTodoFailureStateFromRunEnd(data);
-            if (endReason === "clarify_waiting" || endReason === "proposal_waiting") {
+            if (hitMaxTurns) {
+              updateWorkflowSticky({ status: "waiting_user", lastEndReason: "max_turns" });
+              markCompositeTaskWaitingOnMaxTurns();
+            } else if (endReason === "clarify_waiting" || endReason === "proposal_waiting") {
               updateWorkflowSticky({ status: "waiting_user", lastEndReason: endReason });
             } else if (endReason) {
               const derivedWaitingPatch = endReason === "completed" ? deriveWaitingWorkflowPatchFromAssistant() : null;
@@ -888,6 +939,17 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               if (selectedServerIds.length > 0) {
                 updateWorkflowSticky({ status: "running", selectedServerIds });
               }
+            }
+            if (title === "CompositeTaskPlan") {
+              const plan = detail && typeof detail === "object" ? (detail as any).plan : null;
+              if (plan && typeof plan === "object" && !Array.isArray(plan)) {
+                updateMainDoc({ compositeTaskV1: plan });
+              }
+            }
+            if (title === "MaxTurnsExceeded") {
+              sawMaxTurnsExceeded = true;
+              updateWorkflowSticky({ status: "waiting_user", lastEndReason: "max_turns" });
+              markCompositeTaskWaitingOnMaxTurns();
             }
             if (rt.getIsRunning() && title) {
               setActivity(`系统：${title}`, { resetTimer: true });
@@ -1311,6 +1373,11 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           // ---- error (inside event envelope) ----
           if (event === "error") {
             const errMsg = data?.error ? String(data.error) : "unknown";
+            if (sawMaxTurnsExceeded && /\baborted\b/i.test(errMsg)) {
+              log("info", "ws.run.max_turns.error_suppressed", { error: errMsg });
+              if (rt.getIsRunning()) setActivity("达到回合上限，等待你的下一步…", { resetTimer: true });
+              return;
+            }
             const id = ensureAssistant();
             patchAssistant(id, { hidden: false });
             appendAssistantDelta(id, `\n\n[模型错误] ${errMsg}`);
@@ -1334,7 +1401,11 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
         /\baborted\b/i.test(msg);
 
       if (aborted) {
-        log("info", "ws.run.aborted", { message: msg, cancelReason });
+        log("info", "ws.run.aborted", { message: msg, cancelReason, sawMaxTurnsExceeded });
+        if (sawMaxTurnsExceeded) {
+          updateWorkflowSticky({ status: "waiting_user", lastEndReason: "max_turns" });
+          markCompositeTaskWaitingOnMaxTurns();
+        }
         cancelInlineFileOpConfirm();
         setRunning(false); setActivity(null);
         if (currentAssistantId) { finishAssistant(currentAssistantId); currentAssistantId = null; }

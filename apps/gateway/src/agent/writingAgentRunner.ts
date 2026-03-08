@@ -272,7 +272,7 @@ interface TurnAdapter {
   }): { entry: CanonicalHistoryEntry; shouldPush: boolean };
 }
 
-const MAX_TURNS = 30;
+const MAX_TURNS = 48;
 const TOOL_RESULT_TIMEOUT_MS = 180_000;
 const LINT_MAX_REWORK = 2;
 const STYLE_LINT_PASS_SCORE = 70;
