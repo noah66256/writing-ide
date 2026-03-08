@@ -29,6 +29,7 @@ function humanizeActivityLine(text: string | undefined, isRunning: boolean): str
   const t = String(text ?? "").trim();
   if (!isRunning) return "";
   if (!t) return "思考中…";
+  if (/(连接可能中断|连接已中断|无新事件|网络错误|服务端错误)/.test(t)) return t;
   if (/(达到回合上限|等待你的下一步|需要你确认|等待用户)/.test(t)) return t;
   if (/(网页任务|浏览器|网页)/.test(t)) return "正在执行网页任务…";
   if (/(搜索|检索|抓取网页|搜索资料)/.test(t)) return "正在搜索资料…";

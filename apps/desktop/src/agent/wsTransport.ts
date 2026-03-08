@@ -127,6 +127,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
   const resolveDoneOnce = () => { if (resolveDone) { const r = resolveDone; resolveDone = null; r(); } };
 
   let currentAssistantId: string | null = null;
+  let assistantId: string | null = null;
   const subAgentBubbles = new Map<string, string>();
   const runStartStepCount = (rt.getSteps() ?? []).length;
   let runDoneNote = "";
@@ -367,6 +368,13 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       try {
         if (ended || abort.signal.aborted || !rt.getIsRunning()) return;
         const ms = Date.now() - lastProgressAt;
+        if (ms >= 180_000) {
+          log("error", "ws.run.stalled_timeout", { idleMs: ms, cancelReason });
+          cancelReason = cancelReason || "stalled_timeout";
+          try { (abort as any).abort("stalled_timeout"); } catch { abort.abort(); }
+          setActivity(`连接已中断（已 ${Math.floor(ms / 1000)}s 无新事件）`, { resetTimer: false });
+          return;
+        }
         if (ms < 120_000 || stalledLogged) return;
         stalledLogged = true;
         log("warn", "ws.run.stalled", { idleMs: ms, cancelReason });
@@ -1502,6 +1510,12 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
 
       if (aborted) {
         log("info", "ws.run.aborted", { message: msg, cancelReason, sawMaxTurnsExceeded });
+        if (cancelReason === "stalled_timeout") {
+          const a = currentAssistantId ?? addAssistant("", false, false);
+          patchAssistant(a, { hidden: false });
+          appendAssistantDelta(a, `\n\n[连接中断] 长时间未收到新事件，本轮已停止。请重试一次；若仍复现，再看工具调用审计。\n`);
+          finishAssistant(a);
+        }
         if (sawMaxTurnsExceeded) {
           updateWorkflowSticky({ status: "waiting_user", lastEndReason: "max_turns" });
           markCompositeTaskWaitingOnMaxTurns();
