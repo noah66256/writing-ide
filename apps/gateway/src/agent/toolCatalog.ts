@@ -89,7 +89,8 @@ const CAPABILITY_KEYWORDS: Array<{ capability: string; re: RegExp }> = [
   { capability: "web_search", re: /(全网|联网|上网|搜索网页|新闻|热点|最新|today|latest|搜一下|百度一下|google一下|网上搜|大搜)/i },
   { capability: "web_fetch", re: /(网页|url|链接|fetch|抓取|访问|打开百度|打开谷歌|打开网站|打开网页|open\s+.*https?)/i },
   { capability: "kb_search", re: /(知识库|kb|风格库|语料|检索|抽卡|learn|ingest)/i },
-  { capability: "code_exec", re: /(运行|执行脚本|命令|shell|打包|构建|部署|code\.exec)/i },
+  { capability: "code_exec", re: /(code\.exec|python\b|py脚本|python脚本|写(?:一个|一段)?(?:python|py)?(?:脚本|代码)|执行(?:一段)?代码|运行(?:一段)?代码|跑脚本|python-docx|python-pptx|openpyxl|entryfile|requirements)/i },
+  { capability: "shell_exec", re: /(命令行|终端|shell|bash|zsh|ssh|\bnpm run\b|\bpnpm\b|\byarn\b|\bpytest\b|\bmake\b|编译|构建|打包|部署)/i },
   { capability: "delegate", re: /(委派|分派|指派|派给|delegate|sub[\s_-]?agent|agent\s*delegate)/i },
   { capability: "browser_open", re: /(打开.*网页|打开网站|浏览器|网站|navigate|open\s+.*(baidu|google|url))/i },
   { capability: "mcp_spreadsheet", re: /(excel|xlsx|表格|电子表格|spreadsheet|工作表)/i },
@@ -132,6 +133,7 @@ export function inferCapabilities(name: string, description: string, source: Too
   if (n.startsWith("web.fetch")) caps.add("web_fetch");
   if (n.startsWith("kb.")) caps.add("kb_search");
   if (n === "code.exec") caps.add("code_exec");
+  if (n === "shell.exec" || /^mcp\.[^.]*?(terminal|ssh)[^.]*\./i.test(n)) caps.add("shell_exec");
   if (n === "agent.delegate") caps.add("delegate");
 
   if (source === "mcp") {

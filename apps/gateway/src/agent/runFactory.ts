@@ -608,6 +608,7 @@ export function buildAgentProtocolPrompt(args: {
         `     Word/docx → Word MCP；Excel/xlsx → Excel MCP；浏览器自动化 → Playwright MCP。\n` +
         `     MCP 文档类工具的操作顺序：先 create/open → 再 add/insert/update → 最后 save/export。\n` +
         `     若报 "Document does not exist"，说明漏了 create/open 步骤，不要改用 doc.write 伪造。\n` +
+        `     code.exec 仅用于 Python fallback，不等于 shell/terminal；如果工具列表里没有 shell.exec / terminal / ssh 能力，不得把 code.exec 当成 bash、npm、pnpm、yarn 或部署终端来使用。\n` +
         `     只要 Playwright/browser MCP 工具出现在工具列表中，就表示当前已授权可用，直接使用即可。\n` +
         `   - 组合任务：根据需要组合多种工具完成复杂流程，不要跳过必要步骤直接臆造。\n` +
         `   - 修改/延续任务：先读取当前内容，再按用户要求修改；如已有检查结果，一并纳入参考。\n` +
@@ -824,11 +825,19 @@ export function shouldSuppressSearchDuringBrowserContinuation(args: { mainDoc?: 
   return looksLikeWorkflowContinuationPrompt(prompt);
 }
 
+export function looksLikeExplicitShellExecIntent(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  if (/(不要命令行|别用命令行|不要终端|别开终端|不用shell|不要shell|别用bash|不要bash)/i.test(t)) return false;
+  return /(命令行|终端|shell脚本|bash脚本|zsh脚本|\bbash\b|\bzsh\b|\bssh\b|\bnpm run\b|\bpnpm\b|\byarn\b|\bpytest\b|\bmake\b|编译|构建|打包|部署)/i.test(t);
+}
+
 export function looksLikeExplicitCodeExecIntent(text: string): boolean {
   const t = String(text ?? "").trim();
   if (!t) return false;
   if (/(不要写代码|别写代码|不用写代码|不要脚本|别用脚本|不要code\.exec|别用code\.exec)/i.test(t)) return false;
-  return /(code\.exec|写(?:一个|一段)?(?:python|node|js|javascript|ts|typescript|bash|shell|sql)?脚本|执行(?:一段)?代码|运行(?:一段)?代码|跑脚本|python\b|node\b|npm run|pnpm |yarn |pytest\b|ts-node\b|命令行|终端脚本|shell脚本|bash脚本|调试代码|修复代码|改代码|仓库|repo|pull request|编译|构建|打包|部署)/i.test(t);
+  if (looksLikeExplicitShellExecIntent(t)) return false;
+  return /(code\.exec|写(?:一个|一段)?(?:python|py)?(?:脚本|代码)|执行(?:一段)?代码|运行(?:一段)?代码|跑脚本|python\b|py脚本|python-docx|python-pptx|openpyxl|entryfile|requirements)/i.test(t);
 }
 
 export function shouldAllowCodeExecForRun(args: {
@@ -839,6 +848,7 @@ export function shouldAllowCodeExecForRun(args: {
   const routeId = String(args.routeId ?? "").trim().toLowerCase();
   if (!String(args.projectDir ?? "").trim()) return false;
   if (routeId === "web_radar") return false;
+  if (looksLikeExplicitShellExecIntent(args.userPrompt)) return false;
   return looksLikeExplicitCodeExecIntent(args.userPrompt);
 }
 

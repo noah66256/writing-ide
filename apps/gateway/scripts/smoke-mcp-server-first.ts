@@ -264,6 +264,20 @@ async function scenarioWordDeliveryFailFast() {
   ok("word delivery fail-fast scenario");
 }
 
+async function scenarioShellIntentDoesNotBackdoorCodeExec() {
+  const prepared = await prepare(
+    "请帮我 npm run build 并部署到生产环境",
+    {
+      ...makeSidecar(),
+      ideSummary: { projectDir: "/tmp/mock-project", activePath: "/tmp/mock-project/package.json", openPaths: 1 },
+    },
+  );
+  assert.equal(prepared.selectedAllowedToolNames.has("code.exec"), false, "shell-like scenario should not backdoor code.exec");
+  const systemPrompt = String(prepared.messages[0]?.content ?? "");
+  assert.equal(/code\.exec 仅用于 Python fallback/.test(systemPrompt), true, "system prompt should warn that code.exec is not shell");
+  ok("shell intent does not backdoor code.exec scenario");
+}
+
 async function scenarioExplicitCodeExec() {
   const prepared = await prepare(
     "写一个 Python 脚本扫描项目里的 Markdown 文件并输出统计结果",
@@ -277,6 +291,7 @@ async function scenarioExplicitCodeExec() {
 }
 
 async function main() {
+  await scenarioShellIntentDoesNotBackdoorCodeExec();
   await scenarioBrowserOpen();
   await scenarioWordDoc();
   await scenarioCompositeBrowserToWord();

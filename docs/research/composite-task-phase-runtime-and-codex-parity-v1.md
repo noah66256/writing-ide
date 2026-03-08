@@ -493,6 +493,51 @@ queuedFollowUps: [
   3. 当前 phase 属于 `code_exec_fallback` 或明确代码类任务；
   4. 没有更适合的 MCP 能力。
 
+当前实现要明确写死，避免团队后面再次把它理解成“通用终端”：
+
+- `code.exec` **当前只支持 Python runtime**，不是 `bash.exec` / `shell.exec`；
+- 它的强项是：
+  1. 在项目目录里跑一小段 Python；
+  2. 自动准备 venv；
+  3. 按需安装 `python-docx` / `python-pptx` / `openpyxl` 这类依赖；
+  4. 回收 `docx/xlsx/pptx/pdf/html/csv/图片` 等产物；
+- 它的弱项也要明确：
+  1. 不适合多步终端操作；
+  2. 不适合拿来替代 SSH / shell / browser / 专用 MCP；
+  3. 不适合承接“浏览器采集 → 结构化抽取 → 文档交付”这类复合主链路；
+  4. 一旦系统里已经有 Word / Excel / Browser / Search 这类 MCP，再让模型走 `code.exec`，通常是路由退化。
+
+所以它在我们系统里的真实职责应该被钉成一句话：
+
+> `code.exec` 是“Python 级二进制交付 fallback”，不是“万能命令执行层”。
+
+这点和早期引入它的背景也一致：
+
+- 它最初主要是为 `docx/pptx/xlsx` 等二进制文件交付兜底；
+- 不是为了成为主协议层，更不是为了替代 MCP。
+
+### 4.8 后续替代方向：通用命令执行交给 `shell.exec`，`code.exec` 继续收缩
+
+中长期建议不要把 `code.exec` 越做越大，否则会重新走回“模型看见一个能跑代码的工具，就拿它乱兜底”的老路。
+
+更合理的分层应该是：
+
+- **MCP**：真实世界读写与集成主航道（浏览器、搜索、Word、Excel、PDF、App Server）；
+- **`code.exec`**：仅保留为 Python 二进制交付 fallback；
+- **未来 `shell.exec` / terminal / ssh MCP**：承接真正的命令行任务。
+
+也就是说，后面如果要补“通用 shell 能力”，正确做法不是把 `code.exec` 扩成支持 `bash/zsh/node`，而是新增一条职责明确的高风险工具线：
+
+- `shell.exec`：显式执行命令、带更严格权限和审计；
+- 或 terminal/ssh MCP：把状态化终端能力放到专用 server；
+- Agent 侧继续默认 **MCP-first / shell-last**，只在确实需要命令行时再放开。
+
+这样做的好处是：
+
+- 边界清楚：文档交付 fallback 和通用命令执行不再混在一起；
+- 风险清楚：shell 是高风险工具，单独审计、单独门禁；
+- 路由清楚：模型不会因为“看到一个能跑代码的工具”就回退到脚本方案。
+
 ---
 
 ## 5. 结合当前项目，建议的落地顺序（P0 / P1）

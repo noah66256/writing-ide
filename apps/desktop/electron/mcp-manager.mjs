@@ -191,6 +191,23 @@ const MCP_TOOL_PROFILES = new Set([
   "pdf_read_minimal",
 ]);
 
+function defaultToolProfileForFamily(family) {
+  switch (family) {
+    case "browser":
+      return "browse_minimal";
+    case "search":
+      return "search_minimal";
+    case "word":
+      return "word_delivery_minimal";
+    case "spreadsheet":
+      return "spreadsheet_delivery_minimal";
+    case "pdf":
+      return "pdf_read_minimal";
+    default:
+      return "full";
+  }
+}
+
 function normalizeCsvToolList(value) {
   if (Array.isArray(value)) {
     return Array.from(new Set(value.map((item) => String(item ?? "").trim()).filter(Boolean)));
@@ -776,6 +793,7 @@ export class McpManager {
     }
     // 加载后注入内置 server（已存在的不覆盖）
     await this._ensureBuiltinServers();
+    if (this._normalizePersistedServerConfigs()) await this._saveConfig();
   }
 
   /**
@@ -916,6 +934,14 @@ export class McpManager {
                   return;
                 }
                 entry.tools = this._normalizeListedTools(tools);
+                if (this._reconcileConfigClassification(entry.config, entry.tools) && !entry.config.skillManaged) {
+                  void this._saveConfig().catch((saveError) => {
+                    console.warn("[McpManager] failed to persist corrected MCP classification", {
+                      serverId,
+                      error: String(saveError?.message ?? saveError),
+                    });
+                  });
+                }
                 if (entry.status === "connected") this._notify();
               },
             },
@@ -939,6 +965,9 @@ export class McpManager {
       entry.status = "connected";
       entry.tools = tools;
       entry.error = null;
+      if (this._reconcileConfigClassification(entry.config, entry.tools) && !entry.config.skillManaged) {
+        await this._saveConfig();
+      }
       this._notify();
     } catch (e) {
       entry.status = "error";
@@ -980,6 +1009,34 @@ export class McpManager {
     if (/(search|query|serper|tavily|bocha|fetch|crawler)/.test(haystack)) return "search";
     if (/(playwright|browser_|navigate|snapshot|click|press|fill|tab)/.test(haystack)) return "browser";
     return "custom";
+  }
+
+  _normalizePersistedServerConfigs() {
+    let changed = false;
+    for (const entry of this._servers.values()) {
+      if (!entry?.config || entry.config.skillManaged) continue;
+      if (this._reconcileConfigClassification(entry.config, entry.tools)) changed = true;
+    }
+    return changed;
+  }
+
+  _reconcileConfigClassification(config, tools) {
+    if (!config || typeof config !== "object") return false;
+    const inferredFamily = this._inferServerFamily(config, tools);
+    if (!inferredFamily || inferredFamily === "custom") return false;
+    let changed = false;
+    const hinted = normalizeServerFamily(config.familyHint);
+    if (hinted !== inferredFamily) {
+      config.familyHint = inferredFamily;
+      changed = true;
+    }
+    const explicit = normalizeToolProfile(config.toolProfile);
+    const expectedProfile = defaultToolProfileForFamily(inferredFamily);
+    if (explicit && explicit !== "full" && expectedProfile && explicit !== expectedProfile) {
+      config.toolProfile = expectedProfile;
+      changed = true;
+    }
+    return changed;
   }
 
   _resolveToolProfile(config, family) {
