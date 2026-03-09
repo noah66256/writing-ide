@@ -22,6 +22,7 @@ export type ProviderStreamArgs = {
   tools?: OpenAiCompatTool[];
   toolChoice?: OpenAiCompatToolChoice;
   parallelToolCalls?: boolean;
+  previousResponseId?: string | null;
   signal?: AbortSignal;
 };
 
@@ -88,6 +89,7 @@ export async function* streamChatCompletionViaProvider(args: ProviderStreamArgs)
     tools: args.tools,
     toolChoice: args.toolChoice,
     parallelToolCalls: args.parallelToolCalls,
+    previousResponseId: args.previousResponseId,
     signal: args.signal,
   });
 }
@@ -181,13 +183,16 @@ export function buildInjectedToolResultMessages(args: {
   toolResultText: string;
   /** 当使用 native function calling（非 XML 协议）时设为 true，续写提示不再催促 XML 输出 */
   preferNativeToolCall?: boolean;
+  /** OpenAI Responses native continuation 已生效时，不再注入“继续”提示，仅保留 tool_result 本体 */
+  nativeContinuationActive?: boolean;
 }): OpenAiChatMessage[] {
   const useText = args.toolResultFormat === "text";
   const out: OpenAiChatMessage[] = [
     { role: useText ? "user" : "system", content: useText ? args.toolResultText : args.toolResultXml },
   ];
-  // 兼容部分代理：当 tool_result 作为最后一条消息时，可能会出现"choices 为空不续写"。
-  // 这里额外补一条普通 user 消息，让模型明确"继续推进下一步"（XML/text 都加，避免空输出）。
+  if (args.nativeContinuationActive) {
+    return out;
+  }
   const continuation = args.preferNativeToolCall
     ? "继续。请基于以上 tool_result 推进任务。" +
       "只有在确有必要时再调用工具；若信息已足够，直接给出可交付文本。"
@@ -262,6 +267,7 @@ export async function completionOnceViaProvider(args: ProviderStreamArgs): Promi
       tools: args.tools,
       toolChoice: args.toolChoice,
       parallelToolCalls: args.parallelToolCalls,
+      previousResponseId: args.previousResponseId,
       signal: args.signal,
     });
   }

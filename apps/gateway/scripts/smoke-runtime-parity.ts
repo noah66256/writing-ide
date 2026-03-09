@@ -722,7 +722,8 @@ async function scenario17_providerParitySingleArtifactWriteOnce() {
     });
     const runtimeState = (runtime as any).runState as any;
     assert.equal(Array.isArray(runtimeState.sideEffectLedger) ? runtimeState.sideEffectLedger.length : 0, 1, `${provider.apiType} should record one side effect`);
-    assert.equal(runtimeState.deliveryLatchActivatedAtTurn, 0);
+    assert.equal(runtimeState.deliveryLatched, false, `${provider.apiType} should not latch on write alone`);
+    assert.equal(runtimeState.deliveryLatchActivatedAtTurn, null);
   }
   ok("scenario17.provider_parity.single_artifact_write_once");
 }

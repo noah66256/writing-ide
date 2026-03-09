@@ -327,11 +327,17 @@ export type StreamDeltaEvent =
       usage: { promptTokens: number; completionTokens: number; totalTokens?: number };
       raw?: any;
     }
-  | { type: "done" }
+  | { type: "done"; responseId?: string }
   | { type: "error"; error: string };
 
 export type ChatCompletionOnceResult =
-  | { ok: true; content: string; raw: any; usage?: { promptTokens: number; completionTokens: number; totalTokens?: number } }
+  | {
+      ok: true;
+      content: string;
+      raw: any;
+      usage?: { promptTokens: number; completionTokens: number; totalTokens?: number };
+      responseId?: string;
+    }
   | { ok: false; error: string; status?: number; rawText?: string };
 
 function kindOfContentLike(v: any): string {
@@ -452,6 +458,11 @@ function extractResponsesTextDelta(ev: any): string {
   }
   return "";
 }
+function extractResponsesResponseId(v: any): string | undefined {
+  const direct = String(v?.response?.id ?? v?.id ?? "").trim();
+  return direct || undefined;
+}
+
 
 // OpenAI-compatible：部分上游会把 content 返回为“content parts”（array/object），不是 string。
 // 若只认 string，会导致 deltaChars==0 → empty_output。
@@ -514,11 +525,15 @@ async function* streamResponses(args: {
   tools?: OpenAiCompatTool[];
   toolChoice?: OpenAiCompatToolChoice;
   parallelToolCalls?: boolean;
+  previousResponseId?: string | null;
 }): AsyncGenerator<StreamDeltaEvent> {
   const url = openAiCompatUrl(args.config.baseUrl, args.endpoint || "/responses");
+  const strictTools = isOfficialOpenAiBaseUrl(args.config.baseUrl);
+  const previousResponseId = strictTools ? String(args.previousResponseId ?? "").trim() : "";
   const bodyBase: Record<string, unknown> = {
     model: args.model,
     input: chatMessagesToResponsesInput(args.messages),
+    ...(previousResponseId ? { previous_response_id: previousResponseId } : {}),
     stream: true,
   };
   if (Number.isFinite(Number(args.maxTokens)) && Number(args.maxTokens) > 0) {
@@ -527,7 +542,6 @@ async function* streamResponses(args: {
   if (typeof args.temperature === "number" && Number.isFinite(args.temperature)) {
     bodyBase.temperature = args.temperature;
   }
-  const strictTools = isOfficialOpenAiBaseUrl(args.config.baseUrl);
   const openAiTools = toResponsesToolsPayload(args.tools, { strict: strictTools });
   const openAiToolChoice = toResponsesToolChoicePayload(args.toolChoice);
   const wantsNativeTools = Boolean(openAiTools?.length);
@@ -611,7 +625,7 @@ async function* streamResponses(args: {
     }
     const usage = coerceUsageLike(json?.usage ?? json?.response?.usage);
     if (usage) yield { type: "usage", usage, raw: json };
-    yield { type: "done" };
+    yield { type: "done", responseId: extractResponsesResponseId(json) };
     return;
   }
 
@@ -712,18 +726,19 @@ async function* streamResponses(args: {
       tools: args.tools,
       toolChoice: args.toolChoice,
       parallelToolCalls: args.parallelToolCalls,
+      previousResponseId: args.previousResponseId,
     });
     if (once.ok && once.content.trim().length > 0) {
       yield { type: "delta", delta: once.content };
       if (once.usage) yield { type: "usage", usage: once.usage, raw: once.raw };
-      yield { type: "done" };
+      yield { type: "done", ...(once.responseId ? { responseId: once.responseId } : {}) };
       return;
     }
     yield { type: "error", error: "UPSTREAM_EMPTY_CONTENT" };
     return;
   }
 
-  yield { type: "done" };
+  yield { type: "done", ...(extractResponsesResponseId(completedPayload) ? { responseId: extractResponsesResponseId(completedPayload) } : {}) };
 }
 
 export async function* streamChatCompletions(args: {
@@ -739,6 +754,7 @@ export async function* streamChatCompletions(args: {
   tools?: OpenAiCompatTool[];
   toolChoice?: OpenAiCompatToolChoice;
   parallelToolCalls?: boolean;
+  previousResponseId?: string | null;
 }): AsyncGenerator<StreamDeltaEvent> {
   if (isResponsesEndpoint(args.endpoint)) {
     yield* streamResponses(args);
@@ -1152,12 +1168,14 @@ export async function chatCompletionOnce(args: {
   tools?: OpenAiCompatTool[];
   toolChoice?: OpenAiCompatToolChoice;
   parallelToolCalls?: boolean;
+  previousResponseId?: string | null;
 }): Promise<ChatCompletionOnceResult> {
   const endpoint = args.endpoint || "/chat/completions";
   const isResponses = isResponsesEndpoint(endpoint);
   const url = openAiCompatUrl(args.config.baseUrl, endpoint);
 
   const strictTools = isOfficialOpenAiBaseUrl(args.config.baseUrl);
+  const previousResponseId = isResponses && strictTools ? String(args.previousResponseId ?? "").trim() : "";
   const openAiTools = isResponses ? toResponsesToolsPayload(args.tools, { strict: strictTools }) : toOpenAiToolsPayload(args.tools, { strict: strictTools });
   const openAiToolChoice = isResponses
     ? toResponsesToolChoicePayload(args.toolChoice)
@@ -1169,6 +1187,7 @@ export async function chatCompletionOnce(args: {
       ? {
           model: args.model,
           input: chatMessagesToResponsesInput(args.messages),
+          ...(previousResponseId ? { previous_response_id: previousResponseId } : {}),
           ...(typeof args.temperature === "number" && Number.isFinite(args.temperature)
             ? { temperature: args.temperature }
             : {}),
@@ -1254,10 +1273,16 @@ export async function chatCompletionOnce(args: {
     const xml = toolCallsToXml(toolCalls);
     if (xml) {
       const usage2 = coerceUsageLike(json?.usage ?? json?.response?.usage);
-      return usage2 ? { ok: true, content: xml, raw: json, usage: usage2 } : { ok: true, content: xml, raw: json };
+      const responseId = isResponses ? extractResponsesResponseId(json) : undefined;
+      return usage2
+        ? { ok: true, content: xml, raw: json, usage: usage2, ...(responseId ? { responseId } : {}) }
+        : { ok: true, content: xml, raw: json, ...(responseId ? { responseId } : {}) };
     }
     return { ok: false, error: "UPSTREAM_EMPTY_CONTENT", status: res.status, rawText: JSON.stringify(json) };
   }
   const usage = coerceUsageLike(json?.usage ?? json?.response?.usage);
-  return usage ? { ok: true, content, raw: json, usage } : { ok: true, content, raw: json };
+  const responseId = isResponses ? extractResponsesResponseId(json) : undefined;
+  return usage
+    ? { ok: true, content, raw: json, usage, ...(responseId ? { responseId } : {}) }
+    : { ok: true, content, raw: json, ...(responseId ? { responseId } : {}) };
 }

@@ -618,19 +618,6 @@ export class GatewayRuntime implements AgentRuntime {
     if (family && !this.runState.deliveredArtifactFamilies.includes(family)) {
       this.runState.deliveredArtifactFamilies.push(family);
     }
-    if (this._isDeliveryCandidateTool(toolName) && !this.runState.deliveryLatched) {
-      this.runState.deliveryLatched = true;
-      if (this.runState.deliveryLatchActivatedAtTurn == null) {
-        this.runState.deliveryLatchActivatedAtTurn = this.turn;
-      }
-      this.config.runCtx.writeEvent("run.notice", {
-        turn: this.turn,
-        kind: "info",
-        title: "DeliveryLatchActivated",
-        message: "本轮已生成交付类产物，后续相同逻辑目标将被拦截。",
-        detail: { logicalTarget, toolName, sideEffectLedgerSize: this.runState.sideEffectLedger.length },
-      });
-    }
     return record;
   }
 
@@ -655,6 +642,41 @@ export class GatewayRuntime implements AgentRuntime {
     }
     this.runState.toolLoopGuardReason = null;
   }
+  private _assistantHasVisibleText(message: AssistantMessage): boolean {
+    for (const part of message.content) {
+      if (part.type !== "text") continue;
+      const sanitized = sanitizeAssistantUserFacingText(part.text, {
+        dropPureJsonPayload: true,
+      });
+      if (sanitized.text && sanitized.text.trim()) return true;
+    }
+    return false;
+  }
+
+  private _activateDeliveryLatch(reason: "assistant_text" | "run_done", detail?: Record<string, unknown>): void {
+    if (this.runState.deliveryLatched) return;
+    const families = Array.isArray(this.runState.deliveredArtifactFamilies)
+      ? this.runState.deliveredArtifactFamilies.filter(Boolean)
+      : [];
+    if (families.length <= 0) return;
+    this.runState.deliveryLatched = true;
+    if (this.runState.deliveryLatchActivatedAtTurn == null) {
+      this.runState.deliveryLatchActivatedAtTurn = this.turn;
+    }
+    this.config.runCtx.writeEvent("run.notice", {
+      turn: this.turn,
+      kind: "info",
+      title: "DeliveryLatchActivated",
+      message: "本轮已完成交付收口，后续相同逻辑目标将被拦截。",
+      detail: {
+        reason,
+        deliveredArtifactFamilies: families,
+        sideEffectLedgerSize: this.runState.sideEffectLedger.length,
+        ...(detail ?? {}),
+      },
+    });
+  }
+
 
   private _enforceTurnLevelGuards(ac: AbortController): void {
     const executionContract = this._getExecutionContract();
@@ -1085,7 +1107,7 @@ export class GatewayRuntime implements AgentRuntime {
     const matchedSideEffect = this._isDeliveryCandidateTool(toolName)
       ? this._findMatchingSideEffect(toolName, toolArgs)
       : null;
-    if (matchedSideEffect) {
+    if (this.runState.deliveryLatched && matchedSideEffect) {
       this._recordToolLoopGuard("delivery_latch_blocked");
       this.config.runCtx.writeEvent("run.notice", {
         turn: this.turn,
@@ -1431,6 +1453,9 @@ export class GatewayRuntime implements AgentRuntime {
 
         if (isAssistantMsg(msg)) {
           this._pushAssistantToTranscript(msg);
+          if (msg.stopReason !== "error" && msg.stopReason !== "aborted" && this._assistantHasVisibleText(msg)) {
+            this._activateDeliveryLatch("assistant_text", { stopReason: msg.stopReason ?? null });
+          }
           // 上报 token usage
           this.config.runCtx.onTurnUsage?.(
             Math.max(0, Math.floor(Number(msg.usage?.input ?? 0))),
@@ -1532,6 +1557,7 @@ export class GatewayRuntime implements AgentRuntime {
 
         // run.done 终止语义：与旧 runner 保持一致
         if (rawToolName === "run.done") {
+          this._activateDeliveryLatch("run_done");
           this._setOutcome({
             status: "completed",
             reason: "run_done",

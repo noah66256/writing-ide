@@ -4,7 +4,8 @@
 > 背景：当前 Anthropic 路径相对稳定，但切到 GPT 后出现两个系统性问题：Todo/计划清单丢失、同一副作用工具重复执行；同时 Gemini transport 已有半套实现，但尚未完成正式接入与默认配置。
 
 **实现状态（2026-03-09）**
-- 已完成 `P0-P2` 的最小闭环实现：`pi runtime` 默认路径已具备 `Todo Gate`、`Side-effect Ledger`、`Delivery Latch`、provider capability snapshot、runtime parity smoke 与 run audit 摘要。
+- 已完成 `P0-P2` 的最小闭环实现：`pi runtime` 默认路径已具备 `Todo Gate`、`Side-effect Ledger`、provider capability snapshot、runtime parity smoke 与 run audit 摘要。
+- 本轮已对齐文档尾项：`P0.3 Delivery Latch` 改为“成功副作用 + assistant 最终交付文本 / run.done”后再激活；`P1.2 OpenAI Responses native continuation` 改为优先走 `previous_response_id`，continuation prompt 仅做 fallback。
 - 已覆盖 provider 维度：`anthropic-messages`、`openai-responses`、`openai-chat-completions`、`gemini-generateContent`。
 - 仍保留后续可深化项：更细粒度 side-effect 语义分类、完整 UI debug 面板展示。
 

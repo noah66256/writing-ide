@@ -797,6 +797,10 @@ export class AgentRunner {
   private readonly supportsNativeToolUse: boolean;
   /** 端点是否支持 OpenAI function calling（tools 参数） */
   private readonly supportsNativeFunctionCalling: boolean;
+  /** OpenAI Responses native continuation：上一轮 response_id */
+  private responsesPreviousResponseId: string | null = null;
+  /** OpenAI Responses native continuation：已经提交给上游的消息计数 */
+  private responsesHistoryCount = 0;
   /** 是否以 XML 工具协议为主协议（Gemini 或无原生工具支持的端点） */
   private readonly preferXmlProtocol: boolean;
   /** 端点是否真正尊重 tool_choice: any/tool（Anthropic 支持，GPT 代理多数会剥离） */
@@ -872,6 +876,61 @@ export class AgentRunner {
   // ---------------------------------------------------------------------------
   private _pushHistory(entry: CanonicalHistoryEntry): void {
     this.history.push(entry);
+    if (this._assistantEntryHasVisibleText(entry)) {
+      this._activateDeliveryLatch("assistant_text");
+    }
+  }
+  private _assistantEntryHasVisibleText(entry: CanonicalHistoryEntry): boolean {
+    if (entry.role !== "assistant") return false;
+    for (const block of entry.blocks) {
+      if (block.type !== "text") continue;
+      const sanitized = sanitizeAssistantUserFacingText(block.text, {
+        dropPureJsonPayload: true,
+      });
+      if (sanitized.text && sanitized.text.trim()) return true;
+    }
+    return false;
+  }
+
+  private _activateDeliveryLatch(reason: "assistant_text" | "run_done"): void {
+    if (this.runState.deliveryLatched) return;
+    const families = Array.isArray(this.runState.deliveredArtifactFamilies)
+      ? this.runState.deliveredArtifactFamilies.filter(Boolean)
+      : [];
+    if (families.length <= 0) return;
+    this.runState.deliveryLatched = true;
+    if (this.runState.deliveryLatchActivatedAtTurn == null) {
+      this.runState.deliveryLatchActivatedAtTurn = this.turn;
+    }
+    this.ctx.writeEvent("run.notice", {
+      turn: this.turn,
+      kind: "info",
+      title: "DeliveryLatchActivated",
+      message: "本轮已完成交付收口，后续相同逻辑目标将被拦截。",
+      detail: {
+        reason,
+        deliveredArtifactFamilies: families,
+        sideEffectLedgerSize: Array.isArray(this.runState.sideEffectLedger) ? this.runState.sideEffectLedger.length : 0,
+      },
+    });
+  }
+
+  private _supportsResponsesNativeContinuation(): boolean {
+    const apiType = String(this.ctx.apiType ?? "").trim().toLowerCase();
+    const endpoint = String(this.ctx.endpoint ?? "").trim().toLowerCase();
+    const baseUrl = String(this.ctx.baseUrl ?? "").trim().toLowerCase();
+    const isResponses = apiType === "openai-responses" || endpoint.endsWith("/responses");
+    const isOfficial = /(^|\.)api\.openai\.com(?:\/|$)/.test(baseUrl) || baseUrl.includes("openai.com");
+    return isResponses && isOfficial;
+  }
+
+  private _extractResponsesResponseId(events: Array<any>): string | null {
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i];
+      const responseId = String(event?.responseId ?? event?.raw?.response?.id ?? event?.raw?.id ?? "").trim();
+      if (responseId) return responseId;
+    }
+    return null;
   }
 
   /**
@@ -983,6 +1042,7 @@ export class AgentRunner {
                 toolResultXml: xmlParts.join("\n"),
                 toolResultText: textParts.join("\n"),
                 preferNativeToolCall: this.supportsNativeFunctionCalling,
+                nativeContinuationActive: this._supportsResponsesNativeContinuation() && Boolean(this.responsesPreviousResponseId),
               }),
             );
           }
@@ -1166,18 +1226,25 @@ export class AgentRunner {
         let promptTokens = 0;
         let completionTokens = 0;
 
+        const providerMessages = [...systemMessages, ...this._toProviderMessages()];
+        const useResponsesNativeContinuation = this._supportsResponsesNativeContinuation() && Boolean(this.responsesPreviousResponseId);
+        const incrementalStart = Math.max(0, Math.min(this.responsesHistoryCount, providerMessages.length));
+        const turnMessages = useResponsesNativeContinuation
+          ? providerMessages.slice(incrementalStart)
+          : providerMessages;
         const stream = providerAdapter.streamTurn({
           baseUrl: String(this.ctx.baseUrl ?? ""),
           endpoint,
           apiKey: this.ctx.apiKey,
           model: this.ctx.modelId,
-          messages: [...systemMessages, ...this._toProviderMessages()],
+          messages: turnMessages.length > 0 ? turnMessages : providerMessages.slice(-1),
           temperature: undefined,
           maxTokens: undefined,
           includeUsage: true,
           tools: hasNativeTools ? nativeTools : undefined,
           toolChoice: args.turnToolChoice,
           parallelToolCalls: false,
+          previousResponseId: useResponsesNativeContinuation ? this.responsesPreviousResponseId : undefined,
           signal: args.signal,
         });
 
@@ -1185,6 +1252,12 @@ export class AgentRunner {
         for await (const ev of stream) {
           if (args.signal.aborted) break;
           rawEvents.push(ev);
+        }
+
+        const latestResponsesResponseId = this._extractResponsesResponseId(rawEvents);
+        if (latestResponsesResponseId) {
+          this.responsesPreviousResponseId = latestResponsesResponseId;
+          this.responsesHistoryCount = providerMessages.length;
         }
 
         const canonicalEvents = providerAdapter.toCanonicalEvents(rawEvents);
@@ -1423,10 +1496,6 @@ export class AgentRunner {
       : [];
     if (!families.includes(family)) families.push(family);
     this.runState.deliveredArtifactFamilies = families;
-    this.runState.deliveryLatched = families.length > 0;
-    if (this.runState.deliveryLatchActivatedAtTurn == null) {
-      this.runState.deliveryLatchActivatedAtTurn = this.turn;
-    }
     const outputObj = result.output && typeof result.output === "object"
       ? (result.output as Record<string, unknown>)
       : {};
@@ -1444,6 +1513,7 @@ export class AgentRunner {
   }
 
   private _isDeliveryLatchedFor(toolUse: ContentBlockToolUse): boolean {
+    if (!this.runState.deliveryLatched) return false;
     if (!this._isDeliveryCandidateTool(toolUse.name)) return false;
     const family = this._getArtifactFamily(toolUse);
     if (!family) return false;
@@ -2105,6 +2175,7 @@ export class AgentRunner {
       return false;
     }
     if (hasRunDone) {
+      this._activateDeliveryLatch("run_done");
       this.turnEngine.record({ type: "model_done", finishReason: "run_done" });
       this._setOutcome({ status: "completed", reason: "run_done", reasonCodes: ["run_done"] });
       return false;
