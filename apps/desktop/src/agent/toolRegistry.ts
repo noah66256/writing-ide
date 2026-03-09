@@ -1835,7 +1835,7 @@ const tools: ToolDefinition[] = [
       { name: "text", required: false, desc: "要检查的候选稿文本（text/path 二选一必填）" },
       { name: "path", required: false, desc: "要检查的文件路径（text/path 二选一必填；会优先读取提案态内容）" },
       { name: "libraryIds", required: false, desc: "可选：风格库 ID 数组；不传则默认使用右侧已绑定的风格库（purpose=style）" },
-      { name: "model", required: false, desc: "可选：用于 linter 的模型（默认用服务端 LLM_LINTER_MODEL/LLM_CARD_MODEL）" },
+      { name: "model", required: false, desc: "可选：用于 linter 的模型（默认继承当前会话所选模型）" },
       { name: "maxIssues", required: false, desc: "可选：最多返回多少条“不像点”（默认 10）" },
     ],
     riskLevel: "low",
@@ -1900,7 +1900,11 @@ const tools: ToolDefinition[] = [
       })();
       const copyRisk = computeCopyRiskObserve({ draftText, styleSamples, selectionText, extraSources });
 
-      const model = typeof args.model === "string" ? String(args.model).trim() : "";
+      const runModelState = useRunStore.getState();
+      const inheritedModel = runModelState.mode === "chat"
+        ? String(runModelState.chatModel || runModelState.model || runModelState.agentModel || "").trim()
+        : String(runModelState.agentModel || runModelState.model || runModelState.chatModel || "").trim();
+      const model = (typeof args.model === "string" ? String(args.model).trim() : "") || inheritedModel;
       const maxIssues = typeof args.maxIssues === "number" ? Math.max(3, Math.min(24, Math.floor(args.maxIssues))) : 10;
 
       // P1：把“本轮要求执行的维度（MUST/SHOULD）”随 lint.style 一起带给后端 linter，

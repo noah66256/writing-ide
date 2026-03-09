@@ -13,7 +13,7 @@ import { Mic, SendHorizontal, Square, Paperclip, Image, AtSign, X, FolderOpen, C
 import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/state/projectStore";
 import { useRunStore, type Mode } from "@/state/runStore";
-import { useModelStore } from "@/state/modelStore";
+import { useModelStore, type AvailableModel } from "@/state/modelStore";
 import { buildCurrentSnapshot, useConversationStore } from "@/state/conversationStore";
 import { useWorkspaceStore } from "@/state/workspaceStore";
 import { MentionPopover, type MentionItem } from "./MentionPopover";
@@ -63,6 +63,18 @@ const MODE_OPTIONS: { value: Mode; label: string }[] = [
   { value: "chat", label: "探索" },
   { value: "agent", label: "创作" },
 ];
+
+function modelNoteForMode(model: AvailableModel | null, mode: Mode): string {
+  if (!model) return "";
+  if (mode === "chat") return "";
+  return model.agentSupported === false ? String(model.availabilityNote || "只支持探索模式") : "";
+}
+
+function modelSupportedInMode(model: AvailableModel | null, mode: Mode): boolean {
+  if (!model) return true;
+  if (mode === "chat") return model.chatSupported !== false;
+  return model.agentSupported !== false;
+}
 
 function isMentionChip(node: Node | null): node is HTMLSpanElement {
   return !!node && node instanceof HTMLSpanElement && node.dataset.mentionChip === "true";
@@ -421,6 +433,8 @@ export function InputBar({
   const setModel = useRunStore((s) => s.setModel);
   const activity = useRunStore((s) => s.activity);
   const availableModels = useModelStore((s) => s.availableModels);
+  const chatDefaultModelId = useModelStore((s) => s.chatDefaultModelId);
+  const agentDefaultModelId = useModelStore((s) => s.agentDefaultModelId);
 
   const rootDir = useProjectStore((s) => s.rootDir);
   const projectName = useMemo(() => {
@@ -555,6 +569,7 @@ export function InputBar({
     }),
     [currentModel],
   );
+  const currentModelNote = useMemo(() => modelNoteForMode(currentModel, mode), [currentModel, mode]);
 
   const buttonMode: "mic" | "send" | "stop" = useMemo(
     () => (hasContent ? "send" : isRunning ? "stop" : "mic"),
@@ -829,6 +844,17 @@ export function InputBar({
     }
   }, [setModel]);
 
+  useEffect(() => {
+    const supported = modelSupportedInMode(currentModel, mode);
+    if (supported) return;
+    const fallbackId =
+      (mode === "chat" ? chatDefaultModelId : agentDefaultModelId) ||
+      availableModels.find((item) => modelSupportedInMode(item, mode))?.id ||
+      "";
+    if (!fallbackId || fallbackId === model) return;
+    setModel(fallbackId);
+  }, [agentDefaultModelId, availableModels, chatDefaultModelId, currentModel, mode, model, setModel]);
+
   const removeFile = useCallback((idx: number) => {
     setDroppedFiles((prev) => prev.filter((_, i) => i !== idx));
   }, []);
@@ -1006,13 +1032,19 @@ export function InputBar({
               type="button"
               onClick={() => setModelPickerOpen(true)}
               className={cn(
-                "ml-1 inline-flex max-w-[220px] items-center gap-2 rounded-md border border-border bg-surface px-2.5 py-1.5",
+                "ml-1 inline-flex max-w-[280px] items-center gap-2 rounded-md border border-border bg-surface px-2.5 py-1.5",
                 "text-[12px] text-text-muted transition-colors duration-fast hover:bg-surface-alt hover:text-text",
+                currentModelNote ? "border-amber-300/70 bg-amber-50/70 text-amber-800 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-200" : undefined,
               )}
-              title={currentModel ? `当前模型：${currentModel.label}` : "选择模型"}
+              title={currentModel ? `当前模型：${currentModel.label}${currentModelNote ? ` · ${currentModelNote}` : ""}` : "选择模型"}
             >
               <ProviderLogo brand={currentProviderBrand} size={18} />
               <span className="truncate">{currentModel?.label ?? "选择模型"}</span>
+              {currentModelNote ? (
+                <span className="shrink-0 rounded-full border border-amber-300/70 bg-white/80 px-1.5 py-0.5 text-[10px] leading-none text-amber-700 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-200">
+                  {currentModelNote}
+                </span>
+              ) : null}
               <ChevronsUpDown size={13} className="shrink-0 text-text-faint" />
             </button>
           </div>
@@ -1055,6 +1087,7 @@ export function InputBar({
           title="选择本会话模型"
           items={availableModels}
           value={model}
+          mode={mode === "chat" ? "chat" : "agent"}
           onChange={handleModelChange}
           onClose={() => setModelPickerOpen(false)}
         />

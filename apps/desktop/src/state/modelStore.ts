@@ -1,12 +1,20 @@
 import { create } from "zustand";
 import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
 
+const EXPLORE_ONLY_MODEL_IDS = new Set([
+  "gemini-3.1-pro-preview",
+  "gemini-3.1-flash-lite-preview",
+]);
+
 export type AvailableModel = {
   id: string;
   label: string;
   providerId?: string | null;
   providerName?: string | null;
   endpoint?: string | null;
+  chatSupported?: boolean;
+  agentSupported?: boolean;
+  availabilityNote?: string | null;
 };
 
 export type ModelSyncPayload = {
@@ -84,6 +92,8 @@ function parseSelector(data: SelectorDto | null): ModelSyncPayload | null {
   const agentIds = uniqIds(data.stages?.agent?.modelIds ?? []);
   const chatDefaultModelId = String(data.stages?.chat?.defaultModelId ?? "").trim() || chatIds[0] || "";
   const agentDefaultModelId = String(data.stages?.agent?.defaultModelId ?? "").trim() || agentIds[0] || "";
+  const chatIdSet = new Set(chatIds);
+  const agentIdSet = new Set(agentIds);
 
   const providerNameById = new Map<string, string>();
   for (const item of data.providers ?? []) {
@@ -98,17 +108,29 @@ function parseSelector(data: SelectorDto | null): ModelSyncPayload | null {
     if (!id) continue;
     const providerId = item?.providerId ? String(item.providerId).trim() : null;
     const providerName = item?.providerName ? String(item.providerName).trim() : (providerId ? providerNameById.get(providerId) ?? null : null);
+    const exploreOnly = EXPLORE_ONLY_MODEL_IDS.has(id);
+    const chatSupported = chatIdSet.size > 0 ? chatIdSet.has(id) : true;
+    const agentSupported = exploreOnly ? false : (agentIdSet.size > 0 ? agentIdSet.has(id) : true);
     modelMap.set(id, {
       id,
       label: String(item?.model ?? "").trim() || id,
       providerId,
       providerName,
       endpoint: item?.endpoint ? String(item.endpoint).trim() : null,
+      chatSupported,
+      agentSupported,
+      availabilityNote: exploreOnly ? "只支持探索模式" : null,
     });
   }
 
   const allIds = uniqIds([...chatIds, ...agentIds, chatDefaultModelId, agentDefaultModelId]);
-  const availableModels = allIds.map((id) => modelMap.get(id) ?? { id, label: id });
+  const availableModels = allIds.map((id) => modelMap.get(id) ?? {
+    id,
+    label: id,
+    chatSupported: chatIdSet.size > 0 ? chatIdSet.has(id) : true,
+    agentSupported: EXPLORE_ONLY_MODEL_IDS.has(id) ? false : (agentIdSet.size > 0 ? agentIdSet.has(id) : true),
+    availabilityNote: EXPLORE_ONLY_MODEL_IDS.has(id) ? "只支持探索模式" : null,
+  });
 
   return { availableModels, chatModelIds: chatIds, agentModelIds: agentIds, chatDefaultModelId, agentDefaultModelId };
 }

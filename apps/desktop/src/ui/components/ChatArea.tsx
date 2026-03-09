@@ -203,6 +203,17 @@ function formatTodoNote(note?: string): string {
   return normalizeToolErrorText(raw);
 }
 
+async function copyPlainText(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return;
+  } catch {
+    const api = window.desktop?.clipboard;
+    if (!api?.writeText) throw new Error("COPY_UNAVAILABLE");
+    await api.writeText(text);
+  }
+}
+
 export function ChatArea() {
   const steps = useRunStore((s) => s.steps);
   const isRunning = useRunStore((s) => s.isRunning);
@@ -737,8 +748,8 @@ function AssistantMessage({
           <div className="mt-3 flex items-center gap-1 opacity-0 transition-opacity duration-fast hover:opacity-100">
             <button
               className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-faint transition-colors duration-fast hover:bg-surface-alt hover:text-text-muted"
-              onClick={() => navigator.clipboard.writeText(step.text)}
-              title="复制"
+              onClick={() => { void copyPlainText(step.text); }}
+              title="复制文本"
             >
               <Copy size={12} />
               复制

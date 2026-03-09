@@ -7,6 +7,9 @@ export type ModelPickerItem = {
   label: string;
   providerName?: string | null;
   providerId?: string | null;
+  chatSupported?: boolean;
+  agentSupported?: boolean;
+  availabilityNote?: string | null;
 };
 
 function getBrand(item: ModelPickerItem) {
@@ -22,15 +25,20 @@ function groupName(m: ModelPickerItem): string {
   return getBrand(m).label;
 }
 
+function isSelectable(item: ModelPickerItem, mode: "chat" | "agent") {
+  return mode === "chat" ? item.chatSupported !== false : item.agentSupported !== false;
+}
+
 export function ModelPickerModal(props: {
   open: boolean;
   title?: string;
   items: ModelPickerItem[];
   value: string;
+  mode: "chat" | "agent";
   onChange: (id: string) => void;
   onClose: () => void;
 }) {
-  const { open, items, value } = props;
+  const { open, items, value, mode } = props;
   const [q, setQ] = useState("");
   const inputRef = useRef<HTMLInputElement | null>(null);
 
@@ -58,7 +66,8 @@ export function ModelPickerModal(props: {
       const b = String(m.providerName || "").toLowerCase();
       const c = String(m.providerId || "").toLowerCase();
       const d = getBrand(m).label.toLowerCase();
-      return a.includes(qq) || b.includes(qq) || c.includes(qq) || d.includes(qq);
+      const note = String(m.availabilityNote || "").toLowerCase();
+      return a.includes(qq) || b.includes(qq) || c.includes(qq) || d.includes(qq) || note.includes(qq);
     });
   }, [items, q]);
 
@@ -111,26 +120,52 @@ export function ModelPickerModal(props: {
                   {g.items.map((m) => {
                     const active = m.id === value;
                     const brand = getBrand(m);
+                    const selectable = isSelectable(m, mode);
+                    const note = !selectable ? String(m.availabilityNote || "当前模式不可用") : String(m.availabilityNote || "").trim();
                     return (
                       <button
                         key={m.id}
                         type="button"
+                        disabled={!selectable}
                         className="refItem"
                         style={
                           active
-                            ? { borderColor: "rgba(37, 99, 235, 0.6)", boxShadow: "0 0 0 2px rgba(37, 99, 235, 0.10)" }
-                            : undefined
+                            ? { borderColor: "rgba(37, 99, 235, 0.6)", boxShadow: "0 0 0 2px rgba(37, 99, 235, 0.10)", opacity: selectable ? 1 : 0.72 }
+                            : selectable
+                              ? undefined
+                              : { opacity: 0.62, cursor: "not-allowed" }
                         }
                         onClick={() => {
+                          if (!selectable) return;
                           props.onChange(m.id);
                           props.onClose();
                         }}
-                        title={m.label}
+                        title={note ? `${m.label} · ${note}` : m.label}
                       >
                         <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, width: "100%" }}>
                           <ProviderLogo brand={brand} size={22} />
                           <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0, flex: 1 }}>
-                            <div style={{ fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>{m.label}</div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                              <div style={{ fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+                                {m.label}
+                              </div>
+                              {note ? (
+                                <span
+                                  style={{
+                                    flexShrink: 0,
+                                    borderRadius: 999,
+                                    padding: "2px 6px",
+                                    fontSize: 11,
+                                    lineHeight: 1.1,
+                                    color: selectable ? "var(--text-faint)" : "#b45309",
+                                    background: selectable ? "var(--surface-alt)" : "rgba(245, 158, 11, 0.14)",
+                                    border: selectable ? "1px solid var(--border)" : "1px solid rgba(245, 158, 11, 0.25)",
+                                  }}
+                                >
+                                  {note}
+                                </span>
+                              ) : null}
+                            </div>
                             <div style={{ fontSize: 12, color: "var(--muted)", display: "flex", alignItems: "center", gap: 6 }}>
                               <span>{brand.label}</span>
                               <span>·</span>

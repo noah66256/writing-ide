@@ -530,6 +530,25 @@ function isKbTextLlmEndpoint(endpoint: string) {
   return /chat\/completions/i.test(ep);
 }
 
+async function resolveExplicitKbModelRuntime(modelId?: string) {
+  const id = String(modelId ?? "").trim();
+  if (!id) return null;
+  try {
+    const m = await aiConfig.resolveModel(id);
+    const endpoint = String(m.endpoint || "").trim();
+    if (!endpoint || !isKbTextLlmEndpoint(endpoint)) return null;
+    return {
+      modelId: m.modelId,
+      model: m.model,
+      baseUrl: m.baseURL,
+      endpoint,
+      apiKey: m.apiKey,
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function getPlaybookEnv(db?: Db) {
   try {
     const r = await aiConfig.resolveStage("rag.ingest.build_library_playbook");
@@ -3883,16 +3902,17 @@ fastify.post(
   });
   const body = bodySchema.parse((request as any).body);
 
-  const cardEnv = await getCardEnv();
-  const cardBaseUrl = cardEnv.baseUrl;
-  const cardEndpoint = (cardEnv as any).endpoint || "/v1/chat/completions";
-  const cardApiKey = cardEnv.apiKey;
-  const cardModelDefault = cardEnv.defaultModel;
+  const explicitRuntime = await resolveExplicitKbModelRuntime(body.model);
+  const cardEnv = explicitRuntime ? null : await getCardEnv();
+  const cardBaseUrl = explicitRuntime?.baseUrl ?? cardEnv?.baseUrl ?? "";
+  const cardEndpoint = explicitRuntime?.endpoint ?? ((cardEnv as any)?.endpoint || "/v1/chat/completions");
+  const cardApiKey = explicitRuntime?.apiKey ?? cardEnv?.apiKey ?? "";
+  const cardModelDefault = explicitRuntime?.model ?? cardEnv?.defaultModel ?? "";
 
-  if (!cardEnv.ok) {
+  if (!explicitRuntime && !cardEnv?.ok) {
     return reply.code(500).send({
       error: "LLM_NOT_CONFIGURED",
-      hint: "请配置 LLM_BASE_URL/LLM_MODEL/LLM_API_KEY；若抽卡需不同 key/model，请配置 LLM_CARD_MODEL/LLM_CARD_API_KEY（可选 LLM_CARD_BASE_URL）。"
+      hint: "请先在顶部选择一个可用模型；若未显式传模型，再回退到 LLM_BASE_URL/LLM_MODEL/LLM_API_KEY 或独立抽卡配置。"
     });
   }
 
@@ -3904,24 +3924,10 @@ fastify.post(
     // ignore
   }
 
-  let model = body.model ?? cardModelDefault;
-  let baseUrl = cardBaseUrl;
-  let endpoint = cardEndpoint;
-  let apiKey = cardApiKey;
-  if (body.model) {
-    try {
-      const m = await aiConfig.resolveModel(body.model);
-      const ep = String(m.endpoint || "").trim();
-      if (ep && isKbTextLlmEndpoint(ep)) {
-        model = m.model;
-        baseUrl = m.baseURL;
-        apiKey = m.apiKey || apiKey;
-        endpoint = ep;
-      }
-    } catch {
-      // ignore
-    }
-  }
+  let model = explicitRuntime?.model ?? body.model ?? cardModelDefault;
+  let baseUrl = explicitRuntime?.baseUrl ?? cardBaseUrl;
+  let endpoint = explicitRuntime?.endpoint ?? cardEndpoint;
+  let apiKey = explicitRuntime?.apiKey || cardApiKey;
   const maxCards = body.maxCards ?? 18;
   const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 1);
   const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
@@ -4276,16 +4282,17 @@ fastify.post(
   });
   const body = bodySchema.parse((request as any).body);
 
-  const playbookEnv = await getPlaybookEnv();
-  const playbookBaseUrl = playbookEnv.baseUrl;
-  const playbookEndpoint = (playbookEnv as any).endpoint || "/v1/chat/completions";
-  const playbookApiKey = playbookEnv.apiKey;
-  const playbookModelDefault = playbookEnv.defaultModel;
+  const explicitRuntime = await resolveExplicitKbModelRuntime(body.model);
+  const playbookEnv = explicitRuntime ? null : await getPlaybookEnv();
+  const playbookBaseUrl = explicitRuntime?.baseUrl ?? playbookEnv?.baseUrl ?? "";
+  const playbookEndpoint = explicitRuntime?.endpoint ?? ((playbookEnv as any)?.endpoint || "/v1/chat/completions");
+  const playbookApiKey = explicitRuntime?.apiKey ?? playbookEnv?.apiKey ?? "";
+  const playbookModelDefault = explicitRuntime?.model ?? playbookEnv?.defaultModel ?? "";
 
-  if (!playbookEnv.ok) {
+  if (!explicitRuntime && !playbookEnv?.ok) {
     return reply.code(500).send({
       error: "LLM_NOT_CONFIGURED",
-      hint: "请配置 LLM_BASE_URL/LLM_MODEL/LLM_API_KEY；若抽卡需不同 key/model，请配置 LLM_CARD_MODEL/LLM_CARD_API_KEY（可选 LLM_CARD_BASE_URL）。"
+      hint: "请先在顶部选择一个可用模型；若未显式传模型，再回退到 LLM_BASE_URL/LLM_MODEL/LLM_API_KEY 或独立抽卡配置。"
     });
   }
 
@@ -4297,24 +4304,10 @@ fastify.post(
     // ignore
   }
 
-  let model = body.model ?? playbookModelDefault;
-  let baseUrl = playbookBaseUrl;
-  let endpoint = playbookEndpoint;
-  let apiKey = playbookApiKey;
-  if (body.model) {
-    try {
-      const m = await aiConfig.resolveModel(body.model);
-      const ep = String(m.endpoint || "").trim();
-      if (ep && isKbTextLlmEndpoint(ep)) {
-        model = m.model;
-        baseUrl = m.baseURL;
-        apiKey = m.apiKey || apiKey;
-        endpoint = ep;
-      }
-    } catch {
-      // ignore
-    }
-  }
+  let model = explicitRuntime?.model ?? body.model ?? playbookModelDefault;
+  let baseUrl = explicitRuntime?.baseUrl ?? playbookBaseUrl;
+  let endpoint = explicitRuntime?.endpoint ?? playbookEndpoint;
+  let apiKey = explicitRuntime?.apiKey || playbookApiKey;
   const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 3);
   const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
   // 说明：前端/网络层常见“连接空闲超时”会在 ~60-120s 把连接掐断，导致 Desktop 看到 Failed to fetch。
@@ -5607,28 +5600,46 @@ fastify.post(
   });
   const body = bodySchema.parse((request as any).body);
 
-  // 运行时：优先使用主 Agent 透传的 LLM 配置（与主 agent 共用模型，避免独立端点挂了 lint 不可用）
-  // 若无透传，则回退到 stage=lint.style 绑定的模型
+  // 运行时优先级：主 Agent 透传 llmOverride > 显式 body.model > stage=lint.style。
+  // 这样切换主模型后，lint.style 不再依赖单独配置才能可用。
   const hasLlmOverride = !!(body.llmOverride && body.llmOverride.baseUrl && body.llmOverride.apiKey && body.llmOverride.model);
+  const explicitRuntime = hasLlmOverride ? null : await resolveExplicitKbModelRuntime(body.model);
   let st: Awaited<ReturnType<typeof aiConfig.resolveStage>> | null = null;
-  try {
-    st = await aiConfig.resolveStage("lint.style");
-  } catch (e) {
-    // resolveStage 可能因 API Key 解密失败等原因抛异常。
-    // 若有 llmOverride 则无需 stage 配置，继续执行；否则上抛。
-    if (!hasLlmOverride) throw e;
+  if (!hasLlmOverride && !explicitRuntime) {
+    try {
+      st = await aiConfig.resolveStage("lint.style");
+    } catch (e) {
+      throw e;
+    }
   }
-  let model = hasLlmOverride ? body.llmOverride!.model : st!.model;
-  let baseUrl = hasLlmOverride ? body.llmOverride!.baseUrl : st!.baseURL;
-  let endpoint = hasLlmOverride ? (body.llmOverride!.endpoint || "/v1/chat/completions") : (st!.endpoint || "/v1/chat/completions");
-  let apiKey = hasLlmOverride ? body.llmOverride!.apiKey : st!.apiKey;
+  let model = hasLlmOverride
+    ? body.llmOverride!.model
+    : explicitRuntime?.model ?? st?.model ?? "";
+  let baseUrl = hasLlmOverride
+    ? body.llmOverride!.baseUrl
+    : explicitRuntime?.baseUrl ?? st?.baseURL ?? "";
+  let endpoint = hasLlmOverride
+    ? (body.llmOverride!.endpoint || "/v1/chat/completions")
+    : explicitRuntime?.endpoint ?? (st?.endpoint || "/v1/chat/completions");
+  let apiKey = hasLlmOverride
+    ? body.llmOverride!.apiKey
+    : explicitRuntime?.apiKey ?? st?.apiKey ?? "";
   const stageMaxTokens = st?.maxTokens ?? null;
   const temperature = st?.temperature ?? 0.2;
 
-  // 备用模型：使用透传时不走备用模型池（主 agent 模型已确定）
+  if (!baseUrl || !apiKey || !model) {
+    return reply.code(500).send({
+      error: "LLM_NOT_CONFIGURED",
+      hint: "请先在顶部选择一个可用模型；若未显式传模型，再回退到 lint.style stage 配置。",
+    });
+  }
+
+  // 备用模型：使用透传/显式模型时不走备用模型池（主模型已确定）
   const candidateModelIds = hasLlmOverride
     ? [body.llmOverride!.model]
-    : await (async () => {
+    : explicitRuntime
+      ? [String(body.model ?? explicitRuntime.modelId ?? explicitRuntime.model).trim()].filter(Boolean)
+      : await (async () => {
     try {
       const stages = await aiConfig.listStages();
       const s = Array.isArray(stages) ? stages.find((x: any) => String(x?.stage ?? "") === "lint.style") : null;
