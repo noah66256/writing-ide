@@ -30,7 +30,7 @@ if [[ -z "${ROOT}" ]]; then
 fi
 cd "${ROOT}"
 
-HOST="${DEPLOY_SSH_HOST:-writing}"
+HOST="${DEPLOY_SSH_HOST:-root@120.26.6.147}"
 BRANCH="${DEPLOY_BRANCH:-master}"
 DIR="${DEPLOY_DIR:-/www/wwwroot/writing-ide}"
 NODE_BIN="${DEPLOY_NODE_BIN:-/www/server/nvm/versions/node/v22.21.1/bin}"
@@ -39,6 +39,13 @@ PORT="${DEPLOY_PORT:-8000}"
 DEPLOY_PUSH="${DEPLOY_PUSH:-1}"
 ALLOW_DIRTY="${DEPLOY_ALLOW_DIRTY:-0}"
 ADMIN_WEB="${DEPLOY_ADMIN_WEB:-1}"
+SSH_OPTS=(
+  -o ProxyCommand=none
+  -o ProxyJump=none
+  -o CanonicalizeHostname=no
+  -o ClearAllForwardings=yes
+  -o ConnectTimeout=10
+)
 
 echo "[deploy] repo=${ROOT}"
 echo "[deploy] branch=$(git rev-parse --abbrev-ref HEAD) head=$(git rev-parse --short HEAD)"
@@ -126,11 +133,21 @@ if [[ "\${health_ok}" != "1" ]]; then
 fi
 
 if [[ "${ADMIN_WEB}" == "1" ]]; then
-  admin_out="\$(curl -fsS -m 2 http://127.0.0.1:8001/ 2>/dev/null | head -c 50 || true)"
-  if [[ -n "\${admin_out}" ]]; then
-    echo "admin-web: OK"
-  else
+  admin_ok=0
+  admin_out=""
+  for i in {1..15}; do
+    admin_out="\$(curl -fsS -m 3 http://127.0.0.1:8001/ 2>/tmp/admin-health.err || true)"
+    if [[ -n "\${admin_out}" ]]; then
+      echo "admin-web: OK (\${admin_out:0:80})"
+      admin_ok=1
+      break
+    fi
+    echo "[remote] admin-web health retry \${i}/15 ..."
+    sleep 1
+  done
+  if [[ "\${admin_ok}" != "1" ]]; then
     echo "admin-web: FAILED (port 8001)"
+    cat /tmp/admin-health.err || true
   fi
 fi
 
@@ -153,8 +170,8 @@ fi
 EOF
 )"
 
-echo "[deploy] ssh ${HOST} ..."
-ssh "${HOST}" "bash -lc $(printf '%q' "${remote_cmd}")"
+echo "[deploy] ssh ${HOST} (direct, no proxy) ..."
+ALL_PROXY= all_proxy= HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= \
+  ssh "${SSH_OPTS[@]}" "${HOST}" "bash -lc $(printf '%q' "${remote_cmd}")"
 
 echo "[deploy] done"
-
