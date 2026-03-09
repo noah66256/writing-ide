@@ -486,6 +486,43 @@ async function scenario12_followUpWaitingNoChase() {
 }
 
 // ---------------------------------------------------------------------------
+// 场景 12b: 软提示不能占用 steering 通道
+// ---------------------------------------------------------------------------
+async function scenario12b_softGuidanceNotSteering() {
+  const mockKernel = new MockKernel();
+  const mockCtx = createMockRunContext(undefined, {
+    allowedToolNames: new Set(["run.setTodoList", "kb.search", "run.done"]),
+    executionContract: {
+      required: true,
+      minToolCalls: 1,
+      maxNoToolTurns: 2,
+      reason: "route:task_execution",
+      preferredToolNames: ["run.setTodoList", "kb.search"],
+    },
+  });
+
+  const runtime = new GatewayRuntime(
+    { mode: "pi", runCtx: mockCtx },
+    mockKernel,
+  );
+  await runtime.run("test prompt");
+
+  const steering = await mockKernel.capturedArgs.getSteeringMessages();
+  assert.deepEqual(steering, [], "soft guidance must not be returned via steering channel");
+
+  const followUp = await mockKernel.capturedArgs.getFollowUpMessages();
+  assert.ok(Array.isArray(followUp));
+  assert.ok(followUp.length > 0, "soft guidance should move to follow-up channel");
+  assert.equal(followUp[0].kind, "runtime_hint");
+  assert.ok(
+    followUp[0].text.includes("你还没有建立 Todo") || followUp[0].text.includes("至少触发 1 次工具调用"),
+    `unexpected follow-up hint: ${followUp[0].text}`,
+  );
+
+  ok("scenario12b.soft_guidance_not_steering");
+}
+
+// ---------------------------------------------------------------------------
 // 场景 13: LegacySubAgentBridge 校验路径
 // ---------------------------------------------------------------------------
 async function scenario13_bridgeValidation() {
@@ -821,6 +858,7 @@ async function main() {
   await scenario10_delegateStub();
   await scenario11_followUpPendingTodo();
   await scenario12_followUpWaitingNoChase();
+  await scenario12b_softGuidanceNotSteering();
   await scenario13_bridgeValidation();
   await scenario14_bridgeAliasLookup();
   await scenario15_bridgeShadowStub();

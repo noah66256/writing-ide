@@ -255,7 +255,7 @@ export class GatewayRuntime implements AgentRuntime {
   private effectiveAllowed: Set<string> | null = null;
   /** 编排者模式标记（由 computePerTurnAllowed 设置） */
   private orchestratorMode = false;
-  /** steering 上次处理时的失败工具计数（避免重复提示） */
+  /** 软提示上次处理时的失败工具计数（避免重复提示） */
   private lastSteeringFailureCount = 0;
 
   constructor(
@@ -822,12 +822,14 @@ export class GatewayRuntime implements AgentRuntime {
   }
 
   /**
-   * getSteeringMessages：每次工具执行后注入引导消息。
-   * 1. 编排者长文本拦截（orchestratorMode + 文本 > 300 字）
-   * 2. 工具失败修复提示（failedToolDigests 新增项）
-   * 3. 执行契约强制（executionContract.required + 工具调用不足）
+   * 软提示收集：这些提示用于“下一轮继续执行/收口”，不能走 steering 通道。
+   *
+   * pi-agent-core 中 getSteeringMessages 的语义是“用户在当前回合中途插话/转向”，
+   * 一旦这里返回消息，会直接跳过当前回合剩余工具调用。此前把 Todo Gate /
+   * 执行契约 / 失败修复等软提示塞进 steering，导致 Gemini 在首个工具后把同轮
+   * 其他工具误判成 “Skipped due to queued user message.”。
    */
-  private async _getSteeringMessages(): Promise<AgentMessage[]> {
+  private _collectSoftGuidanceMessages(): AgentMessage[] {
     const hints: AgentMessage[] = [];
     const pushHint = (text: string, codes: string[]) => {
       const item: CanonicalTranscriptItem = {
@@ -838,7 +840,6 @@ export class GatewayRuntime implements AgentRuntime {
       hints.push(item as unknown as AgentMessage);
     };
 
-    // 1. 编排者长文本拦截
     const lastText = this._getLastAssistantText();
     if (this.orchestratorMode && lastText.length > 300) {
       pushHint(
@@ -848,7 +849,6 @@ export class GatewayRuntime implements AgentRuntime {
       );
     }
 
-    // 2. 工具失败修复提示
     if (this.failureDigest.failedCount > this.lastSteeringFailureCount) {
       const latest = this.failureDigest.failedTools[this.failureDigest.failedTools.length - 1];
       if (latest) {
@@ -879,7 +879,6 @@ export class GatewayRuntime implements AgentRuntime {
       );
     }
 
-    // 3. 执行契约强制
     const minToolCalls = Math.max(0, Math.floor(Number(ec?.minToolCalls ?? 0)));
     if (ec.required && minToolCalls > 0 && this.totalToolCalls < minToolCalls) {
       pushHint(
@@ -899,6 +898,15 @@ export class GatewayRuntime implements AgentRuntime {
   }
 
   /**
+   * getSteeringMessages：仅用于“真实用户中途插话/转向”。
+   * 当前 GatewayRuntime 尚未实现独立的用户 steering 队列，因此这里必须保持空，
+   * 避免把软提示误当成 queued user message，导致同轮剩余工具被跳过。
+   */
+  private async _getSteeringMessages(): Promise<AgentMessage[]> {
+    return [];
+  }
+
+  /**
    * getFollowUpMessages：循环即将结束时的追加消息（阻止过早结束）。
    * - 如果 run.done 已触发，不追加（尊重显式终止信号）
    * - 如果有未完成的 todo，注入追问让 Agent 继续
@@ -907,6 +915,9 @@ export class GatewayRuntime implements AgentRuntime {
   private async _getFollowUpMessages(): Promise<AgentMessage[]> {
     // run.done 已触发，不再追加
     if (this.outcome.reason === "run_done") return [];
+
+    const softGuidance = this._collectSoftGuidanceMessages();
+    if (softGuidance.length > 0) return softGuidance;
 
     if (this.runState.deliveryLatched && this.runState.hasWriteApplied) {
       const item: CanonicalTranscriptItem = {
