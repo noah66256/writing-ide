@@ -327,15 +327,6 @@ export class GatewayRuntime implements AgentRuntime {
       message: `runtime provider=${providerApi} continuation=${this.providerCapabilities.continuationMode}`,
       detail: this.providerCapabilities,
     });
-    if (this._todoGateRequired()) {
-      this.config.runCtx.writeEvent("run.notice", {
-        turn: 0,
-        kind: "info",
-        title: "TodoGateActive",
-        message: "本轮已启用 Todo Gate：必须先建立 Todo，再进入自由执行。",
-        detail: { preferredTool: this._pickTodoGateToolName(), executionContract: this._getExecutionContract() },
-      });
-    }
 
     // 内部 AbortController：链接外部 signal + maxTurns / run.done 保护
     const ac = new AbortController();
@@ -565,33 +556,6 @@ export class GatewayRuntime implements AgentRuntime {
     return { required, minToolCalls, maxNoToolTurns, reason, preferredToolNames };
   }
 
-  private _isTodoToolName(name: string): boolean {
-    return (
-      name === "run.setTodoList" ||
-      name === "run.todo" ||
-      name === "run.todo.upsertMany" ||
-      name === "run.todo.update" ||
-      name === "run.todo.remove" ||
-      name === "run.todo.clear"
-    );
-  }
-
-  private _pickTodoGateToolName(allowed?: Set<string> | null): string | null {
-    const pool = allowed ?? this.effectiveAllowed ?? this.config.runCtx.allowedToolNames;
-    for (const name of ["run.setTodoList", "run.todo", "run.todo.upsertMany"]) {
-      if (pool.has(name)) return name;
-    }
-    return null;
-  }
-
-  private _todoGateRequired(): boolean {
-    const contract = this._getExecutionContract();
-    return Boolean(contract.required) && Boolean(this._pickTodoGateToolName());
-  }
-
-  private _isPreTodoAllowedTool(name: string): boolean {
-    return this._isTodoToolName(name) || name === "run.mainDoc.get" || name === "run.mainDoc.update" || name === "time.now";
-  }
 
   private _normalizeArtifactFamily(value: unknown): string | null {
     const raw = normalizePathLike(value);
@@ -745,48 +709,8 @@ export class GatewayRuntime implements AgentRuntime {
     const executionContract = this._getExecutionContract();
     if (!executionContract.required) return;
 
-    const todoGateRequired = this._todoGateRequired();
     if (this.currentTurnToolCalls > 0) {
       this.executionNoToolTurns = 0;
-      return;
-    }
-
-    if (todoGateRequired && !this.runState.hasTodoList) {
-      this.executionNoToolTurns += 1;
-      const todoToolName = this._pickTodoGateToolName();
-      if (this.executionNoToolTurns <= executionContract.maxNoToolTurns) {
-        this.config.runCtx.writeEvent("run.notice", {
-          turn: this.turn,
-          kind: "warn",
-          title: "TodoGateRetry",
-          message: `执行型回合必须先建 Todo，已触发重试（${this.executionNoToolTurns}/${executionContract.maxNoToolTurns}）` +
-            (todoToolName ? `，优先工具：${todoToolName}` : ""),
-          detail: {
-            hasTodoList: this.runState.hasTodoList,
-            providerContinuationMode: this.providerCapabilities.continuationMode,
-          },
-        });
-        return;
-      }
-      this._recordToolLoopGuard("todo_gate_unsatisfied");
-      this.config.runCtx.writeEvent("run.notice", {
-        turn: this.turn,
-        kind: "error",
-        title: "TodoGateUnsatisfied",
-        message: "执行型回合连续重试后仍未建立 Todo，已结束本轮。",
-        detail: {
-          retries: this.executionNoToolTurns,
-          providerContinuationMode: this.providerCapabilities.continuationMode,
-          sideEffectLedger: this.runState.sideEffectLedger.slice(-5),
-        },
-      });
-      this._setOutcome({
-        status: "failed",
-        reason: "todo_gate_unsatisfied",
-        reasonCodes: ["todo_gate_unsatisfied"],
-        detail: { turn: this.turn, retries: this.executionNoToolTurns },
-      });
-      ac.abort();
       return;
     }
 
@@ -896,19 +820,6 @@ export class GatewayRuntime implements AgentRuntime {
     }
 
     const ec = this._getExecutionContract();
-    const todoGateRequired = this._todoGateRequired();
-    // 仅在模型尚未做过任何工具调用时才追问 todo gate / 执行约束——
-    // 一旦模型已开始执行（totalToolCalls > 0），交给 _enforceTurnLevelGuards 的强约束处理
-    if (this.totalToolCalls === 0 && todoGateRequired && !this.runState.hasTodoList) {
-      const todoToolName = this._pickTodoGateToolName();
-      pushHint(
-        "当前是执行型任务，但你还没有建立 Todo。请先调用 " +
-          (todoToolName ?? "run.setTodoList") +
-          "（或 run.todo action=upsert）写入可执行待办，再继续搜索、写作或交付。",
-        ["todo_gate_enforce"],
-      );
-    }
-
     const minToolCalls = Math.max(0, Math.floor(Number(ec?.minToolCalls ?? 0)));
     if (this.totalToolCalls === 0 && ec.required && minToolCalls > 0 && this.totalToolCalls < minToolCalls) {
       pushHint(
@@ -1155,38 +1066,6 @@ export class GatewayRuntime implements AgentRuntime {
       };
     }
 
-    const executionContract = this._getExecutionContract();
-    if (this._todoGateRequired() && !this.runState.hasTodoList && !this._isPreTodoAllowedTool(toolName)) {
-      this._recordToolLoopGuard("todo_gate_required");
-      this.config.runCtx.writeEvent("run.notice", {
-        turn: this.turn,
-        kind: "warn",
-        title: "TodoGateBlocked",
-        message: `工具 ${toolName} 被 Todo Gate 拦截：必须先建立 Todo。`,
-        detail: {
-          preferredTool: this._pickTodoGateToolName(),
-          providerContinuationMode: this.providerCapabilities.continuationMode,
-        },
-      });
-      return {
-        ok: false,
-        output: {
-          ok: false,
-          error: "TODO_GATE_REQUIRED",
-          message: "当前执行型任务必须先设置 Todo，再进行搜索、写作或交付。",
-          detail: {
-            preferred: this._pickTodoGateToolName(),
-            reason: executionContract.reason ?? "",
-          },
-          next_actions: [
-            "先调用 run.setTodoList 或 run.todo(action=upsert) 建立可执行 Todo",
-            "Todo 建立后再继续搜索、写文件或调用其它工具",
-          ],
-        },
-        executedBy: "gateway",
-      };
-    }
-
     const matchedSideEffect = this._isDeliveryCandidateTool(toolName)
       ? this._findMatchingSideEffect(toolName, toolArgs)
       : null;
@@ -1223,7 +1102,7 @@ export class GatewayRuntime implements AgentRuntime {
       };
     }
 
-    // agent.delegate：通过 LegacySubAgentBridge 复用旧 AgentRunner 执行子 Agent
+    // agent.delegate：通过子运行 bridge 执行子 Agent
     // shadow 模式下保持 stub，避免绕过 Desktop dry-run 保护
     if (toolName === "agent.delegate") {
       if (this.shadowMode === "shadow") {

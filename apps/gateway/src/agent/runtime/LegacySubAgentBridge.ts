@@ -1,9 +1,8 @@
 /**
- * LegacySubAgentBridge — 复用旧 AgentRunner 执行子 Agent 的薄桥接层
+ * LegacySubAgentBridge — 子 Agent 委派桥接层
  *
- * GatewayRuntime 的 agent.delegate 调用通过此 bridge 委派给旧 AgentRunner 执行。
- * MVP 范围：agent 查找 + budget + abort + SSE 事件 + artifact 提取。
- * 不做：MCP 工具作用域、style 注入、记忆注入、blob pool、A2A 结构化消息。
+ * 当前由 GatewayRuntime 的 agent.delegate 调用，并继续使用独立 sub-run 的预算/SSE 包装。
+ * 文件名暂保留，仅为减少迁移噪音；内部已不再依赖旧 AgentRunner。
  */
 
 import {
@@ -12,9 +11,7 @@ import {
   type SubAgentDefinition,
 } from "@ohmycrab/agent-core";
 
-import type { AnthropicMessage } from "../../llm/anthropicMessages.js";
 import {
-  AgentRunner,
   type RunContext,
   type SseWriter,
 } from "../writingAgentRunner.js";
@@ -119,37 +116,6 @@ function cleanSubAgentArtifactText(raw: string): string {
   return deduped.join("\n\n").trim();
 }
 
-function extractLastAssistantText(messages: AnthropicMessage[]): string {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const msg = messages[i];
-    if (msg.role !== "assistant") continue;
-
-    if (typeof msg.content === "string") {
-      const text = cleanSubAgentArtifactText(msg.content);
-      if (text) return text;
-      continue;
-    }
-
-    if (!Array.isArray(msg.content)) continue;
-    for (let j = (msg.content as any[]).length - 1; j >= 0; j -= 1) {
-      const block = (msg.content as any[])[j];
-      if (block?.type !== "text") continue;
-      const text = cleanSubAgentArtifactText(String(block.text ?? ""));
-      if (text) return text;
-    }
-  }
-  return "";
-}
-
-function countAssistantToolUses(messages: AnthropicMessage[]): number {
-  let total = 0;
-  for (const msg of messages) {
-    if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
-    total += (msg.content as any[]).filter((block: any) => block?.type === "tool_use").length;
-  }
-  return total;
-}
-
 function normalizeDelegationTask(rawTask: unknown): string {
   const text = String(rawTask ?? "").trim();
   if (!text) return "";
@@ -236,7 +202,7 @@ export class LegacySubAgentBridge {
 
   /**
    * 执行子 Agent 委派。
-   * 创建 sub RunContext → 实例化旧 AgentRunner → run → 提取 artifact。
+   * 创建 sub RunContext → 实例化 GatewayRuntime → run → 提取 artifact。
    */
   async execute(
     toolCallId: string,
@@ -311,10 +277,17 @@ export class LegacySubAgentBridge {
       if (!subAbort.signal.aborted) subAbort.abort();
     }, budget.timeoutMs);
 
+    let artifactBuffer = "";
+
     // ── writeEvent 包装：计数 + 预算 + agentId 注入 ──
     const subWriteEvent: SseWriter = (event, data) => {
       // 过滤子 Agent 的 run.end 防止 UI 提前终止
       if (event === "run.end") return;
+
+      if (event === "assistant.delta") {
+        const delta = typeof (data as any)?.delta === "string" ? String((data as any).delta) : "";
+        if (delta) artifactBuffer += delta;
+      }
 
       if (event === "tool.call") {
         toolCallsUsed += 1;
@@ -395,7 +368,6 @@ export class LegacySubAgentBridge {
     };
 
     // ── 执行 ──
-    const subRunner = new AgentRunner(subCtx);
     const startedAt = Date.now();
     const taskMessage = buildTaskMessage(toolArgs);
 
@@ -412,9 +384,13 @@ export class LegacySubAgentBridge {
 
     let status: "completed" | "error" | "timeout" = "completed";
     let errorDetail: string | null = null;
+    let turnsUsed = 0;
 
     try {
-      await subRunner.run(taskMessage);
+      const { GatewayRuntime } = await import("./GatewayRuntime.js");
+      const subRuntime = new GatewayRuntime({ mode: "pi", runCtx: subCtx, shadowMode: "off" } as any);
+      const result = await subRuntime.run(taskMessage);
+      turnsUsed = result.turn;
       if (this.parentCtx.abortSignal.aborted) {
         status = "error";
         errorDetail = "PARENT_ABORTED";
@@ -422,6 +398,9 @@ export class LegacySubAgentBridge {
         status = "timeout";
       } else if (toolBudgetExceeded) {
         status = "error";
+      } else if (result.outcome.status !== "completed") {
+        status = "error";
+        errorDetail = String(result.outcome.reason ?? "SUB_AGENT_FAILED");
       }
     } catch (err) {
       errorDetail = toErrorMessage(err);
@@ -443,14 +422,12 @@ export class LegacySubAgentBridge {
     }
 
     // ── 结果提取 ──
-    const messages = subRunner.getMessages();
-    let artifact = extractLastAssistantText(messages);
-    // 截断超长 artifact
+    let artifact = artifactBuffer.trim();
     if (artifact.length > MAX_ARTIFACT_LENGTH) {
-      artifact = `${artifact.slice(0, MAX_ARTIFACT_LENGTH)}\n...[artifact 已截断，共 ${artifact.length} 字符]`;
+      artifact = `${artifact.slice(0, MAX_ARTIFACT_LENGTH)}
+...[artifact 已截断，共 ${artifact.length} 字符]`;
     }
-    const turnsUsed = subRunner.getTurn();
-    const toolCallsUsedFinal = Math.max(toolCallsUsed, countAssistantToolUses(messages));
+    const toolCallsUsedFinal = toolCallsUsed;
 
     this.parentCtx.writeEvent("subagent.done", {
       turn,

@@ -49,26 +49,21 @@ function fail(name: string, err: unknown) {
 function scenario1_factoryCreation() {
   const mockCtx = createMockRunContext();
 
-  // legacy
   const legacy = createRuntime({ mode: "legacy", runCtx: mockCtx });
-  assert.equal(legacy.kind, "legacy");
-  assert.equal(legacy.mode, "legacy");
+  assert.equal(legacy.kind, "gateway");
+  assert.equal(legacy.mode, "pi");
 
-  // hybrid
   const hybrid = createRuntime({ mode: "hybrid", runCtx: mockCtx });
-  assert.equal(hybrid.kind, "legacy"); // hybrid 主路径仍是 legacy
-  assert.equal(hybrid.mode, "hybrid");
+  assert.equal(hybrid.kind, "gateway");
+  assert.equal(hybrid.mode, "pi");
 
-  // pi
   const pi = createRuntime({ mode: "pi", runCtx: mockCtx });
   assert.equal(pi.kind, "gateway");
   assert.equal(pi.mode, "pi");
 
-  // 默认 → pi
   const defaultMode = createRuntime({ runCtx: mockCtx });
   assert.equal(defaultMode.mode, "pi");
 
-  // 非法值 → pi
   const invalid = createRuntime({ mode: "nonsense", runCtx: mockCtx });
   assert.equal(invalid.mode, "pi");
 
@@ -99,43 +94,23 @@ async function scenario2_piKernelException() {
 }
 
 // ---------------------------------------------------------------------------
-// 场景 3: hybrid 模式发出 shadow 事件
+// 场景 3: 旧 runtime mode 统一归一到 pi
 // ---------------------------------------------------------------------------
-async function scenario3_hybridShadowEvents() {
+function scenario3_runtimeModeNormalization() {
   const events: Array<{ event: string; data: unknown }> = [];
   const mockCtx = createMockRunContext((event, data) => {
     events.push({ event, data });
   });
 
-  const runtime = createRuntime({
-    mode: "hybrid",
-    runCtx: mockCtx,
-    shadow: { enabled: true, sampleRate: 1, allowlist: new Set() },
-  });
+  createRuntime({ mode: "hybrid", runCtx: mockCtx });
+  createRuntime({ mode: "legacy", runCtx: mockCtx });
 
-  // hybrid run 会失败（因为 AgentRunner 需要真实环境），但 shadow 事件应该被发出
-  // 这里我们只验证 shadow 启动不会抛异常
-  // 实际 run 会因为 mock 环境不完整而失败
-  try {
-    await runtime.run("test prompt");
-  } catch {
-    // 预期：AgentRunner 在 mock 环境下可能失败
-  }
+  const notices = events.filter((e) => e.event === "run.notice" && String((e.data as any)?.title ?? "") === "RuntimeModeNormalized");
+  assert.equal(notices.length, 2);
+  assert.equal((notices[0]!.data as any).detail.normalizedMode, "pi");
+  assert.equal((notices[1]!.data as any).detail.normalizedMode, "pi");
 
-  // 等待 microtask 完成（shadow 是异步的）
-  await new Promise((resolve) => setTimeout(resolve, 100));
-
-  // shadow 事件应该在 events 中
-  const shadowStart = events.find((e) => e.event === "runtime.shadow.start");
-  // shadow 可能发出也可能没发（取决于 GatewayRuntime 的执行时机）
-  // Phase 1 stub 下 shadow 会发出 start + fail
-  if (shadowStart) {
-    assert.equal((shadowStart.data as any).runtimeKind, "gateway");
-    const shadowFail = events.find((e) => e.event === "runtime.shadow.fail");
-    assert.ok(shadowFail, "should have runtime.shadow.fail after runtime.shadow.start");
-  }
-
-  ok("scenario3.hybrid_shadow_events");
+  ok("scenario3.runtime_mode_normalization");
 }
 
 // ---------------------------------------------------------------------------
@@ -271,7 +246,7 @@ function scenario7_providerCapabilities() {
     assert.equal(anthropicCap.providerKey, "anthropic");
 
     const geminiCap = getProviderCapabilities("gemini");
-    assert.equal(geminiCap.supportsNativeToolCalls, false);
+    assert.equal(geminiCap.supportsNativeToolCalls, true);
     assert.equal(geminiCap.providerKey, "google");
 
     const all = listProviderCapabilities();
@@ -579,7 +554,7 @@ async function scenario14_bridgeAliasLookup() {
 }
 
 // ---------------------------------------------------------------------------
-// 场景 15: LegacySubAgentBridge shadow 模式仍走 stub
+// 场景 15: SubAgentBridge shadow 模式仍走 stub
 // ---------------------------------------------------------------------------
 async function scenario15_bridgeShadowStub() {
   const events: Array<{ event: string; data: unknown }> = [];
@@ -704,16 +679,16 @@ class ScriptedKernel implements LoopKernel {
 }
 
 // ---------------------------------------------------------------------------
-// 场景 16: Provider parity - task_execution.todo_gate
+// 场景 16: Provider parity - task_execution allows direct tool execution without todo
 // ---------------------------------------------------------------------------
-async function scenario16_providerParityTodoGate() {
+async function scenario16_providerParityTodoOptional() {
   for (const provider of PROVIDER_CASES) {
     const mockKernel = new MockKernel();
     const ctx = createMockRunContext(undefined, {
       apiType: provider.apiType,
       endpoint: provider.endpoint,
       modelId: provider.modelId,
-      allowedToolNames: new Set(["run.setTodoList", "doc.write"]),
+      allowedToolNames: new Set(["run.setTodoList", "run.mainDoc.update"]),
       executionContract: {
         required: true,
         minToolCalls: 1,
@@ -724,17 +699,15 @@ async function scenario16_providerParityTodoGate() {
     });
     const runtime = new GatewayRuntime({ mode: "pi", runCtx: ctx } as any, mockKernel);
     await runtime.run("test prompt");
-    const blocked = await (runtime as any)._executeAgentTool("tc_todo_gate", "doc.write", {
-      path: "output/demo.md",
-      content: "hello",
+    const result = await (runtime as any)._executeAgentTool("tc_todo_optional", "run.mainDoc.update", {
+      patch: { research: { status: "running" } },
     });
-    assert.equal(blocked.ok, false, `${provider.apiType} should block write before todo`);
-    assert.equal((blocked.output as any).error, "TODO_GATE_REQUIRED");
+    assert.equal(result.ok, true, `${provider.apiType} should allow direct execution without todo`);
     const report = (runtime as any)._buildExecutionReport(provider.apiType) as any;
     assert.equal(report.providerApi, provider.apiType);
     assert.ok(report.providerCapabilitiesSnapshot, `${provider.apiType} should expose provider capabilities snapshot`);
   }
-  ok("scenario16.provider_parity.todo_gate");
+  ok("scenario16.provider_parity.todo_optional");
 }
 
 // ---------------------------------------------------------------------------
@@ -848,7 +821,7 @@ async function scenario20_browserSessionWaitingUserNotCleared() {
 async function main() {
   scenario1_factoryCreation();
   await scenario2_piKernelException();
-  await scenario3_hybridShadowEvents();
+  scenario3_runtimeModeNormalization();
   scenario4_transcriptOperations();
   scenario5_legacyHistoryConversion();
   await scenario6_providerBridgeAvailability();
@@ -862,7 +835,7 @@ async function main() {
   await scenario13_bridgeValidation();
   await scenario14_bridgeAliasLookup();
   await scenario15_bridgeShadowStub();
-  await scenario16_providerParityTodoGate();
+  await scenario16_providerParityTodoOptional();
   await scenario17_providerParitySingleArtifactWriteOnce();
   await scenario18_providerParityRunDoneStopsLoop();
   await scenario19_providerParityDeliveryLatchBlocksRepeatWrite();

@@ -663,9 +663,8 @@ export function analyzeAutoRetryText(args: {
   const isFIMLeak = looksLikeFIMLeak(args.assistantText);
   const isClarify = looksLikeClarifyQuestions(t) && !args.intent.forceProceed && !looksLikeDraftText(t);
 
-  const todoPolicy: "skip" | "optional" | "required" = args.todoPolicy ?? "required";
-  const needTodo = todoPolicy === "required" && !args.state.hasTodoList && !args.intent.wantsOkOnly;
-  const needFinalText = isEmpty && !needTodo;
+  const needTodo = false;
+  const needFinalText = isEmpty;
 
   const reasons: string[] = [];
   if (isFIMLeak) reasons.push("模型输出异常(FIM token)");
