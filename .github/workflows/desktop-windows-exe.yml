@@ -48,6 +48,12 @@ jobs:
           npm run -w @ohmycrab/tools build || true
           npm run -w @ohmycrab/kb-core build || true
 
+      - name: Prepare MCP runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run -w @ohmycrab/desktop mcp:prepare-runtime
+
       - name: Build EXE
         shell: bash
         run: |

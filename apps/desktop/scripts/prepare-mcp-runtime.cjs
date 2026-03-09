@@ -46,7 +46,13 @@ async function copyIfExists(src, dst) {
 
 async function copyDir(src, dst) {
   await fs.mkdir(path.dirname(dst), { recursive: true });
-  await fs.cp(src, dst, { recursive: true, force: true });
+  await fs.rm(dst, { recursive: true, force: true }).catch(() => void 0);
+  await fs.cp(src, dst, {
+    recursive: true,
+    force: true,
+    dereference: false,
+    verbatimSymlinks: true,
+  });
 }
 
 function detectNpmRoot(nodePath) {
