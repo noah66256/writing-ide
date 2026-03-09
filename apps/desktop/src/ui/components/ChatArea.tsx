@@ -665,7 +665,7 @@ function AssistantMessage({
     [rootDir],
   );
 
-  if (step.hidden) return null;
+  if (step.hidden || step.variant === "progress") return null;
 
   const avatarNode = avatar ? (
     <span>{avatar}</span>
@@ -674,22 +674,6 @@ function AssistantMessage({
   ) : (
     <Bot size={18} className="text-accent" />
   );
-
-  if (step.variant === "progress") {
-    return (
-      <div className="flex gap-3 py-2.5">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border border-border bg-accent-soft text-[16px]">
-          {avatarNode}
-        </div>
-        <div className="min-w-0 flex-1 pt-0.5">
-          <div className="mb-1.5 text-[11px] text-text-faint">{displayName}</div>
-          <div className="inline-flex max-w-full items-center gap-2 rounded-2xl rounded-tl-md border border-border/70 bg-surface-alt/80 px-4 py-2.5 text-[14px] leading-relaxed text-text">
-            <span>{step.text || "思考中..."}</span>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="flex gap-3 py-3">

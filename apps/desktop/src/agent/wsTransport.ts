@@ -142,13 +142,6 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
     return !tool || tool === "time.now" || tool === "run.setTodoList" || tool === "run.done" || tool === "run.mainDoc.get" || tool === "run.mainDoc.update" || tool === "run.todo" || tool.startsWith("run.todo.");
   };
 
-  const finishMainAssistantBubble = () => {
-    if (!currentAssistantId) return;
-    finishAssistant(currentAssistantId);
-    if (assistantId === currentAssistantId) assistantId = null;
-    currentAssistantId = null;
-  };
-
   const emitProgressCheckpoint = (phase: string, text: string, opts?: { force?: boolean }) => {
     const now = Date.now();
     const label = String(text ?? "").trim();
@@ -157,8 +150,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       if (phase && lastProgressPhase === phase && now - lastProgressCheckpointAt < 1200) return;
       if (label === lastProgressText && now - lastProgressCheckpointAt < 2500) return;
     }
-    finishMainAssistantBubble();
-    addAssistant(label, false, false, { variant: "progress" });
+    setActivity(label, { resetTimer: true });
     lastProgressPhase = phase || null;
     lastProgressText = label;
     lastProgressCheckpointAt = now;
@@ -960,13 +952,13 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           if (event === "run.end") {
             log("info", "agent.run.end", data);
             setRunning(false); setActivity(null);
-            clearSettledTodoListIfNeeded();
             maybeAppendRunEndFeedback(data);
             const endReason = String(data?.reason ?? "").trim().toLowerCase();
             const endReasonCodes = Array.isArray(data?.reasonCodes)
               ? (data.reasonCodes as any[]).map((item) => String(item ?? "").trim().toLowerCase()).filter(Boolean)
               : [];
             const hitMaxTurns = sawMaxTurnsExceeded || endReason === "max_turns" || endReasonCodes.includes("max_turns");
+            const derivedWaitingPatch = endReason === "completed" ? deriveWaitingWorkflowPatchFromAssistant() : null;
             syncTodoFailureStateFromRunEnd(data);
             if (hitMaxTurns) {
               updateWorkflowSticky({ status: "waiting_user", lastEndReason: "max_turns" });
@@ -974,7 +966,6 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             } else if (endReason === "clarify_waiting" || endReason === "proposal_waiting") {
               updateWorkflowSticky({ status: "waiting_user", lastEndReason: endReason });
             } else if (endReason) {
-              const derivedWaitingPatch = endReason === "completed" ? deriveWaitingWorkflowPatchFromAssistant() : null;
               if (derivedWaitingPatch) {
                 updateWorkflowSticky({ ...derivedWaitingPatch, lastEndReason: endReason });
                 log("info", "workflow.waiting.derived", derivedWaitingPatch);
@@ -982,6 +973,9 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                 updateWorkflowSticky({ lastEndReason: endReason });
               }
             }
+            const failedCount = Number(data?.failureDigest?.failedCount ?? 0) || 0;
+            const shouldForceClearTodo = endReason === "completed" && !derivedWaitingPatch && !hitMaxTurns && failedCount <= 0;
+            clearSettledTodoListIfNeeded({ force: shouldForceClearTodo });
 
             // 兜底记忆提取（异步，不阻塞 UI）：
             // 从 memoryCursor 到对话末尾，提取本轮 run 中尚未被滚动提取覆盖的所有完整回合
