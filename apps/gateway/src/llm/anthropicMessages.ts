@@ -395,6 +395,7 @@ export type AnthropicOnceArgs = {
   messages: Array<{ role: string; content: string }>;
   temperature?: number;
   maxTokens?: number;
+  timeoutMs?: number;
   signal?: AbortSignal;
 };
 
@@ -432,9 +433,9 @@ export async function completionOnceAnthropicMessages(args: AnthropicOnceArgs): 
   const _t0 = Date.now();
   console.log(`[once] start model=${args.model} body=${_bodyStr.length}B msgs=${args.messages.length}`);
 
-  // 组合 signal：外部传入的 + 90s 超时（取先触发的）
+  // 组合 signal：外部传入的 + 可配置超时（取先触发的）
   let signal = args.signal;
-  const timeoutMs = 90_000;
+  const timeoutMs = Number.isFinite(Number(args.timeoutMs)) && Number(args.timeoutMs) > 0 ? Math.floor(Number(args.timeoutMs)) : 90_000;
   if (!signal) {
     signal = AbortSignal.timeout(timeoutMs);
   } else {

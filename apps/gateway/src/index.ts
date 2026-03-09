@@ -3783,7 +3783,7 @@ fastify.post(
       ...sampled.map((p) => `[#${p.index}] ${brief(p.text)}`),
     ].join("\n");
 
-    const timeoutMs = 90_000;
+    const timeoutMs = Number.isFinite(Number(process.env.LLM_SPLIT_TIMEOUT_MS ?? "")) && Number(process.env.LLM_SPLIT_TIMEOUT_MS) > 0 ? Math.floor(Number(process.env.LLM_SPLIT_TIMEOUT_MS)) : 120_000;
     const t0 = Date.now();
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), timeoutMs);
@@ -3796,6 +3796,7 @@ fastify.post(
           { role: "user", content: user },
         ],
         temperature: 0,
+        timeoutMs,
         signal: abort.signal,
       });
     } finally {
@@ -3957,7 +3958,7 @@ fastify.post(
   const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 1);
   const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
   const timeoutMsCfg = Number(String(process.env.LLM_CARD_TIMEOUT_MS ?? "").trim());
-  const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 45_000;
+  const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 120_000;
   const defaultFacetIds = [
     "intro",
     "opening_design",
@@ -4104,6 +4105,7 @@ fastify.post(
         ],
         temperature: 0.2,
         maxTokens: stageMaxTokens ?? null,
+        timeoutMs,
         signal: abort.signal,
       });
     } finally {
@@ -4195,10 +4197,10 @@ fastify.post(
       error: is429 ? "UPSTREAM_BUSY" : isTimeout ? "UPSTREAM_TIMEOUT" : isInvalidOutput ? "INVALID_MODEL_OUTPUT" : "UPSTREAM_ERROR",
       message:
         isInvalidOutput
-          ? "模型未返回合法 JSON 数组（已重试 " + String(retryMax + 1) + " 次）。可稍后重试，或切换更稳定的抽卡模型（LLM_CARD_MODEL）。"
+          ? "模型未返回合法 JSON 数组（已重试 " + String(retryMax + 1) + " 次）。可稍后重试，或切换更稳定的主 Agent 模型。"
           : (parsed.message || "upstream error") +
             (isTimeout
-              ? "\n\n提示：上游模型响应超时（可能负载过高或输入过长）。可稍后重试，或减少语料长度/拆分文件，或切换更快的抽卡模型（LLM_CARD_MODEL）。"
+              ? "\n\n提示：当前主 Agent 模型响应超时（可能负载过高或输入过长）。可稍后重试，或减少语料长度/拆分文件，或切换更快的主 Agent 模型。"
               : ""),
       requestId: parsed.requestId,
       status: lastStatus ?? null,
@@ -4329,7 +4331,7 @@ fastify.post(
   // 说明：前端/网络层常见“连接空闲超时”会在 ~60-120s 把连接掐断，导致 Desktop 看到 Failed to fetch。
   // 这里把单次上游调用限制在更短窗口，并在失败时返回“可用占位卡”（不中断整条风格手册生成）。
   const timeoutMsCfg = Number(String(process.env.LLM_PLAYBOOK_TIMEOUT_MS ?? "").trim());
-  const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 90_000;
+  const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 150_000;
 
   const facetIds = body.facetIds.slice(0, 80);
 
@@ -4629,6 +4631,7 @@ fastify.post(
       ],
       temperature: 0.2,
       maxTokens: stageMaxTokens ?? null,
+      timeoutMs,
       signal: abort.signal
     });
     clearTimeout(timer);
@@ -4857,7 +4860,7 @@ fastify.post(
     const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 3);
     const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
     const timeoutMsCfg = Number(String(process.env.LLM_PLAYBOOK_TIMEOUT_MS ?? "").trim());
-    const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 60_000;
+    const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 120_000;
 
     const libName = String(body.libraryName ?? "").trim();
     const clusters = body.clusters.slice(0, 3);
@@ -4949,6 +4952,7 @@ fastify.post(
         ],
         temperature: 0.2,
         maxTokens: stageMaxTokens ?? null,
+        timeoutMs,
         signal: abort.signal,
       });
       clearTimeout(timer);
@@ -5134,7 +5138,7 @@ fastify.post(
   const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const timeoutMsCfg = Number(String(process.env.LLM_GENRE_TIMEOUT_MS ?? "").trim());
-  const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 45_000;
+  const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 90_000;
 
   const sys = [
     "你是写作 IDE 的「体裁/声音识别器」（开集分类，不要穷举）。",
@@ -5359,6 +5363,7 @@ fastify.post(
           { role: "user", content: user }
         ],
         temperature: 0.2,
+        timeoutMs,
         signal: abort.signal
       });
     } finally {

@@ -18,6 +18,7 @@ export type ProviderStreamArgs = {
   messages: OpenAiChatMessage[];
   temperature?: number;
   maxTokens?: number | null;
+  timeoutMs?: number;
   includeUsage?: boolean;
   tools?: OpenAiCompatTool[];
   toolChoice?: OpenAiCompatToolChoice;
@@ -251,6 +252,7 @@ export async function completionOnceViaProvider(args: ProviderStreamArgs): Promi
       messages: userAssistantMsgs,
       temperature: args.temperature,
       maxTokens: args.maxTokens ?? undefined,
+      timeoutMs: args.timeoutMs,
       signal: args.signal,
     });
     return r as ChatCompletionOnceResult;
