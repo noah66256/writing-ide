@@ -571,12 +571,14 @@ async function resolveRequiredKbTaskRuntime(modelId?: string) {
         hint: "当前主 Agent 模型不支持该知识库任务，请切换到可用的文本模型。",
       };
     }
+    // env 兜底：与 runFactory agent 运行路径保持一致（解密失败时回退 env）
+    const env = await getLlmEnv();
     const runtime = {
       modelId: String(m.modelId || id).trim() || id,
       model: String(m.model || "").trim(),
-      baseUrl: String(m.baseURL || "").trim(),
+      baseUrl: String(m.baseURL || "").trim() || env.baseUrl,
       endpoint,
-      apiKey: String(m.apiKey || "").trim(),
+      apiKey: String(m.apiKey || "").trim() || env.apiKey,
     };
     if (!runtime.model || !runtime.baseUrl || !runtime.apiKey) {
       return {
