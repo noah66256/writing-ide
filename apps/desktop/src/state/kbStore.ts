@@ -18,11 +18,14 @@ function kbLog(level: "info" | "warn" | "error", message: string, data?: unknown
 
 function preferredKbModelId(): string {
   const run = useRunStore.getState();
-  const mode = run.mode === "chat" ? "chat" : "agent";
-  if (mode === "chat") {
-    return String(run.chatModel || run.model || run.agentModel || "").trim();
-  }
   return String(run.agentModel || run.model || run.chatModel || "").trim();
+}
+
+function requirePreferredKbModelId(taskLabel: string): string | null {
+  const modelId = preferredKbModelId();
+  if (modelId) return modelId;
+  kbLog("warn", "kb.agent_model.required", { taskLabel });
+  return null;
 }
 
 type KbFormat = "md" | "mdx" | "txt" | "docx" | "pdf" | "unknown";
@@ -1672,7 +1675,8 @@ async function postSplitArticles(args: {
   if (!ensureLoginForKbLlm("篇级分块")) return { ok: false, error: "AUTH_REQUIRED" };
   const auth = authHeader();
   try {
-    const model = preferredKbModelId();
+    const model = requirePreferredKbModelId("篇级分块");
+    if (!model) return { ok: false, error: "AGENT_MODEL_REQUIRED（请先在顶部选择主 Agent 模型）" };
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...auth },
@@ -1722,7 +1726,8 @@ async function postExtractCards(args: {
   const t0 = Date.now();
   console.log(`[kbStore] postExtractCards 请求: paragraphs=${args.paragraphs.length}, maxCards=${args.maxCards}, mode=${args.mode}, signalAborted=${Boolean(args.signal?.aborted)}`);
   try {
-    const model = String(args.model ?? "").trim() || preferredKbModelId();
+    const model = String(args.model ?? "").trim() || requirePreferredKbModelId("抽卡/风格手册");
+    if (!model) return { ok: false, error: "AGENT_MODEL_REQUIRED（请先在顶部选择主 Agent 模型）" };
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...auth },
@@ -1782,13 +1787,14 @@ async function postBuildLibraryPlaybook(args: {
   if (!ensureLoginForKbLlm("生成风格手册/仿写手册")) return { ok: false, error: "AUTH_REQUIRED" };
   const auth = authHeader();
   try {
-    const model = String(args.model ?? "").trim() || preferredKbModelId();
+    const model = String(args.model ?? "").trim() || requirePreferredKbModelId("风格手册/仿写手册");
+    if (!model) return { ok: false, error: "AGENT_MODEL_REQUIRED（请先在顶部选择主 Agent 模型）" };
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...auth },
       signal: args.signal,
       body: JSON.stringify({
-        model: model || undefined,
+        model,
         mode: args.mode,
         part: args.part,
         facetIds: args.facetIds,
@@ -1893,13 +1899,14 @@ async function postBuildClusterRules(args: {
   if (!ensureLoginForKbLlm("生成写法簇规则卡（values/lens）")) return { ok: false, error: "AUTH_REQUIRED" };
   const auth = authHeader();
   try {
-    const model = String(args.model ?? "").trim() || preferredKbModelId();
+    const model = String(args.model ?? "").trim() || requirePreferredKbModelId("深度克隆/规则手册");
+    if (!model) return { ok: false, error: "AGENT_MODEL_REQUIRED（请先在顶部选择主 Agent 模型）" };
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...auth },
       signal: args.signal,
       body: JSON.stringify({
-        model: model || undefined,
+        model,
         libraryName: args.libraryName,
         clusters: (args.clusters ?? []).slice(0, 3),
       }),
@@ -1953,12 +1960,14 @@ async function postClassifyGenre(args: {
   if (!ensureLoginForKbLlm("库体检/体裁识别")) return { ok: false, error: "AUTH_REQUIRED" };
   const auth = authHeader();
   try {
+    const model = String(args.model ?? "").trim() || requirePreferredKbModelId("库体检/体裁识别");
+    if (!model) return { ok: false, error: "AGENT_MODEL_REQUIRED（请先在顶部选择主 Agent 模型）" };
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...auth },
       signal: args.signal,
       body: JSON.stringify({
-        model: args.model,
+        model,
         stats: args.stats ?? null,
         samples: (args.samples ?? []).slice(0, 24),
       }),

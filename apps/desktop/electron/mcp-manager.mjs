@@ -359,7 +359,7 @@ export class McpManager {
       if (!base) continue;
       for (const ext of extCandidates) {
         const candidate = path.join(base, `${cmd}${ext}`);
-        if (await this._pathExists(candidate)) {
+        if (await this._pathIsFile(candidate)) {
           return candidate;
         }
       }
@@ -402,13 +402,22 @@ export class McpManager {
     const raw = String(command ?? "").trim();
     if (!raw) return null;
 
+    const resolveExplicit = async (candidate) => {
+      const value = String(candidate ?? "").trim();
+      if (!value) return null;
+      const stat = await this._pathStat(value);
+      if (!stat) return null;
+      if (!stat.isFile()) {
+        return { resolved: null, source: "explicit", error: `STDIO_COMMAND_NOT_EXECUTABLE:${value}` };
+      }
+      return { resolved: value, source: "explicit" };
+    };
+
     // 绝对/相对路径直接按文件判断
     const looksLikePath = raw.includes(path.sep) || raw.includes("/") || raw.includes("\\");
     if (looksLikePath) {
       const abs = path.resolve(raw);
-      if (await this._pathExists(abs)) return { resolved: abs, source: "explicit" };
-      if (await this._pathExists(raw)) return { resolved: raw, source: "explicit" };
-      return null;
+      return (await resolveExplicit(abs)) ?? (await resolveExplicit(raw));
     }
 
     const candidates = this._commandAliasCandidates(raw);
@@ -476,6 +485,7 @@ export class McpManager {
         ok: Boolean(resolved?.resolved),
         source: resolved?.source ?? "missing",
         path: resolved?.resolved ?? null,
+        error: resolved?.error ?? null,
         installable: Boolean(plan),
         planId: plan?.id ?? null,
       });
@@ -1163,6 +1173,9 @@ export class McpManager {
       const command = String(config.command ?? "").trim();
       if (!command) throw new Error("STDIO_COMMAND_REQUIRED");
       const resolved = await this._resolveStdioCommand(command, runtimeDirs, env.PATH ?? "");
+      if (resolved?.error) {
+        throw new Error(resolved.error);
+      }
       if (!resolved?.resolved) {
         throw new Error(`STDIO_COMMAND_NOT_FOUND:${command}`);
       }
@@ -1294,12 +1307,22 @@ export class McpManager {
 
   /** @param {string} filePath */
   async _pathExists(filePath) {
+    return Boolean(await this._pathStat(filePath));
+  }
+
+  /** @param {string} filePath */
+  async _pathStat(filePath) {
     try {
-      await fs.access(filePath);
-      return true;
+      return await fs.stat(filePath);
     } catch {
-      return false;
+      return null;
     }
+  }
+
+  /** @param {string} filePath */
+  async _pathIsFile(filePath) {
+    const stat = await this._pathStat(filePath);
+    return Boolean(stat?.isFile?.());
   }
 
   // ── 工具操作 ──────────────────────────

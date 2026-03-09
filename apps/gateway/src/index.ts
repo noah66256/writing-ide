@@ -549,6 +549,53 @@ async function resolveExplicitKbModelRuntime(modelId?: string) {
   }
 }
 
+async function resolveRequiredKbTaskRuntime(modelId?: string) {
+  const id = String(modelId ?? "").trim();
+  if (!id) {
+    return {
+      ok: false as const,
+      status: 400,
+      error: "AGENT_MODEL_REQUIRED",
+      hint: "请先在顶部选择主 Agent 模型；知识库抽卡/风格手册/深度克隆只使用主 Agent 当前模型。",
+    };
+  }
+  try {
+    const m = await aiConfig.resolveModel(id);
+    const endpoint = String(m.endpoint || "").trim();
+    if (!endpoint || !isKbTextLlmEndpoint(endpoint)) {
+      return {
+        ok: false as const,
+        status: 400,
+        error: "AGENT_MODEL_UNSUPPORTED",
+        hint: "当前主 Agent 模型不支持该知识库任务，请切换到可用的文本模型。",
+      };
+    }
+    const runtime = {
+      modelId: String(m.modelId || id).trim() || id,
+      model: String(m.model || "").trim(),
+      baseUrl: String(m.baseURL || "").trim(),
+      endpoint,
+      apiKey: String(m.apiKey || "").trim(),
+    };
+    if (!runtime.model || !runtime.baseUrl || !runtime.apiKey) {
+      return {
+        ok: false as const,
+        status: 500,
+        error: "AGENT_MODEL_RUNTIME_INVALID",
+        hint: "当前主 Agent 模型配置不完整，请检查后台 AI 配置。",
+      };
+    }
+    return { ok: true as const, ...runtime };
+  } catch {
+    return {
+      ok: false as const,
+      status: 400,
+      error: "AGENT_MODEL_NOT_FOUND",
+      hint: "当前主 Agent 模型未在 AI 配置中注册，请检查顶部模型选择或后台配置。",
+    };
+  }
+}
+
 async function getPlaybookEnv(db?: Db) {
   try {
     const r = await aiConfig.resolveStage("rag.ingest.build_library_playbook");
@@ -3681,28 +3728,15 @@ fastify.post(
     });
     const body = bodySchema.parse((request as any).body);
 
-    const splitEnv = await getSplitEnv();
-    if (!splitEnv.ok) {
-      return reply.code(500).send({ error: "LLM_NOT_CONFIGURED" });
+    const runtime = await resolveRequiredKbTaskRuntime(body.model);
+    if (!runtime.ok) {
+      return reply.code(runtime.status).send({ error: runtime.error, hint: runtime.hint });
     }
 
-    let model = splitEnv.defaultModel;
-    let baseUrl = splitEnv.baseUrl;
-    let endpoint = (splitEnv as any).endpoint || "/v1/chat/completions";
-    let apiKey = splitEnv.apiKey;
-
-    if (body.model) {
-      try {
-        const m = await aiConfig.resolveModel(body.model);
-        const ep = String(m.endpoint || "").trim();
-        if (ep && isKbTextLlmEndpoint(ep)) {
-          model = m.model;
-          baseUrl = m.baseURL;
-          apiKey = m.apiKey || apiKey;
-          endpoint = ep;
-        }
-      } catch { /* ignore */ }
-    }
+    let model = runtime.model;
+    let baseUrl = runtime.baseUrl;
+    let endpoint = runtime.endpoint;
+    let apiKey = runtime.apiKey;
 
     // 构建提示词：每段只取前80字；超长文档先采样，避免 split 阶段本身超时。
     const ordered = (body.paragraphs as Array<{ index: number; text: string }>)
@@ -3902,18 +3936,9 @@ fastify.post(
   });
   const body = bodySchema.parse((request as any).body);
 
-  const explicitRuntime = await resolveExplicitKbModelRuntime(body.model);
-  const cardEnv = explicitRuntime ? null : await getCardEnv();
-  const cardBaseUrl = explicitRuntime?.baseUrl ?? cardEnv?.baseUrl ?? "";
-  const cardEndpoint = explicitRuntime?.endpoint ?? ((cardEnv as any)?.endpoint || "/v1/chat/completions");
-  const cardApiKey = explicitRuntime?.apiKey ?? cardEnv?.apiKey ?? "";
-  const cardModelDefault = explicitRuntime?.model ?? cardEnv?.defaultModel ?? "";
-
-  if (!explicitRuntime && !cardEnv?.ok) {
-    return reply.code(500).send({
-      error: "LLM_NOT_CONFIGURED",
-      hint: "请先在顶部选择一个可用模型；若未显式传模型，再回退到 LLM_BASE_URL/LLM_MODEL/LLM_API_KEY 或独立抽卡配置。"
-    });
+  const runtime = await resolveRequiredKbTaskRuntime(body.model);
+  if (!runtime.ok) {
+    return reply.code(runtime.status).send({ error: runtime.error, hint: runtime.hint });
   }
 
   let stageMaxTokens: number | undefined = undefined;
@@ -3924,10 +3949,10 @@ fastify.post(
     // ignore
   }
 
-  let model = explicitRuntime?.model ?? body.model ?? cardModelDefault;
-  let baseUrl = explicitRuntime?.baseUrl ?? cardBaseUrl;
-  let endpoint = explicitRuntime?.endpoint ?? cardEndpoint;
-  let apiKey = explicitRuntime?.apiKey || cardApiKey;
+  let model = runtime.model;
+  let baseUrl = runtime.baseUrl;
+  let endpoint = runtime.endpoint;
+  let apiKey = runtime.apiKey;
   const maxCards = body.maxCards ?? 18;
   const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 1);
   const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
@@ -4282,18 +4307,9 @@ fastify.post(
   });
   const body = bodySchema.parse((request as any).body);
 
-  const explicitRuntime = await resolveExplicitKbModelRuntime(body.model);
-  const playbookEnv = explicitRuntime ? null : await getPlaybookEnv();
-  const playbookBaseUrl = explicitRuntime?.baseUrl ?? playbookEnv?.baseUrl ?? "";
-  const playbookEndpoint = explicitRuntime?.endpoint ?? ((playbookEnv as any)?.endpoint || "/v1/chat/completions");
-  const playbookApiKey = explicitRuntime?.apiKey ?? playbookEnv?.apiKey ?? "";
-  const playbookModelDefault = explicitRuntime?.model ?? playbookEnv?.defaultModel ?? "";
-
-  if (!explicitRuntime && !playbookEnv?.ok) {
-    return reply.code(500).send({
-      error: "LLM_NOT_CONFIGURED",
-      hint: "请先在顶部选择一个可用模型；若未显式传模型，再回退到 LLM_BASE_URL/LLM_MODEL/LLM_API_KEY 或独立抽卡配置。"
-    });
+  const runtime = await resolveRequiredKbTaskRuntime(body.model);
+  if (!runtime.ok) {
+    return reply.code(runtime.status).send({ error: runtime.error, hint: runtime.hint });
   }
 
   let stageMaxTokens: number | undefined = undefined;
@@ -4304,10 +4320,10 @@ fastify.post(
     // ignore
   }
 
-  let model = explicitRuntime?.model ?? body.model ?? playbookModelDefault;
-  let baseUrl = explicitRuntime?.baseUrl ?? playbookBaseUrl;
-  let endpoint = explicitRuntime?.endpoint ?? playbookEndpoint;
-  let apiKey = explicitRuntime?.apiKey || playbookApiKey;
+  let model = runtime.model;
+  let baseUrl = runtime.baseUrl;
+  let endpoint = runtime.endpoint;
+  let apiKey = runtime.apiKey;
   const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 3);
   const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
   // 说明：前端/网络层常见“连接空闲超时”会在 ~60-120s 把连接掐断，导致 Desktop 看到 Failed to fetch。
@@ -4820,17 +4836,9 @@ fastify.post(
     });
     const body = bodySchema.parse((request as any).body);
 
-    const playbookEnv = await getPlaybookEnv();
-    const playbookBaseUrl = playbookEnv.baseUrl;
-    const playbookEndpoint = (playbookEnv as any).endpoint || "/v1/chat/completions";
-    const playbookApiKey = playbookEnv.apiKey;
-    const playbookModelDefault = playbookEnv.defaultModel;
-
-    if (!playbookEnv.ok) {
-      return reply.code(500).send({
-        error: "LLM_NOT_CONFIGURED",
-        hint: "请配置 LLM_BASE_URL/LLM_MODEL/LLM_API_KEY；可在 B 端把 stage=rag.ingest.build_cluster_rules 指向更稳的模型。",
-      });
+    const runtime = await resolveRequiredKbTaskRuntime(body.model);
+    if (!runtime.ok) {
+      return reply.code(runtime.status).send({ error: runtime.error, hint: runtime.hint });
     }
 
     let stageMaxTokens: number | undefined = undefined;
@@ -4841,24 +4849,10 @@ fastify.post(
       // ignore
     }
 
-    let model = body.model ?? playbookModelDefault;
-    let baseUrl = playbookBaseUrl;
-    let endpoint = playbookEndpoint;
-    let apiKey = playbookApiKey;
-    if (body.model) {
-      try {
-        const m = await aiConfig.resolveModel(body.model);
-        const ep = String(m.endpoint || "").trim();
-        if (ep && (/chat\/completions/i.test(ep) || isGeminiLikeEndpoint(ep))) {
-          model = m.model;
-          baseUrl = m.baseURL;
-          apiKey = m.apiKey || apiKey;
-          endpoint = ep;
-        }
-      } catch {
-        // ignore
-      }
-    }
+    let model = runtime.model;
+    let baseUrl = runtime.baseUrl;
+    let endpoint = runtime.endpoint;
+    let apiKey = runtime.apiKey;
 
     const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 3);
     const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
@@ -5127,29 +5121,15 @@ fastify.post(
   });
   const body = bodySchema.parse((request as any).body);
 
-  const llmEnv = await getLlmEnv();
-  if (!llmEnv.ok) {
-    return reply.code(500).send({ error: "LLM_NOT_CONFIGURED", hint: "请配置 LLM_BASE_URL/LLM_MODEL/LLM_API_KEY" });
+  const runtime = await resolveRequiredKbTaskRuntime(body.model);
+  if (!runtime.ok) {
+    return reply.code(runtime.status).send({ error: runtime.error, hint: runtime.hint });
   }
 
-  let model = body.model ?? llmEnv.defaultModel;
-  let baseUrl = llmEnv.baseUrl;
-  let endpoint = (llmEnv as any).endpoint || "/v1/chat/completions";
-  let apiKey = llmEnv.apiKey;
-  if (body.model) {
-    try {
-      const m = await aiConfig.resolveModel(body.model);
-      const ep = String(m.endpoint || "").trim();
-      if (ep && isKbTextLlmEndpoint(ep)) {
-        model = m.model;
-        baseUrl = m.baseURL;
-        apiKey = m.apiKey || apiKey;
-        endpoint = ep;
-      }
-    } catch {
-      // ignore
-    }
-  }
+  let model = runtime.model;
+  let baseUrl = runtime.baseUrl;
+  let endpoint = runtime.endpoint;
+  let apiKey = runtime.apiKey;
   const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 3);
   const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
