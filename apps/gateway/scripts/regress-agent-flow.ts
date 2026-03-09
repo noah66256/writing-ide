@@ -16,6 +16,10 @@ import {
   isWriteLikeTool,
   type ParsedToolCall,
 } from "@ohmycrab/agent-core";
+import {
+  computeIntentRouteDecisionPhase0,
+  shouldPreferPendingWriteResumeFromTaskState,
+} from "../src/agent/runFactory.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -469,3 +473,34 @@ main().catch((e) => {
   console.error("[regress-agent-flow] FAILED:", e);
   process.exit(1);
 });
+
+
+  // ======== 4) 路由：Directive / Inquiry / Continuation ========
+  {
+    const mode = "agent" as const;
+    const userPrompt = "hi";
+    const intent = detectRunIntent({ mode, userPrompt });
+    const route = computeIntentRouteDecisionPhase0({ mode, userPrompt, intent, runTodo: [], mainDoc: null });
+    assert.equal(route.intentType, "discussion");
+    assert.equal(route.routeId, "discussion");
+  }
+  {
+    const mode = "agent" as const;
+    const userPrompt = "打开小红书页面，等我登录后告诉你下一步";
+    const intent = detectRunIntent({ mode, userPrompt });
+    const route = computeIntentRouteDecisionPhase0({ mode, userPrompt, intent, runTodo: [], mainDoc: null });
+    assert.equal(route.intentType, "task_execution");
+  }
+  {
+    const ok = shouldPreferPendingWriteResumeFromTaskState({
+      taskState: {
+        resume: { canResumePendingWrite: true, artifactId: "artifact_1", pathHint: "drafts/a.md" },
+      },
+      userPrompt: "保存吧",
+      projectDirAvailable: true,
+      intent: {},
+    });
+    assert.equal(ok, true);
+  }
+  ok("routing.directive_inquiry_and_resume_state");
+

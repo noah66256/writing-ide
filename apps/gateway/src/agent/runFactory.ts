@@ -420,6 +420,20 @@ export function parsePendingArtifactsFromContextPack(ctx?: string): any[] | null
   }
 }
 
+export function parseTaskStateFromContextPack(ctx?: string): any | null {
+  const text = String(ctx ?? "");
+  if (!text) return null;
+  const m = text.match(new RegExp(String.raw`TASK_STATE\(JSON\):\n([\s\S]*?)(?:\n\n|$)`));
+  const raw = m?.[1] ? String(m[1]).trim() : "";
+  if (!raw) return null;
+  try {
+    const j = JSON.parse(raw);
+    return j && typeof j === "object" ? j : null;
+  } catch {
+    return null;
+  }
+}
+
 export function parseRecentDialogueFromContextPack(
   ctx?: string,
 ): Array<{ role: "user" | "assistant"; text: string }> | null {
@@ -601,8 +615,10 @@ export function buildAgentProtocolPrompt(args: {
         `工作流程：\n` +
         `- 收到任务后：分析需求 → 拆解任务 → 制定 Todo → 直接执行 → 自检 → 交付。\n` +
         `- 仅在会产生现实后果时才先确认：发布到平台、花钱/投流、群发消息、删除用户已有文件。确认用自然语言一句话（例如”确定进行删除操作吗？”），不要提 Keep/Diff，不要弹窗。\n` +
+        `- 先判断这轮属于哪类：Directive（明确要求执行/操作） / Inquiry（询问、讨论、分析、解释） / ContinueExistingTask（继续上一轮任务）。\n` +
+        `- 默认按 Inquiry 处理；只有明确执行动作、已有任务续跑证据、或工具型目标清晰时，才进入任务闭环。\n` +
         `- 用户若明确要求只回一句/只回 OK/只答是或否，且不需要工具，严格短答并结束。\n` +
-        `- 上下文优先级：优先使用 Context Pack 的 REFERENCES 与已关联 KB（KB_SELECTED_LIBRARIES/KB_LIBRARY_PLAYBOOK/KB_STYLE_CLUSTERS）。信息不足再读项目文件或遍历目录。\n` +
+        `- 上下文优先级：优先使用 Context Pack 的 TASK_STATE / REFERENCES 与已关联 KB（KB_SELECTED_LIBRARIES/KB_LIBRARY_PLAYBOOK/KB_STYLE_CLUSTERS）。信息不足再读项目文件或遍历目录。\n` +
         `- 风格库优先：当 KB_SELECTED_LIBRARIES 含 purpose=style 且任务为写作/仿写/改写/润色时，口吻/节奏/结构以风格库为第一优先（除非用户明确覆盖）。\n` +
         `- 完成即停：本轮目标达成后立刻停止，不追加新任务或开启下一段流程。\n\n` +
         `执行机制：\n` +
@@ -793,6 +809,33 @@ export function looksLikePendingResumeOverridePrompt(text: string): boolean {
   return /(别存了|不要存了|不存了|不用存了|取消保存|先别保存|先别继续|不用继续|别继续|先别写入|别写了|重写|重新写|重来|改成|换成|换个主题|另写|重新生成)/.test(t);
 }
 
+export function classifyDirectiveIntent(text: string): {
+  kind: "directive" | "inquiry" | "continuation";
+  reason: string;
+} {
+  const t = String(text ?? "").trim();
+  if (!t) return { kind: "inquiry", reason: "empty_prompt" };
+  if (looksLikeWorkflowContinuationPrompt(t)) {
+    return { kind: "continuation", reason: "workflow_continuation" };
+  }
+  if (looksLikeExplicitNonTaskPrompt(t)) {
+    return { kind: "inquiry", reason: "explicit_non_task" };
+  }
+  if (looksLikeVisibilityQuestion(t) || looksLikeResearchOnlyPrompt(t)) {
+    return { kind: "inquiry", reason: "visibility_or_research" };
+  }
+  if (/^(hi|hello|hey|你好|嗨|哈喽|在吗|在不|早上好|中午好|下午好|晚上好|打个招呼)\b/i.test(t)) {
+    return { kind: "inquiry", reason: "greeting" };
+  }
+  if (/(打开|进入|点开|查看|搜索|检索|查询|生成|写|改|润色|导出|保存|登录|部署|提交|修复|分析|总结|整理|收集|抓取|浏览)/.test(t)) {
+    return { kind: "directive", reason: "explicit_action_verb" };
+  }
+  if (t.length <= 24 && /^(可以|行|好|好的|收到|明白|继续|下一步|开始|保存吧|写吧)$/i.test(t)) {
+    return { kind: "continuation", reason: "short_follow_up" };
+  }
+  return { kind: "inquiry", reason: "default_inquiry" };
+}
+
 export function readPendingWriteResumeState(args: { mainDoc?: unknown; pendingArtifacts?: any[] | null }) {
   const doc = args.mainDoc && typeof args.mainDoc === "object" && !Array.isArray(args.mainDoc) ? (args.mainDoc as any) : null;
   const wf = doc?.workflowV1 && typeof doc.workflowV1 === "object" && !Array.isArray(doc.workflowV1) ? (doc.workflowV1 as any) : null;
@@ -807,6 +850,28 @@ export function readPendingWriteResumeState(args: { mainDoc?: unknown; pendingAr
     : pendingList.find((x: any) => x && typeof x === "object" && String(x?.status ?? "pending").trim().toLowerCase() === "pending" && (!pathHint || String(x?.pathHint ?? "").trim() === pathHint));
   const waiting = kind === "project_open_resume_write" && status === "waiting_user";
   return { waiting, kind, status, resumeAction, artifact: artifact ?? null, pathHint };
+}
+
+export function shouldPreferPendingWriteResumeFromTaskState(args: {
+  taskState?: any;
+  userPrompt: string;
+  projectDirAvailable: boolean;
+  intent?: any;
+}): boolean {
+  if (!args.projectDirAvailable) return false;
+  const state = args.taskState && typeof args.taskState === "object" ? args.taskState : null;
+  const resume = state && typeof (state as any).resume === "object" ? (state as any).resume : null;
+  if (!resume || resume.canResumePendingWrite !== true || !String((resume as any).artifactId ?? "").trim()) return false;
+  const prompt = String(args.userPrompt ?? "").trim();
+  if (!prompt) return true;
+  if (looksLikeExplicitNonTaskPrompt(prompt)) return false;
+  if (looksLikePendingResumeOverridePrompt(prompt)) return false;
+  const looksLikeFreshTask =
+    !looksLikeWorkflowContinuationPrompt(prompt) &&
+    prompt.length >= 16 &&
+    Boolean(args.intent?.isWritingTask || args.intent?.wantsWrite || looksLikeResearchOnlyPrompt(prompt));
+  if (looksLikeFreshTask) return false;
+  return true;
 }
 
 export function shouldPreferPendingWriteResume(args: {
@@ -1114,6 +1179,8 @@ export function computeIntentRouteDecisionPhase0(args: {
   const p = String(args.userPrompt ?? "");
   const pTrim = p.trim();
   const mode = args.mode;
+  const directiveIntent = classifyDirectiveIntent(pTrim);
+  derivedFrom.push(`intent_class:${directiveIntent.kind}`, `intent_reason:${directiveIntent.reason}`);
 
   if (mode === "chat") {
     return {
@@ -1369,16 +1436,15 @@ export function computeIntentRouteDecisionPhase0(args: {
     };
   }
 
-  // mode=agent（创作）时，用户明确选了"创作"按钮——默认进入任务闭环
-  if (mode === "agent") {
+  if (directiveIntent.kind === "directive") {
     return {
       intentType: "task_execution",
-      confidence: 0.7,
+      confidence: 0.72,
       nextAction: "enter_workflow",
       todoPolicy: "required",
       toolPolicy: "allow_tools",
-      reason: "mode=agent 且无明确讨论信号：默认进入任务闭环（用户选了「创作」）",
-      derivedFrom: ["default:agent_task", ...derivedFrom],
+      reason: "Directive 优先：用户明确要求执行动作，进入任务闭环",
+      derivedFrom: ["directive:explicit_action", ...derivedFrom],
       routeId: "task_execution",
     };
   }
@@ -1684,6 +1750,7 @@ export async function prepareAgentRun(args: {
   const runTodoFromPack = parseRunTodoFromContextPack(body.contextPack);
   const recentDialogueFromPack = parseRecentDialogueFromContextPack(body.contextPack);
   const contextManifestFromPack = parseContextManifestFromContextPack(body.contextPack);
+  const taskStateFromPack = parseTaskStateFromContextPack(body.contextPack);
   const pendingArtifactsFromPack = parsePendingArtifactsFromContextPack(body.contextPack);
   const personaFromPack = parseAgentPersonaFromContextPack(body.contextPack);
   const l1MemoryFromPack = parseMarkdownSegmentFromContextPack(body.contextPack, "L1_GLOBAL_MEMORY");
@@ -1710,7 +1777,12 @@ export async function prepareAgentRun(args: {
   });
 
   const projectDirCandidate = normalizeIdeMeta({ ideSummary: ideSummaryFromSidecar, contextPack: body.contextPack, kbSelected: kbSelectedList }).projectDir;
-  const preferPendingWriteResume = shouldPreferPendingWriteResume({
+  const preferPendingWriteResume = shouldPreferPendingWriteResumeFromTaskState({
+    taskState: taskStateFromPack,
+    userPrompt,
+    projectDirAvailable: Boolean(projectDirCandidate),
+    intent,
+  }) || shouldPreferPendingWriteResume({
     mainDoc: mainDocFromPack,
     pendingArtifacts: pendingArtifactsFromPack,
     userPrompt,
@@ -2559,7 +2631,12 @@ export async function prepareAgentRun(args: {
   const compositeTaskSummary = summarizeCompositeTaskPlan(compositeTaskPlan);
   const workflowFromPack = mainDocFromPack && typeof mainDocFromPack === "object" ? (mainDocFromPack as any)?.workflowV1 ?? null : null;
   const pendingResumeState = readPendingWriteResumeState({ mainDoc: mainDocFromPack, pendingArtifacts: pendingArtifactsFromPack });
-  const shouldResumePendingWrite = shouldPreferPendingWriteResume({
+  const shouldResumePendingWrite = shouldPreferPendingWriteResumeFromTaskState({
+    taskState: taskStateFromPack,
+    userPrompt,
+    projectDirAvailable: Boolean(projectDirFromSidecar),
+    intent,
+  }) || shouldPreferPendingWriteResume({
     mainDoc: mainDocFromPack,
     pendingArtifacts: pendingArtifactsFromPack,
     userPrompt,

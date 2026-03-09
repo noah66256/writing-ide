@@ -883,6 +883,59 @@ function renderContextManifestV1(args: { mode: Mode; segments: ContextManifestSe
   return `CONTEXT_MANIFEST(JSON):\n${JSON.stringify(payload, null, 2)}\n\n`;
 }
 
+function renderTaskStateV1(args: { mainDoc: any; todoList: any[]; pendingArtifacts: any[] }) {
+  const mainDoc = args.mainDoc && typeof args.mainDoc === "object" ? args.mainDoc : {};
+  const workflow = mainDoc && typeof (mainDoc as any).workflowV1 === "object" ? (mainDoc as any).workflowV1 : null;
+  const todo = Array.isArray(args.todoList) ? args.todoList : [];
+  const pendingArtifacts = (Array.isArray(args.pendingArtifacts) ? args.pendingArtifacts : [])
+    .filter((x) => x && typeof x === "object")
+    .map((item: any) => ({
+      id: String(item?.id ?? "").trim(),
+      kind: String(item?.kind ?? "").trim(),
+      status: String(item?.status ?? "pending").trim(),
+      pathHint: String(item?.pathHint ?? "").trim(),
+      format: String(item?.format ?? "unknown").trim(),
+      updatedAt: Number(item?.updatedAt ?? 0) || 0,
+    }))
+    .filter((item) => item.id)
+    .slice(-3);
+  const done = todo.filter((item: any) => String(item?.status ?? "").trim().toLowerCase() === "done").length;
+  const hasWaiting = todo.some((item: any) => {
+    const status = String(item?.status ?? "").trim().toLowerCase();
+    const note = String(item?.note ?? "").trim();
+    const text = String(item?.text ?? "").trim();
+    return status === "blocked" || /等待用户|待确认|请确认|请选择/.test(note) || /等待用户|待确认|请确认|请选择/.test(text);
+  });
+  const resumeAction = workflow && typeof (workflow as any).resumeAction === "object" ? (workflow as any).resumeAction : null;
+  const resumeArtifactId = String((resumeAction as any)?.artifactId ?? "").trim();
+  const matchedArtifact = resumeArtifactId
+    ? pendingArtifacts.find((item) => item.id === resumeArtifactId && item.status.toLowerCase() === "pending")
+    : pendingArtifacts.find((item) => item.status.toLowerCase() === "pending");
+  const payload = {
+    v: 1,
+    runIntent: String((mainDoc as any)?.runIntent ?? "auto").trim() || "auto",
+    workflow: workflow
+      ? {
+          kind: String((workflow as any)?.kind ?? "").trim(),
+          status: String((workflow as any)?.status ?? "").trim(),
+          routeId: String((workflow as any)?.routeId ?? "").trim(),
+          updatedAt: String((workflow as any)?.updatedAt ?? "").trim(),
+        }
+      : null,
+    todo: { total: todo.length, done, hasWaiting },
+    pendingArtifacts,
+    resume: {
+      canResumePendingWrite:
+        String((workflow as any)?.kind ?? "").trim().toLowerCase() === "project_open_resume_write" &&
+        String((workflow as any)?.status ?? "").trim().toLowerCase() === "waiting_user" &&
+        Boolean(matchedArtifact),
+      artifactId: matchedArtifact?.id ?? "",
+      pathHint: String((resumeAction as any)?.pathHint ?? matchedArtifact?.pathHint ?? "").trim(),
+    },
+  };
+  return `TASK_STATE(JSON):\n${JSON.stringify(payload, null, 2)}\n\n`;
+}
+
 /** 将证据原文/anchor 降级为"句式特征描述"，防止模型照抄原文。 */
 export function summarizeQuoteAsFeatureV1(quote: string): string {
   const t = String(quote ?? "").trim();
@@ -1851,6 +1904,11 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     ? `PENDING_ARTIFACTS(JSON):\n${JSON.stringify(pendingArtifactsForPack, null, 2)}\n\n` +
       `提示：这些是“上一轮已经生成但尚未落盘”的待恢复产物。若用户本轮是在继续/保存/恢复，请优先复用这些产物，不要重新生成。\n\n`
     : "";
+  const taskStateSection = renderTaskStateV1({
+    mainDoc: mainDocForPack,
+    todoList: runTodoForPack,
+    pendingArtifacts: pendingArtifactsRaw,
+  });
 
   const segments: ContextManifestSegmentV1[] = [];
   const parts: string[] = [];
@@ -1974,6 +2032,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
 
   // p2: 提案态提示（可信）
   if (pendingSection) pushSeg({ name: "PENDING_FILE_PROPOSALS", content: pendingSection, priority: "p2", trusted: true, source: "desktop" });
+  pushSeg({ name: "TASK_STATE", content: taskStateSection, priority: "p0", trusted: true, source: "desktop" });
   if (pendingArtifactsSection) pushSeg({ name: "PENDING_ARTIFACTS", content: pendingArtifactsSection, priority: "p0", trusted: true, source: "desktop" });
 
   // p2: 选区（可信，但可能截断）
@@ -2063,6 +2122,11 @@ export function buildChatContextPack(extra?: { referencesText?: string; userProm
     ? `PENDING_ARTIFACTS(JSON):\n${JSON.stringify(pendingArtifactsForPack, null, 2)}\n\n` +
       `提示：这些是“上一轮已经生成但尚未落盘”的待恢复产物。若用户本轮是在继续/保存/恢复，请优先复用这些产物，不要重新生成。\n\n`
     : "";
+  const taskStateSection = renderTaskStateV1({
+    mainDoc: (useRunStore.getState() as any).mainDoc ?? {},
+    todoList: (useRunStore.getState() as any).todoList ?? [],
+    pendingArtifacts: pendingArtifactsRaw,
+  });
 
   const segments: ContextManifestSegmentV1[] = [];
   const parts: string[] = [];
@@ -2125,6 +2189,8 @@ export function buildChatContextPack(extra?: { referencesText?: string; userProm
   }
 
   if (refs) pushSeg({ name: "REFERENCES", content: refs, priority: "p1", trusted: false, source: "desktop" });
+  pushSeg({ name: "TASK_STATE", content: taskStateSection, priority: "p0", trusted: true, source: "desktop" });
+  if (pendingArtifactsSection) pushSeg({ name: "PENDING_ARTIFACTS", content: pendingArtifactsSection, priority: "p0", trusted: true, source: "desktop" });
   pushSeg({
     name: "EDITOR_SELECTION",
     content: `EDITOR_SELECTION(JSON):\n${JSON.stringify(selection, null, 2)}\n`,
