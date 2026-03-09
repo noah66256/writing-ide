@@ -292,6 +292,7 @@ function buildRouteDecisionV1(args: {
     "kb_ops",
   ]);
   const executionPreferredRaw: string[] = [];
+  const freshWebResearchTask = looksLikeFreshWebResearchTask(args.userPrompt);
 
   if (routeIdLower === "file_delete_only") {
     executionPreferredRaw.push("doc.deletePath", "project.listFiles");
@@ -304,9 +305,9 @@ function buildRouteDecisionV1(args: {
   } else if (routeIdLower === "kb_ops") {
     executionPreferredRaw.push("kb.search", "run.mainDoc.get", "run.setTodoList");
   } else if (routeIdLower === "task_execution") {
-    // Anthropic 端点工具遵循度高，推荐先建 Todo 再执行；
-    // 非 Anthropic 端点（GPT 等）对复杂工具链遵循度低，推荐先读取再决策。
-    if (isAnthropicLike) {
+    if (freshWebResearchTask) {
+      executionPreferredRaw.push("time.now", "web.search", "web.fetch", "run.mainDoc.get", "kb.search", "run.setTodoList", "run.todo");
+    } else if (isAnthropicLike) {
       executionPreferredRaw.push("run.setTodoList", "run.todo", "run.mainDoc.get", "kb.search");
     } else {
       executionPreferredRaw.push("run.mainDoc.get", "kb.search", "run.setTodoList");
@@ -1025,9 +1026,12 @@ export function looksLikeProjectSearchIntent(text: string): boolean {
   const hasProjectHints =
     /(文件|目录|项目|代码|路径|\.md|\.mdx|\.ts|\.tsx|\.js|\.json|@\{[^}]+\}|src\/|apps\/|packages\/)/i.test(t) ||
     /(哪里用到了|在哪(里)?用|引用|import|require|调用|定义|实现)/i.test(t);
+  const fileMentionLooksLikeDelivery =
+    /(生成文件|写成文件|写入文件|保存文件|输出文件|落盘|导出文件)/.test(t) &&
+    !/(项目|代码|目录|路径|src\/|apps\/|packages\/|哪里用到了|在哪(里)?用|import|require|调用|定义|实现|\.ts|\.tsx|\.js|\.json)/i.test(t);
 
-  if (looksWeb && !hasProjectHints) return false;
-  if (!hasProjectHints) return false;
+  if (looksWeb && (!hasProjectHints || fileMentionLooksLikeDelivery)) return false;
+  if (!hasProjectHints || fileMentionLooksLikeDelivery) return false;
 
   const looksDiscussion = /(原因|为什么|怎么会|解释|讨论)/.test(t) && !hasProjectHints;
   if (looksDiscussion) return false;
@@ -1129,6 +1133,18 @@ export function looksLikeDirectOpenWebIntent(text: string): boolean {
   if (!hasTarget) return false;
   // 排除“写作页面/落地页文案”等非网页导航语义
   if (/(落地页|详情页|页面文案|页面结构|开场|脚本|文案|仿写|改写|润色)/.test(t)) return false;
+  return true;
+}
+
+export function looksLikeFreshWebResearchTask(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  const hasSearchIntent = /(查(一下)?|查询|搜索|检索|全网|上网|联网|搜集|收集|调研|研究|盘点|热点|新闻|时事|快讯|资讯|资料|素材|来源)/.test(t);
+  if (!hasSearchIntent) return false;
+  const hasFreshness = /(今天|今日|当天|最新|最近|实时|刚刚|本周|今日份|科技圈|财经圈|AI圈|热搜|热点|爆点|多搜几轮)/.test(t);
+  if (!hasFreshness) return false;
+  const isProjectOnly = /(项目|仓库|代码|文件|报错|bug|报错日志|本地)/.test(t) && !/(热点|新闻|财经|科技|时事)/.test(t);
+  if (isProjectOnly) return false;
   return true;
 }
 
@@ -2869,34 +2885,51 @@ export async function prepareAgentRun(args: {
     // 执行启动阶段（首个工具调用前）：收敛到"任务首工具"集合，减少模型盲选和偏航。
     if (executionContract.required && !state.hasAnyToolCall) {
       const allowedNow = allowed ?? new Set<string>();
+      const shouldStartWithWebResearch = routeIdLower === "task_execution" && webGate.enabled && webGate.needsSearch && !state.hasWebSearch;
+      if (shouldStartWithWebResearch) {
+        hints.push("本轮包含强时效联网研究要求：请先调用 time.now / web.search / web.fetch 补齐当天信息，再进入写作与交付。");
+      }
 
       const bootCandidates =
         routeIdLower === "web_radar" || directOpenWebIntent
           ? executionPreferredWithComposite
-          : (!state.hasTodoList
-              ? [
-                  "run.setTodoList",
-                  "run.todo",
-                  "run.mainDoc.get",
-                  "run.mainDoc.update",
-                  "kb.search",
-                  "web.search",
-                  "web.fetch",
-                  "doc.write",
-                  ...executionPreferredWithComposite,
-                ]
-              : [
-                  ...executionPreferredWithComposite,
-                  "run.mainDoc.get",
-                  "run.mainDoc.update",
-                  "run.setTodoList",
-                  "run.todo",
-                  "project.listFiles",
-                  "kb.search",
-                  "web.search",
-                  "web.fetch",
-                  "doc.write",
-                ]);
+          : shouldStartWithWebResearch
+            ? [
+                "time.now",
+                "web.search",
+                "web.fetch",
+                "run.mainDoc.get",
+                "kb.search",
+                ...executionPreferredWithComposite,
+                "run.setTodoList",
+                "run.todo",
+                "run.mainDoc.update",
+                "doc.write",
+              ]
+            : (!state.hasTodoList
+                ? [
+                    "run.setTodoList",
+                    "run.todo",
+                    "run.mainDoc.get",
+                    "run.mainDoc.update",
+                    "kb.search",
+                    "web.search",
+                    "web.fetch",
+                    "doc.write",
+                    ...executionPreferredWithComposite,
+                  ]
+                : [
+                    ...executionPreferredWithComposite,
+                    "run.mainDoc.get",
+                    "run.mainDoc.update",
+                    "run.setTodoList",
+                    "run.todo",
+                    "project.listFiles",
+                    "kb.search",
+                    "web.search",
+                    "web.fetch",
+                    "doc.write",
+                  ]);
       const boot = new Set<string>(
         Array.from(new Set(bootCandidates.map((x) => String(x ?? "").trim()).filter(Boolean))).filter((n) => allowedNow.has(n)),
       );
