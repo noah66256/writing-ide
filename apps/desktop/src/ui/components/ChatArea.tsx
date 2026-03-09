@@ -503,13 +503,13 @@ function WorkflowTodoPanel({
         >
           <div className="flex items-center gap-2 min-w-0">
             {collapsed ? <ChevronRight size={15} className="text-text-faint shrink-0" /> : <ChevronDown size={15} className="text-text-faint shrink-0" />}
-            <div className="text-[13px] font-semibold text-text">任务清单</div>
+            <div className="text-[14px] font-semibold text-text">任务清单</div>
           </div>
           <div className="flex items-center gap-3 shrink-0">
-            <div className="text-[12px] text-text-muted whitespace-nowrap">
+            <div className="text-[13px] text-text-muted whitespace-nowrap">
               {done >= total ? ("已完成 " + done + "/" + total + (isRunning ? " · 收尾中" : "")) : ("已完成 " + done + "/" + total)}
             </div>
-            <div className="text-[12px] text-text-faint whitespace-nowrap">{collapsed ? "展开" : "收起"}</div>
+            <div className="text-[13px] text-text-faint whitespace-nowrap">{collapsed ? "展开" : "收起"}</div>
           </div>
         </button>
         {!collapsed ? (
@@ -532,13 +532,13 @@ function WorkflowTodoPanel({
                   {icon}
                   <div className="min-w-0 flex-1">
                     <div className={cn(
-                      "text-[13px] leading-6 break-words",
+                      "text-[14px] leading-6 break-words",
                       isDone ? "text-text-muted line-through" : isBlocked ? "text-error" : "text-text",
                     )}>
                       {index + 1}. {item.text}
                     </div>
                     {item.note ? (
-                      <div className="mt-0.5 text-[12px] leading-5 text-text-faint break-words">{formatTodoNote(item.note)}</div>
+                      <div className="mt-0.5 text-[13px] leading-5 text-text-faint break-words">{formatTodoNote(item.note)}</div>
                     ) : null}
                   </div>
                 </div>
@@ -700,7 +700,7 @@ function AssistantMessage({
               思考中...
             </span>
           ) : (
-            <div className="markdown-body max-w-none whitespace-pre-wrap break-words">
+            <div className="markdown-body chat-markdown-body max-w-none whitespace-pre-wrap break-words">
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 urlTransform={(url) => url.startsWith("file-ref:") ? url : defaultUrlTransform(url)}

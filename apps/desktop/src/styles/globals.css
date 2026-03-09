@@ -221,3 +221,39 @@ html, body {
   border-top: 1px solid var(--color-border-soft);
   margin: 1em 0;
 }
+
+
+.chat-markdown-body {
+  font-size: 14px;
+  line-height: 1.75;
+}
+.chat-markdown-body h1,
+.chat-markdown-body h2,
+.chat-markdown-body h3,
+.chat-markdown-body h4 {
+  font-size: 1em;
+  font-weight: 600;
+  line-height: 1.6;
+  margin-top: 0.75em;
+  margin-bottom: 0.35em;
+}
+.chat-markdown-body p,
+.chat-markdown-body ul,
+.chat-markdown-body ol,
+.chat-markdown-body blockquote,
+.chat-markdown-body table,
+.chat-markdown-body pre {
+  margin-top: 0.45em;
+  margin-bottom: 0.45em;
+}
+.chat-markdown-body li {
+  margin-top: 0.12em;
+  margin-bottom: 0.12em;
+}
+.chat-markdown-body code {
+  font-size: 0.9em;
+}
+.chat-markdown-body pre {
+  font-size: 0.9em;
+  line-height: 1.65;
+}
