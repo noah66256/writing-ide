@@ -64,6 +64,47 @@ function normalizeBaseURL(baseURL: string): string {
   return String(baseURL || "").trim().replace(/\/+$/g, "");
 }
 
+/**
+ * 加密机制临时禁用期间：根据模型名/endpoint/stage 选择对应的 env API key。
+ * 不同模型族的 key 不通用（代理按 key 分 channel），必须区分。
+ */
+function pickEnvApiKey(opts: { modelName?: string; endpoint?: string; stageKey?: string }): string {
+  const envKey = normalizeApiKeyInput(String(process.env.LLM_API_KEY ?? ""));
+  const mn = (opts.modelName ?? "").toLowerCase();
+  const ep = (opts.endpoint ?? "").toLowerCase();
+
+  // 1. 模型族判定（最高优先级：不同 provider 的 key 不通用）
+  if (/\b(gpt[-.]|o[1-9]|chatgpt)\b/.test(mn) || /\/responses/i.test(ep)) {
+    return normalizeApiKeyInput(String(process.env.LLM_OPENAI_API_KEY ?? "")) || envKey;
+  }
+  if (/\bgemini\b/.test(mn) || /generatecontent/i.test(ep)) {
+    return normalizeApiKeyInput(String(process.env.LLM_GEMINI_API_KEY ?? "")) || envKey;
+  }
+  if (/\/embeddings/i.test(ep)) {
+    return normalizeApiKeyInput(String(process.env.LLM_EMBED_API_KEY ?? process.env.LLM_CARD_API_KEY ?? "")) || envKey;
+  }
+
+  // 2. stage 级 env（同族模型在不同 stage 可能用不同 key/配额）
+  const sk = opts.stageKey ?? "";
+  if (sk === "rag.ingest.split_articles") {
+    return normalizeApiKeyInput(String(process.env.LLM_SPLIT_API_KEY ?? process.env.LLM_HAIKU_API_KEY ?? process.env.LLM_CARD_API_KEY ?? "")) || envKey;
+  }
+  if (sk.startsWith("rag.ingest.")) {
+    return normalizeApiKeyInput(String(process.env.LLM_CARD_API_KEY ?? "")) || envKey;
+  }
+  if (sk === "lint.style") {
+    return normalizeApiKeyInput(String(process.env.LLM_LINTER_API_KEY ?? process.env.LLM_CARD_API_KEY ?? "")) || envKey;
+  }
+  if (sk === "agent.tool_call_repair") {
+    return normalizeApiKeyInput(String(process.env.LLM_TOOL_REPAIR_API_KEY ?? "")) || envKey;
+  }
+  if (sk === "agent.context_selector") {
+    return normalizeApiKeyInput(String(process.env.LLM_CONTEXT_SELECTOR_API_KEY ?? process.env.LLM_TOOL_REPAIR_API_KEY ?? "")) || envKey;
+  }
+
+  return envKey;
+}
+
 function normalizeEndpoint(endpoint: string, fallback: string): string {
   const raw = String(endpoint || "").trim();
   const v = raw || fallback;
@@ -843,11 +884,10 @@ export function createAiConfigService(args: {
 
     const provider = modelDoc.providerId ? getProviderById(ai, modelDoc.providerId) : null;
     if (provider && !provider.isEnabled) throw new Error(`provider_not_available:${provider.id}`);
-    // 加密机制临时禁用：直接读 .env，后续重做加密时恢复 decryptApiKey 逻辑
-    const envApiKey = normalizeApiKeyInput(String(process.env.LLM_API_KEY ?? ""));
-    const envBaseURL = normalizeBaseURL(String(process.env.LLM_BASE_URL ?? ""));
-    const apiKey = envApiKey;
+    // 加密机制临时禁用：根据模型特征 + stage 选择对应 env API key
     const endpoint = normalizeEndpoint(modelDoc.endpoint, def.defaultEndpoint);
+    const apiKey = pickEnvApiKey({ modelName: modelDoc.model, endpoint, stageKey: key });
+    const envBaseURL = normalizeBaseURL(String(process.env.LLM_BASE_URL ?? ""));
     return {
       stage: key,
       modelId: modelDoc.id,
@@ -868,11 +908,10 @@ export function createAiConfigService(args: {
     if (!modelDoc || !modelDoc.isEnabled) throw new Error(`model_not_available:${id}`);
     const provider = modelDoc.providerId ? getProviderById(ai, modelDoc.providerId) : null;
     if (provider && !provider.isEnabled) throw new Error(`provider_not_available:${provider.id}`);
-    // 加密机制临时禁用：直接读 .env，后续重做加密时恢复 decryptApiKey 逻辑
-    const envApiKey = normalizeApiKeyInput(String(process.env.LLM_API_KEY ?? ""));
-    const envBaseURL = normalizeBaseURL(String(process.env.LLM_BASE_URL ?? ""));
-    const apiKey = envApiKey;
+    // 加密机制临时禁用：根据模型特征选择对应 env API key
     const endpoint = normalizeEndpoint(modelDoc.endpoint, "/v1/chat/completions");
+    const apiKey = pickEnvApiKey({ modelName: modelDoc.model, endpoint });
+    const envBaseURL = normalizeBaseURL(String(process.env.LLM_BASE_URL ?? ""));
     return {
       modelId: modelDoc.id,
       baseURL: normalizeBaseURL(provider?.baseURL || modelDoc.baseURL) || envBaseURL,
@@ -1358,8 +1397,8 @@ export function createAiConfigService(args: {
       return { modelId: m.id, model: m.model, baseURL, endpoint, endpointUrl, ...tr };
     }
 
-    // 加密机制临时禁用：直接读 .env
-    const apiKey = normalizeApiKeyInput(String(process.env.LLM_API_KEY ?? ""));
+    // 加密机制临时禁用：根据模型特征选择对应 env API key
+    const apiKey = pickEnvApiKey({ modelName: m.model, endpoint });
     if (!apiKey) {
       const tr: AiModelTestResult = { ok: false, latencyMs: null, status: null, error: "apiKey_missing", testedAt: nowIso() };
       await writeResult(tr);
