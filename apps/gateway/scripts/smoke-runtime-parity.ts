@@ -64,13 +64,13 @@ function scenario1_factoryCreation() {
   assert.equal(pi.kind, "gateway");
   assert.equal(pi.mode, "pi");
 
-  // 默认 → legacy
+  // 默认 → pi
   const defaultMode = createRuntime({ runCtx: mockCtx });
-  assert.equal(defaultMode.mode, "legacy");
+  assert.equal(defaultMode.mode, "pi");
 
-  // 非法值 → legacy
+  // 非法值 → pi
   const invalid = createRuntime({ mode: "nonsense", runCtx: mockCtx });
-  assert.equal(invalid.mode, "legacy");
+  assert.equal(invalid.mode, "pi");
 
   ok("scenario1.factory_creation");
 }
@@ -588,8 +588,11 @@ async function scenario15_bridgeShadowStub() {
 // ---------------------------------------------------------------------------
 // mock RunContext（最小化，仅满足 RuntimeFactory 创建需求）
 // ---------------------------------------------------------------------------
-function createMockRunContext(writeEvent?: (event: string, data: unknown) => void) {
-  return {
+function createMockRunContext(
+  writeEvent?: (event: string, data: unknown) => void,
+  overrides?: Record<string, unknown>,
+) {
+  const base = {
     runId: `smoke_${Date.now()}`,
     mode: "agent" as const,
     intent: {
@@ -631,6 +634,174 @@ function createMockRunContext(writeEvent?: (event: string, data: unknown) => voi
     maxTurns: 1,
     jsonToolFallbackEnabled: false,
   };
+  const merged = { ...base, ...(overrides ?? {}) } as any;
+  if (overrides?.initialRunState) {
+    merged.initialRunState = { ...((base as any).initialRunState ?? {}), ...overrides.initialRunState };
+  }
+  return merged;
+}
+
+const PROVIDER_CASES = [
+  { apiType: "anthropic-messages" as const, endpoint: "/v1/messages", modelId: "claude-test" },
+  { apiType: "openai-responses" as const, endpoint: "/v1/responses", modelId: "gpt-5-test" },
+  { apiType: "openai-completions" as const, endpoint: "/v1/chat/completions", modelId: "gpt-5-test" },
+  { apiType: "gemini" as const, endpoint: "/v1beta/models/gemini-3.1-pro-preview:generateContent", modelId: "gemini-3.1-pro-preview" },
+];
+
+class ScriptedKernel implements LoopKernel {
+  constructor(private readonly scriptedEvents: any[]) {}
+
+  run(_args: any): any {
+    const events = [...this.scriptedEvents];
+    return {
+      async *[Symbol.asyncIterator]() {
+        for (const event of events) {
+          yield event;
+        }
+      },
+      async result() {
+        return [];
+      },
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 场景 16: Provider parity - task_execution.todo_gate
+// ---------------------------------------------------------------------------
+async function scenario16_providerParityTodoGate() {
+  for (const provider of PROVIDER_CASES) {
+    const mockKernel = new MockKernel();
+    const ctx = createMockRunContext(undefined, {
+      apiType: provider.apiType,
+      endpoint: provider.endpoint,
+      modelId: provider.modelId,
+      allowedToolNames: new Set(["run.setTodoList", "doc.write"]),
+      executionContract: {
+        required: true,
+        minToolCalls: 1,
+        maxNoToolTurns: 1,
+        reason: "task_execution",
+        preferredToolNames: ["run.setTodoList"],
+      },
+    });
+    const runtime = new GatewayRuntime({ mode: "pi", runCtx: ctx } as any, mockKernel);
+    await runtime.run("test prompt");
+    const blocked = await (runtime as any)._executeAgentTool("tc_todo_gate", "doc.write", {
+      path: "output/demo.md",
+      content: "hello",
+    });
+    assert.equal(blocked.ok, false, `${provider.apiType} should block write before todo`);
+    assert.equal((blocked.output as any).error, "TODO_GATE_REQUIRED");
+    const report = (runtime as any)._buildExecutionReport(provider.apiType) as any;
+    assert.equal(report.providerApi, provider.apiType);
+    assert.ok(report.providerCapabilitiesSnapshot, `${provider.apiType} should expose provider capabilities snapshot`);
+  }
+  ok("scenario16.provider_parity.todo_gate");
+}
+
+// ---------------------------------------------------------------------------
+// 场景 17: Provider parity - task_execution.single_artifact_write_once
+// ---------------------------------------------------------------------------
+async function scenario17_providerParitySingleArtifactWriteOnce() {
+  for (const provider of PROVIDER_CASES) {
+    const mockKernel = new MockKernel();
+    const ctx = createMockRunContext(undefined, {
+      apiType: provider.apiType,
+      endpoint: provider.endpoint,
+      modelId: provider.modelId,
+      allowedToolNames: new Set(["doc.write", "run.done"]),
+      initialRunState: { hasTodoList: true },
+    });
+    const runtime = new GatewayRuntime({ mode: "pi", runCtx: ctx } as any, mockKernel);
+    await runtime.run("test prompt");
+    (runtime as any)._updateRunState("doc.write", { path: "output/report.md", content: "v1" }, {
+      ok: true,
+      output: { path: "output/report.md", ok: true },
+      executedBy: "gateway",
+    });
+    const runtimeState = (runtime as any).runState as any;
+    assert.equal(Array.isArray(runtimeState.sideEffectLedger) ? runtimeState.sideEffectLedger.length : 0, 1, `${provider.apiType} should record one side effect`);
+    assert.equal(runtimeState.deliveryLatchActivatedAtTurn, 0);
+  }
+  ok("scenario17.provider_parity.single_artifact_write_once");
+}
+
+// ---------------------------------------------------------------------------
+// 场景 18: Provider parity - task_execution.run_done_stops_loop
+// ---------------------------------------------------------------------------
+async function scenario18_providerParityRunDoneStopsLoop() {
+  for (const provider of PROVIDER_CASES) {
+    const scripted = new ScriptedKernel([
+      { type: "turn_start" },
+      { type: "tool_execution_start", toolCallId: "tc_done", toolName: "run_dot_done", args: {} },
+      {
+        type: "tool_execution_end",
+        toolCallId: "tc_done",
+        toolName: "run_dot_done",
+        isError: false,
+        result: { details: { ok: true, output: { ok: true }, executedBy: "gateway" }, content: [] },
+      },
+      { type: "turn_end" },
+      { type: "agent_end" },
+    ]);
+    const ctx = createMockRunContext(undefined, {
+      apiType: provider.apiType,
+      endpoint: provider.endpoint,
+      modelId: provider.modelId,
+      allowedToolNames: new Set(["run.done"]),
+    });
+    const runtime = new GatewayRuntime({ mode: "pi", runCtx: ctx } as any, scripted);
+    const result = await runtime.run("test prompt");
+    assert.equal(result.outcome.reason, "run_done", `${provider.apiType} should stop on run.done`);
+  }
+  ok("scenario18.provider_parity.run_done_stops_loop");
+}
+
+// ---------------------------------------------------------------------------
+// 场景 19: Provider parity - task_execution.delivery_latch_blocks_repeat_write
+// ---------------------------------------------------------------------------
+async function scenario19_providerParityDeliveryLatchBlocksRepeatWrite() {
+  for (const provider of PROVIDER_CASES) {
+    const mockKernel = new MockKernel();
+    const ctx = createMockRunContext(undefined, {
+      apiType: provider.apiType,
+      endpoint: provider.endpoint,
+      modelId: provider.modelId,
+      allowedToolNames: new Set(["doc.write"]),
+      initialRunState: {
+        hasTodoList: true,
+        deliveryLatched: true,
+        deliveredArtifactFamilies: ["output/report"],
+        sideEffectLedger: [{
+          semanticKind: "artifact_write",
+          toolName: "doc.write",
+          logicalTarget: "output/report",
+          argsFingerprint: "a",
+          resultFingerprint: "b",
+          contentFingerprint: "c",
+          ts: Date.now(),
+        }],
+      },
+    });
+    const runtime = new GatewayRuntime({ mode: "pi", runCtx: ctx } as any, mockKernel);
+    await runtime.run("test prompt");
+    const blocked = await (runtime as any)._executeAgentTool("tc_repeat", "doc.write", {
+      path: "output/report_v2.md",
+      content: "v2",
+    });
+    assert.equal(blocked.ok, false, `${provider.apiType} should block repeat write`);
+    assert.equal((blocked.output as any).error, "DELIVERY_LATCHED");
+  }
+  ok("scenario19.provider_parity.delivery_latch_blocks_repeat_write");
+}
+
+// ---------------------------------------------------------------------------
+// 场景 20: browser_session.waiting_user_not_cleared
+// ---------------------------------------------------------------------------
+async function scenario20_browserSessionWaitingUserNotCleared() {
+  await scenario12_followUpWaitingNoChase();
+  ok("scenario20.browser_session.waiting_user_not_cleared");
 }
 
 // ---------------------------------------------------------------------------
@@ -652,6 +823,11 @@ async function main() {
   await scenario13_bridgeValidation();
   await scenario14_bridgeAliasLookup();
   await scenario15_bridgeShadowStub();
+  await scenario16_providerParityTodoGate();
+  await scenario17_providerParitySingleArtifactWriteOnce();
+  await scenario18_providerParityRunDoneStopsLoop();
+  await scenario19_providerParityDeliveryLatchBlocksRepeatWrite();
+  await scenario20_browserSessionWaitingUserNotCleared();
   console.log("[smoke-parity] ALL PASSED");
 }
 

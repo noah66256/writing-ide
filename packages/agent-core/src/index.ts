@@ -18,6 +18,7 @@ export type {
   RunState,
   AutoRetryAnalysis,
   StyleWorkflowBatchAnalysis,
+  SideEffectRecordV1,
 } from "./runMachine.js";
 export {
   createInitialRunState,

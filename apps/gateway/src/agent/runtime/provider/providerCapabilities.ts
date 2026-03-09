@@ -5,12 +5,13 @@
  */
 
 import type { ModelApiType } from "../../writingAgentRunner.js";
+import { deriveProviderCapabilities, type ProviderCapabilitySnapshot } from "../../../llm/providerCapabilities.js";
 
 // ── 类型 ─────────────────────────────────────────
 
 export type PiProviderKey = "anthropic" | "openai" | "google";
 
-export type ProviderCapabilities = {
+export type BaseProviderCapabilities = {
   apiType: ModelApiType;
   providerKey: PiProviderKey;
   /** pi-ai 的 provider registry key */
@@ -24,9 +25,11 @@ export type ProviderCapabilities = {
   notes: string[];
 };
 
+export type ProviderCapabilities = ProviderCapabilitySnapshot & BaseProviderCapabilities;
+
 // ── 能力矩阵 ─────────────────────────────────────
 
-const CAPABILITY_MATRIX: Record<ModelApiType, ProviderCapabilities> = {
+const CAPABILITY_MATRIX: Record<ModelApiType, BaseProviderCapabilities> = {
   "anthropic-messages": {
     apiType: "anthropic-messages",
     providerKey: "anthropic",
@@ -88,10 +91,18 @@ export function inferProviderApiType(args: {
 }
 
 /** 获取指定 apiType 的能力描述 */
-export function getProviderCapabilities(apiType?: ModelApiType): ProviderCapabilities {
+export function getProviderCapabilities(
+  apiType?: ModelApiType,
+  args?: { baseUrl?: string; endpoint?: string },
+): ProviderCapabilities {
   const resolved = apiType ?? "openai-completions";
   const cap = CAPABILITY_MATRIX[resolved] ?? CAPABILITY_MATRIX["openai-completions"];
-  return { ...cap, notes: cap.notes.slice() };
+  const derived = deriveProviderCapabilities({
+    apiType: resolved,
+    baseUrl: args?.baseUrl,
+    endpoint: args?.endpoint,
+  });
+  return { ...cap, ...derived, notes: cap.notes.slice() };
 }
 
 /** 推断 pi-ai provider key */
@@ -105,5 +116,7 @@ export function inferPiProviderKey(args: {
 
 /** 列出所有已定义的 provider 能力 */
 export function listProviderCapabilities(): ProviderCapabilities[] {
-  return Object.values(CAPABILITY_MATRIX).map((c) => ({ ...c, notes: c.notes.slice() }));
+  return (Object.keys(CAPABILITY_MATRIX) as ModelApiType[]).map((apiType) =>
+    getProviderCapabilities(apiType),
+  );
 }

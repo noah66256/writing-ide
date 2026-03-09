@@ -839,6 +839,18 @@ export class AgentRunner {
     if (typeof this.runState.deliveryLatched !== "boolean") {
       this.runState.deliveryLatched = false;
     }
+    if (!Array.isArray(this.runState.sideEffectLedger)) {
+      this.runState.sideEffectLedger = [];
+    }
+    if (this.runState.todoGateSatisfiedAtTurn === undefined) {
+      this.runState.todoGateSatisfiedAtTurn = null;
+    }
+    if (this.runState.deliveryLatchActivatedAtTurn === undefined) {
+      this.runState.deliveryLatchActivatedAtTurn = null;
+    }
+    if (this.runState.toolLoopGuardReason === undefined) {
+      this.runState.toolLoopGuardReason = null;
+    }
 
     // 端点能力推导
     this.apiType = ctx.apiType ?? inferApiType(ctx.endpoint);
@@ -1412,6 +1424,23 @@ export class AgentRunner {
     if (!families.includes(family)) families.push(family);
     this.runState.deliveredArtifactFamilies = families;
     this.runState.deliveryLatched = families.length > 0;
+    if (this.runState.deliveryLatchActivatedAtTurn == null) {
+      this.runState.deliveryLatchActivatedAtTurn = this.turn;
+    }
+    const outputObj = result.output && typeof result.output === "object"
+      ? (result.output as Record<string, unknown>)
+      : {};
+    const record = {
+      semanticKind: "artifact_write",
+      toolName: String(toolUse.name ?? ""),
+      logicalTarget: family,
+      argsFingerprint: stableStringify(toolUse.input ?? {}).slice(0, 200),
+      resultFingerprint: stableStringify(result.output ?? {}).slice(0, 200),
+      contentFingerprint: typeof outputObj.path === "string" ? String(outputObj.path) : family,
+      ts: Date.now(),
+    };
+    const ledger = Array.isArray(this.runState.sideEffectLedger) ? this.runState.sideEffectLedger : [];
+    this.runState.sideEffectLedger = [...ledger, record as any].slice(-20);
   }
 
   private _isDeliveryLatchedFor(toolUse: ContentBlockToolUse): boolean {
@@ -3317,6 +3346,10 @@ export class AgentRunner {
     ) {
       this.runState.hasTodoList = true;
       this.runState.hasPlanCommitment = true;
+      if (this.runState.todoGateSatisfiedAtTurn == null) {
+        this.runState.todoGateSatisfiedAtTurn = this.turn;
+      }
+      this.runState.toolLoopGuardReason = null;
       return;
     }
 
@@ -3732,6 +3765,14 @@ export class AgentRunner {
       totalToolCalls: this.totalToolCalls,
       executionNoToolTurns: this.executionNoToolTurns,
       failedToolCount: this.failedToolDigests.length,
+      providerApi: this.apiType,
+      providerCapabilitiesSnapshot: this.providerCapabilities,
+      providerContinuationMode: this.providerCapabilities.continuationMode,
+      todoGateSatisfiedAtTurn: this.runState.todoGateSatisfiedAtTurn,
+      deliveryLatchActivatedAtTurn: this.runState.deliveryLatchActivatedAtTurn,
+      sideEffectLedgerSize: Array.isArray(this.runState.sideEffectLedger) ? this.runState.sideEffectLedger.length : 0,
+      toolLoopGuardReason: this.runState.toolLoopGuardReason,
+      runState: this.runState,
     };
   }
 

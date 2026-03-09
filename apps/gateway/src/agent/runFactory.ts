@@ -3713,6 +3713,19 @@ export async function executeAgentRun(args: {
 
   const failureDigest = runtime.getFailureDigest();
   const executionReport = runtime.getExecutionReport();
+  try {
+    (audit.meta as any).runtimeExecutionSummary = sanitizeForAudit({
+      providerApi: (executionReport as any)?.providerApi ?? (executionReport as any)?.provider ?? null,
+      providerCapabilitiesSnapshot: (executionReport as any)?.providerCapabilitiesSnapshot ?? null,
+      providerContinuationMode: (executionReport as any)?.providerContinuationMode ?? null,
+      todoGateSatisfiedAtTurn: (executionReport as any)?.todoGateSatisfiedAtTurn ?? null,
+      deliveryLatchActivatedAtTurn: (executionReport as any)?.deliveryLatchActivatedAtTurn ?? null,
+      sideEffectLedgerSize: (executionReport as any)?.sideEffectLedgerSize ?? null,
+      toolLoopGuardReason: (executionReport as any)?.toolLoopGuardReason ?? null,
+    });
+  } catch {
+    // ignore audit summary mutation failures
+  }
   writeEvent("run.execution.report", {
     runId,
     ...executionReport,

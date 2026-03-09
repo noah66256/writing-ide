@@ -128,7 +128,10 @@ export class PiProviderBridge {
       endpoint: request.endpoint,
       modelId: request.modelId,
     });
-    const capabilities = getProviderCapabilities(apiType);
+    const capabilities = getProviderCapabilities(apiType, {
+      baseUrl: request.baseUrl,
+      endpoint: request.endpoint,
+    });
     const mod = await this._load();
 
     if (!mod) {
@@ -170,7 +173,10 @@ export class PiProviderBridge {
       endpoint: request.endpoint,
       modelId: request.modelId,
     });
-    const capabilities = getProviderCapabilities(apiType);
+    const capabilities = getProviderCapabilities(apiType, {
+      baseUrl: request.baseUrl,
+      endpoint: request.endpoint,
+    });
     const mod = await this._load();
 
     if (!mod) {

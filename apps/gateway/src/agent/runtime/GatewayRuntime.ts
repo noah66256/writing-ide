@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 /**
  * GatewayRuntime — Phase 3：基于 pi-agent-core 的新运行时
  *
@@ -10,7 +12,7 @@
  * - shadow 模式下 Desktop 工具 dry-run
  */
 
-import { createInitialRunState, type RunState } from "@ohmycrab/agent-core";
+import { createInitialRunState, isContentWriteTool, isWriteLikeTool, type RunState, type SideEffectRecordV1 } from "@ohmycrab/agent-core";
 import { TOOL_LIST, encodeToolName, decodeToolName } from "@ohmycrab/tools";
 import type {
   AgentEvent,
@@ -56,7 +58,7 @@ import {
   pushItem,
   summarizeTranscript,
 } from "./transcript/canonicalTranscript.js";
-import { getProviderCapabilities } from "./provider/providerCapabilities.js";
+import { getProviderCapabilities, type ProviderCapabilities } from "./provider/providerCapabilities.js";
 import { PiLoopKernel } from "./kernel/PiLoopKernel.js";
 import type { LoopKernel } from "./kernel/LoopKernel.types.js";
 import { LegacySubAgentBridge } from "./LegacySubAgentBridge.js";
@@ -153,6 +155,31 @@ function appendUnique(list: string[], value: string, limit = 10): string[] {
   return [...list, normalized].slice(-limit);
 }
 
+function stableStringify(value: unknown): string {
+  const walk = (input: unknown): unknown => {
+    if (Array.isArray(input)) return input.map((item) => walk(item));
+    if (!input || typeof input !== "object") return input;
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(input as Record<string, unknown>).sort()) {
+      out[key] = walk((input as Record<string, unknown>)[key]);
+    }
+    return out;
+  };
+  try {
+    return JSON.stringify(walk(value));
+  } catch {
+    return String(value ?? "");
+  }
+}
+
+function fingerprint(value: unknown): string {
+  return createHash("sha1").update(stableStringify(value)).digest("hex").slice(0, 16);
+}
+
+function normalizePathLike(value: unknown): string {
+  return String(value ?? "").trim().replace(/\\/g, "/").replace(/\/+/g, "/");
+}
+
 function extractDomain(rawUrl: unknown): string {
   try {
     return new URL(String(rawUrl ?? "").trim()).hostname || "";
@@ -219,6 +246,9 @@ export class GatewayRuntime implements AgentRuntime {
   private runState: RunState = createInitialRunState();
   private readonly turnEngine = new TurnEngine();
   private readonly toolCallSnapshots = new Map<string, ToolCallSnapshot>();
+  private readonly providerCapabilities: ProviderCapabilities;
+  private executionNoToolTurns = 0;
+  private currentTurnToolCalls = 0;
   /** 当前 run() 的内部 AbortController，run.done / maxTurns 通过此终止 */
   private internalAc: AbortController | null = null;
   /** 当前轮次的有效工具白名单（由 computePerTurnAllowed 动态计算） */
@@ -237,6 +267,10 @@ export class GatewayRuntime implements AgentRuntime {
   ) {
     this.mode = config.mode;
     this.shadowMode = config.shadowMode ?? "off";
+    this.providerCapabilities = getProviderCapabilities(
+      inferProviderApi(this.config),
+      { baseUrl: this.config.runCtx.baseUrl, endpoint: this.config.runCtx.endpoint },
+    );
   }
 
   // ── 公开方法 ───────────────────────────────────
@@ -246,6 +280,23 @@ export class GatewayRuntime implements AgentRuntime {
 
     const providerApi = inferProviderApi(this.config);
     const maxTurns = this.config.runCtx.maxTurns ?? DEFAULT_MAX_TURNS;
+
+    this.config.runCtx.writeEvent("run.notice", {
+      turn: 0,
+      kind: "info",
+      title: "ProviderRuntimeCapabilities",
+      message: `runtime provider=${providerApi} continuation=${this.providerCapabilities.continuationMode}`,
+      detail: this.providerCapabilities,
+    });
+    if (this._todoGateRequired()) {
+      this.config.runCtx.writeEvent("run.notice", {
+        turn: 0,
+        kind: "info",
+        title: "TodoGateActive",
+        message: "本轮已启用 Todo Gate：必须先建立 Todo，再进入自由执行。",
+        detail: { preferredTool: this._pickTodoGateToolName(), executionContract: this._getExecutionContract() },
+      });
+    }
 
     // 内部 AbortController：链接外部 signal + maxTurns / run.done 保护
     const ac = new AbortController();
@@ -408,7 +459,15 @@ export class GatewayRuntime implements AgentRuntime {
     this.effectiveAllowed = new Set(this.config.runCtx.allowedToolNames);
     this.orchestratorMode = false;
     this.lastSteeringFailureCount = 0;
+    this.executionNoToolTurns = 0;
+    this.currentTurnToolCalls = 0;
     this.toolCallSnapshots.clear();
+    if (!Array.isArray(this.runState.deliveredArtifactFamilies)) this.runState.deliveredArtifactFamilies = [];
+    if (!Array.isArray(this.runState.sideEffectLedger)) this.runState.sideEffectLedger = [];
+    if (typeof this.runState.deliveryLatched !== "boolean") this.runState.deliveryLatched = false;
+    if (this.runState.todoGateSatisfiedAtTurn === undefined) this.runState.todoGateSatisfiedAtTurn = null;
+    if (this.runState.deliveryLatchActivatedAtTurn === undefined) this.runState.deliveryLatchActivatedAtTurn = null;
+    if (this.runState.toolLoopGuardReason === undefined) this.runState.toolLoopGuardReason = null;
     this.turnEngine.reset();
     this._setOutcome({ ...COMPLETED_OUTCOME });
   }
@@ -423,6 +482,249 @@ export class GatewayRuntime implements AgentRuntime {
       detail: next.detail ?? null,
     };
     this.turnEngine.setOutcome(this.outcome);
+  }
+
+  private _getExecutionContract() {
+    const raw = (this.config.runCtx.executionContract ?? {}) as {
+      required?: boolean;
+      minToolCalls?: number;
+      maxNoToolTurns?: number;
+      reason?: string;
+      preferredToolNames?: string[];
+    };
+    const required = Boolean(raw.required);
+    const minToolCalls = required ? Math.max(1, Math.floor(Number(raw.minToolCalls ?? 1) || 1)) : 0;
+    const maxNoToolTurns = required ? Math.max(1, Math.min(3, Math.floor(Number(raw.maxNoToolTurns ?? 2) || 2))) : 0;
+    const reason = String(raw.reason ?? "").trim();
+    const preferredToolNames = Array.isArray(raw.preferredToolNames)
+      ? raw.preferredToolNames.map((item) => String(item ?? "").trim()).filter(Boolean).slice(0, 8)
+      : [];
+    return { required, minToolCalls, maxNoToolTurns, reason, preferredToolNames };
+  }
+
+  private _isTodoToolName(name: string): boolean {
+    return (
+      name === "run.setTodoList" ||
+      name === "run.todo" ||
+      name === "run.todo.upsertMany" ||
+      name === "run.todo.update" ||
+      name === "run.todo.remove" ||
+      name === "run.todo.clear"
+    );
+  }
+
+  private _pickTodoGateToolName(allowed?: Set<string> | null): string | null {
+    const pool = allowed ?? this.effectiveAllowed ?? this.config.runCtx.allowedToolNames;
+    for (const name of ["run.setTodoList", "run.todo", "run.todo.upsertMany"]) {
+      if (pool.has(name)) return name;
+    }
+    return null;
+  }
+
+  private _todoGateRequired(): boolean {
+    const contract = this._getExecutionContract();
+    return Boolean(contract.required) && Boolean(this._pickTodoGateToolName());
+  }
+
+  private _isPreTodoAllowedTool(name: string): boolean {
+    return this._isTodoToolName(name) || name === "run.mainDoc.get" || name === "run.mainDoc.update" || name === "time.now";
+  }
+
+  private _normalizeArtifactFamily(value: unknown): string | null {
+    const raw = normalizePathLike(value);
+    if (!raw) return null;
+    let normalized = raw.replace(/\.[^/.]+$/, "");
+    normalized = normalized.replace(/(?:[_-]v\d+|[（(]\d+[)）])$/i, "");
+    normalized = normalized.replace(/\s+/g, " ").trim();
+    return normalized || null;
+  }
+
+  private _semanticKindForTool(toolName: string): SideEffectRecordV1["semanticKind"] {
+    if (toolName === "doc.applyEdits" || toolName === "doc.replaceSelection" || toolName === "doc.restoreSnapshot") {
+      return "doc_edit";
+    }
+    if (toolName === "doc.write" || toolName === "doc.splitToDir" || toolName === "code.exec") {
+      return "artifact_write";
+    }
+    return "other";
+  }
+
+  private _isDeliveryCandidateTool(toolName: string): boolean {
+    return isContentWriteTool(toolName) || toolName === "doc.snapshot" || toolName === "code.exec";
+  }
+
+  private _logicalTargetForTool(
+    toolName: string,
+    toolArgs: Record<string, unknown>,
+    result?: GatewayToolExecResult,
+  ): string | null {
+    const output = result?.output && typeof result.output === "object"
+      ? (result.output as Record<string, unknown>)
+      : {};
+    const artifact = output.artifact && typeof output.artifact === "object"
+      ? (output.artifact as Record<string, unknown>)
+      : null;
+    const artifacts = Array.isArray(output.artifacts) ? output.artifacts : [];
+    const candidates: unknown[] = [
+      toolArgs.path,
+      toolArgs.targetDir,
+      output.path,
+      output.renamedFrom,
+      artifact?.relPath,
+      artifact?.absPath,
+    ];
+    for (const item of artifacts.slice(0, 3)) {
+      if (!item || typeof item !== "object") continue;
+      candidates.push((item as Record<string, unknown>).relPath);
+      candidates.push((item as Record<string, unknown>).absPath);
+    }
+    for (const candidate of candidates) {
+      const family = this._normalizeArtifactFamily(candidate);
+      if (family) return family;
+    }
+    if (this._isDeliveryCandidateTool(toolName)) {
+      return `${toolName}:${fingerprint({ args: toolArgs })}`;
+    }
+    return null;
+  }
+
+  private _recordToolLoopGuard(reason: string): void {
+    this.runState.toolLoopGuardReason = reason;
+  }
+
+  private _recordSideEffect(
+    toolName: string,
+    toolArgs: Record<string, unknown>,
+    result: GatewayToolExecResult,
+  ): SideEffectRecordV1 | null {
+    const logicalTarget = this._logicalTargetForTool(toolName, toolArgs, result);
+    if (!logicalTarget) return null;
+    const outputObj = result.output && typeof result.output === "object"
+      ? (result.output as Record<string, unknown>)
+      : {};
+    const contentValue = toolArgs.content ?? outputObj.diffUnified ?? outputObj.content ?? outputObj.path ?? logicalTarget;
+    const record: SideEffectRecordV1 = {
+      semanticKind: this._semanticKindForTool(toolName),
+      toolName,
+      logicalTarget,
+      argsFingerprint: fingerprint(toolArgs),
+      resultFingerprint: fingerprint(result.output),
+      contentFingerprint: contentValue == null ? null : fingerprint(contentValue),
+      ts: Date.now(),
+    };
+    const prev = Array.isArray(this.runState.sideEffectLedger) ? this.runState.sideEffectLedger : [];
+    this.runState.sideEffectLedger = [...prev, record].slice(-20);
+    const family = this._normalizeArtifactFamily(logicalTarget);
+    if (family && !this.runState.deliveredArtifactFamilies.includes(family)) {
+      this.runState.deliveredArtifactFamilies.push(family);
+    }
+    if (this._isDeliveryCandidateTool(toolName) && !this.runState.deliveryLatched) {
+      this.runState.deliveryLatched = true;
+      if (this.runState.deliveryLatchActivatedAtTurn == null) {
+        this.runState.deliveryLatchActivatedAtTurn = this.turn;
+      }
+      this.config.runCtx.writeEvent("run.notice", {
+        turn: this.turn,
+        kind: "info",
+        title: "DeliveryLatchActivated",
+        message: "本轮已生成交付类产物，后续相同逻辑目标将被拦截。",
+        detail: { logicalTarget, toolName, sideEffectLedgerSize: this.runState.sideEffectLedger.length },
+      });
+    }
+    return record;
+  }
+
+  private _findMatchingSideEffect(
+    toolName: string,
+    toolArgs: Record<string, unknown>,
+  ): SideEffectRecordV1 | null {
+    const logicalTarget = this._logicalTargetForTool(toolName, toolArgs);
+    if (!logicalTarget) return null;
+    const semanticKind = this._semanticKindForTool(toolName);
+    const records = Array.isArray(this.runState.sideEffectLedger) ? this.runState.sideEffectLedger : [];
+    for (let i = records.length - 1; i >= 0; i -= 1) {
+      const item = records[i];
+      if (item.logicalTarget === logicalTarget && item.semanticKind === semanticKind) return item;
+    }
+    return null;
+  }
+
+  private _markTodoSatisfied(): void {
+    if (this.runState.todoGateSatisfiedAtTurn == null) {
+      this.runState.todoGateSatisfiedAtTurn = this.turn;
+    }
+    this.runState.toolLoopGuardReason = null;
+  }
+
+  private _enforceTurnLevelGuards(ac: AbortController): void {
+    const executionContract = this._getExecutionContract();
+    if (!executionContract.required) return;
+
+    const todoGateRequired = this._todoGateRequired();
+    if (this.currentTurnToolCalls > 0) {
+      this.executionNoToolTurns = 0;
+      return;
+    }
+
+    if (todoGateRequired && !this.runState.hasTodoList) {
+      this.executionNoToolTurns += 1;
+      const todoToolName = this._pickTodoGateToolName();
+      if (this.executionNoToolTurns <= executionContract.maxNoToolTurns) {
+        this.config.runCtx.writeEvent("run.notice", {
+          turn: this.turn,
+          kind: "warn",
+          title: "TodoGateRetry",
+          message: `执行型回合必须先建 Todo，已触发重试（${this.executionNoToolTurns}/${executionContract.maxNoToolTurns}）` +
+            (todoToolName ? `，优先工具：${todoToolName}` : ""),
+          detail: {
+            hasTodoList: this.runState.hasTodoList,
+            providerContinuationMode: this.providerCapabilities.continuationMode,
+          },
+        });
+        return;
+      }
+      this._recordToolLoopGuard("todo_gate_unsatisfied");
+      this.config.runCtx.writeEvent("run.notice", {
+        turn: this.turn,
+        kind: "error",
+        title: "TodoGateUnsatisfied",
+        message: "执行型回合连续重试后仍未建立 Todo，已结束本轮。",
+        detail: {
+          retries: this.executionNoToolTurns,
+          providerContinuationMode: this.providerCapabilities.continuationMode,
+          sideEffectLedger: this.runState.sideEffectLedger.slice(-5),
+        },
+      });
+      this._setOutcome({
+        status: "failed",
+        reason: "todo_gate_unsatisfied",
+        reasonCodes: ["todo_gate_unsatisfied"],
+        detail: { turn: this.turn, retries: this.executionNoToolTurns },
+      });
+      ac.abort();
+      return;
+    }
+
+    if (this.totalToolCalls < executionContract.minToolCalls) {
+      this.executionNoToolTurns += 1;
+      if (this.executionNoToolTurns > executionContract.maxNoToolTurns) {
+        this._recordToolLoopGuard("execution_contract_unsatisfied");
+        this._setOutcome({
+          status: "failed",
+          reason: "execution_contract_unsatisfied",
+          reasonCodes: ["execution_contract_unsatisfied"],
+          detail: { turn: this.turn, retries: this.executionNoToolTurns },
+        });
+        this.config.runCtx.writeEvent("run.notice", {
+          turn: this.turn,
+          kind: "error",
+          title: "ExecutionContractFailed",
+          message: "执行达成约束失败：连续重试后仍未触发工具调用。",
+          detail: { retries: this.executionNoToolTurns, providerContinuationMode: this.providerCapabilities.continuationMode },
+        });
+        ac.abort();
+      }
+    }
   }
 
   // ── Hook 实现 ──────────────────────────────────
@@ -508,13 +810,31 @@ export class GatewayRuntime implements AgentRuntime {
       this.lastSteeringFailureCount = this.failureDigest.failedCount;
     }
 
+    const ec = this._getExecutionContract();
+    const todoGateRequired = this._todoGateRequired();
+    if (todoGateRequired && !this.runState.hasTodoList) {
+      const todoToolName = this._pickTodoGateToolName();
+      pushHint(
+        "当前是执行型任务，但你还没有建立 Todo。请先调用 " +
+          (todoToolName ?? "run.setTodoList") +
+          "（或 run.todo action=upsert）写入可执行待办，再继续搜索、写作或交付。",
+        ["todo_gate_enforce"],
+      );
+    }
+
     // 3. 执行契约强制
-    const ec = this.config.runCtx.executionContract;
     const minToolCalls = Math.max(0, Math.floor(Number(ec?.minToolCalls ?? 0)));
-    if (ec?.required && minToolCalls > 0 && this.totalToolCalls < minToolCalls) {
+    if (ec.required && minToolCalls > 0 && this.totalToolCalls < minToolCalls) {
       pushHint(
         `当前回合要求至少触发 ${minToolCalls} 次工具调用。请不要只输出文本，先调用工具完成动作，再继续回复。`,
         ["execution_contract_enforce"],
+      );
+    }
+
+    if (this.runState.deliveryLatched) {
+      pushHint(
+        "本轮已经生成交付类产物。除非你要创建一个新的目标文件，否则不要重复写入；若任务已完成，请直接调用 run.done 收口。",
+        ["delivery_latch_active"],
       );
     }
 
@@ -530,6 +850,15 @@ export class GatewayRuntime implements AgentRuntime {
   private async _getFollowUpMessages(): Promise<AgentMessage[]> {
     // run.done 已触发，不再追加
     if (this.outcome.reason === "run_done") return [];
+
+    if (this.runState.deliveryLatched && this.runState.hasWriteApplied) {
+      const item: CanonicalTranscriptItem = {
+        kind: "runtime_hint",
+        text: "交付类产物已经生成。若没有新的目标文件，请直接调用 run.done 结束，不要重复写入同一产物。",
+        reasonCodes: ["delivery_latch_followup"],
+      };
+      return [item as unknown as AgentMessage];
+    }
 
     // 检查 mainDoc 中的 todo 列表
     const runTodo = this.config.runCtx.mainDoc?.runTodo as
@@ -716,6 +1045,74 @@ export class GatewayRuntime implements AgentRuntime {
           ok: false,
           error: "TOOL_NOT_ALLOWED_THIS_TURN",
           message: `工具 "${toolName}" 在当前阶段不可用，请使用其他工具。`,
+        },
+        executedBy: "gateway",
+      };
+    }
+
+    const executionContract = this._getExecutionContract();
+    if (this._todoGateRequired() && !this.runState.hasTodoList && !this._isPreTodoAllowedTool(toolName)) {
+      this._recordToolLoopGuard("todo_gate_required");
+      this.config.runCtx.writeEvent("run.notice", {
+        turn: this.turn,
+        kind: "warn",
+        title: "TodoGateBlocked",
+        message: `工具 ${toolName} 被 Todo Gate 拦截：必须先建立 Todo。`,
+        detail: {
+          preferredTool: this._pickTodoGateToolName(),
+          providerContinuationMode: this.providerCapabilities.continuationMode,
+        },
+      });
+      return {
+        ok: false,
+        output: {
+          ok: false,
+          error: "TODO_GATE_REQUIRED",
+          message: "当前执行型任务必须先设置 Todo，再进行搜索、写作或交付。",
+          detail: {
+            preferred: this._pickTodoGateToolName(),
+            reason: executionContract.reason ?? "",
+          },
+          next_actions: [
+            "先调用 run.setTodoList 或 run.todo(action=upsert) 建立可执行 Todo",
+            "Todo 建立后再继续搜索、写文件或调用其它工具",
+          ],
+        },
+        executedBy: "gateway",
+      };
+    }
+
+    const matchedSideEffect = this._isDeliveryCandidateTool(toolName)
+      ? this._findMatchingSideEffect(toolName, toolArgs)
+      : null;
+    if (matchedSideEffect) {
+      this._recordToolLoopGuard("delivery_latch_blocked");
+      this.config.runCtx.writeEvent("run.notice", {
+        turn: this.turn,
+        kind: "warn",
+        title: "DeliveryLatchBlocked",
+        message: `工具 ${toolName} 命中了已交付产物，已拦截重复写入。`,
+        detail: {
+          logicalTarget: matchedSideEffect.logicalTarget,
+          toolName,
+          sideEffectLedgerSize: this.runState.sideEffectLedger.length,
+        },
+      });
+      return {
+        ok: false,
+        output: {
+          ok: false,
+          error: "DELIVERY_LATCHED",
+          message: "该逻辑产物已完成交付，禁止重复写入同一产物族。",
+          detail: {
+            logicalTarget: matchedSideEffect.logicalTarget,
+            providerContinuationMode: this.providerCapabilities.continuationMode,
+          },
+          next_actions: [
+            "读取上一条工具结果并确认是否已经交付成功",
+            "若需新版本，请明确新的目标文件名或改写成新的产物",
+            "如果任务已完成，请调用 run.done 收口",
+          ],
         },
         executedBy: "gateway",
       };
@@ -1067,6 +1464,7 @@ export class GatewayRuntime implements AgentRuntime {
       case "tool_execution_start": {
         const rawToolName = decodeToolName(event.toolName);
         this.totalToolCalls += 1;
+        this.currentTurnToolCalls += 1;
         this.turnEngine.record({
           type: "model_tool_call",
           callId: event.toolCallId,
@@ -1147,8 +1545,9 @@ export class GatewayRuntime implements AgentRuntime {
         return;
       }
 
-      // 以下事件不做处理
       case "turn_end":
+        this._enforceTurnLevelGuards(ac);
+        return;
       case "message_start":
       case "tool_execution_update":
       case "agent_end":
@@ -1391,6 +1790,20 @@ export class GatewayRuntime implements AgentRuntime {
     ) {
       this.runState.hasTodoList = true;
       this.runState.hasPlanCommitment = true;
+      this._markTodoSatisfied();
+      return;
+    }
+
+    const isSnapshotRestore =
+      toolName === "doc.snapshot" && String(toolArgs.action ?? "").trim().toLowerCase() === "restore";
+    if (isWriteLikeTool(toolName) || isSnapshotRestore) {
+      this.runState.hasWriteOps = true;
+    }
+    if (isContentWriteTool(toolName) || isSnapshotRestore || toolName === "code.exec") {
+      this.runState.hasWriteOps = true;
+      this.runState.hasWriteApplied = true;
+      this._recordSideEffect(toolName, toolArgs, result);
+      this.runState.toolLoopGuardReason = null;
     }
   }
 
@@ -1540,9 +1953,17 @@ export class GatewayRuntime implements AgentRuntime {
       runtimeMode: this.mode,
       shadowMode: this.shadowMode,
       provider: providerApi,
+      providerApi,
       modelId: this.config.runCtx.modelId,
       implemented: true,
       failedToolCount: this.failureDigest.failedCount,
+      providerCapabilitiesSnapshot: this.providerCapabilities,
+      providerContinuationMode: this.providerCapabilities.continuationMode,
+      todoGateSatisfiedAtTurn: this.runState.todoGateSatisfiedAtTurn,
+      deliveryLatchActivatedAtTurn: this.runState.deliveryLatchActivatedAtTurn,
+      sideEffectLedgerSize: Array.isArray(this.runState.sideEffectLedger) ? this.runState.sideEffectLedger.length : 0,
+      recentSideEffectLedger: Array.isArray(this.runState.sideEffectLedger) ? this.runState.sideEffectLedger.slice(-5) : [],
+      toolLoopGuardReason: this.runState.toolLoopGuardReason,
       transcriptSummary: summarizeTranscript(this.transcript),
       runState: this.runState,
       ...snapshot,

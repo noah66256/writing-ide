@@ -64,6 +64,16 @@ export type DraftCandidateV1 = {
   copy: CopyLintMetaV1 | null;
 };
 
+export type SideEffectRecordV1 = {
+  semanticKind: "artifact_write" | "publish" | "doc_edit" | "other";
+  toolName: string;
+  logicalTarget: string;
+  argsFingerprint: string;
+  resultFingerprint: string;
+  contentFingerprint?: string | null;
+  ts: number;
+};
+
 export type RunState = {
   hasTodoList: boolean;
   hasPlanCommitment: boolean;
@@ -152,6 +162,11 @@ export type RunState = {
   // P0：已进入交付收口，避免同一逻辑产物被反复写入
   deliveryLatched: boolean;
   deliveredArtifactFamilies: string[];
+  // P1：副作用账本 + Gate 关键时间点 + 最近一次 loop guard 原因
+  sideEffectLedger: SideEffectRecordV1[];
+  todoGateSatisfiedAtTurn: number | null;
+  deliveryLatchActivatedAtTurn: number | null;
+  toolLoopGuardReason: string | null;
 };
 
 export function createInitialRunState(args?: { protocolRetryBudget?: number; workflowRetryBudget?: number; lintReworkBudget?: number }): RunState {
@@ -200,6 +215,10 @@ export function createInitialRunState(args?: { protocolRetryBudget?: number; wor
     hasWriteApplied: false,
     deliveryLatched: false,
     deliveredArtifactFamilies: [],
+    sideEffectLedger: [],
+    todoGateSatisfiedAtTurn: null,
+    deliveryLatchActivatedAtTurn: null,
+    toolLoopGuardReason: null,
   };
 }
 
