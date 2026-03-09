@@ -84,6 +84,7 @@ const COMPLETED_OUTCOME: RunOutcome = {
 
 /** 默认最大回合数，防止无限循环 */
 const DEFAULT_MAX_TURNS = 48;
+const MAX_PROVIDER_TOOL_NAME_LEN = 64;
 
 // ── 内部类型 ─────────────────────────────────────
 
@@ -246,6 +247,8 @@ export class GatewayRuntime implements AgentRuntime {
   private runState: RunState = createInitialRunState();
   private readonly turnEngine = new TurnEngine();
   private readonly toolCallSnapshots = new Map<string, ToolCallSnapshot>();
+  private readonly rawToEncodedToolName = new Map<string, string>();
+  private readonly encodedToRawToolName = new Map<string, string>();
   private readonly providerCapabilities: ProviderCapabilities;
   private executionNoToolTurns = 0;
   private currentTurnToolCalls = 0;
@@ -271,6 +274,40 @@ export class GatewayRuntime implements AgentRuntime {
       inferProviderApi(this.config),
       { baseUrl: this.config.runCtx.baseUrl, endpoint: this.config.runCtx.endpoint },
     );
+  }
+
+  private _encodeRuntimeToolName(rawToolName: string): string {
+    const raw = String(rawToolName ?? "").trim();
+    if (!raw) return "tool_unknown";
+    const cached = this.rawToEncodedToolName.get(raw);
+    if (cached) return cached;
+
+    let encoded = encodeToolName(raw).replace(/[^A-Za-z0-9_.:-]/g, "_");
+    if (!/^[A-Za-z_]/.test(encoded)) encoded = `t_${encoded}`;
+    if (encoded.length > MAX_PROVIDER_TOOL_NAME_LEN) {
+      const hash = createHash("sha1").update(raw).digest("hex").slice(0, 12);
+      const normalized = encoded.replace(/[^A-Za-z0-9_.:-]/g, "_").replace(/^[^A-Za-z_]+/, "tool_");
+      const suffix = `_${hash}`;
+      const headBudget = Math.max(1, MAX_PROVIDER_TOOL_NAME_LEN - suffix.length);
+      encoded = `${normalized.slice(0, headBudget)}${suffix}`;
+    }
+
+    const existingRaw = this.encodedToRawToolName.get(encoded);
+    if (existingRaw && existingRaw !== raw) {
+      const hash = createHash("sha1").update(raw).digest("hex").slice(0, 20);
+      const prefix = /^[A-Za-z_]/.test(encoded) ? encoded[0] : "t";
+      encoded = `${prefix}_${hash}`.slice(0, MAX_PROVIDER_TOOL_NAME_LEN);
+    }
+
+    this.rawToEncodedToolName.set(raw, encoded);
+    this.encodedToRawToolName.set(encoded, raw);
+    return encoded;
+  }
+
+  private _decodeRuntimeToolName(encodedToolName: string): string {
+    const encoded = String(encodedToolName ?? "").trim();
+    if (!encoded) return "";
+    return this.encodedToRawToolName.get(encoded) ?? decodeToolName(encoded);
   }
 
   // ── 公开方法 ───────────────────────────────────
@@ -1005,7 +1042,7 @@ export class GatewayRuntime implements AgentRuntime {
       .filter((tool) => allowed.size === 0 || allowed.has(tool.name))
       .filter((tool) => !tool.modes || tool.modes.includes(this.config.runCtx.mode))
       .map((tool) => ({
-        name: encodeToolName(tool.name),
+        name: this._encodeRuntimeToolName(tool.name),
         label: tool.name,
         description: tool.description,
         parameters: (tool.inputSchema ?? {
@@ -1055,7 +1092,7 @@ export class GatewayRuntime implements AgentRuntime {
       .map((t: any) => {
         const toolName = String(t.name).trim();
         return {
-          name: encodeToolName(toolName),
+          name: this._encodeRuntimeToolName(toolName),
           label: toolName,
           description: String(t.description ?? ""),
           parameters: normalizeToolParametersSchema(t.inputSchema) as any,
@@ -1533,7 +1570,7 @@ export class GatewayRuntime implements AgentRuntime {
       }
 
       case "tool_execution_start": {
-        const rawToolName = decodeToolName(event.toolName);
+        const rawToolName = this._decodeRuntimeToolName(event.toolName);
         this.totalToolCalls += 1;
         this.currentTurnToolCalls += 1;
         this.turnEngine.record({
@@ -1550,7 +1587,7 @@ export class GatewayRuntime implements AgentRuntime {
       }
 
       case "tool_execution_end": {
-        const rawToolName = decodeToolName(event.toolName);
+        const rawToolName = this._decodeRuntimeToolName(event.toolName);
         const details = this._extractExecDetails(event.result?.details);
         const snap = this.toolCallSnapshots.get(event.toolCallId);
         const ok = details?.ok ?? !event.isError;
@@ -1658,7 +1695,7 @@ export class GatewayRuntime implements AgentRuntime {
         pushItem(this.transcript, {
           kind: "assistant_tool_call",
           callId: part.id,
-          toolName: decodeToolName(part.name),
+          toolName: this._decodeRuntimeToolName(part.name),
           args: part.arguments ?? {},
           providerMeta: {
             api: message.api,
@@ -1679,7 +1716,7 @@ export class GatewayRuntime implements AgentRuntime {
     const item: CanonicalToolResultItem = {
       kind: "tool_result",
       callId: message.toolCallId,
-      toolName: decodeToolName(message.toolName),
+      toolName: this._decodeRuntimeToolName(message.toolName),
       ok,
       output,
       normalizedText,
@@ -1756,7 +1793,7 @@ export class GatewayRuntime implements AgentRuntime {
           assistantParts.push({
             type: "toolCall",
             id: item.callId,
-            name: encodeToolName(item.toolName),
+            name: this._encodeRuntimeToolName(item.toolName),
             arguments: item.args ?? {},
           } as ToolCall);
           break;
@@ -1766,7 +1803,7 @@ export class GatewayRuntime implements AgentRuntime {
           out.push({
             role: "toolResult",
             toolCallId: item.callId,
-            toolName: encodeToolName(item.toolName),
+            toolName: this._encodeRuntimeToolName(item.toolName),
             content: buildTextContent(
               item.normalizedText || normalizeToolOutputText(item.output),
             ),

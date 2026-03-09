@@ -467,6 +467,52 @@ async function tryMigrateGlobalMemory(userData, appData) {
   });
 }
 
+function buildLegacyAppDataFileCandidates(args) {
+  const appData = String(args?.appData ?? "");
+  const relDir = String(args?.relDir ?? "");
+  const filename = String(args?.filename ?? "");
+  const legacyRelDirs = Array.isArray(args?.legacyRelDirs) ? args.legacyRelDirs : [];
+  if (!appData || !relDir || !filename) return [];
+
+  const relDirs = [relDir, ...legacyRelDirs.filter((d) => d && d !== relDir)];
+  const out = [];
+  for (const name of getLegacyAppDataProductNames()) {
+    for (const rd of relDirs) {
+      out.push({
+        used: `legacy:${name}/${rd}`,
+        file: path.join(appData, name, rd, filename),
+      });
+    }
+  }
+  return out;
+}
+
+function listHistoryReadCandidates() {
+  const { primary, fallback } = historyCandidateDirs();
+  const out = [];
+  if (primary) out.push({ used: "primary", file: path.join(primary, HISTORY_FILENAME) });
+  if (fallback) out.push({ used: "fallback", file: path.join(fallback, HISTORY_FILENAME) });
+  try {
+    out.push(
+      ...buildLegacyAppDataFileCandidates({
+        appData: app.getPath("appData"),
+        relDir: HISTORY_DIRNAME,
+        legacyRelDirs: ["writing-ide-data", "ohmycrab-data"],
+        filename: HISTORY_FILENAME,
+      }),
+    );
+  } catch {
+    // ignore
+  }
+  const seen = new Set();
+  return out.filter((item) => {
+    const file = String(item?.file ?? "");
+    if (!file || seen.has(file)) return false;
+    seen.add(file);
+    return true;
+  });
+}
+
 async function resolveHistoryFileForRead() {
   const { primary, fallback } = historyCandidateDirs();
   const p1 = primary ? path.join(primary, HISTORY_FILENAME) : null;
@@ -1570,17 +1616,8 @@ function registerIpc() {
 
   ipcMain.handle("history.loadConversations", async () => {
     try {
-      const { primary, fallback } = historyCandidateDirs();
-      const candidates = [];
-      if (primary) candidates.push({ used: "primary", file: path.join(primary, HISTORY_FILENAME) });
-      if (fallback) candidates.push({ used: "fallback", file: path.join(fallback, HISTORY_FILENAME) });
-
-      const seen = new Set();
-      const unique = candidates.filter((x) => {
-        if (!x?.file || seen.has(x.file)) return false;
-        seen.add(x.file);
-        return true;
-      });
+      const { primary } = historyCandidateDirs();
+      const unique = listHistoryReadCandidates();
 
       const parsedList = [];
       let parseErr = null;
