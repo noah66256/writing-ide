@@ -380,7 +380,6 @@ export class GatewayRuntime implements AgentRuntime {
         ? initialGate.allowed
         : this.effectiveAllowed;
       const visibleTools = this._buildAgentTools(initialVisibleAllowed);
-      const kernelToolChoice = this._deriveKernelToolChoice();
 
       this.config.runCtx.writeEvent("run.notice", {
         turn: 0,
@@ -395,7 +394,7 @@ export class GatewayRuntime implements AgentRuntime {
           userPromptChars: String(userPrompt ?? "").length,
           visibleToolCount: visibleTools.length,
           selectedToolCount: this.config.runCtx.allowedToolNames.size,
-          toolChoice: kernelToolChoice ?? null,
+          toolChoice: null,
         },
       });
 
@@ -411,7 +410,6 @@ export class GatewayRuntime implements AgentRuntime {
         },
         tools: visibleTools,
         signal: ac.signal,
-        toolChoice: kernelToolChoice,
         convertToLlm: (messages) => this._convertToLlm(messages),
         transformContext: (messages, signal) => this._transformContext(messages, signal),
         getSteeringMessages: () => this._getSteeringMessages(),
@@ -573,16 +571,6 @@ export class GatewayRuntime implements AgentRuntime {
       name === "run.todo.remove" ||
       name === "run.todo.clear"
     );
-  }
-
-  private _deriveKernelToolChoice(): "any" | undefined {
-    if (!this.providerCapabilities.supportsNativeFunctionCalling) return undefined;
-    const executionContract = this._getExecutionContract();
-    if (!executionContract.required) return undefined;
-    if (this.totalToolCalls >= executionContract.minToolCalls) return undefined;
-    const preferredTool = this._pickTodoGateToolName(this.effectiveAllowed);
-    if (!preferredTool) return undefined;
-    return "any";
   }
 
   private _pickTodoGateToolName(allowed?: Set<string> | null): string | null {
