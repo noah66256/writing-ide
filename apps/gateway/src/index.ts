@@ -526,6 +526,7 @@ function isKbTextLlmEndpoint(endpoint: string) {
   const ep = String(endpoint ?? "").trim();
   if (!ep) return false;
   if (isGeminiLikeEndpoint(ep)) return true;
+  if (/\/messages(?:\?|$)/i.test(ep)) return true;
   if (/\/responses(?:\?|$)/i.test(ep)) return true;
   return /chat\/completions/i.test(ep);
 }
