@@ -32,6 +32,8 @@ export type LoopKernelRunArgs = {
   model: LoopKernelModelConfig;
   tools: AgentTool<any>[];
   signal?: AbortSignal;
+  /** 原生 function calling provider 可用时的 toolChoice 提示（如 any/auto/none） */
+  toolChoice?: "any" | "auto" | "none";
   /** 将 AgentMessage[]（混合 CanonicalTranscriptItem 和 pi-ai Message）转为 LLM 可理解的 Message[] */
   convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
   transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;

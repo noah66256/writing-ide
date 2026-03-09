@@ -338,6 +338,30 @@ export class GatewayRuntime implements AgentRuntime {
     }
 
     try {
+      const initialGate = this.config.runCtx.computePerTurnAllowed?.(this.runState) ?? null;
+      const initialVisibleAllowed = initialGate?.allowed instanceof Set
+        ? initialGate.allowed
+        : this.effectiveAllowed;
+      const visibleTools = this._buildAgentTools(initialVisibleAllowed);
+      const kernelToolChoice = this._deriveKernelToolChoice();
+
+      this.config.runCtx.writeEvent("run.notice", {
+        turn: 0,
+        kind: "info",
+        title: "KernelInputProfile",
+        message:
+          "kernel 输入已收敛：system=" + String(this.config.runCtx.systemPrompt ?? "").length +
+          " chars, user=" + String(userPrompt ?? "").length +
+          " chars, tools=" + visibleTools.length,
+        detail: {
+          systemPromptChars: String(this.config.runCtx.systemPrompt ?? "").length,
+          userPromptChars: String(userPrompt ?? "").length,
+          visibleToolCount: visibleTools.length,
+          selectedToolCount: this.config.runCtx.allowedToolNames.size,
+          toolChoice: kernelToolChoice ?? null,
+        },
+      });
+
       const stream = this.kernel.run({
         systemPrompt: this.config.runCtx.systemPrompt,
         transcript: seedTranscript,
@@ -348,8 +372,9 @@ export class GatewayRuntime implements AgentRuntime {
           endpoint: this.config.runCtx.endpoint,
           apiKey: this.config.runCtx.apiKey,
         },
-        tools: this._buildAgentTools(),
+        tools: visibleTools,
         signal: ac.signal,
+        toolChoice: kernelToolChoice,
         convertToLlm: (messages) => this._convertToLlm(messages),
         transformContext: (messages, signal) => this._transformContext(messages, signal),
         getSteeringMessages: () => this._getSteeringMessages(),
@@ -511,6 +536,16 @@ export class GatewayRuntime implements AgentRuntime {
       name === "run.todo.remove" ||
       name === "run.todo.clear"
     );
+  }
+
+  private _deriveKernelToolChoice(): "any" | undefined {
+    if (!this.providerCapabilities.supportsNativeFunctionCalling) return undefined;
+    const executionContract = this._getExecutionContract();
+    if (!executionContract.required) return undefined;
+    if (this.totalToolCalls >= executionContract.minToolCalls) return undefined;
+    const preferredTool = this._pickTodoGateToolName(this.effectiveAllowed);
+    if (!preferredTool) return undefined;
+    return "any";
   }
 
   private _pickTodoGateToolName(allowed?: Set<string> | null): string | null {
@@ -951,8 +986,8 @@ export class GatewayRuntime implements AgentRuntime {
    * 工具名经过 encodeToolName 编码（dot → _dot_），兼容 OpenAI / Gemini 的 function name 限制。
    * execute 回调用原始名路由执行（MCP 工具走 _executeAgentTool → desktop）。
    */
-  private _buildAgentTools(): AgentTool<any>[] {
-    const allowed = this.config.runCtx.allowedToolNames;
+  private _buildAgentTools(visibleAllowed?: Set<string> | null): AgentTool<any>[] {
+    const allowed = visibleAllowed instanceof Set ? visibleAllowed : this.config.runCtx.allowedToolNames;
 
     // ── 内置工具 ──────────────────────────────────
     const builtins = TOOL_LIST

@@ -2867,14 +2867,30 @@ export async function prepareAgentRun(args: {
       const bootCandidates =
         routeIdLower === "web_radar" || directOpenWebIntent
           ? executionPreferredWithComposite
-          : [
-              ...executionPreferredWithComposite,
-              "run.mainDoc.get",
-              "run.setTodoList",
-              "run.todo",
-              "project.listFiles",
-              "kb.search",
-            ];
+          : (!state.hasTodoList
+              ? [
+                  "run.setTodoList",
+                  "run.todo",
+                  "run.mainDoc.get",
+                  "run.mainDoc.update",
+                  "kb.search",
+                  "web.search",
+                  "web.fetch",
+                  "doc.write",
+                  ...executionPreferredWithComposite,
+                ]
+              : [
+                  ...executionPreferredWithComposite,
+                  "run.mainDoc.get",
+                  "run.mainDoc.update",
+                  "run.setTodoList",
+                  "run.todo",
+                  "project.listFiles",
+                  "kb.search",
+                  "web.search",
+                  "web.fetch",
+                  "doc.write",
+                ]);
       const boot = new Set<string>(
         Array.from(new Set(bootCandidates.map((x) => String(x ?? "").trim()).filter(Boolean))).filter((n) => allowedNow.has(n)),
       );

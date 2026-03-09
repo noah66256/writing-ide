@@ -62,9 +62,9 @@ const CAPABILITY_MATRIX: Record<ModelApiType, BaseProviderCapabilities> = {
     providerKey: "google",
     registryKey: "google",
     supportsStreamSimple: true,
-    supportsNativeToolCalls: false,
+    supportsNativeToolCalls: true,
     supportsUsageInStream: true,
-    notes: ["Gemini 桥接，工具调用通过 pi-ai 归一化"],
+    notes: ["Gemini（PI runtime）走 pi-ai Google provider，支持原生 function calling"],
   },
 };
 
@@ -102,6 +102,19 @@ export function getProviderCapabilities(
     baseUrl: args?.baseUrl,
     endpoint: args?.endpoint,
   });
+  if (resolved === "gemini") {
+    return {
+      ...cap,
+      ...derived,
+      supportsNativeToolUse: false,
+      supportsNativeFunctionCalling: true,
+      supportsForcedToolChoice: false,
+      preferXmlProtocol: false,
+      continuationMode: "native",
+      toolResultFormatHint: "text",
+      notes: cap.notes.slice(),
+    };
+  }
   return { ...cap, ...derived, notes: cap.notes.slice() };
 }
 

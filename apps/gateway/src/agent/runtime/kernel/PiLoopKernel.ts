@@ -150,10 +150,11 @@ export class PiLoopKernel implements LoopKernel {
     const model = resolveModel(args);
     console.log("[PiLoopKernel] model resolved:", { api: model.api, provider: model.provider, baseUrl: model.baseUrl, id: model.id });
 
-    const config: AgentLoopConfig = {
+    const config: AgentLoopConfig & { toolChoice?: "any" | "auto" | "none" } = {
       model,
       apiKey: args.model.apiKey,
       signal: args.signal,
+      ...(args.toolChoice ? { toolChoice: args.toolChoice } : {}),
       convertToLlm: args.convertToLlm,
       transformContext: args.transformContext,
       getSteeringMessages: args.getSteeringMessages,
@@ -167,7 +168,7 @@ export class PiLoopKernel implements LoopKernel {
         messages: history as unknown as AgentMessage[],
         tools: args.tools,
       },
-      config,
+      config as any,
       args.signal,
     );
   }
