@@ -469,15 +469,30 @@ export function createAiConfigService(args: {
     const ensureModel = (modelId: string, stageKey: string, endpoint: string) => {
       const id = normalizeModelId(modelId);
       if (!id) return null;
-      const existed = byId.get(id);
-      if (existed) return existed;
       const creds = pickCredsForStage(stageKey);
+      const endpointNorm = normalizeEndpoint(endpoint, "/v1/chat/completions");
+      const useTextToolResult = /\/responses/i.test(endpointNorm);
+      const existed = byId.get(id);
+      if (existed) {
+        const isEnvManaged =
+          String(existed.updatedBy ?? "").trim().toLowerCase() === "system" &&
+          String(existed.description ?? "").includes("自动初始化：来自 env 默认值");
+        if (isEnvManaged && creds.baseURL) {
+          const enc = creds.apiKey ? encryptApiKey(creds.apiKey) : null;
+          existed.baseURL = creds.baseURL;
+          existed.endpoint = endpointNorm;
+          existed.toolResultFormat = useTextToolResult ? "text" : "xml";
+          existed.apiKeyEnc = enc ? enc.enc : null;
+          existed.apiKeyLast4 = enc ? enc.last4 : null;
+          existed.updatedAt = nowIso();
+          existed.updatedBy = "system";
+        }
+        return existed;
+      }
       if (!creds.baseURL) return null;
 
       const enc = creds.apiKey ? encryptApiKey(creds.apiKey) : null;
       const t = nowIso();
-      const endpointNorm = normalizeEndpoint(endpoint, "/v1/chat/completions");
-      const useTextToolResult = /\/responses/i.test(endpointNorm);
       const m: AiModel = {
         id,
         model: id,
