@@ -270,6 +270,7 @@ function inferApiType(endpoint?: string): ModelApiType {
 
 function buildRouteDecisionV1(args: {
   routeId: string;
+  mode: AgentMode;
   nextAction: NextAction;
   effectiveToolPolicy: ToolPolicy;
   userPrompt: string;
@@ -337,8 +338,12 @@ function buildRouteDecisionV1(args: {
     }
   }
 
+  const shouldForceExecutionForGenericTask =
+    routeIdLower === "task_execution" &&
+    args.mode === "agent" &&
+    args.effectiveToolPolicy === "allow_tools";
   const requiresToolExecution =
-    isExecutionRoute && (strictExecutionRoutes.has(routeIdLower) || directOpenWebIntent);
+    isExecutionRoute && (strictExecutionRoutes.has(routeIdLower) || directOpenWebIntent || shouldForceExecutionForGenericTask);
   const executionContract: ExecutionContract = {
     required: requiresToolExecution,
     minToolCalls: requiresToolExecution ? 1 : 0,
@@ -2391,6 +2396,7 @@ export async function prepareAgentRun(args: {
 
   const routeDecision = buildRouteDecisionV1({
     routeId: intentRoute.routeId ?? "",
+    mode,
     nextAction: intentRoute.nextAction,
     effectiveToolPolicy,
     userPrompt,
