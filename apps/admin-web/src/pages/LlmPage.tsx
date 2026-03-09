@@ -186,9 +186,11 @@ export function LlmPage() {
     const defaults = [
       "/v1/chat/completions",
       "/v1/embeddings",
-      // Gemini（示例）：用户可把 model 名替换成实际的 gemini-xxx
-      "/v1beta/models/gemini-3-flash-preview:generateContent",
-      "/v1beta/models/gemini-3-flash-preview:streamGenerateContent",
+      // Gemini（示例）：默认给出当前已接入的 3.1 preview 路径
+      "/v1beta/models/gemini-3.1-pro-preview:generateContent",
+      "/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent",
+      "/v1beta/models/gemini-3.1-flash-lite-preview:generateContent",
+      "/v1beta/models/gemini-3.1-flash-lite-preview:streamGenerateContent",
     ];
     const fromModels = models.map((m) => normalizeEndpointInput(m.endpoint)).filter(Boolean);
     const fromHistory = loadEndpointHistory();

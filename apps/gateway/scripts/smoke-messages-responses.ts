@@ -114,6 +114,28 @@ async function smokeProviderEndpoints() {
       );
     }
 
+    if (url.includes(":generateContent") || url.includes(":streamGenerateContent")) {
+      if (url.includes(":streamGenerateContent")) {
+        const stream = new ReadableStream({
+          start(controller) {
+            const lines = [
+              JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok gemini stream" }] } }], usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 6, totalTokenCount: 10 } }) + "\n",
+            ];
+            for (const line of lines) controller.enqueue(new TextEncoder().encode(line));
+            controller.close();
+          },
+        });
+        return new Response(stream, { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: "ok gemini generate" }] } }],
+          usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 6, totalTokenCount: 10 },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
     if (url.endsWith("/messages")) {
       return new Response(
         JSON.stringify({
@@ -239,6 +261,31 @@ async function smokeProviderEndpoints() {
     const canonical = responsesAdapter.toCanonicalEvents(streamResEvents as any);
     assert.ok(canonical.some((ev) => ev.type === "tool_call"));
     ok("provider.responses.adapter.canonical");
+
+    const rGemini = await completionOnceViaProvider({
+      baseUrl: "https://generativelanguage.googleapis.com",
+      endpoint: "/v1beta/models/gemini-3.1-pro-preview:generateContent",
+      apiKey: "k",
+      model: "gemini-3.1-pro-preview",
+      messages,
+    });
+    assert.equal(rGemini.ok, true);
+    assert.equal((rGemini as any).content, "ok gemini generate");
+    ok("provider.gemini.generate_content");
+
+    const geminiStreamPieces: string[] = [];
+    for await (const ev of streamChatCompletionViaProvider({
+      baseUrl: "https://generativelanguage.googleapis.com",
+      endpoint: "/v1beta/models/gemini-3.1-flash-lite-preview:streamGenerateContent",
+      apiKey: "k",
+      model: "gemini-3.1-flash-lite-preview",
+      messages,
+    })) {
+      if (ev.type === "delta") geminiStreamPieces.push(String(ev.delta ?? ""));
+      if (ev.type === "error") throw new Error(String((ev as any).error ?? "gemini stream failed"));
+    }
+    assert.equal(geminiStreamPieces.join(""), "ok gemini stream");
+    ok("provider.gemini.stream_generate_content");
 
     const r3 = await completionOnceViaProvider({
       baseUrl: "https://mock.local",

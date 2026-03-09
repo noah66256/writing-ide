@@ -19,6 +19,7 @@ import {
   xmlEscapeAttr,
 } from "../llm/toolXmlProtocol.js";
 import { sanitizeAssistantUserFacingText } from "./userFacingText.js";
+import { deriveProviderCapabilities, type ProviderCapabilitySnapshot } from "../llm/providerCapabilities.js";
 
 import {
   analyzeAutoRetryText,
@@ -800,6 +801,8 @@ export class AgentRunner {
   private readonly preferXmlProtocol: boolean;
   /** 端点是否真正尊重 tool_choice: any/tool（Anthropic 支持，GPT 代理多数会剥离） */
   private readonly supportsForcedToolChoice: boolean;
+  /** Provider 能力快照（P0：统一 provider-native / fallback 判定） */
+  private readonly providerCapabilities: ProviderCapabilitySnapshot;
   /** Phase D: 统一 turn 适配器 */
   private readonly turnAdapter: TurnAdapter;
   private consecutiveMainDocOnlyTurns = 0;
@@ -830,16 +833,25 @@ export class AgentRunner {
     if (!this.runState.delegationCounts || typeof this.runState.delegationCounts !== "object" || Array.isArray(this.runState.delegationCounts)) {
       this.runState.delegationCounts = {};
     }
+    if (!Array.isArray(this.runState.deliveredArtifactFamilies)) {
+      this.runState.deliveredArtifactFamilies = [];
+    }
+    if (typeof this.runState.deliveryLatched !== "boolean") {
+      this.runState.deliveryLatched = false;
+    }
 
     // 端点能力推导
     this.apiType = ctx.apiType ?? inferApiType(ctx.endpoint);
-    this.isAnthropicApi = this.apiType === "anthropic-messages";
-    this.supportsNativeToolUse = this.isAnthropicApi;
-    this.supportsNativeFunctionCalling =
-      this.apiType === "openai-completions" || this.apiType === "openai-responses";
-    this.preferXmlProtocol =
-      this.apiType === "gemini" || (!this.supportsNativeToolUse && !this.supportsNativeFunctionCalling);
-    this.supportsForcedToolChoice = this.isAnthropicApi;
+    this.providerCapabilities = deriveProviderCapabilities({
+      apiType: this.apiType,
+      baseUrl: ctx.baseUrl,
+      endpoint: ctx.endpoint,
+    });
+    this.isAnthropicApi = this.providerCapabilities.apiType === "anthropic-messages";
+    this.supportsNativeToolUse = this.providerCapabilities.supportsNativeToolUse;
+    this.supportsNativeFunctionCalling = this.providerCapabilities.supportsNativeFunctionCalling;
+    this.preferXmlProtocol = this.providerCapabilities.preferXmlProtocol;
+    this.supportsForcedToolChoice = this.providerCapabilities.supportsForcedToolChoice;
     this.turnAdapter = this._createTurnAdapter();
   }
 
@@ -1307,6 +1319,106 @@ export class AgentRunner {
       if (!String(name ?? "").startsWith("mcp.")) return String(name);
     }
     return null;
+  }
+
+
+  private _isTodoToolName(name: string): boolean {
+    return (
+      name === "run.setTodoList" ||
+      name === "run.todo" ||
+      name === "run.todo.upsertMany" ||
+      name === "run.todo.update" ||
+      name === "run.todo.remove" ||
+      name === "run.todo.clear"
+    );
+  }
+
+  private _isPreTodoAllowedTool(name: string): boolean {
+    return (
+      this._isTodoToolName(name) ||
+      name === "run.mainDoc.get" ||
+      name === "run.mainDoc.update" ||
+      name === "time.now"
+    );
+  }
+
+  private _todoGateRequired(contract: { required: boolean }): boolean {
+    const allowed = this.turnAllowedToolNames ?? this.ctx.allowedToolNames;
+    return Boolean(contract.required) && !this.ctx.agentId && Boolean(this._pickTodoGateToolName(allowed));
+  }
+
+  private _pickTodoGateToolName(allowed: Set<string>): string | null {
+    for (const name of ["run.setTodoList", "run.todo", "run.todo.upsertMany"]) {
+      if (allowed.has(name)) return name;
+    }
+    return null;
+  }
+
+  private _normalizeArtifactFamily(value: unknown): string | null {
+    const raw = String(value ?? "").trim();
+    if (!raw) return null;
+    let normalized = raw.replace(/\\/g, "/").replace(/\/+/g, "/");
+    normalized = normalized.replace(/\.[^/.]+$/, "");
+    normalized = normalized.replace(/(?:[_-]v\d+|[（(]\d+[)）])$/i, "");
+    normalized = normalized.replace(/\s+/g, " ").trim();
+    return normalized || null;
+  }
+
+  private _getArtifactFamily(toolUse: ContentBlockToolUse, result?: ToolExecResult): string | null {
+    const input = toolUse.input && typeof toolUse.input === "object"
+      ? (toolUse.input as Record<string, unknown>)
+      : {};
+    const output = result?.output && typeof result.output === "object"
+      ? (result.output as Record<string, unknown>)
+      : {};
+
+    const candidates: unknown[] = [
+      input.path,
+      input.targetDir,
+      output.path,
+      output.renamedFrom,
+    ];
+
+    const artifact = output.artifact;
+    if (artifact && typeof artifact === "object") {
+      candidates.push((artifact as Record<string, unknown>).relPath);
+      candidates.push((artifact as Record<string, unknown>).absPath);
+    }
+
+    const artifacts = Array.isArray(output.artifacts) ? output.artifacts : [];
+    for (const item of artifacts.slice(0, 3)) {
+      if (!item || typeof item !== "object") continue;
+      candidates.push((item as Record<string, unknown>).relPath);
+      candidates.push((item as Record<string, unknown>).absPath);
+    }
+
+    for (const candidate of candidates) {
+      const family = this._normalizeArtifactFamily(candidate);
+      if (family) return family;
+    }
+    return null;
+  }
+
+  private _isDeliveryCandidateTool(name: string): boolean {
+    return isContentWriteTool(name) || name === "doc.snapshot" || name === "code.exec";
+  }
+
+  private _recordDeliveredArtifact(toolUse: ContentBlockToolUse, result: ToolExecResult): void {
+    const family = this._getArtifactFamily(toolUse, result);
+    if (!family) return;
+    const families = Array.isArray(this.runState.deliveredArtifactFamilies)
+      ? this.runState.deliveredArtifactFamilies
+      : [];
+    if (!families.includes(family)) families.push(family);
+    this.runState.deliveredArtifactFamilies = families;
+    this.runState.deliveryLatched = families.length > 0;
+  }
+
+  private _isDeliveryLatchedFor(toolUse: ContentBlockToolUse): boolean {
+    if (!this._isDeliveryCandidateTool(toolUse.name)) return false;
+    const family = this._getArtifactFamily(toolUse);
+    if (!family) return false;
+    return (this.runState.deliveredArtifactFamilies ?? []).includes(family);
   }
 
   private _resolveTurnToolChoice(availableToolNames: Set<string>) {
@@ -2407,6 +2519,60 @@ export class AgentRunner {
       };
     }
 
+    const executionContract = this._getExecutionContract();
+    const todoGateRequired = this._todoGateRequired(executionContract);
+    if (todoGateRequired && !this.runState.hasTodoList && !this._isPreTodoAllowedTool(toolUse.name)) {
+      this.ctx.writeEvent("tool.call", {
+        toolCallId: toolUse.id,
+        name: toolUse.name,
+        args: rawInput,
+        executedBy: "gateway",
+        turn: this.turn,
+      });
+      return {
+        ok: false as const,
+        output: {
+          ok: false,
+          error: "TODO_GATE_REQUIRED",
+          message: "当前执行型任务必须先设置 Todo，再进行搜索、写作或交付。",
+          detail: {
+            preferred: this._pickTodoGateToolName(allowedForTurn),
+            reason: executionContract.reason ?? "",
+          },
+          next_actions: [
+            "先调用 run.setTodoList 或 run.todo(action=upsert) 建立可执行 Todo",
+            "Todo 建立后再继续搜索、写文件或调用其它工具",
+          ],
+        },
+      };
+    }
+
+    if (this._isDeliveryLatchedFor(toolUse)) {
+      this.ctx.writeEvent("tool.call", {
+        toolCallId: toolUse.id,
+        name: toolUse.name,
+        args: rawInput,
+        executedBy: "gateway",
+        turn: this.turn,
+      });
+      return {
+        ok: false as const,
+        output: {
+          ok: false,
+          error: "DELIVERY_LATCHED",
+          message: "该逻辑产物已完成交付，禁止重复写入同一产物族。",
+          detail: {
+            artifactFamily: this._getArtifactFamily(toolUse),
+          },
+          next_actions: [
+            "读取上一条工具结果并确认是否已经交付成功",
+            "若需新版本，请明确新的目标文件名或改写成新的产物",
+            "如果任务已完成，请调用 run.done 收口",
+          ],
+        },
+      };
+    }
+
     // mainDoc 熔断：连续更新过多后直接拒绝
     if (toolUse.name === "run.mainDoc.update" && this.blockMainDocUpdate) {
       this.ctx.writeEvent("tool.call", {
@@ -3277,6 +3443,10 @@ export class AgentRunner {
       this.runState.hasWriteOps = true;
       this.runState.hasWriteApplied = true;
     }
+
+    if (result.ok && (isContentWriteTool(name) || isSnapshotRestore || name === "code.exec" || name === "doc.write")) {
+      this._recordDeliveredArtifact(toolUse, result);
+    }
   }
 
   private _checkAutoRetry(assistantText: string): boolean {
@@ -3287,6 +3457,64 @@ export class AgentRunner {
     const canForceToolChoice = this.supportsForcedToolChoice;
     const assistantHasText = String(assistantText ?? "").trim().length > 0;
     const executionContract = this._getExecutionContract();
+    const allowedToolNames = this.turnAllowedToolNames ?? this.ctx.allowedToolNames;
+    const todoGateRequired = this._todoGateRequired(executionContract);
+
+    if (todoGateRequired && !this.runState.hasTodoList && allowedToolNames.size > 0) {
+      this.executionNoToolTurns += 1;
+      const todoToolName = this._pickTodoGateToolName(allowedToolNames);
+      this.forcedToolChoice = canForceToolChoice
+        ? (todoToolName ? { type: "tool", name: todoToolName } : { type: "any" })
+        : null;
+
+      if (this.executionNoToolTurns <= executionContract.maxNoToolTurns) {
+        pushRetryUserMessage(
+          `你还没有设置 Todo（第 ${this.executionNoToolTurns} 次重试）。` +
+            "请先调用 run.setTodoList（或 run.todo action=upsert）写入可执行 Todo，再继续后续工具。禁止直接开始搜索、写文件或只回复文本。",
+        );
+        this.ctx.writeEvent("run.notice", {
+          turn: this.turn,
+          kind: "warn",
+          title: "TodoGateRetry",
+          message:
+            `执行型回合必须先建 Todo，已触发重试（${this.executionNoToolTurns}/${executionContract.maxNoToolTurns}）` +
+            (todoToolName
+              ? `，优先工具：${todoToolName}`
+              : canForceToolChoice
+                ? "，优先策略：任意 Todo 工具"
+                : "，兼容端点：仅文本提醒（不强制 tool_choice）"),
+          detail: {
+            reason: executionContract.reason ?? "",
+            hasTodoList: this.runState.hasTodoList,
+            continuationMode: this.providerCapabilities.continuationMode,
+          },
+        });
+        return true;
+      }
+
+      this.ctx.writeEvent("run.notice", {
+        turn: this.turn,
+        kind: "error",
+        title: "TodoGateUnsatisfied",
+        message: "执行型回合连续重试后仍未建立 Todo，已结束本轮。",
+        detail: {
+          reason: executionContract.reason ?? "",
+          retries: this.executionNoToolTurns,
+          continuationMode: this.providerCapabilities.continuationMode,
+        },
+      });
+      this._setOutcome({
+        status: "failed",
+        reason: "todo_gate_unsatisfied",
+        reasonCodes: ["todo_gate_unsatisfied"],
+        detail: {
+          reason: executionContract.reason ?? "",
+          turn: this.turn,
+          retries: this.executionNoToolTurns,
+        },
+      });
+      return false;
+    }
 
     // Sub-agent tool nudge: if a sub-agent's early turns produce text without
     // calling any tools (and tools are available), inject a nudge message.
@@ -3310,7 +3538,7 @@ export class AgentRunner {
     ) {
       // 非 Anthropic 端点 + 非 strict 路由（task_execution）+ 已有可读文本：直接软降级。
       // GPT 等模型对 tool_choice 强制的遵循度低，反复重试会浪费 token 且最终仍失败。
-      // 仅对 task_execution 路由生效；file_delete_only/web_radar/project_search 等 strict 路由仍强制调工具。
+      // 仅在 Todo Gate 已满足后才允许软降级；否则必须先建 Todo。
       const isNonStrictRoute = (this.ctx.intentRouteId ?? "") === "task_execution" ||
         (this.ctx.intentRouteId ?? "") === "kb_ops";
       if (!canForceToolChoice && assistantHasText && isNonStrictRoute) {

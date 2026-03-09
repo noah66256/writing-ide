@@ -149,6 +149,9 @@ export type RunState = {
   // proposal/write 语义：区分“已提案但未 Keep”与“已落盘/已应用”
   hasWriteProposed: boolean;
   hasWriteApplied: boolean;
+  // P0：已进入交付收口，避免同一逻辑产物被反复写入
+  deliveryLatched: boolean;
+  deliveredArtifactFamilies: string[];
 };
 
 export function createInitialRunState(args?: { protocolRetryBudget?: number; workflowRetryBudget?: number; lintReworkBudget?: number }): RunState {
@@ -195,6 +198,8 @@ export function createInitialRunState(args?: { protocolRetryBudget?: number; wor
     lintReworkBudget: Number.isFinite(args?.lintReworkBudget as any) ? Math.max(0, Math.floor(Number(args?.lintReworkBudget))) : 2,
     hasWriteProposed: false,
     hasWriteApplied: false,
+    deliveryLatched: false,
+    deliveredArtifactFamilies: [],
   };
 }
 

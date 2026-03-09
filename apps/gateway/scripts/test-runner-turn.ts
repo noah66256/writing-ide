@@ -104,6 +104,8 @@ function buildRunner(args: {
   allowedToolNames?: string[];
   toolResultFormat?: "xml" | "text";
   maxTurns?: number;
+  executionContract?: any;
+  initialRunState?: any;
 }) {
   const events: Emitted[] = [];
   const abort = new AbortController();
@@ -148,6 +150,8 @@ function buildRunner(args: {
     mainDoc: {},
     maxTurns: args.maxTurns ?? 3,
     jsonToolFallbackEnabled: false,
+    executionContract: args.executionContract,
+    initialRunState: args.initialRunState,
   };
   return { runner: new AgentRunner(ctx), events, abort };
 }
@@ -462,6 +466,64 @@ async function scenario8_openAiNativeToolCallsStreaming() {
 }
 
 // ---------------------------------------------------------------------------
+// 场景 9: Todo Gate - 执行型回合未建 Todo 时应失败
+// ---------------------------------------------------------------------------
+async function scenario9_todoGateFailsWithoutTodo() {
+  await withMockFetch(async (input) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.includes("/chat/completions")) return openAiTextSse("我先直接开始写稿。");
+    return new Response("unexpected", { status: 500 });
+  }, async () => {
+    const { runner, events } = buildRunner({
+      apiType: "openai-completions",
+      endpoint: "/v1/chat/completions",
+      allowedToolNames: ["run.setTodoList", "kb.search", "doc.write"],
+      maxTurns: 3,
+      executionContract: {
+        required: true,
+        minToolCalls: 1,
+        maxNoToolTurns: 1,
+        reason: "task_execution",
+        preferredToolNames: ["run.setTodoList"],
+      },
+    });
+    await runner.run("先列 Todo 再执行");
+    const outcome = runner.getOutcome();
+    assert.equal(outcome.status, "failed", `expected failed, got ${outcome.status} (${outcome.reason})`);
+    assert.equal(outcome.reason, "todo_gate_unsatisfied", `expected todo_gate_unsatisfied, got ${outcome.reason}`);
+    assert.equal(
+      events.some((e) => e.event === "run.notice" && String((e.data as any)?.title ?? "") === "TodoGateRetry"),
+      true,
+      "should emit TodoGateRetry notice",
+    );
+  });
+  ok("scenario9.todo_gate_fails_without_todo");
+}
+
+// ---------------------------------------------------------------------------
+// 场景 10: Delivery Latch - 同一逻辑产物族重复写入应被拦截
+// ---------------------------------------------------------------------------
+async function scenario10_deliveryLatchNormalizesVersionedPaths() {
+  const { runner } = buildRunner({
+    apiType: "openai-completions",
+    endpoint: "/v1/chat/completions",
+    allowedToolNames: ["code.exec"],
+    initialRunState: {
+      deliveredArtifactFamilies: ["output/OpenClaw口播稿-第二版"],
+      deliveryLatched: true,
+    },
+  });
+  const blocked = (runner as any)._isDeliveryLatchedFor({
+    type: "tool_use",
+    id: "tool_test_delivery_latch",
+    name: "code.exec",
+    input: { path: "output/OpenClaw口播稿-第二版_v2.docx" },
+  });
+  assert.equal(blocked, true, "versioned artifact path should hit delivery latch");
+  ok("scenario10.delivery_latch_normalizes_versioned_paths");
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 async function main() {
@@ -473,6 +535,8 @@ async function main() {
   await scenario6_toolResultInjectionFormat();
   await scenario7_anthropicMissingParamPreValidation();
   await scenario8_openAiNativeToolCallsStreaming();
+  await scenario9_todoGateFailsWithoutTodo();
+  await scenario10_deliveryLatchNormalizesVersionedPaths();
   console.log("[test-runner-turn] ALL PASSED");
 }
 

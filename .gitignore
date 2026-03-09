@@ -59,3 +59,7 @@ apps/*.pkg
 apps/*.exe
 apps/*.blockmap
 apps/*.zip
+
+# local vendor mirrors (do not commit)
+third_party/openai-codex/
+third_party/google-gemini-cli/

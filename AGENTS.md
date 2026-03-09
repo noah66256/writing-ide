@@ -43,6 +43,7 @@
 2. **范式优先**：先找系统性机制/范式（Gate/Router/Contract/StateMachine/Registry 等），不做零散修补
 3. **研究先行**：涉及机制选型或反复失败时，做全网+GitHub 大搜，产物落盘到 `docs/research/`
    - **有成熟对照组时先读实现，不靠猜**：如果存在成熟开源项目、官方文档或可直接查看的源码实现（如 `openai/codex`），必须先看一手实现与关键代码路径，再做结论和方案；只有源码/文档覆盖不到的部分，才允许明确标注为推断。
+   - **优先使用本地参考仓库**：本仓库已内置两份一手参考源码：`third_party/openai-codex`、`third_party/google-gemini-cli`。后续涉及 OpenAI Responses / Codex 上下文注入 / Gemini CLI 与 Gemini API 行为时，优先读这两个本地目录，避免每轮重复上网。
 4. **Plan 驱动**：拆成可执行 todo，先最小闭环再扩展
 5. **proposal-first 实现**：写入/批量修改先提供可审阅的 diff，变更必须可回滚
 6. **验证闭环**：给出验证 checklist，常见坑沉淀到 debug.md

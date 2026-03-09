@@ -439,6 +439,19 @@ export function createAiConfigService(args: {
     const envOpenAiBase = normalizeBaseURL(String(process.env.LLM_OPENAI_BASE_URL ?? "")) || envBase;
     const envOpenAiKey = normalizeApiKeyInput(String(process.env.LLM_OPENAI_API_KEY ?? "")) || envKey;
     const envOpenAiEndpoint = normalizeEndpoint(String(process.env.LLM_OPENAI_ENDPOINT ?? "/v1/responses"), "/v1/responses");
+    const envGeminiProModel = normalizeModelId(String(process.env.LLM_GEMINI_PRO_MODEL ?? ""));
+    const envGeminiFlashLiteModel = normalizeModelId(String(process.env.LLM_GEMINI_FLASH_LITE_MODEL ?? ""));
+    const envGeminiKey = normalizeApiKeyInput(String(process.env.LLM_GEMINI_API_KEY ?? ""));
+    const envGeminiBaseRaw = normalizeBaseURL(String(process.env.LLM_GEMINI_BASE_URL ?? ""));
+    const envGeminiBase = envGeminiBaseRaw || ((envGeminiKey || envGeminiProModel || envGeminiFlashLiteModel) ? "https://generativelanguage.googleapis.com" : "");
+    const envGeminiProEndpoint = normalizeEndpoint(
+      String(process.env.LLM_GEMINI_PRO_ENDPOINT ?? "/v1beta/models/gemini-3.1-pro-preview:generateContent"),
+      "/v1beta/models/gemini-3.1-pro-preview:generateContent",
+    );
+    const envGeminiFlashLiteEndpoint = normalizeEndpoint(
+      String(process.env.LLM_GEMINI_FLASH_LITE_ENDPOINT ?? "/v1beta/models/gemini-3.1-flash-lite-preview:generateContent"),
+      "/v1beta/models/gemini-3.1-flash-lite-preview:generateContent",
+    );
 
     const pickCredsForStage = (stageKey: string) => {
       if (stageKey === "embedding") return { baseURL: envEmbedBase || envBase, apiKey: envEmbedKey || envKey };
@@ -449,6 +462,7 @@ export function createAiConfigService(args: {
       if (stageKey === "agent.context_selector") return { baseURL: envContextSelectorBase || envBase, apiKey: envContextSelectorKey || envKey };
       if (stageKey === "llm.haiku") return { baseURL: envHaikuBase || envBase, apiKey: envHaikuKey || envKey };
       if (stageKey === "llm.openai") return { baseURL: envOpenAiBase || envBase, apiKey: envOpenAiKey || envKey };
+      if (stageKey === "llm.gemini") return { baseURL: envGeminiBase || envBase, apiKey: envGeminiKey || envKey };
       return { baseURL: envBase, apiKey: envKey };
     };
 
@@ -517,6 +531,13 @@ export function createAiConfigService(args: {
         }
       }
     }
+    // 1.4) env 额外声明的 Gemini 模型（官方 generateContent endpoint）
+    if (envGeminiProModel) {
+      ensureModel(envGeminiProModel, "llm.gemini", envGeminiProEndpoint);
+    }
+    if (envGeminiFlashLiteModel) {
+      ensureModel(envGeminiFlashLiteModel, "llm.gemini", envGeminiFlashLiteEndpoint);
+    }
 
     // 2) 确保所有 stage 都有 stage 配置（缺失则补齐）
     const stageMap = new Map<string, AiStageConfig>((ai.stages ?? []).map((s) => [s.stage, s]));
@@ -541,44 +562,43 @@ export function createAiConfigService(args: {
       ai.stages = [...(ai.stages ?? []), s];
     }
 
-    // 3) 把 env opus 模型追加到 chat/agent 的候选列表中（仅在模型已启用时）
+    const appendToStage = (stage: AiStageConfig | undefined, modelId: string) => {
+      if (!stage || stage.stage === "embedding") return;
+      const cur = Array.isArray(stage.modelIds)
+        ? stage.modelIds.map((x) => normalizeModelId(String(x))).filter(Boolean)
+        : [];
+      const merged = Array.from(
+        new Set([...cur, normalizeModelId(String(stage.modelId ?? "")), modelId].filter(Boolean)),
+      ).slice(0, 60);
+      if (merged.join(",") !== (cur.join(",") || "")) {
+        stage.modelIds = merged.length ? merged : null;
+        stage.updatedAt = nowIso();
+      }
+    };
+
+    // 3) 把 env 附加模型追加到 chat/agent 的候选列表中（用于 C 端模型切换）
     const opusDoc = envOpusModel ? byId.get(envOpusModel) : null;
     if (envOpusModel && opusDoc?.isEnabled) {
-      const appendToStage = (stage: AiStageConfig | undefined, modelId: string) => {
-        if (!stage || stage.stage === "embedding") return;
-        const cur = Array.isArray(stage.modelIds)
-          ? stage.modelIds.map((x) => normalizeModelId(String(x))).filter(Boolean)
-          : [];
-        const merged = Array.from(
-          new Set([...cur, normalizeModelId(String(stage.modelId ?? "")), modelId].filter(Boolean)),
-        ).slice(0, 60);
-        if (merged.join(",") !== (cur.join(",") || "")) {
-          stage.modelIds = merged.length ? merged : null;
-          stage.updatedAt = nowIso();
-        }
-      };
       appendToStage(stageMap.get("llm.chat"), envOpusModel);
       appendToStage(stageMap.get("agent.run"), envOpusModel);
     }
 
-    // 3.1) 把 env OpenAI 模型追加到 chat/agent 候选列表（用于 C 端模型切换）
     const openAiDoc = envOpenAiModel ? byId.get(envOpenAiModel) : null;
     if (envOpenAiModel && openAiDoc?.isEnabled) {
-      const appendToStage = (stage: AiStageConfig | undefined, modelId: string) => {
-        if (!stage || stage.stage === "embedding") return;
-        const cur = Array.isArray(stage.modelIds)
-          ? stage.modelIds.map((x) => normalizeModelId(String(x))).filter(Boolean)
-          : [];
-        const merged = Array.from(
-          new Set([...cur, normalizeModelId(String(stage.modelId ?? "")), modelId].filter(Boolean)),
-        ).slice(0, 60);
-        if (merged.join(",") !== (cur.join(",") || "")) {
-          stage.modelIds = merged.length ? merged : null;
-          stage.updatedAt = nowIso();
-        }
-      };
       appendToStage(stageMap.get("llm.chat"), envOpenAiModel);
       appendToStage(stageMap.get("agent.run"), envOpenAiModel);
+    }
+
+    const geminiProDoc = envGeminiProModel ? byId.get(envGeminiProModel) : null;
+    if (envGeminiProModel && geminiProDoc?.isEnabled) {
+      appendToStage(stageMap.get("llm.chat"), envGeminiProModel);
+      appendToStage(stageMap.get("agent.run"), envGeminiProModel);
+    }
+
+    const geminiFlashLiteDoc = envGeminiFlashLiteModel ? byId.get(envGeminiFlashLiteModel) : null;
+    if (envGeminiFlashLiteModel && geminiFlashLiteDoc?.isEnabled) {
+      appendToStage(stageMap.get("llm.chat"), envGeminiFlashLiteModel);
+      appendToStage(stageMap.get("agent.run"), envGeminiFlashLiteModel);
     }
 
       db.aiConfig = { ...ai, updatedAt: nowIso() };
