@@ -843,13 +843,15 @@ export function createAiConfigService(args: {
 
     const provider = modelDoc.providerId ? getProviderById(ai, modelDoc.providerId) : null;
     if (provider && !provider.isEnabled) throw new Error(`provider_not_available:${provider.id}`);
-    const apiKeyEnc = modelDoc.apiKeyEnc || provider?.apiKeyEnc || null;
-    const apiKey = apiKeyEnc ? normalizeApiKeyInput(decryptApiKey(apiKeyEnc)) : "";
+    // 加密机制临时禁用：直接读 .env，后续重做加密时恢复 decryptApiKey 逻辑
+    const envApiKey = normalizeApiKeyInput(String(process.env.LLM_API_KEY ?? ""));
+    const envBaseURL = normalizeBaseURL(String(process.env.LLM_BASE_URL ?? ""));
+    const apiKey = envApiKey;
     const endpoint = normalizeEndpoint(modelDoc.endpoint, def.defaultEndpoint);
     return {
       stage: key,
       modelId: modelDoc.id,
-      baseURL: normalizeBaseURL(provider?.baseURL || modelDoc.baseURL),
+      baseURL: normalizeBaseURL(provider?.baseURL || modelDoc.baseURL) || envBaseURL,
       endpoint,
       apiKey,
       model: modelDoc.model,
@@ -866,12 +868,14 @@ export function createAiConfigService(args: {
     if (!modelDoc || !modelDoc.isEnabled) throw new Error(`model_not_available:${id}`);
     const provider = modelDoc.providerId ? getProviderById(ai, modelDoc.providerId) : null;
     if (provider && !provider.isEnabled) throw new Error(`provider_not_available:${provider.id}`);
-    const apiKeyEnc = modelDoc.apiKeyEnc || provider?.apiKeyEnc || null;
-    const apiKey = apiKeyEnc ? normalizeApiKeyInput(decryptApiKey(apiKeyEnc)) : "";
+    // 加密机制临时禁用：直接读 .env，后续重做加密时恢复 decryptApiKey 逻辑
+    const envApiKey = normalizeApiKeyInput(String(process.env.LLM_API_KEY ?? ""));
+    const envBaseURL = normalizeBaseURL(String(process.env.LLM_BASE_URL ?? ""));
+    const apiKey = envApiKey;
     const endpoint = normalizeEndpoint(modelDoc.endpoint, "/v1/chat/completions");
     return {
       modelId: modelDoc.id,
-      baseURL: normalizeBaseURL(provider?.baseURL || modelDoc.baseURL),
+      baseURL: normalizeBaseURL(provider?.baseURL || modelDoc.baseURL) || envBaseURL,
       endpoint,
       apiKey,
       model: modelDoc.model,
@@ -1354,8 +1358,8 @@ export function createAiConfigService(args: {
       return { modelId: m.id, model: m.model, baseURL, endpoint, endpointUrl, ...tr };
     }
 
-    const apiKeyEnc = m.apiKeyEnc || provider?.apiKeyEnc || null;
-    const apiKey = apiKeyEnc ? normalizeApiKeyInput(decryptApiKey(apiKeyEnc)) : "";
+    // 加密机制临时禁用：直接读 .env
+    const apiKey = normalizeApiKeyInput(String(process.env.LLM_API_KEY ?? ""));
     if (!apiKey) {
       const tr: AiModelTestResult = { ok: false, latencyMs: null, status: null, error: "apiKey_missing", testedAt: nowIso() };
       await writeResult(tr);
