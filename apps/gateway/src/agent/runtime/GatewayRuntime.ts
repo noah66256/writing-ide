@@ -252,6 +252,8 @@ export class GatewayRuntime implements AgentRuntime {
   private readonly providerCapabilities: ProviderCapabilities;
   private executionNoToolTurns = 0;
   private currentTurnToolCalls = 0;
+  /** 连续纯文本回合计数——用于隐式完成检测（参考 Codex 模式） */
+  private consecutiveTextOnlyTurns = 0;
   /** 当前 run() 的内部 AbortController，run.done / maxTurns 通过此终止 */
   private internalAc: AbortController | null = null;
   /** 当前轮次的有效工具白名单（由 computePerTurnAllowed 动态计算） */
@@ -520,6 +522,7 @@ export class GatewayRuntime implements AgentRuntime {
     this.orchestratorMode = false;
     this.lastSteeringFailureCount = 0;
     this.executionNoToolTurns = 0;
+    this.consecutiveTextOnlyTurns = 0;
     this.currentTurnToolCalls = 0;
     this.toolCallSnapshots.clear();
     if (!Array.isArray(this.runState.deliveredArtifactFamilies)) this.runState.deliveredArtifactFamilies = [];
@@ -894,7 +897,9 @@ export class GatewayRuntime implements AgentRuntime {
 
     const ec = this._getExecutionContract();
     const todoGateRequired = this._todoGateRequired();
-    if (todoGateRequired && !this.runState.hasTodoList) {
+    // 仅在模型尚未做过任何工具调用时才追问 todo gate / 执行约束——
+    // 一旦模型已开始执行（totalToolCalls > 0），交给 _enforceTurnLevelGuards 的强约束处理
+    if (this.totalToolCalls === 0 && todoGateRequired && !this.runState.hasTodoList) {
       const todoToolName = this._pickTodoGateToolName();
       pushHint(
         "当前是执行型任务，但你还没有建立 Todo。请先调用 " +
@@ -905,7 +910,7 @@ export class GatewayRuntime implements AgentRuntime {
     }
 
     const minToolCalls = Math.max(0, Math.floor(Number(ec?.minToolCalls ?? 0)));
-    if (ec.required && minToolCalls > 0 && this.totalToolCalls < minToolCalls) {
+    if (this.totalToolCalls === 0 && ec.required && minToolCalls > 0 && this.totalToolCalls < minToolCalls) {
       pushHint(
         `当前回合要求至少触发 ${minToolCalls} 次工具调用。请不要只输出文本，先调用工具完成动作，再继续回复。`,
         ["execution_contract_enforce"],
@@ -940,6 +945,13 @@ export class GatewayRuntime implements AgentRuntime {
   private async _getFollowUpMessages(): Promise<AgentMessage[]> {
     // run.done 已触发，不再追加
     if (this.outcome.reason === "run_done") return [];
+
+    // 隐式完成：模型已做过工具调用，且连续纯文本回合 ≥ 2 → 自然终止（参考 Codex 模式）
+    // Codex 的设计：模型不返回 tool call 即视为完成，不注入追问。
+    // 我们保留 1 次追问机会（consecutiveTextOnlyTurns < 2），超过后尊重模型的"自然结束"信号。
+    if (this.totalToolCalls > 0 && this.consecutiveTextOnlyTurns >= 2) {
+      return [];
+    }
 
     const softGuidance = this._collectSoftGuidanceMessages();
     if (softGuidance.length > 0) return softGuidance;
@@ -1475,6 +1487,7 @@ export class GatewayRuntime implements AgentRuntime {
 
       case "turn_start":
         this.turn += 1;
+        this.currentTurnToolCalls = 0;
         this.turnEngine.setTurn(this.turn);
         // maxTurns 保护
         if (this.turn > maxTurns) {
@@ -1643,6 +1656,12 @@ export class GatewayRuntime implements AgentRuntime {
       }
 
       case "turn_end":
+        // 追踪连续纯文本回合——用于隐式完成检测
+        if (this.currentTurnToolCalls === 0) {
+          this.consecutiveTextOnlyTurns += 1;
+        } else {
+          this.consecutiveTextOnlyTurns = 0;
+        }
         this._enforceTurnLevelGuards(ac);
         return;
       case "message_start":
