@@ -8,6 +8,7 @@
     "packages/*"
   ],
   "scripts": {
+    "dev:local": "bash scripts/dev-local.sh",
     "dev:gateway": "npm run -w @ohmycrab/gateway dev",
     "dev:desktop": "npm run -w @ohmycrab/desktop dev",
     "dev:admin": "npm run -w @ohmycrab/admin-web dev",
@@ -25,4 +26,3 @@
     "validate:mcp:full": "bash scripts/validate-mcp-stack.sh full"
   }
 }
-
