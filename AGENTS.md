@@ -52,3 +52,29 @@
 
 - 始终使用简体中文回复
 - 结论先行，避免长篇赘述；给出明确的下一步与需用户确认点
+
+## Dev 数据路径（重要）
+
+在 dev 模式下（Vite + Electron），Electron 默认 productName 可能是 "Electron"，会导致 `app.getPath("userData")` 落到：
+
+- macOS: `~/Library/Application Support/Electron/`
+
+而正式版（`productName=OhMyCrab`）落到：
+
+- macOS: `~/Library/Application Support/OhMyCrab/`
+
+现象：dev 新开对话像"全忘了"（对话历史、L1 全局记忆、skills/mcp 配置在另一个目录）。
+
+本仓库已在 `/Users/noah/writing-ide/apps/desktop/electron/main.cjs` 增加逻辑：dev 默认将 `userData` 强制对齐到正式版目录，并复用既有迁移（legacy productName 列表包含 `Electron`）。
+
+- 如需 dev 独立数据目录：设置环境变量 `OHMYCRAB_DEV_USERDATA_MODE=isolated`
+- 如需自定义数据目录：设置 `OHMYCRAB_USER_DATA_DIR=/abs/path`
+
+### Dev 丢对话排查
+对话历史文件由主进程落盘，位置在 `userData/ohmycrab-data/conversations.v1.json`。
+如果 dev 里出现"对话列表丢失"，优先检查：
+1) 当前 `userData` 是否对齐（见上）。
+2) `conversations.v1.json` 是否存在、是否被写到了另一套目录。
+
+### L1 全局记忆位置
+L1 全局记忆文件在 `userData/memory/global.md`（主进程 IPC: `memory.readGlobal`/`memory.writeGlobal`）。
