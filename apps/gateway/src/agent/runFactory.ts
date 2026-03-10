@@ -1593,6 +1593,9 @@ const agentRunBodySchema = z.object({
   /** Desktop 传来的外部扩展包 skill manifests */
   userSkillManifests: z.array(z.any()).max(20).optional(),
   contextPack: z.string().optional(),
+  /** P3：结构化上下文段落（优先于 contextPack） */
+  contextSegments: z.array(z.any()).max(200).optional(),
+  contextManifest: z.any().optional(),
   images: z.array(z.object({
     mediaType: z.string().min(1).max(200),
     data: z.string().min(1),
@@ -1771,17 +1774,60 @@ export async function prepareAgentRun(args: {
 
   const mode = (body.mode ?? "agent") as AgentMode;
   const userPrompt = String(body.prompt ?? "");
-  const mainDocFromPack = parseMainDocFromContextPack(body.contextPack);
-  const kbSelectedList = parseKbSelectedLibrariesFromContextPack(body.contextPack);
-  const runTodoFromPack = parseRunTodoFromContextPack(body.contextPack);
-  const recentDialogueFromPack = parseRecentDialogueFromContextPack(body.contextPack);
-  const contextManifestFromPack = parseContextManifestFromContextPack(body.contextPack);
-  const taskStateFromPack = parseTaskStateFromContextPack(body.contextPack);
-  const pendingArtifactsFromPack = parsePendingArtifactsFromContextPack(body.contextPack);
-  const personaFromPack = parseAgentPersonaFromContextPack(body.contextPack);
-  const l1MemoryFromPack = parseMarkdownSegmentFromContextPack(body.contextPack, "L1_GLOBAL_MEMORY");
-  const l2MemoryFromPack = parseMarkdownSegmentFromContextPack(body.contextPack, "L2_PROJECT_MEMORY");
-  const ctxDialogueSummaryFromPack = parseMarkdownSegmentFromContextPack(body.contextPack, "DIALOGUE_SUMMARY");
+
+  const contextPackFallback = body.contextPack;
+  const contextSegmentsFromBody = Array.isArray((body as any).contextSegments) ? ((body as any).contextSegments as any[]) : [];
+  const contextPackForParsing = contextSegmentsFromBody.length ? undefined : contextPackFallback;
+
+  // P3：结构化段落存在时，从 segments 提取本轮关键字段，避免主流程依赖正则 parseXxxFromContextPack。
+  const getSegmentContent = (name: string) => {
+    const hit = contextSegmentsFromBody.find((seg: any) => String(seg?.name ?? "").trim() === name);
+    const raw = hit && typeof hit === "object" ? String((hit as any).content ?? "") : "";
+    return raw.trim();
+  };
+  const parseJsonSegment = (name: string) => {
+    const raw = getSegmentContent(name);
+    if (!raw) return null;
+    try {
+      const j = JSON.parse(raw);
+      return j && typeof j === "object" ? j : null;
+    } catch {
+      return null;
+    }
+  };
+  const stripMarkdownHeader = (raw: string, prefix: string) => {
+    const text = String(raw ?? "");
+    const p = `${prefix}(Markdown):`;
+    if (text.startsWith(p)) return text.slice(p.length).trim();
+    return text.trim();
+  };
+
+  const mainDocFromSegments = contextSegmentsFromBody.length ? parseJsonSegment("MAIN_DOC") : null;
+  const kbSelectedListFromSegments = contextSegmentsFromBody.length ? parseJsonSegment("KB_SELECTED_LIBRARIES") : null;
+  const runTodoFromSegments = contextSegmentsFromBody.length ? parseJsonSegment("RUN_TODO") : null;
+  const recentDialogueFromSegments = contextSegmentsFromBody.length ? parseJsonSegment("RECENT_DIALOGUE") : null;
+  const taskStateFromSegments = contextSegmentsFromBody.length ? parseJsonSegment("TASK_STATE") : null;
+  const pendingArtifactsFromSegments = contextSegmentsFromBody.length ? parseJsonSegment("PENDING_ARTIFACTS") : null;
+  const personaFromSegments = contextSegmentsFromBody.length ? parseJsonSegment("AGENT_PERSONA") : null;
+  const l1MemoryFromSegments = contextSegmentsFromBody.length ? stripMarkdownHeader(getSegmentContent("L1_GLOBAL_MEMORY"), "L1_GLOBAL_MEMORY") : "";
+  const l2MemoryFromSegments = contextSegmentsFromBody.length ? stripMarkdownHeader(getSegmentContent("L2_PROJECT_MEMORY"), "L2_PROJECT_MEMORY") : "";
+  const ctxDialogueSummaryFromSegments = contextSegmentsFromBody.length ? stripMarkdownHeader(getSegmentContent("DIALOGUE_SUMMARY"), "DIALOGUE_SUMMARY") : "";
+  const contextManifestFromSegments = contextSegmentsFromBody.length ? ((body as any).contextManifest ?? null) : null;
+
+  const mainDocFromPack = mainDocFromSegments ?? parseMainDocFromContextPack(contextPackForParsing);
+  const kbSelectedList = (Array.isArray(kbSelectedListFromSegments) ? kbSelectedListFromSegments : null) ?? parseKbSelectedLibrariesFromContextPack(contextPackForParsing);
+  const runTodoFromPack = (Array.isArray(runTodoFromSegments) ? runTodoFromSegments : null) ?? parseRunTodoFromContextPack(contextPackForParsing);
+  const recentDialogueFromPack =
+    (Array.isArray(recentDialogueFromSegments) ? recentDialogueFromSegments : null) ?? parseRecentDialogueFromContextPack(contextPackForParsing);
+  const contextManifestFromPack = contextManifestFromSegments ?? parseContextManifestFromContextPack(contextPackForParsing);
+  const taskStateFromPack = taskStateFromSegments ?? parseTaskStateFromContextPack(contextPackForParsing);
+  const pendingArtifactsFromPack =
+    (Array.isArray(pendingArtifactsFromSegments) ? pendingArtifactsFromSegments : null) ?? parsePendingArtifactsFromContextPack(contextPackForParsing);
+  const personaFromPack = personaFromSegments ?? parseAgentPersonaFromContextPack(contextPackForParsing);
+  const l1MemoryFromPack = l1MemoryFromSegments || parseMarkdownSegmentFromContextPack(contextPackForParsing, "L1_GLOBAL_MEMORY");
+  const l2MemoryFromPack = l2MemoryFromSegments || parseMarkdownSegmentFromContextPack(contextPackForParsing, "L2_PROJECT_MEMORY");
+  const ctxDialogueSummaryFromPack =
+    ctxDialogueSummaryFromSegments || parseMarkdownSegmentFromContextPack(contextPackForParsing, "DIALOGUE_SUMMARY");
 
   const intent = detectRunIntent({
     mode,
@@ -1802,7 +1848,7 @@ export async function prepareAgentRun(args: {
     ideSummary: ideSummaryFromSidecar,
   });
 
-  const projectDirCandidate = normalizeIdeMeta({ ideSummary: ideSummaryFromSidecar, contextPack: body.contextPack, kbSelected: kbSelectedList }).projectDir;
+  const projectDirCandidate = normalizeIdeMeta({ ideSummary: ideSummaryFromSidecar, contextPack: contextPackForParsing, kbSelected: kbSelectedList }).projectDir;
   const preferPendingWriteResume = shouldPreferPendingWriteResumeFromTaskState({
     taskState: taskStateFromPack,
     userPrompt,
@@ -2674,7 +2720,8 @@ export async function prepareAgentRun(args: {
   const assembledContext = buildAssembledContextMessages({
     mode,
     userPrompt: body.prompt,
-    contextPack: body.contextPack,
+    contextPack: contextPackFallback,
+    contextSegments: contextSegmentsFromBody,
     selectedAllowedToolNames,
     toolCatalogSummary,
     mcpToolsForRun,
@@ -3223,6 +3270,7 @@ export async function executeAgentRun(args: {
       promptPreview: String(body.prompt ?? "").slice(0, 240),
       promptChars: String(body.prompt ?? "").length,
       contextPackChars: String(body.contextPack ?? "").length,
+      contextSegmentsCount: Array.isArray((body as any).contextSegments) ? (body as any).contextSegments.length : 0,
       assembledContextSummary,
       contextManifest: (() => {
         const m = contextManifestFromPack;

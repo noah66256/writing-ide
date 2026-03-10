@@ -18,6 +18,7 @@ import { buildStyleLinterLibrariesSidecar, executeToolCall, getTool } from "./to
 import { createRunTarget } from "./runTarget";
 import { cancelConvRun, setConvRunCancel } from "../state/runRegistry";
 import { mergeWorkflowStickyFromMcpSuccess } from "./mcpWorkflowSticky";
+import { buildContextManifestV1, renderContextPackV1, type ContextSegmentV1 } from "@ohmycrab/shared";
 import {
   type GatewayRunController,
   type GatewayRunArgs,
@@ -711,6 +712,56 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           ? buildChatContextPack({ referencesText, userPrompt: promptForGateway })
           : await buildContextPack({ referencesText, userPrompt: promptForGateway, kbMentionIds: args.kbMentionIds });
 
+      // P3：结构化 contextSegments（优先）+ contextPack 兼容（fallback）。
+      // 当前 buildContextPack 返回的大字符串内部已是段落结构（NAME(JSON/Markdown):\n...），
+      // 这里先走“从字符串提取 segment”的过渡方案，后续可直接改为 buildContextSegmentsV1()。
+      const contextSegments: ContextSegmentV1[] = (() => {
+        const extractFirstJsonValue = (raw: string) => {
+          const text = String(raw ?? "").trim();
+          if (!text) return "";
+          if (!text.startsWith("{") && !text.startsWith("[")) return text;
+          // 尝试从“前缀 JSON + 追加提示文本”的结构中，截出第一段可解析 JSON。
+          for (let i = text.length; i >= 2; i--) {
+            const ch = text[i - 1];
+            if (ch !== "}" && ch !== "]") continue;
+            const cand = text.slice(0, i);
+            try {
+              JSON.parse(cand);
+              return cand;
+            } catch {
+              // continue
+            }
+          }
+          return text;
+        };
+
+        const text = String(contextPack ?? "");
+        const re = /(?:^|\n)([A-Z0-9_]+)\((JSON|Markdown)\):\n([\s\S]*?)(?=\n[A-Z0-9_]+\((?:JSON|Markdown)\):\n|$)/g;
+        const out: ContextSegmentV1[] = [];
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(text))) {
+          const name = String(m[1] ?? "").trim();
+          const format = String(m[2] ?? "").trim() === "Markdown" ? "Markdown" : "JSON";
+          const contentRaw = String(m[3] ?? "").trim();
+          const content = format === "JSON" ? extractFirstJsonValue(contentRaw) : contentRaw;
+          if (!name || !content) continue;
+          const trusted = !/^(REFERENCES|KB_LIBRARY_PLAYBOOK|STYLE_SELECTOR|KB_STYLE_CLUSTERS|STYLE_DIMENSIONS|STYLE_CATALOG)$/.test(name);
+          out.push({
+            id: name,
+            name,
+            kind: name === "MAIN_DOC" || name === "RUN_TODO" || name === "TASK_STATE" ? "taskState" : trusted ? "meta" : "materials",
+            priority: name === "MAIN_DOC" || name === "RUN_TODO" || name === "TASK_STATE" ? "p0" : "p1",
+            trusted,
+            format: format as any,
+            content,
+            meta: { source: "desktop" },
+          });
+        }
+        return out.slice(0, 200);
+      })();
+      const contextManifest = buildContextManifestV1({ mode: args.mode, segments: contextSegments });
+      const contextPackCompat = renderContextPackV1({ mode: args.mode, segments: contextSegments, manifest: contextManifest });
+
       // ====================================================================
       // 2. WebSocket connection
       // ====================================================================
@@ -761,7 +812,9 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           model: args.model,
           mode: args.mode,
           prompt: promptForGateway,
-          contextPack,
+          contextPack: contextPackCompat,
+          contextSegments,
+          contextManifest,
           toolSidecar,
           ...(args.images?.length ? { images: args.images } : {}),
           ...(targetAgentIds ? { targetAgentIds } : {}),

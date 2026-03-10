@@ -43,6 +43,16 @@ export type BuildAssembledContextArgs = {
   mode: AgentMode;
   userPrompt: string;
   contextPack?: string;
+  contextSegments?: Array<{
+    id?: string;
+    name?: string;
+    kind?: string;
+    priority?: string;
+    trusted?: boolean;
+    format?: string;
+    content?: string;
+    meta?: Record<string, unknown>;
+  }>;
   selectedAllowedToolNames: Set<string>;
   toolCatalogSummary: ToolCatalogSummary;
   mcpToolsForRun: McpToolLite[];
@@ -59,6 +69,23 @@ export type BuildAssembledContextArgs = {
   kbSelectedList: any[];
   webSearchHint?: string;
 };
+
+export function parseContextSegmentsV1(
+  segments?: BuildAssembledContextArgs["contextSegments"],
+): ContextPackSegment[] {
+  const list = Array.isArray(segments) ? segments : [];
+  const out: ContextPackSegment[] = [];
+  for (const seg of list) {
+    if (!seg || typeof seg !== "object") continue;
+    const name = String((seg as any).name ?? "").trim();
+    const formatRaw = String((seg as any).format ?? "").trim().toLowerCase();
+    const format: "JSON" | "Markdown" = formatRaw === "markdown" ? "Markdown" : "JSON";
+    const content = String((seg as any).content ?? "").trim();
+    if (!name || !content) continue;
+    out.push({ name, format, content });
+  }
+  return out;
+}
 
 export type BuildAssembledContextResult = {
   messages: OpenAiChatMessage[];
@@ -504,8 +531,16 @@ function buildMaterialsMessage(args: BuildAssembledContextArgs, segments: Contex
 }
 
 export function buildAssembledContextMessages(args: BuildAssembledContextArgs): BuildAssembledContextResult {
-  const segments = parseContextPackSegments(args.contextPack);
-  const sourceChars = String(args.contextPack ?? "").length;
+  const segmentsFromStructured = parseContextSegmentsV1(args.contextSegments);
+  const segmentsFromPack = parseContextPackSegments(args.contextPack);
+  const merged = new Map<string, ContextPackSegment>();
+  for (const seg of segmentsFromPack) merged.set(seg.name, seg);
+  for (const seg of segmentsFromStructured) merged.set(seg.name, seg);
+  const segments = Array.from(merged.values());
+
+  const sourceCharsStructured = segmentsFromStructured.reduce((acc, seg) => acc + String(seg.content ?? "").length, 0);
+  const sourceCharsPack = String(args.contextPack ?? "").length;
+  const sourceChars = sourceCharsStructured > 0 ? sourceCharsStructured : sourceCharsPack;
   const retained = new Set<string>();
   const messages: OpenAiChatMessage[] = [];
 
