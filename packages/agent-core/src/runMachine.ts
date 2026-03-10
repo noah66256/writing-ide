@@ -92,9 +92,18 @@ export type RunState = {
   // Web Gate（配额型）：用于“热点/素材盘点”等广度优先场景
   webSearchCount: number;
   webFetchCount: number;
+  // B2：失败驱动工具扩展（用于 fetch/search->browser fallback）
+  webSearchFailCount: number;
+  webFetchFailCount: number;
   // 为了可观测/可解释：只保留少量 unique（避免无限增长）
   webSearchUniqueQueries: string[];
   webFetchUniqueDomains: string[];
+
+  // B2：工具粘性（跨 turn 保留成功工具，避免随机消失）
+  stickyToolNames: string[];
+
+  // B2：自愈（当出现 TOOL_NOT_ALLOWED_THIS_TURN 时，下一 turn 自动补齐）
+  lastToolNotAllowedName: string | null;
   // 编排者对各子 Agent 的委派次数（用于重复委派预警）
   delegationCounts: Record<string, number>;
   hasStyleKbSearch: boolean; // 风格库样例检索是否已完成（以”已尝试检索”为准；0 命中也算完成，避免卡死）
@@ -186,8 +195,12 @@ export function createInitialRunState(args?: { protocolRetryBudget?: number; wor
     hasWebFetch: false,
     webSearchCount: 0,
     webFetchCount: 0,
+    webSearchFailCount: 0,
+    webFetchFailCount: 0,
     webSearchUniqueQueries: [],
     webFetchUniqueDomains: [],
+    stickyToolNames: [],
+    lastToolNotAllowedName: null,
     delegationCounts: {},
     hasStyleKbSearch: false,
     hasStyleKbHit: false,
@@ -779,4 +792,3 @@ export function isProposalWaitingMeta(meta: any): boolean {
   const m: any = meta && typeof meta === "object" ? meta : null;
   return Boolean(m && String(m.applyPolicy ?? "") === "proposal" && m.hasApply === true);
 }
-

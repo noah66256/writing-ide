@@ -2683,6 +2683,59 @@ export async function prepareAgentRun(args: {
       }
     }
   }
+
+  // B2：若本轮需要允许 web.search/web.fetch，则同步预授权其 MCP fallback 链所需工具名。
+  // 目的：避免 Gateway 执行失败后，runner 的 MCP 回退被 TOOL_NOT_ALLOWED 拦截。
+  const allowWebFallbackMcpTools = (args: { selectedAllowedToolNames: Set<string>; mcpTools: Array<{ name: string; originalName: string }> }) => {
+    const { selectedAllowedToolNames, mcpTools } = args;
+    const allowsWebSearch = selectedAllowedToolNames.has("web.search");
+    const allowsWebFetch = selectedAllowedToolNames.has("web.fetch");
+    if (!allowsWebSearch && !allowsWebFetch) return;
+
+    const toName = (t: any) => String(t?.name ?? "").trim();
+    const toOrig = (t: any) => String(t?.originalName ?? t?.name ?? "").trim();
+
+    // search: bocha_web_search / web_search
+    if (allowsWebSearch) {
+      for (const t of mcpTools) {
+        const name = toName(t);
+        const orig = toOrig(t).toLowerCase();
+        if (!name) continue;
+        if (/bocha_web_search/.test(orig) || /\bweb_search\b/.test(orig)) {
+          if (baseAllowedToolNames.has(name)) selectedAllowedToolNames.add(name);
+        }
+      }
+    }
+
+    // fetch: get_page_content
+    if (allowsWebFetch) {
+      for (const t of mcpTools) {
+        const name = toName(t);
+        const orig = toOrig(t).toLowerCase();
+        if (!name) continue;
+        if (/get_page_content/.test(orig)) {
+          if (baseAllowedToolNames.has(name)) selectedAllowedToolNames.add(name);
+        }
+      }
+    }
+
+    // playwright navigate: browser_navigate
+    if (allowsWebSearch || allowsWebFetch) {
+      for (const t of mcpTools) {
+        const name = toName(t);
+        const orig = toOrig(t).toLowerCase();
+        if (!name) continue;
+        if (/browser_navigate/.test(orig)) {
+          if (baseAllowedToolNames.has(name)) selectedAllowedToolNames.add(name);
+        }
+      }
+    }
+  };
+
+  allowWebFallbackMcpTools({
+    selectedAllowedToolNames,
+    mcpTools: mcpToolsForRun.map((t) => ({ name: t.name, originalName: t.originalName })),
+  });
   const allowCodeExecForRun = shouldAllowCodeExecForRun({
     userPrompt,
     routeId: routeIdLower || intentRoute.routeId || "",
@@ -2996,6 +3049,41 @@ export async function prepareAgentRun(args: {
     let allowed: Set<string> | null = null;
     const hints: string[] = [];
 
+    // B2：sticky tools + 自愈补齐（TOOL_NOT_ALLOWED） + 失败驱动扩展（web.fetch/search -> playwright/web-search MCP）
+    // 说明：这是在 baseline selectedAllowedToolNames 之上的“增量扩展”，避免工具随机消失。
+    const stickyTools = new Set<string>(
+      (Array.isArray((state as any)?.stickyToolNames) ? ((state as any).stickyToolNames as any[]) : [])
+        .map((x) => String(x ?? "").trim())
+        .filter((x) => x && baseAllowedToolNames.has(x)),
+    );
+
+    const lastNotAllowed = String((state as any)?.lastToolNotAllowedName ?? "").trim();
+    const healTools = new Set<string>();
+    if (lastNotAllowed && baseAllowedToolNames.has(lastNotAllowed)) {
+      healTools.add(lastNotAllowed);
+      hints.push(`检测到上一回合 TOOL_NOT_ALLOWED：已自动补齐工具 ${lastNotAllowed}（自愈）。`);
+    }
+
+    const failFetch = Math.max(0, Math.floor(Number((state as any)?.webFetchFailCount ?? 0)));
+    const failSearch = Math.max(0, Math.floor(Number((state as any)?.webSearchFailCount ?? 0)));
+    const expansionTools = new Set<string>();
+    if (failFetch > 0 || failSearch > 0) {
+      // runner 内置回退链需要的 MCP 工具名：web-search.get_page_content / playwright.browser_navigate
+      for (const t of mcpToolsForRun) {
+        const name = String((t as any)?.name ?? "").trim();
+        if (!name || !baseAllowedToolNames.has(name)) continue;
+        const orig = String((t as any)?.originalName ?? (t as any)?.name ?? "").trim().toLowerCase();
+        if (failFetch > 0 && /get_page_content/.test(orig)) expansionTools.add(name);
+        if ((failFetch > 0 || failSearch > 0) && /browser_navigate/.test(orig)) expansionTools.add(name);
+        if (failSearch > 0 && (/bocha_web_search/.test(orig) || /\bweb_search\b/.test(orig))) expansionTools.add(name);
+      }
+      if (expansionTools.size > 0) {
+        hints.push(
+          `检测到 web.* 失败（searchFail=${failSearch}, fetchFail=${failFetch}）：已为回退链补齐 ${expansionTools.size} 个 MCP 工具。`,
+        );
+      }
+    }
+
     if (isDeleteOnlyRoute) {
       allowed = new Set(Array.from(selectedAllowedToolNames).filter((name) => DELETE_ONLY_ALLOWED_TOOL_NAMES.has(name)));
       // 兜底确保关键链路可用（受 mode/toolPolicy 影响时仍保留）。
@@ -3013,8 +3101,26 @@ export async function prepareAgentRun(args: {
       allowed = new Set(selectedAllowedToolNames);
     }
 
+    // 增量合并：sticky/heal/expansion
+    for (const n of stickyTools) allowed.add(n);
+    for (const n of healTools) allowed.add(n);
+    for (const n of expansionTools) allowed.add(n);
+
+    // 自愈触发时：若补齐的是浏览器 MCP，则视作浏览器意图信号（避免再次被屏蔽）
+    const shouldForceAllowBrowser = Array.from(healTools).some((n) => /^mcp\.[^.]*?(?:playwright|browser)[^.]*\./i.test(n));
+    const allowBrowserForTurn = allowBrowserToolsEffective || shouldForceAllowBrowser;
+
+    // B2：尽量避免工具集合无限膨胀（以“提示 + 审计”为主，不硬裁掉核心工具）
+    if (allowed.size > 56) {
+      const sticky = Array.from(stickyTools).slice(0, 12);
+      const healed = Array.from(healTools).slice(0, 6);
+      const expanded = Array.from(expansionTools).slice(0, 12);
+      hints.push(`当前回合工具数较多（${allowed.size}），已启用轻量收敛提示；如频繁出现 TOOL_NOT_ALLOWED，可继续优化选择器。`);
+      hints.push(`sticky=${sticky.join(", ") || "-"} / heal=${healed.join(", ") || "-"} / expand=${expanded.join(", ") || "-"}`);
+    }
+
     // 非网页导航场景：默认屏蔽浏览器类 MCP 工具，避免“执行约束”把写作/文件任务导向 browser。
-    if (!allowBrowserToolsEffective && browserMcpToolNames.size > 0) {
+    if (!allowBrowserForTurn && browserMcpToolNames.size > 0) {
       let removed = 0;
       for (const n of browserMcpToolNames) {
         if (allowed.delete(n)) removed += 1;
@@ -3033,7 +3139,7 @@ export async function prepareAgentRun(args: {
       }
 
       const bootCandidates =
-        routeIdLower === "web_radar" || directOpenWebIntent || allowBrowserToolsEffective
+        routeIdLower === "web_radar" || directOpenWebIntent || allowBrowserForTurn
           ? executionPreferredWithComposite
           : shouldStartWithWebResearch
             ? [
@@ -3081,7 +3187,7 @@ export async function prepareAgentRun(args: {
           boot.delete(name);
           continue;
         }
-        if (!allowBrowserToolsEffective && layer === "L2_MCP") {
+        if (!allowBrowserForTurn && layer === "L2_MCP") {
           boot.delete(name);
           continue;
         }
@@ -3089,7 +3195,7 @@ export async function prepareAgentRun(args: {
       if (boot.size === 0) {
         for (const name of allowedNow) {
           const layer = classifyToolLayer(name);
-          if (layer === "L0_CONTROL" || layer === "L1_LOCAL" || (allowBrowserToolsEffective && layer === "L2_MCP")) {
+          if (layer === "L0_CONTROL" || layer === "L1_LOCAL" || (allowBrowserForTurn && layer === "L2_MCP")) {
             boot.add(name);
           }
         }

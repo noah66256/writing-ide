@@ -102,6 +102,16 @@ type ToolCallSnapshot = {
   dryRun?: boolean;
 };
 
+function appendUniqueBounded(list: string[], item: string, limit: number): string[] {
+  const value = String(item ?? "").trim();
+  if (!value) return list;
+  const out = Array.isArray(list) ? list.slice() : [];
+  if (!out.includes(value)) out.push(value);
+  const lim = Math.max(1, Math.floor(Number(limit) || 1));
+  if (out.length > lim) out.splice(0, out.length - lim);
+  return out;
+}
+
 // ── 辅助函数 ─────────────────────────────────────
 
 function inferProviderApi(config: RuntimeConfig): ModelApiType {
@@ -1055,6 +1065,17 @@ export class GatewayRuntime implements AgentRuntime {
       this.effectiveAllowed.size > 0 &&
       !this.effectiveAllowed.has(toolName)
     ) {
+      (this.runState as any).lastToolNotAllowedName = String(toolName ?? "").trim() || null;
+      this.config.runCtx.writeEvent("run.notice", {
+        turn: this.turn,
+        kind: "warn",
+        title: "ToolNotAllowed",
+        message: `工具 "${toolName}" 在当前回合不可用（TOOL_NOT_ALLOWED_THIS_TURN）。`,
+        detail: {
+          toolName,
+          effectiveAllowedCount: this.effectiveAllowed?.size ?? 0,
+        },
+      });
       return {
         ok: false,
         output: {
@@ -1729,12 +1750,39 @@ export class GatewayRuntime implements AgentRuntime {
   ): void {
     this.runState.hasAnyToolCall = true;
 
+    // B2：sticky 记录（成功工具跨 turn 保留；低成本提高稳定性）
+    if (result.ok && !result.dryRun) {
+      const nextSticky = appendUniqueBounded(
+        Array.isArray((this.runState as any).stickyToolNames) ? ((this.runState as any).stickyToolNames as string[]) : [],
+        toolName,
+        10,
+      );
+      (this.runState as any).stickyToolNames = nextSticky;
+    }
+
     // MCP 工具统计
     if (toolName.startsWith("mcp.")) {
       this.runState.hasMcpToolCall = true;
       this.runState.mcpToolCallCount += 1;
       if (result.ok) this.runState.mcpToolSuccessCount += 1;
       else this.runState.mcpToolFailCount += 1;
+    }
+
+    // B2：失败统计（用于 failure-driven tool expansion）
+    if (!result.ok && !result.dryRun) {
+      if (toolName === "web.search") {
+        (this.runState as any).webSearchFailCount = Math.max(0, Math.floor(Number((this.runState as any).webSearchFailCount ?? 0))) + 1;
+        return;
+      }
+      if (toolName === "web.fetch") {
+        (this.runState as any).webFetchFailCount = Math.max(0, Math.floor(Number((this.runState as any).webFetchFailCount ?? 0))) + 1;
+        // 同时保留 domain 观测（失败也应记一次，便于审计）
+        this.runState.webFetchUniqueDomains = appendUnique(
+          this.runState.webFetchUniqueDomains,
+          extractDomain(toolArgs.url),
+        );
+        return;
+      }
     }
 
     if (!result.ok || result.dryRun) return;
