@@ -378,11 +378,20 @@ export class GatewayRuntime implements AgentRuntime {
     }
 
     try {
-      const initialGate = this.config.runCtx.computePerTurnAllowed?.(this.runState) ?? null;
-      const initialVisibleAllowed = initialGate?.allowed instanceof Set
-        ? initialGate.allowed
-        : this.effectiveAllowed;
-      const visibleTools = this._buildAgentTools(initialVisibleAllowed);
+      // 重要：Pi runtime 的 tools 声明集在 run 内基本是静态的（pi-agent-core 不支持每 turn 替换 tools）。
+      // 若按 turn0 的 effectiveAllowed（boot 收敛）去构建 kernel.tools，会出现：
+      // - system prompt 里明明写了工具
+      // - 但 kernel 只声明了 1~3 个工具
+      // - 模型调用其它工具时直接报：Tool XXX not found（不是 TOOL_NOT_ALLOWED）
+      // 因此这里必须用“稳定声明集”，保证每 turn 的 effectiveAllowed 都是它的子集。
+      const declaredAllowed = this.config.runCtx.allowedToolNames;
+      const turn0Gate = this.config.runCtx.computePerTurnAllowed?.(this.runState) ?? null;
+      const turn0EffectiveAllowed = turn0Gate?.allowed instanceof Set
+        ? turn0Gate.allowed
+        : null;
+      // 预置 effectiveAllowed，避免 transformContext 运行前出现空白窗口。
+      this.effectiveAllowed = new Set(turn0EffectiveAllowed ?? declaredAllowed);
+      const visibleTools = this._buildAgentTools(declaredAllowed);
 
       this.config.runCtx.writeEvent("run.notice", {
         turn: 0,
@@ -396,7 +405,8 @@ export class GatewayRuntime implements AgentRuntime {
           systemPromptChars: String(this.config.runCtx.systemPrompt ?? "").length,
           userPromptChars: String(userPrompt ?? "").length,
           visibleToolCount: visibleTools.length,
-          selectedToolCount: this.config.runCtx.allowedToolNames.size,
+          declaredToolCount: declaredAllowed.size,
+          turn0EffectiveAllowedCount: turn0EffectiveAllowed?.size ?? null,
           toolChoice: null,
         },
       });
