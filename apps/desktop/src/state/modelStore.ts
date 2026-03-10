@@ -1,11 +1,6 @@
 import { create } from "zustand";
 import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
 
-const EXPLORE_ONLY_MODEL_IDS = new Set([
-  "gemini-3.1-pro-preview",
-  "gemini-3.1-flash-lite-preview",
-]);
-
 export type AvailableModel = {
   id: string;
   label: string;
@@ -110,11 +105,10 @@ function parseSelector(data: SelectorDto | null): ModelSyncPayload | null {
     if (!id) continue;
     const providerId = item?.providerId ? String(item.providerId).trim() : null;
     const providerName = item?.providerName ? String(item.providerName).trim() : (providerId ? providerNameById.get(providerId) ?? null : null);
-    const exploreOnly = EXPLORE_ONLY_MODEL_IDS.has(id);
     const ctx = item?.contextWindowTokens;
     const contextWindowTokens = Number.isFinite(Number(ctx)) ? Math.max(0, Math.floor(Number(ctx))) : null;
     const chatSupported = chatIdSet.size > 0 ? chatIdSet.has(id) : true;
-    const agentSupported = exploreOnly ? false : (agentIdSet.size > 0 ? agentIdSet.has(id) : true);
+    const agentSupported = agentIdSet.size > 0 ? agentIdSet.has(id) : true;
     modelMap.set(id, {
       id,
       label: String(item?.model ?? "").trim() || id,
@@ -124,7 +118,7 @@ function parseSelector(data: SelectorDto | null): ModelSyncPayload | null {
       contextWindowTokens,
       chatSupported,
       agentSupported,
-      availabilityNote: exploreOnly ? "只支持探索模式" : null,
+      availabilityNote: null,
     });
   }
 
@@ -133,8 +127,8 @@ function parseSelector(data: SelectorDto | null): ModelSyncPayload | null {
     id,
     label: id,
     chatSupported: chatIdSet.size > 0 ? chatIdSet.has(id) : true,
-    agentSupported: EXPLORE_ONLY_MODEL_IDS.has(id) ? false : (agentIdSet.size > 0 ? agentIdSet.has(id) : true),
-    availabilityNote: EXPLORE_ONLY_MODEL_IDS.has(id) ? "只支持探索模式" : null,
+    agentSupported: agentIdSet.size > 0 ? agentIdSet.has(id) : true,
+    availabilityNote: null,
   });
 
   return { availableModels, chatModelIds: chatIds, agentModelIds: agentIds, chatDefaultModelId, agentDefaultModelId };
