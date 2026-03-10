@@ -16,6 +16,7 @@ import {
   type McpSidecarServer,
   type ToolCatalogSummary,
 } from "./toolCatalog.js";
+import { retrieveToolsForRun, type ToolRetrievalResult } from "./toolRetriever.js";
 import {
   ensureRunAuditEnded,
   persistRunAudit,
@@ -1714,6 +1715,7 @@ export type PreparedRun = {
   baseAllowedToolNames: Set<string>;
   selectedAllowedToolNames: Set<string>;
   toolCatalogSummary: ToolCatalogSummary;
+  toolRetrievalNotice: any;
   styleLinterLibraries: any[];
   projectFilesCount: number;
   messages: OpenAiChatMessage[];
@@ -2591,14 +2593,39 @@ export async function prepareAgentRun(args: {
     allowedToolNames: baseAllowedToolNames,
     mcpTools: mcpToolsForRun,
   });
+
+  // [B0/B1] 工具检索（Tool Retrieval）：先给出候选，再以 preferred 方式影响 top-K 选择。
+  const maxToolsForMode = mode === "agent" ? 30 : 20;
+  const toolRetrieval: ToolRetrievalResult = retrieveToolsForRun({
+    catalog: toolCatalog,
+    userPrompt,
+    routeId: routeIdLower || intentRoute.routeId,
+    maxCandidates: 16,
+    desired: mode === "agent" ? 6 : 4,
+  });
+
+  const pinnedToolNames = new Set<string>([
+    ...Array.from(preserveToolNamesWithComposite),
+    ...executionPreferredWithComposite,
+  ]);
+  const retrievalBudget = Math.max(0, maxToolsForMode - pinnedToolNames.size);
+  const injectedRetrievalToolNames = toolRetrieval.retrievedToolNames
+    .filter((name) => Boolean(name) && !pinnedToolNames.has(name))
+    .slice(0, retrievalBudget);
+
+  const preferredToolNamesWithRetrieval = Array.from(
+    new Set([...executionPreferredWithComposite, ...injectedRetrievalToolNames]),
+  );
+
   const toolSelection = selectToolSubset({
     catalog: toolCatalog,
     routeId: routeIdLower || intentRoute.routeId,
     userPrompt,
-    preferredToolNames: executionPreferredWithComposite,
+    preferredToolNames: preferredToolNamesWithRetrieval,
     preserveToolNames: Array.from(preserveToolNamesWithComposite),
-    maxTools: mode === "agent" ? 30 : 20,
+    maxTools: maxToolsForMode,
   });
+
   const selectedAllowedToolNames =
     toolSelection.selectedToolNames.size > 0
       ? toolSelection.selectedToolNames
@@ -2606,9 +2633,22 @@ export async function prepareAgentRun(args: {
   for (const name of preserveToolNamesWithComposite) {
     if (baseAllowedToolNames.has(name)) selectedAllowedToolNames.add(name);
   }
-  for (const name of executionPreferredWithComposite) {
+  for (const name of preferredToolNamesWithRetrieval) {
     if (baseAllowedToolNames.has(name)) selectedAllowedToolNames.add(name);
   }
+
+  const toolRetrievalNotice = {
+    routeId: routeIdLower || intentRoute.routeId || "unknown",
+    promptCaps: toolRetrieval.promptCaps,
+    queryTokens: toolRetrieval.queryTokens,
+    candidates: toolRetrieval.candidates,
+    retrievedToolNames: injectedRetrievalToolNames,
+    injectedPreferredCount: injectedRetrievalToolNames.length,
+    pinnedCount: pinnedToolNames.size,
+    maxTools: maxToolsForMode,
+    finalIncludedToolNames: injectedRetrievalToolNames.filter((name) => selectedAllowedToolNames.has(name)),
+    finalMissingToolNames: injectedRetrievalToolNames.filter((name) => !selectedAllowedToolNames.has(name)),
+  };
 
   const suppressSearchDuringBrowserContinuation = shouldSuppressSearchDuringBrowserContinuation({
     mainDoc: mainDocFromPack,
@@ -3161,7 +3201,8 @@ export async function prepareAgentRun(args: {
       baseAllowedToolNames,
       selectedAllowedToolNames,
       toolCatalogSummary,
-      styleLinterLibraries,
+      toolRetrievalNotice,
+        styleLinterLibraries,
       projectFilesCount,
       messages,
       gates,
@@ -3225,6 +3266,7 @@ export async function executeAgentRun(args: {
     baseAllowedToolNames,
     selectedAllowedToolNames,
     toolCatalogSummary,
+    toolRetrievalNotice,
     styleLinterLibraries,
     projectFilesCount,
     contextManifestFromPack,
@@ -3531,6 +3573,16 @@ export async function executeAgentRun(args: {
     title: "ContextAssembly",
     message: `上下文已重组：core=${assembledContextSummary.coreChars} / task=${assembledContextSummary.taskChars} / memory=${assembledContextSummary.memoryChars} / l3=${assembledContextSummary.runtimeContextChars} / materials=${assembledContextSummary.materialsChars}${assembledContextSummary.modelContextWindowTokens ? `（ctx=${assembledContextSummary.modelContextWindowTokens}）` : ""}` ,
     detail: assembledContextSummary,
+  });
+  writeEvent("run.notice", {
+    turn: 0,
+    kind: toolRetrievalNotice.injectedPreferredCount > 0 ? "info" : "debug",
+    title: "ToolRetrieval",
+    message:
+      toolRetrievalNotice.injectedPreferredCount > 0
+        ? `本轮已注入检索工具：+${toolRetrievalNotice.injectedPreferredCount}（用于避免关键工具被 top-K 裁掉）`
+        : "本轮工具检索未注入（候选不足或已被 pinned 覆盖）",
+    detail: toolRetrievalNotice,
   });
   writeEvent("run.notice", {
     turn: 0,
