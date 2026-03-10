@@ -72,6 +72,7 @@
 
 ### Dev 丢对话排查
 对话历史文件由主进程落盘，位置在 `userData/ohmycrab-data/conversations.v1.json`。
+另外还有一个崩溃兜底文件：`userData/ohmycrab-data/conversations.pending.v1.json`（主历史写盘前先写这里；启动会合并它）。
 如果 dev 里出现"对话列表丢失"，优先检查：
 1) 当前 `userData` 是否对齐（见上）。
 2) `conversations.v1.json` 是否存在、是否被写到了另一套目录。

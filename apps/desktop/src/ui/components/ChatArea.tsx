@@ -228,6 +228,7 @@ export function ChatArea() {
   const [suggestText, setSuggestText] = useState<string>("");
   const [todoPanelCollapsed, setTodoPanelCollapsed] = useState(false);
   const controllerRef = useRef<RunController | null>(null);
+  const prevRunningRef = useRef(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -282,6 +283,19 @@ export function ChatArea() {
     }, 2000);
     return () => clearTimeout(timer);
   }, [steps, mainDoc, todoList, kbAttachedLibraryIds, ctxRefs, pendingArtifacts, mode, model]);
+
+  // 运行结束时立即刷盘一次，避免 dev/HMR/强制退出导致最后一轮没落盘
+  useEffect(() => {
+    const prev = prevRunningRef.current;
+    if (prev && !isRunning) {
+      try {
+        void useConversationStore.getState().flushDraftSnapshotNow().catch(() => void 0);
+      } catch {
+        // ignore
+      }
+    }
+    prevRunningRef.current = isRunning;
+  }, [isRunning]);
 
   // 卸载时取消运行
   useEffect(() => {

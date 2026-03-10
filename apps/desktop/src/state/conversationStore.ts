@@ -159,15 +159,13 @@ function capConversations(list: Conversation[]) {
 
 function schedulePersistToDisk(args: { conversations: Conversation[]; draftSnapshot: RunSnapshot | null }) {
   const api = window.desktop?.history;
-  if (!api?.saveConversations) return;
-  // 水化未完成时不写盘，避免以 conversations:[] 覆盖已有数据
-  if (!diskWriteAllowed) return;
+  if (!api?.saveConversations && !api?.savePendingConversations) return;
 
   const conversations = capConversations(args.conversations);
   const draftSnapshot = args.draftSnapshot ?? null;
   // activeConvId 自动从 store 读取（避免改动所有调用处）
   const activeConvId = useConversationStore?.getState?.()?.activeConvId ?? null;
-  pendingPayload = {
+  const payload = {
     version: 1,
     updatedAt: Date.now(),
     conversations,
@@ -175,12 +173,25 @@ function schedulePersistToDisk(args: { conversations: Conversation[]; draftSnaps
     activeConvId,
   };
 
+  // crash-safe：无论是否允许写主历史文件，都尽量先把最新 payload 写到 pending 文件。
+  // 这样 dev/HMR/强制退出时，即使主历史还没来得及落盘，也能在下次启动时被 hydrate 合并回来。
+  if (api?.savePendingConversations) {
+    void api.savePendingConversations(payload).catch(() => void 0);
+  }
+
+  // 水化未完成时不写主历史文件，避免以 conversations:[] 覆盖已有数据。
+  // 但上面的 pending 文件仍会保留最新 payload，供下一次启动合并。
+  if (!api?.saveConversations) return;
+  if (!diskWriteAllowed) return;
+
+  pendingPayload = payload;
+
   if (persistTimer) return;
   persistTimer = setTimeout(() => {
-    const payload = pendingPayload;
+    const next = pendingPayload;
     pendingPayload = null;
     persistTimer = null;
-    void api.saveConversations(payload).catch(() => void 0);
+    void api.saveConversations(next).catch(() => void 0);
   }, 220);
 }
 
@@ -201,35 +212,71 @@ export const useConversationStore = create<ConversationState>()(
         }
 
         try {
-          const res = await api.loadConversations();
+          const [res, pendingRes] = await Promise.all([
+            api.loadConversations(),
+            api.loadPendingConversations ? api.loadPendingConversations().catch(() => null) : Promise.resolve(null),
+          ]);
+
           if ((res as any)?.ok === false) {
             throw new Error(String((res as any)?.error || (res as any)?.detail || "history_load_failed"));
           }
-          const list = Array.isArray((res as any)?.conversations) ? ((res as any).conversations as any[]) : [];
+
+          const diskList = Array.isArray((res as any)?.conversations) ? ((res as any).conversations as any[]) : [];
           const diskDraft = ((res as any)?.draftSnapshot ?? null) as any;
           const diskActiveConvId = ((res as any)?.activeConvId ?? null) as string | null;
 
-          // 磁盘优先：localStorage 只作为极弱兜底（避免 QuotaExceededError 把渲染打崩）
+          const pendingPayload = pendingRes && (pendingRes as any).ok !== false ? (pendingRes as any).payload : null;
+          const pendingList = Array.isArray(pendingPayload?.conversations) ? (pendingPayload.conversations as any[]) : [];
+          const pendingDraft = pendingPayload?.draftSnapshot && typeof pendingPayload.draftSnapshot === "object" ? pendingPayload.draftSnapshot : null;
+          const pendingActiveConvId = typeof pendingPayload?.activeConvId === "string" ? pendingPayload.activeConvId : null;
+
+          // 当前内存态（可能在 hydrate 尚未完成时，用户已经发了消息/产生草稿）
           const curConvs = get().conversations ?? [];
           const curDraft = get().draftSnapshot ?? null;
+          const curActiveConvId = get().activeConvId ?? null;
 
-          const patch: Partial<ConversationState> = {};
-          // Electron 模式下磁盘是单一真实来源：只要磁盘有数据，就覆盖内存态（避免旧 localStorage 残留挡住历史恢复）
-          if (list.length) patch.conversations = capConversations(list as any);
-          if (diskDraft && typeof diskDraft === "object") patch.draftSnapshot = diskDraft as any;
+          const diskConvs = capConversations(diskList as any);
+          const pendConvs = capConversations(pendingList as any);
 
-          // 恢复 activeConvId（仅当对话仍存在时）
-          const finalConvs = (patch.conversations ?? curConvs) as Conversation[];
-          if (diskActiveConvId && finalConvs.some((c) => c.id === diskActiveConvId)) {
-            patch.activeConvId = diskActiveConvId;
+          // precedence：disk < pending < memory
+          const byId = new Map();
+          for (const list of [diskConvs, pendConvs, curConvs]) {
+            for (const c of Array.isArray(list) ? list : []) {
+              if (!c || !c.id) continue;
+              byId.set(c.id, c);
+            }
           }
+          // order：memory > pending > disk
+          const order = [];
+          const seen = new Set();
+          for (const list of [curConvs, pendConvs, diskConvs]) {
+            for (const c of Array.isArray(list) ? list : []) {
+              const id = String(c?.id ?? "");
+              if (!id || seen.has(id)) continue;
+              seen.add(id);
+              order.push(id);
+            }
+          }
+          const merged = capConversations(order.map((id) => byId.get(id)).filter(Boolean) as any);
 
-          if (Object.keys(patch).length) set(patch as any);
+          const finalDraft =
+            (curDraft && typeof curDraft === "object" ? curDraft : null) ??
+            pendingDraft ??
+            (diskDraft && typeof diskDraft === "object" ? diskDraft : null);
+
+          const pickActive = (id: string | null) => (id && merged.some((c) => c.id === id) ? id : null);
+          const finalActiveConvId = pickActive(curActiveConvId) || pickActive(pendingActiveConvId) || pickActive(diskActiveConvId);
+
+          set({
+            conversations: merged,
+            draftSnapshot: finalDraft as any,
+            activeConvId: finalActiveConvId,
+          } as any);
 
           // 水化成功后开放写权限，并把最终态同步回磁盘
           diskWriteAllowed = true;
-          const finalDraft = (patch.draftSnapshot ?? curDraft) as any;
-          schedulePersistToDisk({ conversations: finalConvs, draftSnapshot: finalDraft });
+          schedulePersistToDisk({ conversations: merged, draftSnapshot: (finalDraft as any) ?? null });
+          void api.clearPendingConversations?.().catch(() => void 0);
 
           // 并把 localStorage 写回一个"很小的占位"，清掉旧的大对象（避免下一次 setItem 直接 quota 崩溃）
           try {

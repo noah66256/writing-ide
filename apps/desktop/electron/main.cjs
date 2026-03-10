@@ -72,6 +72,7 @@ const MAX_INDEX_FILES = 10000;
 
 const HISTORY_DIRNAME = "ohmycrab-data";
 const HISTORY_FILENAME = "conversations.v1.json";
+const HISTORY_PENDING_FILENAME = "conversations.pending.v1.json";
 const HISTORY_BAK_SUFFIX = ".bak";
 
 let mainWindow = null;
@@ -538,6 +539,40 @@ function listHistoryReadCandidates() {
     seen.add(file);
     return true;
   });
+}
+
+function listHistoryPendingReadCandidates() {
+  const { primary, fallback } = historyCandidateDirs();
+  const out = [];
+  if (primary) out.push({ used: "primary", file: path.join(primary, HISTORY_PENDING_FILENAME) });
+  if (fallback) out.push({ used: "fallback", file: path.join(fallback, HISTORY_PENDING_FILENAME) });
+  const seen = new Set();
+  return out.filter((item) => {
+    const file = String(item?.file ?? "");
+    if (!file || seen.has(file)) return false;
+    seen.add(file);
+    return true;
+  });
+}
+
+async function resolveHistoryPendingFileForWrite() {
+  const { dir, used } = await resolveHistoryFileForWrite();
+  const file = path.join(dir, HISTORY_PENDING_FILENAME);
+  return { dir, file, used };
+}
+
+async function clearHistoryPendingFiles() {
+  const { primary, fallback } = historyCandidateDirs();
+  const files = [];
+  if (primary) files.push(path.join(primary, HISTORY_PENDING_FILENAME));
+  if (fallback) files.push(path.join(fallback, HISTORY_PENDING_FILENAME));
+  for (const f of files) {
+    try {
+      await fsp.unlink(f);
+    } catch {
+      // ignore
+    }
+  }
 }
 
 async function resolveHistoryFileForRead() {
@@ -1718,6 +1753,71 @@ function registerIpc() {
     }
   });
 
+
+  ipcMain.handle("history.loadPendingConversations", async () => {
+    try {
+      const unique = listHistoryPendingReadCandidates();
+      let best = null;
+      for (const c of unique) {
+        try {
+          const raw = await fsp.readFile(c.file, "utf-8");
+          const parsed = JSON.parse(String(raw ?? ""));
+          if (!parsed || typeof parsed !== "object") continue;
+          const updatedAt = Number(parsed.updatedAt ?? 0) || 0;
+          const conversations = Array.isArray(parsed.conversations) ? parsed.conversations : [];
+          const draftSnapshot = parsed.draftSnapshot && typeof parsed.draftSnapshot === "object" ? parsed.draftSnapshot : null;
+          const activeConvId = typeof parsed.activeConvId === "string" ? parsed.activeConvId : null;
+          const payload = { version: 1, updatedAt, conversations, draftSnapshot, activeConvId };
+          if (!best || updatedAt > Number(best.updatedAt ?? 0)) {
+            best = { ...c, updatedAt, payload };
+          }
+        } catch {
+          // ignore
+        }
+      }
+      if (!best) return { ok: true, payload: null };
+      return { ok: true, payload: best.payload, used: best.used, file: best.file };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
+  ipcMain.handle("history.savePendingConversations", async (_event, payload) => {
+    try {
+      const { file, used } = await resolveHistoryPendingFileForWrite();
+      const text = typeof payload === "string" ? payload : JSON.stringify(payload ?? null);
+      const tmp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+      await fsp.writeFile(tmp, text, "utf-8");
+      try {
+        await fsp.rename(tmp, file);
+      } catch (e) {
+        const code = String(e?.code ?? "");
+        if (code === "EPERM" || code === "EEXIST") {
+          try {
+            await fsp.unlink(file);
+          } catch {
+            // ignore
+          }
+          await fsp.rename(tmp, file);
+        } else {
+          throw e;
+        }
+      }
+      return { ok: true, used, file };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
+  ipcMain.handle("history.clearPendingConversations", async () => {
+    try {
+      await clearHistoryPendingFiles();
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
   ipcMain.handle("history.saveConversations", async (_event, payload) => {
     try {
       const { file, used } = await resolveHistoryFileForWrite();
@@ -1747,6 +1847,11 @@ function registerIpc() {
         } else {
           throw e;
         }
+      }
+      try {
+        await clearHistoryPendingFiles();
+      } catch {
+        // ignore
       }
       return { ok: true, used, file };
     } catch (e) {

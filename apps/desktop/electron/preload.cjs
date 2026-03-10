@@ -93,6 +93,15 @@ contextBridge.exposeInMainWorld("desktop", {
     saveConversations(payload) {
       return ipcRenderer.invoke("history.saveConversations", payload);
     },
+    loadPendingConversations() {
+      return ipcRenderer.invoke("history.loadPendingConversations");
+    },
+    savePendingConversations(payload) {
+      return ipcRenderer.invoke("history.savePendingConversations", payload);
+    },
+    clearPendingConversations() {
+      return ipcRenderer.invoke("history.clearPendingConversations");
+    },
     getInfo() {
       return ipcRenderer.invoke("history.getInfo");
     },

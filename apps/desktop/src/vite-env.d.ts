@@ -147,6 +147,9 @@ declare global {
           detail?: string;
         }>;
         saveConversations: (payload: any) => Promise<{ ok: boolean; used?: "primary" | "fallback"; file?: string; error?: string }>;
+        loadPendingConversations: () => Promise<{ ok: boolean; payload?: any | null; used?: "primary" | "fallback"; file?: string; error?: string }>;
+        savePendingConversations: (payload: any) => Promise<{ ok: boolean; used?: "primary" | "fallback"; file?: string; error?: string }>;
+        clearPendingConversations: () => Promise<{ ok: boolean; error?: string }>;
       };
       clipboard?: {
         writeText: (text: string) => Promise<{ ok: boolean; error?: string }>;

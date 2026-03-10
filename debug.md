@@ -29,11 +29,14 @@
 
 #### 根因（高概率）
 
-- Dev/HMR/窗口关闭时，最后一次 `setDraftSnapshot()` 仍在 debounce（默认 2s）内，尚未写盘；重启后自然恢复不到最新状态，于是回到欢迎页。
+- **写盘竞态**：`conversationStore` 在 `hydrateFromDisk()` 完成前会禁止写入主历史文件（`diskWriteAllowed=false`），而 dev/HMR/强制退出可能发生在 debounce/节流窗口内，导致最后一轮状态还没落盘。
+- **覆盖竞态**：旧逻辑在磁盘有历史时偏向“磁盘覆盖内存态”，若用户在水合尚未结束前已产生新对话/新草稿，可能被覆盖，从而表现为“最新对话消失、回到欢迎页”。
 
 #### 修复
 
-- 在布局层监听 `beforeunload/pagehide/visibilitychange(hidden)`，强制 `flushDraftSnapshotNow()` 刷盘，降低丢对话概率：`/Users/noah/writing-ide/apps/desktop/src/ui/layouts/ConversationLayout.tsx`。
+- **pending 兜底落盘**：任何一次对话状态变更都会先写入 `conversations.pending.v1.json`（崩溃兜底），主历史文件 `conversations.v1.json` 仍按节流写入。
+- **水合合并**：启动水合时合并 `disk + pending + memory`，保证“水合前产生的新对话/草稿”不会被覆盖。
+- **更积极的刷盘点**：run 结束时立即 `flushDraftSnapshotNow()`；布局层继续监听 `beforeunload/pagehide/visibilitychange(hidden)` 刷盘。
 
 #### 验收
 
