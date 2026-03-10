@@ -2781,6 +2781,8 @@ export class AgentRunner {
           llmOverride: this.ctx.baseUrl && this.ctx.apiKey && this.ctx.modelId
             ? { baseUrl: this.ctx.baseUrl, endpoint: this.ctx.endpoint, apiKey: this.ctx.apiKey, model: this.ctx.modelId }
             : null,
+          mode: this.ctx.mode,
+          allowedToolNames: this.ctx.allowedToolNames,
         });
 
         if (ret.ok) {

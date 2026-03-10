@@ -134,6 +134,83 @@ export const TOOL_LIST: ToolMeta[] = [
 
   },
   {
+    name: "tools.search",
+    description:
+      "在本轮可用工具池中搜索工具（内置 + MCP），返回候选工具名与参数摘要。\n" +
+      "当工具很多、不确定该用哪个时：先 tools.search，再 tools.describe，再调用具体工具。\n" +
+      "只读、无副作用。",
+    args: [
+      { name: "query", required: true, desc: "搜索问题/想要的能力（自然语言即可）", type: "string" },
+      { name: "limit", desc: "返回数量（默认 8，最大 20）", type: "number" },
+      { name: "sources", desc: "可选：限制来源（builtin/mcp）", type: "array" },
+      { name: "includeSchemas", desc: "是否附带 inputSchema（默认 false）", type: "boolean" },
+    ],
+    modes: ["chat", "agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        limit: { type: "number" },
+        sources: { type: "array", items: { type: "string" } },
+        includeSchemas: { type: "boolean" },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+    outputSchema: {
+      type: "object",
+      description: "Tool search results",
+      properties: {
+        ok: { type: "boolean", description: "success" },
+        tools: {
+          type: "array",
+          description: "matched tools",
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string" },
+              source: { type: "string" },
+              description: { type: "string" },
+              riskLevel: { type: "string" },
+              capabilities: { type: "array", items: { type: "string" } },
+              requiredArgs: { type: "array", items: { type: "string" } },
+              schemaSummary: { type: "object" },
+            },
+          },
+        },
+      },
+    },
+  },
+  {
+    name: "tools.describe",
+    description:
+      "获取某个工具的详细说明与参数 schema（内置 + MCP）。\n" +
+      "建议用法：tools.search 找到候选后，再 tools.describe 确认参数，再调用工具。\n" +
+      "只读、无副作用。",
+    args: [
+      { name: "name", required: true, desc: "工具名（例如 doc.write 或 mcp.playwright.browser_snapshot）", type: "string" },
+      { name: "includeSchema", desc: "是否附带完整 schema（默认 true）", type: "boolean" },
+    ],
+    modes: ["chat", "agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        includeSchema: { type: "boolean" },
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+    outputSchema: {
+      type: "object",
+      description: "Tool details",
+      properties: {
+        ok: { type: "boolean" },
+        tool: { type: "object" },
+      },
+    },
+  },
+  {
     name: "web.search",
     description:
       "联网搜索。用于热点追踪、关键词研究、竞品分析、实时信息获取。\n" +
@@ -1331,7 +1408,6 @@ export function collectToolSchemaIssues(toolList: ToolMeta[] = TOOL_LIST): ToolS
   }
   return out;
 }
-
 
 
 

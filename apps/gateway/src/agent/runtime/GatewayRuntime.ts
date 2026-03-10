@@ -1234,6 +1234,8 @@ export class GatewayRuntime implements AgentRuntime {
                 model: this.config.runCtx.modelId,
               }
             : null,
+        mode: this.config.runCtx.mode,
+        allowedToolNames: this.config.runCtx.allowedToolNames,
       });
 
       if (ret.ok) {
@@ -1537,6 +1539,19 @@ export class GatewayRuntime implements AgentRuntime {
 
         // 失败摘要
         if (!ok && !dryRun) {
+          const flat = normalizeToolOutputText(output);
+          const m = flat.match(/\bTool\s+([A-Za-z0-9_]+)\s+not\s+found\b/i);
+          if (m?.[1]) {
+            const raw = this._decodeRuntimeToolName(String(m[1]));
+            (this.runState as any).lastToolNotFoundName = raw || null;
+            this.config.runCtx.writeEvent("run.notice", {
+              turn: this.turn,
+              kind: "warn",
+              title: "ToolNotFound",
+              message: `检测到 TOOL_NOT_FOUND：${raw || m[1]}，下一回合将自愈补齐工具池。`,
+              detail: { toolName: raw || m[1], rawError: flat.slice(0, 240) },
+            });
+          }
           this.failureDigest.failedTools.push({
             toolCallId: event.toolCallId,
             name: rawToolName,

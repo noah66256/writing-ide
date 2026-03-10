@@ -230,6 +230,8 @@ const RouteIdSchema = z.enum(ROUTE_REGISTRY_V1.map((r) => r.routeId) as [RouteId
 
 const CORE_WORKFLOW_TOOL_NAMES = [
   "time.now",
+  "tools.search",
+  "tools.describe",
   "run.mainDoc.get",
   "run.mainDoc.update",
   "run.setTodoList",
@@ -364,11 +366,26 @@ function buildRouteDecisionV1(args: {
   const deleteRoutePinnedToolNames = new Set(
     DELETE_ROUTE_PINNED_TOOL_NAMES.filter((name) => args.baseAllowedToolNames.has(name)),
   );
+  const deliveryPinnedToolNames = (() => {
+    if (!looksLikeProjectDeliveryIntent(args.userPrompt)) return [] as string[];
+    const pins = [
+      "doc.write",
+      "doc.read",
+      "doc.mkdir",
+      "doc.splitToDir",
+      "doc.previewDiff",
+      "doc.applyEdits",
+      "project.listFiles",
+    ];
+    return pins.filter((name) => args.baseAllowedToolNames.has(name));
+  })();
+
   const preserveToolNames = new Set<string>([
     ...Array.from(alwaysAllowToolNames),
     ...Array.from(args.skillPinnedToolNames),
     ...executionPreferred,
     ...(routeIdLower === "file_delete_only" ? Array.from(deleteRoutePinnedToolNames) : []),
+    ...deliveryPinnedToolNames,
   ]);
 
   return {
@@ -1150,6 +1167,21 @@ export function looksLikeFreshWebResearchTask(text: string): boolean {
   if (!hasFreshness) return false;
   const isProjectOnly = /(项目|仓库|代码|文件|报错|bug|报错日志|本地)/.test(t) && !/(热点|新闻|财经|科技|时事)/.test(t);
   if (isProjectOnly) return false;
+  return true;
+}
+
+export function looksLikeProjectDeliveryIntent(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  // 仅当用户显式要求"生成/保存/落盘文件"时触发，避免把普通总结误判为写入。
+  const hasVerb = /(写(成|为)?|保存|落盘|生成|导出|输出到|写入|写到|dump|persist|save|export|output\s+to)/i.test(t);
+  if (!hasVerb) return false;
+  const hasFileHint =
+    /\.(md|mdx|markdown|txt|json|csv|docx|xlsx|pdf)\b/i.test(t) ||
+    /(md文件|markdown|文档文件|写个.*md|总结.*md|保存成.*文件|输出.*文件|写入项目|保存到项目)/i.test(t);
+  if (!hasFileHint) return false;
+  // 排除明显的"仅讨论/解释"语义
+  if (/(不需要落盘|不用保存|只要说说|只回答|不用写文件)/i.test(t)) return false;
   return true;
 }
 
@@ -3062,6 +3094,12 @@ export async function prepareAgentRun(args: {
     if (lastNotAllowed && baseAllowedToolNames.has(lastNotAllowed)) {
       healTools.add(lastNotAllowed);
       hints.push(`检测到上一回合 TOOL_NOT_ALLOWED：已自动补齐工具 ${lastNotAllowed}（自愈）。`);
+    }
+
+    const lastNotFound = String((state as any)?.lastToolNotFoundName ?? "").trim();
+    if (lastNotFound && baseAllowedToolNames.has(lastNotFound)) {
+      healTools.add(lastNotFound);
+      hints.push(`检测到上一回合 TOOL_NOT_FOUND：已自动补齐工具 ${lastNotFound}（自愈）。`);
     }
 
     const failFetch = Math.max(0, Math.floor(Number((state as any)?.webFetchFailCount ?? 0)));

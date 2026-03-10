@@ -2,6 +2,9 @@ import type { FastifyInstance } from "fastify";
 import { createHash } from "node:crypto";
 import { computeDraftStatsForStyleLint } from "../kb/styleLintDraftStats.js";
 import { toolConfig } from "../toolConfig.js";
+import { TOOL_LIST } from "@ohmycrab/tools";
+import { buildToolCatalog, type ToolCatalogEntry } from "./toolCatalog.js";
+import { retrieveToolsForRun } from "./toolRetriever.js";
 
 export type ServerToolExecutionDecision = {
   executedBy: "gateway" | "desktop";
@@ -11,6 +14,9 @@ export type ServerToolExecutionDecision = {
 export type ToolSidecar = {
   styleLinterLibraries?: any[];
   projectFiles?: Array<{ path: string }>;
+  /** 当前 run 选择出的 MCP tools（已按 server selection 过滤） */
+  mcpTools?: any[];
+  mcpServers?: any[];
 };
 
 function parseCsv(v: any) {
@@ -25,6 +31,7 @@ function getServerToolAllowlist(): Set<string> {
   const list = cfg
     ? parseCsv(cfg)
     : ["lint.style", "time.now",
+       "tools.search", "tools.describe",
        "web.search", "web.fetch",
        "run.done", "run.setTodoList", "run.todo", "run.mainDoc.update", "run.mainDoc.get",
        "agent.delegate"];
@@ -65,6 +72,10 @@ export function decideServerToolExecution(args: {
 
   // time.*：完全 server-side（只读时间）；不依赖 Desktop sidecar
   if (name === "time.now") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "time_now_server_side"] };
+  // tools.*：工具发现（只读）
+  if (name === "tools.search" || name === "tools.describe") {
+    return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "tool_discovery_server_side"] };
+  }
   // web.*：优先 Gateway 执行（Bocha API / 直接 HTTP）；若不可用，Runner 层回退到 MCP
   if (name === "web.search" || name === "web.fetch") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "web_gateway_first"] };
   // run.*：系统编排类工具（无副作用，但会影响 run 生命周期），应 server-side 执行
@@ -161,6 +172,8 @@ function extractTextFromHtml(html: string): { title: string | null; text: string
 
   return { title, text: t };
 }
+
+// ── Tool Discovery (Phase 1) ────────────────────────────────────────────────
 
 function parseDomainsEnv(name: string) {
   return parseCsv(process.env[name] ?? "")
@@ -451,6 +464,8 @@ export async function executeServerToolOnGateway(args: {
   authorization?: string | null;
   mainDoc: Record<string, unknown>;
   llmOverride?: { baseUrl: string; endpoint?: string; apiKey: string; model: string } | null;
+  mode: "chat" | "agent";
+  allowedToolNames?: Set<string> | null;
 }) {
   const name = String(args.call?.name ?? "").trim();
   if (name === "run.done") return { ok: true as const, output: { ok: true } };
@@ -523,6 +538,22 @@ export async function executeServerToolOnGateway(args: {
     return { ok: true as const, output: { ok: true, mainDoc: args.mainDoc } };
   }
   if (name === "time.now") return executeTimeNowOnGateway();
+  if (name === "tools.search") {
+    return executeToolsSearchOnGateway({
+      call: args.call,
+      toolSidecar: args.toolSidecar,
+      mode: args.mode,
+      allowedToolNames: args.allowedToolNames ?? null,
+    });
+  }
+  if (name === "tools.describe") {
+    return executeToolsDescribeOnGateway({
+      call: args.call,
+      toolSidecar: args.toolSidecar,
+      mode: args.mode,
+      allowedToolNames: args.allowedToolNames ?? null,
+    });
+  }
   if (name === "web.search") {
     const ret = await executeWebSearchOnGateway({ call: args.call });
     if (ret.ok) return ret;
@@ -547,6 +578,147 @@ export async function executeServerToolOnGateway(args: {
   if (name === "agent.delegate") return { ok: false as const, error: "HANDLED_BY_RUNNER" };
   return { ok: false as const, error: "SERVER_TOOL_NOT_IMPLEMENTED" };
 }
+
+function clampBool(v: any, fallback: boolean) {
+  if (typeof v === "boolean") return v;
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "1" || s === "true" || s === "yes") return true;
+  if (s === "0" || s === "false" || s === "no") return false;
+  return fallback;
+}
+
+function normalizeStringArray(v: any): string[] {
+  if (Array.isArray(v)) return v.map((x) => String(x ?? "").trim()).filter(Boolean);
+  const s = String(v ?? "").trim();
+  if (!s) return [];
+  if (s.includes(",")) return s.split(",").map((x) => x.trim()).filter(Boolean);
+  return [s];
+}
+
+function summarizeInputSchema(schema: any, maxKeys = 10): Record<string, unknown> | null {
+  const s = schema && typeof schema === "object" && !Array.isArray(schema) ? (schema as any) : null;
+  if (!s) return null;
+  const props = s.properties && typeof s.properties === "object" ? s.properties : null;
+  const required = Array.isArray(s.required) ? s.required.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
+  const keys = props ? Object.keys(props).slice(0, Math.max(0, Math.floor(maxKeys))) : [];
+  return {
+    type: String(s.type ?? "object"),
+    required,
+    keys,
+  };
+}
+
+function requiredArgsFromSchema(schema: any): string[] {
+  const s = schema && typeof schema === "object" && !Array.isArray(schema) ? (schema as any) : null;
+  if (!s) return [];
+  const req = Array.isArray(s.required) ? s.required : [];
+  return req.map((x: any) => String(x ?? "").trim()).filter(Boolean);
+}
+
+function listCatalogForDiscovery(args: {
+  mode: "chat" | "agent";
+  allowedToolNames: Set<string> | null;
+  toolSidecar: ToolSidecar | null;
+}): ToolCatalogEntry[] {
+  const allowed = args.allowedToolNames ?? new Set(TOOL_LIST.map((t) => String(t?.name ?? "").trim()).filter(Boolean));
+  const sidecar = (args.toolSidecar ?? null) as any;
+  const mcpTools = Array.isArray(sidecar?.mcpTools) ? (sidecar.mcpTools as any[]) : [];
+  return buildToolCatalog({
+    mode: args.mode,
+    allowedToolNames: allowed,
+    mcpTools,
+  });
+}
+
+function executeToolsSearchOnGateway(args: {
+  call: any;
+  toolSidecar: ToolSidecar | null;
+  mode: "chat" | "agent";
+  allowedToolNames: Set<string> | null;
+}) {
+  const query = String(args.call?.args?.query ?? "").trim();
+  if (!query) return { ok: false as const, error: "MISSING_QUERY" };
+
+  const limit = clampInt(args.call?.args?.limit, 1, 20, 8);
+  const includeSchemas = clampBool(args.call?.args?.includeSchemas, false);
+  const sources = new Set(normalizeStringArray(args.call?.args?.sources).map((x) => x.toLowerCase()));
+
+  const catalog = listCatalogForDiscovery({
+    mode: args.mode,
+    allowedToolNames: args.allowedToolNames,
+    toolSidecar: args.toolSidecar,
+  });
+
+  const filteredCatalog = sources.size > 0
+    ? catalog.filter((e) => sources.has(String(e.source ?? "").toLowerCase()))
+    : catalog;
+
+  const retrieval = retrieveToolsForRun({
+    catalog: filteredCatalog,
+    userPrompt: query,
+    routeId: null,
+    maxCandidates: Math.max(12, limit * 2),
+    desired: limit,
+  });
+
+  const byName = new Map(filteredCatalog.map((e) => [e.name, e] as const));
+  const tools = retrieval.retrievedToolNames
+    .map((name) => byName.get(name))
+    .filter(Boolean)
+    .slice(0, limit)
+    .map((e) => ({
+      name: e!.name,
+      source: e!.source,
+      description: e!.description,
+      riskLevel: e!.riskLevel,
+      capabilities: e!.capabilities,
+      requiredArgs: requiredArgsFromSchema(e!.inputSchema),
+      schemaSummary: includeSchemas ? (e!.inputSchema ?? null) : summarizeInputSchema(e!.inputSchema, 10),
+    }));
+
+  return {
+    ok: true as const,
+    output: {
+      ok: true,
+      tools,
+    },
+  };
+}
+
+function executeToolsDescribeOnGateway(args: {
+  call: any;
+  toolSidecar: ToolSidecar | null;
+  mode: "chat" | "agent";
+  allowedToolNames: Set<string> | null;
+}) {
+  const name = String(args.call?.args?.name ?? "").trim();
+  if (!name) return { ok: false as const, error: "MISSING_NAME" };
+  const includeSchema = clampBool(args.call?.args?.includeSchema, true);
+
+  const catalog = listCatalogForDiscovery({
+    mode: args.mode,
+    allowedToolNames: args.allowedToolNames,
+    toolSidecar: args.toolSidecar,
+  });
+  const entry = catalog.find((e) => e.name === name) ?? null;
+  if (!entry) return { ok: false as const, error: "TOOL_NOT_FOUND", detail: { name } };
+
+  return {
+    ok: true as const,
+    output: {
+      ok: true,
+      tool: {
+        name: entry.name,
+        source: entry.source,
+        description: entry.description,
+        riskLevel: entry.riskLevel,
+        capabilities: entry.capabilities,
+        inputSchema: includeSchema ? (entry.inputSchema ?? null) : summarizeInputSchema(entry.inputSchema, 20),
+      },
+    },
+  };
+}
+
 
 function executeTimeNowOnGateway() {
   const d = new Date();
@@ -574,4 +746,3 @@ function executeTimeNowOnGateway() {
     },
   };
 }
-
