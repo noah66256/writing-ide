@@ -3138,9 +3138,29 @@ export async function prepareAgentRun(args: {
         hints.push("本轮包含强时效联网研究要求：请先调用 time.now / web.search / web.fetch 补齐当天信息，再进入写作与交付。");
       }
 
+      // 浏览器意图（包括短追问/上轮已注入 playwright）下，启动阶段也必须给出最小可执行工具，
+      // 否则 Pi runtime 可能出现“工具声明在 system 中，但 kernel.tools 太少 → Tool ... not found”。
+      const playwrightNavigateTool = mcpToolsForRun
+        .map((t) => ({
+          name: String((t as any)?.name ?? "").trim(),
+          originalName: String((t as any)?.originalName ?? (t as any)?.name ?? "").trim(),
+        }))
+        .find((t) => /^mcp\.[^.]*?(?:playwright|browser)[^.]*\./i.test(t.name) && /browser_navigate/i.test(t.originalName))
+        ?.name;
+      const browserBootExtras = allowBrowserForTurn
+        ? [
+            playwrightNavigateTool || "",
+            baseAllowedToolNames.has("web.search") ? "web.search" : "",
+            baseAllowedToolNames.has("web.fetch") ? "web.fetch" : "",
+            baseAllowedToolNames.has("run.mainDoc.get") ? "run.mainDoc.get" : "",
+            baseAllowedToolNames.has("run.setTodoList") ? "run.setTodoList" : "",
+            baseAllowedToolNames.has("run.todo") ? "run.todo" : "",
+          ].filter(Boolean)
+        : [];
+
       const bootCandidates =
         routeIdLower === "web_radar" || directOpenWebIntent || allowBrowserForTurn
-          ? executionPreferredWithComposite
+          ? [...browserBootExtras, ...executionPreferredWithComposite]
           : shouldStartWithWebResearch
             ? [
                 "time.now",
