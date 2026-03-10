@@ -38,6 +38,112 @@ import {
   unifiedDiff,
 } from "./gatewayAgent";
 
+function buildProjectMapSegmentV1(args: { rootDir: string | null; indexFiles: Array<{ path: string; mtime?: number; type?: string }> | null }) {
+  const rootDir = args.rootDir ? String(args.rootDir) : "";
+  const files = Array.isArray(args.indexFiles) ? args.indexFiles : [];
+  if (!rootDir || files.length === 0) return null;
+
+  const rootName = rootDir.replace(/\\/g, "/").split("/").filter(Boolean).slice(-1)[0] || rootDir;
+
+  const topDirCount = new Map<string, number>();
+  const extCount = new Map<string, number>();
+
+  const normExt = (p: string) => {
+    const m = String(p).toLowerCase().match(/(\.[a-z0-9]{1,12})$/);
+    return m ? m[1] : "(none)";
+  };
+
+  for (const f of files) {
+    const p = String((f as any)?.path ?? "").replace(/\\/g, "/").trim();
+    if (!p) continue;
+    const parts = p.split("/").filter(Boolean);
+    if (!parts.length) continue;
+    const top = parts[0];
+    topDirCount.set(top, (topDirCount.get(top) ?? 0) + 1);
+    const ext = normExt(p);
+    extCount.set(ext, (extCount.get(ext) ?? 0) + 1);
+  }
+
+  const topDirs = Array.from(topDirCount.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12)
+    .map(([name, fileCount]) => ({ name, fileCount }));
+
+  const extTop = Array.from(extCount.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([ext, count]) => ({ ext, count }));
+
+  const rootAnchors = [
+    /^README(\..+)?$/i,
+    /^package\.json$/i,
+    /^tsconfig\.json$/i,
+    /^Cargo\.toml$/i,
+    /^pyproject\.toml$/i,
+    /^requirements\.txt$/i,
+    /^go\.mod$/i,
+    /^pom\.xml$/i,
+    /^Dockerfile$/i,
+    /^Makefile$/i,
+    /^\.env\.example$/i,
+    /^\.env\.sample$/i,
+  ];
+
+  const rootFiles = files
+    .map((f) => String((f as any)?.path ?? "").replace(/\\/g, "/"))
+    .filter((p) => p && !p.includes("/"));
+  const anchorHits = rootFiles
+    .filter((p) => rootAnchors.some((re) => re.test(p)))
+    .slice(0, 12)
+    .map((path) => ({ path, type: "text", reason: "root_anchor" }));
+
+  const entryPatterns = [
+    /(^|\/)src\/(index|main)\.[a-z0-9]+$/i,
+    /(^|\/)(app|server|cli)\.[a-z0-9]+$/i,
+    /(^|\/)electron\/main\.[a-z0-9]+$/i,
+  ];
+  const entryHits = files
+    .map((f) => ({ path: String((f as any)?.path ?? "").replace(/\\/g, "/"), type: String((f as any)?.type ?? "other"), mtime: Number((f as any)?.mtime ?? 0) || 0 }))
+    .filter((f) => f.path && entryPatterns.some((re) => re.test(f.path)))
+    .slice(0, 12)
+    .map((f) => ({ path: f.path, type: f.type === "text" ? "text" : "other", reason: "entry_pattern" }));
+
+  const recentHits = files
+    .map((f) => ({ path: String((f as any)?.path ?? "").replace(/\\/g, "/"), type: String((f as any)?.type ?? "other"), mtime: Number((f as any)?.mtime ?? 0) || 0 }))
+    .filter((f) => f.path && f.mtime)
+    .sort((a, b) => b.mtime - a.mtime)
+    .slice(0, 8)
+    .map((f) => ({ path: f.path, type: f.type === "text" ? "text" : "other", reason: "recent_mtime" }));
+
+  const hotFileMap = new Map<string, any>();
+  for (const item of [...anchorHits, ...entryHits, ...recentHits]) {
+    if (!hotFileMap.has(item.path)) hotFileMap.set(item.path, item);
+    if (hotFileMap.size >= 20) break;
+  }
+  const hotFiles = Array.from(hotFileMap.values()).slice(0, 20);
+
+  const payload = {
+    v: 1,
+    project: { rootName, totalFiles: files.length, updatedAt: Date.now() },
+    topDirs,
+    hotFiles,
+    extTop,
+  };
+  const content = JSON.stringify(payload, null, 2);
+  const maxChars = 1200;
+  const clipped = content.length <= maxChars ? content : content.slice(0, maxChars).trimEnd() + "\n…";
+  return {
+    id: "PROJECT_MAP",
+    name: "PROJECT_MAP",
+    kind: "taskState",
+    priority: "p3",
+    trusted: true,
+    format: "JSON" as const,
+    content: clipped,
+    meta: { source: "desktop", truncated: content.length > maxChars },
+  } satisfies ContextSegmentV1;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -759,6 +865,20 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
         }
         return out.slice(0, 200);
       })();
+
+      // Project Map v1：极轻量“项目导航摘要”（只做结构事实，不做语义解释）
+      try {
+        const p = useProjectStore.getState();
+        const idx = useProjectIndexStore.getState().index;
+        const seg = buildProjectMapSegmentV1({
+          rootDir: p.rootDir ?? null,
+          indexFiles: idx?.rootDir && p.rootDir && idx.rootDir === p.rootDir ? (idx.files as any) : null,
+        });
+        if (seg) contextSegments.push(seg);
+      } catch {
+        // ignore
+      }
+
       const contextManifest = buildContextManifestV1({ mode: args.mode, segments: contextSegments });
       const contextPackCompat = renderContextPackV1({ mode: args.mode, segments: contextSegments, manifest: contextManifest });
 
