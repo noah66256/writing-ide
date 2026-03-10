@@ -2362,6 +2362,7 @@ export async function prepareAgentRun(args: {
   let endpoint = "/v1/chat/completions";
   let toolResultFormat: "xml" | "text" = "xml";
   let modelIdUsed: string = pickedId || "";
+  let modelContextWindowTokens: number | null = null;
   if (pickedId) {
     try {
       const m = await services.aiConfig.resolveModel(pickedId);
@@ -2371,10 +2372,12 @@ export async function prepareAgentRun(args: {
       endpoint = m.endpoint || endpoint;
       toolResultFormat = m.toolResultFormat;
       modelIdUsed = m.modelId;
+      modelContextWindowTokens = m.contextWindowTokens ?? null;
     } catch {
       // resolveModel 失败时（model 未在后台注册），直接用用户选的 id 作为 model name
       model = pickedId;
       modelIdUsed = pickedId;
+      modelContextWindowTokens = null;
     }
   }
   // /responses 在部分 OpenAI-compatible 上默认使用 text 注入更稳，避免 tool_result 不被吸收导致重复调工具。
@@ -2719,6 +2722,7 @@ export async function prepareAgentRun(args: {
 
   const assembledContext = buildAssembledContextMessages({
     mode,
+    modelContextWindowTokens,
     userPrompt: body.prompt,
     contextPack: contextPackFallback,
     contextSegments: contextSegmentsFromBody,
@@ -3525,7 +3529,7 @@ export async function executeAgentRun(args: {
     turn: 0,
     kind: "info",
     title: "ContextAssembly",
-    message: `上下文已重组：core=${assembledContextSummary.coreChars} / task=${assembledContextSummary.taskChars} / memory=${assembledContextSummary.memoryChars} / materials=${assembledContextSummary.materialsChars}` ,
+    message: `上下文已重组：core=${assembledContextSummary.coreChars} / task=${assembledContextSummary.taskChars} / memory=${assembledContextSummary.memoryChars} / l3=${assembledContextSummary.runtimeContextChars} / materials=${assembledContextSummary.materialsChars}${assembledContextSummary.modelContextWindowTokens ? `（ctx=${assembledContextSummary.modelContextWindowTokens}）` : ""}` ,
     detail: assembledContextSummary,
   });
   writeEvent("run.notice", {

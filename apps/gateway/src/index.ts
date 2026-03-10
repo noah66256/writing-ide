@@ -1018,6 +1018,7 @@ fastify.get("/api/llm/selector", async () => {
       providerId: m.providerId ?? null,
       providerName: m.providerName ?? null,
       endpoint: m.endpoint,
+      contextWindowTokens: Number.isFinite(Number(m.contextWindowTokens)) ? Math.max(0, Math.floor(Number(m.contextWindowTokens))) : null,
     })),
     stages: {
       chat: pickStage(chat),

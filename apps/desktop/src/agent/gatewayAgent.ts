@@ -8,6 +8,7 @@ import { usePersonaStore } from "../state/personaStore";
 import { useTeamStore, getEffectiveAgents } from "../state/teamStore";
 import { useSkillStore } from "../state/skillStore";
 import { useMemoryStore } from "../state/memoryStore";
+import { useModelStore } from "../state/modelStore";
 import { startGatewayRunWs } from "./wsTransport";
 
 export function authHeader(): Record<string, string> {
@@ -959,8 +960,28 @@ export function summarizeQuoteAsFeatureV1(quote: string): string {
 
 type DialogueTurn = { user: string; assistant: string };
 
-/** 每次向 Gateway 发送的"原文保留"回合数（不进入摘要压缩） */
-const RAW_KEEP_TURNS = 5;
+const DEFAULT_CONTEXT_WINDOW_TOKENS = 131_072;
+const RAW_KEEP_TURNS_MIN = 5;
+const RAW_KEEP_TURNS_MAX = 30;
+
+function getModelContextWindowTokens(modelId: string): number | null {
+  const id = String(modelId ?? "").trim();
+  if (!id) return null;
+  const models = (useModelStore.getState() as any).availableModels ?? [];
+  const hit = Array.isArray(models) ? models.find((m: any) => String(m?.id ?? "").trim() === id) : null;
+  const v = hit ? (hit as any).contextWindowTokens : null;
+  const n = Number.isFinite(Number(v)) ? Math.floor(Number(v)) : null;
+  return n && n > 0 ? n : null;
+}
+
+function computeDialogueCompactionConfig(preferModelId: string) {
+  const ctx = getModelContextWindowTokens(preferModelId) ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
+  const rawKeepTurns = Math.max(RAW_KEEP_TURNS_MIN, Math.min(RAW_KEEP_TURNS_MAX, Math.floor(ctx / 8000)));
+  const triggerRatio = ctx >= 100_000 ? 0.85 : ctx >= 50_000 ? 0.8 : 0.75;
+  const compactTriggerTokens = Math.floor(ctx * triggerRatio);
+  return { contextWindowTokens: ctx, rawKeepTurns, compactTriggerTokens, triggerRatio };
+}
+
 const MEMORY_SHORT_INJECT_THRESHOLD_CHARS = 2000;
 const MEMORY_AGENT_ANCHOR_GLOBAL = new Set(["用户画像", "决策偏好"]);
 const MEMORY_AGENT_ANCHOR_PROJECT = new Set(["项目决策"]);
@@ -970,15 +991,6 @@ const MEMORY_RETRIEVAL_GLOBAL = new Set(["跨项目进展"]);
 const MEMORY_RETRIEVAL_PROJECT = new Set(["项目概况", "重要约定", "当前进展"]);
 const MEMORY_RECALL_TOPK = 3;
 
-/**
- * 外部基线（2026-03）：
- * - Claude Code：约 95% context window 触发自动压缩（常见窗口 200k）。
- * - Codex：源码默认 90% context window 触发自动压缩（gpt-5.2-codex 为 272k）。
- * 取较小阈值作为本地压缩触发线，避免“短回复续跑”前上下文先爆掉。
- */
-const CLAUDE_CODE_AUTO_COMPACT_TOKENS = Math.floor(200_000 * 0.95);
-const CODEX_AUTO_COMPACT_TOKENS = Math.floor(272_000 * 0.9);
-const DIALOGUE_COMPACT_TRIGGER_TOKENS = Math.min(CLAUDE_CODE_AUTO_COMPACT_TOKENS, CODEX_AUTO_COMPACT_TOKENS);
 type MemoryTopLevelSection = { heading: string; content: string };
 
 function parseTopLevelMemorySections(text: string): MemoryTopLevelSection[] {
@@ -1299,6 +1311,8 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   const proj = useProjectStore.getState();
   const kbLibraries = useKbStore.getState().libraries ?? [];
   const userPrompt = String(extra?.userPrompt ?? "");
+  const runAny: any = useRunStore.getState();
+  const preferModelId = String(runAny.agentModel || runAny.model || "").trim();
   // 仅使用本次消息 @提及的库（绑定机制已废弃）
   const kbMentionIds = Array.isArray(extra?.kbMentionIds) ? extra!.kbMentionIds : [];
   const kbSelectedIds = Array.from(new Set(kbMentionIds));
@@ -1374,7 +1388,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     if (freshWritingBoundary) return undefined;
     const turnsAll = buildDialogueTurnsFromSteps(useRunStore.getState().steps ?? [], { includeToolSummaries: true });
     const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
-    return buildRecentDialogueJsonFromTurns(completeTurns, RAW_KEEP_TURNS);
+    return buildRecentDialogueJsonFromTurns(completeTurns, computeDialogueCompactionConfig(preferModelId).rawKeepTurns);
   })();
 
   const dialogueSummary = (() => {
@@ -2071,6 +2085,8 @@ ${rawProjectMemory}
 
 export function buildChatContextPack(extra?: { referencesText?: string; userPrompt?: string }) {
   const proj = useProjectStore.getState();
+  const runAny: any = useRunStore.getState();
+  const preferModelId = String(runAny.agentModel || runAny.model || "").trim();
   const selection = (() => {
     const ed = proj.editorRef;
     const model = ed?.getModel();
@@ -2101,6 +2117,14 @@ export function buildChatContextPack(extra?: { referencesText?: string; userProm
   const refs = extra?.referencesText ? `${extra.referencesText}\n\n` : "";
   const rawChatGlobalMemory = String(useMemoryStore.getState().globalMemory ?? "").trim();
   const rawChatProjectMemory = String(useMemoryStore.getState().projectMemory ?? "").trim();
+  const chatMemory = selectMemorySectionsForContext({
+    mode: "chat",
+    globalMemory: rawChatGlobalMemory,
+    projectMemory: rawChatProjectMemory,
+    queryText: String(extra?.userPrompt ?? ""),
+  });
+  const chatGlobalMemoryPicked = String(chatMemory.globalMemory ?? "").trim();
+  const chatProjectMemoryPicked = String(chatMemory.projectMemory ?? "").trim();
   const pendingArtifactsRaw = (((useRunStore.getState() as any).pendingArtifacts ?? []) as any[])
     .filter((x) => x && typeof x === "object" && String((x as any).status ?? "pending").trim().toLowerCase() === "pending")
     .slice(-2);
@@ -2157,13 +2181,13 @@ export function buildChatContextPack(extra?: { referencesText?: string; userProm
   const chatRecentDialogue = (() => {
     const turnsAll = buildDialogueTurnsFromSteps(useRunStore.getState().steps ?? [], { includeToolSummaries: true });
     const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
-    return buildRecentDialogueJsonFromTurns(completeTurns, RAW_KEEP_TURNS);
+    return buildRecentDialogueJsonFromTurns(completeTurns, computeDialogueCompactionConfig(preferModelId).rawKeepTurns);
   })();
   if (chatSummary) pushSeg({ name: "DIALOGUE_SUMMARY", content: chatSummary, priority: "p1", trusted: true, source: "desktop" });
   if (chatRecentDialogue)
     pushSeg({ name: "RECENT_DIALOGUE", content: chatRecentDialogue, priority: "p1", trusted: true, source: "desktop" });
 
-  if (rawChatGlobalMemory) {
+  if (chatGlobalMemoryPicked) {
     pushSeg({
       name: "L1_GLOBAL_MEMORY",
       content: `L1_GLOBAL_MEMORY(Markdown):\n${rawChatGlobalMemory}\n\n`,
@@ -2173,7 +2197,7 @@ export function buildChatContextPack(extra?: { referencesText?: string; userProm
       note: `chat 锚点记忆 | selected=${chatMemory.selectedHeadings.global.join(",") || "none"}`,
     });
   }
-  if (rawChatProjectMemory) {
+  if (chatProjectMemoryPicked) {
     pushSeg({
       name: "L2_PROJECT_MEMORY",
       content: `L2_PROJECT_MEMORY(Markdown):\n${rawChatProjectMemory}\n\n`,
@@ -2259,12 +2283,16 @@ export async function rollDialogueSummaryIfNeeded(args: {
 
   const summaryByMode: any = run.dialogueSummaryByMode ?? {};
   const previousSummary = String(summaryByMode?.[args.mode] ?? "");
+  const runAny: any = useRunStore.getState();
+  const preferModelId = String(runAny.agentModel || runAny.model || "").trim();
+  const cfg = computeDialogueCompactionConfig(preferModelId);
+
   const approxTokens = estimateDialogueTokens(completeTurns, previousSummary);
-  if (approxTokens < DIALOGUE_COMPACT_TRIGGER_TOKENS) {
+  if (approxTokens < cfg.compactTriggerTokens) {
     return { ok: true as const, rolled: false as const };
   }
 
-  const turnsToSummarize = Math.max(0, completeTurns.length - RAW_KEEP_TURNS);
+  const turnsToSummarize = Math.max(0, completeTurns.length - cfg.rawKeepTurns);
   const cursorByMode: any = run.dialogueSummaryTurnCursorByMode ?? {};
   const cursor = Number.isFinite(Number(cursorByMode?.[args.mode])) ? Math.max(0, Math.floor(Number(cursorByMode[args.mode]))) : 0;
   if (turnsToSummarize <= cursor) return { ok: true as const, rolled: false as const };
@@ -2273,7 +2301,6 @@ export async function rollDialogueSummaryIfNeeded(args: {
   if (delta.length < 1) return { ok: true as const, rolled: false as const };
 
   // 用户要求：摘要模型默认复用"agentModel"（即使在 chat 模式），后续可在 B 端单独配置 stage 覆盖/约束
-  const preferModelId = String(run.agentModel || "").trim() || String(run.model || "").trim();
   if (!preferModelId) return { ok: true as const, rolled: false as const };
 
   args.log("info", "context.summary.roll", {
@@ -2282,7 +2309,10 @@ export async function rollDialogueSummaryIfNeeded(args: {
     turnsToSummarize,
     deltaTurns: delta.length,
     approxTokens,
-    triggerTokens: DIALOGUE_COMPACT_TRIGGER_TOKENS,
+    contextWindowTokens: cfg.contextWindowTokens,
+    rawKeepTurns: cfg.rawKeepTurns,
+    triggerTokens: cfg.compactTriggerTokens,
+    triggerRatio: cfg.triggerRatio,
   });
   const ret = await fetchContextSummaryOnce({
     gatewayUrl: args.gatewayUrl,

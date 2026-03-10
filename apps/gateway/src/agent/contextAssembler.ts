@@ -34,6 +34,14 @@ export type AssembledContextSummary = {
   sourceSegments: number;
   sourceSegmentsStructured: number;
   sourcePackChars: number;
+  modelContextWindowTokens: number | null;
+  effectiveInputBudgetChars: number | null;
+  runtimeContextBudgetChars: number | null;
+  runtimeContextChars: number;
+  dialogueSummaryChars: number;
+  recentDialogueMsgsRetained: number;
+  recentDialogueMsgsOmitted: number;
+  materialsBudgetChars: number | null;
   coreChars: number;
   taskChars: number;
   memoryChars: number;
@@ -44,6 +52,7 @@ export type AssembledContextSummary = {
 
 export type BuildAssembledContextArgs = {
   mode: AgentMode;
+  modelContextWindowTokens?: number | null;
   userPrompt: string;
   contextPack?: string;
   contextSegments?: Array<{
@@ -99,8 +108,19 @@ const MAX_JSON_BLOCK_CHARS = 1800;
 const MAX_MAIN_DOC_CHARS = 2400;
 const MAX_PENDING_ARTIFACTS_CHARS = 2600;
 const MAX_PROJECT_MAP_CHARS = 1200;
-const MAX_RECENT_DIALOGUE_MSGS = 4;
-const MAX_RECENT_DIALOGUE_ITEM_CHARS = 280;
+
+const DEFAULT_CONTEXT_WINDOW_TOKENS = 131_072;
+const EFFECTIVE_INPUT_BUDGET_RATIO = 0.8;
+
+// L3(runtime context) hard caps：防止大窗口模型无限塞历史导致成本爆炸
+const MIN_RUNTIME_CONTEXT_CHARS = 1800;
+const MAX_RUNTIME_CONTEXT_CHARS = 32_000;
+
+const MIN_RECENT_DIALOGUE_MSGS = 4;
+const MAX_RECENT_DIALOGUE_MSGS = 60;
+const DEFAULT_RECENT_DIALOGUE_ITEM_CHARS = 280;
+const MAX_RECENT_DIALOGUE_ITEM_CHARS = 900;
+
 const MAX_MEMORY_BLOCK_CHARS = 2200;
 const MEMORY_FULL_INJECT_THRESHOLD_CHARS = 2000;
 const MEMORY_L1_ANCHOR_TITLES = ["用户画像", "决策偏好"];
@@ -354,12 +374,66 @@ function compactPendingArtifacts(items: any[] | null) {
   });
 }
 
-function compactRecentDialogue(msgs: Array<{ role: "user" | "assistant"; text: string }> | null) {
-  const list = Array.isArray(msgs) ? msgs.slice(-MAX_RECENT_DIALOGUE_MSGS) : [];
-  return list.map((msg) => ({
-    role: msg.role,
-    text: clipText(String(msg.text ?? "").trim(), MAX_RECENT_DIALOGUE_ITEM_CHARS, "…"),
-  }));
+function clampInt(value: number, min: number, max: number) {
+  if (!Number.isFinite(Number(value))) return min;
+  const v = Math.floor(Number(value));
+  if (v < min) return min;
+  if (v > max) return max;
+  return v;
+}
+
+function compactRecentDialogue(
+  msgs: Array<{ role: "user" | "assistant"; text: string }> | null,
+  opts?: { budgetChars?: number | null },
+): {
+  items: Array<{ role: "user" | "assistant"; text: string }>;
+  retained: number;
+  omitted: number;
+  itemChars: number;
+  budgetChars: number | null;
+} {
+  const list = Array.isArray(msgs) ? msgs : [];
+  const budgetRaw = opts?.budgetChars;
+  const budget = budgetRaw === null || budgetRaw === undefined
+    ? null
+    : (Number.isFinite(Number(budgetRaw)) ? Math.max(0, Math.floor(Number(budgetRaw))) : null);
+
+  if (budget === 0) {
+    return { items: [], retained: 0, omitted: list.length, itemChars: DEFAULT_RECENT_DIALOGUE_ITEM_CHARS, budgetChars: 0 };
+  }
+
+  // fallback：兼容旧行为（固定保留极少 recent，避免小窗口爆炸）
+  if (budget === null) {
+    const items = list.slice(-MIN_RECENT_DIALOGUE_MSGS).map((msg) => ({
+      role: msg.role,
+      text: clipText(String(msg.text ?? "").trim(), DEFAULT_RECENT_DIALOGUE_ITEM_CHARS, "…"),
+    }));
+    return { items, retained: items.length, omitted: Math.max(0, list.length - items.length), itemChars: DEFAULT_RECENT_DIALOGUE_ITEM_CHARS, budgetChars: null };
+  }
+
+  const maxMsgs = clampInt(Math.floor(budget / 420), MIN_RECENT_DIALOGUE_MSGS, MAX_RECENT_DIALOGUE_MSGS);
+  const itemChars = clampInt(Math.floor(budget / maxMsgs) - 80, DEFAULT_RECENT_DIALOGUE_ITEM_CHARS, MAX_RECENT_DIALOGUE_ITEM_CHARS);
+
+  const picked: Array<{ role: "user" | "assistant"; text: string }> = [];
+  let used = 0;
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (picked.length >= maxMsgs) break;
+    const one = list[i]!;
+    const clipped = clipText(String(one.text ?? "").trim(), itemChars, "…");
+    if (!clipped.trim()) continue;
+    const est = clipped.length + 60; // json + title overhead rough estimate
+    if (used + est > budget && picked.length >= MIN_RECENT_DIALOGUE_MSGS) break;
+    used += est;
+    picked.push({ role: one.role, text: clipped });
+  }
+  picked.reverse();
+  return {
+    items: picked,
+    retained: picked.length,
+    omitted: Math.max(0, list.length - picked.length),
+    itemChars,
+    budgetChars: budget,
+  };
 }
 
 function buildCapabilitySummaryMessage(args: BuildAssembledContextArgs): string {
@@ -494,25 +568,109 @@ function buildMemoryMessage(args: BuildAssembledContextArgs) {
     blocks.push(renderMarkdownSection("L2_PROJECT_MEMORY", l2.snippet, MAX_MEMORY_BLOCK_CHARS));
     retained.add("L2_PROJECT_MEMORY");
   }
-  if (args.ctxDialogueSummaryFromPack.trim()) {
-    blocks.push(renderMarkdownSection("DIALOGUE_SUMMARY", args.ctxDialogueSummaryFromPack, 1200));
-    retained.add("DIALOGUE_SUMMARY");
-  }
-  const recent = compactRecentDialogue(args.recentDialogueFromPack);
-  if (recent.length > 0) {
-    blocks.push(renderJsonSection("RECENT_DIALOGUE", recent, 1600));
-    retained.add("RECENT_DIALOGUE");
-  }
   if (blocks.length === 0) return { message: "", retained };
   return {
     message:
-      "【记忆与续跑线索】\n以下只保留少量高相关记忆与最近对话，不代表完整历史；历史不足时用工具补证据，不要脑补。\n\n" +
+      "【记忆锚点（L1/L2）】\n以下只保留少量高相关长期记忆锚点；若信息不足请用工具补证据，不要脑补。\n\n" +
       blocks.join("\n\n"),
     retained,
   };
 }
 
-function buildMaterialsMessage(args: BuildAssembledContextArgs, segments: ContextPackSegment[]) {
+type RuntimeContextBuildResult = {
+  message: string;
+  retained: Set<string>;
+  stats: {
+    runtimeContextBudgetChars: number | null;
+    runtimeContextChars: number;
+    dialogueSummaryChars: number;
+    recentDialogueMsgsRetained: number;
+    recentDialogueMsgsOmitted: number;
+    recentDialogueBudgetChars: number | null;
+  };
+};
+
+function buildRuntimeContextMessage(args: BuildAssembledContextArgs, budgetChars: number | null): RuntimeContextBuildResult {
+  const retained = new Set<string>();
+  const blocks: string[] = [];
+
+  const budget = budgetChars === null || budgetChars === undefined
+    ? null
+    : (Number.isFinite(Number(budgetChars)) ? Math.max(0, Math.floor(Number(budgetChars))) : null);
+
+  if (budget === 0) {
+    const list = Array.isArray(args.recentDialogueFromPack) ? args.recentDialogueFromPack : [];
+    return {
+      message: "",
+      retained,
+      stats: {
+        runtimeContextBudgetChars: 0,
+        runtimeContextChars: 0,
+        dialogueSummaryChars: 0,
+        recentDialogueMsgsRetained: 0,
+        recentDialogueMsgsOmitted: list.length,
+        recentDialogueBudgetChars: 0,
+      },
+    };
+  }
+
+  const summaryBudget = budget ? clampInt(Math.floor(budget * 0.45), 1200, 12_000) : 1200;
+  const recentBudget = budget ? Math.max(1200, budget - summaryBudget) : 1600;
+
+  let dialogueSummaryChars = 0;
+  const summaryRaw = String(args.ctxDialogueSummaryFromPack ?? "").trim();
+  if (summaryRaw) {
+    const block = renderMarkdownSection("DIALOGUE_SUMMARY", summaryRaw, summaryBudget);
+    if (block.trim()) {
+      blocks.push(block);
+      retained.add("DIALOGUE_SUMMARY");
+      dialogueSummaryChars = block.length;
+    }
+  }
+
+  const recent = compactRecentDialogue(args.recentDialogueFromPack, { budgetChars: budget ? recentBudget : null });
+  if (recent.items.length > 0) {
+    const block = renderJsonSection("RECENT_DIALOGUE", recent.items, recentBudget);
+    if (block.trim()) {
+      blocks.push(block);
+      retained.add("RECENT_DIALOGUE");
+    }
+  }
+
+  if (blocks.length === 0) {
+    return {
+      message: "",
+      retained,
+      stats: {
+        runtimeContextBudgetChars: budget,
+        runtimeContextChars: 0,
+        dialogueSummaryChars: 0,
+        recentDialogueMsgsRetained: 0,
+        recentDialogueMsgsOmitted: 0,
+        recentDialogueBudgetChars: budget ? recentBudget : null,
+      },
+    };
+  }
+
+  const message =
+    "【运行上下文（L3）】\n以下是滚动摘要 + 最近对话原文片段，用于续跑与承接；不代表完整历史。\n\n" +
+    blocks.join("\n\n");
+
+  return {
+    message,
+    retained,
+    stats: {
+      runtimeContextBudgetChars: budget,
+      runtimeContextChars: message.length,
+      dialogueSummaryChars,
+      recentDialogueMsgsRetained: recent.retained,
+      recentDialogueMsgsOmitted: recent.omitted,
+      recentDialogueBudgetChars: budget ? recentBudget : null,
+    },
+  };
+}
+
+function buildMaterialsMessage(args: BuildAssembledContextArgs, segments: ContextPackSegment[], maxChars?: number | null) {
   const retained = new Set<string>();
   const blocks: string[] = [];
   if (Array.isArray(args.kbSelectedList) && args.kbSelectedList.length > 0) {
@@ -524,7 +682,10 @@ function buildMaterialsMessage(args: BuildAssembledContextArgs, segments: Contex
     blocks.push(renderJsonSection("KB_SELECTED_LIBRARIES", libs, 1000));
     retained.add("KB_SELECTED_LIBRARIES");
   }
-  let remaining = MAX_MATERIALS_BLOCK_CHARS;
+  const budget = maxChars === null || maxChars === undefined
+    ? null
+    : (Number.isFinite(Number(maxChars)) ? Math.max(0, Math.floor(Number(maxChars))) : null);
+  let remaining = Math.min(MAX_MATERIALS_BLOCK_CHARS, budget ?? MAX_MATERIALS_BLOCK_CHARS);
   for (const name of MATERIAL_SEGMENT_NAMES) {
     if (remaining <= 0) break;
     const seg = getSegment(segments, name);
@@ -562,6 +723,10 @@ export function buildAssembledContextMessages(args: BuildAssembledContextArgs): 
   const retained = new Set<string>();
   const messages: OpenAiChatMessage[] = [];
 
+  const ctxRaw = args.modelContextWindowTokens;
+  const modelContextWindowTokens = Number.isFinite(Number(ctxRaw)) && Number(ctxRaw) > 0 ? Math.floor(Number(ctxRaw)) : null;
+  const effectiveInputBudgetChars = modelContextWindowTokens ? Math.floor(modelContextWindowTokens * 4 * EFFECTIVE_INPUT_BUDGET_RATIO) : null;
+
   const capabilityMessage = buildCapabilitySummaryMessage(args);
   messages.push({ role: "system", content: capabilityMessage });
 
@@ -577,7 +742,20 @@ export function buildAssembledContextMessages(args: BuildAssembledContextArgs): 
     for (const name of memory.retained) retained.add(name);
   }
 
-  const materials = buildMaterialsMessage(args, segments);
+  const usedBeforeL3 = capabilityMessage.length + task.message.length + memory.message.length;
+  const runtimeContextBudgetChars =
+    effectiveInputBudgetChars !== null
+      ? Math.max(0, Math.min(MAX_RUNTIME_CONTEXT_CHARS, effectiveInputBudgetChars - usedBeforeL3))
+      : null;
+  const runtimeContext = buildRuntimeContextMessage(args, runtimeContextBudgetChars);
+  if (runtimeContext.message) {
+    messages.push({ role: "system", content: runtimeContext.message });
+    for (const name of runtimeContext.retained) retained.add(name);
+  }
+
+  const usedAfterL3 = usedBeforeL3 + runtimeContext.message.length;
+  const materialsBudgetChars = effectiveInputBudgetChars !== null ? Math.max(0, effectiveInputBudgetChars - usedAfterL3) : null;
+  const materials = buildMaterialsMessage(args, segments, materialsBudgetChars);
   if (materials.message) {
     messages.push({ role: "system", content: materials.message });
     for (const name of materials.retained) retained.add(name);
@@ -591,6 +769,14 @@ export function buildAssembledContextMessages(args: BuildAssembledContextArgs): 
     sourceSegments: allSegmentNames.length,
     sourceSegmentsStructured: segmentsFromStructured.length,
     sourcePackChars: sourceCharsPack,
+    modelContextWindowTokens,
+    effectiveInputBudgetChars,
+    runtimeContextBudgetChars: runtimeContext.stats.runtimeContextBudgetChars,
+    runtimeContextChars: runtimeContext.stats.runtimeContextChars,
+    dialogueSummaryChars: runtimeContext.stats.dialogueSummaryChars,
+    recentDialogueMsgsRetained: runtimeContext.stats.recentDialogueMsgsRetained,
+    recentDialogueMsgsOmitted: runtimeContext.stats.recentDialogueMsgsOmitted,
+    materialsBudgetChars,
     coreChars: capabilityMessage.length,
     taskChars: task.message.length,
     memoryChars: memory.message.length,

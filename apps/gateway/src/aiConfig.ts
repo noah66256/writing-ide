@@ -25,6 +25,7 @@ export type ResolvedAiStageRuntime = {
 
 export type ResolvedAiModelRuntime = {
   modelId: string;
+  contextWindowTokens: number | null;
   baseURL: string;
   endpoint: string;
   apiKey: string;
@@ -913,8 +914,13 @@ export function createAiConfigService(args: {
     const endpoint = normalizeEndpoint(modelDoc.endpoint, "/v1/chat/completions");
     const apiKey = pickEnvApiKey({ modelName: modelDoc.model, endpoint });
     const envBaseURL = normalizeBaseURL(String(process.env.LLM_BASE_URL ?? ""));
+    const ctx = modelDoc.contextWindowTokens;
+    const contextWindowTokens = ctx && Number.isFinite(Number(ctx))
+      ? Math.max(0, Math.floor(Number(ctx)))
+      : null;
     return {
       modelId: modelDoc.id,
+      contextWindowTokens,
       baseURL: normalizeBaseURL(provider?.baseURL || modelDoc.baseURL) || envBaseURL,
       endpoint,
       apiKey,

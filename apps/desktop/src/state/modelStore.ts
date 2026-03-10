@@ -12,6 +12,7 @@ export type AvailableModel = {
   providerId?: string | null;
   providerName?: string | null;
   endpoint?: string | null;
+  contextWindowTokens?: number | null;
   chatSupported?: boolean;
   agentSupported?: boolean;
   availabilityNote?: string | null;
@@ -34,6 +35,7 @@ type SelectorDto = {
     providerId?: string | null;
     providerName?: string | null;
     endpoint?: string | null;
+    contextWindowTokens?: number | null;
   }>;
   stages?: {
     chat?: { modelIds?: string[]; defaultModelId?: string };
@@ -109,6 +111,8 @@ function parseSelector(data: SelectorDto | null): ModelSyncPayload | null {
     const providerId = item?.providerId ? String(item.providerId).trim() : null;
     const providerName = item?.providerName ? String(item.providerName).trim() : (providerId ? providerNameById.get(providerId) ?? null : null);
     const exploreOnly = EXPLORE_ONLY_MODEL_IDS.has(id);
+    const ctx = item?.contextWindowTokens;
+    const contextWindowTokens = Number.isFinite(Number(ctx)) ? Math.max(0, Math.floor(Number(ctx))) : null;
     const chatSupported = chatIdSet.size > 0 ? chatIdSet.has(id) : true;
     const agentSupported = exploreOnly ? false : (agentIdSet.size > 0 ? agentIdSet.has(id) : true);
     modelMap.set(id, {
@@ -117,6 +121,7 @@ function parseSelector(data: SelectorDto | null): ModelSyncPayload | null {
       providerId,
       providerName,
       endpoint: item?.endpoint ? String(item.endpoint).trim() : null,
+      contextWindowTokens,
       chatSupported,
       agentSupported,
       availabilityNote: exploreOnly ? "只支持探索模式" : null,
