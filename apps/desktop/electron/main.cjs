@@ -72,6 +72,7 @@ const MAX_INDEX_FILES = 10000;
 
 const HISTORY_DIRNAME = "ohmycrab-data";
 const HISTORY_FILENAME = "conversations.v1.json";
+const HISTORY_BAK_SUFFIX = ".bak";
 
 let mainWindow = null;
 let recentProjects = [];
@@ -508,8 +509,16 @@ function buildLegacyAppDataFileCandidates(args) {
 function listHistoryReadCandidates() {
   const { primary, fallback } = historyCandidateDirs();
   const out = [];
-  if (primary) out.push({ used: "primary", file: path.join(primary, HISTORY_FILENAME) });
-  if (fallback) out.push({ used: "fallback", file: path.join(fallback, HISTORY_FILENAME) });
+  if (primary) {
+    const file = path.join(primary, HISTORY_FILENAME);
+    out.push({ used: "primary", file });
+    out.push({ used: "primary:bak", file: file + HISTORY_BAK_SUFFIX });
+  }
+  if (fallback) {
+    const file = path.join(fallback, HISTORY_FILENAME);
+    out.push({ used: "fallback", file });
+    out.push({ used: "fallback:bak", file: file + HISTORY_BAK_SUFFIX });
+  }
   try {
     out.push(
       ...buildLegacyAppDataFileCandidates({
@@ -1713,7 +1722,32 @@ function registerIpc() {
     try {
       const { file, used } = await resolveHistoryFileForWrite();
       const text = typeof payload === "string" ? payload : JSON.stringify(payload ?? null);
-      await fsp.writeFile(file, text, "utf-8");
+      const tmp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+      // 最小兜底：写入前备份上一版，避免写入中断导致“历史全没了”。
+      // 备份失败不应阻塞写入（例如首次写入/文件不存在）。
+      const bak = file + HISTORY_BAK_SUFFIX;
+      try {
+        await fsp.copyFile(file, bak);
+      } catch {
+        // ignore
+      }
+      await fsp.writeFile(tmp, text, "utf-8");
+      try {
+        await fsp.rename(tmp, file);
+      } catch (e) {
+        // Windows 等平台可能不允许直接覆盖 rename；删除后再替换。
+        const code = String(e?.code ?? "");
+        if (code === "EPERM" || code === "EEXIST") {
+          try {
+            await fsp.unlink(file);
+          } catch {
+            // ignore
+          }
+          await fsp.rename(tmp, file);
+        } else {
+          throw e;
+        }
+      }
       return { ok: true, used, file };
     } catch (e) {
       return { ok: false, error: String(e?.message ?? e) };

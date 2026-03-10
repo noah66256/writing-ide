@@ -23,6 +23,29 @@ export function ConversationLayout() {
     void hydrateFromDisk().catch(() => void 0);
   }, [hydrateFromDisk]);
 
+  // Dev/HMR/关闭窗口时容易丢失最新对话：卸载/隐藏前强制刷盘一次。
+  useEffect(() => {
+    const flush = () => {
+      try {
+        void useConversationStore.getState().flushDraftSnapshotNow().catch(() => void 0);
+      } catch {
+        // ignore
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    window.addEventListener("beforeunload", flush);
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("beforeunload", flush);
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVisibility);
+      flush();
+    };
+  }, []);
+
   // 水合后恢复草稿快照（若当前 run 为空）
   useEffect(() => {
     if (restoredRef.current) return;

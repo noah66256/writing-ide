@@ -10,7 +10,34 @@
 - **打开 DevTools**：菜单 `查看 → 开发者工具`
 - **优先看**：
   - **Console**：报错栈、CORS/Failed to fetch
-  - **Network**：请求是否发出、状态码、Response Headers（尤其是 `access-control-allow-origin`）
+- **Network**：请求是否发出、状态码、Response Headers（尤其是 `access-control-allow-origin`）
+
+---
+
+### 0.x) Dev 端“丢对话 / 只显示默认首页（欢迎页）”
+
+#### 现象
+
+- `npm run dev` 或 `npm run dev:local`（带 Vite HMR）时更容易复现。
+- 刷新/重启后：左侧历史对话消失，右侧只显示欢迎页（默认首页）。
+
+#### 定位
+
+- 历史对话持久化：`/Users/noah/writing-ide/apps/desktop/src/state/conversationStore.ts`
+- Electron 落盘 IPC：`/Users/noah/writing-ide/apps/desktop/electron/main.cjs`（`history.saveConversations/loadConversations`）
+- 启动水合入口：`/Users/noah/writing-ide/apps/desktop/src/ui/layouts/ConversationLayout.tsx`
+
+#### 根因（高概率）
+
+- Dev/HMR/窗口关闭时，最后一次 `setDraftSnapshot()` 仍在 debounce（默认 2s）内，尚未写盘；重启后自然恢复不到最新状态，于是回到欢迎页。
+
+#### 修复
+
+- 在布局层监听 `beforeunload/pagehide/visibilitychange(hidden)`，强制 `flushDraftSnapshotNow()` 刷盘，降低丢对话概率：`/Users/noah/writing-ide/apps/desktop/src/ui/layouts/ConversationLayout.tsx`。
+
+#### 验收
+
+- dev 模式随便聊几句后直接刷新/重启：历史对话仍能恢复；不再频繁回到欢迎页。
 
 ---
 
@@ -797,5 +824,4 @@ rsync -avz --delete \
 - [ ] 备份保留最近 7 天的每日快照
 
 ---
-
 

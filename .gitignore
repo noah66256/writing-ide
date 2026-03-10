@@ -53,6 +53,10 @@ _VERIFICATION_RESULT.md
 .playwright-mcp/
 .writing-ide/
 
+# local project indices
+.ohmycrab/
+.worktrees/
+
 # desktop packaging outputs at repo root
 apps/*.dmg
 apps/*.pkg

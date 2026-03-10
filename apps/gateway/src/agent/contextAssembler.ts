@@ -98,6 +98,7 @@ export type BuildAssembledContextResult = {
 const MAX_JSON_BLOCK_CHARS = 1800;
 const MAX_MAIN_DOC_CHARS = 2400;
 const MAX_PENDING_ARTIFACTS_CHARS = 2600;
+const MAX_PROJECT_MAP_CHARS = 1200;
 const MAX_RECENT_DIALOGUE_MSGS = 4;
 const MAX_RECENT_DIALOGUE_ITEM_CHARS = 280;
 const MAX_MEMORY_BLOCK_CHARS = 2200;
@@ -435,6 +436,19 @@ function buildTaskStateMessage(args: BuildAssembledContextArgs, segments: Contex
       retained.add("EDITOR_SELECTION");
     }
   }
+
+  const projectMapSeg = getSegment(segments, "PROJECT_MAP", "JSON");
+  if (projectMapSeg) {
+    const parsed = tryParseJson(projectMapSeg.content);
+    if (parsed && typeof parsed === "object") {
+      blocks.push(renderJsonSection("PROJECT_MAP", parsed, MAX_PROJECT_MAP_CHARS));
+    } else {
+      const clipped = clipText(projectMapSeg.content, MAX_PROJECT_MAP_CHARS, "\n…");
+      blocks.push(renderMarkdownSection("PROJECT_MAP", `\n\n\`\`\`json\n${clipped}\n\`\`\`\n`, MAX_PROJECT_MAP_CHARS + 200));
+    }
+    retained.add("PROJECT_MAP");
+  }
+
   if (blocks.length === 0) return { message: "", retained };
   return {
     message:
