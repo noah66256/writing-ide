@@ -1,5 +1,23 @@
 const { app, BrowserWindow, Menu, shell, ipcMain, dialog, clipboard, protocol, session } = require("electron");
 const path = require("path");
+
+// ======== userData 路径对齐（dev <-> packaged） ========
+// 背景：dev 模式默认 productName 可能是 "Electron"，导致 userData 落到另一个目录，
+// 从而出现：dev 新开对话像"全忘了"（对话历史、L1 全局记忆、skills/mcp 配置都不在同一路径）。
+// 正式版 productName=OhMyCrab（apps/desktop/package.json#build.productName）。
+// 这里把 dev 的 userData 强制对齐到正式版目录，并复用既有迁移逻辑（legacy productName 列表含 Electron）。
+(() => {
+  try {
+    if (app.isPackaged) return;
+    if (String(process.env.OHMYCRAB_DEV_USERDATA_MODE ?? "").trim().toLowerCase() === "isolated") return;
+    const forced = String(process.env.OHMYCRAB_USER_DATA_DIR ?? "").trim();
+    const target = forced || path.join(app.getPath("appData"), "OhMyCrab");
+    const current = app.getPath("userData");
+    if (current && target && current !== target) app.setPath("userData", target);
+  } catch {
+    // ignore
+  }
+})();
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const crypto = require("node:crypto");
