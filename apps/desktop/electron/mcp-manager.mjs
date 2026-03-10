@@ -1052,6 +1052,12 @@ export class McpManager {
   _resolveToolProfile(config, family) {
     const explicit = normalizeToolProfile(config?.toolProfile);
     if (explicit) return explicit;
+
+    // Playwright 是核心能力，默认全量暴露可显著降低“缺工具绕路”的概率。
+    // 仍允许用户显式设置为 browse_minimal 等 profile。
+    const idText = String(config?.id ?? "").trim().toLowerCase();
+    if (idText === "playwright") return "full";
+
     switch (family) {
       case "browser":
         return "browse_minimal";
