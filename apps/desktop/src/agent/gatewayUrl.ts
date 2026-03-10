@@ -1,4 +1,5 @@
 export const DEFAULT_GATEWAY_URL = "http://120.26.6.147:8000";
+export const DEFAULT_AUTH_GATEWAY_URL = DEFAULT_GATEWAY_URL;
 
 function trimSlash(url: string) {
   return String(url ?? "")
@@ -57,4 +58,47 @@ export function getGatewayBaseUrl(): string {
   return "";
 }
 
+/**
+ * Auth 专用 Gateway baseURL。
+ *
+ * 典型用途：打包时主业务指向本地 Gateway（127.0.0.1:8000），
+ * 但验证码/登录仍走远端（避免本地未配置短信/邮箱服务）。
+ */
+export function getAuthGatewayBaseUrl(): string {
+  // 1) build-time env（打包时注入）
+  try {
+    const fromEnv = normalizeGatewayUrlOrEmpty(String((import.meta as any).env?.VITE_AUTH_GATEWAY_URL ?? ""));
+    if (fromEnv) return fromEnv;
+  } catch {
+    // ignore
+  }
+
+  // 2) runtime override（用户本机临时切换）
+  try {
+    const fromLs = normalizeGatewayUrlOrEmpty(String(window?.localStorage?.getItem("writing-ide.authGatewayUrl") ?? ""));
+    if (fromLs) return fromLs;
+  } catch {
+    // ignore
+  }
+
+  // 3) 默认与主 Gateway 一致（避免 token/账号体系割裂）
+  try {
+    const gw = getGatewayBaseUrl();
+    if (gw) return gw;
+  } catch {
+    // ignore
+  }
+
+  // 4) packaged：兜底为默认远端
+  try {
+    if ((import.meta as any).env?.PROD) {
+      return normalizeGatewayUrlOrEmpty(DEFAULT_AUTH_GATEWAY_URL);
+    }
+  } catch {
+    // ignore
+  }
+
+  // 5) dev：留空 => 相对 /api（Vite proxy）
+  return "";
+}
 

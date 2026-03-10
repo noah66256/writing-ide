@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { getGatewayBaseUrl } from "../agent/gatewayUrl";
+import { getAuthGatewayBaseUrl } from "../agent/gatewayUrl";
 
 export type AuthUser = {
   id: string;
@@ -53,7 +53,7 @@ type AuthState = {
 };
 
 function apiUrl(path: string) {
-  const base = getGatewayBaseUrl();
+  const base = getAuthGatewayBaseUrl();
   return base ? `${base}${path}` : path;
 }
 
@@ -252,5 +252,4 @@ export const useAuthStore = create<AuthState>()(
     { name: "writing-ide.auth.v1", partialize: (s) => ({ accessToken: s.accessToken, user: s.user, userAvatarDataUrl: s.userAvatarDataUrl }) },
   ),
 );
-
 
