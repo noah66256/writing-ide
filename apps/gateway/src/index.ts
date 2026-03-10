@@ -2035,6 +2035,18 @@ fastify.post(
     // JSON 解析失败，返回空 patches
   }
 
+  // P1：来源可信度分层（assistant 来源默认不自动落盘，避免幻觉污染）
+  const downgradeAssistantOps = <T extends { source?: "user" | "assistant" | "consensus"; confidence?: number }>(
+    ops: T[],
+  ): T[] =>
+    ops.map((op) =>
+      op.source === "assistant"
+        ? ({ ...op, confidence: Math.min(op.confidence ?? 0.4, 0.49) } as T)
+        : op,
+    );
+  globalOps = downgradeAssistantOps(globalOps);
+  projectOps = downgradeAssistantOps(projectOps);
+
   return {
     ok: true,
     globalPatches,
