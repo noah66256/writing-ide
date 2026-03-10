@@ -192,6 +192,8 @@ export type AiModelDto = {
   providerBaseURL: string | null;
   baseURL: string;
   endpoint: string;
+  /** 模型上下文窗口上限（输入侧 tokens）；null 表示未知 */
+  contextWindowTokens?: number | null;
   toolResultFormat?: "xml" | "text";
   priceInCnyPer1M: number | null;
   priceOutCnyPer1M: number | null;
@@ -261,6 +263,7 @@ export async function aiConfigCreateModel(body: {
   providerId?: string;
   baseURL?: string;
   endpoint?: string;
+  contextWindowTokens?: number | null;
   apiKey?: string;
   copyFromId?: string;
   toolResultFormat?: "xml" | "text";
@@ -281,6 +284,7 @@ export async function aiConfigUpdateModel(id: string, body: Partial<{
   providerId: string | null;
   baseURL: string;
   endpoint: string;
+  contextWindowTokens: number | null;
   toolResultFormat: "xml" | "text";
   apiKey: string;
   clearApiKey: boolean;

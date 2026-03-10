@@ -540,6 +540,7 @@ export function createAiConfigService(args: {
         providerId: null,
         baseURL: creds.baseURL,
         endpoint: endpointNorm,
+        contextWindowTokens: null,
         // /responses 在部分 OpenAI-compatible 上对 system+xml 注入兼容较差，默认改为 text 更稳。
         toolResultFormat: useTextToolResult ? "text" : "xml",
         apiKeyEnc: enc ? enc.enc : null,
@@ -934,6 +935,7 @@ export function createAiConfigService(args: {
     providerId?: string | null;
     baseURL?: string;
     endpoint?: string;
+    contextWindowTokens?: number | null;
     apiKey?: string;
     copyFromId?: string;
     toolResultFormat?: "xml" | "text";
@@ -957,6 +959,12 @@ export function createAiConfigService(args: {
     const baseURL = normalizeBaseURL(provider?.baseURL || String(params.baseURL || ""));
     if (!baseURL) throw new Error("baseURL_required");
     const endpoint = normalizeEndpoint(params.endpoint || "/v1/chat/completions", "/v1/chat/completions");
+    const ctxTokensRaw = params.contextWindowTokens;
+    const contextWindowTokens = ctxTokensRaw === null || ctxTokensRaw === undefined
+      ? null
+      : Number.isFinite(Number(ctxTokensRaw))
+        ? Math.max(0, Math.floor(Number(ctxTokensRaw)))
+        : null;
     const priceIn = Number(params.priceInCnyPer1M);
     const priceOut = Number(params.priceOutCnyPer1M);
     if (!Number.isFinite(priceIn) || !Number.isFinite(priceOut) || priceIn < 0 || priceOut < 0) throw new Error("pricing_invalid");
@@ -1016,6 +1024,7 @@ export function createAiConfigService(args: {
       providerId: providerId || null,
       baseURL,
       endpoint,
+      contextWindowTokens: contextWindowTokens && contextWindowTokens > 0 ? contextWindowTokens : null,
       toolResultFormat,
       apiKeyEnc,
       apiKeyLast4,
@@ -1048,6 +1057,7 @@ export function createAiConfigService(args: {
       providerId: string | null;
       baseURL: string;
       endpoint: string;
+      contextWindowTokens: number | null;
       toolResultFormat: "xml" | "text";
       apiKey: string;
       clearApiKey: boolean;
@@ -1075,6 +1085,13 @@ export function createAiConfigService(args: {
 
     const nextBase = nextProvider ? normalizeBaseURL(nextProvider.baseURL) : patch.baseURL !== undefined ? normalizeBaseURL(patch.baseURL) : cur.baseURL;
     const nextEndpoint = patch.endpoint !== undefined ? normalizeEndpoint(patch.endpoint, cur.endpoint) : cur.endpoint;
+    const nextCtx = patch.contextWindowTokens !== undefined
+      ? (patch.contextWindowTokens === null
+        ? null
+        : Number.isFinite(Number(patch.contextWindowTokens))
+          ? Math.max(0, Math.floor(Number(patch.contextWindowTokens)))
+          : null)
+      : cur.contextWindowTokens ?? null;
     const nextToolResultFormat = patch.toolResultFormat !== undefined ? (patch.toolResultFormat === "text" ? "text" : "xml") : cur.toolResultFormat === "text" ? "text" : "xml";
 
     let apiKeyEnc = cur.apiKeyEnc;
@@ -1129,6 +1146,7 @@ export function createAiConfigService(args: {
       providerId: nextProviderId || null,
       baseURL: nextBase,
       endpoint: nextEndpoint,
+      contextWindowTokens: nextCtx && nextCtx > 0 ? nextCtx : null,
       toolResultFormat: nextToolResultFormat,
       apiKeyEnc,
       apiKeyLast4,

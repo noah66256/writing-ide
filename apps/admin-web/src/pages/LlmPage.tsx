@@ -25,6 +25,7 @@ type StageDraft = Pick<AiStageDto, "stage" | "name" | "description" | "modelId" 
 type ModelDraftUi = ModelDraft & {
   priceInInput?: string;
   priceOutInput?: string;
+  contextWindowTokensInput?: string;
 };
 
 function endpointLabel(endpoint: string) {
@@ -109,6 +110,7 @@ export function LlmPage() {
   const [newModel, setNewModel] = useState("");
   const [newBaseURL, setNewBaseURL] = useState("");
   const [newEndpoint, setNewEndpoint] = useState(() => safeGetLocalStorage(ENDPOINT_LAST_KEY) || "/v1/chat/completions");
+  const [newContextWindowTokens, setNewContextWindowTokens] = useState("");
   const [newToolResultFormat, setNewToolResultFormat] = useState<"xml" | "text">("xml");
   const [newApiKey, setNewApiKey] = useState("");
   const [newPriceIn, setNewPriceIn] = useState("");
@@ -155,6 +157,7 @@ export function LlmPage() {
           ...m,
           apiKeyInput: "",
           clearApiKey: false,
+          contextWindowTokensInput: m.contextWindowTokens === null || m.contextWindowTokens === undefined ? "" : String(m.contextWindowTokens),
           priceInInput: m.priceInCnyPer1M === null ? "" : String(m.priceInCnyPer1M),
           priceOutInput: m.priceOutCnyPer1M === null ? "" : String(m.priceOutCnyPer1M),
         })),
@@ -208,6 +211,8 @@ export function LlmPage() {
     const priceIn = Number(newPriceIn);
     const priceOut = Number(newPriceOut);
     const sortOrder = Number(newSortOrder);
+    const ctxStr = String(newContextWindowTokens ?? "").trim();
+    const contextWindowTokens = ctxStr ? Number(ctxStr) : null;
     const selectedProvider = newProviderId ? providers.find((p) => p.id === newProviderId) || null : null;
     if (!newModel.trim()) return setError("model 不能为空");
     if (!newEndpoint.trim()) return setError("endpoint 不能为空");
@@ -221,6 +226,10 @@ export function LlmPage() {
     if (!Number.isFinite(priceIn) || priceIn < 0) return setError("输入单价必须是 >=0 的数字（元/1,000,000 tokens）");
     if (!Number.isFinite(priceOut) || priceOut < 0) return setError("输出单价必须是 >=0 的数字（元/1,000,000 tokens）");
     if (!Number.isFinite(sortOrder) || !Number.isInteger(sortOrder)) return setError("sortOrder 必须是整数");
+    if (contextWindowTokens !== null) {
+      if (!Number.isFinite(contextWindowTokens) || contextWindowTokens <= 0) return setError("上下文窗口必须是 >0 的数字");
+      if (!Number.isInteger(contextWindowTokens)) return setError("上下文窗口必须是整数");
+    }
 
     setBusy(true);
     try {
@@ -228,6 +237,7 @@ export function LlmPage() {
         model: newModel.trim(),
         ...(selectedProvider ? { providerId: selectedProvider.id } : { baseURL: newBaseURL.trim(), apiKey: newApiKey.trim() }),
         endpoint: normalizeEndpointInput(newEndpoint),
+        ...(contextWindowTokens !== null ? { contextWindowTokens } : {}),
         toolResultFormat: newToolResultFormat,
         priceInCnyPer1M: priceIn,
         priceOutCnyPer1M: priceOut,
@@ -242,6 +252,7 @@ export function LlmPage() {
       setNewProviderId("");
       setNewModel("");
       setNewBaseURL("");
+      setNewContextWindowTokens("");
       setNewToolResultFormat("xml");
       setNewApiKey("");
       setNewPriceIn("");
@@ -348,6 +359,13 @@ export function LlmPage() {
     if (!endpoint) return setError("Endpoint 不能为空");
     const toolResultFormat = m.toolResultFormat === "text" ? "text" : "xml";
 
+    const ctxStr = String(m.contextWindowTokensInput ?? m.contextWindowTokens ?? "").trim();
+    const contextWindowTokens = ctxStr ? Number(ctxStr) : null;
+    if (contextWindowTokens !== null) {
+      if (!Number.isFinite(contextWindowTokens) || contextWindowTokens <= 0) return setError("上下文窗口必须是 >0 的数字");
+      if (!Number.isInteger(contextWindowTokens)) return setError("上下文窗口必须是整数");
+    }
+
     const inStr = typeof m.priceInInput === "string" ? m.priceInInput.trim() : m.priceInCnyPer1M === null ? "" : String(m.priceInCnyPer1M);
     const outStr = typeof m.priceOutInput === "string" ? m.priceOutInput.trim() : m.priceOutCnyPer1M === null ? "" : String(m.priceOutCnyPer1M);
 
@@ -365,6 +383,7 @@ export function LlmPage() {
         providerId: m.providerId ?? null,
         baseURL: m.baseURL.trim(),
         endpoint,
+        contextWindowTokens,
         toolResultFormat,
         priceInCnyPer1M: priceIn,
         priceOutCnyPer1M: priceOut,
@@ -724,6 +743,22 @@ export function LlmPage() {
                   </label>
 
                   <label className="field">
+                    <div className="label">上下文窗口（MaxTokens）</div>
+                    <input
+                      className="input"
+                      value={String(m.contextWindowTokensInput ?? m.contextWindowTokens ?? "")}
+                      onChange={(e) =>
+                        setModels((prev) =>
+                          prev.map((x) =>
+                            x.id === m.id ? ({ ...x, contextWindowTokensInput: e.target.value } as any) : x,
+                          ),
+                        )
+                      }
+                      placeholder="200000"
+                    />
+                  </label>
+
+                  <label className="field">
                     <div className="label">tool_result 格式（Agent）</div>
                     <select
                       className="input"
@@ -1055,6 +1090,16 @@ export function LlmPage() {
                   value={newEndpoint}
                   onChange={(e) => setNewEndpoint(e.target.value)}
                   placeholder="/v1/chat/completions 或 /v1beta/models/...:generateContent"
+                />
+              </label>
+
+              <label className="field">
+                <div className="label">上下文窗口（MaxTokens）</div>
+                <input
+                  className="input"
+                  value={newContextWindowTokens}
+                  onChange={(e) => setNewContextWindowTokens(e.target.value)}
+                  placeholder="200000（可空）"
                 />
               </label>
               <label className="field">

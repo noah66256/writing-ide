@@ -157,6 +157,11 @@ export type AiModel = {
   baseURL: string;
   endpoint: string;
   /**
+   * 模型上下文窗口上限（输入侧 tokens）。
+   * 用于 L3 动态预算/自动 compact；与 stage.maxTokens（单次输出上限）不同。
+   */
+  contextWindowTokens: number | null;
+  /**
    * Agent tool_result 注入格式：
    * - xml：system role 的 `<tool_result><![CDATA[json]]></tool_result>`（默认）
    * - text：user role 的纯文本 `[tool_result] json [/tool_result]`（兼容某些 OpenAI-compatible 代理）
@@ -666,6 +671,11 @@ export async function loadDb(): Promise<Db> {
           const endpoint = normStr(m?.endpoint) || "/v1/chat/completions";
           if (!id || !model || !baseURL) return null;
 
+          const contextWindowTokens = normNum((m as any)?.contextWindowTokens);
+          const ctx = contextWindowTokens !== null && Number.isFinite(contextWindowTokens)
+            ? Math.max(0, Math.floor(Number(contextWindowTokens)))
+            : null;
+
           const toolResultFormat: "xml" | "text" = m?.toolResultFormat === "text" ? "text" : "xml";
           const apiKeyEnc = typeof m?.apiKeyEnc === "string" ? String(m.apiKeyEnc) : null;
           const apiKeyLast4 = typeof m?.apiKeyLast4 === "string" ? normStr(m.apiKeyLast4) : null;
@@ -696,6 +706,7 @@ export async function loadDb(): Promise<Db> {
             providerId,
             baseURL,
             endpoint,
+            contextWindowTokens: ctx && ctx > 0 ? ctx : null,
             toolResultFormat,
             apiKeyEnc,
             apiKeyLast4,
