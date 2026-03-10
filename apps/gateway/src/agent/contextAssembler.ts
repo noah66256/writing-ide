@@ -29,8 +29,11 @@ type MarkdownSection = {
 
 
 export type AssembledContextSummary = {
+  sourceKind: "contextSegments" | "contextPack";
   sourceChars: number;
   sourceSegments: number;
+  sourceSegmentsStructured: number;
+  sourcePackChars: number;
   coreChars: number;
   taskChars: number;
   memoryChars: number;
@@ -540,7 +543,8 @@ export function buildAssembledContextMessages(args: BuildAssembledContextArgs): 
 
   const sourceCharsStructured = segmentsFromStructured.reduce((acc, seg) => acc + String(seg.content ?? "").length, 0);
   const sourceCharsPack = String(args.contextPack ?? "").length;
-  const sourceChars = sourceCharsStructured > 0 ? sourceCharsStructured : sourceCharsPack;
+  const sourceKind: AssembledContextSummary["sourceKind"] = sourceCharsStructured > 0 ? "contextSegments" : "contextPack";
+  const sourceChars = sourceKind === "contextSegments" ? sourceCharsStructured : sourceCharsPack;
   const retained = new Set<string>();
   const messages: OpenAiChatMessage[] = [];
 
@@ -568,8 +572,11 @@ export function buildAssembledContextMessages(args: BuildAssembledContextArgs): 
   const allSegmentNames = Array.from(new Set(segments.map((segment) => segment.name)));
   const omittedSegmentNames = allSegmentNames.filter((name) => !retained.has(name) && name !== "AGENT_PERSONA" && name !== "ACTIVE_SKILLS");
   const summary: AssembledContextSummary = {
+    sourceKind,
     sourceChars,
     sourceSegments: allSegmentNames.length,
+    sourceSegmentsStructured: segmentsFromStructured.length,
+    sourcePackChars: sourceCharsPack,
     coreChars: capabilityMessage.length,
     taskChars: task.message.length,
     memoryChars: memory.message.length,
