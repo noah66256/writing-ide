@@ -1133,7 +1133,7 @@ export function looksLikeDirectOpenWebIntent(text: string): boolean {
   if (!hasAction) return false;
   const hasUrlLikeTarget = /(https?:\/\/|www\.|[a-z0-9-]+\.(?:com|cn|net|org|io|ai|app|dev|co)(?:\b|\/))/i.test(t);
   const hasKnownSiteTarget =
-    /(百度|google|bing|github|知乎|微博|小红书|抖音|b站|哔哩|淘宝|天猫|京东|拼多多|微信公众号|公众号|微信|官网|官方网站|网站|浏览器|网页登录|登录页|url\b)/i.test(t);
+    /(百度|google|bing|github|知乎|微博|小红书|抖音|b站|哔哩|淘宝|天猫|京东|拼多多|微信公众号|公众号|微信|千川|巨量千川|qianchuan|控制台|管理后台|后台|dashboard|官网|官方网站|网站|浏览器|网页登录|登录页|url\b)/i.test(t);
   const hasTarget = hasUrlLikeTarget || hasKnownSiteTarget;
   if (!hasTarget) return false;
   // 排除“写作页面/落地页文案”等非网页导航语义
@@ -2595,10 +2595,21 @@ export async function prepareAgentRun(args: {
   });
 
   // [B0/B1] 工具检索（Tool Retrieval）：先给出候选，再以 preferred 方式影响 top-K 选择。
+  const retrievalInputText = (() => {
+    if (!looksLikeShortFollowUp(userPrompt)) return userPrompt;
+    const list = Array.isArray(recentDialogueFromPack) ? (recentDialogueFromPack as any[]) : [];
+    const tail = list.slice(-6).map((m: any) => {
+      const role = String(m?.role ?? "").trim() || "unknown";
+      const t = String(m?.text ?? "").trim();
+      return t ? `${role}: ${t}` : "";
+    }).filter(Boolean).join("\n");
+    return tail ? `${tail}\nuser: ${userPrompt}` : userPrompt;
+  })();
+
   const maxToolsForMode = mode === "agent" ? 30 : 20;
   const toolRetrieval: ToolRetrievalResult = retrieveToolsForRun({
     catalog: toolCatalog,
-    userPrompt,
+    userPrompt: retrievalInputText,
     routeId: routeIdLower || intentRoute.routeId,
     maxCandidates: 16,
     desired: mode === "agent" ? 6 : 4,
@@ -2641,7 +2652,11 @@ export async function prepareAgentRun(args: {
     routeId: routeIdLower || intentRoute.routeId || "unknown",
     promptCaps: toolRetrieval.promptCaps,
     queryTokens: toolRetrieval.queryTokens,
-    candidates: toolRetrieval.candidates,
+    candidates: toolRetrieval.candidates.slice(0, 12).map((c) => ({
+      name: c.name,
+      score: Math.round(c.score * 1000) / 1000,
+      reasons: (Array.isArray(c.reasons) ? c.reasons.slice(0, 6) : []).join("|"),
+    })),
     retrievedToolNames: injectedRetrievalToolNames,
     injectedPreferredCount: injectedRetrievalToolNames.length,
     pinnedCount: pinnedToolNames.size,
@@ -2649,6 +2664,13 @@ export async function prepareAgentRun(args: {
     finalIncludedToolNames: injectedRetrievalToolNames.filter((name) => selectedAllowedToolNames.has(name)),
     finalMissingToolNames: injectedRetrievalToolNames.filter((name) => !selectedAllowedToolNames.has(name)),
   };
+
+  const allowBrowserToolsEffective =
+    allowBrowserTools ||
+    toolRetrieval.promptCaps.includes("browser_open") ||
+    injectedRetrievalToolNames.some((name) => /^mcp\.[^.]*?(?:playwright|browser)[^.]*\./i.test(String(name ?? ""))) ||
+    Array.from(selectedAllowedToolNames).some((name) => /^mcp\.[^.]*?(?:playwright|browser)[^.]*\./i.test(String(name ?? "")));
+
 
   const suppressSearchDuringBrowserContinuation = shouldSuppressSearchDuringBrowserContinuation({
     mainDoc: mainDocFromPack,
@@ -2992,7 +3014,7 @@ export async function prepareAgentRun(args: {
     }
 
     // 非网页导航场景：默认屏蔽浏览器类 MCP 工具，避免“执行约束”把写作/文件任务导向 browser。
-    if (!allowBrowserTools && browserMcpToolNames.size > 0) {
+    if (!allowBrowserToolsEffective && browserMcpToolNames.size > 0) {
       let removed = 0;
       for (const n of browserMcpToolNames) {
         if (allowed.delete(n)) removed += 1;
@@ -3011,7 +3033,7 @@ export async function prepareAgentRun(args: {
       }
 
       const bootCandidates =
-        routeIdLower === "web_radar" || directOpenWebIntent
+        routeIdLower === "web_radar" || directOpenWebIntent || allowBrowserToolsEffective
           ? executionPreferredWithComposite
           : shouldStartWithWebResearch
             ? [
@@ -3059,7 +3081,7 @@ export async function prepareAgentRun(args: {
           boot.delete(name);
           continue;
         }
-        if (!allowBrowserTools && layer === "L2_MCP") {
+        if (!allowBrowserToolsEffective && layer === "L2_MCP") {
           boot.delete(name);
           continue;
         }
@@ -3067,7 +3089,7 @@ export async function prepareAgentRun(args: {
       if (boot.size === 0) {
         for (const name of allowedNow) {
           const layer = classifyToolLayer(name);
-          if (layer === "L0_CONTROL" || layer === "L1_LOCAL" || (allowBrowserTools && layer === "L2_MCP")) {
+          if (layer === "L0_CONTROL" || layer === "L1_LOCAL" || (allowBrowserToolsEffective && layer === "L2_MCP")) {
             boot.add(name);
           }
         }
