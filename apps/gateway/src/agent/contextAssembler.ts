@@ -426,17 +426,19 @@ function buildMemoryMessage(args: BuildAssembledContextArgs) {
       .filter(Boolean)
       .join("\n"),
   );
+  const l1OptionalTitles = args.mode === "chat" ? [] : MEMORY_L1_OPTIONAL_TITLES;
+  const l2OptionalTitles = args.mode === "chat" ? [] : MEMORY_L2_OPTIONAL_TITLES;
   const l1 = selectMemorySnippet({
     raw: args.l1MemoryFromPack,
     anchorTitles: MEMORY_L1_ANCHOR_TITLES,
-    optionalTitles: MEMORY_L1_OPTIONAL_TITLES,
+    optionalTitles: l1OptionalTitles,
     queryTokens,
     maxChars: MAX_MEMORY_BLOCK_CHARS,
   });
   const l2 = selectMemorySnippet({
     raw: args.l2MemoryFromPack,
     anchorTitles: MEMORY_L2_ANCHOR_TITLES,
-    optionalTitles: MEMORY_L2_OPTIONAL_TITLES,
+    optionalTitles: l2OptionalTitles,
     queryTokens,
     maxChars: MAX_MEMORY_BLOCK_CHARS,
   });
