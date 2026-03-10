@@ -18,7 +18,13 @@ function kbLog(level: "info" | "warn" | "error", message: string, data?: unknown
 
 function preferredKbModelId(): string {
   const run = useRunStore.getState();
-  return String(run.agentModel || run.model || run.chatModel || "").trim();
+  // KB 抽卡/手册/深度克隆：严格跟随“主 Agent 模型”，不使用 Chat-only 模型兜底。
+  // - agentModel：顶部主选择（跨 mode 保持）
+  // - model：仅在当前 mode=agent 时与 agentModel 同步；chat 模式下 model=chatModel，不能用于 KB 任务
+  const agent = String(run.agentModel || "").trim();
+  if (agent) return agent;
+  if (run.mode !== "chat") return String(run.model || "").trim();
+  return "";
 }
 
 function requirePreferredKbModelId(taskLabel: string): string | null {

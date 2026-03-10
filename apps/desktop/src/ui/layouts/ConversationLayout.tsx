@@ -85,6 +85,32 @@ export function ConversationLayout() {
       if (agentDefault && !st.agentModel) {
         st.setModelForMode("agent", agentDefault);
       }
+
+      // 若用户本地持久化了已下线/禁用的模型（常见于后台改了 allowlist 或新模型启用），
+      // 需要自动纠正，否则 KB 抽卡/手册等后台任务会拿到“未注册模型”并失败。
+      const chatAllowed = new Set(payload.chatModelIds ?? []);
+      const agentAllowed = new Set(payload.agentModelIds ?? []);
+      const isChatAllowed = (id: string) => !chatAllowed.size || chatAllowed.has(id);
+      const isAgentAllowed = (id: string) => !agentAllowed.size || agentAllowed.has(id);
+
+      if (st.chatModel && !isChatAllowed(st.chatModel)) {
+        const next = chatDefault || agentDefault;
+        if (next) st.setModelForMode("chat", next);
+      }
+      if (st.agentModel && !isAgentAllowed(st.agentModel)) {
+        const next = agentDefault || chatDefault;
+        if (next) st.setModelForMode("agent", next);
+      }
+
+      // 确保当前 mode 的 st.model 也在 allowlist 内（避免 UI 显示/实际请求不一致）
+      if (st.mode === "chat") {
+        const desired = st.chatModel || chatDefault || agentDefault;
+        if (desired && (!st.model || !isChatAllowed(st.model))) st.setModel(desired);
+      } else {
+        const desired = st.agentModel || agentDefault || chatDefault;
+        if (desired && (!st.model || !isAgentAllowed(st.model))) st.setModel(desired);
+      }
+
       if (!st.model) {
         const preferred = st.mode === "chat" ? chatDefault || agentDefault : agentDefault || chatDefault;
         if (preferred) st.setModel(preferred);

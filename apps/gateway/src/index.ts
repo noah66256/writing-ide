@@ -594,7 +594,7 @@ async function resolveRequiredKbTaskRuntime(modelId?: string) {
       ok: false as const,
       status: 400,
       error: "AGENT_MODEL_NOT_FOUND",
-      hint: "当前主 Agent 模型未在 AI 配置中注册，请检查顶部模型选择或后台配置。",
+      hint: `当前主 Agent 模型（${id}）未在 AI 配置中注册或已禁用，请检查顶部模型选择或后台配置。`,
     };
   }
 }
