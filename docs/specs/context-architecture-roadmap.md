@@ -131,3 +131,45 @@
 - 再做 `P1`：架构立住
 - 再做 `P2`：记忆成为系统能力
 - 最后做 `P3`：技术债一次清掉
+
+---
+
+## 对标依据（OpenClaw & Codex 的关键启发）
+
+> 这部分用于说明 P0-P3 的来源：我们不是拍脑袋，而是对照 OpenClaw 的“能力目录常驻 + 上下文预算化 + 记忆外置检索”与 Codex 的“历史压缩/守护”思路，结合写作 IDE 的现状（三层记忆 + 大 contextPack 注入）得出的执行路线。
+
+### OpenClaw：能力边界永远可见 + 上下文严格预算化
+
+- **能力目录常驻（Tooling）**：OpenClaw 的 system prompt 明确有 `## Tooling`，并强调“工具名大小写敏感、按清单调用”。
+  - 参考：`/Users/noah/Crab/openclaw/src/agents/system-prompt.ts:420`
+
+- **Bootstrap 上下文有单文件上限 + 总上限**，并支持 lightweight 模式让上下文几乎为空（避免“越用越肥”）。
+  - 参考：`/Users/noah/Crab/openclaw/src/agents/bootstrap-files.ts:1`
+
+### OpenClaw：永久记忆 = 落盘 Markdown + 按需检索（不是每轮塞 prompt）
+
+- **记忆文件是事实源**：`MEMORY.md` + `memory/YYYY-MM-DD.md` 才是 source of truth；模型只“记得写到磁盘的东西”。
+  - 参考：`/Users/noah/Crab/openclaw/docs/concepts/memory.md:1`
+
+- **记忆默认不常驻注入**：通过 `memory_search` / `memory_get` 按需取，避免每轮系统提示膨胀。
+  - 参考：`/Users/noah/Crab/openclaw/src/agents/tools/memory-tool.ts:51`
+
+- **接近 compaction 前触发 silent memory flush**：用一个“静默 agentic turn”提醒模型先把 durable memory 写盘。
+  - 参考：`/Users/noah/Crab/openclaw/src/auto-reply/reply/memory-flush.ts:1`
+
+### Codex：更偏“少而稳的静态规则 + 历史压缩（compaction）”
+
+- 我们的现状更像“把一切都塞进 system”，而 Codex 倾向于：
+  - 静态规则少而稳定
+  - 动态历史通过压缩/整理控制体积
+
+> 注：Codex 的具体实现文件在你本地 `third_party/openai-codex` 下（后续我们可以把关键点补充进 docs/research，避免 spec 里放过多实现细节）。
+
+---
+
+## 当前实现与路线图的对应关系（简表）
+
+- **P0 已做**：Gateway 端 context assembler + capability summary 常驻 + materials 降权。
+- **P1 已做（gateway 侧可落地版本）**：四槽注入 + 记忆锚点/召回 + 来源可信度分层 + 子 Agent 角色模板。
+- **P2 待做**：把“记忆召回的输入与选择权”进一步从 Desktop 下沉到 Gateway（跨客户端一致）。
+- **P3 待做**：协议升级为结构化 `contextSegments[]`，彻底移除主流程中的 `parseXxxFromContextPack()`。
