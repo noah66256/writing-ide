@@ -1961,36 +1961,36 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     source: "desktop",
   });
 
-  const rawGlobalMemory = useMemoryStore.getState().globalMemory;
-  const rawProjectMemory = useMemoryStore.getState().projectMemory;
-  const selectedMemory = selectMemorySectionsForContext({
-    mode: "agent",
-    globalMemory: rawGlobalMemory,
-    projectMemory: rawProjectMemory,
-    queryText: userPrompt,
-  });
+  const rawGlobalMemory = String(useMemoryStore.getState().globalMemory ?? "").trim();
+  const rawProjectMemory = String(useMemoryStore.getState().projectMemory ?? "").trim();
 
-  // L1: 全局记忆（锚点 + 按需召回）
-  if (selectedMemory.globalMemory.trim()) {
+  // P2：记忆召回选择权下沉到 Gateway。
+  // Desktop 只负责提供原始 L1/L2 记忆全文；由 Gateway 按本轮 userPrompt + budget 选择锚点与按需召回片段。
+  if (rawGlobalMemory) {
     pushSeg({
       name: "L1_GLOBAL_MEMORY",
-      content: `L1_GLOBAL_MEMORY(Markdown):\n${selectedMemory.globalMemory}\n\n`,
+      content: `L1_GLOBAL_MEMORY(Markdown):
+${rawGlobalMemory}
+
+`,
       priority: "p0",
       trusted: true,
       source: "desktop",
-      note: `全局记忆（锚点+按需召回）| ${selectedMemory.recallNote} | selected=${selectedMemory.selectedHeadings.global.join(",") || "none"}`,
+      note: "L1 全局记忆原文（由 Gateway 负责锚点常驻 + 按需召回裁剪）",
     });
   }
 
-  // L2: 项目记忆（锚点 + 按需召回）
-  if (selectedMemory.projectMemory.trim()) {
+  if (rawProjectMemory) {
     pushSeg({
       name: "L2_PROJECT_MEMORY",
-      content: `L2_PROJECT_MEMORY(Markdown):\n${selectedMemory.projectMemory}\n\n`,
+      content: `L2_PROJECT_MEMORY(Markdown):
+${rawProjectMemory}
+
+`,
       priority: "p0",
       trusted: true,
       source: "desktop",
-      note: `项目记忆（锚点+按需召回）| ${selectedMemory.recallNote} | selected=${selectedMemory.selectedHeadings.project.join(",") || "none"}`,
+      note: "L2 项目记忆原文（由 Gateway 负责锚点常驻 + 按需召回裁剪）",
     });
   }
 
@@ -2099,12 +2099,8 @@ export function buildChatContextPack(extra?: { referencesText?: string; userProm
     };
   })();
   const refs = extra?.referencesText ? `${extra.referencesText}\n\n` : "";
-  const chatMemory = selectMemorySectionsForContext({
-    mode: "chat",
-    globalMemory: useMemoryStore.getState().globalMemory,
-    projectMemory: useMemoryStore.getState().projectMemory,
-    queryText: String(extra?.userPrompt ?? ""),
-  });
+  const rawChatGlobalMemory = String(useMemoryStore.getState().globalMemory ?? "").trim();
+  const rawChatProjectMemory = String(useMemoryStore.getState().projectMemory ?? "").trim();
   const pendingArtifactsRaw = (((useRunStore.getState() as any).pendingArtifacts ?? []) as any[])
     .filter((x) => x && typeof x === "object" && String((x as any).status ?? "pending").trim().toLowerCase() === "pending")
     .slice(-2);
@@ -2167,20 +2163,20 @@ export function buildChatContextPack(extra?: { referencesText?: string; userProm
   if (chatRecentDialogue)
     pushSeg({ name: "RECENT_DIALOGUE", content: chatRecentDialogue, priority: "p1", trusted: true, source: "desktop" });
 
-  if (chatMemory.globalMemory.trim()) {
+  if (rawChatGlobalMemory) {
     pushSeg({
       name: "L1_GLOBAL_MEMORY",
-      content: `L1_GLOBAL_MEMORY(Markdown):\n${chatMemory.globalMemory}\n\n`,
+      content: `L1_GLOBAL_MEMORY(Markdown):\n${rawChatGlobalMemory}\n\n`,
       priority: "p1",
       trusted: true,
       source: "desktop",
       note: `chat 锚点记忆 | selected=${chatMemory.selectedHeadings.global.join(",") || "none"}`,
     });
   }
-  if (chatMemory.projectMemory.trim()) {
+  if (rawChatProjectMemory) {
     pushSeg({
       name: "L2_PROJECT_MEMORY",
-      content: `L2_PROJECT_MEMORY(Markdown):\n${chatMemory.projectMemory}\n\n`,
+      content: `L2_PROJECT_MEMORY(Markdown):\n${rawChatProjectMemory}\n\n`,
       priority: "p1",
       trusted: true,
       source: "desktop",
