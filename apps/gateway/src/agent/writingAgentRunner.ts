@@ -282,6 +282,18 @@ const MAIN_DOC_UPDATE_HARD_LIMIT = 8;
 /** 子 Agent 自动注入记忆段的字符上限 */
 const SUB_AGENT_MEMORY_MAX_CHARS = 1500;
 
+
+// P1：按子 Agent 角色模板化注入记忆（降低噪声，提升角色对齐）
+const ROLE_MEMORY_TEMPLATES: Record<
+  string,
+  { l1Sections: string[]; l2Sections: string[]; budgetChars: number }
+> = {
+  copywriter: { l1Sections: ["用户画像", "决策偏好"], l2Sections: ["重要约定"], budgetChars: 1200 },
+  seo_specialist: { l1Sections: ["决策偏好"], l2Sections: ["项目决策", "重要约定"], budgetChars: 1500 },
+  topic_planner: { l1Sections: ["用户画像"], l2Sections: ["项目概况", "项目决策"], budgetChars: 1500 },
+  _default: { l1Sections: ["用户画像", "决策偏好"], l2Sections: ["项目决策", "重要约定"], budgetChars: 1500 },
+};
+
 function toErrorMessage(err: unknown): string {
   if (err instanceof Error && err.message) return err.message;
   return String(err ?? "UNKNOWN_ERROR");
@@ -624,12 +636,15 @@ function pickMarkdownSections(raw: unknown, allowedTitles: string[]): string {
 
 /** 构建注入给子 Agent 的记忆提示段（L1 + L2 筛选后 section + 对话摘要，总上限 1500 字）。 */
 function buildSubAgentMemoryHint(args: {
+  agentId?: string;
   l1Memory?: string;
   l2Memory?: string;
   ctxDialogueSummary?: string;
 }): string {
-  const l1 = pickMarkdownSections(args.l1Memory, ["用户画像", "决策偏好"]);
-  const l2 = pickMarkdownSections(args.l2Memory, ["项目决策", "重要约定"]);
+  const agentId = String(args.agentId ?? "").trim();
+  const tpl = ROLE_MEMORY_TEMPLATES[agentId] ?? ROLE_MEMORY_TEMPLATES._default;
+  const l1 = pickMarkdownSections(args.l1Memory, tpl.l1Sections);
+  const l2 = pickMarkdownSections(args.l2Memory, tpl.l2Sections);
   const summary = String(args.ctxDialogueSummary ?? "").trim();
 
   const parts: string[] = [];
@@ -639,13 +654,15 @@ function buildSubAgentMemoryHint(args: {
   if (parts.length === 0) return "";
 
   const combined = parts.join("\n\n");
-  if (combined.length <= SUB_AGENT_MEMORY_MAX_CHARS) return combined;
+  const budget = Math.max(600, Math.floor(Number(tpl.budgetChars ?? SUB_AGENT_MEMORY_MAX_CHARS)));
+  if (combined.length <= budget) return combined;
   // 截断并标注
-  const keep = Math.max(0, SUB_AGENT_MEMORY_MAX_CHARS - 6);
+  const keep = Math.max(0, budget - 6);
   return `${combined.slice(0, keep).trimEnd()}\n（已截断）`;
 }
 
 function buildSubAgentContextHint(args: {
+  agentId?: string;
   styleLibIds: string[];
   mainDoc: Record<string, unknown> | null | undefined;
   styleLibIdSet: Set<string>;
@@ -666,6 +683,7 @@ function buildSubAgentContextHint(args: {
   const mainDoc = args.mainDoc && typeof args.mainDoc === "object" ? args.mainDoc : {};
 
   const memoryHint = buildSubAgentMemoryHint({
+    agentId: args.agentId,
     l1Memory: args.l1Memory,
     l2Memory: args.l2Memory,
     ctxDialogueSummary: args.ctxDialogueSummary,
@@ -3225,6 +3243,7 @@ export class AgentRunner {
 
     // 自动注入精简上下文到 taskMessage（风格库 ID + mainDoc 目标/约束 + 记忆/摘要）
     const contextHint = buildSubAgentContextHint({
+      agentId: subAgent.id,
       styleLibIds: this.ctx.styleLibIds,
       mainDoc: this.ctx.mainDoc,
       styleLibIdSet: this.ctx.gates.styleLibIdSet,

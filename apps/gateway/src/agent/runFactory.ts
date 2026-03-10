@@ -55,6 +55,10 @@ import {
   type ModelApiType,
 } from "./writingAgentRunner.js";
 import { createRuntime } from "./runtime/RuntimeFactory.js";
+import {
+  buildAssembledContextMessages,
+  type AssembledContextSummary,
+} from "./contextAssembler.js";
 
 const TOOL_SCHEMA_ISSUES = collectToolSchemaIssues();
 let TOOL_SCHEMA_NOTICE_EMITTED = false;
@@ -1746,6 +1750,7 @@ export type PreparedRun = {
   l2MemoryFromPack: string;
   ctxDialogueSummaryFromPack: string;
   compositeTaskPlan: CompositeTaskPlanV1 | null;
+  assembledContextSummary: AssembledContextSummary;
 };
 
 export type PrepareAgentRunResult =
@@ -2666,6 +2671,30 @@ export async function prepareAgentRun(args: {
     intent,
   });
 
+  const assembledContext = buildAssembledContextMessages({
+    mode,
+    userPrompt: body.prompt,
+    contextPack: body.contextPack,
+    selectedAllowedToolNames,
+    toolCatalogSummary,
+    mcpToolsForRun,
+    mcpServersForRun: mcpServersFromSidecar.filter((server: any) => {
+      const serverId = String(server?.serverId ?? "").trim();
+      return !mcpServerSelection.summary.selectedServerIds.length || mcpServerSelection.summary.selectedServerIds.includes(serverId);
+    }),
+    mcpServerSelectionSummary: mcpServerSelection.summary,
+    mainDocFromPack,
+    runTodoFromPack,
+    taskStateFromPack,
+    pendingArtifactsFromPack,
+    recentDialogueFromPack,
+    l1MemoryFromPack,
+    l2MemoryFromPack,
+    ctxDialogueSummaryFromPack,
+    kbSelectedList,
+    webSearchHint: webSearchHint || undefined,
+  });
+
   const messages: OpenAiChatMessage[] = [
     {
       role: "system",
@@ -2685,7 +2714,7 @@ export async function prepareAgentRun(args: {
     ...(shouldResumePendingWrite
       ? ([{ role: "system", content: `检测到这是一次“恢复上轮未落盘写入”的续跑：上轮因未打开项目目录而阻塞，现在项目目录已可用。\n你必须优先复用 Context Pack 中的 PENDING_ARTIFACTS 里的现成正文，直接调用 doc.write 保存到 workflowV1.resumeAction.pathHint；不要重新调研，不要重新生成正文。\n写入成功后，把 workflowV1.status 更新为 done。` }] as OpenAiChatMessage[])
       : []),
-    ...(body.contextPack ? ([{ role: "system", content: body.contextPack }] as OpenAiChatMessage[]) : []),
+    ...assembledContext.messages,
     { role: "user", content: body.prompt },
   ];
 
@@ -3110,6 +3139,7 @@ export async function prepareAgentRun(args: {
       l1MemoryFromPack,
       l2MemoryFromPack,
       ctxDialogueSummaryFromPack,
+      assembledContextSummary: assembledContext.summary,
     },
   };
 }
@@ -3170,6 +3200,7 @@ export async function executeAgentRun(args: {
     l1MemoryFromPack,
     l2MemoryFromPack,
     ctxDialogueSummaryFromPack,
+    assembledContextSummary,
   } = prepared;
 
   services.agentRunWaiters.set(runId, transport.waiters);
@@ -3192,6 +3223,7 @@ export async function executeAgentRun(args: {
       promptPreview: String(body.prompt ?? "").slice(0, 240),
       promptChars: String(body.prompt ?? "").length,
       contextPackChars: String(body.contextPack ?? "").length,
+      assembledContextSummary,
       contextManifest: (() => {
         const m = contextManifestFromPack;
         const segs = Array.isArray((m as any)?.segments) ? ((m as any).segments as any[]) : [];
@@ -3441,6 +3473,13 @@ export async function executeAgentRun(args: {
       },
     });
   }
+  writeEvent("run.notice", {
+    turn: 0,
+    kind: "info",
+    title: "ContextAssembly",
+    message: `上下文已重组：core=${assembledContextSummary.coreChars} / task=${assembledContextSummary.taskChars} / memory=${assembledContextSummary.memoryChars} / materials=${assembledContextSummary.materialsChars}` ,
+    detail: assembledContextSummary,
+  });
   writeEvent("run.notice", {
     turn: 0,
     kind: "info",
