@@ -478,9 +478,11 @@ export function createAiConfigService(args: {
     const envHaikuBase = normalizeBaseURL(String(process.env.LLM_HAIKU_BASE_URL ?? "")) || envBase;
     const envHaikuKey = normalizeApiKeyInput(String(process.env.LLM_HAIKU_API_KEY ?? "")) || envKey;
     const envOpenAiModel = normalizeModelId(String(process.env.LLM_OPENAI_MODEL ?? ""));
+    const envOpenAiModel2 = normalizeModelId(String(process.env.LLM_OPENAI_MODEL_2 ?? ""));
     const envOpenAiBase = normalizeBaseURL(String(process.env.LLM_OPENAI_BASE_URL ?? "")) || envBase;
     const envOpenAiKey = normalizeApiKeyInput(String(process.env.LLM_OPENAI_API_KEY ?? "")) || envKey;
     const envOpenAiEndpoint = normalizeEndpoint(String(process.env.LLM_OPENAI_ENDPOINT ?? "/v1/responses"), "/v1/responses");
+    const openAiEnvModelIds = Array.from(new Set([envOpenAiModel, envOpenAiModel2].filter(Boolean)));
     const envGeminiProModel = normalizeModelId(String(process.env.LLM_GEMINI_PRO_MODEL ?? ""));
     const envGeminiFlashLiteModel = normalizeModelId(String(process.env.LLM_GEMINI_FLASH_LITE_MODEL ?? ""));
     const envGeminiKey = normalizeApiKeyInput(String(process.env.LLM_GEMINI_API_KEY ?? ""));
@@ -577,15 +579,17 @@ export function createAiConfigService(args: {
       ensureModel(envHaikuModel, "llm.haiku", chatEndpoint);
     }
     // 1.3) env 额外声明的 OpenAI Responses 模型（默认 endpoint=/v1/responses）
-    if (envOpenAiModel) {
-      ensureModel(envOpenAiModel, "llm.openai", envOpenAiEndpoint);
-      const openAiDoc = byId.get(envOpenAiModel);
-      if (openAiDoc) {
-        const ep = normalizeEndpoint(openAiDoc.endpoint, "/v1/chat/completions");
-        if (/\/responses/i.test(ep) && openAiDoc.toolResultFormat !== "text") {
-          openAiDoc.toolResultFormat = "text";
-          openAiDoc.updatedAt = nowIso();
-          openAiDoc.updatedBy = "system";
+    if (openAiEnvModelIds.length) {
+      for (const openAiModelId of openAiEnvModelIds) {
+        ensureModel(openAiModelId, "llm.openai", envOpenAiEndpoint);
+        const openAiDoc = byId.get(openAiModelId);
+        if (openAiDoc) {
+          const ep = normalizeEndpoint(openAiDoc.endpoint, "/v1/chat/completions");
+          if (/\/responses/i.test(ep) && openAiDoc.toolResultFormat !== "text") {
+            openAiDoc.toolResultFormat = "text";
+            openAiDoc.updatedAt = nowIso();
+            openAiDoc.updatedBy = "system";
+          }
         }
       }
     }
@@ -641,10 +645,12 @@ export function createAiConfigService(args: {
       appendToStage(stageMap.get("agent.run"), envOpusModel);
     }
 
-    const openAiDoc = envOpenAiModel ? byId.get(envOpenAiModel) : null;
-    if (envOpenAiModel && openAiDoc?.isEnabled) {
-      appendToStage(stageMap.get("llm.chat"), envOpenAiModel);
-      appendToStage(stageMap.get("agent.run"), envOpenAiModel);
+    for (const openAiModelId of openAiEnvModelIds) {
+      const openAiDoc = byId.get(openAiModelId) ?? null;
+      if (openAiDoc?.isEnabled) {
+        appendToStage(stageMap.get("llm.chat"), openAiModelId);
+        appendToStage(stageMap.get("agent.run"), openAiModelId);
+      }
     }
 
     const geminiProDoc = envGeminiProModel ? byId.get(envGeminiProModel) : null;
