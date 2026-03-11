@@ -493,8 +493,12 @@ export function deriveStyleGate(args: {
   const hasStyleLibrary = args.mode !== "chat" && styleLibIds.length > 0;
   const hasNonStyleLibraries = args.mode !== "chat" && nonStyleLibIds.length > 0;
   const skillIds = Array.isArray(args.activeSkillIds) ? args.activeSkillIds.map((x) => String(x ?? "").trim()).filter(Boolean) : null;
-  const styleSkillActive = skillIds ? new Set(skillIds).has("style_imitate") : false;
-  const styleGateEnabled = hasStyleLibrary && (skillIds ? styleSkillActive : args.intent.isWritingTask);
+  const styleSkillActiveByIds = skillIds ? new Set(skillIds).has("style_imitate") : false;
+  // Skill 激活判定（fail-close）：
+  // - 只要当前有 purpose=style 的库且本轮为写作任务，就视为需要拉起 style_imitate Skill；
+  // - ACTIVE_SKILLS(JSON) 中缺失 style_imitate 时，仍然按写作意图自动启用 Gate，防止因桌面侧遗漏导致风格闭环失效；
+  // - 若 Desktop 显式激活 style_imitate，则 styleSkillActiveByIds=true，与写作意图一起加固 Gate。
+  const styleGateEnabled = hasStyleLibrary && args.mode !== "chat" && args.intent.isWritingTask;
   const lintGateEnabled = styleGateEnabled && !args.intent.skipLint;
   const copyGateEnabled = lintGateEnabled;
   return {

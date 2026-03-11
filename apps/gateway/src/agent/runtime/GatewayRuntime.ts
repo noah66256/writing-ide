@@ -1566,9 +1566,13 @@ export class GatewayRuntime implements AgentRuntime {
         // StyleWorkflow Gate：当 style_imitate 激活且处于 gate 模式时，按闭环顺序拦截违规调用
         const runCtx: any = this.config.runCtx;
         const activeSkills = Array.isArray(runCtx.activeSkills) ? runCtx.activeSkills : [];
-        const styleSkillActive = activeSkills.some(
-          (s: any) => String(s?.id ?? "").trim() === "style_imitate",
-        );
+        const gates: any = runCtx.gates ?? {};
+        // Skill 激活判定（runtime 兜底）：
+        // - 优先以 ACTIVE_SKILLS(JSON) 中的 style_imitate 为准；
+        // - 若 Desktop 侧遗漏，但存在风格库且写作意图明确（styleGateEnabled），也视为已激活 style_imitate。
+        const styleSkillActive =
+          activeSkills.some((s: any) => String(s?.id ?? "").trim() === "style_imitate") ||
+          (gates.styleGateEnabled && runCtx.intent?.isWritingTask);
 
         if (styleSkillActive && !dryRun) {
           const toolCalls: ParsedToolCall[] = [
@@ -2308,7 +2312,10 @@ export class GatewayRuntime implements AgentRuntime {
     // Style_imitate 工作流摘要：仅当 style skill 激活且为写作任务时写入，便于审计与调试。
     const runCtx: any = this.config.runCtx;
     const activeSkills = Array.isArray(runCtx.activeSkills) ? runCtx.activeSkills : [];
-    const styleSkillActive = activeSkills.some((s: any) => String(s?.id ?? "").trim() === "style_imitate");
+    const gates: any = runCtx.gates ?? {};
+    const styleSkillActive =
+      activeSkills.some((s: any) => String(s?.id ?? "").trim() === "style_imitate") ||
+      (gates.styleGateEnabled && runCtx.intent?.isWritingTask);
     const styleWorkflow = styleSkillActive && runCtx.intent?.isWritingTask
       ? {
           active: true,
