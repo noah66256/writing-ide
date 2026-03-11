@@ -1282,10 +1282,6 @@ export class GatewayRuntime implements AgentRuntime {
     }
   }
 
-  /**
-   * web.search / web.fetch 的 MCP 回退：bocha 不可用时找 sidecar 中的专用搜索工具，
-   * 通过 Desktop WS 执行。
-   */
   private async _fallbackWebToolViaMcp(
     toolCallId: string,
     toolName: string,
@@ -1296,37 +1292,81 @@ export class GatewayRuntime implements AgentRuntime {
         ? (this.config.runCtx.toolSidecar.mcpTools as any[])
         : [];
     if (!mcpTools.length) return null;
-
-    let mcpToolName: string | null = null;
-    let mcpArgs: Record<string, unknown> = {};
+    type FallbackCandidate = { name: string; args: Record<string, unknown> };
+    const candidates: FallbackCandidate[] = [];
 
     if (toolName === "web.search") {
       const query = String(toolArgs.query ?? "").trim();
       if (!query) return null;
-      // 优先 bocha-search，其次 web-search
+
+      const count = toolArgs.count;
+      const freshness = toolArgs.freshness;
+
+      // 策略 1：Bocha 搜索 MCP（若存在）
       const bochaSearch = mcpTools.find((t) =>
-        /^mcp\.bocha-search\./i.test(t.name) && /web_search/i.test(t.originalName ?? t.name),
+        /^mcp\.bocha-search\./i.test(String(t.name ?? "")) &&
+        /bocha_web_search|web_search/i.test(String(t.originalName ?? t.name ?? "")),
       );
+      if (bochaSearch) {
+        const args: Record<string, unknown> = { query };
+        if (count != null) args.count = count as unknown;
+        if (freshness != null) args.freshness = freshness as unknown;
+        candidates.push({ name: bochaSearch.name, args });
+      }
+
+      // 策略 2：通用 web-search MCP（Serper/Tavily）
       const webSearch = mcpTools.find((t) =>
-        /^mcp\.web-search\./i.test(t.name) && /web_search/i.test(t.originalName ?? t.name),
+        /^mcp\.web-search\./i.test(String(t.name ?? "")) &&
+        /web_search/i.test(String(t.originalName ?? t.name ?? "")),
       );
-      const chosen = bochaSearch ?? webSearch;
-      if (!chosen) return null;
-      mcpToolName = chosen.name;
-      mcpArgs = { query, ...(toolArgs.count != null ? { num_results: toolArgs.count } : {}) };
+      if (webSearch) {
+        const args: Record<string, unknown> = { query };
+        if (count != null) args.num_results = count as unknown;
+        candidates.push({ name: webSearch.name, args });
+      }
+
+      // 策略 3：Playwright 保底 → 导航到百度搜索
+      const playwrightNav = mcpTools.find((t) =>
+        /^mcp\.playwright\./i.test(String(t.name ?? "")) &&
+        /browser_navigate/i.test(String(t.originalName ?? t.name ?? "")),
+      );
+      if (playwrightNav) {
+        const url = `https://www.baidu.com/s?wd=${encodeURIComponent(query)}`;
+        candidates.push({ name: playwrightNav.name, args: { url } });
+      }
     } else if (toolName === "web.fetch") {
       const url = String(toolArgs.url ?? "").trim();
       if (!url) return null;
+
+      // 策略 1：web-search MCP 的 get_page_content
       const getPage = mcpTools.find((t) =>
-        /^mcp\.web-search\./i.test(t.name) && /get_page_content/i.test(t.originalName ?? t.name),
+        /^mcp\.web-search\./i.test(String(t.name ?? "")) &&
+        /get_page_content/i.test(String(t.originalName ?? t.name ?? "")),
       );
-      if (!getPage) return null;
-      mcpToolName = getPage.name;
-      mcpArgs = { url };
+      if (getPage) {
+        candidates.push({ name: getPage.name, args: { url } });
+      }
+
+      // 策略 2：Playwright 保底 → 直接 navigate 到目标 URL
+      const playwrightNav = mcpTools.find((t) =>
+        /^mcp\.playwright\./i.test(String(t.name ?? "")) &&
+        /browser_navigate/i.test(String(t.originalName ?? t.name ?? "")),
+      );
+      if (playwrightNav) {
+        candidates.push({ name: playwrightNav.name, args: { url } });
+      }
     }
 
-    if (!mcpToolName) return null;
-    return this._waitForDesktopToolResult(toolCallId, mcpToolName, mcpArgs);
+    if (!candidates.length) return null;
+
+    let lastResult: GatewayToolExecResult | null = null;
+    for (const cand of candidates) {
+      const res = await this._waitForDesktopToolResult(toolCallId, cand.name, cand.args);
+      lastResult = res;
+      if (res.ok) return res;
+    }
+
+    return lastResult;
   }
 
   /**
