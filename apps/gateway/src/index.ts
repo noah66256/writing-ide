@@ -6206,7 +6206,12 @@ fastify.post(
   let usedModelName = model;
 
   const MAX_FALLBACK = 2; // 最多切换 2 次（主 + 2 备）
-  for (let attempt = 0; attempt < Math.min(candidateModelIds.length, 1 + MAX_FALLBACK); attempt += 1) {
+  // 总尝试次数：
+  // - 若 candidateModelIds 非空：按候选列表与 MAX_FALLBACK 取最小值；
+  // - 若 candidateModelIds 为空：仍至少尝试 1 次，使用 getLinterEnv/resolveStage 得到的默认模型，避免因阶段配置缺失而“零调用即降级”。
+  const totalCandidates = candidateModelIds.length || 1;
+  const maxAttempts = Math.min(totalCandidates, 1 + MAX_FALLBACK);
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const mid = candidateModelIds[attempt] ? String(candidateModelIds[attempt]).trim() : "";
     // 可靠性：admin 也应参与备用模型切换（否则线上排障/冒烟时永远卡在主模型超时，误以为“fallback 无效”）
     if (mid) {
