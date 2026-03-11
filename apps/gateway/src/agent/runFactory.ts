@@ -3290,65 +3290,9 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       allowed = new Set(selectedAllowedToolNames);
     }
 
-    // Style_imitate 四阶段工具白名单：仅在写作类意图且 style skill 激活时收紧工具集
-    try {
-      const hasStyleSkill = activeSkillIds.includes("style_imitate");
-      if (hasStyleSkill && intent.isWritingTask && gates.styleGateEnabled) {
-        const allow = new Set<string>();
-        const base = allowed as Set<string>;
-
-        const canUse = (name: string) => base.has(name) && baseAllowedToolNames.has(name);
-        const pin = (name: string) => {
-          if (canUse(name)) allow.add(name);
-        };
-
-        // 通用基础工具（任意阶段都可用）
-        for (const name of [
-          "run.mainDoc.get",
-          "run.mainDoc.update",
-          "run.setTodoList",
-          "run.todo",
-          "time.now",
-          "run.done",
-        ]) {
-          if (canUse(name)) allow.add(name);
-        }
-
-        const hasDraft = state.hasDraftText === true;
-        const copyPassed = state.copyLintPassed === true;
-        const stylePassed = state.styleLintPassed === true;
-
-        if (!state.hasStyleKbSearch) {
-          // 阶段 A：尚未完成风格样例检索 —— 只允许拉样例 / 准备上下文
-          if (canUse("tools.search")) allow.add("tools.search");
-          if (canUse("kb.search")) allow.add("kb.search");
-        } else if (!hasDraft) {
-          // 阶段 B：已有样例但尚未产出初稿 —— 允许写入 mainDoc/文件作为草稿
-          if (canUse("kb.search")) allow.add("kb.search");
-          if (canUse("doc.write")) allow.add("doc.write");
-          if (canUse("doc.applyEdits")) allow.add("doc.applyEdits");
-        } else if (!copyPassed) {
-          // 阶段 C：已有 draft，但尚未通过 copy lint —— 仅允许 lint.copy
-          if (canUse("lint.copy")) allow.add("lint.copy");
-        } else if (!stylePassed) {
-          // 阶段 D：已通过 copy lint，尚未通过 style lint —— 仅允许 lint.style
-          if (canUse("lint.style")) allow.add("lint.style");
-        } else {
-          // 阶段 E：lint 双通过 —— 允许写入类工具落盘
-          if (canUse("doc.write")) allow.add("doc.write");
-          if (canUse("doc.applyEdits")) allow.add("doc.applyEdits");
-        }
-
-        if (allow.size > 0) {
-          allowed = allow;
-          hints.push(
-            "Style_imitate 阶段门禁已生效：当前仅暴露与本阶段匹配的风格工具（kb → draft → lint.copy → lint.style → doc.write）。",
-          );
-        }
-      }
-    } catch {
-      // gating 失败时不影响主流程
-    }
+    // Style_imitate 顺序 gate 统一由 analyzeStyleWorkflowBatch 负责；
+    // 此处不再收紧 per-turn 工具白名单，避免出现 TOOL_NOT_ALLOWED_THIS_TURN，
+    // 只通过提示引导模型遵守 kb → draft → lint.copy → lint.style → doc.write 的顺序。
 
     for (const n of compositePhasePins) allowed.add(n);
 
@@ -4470,12 +4414,11 @@ export async function executeAgentRun(args: {
       });
       (audit.meta as any).skillStatus = skillStatusRaw;
 
-      // 仅在样例与草稿都已存在的前提下，才认为“闭环未完成”。
-      styleWorkflowIncomplete = Boolean(
-        sw.hasStyleKbSearch &&
-        sw.hasDraftText &&
-        (!sw.copyLintPassed || !sw.styleLintPassed),
-      );
+      // 只要 style skill 激活且未进入 completed，都视为本轮风格闭环未完成：
+      // - 包括“完全没跑闭环”（not_started）和“只写了草稿但没 lint”等情况；
+      // - 由 RunOutcome 收口统一标记为 style_workflow_incomplete，交给下一轮补闭环。
+      const completed = sw.hasStyleKbSearch && sw.hasDraftText && sw.copyLintPassed && sw.styleLintPassed;
+      styleWorkflowIncomplete = !completed;
     }
   } catch {
     // ignore audit summary mutation failures

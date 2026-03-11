@@ -2169,9 +2169,14 @@ export class AgentRunner {
     const canonicalResults: CanonicalToolResult[] = [];
     let hasRunDone = false;
 
-    const styleSkillActive = Array.isArray(this.ctx.activeSkills)
+    // Style skill 视为激活的条件：
+    // - Desktop 显式激活 style_imitate，或
+    // - 运行时根据 gates.styleGateEnabled + 写作意图自动拉起（fail-close）。
+    const styleSkillActiveById = Array.isArray(this.ctx.activeSkills)
       ? this.ctx.activeSkills.some((s: any) => String(s?.id ?? "").trim() === "style_imitate")
       : false;
+    const styleSkillActiveByGate = Boolean(this.ctx.gates?.styleGateEnabled && this.ctx.intent?.isWritingTask);
+    const styleSkillActive = styleSkillActiveById || styleSkillActiveByGate;
     const shouldEnforceStyleGate = styleSkillActive && (batch.enforceCopy || batch.enforceLint);
 
     if (batch.violation && shouldEnforceStyleGate) {

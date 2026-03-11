@@ -53,6 +53,45 @@
 - 始终使用简体中文回复
 - 结论先行，避免长篇赘述；给出明确的下一步与需用户确认点
 
+## 最近一周设计文档索引（research/specs）
+
+> 用于快速定位最近一周落盘的架构/机制类文档，避免重复踩坑或“忘了已经研究过”。详细内容请直接打开对应 md 文件。
+
+- **工具/路由/编排范式（对标 Codex / OpenClaw）**
+  - `docs/research/codex-openclaw-intent-routing-and-tool-exposure-benchmark-2026-03-11.md` — Codex vs OpenClaw：意图路由与工具暴露/选择对标，解释“这轮为什么看不到某工具/无法落盘 md”。
+  - `docs/research/composite-task-phase-runtime-and-codex-parity-v1.md` — 复合任务运行时范式，对标 Codex 的长任务/分阶段执行机制。
+  - `docs/research/openclaw-inspired-endpoint-output-guardrails-phase-playbook-v1.md` — 多端点与输出护栏改造手册，按单核心执行+薄适配的思路收敛 Responses/Chat 等端点。
+  - `docs/research/tooling-platformization-phased-plan-2026-03-11.md` — 工具/Skill/MCP 平台化分 Phase 路线，面向“工具数量级膨胀”时的整体架构。
+  - `docs/specs/tool-retrieval-v0.1.md` — Tool Retrieval v0.1：对齐 Codex/OpenClaw 的工具可见性/选择范式，避免关键工具被裁掉。
+  - `docs/specs/skill-contract-openclaw-parity-v0.1.md` — Skill 合同化规范：把 style_imitate 等 Workflow Skill 从“软提示”升级为必须执行的工作流合同。
+
+- **上下文/线程/续跑架构**
+  - `docs/specs/context-architecture-roadmap.md` — 上下文架构路线图：解耦 contextPack，把规则/记忆/任务主线/材料做成可预算、可观测的结构。
+  - `docs/specs/model-context-window-tokens.md` — 模型上下文窗口配置：在 B 端为每个模型配置 MaxTokens，方便后续预算与 compact 策略。
+  - `docs/specs/l3-dynamic-budget-and-auto-compact-v0.1.md` — L3 动态预算 + 自动 compact 方案：控制运行时上下文体积。
+  - `docs/research/context-resume-artifact-cache-codex-parity-v1.md` — Context/Resume/Artifact Cache 修复方案，对齐 Codex 的 resume 行为。
+  - `docs/research/thread-first-task-state-resume-parity-v1.md` — Thread-first / Task State / Resume Cache，对标 Codex+Gemini CLI 的线程续跑机制。
+  - `docs/research/streaming-checkpoints-codex-parity-v1.md` — 分段播报与流式检查点，对齐 Codex 的流式 checkpoint 设计。
+  - `docs/research/todo-and-streaming-ux-codex-parity-v1.md` — Todo + 流式输出 UX：把 Todo 与 streaming 交互做成稳定的 UI/协议。
+  - `docs/research/continuous-task-sticky-workflow-and-todo-panel-v1.md` — 连续任务 Sticky Workflow + 底部 Todo 面板的改造方案。
+
+- **MCP / Provider / 多端点执行**
+  - `docs/specs/multi-endpoint-refactor-v0.1.md` — 多端点兼容重构：统一 Chat/Responses 等端点上的消息队列与 turn 函数。
+  - `docs/specs/mcp-validation-strategy-v1.md` — MCP 改造验收策略：定义接入/改造 MCP 时的验收标准。
+  - `docs/research/mcp-fat-server-profile-and-codex-parity-v1.md` — MCP fat server 收敛方案：解决 Word 等多工具 server 暴露子集不稳、交付卡死的问题。
+  - `docs/research/mcp-hierarchical-tool-selection-v1.md` — MCP 分层工具选择：先选系统工具+Server，再选具体 Tool，避免一个大扁平列表。
+  - `docs/research/mcp-session-reliability-and-thread-accounting-repair-v1.md` — MCP 会话可靠性与线程记账修复方案，对齐 Codex 范式回调。
+  - `docs/research/provider-native-execution-and-gemini-adoption-v1.md` — Provider-native 执行框架 + Gemini 接入方案，把 provider 差异收敛到适配层。
+  - `docs/research/single-core-adapter-playbook-chat-responses-v1.md` — 单核心编排改造手册（Chat+Responses）：把编排收敛为单核心状态机+适配层。
+  - `docs/research/gemini-pi-runtime-stall-2026-03-09.md` — Gemini PI Runtime Stall 排查纪要。
+
+- **项目地图 / Deep Research / 其它**
+  - `docs/specs/project-map-v1.md` — Project Map v1：为 Agent 提供轻量“项目导航摘要”，在不读全文件的前提下理解项目结构。
+  - `docs/research/deep-research-skill-marketplace-adaptation-v1.md` — Deep Research Skill 上架方案（Marketplace + 内置 PDF）。
+  - `docs/research/deepresearch-intent-routing-tool-discovery-and-file-delivery-contract-2026-03-11.md` — Deep Research：意图路由 × 工具发现 × 文件交付契约，解决“采集+总结+落盘”型任务断链问题。
+  - `docs/research/mcp-fat-server-profile-and-codex-parity-v1.md` — 同上，重点是 fat MCP server 的 profile 收敛。
+
+
 ## Dev 数据路径（重要）
 
 在 dev 模式下（Vite + Electron），Electron 默认 productName 可能是 "Electron"，会导致 `app.getPath("userData")` 落到：
