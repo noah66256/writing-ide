@@ -2135,6 +2135,72 @@ export class AgentRunner {
       toolCalls: parsedToolCalls,
     });
 
+    const canonicalResults: CanonicalToolResult[] = [];
+    let hasRunDone = false;
+
+    const styleSkillActive = Array.isArray(this.ctx.activeSkills)
+      ? this.ctx.activeSkills.some((s: any) => String(s?.id ?? "").trim() === "style_imitate")
+      : false;
+    const shouldEnforceStyleGate = styleSkillActive && (batch.enforceCopy || batch.enforceLint);
+
+    if (batch.violation && shouldEnforceStyleGate) {
+      const violation = String(batch.violation);
+      const note = [
+        `【StyleWorkflow】检测到风格闭环步骤顺序不合理（violation=${violation}）。`,
+        "请按\"先从风格库拉模板 kb.search → 写出候选稿 → 运行 lint.copy（防复用）→ 运行 lint.style（风格校验）→ 最后 doc.write/doc.applyEdits 落盘\"的顺序调整工具调用。",
+      ].join("\n");
+
+      this.ctx.writeEvent("run.notice", {
+        turn: this.turn,
+        kind: "warn",
+        title: "StyleWorkflowViolation",
+        message: `StyleWorkflow violation=${violation}，本回合工具调用已被拦截，将返回错误结果提示模型按闭环顺序重试。`,
+        detail: { violation, enforceCopy: batch.enforceCopy, enforceLint: batch.enforceLint },
+      });
+
+      for (const toolUse of completedToolUses) {
+        const errorOutput: ToolExecResult = {
+          ok: false,
+          output: {
+            ok: false,
+            error: "STYLE_WORKFLOW_VIOLATION",
+            violation,
+            message: note,
+            toolName: toolUse.name,
+          },
+        };
+
+        this._recordToolFailure(toolUse, errorOutput);
+
+        this.ctx.writeEvent("tool.result", {
+          toolCallId: toolUse.id,
+          name: toolUse.name,
+          ok: false,
+          output: errorOutput.output,
+          meta: null,
+          turn: this.turn,
+        });
+
+        const rawOutput = JSON.stringify(errorOutput.output ?? null);
+        canonicalResults.push({
+          toolUseId: toolUse.id,
+          toolName: toolUse.name,
+          content: rawOutput,
+          isError: true,
+        });
+      }
+
+      if (canonicalResults.length > 0) {
+        this._pushHistory({
+          role: "tool_result",
+          results: canonicalResults,
+          noteText: note,
+        } as any);
+      }
+
+      return false;
+    }
+
     if (batch.violation) {
       this.ctx.writeEvent("run.notice", {
         turn: this.turn,
@@ -2143,9 +2209,6 @@ export class AgentRunner {
         message: `工具调用顺序提示（${batch.violation}），已放行，由 LLM 自行判断。`,
       });
     }
-
-    const canonicalResults: CanonicalToolResult[] = [];
-    let hasRunDone = false;
 
     const delegateCalls: { index: number; toolUse: ContentBlockToolUse }[] = [];
     const regularCalls: { index: number; toolUse: ContentBlockToolUse }[] = [];
