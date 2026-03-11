@@ -475,12 +475,43 @@ function coerceToolArgByType(value: unknown, type: string | undefined): unknown 
   return value;
 }
 
+function normalizeToolNameAlias(name: string): string {
+  const raw = String(name ?? '').trim();
+  if (!raw) return raw;
+  const lower = raw.toLowerCase();
+  switch (lower) {
+    case 'web_search':
+      return 'web.search';
+    case 'web_fetch':
+      return 'web.fetch';
+    case 'kb_search':
+      return 'kb.search';
+    case 'tools_search':
+    case 'tool_search':
+      return 'tools.search';
+    case 'tools_describe':
+    case 'tool_describe':
+      return 'tools.describe';
+    case 'run_settodolist':
+    case 'run_set_todo_list':
+      return 'run.setTodoList';
+    case 'run_maindoc_update':
+    case 'run_main_doc_update':
+      return 'run.mainDoc.update';
+    case 'run_maindoc_get':
+    case 'run_main_doc_get':
+      return 'run.mainDoc.get';
+    default:
+      return raw;
+  }
+}
+
 function normalizeToolCallForValidation(nameRaw: string, argsRaw: Record<string, unknown>): {
   name: string;
   args: Record<string, unknown>;
   sanitized: boolean;
 } {
-  const name = decodeToolName(String(nameRaw ?? "").trim());
+  const name = normalizeToolNameAlias(decodeToolName(String(nameRaw ?? "").trim()));
   const meta = TOOL_LIST.find((t) => t.name === name);
   const baseArgs = argsRaw && typeof argsRaw === "object" && !Array.isArray(argsRaw) ? argsRaw : {};
   if (!meta) return { name, args: baseArgs, sanitized: false };
