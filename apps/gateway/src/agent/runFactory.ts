@@ -4417,7 +4417,6 @@ export async function executeAgentRun(args: {
       // 只要 style skill 激活且未进入 completed，都视为本轮风格闭环未完成：
       // - 包括“完全没跑闭环”（not_started）和“只写了草稿但没 lint”等情况；
       // - 由 RunOutcome 收口统一标记为 style_workflow_incomplete，交给下一轮补闭环。
-      const completed = sw.hasStyleKbSearch && sw.hasDraftText && sw.copyLintPassed && sw.styleLintPassed;
       styleWorkflowIncomplete = !completed;
     }
   } catch {
