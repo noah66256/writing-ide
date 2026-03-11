@@ -12,7 +12,18 @@ import { createHash } from "node:crypto";
  * - shadow 模式下 Desktop 工具 dry-run
  */
 
-import { createInitialRunState, isContentWriteTool, isWriteLikeTool, type RunState, type SideEffectRecordV1 } from "@ohmycrab/agent-core";
+import {
+  analyzeStyleWorkflowBatch,
+  createInitialRunState,
+  isContentWriteTool,
+  isStyleExampleKbSearch,
+  isWriteLikeTool,
+  looksLikeDraftText,
+  parseStyleLintResult,
+  type ParsedToolCall,
+  type RunState,
+  type SideEffectRecordV1,
+} from "@ohmycrab/agent-core";
 import { TOOL_LIST, encodeToolName, decodeToolName } from "@ohmycrab/tools";
 import type {
   AgentEvent,
@@ -85,6 +96,9 @@ const COMPLETED_OUTCOME: RunOutcome = {
 /** 默认最大回合数，防止无限循环 */
 const DEFAULT_MAX_TURNS = 48;
 const MAX_PROVIDER_TOOL_NAME_LEN = 64;
+
+const STYLE_LINT_PASS_SCORE = 70;
+const LINT_MAX_REWORK = 2;
 
 // ── 内部类型 ─────────────────────────────────────
 
@@ -1509,6 +1523,97 @@ export class GatewayRuntime implements AgentRuntime {
         const executedBy = details?.executedBy ?? snap?.executedBy ?? "gateway";
         const dryRun = Boolean(details?.dryRun ?? snap?.dryRun);
 
+        // StyleWorkflow Gate：当 style_imitate 激活且处于 gate 模式时，按闭环顺序拦截违规调用
+        const runCtx: any = this.config.runCtx;
+        const activeSkills = Array.isArray(runCtx.activeSkills) ? runCtx.activeSkills : [];
+        const styleSkillActive = activeSkills.some(
+          (s: any) => String(s?.id ?? "").trim() === "style_imitate",
+        );
+
+        if (styleSkillActive && !dryRun) {
+          const toolCalls: ParsedToolCall[] = [
+            { name: rawToolName, args: snap?.args ?? {} },
+          ];
+          const batch = analyzeStyleWorkflowBatch({
+            mode: runCtx.mode,
+            intent: runCtx.intent,
+            gates: runCtx.gates,
+            state: this.runState,
+            lintMaxRework: LINT_MAX_REWORK,
+            toolCalls,
+          });
+
+          const shouldEnforceStyleGate = batch.enforceCopy || batch.enforceLint;
+          if (batch.violation && shouldEnforceStyleGate) {
+            const violation = String(batch.violation);
+            const note = [
+              `【StyleWorkflow】检测到风格闭环步骤顺序不合理（violation=${violation}）。`,
+              "请按\"先从风格库拉模板 kb.search → 写出候选稿 → 运行 lint.copy（防复用）→ 运行 lint.style（风格校验）→ 最后 doc.write/doc.applyEdits 落盘\"的顺序调整工具调用。",
+            ].join("\n");
+
+            this.config.runCtx.writeEvent("run.notice", {
+              turn: this.turn,
+              kind: "warn",
+              title: "StyleWorkflowViolation",
+              message: `StyleWorkflow violation=${violation}，本回合工具调用已被拦截，将返回错误结果提示模型按闭环顺序重试。`,
+              detail: { violation, enforceCopy: batch.enforceCopy, enforceLint: batch.enforceLint },
+            });
+
+            const errorOutput = {
+              ok: false,
+              error: "STYLE_WORKFLOW_VIOLATION",
+              violation,
+              message: note,
+              toolName: rawToolName,
+            };
+
+            // SSE：tool.result（以 gate 错误形式返回）
+            this.config.runCtx.writeEvent("tool.result", {
+              toolCallId: event.toolCallId,
+              name: rawToolName,
+              ok: false,
+              output: errorOutput,
+              meta,
+            });
+
+            // TurnEngine：记录错误结果
+            this.turnEngine.record({
+              type: "tool_result",
+              callId: event.toolCallId,
+              name: rawToolName,
+              ok: false,
+              output: errorOutput,
+              error: "STYLE_WORKFLOW_VIOLATION",
+            });
+
+            // 失败摘要
+            this.failureDigest.failedTools.push({
+              toolCallId: event.toolCallId,
+              name: rawToolName,
+              error: "STYLE_WORKFLOW_VIOLATION",
+              message: note,
+              path: undefined,
+              next_actions: [
+                "按提示调整 kb.search / lint.copy / lint.style / doc.write 的顺序",
+              ],
+              turn: this.turn,
+            });
+            this.failureDigest.failedCount = this.failureDigest.failedTools.length;
+
+            this.toolCallSnapshots.delete(event.toolCallId);
+            return;
+          }
+
+          if (batch.violation) {
+            this.config.runCtx.writeEvent("run.notice", {
+              turn: this.turn,
+              kind: "info",
+              title: "StyleWorkflow",
+              message: `工具调用顺序提示（${batch.violation}），已放行，由 LLM 自行判断。`,
+            });
+          }
+        }
+
         // SSE：tool.result（使用原始工具名）
         this.config.runCtx.writeEvent("tool.result", {
           toolCallId: event.toolCallId,
@@ -1619,6 +1724,15 @@ export class GatewayRuntime implements AgentRuntime {
             kind: "assistant_text",
             text: sanitized.text,
           });
+
+          // 写作类任务：检测是否已产出 draft 文本（用于 style_imitate 闭环）
+          try {
+            if (this.config.runCtx.intent?.isWritingTask && looksLikeDraftText(sanitized.text)) {
+              this.runState.hasDraftText = true;
+            }
+          } catch {
+            // 兜底：intent 缺失时忽略 draft 标记
+          }
         }
         continue;
       }
@@ -1793,6 +1907,14 @@ export class GatewayRuntime implements AgentRuntime {
       else this.runState.mcpToolFailCount += 1;
     }
 
+    // Tool Discovery：即使失败也算“已尝试”，避免反复卡死在同一步
+    if (toolName === "tools.search") this.runState.hasToolsSearch = true;
+    if (toolName === "tools.describe") this.runState.hasToolsDescribe = true;
+    // 浏览器类 MCP（Playwright/browser）标记：用于复合任务阶段推断
+    if (toolName.startsWith("mcp.") && /(playwright|browser)/i.test(toolName)) {
+      this.runState.hasBrowserMcpToolCall = true;
+    }
+
     // B2：失败统计（用于 failure-driven tool expansion）
     if (!result.ok && !result.dryRun) {
       if (toolName === "web.search") {
@@ -1859,6 +1981,119 @@ export class GatewayRuntime implements AgentRuntime {
       this.runState.hasTodoList = true;
       this.runState.hasPlanCommitment = true;
       this._markTodoSatisfied();
+      return;
+    }
+
+    if (toolName === "kb.search") {
+      this.runState.hasKbSearch = true;
+
+      const parsedCall: ParsedToolCall = {
+        name: toolName,
+        args: toolArgs,
+      };
+
+      const styleLibIdSet = new Set(
+        (this.config.runCtx.styleLibIds ?? [])
+          .map((id: unknown) => String(id ?? "").trim())
+          .filter(Boolean),
+      );
+
+      const isStyleKb = isStyleExampleKbSearch({
+        call: parsedCall,
+        styleLibIdSet,
+        hasNonStyleLibraries: this.config.runCtx.gates?.hasNonStyleLibraries,
+      });
+
+      if (isStyleKb) {
+        this.runState.hasStyleKbSearch = true;
+
+        const groupsRaw = (result.output as any)?.groups;
+        const groupCount = Array.isArray(groupsRaw)
+          ? groupsRaw.length
+          : Number.isFinite(Number(groupsRaw))
+            ? Math.max(0, Math.floor(Number(groupsRaw)))
+            : 0;
+
+        if (groupCount > 0) {
+          this.runState.hasStyleKbHit = true;
+        } else if (!this.runState.hasStyleKbHit) {
+          this.runState.styleKbDegraded = true;
+        }
+
+        if (this.runState.hasDraftText) {
+          this.runState.hasPostDraftStyleKbSearch = true;
+        }
+      }
+
+      return;
+    }
+
+    if (toolName === "lint.style") {
+      const parsed = parseStyleLintResult(result.output);
+      this.runState.lastStyleLint = parsed;
+
+      const mustCovered =
+        parsed.expectedDimensions.length === 0 || parsed.missingDimensions.length === 0;
+
+      const passed =
+        parsed.score !== null &&
+        Number.isFinite(parsed.score) &&
+        parsed.score >= STYLE_LINT_PASS_SCORE &&
+        parsed.highIssues === 0 &&
+        mustCovered;
+
+      this.runState.styleLintPassed = passed;
+      if (!passed) {
+        this.runState.styleLintFailCount = Math.max(
+          0,
+          Math.floor(Number(this.runState.styleLintFailCount ?? 0)),
+        ) + 1;
+      }
+
+      return;
+    }
+
+    if (toolName === "lint.copy") {
+      const out =
+        result.output && typeof result.output === "object"
+          ? (result.output as Record<string, unknown>)
+          : {};
+
+      const passed = (out as any)?.passed === true;
+      this.runState.copyLintPassed = passed;
+
+      if (passed) {
+        this.runState.copyLintFailCount = 0;
+      } else {
+        this.runState.copyLintFailCount =
+          Math.max(0, Math.floor(Number(this.runState.copyLintFailCount ?? 0))) + 1;
+      }
+
+      const riskRaw = String((out as any)?.riskLevel ?? "").trim().toLowerCase();
+      const riskLevel: "low" | "medium" | "high" =
+        riskRaw === "high" ? "high" : riskRaw === "medium" ? "medium" : "low";
+      const maxOverlapChars = Number.isFinite(Number((out as any)?.maxOverlapChars))
+        ? Math.max(0, Math.floor(Number((out as any)?.maxOverlapChars)))
+        : 0;
+      const maxChar5gramJaccard = Number.isFinite(Number((out as any)?.maxChar5gramJaccard))
+        ? Math.max(0, Number((out as any)?.maxChar5gramJaccard))
+        : 0;
+      const topOverlaps = Array.isArray((out as any)?.topOverlaps)
+        ? (out as any).topOverlaps.slice(0, 8)
+        : [];
+      const sources =
+        (out as any)?.sources && typeof (out as any).sources === "object"
+          ? (out as any).sources
+          : null;
+
+      this.runState.lastCopyLint = {
+        riskLevel,
+        maxOverlapChars,
+        maxChar5gramJaccard,
+        topOverlaps,
+        sources,
+      };
+
       return;
     }
 
