@@ -1236,17 +1236,40 @@ export class McpManager {
     if (!raw) throw new Error("STDIO_BUNDLED_MODULE_PATH_REQUIRED");
 
     const appBase = path.resolve(this._appBasePath || process.cwd());
+    const isInternalMcpServer = raw.startsWith("electron/mcp-servers/");
     const candidates = [];
 
     if (this._isPackaged) {
-      // 打包后：app.asar 内的路径不能被 spawn，只尝试 app.asar.unpacked
+      // 打包后：
+      // - 第三方 MCP（如 Playwright）依赖 asarUnpack 出来的 node_modules，优先使用 app.asar.unpacked
+      // - 我们自己写的 electron/mcp-servers/*.mjs 则依赖 app.asar 内的 node_modules，优先尝试 app.asar 路径
       const fromAppBase = path.isAbsolute(raw) ? raw : path.resolve(appBase, raw);
-      candidates.push(this._replaceAsarWithUnpacked(fromAppBase));
+      const fromAppBaseUnpacked = this._replaceAsarWithUnpacked(fromAppBase);
+
+      if (isInternalMcpServer) {
+        // 内置脚本：先尝试 app.asar，再兜底到 unpacked
+        candidates.push(fromAppBase);
+        candidates.push(fromAppBaseUnpacked);
+      } else {
+        // 第三方依赖：先尝试 unpacked，再兜底到 asar
+        candidates.push(fromAppBaseUnpacked);
+        candidates.push(fromAppBase);
+      }
+
       // 兼顾 process.resourcesPath（Windows/Mac 均可用）
       if (typeof process.resourcesPath === "string") {
-        candidates.push(path.resolve(process.resourcesPath, "app.asar.unpacked", raw));
+        const resBase = path.resolve(process.resourcesPath, "app.asar");
+        const resUnpackedBase = this._replaceAsarWithUnpacked(resBase);
+        if (isInternalMcpServer) {
+          candidates.push(path.resolve(resBase, raw));
+          candidates.push(path.resolve(resUnpackedBase, raw));
+        } else {
+          candidates.push(path.resolve(resUnpackedBase, raw));
+          candidates.push(path.resolve(resBase, raw));
+        }
       }
-      // 打包模式下不回退到 app.asar（spawn 必定失败），直接用 unpacked 候选
+      // 注意：我们仍然通过 fs.stat 过滤不存在的候选路径；真正 spawn 时可以使用 app.asar 内部脚本，
+      // 因为 Electron 对包含 .asar 段的路径做了扩展。
     } else {
       // ── 开发环境 ──
       // app.getAppPath() 在 `electron <file>` 模式下返回入口脚本所在目录，
