@@ -46,6 +46,19 @@
 
 > 结论：**只靠 prompt 里的‘不要声称已完成’不够**，必须把“文件交付”升级成 runner 层面的硬契约（artifact contract），并对文件交付类任务关闭/收紧这类软降级（见第 5 节范式）。
 
+补充（本次线上回放里你看到的现象对应的具体 bug）：
+
+- **Deliverability 检查只挂在 ExecutionContract 的 minToolCalls 分支下**：一旦模型前面已经调用过足够多工具（例如 `web.search` / `browser`），最后一轮纯文本收口就可能绕过“必须写文件”的提示，直接 completed。
+- **契约验收过宽**：只要这轮 run 里写过任何文件（甚至是探针/临时文件），就会被视为已满足“交付物存在”，导致后续真正的 `output/*.md` 仍未落盘却无法触发重试。
+- **`run.done` 早退漏洞**：模型调用 `run.done` 也会直接 completed，没有在 runner 层复核“交付物是否已满足”。
+
+对应修复点（已落在 gateway runner）：
+
+- 在 **所有无工具文本收口** 的回合上都检查 `deliveryContract.required`，与是否已满足 minToolCalls 解耦。
+- 验收从“任意 artifact”收紧到“至少写入 recommendedPath（规范化 family）”。
+- `run.done` 前增加 deliverability 复核：未满足且具备写入条件时，拦截 run.done 并强制下一轮先写入。
+
+
 ### 1.2 我们已经写了“写作默认 doc.write”，但触发与强制不够
 
 文件：`/Users/noah/writing-ide/apps/gateway/src/agent/runFactory.ts`
@@ -111,7 +124,7 @@
 
 ### 3.1 Codex（openai/codex）：稳定工具底座 + 风险 gate
 
-源码（本地 vendor）：`/Users/noah/writing-ide/third_party/openai-codex`
+源码（本地 clone）：`/Users/noah/Crab/codex`
 
 关键观察：
 
@@ -125,7 +138,7 @@
 
 ### 3.2 OpenClaw：profiles + allow/deny pipeline，防误配保底
 
-源码：`/Users/noah/Crab/openclaw`
+源码（本地 repo）：`/Users/noah/Crab/openclaw`
 
 关键观察：
 

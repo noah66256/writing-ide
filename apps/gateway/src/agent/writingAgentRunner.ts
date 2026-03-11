@@ -851,6 +851,8 @@ export class AgentRunner {
   private turnAllowedToolNames: Set<string> | null = null;
   private readonly failedToolDigests: ToolFailureDigest[] = [];
   private executionNoToolTurns = 0;
+  private deliverabilityNoWriteTurns = 0;
+  private hasDeliveryWriteAttempt = false;
   private orchestratorTextRetries = 0;
   private totalToolCalls = 0;
   private forcedToolChoice: ForcedToolChoice | null = null;
@@ -872,11 +874,50 @@ export class AgentRunner {
     };
   }
 
-  private _hasAnyDeliveredArtifact(): boolean {
-    const families = Array.isArray(this.runState.deliveredArtifactFamilies)
+  private _deliveredArtifactFamilies(): string[] {
+    return Array.isArray(this.runState.deliveredArtifactFamilies)
       ? this.runState.deliveredArtifactFamilies.filter(Boolean)
       : [];
-    return families.length > 0;
+  }
+
+  private _hasAnyDeliveredArtifact(): boolean {
+    return this._deliveredArtifactFamilies().length > 0;
+  }
+
+  private _hasSatisfiedDeliveryContract(dc: DeliveryContract): boolean {
+    if (!dc.required) return true;
+    const families = this._deliveredArtifactFamilies();
+    if (families.length <= 0) return false;
+
+    const recFamily = dc.recommendedPath ? this._normalizeArtifactFamily(dc.recommendedPath) : null;
+    if (recFamily) return families.includes(recFamily);
+
+    // 没有明确推荐路径时：只要有任何一次可审计写入即可视为满足（保底）。
+    return true;
+  }
+
+  private _projectDirAvailable(): boolean {
+    const sidecar: any = this.ctx.toolSidecar ?? null;
+    const dir = typeof sidecar?.ideSummary?.projectDir === "string" ? String(sidecar.ideSummary.projectDir).trim() : "";
+    return Boolean(dir);
+  }
+
+  private _pickPreferredWriteToolName(dc: DeliveryContract, allowed: Set<string>): string | null {
+    const candidates = Array.isArray(dc.preferredWriteToolNames) && dc.preferredWriteToolNames.length > 0
+      ? dc.preferredWriteToolNames
+      : ["doc.write", "doc.applyEdits", "code.exec"];
+    for (const name of candidates) {
+      const n = String(name ?? "").trim();
+      if (n && allowed.has(n)) return n;
+    }
+    return null;
+  }
+
+  private _looksLikeClarifyQuestion(text: string): boolean {
+    const t = String(text ?? "").trim();
+    if (!t) return false;
+    if (t.length > 260) return false;
+    return /(请问|是否|要不要|需要.*确认|你希望|您希望|选哪个|选哪种|哪个更|更偏好|需要我.*吗)[?？]?$/.test(t);
   }
 
   constructor(ctx: RunContext) {
@@ -899,6 +940,7 @@ export class AgentRunner {
     if (!Array.isArray(this.runState.deliveredArtifactFamilies)) {
       this.runState.deliveredArtifactFamilies = [];
     }
+    this.hasDeliveryWriteAttempt = this._hasAnyDeliveredArtifact();
     if (typeof this.runState.deliveryLatched !== "boolean") {
       this.runState.deliveryLatched = false;
     }
@@ -2081,6 +2123,10 @@ export class AgentRunner {
     const delegateCalls: { index: number; toolUse: ContentBlockToolUse }[] = [];
     const regularCalls: { index: number; toolUse: ContentBlockToolUse }[] = [];
     completedToolUses.forEach((toolUse, i) => {
+      if (this._isDeliveryCandidateTool(toolUse.name)) {
+        this.hasDeliveryWriteAttempt = true;
+        this.deliverabilityNoWriteTurns = 0;
+      }
       if (toolUse.name === "agent.delegate") delegateCalls.push({ index: i, toolUse });
       else regularCalls.push({ index: i, toolUse });
     });
@@ -2234,6 +2280,39 @@ export class AgentRunner {
       return false;
     }
     if (hasRunDone) {
+      const deliveryContract = this._deliveryContract();
+      const needsArtifact = deliveryContract.required && !this._hasSatisfiedDeliveryContract(deliveryContract);
+      const allowed = this.turnAllowedToolNames ?? this.ctx.allowedToolNames;
+      const preferredWrite = this._pickPreferredWriteToolName(deliveryContract, allowed);
+      const canAttemptWrite = this._projectDirAvailable() && Boolean(preferredWrite);
+
+      // run.done 不能绕过文件交付契约：若还没落盘且具备写入条件，则拦截并继续下一轮。
+      if (needsArtifact && canAttemptWrite) {
+        this.deliverabilityNoWriteTurns += 1;
+        this.forcedToolChoice = this.supportsForcedToolChoice
+          ? (preferredWrite ? { type: "tool", name: preferredWrite } : { type: "any" })
+          : null;
+        const recPath = deliveryContract.recommendedPath ? `建议路径：${deliveryContract.recommendedPath}。` : "";
+        this._pushHistory({
+          role: "user_hint",
+          text:
+            `你调用了 run.done，但尚未真正产出交付文件。请先调用 ${preferredWrite} 写入交付文件，再 run.done 收口。${recPath}`,
+        });
+        this.ctx.writeEvent("run.notice", {
+          turn: this.turn,
+          kind: "warn",
+          title: "DeliverabilityContractBlockedRunDone",
+          message: "检测到 run.done 早退但未满足文件交付契约，已拦截并继续下一轮。",
+          detail: {
+            kind: deliveryContract.kind ?? "unknown",
+            recommendedPath: deliveryContract.recommendedPath ?? null,
+            preferredWriteTool: preferredWrite,
+            retries: this.deliverabilityNoWriteTurns,
+          },
+        });
+        return true;
+      }
+
       this._activateDeliveryLatch("run_done");
       this.turnEngine.record({ type: "model_done", finishReason: "run_done" });
       this._setOutcome({ status: "completed", reason: "run_done", reasonCodes: ["run_done"] });
@@ -2266,9 +2345,14 @@ export class AgentRunner {
 
     // [4] executionContract + holdAssistantDelta
     const executionContract = this._getExecutionContract();
+    const deliveryContract = this._deliveryContract();
+    const needsArtifact = deliveryContract.required && !this._hasSatisfiedDeliveryContract(deliveryContract);
+    const preferredWrite = this._pickPreferredWriteToolName(deliveryContract, effectiveAllowed);
+    const deliveryHold = needsArtifact && this._projectDirAvailable() && Boolean(preferredWrite);
     const holdAssistantDelta =
       orchestratorMode ||
-      (executionContract.required && this.totalToolCalls < executionContract.minToolCalls);
+      (executionContract.required && this.totalToolCalls < executionContract.minToolCalls) ||
+      deliveryHold;
 
     // [5] writeEvent("assistant.start")
     this.ctx.writeEvent("assistant.start", { turn: this.turn });
@@ -3626,7 +3710,7 @@ export class AgentRunner {
     const deliveryContract = this._deliveryContract();
     const allowedToolNames = this.turnAllowedToolNames ?? this.ctx.allowedToolNames;
     const todoGateRequired = this._todoGateRequired(executionContract);
-    const needsArtifact = deliveryContract.required && !this._hasAnyDeliveredArtifact();
+    const needsArtifact = deliveryContract.required && !this._hasSatisfiedDeliveryContract(deliveryContract);
 
     if (todoGateRequired && !this.runState.hasTodoList && allowedToolNames.size > 0) {
       this.executionNoToolTurns += 1;
@@ -3698,6 +3782,74 @@ export class AgentRunner {
       });
       return true;
     }
+
+    // Phase2：交付文件类任务（Delivery Contract）
+    // 无论是否已满足 minToolCalls，只要本轮要求“产出文件”，就必须在收口前落盘。
+    if (assistantHasText && needsArtifact) {
+      // 如果是在向用户澄清/等待确认，不强行重试写入（避免卡死）。
+      if (this._looksLikeClarifyQuestion(assistantText)) return false;
+
+      const projectDirAvailable = this._projectDirAvailable();
+      const preferredWrite = this._pickPreferredWriteToolName(deliveryContract, allowedToolNames);
+      const canAttemptWrite = projectDirAvailable && Boolean(preferredWrite);
+
+      // 缺少项目目录或写入工具不可用：放行文本，让助手提示用户补齐前置条件。
+      if (!canAttemptWrite) {
+        this.ctx.writeEvent("run.notice", {
+          turn: this.turn,
+          kind: "warn",
+          title: "DeliverabilityContractBlocked",
+          message: "文件交付契约未满足：当前缺少项目目录或写入工具不可用，已放行文本提示用户补齐前置条件。",
+          detail: {
+            projectDirAvailable,
+            preferredWriteTool: preferredWrite,
+            recommendedPath: deliveryContract.recommendedPath ?? null,
+          },
+        });
+        return false;
+      }
+
+      this.deliverabilityNoWriteTurns += 1;
+      this.forcedToolChoice = canForceToolChoice
+        ? (preferredWrite ? { type: "tool", name: preferredWrite } : { type: "any" })
+        : null;
+
+      if (this.deliverabilityNoWriteTurns <= 3) {
+        const recPath = deliveryContract.recommendedPath ? `建议路径：${deliveryContract.recommendedPath}。` : "";
+        pushRetryUserMessage(
+          `你还没有真正产出可交付文件（第 ${this.deliverabilityNoWriteTurns} 次提醒）。` +
+            `本轮属于文件交付任务，禁止只回复文本。请立即调用 doc.write（或等价写入工具）完成落盘。${recPath}`,
+        );
+        this.ctx.writeEvent("run.notice", {
+          turn: this.turn,
+          kind: "warn",
+          title: "DeliverabilityContractRetry",
+          message: "文件交付契约未满足：检测到仅文本输出，已注入强制写入提示并重试。",
+          detail: {
+            kind: deliveryContract.kind ?? "unknown",
+            recommendedPath: deliveryContract.recommendedPath ?? null,
+            preferredWriteTool: preferredWrite ?? null,
+            continuationMode: this.providerCapabilities.continuationMode,
+          },
+        });
+        return true;
+      }
+
+      // 超过重试上限：放行文本，避免无限循环；但记录 error 方便排查。
+      this.ctx.writeEvent("run.notice", {
+        turn: this.turn,
+        kind: "error",
+        title: "DeliverabilityContractRetryExceeded",
+        message: "文件交付契约连续重试后仍未落盘，已放行文本输出（避免无限循环）。",
+        detail: {
+          kind: deliveryContract.kind ?? "unknown",
+          recommendedPath: deliveryContract.recommendedPath ?? null,
+          retries: this.deliverabilityNoWriteTurns,
+        },
+      });
+      return false;
+    }
+
 
     if (
       executionContract.required &&
