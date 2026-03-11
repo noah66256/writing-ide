@@ -1583,7 +1583,10 @@ export class GatewayRuntime implements AgentRuntime {
             toolCalls,
           });
 
-          const shouldEnforceStyleGate = batch.enforceCopy || batch.enforceLint;
+          // 当 style_imitate 已激活且仍处于“需要样例/需要草稿/需要 lint”阶段时，
+          // 也应视为必须执行的工作流合同，避免模型绕过闭环工具直接写终稿。
+          const shouldEnforceStyleGate =
+            batch.enforceCopy || batch.enforceLint || batch.needStyleKb || batch.needDraftText;
           if (batch.violation && shouldEnforceStyleGate) {
             const violation = String(batch.violation);
             const note = [

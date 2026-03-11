@@ -723,6 +723,12 @@ export function buildAgentProtocolPrompt(args: {
         `- 上下文优先级：优先使用 Context Pack 的 TASK_STATE / REFERENCES 与已关联 KB（KB_SELECTED_LIBRARIES/KB_LIBRARY_PLAYBOOK/KB_STYLE_CLUSTERS）。信息不足再读项目文件或遍历目录。\n` +
         `- 风格库优先：当 KB_SELECTED_LIBRARIES 含 purpose=style 且任务为写作/仿写/改写/润色时，口吻/节奏/结构以风格库为第一优先（除非用户明确覆盖）。\n` +
         `- 完成即停：本轮目标达成后立刻停止，不追加新任务或开启下一段流程。\n\n` +
+        `Skills（必须执行）：\n` +
+        `- Context Pack 中包含 ACTIVE_SKILLS(JSON)，列出了当前本轮已激活的 Skill 列表（例如 style_imitate）。\n` +
+        `- 回复任何内容之前，先快速浏览 ACTIVE_SKILLS(JSON)。\n` +
+        `- 如果明显只有一个 Skill 适用于本轮任务（例如写作/仿写任务且已绑定风格库时的 style_imitate），你必须按该 Skill 的工作流步骤执行，不要跳过关键步骤。\n` +
+        `- 如果有多个 Skill 可能适用，优先选择与当前任务最相关、最具体的那个 Skill。\n` +
+        `- 如果没有任何 Skill 明显适用，可以按常规 Agent 流程处理，本轮不强制执行 Skill 工作流。\n\n` +
         `执行机制：\n` +
         `1) Todo（任务清单）：进入执行流后默认维护 Todo。\n` +
         `   - Todo 体现执行者视角，例如”① 搜索素材 ② 整理要点 ③ 撰写初稿 ④ 风格检查 ⑤ 交付用户”。\n` +
@@ -754,7 +760,13 @@ export function buildAgentProtocolPrompt(args: {
         `- 如需更新多个 Todo/Main Doc：在同一轮中批量调用多个工具，减少回合。\n` +
         `- 写入类操作遵守系统的 proposal-first / Keep/Undo 机制。\n` +
         `- 交付文件导航：任务产出了文件（doc.write/code.exec 等写入的文件）时，在最终交付文字中列出所有产出文件的相对路径（如 output/report.md），供用户点击打开。路径直接写纯文本，不要用反引号或代码格式包裹。不要主动调用 file.open 自动打开文件，除非用户明确要求"打开"或"预览"。\n` +
-        `- 写作产出格式：写作类任务默认用 doc.write 输出 .md 文件（Markdown 省 token、可 diff、可 proposal-first）。doc.write 只能写纯文本文件（.md/.txt/.json 等），不能创建真实的 .docx/.xlsx/.pptx/.pdf。用户要求 Office/PDF 格式时，优先用对应 MCP 工具（Word MCP / Excel MCP）；仅当工具列表中无对应 MCP 时才退回 code.exec。\n\n`;
+        `- 写作产出格式：写作类任务默认用 doc.write 输出 .md 文件（Markdown 省 token、可 diff、可 proposal-first）。doc.write 只能写纯文本文件（.md/.txt/.json 等），不能创建真实的 .docx/.xlsx/.pptx/.pdf。用户要求 Office/PDF 格式时，优先用对应 MCP 工具（Word MCP / Excel MCP）；仅当工具列表中无对应 MCP 时才退回 code.exec。\n\n` +
+        `Skills（必须执行）：\n` +
+        `- Context Pack 中包含 ACTIVE_SKILLS(JSON)，列出了当前本轮已激活的 Skill 列表（例如 style_imitate）。\n` +
+        `- 回复任何内容之前，先快速浏览 ACTIVE_SKILLS(JSON)。\n` +
+        `- 如果明显只有一个 Skill 适用于本轮任务（例如写作/仿写任务且已绑定风格库时的 style_imitate），你必须按该 Skill 的工作流步骤执行，不要跳过关键步骤。\n` +
+        `- 如果有多个 Skill 可能适用，优先选择与当前任务最相关、最具体的那个 Skill。\n` +
+        `- 如果没有任何 Skill 明显适用，可以按常规 Agent 流程处理，本轮不强制执行 Skill 工作流。\n\n`;
 
   const p = args.persona;
   const agentName = p?.agentName?.trim() || "Friday";
