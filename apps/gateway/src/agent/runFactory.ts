@@ -4485,7 +4485,10 @@ export async function executeAgentRun(args: {
     ...executionReport,
   });
 
-  // 风格闭环未完成时，在结果层给出温和提示（不改变 status，只增加 notice 与 reasonCode）。
+  // 风格闭环未完成时，将本轮视为"未完成"：
+  // - 将 runnerOutcome.status 标记为 failed；
+  // - reason 置为 style_workflow_incomplete；
+  // - 追加 reasonCodes: style_workflow_incomplete。
   if (styleWorkflowIncomplete && runnerOutcome.status === 'completed') {
     writeEvent('run.notice', {
       turn: runtime.getTurn(),
@@ -4498,6 +4501,14 @@ export async function executeAgentRun(args: {
         missingSteps: styleWorkflowMissingSteps,
       },
     });
+
+    const baseCodes = Array.isArray(runnerOutcome.reasonCodes) ? runnerOutcome.reasonCodes : [];
+    runnerOutcome = {
+      ...runnerOutcome,
+      status: 'failed',
+      reason: 'style_workflow_incomplete',
+      reasonCodes: [...baseCodes, 'style_workflow_incomplete'],
+    };
   }
 
   if (failureDigest.failedCount > 0) {
@@ -4507,14 +4518,9 @@ export async function executeAgentRun(args: {
       failedTools: failureDigest.failedTools,
     });
   }
-  const extraReasonCodes: string[] = [];
-  if (styleWorkflowIncomplete && runnerOutcome.status === 'completed') {
-    extraReasonCodes.push('style_workflow_incomplete');
-  }
   const outcomeReasonCodes = Array.from(
     new Set([
       ...(Array.isArray(runnerOutcome.reasonCodes) ? runnerOutcome.reasonCodes : []),
-      ...extraReasonCodes,
       ...(failureDigest.failedCount > 0 ? ["has_failures"] : []),
       ...(runnerOutcome.status === "failed" ? ["failed"] : []),
       ...(runnerOutcome.status === "aborted" ? ["aborted"] : []),
