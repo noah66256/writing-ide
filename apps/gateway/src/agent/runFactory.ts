@@ -4451,8 +4451,8 @@ export async function executeAgentRun(args: {
         runState && (
           runState.styleKbDegraded === true ||
           runState.lintGateDegraded === true ||
-          runState.copyGateDegraded === true,
-        ),
+          runState.copyGateDegraded === true
+        )
       );
 
       let status: 'not_started' | 'in_progress' | 'completed' | 'degraded' = 'not_started';
@@ -4492,9 +4492,7 @@ export async function executeAgentRun(args: {
       kind: 'warn',
       title: 'StyleWorkflowIncomplete',
       message:
-        '本轮已激活 style_imitate，但未完整走完风格仿写闭环（缺少 lint.copy / lint.style）。' +
-        '
-建议按"kb.search → 草稿 draft → lint.copy → lint.style → 最终 doc.write" 的顺序重试。',
+        '本轮已激活 style_imitate，但未完整走完风格仿写闭环（缺少 lint.copy / lint.style）。\n建议按"kb.search → 草稿 draft → lint.copy → lint.style → 最终 doc.write" 的顺序重试。',
       detail: {
         styleWorkflow,
         missingSteps: styleWorkflowMissingSteps,
