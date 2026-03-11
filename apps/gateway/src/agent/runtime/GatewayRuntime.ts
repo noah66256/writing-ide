@@ -2304,6 +2304,21 @@ export class GatewayRuntime implements AgentRuntime {
 
   private _buildExecutionReport(providerApi: ModelApiType): RuntimeExecutionReport {
     const snapshot = this.turnEngine.getSnapshot();
+
+    // Style_imitate 工作流摘要：仅当 style skill 激活且为写作任务时写入，便于审计与调试。
+    const runCtx: any = this.config.runCtx;
+    const activeSkills = Array.isArray(runCtx.activeSkills) ? runCtx.activeSkills : [];
+    const styleSkillActive = activeSkills.some((s: any) => String(s?.id ?? "").trim() === "style_imitate");
+    const styleWorkflow = styleSkillActive && runCtx.intent?.isWritingTask
+      ? {
+          active: true,
+          hasStyleKbSearch: Boolean((this.runState as any)?.hasStyleKbSearch),
+          hasDraftText: Boolean((this.runState as any)?.hasDraftText),
+          copyLintPassed: Boolean((this.runState as any)?.copyLintPassed),
+          styleLintPassed: Boolean((this.runState as any)?.styleLintPassed),
+        }
+      : undefined;
+
     return {
       runtimeKind: this.kind,
       runtimeMode: this.mode,
@@ -2320,6 +2335,7 @@ export class GatewayRuntime implements AgentRuntime {
       sideEffectLedgerSize: Array.isArray(this.runState.sideEffectLedger) ? this.runState.sideEffectLedger.length : 0,
       recentSideEffectLedger: Array.isArray(this.runState.sideEffectLedger) ? this.runState.sideEffectLedger.slice(-5) : [],
       toolLoopGuardReason: this.runState.toolLoopGuardReason,
+      ...(styleWorkflow ? { styleWorkflow } : {}),
       transcriptSummary: summarizeTranscript(this.transcript),
       runState: this.runState,
       ...snapshot,
