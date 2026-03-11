@@ -772,7 +772,7 @@ export function analyzeStyleWorkflowBatch(args: {
   else if (batchHasWrite && needStyleKb) violation = "WRITE_BEFORE_KB";
   else if (batchHasCopyLint && needDraftText) violation = "COPY_BEFORE_DRAFT";
   else if (batchHasLint && needDraftText) violation = "LINT_BEFORE_DRAFT";
-  else if (batchHasLint && needCopyLint) violation = copyExhausted ? "LINT_BLOCKED_COPY_EXHAUSTED" : "LINT_BEFORE_COPY_PASS";
+  // 两个 Lint 的先后顺序不再作为硬闸门，仅要求在写入前都跑完，因此不再拦截 "LINT_BEFORE_COPY_PASS"。
   else if (batchHasWrite && needCopyLint) violation = copyExhausted ? "WRITE_BLOCKED_COPY_EXHAUSTED" : "WRITE_BEFORE_COPY_PASS";
   else if (batchHasWrite && needStyleLint) violation = lintExhausted ? "WRITE_BLOCKED_LINT_EXHAUSTED" : "WRITE_BEFORE_LINT_PASS";
   else if (batchHasKb && needStyleKb && !batchHasStyleKb) violation = "KB_NOT_STYLE_EXAMPLES";
