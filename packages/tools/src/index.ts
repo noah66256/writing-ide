@@ -61,7 +61,33 @@ export function encodeToolName(name: string): string {
 }
 
 export function decodeToolName(encoded: string): string {
-  return encoded.replace(/_dot_/g, ".");
+  const raw = encoded.replace(/_dot_/g, ".");
+  const lower = raw.toLowerCase();
+  switch (lower) {
+    case "web_search":
+      return "web.search";
+    case "web_fetch":
+      return "web.fetch";
+    case "kb_search":
+      return "kb.search";
+    case "tools_search":
+    case "tool_search":
+      return "tools.search";
+    case "tools_describe":
+    case "tool_describe":
+      return "tools.describe";
+    case "run_settodolist":
+    case "run_set_todo_list":
+      return "run.setTodoList";
+    case "run_maindoc_update":
+    case "run_main_doc_update":
+      return "run.mainDoc.update";
+    case "run_maindoc_get":
+    case "run_main_doc_get":
+      return "run.mainDoc.get";
+    default:
+      return raw;
+  }
 }
 
 // 工具契约（单一来源）：
