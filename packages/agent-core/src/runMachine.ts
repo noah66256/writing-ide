@@ -89,6 +89,11 @@ export type RunState = {
   lastTimeNowIso: string | null;
   hasWebSearch: boolean;
   hasWebFetch: boolean;
+  // Tool Discovery（Phase1）：用于“我不知道用哪些工具”场景的可验证工作流
+  hasToolsSearch: boolean;
+  hasToolsDescribe: boolean;
+  // Composite/workflow：是否已调用浏览器类 MCP（Playwright 等）
+  hasBrowserMcpToolCall: boolean;
   // Web Gate（配额型）：用于“热点/素材盘点”等广度优先场景
   webSearchCount: number;
   webFetchCount: number;
@@ -193,6 +198,9 @@ export function createInitialRunState(args?: { protocolRetryBudget?: number; wor
     lastTimeNowIso: null,
     hasWebSearch: false,
     hasWebFetch: false,
+    hasToolsSearch: false,
+    hasToolsDescribe: false,
+    hasBrowserMcpToolCall: false,
     webSearchCount: 0,
     webFetchCount: 0,
     webSearchFailCount: 0,

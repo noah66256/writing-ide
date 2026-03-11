@@ -260,6 +260,11 @@
 
 每段都有自己的“最小工具集”，并且 Deliver 段永远包含写入工具。
 
+阶段工具保底（MVP 已落地）：
+
+- Gateway 在 `computePerTurnAllowed` 中基于 `compositeTaskPlan` + `runState` 推断当前阶段，并把该阶段的 `allowedToolHints` 做成 per-turn 的保底补齐（union 进 allowedToolNames）。
+- 目的：避免复合任务中“当前阶段关键工具被裁掉/随机消失”，同时不强行硬裁其他工具（先保交付稳定性）。
+
 
 ### 5.5 Phase2 会不会和“每 turn 重算工具菜单”打架？（不会）
 
@@ -279,7 +284,15 @@
 
 ## 6. 下一步建议（按 Phase 排序，贴合你们的产品化节奏）
 
-### Phase2（建议尽快）：Deliverability Contract（强制产物）
+### Phase2（已完成）：Deliverability Contract（强制产物）
+
+已落地（代码，commit：`fb7f880`）：
+
+- runner 强制验收 `deliveryContract.required`（文件类交付必须落盘到 artifact）：
+  - 文本无工具收口时，若未满足交付且具备写入条件 → 强制重试并优先写入工具；
+  - `run.done` 不能绕过交付（未落盘且具备写入条件 → 拦截并继续下一轮先写入）。
+- 交付从“任意 artifact”收紧为：**必须写到 `recommendedPath` 对应 family**（避免写到别处也算完成）。
+- 关键实现：`apps/gateway/src/agent/writingAgentRunner.ts`
 
 - runner 增加 `requiredArtifacts`（或 `mustCallAnyOf`）机制：
   - `file_markdown` 必须 `doc.write` 成功；
@@ -289,7 +302,14 @@
   - 禁止对 `file_*` 的软降级交付；
   - 如果要兼容，至少把最终回复改成“我还没能写入文件（因为…），是否继续执行写入步骤？”而不是“已写入”。
 
-### Phase3：Tool Discovery 变成“可验证的 workflow”
+### Phase3（已实现 MVP）：Tool Discovery 变成“可验证的 workflow”
+
+已落地（代码）：
+
+- `toolDiscoveryContract.required=true` 时：
+  - 文本无工具收口会被强制重试，优先 `tools.search`；
+  - `run.done` 不能绕过该契约（未完成 discovery 会被拦截）；
+  - 执行启动阶段会把工具集收敛到 discovery 启动集（减少盲选）。
 
 - 把 `tools.search/tools.describe` 变成“当用户说不知道工具时必经步骤”。
 - 补齐审计：记录 search 的 query、候选、最终选择理由（用于你们 admin-web 审计）。

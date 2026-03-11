@@ -1096,6 +1096,14 @@ export function resolveStickyMcpServerIds(args: {
   return wf.selectedServerIds.filter((id) => available.has(id)).slice(0, maxServers);
 }
 
+export function looksLikeToolUncertaintyPrompt(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  if (/(不用工具|不要工具|别用工具|不需要工具)/i.test(t)) return false;
+  // 用户明确表达“不知道有哪些工具/能力/怎么做”，需要先走 tools.search/tools.describe。
+  return /(不知道用哪些工具|不知道用什么工具|有哪些工具|有什么工具|你有哪些工具|你能用哪些工具|能用哪些工具|能做什么|有哪些能力|我该用什么工具)/i.test(t);
+}
+
 export function looksLikeExecuteOrWriteIntent(text: string): boolean {
   const t = String(text ?? "").trim();
   if (!t) return false;
@@ -1857,6 +1865,7 @@ export type PreparedRun = {
   mcpServerStickyFallbackIds: string[];
   executionContract: ExecutionContract;
   deliveryContract: DeliveryContractV1;
+  toolDiscoveryContract: { required: boolean; preferredToolNames?: string[]; reason?: string };
   authorization: string;
   l1MemoryFromPack: string;
   l2MemoryFromPack: string;
@@ -2532,6 +2541,20 @@ export async function prepareAgentRun(args: {
         ? new Set(Array.from(allToolNamesForModeEffective).filter((n) => !isWriteLikeTool(n)))
         : new Set(allToolNamesForModeEffective);
 
+  const toolDiscoveryContract: { required: boolean; preferredToolNames?: string[]; reason?: string } = (() => {
+    // 仅在 agent + allow_tools 下启用：chat/只读不需要强制发现。
+    if (mode !== "agent" || effectiveToolPolicy !== "allow_tools") return { required: false };
+    if (!baseAllowedToolNames.has("tools.search")) return { required: false };
+    const merged = `${userPrompt}
+${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
+    if (!looksLikeToolUncertaintyPrompt(merged)) return { required: false };
+    return {
+      required: true,
+      preferredToolNames: ["tools.search"],
+      reason: "tool_uncertainty",
+    };
+  })();
+
   const runId = randomUUID();
   const styleLinterLibraries = Array.isArray(toolSidecar?.styleLinterLibraries) ? (toolSidecar.styleLinterLibraries as any[]) : [];
   const projectFilesCount = Array.isArray(toolSidecar?.projectFiles) ? (toolSidecar.projectFiles as any[]).length : 0;
@@ -3165,6 +3188,38 @@ export async function prepareAgentRun(args: {
     let allowed: Set<string> | null = null;
     const hints: string[] = [];
 
+    if (compositeTaskSummary) {
+      hints.push(compositeTaskSummary);
+    }
+
+    const compositePhasePins = new Set<string>();
+    if (compositeTaskPlan) {
+      const phases = Array.isArray(compositeTaskPlan.phases) ? compositeTaskPlan.phases : [];
+      const delivered = Array.isArray((state as any)?.deliveredArtifactFamilies)
+        ? ((state as any).deliveredArtifactFamilies as any[]).filter(Boolean)
+        : [];
+      const needsDelivery = Boolean(deliveryContract.required) && delivered.length === 0;
+
+      const phaseSatisfied = (kind: string) => {
+        if (kind === "web_research") return Boolean(state.hasWebSearch || state.hasWebFetch);
+        if (kind === "browser_collect") return Boolean((state as any).hasBrowserMcpToolCall);
+        if (kind === "project_delivery") return !needsDelivery;
+        return false;
+      };
+
+      const current = phases.find((p: any) => !phaseSatisfied(String(p?.kind ?? ""))) ?? phases[0] ?? null;
+      const hintList = Array.isArray((current as any)?.allowedToolHints) ? ((current as any).allowedToolHints as any[]) : [];
+      for (const it of hintList.slice(0, 16)) {
+        const name = String(it ?? "").trim();
+        if (name && baseAllowedToolNames.has(name)) compositePhasePins.add(name);
+      }
+      if ((current as any)?.kind) {
+        const sample = Array.from(compositePhasePins).slice(0, 8).join(", ");
+        hints.push(`复合任务阶段保底：currentPhase=${String((current as any).kind)}，已补齐 ${compositePhasePins.size} 个阶段工具${sample ? "（例如：" + sample + "）" : ""}。`);
+      }
+    }
+
+
     // B2：sticky tools + 自愈补齐（TOOL_NOT_ALLOWED） + 失败驱动扩展（web.fetch/search -> playwright/web-search MCP）
     // 说明：这是在 baseline selectedAllowedToolNames 之上的“增量扩展”，避免工具随机消失。
     const stickyTools = new Set<string>(
@@ -3223,6 +3278,8 @@ export async function prepareAgentRun(args: {
       allowed = new Set(selectedAllowedToolNames);
     }
 
+    for (const n of compositePhasePins) allowed.add(n);
+
     // 增量合并：sticky/heal/expansion
     for (const n of stickyTools) allowed.add(n);
     for (const n of healTools) allowed.add(n);
@@ -3255,6 +3312,30 @@ export async function prepareAgentRun(args: {
     // 执行启动阶段（首个工具调用前）：收敛到"任务首工具"集合，减少模型盲选和偏航。
     if (executionContract.required && !state.hasAnyToolCall) {
       const allowedNow = allowed ?? new Set<string>();
+      const toolDiscoveryBoot = toolDiscoveryContract.required && !state.hasToolsSearch && allowedNow.has("tools.search");
+      if (toolDiscoveryBoot) {
+        const boot = new Set<string>(
+          [
+            "tools.search",
+            "tools.describe",
+            "run.mainDoc.get",
+            "run.mainDoc.update",
+            "run.setTodoList",
+            "run.todo",
+            "time.now",
+            "kb.search",
+            "web.search",
+            "web.fetch",
+            deliveryContract.required ? "doc.write" : "",
+          ]
+            .map((x) => String(x ?? "").trim())
+            .filter(Boolean)
+            .filter((n) => allowedNow.has(n)),
+        );
+        hints.push("工具发现契约：用户明确表示不知道用哪些工具时，必须先 tools.search（必要时再 tools.describe），再继续执行。当前已将本回合工具收敛到工具发现启动集。");
+        return { allowed: boot.size ? boot : allowedNow, hint: hints.join("\n\n") };
+      }
+
       const shouldStartWithWebResearch = routeIdLower === "task_execution" && webGate.enabled && webGate.needsSearch && !state.hasWebSearch;
       if (shouldStartWithWebResearch) {
         hints.push("本轮包含强时效联网研究要求：请先调用 time.now / web.search / web.fetch 补齐当天信息，再进入写作与交付。");
@@ -3499,6 +3580,7 @@ export async function prepareAgentRun(args: {
       mcpServerStickyFallbackIds: mcpServerSelectionUsedStickyFallback ? mcpServerSelection.summary.selectedServerIds.slice(0, 12) : [],
       executionContract,
       deliveryContract,
+      toolDiscoveryContract,
       compositeTaskPlan,
       authorization: String((request as any)?.headers?.authorization ?? ""),
       l1MemoryFromPack,
@@ -3563,6 +3645,7 @@ export async function executeAgentRun(args: {
     mcpServerStickyFallbackIds,
     executionContract,
     deliveryContract,
+    toolDiscoveryContract,
     compositeTaskPlan,
     l1MemoryFromPack,
     l2MemoryFromPack,
@@ -4232,6 +4315,7 @@ export async function executeAgentRun(args: {
     ctxDialogueSummary: ctxDialogueSummaryFromPack || "",
     executionContract,
     deliveryContract,
+    toolDiscoveryContract,
     jsonToolFallbackEnabled,
   };
 

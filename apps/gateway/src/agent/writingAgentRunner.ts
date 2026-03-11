@@ -137,6 +137,17 @@ export type RunContext = {
     recommendedPath?: string;
     preferredWriteToolNames?: string[];
   };
+  /**
+   * Phase1：工具发现契约（Tool Discovery Contract）
+   * - required=true 时：在进入执行流前必须先调用 tools.search（用于“我不知道用哪些工具/有哪些能力”场景）。
+   * - 目的：把工具发现从“建议”升级为可验收工作流，避免模型直接臆造或跳过发现步骤。
+   */
+  toolDiscoveryContract?: {
+    required: boolean;
+    preferredToolNames?: string[];
+    reason?: string;
+  };
+
   /** Custom agent definitions from Desktop (for agent.delegate to resolve custom agents) */
   customAgentDefinitions?: SubAgentDefinition[];
   /** 注入给子 Agent 的 L1 全局记忆（裁剪过的 section 子集） */
@@ -852,6 +863,7 @@ export class AgentRunner {
   private readonly failedToolDigests: ToolFailureDigest[] = [];
   private executionNoToolTurns = 0;
   private deliverabilityNoWriteTurns = 0;
+  private toolDiscoveryNoSearchTurns = 0;
   private hasDeliveryWriteAttempt = false;
   private orchestratorTextRetries = 0;
   private totalToolCalls = 0;
@@ -873,6 +885,21 @@ export class AgentRunner {
         : undefined,
     };
   }
+
+  private _toolDiscoveryContract(): { required: boolean; preferredToolNames?: string[]; reason?: string } {
+    const dc = (this.ctx as any).toolDiscoveryContract && typeof (this.ctx as any).toolDiscoveryContract === "object"
+      ? ((this.ctx as any).toolDiscoveryContract as any)
+      : null;
+    if (!dc || typeof dc.required !== "boolean") return { required: false };
+    return {
+      required: Boolean(dc.required),
+      preferredToolNames: Array.isArray(dc.preferredToolNames)
+        ? dc.preferredToolNames.map((x: any) => String(x ?? "").trim()).filter(Boolean)
+        : undefined,
+      reason: typeof dc.reason === "string" ? String(dc.reason).trim() : undefined,
+    };
+  }
+
 
   private _deliveredArtifactFamilies(): string[] {
     return Array.isArray(this.runState.deliveredArtifactFamilies)
@@ -2281,10 +2308,35 @@ export class AgentRunner {
     }
     if (hasRunDone) {
       const deliveryContract = this._deliveryContract();
+      const toolDiscoveryContract = this._toolDiscoveryContract();
+      const needsToolDiscovery = toolDiscoveryContract.required && !this.runState.hasToolsSearch;
       const needsArtifact = deliveryContract.required && !this._hasSatisfiedDeliveryContract(deliveryContract);
       const allowed = this.turnAllowedToolNames ?? this.ctx.allowedToolNames;
       const preferredWrite = this._pickPreferredWriteToolName(deliveryContract, allowed);
       const canAttemptWrite = this._projectDirAvailable() && Boolean(preferredWrite);
+
+      // run.done 不能绕过工具发现契约：若要求先 tools.search，则在满足前不允许收口。
+      const preferredSearch = allowed.has("tools.search") ? "tools.search" : null;
+      if (needsToolDiscovery && preferredSearch) {
+        this.toolDiscoveryNoSearchTurns += 1;
+        this.forcedToolChoice = this.supportsForcedToolChoice ? { type: "tool", name: preferredSearch } : null;
+        this._pushHistory({
+          role: "user_hint",
+          text:
+            `你调用了 run.done，但尚未完成工具发现。请先调用 ${preferredSearch} 获取可用工具，再决定下一步（写入/搜索/浏览等）。`,
+        });
+        this.ctx.writeEvent("run.notice", {
+          turn: this.turn,
+          kind: "warn",
+          title: "ToolDiscoveryGateBlockedRunDone",
+          message: "检测到 run.done 早退但未满足工具发现契约，已拦截并继续下一轮。",
+          detail: {
+            reason: toolDiscoveryContract.reason ?? null,
+            retries: this.toolDiscoveryNoSearchTurns,
+          },
+        });
+        return true;
+      }
 
       // run.done 不能绕过文件交付契约：若还没落盘且具备写入条件，则拦截并继续下一轮。
       if (needsArtifact && canAttemptWrite) {
@@ -3535,6 +3587,12 @@ export class AgentRunner {
       }
     }
 
+    // Tool Discovery：即使失败也算“已尝试”，避免反复卡死在同一步
+    if (name === "tools.search") this.runState.hasToolsSearch = true;
+    if (name === "tools.describe") this.runState.hasToolsDescribe = true;
+    // 浏览器类 MCP（Playwright/browser）标记：用于复合任务阶段推断
+    if (name.startsWith("mcp.") && /(playwright|browser)/i.test(name)) this.runState.hasBrowserMcpToolCall = true;
+
     if (!result.ok) return;
 
     if (name === "time.now") {
@@ -3711,6 +3769,51 @@ export class AgentRunner {
     const allowedToolNames = this.turnAllowedToolNames ?? this.ctx.allowedToolNames;
     const todoGateRequired = this._todoGateRequired(executionContract);
     const needsArtifact = deliveryContract.required && !this._hasSatisfiedDeliveryContract(deliveryContract);
+
+    const toolDiscoveryContract = this._toolDiscoveryContract();
+    const needsToolDiscovery = toolDiscoveryContract.required && !this.runState.hasToolsSearch;
+
+
+    // Tool Discovery Gate：当用户明确表示“不知道有哪些工具/能力”时，先强制调用 tools.search。
+    if (needsToolDiscovery && allowedToolNames.size > 0 && allowedToolNames.has("tools.search")) {
+      this.toolDiscoveryNoSearchTurns += 1;
+      const preferred = (toolDiscoveryContract.preferredToolNames ?? []).find((n: string) => allowedToolNames.has(String(n ?? "").trim()))
+        ?? "tools.search";
+      this.forcedToolChoice = canForceToolChoice
+        ? { type: "tool", name: preferred }
+        : null;
+
+      if (this.toolDiscoveryNoSearchTurns <= 2) {
+        pushRetryUserMessage(
+          `你还没有完成工具发现（第 ${this.toolDiscoveryNoSearchTurns} 次提醒）。` +
+            "用户明确表示不知道用哪些工具时，必须先调用 tools.search(query) 获取候选工具，再继续执行。",
+        );
+        this.ctx.writeEvent("run.notice", {
+          turn: this.turn,
+          kind: "warn",
+          title: "ToolDiscoveryGateRetry",
+          message: "工具发现契约未满足：检测到无工具文本输出，已注入强制 tools.search 提示并重试。",
+          detail: {
+            preferredTool: preferred,
+            reason: toolDiscoveryContract.reason ?? null,
+          },
+        });
+        return true;
+      }
+
+      // 超过重试上限：放行文本，避免无限循环；但记录 warning 便于审计。
+      this.ctx.writeEvent("run.notice", {
+        turn: this.turn,
+        kind: "error",
+        title: "ToolDiscoveryGateRetryExceeded",
+        message: "工具发现契约连续重试后仍未执行 tools.search，已放行文本输出（避免无限循环）。",
+        detail: {
+          reason: toolDiscoveryContract.reason ?? null,
+          retries: this.toolDiscoveryNoSearchTurns,
+        },
+      });
+      return false;
+    }
 
     if (todoGateRequired && !this.runState.hasTodoList && allowedToolNames.size > 0) {
       this.executionNoToolTurns += 1;
