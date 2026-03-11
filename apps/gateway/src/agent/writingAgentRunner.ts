@@ -67,6 +67,13 @@ type ExecutionContract = {
   preferredToolNames?: string[];
 };
 
+type DeliveryContract = {
+  required: boolean;
+  kind?: "file_markdown" | "file_office" | "unknown" | "none";
+  recommendedPath?: string;
+  preferredWriteToolNames?: string[];
+};
+
 export type WaiterMap = Map<string, (payload: ToolResultPayload) => void>;
 
 export type ModelApiType =
@@ -118,6 +125,18 @@ export type RunContext = {
   targetChars?: number | null;
   /** 运行期间 mainDoc 的可变状态，供 run.mainDoc.get / run.mainDoc.update 读写 */
   mainDoc: Record<string, unknown>;
+
+  /**
+   * Phase2：交付契约（Deliverability Contract）
+   * - required=true 时，run 结束前必须产出至少一个“可审计的交付物（artifact）”，否则不允许按纯文本完成。
+   * - 当前最常见的是 file_markdown：要求 doc.write / doc.applyEdits / code.exec 等成功写入。
+   */
+  deliveryContract?: {
+    required: boolean;
+    kind?: "file_markdown" | "file_office" | "unknown" | "none";
+    recommendedPath?: string;
+    preferredWriteToolNames?: string[];
+  };
   /** Custom agent definitions from Desktop (for agent.delegate to resolve custom agents) */
   customAgentDefinitions?: SubAgentDefinition[];
   /** 注入给子 Agent 的 L1 全局记忆（裁剪过的 section 子集） */
@@ -837,6 +856,28 @@ export class AgentRunner {
   private forcedToolChoice: ForcedToolChoice | null = null;
   private readonly turnEngine = new TurnEngine();
   private readonly recentToolAttempts: ToolAttemptSnapshot[] = [];
+
+  private _deliveryContract(): DeliveryContract {
+    const dc = this.ctx.deliveryContract && typeof this.ctx.deliveryContract === "object"
+      ? (this.ctx.deliveryContract as DeliveryContract)
+      : null;
+    if (!dc || typeof dc.required !== "boolean") return { required: false, kind: "none" };
+    return {
+      required: Boolean(dc.required),
+      kind: (dc.kind ?? "unknown"),
+      recommendedPath: typeof dc.recommendedPath === "string" ? dc.recommendedPath : undefined,
+      preferredWriteToolNames: Array.isArray(dc.preferredWriteToolNames)
+        ? dc.preferredWriteToolNames.map((x) => String(x ?? "").trim()).filter(Boolean)
+        : undefined,
+    };
+  }
+
+  private _hasAnyDeliveredArtifact(): boolean {
+    const families = Array.isArray(this.runState.deliveredArtifactFamilies)
+      ? this.runState.deliveredArtifactFamilies.filter(Boolean)
+      : [];
+    return families.length > 0;
+  }
 
   constructor(ctx: RunContext) {
     // 若设置了 agentId，包装 writeEvent 自动注入到每条 SSE 事件
@@ -3582,8 +3623,10 @@ export class AgentRunner {
     const canForceToolChoice = this.supportsForcedToolChoice;
     const assistantHasText = String(assistantText ?? "").trim().length > 0;
     const executionContract = this._getExecutionContract();
+    const deliveryContract = this._deliveryContract();
     const allowedToolNames = this.turnAllowedToolNames ?? this.ctx.allowedToolNames;
     const todoGateRequired = this._todoGateRequired(executionContract);
+    const needsArtifact = deliveryContract.required && !this._hasAnyDeliveredArtifact();
 
     if (todoGateRequired && !this.runState.hasTodoList && allowedToolNames.size > 0) {
       this.executionNoToolTurns += 1;
@@ -3666,7 +3709,7 @@ export class AgentRunner {
       // 仅在 Todo Gate 已满足后才允许软降级；否则必须先建 Todo。
       const isNonStrictRoute = (this.ctx.intentRouteId ?? "") === "task_execution" ||
         (this.ctx.intentRouteId ?? "") === "kb_ops";
-      if (!canForceToolChoice && assistantHasText && isNonStrictRoute) {
+      if (!canForceToolChoice && assistantHasText && isNonStrictRoute && !needsArtifact) {
         this.ctx.writeEvent("run.notice", {
           turn: this.turn,
           kind: "warn",
@@ -3726,7 +3769,7 @@ export class AgentRunner {
       }
 
       // 软降级：若已有可读文本，则不直接失败，避免"只因未调工具而整轮失败"。
-      if (assistantHasText) {
+      if (assistantHasText && !needsArtifact) {
         this.ctx.writeEvent("run.notice", {
           turn: this.turn,
           kind: "warn",
@@ -3740,6 +3783,35 @@ export class AgentRunner {
           },
         });
         return false;
+      }
+
+      // Phase2：文件交付类任务禁止按文本软降级。
+      if (assistantHasText && needsArtifact) {
+        this.executionNoToolTurns += 1;
+        const preferredWrite = (deliveryContract.preferredWriteToolNames ?? []).find((name) =>
+          this.ctx.allowedToolNames.has(String(name ?? "").trim()),
+        );
+        this.forcedToolChoice = canForceToolChoice
+          ? (preferredWrite ? { type: "tool", name: preferredWrite } : { type: "any" })
+          : null;
+        const recPath = deliveryContract.recommendedPath ? `建议路径：${deliveryContract.recommendedPath}。` : "";
+        pushRetryUserMessage(
+          `你还没有真正产出可交付文件（第 ${this.executionNoToolTurns} 次提醒）。` +
+            `本轮属于文件交付任务，禁止只回复文本。请立即调用 doc.write（或等价写入工具）完成落盘。${recPath}`,
+        );
+        this.ctx.writeEvent("run.notice", {
+          turn: this.turn,
+          kind: "warn",
+          title: "DeliverabilityContractRetry",
+          message: "文件交付契约未满足：检测到仅文本输出，已注入强制写入提示并重试。",
+          detail: {
+            kind: deliveryContract.kind ?? "unknown",
+            recommendedPath: deliveryContract.recommendedPath ?? null,
+            preferredWriteTool: preferredWrite ?? null,
+            continuationMode: this.providerCapabilities.continuationMode,
+          },
+        });
+        return true;
       }
 
       // 无文本可回显时，保留失败分支，避免用户看起来"没结果却成功"。

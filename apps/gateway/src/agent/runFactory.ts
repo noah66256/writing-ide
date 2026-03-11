@@ -137,6 +137,13 @@ type ExecutionContract = {
   preferredToolNames: string[];
 };
 
+type DeliveryContractV1 = {
+  required: boolean;
+  kind: "file_markdown" | "file_office" | "unknown" | "none";
+  recommendedPath?: string;
+  preferredWriteToolNames?: string[];
+};
+
 export type IntentRouteDecision = {
   intentType: IntentType;
   confidence: number;
@@ -281,6 +288,8 @@ function buildRouteDecisionV1(args: {
   nextAction: NextAction;
   effectiveToolPolicy: ToolPolicy;
   userPrompt: string;
+  /** deliverability contract 的“保底工具 pin”信号（允许由 Main Doc goal 续跑触发） */
+  deliveryRequiredForPins: boolean;
   baseAllowedToolNames: Set<string>;
   mcpToolsFromSidecar: Array<{ name: string }>;
   skillPinnedToolNames: Set<string>;
@@ -367,7 +376,7 @@ function buildRouteDecisionV1(args: {
     DELETE_ROUTE_PINNED_TOOL_NAMES.filter((name) => args.baseAllowedToolNames.has(name)),
   );
   const deliveryPinnedToolNames = (() => {
-    if (!looksLikeProjectDeliveryIntent(args.userPrompt)) return [] as string[];
+    if (!args.deliveryRequiredForPins) return [] as string[];
     const pins = [
       "doc.write",
       "doc.read",
@@ -396,6 +405,71 @@ function buildRouteDecisionV1(args: {
     executionPreferred,
     executionContract,
     preserveToolNames,
+  };
+}
+
+function extractFirstFilePath(text: string, extRe: RegExp): string | null {
+  const t = String(text ?? "");
+  if (!t) return null;
+  const m = t.match(new RegExp(String.raw`(?:^|\s)([\w\-./\u4e00-\u9fa5]+${extRe.source})(?:\b|\s|$)`));
+  const raw = m?.[1] ? String(m[1]).trim() : "";
+  return raw || null;
+}
+
+function inferDeliveryContractV1(args: {
+  mode: AgentMode;
+  effectiveToolPolicy: ToolPolicy;
+  intent: { wantsWrite?: boolean; isWritingTask?: boolean } | null | undefined;
+  userPrompt: string;
+  mainDocGoal?: unknown;
+}): DeliveryContractV1 {
+  const mode = args.mode;
+  const policy = String(args.effectiveToolPolicy ?? "").trim().toLowerCase();
+  const intent = args.intent ?? null;
+
+  if (mode !== "agent" || policy !== "allow_tools") {
+    return { required: false, kind: "none" };
+  }
+
+  const userPrompt = String(args.userPrompt ?? "").trim();
+  const goal = String(args.mainDocGoal ?? "").trim();
+  const merged = `${userPrompt}\n${goal}`.trim();
+
+  // 用户明确说“别落盘/只在对话里”则强制关闭交付契约
+  if (/(不需要落盘|不用保存|别保存|不要保存|只在对话里|只要说说|不用写文件|不写文件)/i.test(merged)) {
+    return { required: false, kind: "none" };
+  }
+
+  const mentionsMd = /(markdown|\bmd\b|\.md\b)/i.test(merged) || /(md文件|markdown\s*文件)/i.test(merged);
+  const mentionsOffice = /\.(docx?|xlsx?|xlsm|pptx?|pdf)\b/i.test(merged) || /(docx|xlsx|pptx|pdf)\s*文件/i.test(merged);
+  const kind: DeliveryContractV1["kind"] = mentionsOffice
+    ? "file_office"
+    : mentionsMd
+      ? "file_markdown"
+      : "unknown";
+
+  const explicitDelivery = looksLikeProjectDeliveryIntent(merged) || Boolean(intent?.wantsWrite);
+  const writingDefault = Boolean(intent?.isWritingTask);
+  // “出个 md/给我个 md/整理成 md”这类不一定包含“保存/落盘”，但在产品语境下通常意味着文件交付。
+  const implicitMdDelivery = mentionsMd && /(出(一份|个)?|给我|整理成|写(成|个)?|生成|导出|输出)/.test(merged);
+
+  const required = Boolean(explicitDelivery || writingDefault || implicitMdDelivery);
+  if (!required) return { required: false, kind: "none" };
+
+  const recommendedPath = (
+    extractFirstFilePath(merged, /\.mdx?/i) ||
+    (kind === "file_markdown" ? "output/deliverable.md" : null)
+  ) || undefined;
+
+  const preferredWriteToolNames = kind === "file_office"
+    ? ["doc.write", "code.exec"]
+    : ["doc.write", "doc.applyEdits", "code.exec"];
+
+  return {
+    required: true,
+    kind,
+    recommendedPath,
+    preferredWriteToolNames,
   };
 }
 
@@ -1782,6 +1856,7 @@ export type PreparedRun = {
   mcpServerStickyFallbackUsed: boolean;
   mcpServerStickyFallbackIds: string[];
   executionContract: ExecutionContract;
+  deliveryContract: DeliveryContractV1;
   authorization: string;
   l1MemoryFromPack: string;
   l2MemoryFromPack: string;
@@ -2442,6 +2517,14 @@ export async function prepareAgentRun(args: {
       ? intentRoute.toolPolicy
       : modeFloorPolicy;
 
+  const deliveryContract = inferDeliveryContractV1({
+    mode,
+    effectiveToolPolicy,
+    intent,
+    userPrompt,
+    mainDocGoal: (mainDocFromPack as any)?.goal,
+  });
+
   const baseAllowedToolNames =
     effectiveToolPolicy === "deny"
       ? new Set<string>()
@@ -2504,6 +2587,7 @@ export async function prepareAgentRun(args: {
     nextAction: intentRoute.nextAction,
     effectiveToolPolicy,
     userPrompt,
+    deliveryRequiredForPins: deliveryContract.required,
     baseAllowedToolNames,
     mcpToolsFromSidecar: mcpToolsFromSidecar.map((x) => ({ name: String(x?.name ?? "").trim() })),
     skillPinnedToolNames,
@@ -3193,6 +3277,8 @@ export async function prepareAgentRun(args: {
             baseAllowedToolNames.has("run.mainDoc.get") ? "run.mainDoc.get" : "",
             baseAllowedToolNames.has("run.setTodoList") ? "run.setTodoList" : "",
             baseAllowedToolNames.has("run.todo") ? "run.todo" : "",
+            // Phase2：文件交付契约下，确保 doc.write 在启动阶段也可见（避免模型只看到浏览器工具导致后续忘写）。
+            (deliveryContract.required && baseAllowedToolNames.has("doc.write")) ? "doc.write" : "",
           ].filter(Boolean)
         : [];
 
@@ -3412,6 +3498,7 @@ export async function prepareAgentRun(args: {
       mcpServerStickyFallbackUsed: mcpServerSelectionUsedStickyFallback,
       mcpServerStickyFallbackIds: mcpServerSelectionUsedStickyFallback ? mcpServerSelection.summary.selectedServerIds.slice(0, 12) : [],
       executionContract,
+      deliveryContract,
       compositeTaskPlan,
       authorization: String((request as any)?.headers?.authorization ?? ""),
       l1MemoryFromPack,
@@ -3475,6 +3562,7 @@ export async function executeAgentRun(args: {
     mcpServerStickyFallbackUsed,
     mcpServerStickyFallbackIds,
     executionContract,
+    deliveryContract,
     compositeTaskPlan,
     l1MemoryFromPack,
     l2MemoryFromPack,
@@ -4143,6 +4231,7 @@ export async function executeAgentRun(args: {
     l2Memory: l2MemoryFromPack || "",
     ctxDialogueSummary: ctxDialogueSummaryFromPack || "",
     executionContract,
+    deliveryContract,
     jsonToolFallbackEnabled,
   };
 
