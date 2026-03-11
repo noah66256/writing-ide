@@ -319,7 +319,7 @@
 
 ## 附录 B：对标关键源码入口
 
-- Codex prompt：`/Users/noah/writing-ide/third_party/openai-codex/codex-rs/core/prompt.md`
+- Codex prompt：`/Users/noah/Crab/codex/codex-rs/core/prompt.md`
 - OpenClaw system prompt：`/Users/noah/Crab/openclaw/src/agents/system-prompt.ts`
 - Cline：
   - 文件编辑规则：`/Users/noah/Crab/cline/src/core/prompts/system-prompt/components/editing_files.ts`
