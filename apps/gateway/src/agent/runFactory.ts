@@ -4419,6 +4419,9 @@ export async function executeAgentRun(args: {
 
   const failureDigest = runtime.getFailureDigest();
   const executionReport = runtime.getExecutionReport();
+  const styleWorkflow: any = (executionReport as any)?.styleWorkflow ?? null;
+  let styleWorkflowIncomplete = false;
+  let styleWorkflowMissingSteps: string[] = [];
   try {
     (audit.meta as any).runtimeExecutionSummary = sanitizeForAudit({
       providerApi: (executionReport as any)?.providerApi ?? (executionReport as any)?.provider ?? null,
@@ -4428,7 +4431,52 @@ export async function executeAgentRun(args: {
       deliveryLatchActivatedAtTurn: (executionReport as any)?.deliveryLatchActivatedAtTurn ?? null,
       sideEffectLedgerSize: (executionReport as any)?.sideEffectLedgerSize ?? null,
       toolLoopGuardReason: (executionReport as any)?.toolLoopGuardReason ?? null,
+      styleWorkflow: styleWorkflow ?? null,
     });
+
+    // SkillStatus：对 style_imitate 的闭环状态做一次快照（仅用于审计，不改变 RunOutcome 语义）。
+    if (styleWorkflow && styleWorkflow.active) {
+      const sw: any = styleWorkflow;
+      const missingSteps: string[] = [];
+      if (!sw.hasStyleKbSearch) missingSteps.push('kb.search(style)');
+      if (!sw.hasDraftText) missingSteps.push('draft');
+      if (!sw.copyLintPassed) missingSteps.push('lint.copy');
+      if (!sw.styleLintPassed) missingSteps.push('lint.style');
+      styleWorkflowMissingSteps = missingSteps;
+
+      const started = sw.hasStyleKbSearch || sw.hasDraftText || sw.copyLintPassed || sw.styleLintPassed;
+      const completed = sw.hasStyleKbSearch && sw.hasDraftText && sw.copyLintPassed && sw.styleLintPassed;
+      const runState: any = (executionReport as any)?.runState ?? null;
+      const degraded = Boolean(
+        runState && (
+          runState.styleKbDegraded === true ||
+          runState.lintGateDegraded === true ||
+          runState.copyGateDegraded === true,
+        ),
+      );
+
+      let status: 'not_started' | 'in_progress' | 'completed' | 'degraded' = 'not_started';
+      if (completed) status = 'completed';
+      else if (degraded) status = 'degraded';
+      else if (started) status = 'in_progress';
+
+      const skillStatusRaw: any = (audit.meta as any).skillStatus && typeof (audit.meta as any).skillStatus === 'object'
+        ? (audit.meta as any).skillStatus
+        : {};
+      skillStatusRaw['style_imitate.v1'] = sanitizeForAudit({
+        status,
+        missingSteps: missingSteps.length ? missingSteps : undefined,
+        styleWorkflow: sw,
+      });
+      (audit.meta as any).skillStatus = skillStatusRaw;
+
+      // 仅在样例与草稿都已存在的前提下，才认为“闭环未完成”。
+      styleWorkflowIncomplete = Boolean(
+        sw.hasStyleKbSearch &&
+        sw.hasDraftText &&
+        (!sw.copyLintPassed || !sw.styleLintPassed),
+      );
+    }
   } catch {
     // ignore audit summary mutation failures
   }
@@ -4436,6 +4484,24 @@ export async function executeAgentRun(args: {
     runId,
     ...executionReport,
   });
+
+  // 风格闭环未完成时，在结果层给出温和提示（不改变 status，只增加 notice 与 reasonCode）。
+  if (styleWorkflowIncomplete && runnerOutcome.status === 'completed') {
+    writeEvent('run.notice', {
+      turn: runtime.getTurn(),
+      kind: 'warn',
+      title: 'StyleWorkflowIncomplete',
+      message:
+        '本轮已激活 style_imitate，但未完整走完风格仿写闭环（缺少 lint.copy / lint.style）。' +
+        '
+建议按"kb.search → 草稿 draft → lint.copy → lint.style → 最终 doc.write" 的顺序重试。',
+      detail: {
+        styleWorkflow,
+        missingSteps: styleWorkflowMissingSteps,
+      },
+    });
+  }
+
   if (failureDigest.failedCount > 0) {
     writeEvent("run.end.failure_digest", {
       runId,
@@ -4443,9 +4509,14 @@ export async function executeAgentRun(args: {
       failedTools: failureDigest.failedTools,
     });
   }
+  const extraReasonCodes: string[] = [];
+  if (styleWorkflowIncomplete && runnerOutcome.status === 'completed') {
+    extraReasonCodes.push('style_workflow_incomplete');
+  }
   const outcomeReasonCodes = Array.from(
     new Set([
       ...(Array.isArray(runnerOutcome.reasonCodes) ? runnerOutcome.reasonCodes : []),
+      ...extraReasonCodes,
       ...(failureDigest.failedCount > 0 ? ["has_failures"] : []),
       ...(runnerOutcome.status === "failed" ? ["failed"] : []),
       ...(runnerOutcome.status === "aborted" ? ["aborted"] : []),

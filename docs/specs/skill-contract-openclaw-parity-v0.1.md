@@ -131,9 +131,9 @@ phase = !hasStyleKbSearch
 - 通过 `run.notice` 提示模型按“kb.search → 草稿 → lint.copy → lint.style → doc.write”的顺序重试；
 - 不更新 RunState 中与该工具相关的成功统计，避免“错写一半”的中间状态。
 
-### 5. 对 RunOutcome 的影响（预留）
+### 5. 对 RunOutcome 的影响（分阶段收口）
 
-短期内，RunOutcome 仍可按现有逻辑判定 `completed/failed`，但建议在 RunAudit 中增加每个 Workflow Skill 的执行状态，例如：
+短期内，RunOutcome 仍可按现有逻辑判定 `completed/failed`，但必须在 RunAudit 中增加每个 Workflow Skill 的执行状态，例如：
 
 ```ts
 skillStatus: {
@@ -144,7 +144,31 @@ skillStatus: {
 }
 ```
 
-后续可以逐步收紧：当 `style_imitate` 激活但未进入 `completed` 状态且用户没有明确要求跳过闭环时，将 RunOutcome 标记为 `style_workflow_incomplete`，并在 UI 中提示“风格闭环未完成”。
+并在 `runtimeExecutionSummary` / `run.execution.report` 中携带 `styleWorkflow` 快照，至少包含：
+
+```ts
+styleWorkflow: {
+  active: boolean,
+  hasStyleKbSearch: boolean,
+  hasDraftText: boolean,
+  copyLintPassed: boolean,
+  styleLintPassed: boolean,
+}
+```
+
+推荐采用两阶段收口：
+
+1. **Phase 3A（温和收口）**
+   - 若 `style_imitate` 已激活，且 `hasStyleKbSearch=true`、`hasDraftText=true`，但 `copyLintPassed=false` 或 `styleLintPassed=false`；
+   - 则 RunOutcome 仍可保持 `completed`，但必须：
+     - 发出 `run.notice(title="StyleWorkflowIncomplete")`；
+     - 在 `reasonCodes` 中附加 `style_workflow_incomplete`；
+     - 在 `skillStatus["style_imitate.v1"]` 中记录缺失步骤。
+
+2. **Phase 3B（强收口）**
+   - 当线上观测稳定后，可进一步收紧为：
+     - 若 `style_imitate` 激活但未进入 `completed`，且用户没有明确要求跳过闭环；
+     - 则将 RunOutcome 标记为 `style_workflow_incomplete`（failed/degraded 视产品策略而定），并在 UI 中提示“风格闭环未完成”。
 
 ### 6. 与 M0–M2 的关系
 
