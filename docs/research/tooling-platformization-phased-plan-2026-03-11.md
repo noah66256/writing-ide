@@ -6,6 +6,20 @@
 
 ---
 
+
+## 进度快照（2026-03-11）
+
+> 重要：本文的 Phase2 指「Profiles + Policy Pipeline（平台治理核心）」。
+> 我们代码里最近落地并验证通过的“Phase2”是另一条线：**文件交付契约（Delivery Contract）**。
+> 两条线都成立，但不要混用编号。
+
+已落地（交付链路止血线，直接对应线上回放问题）：
+- Phase0：Deliverability 不变量 + 基础自愈（避免交付工具被裁掉）
+- Phase1：工具发现层 `tools.search/tools.describe`
+- Phase2：文件交付契约（禁止口头交付；`run.done` 不可绕过；文本收口前强制落盘）
+
+参考：`docs/research/deepresearch-intent-routing-tool-discovery-and-file-delivery-contract-2026-03-11.md`
+
 ## 0. 术语对齐（我们系统里三类东西的定位）
 
 ### Tool（内置工具）

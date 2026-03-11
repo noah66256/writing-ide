@@ -253,6 +253,42 @@ localStorage.setItem("writing-ide.gatewayUrl", "http://120.26.6.147:8000");
 
 ---
 
+### 0.4) Playwright 打不开网页：`browserType.launchPersistentContext` 失败
+
+#### 现象
+- Run 里 `打开网页` 直接失败，报错形如：
+  - `browserType.launchPersistentContext: Failed ...`
+- 同一轮里可能会出现“浏览器失败 → 自动改走 web.search（Serper）”，从而**违背用户明确约束**（例如“不要用内置搜索，只在 Google 页面里找热点”）。
+
+#### 最快定位
+1) 看是否已有 Playwright/MCP 启动的 Chrome 进程占用同一个 profile：
+
+```bash
+ps -ax -o pid=,command= | rg -i "ms-playwright|mcp-chrome|playwright" | head
+```
+
+2) 检查 user-data-dir 是否被 Chrome 的 SingletonLock 占用：
+
+```bash
+ls -la ~/Library/Caches/ms-playwright/mcp-chrome | rg -n "SingletonLock|SingletonSocket|SingletonCookie" || true
+```
+
+如果看到 `SingletonLock` / `SingletonSocket`，并且对应的 Chrome 进程仍在跑，基本就是“**同一个 persistent profile 不能被第二个 persistent context 再次拉起**”。
+
+#### 根因（高概率）
+- Playwright 走 `launchPersistentContext`，但上一次会话没有被正常关闭；或并发触发了第二个启动请求，导致 profile 锁冲突。
+
+#### 处理方式（建议顺序）
+- 优先：结束旧的 Playwright Chrome 会话（关闭窗口或 kill 对应 Chrome 进程），再重试打开网页。
+- 若业务必须并发浏览器：不要复用同一个 `user-data-dir`，改为按 runId/thread 分配不同 profile 目录（避免锁冲突）。
+
+#### 产品/策略约束（别再踩）
+- **用户明确说“不要用内置搜索”**：即使浏览器失败，也不要自动降级到 `web.search` 并声称满足了约束；应明确失败原因，并提示用户如何恢复浏览器能力后重试。
+
+
+
+---
+
 ### 2) Windows 下 `npm install` 报 `EBUSY/EPERM`（electron/esbuild/rollup 被锁）
 
 #### 现象
