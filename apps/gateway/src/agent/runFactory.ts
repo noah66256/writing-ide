@@ -2633,7 +2633,22 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
   const directOpenWebIntent = routeDecision.directOpenWebIntent;
   const allowBrowserTools = routeDecision.allowBrowserTools;
   const executionPreferred = routeDecision.executionPreferred;
-  const executionContract = routeDecision.executionContract;
+  let executionContract = routeDecision.executionContract;
+
+  // Style_imitate：在风格仿写场景下，强化执行达成约束，避免模型仅输出文本而不走闭环工具。
+  const styleGateEnabled = Boolean(gates.styleGateEnabled && intent.isWritingTask);
+  if (styleGateEnabled) {
+    const minTools = Math.max(3, executionContract.minToolCalls || 0);
+    const maxNoToolTurns = Math.min(1, executionContract.maxNoToolTurns || 1);
+    executionContract = {
+      ...executionContract,
+      required: true,
+      minToolCalls: minTools,
+      maxNoToolTurns,
+      reason: (executionContract.reason ? executionContract.reason + '|' : '') + 'style_workflow',
+    };
+  }
+
   const preserveToolNames = routeDecision.preserveToolNames;
   const projectDirFromSidecar = coerceNonEmptyString(ideSummaryFromSidecar?.projectDir);
 

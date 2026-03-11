@@ -2568,6 +2568,41 @@ export class AgentRunner {
     const streamParsedToolCount = result.completedToolUses.length;
     if (result.completedToolUses.length === 0) {
       const autoRetryText = adapter.getAutoRetryText(result);
+
+      // Style_imitate：禁止在闭环未完成时以纯文本收口。
+      // 只要本轮需要执行 style_imitate（有风格库且为写作任务），
+      // 且尚未完成 kb.search → draft → lint.copy → lint.style，
+      // 就不允许直接以 assistant_text 收口，而是注入提示并重试。
+      const styleGateEnabled = Boolean(this.ctx.gates?.styleGateEnabled && this.ctx.intent?.isWritingTask);
+      if (styleGateEnabled) {
+        const st: any = this.runState as any;
+        const styleCompleted = Boolean(
+          st.hasStyleKbSearch &&
+          st.hasDraftText &&
+          st.copyLintPassed &&
+          st.styleLintPassed,
+        );
+        if (!styleCompleted) {
+          const budget = Math.max(0, Math.floor(Number(st.workflowRetryBudget ?? 0)));
+          if (budget > 0) {
+            st.workflowRetryBudget = budget - 1;
+            const hint =
+              "当前已启用 style_imitate 风格仿写 Skill，" +
+              "但尚未按“kb.search 样例 → 草稿 draft → lint.copy → lint.style → doc.write”完整走完闭环。\n" +
+              "请按以下顺序执行：先 kb.search 取风格模板/规则卡，再输出草稿，然后调用 lint.copy 和 lint.style 审计，最后再用 doc.write/doc.applyEdits 落盘。";
+            this._pushHistory({ role: 'user_hint', text: hint });
+            this.ctx.writeEvent('run.notice', {
+              turn: this.turn,
+              kind: 'warn',
+              title: 'StyleWorkflowTextBlocked',
+              message:
+                '检测到 style_imitate 已启用 but 未进入完整问题，已拦截本转断的纯文本完成。',
+            });
+            return true;
+          }
+        }
+      }
+
       const fallbackToolUse = this._trySynthesizeToolUseFromJsonText(autoRetryText);
       if (fallbackToolUse) {
         result.completedToolUses.push(fallbackToolUse);
