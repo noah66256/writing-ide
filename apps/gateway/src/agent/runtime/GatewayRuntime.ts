@@ -891,8 +891,59 @@ export class GatewayRuntime implements AgentRuntime {
     // run.done 已触发，不再追加
     if (this.outcome.reason === "run_done") return [];
 
+    const runCtx: any = this.config.runCtx;
+    const gates: any = runCtx.gates ?? {};
+    const activeSkills = Array.isArray(runCtx.activeSkills) ? runCtx.activeSkills : [];
+    const styleSkillActive =
+      activeSkills.some((s: any) => String(s?.id ?? "").trim() === "style_imitate") ||
+      (gates.styleGateEnabled && runCtx.intent?.isWritingTask);
+
+    // Style_imitate：当风格闭环未完成且仅产生纯文本输出时，禁止模型“自然结束”，注入 runtime_hint 促使其按 Skill 闭环补齐。
+    // - 仅在 style skill 激活且为写作任务时生效；
+    // - 依赖 RunState.workflowRetryBudget 控制最大重试次数，避免死循环；
+    // - 提示内容明确要求执行：kb.search → 草稿 draft → lint.copy → lint.style → doc.write/doc.applyEdits。
+    if (
+      styleSkillActive &&
+      gates.styleGateEnabled &&
+      gates.lintGateEnabled &&
+      runCtx.intent?.isWritingTask
+    ) {
+      const st: any = this.runState as any;
+      const styleCompleted = Boolean(
+        st.hasStyleKbSearch &&
+        st.hasDraftText &&
+        st.copyLintPassed &&
+        st.styleLintPassed,
+      );
+      if (!styleCompleted) {
+        const budget = Math.max(0, Math.floor(Number(st.workflowRetryBudget ?? 0)));
+        if (budget > 0) {
+          st.workflowRetryBudget = budget - 1;
+          const item: CanonicalTranscriptItem = {
+            kind: "runtime_hint",
+            text:
+              "当前已启用 style_imitate 风格仿写 Skill，但尚未按 kb.search 样例 → 草稿 draft → lint.copy → lint.style → doc.write/doc.applyEdits 完整走完闭环。\n" +
+              "请按以下顺序执行工具：先调用 kb.search 从风格库检索模板/规则卡，再输出候选草稿，然后依次调用 lint.copy 和 lint.style 进行审计，最后再用 doc.write 或 doc.applyEdits 落盘。",
+            reasonCodes: ["style_workflow_followup"],
+          };
+          try {
+            this.config.runCtx.writeEvent("run.notice", {
+              turn: this.turn,
+              kind: "warn",
+              title: "StyleWorkflowTextBlocked",
+              message:
+                "检测到 style_imitate 已启用但尚未完成风格闭环，本轮纯文本收口已被拦截，将注入 runtime_hint 引导模型按闭环顺序补齐工具调用。",
+            });
+          } catch {
+            // 非关键路径，忽略审计异常
+          }
+          return [item as unknown as AgentMessage];
+        }
+      }
+    }
+
     // 隐式完成：模型已做过工具调用，且连续纯文本回合 ≥ 2 → 自然终止（参考 Codex 模式）
-    // Codex 的设计：模型不返回 tool call 即视为完成，不注入追问。
+    // Codex 的设计：��型不返回 tool call 即视为完成，不注入追问。
     // 我们保留 1 次追问机会（consecutiveTextOnlyTurns < 2），超过后尊重模型的"自然结束"信号。
     if (this.totalToolCalls > 0 && this.consecutiveTextOnlyTurns >= 2) {
       return [];
