@@ -151,7 +151,7 @@
 
 ### 3.3 Cline：最强的一点是“完成 gate + 写文件失败策略”
 
-源码：`/tmp/agent-research/cline`
+源码：`/Users/noah/Crab/cline`
 
 关键观察：
 
@@ -167,7 +167,7 @@
 
 ### 3.4 OpenHands：事件级 FileWriteAction（天然避免口头交付）
 
-源码：`/tmp/agent-research/OpenHands`
+源码：`/Users/noah/Crab/OpenHands`
 
 关键观察：
 
@@ -322,6 +322,6 @@
 - Codex prompt：`/Users/noah/writing-ide/third_party/openai-codex/codex-rs/core/prompt.md`
 - OpenClaw system prompt：`/Users/noah/Crab/openclaw/src/agents/system-prompt.ts`
 - Cline：
-  - 文件编辑规则：`/tmp/agent-research/cline/src/core/prompts/system-prompt/components/editing_files.ts`
-  - 完成 gate：`/tmp/agent-research/cline/src/core/prompts/system-prompt/tools/attempt_completion.ts`
-- OpenHands：`/tmp/agent-research/OpenHands/openhands/agenthub/codeact_agent/prompts/system_prompt.j2`
+  - 文件编辑规则：`/Users/noah/Crab/cline/src/core/prompts/system-prompt/components/editing_files.ts`
+  - 完成 gate：`/Users/noah/Crab/cline/src/core/prompts/system-prompt/tools/attempt_completion.ts`
+- OpenHands：`/Users/noah/Crab/OpenHands/openhands/agenthub/codeact_agent/prompts/system_prompt.j2`
