@@ -81,6 +81,7 @@ export function decodeToolName(encoded: string): string {
       return "run.setTodoList";
     case "run_maindoc_update":
     case "run_main_doc_update":
+    case "run.maindoc_update":
       return "run.mainDoc.update";
     case "run_maindoc_get":
     case "run_main_doc_get":

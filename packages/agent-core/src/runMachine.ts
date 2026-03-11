@@ -750,11 +750,12 @@ export function analyzeStyleWorkflowBatch(args: {
     args.intent.isWritingTask;
   const enforceCopy = args.gates.copyGateEnabled === true;
   const copyExhausted = enforceCopy && !args.state.copyLintPassed && args.state.copyLintFailCount > args.lintMaxRework;
-  const needCopyLint = enforceCopy && !args.state.copyLintPassed;
+  // 草稿阶段（hasDraftText=false）允许首轮写入；copy/style lint 只在已有草稿后才作为门禁
+  const needCopyLint = enforceCopy && !args.state.copyLintPassed && args.state.hasDraftText;
   // 是否“强制要求 lint”：由 gates.lintGateEnabled 统一控制（Gateway 可根据产品策略选择 hint/gate）
   const enforceLint = args.gates.lintGateEnabled === true;
   const lintExhausted = enforceLint && !args.state.styleLintPassed && args.state.styleLintFailCount > args.lintMaxRework;
-  const needStyleLint = enforceLint && !args.state.styleLintPassed;
+  const needStyleLint = enforceLint && !args.state.styleLintPassed && args.state.hasDraftText;
 
   let violation: string | null = null;
   // 关键约束：
@@ -771,7 +772,6 @@ export function analyzeStyleWorkflowBatch(args: {
   else if (batchHasWrite && needStyleKb) violation = "WRITE_BEFORE_KB";
   else if (batchHasCopyLint && needDraftText) violation = "COPY_BEFORE_DRAFT";
   else if (batchHasLint && needDraftText) violation = "LINT_BEFORE_DRAFT";
-  else if (batchHasWrite && needDraftText) violation = "WRITE_BEFORE_DRAFT";
   else if (batchHasLint && needCopyLint) violation = copyExhausted ? "LINT_BLOCKED_COPY_EXHAUSTED" : "LINT_BEFORE_COPY_PASS";
   else if (batchHasWrite && needCopyLint) violation = copyExhausted ? "WRITE_BLOCKED_COPY_EXHAUSTED" : "WRITE_BEFORE_COPY_PASS";
   else if (batchHasWrite && needStyleLint) violation = lintExhausted ? "WRITE_BLOCKED_LINT_EXHAUSTED" : "WRITE_BEFORE_LINT_PASS";

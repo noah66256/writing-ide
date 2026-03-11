@@ -2107,6 +2107,16 @@ export class GatewayRuntime implements AgentRuntime {
       this.runState.hasWriteApplied = true;
       this._recordSideEffect(toolName, toolArgs, result);
       this.runState.toolLoopGuardReason = null;
+
+      // Style_imitate：允许首轮 doc.write/doc.applyEdits 作为“候选稿”，视为已产生 draft
+      try {
+        const gates: any = this.config.runCtx.gates ?? {};
+        if (!this.runState.hasDraftText && gates.styleGateEnabled && gates.lintGateEnabled && this.runState.hasStyleKbSearch) {
+          this.runState.hasDraftText = true;
+        }
+      } catch {
+        // 若 runCtx 缺失 gate 信息，不影响主流程
+      }
     }
   }
 
