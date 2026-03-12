@@ -756,8 +756,10 @@ export function analyzeStyleWorkflowBatch(args: {
   const copyExhausted = enforceCopy && !args.state.copyLintPassed && args.state.copyLintFailCount > args.lintMaxRework;
   // 草稿阶段（hasDraftText=false）允许首轮写入；copy/style lint 只在已有草稿后才作为门禁
   const needCopyLint = enforceCopy && !args.state.copyLintPassed && args.state.hasDraftText;
-  // 是否“强制要求 lint”：由 gates.lintGateEnabled 统一控制（Gateway 可根据产品策略选择 hint/gate）
-  const enforceLint = args.gates.lintGateEnabled === true;
+  // 是否“强制要求 lint”：由 gates.lintGateEnabled 统一控制（Gateway 可根据产品策略选择 hint/gate），
+  // 且当运行时已标记 lintGateDegraded=true 时不再作为硬闸门（进入 safe 降级，仅提示不拦截写入）。
+  const lintDegraded = Boolean((args.state as any).lintGateDegraded);
+  const enforceLint = args.gates.lintGateEnabled === true && !lintDegraded;
   const lintExhausted = enforceLint && !args.state.styleLintPassed && args.state.styleLintFailCount > args.lintMaxRework;
   const needStyleLint = enforceLint && !args.state.styleLintPassed && args.state.hasDraftText;
 

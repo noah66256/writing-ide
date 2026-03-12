@@ -2131,6 +2131,13 @@ export class GatewayRuntime implements AgentRuntime {
       const parsed = parseStyleLintResult(result.output);
       this.runState.lastStyleLint = parsed;
 
+      const outObj = result.output && typeof result.output === "object"
+        ? (result.output as Record<string, unknown>)
+        : null;
+      if (outObj && (outObj as any).degraded === true) {
+        this.runState.lintGateDegraded = true;
+      }
+
       const mustCovered =
         parsed.expectedDimensions.length === 0 || parsed.missingDimensions.length === 0;
 

@@ -3808,6 +3808,13 @@ export class AgentRunner {
       const parsed = parseStyleLintResult(result.output);
       this.runState.lastStyleLint = parsed;
 
+      const outObj = result.output && typeof result.output === "object"
+        ? (result.output as Record<string, unknown>)
+        : null;
+      if (outObj && (outObj as any).degraded === true) {
+        this.runState.lintGateDegraded = true;
+      }
+
       // MUST 维度覆盖：当 lint.style 返回了 expectedDimensions 时，missingDimensions 必须为空才算通过
       const mustCovered =
         parsed.expectedDimensions.length === 0 || parsed.missingDimensions.length === 0;
