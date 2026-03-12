@@ -3041,7 +3041,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
 
   const lintMaxRework = Number(process.env.STYLE_LINT_MAX_REWORK ?? 2);
   const copyMaxRework = Number(process.env.STYLE_COPY_LINT_MAX_REWORK ?? 2);
-  const lintModeRaw = String(process.env.STYLE_LINT_MODE ?? "hint").trim().toLowerCase();
+  const lintModeRaw = String(process.env.STYLE_LINT_MODE ?? "gate").trim().toLowerCase();
   const lintModeEnv: "hint" | "safe" | "gate" =
     lintModeRaw === "gate" || lintModeRaw === "hard"
       ? "gate"
