@@ -168,6 +168,59 @@ const RECORDS: MarketplaceRecord[] = [
   },
   {
     manifest: {
+      id: "reviewed.lark-openapi-mcp",
+      type: "mcp_server",
+      name: "Lark/飞书 OpenAPI MCP",
+      version: "0.1.0",
+      publisher: "Community",
+      source: "reviewed",
+      description: "将 Lark/飞书 OpenAPI 暴露为 MCP 工具，用于日程、群聊、文档等自动化操作。",
+      minAppVersion: "0.1.0",
+      platforms: ["darwin-arm64", "darwin-x64", "win32-x64"],
+      tags: ["mcp", "lark", "feishu", "calendar", "docs"],
+      install: { kind: "mcp_server" },
+      permissions: {
+        exec: ["npx"],
+        network: ["open.feishu.cn", "open.larksuite.com"],
+      },
+      changelog: [
+        "预置 Lark/飞书 OpenAPI MCP stdio 配置模板。",
+        "支持在设置页填写 App ID / App Secret 后启用。",
+      ],
+    },
+    payload: {
+      kind: "mcp_server",
+      serverId: "marketplace-lark-openapi-mcp",
+      config: {
+        name: "Lark/飞书 OpenAPI MCP",
+        transport: "stdio",
+        command: "npx",
+        args: ["-y", "lark-openapi-mcp"],
+        enabled: false,
+        env: {},
+        configFields: [
+          {
+            envKey: "LARK_APP_ID",
+            label: "Lark/飞书 App ID",
+            placeholder: "cli_***",
+            helpUrl: "https://open.feishu.cn/app",
+            helpText: "在飞书开放平台创建企业自建应用后，可在「凭证与基础信息」中找到 App ID。",
+            required: true,
+          },
+          {
+            envKey: "LARK_APP_SECRET",
+            label: "Lark/飞书 App Secret",
+            placeholder: "appsec_***",
+            helpUrl: "https://open.feishu.cn/app",
+            helpText: "在同一页面下方获取 App Secret，注意不要泄露。",
+            required: true,
+          },
+        ],
+      },
+    },
+  },
+  {
+    manifest: {
       id: "official.deep-research-skill",
       type: "skill",
       name: "Deep Research",
