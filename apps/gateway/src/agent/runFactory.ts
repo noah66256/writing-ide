@@ -3303,7 +3303,8 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       } as any,
       baseAllowedToolNames: selectedAllowedToolNames,
     });
-    if (!isDeleteOnlyRoute && styleTurnCaps) {
+    const needsWebFirst = webGate.enabled && webGate.needsSearch && !state.hasWebSearch;
+    if (!isDeleteOnlyRoute && styleTurnCaps && !needsWebFirst) {
       const styleAllowed = new Set(styleTurnCaps.allowedToolNames);
       if (styleAllowed.size > 0) {
         hints.push("style_imitate orchestrator：phase=" + String(styleTurnCaps.snapshot.currentPhase ?? "") + "。");

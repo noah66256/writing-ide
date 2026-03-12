@@ -171,6 +171,15 @@ export const STYLE_IMITATE_SKILL: SkillManifest = {
   description: "\u7ED1\u5B9A\u98CE\u683C\u5E93\u540E\uFF0C\u4EC5\u5728\u5199\u4F5C/\u6539\u5199/\u6DA6\u8272\u610F\u56FE\u4E0B\u81EA\u52A8\u542F\u7528\uFF1A\u5148\u68C0\u7D22\u6837\u4F8B\u2192\u518D lint.style\u2192\u6700\u540E\u5141\u8BB8\u5199\u5165\uFF08\u652F\u6301\u964D\u7EA7/\u8DF3\u8FC7\uFF09\u3002",
   priority: 100,
   stageKey: "agent.skill.style_imitate",
+  toolCaps: {
+    allowTools: [
+      "kb.search",
+      "doc.write",
+      "doc.applyEdits",
+      "lint.copy",
+      "lint.style",
+    ],
+  },
   autoEnable: true,
   triggers: [
     { when: "mode_in", args: { modes: ["agent"] } },
