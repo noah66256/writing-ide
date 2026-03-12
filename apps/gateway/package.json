@@ -14,7 +14,8 @@
     "test:mcp-selection": "tsx scripts/validate-mcp-selection.ts",
     "smoke:mcp-server-first": "tsx scripts/smoke-mcp-server-first.ts",
     "smoke:workflow-sticky": "tsx scripts/smoke-workflow-sticky.ts",
-    "smoke:mcp-session-reliability": "tsx scripts/smoke-mcp-session-reliability.ts"
+    "smoke:mcp-session-reliability": "tsx scripts/smoke-mcp-session-reliability.ts",
+    "smoke:style-orchestrator": "tsx scripts/smoke-style-orchestrator.ts"
   },
   "dependencies": {
     "@alicloud/dypnsapi20170525": "^2.0.0",

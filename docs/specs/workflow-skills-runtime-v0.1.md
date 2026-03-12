@@ -242,3 +242,71 @@ type WorkflowSkillContract = {
      - Workflow Skills Runtime 不介入，不产生任何额外 Gate 或 reasonCodes；
      - 行为与当前实现一致。
 
+
+---
+
+### 4. Phase 4 展望：从“LLM 驱动 + Gate”到“Runtime 编排的真正 Workflow”
+
+> 本节不是 v0.1 的必须范围，而是基于实现过程中新暴露的问题，对下一阶段（v0.2）的方向性记录。
+
+当前 v0.1 的 Workflow Skills Runtime，解决的是：
+
+- 把 `style_imitate` 这类 Skill 从“散落在多处的 if/特例”收敛为：
+  - **有状态的合同**（snapshot/phase/missingSteps）；
+  - **统一的顺序 Gate**（`STYLE_WORKFLOW_VIOLATION` / `workflow_skill_incomplete`）；
+  - **可续跑的补课机制**（TASK_STATE.workflowSkills + prompt 提示按 missingSteps 补工具）。
+
+但它仍然是一个 **“LLM 驱动 + Runtime 守门”** 的范式：
+
+- 工具选择与调用顺序依然由 Provider 决定；
+- Runtime 只在模型“踩线”时给一刀（例如 `WRITE_BEFORE_COPY_PASS`）；
+- Phase 2 通过 TASK_STATE + 提示词，引导下一轮“不要再犯同一个顺序错误”。
+
+这跟 Dify / n8n / LangGraph 等“真正意义上的 workflow 编排器”还有一层差距：
+
+- 在那类系统里，**步骤顺序由引擎控制**，LLM 只在节点内部产内容；
+- 引擎不会把 `lint.copy` / `lint.style` / 终稿 `doc.write` 这些内部细节直接暴露给大模型；
+- 因此从理论上讲，不会出现高频的 `WRITE_BEFORE_COPY_PASS`——模型拿不到乱叫这些工具的权限。
+
+#### 4.1 我们现在的位置
+
+综合来看，当前 v0.1 处于这样一个折中状态：
+
+- **已完成**：
+  - WorkflowSkill 抽象 + Runtime Gate + RunOutcome 收口；
+  - Desktop 把 workflowSkills 快照写入 TASK_STATE，方便下一轮补课；
+  - `skills/style_imitate/SKILL.md` 给出了明确的 Workflow 合同与 Done 条件。
+- **尚未完成的部分**：
+  - 工具调度权仍在 LLM 手里，Runtime 只是守门员；
+  - `WRITE_BEFORE_COPY_PASS` 等 violation 仍然是日常可见的错误类型，而非极端兜底。
+
+#### 4.2 v0.2 / Phase 4 的目标（Orchestrated Workflow）
+
+下一阶段（暂称 v0.2 / Phase 4）要做的，是把 `style_imitate` 从“守门型 workflow skill”升级为“由 Runtime 主动编排的子工作流”：
+
+1. **收回工具调度权**
+   - 对写作 Agent 来说，不再直接向 Provider 暴露 `kb.search` / `lint.copy` / `lint.style` / `doc.write(终稿)` 整套工具；
+   - 而是对外暴露一个更高阶的节点/子 Agent，例如 `style_imitate.run`；
+   - 节点内部由 Runtime/子 Agent 按状态机顺序调用具体工具，模型只在“写草稿/改稿”这些点上补内容。
+
+2. **Runtime 内部实现真正的节点流**
+   - 结合 `WorkflowSkillPhaseSnapshot` 与 RunState：
+     - 决定下一步应该执行哪一个内部步骤（样例检索 / 草稿 / lint / 改稿 / 终稿落盘）；
+     - 主动生成对应的工具调用，而不是等待模型自行拼凑工具序列；
+   - 对外的 Agent 循环只看到“调用 style_imitate 工作流一次”，不用关心内部 5–6 个子步骤。
+
+3. **Gate 从“主路径依赖”降级为“安全网”**
+   - 在 Orchestrated Workflow 模式下，正常路径上不会再出现“模型直接写终稿”的情况，因为该工具根本不暴露；
+   - `STYLE_WORKFLOW_VIOLATION` 仍然保留，但语义从“教学提示 + 纠偏手段”降级为“极端错误/系统 Bug 时的兜底信号”。
+
+#### 4.3 与当前 v0.1 的边界
+
+- 本文档所描述的 v0.1 范围，仅包括：
+  - WorkflowSkill 抽象与 style_imitate 的 v0.1 实现；
+  - Runtime 级 Gate + RunOutcome 收口；
+  - Desktop/TASK_STATE 对 workflowSkills 的回灌；
+  - SKILL 合同（`skills/style_imitate/SKILL.md`）作为行为真相。
+- 真正的“节点式 workflow 编排”（即上文 4.2 所述）不在 v0.1 的 DoD 内，
+  - 会在单独的 v0.2 / Phase 4 规格中详细展开；
+  - 包括是否用子 Agent、子图（subgraph）或专用 orchestrator 来承载 style_imitate 内部状态机。
+
