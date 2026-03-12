@@ -5196,6 +5196,20 @@ fastify.post(
     2
   );
 
+  // 诊断：记录本次 lint.style 提示体量（近似 token 数）
+  try {
+    const promptChars = sys.length + user.length;
+    const approxTokens = Math.ceil(promptChars / 4);
+    (request as any)?.log?.info?.({
+      event: "lint_style_prompt_stats",
+      modelUsed: model,
+      promptChars,
+      approxPromptTokens: approxTokens,
+    }, "lint.style prompt stats");
+  } catch {
+    // ignore logging failures
+  }
+
   const parseUpstream = (text: string) => {
     let message = String(text ?? "");
     try {
@@ -6263,9 +6277,7 @@ fastify.post(
       if (m?.[0]) parsed = tryParse(m[0]);
     }
     if (!parsed) {
-      const repaired = await tryRepairLintStyleJson({ raw, reason: "json_parse_failed" });
-      if (repaired.ok) parsed = repaired.parsed;
-      // repair 失败：继续走 sanitize -> schema（会走兜底字段），尽量不要直接 tool failed
+      // repair 已禁用：直接进入 sanitize + schema 兜底
     }
     parsed = sanitizeLintParsed(parsed);
 
@@ -6379,50 +6391,8 @@ fastify.post(
         ...outWithPatch,
       });
     } catch (e: any) {
-      // schema 不合规：优先尝试“输出修复器”（小模型）；仍失败再切换备用模型
+      // schema 不合规：已禁用 JSON 修复器，直接记录错误并尝试下一个候选模型
       const schemaErr = String(e?.message ?? e);
-      const repaired = await tryRepairLintStyleJson({ raw, reason: "schema_failed", schemaError: schemaErr });
-      if (repaired.ok) {
-        const parsed2 = sanitizeLintParsed(repaired.parsed);
-        try {
-          const out2 = outSchema.parse(parsed2);
-          // 计费：仍按原始 lint.style 调用的 usage（repair 不额外计费）
-          let billing: any = null;
-          try {
-            const usage = (ret as any)?.usage ?? null;
-            const userId = typeof request.user?.sub === "string" ? String(request.user.sub).trim() : "";
-            const isAdmin = request.user?.role === "admin";
-            if (!isAdmin && userId) {
-              if (usage && typeof usage === "object") {
-                billing = await chargeUserForLlmUsage({
-                  userId,
-                  modelId: usedModelId,
-                  usage,
-                  source: "tool.lint.style",
-                  metaExtra: { stage: "lint.style", repaired: true, repairMode: "model" },
-                });
-              } else {
-                billing = { ok: false, reason: "USAGE_NOT_RETURNED" };
-              }
-            }
-          } catch (e2: any) {
-            const msg = e2?.message ? String(e2.message) : String(e2);
-            billing = { ok: false, reason: msg || "CHARGE_FAILED" };
-          }
-          return reply.send({
-            ok: true,
-            modelUsed: usedModelName,
-            timeoutMs,
-            ...(((ret as any)?.usage ?? null) ? { usage: (ret as any).usage } : {}),
-            ...(billing ? { billing } : {}),
-            ...out2,
-            repair: repaired.repairMeta,
-          });
-        } catch (e3: any) {
-          // repair 也未能通过 schema：继续尝试下一个候选模型
-        }
-      }
-
       lastErr = {
         ok: false,
         error: "INVALID_LINTER_OUTPUT_SCHEMA",
