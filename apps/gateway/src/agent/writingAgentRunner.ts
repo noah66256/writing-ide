@@ -3088,10 +3088,10 @@ export class AgentRunner {
           styleLinterLibraries: this.ctx.styleLinterLibraries,
           authorization: this.ctx.authorization ?? null,
           mainDoc: this.ctx.mainDoc,
-          // lint.style 共用主 Agent 的 LLM 配置，避免独立端点挂了导致 lint 不可用
-          llmOverride: this.ctx.baseUrl && this.ctx.apiKey && this.ctx.modelId
-            ? { baseUrl: this.ctx.baseUrl, endpoint: this.ctx.endpoint, apiKey: this.ctx.apiKey, model: this.ctx.modelId }
-            : null,
+          // lint.style 使用自身阶段配置；其它工具可共用主 Agent 的 LLM 配置
+          llmOverride: toolUse.name === "lint.style" || !this.ctx.baseUrl || !this.ctx.apiKey || !this.ctx.modelId
+            ? null
+            : { baseUrl: this.ctx.baseUrl, endpoint: this.ctx.endpoint, apiKey: this.ctx.apiKey, model: this.ctx.modelId },
           mode: this.ctx.mode,
           allowedToolNames: this.ctx.allowedToolNames,
         });

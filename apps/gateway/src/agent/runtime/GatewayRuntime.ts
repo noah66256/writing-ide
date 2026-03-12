@@ -1292,14 +1292,14 @@ export class GatewayRuntime implements AgentRuntime {
           ? cloneMainDoc(this.config.runCtx.mainDoc)
           : this.config.runCtx.mainDoc,
         llmOverride:
-          this.config.runCtx.baseUrl && this.config.runCtx.apiKey && this.config.runCtx.modelId
-            ? {
+          toolName === "lint.style" || !this.config.runCtx.baseUrl || !this.config.runCtx.apiKey || !this.config.runCtx.modelId
+            ? null
+            : {
                 baseUrl: this.config.runCtx.baseUrl,
                 endpoint: this.config.runCtx.endpoint,
                 apiKey: this.config.runCtx.apiKey,
                 model: this.config.runCtx.modelId,
-              }
-            : null,
+              },
         mode: this.config.runCtx.mode,
         allowedToolNames: this.config.runCtx.allowedToolNames,
       });
