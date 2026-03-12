@@ -5657,7 +5657,9 @@ fastify.post(
     ? [body.llmOverride!.model]
     : explicitRuntime
       ? [String(body.model ?? explicitRuntime.modelId ?? explicitRuntime.model).trim()].filter(Boolean)
-      : await (async () => {
+      : forcedLinterModelId
+        ? [forcedLinterModelId]
+        : await (async () => {
     try {
       const stages = await aiConfig.listStages();
       const s = Array.isArray(stages) ? stages.find((x: any) => String(x?.stage ?? "") === "lint.style") : null;
@@ -5690,6 +5692,16 @@ fastify.post(
   const maxIssues = Number.isFinite(body.maxIssues as any) ? Number(body.maxIssues) : 10;
   const env = await getLinterEnv();
   const timeoutMs = env.ok ? env.timeoutMs : 60_000;
+
+  // NOTE(Boss要求)：lint.style 一律固定用 gpt-5.4，避免候选模型里夹 claude 抽风。
+  // 这里不再根据 stage.modelIds 轮询多模型，而是：
+  // - 若无 llmOverride/显式 modelId，则优先用环境变量 LLM_LINTER_MODEL；
+  // - 若未配置，则回退到硬编码 "gpt-5.4"；
+  // - 若显式传入 body.model 或 llmOverride，则仍尊重调用方。
+  // 这样可以保证 style_imitate 闭环里的 lint.style 永远跑在 gpt-5.4 上。
+  const forcedLinterModelId = !hasLlmOverride && !explicitRuntime
+    ? (String(process.env.LLM_LINTER_MODEL ?? "").trim() || "gpt-5.4")
+    : null;
 
   // A/B：是否把风格库“原句 reference”下发给模型/前端。
   // 背景：reference 会被模型当成可复用素材，极易导致“把库原文贴进正文”的污染。
