@@ -20,6 +20,9 @@ export type {
   StyleWorkflowBatchAnalysis,
   SideEffectRecordV1,
 } from "./runMachine.js";
+
+export type { WorkflowSkillPhaseSnapshot, WorkflowSkillContract } from "./workflowSkills.js";
+export { getWorkflowSkillContracts, getActiveWorkflowSkills, planStyleNextStep } from "./workflowSkills.js";
 export {
   createInitialRunState,
   parseMainDocFromContextPack,

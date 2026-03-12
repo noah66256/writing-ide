@@ -15,6 +15,7 @@ import { createHash } from "node:crypto";
 import {
   analyzeStyleWorkflowBatch,
   createInitialRunState,
+  getActiveWorkflowSkills,
   isContentWriteTool,
   isStyleExampleKbSearch,
   isWriteLikeTool,

@@ -55,6 +55,13 @@
 
 ## 最近一周设计文档索引（research/specs）
 
+> 与 style_imitate / Workflow Skills 相关的关键文档（本次改动优先对齐）：
+> - `docs/specs/style-imitate-v2-clean.md` — Style 仿写 V2 合同：明确 kb → draft → lint.copy → lint.style → write 的链式闭环。
+> - `docs/specs/workflow-skills-runtime-v0.1.md` — Workflow Skills Runtime v0.1：对标 OpenClaw，将 style_imitate 收敛为显式 Workflow Skill。
+> - `docs/specs/skill-contract-openclaw-parity-v0.1.md` — Skill 合同：style_imitate 在 OpenClaw 语义下的阶段/Done 条件与 Parity 约束。
+> - `docs/research/lint-style-reliability-2026-03-12.md` — lint.style 可靠性排查：记录本次修复零调用降级问题的背景与细节。
+
+
 > 用于快速定位最近一周落盘的架构/机制类文档，避免重复踩坑或“忘了已经研究过”。详细内容请直接打开对应 md 文件。
 
 - **工具/路由/编排范式（对标 Codex / OpenClaw）**
