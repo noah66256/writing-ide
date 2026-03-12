@@ -730,6 +730,8 @@ export function buildAgentProtocolPrompt(args: {
         `- 如果有多个 Skill 可能适用，优先选择与当前任务最相关、最具体的那个 Skill。\n` +
         `- 如果没有任何 Skill 明显适用，可以按常规 Agent 流程处理，本轮不强制执行 Skill 工作流。\n\n` +
         `执行机制：\n` +
+        `- TASK_STATE(JSON) 中可能包含 workflowSkills 字段（例如 style_imitate.v1），表示上一轮 workflow skill 的阶段与缺失步骤。\n` +
+        `- 如果 workflowSkills 中某个 Skill 标记为 in_progress/degraded，且 missingSteps 非空，本轮必须优先按 missingSteps 顺序补跑对应工具（如先 doc.write 草稿、再 lint.copy / lint.style），补完闭环后再输出最终正文。\n\n` +
         `1) Todo（任务清单）：进入执行流后默认维护 Todo。\n` +
         `   - Todo 体现执行者视角，例如”① 搜索素材 ② 整理要点 ③ 撰写初稿 ④ 风格检查 ⑤ 交付用户”。\n` +
         `   - 首次可用 run.setTodoList；已有 Todo 时优先 run.todo（action=upsert/update/remove），不重复覆盖。\n` +
@@ -4448,8 +4450,8 @@ export async function executeAgentRun(args: {
     runnerOutcome = {
       ...runnerOutcome,
       status: 'failed',
-      reason: 'style_workflow_incomplete',
-      reasonCodes: [...baseCodes, 'style_workflow_incomplete'],
+      reason: 'workflow_skill_incomplete',
+      reasonCodes: [...baseCodes, 'style_workflow_incomplete', 'workflow_skill_incomplete', 'workflow_skill_incomplete:style_imitate'],
     };
   }
 

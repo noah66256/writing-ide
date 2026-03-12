@@ -884,7 +884,7 @@ function renderContextManifestV1(args: { mode: Mode; segments: ContextManifestSe
   return `CONTEXT_MANIFEST(JSON):\n${JSON.stringify(payload, null, 2)}\n\n`;
 }
 
-function renderTaskStateV1(args: { mainDoc: any; todoList: any[]; pendingArtifacts: any[] }) {
+function renderTaskStateV1(args: { mainDoc: any; todoList: any[]; pendingArtifacts: any[]; workflowSkills?: any }) {
   const mainDoc = args.mainDoc && typeof args.mainDoc === "object" ? args.mainDoc : {};
   const workflow = mainDoc && typeof (mainDoc as any).workflowV1 === "object" ? (mainDoc as any).workflowV1 : null;
   const todo = Array.isArray(args.todoList) ? args.todoList : [];
@@ -912,7 +912,7 @@ function renderTaskStateV1(args: { mainDoc: any; todoList: any[]; pendingArtifac
   const matchedArtifact = resumeArtifactId
     ? pendingArtifacts.find((item) => item.id === resumeArtifactId && item.status.toLowerCase() === "pending")
     : pendingArtifacts.find((item) => item.status.toLowerCase() === "pending");
-  const payload = {
+  const payload: any = {
     v: 1,
     runIntent: String((mainDoc as any)?.runIntent ?? "auto").trim() || "auto",
     workflow: workflow
@@ -934,6 +934,9 @@ function renderTaskStateV1(args: { mainDoc: any; todoList: any[]; pendingArtifac
       pathHint: String((resumeAction as any)?.pathHint ?? matchedArtifact?.pathHint ?? "").trim(),
     },
   };
+  if (args.workflowSkills && typeof args.workflowSkills === "object") {
+    payload.workflowSkills = args.workflowSkills;
+  }
   return `TASK_STATE(JSON):\n${JSON.stringify(payload, null, 2)}\n\n`;
 }
 
@@ -1922,6 +1925,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     mainDoc: mainDocForPack,
     todoList: runTodoForPack,
     pendingArtifacts: pendingArtifactsRaw,
+    workflowSkills: (useRunStore.getState() as any).workflowSkills ?? {},
   });
 
   const segments: ContextManifestSegmentV1[] = [];
@@ -2146,6 +2150,7 @@ export function buildChatContextPack(extra?: { referencesText?: string; userProm
     mainDoc: (useRunStore.getState() as any).mainDoc ?? {},
     todoList: (useRunStore.getState() as any).todoList ?? [],
     pendingArtifacts: pendingArtifactsRaw,
+    workflowSkills: (useRunStore.getState() as any).workflowSkills ?? {},
   });
 
   const segments: ContextManifestSegmentV1[] = [];

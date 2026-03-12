@@ -179,6 +179,10 @@ type RunState = {
   toggleKbAttachedLibrary: (id: string) => void;
   clearKbAttachedLibraries: () => void;
 
+  // Workflow Skills：上一轮运行时的闭环快照（写入 TASK_STATE，指导续跑补步骤）
+  workflowSkills?: Record<string, { status: "not_started" | "in_progress" | "completed" | "degraded"; missingSteps?: string[] }>;
+  setWorkflowSkills: (skills: Record<string, { status: "not_started" | "in_progress" | "completed" | "degraded"; missingSteps?: string[] }>) => void;
+
   // Context：常驻“引用文件/目录”列表（用于构建 REFERENCES；不随输入框清空而丢失）
   ctxRefs: CtxRefItem[];
   pendingArtifacts: PendingArtifact[];
@@ -347,6 +351,7 @@ export const useRunStore = create<RunState>()(
   ctxRefs: [],
   pendingArtifacts: [],
   kbAttachedLibraryIds: [],
+  workflowSkills: {},
 
   setMode: (mode) =>
     set((s) => {
@@ -418,6 +423,7 @@ export const useRunStore = create<RunState>()(
       todoList: [],
       ctxRefs: [],
       pendingArtifacts: [],
+      workflowSkills: {},
       dialogueSummaryByMode: { agent: "", chat: "" },
       dialogueSummaryTurnCursorByMode: { agent: 0, chat: 0 },
       memoryExtractTurnCursorByMode: { agent: 0, chat: 0 },
@@ -428,6 +434,7 @@ export const useRunStore = create<RunState>()(
       logs: [],
       isRunning: false,
       activity: null,
+      workflowSkills: {},
       // 对话清空后摘要无意义：一并清掉，避免旧摘要被注入 Context Pack 造成跑偏
       dialogueSummaryByMode: { agent: "", chat: "" },
       dialogueSummaryTurnCursorByMode: { agent: 0, chat: 0 },
@@ -521,6 +528,11 @@ export const useRunStore = create<RunState>()(
     set({ kbAttachedLibraryIds: next });
   },
   clearKbAttachedLibraries: () => set({ kbAttachedLibraryIds: [] }),
+
+  setWorkflowSkills: (skills) => {
+    const safe = skills && typeof skills === "object" ? skills : {};
+    set({ workflowSkills: safe as any });
+  },
 
   setCtxRefs: (items) => set({ ctxRefs: dedupeCtxRefs(Array.isArray(items) ? items : []) }),
   addCtxRef: (item) =>

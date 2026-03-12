@@ -1241,6 +1241,29 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           // ---- run.execution.report ----
           if (event === "run.execution.report") {
             log("info", "run.execution.report", data);
+            try {
+              const skills = Array.isArray((data as any)?.workflowSkills) ? (data as any).workflowSkills : [];
+              const map: Record<string, { status: string; missingSteps?: string[] }> = {};
+              for (const s of skills) {
+                if (!s || typeof s !== "object") continue;
+                const id = String((s as any).id ?? "").trim();
+                if (!id) continue;
+                const key = id === "style_imitate" ? "style_imitate.v1" : id + ".v1";
+                const phase = String((s as any).currentPhase ?? "").trim();
+                let status: string = "not_started";
+                if (phase === "completed") status = "completed";
+                else if (phase) status = "in_progress";
+                const missing = Array.isArray((s as any).missingSteps)
+                  ? (s as any).missingSteps.map((x: any) => String(x ?? "").trim()).filter(Boolean)
+                  : [];
+                map[key] = missing.length ? { status, missingSteps: missing } : { status };
+              }
+              if (Object.keys(map).length) {
+                (useRunStore.getState() as any).setWorkflowSkills(map);
+              }
+            } catch {
+              // ignore bad workflowSkills payload
+            }
           }
 
           // ---- assistant.start ----
