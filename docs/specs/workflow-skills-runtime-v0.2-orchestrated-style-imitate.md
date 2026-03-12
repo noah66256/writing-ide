@@ -226,3 +226,22 @@ v0.1（见 `workflow-skills-runtime-v0.1.md`）已经完成：
    - 未启用 style_imitate 的任务，不受 Orchestrator 引入的任何额外约束；
    - 旧的 StyleWorkflowViolation 报警仍然可以在异常情况下触发，用于调试。  
 
+
+
+### 7. 当前实现状态（2026-03-12）
+
+> 说明：本节描述当前代码仓库中已落地的部分，与上文的理想 DoD 对照，便于后续继续演进。
+
+- Style Workflow Runtime v0.1 已完全落地：style_imitate 作为 workflow skill，snapshot/phase/missingSteps 与 Gate 逻辑均在 Runtime 统一维护，Desktop 通过 TASK_STATE(JSON).workflowSkills 续跑补课。
+
+- v0.2 目前采用的是“轻量 Orchestrator”方案：通过 `computeStyleTurnCaps()` 在 Gateway 侧按阶段（need_style_kb / need_draft / need_copy_lint / need_style_lint / completed）收敛**每回合可见的风格工具集合**，并在 runFactory 中注入 hint，引导 Provider 按 kb → draft → lint.copy → lint.style → doc.write 的顺序执行。
+
+- 对于写作类任务 + 绑定风格库的场景：
+  - 在 Pi Agent Runtime 下，style_imitate 会自动拉起，且 per-turn allowlist 只在当前阶段暴露必要的 kb/lint/doc.write 工具；
+  - 旧的 StyleWorkflowViolation 仍作为兜底 Gate 保留，但在正常路径中显著降频（多数顺序错误会在工具白名单阶段被消掉）。
+
+- 尚未实现的部分（保留为后续 v0.3+ 升级方向）：
+  - 还没有对外暴露独立的高阶工具 `style_imitate.run`（当前依然由主 Agent 直接调用 kb.search / lint.copy / lint.style / doc.write，只是经过 per-turn orchestrator 收敛顺序）；
+  - 尚未在 Gateway 内部实现“完全由 Orchestrator 驱动、无需 Provider 自选工具”的子 Agent 版本，runOrchestratedStyleImitate 仍预留为演进挂钩。
+
+- 因此可以理解为：目前代码状态已经覆盖了本文第 5 节中 Phase A/B/C 的“Runtime 收敛 + per-turn Orchestrator + 冒烟验证”部分，而 DoD 中关于 `style_imitate.run` 高阶入口与完整子 Agent Orchestrator 的部分，会在后续版本中继续推进。
