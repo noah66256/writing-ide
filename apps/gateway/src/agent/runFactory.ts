@@ -321,6 +321,7 @@ function buildRouteDecisionV1(args: {
   ]);
   const executionPreferredRaw: string[] = [];
   const freshWebResearchTask = looksLikeFreshWebResearchTask(args.userPrompt);
+  const installOrDeployTask = looksLikeInstallOrDeployTask(args.userPrompt);
 
   if (routeIdLower === "file_delete_only") {
     executionPreferredRaw.push("delete", "project.listFiles");
@@ -339,6 +340,10 @@ function buildRouteDecisionV1(args: {
       executionPreferredRaw.push("run.setTodoList", "run.todo", "run.mainDoc.get", "kb.search");
     } else {
       executionPreferredRaw.push("run.mainDoc.get", "kb.search", "run.setTodoList");
+    }
+    // 安装/部署类任务：优先建议使用本地 runtime 工具（shell.exec/process.run）
+    if (installOrDeployTask) {
+      executionPreferredRaw.unshift("process.run", "shell.exec");
     }
   }
 
@@ -1355,6 +1360,23 @@ export function looksLikeFreshWebResearchTask(text: string): boolean {
   const isProjectOnly = /(项目|仓库|代码|文件|报错|bug|报错日志|本地)/.test(t) && !/(热点|新闻|财经|科技|时事)/.test(t);
   if (isProjectOnly) return false;
   return true;
+}
+
+export function looksLikeInstallOrDeployTask(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  // 仅在明显涉及“安装/卸载/部署/拉起服务”等语义时触发，避免把普通“更新文案/配置”误判进去。
+  const hasInstallVerb = /(安装(一下|下)?|卸载|重装|升级|更新(一下|下)?|部署|本地部署|部署到本地|拉起|拉起来|启动(一下|下)?(服务|项目|gateway)?)/i.test(
+    t,
+  );
+  if (!hasInstallVerb) return false;
+  // 排除明显纯写作/打包类的“安装包/打包出安装包”等描述（这类更偏内容生成）
+  if (/(安装包|打包(成)?安装包|生成安装包)/i.test(t)) return false;
+  // 若包含常见包管理器/CLI 关键词，则进一步确认为安装/部署任务
+  if (/(npm\s+install|pnpm\s+install|yarn\s+add|pip\s+install|brew\s+install|winget\s+install|apt(-get)?\s+install)/i.test(t)) return true;
+  // 包含“openclaw”等典型 CLI 工具名 + 安装/部署指令时，也视为安装/部署任务
+  if (/(openclaw|clawhub|gateway)/i.test(t) && hasInstallVerb) return true;
+  return hasInstallVerb;
 }
 
 export function looksLikeProjectDeliveryIntent(text: string): boolean {
