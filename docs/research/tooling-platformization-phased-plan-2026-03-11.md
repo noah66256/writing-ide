@@ -1,5 +1,11 @@
 # 工具/Skill/MCP 平台化分 Phase 路线（面向创业者/企业）
 
+> TIP（2026-03-13）：Phase2 中提到的“profile/policy pipeline”在 Crab 中已具体落地为：  
+> - gateway 层显式维护 `CORE_TOOLS` / `HIGH_RISK_TOOLS` 集合；  
+> - 通过 opMode（创作/助手）控制基础工具与高危工具的暴露，而不是再引入一套独立的 profile 维度；  
+> - Tool Retrieval/B2 仅在 MCP/插件工具空间内做检索/扩展，基础工具集合不再参与裁剪。  
+> 更细节的实现与取舍见 `docs/research/core-tools-exposure-refactor-2026-03-13.md`，本文的 Phase 拆解依然作为整体路线参考。
+
 > 目标：让「对话驱动的 AI 内容团队」在工具规模变大（几十→几百→上千）时仍然 **稳定交付、可控可审计、可配置扩展**。
 >
 > 核心问题：不能再把“工具是否可用”赌在每轮 LLM 的一次意图判断或 topK 检索上；需要把能力治理做成平台底座。
@@ -179,4 +185,3 @@
 2) Phase1：做 tools.search/tools.describe（解决“工具太多塞不进 prompt”）
 3) Phase2：上 profile/policy pipeline（平台治理）
 4) Phase3：路由到 workflow/stage（复合任务稳态）
-

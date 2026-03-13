@@ -5718,7 +5718,7 @@ fastify.post(
   const patchFallbackEnabled = patchFallbackEnabledRaw === "1" || patchFallbackEnabledRaw === "true" || patchFallbackEnabledRaw === "on";
 
   // 可靠性策略（v1.1）：
-  // - 上游偶发“不遵守 JSON / schema”会导致 lint.style 工具失败，从而让 style_gate 卡在 style_need_style（doc.write 被禁止）。
+  // - 上游偶发“不遵守 JSON / schema”会导致 lint.style 工具失败，从而让 style_gate 卡在 style_need_style（write 被禁止）。
   // - 为避免卡死：我们对输出做确定性纠偏；必要时用小模型做“结构修复”；仍失败则返回最小可用兜底结果（ok=true，score=0+high issue）。
   // - 兜底结果会让闸门判为未通过，从而进入有限次回炉→safe 降级放行（避免死循环）。
 

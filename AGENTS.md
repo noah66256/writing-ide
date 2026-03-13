@@ -60,6 +60,7 @@
 > - `docs/specs/workflow-skills-runtime-v0.1.md` — Workflow Skills Runtime v0.1：对标 OpenClaw，将 style_imitate 收敛为显式 Workflow Skill。
 > - `docs/specs/skill-contract-openclaw-parity-v0.1.md` — Skill 合同：style_imitate 在 OpenClaw 语义下的阶段/Done 条件与 Parity 约束。
 > - `docs/research/lint-style-reliability-2026-03-12.md` — lint.style 可靠性排查：记录本次修复零调用降级问题的背景与细节。
+> - `docs/research/core-tools-exposure-refactor-2026-03-13.md` — 基础工具暴露改造开工文档：把 21 个基础工具收拢为核心目录，并用 opMode（创作/助手）替代散装 if/else。
 
 
 > 用于快速定位最近一周落盘的架构/机制类文档，避免重复踩坑或“忘了已经研究过”。详细内容请直接打开对应 md 文件。
@@ -70,7 +71,10 @@
   - `docs/research/openclaw-inspired-endpoint-output-guardrails-phase-playbook-v1.md` — 多端点与输出护栏改造手册，按单核心执行+薄适配的思路收敛 Responses/Chat 等端点。
   - `docs/research/tooling-platformization-phased-plan-2026-03-11.md` — 工具/Skill/MCP 平台化分 Phase 路线，面向“工具数量级膨胀”时的整体架构。
   - `docs/specs/tool-retrieval-v0.1.md` — Tool Retrieval v0.1：对齐 Codex/OpenClaw 的工具可见性/选择范式，避免关键工具被裁掉。
+  - `docs/research/core-tools-exposure-refactor-2026-03-13.md` — 基础工具暴露改造开工文档：定义 CORE_TOOLS / HIGH_RISK_TOOLS 集合，以及 opMode → allowed tools 的映射，部分细节收敛/修正上述两篇文档中的旧设想。
+  - `docs/research/terminal-unified-exec-and-shell-tracking-codex-parity-v0.1.md` — 终端命令 & Unified Exec 跟踪改造：分 Phase 引入 Codex 式 shell.exec 结果契约、终端记录、processId 会话与 UI 呈现路线。
   - `docs/specs/skill-contract-openclaw-parity-v0.1.md` — Skill 合同化规范：把 style_imitate 等 Workflow Skill 从“软提示”升级为必须执行的工作流合同。
+  - `docs/specs/tools-fs-and-runtime-refactor-v0.1.md` — 工具面重构：统一 read/write/edit/mkdir/rename/delete，新增 shell.exec/process/cron，通过“创作模式 / 助手模式”显式划清本机命令执行边界，并定义本地 `<userData>/automations/**` 与 Gateway 多账号 cron/automations（ownerUserId + agentId）的对齐路线。
 
 - **上下文/线程/续跑架构**
   - `docs/specs/context-architecture-roadmap.md` — 上下文架构路线图：解耦 contextPack，把规则/记忆/任务主线/材料做成可预算、可观测的结构。

@@ -3,6 +3,7 @@ import { persist } from "zustand/middleware";
 import type { ProjectSnapshot } from "./projectStore";
 
 export type Mode = "agent" | "chat";
+export type OpMode = "creative" | "assistant";
 export type ToolApplyPolicy = "proposal" | "auto_apply";
 export type ToolRiskLevel = "low" | "medium" | "high";
 
@@ -132,7 +133,7 @@ export type PendingArtifact = {
   content: string;
   ifExists?: "rename" | "overwrite" | "error";
   suggestedName?: string;
-  sourceTool?: "doc.write";
+  sourceTool?: "write";
   sourceTask?: string;
   createdAt: number;
   updatedAt: number;
@@ -154,6 +155,7 @@ export function cancelActiveRun(reason = "manual_cancel") {
 
 type RunState = {
   mode: Mode;
+  opMode: OpMode;
   /** Chat 模式选中的模型（可与 Agent 分开记忆） */
   chatModel: string;
   /** Agent 模式选中的模型 */
@@ -197,6 +199,7 @@ type RunState = {
   startFreshWritingTaskBoundary: () => void;
 
   setMode: (mode: Mode) => void;
+  setOpMode: (mode: OpMode) => void;
   setModel: (model: string) => void;
   setModelForMode: (mode: "chat" | "agent", model: string) => void;
   setDialogueSummary: (mode: Mode, summary: string, cursorTurns: number) => void;
@@ -315,7 +318,7 @@ function normalizePendingArtifact(item: PendingArtifact | null | undefined): Pen
     content,
     ...(ifExists ? { ifExists: ifExists as any } : {}),
     ...(suggestedName ? { suggestedName } : {}),
-    sourceTool: "doc.write",
+    sourceTool: "write",
     ...(sourceTask ? { sourceTask } : {}),
     createdAt,
     updatedAt,
@@ -339,6 +342,7 @@ export const useRunStore = create<RunState>()(
   chatModel: "",
   agentModel: "",
   model: "",
+  opMode: "creative",
   dialogueSummaryByMode: { agent: "", chat: "" },
   dialogueSummaryTurnCursorByMode: { agent: 0, chat: 0 },
   memoryExtractTurnCursorByMode: { agent: 0, chat: 0 },
@@ -358,6 +362,7 @@ export const useRunStore = create<RunState>()(
       const nextModel = mode === "chat" ? s.chatModel || s.model : s.agentModel || s.model;
       return { mode, model: nextModel };
     }),
+  setOpMode: (opMode) => set({ opMode }),
   setModel: (model) =>
     set((s) => {
       const v = String(model ?? "").trim();
@@ -858,12 +863,14 @@ export const useRunStore = create<RunState>()(
         model: s.model,
         chatModel: s.chatModel,
         agentModel: s.agentModel,
+        opMode: s.opMode,
         kbAttachedLibraryIds: s.kbAttachedLibraryIds,
       }),
       merge: (persisted: unknown, current: RunState) => {
         const p = persisted && typeof persisted === "object" ? { ...(persisted as Record<string, unknown>) } : {};
         // 老版本可能存了 mode:"plan" 等已废弃值，新版 Gateway 只接受 "agent"|"chat"
         if (p.mode !== "agent" && p.mode !== "chat") p.mode = "agent";
+        if (p.opMode !== "creative" && p.opMode !== "assistant") p.opMode = "creative";
         return { ...current, ...p } as RunState;
       },
     },

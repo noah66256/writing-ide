@@ -11,6 +11,10 @@ import { useUpdateStore } from "./state/updateStore";
 import { useAuthStore } from "./state/authStore";
 import { useSkillStore } from "./state/skillStore";
 import { getUpdateBaseUrl } from "./agent/updateBaseUrl";
+import { getGatewayBaseUrl } from "./agent/gatewayUrl";
+import { startGatewayRun } from "./agent/gatewayAgent";
+import { useRunStore } from "./state/runStore";
+import { useConversationStore } from "./state/conversationStore";
 import { Loader2 } from "lucide-react";
 import "./state/themeStore"; // side-effect: apply theme on load
 import "./state/fontScaleStore"; // side-effect: apply font scale on load
@@ -175,6 +179,59 @@ export default function App() {
       }
     };
   }, [setDownload]);
+
+  // Automation Cron：主进程 scheduler 到点后触发一次 Agent run
+  useEffect(() => {
+    const off = window.desktop?.automation?.onCronDue?.((payload: any) => {
+      try {
+        const promptRaw = String(payload?.prompt ?? "").trim();
+        if (!promptRaw) return;
+
+        const runState = useRunStore.getState();
+        const mode = runState.mode || "agent";
+        const opMode = runState.opMode || "creative";
+        const model = String(runState.model || runState.agentModel || runState.chatModel || "").trim();
+        if (!model) {
+          // 没有选模型时，仅在对话里给出提示
+          runState.addAssistant?.("（定时任务触发失败：当前未选择模型，请先在右上角选择一个模型。）");
+          return;
+        }
+
+        const gatewayUrl = getGatewayBaseUrl();
+        const runConvId = useConversationStore.getState().activeConvId ?? undefined;
+
+        const baseline = {
+          project: useProjectStore.getState().snapshot(),
+          mainDoc: JSON.parse(JSON.stringify(runState.mainDoc ?? {})),
+          todoList: JSON.parse(JSON.stringify(runState.todoList ?? [])),
+          ctxRefs: JSON.parse(JSON.stringify(runState.ctxRefs ?? [])),
+        };
+
+        // 在当前对话里追加一条“系统用户消息”，方便溯源
+        const userText = promptRaw;
+        runState.addUser(userText, baseline as any, undefined, undefined);
+
+        const c = startGatewayRun({
+          gatewayUrl,
+          mode,
+          model,
+          prompt: promptRaw,
+          opMode,
+          ...(runConvId ? { convId: runConvId } : {}),
+        });
+        void c.done;
+      } catch (e) {
+        console.warn("[App] automation.cronDue handler failed:", e);
+      }
+    });
+    return () => {
+      try {
+        off?.();
+      } catch {
+        // ignore
+      }
+    };
+  }, []);
 
   // 初始化中：居中 loading
   if (initStatus !== "done") {

@@ -41,7 +41,7 @@ function fileKindLabel(p?: string) {
 }
 
 function diffStatus(step: ToolBlockStep): "new" | "modified" {
-  if (step.toolName === "doc.write") {
+  if (step.toolName === "write") {
     const out = step.output as any;
     if (out && typeof out.created === "boolean") return out.created ? "new" : "modified";
   }
@@ -175,7 +175,7 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
     };
   }, [step.output, step.toolName]);
 
-  // 统一提取产出文件（code.exec + doc.write）
+  // 统一提取产出文件（code.exec + write）
   const toolArtifacts = useMemo(() => {
     const out = step.output as any;
     if (!out || typeof out !== "object") return [];
@@ -191,7 +191,7 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
         }))
         .filter((a: any) => Boolean(a.absPath));
     }
-    if (step.toolName === "doc.write" && out.artifact && typeof out.artifact === "object") {
+    if (step.toolName === "write" && out.artifact && typeof out.artifact === "object") {
       const a = out.artifact;
       const absPath = String(a.absPath ?? "").trim();
       if (!absPath) return [];
@@ -235,14 +235,14 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
       applied: true,
     });
 
-    // 2) doc.write（新建草稿文件，low auto-apply，Undo=回到执行前快照）
+    // 2) write（新建草稿文件，low auto-apply，Undo=回到执行前快照）
     const snap = useProjectStore.getState().snapshot();
     const path = `drafts/run-${Date.now()}.md`;
     useProjectStore.getState().createFile(path, buildDraft(candidate));
     const undoDoc = () => useProjectStore.getState().restore(snap);
 
     useRunStore.getState().addTool({
-      toolName: "doc.write",
+      toolName: "write",
       status: "success",
       input: { path },
       output: { path },

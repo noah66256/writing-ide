@@ -224,6 +224,8 @@ export function ChatArea() {
   const pendingArtifacts = useRunStore((s) => s.pendingArtifacts);
   const mode = useRunStore((s) => s.mode);
   const model = useRunStore((s) => s.model);
+  const opMode = useRunStore((s) => s.opMode);
+  const setOpMode = useRunStore((s) => s.setOpMode);
 
   const [suggestText, setSuggestText] = useState<string>("");
   const [todoPanelCollapsed, setTodoPanelCollapsed] = useState(false);
@@ -383,7 +385,7 @@ export function ChatArea() {
       // 读取当前 activeConvId（此时可能刚被 setActiveConvId 更新）
       const runConvId = useConversationStore.getState().activeConvId ?? undefined;
       const c = startGatewayRun({
-        gatewayUrl, mode, model, prompt: cleanPrompt,
+        gatewayUrl, mode, model, prompt: cleanPrompt, opMode,
         ...(images.length ? { images } : {}),
         ...(targetAgentIds?.length ? { targetAgentIds } : {}),
         ...(activeSkillIds?.length ? { activeSkillIds } : {}),
@@ -402,7 +404,7 @@ export function ChatArea() {
         }
       });
     },
-    [mode, model],
+    [mode, model, opMode],
   );
 
   const handleAssistantQuickAction = useCallback(
@@ -448,6 +450,17 @@ export function ChatArea() {
 
   return (
     <div className="flex-1 flex flex-col min-h-0 pt-[52px]">
+      {/* 助手模式提示仅在启用时显示，避免干扰主创作体验 */}
+      {opMode === "assistant" ? (
+        <div className="w-full max-w-[var(--chat-max-width)] mx-auto px-4 pt-2 pb-1 flex justify-end">
+          <div className="inline-flex items-center gap-2 rounded-full border border-red-500/70 bg-red-500/10 px-3 py-1 text-[11px] font-medium leading-none text-red-600">
+            <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-white text-[9px] font-bold">
+              !
+            </span>
+            <span>助手模式已开启 · 可执行本机命令（高风险）</span>
+          </div>
+        </div>
+      ) : null}
       {hasMessages ? (
         /* 消息列表 */
         <div
@@ -952,17 +965,15 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   "kb.jobStatus": "查看任务进度",
   "web.search": "全网搜索",
   "web.fetch": "读取网页",
-  "doc.read": "读取文件",
-  "doc.write": "写入文件",
+  "read": "读取文件",
+  "write": "写入文件",
   "doc.previewDiff": "生成修改提案",
   "doc.splitToDir": "拆分并写入文件",
-  "doc.applyEdits": "编辑文件",
-  "doc.mkdir": "创建目录",
-  "doc.renamePath": "重命名文件",
-  "doc.deletePath": "删除文件",
+  "edit": "编辑文件",
+  "mkdir": "创建目录",
+  "rename": "重命名文件",
+  "delete": "删除文件",
   "doc.snapshot": "创建快照",
-  "doc.getSelection": "读取选区",
-  "doc.replaceSelection": "替换选区",
   "lint.style": "风格校验",
   "lint.copy": "复述风险检查",
   "run.setTodoList": "更新待办事项",
@@ -974,6 +985,12 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   "project.docRules.get": "读取文档规范",
   "file.open": "打开文件",
   "code.exec": "执行代码",
+  "shell.exec": "执行命令",
+  "process.run": "启动进程",
+  "process.list": "查看进程",
+  "process.stop": "停止进程",
+  "cron.create": "创建定时任务",
+  "cron.list": "查看定时任务",
   "memory": "读写记忆",
   "agent.config": "管理团队配置",
   "agent.config.create": "创建团队成员",
@@ -1006,8 +1023,12 @@ function summarizeToolInput(toolName: string, input: unknown): string {
     if (!raw) return "";
     try { return new URL(raw).hostname; } catch { return _trunc(raw, 28); }
   }
-  if (toolName === "doc.read" || toolName === "doc.write" || toolName === "doc.previewDiff" || toolName === "doc.splitToDir" || toolName === "doc.applyEdits") {
+  if (toolName === "read" || toolName === "write" || toolName === "doc.previewDiff" || toolName === "doc.splitToDir" || toolName === "edit") {
     return _trunc(args.path ?? args.filePath ?? args.targetPath, 40);
+  }
+  if (toolName === "shell.exec") {
+    const cmd = _trunc(args.command, 40);
+    return cmd || "";
   }
   if (toolName === "run.setTodoList") {
     const n = Array.isArray(args.items) ? args.items.length : 0;

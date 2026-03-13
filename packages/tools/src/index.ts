@@ -215,7 +215,7 @@ export const TOOL_LIST: ToolMeta[] = [
       "建议用法：tools.search 找到候选后，再 tools.describe 确认参数，再调用工具。\n" +
       "只读、无副作用。",
     args: [
-      { name: "name", required: true, desc: "工具名（例如 doc.write 或 mcp.playwright.browser_snapshot）", type: "string" },
+      { name: "name", required: true, desc: "工具名（例如 write 或 mcp.playwright.browser_snapshot）", type: "string" },
       { name: "includeSchema", desc: "是否附带完整 schema（默认 true）", type: "boolean" },
     ],
     modes: ["chat", "agent"],
@@ -736,7 +736,7 @@ export const TOOL_LIST: ToolMeta[] = [
       "【推荐工作流】（风格库已绑定且任务为写作类）：\n" +
       "1) 先 kb.search(kind=card, cardTypes=[hook,one_liner,ending,outline,thesis]) 拉套路/结构，再按需 kb.search(kind=paragraph, anchorParagraphIndexMax/anchorFromEndMax) 拉原文证据\n" +
       "2) 先产出一版候选稿（不要立刻写入文件）\n" +
-      "3) lint.style(text=候选稿) → 拿 rewritePrompt 再改一版 → 最后 doc.write/doc.applyEdits\n",
+      "3) lint.style(text=候选稿) → 拿 rewritePrompt 再改一版 → 最后 write/edit\n",
     args: [
       { name: "text", required: false, desc: "要检查的候选稿文本（text/path 二选一必填）", type: "string" },
       { name: "path", required: false, desc: "要检查的文件路径（text/path 二选一必填；会优先读取提案态内容）", type: "string" },
@@ -868,7 +868,7 @@ export const TOOL_LIST: ToolMeta[] = [
       "显式结束本次 Run（让系统立刻停机，而不是继续多跑一轮）。\n" +
       "【何时用】\n" +
       "- 你确认任务已完成，且不需要再调用任何工具\n" +
-      "- 尤其是：已完成写入（doc.write/doc.applyEdits/doc.splitToDir 等）并且 To-do 已清空/全部 done\n" +
+      "- 尤其是：已完成写入（write/edit/doc.splitToDir 等）并且 To-do 已清空/全部 done\n" +
       "【注意】调用 run.done 后，系统会生成一份\u201c执行报告\u201d并终止本次 run。",
     args: [{ name: "note", required: false, desc: "可选：完成口径/选取策略的简短备注（<=200字）", type: "string" }],
     modes: ["agent"],
@@ -888,10 +888,9 @@ export const TOOL_LIST: ToolMeta[] = [
   {
     name: "project.search",
     description:
-      "在当前项目中搜索文本（跨文件）。\n" +
-      "- 这是 IDE 级“Find in Files”的基础能力。\n" +
-      "- 默认只搜索项目内可见的文本文件（如 .md/.mdx/.txt）。\n" +
-      "- 若要限定范围，请先用 project.listFiles 观察路径，再用 paths 传入文件/目录前缀过滤。",
+      "[已弃用] 在当前项目中搜索文本（跨文件）。\n" +
+      "- 当前产品形态已不再强调 IDE 式“全项目搜索”，多数场景可直接依赖 L2 记忆索引与 doc.read。\n" +
+      "- 新任务中请避免主动使用该工具；仅为兼容历史 Run 保留，未来版本可能移除。",
     args: [
       { name: "query", required: true, desc: "搜索关键字（或正则表达式文本）", type: "string" },
       { name: "useRegex", required: false, desc: "可选：是否按正则搜索（默认 false）", type: "boolean" },
@@ -900,7 +899,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "maxResults", required: false, desc: "可选：最多返回多少条命中（默认 80，最大 500）", type: "number" },
       { name: "maxPerFile", required: false, desc: "可选：每个文件最多返回多少条命中（默认 20，最大 200）", type: "number" },
     ],
-    modes: ["chat", "agent"],
+    modes: [],
     inputSchema: {
       type: "object",
       properties: {
@@ -935,7 +934,7 @@ export const TOOL_LIST: ToolMeta[] = [
     },
   },
   {
-    name: "doc.read",
+    name: "read",
     description: "读取文件内容（path）。",
     args: [{ name: "path", required: true, desc: "文件路径（如 drafts/draft.md）", type: "string" }],
     modes: ["chat", "agent"],
@@ -959,14 +958,14 @@ export const TOOL_LIST: ToolMeta[] = [
 
   },
   {
-    name: "doc.mkdir",
+    name: "mkdir",
     description: "创建目录（path）。用于新建文件夹/目录结构。",
     args: [{ name: "path", required: true, desc: "目录路径（如 drafts/ 或 assets/images/）", type: "string" }],
     modes: ["agent"],
     inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: true },
   },
   {
-    name: "doc.renamePath",
+    name: "rename",
     description: "重命名/移动 文件或目录（fromPath → toPath）。默认自动执行（可 Undo 回滚）。",
     args: [
       { name: "fromPath", required: true, desc: "源路径（文件或目录）", type: "string" },
@@ -981,7 +980,7 @@ export const TOOL_LIST: ToolMeta[] = [
     },
   },
   {
-    name: "doc.deletePath",
+    name: "delete",
     description: "删除文件或目录（path）。高风险操作会先在对话中确认，确认后自动删除；支持 Undo 回滚。",
     args: [{ name: "path", required: true, desc: "文件或目录路径", type: "string" }],
     modes: ["agent"],
@@ -989,11 +988,7 @@ export const TOOL_LIST: ToolMeta[] = [
   },
   {
     name: "doc.snapshot",
-    description:
-      "管理项目快照（用于回滚/Undo）。\n" +
-      "action=create：创建快照（可选 label 备注）。\n" +
-      "action=list：列出快照列表（只读）。\n" +
-      "action=restore：恢复到指定快照（传 snapshotId）。高风险操作会先确认。",
+    description: "管理项目快照（用于回滚/Undo）。action=create：创建快照（可选 label 备注）。action=list：列出快照列表（只读）。action=restore：恢复到指定快照（传 snapshotId）。高风险操作会先确认。",
     args: [
       { name: "action", required: true, desc: "操作类型: create|list|restore", type: "string" },
       { name: "label", desc: "create 时的快照备注（可选）", type: "string" },
@@ -1036,7 +1031,7 @@ export const TOOL_LIST: ToolMeta[] = [
     },
   },
   {
-    name: "doc.write",
+    name: "write",
     description: "写入文件（path, content）。高风险写入会先在对话中确认，确认后自动执行；支持 Undo 回滚。",
     args: [
       { name: "path", required: true, desc: "文件路径", type: "string" },
@@ -1088,7 +1083,7 @@ export const TOOL_LIST: ToolMeta[] = [
   },
   {
     name: "doc.splitToDir",
-    description: "\u5c06\u4e00\u4e2a\u5927\u6587\u6863\u6309\u201c\u6807\u9898/\u6587\u6848(\u6b63\u6587)\u201d\u5757\u5206\u5272\u6210\u591a\u7bc7\uff0c\u5e76\u5199\u5165\u76ee\u6807\u6587\u4ef6\u5939\uff08\u4e2d\u98ce\u9669\u9ed8\u8ba4\u81ea\u52a8\u5199\u5165\uff0c\u652f\u6301 Undo \u56de\u6eda\uff09\u3002",
+    description: "将一个大文档按“标题/文案(正文)”块分割成多篇，并写入目标文件夹（中风险默认自动写入，支持 Undo 回滚）。",
     args: [
       { name: "path", required: true, desc: "源文件路径（如 直男财经.md）", type: "string" },
       { name: "targetDir", required: true, desc: "目标目录（如 直男财经/）", type: "string" },
@@ -1097,22 +1092,8 @@ export const TOOL_LIST: ToolMeta[] = [
     inputSchema: { type: "object", properties: { path: { type: "string" }, targetDir: { type: "string" } }, required: ["path", "targetDir"], additionalProperties: true },
   },
   {
-    name: "doc.getSelection",
-    description: "获取编辑器当前选区内容。",
-    args: [],
-    modes: ["agent"],
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-  },
-  {
-    name: "doc.replaceSelection",
-    description: "替换当前选区为 text（可 Undo）。",
-    args: [{ name: "text", required: true, desc: "替换后的文本", type: "string" }],
-    modes: ["agent"],
-    inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"], additionalProperties: true },
-  },
-  {
-    name: "doc.applyEdits",
-    description: "对指定文件应用一组 TextEdit（中风险默认自动写入，支持 Undo 回滚）。",
+    name: "edit",
+    description: "对指定文件应用一组 TextEdit（增量编辑，支持 Undo 回滚）。",
     args: [
       { name: "path", required: false, desc: "文件路径（默认 activePath）", type: "string" },
       { name: "edits", required: true, desc: "JSON 数组：TextEdit[]", type: "array" },
@@ -1184,6 +1165,163 @@ export const TOOL_LIST: ToolMeta[] = [
             },
           },
         },
+      },
+    },
+  },
+  {
+    name: "shell.exec",
+    description: "在项目工作目录中执行命令（高风险）。主要用于运行测试脚本、构建命令或安装工具；慎用：可能修改本机环境，通常只在明确需要时调用。",
+    args: [
+      { name: "command", required: true, desc: "命令名或完整命令行（如 npm 或 npm run test）", type: "string" },
+      { name: "args", required: false, desc: "可选：命令参数数组", type: "array" },
+      { name: "timeoutMs", required: false, desc: "可选：超时（毫秒），默认 120000，最大 600000", type: "number" },
+    ],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        command: { type: "string" },
+        args: { type: "array", items: { type: "string" } },
+        timeoutMs: { type: "number" },
+      },
+      required: ["command"],
+      additionalProperties: true,
+    },
+    outputSchema: {
+      type: "object",
+      description: "Shell 执行结果",
+      properties: {
+        ok: { type: "boolean", description: "是否执行成功（exitCode===0）" },
+        exitCode: { type: "number", description: "进程退出码" },
+        stdout: { type: "string", description: "标准输出（可能截断）" },
+        stderr: { type: "string", description: "标准错误（可能截断）" },
+        error: { type: "string", description: "启动失败或超时时的错误信息" },
+        timedOut: { type: "boolean", description: "是否因为超时被终止" },
+      },
+    },
+  },
+  {
+    name: "process.run",
+    description: "启动一个长时间运行的本地进程（仅管理由 Crab 自己启动的进程）。",
+    args: [
+      { name: "command", required: true, desc: "命令名或完整命令行", type: "string" },
+      { name: "args", required: false, desc: "命令参数数组", type: "array" },
+      { name: "cwd", required: false, desc: "可选：工作目录（默认项目目录）", type: "string" },
+    ],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        command: { type: "string" },
+        args: { type: "array", items: { type: "string" } },
+        cwd: { type: "string" },
+      },
+      required: ["command"],
+      additionalProperties: true,
+    },
+    outputSchema: {
+      type: "object",
+      description: "进程启动结果",
+      properties: {
+        ok: { type: "boolean" },
+        id: { type: "string", description: "Crab 内部进程 ID" },
+        pid: { type: "number", description: "操作系统进程 PID" },
+        error: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "process.list",
+    description: "列出当前由 Crab 启动并跟踪的本地进程。",
+    args: [],
+    modes: ["agent"],
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    outputSchema: {
+      type: "object",
+      description: "进程列表",
+      properties: {
+        ok: { type: "boolean" },
+        processes: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string" },
+              pid: { type: "number" },
+              command: { type: "string" },
+              cwd: { type: "string" },
+              status: { type: "string" },
+            },
+          },
+        },
+      },
+    },
+  },
+  {
+    name: "process.stop",
+    description: "停止一个由 Crab 启动并跟踪的本地进程（仅限自身启动的进程）。",
+    args: [
+      { name: "id", required: true, desc: "Crab 内部进程 ID", type: "string" },
+    ],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string" } },
+      required: ["id"],
+      additionalProperties: false,
+    },
+    outputSchema: {
+      type: "object",
+      description: "停止结果",
+      properties: {
+        ok: { type: "boolean" },
+        id: { type: "string" },
+        stopped: { type: "boolean" },
+        error: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "cron.create",
+    description: "创建一个基于本地 automations 的简单定时任务（封装 Codex automation）。",
+    args: [
+      { name: "name", required: true, desc: "任务名称", type: "string" },
+      { name: "prompt", required: true, desc: "任务说明/要做的事", type: "string" },
+      { name: "rrule", required: true, desc: "调度规则（如 FREQ=WEEKLY;BYDAY=MO;BYHOUR=9;BYMINUTE=0）", type: "string" },
+    ],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        prompt: { type: "string" },
+        rrule: { type: "string" },
+      },
+      required: ["name", "prompt", "rrule"],
+      additionalProperties: true,
+    },
+    outputSchema: {
+      type: "object",
+      description: "定时任务创建结果",
+      properties: {
+        ok: { type: "boolean" },
+        id: { type: "string" },
+        error: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "cron.list",
+    description: "列出当前本地 automations 中与项目相关的定时任务。",
+    args: [],
+    modes: ["agent"],
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    outputSchema: {
+      type: "object",
+      description: "定时任务列表",
+      properties: {
+        ok: { type: "boolean" },
+        automations: { type: "array", items: { type: "object" } },
       },
     },
   },
@@ -1435,6 +1573,5 @@ export function collectToolSchemaIssues(toolList: ToolMeta[] = TOOL_LIST): ToolS
   }
   return out;
 }
-
 
 

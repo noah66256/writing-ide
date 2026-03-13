@@ -123,7 +123,7 @@ export function planStyleNextStep(snapshot: WorkflowSkillPhaseSnapshot): string 
   if (snapshot.id !== "style_imitate") return null;
   const phase = snapshot.currentPhase;
   if (phase === "need_style_kb") return "kb.search";
-  if (phase === "need_draft") return "doc.write";
+  if (phase === "need_draft") return "write";
   if (phase === "need_copy_lint") return "lint.copy";
   if (phase === "need_style_lint") return "lint.style";
   return null;

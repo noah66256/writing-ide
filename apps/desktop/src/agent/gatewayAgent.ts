@@ -1,5 +1,5 @@
 import { useProjectStore } from "../state/projectStore";
-import { useRunStore, type ImageAttachment, type Mode } from "../state/runStore";
+import { useRunStore, type ImageAttachment, type Mode, type OpMode } from "../state/runStore";
 import { useKbStore } from "../state/kbStore";
 import { useAuthStore } from "../state/authStore";
 import { facetLabel, getFacetPack } from "../kb/facets";
@@ -38,6 +38,7 @@ export type GatewayRunArgs = {
   mode: Mode;
   model: string;
   prompt: string;
+  opMode?: OpMode;
   targetAgentId?: string;
   targetAgentIds?: string[];
   activeSkillIds?: string[];
@@ -249,8 +250,9 @@ export function humanizeToolActivity(name: string, args: Record<string, unknown>
   if (tool === "run.done") return "思考中…";
   if (tool === "run.mainDoc.get" || tool === "run.mainDoc.update") return "思考中…";
   if (tool === "kb.search") return "正在搜索资料…";
-  if (tool === "doc.read") return "正在读取文件…";
-  if (tool === "doc.write" || tool === "doc.previewDiff" || tool === "doc.splitToDir") return "正在整理结果…";
+  if (tool === "read") return "正在读取文件…";
+  if (tool === "shell.exec") return "正在执行命令…";
+  if (tool === "write" || tool === "doc.previewDiff" || tool === "doc.splitToDir") return "正在整理结果…";
   if (tool === "web.search") {
     const q = oneLine((args as any)?.query ?? (args as any)?.q ?? (args as any)?.keyword, 36);
     return q ? `正在全网搜索：${q}` : "正在全网搜索…";
@@ -341,7 +343,7 @@ export async function buildReferencesTextFromRefs(refs: Ref[]) {
 
   const parts: string[] = [];
   pushLimited(
-    `REFERENCES（来自用户输入中的 @{} 引用；已提供正文，无需再调用 doc.read）：\n`,
+    `REFERENCES（来自用户输入中的 @{} 引用；已提供正文，无需再调用 read）：\n`,
     parts,
   );
 
@@ -1864,17 +1866,17 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
       if (st.applyPolicy !== "proposal") continue;
       if (st.applied === true) continue;
       if (st.status === "undone") continue;
-      if (st.toolName === "doc.write") {
+      if (st.toolName === "write") {
         out.push({
-          toolName: "doc.write",
+          toolName: "write",
           path: typeof st.input?.path === "string" ? st.input.path : typeof st.output?.path === "string" ? st.output.path : undefined,
           note: typeof st.output?.preview?.note === "string" ? st.output.preview.note : undefined,
         });
         continue;
       }
-      if (st.toolName === "doc.applyEdits") {
+      if (st.toolName === "edit") {
         out.push({
-          toolName: "doc.applyEdits",
+          toolName: "edit",
           path: typeof st.output?.path === "string" ? st.output.path : typeof st.input?.path === "string" ? st.input.path : undefined,
           note: typeof st.output?.preview?.note === "string" ? st.output.preview.note : undefined,
         });
@@ -1901,7 +1903,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   })();
   const pendingSection = pendingProposals.length
     ? `PENDING_FILE_PROPOSALS(JSON):\n${JSON.stringify(pendingProposals, null, 2)}\n\n` +
-      `提示：存在未 Keep 的"文件提案"。后续若调用 doc.read 读取对应文件，系统会优先返回"提案态最新内容"（不要求先 Keep）。\n\n`
+      `提示：存在未 Keep 的"文件提案"。后续若调用 read 读取对应文件，系统会优先返回"提案态最新内容"（不要求先 Keep）。\n\n`
     : "";
 
   const pendingArtifactsRaw = (((useRunStore.getState() as any).pendingArtifacts ?? []) as any[])
@@ -2076,7 +2078,7 @@ ${rawProjectMemory}
     content:
       `注意：\n` +
       `- 已提供当前编辑器选区（EDITOR_SELECTION）。若用户说"改写我选中的这段"，优先用该选区。\n` +
-      `- 如需文件正文请调用 doc.read；如需刷新选区也可调用 doc.getSelection。\n` +
+      `- 如需文件正文请调用 read。\n` +
       `- 本次 Context Pack 仅注入少量最近对话片段（RECENT_DIALOGUE），不是完整历史；关键决策请写入 Main Doc（run.mainDoc.update），历史素材请用 @{} 显式引用。\n\n`,
     priority: "p3",
     trusted: true,
@@ -2346,6 +2348,7 @@ export function startGatewayRun(args: {
   mode: Mode;
   model: string;
   prompt: string;
+  opMode?: OpMode;
   targetAgentId?: string;
   targetAgentIds?: string[];
   activeSkillIds?: string[];

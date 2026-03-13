@@ -477,7 +477,7 @@ async function scenario9_todoGateFailsWithoutTodo() {
     const { runner, events } = buildRunner({
       apiType: "openai-completions",
       endpoint: "/v1/chat/completions",
-      allowedToolNames: ["run.setTodoList", "kb.search", "doc.write"],
+      allowedToolNames: ["run.setTodoList", "kb.search", "write"],
       maxTurns: 3,
       executionContract: {
         required: true,

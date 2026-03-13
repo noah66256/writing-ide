@@ -1,5 +1,11 @@
 # MCP 分层工具选择范式调研（系统工具 + MCP Server + Tool，v1）
 
+> TIP（2026-03-13）：本文关于“系统工具 + MCP Server + Tool 三层选择”的方向依然成立，但在 Crab 中：  
+> - 系统工具集合以后以 gateway 层的 `CORE_TOOLS` 为准，不再允许在 Tool Retrieval/allowlist 中被裁剪；  
+> - MCP/插件工具依旧按 server → tool 逐层选择/检索，避免与基础工具竞争 top-K 配额；  
+> - 相关实现细节见 `docs/research/core-tools-exposure-refactor-2026-03-13.md`。  
+> 本文其余分析可继续作为分层选择策略的背景与设计参考。
+
 > 目标：验证“不要把系统工具和所有 MCP 工具直接摊平成一个大列表统一裁剪；而应先选系统工具集合 + MCP Server 集合，再从已选 server 中展开/筛选具体 tool”这一假设是否成立，并给出 **OpenClaw vs OpenAI/Codex** 对当前项目的聚焦选型结论。
 
 ---

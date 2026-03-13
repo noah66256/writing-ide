@@ -80,7 +80,7 @@ const COMPOSITE_PHASE_SPECS: Record<CompositeTaskPhaseKind, {
   project_read: {
     title: "项目读取",
     allowedServerFamilies: [],
-    allowedToolHints: ["project.search", "doc.read", "project.listFiles"],
+    allowedToolHints: ["project.search", "read", "project.listFiles"],
     successCriteria: ["read_required_project_context"],
     budget: { maxTurns: 8, maxToolCalls: 12 },
   },
@@ -108,7 +108,7 @@ const COMPOSITE_PHASE_SPECS: Record<CompositeTaskPhaseKind, {
   project_delivery: {
     title: "项目写入交付",
     allowedServerFamilies: [],
-    allowedToolHints: ["doc.write", "doc.mkdir"],
+    allowedToolHints: ["write", "mkdir"],
     successCriteria: ["files_written"],
     budget: { maxTurns: 8, maxToolCalls: 10 },
   },

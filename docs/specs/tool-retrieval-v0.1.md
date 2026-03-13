@@ -1,5 +1,12 @@
 # 工具检索（Tool Retrieval）v0.1（B0-B2）
 
+> TIP（2026-03-13）：本规范中关于“coreAlwaysOn”如何具体落地的部分，已由  
+> `docs/research/core-tools-exposure-refactor-2026-03-13.md` 更新为：  
+> - 核心基础工具集合由 gateway 层显式的 `CORE_TOOLS` 常量定义；  
+> - B2 阶段对 `CORE_TOOLS` 不再做裁剪，仅在 MCP/插件工具空间内做检索/扩展；  
+> - opMode（创作/助手）通过 `getAllowedToolsForOpMode` 控制基础工具与高危工具（`HIGH_RISK_TOOLS`）的暴露。  
+> 本文的其余部分（尤其是 B0/B1/B2 分段观测与自愈策略）依然有效，具体实现以上述新文档为准。
+
 > 目标：对齐 Codex/OpenClaw 的“工具可用性/选择”范式，降低“工具接了但本轮看不到”的随机性；同时不与现有 L1/L2/L3 上下文分槽与 compact 机制冲突。
 
 ## 背景与问题

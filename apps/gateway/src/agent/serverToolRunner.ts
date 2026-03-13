@@ -516,7 +516,7 @@ export async function executeServerToolOnGateway(args: {
       if (fieldChars > MAX_FIELD_CHARS) {
         return {
           ok: false as const,
-          error: `MAIN_DOC_FIELD_TOO_LARGE: 字段 "${key}" 长度 ${fieldChars} 超过 ${MAX_FIELD_CHARS}。mainDoc 只存摘要/约束，请用 doc.write 存储草稿或 lint 结果。`,
+          error: `MAIN_DOC_FIELD_TOO_LARGE: 字段 "${key}" 长度 ${fieldChars} 超过 ${MAX_FIELD_CHARS}。mainDoc 只存摘要/约束，请用 write 存储草稿或 lint 结果。`,
         };
       }
     }
@@ -527,7 +527,7 @@ export async function executeServerToolOnGateway(args: {
     if (mergedChars > MAX_MAIN_DOC_CHARS) {
       return {
         ok: false as const,
-        error: `MAIN_DOC_TOO_LARGE: mainDoc 总长度 ${mergedChars} 超过 ${MAX_MAIN_DOC_CHARS}。请把草稿/中间产物用 doc.write 写入文件。`,
+        error: `MAIN_DOC_TOO_LARGE: mainDoc 总长度 ${mergedChars} 超过 ${MAX_MAIN_DOC_CHARS}。请把草稿/中间产物用 write 写入文件。`,
       };
     }
 

@@ -602,16 +602,18 @@ export class GatewayRuntime implements AgentRuntime {
   }
 
   private _semanticKindForTool(toolName: string): SideEffectRecordV1["semanticKind"] {
-    if (toolName === "doc.applyEdits" || toolName === "doc.replaceSelection" || toolName === "doc.restoreSnapshot") {
+    if (toolName === "edit" || toolName === "doc.restoreSnapshot") {
       return "doc_edit";
     }
-    if (toolName === "doc.write" || toolName === "doc.splitToDir" || toolName === "code.exec") {
+    if (toolName === "write" || toolName === "doc.splitToDir" || toolName === "code.exec") {
       return "artifact_write";
     }
     return "other";
   }
 
   private _isDeliveryCandidateTool(toolName: string): boolean {
+
+    const opMode = (this.config.runCtx as any).opMode === "assistant" ? "assistant" : "creative";
     return isContentWriteTool(toolName) || toolName === "doc.snapshot" || toolName === "code.exec";
   }
 
@@ -902,7 +904,7 @@ export class GatewayRuntime implements AgentRuntime {
     // Style_imitate：当风格闭环未完成且仅产生纯文本输出时，禁止模型“自然结束”，注入 runtime_hint 促使其按 Skill 闭环补齐。
     // - 仅在 style skill 激活且为写作任务时生效；
     // - 依赖 RunState.workflowRetryBudget 控制最大重试次数，避免死循环；
-    // - 提示内容明确要求执行：kb.search → 草稿 draft → lint.copy → lint.style → doc.write/doc.applyEdits。
+    // - 提示内容明确要求执行：kb.search → 草稿 draft → lint.copy → lint.style → write/edit。
     if (
       styleSkillActive &&
       gates.styleGateEnabled &&
@@ -923,8 +925,8 @@ export class GatewayRuntime implements AgentRuntime {
           const item: CanonicalTranscriptItem = {
             kind: "runtime_hint",
             text:
-              "当前已启用 style_imitate 风格仿写 Skill，但尚未按 kb.search 样例 → 草稿 draft → lint.copy → lint.style → doc.write/doc.applyEdits 完整走完闭环。\n" +
-              "请按以下顺序执行工具：先调用 kb.search 从风格库检索模板/规则卡，再输出候选草稿，然后依次调用 lint.copy 和 lint.style 进行审计，最后再用 doc.write 或 doc.applyEdits 落盘。",
+              "当前已启用 style_imitate 风格仿写 Skill，但尚未按 kb.search 样例 → 草稿 draft → lint.copy → lint.style → write/edit 完整走完闭环。\n" +
+              "请按以下顺序执行工具：先调用 kb.search 从风格库检索模板/规则卡，再输出候选草稿，然后依次调用 lint.copy 和 lint.style 进行审计，最后再用 write 或 edit 落盘。",
             reasonCodes: ["style_workflow_followup"],
           };
           try {
@@ -1160,6 +1162,31 @@ export class GatewayRuntime implements AgentRuntime {
           message: `工具 "${toolName}" 在当前阶段不可用，请使用其他工具。`,
         },
         executedBy: "gateway",
+      };
+    }
+
+    const opMode = (this.config.runCtx as any).opMode === "assistant" ? "assistant" : "creative";
+    const runtimeHighRiskTools = new Set<string>(["shell.exec", "process.run", "process.list", "process.stop", "cron.create", "cron.list"]);
+    if (opMode !== "assistant" && runtimeHighRiskTools.has(toolName)) {
+      this.config.runCtx.writeEvent("run.notice", {
+        turn: this.turn,
+        kind: "warn",
+        title: "AssistantModeRequired",
+        message: "当前为创作模式(opMode=" + opMode + ")，已拦截高风险运行时工具调用：" + toolName,
+        detail: { toolName, opMode },
+      });
+      return {
+        ok: false,
+        output: {
+          ok: false,
+          error: "ASSISTANT_MODE_REQUIRED",
+          message: "当前为创作模式，禁止执行 shell.exec / process.* / cron.* 等高风险本机操作；如确需执行，请先在桌面端切换到“助手模式”后再重试。",
+          next_actions: [
+            "如确需执行命令，请先在桌面端显式开启助手模式",
+            "助手模式开启后，可明确说明要执行的命令及目的",
+          ],
+        },
+        executedBy: "desktop",
       };
     }
 
@@ -1650,7 +1677,7 @@ export class GatewayRuntime implements AgentRuntime {
               const violation = String(batch.violation);
               const note = [
                 "【StyleWorkflow】检测到风格闭环步骤顺序不合理（violation=" + violation + "）。",
-                "请按\"先从风格库拉模板 kb.search → 写出候选稿 → 运行 lint.copy（防复用）→ 运行 lint.style（风格校验）→ 最后 doc.write/doc.applyEdits 落盘\"的顺序调整工具调用。",
+                "请按\"先从风格库拉模板 kb.search → 写出候选稿 → 运行 lint.copy（防复用）→ 运行 lint.style（风格校验）→ 最后 write/edit 落盘\"的顺序调整工具调用。",
               ].join("\n");
 
               this.config.runCtx.writeEvent("run.notice", {
@@ -1693,7 +1720,7 @@ export class GatewayRuntime implements AgentRuntime {
                 message: note,
                 path: undefined,
                 next_actions: [
-                  "按提示调整 kb.search / lint.copy / lint.style / doc.write 的顺序",
+                  "按提示调整 kb.search / lint.copy / lint.style / write 的顺序",
                 ],
                 turn: this.turn,
               });
@@ -2214,7 +2241,7 @@ export class GatewayRuntime implements AgentRuntime {
       this._recordSideEffect(toolName, toolArgs, result);
       this.runState.toolLoopGuardReason = null;
 
-      // Style_imitate：允许首轮 doc.write/doc.applyEdits 作为“候选稿”，视为已产生 draft
+      // Style_imitate：允许首轮 write/edit 作为“候选稿”，视为已产生 draft
       try {
         const gates: any = this.config.runCtx.gates ?? {};
         if (!this.runState.hasDraftText && gates.styleGateEnabled && gates.lintGateEnabled && this.runState.hasStyleKbSearch) {

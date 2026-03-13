@@ -81,7 +81,7 @@ function buildHint(snapshot: WorkflowSkillPhaseSnapshot, state: RunState, nextTo
   if (phase === "need_draft") {
     return [
       "style_imitate 编排阶段：风格样例已具备，现在先产出候选草稿。",
-      "- 只调用 doc.write 生成候选稿（draft），不要直接宣称终稿完成。",
+      "- 只调用 write 生成候选稿（draft），不要直接宣称终稿完成。",
       "- 草稿应服务于后续 lint.copy / lint.style，不要跳过审计。",
     ].join("\n");
   }
@@ -90,7 +90,7 @@ function buildHint(snapshot: WorkflowSkillPhaseSnapshot, state: RunState, nextTo
     if (lastCopyLint && !Boolean((state as any).copyLintPassed)) {
       return [
         "style_imitate 编排阶段：copy lint 尚未通过，先改稿再复检。",
-        "- 优先使用 doc.applyEdits（或必要时 doc.write）根据上轮 lint.copy 的 rewritePrompt/重合风险做降重。",
+        "- 优先使用 edit（或必要时 write）根据上轮 lint.copy 的 rewritePrompt/重合风险做降重。",
         "- 改完后再调用 lint.copy 复检；不要提前进入 lint.style 或终稿写入。",
       ].join("\n");
     }
@@ -105,7 +105,7 @@ function buildHint(snapshot: WorkflowSkillPhaseSnapshot, state: RunState, nextTo
     if (lastStyleLint && !Boolean((state as any).styleLintPassed)) {
       return [
         "style_imitate 编排阶段：style lint 尚未通过，先按风格问题清单修稿。",
-        "- 优先使用 doc.applyEdits（或必要时 doc.write）根据上轮 lint.style 的 issues/rewritePrompt 改稿。",
+        "- 优先使用 edit（或必要时 write）根据上轮 lint.style 的 issues/rewritePrompt 改稿。",
         "- 改完后再调用 lint.style 复检；不要直接终稿写入。",
       ].join("\n");
     }
@@ -118,8 +118,8 @@ function buildHint(snapshot: WorkflowSkillPhaseSnapshot, state: RunState, nextTo
 
   return [
     "style_imitate 编排阶段：闭环已完成，可以进入交付。",
-    "- 允许调用 doc.write / doc.applyEdits 落盘终稿，并最终 run.done。",
-    nextTool ? `- 当前建议优先动作：${nextTool}` : "- 当前建议优先动作：doc.write（终稿）或 run.done。",
+    "- 允许调用 write / edit 落盘终稿，并最终 run.done。",
+    nextTool ? `- 当前建议优先动作：${nextTool}` : "- 当前建议优先动作：write（终稿）或 run.done。",
   ].join("\n");
 }
 
@@ -155,24 +155,24 @@ export function computeStyleTurnCaps(args: {
   if (phase === "need_style_kb") {
     addIfAllowed("kb.search");
   } else if (phase === "need_draft") {
-    addIfAllowed("doc.write");
+    addIfAllowed("write");
   } else if (phase === "need_copy_lint") {
     const hasPriorCopyLint = Boolean((args.runState as any).lastCopyLint);
     if (hasPriorCopyLint) {
-      addIfAllowed("doc.applyEdits");
-      addIfAllowed("doc.write");
+      addIfAllowed("edit");
+      addIfAllowed("write");
     }
     addIfAllowed("lint.copy");
   } else if (phase === "need_style_lint") {
     const hasPriorStyleLint = Boolean((args.runState as any).lastStyleLint);
     if (hasPriorStyleLint) {
-      addIfAllowed("doc.applyEdits");
-      addIfAllowed("doc.write");
+      addIfAllowed("edit");
+      addIfAllowed("write");
     }
     addIfAllowed("lint.style");
   } else {
-    addIfAllowed("doc.write");
-    addIfAllowed("doc.applyEdits");
+    addIfAllowed("write");
+    addIfAllowed("edit");
   }
 
   const ordered = uniq(Array.from(allowed));

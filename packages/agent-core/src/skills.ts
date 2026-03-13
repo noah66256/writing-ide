@@ -174,8 +174,8 @@ export const STYLE_IMITATE_SKILL: SkillManifest = {
   toolCaps: {
     allowTools: [
       "kb.search",
-      "doc.write",
-      "doc.applyEdits",
+      "write",
+      "edit",
       "lint.copy",
       "lint.style",
     ],

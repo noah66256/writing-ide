@@ -75,6 +75,9 @@ const HISTORY_FILENAME = "conversations.v1.json";
 const HISTORY_PENDING_FILENAME = "conversations.pending.v1.json";
 const HISTORY_BAK_SUFFIX = ".bak";
 
+const AUTOMATIONS_DIRNAME = "automations";
+const AUTOMATIONS_STATE_FILENAME = "automations.state.json";
+
 let mainWindow = null;
 let recentProjects = [];
 let watcher = null;
@@ -87,6 +90,11 @@ let marketplaceManager = null;  // Marketplace 安装管理器
 let appSettings = {};  // 应用级设置（含浏览器路径等）
 let appSettingsModules = null;  // { loadSettings, saveSettings, detectBrowser }
 let codeExecManager = null;  // 代码执行管理器（Python 沙箱执行）
+// 进程管理器：仅跟踪由 Crab 启动的子进程
+const processTable = new Map(); // id -> { id,pid,command,cwd,status,startedAt,endedAt,exitCode,signal,lastError,child }
+let processSeq = 0;
+// Cron 调度器定时器（Desktop 本地版 v0.1）
+let automationCronTimer = null;
 
 /**
  * 差量更新 skill-managed MCP Server：增删改对齐到最新的 loaded skills。
@@ -605,6 +613,392 @@ async function resolveHistoryFileForWrite() {
     return { dir: fallback, file: p2, used: "fallback" };
   }
   throw new Error("NO_HISTORY_DIR");
+}
+
+async function cronTriggerAutomationRun(automation, now) {
+  try {
+    if (!mainWindow) return;
+    const payload = {
+      id: automation.id || "",
+      name: automation.name || "",
+      prompt: automation.prompt || "",
+      rrule: automation.rrule || "",
+      status: automation.status || "ACTIVE",
+      cwds: Array.isArray(automation.cwds) ? automation.cwds : [],
+      created_at: automation.created_at || null,
+      updated_at: automation.updated_at || null,
+      file: automation.file || null,
+      ts: now.toISOString(),
+    };
+    mainWindow.webContents.send("automation.cronDue", payload);
+  } catch (e) {
+    console.warn("[electron] cronTriggerAutomationRun failed:", e?.message ?? e);
+  }
+}
+
+async function cronTickOnce() {
+  const now = new Date();
+  let automations = [];
+  try {
+    const files = await listAutomationFiles();
+    for (const item of files) {
+      try {
+        const raw = await fsp.readFile(item.file, "utf-8");
+        const data = parseAutomationToml(raw, item.id);
+        automations.push({
+          id: data.id || item.id,
+          name: data.name || "",
+          prompt: data.prompt || "",
+          rrule: data.rrule || "",
+          status: (data.status || "ACTIVE").toUpperCase(),
+          cwds: Array.isArray(data.cwds) ? data.cwds : [],
+          created_at: data.created_at || null,
+          updated_at: data.updated_at || null,
+          file: item.file,
+        });
+      } catch {
+        // ignore broken file
+      }
+    }
+  } catch (e) {
+    console.warn("[electron] cronTickOnce listAutomationFiles failed:", e?.message ?? e);
+    automations = [];
+  }
+
+  if (!automations.length) return;
+
+  const state = await readAutomationState();
+  const nowMs = now.getTime();
+
+  for (const a of automations) {
+    if (a.status === "DISABLED") continue;
+    const st = state[a.id] && typeof state[a.id] === "object" ? state[a.id] : {};
+    const runCount = Number(st.runCount ?? 0) || 0;
+    if (st.completed) continue;
+
+    const rrule = String(a.rrule || "").trim();
+    if (!rrule) continue;
+
+    let nextRun = null;
+    if (st.nextRunAt) {
+      const t = new Date(st.nextRunAt);
+      if (Number.isFinite(t.getTime())) nextRun = t;
+    }
+    if (!nextRun) {
+      nextRun = computeNextRunFromRrule({
+        rrule,
+        now,
+        lastRunAt: typeof st.lastRunAt === "string" ? st.lastRunAt : null,
+        runCount,
+      });
+    }
+
+    if (!nextRun) {
+      st.completed = true;
+      state[a.id] = st;
+      continue;
+    }
+
+    const nextMs = nextRun.getTime();
+    if (nextMs <= nowMs + 1_000) {
+      await cronTriggerAutomationRun(a, now);
+      const newRunCount = runCount + 1;
+      st.lastRunAt = now.toISOString();
+      st.runCount = newRunCount;
+      const following = computeNextRunFromRrule({
+        rrule,
+        now,
+        lastRunAt: st.lastRunAt,
+        runCount: newRunCount,
+      });
+      if (following) {
+        st.nextRunAt = following.toISOString();
+      } else {
+        st.nextRunAt = null;
+        st.completed = true;
+      }
+      state[a.id] = st;
+    } else {
+      // 未来时间：缓存 nextRunAt，避免每次 tick 重算
+      if (!st.nextRunAt) {
+        st.nextRunAt = nextRun.toISOString();
+        state[a.id] = st;
+      }
+    }
+  }
+
+  await writeAutomationState(state);
+}
+
+function startAutomationScheduler() {
+  if (automationCronTimer) return;
+  // 先跑一轮，后续每分钟 tick 一次
+  void cronTickOnce().catch(() => {});
+  automationCronTimer = setInterval(() => {
+    void cronTickOnce().catch(() => {});
+  }, 60_000);
+}
+
+function stopAutomationScheduler() {
+  if (automationCronTimer) {
+    try {
+      clearInterval(automationCronTimer);
+    } catch {
+      // ignore
+    }
+    automationCronTimer = null;
+  }
+}
+
+function getAutomationsRootDir() {
+  try {
+    const userData = app.getPath("userData");
+    return path.join(userData, AUTOMATIONS_DIRNAME);
+  } catch {
+    return null;
+  }
+}
+
+async function ensureAutomationsRootDir() {
+  const dir = getAutomationsRootDir();
+  if (!dir) throw new Error("NO_AUTOMATIONS_ROOT_DIR");
+  await fsp.mkdir(dir, { recursive: true });
+  return dir;
+}
+
+function sanitizeAutomationId(rawId) {
+  const base = String(rawId ?? "").trim() || "auto";
+  const cleaned = base
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+/, "")
+    .replace(/-+$/, "");
+  return cleaned || "auto";
+}
+
+async function listAutomationFiles() {
+  const root = getAutomationsRootDir();
+  if (!root) return [];
+  let entries = [];
+  try {
+    entries = await fsp.readdir(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const ent of entries) {
+    if (!ent?.name || !ent.isDirectory()) continue;
+    const dir = path.join(root, ent.name);
+    const file = path.join(dir, "automation.toml");
+    out.push({ id: ent.name, dir, file });
+  }
+  return out;
+}
+
+function parseTomlStringValue(raw) {
+  const v = String(raw ?? "").trim();
+  if (!v) return "";
+  if (v.startsWith("\"") && v.endsWith("\"")) {
+    const inner = v.slice(1, -1);
+    return inner
+      .replace(/\\\\n/g, "\n")
+      .replace(/\\\\t/g, "\t")
+      .replace(/\\\\\"/g, "\"")
+      .replace(/\\\\\\\\/g, "\\");
+  }
+  return v;
+}
+
+function parseAutomationToml(text, fallbackId) {
+  const lines = String(text ?? "").split(/\r?\n/);
+  const data = { id: fallbackId };
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const m = trimmed.match(/^(id|name|prompt|rrule|status|created_at|updated_at|cwds)\s*=\s*(.+)$/);
+    if (!m) continue;
+    const key = m[1];
+    const valueRaw = m[2];
+    if (key === "cwds") {
+      const arrMatch = valueRaw.match(/^\[(.*)]$/);
+      if (!arrMatch) continue;
+      const inner = arrMatch[1];
+      const items = inner
+        .split(",")
+        .map((s) => parseTomlStringValue(s))
+        .map((s) => String(s || "").trim())
+        .filter(Boolean);
+      data.cwds = items;
+      continue;
+    }
+    const v = parseTomlStringValue(valueRaw);
+    if (key === "id" && v) data.id = v;
+    else if (key === "name") data.name = v;
+    else if (key === "prompt") data.prompt = v;
+    else if (key === "rrule") data.rrule = v;
+    else if (key === "status") data.status = v;
+    else if (key === "created_at") data.created_at = v;
+    else if (key === "updated_at") data.updated_at = v;
+  }
+  return data;
+}
+
+function toTomlStringLiteral(str) {
+  const s = String(str ?? "");
+  const escaped = s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\t/g, "\\t");
+  return `"${escaped}"`;
+}
+
+function getAutomationsStateFile() {
+  const root = getAutomationsRootDir();
+  if (!root) return null;
+  return path.join(root, AUTOMATIONS_STATE_FILENAME);
+}
+
+async function readAutomationState() {
+  const file = getAutomationsStateFile();
+  if (!file) return {};
+  try {
+    const raw = await fsp.readFile(file, "utf-8");
+    const parsed = JSON.parse(String(raw ?? ""));
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed;
+  } catch (e) {
+    const code = String(e?.code ?? "");
+    if (code === "ENOENT") return {};
+    console.warn("[electron] readAutomationState failed:", e?.message ?? e);
+    return {};
+  }
+}
+
+async function writeAutomationState(state) {
+  const file = getAutomationsStateFile();
+  if (!file) return;
+  try {
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    const text = JSON.stringify(state ?? {}, null, 2);
+    const tmp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+    await fsp.writeFile(tmp, text, "utf-8");
+    try {
+      await fsp.rename(tmp, file);
+    } catch (e) {
+      const code = String(e?.code ?? "");
+      if (code === "EPERM" || code === "EEXIST") {
+        try {
+          await fsp.unlink(file);
+        } catch {
+          // ignore
+        }
+        await fsp.rename(tmp, file);
+      } else {
+        throw e;
+      }
+    }
+  } catch (e) {
+    console.warn("[electron] writeAutomationState failed:", e?.message ?? e);
+  }
+}
+
+function parseRruleSpec(rrule) {
+  const spec = {};
+  const raw = String(rrule ?? "").trim();
+  if (!raw) return spec;
+  for (const part of raw.split(";")) {
+    if (!part) continue;
+    const idx = part.indexOf("=");
+    if (idx <= 0) continue;
+    const key = part.slice(0, idx).trim().toUpperCase();
+    const value = part.slice(idx + 1).trim();
+    if (!key) continue;
+    spec[key] = value;
+  }
+  return spec;
+}
+
+function computeNextRunFromRrule(args) {
+  const { rrule, now, lastRunAt, runCount } = args;
+  const spec = parseRruleSpec(rrule);
+  const freq = String(spec.FREQ ?? "").toUpperCase();
+  if (!freq) return null;
+  const count = spec.COUNT != null ? Number(spec.COUNT) : null;
+  const hasFiniteCount = Number.isFinite(count);
+  if (hasFiniteCount && runCount >= count) return null;
+
+  const nowMs = now.getTime();
+  const baseDate = lastRunAt ? new Date(lastRunAt) : now;
+
+  if (freq === "MINUTELY") {
+    const interval = Number(spec.INTERVAL ?? 1) || 1;
+    let candidate = new Date(baseDate.getTime() + interval * 60_000);
+    // 确保下一次在当前时间之后
+    while (candidate.getTime() <= nowMs + 500) {
+      candidate = new Date(candidate.getTime() + interval * 60_000);
+    }
+    return candidate;
+  }
+
+  if (freq === "HOURLY") {
+    const interval = Number(spec.INTERVAL ?? 1) || 1;
+    const byMinute = spec.BYMINUTE != null ? Math.min(59, Math.max(0, Number(spec.BYMINUTE) || 0)) : 0;
+    let candidate;
+    if (!lastRunAt) {
+      candidate = new Date(now);
+      candidate.setSeconds(0, 0);
+      candidate.setMinutes(byMinute, 0, 0);
+      if (candidate.getTime() <= nowMs + 500) {
+        candidate.setHours(candidate.getHours() + interval);
+      }
+    } else {
+      candidate = new Date(lastRunAt);
+      candidate.setSeconds(0, 0);
+      candidate.setMinutes(byMinute, 0, 0);
+      candidate.setHours(candidate.getHours() + interval);
+      if (candidate.getTime() <= nowMs + 500) {
+        candidate.setHours(candidate.getHours() + interval);
+      }
+    }
+    return candidate;
+  }
+
+  if (freq === "WEEKLY") {
+    const byDayRaw = String(spec.BYDAY ?? "").trim();
+    if (!byDayRaw) return null;
+    const dayMap = {
+      SU: 0,
+      MO: 1,
+      TU: 2,
+      WE: 3,
+      TH: 4,
+      FR: 5,
+      SA: 6,
+    };
+    const byDays = byDayRaw
+      .split(",")
+      .map((s) => dayMap[String(s || "").trim().toUpperCase()] ?? null)
+      .filter((n) => n != null);
+    if (!byDays.length) return null;
+    const hour = spec.BYHOUR != null ? Math.min(23, Math.max(0, Number(spec.BYHOUR) || 0)) : 0;
+    const minute = spec.BYMINUTE != null ? Math.min(59, Math.max(0, Number(spec.BYMINUTE) || 0)) : 0;
+
+    const start = new Date(Math.max(baseDate.getTime(), nowMs));
+    start.setSeconds(0, 0);
+
+    for (let offset = 0; offset <= 14; offset += 1) {
+      const d = new Date(start);
+      d.setDate(d.getDate() + offset);
+      d.setHours(hour, minute, 0, 0);
+      if (!byDays.includes(d.getDay())) continue;
+      if (d.getTime() <= nowMs + 500) continue;
+      return d;
+    }
+    return null;
+  }
+
+  return null;
 }
 
 function startWatch(rootDir) {
@@ -1554,7 +1948,7 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle("doc.readFile", async (_event, rootDir, relPath) => {
+  ipcMain.handle("readFile", async (_event, rootDir, relPath) => {
     const root = String(rootDir ?? "");
     if (!root) return { ok: false, error: "MISSING_ROOT" };
     const file = toFsPath(root, relPath);
@@ -1562,7 +1956,7 @@ function registerIpc() {
     return { ok: true, content };
   });
 
-  ipcMain.handle("doc.writeFile", async (_event, rootDir, relPath, content) => {
+  ipcMain.handle("writeFile", async (_event, rootDir, relPath, content) => {
     const root = String(rootDir ?? "");
     if (!root) return { ok: false, error: "MISSING_ROOT" };
     const file = toFsPath(root, relPath);
@@ -1588,7 +1982,7 @@ function registerIpc() {
     return { ok: true };
   });
 
-  ipcMain.handle("doc.deletePath", async (_event, rootDir, relPath) => {
+  ipcMain.handle("delete", async (_event, rootDir, relPath) => {
     const root = String(rootDir ?? "");
     if (!root) return { ok: false, error: "MISSING_ROOT" };
     const target = toFsPath(root, relPath);
@@ -1608,7 +2002,7 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle("doc.mkdir", async (_event, rootDir, relDir) => {
+  ipcMain.handle("mkdir", async (_event, rootDir, relDir) => {
     const root = String(rootDir ?? "");
     if (!root) return { ok: false, error: "MISSING_ROOT" };
     const dir = toFsPath(root, relDir);
@@ -1616,7 +2010,7 @@ function registerIpc() {
     return { ok: true };
   });
 
-  ipcMain.handle("doc.renamePath", async (_event, rootDir, fromRel, toRel) => {
+  ipcMain.handle("rename", async (_event, rootDir, fromRel, toRel) => {
     const root = String(rootDir ?? "");
     if (!root) return { ok: false, error: "MISSING_ROOT" };
     const from = toFsPath(root, fromRel);
@@ -1859,6 +2253,198 @@ function registerIpc() {
     }
   });
 
+  // Shell Exec（项目目录内执行命令，高风险）
+  ipcMain.handle("shell.exec", async (_event, params) => {
+    try {
+      const p = params && typeof params === "object" ? params : {};
+      const projectDir = String(p.projectDir ?? "").trim();
+      if (!projectDir) return { ok: false, error: "MISSING_PROJECT_DIR" };
+      const commandRaw = String(p.command ?? "").trim();
+      if (!commandRaw) return { ok: false, error: "MISSING_COMMAND" };
+      const args = Array.isArray(p.args) ? p.args.map((x) => String(x ?? "")) : [];
+      const timeoutMs = (() => {
+        const n = Number(p.timeoutMs);
+        if (!Number.isFinite(n)) return 120_000;
+        return Math.max(1_000, Math.min(600_000, Math.floor(n)));
+      })();
+
+      // 基础危险命令拦截：rm -rf / / * ~
+      try {
+        const fullCmd = [commandRaw, ...args].join(" ").replace(/\s+/g, " ").trim();
+        const lower = fullCmd.toLowerCase();
+        const isDangerousRmRf = (() => {
+          if (!lower.includes("rm") || !lower.includes("-rf")) return false;
+          const tokens = lower.split(/\s+/).filter(Boolean);
+          const rmIndex = tokens.indexOf("rm");
+          if (rmIndex === -1) return false;
+          const after = tokens.slice(rmIndex + 1);
+          if (!after.length) return false;
+          const flags = after.filter((t) => t.startsWith("-"));
+          const hasRf = flags.some((t) => t.includes("rf") || (t.includes("r") && t.includes("f")));
+          if (!hasRf) return false;
+          const targets = after.filter((t) => !t.startsWith("-"));
+          if (!targets.length) return false;
+          const targetStr = targets.join(" ");
+          if (/^\/(\s|$)/.test(targetStr)) return true;
+          if (/^\/\s*\*/.test(targetStr)) return true;
+          if (/^\*\s*$/.test(targetStr)) return true;
+          if (/^~(\/|\s|$)/.test(targetStr)) return true;
+          return false;
+        })();
+        if (isDangerousRmRf) {
+          return {
+            ok: false,
+            error: "DANGEROUS_COMMAND_BLOCKED",
+            exitCode: null,
+            stdout: "",
+            stderr: "Blocked dangerous command pattern: rm -rf on root/home/*",
+            timedOut: false,
+          };
+        }
+      } catch {
+        // 如果危险命令检测本身异常，不影响后续正常命令执行
+      }
+
+      return await new Promise((resolve) => {
+        let stdout = "";
+        let stderr = "";
+        let timedOut = false;
+        let settled = false;
+        const child = spawn(commandRaw, args, { cwd: projectDir, shell: true });
+        const maxLen = 60_000;
+        const timer = setTimeout(() => {
+          timedOut = true;
+          try { child.kill("SIGKILL"); } catch {}
+        }, timeoutMs);
+        const finish = (exitCode, error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (stdout.length > maxLen) stdout = stdout.slice(0, maxLen) + "\n...[stdout truncated]";
+          if (stderr.length > maxLen) stderr = stderr.slice(0, maxLen) + "\n...[stderr truncated]";
+          const ok = !timedOut && exitCode === 0 && !error;
+          resolve({ ok, exitCode, stdout, stderr, timedOut, error: error ?? (timedOut ? "TIMEOUT" : undefined) });
+        };
+        if (child.stdout) {
+          child.stdout.on("data", (d) => { stdout += String(d ?? ""); });
+        }
+        if (child.stderr) {
+          child.stderr.on("data", (d) => { stderr += String(d ?? ""); });
+        }
+        child.on("error", (e) => { finish(null, String(e && e.message ? e.message : e)); });
+        child.on("close", (code) => {
+          const exitCode = typeof code === "number" ? code : null;
+          finish(exitCode);
+        });
+      });
+    } catch (e) {
+      return { ok: false, error: String(e && e.message ? e.message : e) };
+    }
+  });
+
+  // Process Manager：仅管理由 Crab 启动的长跑进程
+  ipcMain.handle("process.run", async (_event, params) => {
+    try {
+      const p = params && typeof params === "object" ? params : {};
+      const projectDir = String(p.projectDir ?? "").trim();
+      const commandRaw = String(p.command ?? "").trim();
+      if (!commandRaw) return { ok: false, error: "MISSING_COMMAND" };
+      const args = Array.isArray(p.args) ? p.args.map((x) => String(x ?? "")) : [];
+      const cwdRaw = String(p.cwd ?? "").trim();
+      const cwd = cwdRaw || projectDir || process.cwd();
+
+      const id = "proc_" + Date.now().toString(36) + "_" + (processSeq++).toString(36);
+      const child = spawn(commandRaw, args, { cwd, shell: true });
+      const entry = {
+        id,
+        pid: child && typeof child.pid === "number" ? child.pid : null,
+        command: [commandRaw].concat(args || []).join(" "),
+        cwd,
+        status: "running",
+        startedAt: Date.now(),
+        endedAt: null,
+        exitCode: null,
+        signal: null,
+        lastError: null,
+        child,
+      };
+      processTable.set(id, entry);
+
+      child.on("exit", (code, signal) => {
+        const rec = processTable.get(id);
+        if (!rec) return;
+        rec.status = "exited";
+        rec.endedAt = Date.now();
+        rec.exitCode = typeof code === "number" ? code : null;
+        rec.signal = signal || null;
+      });
+      child.on("error", (e) => {
+        const rec = processTable.get(id);
+        if (!rec) return;
+        rec.status = "error";
+        rec.lastError = String(e && e.message ? e.message : e);
+      });
+
+      return {
+        ok: true,
+        id,
+        pid: entry.pid,
+        status: entry.status,
+        cwd: entry.cwd,
+        command: entry.command,
+      };
+    } catch (e) {
+      return { ok: false, error: String(e && e.message ? e.message : e) };
+    }
+  });
+
+  ipcMain.handle("process.list", async () => {
+    try {
+      const processes = [];
+      for (const rec of processTable.values()) {
+        processes.push({
+          id: rec.id,
+          pid: rec.pid,
+          command: rec.command,
+          cwd: rec.cwd,
+          status: rec.status,
+          startedAt: rec.startedAt,
+          endedAt: rec.endedAt,
+          exitCode: rec.exitCode,
+          signal: rec.signal,
+          lastError: rec.lastError,
+        });
+      }
+      return { ok: true, processes };
+    } catch (e) {
+      return { ok: false, error: String(e && e.message ? e.message : e) };
+    }
+  });
+
+  ipcMain.handle("process.stop", async (_event, params) => {
+    try {
+      const p = params && typeof params === "object" ? params : {};
+      const id = String(p.id ?? "").trim();
+      if (!id) return { ok: false, error: "MISSING_ID" };
+      const rec = processTable.get(id);
+      if (!rec) return { ok: false, error: "PROCESS_NOT_FOUND" };
+      const child = rec.child;
+      if (!child || child.killed || rec.status === "exited" || rec.status === "error") {
+        rec.status = "exited";
+        return { ok: true, stopped: true, id, pid: rec.pid, status: rec.status };
+      }
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // ignore
+      }
+      // 交给 exit 事件更新最终状态
+      return { ok: true, stopped: true, id, pid: rec.pid, status: "stopping" };
+    } catch (e) {
+      return { ok: false, error: String(e && e.message ? e.message : e) };
+    }
+  });
+
   // Code Exec（沙箱化代码执行）
   ipcMain.handle("exec.run", async (_event, params) => {
     try {
@@ -1866,6 +2452,102 @@ function registerIpc() {
       return await codeExecManager.exec(params ?? {});
     } catch (e) {
       return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
+  // Cron：基于本地 automations 的简单定时任务封装
+  ipcMain.handle("cron.create", async (_event, params) => {
+    try {
+      const p = params && typeof params === "object" ? params : {};
+      const name = String(p.name ?? "").trim();
+      const prompt = String(p.prompt ?? "").trim();
+      const rrule = String(p.rrule ?? "").trim();
+      const projectDir = String(p.projectDir ?? "").trim();
+      if (!name || !rrule) {
+        return { ok: false, error: "MISSING_NAME_OR_RRULE" };
+      }
+
+      const root = await ensureAutomationsRootDir();
+      const baseId = sanitizeAutomationId(name || "auto");
+      let id = baseId;
+      let dir = path.join(root, id);
+      let seq = 0;
+      // 防止重复 id 覆盖，简单在后缀加 -1/-2
+      // 后续如果需要真正的 update 语义，可以在上层通过 id 传入
+      // 这里先实现“永不覆盖”的追加语义
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        try {
+          const st = await fsp.stat(dir);
+          if (st && st.isDirectory()) {
+            seq += 1;
+            id = `${baseId}-${seq}`;
+            dir = path.join(root, id);
+            continue;
+          }
+        } catch {
+          // 不存在该目录，可以使用
+        }
+        break;
+      }
+
+      await fsp.mkdir(dir, { recursive: true });
+      const file = path.join(dir, "automation.toml");
+      const now = new Date().toISOString();
+      const cwds = [];
+      if (projectDir) cwds.push(projectDir);
+      const cwdsToml = cwds.length ? `[${cwds.map((d) => toTomlStringLiteral(d)).join(", ")}]` : "[]";
+      const lines = [
+        `id = ${toTomlStringLiteral(id)}`,
+        `name = ${toTomlStringLiteral(name)}`,
+        `prompt = ${toTomlStringLiteral(prompt)}`,
+        `rrule = ${toTomlStringLiteral(rrule)}`,
+        `cwds = ${cwdsToml}`,
+        `status = "ACTIVE"`,
+        `created_at = ${toTomlStringLiteral(now)}`,
+        `updated_at = ${toTomlStringLiteral(now)}`,
+        `source = "ohmycrab"`,
+      ];
+      const text = lines.join("\n") + "\n";
+      await fsp.writeFile(file, text, "utf-8");
+      return { ok: true, id, file };
+    } catch (e) {
+      return { ok: false, error: String(e && e.message ? e.message : e) };
+    }
+  });
+
+  ipcMain.handle("cron.list", async (_event, params) => {
+    try {
+      const p = params && typeof params === "object" ? params : {};
+      const projectDir = String(p.projectDir ?? "").trim();
+      const files = await listAutomationFiles();
+      const automations = [];
+      for (const item of files) {
+        try {
+          const raw = await fsp.readFile(item.file, "utf-8");
+          const data = parseAutomationToml(raw, item.id);
+          if (projectDir && Array.isArray(data.cwds) && data.cwds.length) {
+            const hit = data.cwds.some((d) => String(d ?? "").trim() === projectDir);
+            if (!hit) continue;
+          }
+          automations.push({
+            id: data.id || item.id,
+            name: data.name || "",
+            prompt: data.prompt || "",
+            rrule: data.rrule || "",
+            status: data.status || "ACTIVE",
+            cwds: Array.isArray(data.cwds) ? data.cwds : [],
+            created_at: data.created_at || null,
+            updated_at: data.updated_at || null,
+            file: item.file,
+          });
+        } catch {
+          // 解析失败的记录跳过
+        }
+      }
+      return { ok: true, automations };
+    } catch (e) {
+      return { ok: false, error: String(e && e.message ? e.message : e) };
     }
   });
 
@@ -2217,6 +2899,13 @@ app.whenReady().then(async () => {
 
   createWindow();
 
+  // ======== Automation Cron Scheduler（Desktop 本地版 v0.1）========
+  try {
+    startAutomationScheduler();
+  } catch (e) {
+    console.warn("[electron] startAutomationScheduler failed:", e?.message ?? e);
+  }
+
   // ======== Code Exec 初始化 ========
   try {
     const { CodeExecManager } = await import("./code-exec-manager.mjs");
@@ -2367,6 +3056,7 @@ app.whenReady().then(async () => {
 
 app.on("window-all-closed", () => {
   stopWatch();
+  stopAutomationScheduler();
   try { skillLoader?.dispose?.(); } catch { /* ignore */ }
   try { codeExecManager?.dispose?.(); } catch { /* ignore */ }
   try { mcpManager?.dispose?.(); } catch { /* ignore */ }

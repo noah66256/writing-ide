@@ -310,7 +310,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
     if (isInternalToolName(tool)) return null;
     if (tool === "kb.search") return { phase: "kb", text: "先翻一下知识库里的相关资料。" };
     if (tool === "web.search" || tool === "web.fetch") return { phase: "search", text: "先补几条资料，再继续。" };
-    if (tool === "doc.write" || tool === "doc.previewDiff" || tool === "doc.splitToDir") return { phase: "delivery", text: "正在整理结果，准备交付。" };
+    if (tool === "write" || tool === "doc.previewDiff" || tool === "doc.splitToDir") return { phase: "delivery", text: "正在整理结果，准备交付。" };
     if (tool.startsWith("mcp.")) {
       const lower = tool.toLowerCase();
       if (/(browser_|navigate|goto|snapshot|click|fill|type|wait_for|run_code)/.test(lower)) return { phase: "browser", text: "先看一下当前网页状态。" };
@@ -931,6 +931,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
         payload: {
           model: args.model,
           mode: args.mode,
+          opMode: args.opMode ?? "creative",
           prompt: promptForGateway,
           contextPack: contextPackCompat,
           contextSegments,

@@ -125,13 +125,13 @@ function scenario4_transcriptOperations() {
   pushItem(transcript, {
     kind: "assistant_tool_call",
     callId: "tc_1",
-    toolName: "doc.write",
+    toolName: "write",
     args: { text: "文章内容" },
   });
   pushItem(transcript, {
     kind: "tool_result",
     callId: "tc_1",
-    toolName: "doc.write",
+    toolName: "write",
     ok: true,
     output: { success: true },
     normalizedText: '{"success":true}',
@@ -147,7 +147,7 @@ function scenario4_transcriptOperations() {
 
   const toolCalls = extractToolCalls(transcript);
   assert.equal(toolCalls.length, 2);
-  assert.equal(toolCalls[0].toolName, "doc.write");
+  assert.equal(toolCalls[0].toolName, "write");
   assert.equal(toolCalls[1].toolName, "run.done");
 
   const toolResults = extractToolResults(transcript);
@@ -159,7 +159,7 @@ function scenario4_transcriptOperations() {
   assert.equal(summary.toolCallCount, 2);
   assert.equal(summary.toolResultCount, 1);
   assert.equal(summary.failedToolCount, 0);
-  assert.deepEqual(summary.toolCallSequence, ["doc.write", "run.done"]);
+  assert.deepEqual(summary.toolCallSequence, ["write", "run.done"]);
   assert.equal(summary.hasAssistantText, true);
   assert.equal(summary.lastAssistantText, "好的，我来写。");
 
@@ -293,7 +293,7 @@ async function scenario8_transformContextHint() {
   const mockCtx = createMockRunContext();
   // 注入 computePerTurnAllowed 回调
   (mockCtx as any).computePerTurnAllowed = (_state: RunState) => ({
-    allowed: new Set(["run.done", "doc.write"]),
+    allowed: new Set(["run.done", "write"]),
     hint: "当前为执行阶段，请调用工具。",
     orchestratorMode: true,
   });
@@ -346,7 +346,7 @@ async function scenario9_softGatingReject() {
   // 通过 _executeAgentTool 测试越权拒绝
   const execResult = await (runtime as any)._executeAgentTool(
     "tc_test_1",
-    "doc.write",
+    "write",
     { text: "hello" },
   );
   assert.equal(execResult.ok, false);
@@ -720,12 +720,12 @@ async function scenario17_providerParitySingleArtifactWriteOnce() {
       apiType: provider.apiType,
       endpoint: provider.endpoint,
       modelId: provider.modelId,
-      allowedToolNames: new Set(["doc.write", "run.done"]),
+      allowedToolNames: new Set(["write", "run.done"]),
       initialRunState: { hasTodoList: true },
     });
     const runtime = new GatewayRuntime({ mode: "pi", runCtx: ctx } as any, mockKernel);
     await runtime.run("test prompt");
-    (runtime as any)._updateRunState("doc.write", { path: "output/report.md", content: "v1" }, {
+    (runtime as any)._updateRunState("write", { path: "output/report.md", content: "v1" }, {
       ok: true,
       output: { path: "output/report.md", ok: true },
       executedBy: "gateway",
@@ -779,14 +779,14 @@ async function scenario19_providerParityDeliveryLatchBlocksRepeatWrite() {
       apiType: provider.apiType,
       endpoint: provider.endpoint,
       modelId: provider.modelId,
-      allowedToolNames: new Set(["doc.write"]),
+      allowedToolNames: new Set(["write"]),
       initialRunState: {
         hasTodoList: true,
         deliveryLatched: true,
         deliveredArtifactFamilies: ["output/report"],
         sideEffectLedger: [{
           semanticKind: "artifact_write",
-          toolName: "doc.write",
+          toolName: "write",
           logicalTarget: "output/report",
           argsFingerprint: "a",
           resultFingerprint: "b",
@@ -797,7 +797,7 @@ async function scenario19_providerParityDeliveryLatchBlocksRepeatWrite() {
     });
     const runtime = new GatewayRuntime({ mode: "pi", runCtx: ctx } as any, mockKernel);
     await runtime.run("test prompt");
-    const blocked = await (runtime as any)._executeAgentTool("tc_repeat", "doc.write", {
+    const blocked = await (runtime as any)._executeAgentTool("tc_repeat", "write", {
       path: "output/report_v2.md",
       content: "v2",
     });

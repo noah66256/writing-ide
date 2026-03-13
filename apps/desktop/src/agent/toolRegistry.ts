@@ -82,10 +82,10 @@ function getKbMentionLibraryIdsFromLatestUserStep(): string[] {
   return [];
 }
 
-const HIGH_RISK_FILE_OP_TOOL_NAMES = new Set(["doc.write", "doc.deletePath", "doc.restoreSnapshot"]);
+const HIGH_RISK_FILE_OP_TOOL_NAMES = new Set(["write", "delete", "doc.restoreSnapshot"]);
 
 function getFileOpTargetPath(toolName: string, args: Record<string, unknown>) {
-  if (toolName === "doc.deletePath" || toolName === "doc.write") {
+  if (toolName === "delete" || toolName === "write") {
     const p = String(args.path ?? "").trim();
     if (p) return p;
   }
@@ -97,7 +97,7 @@ function getFileOpTargetPath(toolName: string, args: Record<string, unknown>) {
 }
 
 function getFileOpActionLabel(toolName: string) {
-  if (toolName === "doc.deletePath") return "删除文件";
+  if (toolName === "delete") return "删除文件";
   if (toolName === "doc.restoreSnapshot") return "恢复快照";
   return "写入文件";
 }
@@ -238,7 +238,7 @@ function computeCopyRiskObserve(args: {
   draftText: string;
   styleSamples: Array<{ text: string }>;
   selectionText?: string;
-  /** 可选：额外对照源（例如最近 doc.read/kb.cite 的原文片段），用于降低“贴无关原文”漏检 */
+  /** 可选：额外对照源（例如最近 read/kb.cite 的原文片段），用于降低“贴无关原文”漏检 */
   extraSources?: Array<{ id?: string; text: string }>;
 }) {
   const draftText = String(args.draftText ?? "");
@@ -806,7 +806,7 @@ function getVirtualFileContentFromPendingProposals(args: {
       s.applyPolicy === "proposal" &&
       s.applied !== true &&
       s.status !== "undone" &&
-      (s.toolName === "doc.write" || s.toolName === "doc.applyEdits" || s.toolName === "doc.restoreSnapshot" || s.toolName === "doc.splitToDir"),
+      (s.toolName === "write" || s.toolName === "edit" || s.toolName === "doc.restoreSnapshot" || s.toolName === "doc.splitToDir"),
   ) as any[];
 
   // 按出现顺序顺推，叠加提案（proposal-first）
@@ -841,17 +841,17 @@ function getVirtualFileContentFromPendingProposals(args: {
       continue;
     }
 
-    if (st.toolName === "doc.write") {
+    if (st.toolName === "write") {
       const inPath = normalizeRelPath(String(st.input?.path ?? ""));
       if (inPath !== p) continue;
       const next = String(st.input?.content ?? "");
       exists = true;
       content = next;
-      sources.push(`doc.write(proposal):${st.id}`);
+      sources.push(`write(proposal):${st.id}`);
       continue;
     }
 
-    if (st.toolName === "doc.applyEdits") {
+    if (st.toolName === "edit") {
       const inPath = normalizeRelPath(String(st.input?.path ?? proj.activePath ?? ""));
       if (inPath !== p) continue;
       if (!exists) continue;
@@ -868,7 +868,7 @@ function getVirtualFileContentFromPendingProposals(args: {
         .filter((e: any) => [e.startLineNumber, e.startColumn, e.endLineNumber, e.endColumn].every((n: any) => Number.isFinite(n) && n > 0));
       if (!norm.length) continue;
       content = applyTextEdits({ before: content, edits: norm }).after;
-      sources.push(`doc.applyEdits(proposal):${st.id}`);
+      sources.push(`edit(proposal):${st.id}`);
       continue;
     }
   }
@@ -1654,7 +1654,7 @@ const tools: ToolDefinition[] = [
             cardType: (h.artifact as any).cardType,
             facetIds: h.artifact.facetIds ?? [],
             anchor: h.artifact.anchor,
-            // 注意：不返回全文 content，避免 token 爆炸；需要全文由 doc.read / kb 引用机制后续完善
+            // 注意：不返回全文 content，避免 token 爆炸；需要全文由 read / kb 引用机制后续完善
           },
         })),
       }));
@@ -1765,7 +1765,7 @@ const tools: ToolDefinition[] = [
         return t.trim() ? t : "";
       })();
 
-      // 额外对照源：最近的 doc.read / kb.cite（常见于“改写/续写”任务，能显著降低“贴无关原文”漏检）
+      // 额外对照源：最近的 read / kb.cite（常见于“改写/续写”任务，能显著降低“贴无关原文”漏检）
       const extraSources = (() => {
         const steps = Array.isArray(useRunStore.getState().steps) ? (useRunStore.getState().steps as any[]) : [];
         const out: Array<{ id?: string; text: string }> = [];
@@ -1773,7 +1773,7 @@ const tools: ToolDefinition[] = [
           if (!st || st.type !== "tool") continue;
           if (String(st.status ?? "") !== "success") continue;
           const toolName = String(st.toolName ?? "").trim();
-          if (toolName !== "doc.read" && toolName !== "kb.cite") continue;
+          if (toolName !== "read" && toolName !== "kb.cite") continue;
           const content = String(st.output?.content ?? "").trim();
           if (!content) continue;
           const path = typeof st.output?.path === "string" ? String(st.output.path) : "";
@@ -1889,7 +1889,7 @@ const tools: ToolDefinition[] = [
           if (!st || st.type !== "tool") continue;
           if (String(st.status ?? "") !== "success") continue;
           const toolName = String(st.toolName ?? "").trim();
-          if (toolName !== "doc.read" && toolName !== "kb.cite") continue;
+          if (toolName !== "read" && toolName !== "kb.cite") continue;
           const content = String(st.output?.content ?? "").trim();
           if (!content) continue;
           const path = typeof st.output?.path === "string" ? String(st.output.path) : "";
@@ -2497,7 +2497,7 @@ const tools: ToolDefinition[] = [
     },
   },
   {
-    name: "doc.read",
+    name: "read",
     description: "读取文件内容（path）。需要基于现有文稿/规则做改写时使用。",
     args: [{ name: "path", required: true, desc: "文件路径（如 drafts/draft.md）" }],
     riskLevel: "low",
@@ -2510,8 +2510,8 @@ const tools: ToolDefinition[] = [
       if (looksBinaryDocPath(path)) {
         return failToolResult({
           code: "ERR_BINARY_NOT_TEXT_READABLE",
-          message: "该文件是二进制格式，doc.read 仅支持文本文件读取。",
-          nextActions: ["改用对应的 MCP 文档工具读取（如 Word/Excel/PDF MCP）", "若只想删除该文件，请直接调用 doc.deletePath"],
+          message: "该文件是二进制格式，read 仅支持文本文件读取。",
+          nextActions: ["改用对应的 MCP 文档工具读取（如 Word/Excel/PDF MCP）", "若只想删除该文件，请直接调用 delete"],
           extra: { path },
         });
       }
@@ -2539,7 +2539,7 @@ const tools: ToolDefinition[] = [
       const MAX_READ_CHARS = 40_000;
       const truncated = fullContent.length > MAX_READ_CHARS;
       const content = truncated
-        ? fullContent.slice(0, MAX_READ_CHARS) + `\n\n...[文件已截断，共 ${fullContent.length} 字符，仅返回前 ${MAX_READ_CHARS} 字符。如需后续内容请用 doc.read 配合 offset 参数分段读取]`
+        ? fullContent.slice(0, MAX_READ_CHARS) + `\n\n...[文件已截断，共 ${fullContent.length} 字符，仅返回前 ${MAX_READ_CHARS} 字符。如需后续内容请用 read 配合 offset 参数分段读取]`
         : fullContent;
       return {
         ok: true,
@@ -2557,7 +2557,7 @@ const tools: ToolDefinition[] = [
     },
   },
   {
-    name: "doc.mkdir",
+    name: "mkdir",
     description: "创建目录（path）。用于新建文件夹/目录结构。",
     args: [{ name: "path", required: true, desc: "目录路径（如 drafts/ 或 assets/images/）" }],
     riskLevel: "low",
@@ -2584,7 +2584,7 @@ const tools: ToolDefinition[] = [
     },
   },
   {
-    name: "doc.renamePath",
+    name: "rename",
     description: "重命名/移动 文件或目录（fromPath → toPath）。默认自动执行（可 Undo 回滚）。",
     args: [
       { name: "fromPath", required: true, desc: "源路径（文件或目录）" },
@@ -2658,7 +2658,7 @@ const tools: ToolDefinition[] = [
     },
   },
   {
-    name: "doc.deletePath",
+    name: "delete",
     description: "删除文件或目录（path）。执行前会在对话中确认，确认后自动删除；支持 Undo 回滚。",
     args: [{ name: "path", required: true, desc: "文件或目录路径" }],
     riskLevel: "high",
@@ -2680,7 +2680,7 @@ const tools: ToolDefinition[] = [
       let isFile = !!proj.files.find((f) => f.path === path0);
       let isDir = proj.dirs.includes(path0);
       if (!isFile && !isDir) {
-        await proj.refreshFromDisk("doc.deletePath.precheck");
+        await proj.refreshFromDisk("delete.precheck");
         proj = useProjectStore.getState();
         isFile = !!proj.files.find((f) => f.path === path0);
         isDir = proj.dirs.includes(path0);
@@ -2751,7 +2751,7 @@ const tools: ToolDefinition[] = [
     args: [
       { name: "path", required: true, desc: "文件路径" },
       { name: "newContent", required: false, desc: "新内容全文（JSON 字符串）" },
-      { name: "edits", required: false, desc: "JSON 数组：TextEdit[]（同 doc.applyEdits）" },
+      { name: "edits", required: false, desc: "JSON 数组：TextEdit[]（同 edit）" },
       { name: "ifExists", required: false, desc: "当文件已存在时的策略：rename(默认)/overwrite/error" },
       { name: "suggestedName", required: false, desc: "建议的新文件名（仅 ifExists=rename 时使用）" },
     ],
@@ -2789,7 +2789,7 @@ const tools: ToolDefinition[] = [
         const ext = (pathRaw.split(".").pop() ?? "").toUpperCase();
         return failToolResult({
           code: "BINARY_FORMAT_REQUIRES_SPECIALIZED_TOOL",
-          message: `目标文件 "${pathRaw}" 是 ${ext} 二进制格式，doc.write 只能写纯文本，写入后 Office 无法打开。`,
+          message: `目标文件 "${pathRaw}" 是 ${ext} 二进制格式，write 只能写纯文本，写入后 Office 无法打开。`,
           nextActions: [
             "优先使用对应 MCP 工具（Word MCP / Excel MCP）创建真实 Office 文件",
             "若无对应 MCP，改用 code.exec 配合 python-docx/python-pptx/openpyxl 生成",
@@ -2962,7 +2962,7 @@ const tools: ToolDefinition[] = [
     },
   },
   {
-    name: "doc.write",
+    name: "write",
     description:
       "写入文件（path, content）。高风险写入会先在对话中确认，确认后自动执行；支持 Undo 回滚。",
     args: [
@@ -2998,7 +2998,7 @@ const tools: ToolDefinition[] = [
                 ? "error"
                 : "rename"),
             suggestedName: String((args as any).suggestedName ?? "").trim() || undefined,
-            sourceTool: "doc.write",
+            sourceTool: "write",
             sourceTask: String(((useRunStore.getState().mainDoc as any)?.goal ?? "")).trim() || undefined,
             createdAt: Date.now(),
             updatedAt: Date.now(),
@@ -3013,7 +3013,7 @@ const tools: ToolDefinition[] = [
                 message: "请先打开项目文件夹，之后我会继续保存上轮结果。",
               },
               resumeAction: {
-                type: "doc.write",
+                type: "write",
                 artifactId,
                 pathHint: pathRaw,
                 ifExists: (String((args as any).ifExists ?? "").trim().toLowerCase() === "overwrite"
@@ -3247,7 +3247,7 @@ const tools: ToolDefinition[] = [
         return { path: rel, title, content: b.trimEnd() + "\n" };
       });
 
-      // 仅保存在本地：用于 doc.read 读取“提案态新文件”（不要求 Keep）
+      // 仅保存在本地：用于 read 读取“提案态新文件”（不要求 Keep）
       const proposalId = makeProposalId("splitToDir");
       saveSplitToDirProposal(
         proposalId,
@@ -3315,73 +3315,7 @@ const tools: ToolDefinition[] = [
     },
   },
   {
-    name: "doc.getSelection",
-    description: "获取编辑器当前选中内容（用于段落改写/润色）。",
-    args: [],
-    riskLevel: "low",
-    applyPolicy: "auto_apply",
-    reversible: false,
-    run: async () => {
-      const s = useProjectStore.getState();
-      const ed = s.editorRef;
-      if (!ed) return { ok: false, error: "NO_EDITOR" };
-      const model = ed.getModel();
-      const sel = ed.getSelection();
-      if (!model || !sel) return { ok: false, error: "NO_SELECTION" };
-      const selectedText = model.getValueInRange(sel);
-      return {
-        ok: true,
-        output: {
-          ok: true,
-          path: s.activePath,
-          selectedText,
-          hasSelection: selectedText.length > 0,
-          range: {
-            startLineNumber: sel.startLineNumber,
-            startColumn: sel.startColumn,
-            endLineNumber: sel.endLineNumber,
-            endColumn: sel.endColumn,
-          },
-        },
-        undoable: false,
-      };
-    },
-  },
-  {
-    name: "doc.replaceSelection",
-    description: "用 text 替换当前选区（低风险自动落盘，可 Undo）。",
-    args: [{ name: "text", required: true, desc: "替换后的文本" }],
-    riskLevel: "low",
-    applyPolicy: "auto_apply",
-    reversible: true,
-    run: async (args) => {
-      const text = String(args.text ?? "");
-      const s = useProjectStore.getState();
-      const ed = s.editorRef;
-      if (!ed) return { ok: false, error: "NO_EDITOR" };
-      const model = ed.getModel();
-      const sel = ed.getSelection();
-      if (!model || !sel) return { ok: false, error: "NO_SELECTION" };
-      const before = model.getValueInRange(sel);
-      if (!before) return { ok: false, error: "EMPTY_SELECTION" };
-
-      const snap = s.snapshot();
-      ed.executeEdits("agent", [{ range: sel, text, forceMoveMarkers: true }]);
-      // 确保项目 store 与 Monaco 模型一致（避免 onChange 没触发导致回弹）
-      const next = ed.getModel()?.getValue() ?? "";
-      useProjectStore.getState().updateFile(s.activePath, next);
-      const undo = () => useProjectStore.getState().restore(snap);
-
-      return {
-        ok: true,
-        output: { ok: true, replacedChars: before.length, newChars: text.length },
-        undoable: true,
-        undo,
-      };
-    },
-  },
-  {
-    name: "doc.applyEdits",
+    name: "edit",
     description:
       "对当前活动文件应用一组文本编辑（edits）。中风险默认自动写入，支持 Undo 回滚。",
     args: [
@@ -3408,7 +3342,7 @@ const tools: ToolDefinition[] = [
         return failToolResult({
           code: "FILE_NOT_FOUND",
           message: "未找到要修改的文件。",
-          nextActions: ["确认 path 是否正确", "必要时先 doc.read 确认目标文件存在"],
+          nextActions: ["确认 path 是否正确", "必要时先 read 确认目标文件存在"],
           extra: { path },
         });
       }
@@ -3418,7 +3352,7 @@ const tools: ToolDefinition[] = [
         return failToolResult({
           code: "EMPTY_EDITS",
           message: "edits 为空，无法应用修改。",
-          nextActions: ["传入至少 1 条 Monaco range 编辑", "或改用 doc.write 直接写入全文"],
+          nextActions: ["传入至少 1 条 Monaco range 编辑", "或改用 write 直接写入全文"],
           extra: { path },
         });
       }
@@ -3444,7 +3378,7 @@ const tools: ToolDefinition[] = [
             code: "INVALID_RANGE",
             message: "Monaco range 非法（line/column 必须是 1-based）。",
             detail: { got: { startLineNumber: sl0, startColumn: sc0, endLineNumber: el0, endColumn: ec0 } },
-            nextActions: ["把所有 line/column 调整为从 1 开始", "再重试 doc.applyEdits"],
+            nextActions: ["把所有 line/column 调整为从 1 开始", "再重试 edit"],
             extra: { path },
           });
         }
@@ -3732,6 +3666,283 @@ const tools: ToolDefinition[] = [
       };
     },
   },
+  {
+    name: "shell.exec",
+    description: "在项目目录中执行命令（高风险）。适用于运行测试、构建脚本或安装本地开发工具，慎用。",
+    args: [
+      { name: "command", required: true, desc: "命令名或完整命令行（如 npm 或 npm run test）" },
+      { name: "args", required: false, desc: "命令参数数组（可选）" },
+      { name: "timeoutMs", required: false, desc: "超时时间（毫秒），默认 120000，最大 600000" },
+    ],
+    riskLevel: "high" as ToolRiskLevel,
+    applyPolicy: "proposal" as ToolApplyPolicy,
+    reversible: false,
+    run: async (args: Record<string, unknown>) => {
+      const projectDir = String(useProjectStore.getState().rootDir ?? "").trim();
+      if (!projectDir) {
+        return {
+          ok: false,
+          error: "PROJECT_NOT_OPENED",
+          message: "当前未打开项目文件夹，无法在本地执行命令。请先点击输入框左下角的文件夹按钮选择或创建一个项目文件夹。",
+        } as any;
+      }
+      const commandRaw = String((args as any).command ?? "").trim();
+      if (!commandRaw) {
+        return { ok: false, error: "MISSING_COMMAND" } as any;
+      }
+      const argv = Array.isArray((args as any).args)
+        ? ((args as any).args as any[]).map((x) => String(x ?? ""))
+        : [];
+      const timeoutMs = (() => {
+        const n = Number((args as any).timeoutMs);
+        if (!Number.isFinite(n)) return 120_000;
+        return Math.max(1_000, Math.min(600_000, Math.floor(n)));
+      })();
+
+      const shellApi = (window as any).desktop?.shell;
+      if (!shellApi?.exec) {
+        return { ok: false, error: "SHELL_API_NOT_AVAILABLE" } as any;
+      }
+
+      const result = await shellApi.exec({ projectDir, command: commandRaw, args: argv, timeoutMs });
+      if (!result) return { ok: false, error: "SHELL_EXEC_IPC_FAILED" } as any;
+      const exitCode = typeof result.exitCode === "number" ? result.exitCode : undefined;
+      const ok = exitCode === 0;
+      return {
+        ok,
+        output: {
+          ok,
+          exitCode,
+          stdout: String(result.stdout ?? ""),
+          stderr: String(result.stderr ?? ""),
+          error: exitCode === 0 ? undefined : String(result.error ?? ""),
+          timedOut: Boolean(result.timedOut),
+        },
+        undoable: false,
+      } as any;
+    },
+  },
+  {
+    name: "process.run",
+    description: "启动一个由 Crab 管理的本地进程（助手模式下使用）。",
+    args: [
+      { name: "command", required: true, desc: "命令名或完整命令行" },
+      { name: "args", required: false, desc: "命令参数数组（可选）" },
+      { name: "cwd", required: false, desc: "工作目录（默认项目目录）" },
+    ],
+    riskLevel: "high" as ToolRiskLevel,
+    applyPolicy: "proposal" as ToolApplyPolicy,
+    reversible: false,
+    run: async (args: Record<string, unknown>) => {
+      const projectDir = String(useProjectStore.getState().rootDir ?? "").trim();
+      const commandRaw = String(args.command ?? "").trim();
+      if (!commandRaw) {
+        return {
+          ok: false,
+          error: "MISSING_COMMAND",
+          output: { ok: false, error: "MISSING_COMMAND", message: "process.run 需要提供 command 参数。" },
+        } as any;
+      }
+      const argv = Array.isArray(args.args) ? (args.args as any[]).map((x) => String(x ?? "")) : [];
+      const cwdRaw = String(args.cwd ?? "").trim();
+      const cwd = cwdRaw || projectDir || undefined;
+
+      const api = (window as any).desktop?.process;
+      if (!api || typeof api.run !== "function") {
+        return {
+          ok: false,
+          error: "PROCESS_API_NOT_AVAILABLE",
+          output: { ok: false, error: "PROCESS_API_NOT_AVAILABLE", message: "进程管理服务未就绪，请确认在桌面客户端中使用。" },
+        } as any;
+      }
+
+      const result = await api.run({ projectDir, command: commandRaw, args: argv, cwd });
+      if (!result || result.ok === false) {
+        return {
+          ok: false,
+          error: String(result?.error ?? "PROCESS_RUN_FAILED"),
+          output: result,
+        } as any;
+      }
+
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          id: result.id,
+          pid: result.pid,
+          command: result.command,
+          cwd: result.cwd,
+          status: result.status,
+        },
+        undoable: false,
+      } as any;
+    },
+  },
+  {
+    name: "process.list",
+    description: "列出当前由 Crab 启动并跟踪的本地进程。",
+    args: [],
+    riskLevel: "high" as ToolRiskLevel,
+    applyPolicy: "proposal" as ToolApplyPolicy,
+    reversible: false,
+    run: async () => {
+      const api = (window as any).desktop?.process;
+      if (!api || typeof api.list !== "function") {
+        return {
+          ok: false,
+          error: "PROCESS_API_NOT_AVAILABLE",
+          output: { ok: false, error: "PROCESS_API_NOT_AVAILABLE", message: "进程管理服务未就绪，请确认在桌面客户端中使用。" },
+        } as any;
+      }
+      const result = await api.list();
+      if (!result || result.ok === false) {
+        return {
+          ok: false,
+          error: String(result?.error ?? "PROCESS_LIST_FAILED"),
+          output: result,
+        } as any;
+      }
+      return {
+        ok: true,
+        output: result,
+        undoable: false,
+      } as any;
+    },
+  },
+  {
+    name: "process.stop",
+    description: "停止一个由 Crab 启动并跟踪的本地进程。",
+    args: [{ name: "id", required: true, desc: "Crab 内部进程 ID" }],
+    riskLevel: "high" as ToolRiskLevel,
+    applyPolicy: "proposal" as ToolApplyPolicy,
+    reversible: false,
+    run: async (args: Record<string, unknown>) => {
+      const id = String(args.id ?? "").trim();
+      if (!id) {
+        return {
+          ok: false,
+          error: "MISSING_ID",
+          output: { ok: false, error: "MISSING_ID", message: "process.stop 需要提供 id 参数。" },
+        } as any;
+      }
+      const api = (window as any).desktop?.process;
+      if (!api || typeof api.stop !== "function") {
+        return {
+          ok: false,
+          error: "PROCESS_API_NOT_AVAILABLE",
+          output: { ok: false, error: "PROCESS_API_NOT_AVAILABLE", message: "进程管理服务未就绪，请确认在桌面客户端中使用。" },
+        } as any;
+      }
+      const result = await api.stop(id);
+      if (!result || result.ok === false) {
+        return {
+          ok: false,
+          error: String(result?.error ?? "PROCESS_STOP_FAILED"),
+          output: result,
+        } as any;
+      }
+      return {
+        ok: true,
+        output: result,
+        undoable: false,
+      } as any;
+    },
+  },
+  {
+    name: "cron.create",
+    description: "创建本地定时任务（封装 Codex automation，一般由助手模式下的 Agent 使用）。",
+    args: [
+      { name: "name", required: true, desc: "任务名称" },
+      { name: "prompt", required: true, desc: "任务说明/要做的事" },
+      { name: "rrule", required: true, desc: "调度规则（如 FREQ=WEEKLY;BYDAY=MO;BYHOUR=9;BYMINUTE=0）" },
+    ],
+    riskLevel: "high" as ToolRiskLevel,
+    applyPolicy: "proposal" as ToolApplyPolicy,
+    reversible: false,
+    run: async (args: Record<string, unknown>) => {
+      const name = String(args.name ?? "").trim();
+      const prompt = String(args.prompt ?? "").trim();
+      const rrule = String(args.rrule ?? "").trim();
+      if (!name || !rrule) {
+        return {
+          ok: false,
+          error: "MISSING_NAME_OR_RRULE",
+          output: {
+            ok: false,
+            error: "MISSING_NAME_OR_RRULE",
+            message: "cron.create 需要提供 name 和 rrule 参数。",
+          },
+        } as any;
+      }
+
+      const projectDir = String(useProjectStore.getState().rootDir ?? "").trim();
+      const api = (window as any).desktop?.cron;
+      if (!api || typeof api.create !== "function") {
+        return {
+          ok: false,
+          error: "CRON_API_NOT_AVAILABLE",
+          output: {
+            ok: false,
+            error: "CRON_API_NOT_AVAILABLE",
+            message: "本地定时任务服务未就绪，请确认在桌面客户端中使用。",
+          },
+        } as any;
+      }
+
+      const result = await api.create({ name, prompt, rrule, projectDir });
+      if (!result || result.ok === false) {
+        return {
+          ok: false,
+          error: String(result?.error ?? "CRON_CREATE_FAILED"),
+          output: result,
+        } as any;
+      }
+
+      return {
+        ok: true,
+        output: result,
+        undoable: false,
+      } as any;
+    },
+  },
+  {
+    name: "cron.list",
+    description: "列出当前本地 automations 中与项目相关的定时任务。",
+    args: [],
+    riskLevel: "high" as ToolRiskLevel,
+    applyPolicy: "proposal" as ToolApplyPolicy,
+    reversible: false,
+    run: async () => {
+      const projectDir = String(useProjectStore.getState().rootDir ?? "").trim();
+      const api = (window as any).desktop?.cron;
+      if (!api || typeof api.list !== "function") {
+        return {
+          ok: false,
+          error: "CRON_API_NOT_AVAILABLE",
+          output: {
+            ok: false,
+            error: "CRON_API_NOT_AVAILABLE",
+            message: "本地定时任务服务未就绪，请确认在桌面客户端中使用。",
+          },
+        } as any;
+      }
+      const result = await api.list({ projectDir });
+      if (!result || result.ok === false) {
+        return {
+          ok: false,
+          error: String(result?.error ?? "CRON_LIST_FAILED"),
+          output: result,
+        } as any;
+      }
+      return {
+        ok: true,
+        output: result,
+        undoable: false,
+      } as any;
+    },
+  },
+
   {
     name: "agent.config.list",
     description: "列出所有子 Agent",

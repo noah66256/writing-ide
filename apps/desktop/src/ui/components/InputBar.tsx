@@ -12,7 +12,7 @@ import {
 import { Mic, SendHorizontal, Square, Paperclip, Image, AtSign, X, FolderOpen, ChevronsUpDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useProjectStore } from "@/state/projectStore";
-import { useRunStore, type Mode } from "@/state/runStore";
+import { useRunStore } from "@/state/runStore";
 import { useModelStore, type AvailableModel } from "@/state/modelStore";
 import { buildCurrentSnapshot, useConversationStore } from "@/state/conversationStore";
 import { useWorkspaceStore } from "@/state/workspaceStore";
@@ -59,20 +59,13 @@ const SLASH_QUERY_RE = /\/([^\s/]*)$/;
 // 每个对话独立的输入草稿（模块级，跨渲染保留）
 const conversationDraftMap = new Map<string, string>();
 
-const MODE_OPTIONS: { value: Mode; label: string }[] = [
-  { value: "chat", label: "探索" },
-  { value: "agent", label: "创作" },
-];
-
-function modelNoteForMode(model: AvailableModel | null, mode: Mode): string {
+function modelNoteForMode(model: AvailableModel | null): string {
   if (!model) return "";
-  if (mode === "chat") return "";
-  return model.agentSupported === false ? String(model.availabilityNote || "只支持探索模式") : "";
+  return model.agentSupported === false ? String(model.availabilityNote || "模型暂不支持当前模式") : "";
 }
 
-function modelSupportedInMode(model: AvailableModel | null, mode: Mode): boolean {
+function modelSupported(model: AvailableModel | null): boolean {
   if (!model) return true;
-  if (mode === "chat") return model.chatSupported !== false;
   return model.agentSupported !== false;
 }
 
@@ -429,6 +422,8 @@ export function InputBar({
     useSegments(editorRef);
   const mode = useRunStore((s) => s.mode);
   const setMode = useRunStore((s) => s.setMode);
+  const opMode = useRunStore((s) => s.opMode);
+  const setOpMode = useRunStore((s) => s.setOpMode);
   const model = useRunStore((s) => s.model);
   const setModel = useRunStore((s) => s.setModel);
   const activity = useRunStore((s) => s.activity);
@@ -569,7 +564,7 @@ export function InputBar({
     }),
     [currentModel],
   );
-  const currentModelNote = useMemo(() => modelNoteForMode(currentModel, mode), [currentModel, mode]);
+  const currentModelNote = useMemo(() => modelNoteForMode(currentModel), [currentModel]);
 
   const buttonMode: "mic" | "send" | "stop" = useMemo(
     () => (hasContent ? "send" : isRunning ? "stop" : "mic"),
@@ -845,15 +840,15 @@ export function InputBar({
   }, [setModel]);
 
   useEffect(() => {
-    const supported = modelSupportedInMode(currentModel, mode);
+    const supported = modelSupported(currentModel);
     if (supported) return;
     const fallbackId =
-      (mode === "chat" ? chatDefaultModelId : agentDefaultModelId) ||
-      availableModels.find((item) => modelSupportedInMode(item, mode))?.id ||
+      agentDefaultModelId ||
+      availableModels.find((item) => modelSupported(item))?.id ||
       "";
     if (!fallbackId || fallbackId === model) return;
     setModel(fallbackId);
-  }, [agentDefaultModelId, availableModels, chatDefaultModelId, currentModel, mode, model, setModel]);
+  }, [agentDefaultModelId, availableModels, currentModel, model, setModel]);
 
   const removeFile = useCallback((idx: number) => {
     setDroppedFiles((prev) => prev.filter((_, i) => i !== idx));
@@ -998,24 +993,44 @@ export function InputBar({
               </button>
             )}
 
-            {/* 模式切换 */}
+            {/* 模式切换（创作 / 助手） */}
             <div className="inline-flex items-center rounded-lg border border-border bg-surface-alt p-0.5">
-              {MODE_OPTIONS.map((opt) => (
-                <button
-                  key={opt.value}
-                  type="button"
-                  onClick={() => setMode(opt.value)}
-                  className={cn(
-                    "px-2.5 py-1 rounded-md text-[12px] leading-none font-medium transition-colors duration-fast",
-                    mode === opt.value
-                      ? "bg-accent text-white shadow-sm"
-                      : "text-text-muted hover:text-text hover:bg-surface",
-                  )}
-                  title={`切换到${opt.label}模式`}
-                >
-                  {opt.label}
-                </button>
-              ))}
+              <button
+                type="button"
+                onClick={() => {
+                  setOpMode("creative");
+                  setMode("agent");
+                }}
+                className={cn(
+                  "px-2.5 py-1 rounded-md text-[12px] leading-none font-medium transition-colors duration-fast",
+                  opMode !== "assistant"
+                    ? "bg-accent text-white shadow-sm"
+                    : "text-text-muted hover:text-text hover:bg-surface",
+                )}
+                title="创作模式（默认，安全，不执行本机命令）"
+              >
+                创作
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const ok = window.confirm(
+                    "将切换到“助手模式”。助手模式会允许 Agent 全权控制电脑，存在更高风险。\n\n是否继续？",
+                  );
+                  if (!ok) return;
+                  setOpMode("assistant");
+                  setMode("agent");
+                }}
+                className={cn(
+                  "px-2.5 py-1 rounded-md text-[12px] leading-none font-medium transition-colors duration-fast",
+                  opMode === "assistant"
+                    ? "bg-error text-white shadow-sm"
+                    : "text-text-muted hover:text-text hover:bg-surface",
+                )}
+                title="助手模式（可执行本机命令，高风险）"
+              >
+                助手
+              </button>
             </div>
 
             <span className="mx-0.5 h-4 w-px bg-border" aria-hidden="true" />

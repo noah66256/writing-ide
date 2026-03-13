@@ -181,6 +181,13 @@ declare global {
         install: (pkg: { manifest: any; payload: any }) => Promise<{ ok: boolean; installed?: any; error?: string }>;
         uninstall: (itemId: string) => Promise<{ ok: boolean; removed?: boolean; error?: string }>;
       };
+      cron?: {
+        create: (params: any) => Promise<any>;
+        list: (params?: any) => Promise<any>;
+      };
+      automation?: {
+        onCronDue?: (handler: (payload: any) => void) => () => void;
+      };
     };
   }
 }

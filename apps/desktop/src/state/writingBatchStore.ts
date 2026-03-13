@@ -182,7 +182,7 @@ async function ensureDirOnDisk(rootDir: string, relDir: string) {
   if (!api) return { ok: false as const, error: "NO_FS_API" };
   const dir = ensureRelDir(relDir);
   if (!dir) return { ok: true as const };
-  // 逐级 mkdir（主进程的 doc.mkdir 需要相对项目 rootDir）
+  // 逐级 mkdir（主进程的 mkdir 需要相对项目 rootDir）
   const parts = dir.split("/").filter(Boolean);
   let cur = "";
   for (const p of parts) {

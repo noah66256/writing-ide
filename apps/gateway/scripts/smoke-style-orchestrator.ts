@@ -14,8 +14,8 @@ function baseAllowed(): Set<string> {
     "run.todo",
     "run.done",
     "kb.search",
-    "doc.write",
-    "doc.applyEdits",
+    "write",
+    "edit",
     "lint.copy",
     "lint.style",
   ]);
@@ -66,7 +66,7 @@ function main() {
     "need_draft",
     (s) => { s.hasStyleKbSearch = true; },
     "need_draft",
-    ["doc.write"],
+    ["write"],
     ["lint.copy", "lint.style"],
   );
 
@@ -82,7 +82,7 @@ function main() {
     "need_copy_lint_rework",
     (s) => { s.hasStyleKbSearch = true; s.hasDraftText = true; s.lastCopyLint = { riskLevel: "high" }; },
     "need_copy_lint",
-    ["lint.copy", "doc.applyEdits", "doc.write"],
+    ["lint.copy", "edit", "write"],
   );
   runCase(
     "need_style_lint_first_pass",
@@ -95,7 +95,7 @@ function main() {
     "need_style_lint_rework",
     (s) => { s.hasStyleKbSearch = true; s.hasDraftText = true; s.copyLintPassed = true; s.lastStyleLint = { score: 61 }; },
     "need_style_lint",
-    ["lint.style", "doc.applyEdits", "doc.write"],
+    ["lint.style", "edit", "write"],
   );
 
   console.log("[Phase D] 完成态只做交付");
@@ -103,7 +103,7 @@ function main() {
     "completed",
     (s) => { s.hasStyleKbSearch = true; s.hasDraftText = true; s.copyLintPassed = true; s.styleLintPassed = true; },
     "completed",
-    ["doc.write", "doc.applyEdits", "run.done"],
+    ["write", "edit", "run.done"],
     ["lint.copy", "lint.style", "kb.search"],
   );
 

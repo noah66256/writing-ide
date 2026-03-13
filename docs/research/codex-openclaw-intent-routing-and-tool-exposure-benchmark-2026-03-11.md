@@ -1,5 +1,12 @@
 # Codex vs OpenClaw：意图路由与工具暴露/选择对标（2026-03-11）
 
+> TIP（2026-03-13）：本文中对 OpenClaw `ToolProfileId=minimal/coding/messaging/full` 以及 profile/policy pipeline 的讨论，现已在 Crab 中收敛为：  
+> - 基础工具暴露不再按 profile 细分，而是由 opMode（创作/助手）控制；  
+> - 核心基础工具集合由 `CORE_TOOLS` 常量定义，不再参与 Tool Retrieval/B2 的裁剪；  
+> - MCP/插件工具依然走分层选择与检索，具体策略见  
+>   `docs/research/core-tools-exposure-refactor-2026-03-13.md`。  
+> 因此，本文关于“核心工具可能被 allowlist/检索误裁剪”的风险描述仅作为历史背景，最新实现以上述新文档为准。
+
 > 目的：用“范式对标”回答一个关键问题——**为什么我们的 agent 有时会表现为“这轮没有某工具/不会列目录/无法落盘 md”**，以及如何从机制层避免这类断链。
 
 ## TL;DR（结论先行）

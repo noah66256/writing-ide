@@ -371,7 +371,7 @@ export function detectRunIntent(args: {
         : isWritingTask;
 
   // 文件/目录操作：不应被“写作闭环 sticky”误判为写作任务。
-  // 典型误伤：绑定风格库 + 旧 todo（写作）+ 用户短句“删那 4 篇旧稿” -> 不应触发 style gate 禁用 doc.deletePath。
+  // 典型误伤：绑定风格库 + 旧 todo（写作）+ 用户短句“删那 4 篇旧稿” -> 不应触发 style gate 禁用 delete。
   const looksLikeFileOpsTask = (() => {
     const t = String(userPrompt ?? "");
     if (!t.trim()) return false;
@@ -575,24 +575,22 @@ export function styleNeedsCta(args: { styleGateEnabled: boolean; skipCta: boolea
 
 export function isWriteLikeTool(name: string) {
   return (
-    name === "doc.write" ||
-    name === "doc.applyEdits" ||
-    name === "doc.replaceSelection" ||
-    name === "doc.mkdir" ||
-    name === "doc.renamePath" ||
-    name === "doc.deletePath" ||
+    name === "write" ||
+    name === "edit" ||
+    name === "mkdir" ||
+    name === "rename" ||
+    name === "delete" ||
     name === "doc.restoreSnapshot" ||
     name === "doc.splitToDir"
   );
 }
 
 // “正文写入”类工具：用于风格闭环门禁（StyleGate）。
-// 说明：doc.deletePath/doc.renamePath/doc.mkdir 也会改动项目，但它们不是“写正文”，不应被 style gate 当成 WRITE_BEFORE_KB/LINT。
+// 说明：delete/rename/mkdir 也会改动项目，但它们不是“写正文”，不应被 style gate 当成 WRITE_BEFORE_KB/LINT。
 export function isContentWriteTool(name: string) {
   return (
-    name === "doc.write" ||
-    name === "doc.applyEdits" ||
-    name === "doc.replaceSelection" ||
+    name === "write" ||
+    name === "edit" ||
     name === "doc.restoreSnapshot" ||
     name === "doc.splitToDir"
   );

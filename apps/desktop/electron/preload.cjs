@@ -37,10 +37,10 @@ contextBridge.exposeInMainWorld("desktop", {
       return ipcRenderer.invoke("project.writeIndex", rootDir, data);
     },
     readFile(rootDir, relPath) {
-      return ipcRenderer.invoke("doc.readFile", rootDir, relPath);
+      return ipcRenderer.invoke("readFile", rootDir, relPath);
     },
     writeFile(rootDir, relPath, content) {
-      return ipcRenderer.invoke("doc.writeFile", rootDir, relPath, content);
+      return ipcRenderer.invoke("writeFile", rootDir, relPath, content);
     },
     appendFile(rootDir, relPath, content) {
       return ipcRenderer.invoke("doc.appendFile", rootDir, relPath, content);
@@ -49,13 +49,13 @@ contextBridge.exposeInMainWorld("desktop", {
       return ipcRenderer.invoke("doc.deleteFile", rootDir, relPath);
     },
     deletePath(rootDir, relPath) {
-      return ipcRenderer.invoke("doc.deletePath", rootDir, relPath);
+      return ipcRenderer.invoke("delete", rootDir, relPath);
     },
     mkdir(rootDir, relDir) {
-      return ipcRenderer.invoke("doc.mkdir", rootDir, relDir);
+      return ipcRenderer.invoke("mkdir", rootDir, relDir);
     },
     renamePath(rootDir, fromRel, toRel) {
-      return ipcRenderer.invoke("doc.renamePath", rootDir, fromRel, toRel);
+      return ipcRenderer.invoke("rename", rootDir, fromRel, toRel);
     },
     watchStart(rootDir) {
       return ipcRenderer.invoke("project.watchStart", rootDir);
@@ -154,6 +154,38 @@ contextBridge.exposeInMainWorld("desktop", {
     },
     saveArtifact(opts) {
       return ipcRenderer.invoke("exec.saveArtifact", opts);
+    },
+  },
+  shell: {
+    exec(params) {
+      return ipcRenderer.invoke("shell.exec", params);
+    },
+  },
+  process: {
+    run(params) {
+      return ipcRenderer.invoke("process.run", params);
+    },
+    list() {
+      return ipcRenderer.invoke("process.list");
+    },
+    stop(id) {
+      return ipcRenderer.invoke("process.stop", { id });
+    },
+  },
+  cron: {
+    create(params) {
+      return ipcRenderer.invoke("cron.create", params);
+    },
+    list(params) {
+      return ipcRenderer.invoke("cron.list", params ?? {});
+    },
+  },
+  automation: {
+    onCronDue(handler) {
+      if (typeof handler !== "function") return () => {};
+      const listener = (_event, payload) => handler(payload);
+      ipcRenderer.on("automation.cronDue", listener);
+      return () => ipcRenderer.removeListener("automation.cronDue", listener);
     },
   },
   memory: {

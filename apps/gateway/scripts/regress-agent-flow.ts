@@ -48,7 +48,7 @@ async function main() {
       activeSkillIds: active.map((s) => s.id),
     });
     const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
-    const toolCalls: ParsedToolCall[] = [{ name: "doc.write", args: { path: "drafts/a.md", content: "x" } }];
+    const toolCalls: ParsedToolCall[] = [{ name: "write", args: { path: "drafts/a.md", content: "x" } }];
     const batch = analyzeStyleWorkflowBatch({ mode, intent, gates, state, lintMaxRework: 2, toolCalls });
     assert.equal(batch.shouldEnforce, true);
     assert.equal(batch.batchHasWrite, true);
@@ -63,7 +63,7 @@ async function main() {
     const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }], activeSkillIds: active.map((s) => s.id) });
     const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
     state.hasStyleKbSearch = true;
-    const toolCalls: ParsedToolCall[] = [{ name: "doc.write", args: { path: "a.md", content: "x" } }];
+    const toolCalls: ParsedToolCall[] = [{ name: "write", args: { path: "a.md", content: "x" } }];
     const batch = analyzeStyleWorkflowBatch({ mode, intent, gates, state, lintMaxRework: 2, toolCalls });
     assert.equal(batch.violation, "WRITE_BEFORE_DRAFT");
   }
@@ -75,7 +75,7 @@ async function main() {
     const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }], activeSkillIds: active.map((s) => s.id) });
     const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
     state.hasStyleKbSearch = true;
-    const toolCalls: ParsedToolCall[] = [{ name: "doc.write", args: { path: "a.md", content: "x" } }];
+    const toolCalls: ParsedToolCall[] = [{ name: "write", args: { path: "a.md", content: "x" } }];
     const batch = analyzeStyleWorkflowBatch({ mode, intent, gates, state, lintMaxRework: 2, toolCalls });
     assert.equal(batch.violation, null); // 跳过 lint 时，只要 KB 已完成即可写
   }
@@ -106,7 +106,7 @@ async function main() {
     state.hasStyleKbSearch = true;
     const toolCalls: ParsedToolCall[] = [
       { name: "lint.style", args: { text: "x" } },
-      { name: "doc.write", args: { path: "a.md", content: "y" } },
+      { name: "write", args: { path: "a.md", content: "y" } },
     ];
     const batch = analyzeStyleWorkflowBatch({ mode, intent, gates, state, lintMaxRework: 2, toolCalls });
     assert.equal(batch.violation, "LINT_AND_WRITE_SAME_TURN");
@@ -123,7 +123,7 @@ async function main() {
     state.hasStyleKbSearch = true;
     const toolCalls: ParsedToolCall[] = [
       { name: "lint.style", args: { text: "x" } },
-      { name: "doc.write", args: { path: "a.md", content: "y" } },
+      { name: "write", args: { path: "a.md", content: "y" } },
     ];
     const batch = analyzeStyleWorkflowBatch({ mode, intent, gates, state, lintMaxRework: 2, toolCalls });
     assert.equal(batch.violation, null);
@@ -140,7 +140,7 @@ async function main() {
     state.copyLintPassed = true;
     state.styleLintPassed = false;
     state.styleLintFailCount = 3;
-    const toolCalls: ParsedToolCall[] = [{ name: "doc.write", args: { path: "a.md", content: "y" } }];
+    const toolCalls: ParsedToolCall[] = [{ name: "write", args: { path: "a.md", content: "y" } }];
     const batch = analyzeStyleWorkflowBatch({ mode, intent, gates, state, lintMaxRework: 2, toolCalls });
     assert.equal(batch.violation, "WRITE_BLOCKED_LINT_EXHAUSTED");
   }

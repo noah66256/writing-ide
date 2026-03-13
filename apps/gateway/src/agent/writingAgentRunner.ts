@@ -85,6 +85,7 @@ export type ModelApiType =
 export type RunContext = {
   runId: string;
   mode: "agent" | "chat";
+  opMode?: "creative" | "assistant";
   intent: RunIntent;
   gates: RunGates;
   activeSkills: ActiveSkill[];
@@ -129,7 +130,7 @@ export type RunContext = {
   /**
    * Phase2：交付契约（Deliverability Contract）
    * - required=true 时，run 结束前必须产出至少一个“可审计的交付物（artifact）”，否则不允许按纯文本完成。
-   * - 当前最常见的是 file_markdown：要求 doc.write / doc.applyEdits / code.exec 等成功写入。
+   * - 当前最常见的是 file_markdown：要求 write / edit / code.exec 等成功写入。
    */
   deliveryContract?: {
     required: boolean;
@@ -963,7 +964,7 @@ export class AgentRunner {
   private _pickPreferredWriteToolName(dc: DeliveryContract, allowed: Set<string>): string | null {
     const candidates = Array.isArray(dc.preferredWriteToolNames) && dc.preferredWriteToolNames.length > 0
       ? dc.preferredWriteToolNames
-      : ["doc.write", "doc.applyEdits", "code.exec"];
+      : ["write", "edit", "code.exec"];
     for (const name of candidates) {
       const n = String(name ?? "").trim();
       if (n && allowed.has(n)) return n;
@@ -2183,7 +2184,7 @@ export class AgentRunner {
       const violation = String(batch.violation);
       const note = [
         `【StyleWorkflow】检测到风格闭环步骤顺序不合理（violation=${violation}）。`,
-        "请按\"先从风格库拉模板 kb.search → 写出候选稿 → 运行 lint.copy（防复用）→ 运行 lint.style（风格校验）→ 最后 doc.write/doc.applyEdits 落盘\"的顺序调整工具调用。",
+        "请按\"先从风格库拉模板 kb.search → 写出候选稿 → 运行 lint.copy（防复用）→ 运行 lint.style（风格校验）→ 最后 write/edit 落盘\"的顺序调整工具调用。",
       ].join("\n");
 
       this.ctx.writeEvent("run.notice", {
@@ -2339,10 +2340,10 @@ export class AgentRunner {
         turn: this.turn,
         kind: "warn",
         title: "MainDocLoopGuard",
-        message: `连续 ${this.consecutiveMainDocOnlyTurns} 轮仅更新 mainDoc，请立即改用 lint.copy 或 doc.write。`,
+        message: `连续 ${this.consecutiveMainDocOnlyTurns} 轮仅更新 mainDoc，请立即改用 lint.copy 或 write。`,
       });
       mainDocLoopWarning =
-        "【系统约束】你已连续更新 mainDoc 多轮且未推进实质步骤。请立即调用 lint.copy 完成检查，或调用 doc.write 输出最终稿。禁止继续将正文/改写记录写入 mainDoc。";
+        "【系统约束】你已连续更新 mainDoc 多轮且未推进实质步骤。请立即调用 lint.copy 完成检查，或调用 write 输出最终稿。禁止继续将正文/改写记录写入 mainDoc。";
     }
 
     if (isMainDocOnlyTurn && this.consecutiveMainDocOnlyTurns >= MAIN_DOC_UPDATE_HARD_LIMIT) {
@@ -2588,8 +2589,8 @@ export class AgentRunner {
             st.workflowRetryBudget = budget - 1;
             const hint =
               "当前已启用 style_imitate 风格仿写 Skill，" +
-              "但尚未按“kb.search 样例 → 草稿 draft → lint.copy → lint.style → doc.write”完整走完闭环。\n" +
-              "请按以下顺序执行：先 kb.search 取风格模板/规则卡，再输出草稿，然后调用 lint.copy 和 lint.style 审计，最后再用 doc.write/doc.applyEdits 落盘。";
+              "但尚未按“kb.search 样例 → 草稿 draft → lint.copy → lint.style → write”完整走完闭环。\n" +
+              "请按以下顺序执行：先 kb.search 取风格模板/规则卡，再输出草稿，然后调用 lint.copy 和 lint.style 审计，最后再用 write/edit 落盘。";
             this._pushHistory({ role: 'user_hint', text: hint });
             this.ctx.writeEvent('run.notice', {
               turn: this.turn,
@@ -2913,7 +2914,7 @@ export class AgentRunner {
     // Tool allowlist enforcement: prevent hallucinated tool calls for sub-agents
     if (allowedForTurn.size > 0 && !allowedForTurn.has(toolUse.name)) {
       const routeId = String(this.ctx.intentRouteId ?? "").trim().toLowerCase();
-      const isDeleteOnlyReadBlocked = routeId === "file_delete_only" && toolUse.name === "doc.read";
+      const isDeleteOnlyReadBlocked = routeId === "file_delete_only" && toolUse.name === "read";
       this.ctx.writeEvent("tool.call", {
         toolCallId: toolUse.id,
         name: toolUse.name,
@@ -2936,13 +2937,13 @@ export class AgentRunner {
           ok: false,
           error: "ERR_TOOL_POLICY_DENIED",
           message: isDeleteOnlyReadBlocked
-            ? "当前是删除/清理任务，已禁止 doc.read。"
+            ? "当前是删除/清理任务，已禁止 read。"
             : `工具 "${toolUse.name}" 不在当前回合允许列表中。`,
           detail: isDeleteOnlyReadBlocked
             ? "file_delete_only 路由下禁止先读文件，除非用户明确要求\u201c先看内容再删\u201d。"
             : `Tool "${toolUse.name}" is not available for this agent.`,
           next_actions: isDeleteOnlyReadBlocked
-            ? ["先 project.listFiles 确认目标", "再调用 doc.deletePath 删除目标路径"]
+            ? ["先 project.listFiles 确认目标", "再调用 delete 删除目标路径"]
             : ["改用当前回合允许的工具", "或先调整任务意图后重试"],
         },
       };
@@ -3015,7 +3016,7 @@ export class AgentRunner {
         ok: false as const,
         output: {
           ok: false,
-          error: "MAIN_DOC_UPDATE_BLOCKED: 连续调用过多，已熔断。请改用 lint.copy 或 doc.write。",
+          error: "MAIN_DOC_UPDATE_BLOCKED: 连续调用过多，已熔断。请改用 lint.copy 或 write。",
         },
       };
     }
@@ -3893,7 +3894,7 @@ export class AgentRunner {
       this.runState.hasWriteApplied = true;
     }
 
-    if (result.ok && (isContentWriteTool(name) || isSnapshotRestore || name === "code.exec" || name === "doc.write")) {
+    if (result.ok && (isContentWriteTool(name) || isSnapshotRestore || name === "code.exec" || name === "write")) {
       this._recordDeliveredArtifact(toolUse, result);
     }
   }
@@ -4062,7 +4063,7 @@ export class AgentRunner {
         const recPath = deliveryContract.recommendedPath ? `建议路径：${deliveryContract.recommendedPath}。` : "";
         pushRetryUserMessage(
           `你还没有真正产出可交付文件（第 ${this.deliverabilityNoWriteTurns} 次提醒）。` +
-            `本轮属于文件交付任务，禁止只回复文本。请立即调用 doc.write（或等价写入工具）完成落盘。${recPath}`,
+            `本轮属于文件交付任务，禁止只回复文本。请立即调用 write（或等价写入工具）完成落盘。${recPath}`,
         );
         this.ctx.writeEvent("run.notice", {
           turn: this.turn,
@@ -4193,7 +4194,7 @@ export class AgentRunner {
         const recPath = deliveryContract.recommendedPath ? `建议路径：${deliveryContract.recommendedPath}。` : "";
         pushRetryUserMessage(
           `你还没有真正产出可交付文件（第 ${this.executionNoToolTurns} 次提醒）。` +
-            `本轮属于文件交付任务，禁止只回复文本。请立即调用 doc.write（或等价写入工具）完成落盘。${recPath}`,
+            `本轮属于文件交付任务，禁止只回复文本。请立即调用 write（或等价写入工具）完成落盘。${recPath}`,
         );
         this.ctx.writeEvent("run.notice", {
           turn: this.turn,
