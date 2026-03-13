@@ -2256,11 +2256,32 @@ function registerIpc() {
   // Shell Exec（项目目录内执行命令，高风险）
   ipcMain.handle("shell.exec", async (_event, params) => {
     try {
+      const startedAt = Date.now();
       const p = params && typeof params === "object" ? params : {};
       const projectDir = String(p.projectDir ?? "").trim();
-      if (!projectDir) return { ok: false, error: "MISSING_PROJECT_DIR" };
+      if (!projectDir) {
+        return {
+          ok: false,
+          error: "MISSING_PROJECT_DIR",
+          exitCode: null,
+          stdout: "",
+          stderr: "",
+          timedOut: false,
+          durationMs: Date.now() - startedAt,
+        };
+      }
       const commandRaw = String(p.command ?? "").trim();
-      if (!commandRaw) return { ok: false, error: "MISSING_COMMAND" };
+      if (!commandRaw) {
+        return {
+          ok: false,
+          error: "MISSING_COMMAND",
+          exitCode: null,
+          stdout: "",
+          stderr: "",
+          timedOut: false,
+          durationMs: Date.now() - startedAt,
+        };
+      }
       const args = Array.isArray(p.args) ? p.args.map((x) => String(x ?? "")) : [];
       const timeoutMs = (() => {
         const n = Number(p.timeoutMs);
@@ -2299,6 +2320,7 @@ function registerIpc() {
             stdout: "",
             stderr: "Blocked dangerous command pattern: rm -rf on root/home/*",
             timedOut: false,
+            durationMs: Date.now() - startedAt,
           };
         }
       } catch {
@@ -2322,8 +2344,19 @@ function registerIpc() {
           clearTimeout(timer);
           if (stdout.length > maxLen) stdout = stdout.slice(0, maxLen) + "\n...[stdout truncated]";
           if (stderr.length > maxLen) stderr = stderr.slice(0, maxLen) + "\n...[stderr truncated]";
-          const ok = !timedOut && exitCode === 0 && !error;
-          resolve({ ok, exitCode, stdout, stderr, timedOut, error: error ?? (timedOut ? "TIMEOUT" : undefined) });
+          const durationMs = Date.now() - startedAt;
+          // 约定：超时视为特殊退出码（对齐 Codex/Unix 惯例，如 124）
+          const effectiveExit = timedOut ? 124 : exitCode;
+          const ok = !timedOut && effectiveExit === 0 && !error;
+          resolve({
+            ok,
+            exitCode: effectiveExit,
+            stdout,
+            stderr,
+            timedOut,
+            durationMs,
+            error: error ?? (timedOut ? "TIMEOUT" : undefined),
+          });
         };
         if (child.stdout) {
           child.stdout.on("data", (d) => { stdout += String(d ?? ""); });

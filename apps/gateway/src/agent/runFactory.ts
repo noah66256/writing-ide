@@ -146,6 +146,16 @@ type DeliveryContractV1 = {
   preferredWriteToolNames?: string[];
 };
 
+type ShellExecResult = {
+  ok: boolean;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  durationMs?: number | null;
+  error?: string | null;
+};
+
 export type IntentRouteDecision = {
   intentType: IntentType;
   confidence: number;
@@ -689,6 +699,62 @@ function isLikelyBrowserMcpTool(tool: { name?: string; originalName?: string; de
     /(playwright|browser|chrom(e|ium)|firefox|webkit|browser_navigate|open_url|openurl|goto|go_to)/i.test(raw);
   const action = /(navigate|new[_\s-]?tab|click|type|fill|screenshot)/i.test(raw);
   return strong || action;
+}
+
+function formatShellExecResultForModel(result: ShellExecResult & { command?: string; cwd?: string }): string {
+  const exit = result.timedOut ? (typeof result.exitCode === "number" ? result.exitCode : 124) : result.exitCode;
+  const parts: string[] = [];
+  if (result.timedOut) {
+    const ms = typeof result.durationMs === "number" ? Math.max(0, Math.floor(result.durationMs)) : null;
+    parts.push(`command timed out${ms !== null ? ` after ${ms} ms` : ""}`);
+  }
+  if (result.command) {
+    const cwd = result.cwd ? ` (cwd: ${result.cwd})` : "";
+    parts.push(`Command: ${result.command}${cwd}`);
+  }
+  parts.push(`Exit code: ${exit === null || exit === undefined ? "unknown" : String(exit)}`);
+  if (typeof result.durationMs === "number") {
+    const sec = Math.max(0, result.durationMs) / 1000;
+    parts.push(`Wall time: ${sec.toFixed(2)} seconds`);
+  }
+  const stdout = String(result.stdout ?? "").trim();
+  const stderr = String(result.stderr ?? "").trim();
+  const maxBody = 4000;
+  const bodyParts: string[] = [];
+  if (stdout) {
+    const out =
+      stdout.length > maxBody
+        ? stdout.slice(0, maxBody) + "\n...[stdout truncated]"
+        : stdout;
+    bodyParts.push("STDOUT:\n" + out);
+  }
+  if (stderr) {
+    const err =
+      stderr.length > maxBody
+        ? stderr.slice(0, maxBody) + "\n...[stderr truncated]"
+        : stderr;
+    bodyParts.push("STDERR:\n" + err);
+  }
+  if (!bodyParts.length) {
+    bodyParts.push("Output: <no output>");
+  }
+  return parts.join("\n") + "\n\n" + bodyParts.join("\n\n");
+}
+
+function buildShellExecTranscriptBlock(result: ShellExecResult & { command?: string; cwd?: string }): string {
+  const cmd = String(result.command ?? "").trim();
+  const cwd = String(result.cwd ?? "").trim();
+  const headerLines: string[] = [];
+  headerLines.push("<user_shell_command>");
+  headerLines.push("<command>");
+  if (cwd) headerLines.push(`cd ${cwd} && ${cmd || "<empty>"}`);
+  else headerLines.push(cmd || "<empty>");
+  headerLines.push("</command>");
+  headerLines.push("<result>");
+  headerLines.push(formatShellExecResultForModel(result));
+  headerLines.push("</result>");
+  headerLines.push("</user_shell_command>");
+  return headerLines.join("\n");
 }
 
 export function buildAgentProtocolPrompt(args: {

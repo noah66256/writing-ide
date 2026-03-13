@@ -3706,8 +3706,15 @@ const tools: ToolDefinition[] = [
 
       const result = await shellApi.exec({ projectDir, command: commandRaw, args: argv, timeoutMs });
       if (!result) return { ok: false, error: "SHELL_EXEC_IPC_FAILED" } as any;
-      const exitCode = typeof result.exitCode === "number" ? result.exitCode : undefined;
-      const ok = exitCode === 0;
+
+      const exitCode = typeof result.exitCode === "number" ? result.exitCode : null;
+      const timedOut = Boolean((result as any).timedOut);
+      const durationMsRaw = (result as any).durationMs;
+      const durationMs =
+        typeof durationMsRaw === "number" && Number.isFinite(durationMsRaw)
+          ? Math.max(0, Math.floor(durationMsRaw))
+          : undefined;
+      const ok = !timedOut && exitCode === 0;
       return {
         ok,
         output: {
@@ -3715,8 +3722,9 @@ const tools: ToolDefinition[] = [
           exitCode,
           stdout: String(result.stdout ?? ""),
           stderr: String(result.stderr ?? ""),
-          error: exitCode === 0 ? undefined : String(result.error ?? ""),
-          timedOut: Boolean(result.timedOut),
+          timedOut,
+          durationMs,
+          error: exitCode === 0 && !timedOut ? undefined : String(result.error ?? ""),
         },
         undoable: false,
       } as any;
