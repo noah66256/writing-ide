@@ -2858,6 +2858,19 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     ...compositePreferredToolNames,
   ]);
 
+  // 助手模式 + 已有项目目录时：将 shell.exec / process.* / cron.* 视为“助手核心工具”，
+  // 不允许被 Routing/Tool Retrieval 子集选择器裁掉（只在 baseAllowedToolNames 中存在时才生效）。
+  const shouldPreserveRuntimeTools =
+    opModeForRun === "assistant" && typeof projectDirFromSidecar === "string" && projectDirFromSidecar.length > 0;
+  if (shouldPreserveRuntimeTools) {
+    const runtimeToolNames = ["shell.exec", "process.run", "process.list", "process.stop", "cron.create", "cron.list"];
+    for (const name of runtimeToolNames) {
+      if (baseAllowedToolNames.has(name)) {
+        preserveToolNamesWithComposite.add(name);
+      }
+    }
+  }
+
   const toolCatalog = buildToolCatalog({
     mode,
     allowedToolNames: baseAllowedToolNames,
@@ -2929,6 +2942,30 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
 
   // 兜底：确保 CORE_TOOLS 不被 B2 裁剪掉，只要它们在 baseAllowedToolNames 中。
   ensureCoreToolsSelected({ baseAllowedToolNames, selectedAllowedToolNames });
+
+  // 调试：观察经过 Tool Retrieval / Routing 收敛后的工具集合中，高危运行时工具是否仍然存在。
+  try {
+    const runtimeToolNames = ["shell.exec", "process.run", "process.list", "process.stop", "cron.create", "cron.list"];
+    const runtimeToolsSelected = Array.from(selectedAllowedToolNames).filter((n) => runtimeToolNames.includes(n));
+    services.fastify.log.info(
+      {
+        runId,
+        mode,
+        opModeFromBody: (body as any)?.opMode ?? null,
+        opModeForRun,
+        runtimeToolsSelected,
+        selectedCount: selectedAllowedToolNames.size,
+        toolSelectionSummary: {
+          routeId: routeIdLower || intentRoute.routeId || "unknown",
+          selected: toolSelection.summary.selected,
+          pruned: toolSelection.summary.pruned,
+        },
+      },
+      "agent.run.selected_runtime_tools",
+    );
+  } catch {
+    // logging failures must not影响正常执行
+  }
 
   const toolRetrievalNotice = {
     routeId: routeIdLower || intentRoute.routeId || "unknown",
