@@ -8,11 +8,14 @@ import {
   LogOut,
   LogIn,
   ChevronRight,
+  ChevronDown,
   Check,
   MoreHorizontal,
   Pin,
   PinOff,
   Pencil,
+  Archive,
+  ArchiveRestore,
   ImagePlus,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -96,6 +99,7 @@ export function NavSidebar() {
   const addConversation = useConversationStore((s) => s.addConversation);
   const deleteConversation = useConversationStore((s) => s.deleteConversation);
   const pinConversation = useConversationStore((s) => s.pinConversation);
+  const archiveConversation = useConversationStore((s) => s.archiveConversation);
   const renameConversation = useConversationStore((s) => s.renameConversation);
   const resetRun = useRunStore((s) => s.resetRun);
   const loadSnapshot = useRunStore((s) => s.loadSnapshot);
@@ -131,15 +135,21 @@ export function NavSidebar() {
   const activeConvId = useConversationStore((s) => s.activeConvId);
   const storeSetActiveConvId = useConversationStore((s) => s.setActiveConvId);
 
-  // 置顶优先，同组内按 updatedAt 降序
-  const sortedConversations = useMemo(() => {
+  // 置顶优先，但不再因为“点击/更新”打乱原有顺序：
+  // - activeConvs：未归档的对话（进行中），pinned 在前，其余保留顺序
+  // - archivedConvs：已归档的对话，单独分组展示
+  const { activeConvs, archivedConvs } = useMemo(() => {
     const arr = [...(conversations ?? [])];
-    return arr.sort((a, b) => {
-      if (a.pinned && !b.pinned) return -1;
-      if (!a.pinned && b.pinned) return 1;
-      return b.updatedAt - a.updatedAt;
-    });
+    const activePinned = arr.filter((c) => !c.archived && c.pinned);
+    const activeUnpinned = arr.filter((c) => !c.archived && !c.pinned);
+    const archivedPinned = arr.filter((c) => c.archived && c.pinned);
+    const archivedUnpinned = arr.filter((c) => c.archived && !c.pinned);
+    return {
+      activeConvs: [...activePinned, ...activeUnpinned],
+      archivedConvs: [...archivedPinned, ...archivedUnpinned],
+    };
   }, [conversations]);
+  const [archivesOpen, setArchivesOpen] = useState(false);
 
   // 智能命名：第一轮完成后，若标题仍是"新任务"，用 Haiku 生成标题
   const autoNamingRef = useRef<Set<string>>(new Set());
@@ -327,30 +337,80 @@ export function NavSidebar() {
 
       {/* 对话历史列表 */}
       <div className="flex-1 overflow-y-auto overflow-x-hidden px-2 space-y-0.5">
-        {sortedConversations.length === 0 ? (
+        {activeConvs.length === 0 && archivedConvs.length === 0 ? (
           <div className="px-3 py-6 text-[12px] text-text-faint text-center">暂无对话记录</div>
         ) : (
-        sortedConversations.map((conv) => {
-            const runEntry = convRuns[conv.id];
-            const isRunning = Boolean(runEntry?.isRunning);
-            const showCompleted =
-              !isRunning &&
-              Boolean(runEntry?.completedAt) &&
-              nowTs - Number(runEntry?.completedAt ?? 0) < 30_000;
-            return (
-              <ConvItem
-                key={conv.id}
-                conv={conv}
-                active={activeConvId === conv.id}
-                isRunning={isRunning}
-                showCompleted={showCompleted}
-                onClick={() => handleLoadConversation(conv.id)}
-                onDelete={(e) => handleDeleteConversation(conv.id, e)}
-                onPin={(pinned) => pinConversation(conv.id, pinned)}
-                onRename={(title) => renameConversation(conv.id, title)}
-              />
-            );
-          })
+          <>
+            {/* 进行中对话 */}
+            {activeConvs.map((conv) => {
+              const runEntry = convRuns[conv.id];
+              const isRunning = Boolean(runEntry?.isRunning);
+              const showCompleted =
+                !isRunning &&
+                Boolean(runEntry?.completedAt) &&
+                nowTs - Number(runEntry?.completedAt ?? 0) < 30_000;
+              return (
+                <ConvItem
+                  key={conv.id}
+                  conv={conv}
+                  active={activeConvId === conv.id}
+                  isRunning={isRunning}
+                  showCompleted={showCompleted}
+                  onClick={() => handleLoadConversation(conv.id)}
+                  onDelete={(e) => handleDeleteConversation(conv.id, e)}
+                  onPin={(pinned) => pinConversation(conv.id, pinned)}
+                  onRename={(title) => renameConversation(conv.id, title)}
+                  onArchive={(archived) => archiveConversation(conv.id, archived)}
+                />
+              );
+            })}
+
+            {/* 已归档分组 */}
+            {archivedConvs.length > 0 && (
+              <div className="mt-2">
+                <button
+                  type="button"
+                  onClick={() => setArchivesOpen((v) => !v)}
+                  className="flex items-center gap-1.5 w-full px-3 py-1.5 text-[11px] text-text-faint hover:text-text-muted hover:bg-surface/60 rounded-md"
+                >
+                  {archivesOpen ? (
+                    <ChevronDown size={11} className="shrink-0" />
+                  ) : (
+                    <ChevronRight size={11} className="shrink-0" />
+                  )}
+                  <span className="flex-1 text-left truncate">
+                    已归档对话（{archivedConvs.length}）
+                  </span>
+                </button>
+                {archivesOpen && (
+                  <div className="mt-0.5 space-y-0.5 pl-1 border-l border-border-soft">
+                    {archivedConvs.map((conv) => {
+                      const runEntry = convRuns[conv.id];
+                      const isRunning = Boolean(runEntry?.isRunning);
+                      const showCompleted =
+                        !isRunning &&
+                        Boolean(runEntry?.completedAt) &&
+                        nowTs - Number(runEntry?.completedAt ?? 0) < 30_000;
+                      return (
+                        <ConvItem
+                          key={conv.id}
+                          conv={conv}
+                          active={activeConvId === conv.id}
+                          isRunning={isRunning}
+                          showCompleted={showCompleted}
+                          onClick={() => handleLoadConversation(conv.id)}
+                          onDelete={(e) => handleDeleteConversation(conv.id, e)}
+                          onPin={(pinned) => pinConversation(conv.id, pinned)}
+                          onRename={(title) => renameConversation(conv.id, title)}
+                          onArchive={(archived) => archiveConversation(conv.id, archived)}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </>
         )}
       </div>
 
@@ -658,6 +718,7 @@ function ConvItem({
   onDelete,
   onPin,
   onRename,
+  onArchive,
 }: {
   conv: Conversation;
   active: boolean;
@@ -667,6 +728,7 @@ function ConvItem({
   onDelete: (e: React.MouseEvent) => void;
   onPin: (pinned: boolean) => void;
   onRename: (title: string) => void;
+  onArchive: (archived: boolean) => void;
 }) {
   const [hovered, setHovered] = useState(false);
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
@@ -761,10 +823,12 @@ function ConvItem({
       {menuPos && (
         <ConvContextMenu
           pinned={!!conv.pinned}
+          archived={!!conv.archived}
           pos={menuPos}
           onClose={() => setMenuPos(null)}
           onPin={() => { onPin(!conv.pinned); setMenuPos(null); }}
           onRename={() => { setMenuPos(null); setRenaming(true); }}
+          onArchive={() => { onArchive(!conv.archived); setMenuPos(null); }}
           onDelete={(e) => { setMenuPos(null); onDelete(e); }}
         />
       )}
@@ -776,17 +840,21 @@ function ConvItem({
 
 function ConvContextMenu({
   pinned,
+  archived,
   pos,
   onClose,
   onPin,
   onRename,
+  onArchive,
   onDelete,
 }: {
   pinned: boolean;
+  archived: boolean;
   pos: { x: number; y: number };
   onClose: () => void;
   onPin: () => void;
   onRename: () => void;
+   onArchive: () => void;
   onDelete: (e: React.MouseEvent) => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
@@ -828,6 +896,17 @@ function ConvContextMenu({
       >
         <Pencil size={13} className="text-text-muted" />
         重命名
+      </button>
+      <button
+        onClick={onArchive}
+        className="flex items-center gap-2.5 w-full px-3 py-2 rounded-lg text-text hover:bg-surface-alt transition-colors"
+      >
+        {archived ? (
+          <ArchiveRestore size={13} className="text-text-muted" />
+        ) : (
+          <Archive size={13} className="text-text-muted" />
+        )}
+        {archived ? "取消归档" : "归档"}
       </button>
       <div className="mx-2 my-0.5 border-t border-border-soft" />
       <button

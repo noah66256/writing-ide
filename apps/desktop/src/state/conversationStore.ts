@@ -79,6 +79,8 @@ export type Conversation = {
   updatedAt: number;
   snapshot: RunSnapshot;
   pinned?: boolean;
+  /** 手动归档标记：归档后从“进行中”列表移至“已归档”分组 */
+  archived?: boolean;
 };
 
 type ConversationState = {
@@ -91,6 +93,7 @@ type ConversationState = {
   addConversation: (c: Omit<Conversation, "id" | "createdAt" | "updatedAt"> & { id?: string }) => string;
   deleteConversation: (id: string) => void;
   pinConversation: (id: string, pinned: boolean) => void;
+  archiveConversation: (id: string, archived: boolean) => void;
   renameConversation: (id: string, title: string) => void;
   updateConversation: (id: string, patch: { snapshot?: RunSnapshot; title?: string }) => void;
   setActiveConvId: (id: string | null) => void;
@@ -301,6 +304,8 @@ export const useConversationStore = create<ConversationState>()(
           createdAt: now,
           updatedAt: now,
           snapshot: c.snapshot,
+          ...(c.pinned != null ? { pinned: c.pinned } : {}),
+          ...(c.archived != null ? { archived: c.archived } : {}),
         };
         set(() => {
           const prev = get().conversations ?? [];
@@ -324,7 +329,20 @@ export const useConversationStore = create<ConversationState>()(
         const v = String(id ?? "").trim();
         if (!v) return;
         set((s) => {
-          const next = (s.conversations ?? []).map((x) => (x.id === v ? { ...x, pinned, updatedAt: Date.now() } : x));
+          const next = (s.conversations ?? []).map((x) =>
+            x.id === v ? { ...x, pinned, updatedAt: Date.now() } : x,
+          );
+          schedulePersistToDisk({ conversations: next, draftSnapshot: get().draftSnapshot ?? null });
+          return { conversations: next };
+        });
+      },
+      archiveConversation: (id, archived) => {
+        const v = String(id ?? "").trim();
+        if (!v) return;
+        set((s) => {
+          const next = (s.conversations ?? []).map((x) =>
+            x.id === v ? { ...x, archived, updatedAt: Date.now() } : x,
+          );
           schedulePersistToDisk({ conversations: next, draftSnapshot: get().draftSnapshot ?? null });
           return { conversations: next };
         });
@@ -423,8 +441,6 @@ export const useConversationStore = create<ConversationState>()(
     },
   ),
 );
-
-
 
 
 
