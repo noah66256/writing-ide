@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Check } from "lucide-react";
+import { Check, X } from "lucide-react";
 import { ProviderLogo, resolveProviderBrand } from "@/components/ProviderLogo";
 
 export type ModelPickerItem = {
@@ -93,10 +93,17 @@ export function ModelPickerModal(props: {
   return (
     <div className="modalMask" role="dialog" aria-modal="true" onMouseDown={() => props.onClose()}>
       <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-          <div className="modalTitle">{props.title || "选择模型"}</div>
-          <button className="btn" type="button" onClick={() => props.onClose()}>
-            关闭
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 6 }}>
+          <div className="modalTitle" style={{ marginBottom: 0 }}>
+            {props.title || "选择模型"}
+          </div>
+          <button
+            className="btn btnIconOnly"
+            type="button"
+            onClick={() => props.onClose()}
+            title="关闭"
+          >
+            <X size={16} />
           </button>
         </div>
 

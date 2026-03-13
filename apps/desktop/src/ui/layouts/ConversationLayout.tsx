@@ -2,10 +2,12 @@ import { useEffect, useRef } from "react";
 import { NavSidebar } from "../components/NavSidebar";
 import { ChatArea } from "../components/ChatArea";
 import { CardJobsModal } from "@/components/CardJobsModal";
+import { cn } from "@/lib/utils";
 import { useModelStore } from "@/state/modelStore";
 import { useRunStore } from "@/state/runStore";
 import { useProjectStore } from "@/state/projectStore";
 import { useKbStore } from "@/state/kbStore";
+import { useLayoutStore } from "@/state/layoutStore";
 import { useConversationStore } from "@/state/conversationStore";
 
 /**
@@ -17,6 +19,8 @@ export function ConversationLayout() {
   const hydrateFromDisk = useConversationStore((s) => s.hydrateFromDisk);
   const draftSnapshot = useConversationStore((s) => s.draftSnapshot);
   const restoredRef = useRef(false);
+  const sidebarCollapsed = useLayoutStore((s) => s.sidebarCollapsed);
+  const toggleSidebar = useLayoutStore((s) => s.toggleSidebar);
 
   // 启动时从磁盘/localStorage 水合历史对话
   useEffect(() => {
@@ -135,12 +139,36 @@ export function ConversationLayout() {
       />
 
       {/* 左侧导航栏 — z-30 确保弹出菜单/子菜单不被 main 遮挡 */}
-      <div className="relative z-30">
-        <NavSidebar />
+      <div
+        className={cn(
+          "relative z-30 transition-[width] duration-200 ease-out",
+          sidebarCollapsed ? "w-0" : "w-[var(--nav-width)]",
+        )}
+      >
+        {!sidebarCollapsed && <NavSidebar />}
       </div>
 
       {/* 主区域 */}
       <main className="flex-1 flex flex-col min-w-0 relative z-10">
+        {/* 左侧折叠/展开按钮 */}
+        <button
+          type="button"
+          onClick={toggleSidebar}
+          className={cn(
+            "group absolute left-2 top-[60px] z-20 inline-flex items-center gap-1 rounded-full border border-border-soft",
+            "bg-surface/90 px-2 py-1 text-[11px] text-text-faint shadow-sm backdrop-blur-sm",
+            "hover:bg-surface-alt hover:text-text-muted transition-colors duration-fast",
+          )}
+          style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+          title={sidebarCollapsed ? "展开任务列表" : "收起任务列表"}
+        >
+          <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-surface-alt text-text-faint group-hover:bg-surface">
+            {sidebarCollapsed ? "<" : ">"}
+          </span>
+          <span className="hidden sm:inline">
+            {sidebarCollapsed ? "展开任务" : "收起任务"}
+          </span>
+        </button>
         <ChatArea />
       </main>
 

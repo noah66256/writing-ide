@@ -8,6 +8,7 @@ import { useProjectIndexStore } from "./state/projectIndexStore";
 import { useMemoryStore } from "./state/memoryStore";
 import { useWorkspaceStore } from "./state/workspaceStore";
 import { useUpdateStore } from "./state/updateStore";
+import { useLayoutStore } from "./state/layoutStore";
 import { useAuthStore } from "./state/authStore";
 import { useSkillStore } from "./state/skillStore";
 import { getUpdateBaseUrl } from "./agent/updateBaseUrl";
@@ -111,6 +112,10 @@ export default function App() {
       }
       if (payload.type === "file.save") {
         void useProjectStore.getState().saveActiveNow();
+        return;
+      }
+      if (payload.type === "view.toggleSidebar") {
+        useLayoutStore.getState().toggleSidebar();
         return;
       }
     });
