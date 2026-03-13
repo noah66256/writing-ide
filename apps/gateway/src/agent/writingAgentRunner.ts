@@ -48,6 +48,7 @@ import {
 } from "./serverToolRunner.js";
 import { inferCapabilities } from "./toolCatalog.js";
 import { TurnEngine, type RunOutcome } from "./turnEngine.js";
+import { buildShellExecTranscriptBlock } from "./runFactory.js";
 
 export type SseWriter = (event: string, data: unknown) => void;
 
@@ -2280,6 +2281,7 @@ export class AgentRunner {
     }
 
     orderedResults.sort((a, b) => a.index - b.index);
+    let shellExecNoteText: string | null = null;
     for (const { toolUse, result } of orderedResults) {
       this._updateRunState(toolUse, { ok: result.ok, output: result.output });
       this._recordToolAttempt(toolUse, result);
@@ -2306,9 +2308,41 @@ export class AgentRunner {
 
       const MAX_TOOL_RESULT_CHARS = 60_000;
       const rawOutput = typeof result.output === "string" ? result.output : JSON.stringify(result.output ?? null);
-      const cappedOutput = rawOutput.length > MAX_TOOL_RESULT_CHARS
-        ? rawOutput.slice(0, MAX_TOOL_RESULT_CHARS) + `\n...[工具结果已截断，共 ${rawOutput.length} 字符]`
-        : rawOutput;
+      const cappedOutput =
+        rawOutput.length > MAX_TOOL_RESULT_CHARS
+          ? rawOutput.slice(0, MAX_TOOL_RESULT_CHARS) + `\n...[工具结果已截断，共 ${rawOutput.length} 字符]`
+          : rawOutput;
+
+      // 对 shell.exec 增加 Codex 风格的终端摘要块（<user_shell_command>）
+      if (toolUse.name === "shell.exec") {
+        try {
+          const payload = result.output && typeof result.output === "object" ? (result.output as any) : null;
+          if (payload && typeof payload === "object") {
+            const shellResult = {
+              ok: Boolean(payload.ok),
+              exitCode:
+                typeof payload.exitCode === "number" && Number.isFinite(payload.exitCode)
+                  ? (payload.exitCode as number)
+                  : null,
+              stdout: String(payload.stdout ?? ""),
+              stderr: String(payload.stderr ?? ""),
+              timedOut: Boolean(payload.timedOut),
+              durationMs:
+                typeof payload.durationMs === "number" && Number.isFinite(payload.durationMs)
+                  ? Math.floor(payload.durationMs)
+                  : null,
+              error: payload.error != null ? String(payload.error) : null,
+              command: String((toolUse.input as any)?.command ?? ""),
+              cwd: String((this.ctx as any)?.projectDir ?? ""),
+            };
+            const noteBlock = buildShellExecTranscriptBlock(shellResult);
+            shellExecNoteText = noteBlock;
+          }
+        } catch {
+          // ignore formatter errors; 不影响原始 tool_result
+        }
+      }
+
       canonicalResults.push({
         toolUseId: toolUse.id,
         toolName: toolUse.name,
@@ -2360,7 +2394,7 @@ export class AgentRunner {
       this._pushHistory({
         role: "tool_result",
         results: canonicalResults,
-        noteText: mainDocLoopWarning ?? undefined,
+        noteText: shellExecNoteText || mainDocLoopWarning || undefined,
       });
     } else if (mainDocLoopWarning) {
       this.ctx.writeEvent("run.notice", {

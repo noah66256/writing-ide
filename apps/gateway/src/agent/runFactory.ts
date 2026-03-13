@@ -741,7 +741,7 @@ function formatShellExecResultForModel(result: ShellExecResult & { command?: str
   return parts.join("\n") + "\n\n" + bodyParts.join("\n\n");
 }
 
-function buildShellExecTranscriptBlock(result: ShellExecResult & { command?: string; cwd?: string }): string {
+export function buildShellExecTranscriptBlock(result: ShellExecResult & { command?: string; cwd?: string }): string {
   const cmd = String(result.command ?? "").trim();
   const cwd = String(result.cwd ?? "").trim();
   const headerLines: string[] = [];
