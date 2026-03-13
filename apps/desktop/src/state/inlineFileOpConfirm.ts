@@ -19,7 +19,7 @@ function clearPending() {
   pending = null;
 }
 
-export function requestInlineFileOpConfirm(timeoutMs = 120_000): Promise<FileOpConfirmChoice> {
+export function requestInlineFileOpConfirm(timeoutMs = 600_000): Promise<FileOpConfirmChoice> {
   if (pending) {
     pending.settle("deny");
     clearPending();

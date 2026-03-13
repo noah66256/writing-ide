@@ -3611,7 +3611,7 @@ const tools: ToolDefinition[] = [
       { name: "entryFile", desc: "项目内脚本路径（与 code 二选一）" },
       { name: "args", desc: "脚本参数数组" },
       { name: "requirements", desc: "pip 依赖数组" },
-      { name: "timeoutMs", desc: "执行超时（毫秒），默认 120000，最大 600000" },
+      { name: "timeoutMs", desc: "执行超时（毫秒），默认 600000，最大 600000" },
       { name: "artifactGlobs", desc: "产物 glob 数组" },
     ],
     riskLevel: "medium" as ToolRiskLevel,
@@ -3629,7 +3629,7 @@ const tools: ToolDefinition[] = [
       const entryFile = typeof args.entryFile === "string" ? args.entryFile : "";
       const timeoutMs = (() => {
         const n = Number(args.timeoutMs);
-        if (!Number.isFinite(n)) return 120_000;
+        if (!Number.isFinite(n)) return 600_000;
         return Math.max(1_000, Math.min(600_000, Math.floor(n)));
       })();
       const argv = Array.isArray(args.args) ? args.args.map((x: any) => String(x ?? "")) : [];
@@ -3672,7 +3672,7 @@ const tools: ToolDefinition[] = [
     args: [
       { name: "command", required: true, desc: "命令名或完整命令行（如 npm 或 npm run test）" },
       { name: "args", required: false, desc: "命令参数数组（可选）" },
-      { name: "timeoutMs", required: false, desc: "超时时间（毫秒），默认 120000，最大 600000" },
+      { name: "timeoutMs", required: false, desc: "超时时间（毫秒），默认 600000，最大 600000" },
     ],
     riskLevel: "high" as ToolRiskLevel,
     applyPolicy: "proposal" as ToolApplyPolicy,
@@ -3695,7 +3695,7 @@ const tools: ToolDefinition[] = [
         : [];
       const timeoutMs = (() => {
         const n = Number((args as any).timeoutMs);
-        if (!Number.isFinite(n)) return 120_000;
+        if (!Number.isFinite(n)) return 600_000;
         return Math.max(1_000, Math.min(600_000, Math.floor(n)));
       })();
 

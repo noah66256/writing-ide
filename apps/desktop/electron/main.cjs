@@ -2285,7 +2285,8 @@ function registerIpc() {
       const args = Array.isArray(p.args) ? p.args.map((x) => String(x ?? "")) : [];
       const timeoutMs = (() => {
         const n = Number(p.timeoutMs);
-        if (!Number.isFinite(n)) return 120_000;
+        // 默认超时：10 分钟；上限仍为 10 分钟
+        if (!Number.isFinite(n)) return 600_000;
         return Math.max(1_000, Math.min(600_000, Math.floor(n)));
       })();
 

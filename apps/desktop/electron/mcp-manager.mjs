@@ -505,7 +505,7 @@ export class McpManager {
   }
 
   async _runProcess(command, args, opts = {}) {
-    const timeoutMs = Number(opts?.timeoutMs ?? 180000);
+    const timeoutMs = Number(opts?.timeoutMs ?? 600000);
     const env = opts?.env && typeof opts.env === "object" ? opts.env : process.env;
     return await new Promise((resolve) => {
       const child = spawn(command, Array.isArray(args) ? args : [], {
@@ -601,7 +601,7 @@ export class McpManager {
         commandToRun = resolved;
       }
 
-      const runRet = await this._runProcess(commandToRun, step.args, { timeoutMs: 180000, env: baseEnv });
+      const runRet = await this._runProcess(commandToRun, step.args, { timeoutMs: 600000, env: baseEnv });
       if (runRet?.ok) {
         const normalizeRet = await this._normalizeUvInstallLayout(userRuntimeRoot);
         if (!normalizeRet?.ok) {

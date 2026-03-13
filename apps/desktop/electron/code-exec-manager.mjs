@@ -16,9 +16,10 @@ import { spawn } from "node:child_process";
 
 const MAX_CONCURRENT = 2;
 const MAX_LOG_BYTES = 256 * 1024; // stdout/stderr 各 256KB
-const DEFAULT_TIMEOUT_MS = 120_000;
+// 默认与上限均按 10 分钟对齐，避免长跑 Office/PDF 生成类任务被过早中断
+const DEFAULT_TIMEOUT_MS = 600_000;
 const MAX_TIMEOUT_MS = 600_000;
-const VENV_TIMEOUT_MS = 120_000;
+const VENV_TIMEOUT_MS = 600_000;
 const PYTHON_DETECT_TIMEOUT_MS = 8_000;
 
 const DEFAULT_ARTIFACT_GLOBS = [

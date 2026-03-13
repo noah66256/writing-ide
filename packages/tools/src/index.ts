@@ -1121,7 +1121,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "entryFile", required: false, desc: "项目内脚本路径（与 code 二选一）", type: "string" as ToolArgType },
       { name: "args", required: false, desc: "脚本参数数组", type: "array" as ToolArgType },
       { name: "requirements", required: false, desc: "pip 依赖数组，如 [\"python-pptx==1.0.2\"]", type: "array" as ToolArgType },
-      { name: "timeoutMs", required: false, desc: "执行超时（毫秒），默认 120000，最大 600000", type: "number" as ToolArgType },
+      { name: "timeoutMs", required: false, desc: "执行超时（毫秒），默认 600000，最大 600000", type: "number" as ToolArgType },
       { name: "artifactGlobs", required: false, desc: "产物匹配 glob 数组，默认匹配 Office/PDF/图片文件", type: "array" as ToolArgType },
     ],
     modes: ["agent" as ToolMode],
@@ -1174,7 +1174,7 @@ export const TOOL_LIST: ToolMeta[] = [
     args: [
       { name: "command", required: true, desc: "命令名或完整命令行（如 npm 或 npm run test）", type: "string" },
       { name: "args", required: false, desc: "可选：命令参数数组", type: "array" },
-      { name: "timeoutMs", required: false, desc: "可选：超时（毫秒），默认 120000，最大 600000", type: "number" },
+      { name: "timeoutMs", required: false, desc: "可选：超时（毫秒），默认 600000，最大 600000", type: "number" },
     ],
     modes: ["agent"],
     inputSchema: {
@@ -1590,4 +1590,3 @@ export function collectToolSchemaIssues(toolList: ToolMeta[] = TOOL_LIST): ToolS
   }
   return out;
 }
-

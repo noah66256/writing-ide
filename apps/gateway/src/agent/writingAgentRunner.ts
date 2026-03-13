@@ -308,7 +308,8 @@ interface TurnAdapter {
 // 主 Agent 最大回合数上限（硬顶），防止无限循环；默认 200。
 // 若 RunContext.maxTurns 未显式设置，则回退到该值。
 const MAX_TURNS = 200;
-const TOOL_RESULT_TIMEOUT_MS = 180_000;
+// Desktop 工具结果超时（10 分钟）
+const TOOL_RESULT_TIMEOUT_MS = 600_000;
 const LINT_MAX_REWORK = 2;
 const STYLE_LINT_PASS_SCORE = 70;
 const MAIN_DOC_UPDATE_SOFT_LIMIT = 5;

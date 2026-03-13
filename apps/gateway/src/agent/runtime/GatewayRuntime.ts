@@ -82,8 +82,8 @@ const EMPTY_FAILURE_DIGEST: RuntimeFailureDigest = {
   failedTools: [],
 };
 
-/** Desktop 工具结果超时（3 分钟） */
-const TOOL_RESULT_TIMEOUT_MS = 180_000;
+/** Desktop 工具结果超时（10 分钟） */
+const TOOL_RESULT_TIMEOUT_MS = 600_000;
 
 /** 工具结果文本截断上限 */
 const MAX_TOOL_RESULT_CHARS = 60_000;
