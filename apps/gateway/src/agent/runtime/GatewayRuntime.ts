@@ -95,7 +95,7 @@ const COMPLETED_OUTCOME: RunOutcome = {
 };
 
 /** 默认最大回合数，防止无限循环 */
-const DEFAULT_MAX_TURNS = 48;
+const DEFAULT_MAX_TURNS = 200;
 const MAX_PROVIDER_TOOL_NAME_LEN = 64;
 
 const STYLE_LINT_PASS_SCORE = 70;

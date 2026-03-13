@@ -1054,6 +1054,59 @@ function summarizeToolOutput(toolName: string, output: unknown): string {
   }
   if (Array.isArray(output)) return output.length ? `返回 ${output.length} 项` : "";
   const out = _asRecord(output);
+  if (toolName === "shell.exec") {
+    const exitCodeRaw = (out as any).exitCode;
+    const exitCode = typeof exitCodeRaw === "number" ? exitCodeRaw : null;
+    const timedOut = Boolean((out as any).timedOut);
+    const ok = (out as any).ok === true && !timedOut && exitCode === 0;
+    const durationMsRaw = (out as any).durationMs;
+    const durationMs = typeof durationMsRaw === "number" && Number.isFinite(durationMsRaw) ? durationMsRaw : null;
+    const secs = durationMs != null ? (durationMs / 1000).toFixed(1) : null;
+    const status =
+      timedOut ? "超时" : exitCode === 0 ? "成功" : exitCode === null ? "状态未知" : "失败";
+    const parts: string[] = [];
+    parts.push(`命令${status}`);
+    if (exitCode !== null) parts.push(`exit ${exitCode}`);
+    if (secs) parts.push(`${secs}s`);
+    const errText = String((out as any).error ?? "").trim();
+    if (errText && !ok) {
+      parts.push(_trunc(errText, 32));
+    }
+    const stdout = String((out as any).stdout ?? "").trim();
+    const stderr = String((out as any).stderr ?? "").trim();
+    const preview = stdout || stderr;
+    if (preview) {
+      parts.push(_trunc(preview, 40));
+    }
+    return parts.join(" · ");
+  }
+  if (toolName === "process.run") {
+    const id = String((out as any).processId ?? (out as any).id ?? "").trim();
+    const status = String((out as any).status ?? "").trim() || "状态未知";
+    const cmd = String((out as any).command ?? "").trim();
+    const parts: string[] = [];
+    if (cmd) parts.push(_trunc(cmd, 40));
+    if (id) parts.push(`会话 ${_trunc(id, 16)}`);
+    parts.push(status);
+    return parts.join(" · ");
+  }
+  if (toolName === "process.list") {
+    const processes = Array.isArray((out as any).processes) ? ((out as any).processes as any[]) : [];
+    if (!processes.length) return "暂无由 Crab 启动的进程";
+    const running = processes.filter((p) => String((p as any).status ?? "").trim() === "running").length;
+    if (running > 0) return `${processes.length} 个会话（${running} 个运行中）`;
+    return `${processes.length} 个会话`;
+  }
+  if (toolName === "process.stop") {
+    const id = String((out as any).processId ?? (out as any).id ?? "").trim();
+    const stopped = (out as any).stopped === true;
+    const status = String((out as any).status ?? "").trim();
+    const parts: string[] = [];
+    if (id) parts.push(`会话 ${_trunc(id, 16)}`);
+    parts.push(stopped ? "已请求停止" : "停止失败");
+    if (status) parts.push(status);
+    return parts.join(" · ");
+  }
   if (toolName === "run.mainDoc.update" && out.ok === true) return "主文档已更新";
   if (toolName === "run.setTodoList" && out.ok === true) return "任务清单已更新";
   if (toolName === "time.now" && (out.nowIso || out.unixMs)) return "已读取当前时间";

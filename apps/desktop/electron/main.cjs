@@ -2420,11 +2420,15 @@ function registerIpc() {
 
       return {
         ok: true,
+        // processId 作为对齐 Codex Unified Exec 的“终端会话 ID”语义；
+        // 同时保留 id 字段，向后兼容现有调用方。
         id,
+        processId: id,
         pid: entry.pid,
         status: entry.status,
         cwd: entry.cwd,
         command: entry.command,
+        startedAt: entry.startedAt,
       };
     } catch (e) {
       return { ok: false, error: String(e && e.message ? e.message : e) };
@@ -2436,7 +2440,9 @@ function registerIpc() {
       const processes = [];
       for (const rec of processTable.values()) {
         processes.push({
+          // 同时暴露 id 和 processId，方便协议层统一称为 processId
           id: rec.id,
+          processId: rec.id,
           pid: rec.pid,
           command: rec.command,
           cwd: rec.cwd,
@@ -2464,7 +2470,7 @@ function registerIpc() {
       const child = rec.child;
       if (!child || child.killed || rec.status === "exited" || rec.status === "error") {
         rec.status = "exited";
-        return { ok: true, stopped: true, id, pid: rec.pid, status: rec.status };
+        return { ok: true, stopped: true, id, processId: id, pid: rec.pid, status: rec.status };
       }
       try {
         child.kill("SIGTERM");
@@ -2472,7 +2478,7 @@ function registerIpc() {
         // ignore
       }
       // 交给 exit 事件更新最终状态
-      return { ok: true, stopped: true, id, pid: rec.pid, status: "stopping" };
+      return { ok: true, stopped: true, id, processId: id, pid: rec.pid, status: "stopping" };
     } catch (e) {
       return { ok: false, error: String(e && e.message ? e.message : e) };
     }

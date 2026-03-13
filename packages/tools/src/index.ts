@@ -1224,8 +1224,14 @@ export const TOOL_LIST: ToolMeta[] = [
       description: "进程启动结果",
       properties: {
         ok: { type: "boolean" },
-        id: { type: "string", description: "Crab 内部进程 ID" },
+        /** 统一的“终端会话 ID”语义，对齐 Codex Unified Exec；等价于 id。 */
+        processId: { type: "string", description: "终端会话 ID（processId），等价于 id" },
+        id: { type: "string", description: "Crab 内部进程 ID（向后兼容字段）" },
         pid: { type: "number", description: "操作系统进程 PID" },
+        command: { type: "string", description: "完整命令行" },
+        cwd: { type: "string", description: "工作目录" },
+        status: { type: "string", description: "当前状态：running|exited|error" },
+        startedAt: { type: "number", description: "启动时间（unix ms）" },
         error: { type: "string" },
       },
     },
@@ -1246,11 +1252,18 @@ export const TOOL_LIST: ToolMeta[] = [
           items: {
             type: "object",
             properties: {
+              /** 统一的“终端会话 ID”语义，对齐 Codex Unified Exec；等价于 id。 */
+              processId: { type: "string" },
               id: { type: "string" },
               pid: { type: "number" },
               command: { type: "string" },
               cwd: { type: "string" },
               status: { type: "string" },
+              startedAt: { type: "number" },
+              endedAt: { type: "number" },
+              exitCode: { type: "number" },
+              signal: { type: "string" },
+              lastError: { type: "string" },
             },
           },
         },
@@ -1275,8 +1288,12 @@ export const TOOL_LIST: ToolMeta[] = [
       description: "停止结果",
       properties: {
         ok: { type: "boolean" },
+        /** 统一的“终端会话 ID”语义，对齐 Codex Unified Exec；等价于 id。 */
+        processId: { type: "string" },
         id: { type: "string" },
         stopped: { type: "boolean" },
+        pid: { type: "number" },
+        status: { type: "string" },
         error: { type: "string" },
       },
     },
@@ -1573,5 +1590,4 @@ export function collectToolSchemaIssues(toolList: ToolMeta[] = TOOL_LIST): ToolS
   }
   return out;
 }
-
 

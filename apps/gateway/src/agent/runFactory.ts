@@ -784,6 +784,7 @@ export function buildAgentProtocolPrompt(args: {
             return (
               `当前助手权限：助手模式（高权限）。\n` +
               `- 你可以在用户本机执行命令（例如 shell.exec / process.*），用于跑测试脚本、构建、启动本地服务或使用包管理器（brew/winget 等）。\n` +
+              `- 一次性任务（如 git clone / cat / curl 安装脚本）优先使用 shell.exec；需要长期运行的服务（如 dev server / 本地 dashboard），优先使用 process.run，并通过 process.list / process.stop 管理会话，而不是用 shell.exec 启动无法追踪的后台进程。\n` +
               `- 所有这类命令仍然是高风险操作：在执行安装/升级/修改系统环境的命令前，先用自然语言向用户说明你将做什么，再执行命令。\n` +
               `- 极端危险命令（例如 rm -rf 根目录）在系统层面会被直接拒绝，你不得尝试绕过。\n\n`
             );
@@ -2669,6 +2670,23 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
   })();
 
   const runId = randomUUID();
+  // 观察 agent vs assistant 模式下高危运行时工具的可见性（用于排查 shell.exec/process.* 暂不可用问题）
+  try {
+    const runtimeToolNames = ["shell.exec", "process.run", "process.list", "process.stop", "cron.create", "cron.list"];
+    const runtimeToolsInBase = Array.from(baseAllowedToolNames).filter((n) => runtimeToolNames.includes(n));
+    services.fastify.log.info(
+      {
+        runId,
+        mode,
+        opModeFromBody: (body as any)?.opMode ?? null,
+        opModeForRun,
+        runtimeToolsInBase,
+      },
+      "agent.run.opmode_runtime_tools",
+    );
+  } catch {
+    // logging failures must not影响正常执行
+  }
   const styleLinterLibraries = Array.isArray(toolSidecar?.styleLinterLibraries) ? (toolSidecar.styleLinterLibraries as any[]) : [];
   const projectFilesCount = Array.isArray(toolSidecar?.projectFiles) ? (toolSidecar.projectFiles as any[]).length : 0;
   const mcpServersFromSidecar: McpSidecarServer[] =
