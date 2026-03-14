@@ -959,7 +959,15 @@ export class McpManager {
         },
       );
 
-      await client.connect(transport);
+      // 对部分 server（如 Lark/飞书 MCP）连接阶段可能存在额外网络握手，
+      // 这里允许按 serverId 调整初始化超时时间，避免默认 60s 过早判定超时。
+      let connectOptions = undefined;
+      const serverIdText = String(serverId ?? "").trim().toLowerCase();
+      if (serverIdText === "marketplace-lark-openapi-mcp") {
+        connectOptions = { timeout: 180000 };
+      }
+
+      await client.connect(transport, connectOptions);
 
       // 获取工具列表
       let tools = [];
@@ -1181,7 +1189,24 @@ export class McpManager {
       // 我们在 UI 中将 AppID/Secret 存在 env.LARK_APP_ID / env.LARK_APP_SECRET，
       // 这里在启动前自动补齐 -a/-s，避免 server 因缺少凭证卡在非 MCP 输出导致超时。
       try {
-        const argvLower = args.map((x) => String(x ?? "").toLowerCase());
+        let argvLower = args.map((x) => String(x ?? "").toLowerCase());
+
+        // 兼容早期模板中误用的包名 "lark-openapi-mcp"：
+        // 将其重写为 "@larksuiteoapi/lark-mcp mcp"，避免 npm 404/ETIMEDOUT。
+        const hasLegacyPkg = argvLower.includes("lark-openapi-mcp");
+        if (hasLegacyPkg && !argvLower.includes("@larksuiteoapi/lark-mcp")) {
+          const next = [];
+          for (let i = 0; i < args.length; i += 1) {
+            const token = String(args[i] ?? "");
+            const tokenLower = token.toLowerCase();
+            if (tokenLower === "lark-openapi-mcp") continue; // 丢弃错误包名
+            next.push(token);
+          }
+          next.push("@larksuiteoapi/lark-mcp", "mcp");
+          args = next;
+          argvLower = args.map((x) => String(x ?? "").toLowerCase());
+        }
+
         isLarkMcp = argvLower.includes("@larksuiteoapi/lark-mcp");
         if (isLarkMcp) {
           const hasAppIdFlag = argvLower.includes("-a") || argvLower.includes("--app-id");

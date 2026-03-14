@@ -144,12 +144,14 @@ export function computeStyleTurnCaps(args: {
   };
 
   [
+    // 核心运行时工具：主文档 / Todo / 时间 / 记忆
     "run.mainDoc.get",
     "run.mainDoc.update",
     "run.setTodoList",
     "run.todo",
     "run.done",
     "time.now",
+    "memory",
   ].forEach(addIfAllowed);
 
   if (phase === "need_style_kb") {

@@ -23,7 +23,7 @@
     "dist:mac:pkg:universal": "npm run mcp:prepare-runtime && npm run build && electron-builder --mac pkg --universal"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@modelcontextprotocol/sdk": "^1.12.1",
     "@monaco-editor/react": "^4.7.0",
     "@ohmycrab/agent-core": "0.0.0",
     "@playwright/mcp": "^0.0.68",
