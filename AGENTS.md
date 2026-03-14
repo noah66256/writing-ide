@@ -130,3 +130,21 @@
 
 ### L1 全局记忆位置
 L1 全局记忆文件在 `userData/memory/global.md`（主进程 IPC: `memory.readGlobal`/`memory.writeGlobal`）。
+
+
+## 运维与 SSH 约定（给 Agent 用）
+
+- 线上 Gateway / Admin-Web 默认部署在一台固定服务器上，Agent 可以在需要时通过 SSH 登录排查问题。
+- 默认 SSH 目标：
+  - Host：`root@120.26.6.147`
+  - 代码目录：`/www/wwwroot/writing-ide`
+  - Gateway PM2 应用名：`ohmycrab-gateway`
+  - Admin-Web PM2 应用名：`ohmycrab-admin-web`
+- 常用路径：
+  - Gateway 日志：`/root/.pm2/logs/ohmycrab-gateway-*.log`
+  - Admin-Web 日志：`/root/.pm2/logs/ohmycrab-admin-web-*.log`
+  - Gateway data：`/www/wwwroot/writing-ide/apps/gateway/data/db.json`
+- 安全约束：
+  - Agent **不得**修改 `apps/gateway/data/` 下的数据文件结构（除非用户明确要求做数据修复脚本）。
+  - 只在用户明确说“去服务器上看一下/排查一下/需要部署”时才发起 SSH 相关操作。
+  - 不在对话中泄露实际密码、私钥内容或完整的 `~/.ssh/config`；如需说明，只引用 Host 名称和路径。

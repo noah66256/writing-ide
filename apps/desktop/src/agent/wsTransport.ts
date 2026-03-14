@@ -1562,34 +1562,55 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             }
 
             // -- Desktop-executed tools --
+            // 先在对话区插入“运行中”工具卡（便于观测），再在执行完成后补充结果。
+            const def0 = getTool(name);
+            const stepId = addTool({
+              toolName: name,
+              status: "running",
+              input: parsedArgsPreview,
+              output: null,
+              riskLevel: def0?.riskLevel ?? "high",
+              applyPolicy: def0?.applyPolicy ?? "proposal",
+              undoable: false,
+              kept: def0?.applyPolicy === "auto_apply",
+              applied: def0?.applyPolicy === "auto_apply",
+            });
+
             const exec = await executeToolCall({ toolName: name, rawArgs, mode: args.mode });
-            const def = exec.def;
-            const stepApplyPolicy = exec.result.ok ? exec.result.applyPolicy ?? def?.applyPolicy ?? "proposal" : def?.applyPolicy ?? "proposal";
-            const stepRiskLevel = exec.result.ok ? exec.result.riskLevel ?? def?.riskLevel ?? "high" : def?.riskLevel ?? "high";
+            const def = exec.def ?? def0;
+            const stepApplyPolicy = exec.result.ok
+              ? exec.result.applyPolicy ?? def?.applyPolicy ?? "proposal"
+              : def?.applyPolicy ?? "proposal";
+            const stepRiskLevel = exec.result.ok
+              ? exec.result.riskLevel ?? def?.riskLevel ?? "high"
+              : def?.riskLevel ?? "high";
             const initialKept = stepApplyPolicy === "auto_apply";
             const failedOutput =
               !exec.result.ok && exec.result.output !== undefined
                 ? exec.result.output
                 : { ok: false, error: exec.result.error };
 
-            addTool({
-              toolName: name,
+            patchTool(stepId, {
               status: exec.result.ok ? "success" : "failed",
               input: exec.parsedArgs,
               output: exec.result.ok ? exec.result.output : failedOutput,
-              riskLevel: stepRiskLevel, applyPolicy: stepApplyPolicy,
+              riskLevel: stepRiskLevel,
+              applyPolicy: stepApplyPolicy,
               undoable: exec.result.ok ? exec.result.undoable : false,
               undo: exec.result.ok ? exec.result.undo : undefined,
               apply: exec.result.ok ? exec.result.apply : undefined,
-              kept: initialKept, applied: stepApplyPolicy === "auto_apply",
+              kept: initialKept,
+              applied: stepApplyPolicy === "auto_apply",
             });
 
             submitToolResult({
-              toolCallId, name,
+              toolCallId,
+              name,
               ok: exec.result.ok,
               output: exec.result.ok ? exec.result.output : failedOutput,
               meta: {
-                applyPolicy: stepApplyPolicy, riskLevel: stepRiskLevel,
+                applyPolicy: stepApplyPolicy,
+                riskLevel: stepRiskLevel,
                 hasApply: exec.result.ok ? typeof exec.result.apply === "function" : false,
               },
             });
