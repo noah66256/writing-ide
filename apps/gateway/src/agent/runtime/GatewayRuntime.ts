@@ -1009,10 +1009,20 @@ export class GatewayRuntime implements AgentRuntime {
     }
 
     // 隐式完成：模型已做过工具调用，且连续纯文本回合 ≥ 2 → 自然终止（参考 Codex 模式）
-    // Codex 的设计：��型不返回 tool call 即视为完成，不注入追问。
+    // Codex 的设计：模型不返回 tool call 即视为完成，不注入追问。
     // 我们保留 1 次追问机会（consecutiveTextOnlyTurns < 2），超过后尊重模型的"自然结束"信号。
     if (this.totalToolCalls > 0 && this.consecutiveTextOnlyTurns >= 2) {
       return [];
+    }
+
+    // 模型已输出一轮纯文本总结（consecutiveTextOnlyTurns >= 1），说明最近一次工具失败
+    // 已被语义层处理过（总结/解释原因等）。此时提前消耗 failure 计数，避免
+    // tool_failure_repair 在 followUp 通道再追加一轮“自言自语”式提示。
+    if (
+      this.consecutiveTextOnlyTurns >= 1 &&
+      this.failureDigest.failedCount > this.lastSteeringFailureCount
+    ) {
+      this.lastSteeringFailureCount = this.failureDigest.failedCount;
     }
 
     const softGuidance = this._collectSoftGuidanceMessages();
