@@ -161,6 +161,45 @@ export const TOOL_LIST: ToolMeta[] = [
 
   },
   {
+    name: "style_imitate.run",
+    description:
+      "风格仿写闭环的高阶入口工具。\n" +
+      "【用途】在已绑定风格库的写作任务中，给定任务描述和候选稿文本（draft），自动执行：\n" +
+      "1) 必要时对风格库做一次样例检索（kb.search）；\n" +
+      "2) 调用 lint.copy 做复述/重合风险检查；\n" +
+      "3) 调用 lint.style 做风格对齐检查；\n" +
+      "4) 若 lint 全部通过且提供了 outputPath，则将 draft 写入该路径作为终稿。\n" +
+      "【注意】draft 文本可能较长，请仅在需要闭环校验时调用此工具；若只需轻量提示，可直接使用 lint.copy / lint.style。",
+    args: [
+      { name: "task", required: true, desc: "写作任务描述（主题、受众、平台、长度等）", type: "string" },
+      { name: "draft", required: true, desc: "候选稿文本，将用于 lint.copy / lint.style / 最终写入", type: "string" },
+      { name: "outputPath", required: false, desc: "可选：终稿写入路径（如 drafts/script.md）；不传则只做 lint 不落盘", type: "string" },
+      { name: "lengthHint", required: false, desc: "可选：长度提示（如“约 800 字”），仅作说明用", type: "string" },
+    ],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        task: { type: "string" },
+        draft: { type: "string" },
+        outputPath: { type: "string" },
+        lengthHint: { type: "string" },
+      },
+      required: ["task", "draft"],
+      additionalProperties: true,
+    },
+    outputSchema: {
+      type: "object",
+      description: "Style imitate orchestrated workflow result",
+      properties: {
+        ok: { type: "boolean", description: "是否完整走完风格闭环" },
+        path: { type: "string", description: "若已写入终稿，则为写入路径" },
+        summary: { type: "string", description: "本次闭环执行的简要摘要" },
+        error: { type: "string", description: "若失败，则为错误编码/原因" },
+      },
+    },
+  },
+  {
     name: "tools.search",
     description:
       "在本轮可用工具池中搜索工具（内置 + MCP），返回候选工具名与参数摘要。\n" +

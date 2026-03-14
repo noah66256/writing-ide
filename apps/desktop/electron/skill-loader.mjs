@@ -199,8 +199,13 @@ function parseManifest(raw, skillDir, fallbackId) {
   const badge = norm(uiRaw.badge) || id.replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 10) || "SKILL";
   const color = norm(uiRaw.color) || undefined;
 
+  const kind = norm(raw.kind) || undefined;
+  const activationMode = norm(raw.activationMode) || undefined;
+
   return {
     id, name, description, priority, stageKey, autoEnable,
+    ...(kind ? { kind } : {}),
+    ...(activationMode ? { activationMode } : {}),
     triggers, promptFragments, policies,
     ...(toolCaps ? { toolCaps } : {}),
     version,

@@ -2756,6 +2756,15 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     }
   }
 
+  // Style 专用 lint 工具（lint.copy / lint.style）：默认不进入公共工具池，仅在 style_imitate 激活或风格 gate 生效时可用。
+  const styleSkillActive =
+    activeSkillIds.includes("style_imitate") ||
+    (intent.isWritingTask && deriveStyleGate({ mode, kbSelected: kbSelectedList as any, intent, activeSkillIds }).styleGateEnabled);
+  if (!styleSkillActive) {
+    baseAllowedToolNames.delete("lint.copy");
+    baseAllowedToolNames.delete("lint.style");
+  }
+
   const routeDecision = buildRouteDecisionV1({
     routeId: intentRoute.routeId ?? "",
     mode,

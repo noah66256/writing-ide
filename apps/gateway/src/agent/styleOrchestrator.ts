@@ -1,23 +1,45 @@
 import { planStyleNextStep, type RunState, type WorkflowSkillPhaseSnapshot } from "@ohmycrab/agent-core";
+import { CORE_TOOL_NAME_SET } from "./coreTools.js";
 import type { RunContext } from "./writingAgentRunner.js";
 
 export type StyleOrchestratorTask = {
+  /** 写作任务描述（主题/受众/平台/长度等） */
   description: string;
+  /** 候选稿文本（将用于 lint.copy / lint.style / 最终写入） */
+  draft: string;
+  /** 可选：长度提示（例如 “约 800 字”），主要给上游提示用 */
   lengthHint?: string;
+  /** 可选：终稿写入路径（如 drafts/script.md）；不传则只做 lint 不写文件 */
   outputPathHint?: string;
 };
 
 export type StyleOrchestratorResult = {
   ok: boolean;
+  /** 若已写入终稿，则为写入路径 */
   path?: string;
+  /** 本次 orchestrator 的简要摘要，用于 tool_result 展示 */
   summary?: string;
+  /** 若失败，则为错误编码/简要原因 */
   error?: string;
+};
+
+export type StyleOrchestratorToolExecResult = {
+  ok: boolean;
+  output: unknown;
+  meta?: Record<string, unknown> | null;
 };
 
 export type StyleOrchestratorArgs = {
   ctx: RunContext;
   runState: RunState;
   task: StyleOrchestratorTask;
+  /**
+   * 由上层 Runner 提供的工具执行回调。
+   * 要求：
+   * - 内部必须调用 _updateRunState，保持 RunState 与工具调用一致；
+   * - 负责写入 tool.result SSE 与 turnEngine 记录。
+   */
+  executeTool: (toolName: string, args: Record<string, unknown>) => Promise<StyleOrchestratorToolExecResult>;
 };
 
 export type StyleTurnCaps = {
@@ -143,16 +165,13 @@ export function computeStyleTurnCaps(args: {
     if (args.baseAllowedToolNames.has(toolName)) allowed.add(toolName);
   };
 
-  [
-    // 核心运行时工具：主文档 / Todo / 时间 / 记忆
-    "run.mainDoc.get",
-    "run.mainDoc.update",
-    "run.setTodoList",
-    "run.todo",
-    "run.done",
-    "time.now",
-    "memory",
-  ].forEach(addIfAllowed);
+  // CORE_TOOLS：无论当前处于 style_imitate 的哪个阶段，只要在 baseAllowed 里，就不应被 per-turn gate 剪掉。
+  // 这样可以确保 run.* / memory / 基础读写/检索 等核心能力始终可用。
+  for (const name of CORE_TOOL_NAME_SET) {
+    if (args.baseAllowedToolNames.has(name)) {
+      allowed.add(name);
+    }
+  }
 
   if (phase === "need_style_kb") {
     addIfAllowed("kb.search");
@@ -188,7 +207,118 @@ export function computeStyleTurnCaps(args: {
 }
 
 export async function runOrchestratedStyleImitate(
-  _args: StyleOrchestratorArgs,
+  args: StyleOrchestratorArgs,
 ): Promise<StyleOrchestratorResult> {
-  return { ok: false, error: "STYLE_ORCHESTRATOR_NOT_IMPLEMENTED" };
+  const { ctx, runState, task, executeTool } = args;
+
+  const description = String(task.description ?? "").trim();
+  const draft = String((task as any).draft ?? "").trim();
+  const outputPath = String(task.outputPathHint ?? "").trim();
+
+  if (!draft) {
+    return {
+      ok: false,
+      error: "DRAFT_REQUIRED",
+      summary: "style_imitate.run 需要候选稿文本（draft）作为输入。",
+    };
+  }
+
+  // 当前仅在写作 + 风格 gate 场景下才执行完整闭环；其它场景退回普通工具路径。
+  const styleGateEnabled = Boolean(ctx.gates?.styleGateEnabled && ctx.intent?.isWritingTask);
+  if (!styleGateEnabled) {
+    return {
+      ok: false,
+      error: "STYLE_GATE_DISABLED",
+      summary: "当前未启用风格闭环（未绑定风格库或非写作任务），style_imitate.run 不执行。",
+    };
+  }
+
+  const styleLibIds = Array.isArray(ctx.styleLibIds)
+    ? ctx.styleLibIds.map((id) => String(id ?? "").trim()).filter(Boolean)
+    : [];
+
+  // S0：若尚未完成风格样例检索，先做一轮 kb.search(card) 以满足 hasStyleKbSearch，
+  // 避免 workflowSkills snapshot 长期停留在 need_style_kb。
+  if (!runState.hasStyleKbSearch && styleLibIds.length > 0) {
+    const kbArgs: Record<string, unknown> = {
+      query: description || "风格样例",
+      kind: "card",
+      libraryIds: styleLibIds,
+      cardTypes: ["hook", "one_liner", "ending", "outline", "thesis"],
+      perDocTopN: 3,
+      topDocs: 8,
+      debug: false,
+    };
+    const kbRes = await executeTool("kb.search", kbArgs);
+    if (!kbRes.ok) {
+      return {
+        ok: false,
+        error: "STYLE_KB_SEARCH_FAILED",
+        summary: "风格样例检索失败，未能进入 lint 阶段。",
+      };
+    }
+  }
+
+  // S1：copy lint（anti-regurgitation）
+  const copyArgs: Record<string, unknown> = { text: draft };
+  if (styleLibIds.length > 0) copyArgs.libraryIds = styleLibIds;
+  const copyRes = await executeTool("lint.copy", copyArgs);
+  if (!copyRes.ok) {
+    return {
+      ok: false,
+      error: "COPY_LINT_FAILED",
+      summary: "lint.copy 执行失败，请检查工具调用参数或稍后重试。",
+    };
+  }
+
+  if (!runState.copyLintPassed) {
+    return {
+      ok: false,
+      error: "COPY_LINT_NOT_PASSED",
+      summary: "复述/重合风险较高，lint.copy 未通过，请根据 lint 结果中的建议先做降重再重试。",
+    };
+  }
+
+  // S2：style lint（风格对齐）
+  const styleArgs: Record<string, unknown> = { text: draft };
+  if (styleLibIds.length > 0) styleArgs.libraryIds = styleLibIds;
+  const styleRes = await executeTool("lint.style", styleArgs);
+  if (!styleRes.ok) {
+    return {
+      ok: false,
+      error: "STYLE_LINT_FAILED",
+      summary: "lint.style 执行失败，请检查工具调用参数或稍后重试。",
+    };
+  }
+
+  if (!runState.styleLintPassed) {
+    return {
+      ok: false,
+      error: "STYLE_LINT_NOT_PASSED",
+      summary: "风格校验未通过，请根据 lint.style 的 issues/rewritePrompt 修稿后再重试。",
+    };
+  }
+
+  // S3：终稿写入（可选）
+  if (outputPath) {
+    const writeArgs: Record<string, unknown> = { path: outputPath, content: draft };
+    const writeRes = await executeTool("write", writeArgs);
+    if (!writeRes.ok) {
+      return {
+        ok: false,
+        error: "WRITE_FAILED",
+        summary: `风格闭环已通过，但写入终稿到 ${outputPath} 失败，请检查路径。`,
+      };
+    }
+    return {
+      ok: true,
+      path: outputPath,
+      summary: `风格闭环已完成并写入终稿：${outputPath}`,
+    };
+  }
+
+  return {
+    ok: true,
+    summary: "风格闭环 lint 已完成（未写入文件，请按需要调用 write/edit 落盘）。",
+  };
 }

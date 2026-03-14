@@ -46,6 +46,7 @@ import {
   decideServerToolExecution,
   executeServerToolOnGateway,
 } from "./serverToolRunner.js";
+import { runOrchestratedStyleImitate } from "./styleOrchestrator.js";
 import { inferCapabilities } from "./toolCatalog.js";
 import { TurnEngine, type RunOutcome } from "./turnEngine.js";
 import { buildShellExecTranscriptBlock } from "./runFactory.js";
@@ -2933,6 +2934,117 @@ export class AgentRunner {
 
   private async _executeTool(toolUse: ContentBlockToolUse): Promise<ToolExecResult> {
     let rawInput = toolUse.input ?? {};
+
+    // style_imitate.run：由 Runtime Orchestrator 接管完整闭环（kb.search → lint.copy → lint.style → 可选 write）
+    if (toolUse.name === "style_imitate.run") {
+      const args = (rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)
+        ? (rawInput as Record<string, unknown>)
+        : {}) as Record<string, unknown>;
+
+      const task = String(args.task ?? args.description ?? "").trim();
+      const draft = String(args.draft ?? "").trim();
+      const outputPath = String(args.outputPath ?? "").trim();
+      const lengthHint = String(args.lengthHint ?? "").trim();
+
+      if (!task) {
+        return {
+          ok: false,
+          output: { ok: false, error: "VALIDATION_ERROR", detail: "style_imitate.run 需要 task（写作任务描述）。" },
+        };
+      }
+      if (!draft) {
+        return {
+          ok: false,
+          output: { ok: false, error: "VALIDATION_ERROR", detail: "style_imitate.run 需要 draft（候选稿文本）。" },
+        };
+      }
+
+      // 仅在 style gate 生效的写作任务下执行；否则直接提示降级
+      const styleGateEnabled = Boolean(this.ctx.gates?.styleGateEnabled && this.ctx.intent?.isWritingTask);
+      if (!styleGateEnabled) {
+        return {
+          ok: false,
+          output: {
+            ok: false,
+            error: "STYLE_GATE_DISABLED",
+            message: "当前未启用风格闭环（未绑定风格库或非写作任务），style_imitate.run 不执行。",
+          },
+        };
+      }
+
+      const execTool = async (name: string, toolArgs: Record<string, unknown>): Promise<ToolExecResult> => {
+        // 确保内部需要的工具在本轮 allowed 集合中，不被 gating 拦截
+        const allowedForTurn = this.turnAllowedToolNames ?? this.ctx.allowedToolNames;
+        allowedForTurn.add(name);
+
+        const internalToolUse: ContentBlockToolUse = {
+          type: "tool_use",
+          id: `${toolUse.id}::${name}:${Date.now()}`,
+          name,
+          input: toolArgs,
+        };
+
+        const result = await this._executeTool(internalToolUse);
+        // 内部调用同样需要更新 RunState、事件与审计记录
+        this._updateRunState(internalToolUse, { ok: result.ok, output: result.output });
+        this._recordToolAttempt(internalToolUse, result);
+
+        this.ctx.writeEvent("tool.result", {
+          toolCallId: internalToolUse.id,
+          name,
+          ok: result.ok,
+          output: result.output,
+          meta: result.meta ?? null,
+          turn: this.turn,
+        });
+
+        const outObj = result.output && typeof result.output === "object" ? (result.output as Record<string, unknown>) : null;
+        this.turnEngine.record({
+          type: "tool_result",
+          callId: String(internalToolUse.id ?? ""),
+          name,
+          ok: result.ok,
+          output: result.output,
+          error: result.ok ? undefined : String(outObj?.error ?? "UNKNOWN_ERROR"),
+        });
+
+        return result;
+      };
+
+      const orchestratorResult = await runOrchestratedStyleImitate({
+        ctx: this.ctx,
+        runState: this.runState,
+        task: {
+          description: task,
+          draft,
+          lengthHint: lengthHint || undefined,
+          outputPathHint: outputPath || undefined,
+        },
+        executeTool: execTool,
+      });
+
+      if (!orchestratorResult.ok) {
+        return {
+          ok: false,
+          output: {
+            ok: false,
+            error: orchestratorResult.error ?? "STYLE_ORCHESTRATOR_FAILED",
+            summary: orchestratorResult.summary ?? undefined,
+          },
+          meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
+        };
+      }
+
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          path: orchestratorResult.path ?? null,
+          summary: orchestratorResult.summary ?? "",
+        },
+        meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
+      };
+    }
 
     // Sub-agent delegation: intercept before generic server tool routing
     if (toolUse.name === "agent.delegate") {

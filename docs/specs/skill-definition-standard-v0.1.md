@@ -5,6 +5,10 @@
 ## 1. 核心接口
 
 ```typescript
+type SkillKind = "workflow" | "hint" | "service";
+
+type SkillActivationMode = "auto" | "explicit" | "hybrid";
+
 type SkillManifest = {
   id: string;                    // 唯一标识（如 "style_imitate"）
   name: string;                  // 显示名称（如 "风格仿写闭环"）
@@ -12,6 +16,8 @@ type SkillManifest = {
   priority: number;              // 激活优先级（降序，数值越大越优先）
   stageKey: string;              // 观测阶段 key（如 "agent.skill.style_imitate"）
   autoEnable: boolean;           // 是否在条件满足时自动激活
+  kind?: SkillKind;              // Skill 类型：workflow（有闭环）/hint（纯提示）/service（服务类）
+  activationMode?: SkillActivationMode; // 激活模式：auto/explicit/hybrid
   triggers: TriggerRule[];       // 激活条件（所有规则 AND 组合，全部满足才激活）
   promptFragments: {
     system?: string;             // 注入 system prompt 的片段
@@ -19,8 +25,8 @@ type SkillManifest = {
   };
   policies: string[];            // 关联的 policy 列表
   toolCaps?: {
-    allowTools?: string[];       // 额外允许的工具列表
-    denyTools?: string[];        // 禁用的工具列表
+    allowTools?: string[];       // 额外允许的工具列表（只 pin，不裁剪 CORE_TOOLS）
+    denyTools?: string[];        // （预留）禁用的工具列表
   };
   version?: string;              // 版本号
   conflicts?: string[];          // 互斥的 Skill ID（同时只能激活一个）
@@ -81,6 +87,15 @@ Skill 激活后自动注入 prompt 片段：
 - `conflicts`：互斥关系。如 `writing_batch` 和 `writing_multi` 互斥
 - `requires`：依赖关系。被依赖的 Skill 必须同时激活
 
+### 2.5 toolCaps（工具范围建议）
+
+- `toolCaps.allowTools`：
+  - 作用是**pin 必需工具**，即使在 `toolPolicy=deny` 或 B2 检索阶段也不被裁掉；
+  - **不得用于裁剪 CORE_TOOLS**（run.mainDoc / run.todo / memory / time.now / 基础读写/检索等），这些由 gateway 的 `CORE_TOOL_NAME_SET` 统一兜底。
+- `toolCaps.denyTools`：
+  - 目前仅预留，不在运行时强制生效；
+  - 后续如果启用，也必须保证不会把 CORE_TOOLS 剪掉。
+
 ### 2.4 source（来源层级）
 
 三层配置合并，高优先级覆盖低优先级：
@@ -114,7 +129,7 @@ activateSkills() 遍历所有 SkillManifest
 
 | ID | 名称 | 优先级 | 触发条件摘要 |
 |----|------|--------|-------------|
-| `style_imitate` | 风格仿写闭环 | 100 | agent 模式 + 绑定风格库 + 写作意图 |
+| `style_imitate` | 风格仿写闭环 | 100 | agent 模式 + 绑定风格库 + 写作意图（workflow, activation=hybrid） |
 | `web_topic_radar` | 全网热点雷达 | 110 | agent 模式 + 输入含热点/新闻关键词 |
 | `writing_multi` | 小规模多篇 | 120 | 输入含 2-9 篇多篇 |
 | `writing_batch` | 批量写作长跑 | 130 | 输入含 >=10 篇批量 |

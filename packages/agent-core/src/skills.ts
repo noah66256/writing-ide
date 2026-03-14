@@ -26,6 +26,10 @@ export type SkillMcpConfig = {
   env?: Record<string, string>;
 };
 
+export type SkillKind = "workflow" | "hint" | "service";
+
+export type SkillActivationMode = "auto" | "explicit" | "hybrid";
+
 export type SkillManifest = {
   id: string;
   name: string;
@@ -33,6 +37,10 @@ export type SkillManifest = {
   priority: number;
   stageKey: string;
   autoEnable: boolean;
+  /** Skill 类型：workflow（有闭环合同）/hint（纯提示）/service（服务类能力） */
+  kind?: SkillKind;
+  /** 激活模式：auto（完全按 triggers）、explicit（仅 @skill/显式激活）、hybrid（二者皆可） */
+  activationMode?: SkillActivationMode;
   triggers: TriggerRule[];
   promptFragments: { system?: string; context?: string };
   policies: string[];
@@ -171,6 +179,8 @@ export const STYLE_IMITATE_SKILL: SkillManifest = {
   description: "\u7ED1\u5B9A\u98CE\u683C\u5E93\u540E\uFF0C\u4EC5\u5728\u5199\u4F5C/\u6539\u5199/\u6DA6\u8272\u610F\u56FE\u4E0B\u81EA\u52A8\u542F\u7528\uFF1A\u5148\u68C0\u7D22\u6837\u4F8B\u2192\u518D lint.style\u2192\u6700\u540E\u5141\u8BB8\u5199\u5165\uFF08\u652F\u6301\u964D\u7EA7/\u8DF3\u8FC7\uFF09\u3002",
   priority: 100,
   stageKey: "agent.skill.style_imitate",
+  kind: "workflow",
+  activationMode: "hybrid",
   toolCaps: {
     allowTools: [
       "kb.search",
