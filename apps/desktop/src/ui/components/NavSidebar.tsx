@@ -191,6 +191,9 @@ export function NavSidebar() {
     const activeConv = activeConvId ? conversations.find((c) => c.id === activeConvId) : null;
     if (activeConv?.title === "新任务" && steps.length === 0) return;
 
+    // 新对话默认回到创作模式（更安全），避免助手模式在多会话间“污染”
+    useRunStore.getState().setOpMode("creative");
+
     if (activeConvId) {
       cancelConvRun(activeConvId, "new_chat");
     } else {
@@ -227,34 +230,89 @@ export function NavSidebar() {
       const conv = conversations.find((c) => c.id === id);
       if (!conv) return;
 
-      // 若该对话有后台 buffer（正在运行或已完成但未被覆盖），用 buffer 恢复
       const runEntry = useRunRegistry.getState().runs[id];
-      const snapshotToLoad = runEntry?.buffer
+      const baseSnapshot = runEntry?.buffer
         ? buildSnapshotFromBuffer(conv.snapshot, runEntry.buffer)
         : conv.snapshot;
 
-      loadSnapshot(snapshotToLoad);
-
-      // 若后台 run 仍在执行，恢复 isRunning=true 和 activity
-      if (runEntry?.isRunning) {
-        useRunStore.getState().setRunning(true);
-        const actText = runEntry.buffer?.activity?.text;
-        if (actText) useRunStore.getState().setActivity(actText, { resetTimer: false });
-      } else {
-        useRunStore.getState().setRunning(false);
-      }
-
-      // 恢复对话绑定的项目文件夹
-      const snapDir = snapshotToLoad?.projectDir ?? null;
-      const currentDir = useProjectStore.getState().rootDir;
-      if (snapDir !== currentDir) {
-        if (snapDir) {
-          void useProjectStore.getState().loadProjectFromDisk(snapDir).catch(() => void 0);
-        } else {
-          useProjectStore.getState().clearProject();
+      const historyApi = window.desktop?.history?.loadConversationSegment;
+      if (!historyApi) {
+        loadSnapshot(baseSnapshot);
+        const snapDir = baseSnapshot?.projectDir ?? null;
+        const currentDir = useProjectStore.getState().rootDir;
+        if (snapDir !== currentDir) {
+          if (snapDir) {
+            void useProjectStore.getState().loadProjectFromDisk(snapDir).catch(() => void 0);
+          } else {
+            useProjectStore.getState().clearProject();
+          }
         }
+        if (runEntry?.isRunning) {
+          useRunStore.getState().setRunning(true);
+          const actText = runEntry.buffer?.activity?.text;
+          if (actText) useRunStore.getState().setActivity(actText, { resetTimer: false });
+        } else {
+          useRunStore.getState().setRunning(false);
+        }
+        storeSetActiveConvId(id);
+        return;
       }
-      storeSetActiveConvId(id);
+
+      // Electron 环境：仅加载该会话最近一段 steps，避免一次性加载超长历史导致 UI 卡死
+      void historyApi({ conversationId: id, limit: 80 })
+        .then((res: any) => {
+          const segmentSteps = Array.isArray(res?.steps) ? res.steps : [];
+          const hasMoreBefore = Boolean(res?.hasMoreBefore);
+          useRunStore.getState().setHistoryWindowHasMoreBefore(hasMoreBefore);
+
+          const snapshotToLoad = {
+            ...baseSnapshot,
+            steps: segmentSteps.length ? segmentSteps : (baseSnapshot?.steps ?? []),
+          } as any;
+
+          loadSnapshot(snapshotToLoad);
+
+          if (runEntry?.isRunning) {
+            useRunStore.getState().setRunning(true);
+            const actText = runEntry.buffer?.activity?.text;
+            if (actText) useRunStore.getState().setActivity(actText, { resetTimer: false });
+          } else {
+            useRunStore.getState().setRunning(false);
+          }
+
+          const snapDir = snapshotToLoad?.projectDir ?? null;
+          const currentDir = useProjectStore.getState().rootDir;
+          if (snapDir !== currentDir) {
+            if (snapDir) {
+              void useProjectStore.getState().loadProjectFromDisk(snapDir).catch(() => void 0);
+            } else {
+              useProjectStore.getState().clearProject();
+            }
+          }
+          storeSetActiveConvId(id);
+        })
+        .catch(() => {
+          // 失败时退回到原有 snapshot 全量加载，避免硬错误
+          loadSnapshot(baseSnapshot);
+          useRunStore.getState().setHistoryWindowHasMoreBefore(false);
+          if (runEntry?.isRunning) {
+            useRunStore.getState().setRunning(true);
+            const actText = runEntry.buffer?.activity?.text;
+            if (actText) useRunStore.getState().setActivity(actText, { resetTimer: false });
+          } else {
+            useRunStore.getState().setRunning(false);
+          }
+          const snapDir = baseSnapshot?.projectDir ?? null;
+          const currentDir = useProjectStore.getState().rootDir;
+          if (snapDir !== currentDir) {
+            if (snapDir) {
+              void useProjectStore.getState().loadProjectFromDisk(snapDir).catch(() => void 0);
+            } else {
+              useProjectStore.getState().clearProject();
+            }
+          }
+          storeSetActiveConvId(id);
+        });
     },
     [hasCurrentContent, activeConvId, conversations, addConversation, loadSnapshot, storeSetActiveConvId],
   );
@@ -305,7 +363,7 @@ export function NavSidebar() {
   return (
     <nav
       className={cn(
-        "flex flex-col h-full w-[var(--nav-width)] shrink-0",
+        "flex flex-col h-full min-h-0 w-[var(--nav-width)] shrink-0",
         "border-r border-[var(--color-nav-border)]",
         "bg-[var(--color-nav-bg)] backdrop-blur-2xl",
         "transition-colors duration-normal select-none",

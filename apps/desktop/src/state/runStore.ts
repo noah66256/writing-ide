@@ -175,6 +175,11 @@ type RunState = {
   isRunning: boolean;
   activity: RunActivity | null;
 
+  /** 会话历史窗口信息（用于滚动加载与迷你地图） */
+  historyWindow?: {
+    hasMoreBefore: boolean;
+  };
+
   // KB：右侧 Agent 关联的库（多选；持久化，便于常用库默认保持关联）
   kbAttachedLibraryIds: string[];
   setKbAttachedLibraries: (ids: string[]) => void;
@@ -212,6 +217,7 @@ type RunState = {
   loadSnapshot: (snap: {
     mode: Mode;
     model: string;
+    opMode?: OpMode;
     mainDoc: MainDoc;
     todoList: TodoItem[];
     steps: Array<Step | Omit<ToolBlockStep, "apply" | "undo">>;
@@ -220,6 +226,10 @@ type RunState = {
     ctxRefs?: CtxRefItem[];
     pendingArtifacts?: PendingArtifact[];
   }) => void;
+
+  /** 在当前 steps 前面追加一段更早的历史步骤，用于滚动加载 */
+  prependSteps: (olderSteps: Array<Step | Omit<ToolBlockStep, "apply" | "undo">>) => void;
+  setHistoryWindowHasMoreBefore: (hasMore: boolean) => void;
 
   addUser: (text: string, baseline?: UserStep["baseline"], mentions?: UserMention[], images?: ImageAttachment[]) => string;
   patchUser: (stepId: string, patch: Partial<UserStep>) => void;
@@ -352,6 +362,7 @@ export const useRunStore = create<RunState>()(
   logs: [],
   isRunning: false,
   activity: null,
+  historyWindow: { hasMoreBefore: false },
   ctxRefs: [],
   pendingArtifacts: [],
   kbAttachedLibraryIds: [],
@@ -432,6 +443,7 @@ export const useRunStore = create<RunState>()(
       dialogueSummaryByMode: { agent: "", chat: "" },
       dialogueSummaryTurnCursorByMode: { agent: 0, chat: 0 },
       memoryExtractTurnCursorByMode: { agent: 0, chat: 0 },
+      historyWindow: { hasMoreBefore: false },
     }),
   clearConversationSteps: () =>
     set({
@@ -477,6 +489,8 @@ export const useRunStore = create<RunState>()(
     });
     const mode = s.mode === "agent" || s.mode === "chat" ? s.mode : get().mode;
     const model = typeof s.model === "string" ? s.model : get().model;
+    const opModeRaw = (s as any).opMode;
+    const opMode: OpMode = opModeRaw === "assistant" ? "assistant" : "creative";
     const prev = get();
     const chatModel = mode === "chat" ? model : prev.chatModel;
     const agentModel = mode !== "chat" ? model : prev.agentModel;
@@ -487,6 +501,7 @@ export const useRunStore = create<RunState>()(
       model,
       chatModel,
       agentModel,
+      opMode,
       dialogueSummaryByMode:
         ds && typeof ds === "object"
           ? {
@@ -518,8 +533,27 @@ export const useRunStore = create<RunState>()(
       pendingArtifacts: Array.isArray((s as any).pendingArtifacts) ? dedupePendingArtifacts((s as any).pendingArtifacts as any) : [],
       isRunning: false,
       activity: null,
+      historyWindow: { hasMoreBefore: false },
     });
   },
+  prependSteps: (olderSteps) =>
+    set((s) => {
+      const current = Array.isArray(s.steps) ? s.steps : [];
+      const incoming = Array.isArray(olderSteps) ? olderSteps : [];
+      if (!incoming.length) return {};
+      const existingIds = new Set(current.map((x: any) => String(x?.id ?? "")));
+      const filtered = incoming.filter((step: any) => {
+        const id = String(step?.id ?? "");
+        if (!id) return false;
+        return !existingIds.has(id);
+      }) as Step[];
+      if (!filtered.length) return {};
+      return { steps: [...filtered, ...current] };
+    }),
+  setHistoryWindowHasMoreBefore: (hasMore) =>
+    set(() => ({
+      historyWindow: { hasMoreBefore: Boolean(hasMore) },
+    })),
 
   setKbAttachedLibraries: (ids) => {
     const unique = Array.from(new Set((ids ?? []).map((x) => String(x ?? "").trim()).filter(Boolean)));

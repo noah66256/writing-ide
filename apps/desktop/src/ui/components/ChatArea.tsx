@@ -226,15 +226,18 @@ export function ChatArea() {
   const model = useRunStore((s) => s.model);
   const opMode = useRunStore((s) => s.opMode);
   const setOpMode = useRunStore((s) => s.setOpMode);
+  const hasMoreHistoryBefore = useRunStore((s) => s.historyWindow?.hasMoreBefore ?? false);
 
   const [suggestText, setSuggestText] = useState<string>("");
   const [todoPanelCollapsed, setTodoPanelCollapsed] = useState(false);
+  const [viewportRatio, setViewportRatio] = useState<{ start: number; height: number }>({ start: 0, height: 1 });
   const controllerRef = useRef<RunController | null>(null);
   const prevRunningRef = useRef(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
+  const loadingMoreHistoryRef = useRef(false);
 
   const activeConvId = useConversationStore((s) => s.activeConvId);
   const hasMessages = steps.length > 0;
@@ -251,13 +254,79 @@ export function ChatArea() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [steps]);
 
-  // 滚动事件：判断是否 stick to bottom
+  // 初始化当前会话是否存在更早历史（用于顶部“加载更多”判断）
+  useEffect(() => {
+    const convId = activeConvId;
+    if (!convId || steps.length === 0) {
+      useRunStore.getState().setHistoryWindowHasMoreBefore(false);
+      return;
+    }
+    const api = window.desktop?.history?.loadConversationSegment;
+    if (!api) return;
+    const first = steps[0];
+    if (!first?.id) return;
+    let cancelled = false;
+    void api({ conversationId: convId, beforeStepId: first.id, limit: 1 })
+      .then((res: any) => {
+        if (cancelled || !res || res.ok === false) return;
+        useRunStore.getState().setHistoryWindowHasMoreBefore(Boolean(res.hasMoreBefore));
+      })
+      .catch(() => {
+        // ignore
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeConvId, steps.length]);
+
+  // 滚动事件：判断是否 stick to bottom + 顶部触发历史加载
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
     const threshold = 80;
-    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
-  }, []);
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickRef.current = distanceFromBottom < threshold;
+
+    const totalHeight = el.scrollHeight || 1;
+    const viewHeight = el.clientHeight || 1;
+    const top = el.scrollTop;
+    const start = totalHeight <= viewHeight ? 0 : top / totalHeight;
+    const height = totalHeight <= viewHeight ? 1 : viewHeight / totalHeight;
+    setViewportRatio({ start, height });
+
+    if (el.scrollTop < threshold && hasMoreHistoryBefore && !loadingMoreHistoryRef.current) {
+      const api = window.desktop?.history?.loadConversationSegment;
+      const convId = useConversationStore.getState().activeConvId;
+      const currentSteps = useRunStore.getState().steps ?? [];
+      const first = currentSteps[0];
+      if (!api || !convId || !first) return;
+
+      loadingMoreHistoryRef.current = true;
+      const prevScrollHeight = el.scrollHeight;
+      void api({ conversationId: convId, beforeStepId: first.id, limit: 50 })
+        .then((res: any) => {
+          if (!res || res.ok === false) {
+            useRunStore.getState().setHistoryWindowHasMoreBefore(false);
+            return;
+          }
+          const older = Array.isArray(res.steps) ? res.steps : [];
+          if (older.length > 0) {
+            useRunStore.getState().prependSteps(older as any);
+          }
+          useRunStore.getState().setHistoryWindowHasMoreBefore(Boolean(res.hasMoreBefore));
+          requestAnimationFrame(() => {
+            const node = scrollRef.current;
+            if (!node) return;
+            const newScrollHeight = node.scrollHeight;
+            const delta = newScrollHeight - prevScrollHeight;
+            node.scrollTop = node.scrollTop + delta;
+          });
+        })
+        .finally(() => {
+          loadingMoreHistoryRef.current = false;
+        });
+    }
+  }, [hasMoreHistoryBefore]);
 
   // 自动保存草稿到 conversationStore，同时更新活跃对话
   useEffect(() => {
@@ -462,22 +531,25 @@ export function ChatArea() {
         </div>
       ) : null}
       {hasMessages ? (
-        /* 消息列表 */
-        <div
-          ref={scrollRef}
-          onScroll={handleScroll}
-          className="flex-1 overflow-y-auto overflow-x-hidden flex flex-col"
-        >
-          {/* spacer: 消息少时把内容推到底部 */}
-          <div className="flex-1 min-h-6" />
-          <div className="max-w-[var(--chat-max-width)] mx-auto w-full px-6 pb-4 space-y-1">
-            {renderRows.map((row) => (
-              row.kind === "tool_group"
-                ? <ToolGroupCard key={row.key} steps={row.steps} />
-                : <StepRenderer key={row.key} step={row.step} onAssistantQuickAction={handleAssistantQuickAction} />
-            ))}
-            <div ref={bottomRef} />
+        /* 消息列表 + 迷你地图容器 */
+        <div className="flex-1 min-h-0 relative flex">
+          <div
+            ref={scrollRef}
+            onScroll={handleScroll}
+            className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden flex flex-col"
+          >
+            {/* spacer: 消息少时把内容推到底部 */}
+            <div className="flex-1 min-h-6" />
+            <div className="max-w-[var(--chat-max-width)] mx-auto w-full px-6 pb-4 space-y-1">
+              {renderRows.map((row) => (
+                row.kind === "tool_group"
+                  ? <ToolGroupCard key={row.key} steps={row.steps} />
+                  : <StepRenderer key={row.key} step={row.step} onAssistantQuickAction={handleAssistantQuickAction} />
+              ))}
+              <div ref={bottomRef} />
+            </div>
           </div>
+          <MiniMap steps={steps} viewport={viewportRatio} scrollRef={scrollRef} />
         </div>
       ) : (
         /* 欢迎页 */
@@ -492,6 +564,9 @@ export function ChatArea() {
           onToggle={() => setTodoPanelCollapsed((prev) => !prev)}
         />
       )}
+
+      {/* 后台进程 / 终端状态行（贴在输入框上方） */}
+      <BackgroundProcessSummary steps={steps} />
 
       {/* 输入栏（始终可见） */}
       <InputBar
@@ -578,6 +653,125 @@ function WorkflowTodoPanel({
   );
 }
 
+/* ─── 后台进程状态行（process.run/list/stop 汇总） ─── */
+
+function BackgroundProcessSummary({ steps }: { steps: Step[] }) {
+  const summary = useMemo(() => {
+    const processes = new Map<string, { command: string; status: string }>();
+    for (const step of steps) {
+      if (step.type !== "tool" || !step.output) continue;
+      const name = step.toolName;
+      const out = _asRecord(step.output);
+      if (name === "process.run" && step.status === "success") {
+        const id = String((out as any).processId ?? (out as any).id ?? "").trim();
+        if (!id) continue;
+        const command = String((out as any).command ?? "").trim();
+        const status = String((out as any).status ?? "").trim() || "running";
+        processes.set(id, { command, status });
+      } else if (name === "process.list" && step.status === "success") {
+        const list = Array.isArray((out as any).processes) ? ((out as any).processes as any[]) : [];
+        for (const p of list) {
+          const id = String((p as any).processId ?? (p as any).id ?? "").trim();
+          if (!id) continue;
+          const command = String((p as any).command ?? "").trim();
+          const status = String((p as any).status ?? "").trim() || "running";
+          processes.set(id, { command, status });
+        }
+      } else if (name === "process.stop" && step.status === "success") {
+        const id = String((out as any).processId ?? (out as any).id ?? "").trim();
+        if (!id) continue;
+        const status = String((out as any).status ?? "").trim() || "stopped";
+        const prev = processes.get(id);
+        const command = prev?.command ?? "";
+        processes.set(id, { command, status });
+      }
+    }
+    let total = 0;
+    let running = 0;
+    for (const { status } of processes.values()) {
+      total += 1;
+      if (status === "running" || status === "stopping") running += 1;
+    }
+    return { total, running };
+  }, [steps]);
+
+  if (summary.running <= 0) return null;
+
+  const { total, running } = summary;
+  const text =
+    total === running
+      ? `${running} 个后台终端会话运行中`
+      : `${running} 个后台终端会话运行中 · 共 ${total} 个会话`;
+
+  return (
+    <div className="w-full max-w-[var(--chat-max-width)] mx-auto px-4 pt-1">
+      <div className="text-[11px] text-text-faint border-t border-border/40 mt-1 pt-1.5">
+        {text}
+      </div>
+    </div>
+  );
+}
+
+/* ─── 对话迷你地图（窗口级 v1） ─── */
+
+function MiniMap({
+  steps,
+  viewport,
+  scrollRef,
+}: {
+  steps: Step[];
+  viewport: { start: number; height: number };
+  scrollRef: React.RefObject<HTMLDivElement>;
+}) {
+  const total = steps.length || 1;
+
+  const handleClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      const el = scrollRef.current;
+      if (!el) return;
+      const rect = e.currentTarget.getBoundingClientRect();
+      const y = e.clientY - rect.top;
+      const ratio = rect.height > 0 ? Math.min(Math.max(y / rect.height, 0), 1) : 0;
+      const maxScroll = Math.max(el.scrollHeight - el.clientHeight, 0);
+      el.scrollTop = maxScroll * ratio;
+    },
+    [scrollRef],
+  );
+
+  return (
+    <div className="pointer-events-auto absolute right-3 top-3 h-40 w-2.5 rounded-md bg-surface/70 border border-border/60 shadow-sm flex flex-col overflow-hidden">
+      <div className="relative w-full h-full" onClick={handleClick}>
+        {steps.map((step, index) => {
+          const t = step.type;
+          let color = "bg-accent/60";
+          if (t === "assistant") color = "bg-surface-alt";
+          if (t === "tool") {
+            const st = (step as ToolBlockStep).status;
+            color = st === "failed" ? "bg-red-500/80" : st === "running" ? "bg-accent/80" : "bg-emerald-500/70";
+          }
+          const top = (index / total) * 100;
+          const height = Math.max(0.5, 100 / total);
+          return (
+            <div
+              key={step.id}
+              className={cn("absolute left-0 right-0", color)}
+              style={{ top: `${top}%`, height: `${height}%` }}
+            />
+          );
+        })}
+        {/* 视口高亮框 */}
+        <div
+          className="absolute left-0 right-0 border border-accent bg-accent/10 pointer-events-none"
+          style={{
+            top: `${viewport.start * 100}%`,
+            height: `${viewport.height * 100}%`,
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
 /* ─── Step 渲染分发 ─── */
 
 function StepRenderer({
@@ -600,7 +794,9 @@ function StepRenderer({
     case "assistant":
       return <AssistantMessage step={step} onQuickAction={onAssistantQuickAction} />;
     case "tool":
-      return <ToolCallCard step={step} />;
+      return step.toolName === "shell.exec"
+        ? <ShellExecCard step={step} />
+        : <ToolCallCard step={step} />;
     default:
       return null;
   }
@@ -861,6 +1057,71 @@ function ToolCallCard({ step }: { step: ToolBlockStep }) {
       <div className="flex items-center gap-2 w-full">
         {statusIcon}
         <span className="text-[12px] text-text-muted truncate flex-1">{line}</span>
+      </div>
+    </div>
+  );
+}
+
+/* ─── shell.exec 专用终端小窗 ─── */
+
+function ShellExecCard({ step }: { step: ToolBlockStep }) {
+  const [expanded, setExpanded] = useState(step.status === "running");
+
+  useEffect(() => {
+    if (step.status === "running") {
+      setExpanded(true);
+    } else if (step.status === "success" || step.status === "failed" || step.status === "undone") {
+      // 命令结束后默认收起，小窗只在运行中占空间
+      setExpanded(false);
+    }
+  }, [step.status]);
+
+  const statusIcon = {
+    running: <Loader2 size={13} className="animate-spin text-accent" />,
+    success: <CheckCircle2 size={13} className="text-success" />,
+    failed: <XCircle size={13} className="text-error" />,
+    undone: <XCircle size={13} className="text-text-faint" />,
+  }[step.status];
+
+  const headerLine = formatToolStatusLine(step);
+
+  const out = _asRecord(step.output);
+  const stdout = String((out as any).stdout ?? "").trim();
+  const stderr = String((out as any).stderr ?? "").trim();
+  const hasOutput = Boolean(stdout || stderr);
+
+  const bodyContent = hasOutput ? (
+    <div className="mt-2 rounded-md bg-surface-alt border border-border-soft h-40 max-h-40 overflow-auto">
+      <pre className="p-2 text-[12px] leading-relaxed font-mono whitespace-pre-wrap break-words text-text-muted">
+        {stdout}
+        {stdout && stderr ? "\n\n[stderr]\n" : ""}
+        {stderr}
+      </pre>
+    </div>
+  ) : step.status === "running" ? (
+    <div className="mt-2 rounded-md bg-surface-alt border border-border-soft h-20 max-h-20 flex items-center px-2 text-[12px] text-text-faint">
+      正在执行命令，等待输出…
+    </div>
+  ) : null;
+
+  return (
+    <div className="rounded-md border px-3 py-2 my-1 ml-10 bg-surface/80">
+      <div className="flex items-start gap-2 w-full">
+        <div className="pt-0.5">{statusIcon}</div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[12px] text-text-muted break-words">{headerLine}</div>
+          {expanded && bodyContent}
+        </div>
+        {hasOutput || step.status === "running" ? (
+          <button
+            type="button"
+            className="shrink-0 mt-0.5 text-text-faint hover:text-text transition-colors"
+            onClick={() => setExpanded((prev) => !prev)}
+            aria-label={expanded ? "收起终端输出" : "展开终端输出"}
+          >
+            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          </button>
+        ) : null}
       </div>
     </div>
   );

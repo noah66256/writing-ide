@@ -3952,6 +3952,14 @@ export class AgentRunner {
     const toolDiscoveryContract = this._toolDiscoveryContract();
     const needsToolDiscovery = toolDiscoveryContract.required && !this.runState.hasToolsSearch;
 
+    // 若当前输出本身就是一条面向用户的澄清/确认问题（clarify question），
+    // 则本轮应以“等待用户”结束，而不是继续强行重试 Todo/写入等契约。
+    // 这里不直接设置 outcome（由上层 runFactory/桌面端通过 run.end + workflowV1.waiting 来对齐），
+    // 但通过关闭 AutoRetry，避免在“问你但仍继续跑”场景下再次触发工具调用或二次模型请求。
+    if (assistantHasText && this._looksLikeClarifyQuestion(assistantText)) {
+      return false;
+    }
+
 
     // Tool Discovery Gate：当用户明确表示“不知道有哪些工具/能力”时，先强制调用 tools.search。
     if (needsToolDiscovery && allowedToolNames.size > 0 && allowedToolNames.has("tools.search")) {

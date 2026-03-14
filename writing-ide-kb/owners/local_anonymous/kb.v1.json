@@ -1,0 +1,24 @@
+{
+  "version": 4,
+  "ownerKey": "local_anonymous",
+  "createdAt": "2026-03-13T14:23:26.590Z",
+  "updatedAt": "2026-03-13T14:23:30.174Z",
+  "libraries": [],
+  "trash": [
+    {
+      "library": {
+        "id": "kb_lib_14d4674d-4c8a-4858-b25a-283da32dea8e",
+        "name": "1",
+        "purpose": "material",
+        "facetPackId": "speech_marketing_v1",
+        "createdAt": "2026-03-13T14:23:26.591Z",
+        "updatedAt": "2026-03-13T14:23:30.174Z"
+      },
+      "deletedAt": "2026-03-13T14:23:30.174Z"
+    }
+  ],
+  "sourceDocs": [],
+  "artifacts": [],
+  "libraryPrefs": {},
+  "fingerprints": []
+}

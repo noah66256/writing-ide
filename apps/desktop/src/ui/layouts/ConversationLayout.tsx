@@ -131,7 +131,7 @@ export function ConversationLayout() {
   }, []);
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-bg text-text font-sans">
+    <div className="flex h-screen w-screen min-h-0 overflow-hidden bg-bg text-text font-sans">
       {/* macOS titlebar drag region */}
       <div
         className="fixed top-0 left-0 right-0 h-[52px] z-50"
@@ -149,7 +149,7 @@ export function ConversationLayout() {
       </div>
 
       {/* 主区域 */}
-      <main className="flex-1 flex flex-col min-w-0 relative z-10">
+      <main className="flex-1 flex flex-col min-w-0 min-h-0 relative z-10">
         {/* 左侧折叠/展开按钮 */}
         <button
           type="button"

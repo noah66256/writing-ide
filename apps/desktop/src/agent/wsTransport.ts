@@ -13,7 +13,7 @@ import { useKbStore } from "../state/kbStore";
 import { useAuthStore } from "../state/authStore";
 import { useRunStore } from "../state/runStore";
 import { cancelInlineFileOpConfirm } from "../state/inlineFileOpConfirm";
-import { activateSkills } from "@ohmycrab/agent-core";
+import { activateSkills, looksLikeClarifyQuestions } from "@ohmycrab/agent-core";
 import { buildStyleLinterLibrariesSidecar, executeToolCall, getTool } from "./toolRegistry";
 import { createRunTarget } from "./runTarget";
 import { cancelConvRun, setConvRunCancel } from "../state/runRegistry";
@@ -406,8 +406,17 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       const browserLike = workflowRouteId === "web_radar" || workflowKind === "browser_session" || Array.isArray(workflow?.selectedServerIds) && workflow.selectedServerIds.some((id: any) => /playwright|browser/i.test(String(id ?? "")));
       const asksForReply = /(请直接回复|回复我|回复[A-Da-d]|A：|B：|你回复|完成后告诉我|登录完成后告诉我|告诉我你下一步|选一个|请回我)/.test(lastText);
       const asksForLoginFollowUp = /(你先登录|完成登录|登录成功后|已登录|创作中心后台|左侧菜单|数据看板)/.test(lastText);
-      if (!browserLike && !asksForReply && !asksForLoginFollowUp) return null;
-      if (!asksForReply && !asksForLoginFollowUp) return null;
+      const isGenericClarify = looksLikeClarifyQuestions(lastText);
+
+      // 进入 waiting_user 的三类场景：
+      // 1）浏览器/登录类任务 + 明确“完成后告诉我/选一个”等提示；
+      // 2）浏览器/登录类任务 + 登录类跟进提示；
+      // 3）通用澄清/确认问题（looksLikeClarifyQuestions=true），即便不是 browserLike。
+      const shouldWait =
+        (browserLike && (asksForReply || asksForLoginFollowUp)) ||
+        isGenericClarify;
+      if (!shouldWait) return null;
+
       return {
         status: "waiting_user",
         waiting: {

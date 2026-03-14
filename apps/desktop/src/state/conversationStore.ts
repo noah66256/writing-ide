@@ -6,8 +6,11 @@ import {
   type MainDoc,
   type TodoItem,
   type Step,
+  type UserStep,
+  type AssistantStep,
   type LogEntry,
   type Mode,
+  type OpMode,
   type ToolBlockStep,
   type CtxRefItem,
   type PendingArtifact,
@@ -25,6 +28,8 @@ export type SerializableStep = Exclude<Step, ToolBlockStep> | SerializableToolSt
 export type RunSnapshot = {
   mode: Mode;
   model: string;
+  /** 会话级执行模式：创作 / 助手 */
+  opMode?: OpMode;
   mainDoc: MainDoc;
   todoList: TodoItem[];
   steps: SerializableStep[];
@@ -37,9 +42,81 @@ export type RunSnapshot = {
   dialogueSummaryTurnCursorByMode?: Record<Mode, number>;
 };
 
-function deepClone<T>(value: T): T {
-  if (value === undefined || value === null) return value;
-  return JSON.parse(JSON.stringify(value)) as T;
+// ─── 历史快照“瘦身”工具（对齐 Codex：历史只做入口，不当运行时缓存） ─────────────
+
+const MAX_TOOL_STDIO_HISTORY_CHARS = 4000;
+const MAX_TOOL_GENERIC_STRING_CHARS = 800;
+const MAX_LOG_MESSAGE_HISTORY_CHARS = 400;
+const MAX_LOG_ENTRIES_HISTORY = 80;
+
+function truncateForHistory(raw: unknown, max: number): string {
+  const s = String(raw ?? "");
+  if (!s) return "";
+  if (s.length <= max) return s;
+  return s.slice(0, max) + "…[历史已截断]";
+}
+
+function slimToolIoForHistory(toolName: string, io: unknown): unknown {
+  if (!io || typeof io !== "object" || Array.isArray(io)) return io;
+  const src = io as Record<string, unknown>;
+  const dst: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(src)) {
+    if (typeof v === "string") {
+      const limit =
+        k === "stdout" || k === "stderr" ? MAX_TOOL_STDIO_HISTORY_CHARS : MAX_TOOL_GENERIC_STRING_CHARS;
+      dst[k] = truncateForHistory(v, limit);
+    } else {
+      dst[k] = v;
+    }
+  }
+  return dst;
+}
+
+function slimStepForHistory(raw: Step | SerializableStep): SerializableStep {
+  if (!raw || typeof raw !== "object") return raw as SerializableStep;
+  const step = raw as any;
+  if (step.type === "tool") {
+    const { apply, undo, baseline, ...rest } = step;
+    const toolStep: SerializableToolStep = {
+      ...(rest as SerializableToolStep),
+      undoable: false,
+    };
+    if (toolStep.toolName) {
+      toolStep.input = slimToolIoForHistory(toolStep.toolName, toolStep.input);
+      toolStep.output = slimToolIoForHistory(toolStep.toolName, toolStep.output);
+    }
+    return toolStep;
+  }
+  if (step.type === "user") {
+    const { baseline, ...rest } = step;
+    return { ...(rest as UserStep) } as SerializableStep;
+  }
+  if (step.type === "assistant") {
+    return { ...(step as AssistantStep) } as SerializableStep;
+  }
+  return step as SerializableStep;
+}
+
+function slimLogsForHistory(logs: LogEntry[] | undefined | null): LogEntry[] {
+  const list = Array.isArray(logs) ? logs : [];
+  const sliced =
+    list.length > MAX_LOG_ENTRIES_HISTORY ? list.slice(list.length - MAX_LOG_ENTRIES_HISTORY) : list;
+  return sliced.map((log) => ({
+    ...log,
+    message: truncateForHistory(log.message, MAX_LOG_MESSAGE_HISTORY_CHARS),
+  }));
+}
+
+function slimSnapshotForHistory(snapshot: RunSnapshot | null | undefined): RunSnapshot | null {
+  if (!snapshot || typeof snapshot !== "object") return null;
+  const stepsRaw = Array.isArray((snapshot as any).steps) ? ((snapshot as any).steps as any[]) : [];
+  const stepsSlim: SerializableStep[] = stepsRaw.map((step) => slimStepForHistory(step));
+  const logsSlim = slimLogsForHistory((snapshot as any).logs as LogEntry[]);
+  return {
+    ...(snapshot as RunSnapshot),
+    steps: stepsSlim,
+    logs: logsSlim,
+  };
 }
 
 /**
@@ -50,26 +127,26 @@ export function buildCurrentSnapshot(): RunSnapshot {
   const s = useRunStore.getState();
   const projectDir = useProjectStore.getState().rootDir ?? null;
 
-  const steps: SerializableStep[] = (s.steps ?? []).map((step) => {
-    if (step.type !== "tool") return deepClone(step as Exclude<Step, ToolBlockStep>) as SerializableStep;
-    const { apply, undo, ...rest } = step as ToolBlockStep;
-    return deepClone({ ...rest, undoable: false } as SerializableToolStep);
-  });
-
-  return {
+  const rawSnapshot: RunSnapshot = {
     mode: s.mode,
     model: s.model,
-    mainDoc: deepClone(s.mainDoc ?? {}),
-    todoList: deepClone(s.todoList ?? []),
-    steps,
-    logs: deepClone(s.logs ?? []),
-    kbAttachedLibraryIds: deepClone(s.kbAttachedLibraryIds ?? []),
-    ctxRefs: deepClone(s.ctxRefs ?? []),
-    pendingArtifacts: deepClone((s as any).pendingArtifacts ?? []),
+    opMode: s.opMode,
+    mainDoc: { ...(s.mainDoc ?? {}) },
+    todoList: [...(s.todoList ?? [])],
+    // steps / logs 统一交给 slimSnapshotForHistory 处理，避免 JSON 深拷贝大对象。
+    steps: (s.steps ?? []) as any,
+    logs: (s.logs ?? []) as any,
+    kbAttachedLibraryIds: [...(s.kbAttachedLibraryIds ?? [])],
+    ctxRefs: [...(s.ctxRefs ?? [])],
+    pendingArtifacts: [...(((s as any).pendingArtifacts ?? []) as PendingArtifact[])],
     projectDir,
-    dialogueSummaryByMode: deepClone(s.dialogueSummaryByMode ?? { agent: "", chat: "" }),
-    dialogueSummaryTurnCursorByMode: deepClone(s.dialogueSummaryTurnCursorByMode ?? { agent: 0, chat: 0 }),
+    dialogueSummaryByMode: { ...(s.dialogueSummaryByMode ?? { agent: "", chat: "" }) },
+    dialogueSummaryTurnCursorByMode: {
+      ...(s.dialogueSummaryTurnCursorByMode ?? { agent: 0, chat: 0 }),
+    },
   };
+
+  return slimSnapshotForHistory(rawSnapshot) ?? rawSnapshot;
 }
 
 export type Conversation = {
@@ -250,8 +327,8 @@ export const useConversationStore = create<ConversationState>()(
             }
           }
           // order：memory > pending > disk
-          const order = [];
-          const seen = new Set();
+          const order: string[] = [];
+          const seen = new Set<string>();
           for (const list of [curConvs, pendConvs, diskConvs]) {
             for (const c of Array.isArray(list) ? list : []) {
               const id = String(c?.id ?? "");
@@ -260,12 +337,18 @@ export const useConversationStore = create<ConversationState>()(
               order.push(id);
             }
           }
-          const merged = capConversations(order.map((id) => byId.get(id)).filter(Boolean) as any);
+          const mergedRaw = capConversations(order.map((id) => byId.get(id)).filter(Boolean) as any);
+          const merged = (mergedRaw as any[]).map((c) => {
+            const snap = (c && (c as any).snapshot) as RunSnapshot | null | undefined;
+            const slim = slimSnapshotForHistory(snap);
+            return slim ? { ...c, snapshot: slim } : c;
+          }) as Conversation[];
 
-          const finalDraft =
+          const finalDraftRaw =
             (curDraft && typeof curDraft === "object" ? curDraft : null) ??
             pendingDraft ??
             (diskDraft && typeof diskDraft === "object" ? diskDraft : null);
+          const finalDraft = finalDraftRaw ? slimSnapshotForHistory(finalDraftRaw as any) ?? finalDraftRaw : null;
 
           const pickActive = (id: string | null) => (id && merged.some((c) => c.id === id) ? id : null);
           const finalActiveConvId = pickActive(curActiveConvId) || pickActive(pendingActiveConvId) || pickActive(diskActiveConvId);
@@ -380,7 +463,8 @@ export const useConversationStore = create<ConversationState>()(
         schedulePersistToDisk({ conversations: s.conversations ?? [], draftSnapshot: s.draftSnapshot ?? null });
       },
       setDraftSnapshot: (snap) => {
-        const next = snap && typeof snap === "object" ? (snap as any) : null;
+        const nextRaw = snap && typeof snap === "object" ? (snap as any) : null;
+        const next = nextRaw ? slimSnapshotForHistory(nextRaw) ?? nextRaw : null;
         set(() => {
           const conversations = get().conversations ?? [];
           schedulePersistToDisk({ conversations, draftSnapshot: next });
@@ -388,7 +472,9 @@ export const useConversationStore = create<ConversationState>()(
         });
       },
       flushDraftSnapshotNow: async (snap) => {
-        const next = snap && typeof snap === "object" ? (snap as any) : snap === null ? null : buildCurrentSnapshot();
+        const base =
+          snap && typeof snap === "object" ? (snap as any) : snap === null ? null : buildCurrentSnapshot();
+        const next = base ? slimSnapshotForHistory(base as any) ?? base : null;
         const activeConvId = get().activeConvId;
         const prevConversations = get().conversations ?? [];
         const conversations = activeConvId
@@ -441,7 +527,3 @@ export const useConversationStore = create<ConversationState>()(
     },
   ),
 );
-
-
-
-

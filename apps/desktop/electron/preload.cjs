@@ -105,6 +105,9 @@ contextBridge.exposeInMainWorld("desktop", {
     getInfo() {
       return ipcRenderer.invoke("history.getInfo");
     },
+    loadConversationSegment(params) {
+      return ipcRenderer.invoke("history.loadConversationSegment", params);
+    },
   },
   clipboard: {
     writeText(text) {

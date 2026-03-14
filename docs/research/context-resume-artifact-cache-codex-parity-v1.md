@@ -92,7 +92,7 @@
 - `pathHint` 是目标相对路径
 - `status=pending` 表示等待恢复落盘
 
-### 4.2 Workflow Resume Contract
+### 4.2 Workflow Resume Contract（与 Thread Waiting State 的关系）
 
 挂在 `mainDoc.workflowV1`：
 
@@ -116,6 +116,8 @@
   updatedAt: string,
 }
 ```
+
+> 注：从 `thread-waiting-user-state-v0.1` 起，“是否处于等待用户/审批状态”的**唯一事实源**是线程等待状态（Thread Waiting State）。`workflowV1.status === waiting_user` 及 `workflowV1.waiting.*` 视为该状态在 Main Doc 上的镜像，用于跨轮粘合与上下文注入，不再作为单一事实源；后续 Resume/续跑判定应优先参考线程等待状态，再结合 `workflowV1` 与最近对话作为补充证据。
 
 ---
 

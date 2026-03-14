@@ -74,6 +74,8 @@ const HISTORY_DIRNAME = "ohmycrab-data";
 const HISTORY_FILENAME = "conversations.v1.json";
 const HISTORY_PENDING_FILENAME = "conversations.pending.v1.json";
 const HISTORY_BAK_SUFFIX = ".bak";
+const HISTORY_INDEX_FILENAME_V2 = "conversations.index.v2.json";
+const HISTORY_CONV_DIRNAME_V2 = "conversations";
 
 const AUTOMATIONS_DIRNAME = "automations";
 const AUTOMATIONS_STATE_FILENAME = "automations.state.json";
@@ -423,6 +425,12 @@ async function fileExists(p) {
   }
 }
 
+function normalizeConversationIdForFilename(id) {
+  const s = String(id ?? "");
+  // 仅保留常见安全字符，其余用下划线代替，避免生成非法文件名
+  return s.replace(/[^a-zA-Z0-9_-]/g, "_") || "conv";
+}
+
 function getLegacyAppDataProductNames() {
   // 兼容历史产品名/包名（含最新 ASCII 名），避免 dev/packaged 切换后"看不到历史与记忆"
   return ["OhMyCrab", "WritingIDE", "writing-ide", "写作IDE", "@writing-ide/desktop", "@ohmycrab/desktop", "Electron"];
@@ -482,6 +490,129 @@ async function tryMigrateConversationHistory(userData, appData) {
       return true;
     },
   });
+}
+
+async function tryLoadConversationFromV1(historyDir, convId) {
+  const id = String(convId ?? "").trim();
+  if (!id) return null;
+
+  // 在所有候选 v1 历史文件中查找该会话，优先选择 snapshot.steps 更长的一份；
+  // 若全部都没有 steps，则退而求其次选任意一份（保持旧行为）。
+  const candidates = listHistoryReadCandidates();
+  if (!Array.isArray(candidates) || candidates.length === 0) return null;
+
+  let bestNonEmpty = null; // { conv, stepsLen }
+  let bestAny = null; // { conv, stepsLen }
+
+  for (const c of candidates) {
+    const file = c && typeof c === "object" ? String(c.file ?? "") : "";
+    if (!file) continue;
+    try {
+      const raw = await fsp.readFile(file, "utf-8");
+      const parsed = JSON.parse(String(raw ?? ""));
+      const list = Array.isArray(parsed?.conversations)
+        ? parsed.conversations
+        : Array.isArray(parsed)
+          ? parsed
+          : [];
+      if (!Array.isArray(list) || list.length === 0) continue;
+      const conv = list.find(
+        (convItem) =>
+          convItem &&
+          typeof convItem === "object" &&
+          String(convItem.id ?? "").trim() === id,
+      );
+      if (!conv || !conv.snapshot || typeof conv.snapshot !== "object") continue;
+      const stepsArr = Array.isArray(conv.snapshot.steps) ? conv.snapshot.steps : [];
+      const stepsLen = stepsArr.length;
+
+      if (!bestAny || stepsLen > bestAny.stepsLen) {
+        bestAny = { conv, stepsLen };
+      }
+      if (stepsLen > 0 && (!bestNonEmpty || stepsLen > bestNonEmpty.stepsLen)) {
+        bestNonEmpty = { conv, stepsLen };
+      }
+    } catch {
+      // 某些候选文件可能不存在或格式损坏，忽略即可
+    }
+  }
+
+  if (bestNonEmpty) return bestNonEmpty.conv;
+  if (bestAny) return bestAny.conv;
+  try {
+    // 兜底：仍然尝试当前 primary/fallback v1 文件，保持与旧版本近似的行为
+    const { file } = await resolveHistoryFileForRead();
+    const raw = await fsp.readFile(file, "utf-8");
+    const parsed = JSON.parse(String(raw ?? ""));
+    const list = Array.isArray(parsed?.conversations) ? parsed.conversations : [];
+    const found = list.find((c) => c && typeof c === "object" && String(c.id ?? "").trim() === id);
+    if (!found || !found.snapshot || typeof found.snapshot !== "object") return null;
+    return found;
+  } catch {
+    return null;
+  }
+}
+
+async function saveSingleConversationFileV2(historyDir, rawConv) {
+  const dir = String(historyDir ?? "");
+  if (!dir || !rawConv || typeof rawConv !== "object") return;
+  const id = String(rawConv.id ?? "").trim();
+  if (!id) return;
+  const safeId = normalizeConversationIdForFilename(id);
+  const convRootDir = path.join(dir, HISTORY_CONV_DIRNAME_V2);
+  await fsp.mkdir(convRootDir, { recursive: true });
+  const convFile = path.join(convRootDir, `conv_${safeId}.json`);
+  const snapshot = rawConv.snapshot && typeof rawConv.snapshot === "object" ? rawConv.snapshot : null;
+  const stepsArr = snapshot && Array.isArray(snapshot.steps) ? snapshot.steps : [];
+  const head = snapshot && typeof snapshot === "object"
+    ? {
+        mode: snapshot.mode ?? null,
+        model: snapshot.model ?? "",
+        opMode: snapshot.opMode ?? null,
+        mainDoc: snapshot.mainDoc ?? {},
+        todoList: Array.isArray(snapshot.todoList) ? snapshot.todoList : [],
+        kbAttachedLibraryIds: Array.isArray(snapshot.kbAttachedLibraryIds)
+          ? snapshot.kbAttachedLibraryIds
+          : [],
+        ctxRefs: Array.isArray(snapshot.ctxRefs) ? snapshot.ctxRefs : [],
+        pendingArtifacts: Array.isArray(snapshot.pendingArtifacts) ? snapshot.pendingArtifacts : [],
+        dialogueSummaryByMode: snapshot.dialogueSummaryByMode ?? null,
+        dialogueSummaryTurnCursorByMode: snapshot.dialogueSummaryTurnCursorByMode ?? null,
+      }
+    : {
+        mode: null,
+        model: "",
+        opMode: null,
+        mainDoc: {},
+        todoList: [],
+        kbAttachedLibraryIds: [],
+        ctxRefs: [],
+        pendingArtifacts: [],
+        dialogueSummaryByMode: null,
+        dialogueSummaryTurnCursorByMode: null,
+      };
+  const convPayload = {
+    version: 2,
+    conversationId: id,
+    head,
+    steps: stepsArr,
+    logs:
+      snapshot && Array.isArray(snapshot.logs)
+        ? snapshot.logs
+        : [],
+  };
+  const convTmp = `${convFile}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+  await fsp.writeFile(convTmp, JSON.stringify(convPayload), "utf-8");
+  try {
+    await fsp.rename(convTmp, convFile);
+  } catch {
+    try {
+      await fsp.unlink(convFile);
+    } catch {
+      // ignore
+    }
+    await fsp.rename(convTmp, convFile);
+  }
 }
 
 async function tryMigrateGlobalMemory(userData, appData) {
@@ -613,6 +744,182 @@ async function resolveHistoryFileForWrite() {
     return { dir: fallback, file: p2, used: "fallback" };
   }
   throw new Error("NO_HISTORY_DIR");
+}
+
+async function saveConversationsV2(historyDir, payloadObj) {
+  const dir = String(historyDir ?? "");
+  if (!dir) return;
+  const convRootDir = path.join(dir, HISTORY_CONV_DIRNAME_V2);
+  const indexFile = path.join(dir, HISTORY_INDEX_FILENAME_V2);
+
+  const conversations = Array.isArray(payloadObj?.conversations) ? payloadObj.conversations : [];
+  const activeConvId =
+    payloadObj && typeof payloadObj === "object" && typeof payloadObj.activeConvId === "string"
+      ? payloadObj.activeConvId
+      : null;
+  const updatedAt =
+    payloadObj && typeof payloadObj === "object" && Number.isFinite(Number(payloadObj.updatedAt))
+      ? Number(payloadObj.updatedAt)
+      : Date.now();
+
+  await fsp.mkdir(convRootDir, { recursive: true });
+
+  const indexEntries = [];
+  const expectedConvFiles = new Set();
+
+  for (const raw of conversations) {
+    if (!raw || typeof raw !== "object") continue;
+    const id = String(raw.id ?? "").trim();
+    if (!id) continue;
+    const safeId = normalizeConversationIdForFilename(id);
+    const snapshot = raw.snapshot && typeof raw.snapshot === "object" ? raw.snapshot : null;
+
+    const createdAt = Number(raw.createdAt ?? Date.now()) || Date.now();
+    const convUpdatedAt = Number(raw.updatedAt ?? updatedAt) || updatedAt;
+
+    // 抽取 lastMessagePreview
+    let lastMessagePreview = null;
+    const stepsArr = snapshot && Array.isArray(snapshot.steps) ? snapshot.steps : [];
+    for (let i = stepsArr.length - 1; i >= 0; i -= 1) {
+      const step = stepsArr[i];
+      if (!step || typeof step !== "object") continue;
+      const t = step.type;
+      if (t === "user" || t === "assistant") {
+        const text = String(step.text ?? "").trim();
+        const ts = Number(step.ts ?? step.timestamp ?? 0) || 0;
+        lastMessagePreview = text
+          ? {
+              type: t,
+              text: text.length > 120 ? text.slice(0, 120) + "…" : text,
+              ts,
+            }
+          : null;
+        if (lastMessagePreview) break;
+      }
+    }
+
+    // recentStepsMeta：只保留最近 20 条做简要标记
+    const recentStepsMeta = [];
+    const startIdx = stepsArr.length > 20 ? stepsArr.length - 20 : 0;
+    for (let i = startIdx; i < stepsArr.length; i += 1) {
+      const step = stepsArr[i];
+      if (!step || typeof step !== "object") continue;
+      const meta = {
+        id: String(step.id ?? i),
+        type: step.type === "user" || step.type === "assistant" || step.type === "tool" ? step.type : "assistant",
+        toolName: step.type === "tool" ? String(step.toolName ?? "").trim() || undefined : undefined,
+        hasError:
+          step.type === "tool" && step.status === "failed"
+            ? true
+            : false,
+      };
+      recentStepsMeta.push(meta);
+    }
+
+    indexEntries.push({
+      id,
+      title: String(raw.title ?? "").trim(),
+      pinned: Boolean(raw.pinned),
+      archived: Boolean(raw.archived),
+      createdAt,
+      updatedAt: convUpdatedAt,
+      lastMessagePreview,
+      recentStepsMeta: recentStepsMeta.length ? recentStepsMeta : undefined,
+    });
+
+    // 写 per-conv 文件
+    const convFile = path.join(convRootDir, `conv_${safeId}.json`);
+    expectedConvFiles.add(convFile);
+
+    const head = snapshot && typeof snapshot === "object"
+      ? {
+          mode: snapshot.mode ?? null,
+          model: snapshot.model ?? "",
+          opMode: snapshot.opMode ?? null,
+          mainDoc: snapshot.mainDoc ?? {},
+          todoList: Array.isArray(snapshot.todoList) ? snapshot.todoList : [],
+          kbAttachedLibraryIds: Array.isArray(snapshot.kbAttachedLibraryIds)
+            ? snapshot.kbAttachedLibraryIds
+            : [],
+          ctxRefs: Array.isArray(snapshot.ctxRefs) ? snapshot.ctxRefs : [],
+          pendingArtifacts: Array.isArray(snapshot.pendingArtifacts) ? snapshot.pendingArtifacts : [],
+          dialogueSummaryByMode: snapshot.dialogueSummaryByMode ?? null,
+          dialogueSummaryTurnCursorByMode: snapshot.dialogueSummaryTurnCursorByMode ?? null,
+        }
+      : {
+          mode: null,
+          model: "",
+          opMode: null,
+          mainDoc: {},
+          todoList: [],
+          kbAttachedLibraryIds: [],
+          ctxRefs: [],
+          pendingArtifacts: [],
+          dialogueSummaryByMode: null,
+          dialogueSummaryTurnCursorByMode: null,
+        };
+
+    const convPayload = {
+      version: 2,
+      conversationId: id,
+      head,
+      steps: stepsArr,
+      logs:
+        snapshot && Array.isArray(snapshot.logs)
+          ? snapshot.logs
+          : [],
+    };
+
+    const convTmp = `${convFile}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+    await fsp.writeFile(convTmp, JSON.stringify(convPayload), "utf-8");
+    try {
+      await fsp.rename(convTmp, convFile);
+    } catch {
+      try {
+        await fsp.unlink(convFile);
+      } catch {
+        // ignore
+      }
+      await fsp.rename(convTmp, convFile);
+    }
+  }
+
+  // 清理多余的 conv_*.json
+  try {
+    const files = await fsp.readdir(convRootDir);
+    for (const name of files) {
+      if (!name.startsWith("conv_") || !name.endsWith(".json")) continue;
+      const full = path.join(convRootDir, name);
+      if (!expectedConvFiles.has(full)) {
+        try {
+          await fsp.unlink(full);
+        } catch {
+          // ignore
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  const indexPayload = {
+    version: 2,
+    updatedAt,
+    conversations: indexEntries,
+    activeConvId,
+  };
+  const indexTmp = `${indexFile}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+  await fsp.writeFile(indexTmp, JSON.stringify(indexPayload), "utf-8");
+  try {
+    await fsp.rename(indexTmp, indexFile);
+  } catch {
+    try {
+      await fsp.unlink(indexFile);
+    } catch {
+      // ignore
+    }
+    await fsp.rename(indexTmp, indexFile);
+  }
 }
 
 async function cronTriggerAutomationRun(automation, now) {
@@ -2070,6 +2377,84 @@ function registerIpc() {
     }
   });
 
+  // 按会话按段加载 steps（用于滚动加载与迷你地图）
+  ipcMain.handle("history.loadConversationSegment", async (_event, params) => {
+    try {
+      const p = params && typeof params === "object" ? params : {};
+      const convId = String(p.conversationId ?? "").trim();
+      if (!convId) return { ok: false, error: "MISSING_CONVERSATION_ID" };
+      const limitRaw = Number(p.limit);
+      const limit = Number.isFinite(limitRaw) && limitRaw > 0 && limitRaw <= 200 ? Math.floor(limitRaw) : 50;
+      const beforeStepIdRaw = p.beforeStepId;
+      const beforeStepId =
+        typeof beforeStepIdRaw === "string" && beforeStepIdRaw.trim() ? String(beforeStepIdRaw).trim() : null;
+
+      const { dir } = await resolveHistoryFileForRead();
+      const convRootDir = path.join(dir, HISTORY_CONV_DIRNAME_V2);
+      const safeId = normalizeConversationIdForFilename(convId);
+      const convFile = path.join(convRootDir, `conv_${safeId}.json`);
+
+      let steps = [];
+
+      if (await fileExists(convFile)) {
+        const raw = await fsp.readFile(convFile, "utf-8");
+        const parsed = JSON.parse(String(raw ?? ""));
+        steps = Array.isArray(parsed?.steps) ? parsed.steps : [];
+
+        // per-conv 文件存在但 steps 为空：优先尝试从任意 v1 历史中恢复完整 snapshot，并写回当前目录。
+        if (!Array.isArray(steps) || steps.length === 0) {
+          const fallbackConv = await tryLoadConversationFromV1(dir, convId);
+          if (fallbackConv && fallbackConv.snapshot && Array.isArray(fallbackConv.snapshot.steps)) {
+            const fbSteps = fallbackConv.snapshot.steps;
+            if (fbSteps.length > 0) {
+              steps = fbSteps;
+              try {
+                await saveSingleConversationFileV2(dir, fallbackConv);
+              } catch {
+                // ignore
+              }
+            }
+          }
+        }
+      } else {
+        // v2 文件不存在时，从 v1 历史尝试恢复该会话，并顺便生成 conv 文件
+        const fallbackConv = await tryLoadConversationFromV1(dir, convId);
+        if (!fallbackConv) return { ok: false, error: "CONVERSATION_NOT_FOUND" };
+        steps = Array.isArray(fallbackConv.snapshot?.steps) ? fallbackConv.snapshot.steps : [];
+        if (Array.isArray(steps) && steps.length > 0) {
+          try {
+            await saveSingleConversationFileV2(dir, fallbackConv);
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      if (!Array.isArray(steps) || steps.length === 0) {
+        return { ok: true, steps: [], hasMoreBefore: false };
+      }
+
+      let endIndex = steps.length;
+      if (beforeStepId) {
+        const idx = steps.findIndex((s) => s && typeof s === "object" && String(s.id ?? "") === beforeStepId);
+        if (idx <= 0) {
+          endIndex = idx >= 0 ? idx : 0;
+        } else {
+          endIndex = idx;
+        }
+      }
+
+      if (endIndex <= 0) return { ok: true, steps: [], hasMoreBefore: false };
+
+      const startIndex = Math.max(0, endIndex - limit);
+      const slice = steps.slice(startIndex, endIndex);
+      const hasMoreBefore = startIndex > 0;
+      return { ok: true, steps: slice, hasMoreBefore };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
   ipcMain.handle("history.loadConversations", async () => {
     try {
       const { primary } = historyCandidateDirs();
@@ -2214,8 +2599,9 @@ function registerIpc() {
 
   ipcMain.handle("history.saveConversations", async (_event, payload) => {
     try {
-      const { file, used } = await resolveHistoryFileForWrite();
-      const text = typeof payload === "string" ? payload : JSON.stringify(payload ?? null);
+      const { dir, file, used } = await resolveHistoryFileForWrite();
+      const obj = typeof payload === "string" ? JSON.parse(String(payload ?? "null")) : (payload ?? {});
+      const text = typeof payload === "string" ? payload : JSON.stringify(obj ?? null);
       const tmp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
       // 最小兜底：写入前备份上一版，避免写入中断导致“历史全没了”。
       // 备份失败不应阻塞写入（例如首次写入/文件不存在）。
@@ -2247,6 +2633,14 @@ function registerIpc() {
       } catch {
         // ignore
       }
+
+      // 写入 v2 索引 + per-conv 文件（最佳努力，不影响 v1 主路径）
+      try {
+        await saveConversationsV2(dir, obj);
+      } catch (e) {
+        console.warn("[electron] saveConversationsV2 failed:", e?.message ?? e);
+      }
+
       return { ok: true, used, file };
     } catch (e) {
       return { ok: false, error: String(e?.message ?? e) };

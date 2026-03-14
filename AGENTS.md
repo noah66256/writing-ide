@@ -85,6 +85,7 @@
   - `docs/research/streaming-checkpoints-codex-parity-v1.md` — 分段播报与流式检查点，对齐 Codex 的流式 checkpoint 设计。
   - `docs/research/todo-and-streaming-ux-codex-parity-v1.md` — Todo + 流式输出 UX：把 Todo 与 streaming 交互做成稳定的 UI/协议。
   - `docs/research/continuous-task-sticky-workflow-and-todo-panel-v1.md` — 连续任务 Sticky Workflow + 底部 Todo 面板的改造方案。
+  - `docs/specs/thread-waiting-user-state-v0.1.md` — Thread Waiting State v0.1：统一“等待用户/审批”线程状态的事实源，避免依赖问句 heuristics 导致自问自答或误续跑。
 
 - **MCP / Provider / 多端点执行**
   - `docs/specs/multi-endpoint-refactor-v0.1.md` — 多端点兼容重构：统一 Chat/Responses 等端点上的消息队列与 turn 函数。
