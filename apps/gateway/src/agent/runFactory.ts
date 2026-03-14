@@ -4051,6 +4051,26 @@ export async function executeAgentRun(args: {
     if (event === "error") {
       audit.endReason = "error";
       audit.endReasonCodes = ["error"];
+      // 结构化错误日志：便于通过 runId / 模型 / provider 精确排查
+      try {
+        const p: any = payload && typeof payload === "object" ? (payload as any) : null;
+        const errText = String(p?.error ?? "").slice(0, 500);
+        services.fastify.log.error(
+          {
+            runId,
+            mode,
+            stageKey: stageKeyForRun,
+            providerApi: apiType,
+            modelId: prepared.modelIdUsed || prepared.model || prepared.pickedId || model,
+            endpoint,
+            turn: typeof p?.turn === "number" ? p.turn : currentTurn,
+            error: errText,
+          },
+          "agent.run.error",
+        );
+      } catch {
+        // logging failures must not影响正常执行
+      }
     }
   };
 
