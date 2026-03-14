@@ -215,6 +215,41 @@ function extractDomain(rawUrl: unknown): string {
   }
 }
 
+/**
+ * 合并工具 → Desktop 原名翻译表。
+ * LLM 看到一个合并工具（如 memory），Desktop 仍处理原名（如 memory.read）。
+ * 与 writingAgentRunner.ts 中 MERGED_TOOL_MAP 保持一致。
+ */
+const MERGED_TOOL_MAP: Record<string, Record<string, string>> = {
+  "doc.snapshot": {
+    create: "doc.commitSnapshot",
+    list: "doc.listSnapshots",
+    restore: "doc.restoreSnapshot",
+  },
+  "memory": {
+    read: "memory.read",
+    update: "memory.update",
+  },
+  "agent.config": {
+    list: "agent.config.list",
+    create: "agent.config.create",
+    update: "agent.config.update",
+    remove: "agent.config.remove",
+  },
+};
+
+function expandMergedToolName(name: string, args: Record<string, unknown>): string {
+  const map = MERGED_TOOL_MAP[name];
+  if (!map) return name;
+  const action = String(args?.action ?? "").trim().toLowerCase();
+  return map[action] ?? name;
+}
+
+function stripMergedActionField(args: Record<string, unknown>): Record<string, unknown> {
+  const { action: _action, ...rest } = args;
+  return rest;
+}
+
 /** 检查是否为 pi-ai 的 Message（user / assistant / toolResult） */
 function isPiMessage(message: unknown): message is Message {
   const role = String((message as any)?.role ?? "");
@@ -1318,8 +1353,10 @@ export class GatewayRuntime implements AgentRuntime {
       return ret;
     }
 
-    // Desktop 工具
-    return this._waitForDesktopToolResult(toolCallId, toolName, toolArgs);
+    // Desktop 工具：合并工具名展开（memory → memory.read / memory.update 等）
+    const desktopToolName = expandMergedToolName(toolName, toolArgs);
+    const desktopArgs = desktopToolName !== toolName ? stripMergedActionField(toolArgs) : toolArgs;
+    return this._waitForDesktopToolResult(toolCallId, desktopToolName, desktopArgs);
   }
 
   private async _executeGatewayTool(

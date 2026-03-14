@@ -1,14 +1,23 @@
 # 修复 memory 工具（及核心工具）频繁不可用
 
-> 状态：待实施 | 优先级：P0 | 日期：2026-03-14
+> 状态：Fix 1-3 已部署(a5448da) + Fix 5 已实施 | 优先级：P0 | 日期：2026-03-14
 
 ## 0. 现象
 
-用户反馈 `memory` 工具在 agent run 中频繁不可用，收到 `TOOL_NOT_ALLOWED_THIS_TURN` 错误。此前 commit `93f5240`（fix: allow memory tool in style orchestrator）仅修复了 `style_imitate` 编排路径下的问题，但普通 agent run 中问题依旧。
+用户反馈 `memory` 工具在 agent run 中频繁不可用，收到两类错误：
 
-用户原始报告错误类型：
-- `TOOL_NOT_ALLOWED_THIS_TURN`：工具在声明集中存在，但被 per-turn gating 拦截
-- `UNKNOWN_TOOL`：LLM 层面报告工具不存在（可能来自 pi-agent-core kernel 的 "Tool XXX not found"）
+- `TOOL_NOT_ALLOWED_THIS_TURN`：工具被 per-turn gating 拦截（**已通过 commit a5448da 修复**）
+- `UNKNOWN_TOOL`：Desktop 端找不到工具定义（**根因：GatewayRuntime 缺少合并工具名展开**）
+
+### UNKNOWN_TOOL 的独立根因（Fix 5）
+
+`UNKNOWN_TOOL` 错误来自 Desktop `toolRegistry.ts:4232-4239`，与 per-turn gating 无关：
+
+- LLM 看到的合并工具名是 `memory`（带 `action: "read"|"update"` 参数）
+- 旧版 `writingAgentRunner.ts` 有 `MERGED_TOOL_MAP` + `expandMergedToolName()`，在发送到 Desktop 前把 `memory` 展开为 `memory.read` / `memory.update`
+- 新版 `GatewayRuntime` 迁移时**遗漏了这个映射**，直接发送 `name: "memory"` 到 Desktop
+- Desktop 只注册了 `memory.read` 和 `memory.update`，找不到 `memory` → 返回 `UNKNOWN_TOOL`
+- 同样受影响的还有 `doc.snapshot`（需展开为 `doc.commitSnapshot/listSnapshots/restoreSnapshot`）
 
 ---
 
@@ -428,10 +437,43 @@ npm -w @ohmycrab/gateway run test:runner-turn
 | 文件 | Fix | 改动类型 |
 |------|-----|---------|
 | `apps/gateway/src/agent/runFactory.ts` | Fix 1, 3 | boot 兜底 + ALWAYS_ALLOW 改造 |
-| `apps/gateway/src/agent/runtime/GatewayRuntime.ts` | Fix 2, 4 | hasAnyToolCall 语义 + 日志 |
+| `apps/gateway/src/agent/runtime/GatewayRuntime.ts` | Fix 2, 4, 5 | hasAnyToolCall 语义 + 日志 + 合并工具名展开 |
 | `apps/gateway/src/agent/coreTools.ts` | - | 无需修改（已定义 CORE_TOOL_NAME_SET） |
 | `apps/gateway/src/agent/styleOrchestrator.ts` | - | 无需修改（93f5240 已修复） |
 | `apps/gateway/src/agent/serverToolRunner.ts` | - | 无需修改（memory 路由到 Desktop 是合理设计） |
+
+---
+
+## 8. Fix 5：GatewayRuntime 合并工具名展开（P0）
+
+### 8.1 根因
+
+GatewayRuntime 从旧版 `writingAgentRunner.ts` 迁移时，遗漏了 `MERGED_TOOL_MAP` + `expandMergedToolName()` 逻辑。
+
+旧版在发送工具调用到 Desktop 前，会把合并工具名（LLM 视角）展开为 Desktop 原始工具名：
+- `memory` + `action=read` → `memory.read`
+- `memory` + `action=update` → `memory.update`
+- `doc.snapshot` + `action=create` → `doc.commitSnapshot`
+- `doc.snapshot` + `action=list` → `doc.listSnapshots`
+- `doc.snapshot` + `action=restore` → `doc.restoreSnapshot`
+
+GatewayRuntime 完全缺少此映射，直接发送 `"memory"` 到 Desktop → Desktop 找不到工具 → `UNKNOWN_TOOL`。
+
+### 8.2 修复内容
+
+**文件**：`apps/gateway/src/agent/runtime/GatewayRuntime.ts`
+
+1. 在文件顶部工具函数区添加 `MERGED_TOOL_MAP` + `expandMergedToolName()` + `stripMergedActionField()`
+2. 在 `_executeAgentTool` 的 Desktop 分支，调用 `_waitForDesktopToolResult` 前做名称展开和 action 字段移除
+
+关键设计：
+- 所有上游逻辑（per-turn gating、ExecutionContract、RunState 更新等）仍使用合并工具名
+- 只在发送到 Desktop 时才展开为底层工具名
+- toolCallSnapshots 和 _handleKernelEvent 中的 tool.result 映射不受影响（基于 toolCallId，不依赖工具名）
+
+### 8.3 测试
+
+`npm -w @ohmycrab/gateway run test:runner-turn` 全部 10 个场景通过。
 
 ---
 
