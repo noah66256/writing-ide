@@ -984,6 +984,16 @@ export class McpManager {
       entry.error = String(e?.message ?? e);
       entry.client = null;
       entry.transport = null;
+      try {
+        console.warn("[McpManager] failed to connect MCP server", {
+          serverId,
+          name: String(entry.config?.name ?? "").trim(),
+          error: String(e?.message ?? e),
+          stack: e?.stack ? String(e.stack) : undefined,
+        });
+      } catch {
+        // ignore logging failure
+      }
       this._notify();
       throw e;
     }
@@ -1143,7 +1153,7 @@ export class McpManager {
 
     if (type === "stdio") {
       const bundled = config?.bundled === true;
-      const args = Array.isArray(config.args) ? config.args.map(String) : [];
+      let args = Array.isArray(config.args) ? config.args.map(String) : [];
 
       // 构建环境变量：process.env → 全局注入 → 用户显式配置（优先级最高）
       const baseEnv = { ...process.env };
@@ -1161,6 +1171,35 @@ export class McpManager {
       const runtimeDirs = this._runtimeBinDirs();
       baseEnv.PATH = this._composePathWithRuntime(baseEnv.PATH ?? "", this._managedPathDirs());
       const env = { ...baseEnv, ...userEnv };
+
+      const serverId = String(config.id ?? "").trim() || String(config.name ?? "").trim() || "unknown";
+      let isLarkMcp = false;
+
+      // 特殊处理：Lark/飞书 OpenAPI MCP
+      // 官方推荐写法为：
+      //   npx -y @larksuiteoapi/lark-mcp mcp -a <app_id> -s <app_secret>
+      // 我们在 UI 中将 AppID/Secret 存在 env.LARK_APP_ID / env.LARK_APP_SECRET，
+      // 这里在启动前自动补齐 -a/-s，避免 server 因缺少凭证卡在非 MCP 输出导致超时。
+      try {
+        const argvLower = args.map((x) => String(x ?? "").toLowerCase());
+        isLarkMcp = argvLower.includes("@larksuiteoapi/lark-mcp");
+        if (isLarkMcp) {
+          const hasAppIdFlag = argvLower.includes("-a") || argvLower.includes("--app-id");
+          const hasAppSecretFlag = argvLower.includes("-s") || argvLower.includes("--app-secret");
+          const appId = env.LARK_APP_ID || env.APP_ID || "";
+          const appSecret = env.LARK_APP_SECRET || env.APP_SECRET || "";
+          const nextArgs = [...args];
+          if (!hasAppIdFlag && appId) {
+            nextArgs.push("-a", appId);
+          }
+          if (!hasAppSecretFlag && appSecret) {
+            nextArgs.push("-s", appSecret);
+          }
+          args = nextArgs;
+        }
+      } catch {
+        // best-effort；失败不影响其它 server
+      }
 
       // ── bundled server：通过 ELECTRON_RUN_AS_NODE 用 Electron 自身的 Node 运行 ──
       if (bundled) {
@@ -1185,6 +1224,56 @@ export class McpManager {
       if (!resolved?.resolved) {
         throw new Error(`STDIO_COMMAND_NOT_FOUND:${command}`);
       }
+      if (isLarkMcp) {
+        // 为 Lark MCP 打印一条启动日志（不泄露完整密钥）
+        try {
+          const mask = (value) => {
+            const raw = String(value ?? "");
+            if (!raw) return raw;
+            if (raw.length <= 6) return `${raw[0]}***`;
+            return `${raw.slice(0, 4)}***${raw.slice(-2)}`;
+          };
+          const envDebug = {};
+          for (const key of Object.keys(env)) {
+            if (key.startsWith("LARK") || key.includes("APP_ID") || key.includes("APP_SECRET")) {
+              envDebug[key] = mask(env[key]);
+            }
+          }
+          console.info("[McpManager] launching Lark MCP stdio server", {
+            id: serverId,
+            command: resolved.resolved,
+            args,
+            env: envDebug,
+          });
+        } catch {
+          // debug 日志失败不影响主流程
+        }
+
+        // 将 Lark MCP 的 stderr 透传到 Electron 控制台，便于排查启动/网络错误。
+        const transport = new StdioClientTransport({
+          command: resolved.resolved,
+          args,
+          env,
+          stderr: "pipe",
+        });
+        try {
+          const stderr = transport.stderr;
+          if (stderr && typeof stderr.on === "function") {
+            stderr.on("data", (chunk) => {
+              const text = String(chunk ?? "");
+              if (!text.trim()) return;
+              console.info("[McpManager] Lark MCP stderr", {
+                id: serverId,
+                snippet: text.slice(0, 4000),
+              });
+            });
+          }
+        } catch {
+          // best-effort
+        }
+        return transport;
+      }
+
       return new StdioClientTransport({ command: resolved.resolved, args, env });
     }
 
