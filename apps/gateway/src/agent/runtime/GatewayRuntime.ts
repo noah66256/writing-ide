@@ -1065,6 +1065,15 @@ export class GatewayRuntime implements AgentRuntime {
       // 有等待用户确认的项 → 不追问，让 run 自然结束
       if (hasWaiting) return [];
 
+      // 检测最后一条 assistant 文本是否在向用户提问/确认。
+      // 如果 Agent 已经抛出选择题或确认请求，应等用户回复，而不是继续被 pending_todo 催促。
+      const lastText = this._getLastAssistantText();
+      const askingUserPattern =
+        /[？?]\s*$|要.*吗[？?]?|还是.*[？?]|你.*偏好|帮你.*[？?]|需要.*确认|请.*选择|告诉我/;
+      if (lastText && askingUserPattern.test(lastText.slice(-200))) {
+        return [];
+      }
+
       if (done < total) {
         const item: CanonicalTranscriptItem = {
           kind: "runtime_hint",

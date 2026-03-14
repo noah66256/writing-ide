@@ -1,12 +1,16 @@
 # 修复 Agent 在单次 run 中"自问自答"
 
-> 状态：待实施 | 优先级：P1 | 日期：2026-03-15
+> 状态：Fix 1 已部署(7cf9acf) / Fix 3 待实施 | 优先级：P1 | 日期：2026-03-15
 
 ## 0. 现象
 
-用户让 Agent 测试工具可用性。Agent 调用 `read` → 失败（UNKNOWN_TOOL），调用 `tools.search` 确认工具存在，然后输出一段完整的状态总结表格。但随后在**没有用户输入**的情况下，Agent 又自行追加了第二段回复（"了解，read 在本轮不可用..."），像在"自言自语"。
+### 场景 A（已修复）
+用户让 Agent 测试工具可用性。Agent 调用 `read` → 失败（UNKNOWN_TOOL），调用 `tools.search` 确认工具存在，然后输出完整状态总结。但随后在没有用户输入的情况下，又追加第二段回复。
+**根因**：`tool_failure_repair` 软提示。**已通过 Fix 1 修复**（commit 7cf9acf）。
 
-这种"追加自言自语"在多种场景下可复现：只要有工具执行失败，Agent 输出总结后还会再追加一轮多余的回复。
+### 场景 B（新发现，待修复）
+用户让 Agent 在阿里云查域名可用性。Agent 使用 Playwright MCP 工具多次查询，最终输出完整的域名汇总表格和推荐建议，以"要直接跳转去注册哪个吗？"结尾。**然后在没有用户输入的情况下，Agent 又继续输出了新内容。**
+**根因**：`pending_todo` 分支。Agent 创建了 todo 列表（查询域名的子任务），部分完成后向用户提问，但未完成的 todo 项触发了 `pending_todo` followUp，催 Agent 继续工作。
 
 ---
 
@@ -131,13 +135,15 @@ const softGuidance = this._collectSoftGuidanceMessages();
 
 ### 4.1 自言自语场景
 
-- [ ] 工具调用失败 → Agent 输出总结 → 不应再追加第二段回复
+- [x] 工具调用失败 → Agent 输出总结 → 不应再追加第二段回复（Fix 1 已修复）
 - [ ] 工具调用失败 → Agent 没有输出总结就结束 → 仍应注入 `tool_failure_repair` 提示
+- [ ] Agent 向用户提问后 → 不应被 pending_todo 催着继续（Fix 3）
+- [ ] Agent 在执行多步任务时输出阶段性总结并向用户提问 → 应自然结束等用户回复
 
 ### 4.2 不受影响的追问场景
 
 - [ ] style_imitate 闭环未完成 → 仍应追问
-- [ ] todo 有未完成项 → 仍应追问
+- [ ] todo 有未完成项且 Agent 没有向用户提问 → 仍应追问
 - [ ] 有计划无执行 → 仍应追问
 - [ ] 产物已生成 → 仍应提醒 run.done
 - [ ] 执行契约要求工具调用 → 仍应提醒
@@ -150,8 +156,56 @@ npm -w @ohmycrab/gateway run test:runner-turn
 
 ---
 
-## 5. 涉及文件清单
+## 5. Fix 3（P1）：`pending_todo` 在 Agent 向用户提问时抑制追加轮
+
+### 5.1 根因
+
+`_getFollowUpMessages` 的 `pending_todo` 分支（GatewayRuntime.ts:1040-1077）在检测到未完成 todo 时注入 runtime_hint 催 Agent 继续。
+
+当前的"等待用户"检测只看 **todo 条目自身**的 status/text/note 是否含"等待用户"等关键词（`waitingPattern`），**不会看 Agent 最后的回复内容**。
+
+因此当 Agent 最后一段文本明确在向用户提问（"要直接跳转去注册哪个吗？"、"还是你对某个域名有偏好？"），但 todo 条目本身没有"等待用户"字样时，`pending_todo` 仍会追加一轮——导致自问自答。
+
+### 5.2 修复方案
+
+在 `pending_todo` 的 `done < total` 检查之前，增加一个对 **最后一条 assistant 文本**的检测：如果最后回复包含向用户提问的模式，视为"等待用户回复"，返回 `[]` 不追问。
+
+**修改位置**：`GatewayRuntime.ts:_getFollowUpMessages()`，在 `if (done < total)` 之前：
+
+```typescript
+// 检测 "等待用户" 状态——此类项应让 run 自然结束，不追问
+const waitingPattern = /(等待用户|等待你|待确认|...)/;
+const hasWaiting = runTodo.some((t) => { ... });
+if (hasWaiting) return [];
+
+// [NEW] 检测最后一条 assistant 文本是否在向用户提问/确认
+// 如果 Agent 已经向用户抛出选择题或确认请求，应等用户回复，不催促继续
+const lastText = this._getLastAssistantText();
+const askingUserPattern =
+  /[？?]\s*$|要.*吗[？?]?|还是.*[？?]|你.*偏好|帮你.*[？?]|需要.*确认|请.*选择|告诉我/;
+if (lastText && askingUserPattern.test(lastText.slice(-200))) {
+  return [];
+}
+
+if (done < total) {
+```
+
+### 5.3 设计原则
+
+- 只检测最后 200 字符（避免误匹配正文中的问号）
+- 正则覆盖常见的中文提问模式
+- 不影响 Agent 在"不提问"时被 todo 催着继续工作的正常行为
+- 与现有 `waitingPattern`（扫描 todo 条目）互补，形成双层检测
+
+### 5.4 边界情况
+
+- Agent 输出长文本最后恰好有个问号但不是真正提问 → 可能误抑制，但比"自问自答"的体验更好
+- Agent 在提问后 todo 确实需要继续 → 用户回复后新 run 会继续处理
+
+---
+
+## 6. 涉及文件清单
 
 | 文件 | Fix | 改动类型 |
 |------|-----|---------|
-| `apps/gateway/src/agent/runtime/GatewayRuntime.ts` | Fix 1 | `_getFollowUpMessages` 中添加 failure 抑制逻辑 |
+| `apps/gateway/src/agent/runtime/GatewayRuntime.ts` | Fix 1 (已部署), Fix 3 | failure 抑制 + pending_todo 提问检测 |
