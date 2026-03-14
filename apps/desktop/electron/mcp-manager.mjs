@@ -6,11 +6,13 @@
  * 支持 bundled server（随应用打包，通过 ELECTRON_RUN_AS_NODE 启动）。
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { spawn } from "node:child_process";
+import { PassThrough } from "node:stream";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { createRequire } from "node:module";
@@ -261,6 +263,229 @@ function extractArgValidationSignals(text) {
   };
 }
 
+function _isElectronProcess() {
+  try {
+    // 与 MCP SDK 中的 isElectron 保持一致的判定方式
+    return "type" in process;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Stdio MCP 传输层封装：在 JSON-RPC 解析前过滤 stdout 噪音。
+ *
+ * 过滤规则：
+ * - 按行拆分 stdout；
+ * - 仅保留以 "{" 或 "[" 开头且能被 JSON.parse 成功解析的行；
+ * - 其它行视为噪音，仅打印 debug 日志，不触发 onerror。
+ *
+ * 这样可以容忍 npx/npm/postinstall/banner 等非 JSON 输出，避免 MCP 协议因为单行噪音整体中断。
+ */
+class FilteredStdioClientTransport {
+  /**
+   * @param {{command:string,args?:string[],env?:Record<string,string>,stderr?:"pipe"|"inherit"|"overlapped",cwd?:string}} server
+   */
+  constructor(server) {
+    this._serverParams = server;
+    /** @type {import("node:child_process").ChildProcess | undefined} */
+    this._process = undefined;
+    /** @type {string} */
+    this._buffer = "";
+    /** @type {import("stream").PassThrough | null} */
+    this._stderrStream = null;
+    if (server.stderr === "pipe" || server.stderr === "overlapped") {
+      this._stderrStream = new PassThrough();
+    }
+
+    /** @type {(message: any) => void | undefined} */
+    this.onmessage = undefined;
+    /** @type {(error: any) => void | undefined} */
+    this.onerror = undefined;
+    /** @type {() => void | undefined} */
+    this.onclose = undefined;
+  }
+
+  /**
+   * The stderr stream of the child process, if stderr piping was requested.
+   * 与 StdioClientTransport 保持相同的接口习惯。
+   */
+  get stderr() {
+    if (this._stderrStream) {
+      return this._stderrStream;
+    }
+    return this._process?.stderr ?? null;
+  }
+
+  /** 子进程 pid，启动后可用。 */
+  get pid() {
+    return this._process?.pid ?? null;
+  }
+
+  /**
+   * 启动子进程，并挂接 stdout/stderr 处理。
+   * 与 StdioClientTransport.start 保持类似的行为。
+   */
+  async start() {
+    if (this._process) {
+      throw new Error(
+        "StdioClientTransport already started! If using Client class, note that connect() calls start() automatically.",
+      );
+    }
+    const server = this._serverParams;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const child = spawn(server.command, server.args ?? [], {
+        env: {
+          // 复用 MCP SDK 的默认继承环境，避免丢失关键变量
+          ...getDefaultEnvironment(),
+          ...server.env,
+        },
+        stdio: ["pipe", "pipe", server.stderr ?? "inherit"],
+        shell: false,
+        windowsHide: process.platform === "win32" && _isElectronProcess(),
+        cwd: server.cwd,
+      });
+
+      this._process = child;
+
+      child.on("error", (error) => {
+        if (!settled) {
+          settled = true;
+          reject(error);
+        }
+        if (this.onerror) this.onerror(error);
+      });
+
+      child.on("spawn", () => {
+        if (!settled) {
+          settled = true;
+          resolve();
+        }
+      });
+
+      child.on("close", () => {
+        this._process = undefined;
+        if (this.onclose) this.onclose();
+      });
+
+      child.stdin?.on("error", (error) => {
+        if (this.onerror) this.onerror(error);
+      });
+
+      child.stdout?.on("data", (chunk) => {
+        this._handleStdoutData(chunk);
+      });
+
+      child.stdout?.on("error", (error) => {
+        if (this.onerror) this.onerror(error);
+      });
+
+      if (this._stderrStream && child.stderr) {
+        child.stderr.pipe(this._stderrStream);
+      }
+    });
+  }
+
+  _handleStdoutData(chunk) {
+    try {
+      this._buffer += chunk.toString("utf8");
+    } catch (error) {
+      if (this.onerror) this.onerror(error);
+      return;
+    }
+
+    // 逐行拆分，并按规则过滤噪音
+    while (true) {
+      const idx = this._buffer.indexOf("\n");
+      if (idx === -1) break;
+      let line = this._buffer.slice(0, idx);
+      this._buffer = this._buffer.slice(idx + 1);
+
+      line = line.replace(/\r$/, "");
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      const first = trimmed[0];
+      if (first !== "{" && first !== "[") {
+        console.info("[McpManager] MCP stdout noise filtered", trimmed.slice(0, 4000));
+        continue;
+      }
+
+      try {
+        const message = JSON.parse(trimmed);
+        if (this.onmessage) this.onmessage(message);
+      } catch (error) {
+        // 保守处理：解析失败视为噪音，记录日志但不终止连接
+        console.info("[McpManager] MCP stdout JSON parse error, line dropped", {
+          snippet: trimmed.slice(0, 4000),
+          error: String(error?.message ?? error),
+        });
+      }
+    }
+  }
+
+  async close() {
+    this._buffer = "";
+    if (!this._process) {
+      return;
+    }
+    const processToClose = this._process;
+    this._process = undefined;
+
+    const closePromise = new Promise((resolve) => {
+      processToClose.once("close", () => resolve());
+    });
+
+    try {
+      processToClose.stdin?.end();
+    } catch {
+      // ignore
+    }
+
+    await Promise.race([
+      closePromise,
+      new Promise((resolve) => setTimeout(resolve, 2000).unref()),
+    ]);
+
+    if (processToClose.exitCode === null) {
+      try {
+        processToClose.kill("SIGTERM");
+      } catch {
+        // ignore
+      }
+      await Promise.race([
+        closePromise,
+        new Promise((resolve) => setTimeout(resolve, 2000).unref()),
+      ]);
+    }
+
+    if (processToClose.exitCode === null) {
+      try {
+        processToClose.kill("SIGKILL");
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  send(message) {
+    return new Promise((resolve, reject) => {
+      const proc = this._process;
+      if (!proc?.stdin) {
+        reject(new Error("Not connected"));
+        return;
+      }
+      const json = JSON.stringify(message) + "\n";
+      if (proc.stdin.write(json)) {
+        resolve();
+      } else {
+        proc.stdin.once("drain", resolve);
+      }
+    });
+  }
+}
+
 export class McpManager {
   /**
    * @param {string} userDataPath - app.getPath('userData')
@@ -321,10 +546,68 @@ export class McpManager {
   _knownUserBinDirs() {
     const home = String(process.env.HOME || process.env.USERPROFILE || "").trim();
     const out = [];
+    const platform = process.platform;
+
     if (home) {
+      // 通用 Unix 风格目录
       out.push(path.join(home, ".local", "bin"));
       out.push(path.join(home, ".cargo", "bin"));
     }
+
+    if (platform === "darwin" || platform === "linux") {
+      // macOS Homebrew
+      if (platform === "darwin") {
+        out.push("/usr/local/bin");
+        out.push("/opt/homebrew/bin");
+      }
+
+      // NVM：优先 NVM_BIN 环境变量，其次 alias default，兜底最新版目录
+      if (home) {
+        const nvmDir = path.join(home, ".nvm");
+        const nvmBinEnv = String(process.env.NVM_BIN || "").trim();
+        if (nvmBinEnv) {
+          out.push(nvmBinEnv);
+        }
+        try {
+          const aliasDefault = path.join(nvmDir, "alias", "default");
+          if (fsSync.existsSync(aliasDefault)) {
+            const alias = String(fsSync.readFileSync(aliasDefault, "utf-8") || "").trim();
+            if (alias) out.push(path.join(nvmDir, "versions", "node", alias, "bin"));
+          } else {
+            const versionsRoot = path.join(nvmDir, "versions", "node");
+            if (fsSync.existsSync(versionsRoot)) {
+              const entries = fsSync.readdirSync(versionsRoot, { withFileTypes: true });
+              const latest = entries.filter((e) => e.isDirectory()).map((e) => e.name).sort().pop();
+              if (latest) out.push(path.join(versionsRoot, latest, "bin"));
+            }
+          }
+        } catch {
+          // nvm 不存在或权限不足，忽略
+        }
+
+        // Volta
+        out.push(path.join(home, ".volta", "bin"));
+
+        // fnm
+        if (platform === "darwin") {
+          out.push(path.join(home, ".fnm", "current", "bin"));
+        }
+      }
+    }
+
+    if (platform === "win32") {
+      const appData = String(process.env.APPDATA || "").trim();
+      const localAppData = String(process.env.LOCALAPPDATA || "").trim();
+      const programFiles = String(process.env.PROGRAMFILES || process.env.ProgramFiles || "").trim();
+
+      // npm 全局
+      if (appData) out.push(path.join(appData, "npm"));
+      // Node 安装目录
+      if (programFiles) out.push(path.join(programFiles, "nodejs"));
+      // Volta
+      if (localAppData) out.push(path.join(localAppData, "volta", "bin"));
+    }
+
     return [...new Set(out.map((d) => path.normalize(String(d || ""))).filter(Boolean))];
   }
 
@@ -989,14 +1272,41 @@ export class McpManager {
       this._notify();
     } catch (e) {
       entry.status = "error";
-      entry.error = String(e?.message ?? e);
+      // 生成更具诊断价值的错误说明
+      const rawError = String(e?.message ?? e);
+      let diagHint = "";
+      try {
+        const cfg = entry.config;
+        if (cfg?.transport === "stdio" && !cfg?.bundled) {
+          const cmd = String(cfg.command ?? "").trim();
+          if (cmd) {
+            // 检查命令是否可找到
+            const runtimeDirs = this._runtimeBinDirs();
+            const managedPath = this._composePathWithRuntime(process.env.PATH ?? "", this._managedPathDirs());
+            const resolved = await this._resolveStdioCommand(cmd, runtimeDirs, managedPath);
+            if (!resolved?.resolved) {
+              diagHint = `命令 "${cmd}" 在当前环境中找不到。请确认已安装 ${
+                cmd === "npx" || cmd === "node" || cmd === "npm" ? "Node.js" : cmd
+              }，或在终端中运行 "which ${cmd}" 确认路径。`;
+            } else if (rawError.includes("-32000") || rawError.includes("Connection closed")) {
+              const argsText = Array.isArray(cfg.args) ? cfg.args.join(" ") : "";
+              diagHint =
+                `MCP Server 进程已启动但协议握手失败。可能原因：(1) npm 首次下载包时 stdout 输出了非 JSON 内容；` +
+                `(2) Server 因凭证或网络问题提前退出。建议先在终端运行 "${cmd}${argsText ? " " + argsText : ""}" 确认能正常启动。`;
+            }
+          }
+        }
+      } catch {
+        // 诊断逻辑失败不影响主流程
+      }
+      entry.error = diagHint ? `${rawError}\n\n💡 ${diagHint}` : rawError;
       entry.client = null;
       entry.transport = null;
       try {
         console.warn("[McpManager] failed to connect MCP server", {
           serverId,
           name: String(entry.config?.name ?? "").trim(),
-          error: String(e?.message ?? e),
+          error: entry.error,
           stack: e?.stack ? String(e.stack) : undefined,
         });
       } catch {
@@ -1273,33 +1583,34 @@ export class McpManager {
         } catch {
           // debug 日志失败不影响主流程
         }
-
-        // 将 Lark MCP 的 stderr 透传到 Electron 控制台，便于排查启动/网络错误。
-        const transport = new StdioClientTransport({
-          command: resolved.resolved,
-          args,
-          env,
-          stderr: "pipe",
-        });
-        try {
-          const stderr = transport.stderr;
-          if (stderr && typeof stderr.on === "function") {
-            stderr.on("data", (chunk) => {
-              const text = String(chunk ?? "");
-              if (!text.trim()) return;
-              console.info("[McpManager] Lark MCP stderr", {
-                id: serverId,
-                snippet: text.slice(0, 4000),
-              });
-            });
-          }
-        } catch {
-          // best-effort
-        }
-        return transport;
       }
 
-      return new StdioClientTransport({ command: resolved.resolved, args, env });
+      // 所有非 bundled stdio MCP 使用 FilteredStdioClientTransport，
+      // 过滤 stdout 中的非 JSON-RPC 噪音（npx/npm/postinstall/banner 等）。
+      // bundled server 由 ELECTRON_RUN_AS_NODE 启动，stdout 干净，无需过滤。
+      const transport = new FilteredStdioClientTransport({
+        command: resolved.resolved,
+        args,
+        env,
+        stderr: "pipe",
+      });
+      try {
+        const stderr = transport.stderr;
+        if (stderr && typeof stderr.on === "function") {
+          const serverIdForLog = String(config.id ?? config.name ?? "").trim();
+          stderr.on("data", (chunk) => {
+            const text = String(chunk ?? "");
+            if (!text.trim()) return;
+            console.info("[McpManager] MCP stderr", {
+              id: serverIdForLog || serverId,
+              snippet: text.slice(0, 4000),
+            });
+          });
+        }
+      } catch {
+        // best-effort
+      }
+      return transport;
     }
 
     if (type === "streamable-http") {

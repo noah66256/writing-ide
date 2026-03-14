@@ -174,7 +174,8 @@ const RECORDS: MarketplaceRecord[] = [
       version: "0.1.0",
       publisher: "Community",
       source: "reviewed",
-      description: "将 Lark/飞书 OpenAPI 暴露为 MCP 工具，用于日程、群聊、文档等自动化操作。",
+      description:
+        "将 Lark/飞书 OpenAPI 暴露为 MCP 工具，用于日程、群聊、文档等自动化操作。建议先在终端运行 npx -y @larksuiteoapi/lark-mcp --help 确认包可正常下载。",
       minAppVersion: "0.1.0",
       platforms: ["darwin-arm64", "darwin-x64", "win32-x64"],
       tags: ["mcp", "lark", "feishu", "calendar", "docs"],
