@@ -18,6 +18,8 @@ export function ConversationLayout() {
   const fetchModels = useModelStore((s) => s.fetchModels);
   const hydrateFromDisk = useConversationStore((s) => s.hydrateFromDisk);
   const draftSnapshot = useConversationStore((s) => s.draftSnapshot);
+  const activeConvId = useConversationStore((s) => s.activeConvId);
+  const conversations = useConversationStore((s) => s.conversations);
   const restoredRef = useRef(false);
   const sidebarCollapsed = useLayoutStore((s) => s.sidebarCollapsed);
   const toggleSidebar = useLayoutStore((s) => s.toggleSidebar);
@@ -50,10 +52,9 @@ export function ConversationLayout() {
     };
   }, []);
 
-  // 水合后恢复草稿快照（若当前 run 为空）
+  // 水合后恢复草稿/最近一次对话快照（若当前 run 为空）
   useEffect(() => {
     if (restoredRef.current) return;
-    if (!draftSnapshot) return;
     const st = useRunStore.getState();
     const hasAny =
       (st.steps ?? []).length > 0 ||
@@ -62,15 +63,33 @@ export function ConversationLayout() {
       restoredRef.current = true;
       return;
     }
-    st.loadSnapshot(draftSnapshot as any);
-    // 恢复草稿绑定的项目文件夹
-    const snapDir = (draftSnapshot as any)?.projectDir ?? null;
+
+    // 在 draftSnapshot 和 activeConv snapshot 之间选择 steps 更多的一份
+    const conv =
+      activeConvId && conversations
+        ? conversations.find((c) => c.id === activeConvId)
+        : null;
+    const draftSteps =
+      draftSnapshot && Array.isArray((draftSnapshot as any).steps)
+        ? (draftSnapshot as any).steps.length
+        : 0;
+    const convSteps =
+      conv && conv.snapshot && Array.isArray((conv.snapshot as any).steps)
+        ? (conv.snapshot as any).steps.length
+        : 0;
+    const snap =
+      draftSteps >= convSteps ? (draftSnapshot as any) : (conv?.snapshot as any);
+    if (!snap) return;
+
+    st.loadSnapshot(snap);
+    // 恢复快照绑定的项目文件夹
+    const snapDir = (snap as any)?.projectDir ?? null;
     const currentDir = useProjectStore.getState().rootDir;
     if (snapDir && snapDir !== currentDir) {
       void useProjectStore.getState().loadProjectFromDisk(snapDir).catch(() => {});
     }
     restoredRef.current = true;
-  }, [draftSnapshot]);
+  }, [draftSnapshot, activeConvId, conversations]);
 
   useEffect(() => {
     let cancelled = false;

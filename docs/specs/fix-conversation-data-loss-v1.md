@@ -1,8 +1,23 @@
 # 修复方案：对话数据丢失（会话恢复 + 破坏性自动保存）
 
 > 日期：2026-03-14
-> 状态：待实施
+> 状态：设计稿（前端待实施；Electron 端历史 IO 已部分落地）
 > 影响范围：`apps/desktop`（dev + 打包版均受影响）
+
+---
+
+## 0. 当前状态与范围
+
+- 本文中的 R1–S3 是 **前端 store 侧的候选修复方案**，截至 2026-03-14，这部分改动尚未在  
+  `apps/desktop/src/state/conversationStore.ts` / `apps/desktop/src/ui/components/ChatArea.tsx` /  
+  `apps/desktop/src/ui/layouts/ConversationLayout.tsx` 中真正落地，仍然是 proposal-first 设计。
+- 与对话历史相关的 **Electron 端 IO 防护** 已经部分上线（`apps/desktop/electron/main.cjs`），包括：
+  - `history.saveConversations` 使用 tmp + rename，并在写入前复制 `.bak`，降低“写入中断导致整文件损坏”的风险；
+  - `history.savePendingConversations` / `history.loadPendingConversations` 作为 pending 缓冲，避免崩溃或 HMR 时丢失最近几轮；
+  - v2 历史格式：索引文件 + per-conversation `conv_*.json` 拆分，单个会话读写不再拖整个巨型 JSON；
+  - `tryMigrateConversationHistory` + productName 白名单，统一 dev / 打包版的 userData 路径，并迁移旧版 `Electron` 目录下的历史文件。
+- 上述 Electron 端改造已经显著减轻了“看起来所有对话都没了”的假象，但**前端仍存在“空快照覆盖有内容对话”的潜在风险**，  
+  因此 R1–S3 仍然有必要在后续版本逐步落地，用于进一步收紧前端的恢复和自动保存行为。
 
 ---
 

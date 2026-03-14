@@ -328,7 +328,7 @@ export function ChatArea() {
     }
   }, [hasMoreHistoryBefore]);
 
-  // 自动保存草稿到 conversationStore，同时更新活跃对话
+  // 自动保存草稿到 conversationStore，同时更新活跃对话（带防降级保护）
   useEffect(() => {
     const hasDraftState =
       steps.length > 0 ||
@@ -344,16 +344,34 @@ export function ChatArea() {
       });
     const hasConversationContext = Boolean(activeConvId) || Boolean(model) || Boolean(mode);
     if (!hasDraftState && !hasConversationContext) return;
+
+    // 防降级：当前运行态完全为空，但 active 对话已有非空 snapshot 时，
+    // 跳过本轮自动保存，避免把历史对话误写成"空对话"快照。
+    const convStore = useConversationStore.getState();
+    const convIdNow = convStore.activeConvId;
+    const existingSnapshot =
+      convIdNow
+        ? convStore.conversations.find((c) => c.id === convIdNow)?.snapshot
+        : null;
+    const existingSteps =
+      existingSnapshot && Array.isArray((existingSnapshot as any).steps)
+        ? (existingSnapshot as any).steps.length
+        : 0;
+    if (!hasDraftState && existingSteps > 0) {
+      return;
+    }
+
     const timer = setTimeout(() => {
       const snap = buildCurrentSnapshot();
-      useConversationStore.getState().setDraftSnapshot(snap);
-      const convId = useConversationStore.getState().activeConvId;
+      const store = useConversationStore.getState();
+      store.setDraftSnapshot(snap);
+      const convId = store.activeConvId;
       if (convId) {
-        useConversationStore.getState().updateConversation(convId, { snapshot: snap });
+        store.updateConversation(convId, { snapshot: snap });
       }
     }, 2000);
     return () => clearTimeout(timer);
-  }, [steps, mainDoc, todoList, kbAttachedLibraryIds, ctxRefs, pendingArtifacts, mode, model]);
+  }, [steps, mainDoc, todoList, kbAttachedLibraryIds, ctxRefs, pendingArtifacts, mode, model, activeConvId]);
 
   // 运行结束时立即刷盘一次，避免 dev/HMR/强制退出导致最后一轮没落盘
   useEffect(() => {

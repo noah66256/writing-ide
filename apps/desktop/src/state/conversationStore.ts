@@ -119,6 +119,12 @@ function slimSnapshotForHistory(snapshot: RunSnapshot | null | undefined): RunSn
   };
 }
 
+function getSnapshotStepsCount(raw: unknown): number {
+  if (!raw || typeof raw !== "object") return 0;
+  const steps = (raw as any).steps;
+  return Array.isArray(steps) ? steps.length : 0;
+}
+
 /**
  * 从当前 runStore + projectStore 构建可序列化的 RunSnapshot。
  * 替代 NavSidebar / ChatArea 中的 inline buildSnapshot()。
@@ -344,14 +350,49 @@ export const useConversationStore = create<ConversationState>()(
             return slim ? { ...c, snapshot: slim } : c;
           }) as Conversation[];
 
-          const finalDraftRaw =
-            (curDraft && typeof curDraft === "object" ? curDraft : null) ??
-            pendingDraft ??
-            (diskDraft && typeof diskDraft === "object" ? diskDraft : null);
-          const finalDraft = finalDraftRaw ? slimSnapshotForHistory(finalDraftRaw as any) ?? finalDraftRaw : null;
+          // 计算最终 activeConvId（memory > pending > disk）
+          const pickActive = (id: string | null) =>
+            id && merged.some((c) => c.id === id) ? id : null;
+          const finalActiveConvId =
+            pickActive(curActiveConvId) ||
+            pickActive(pendingActiveConvId) ||
+            pickActive(diskActiveConvId);
 
-          const pickActive = (id: string | null) => (id && merged.some((c) => c.id === id) ? id : null);
-          const finalActiveConvId = pickActive(curActiveConvId) || pickActive(pendingActiveConvId) || pickActive(diskActiveConvId);
+          // 在 curDraft / pendingDraft / diskDraft 之间选择 steps 更多的一份；
+          // 若三者都不存在，则回退到 activeConvId 对应对话的 snapshot。
+          const draftCandidates: Array<RunSnapshot | null> = [];
+          if (curDraft && typeof curDraft === "object") {
+            draftCandidates.push(curDraft as RunSnapshot);
+          }
+          if (pendingDraft && typeof pendingDraft === "object") {
+            draftCandidates.push(pendingDraft as RunSnapshot);
+          }
+          if (diskDraft && typeof diskDraft === "object") {
+            draftCandidates.push(diskDraft as RunSnapshot);
+          }
+
+          let finalDraftRaw: RunSnapshot | null = null;
+          let bestSteps = -1;
+          for (const snap of draftCandidates) {
+            if (!snap || typeof snap !== "object") continue;
+            const steps = getSnapshotStepsCount(snap);
+            if (steps > bestSteps) {
+              bestSteps = steps;
+              finalDraftRaw = snap;
+            }
+          }
+
+          // 草稿源都不存在时，尝试用当前 activeConv 的 snapshot 作为最近草稿
+          if (!finalDraftRaw && finalActiveConvId) {
+            const activeConv = merged.find((c) => c.id === finalActiveConvId);
+            if (activeConv && activeConv.snapshot && typeof activeConv.snapshot === "object") {
+              finalDraftRaw = activeConv.snapshot as RunSnapshot;
+            }
+          }
+
+          const finalDraft = finalDraftRaw
+            ? slimSnapshotForHistory(finalDraftRaw as any) ?? finalDraftRaw
+            : null;
 
           set({
             conversations: merged,
@@ -445,10 +486,18 @@ export const useConversationStore = create<ConversationState>()(
         set((s) => {
           const next = (s.conversations ?? []).map((x) => {
             if (x.id !== v) return x;
+            let nextSnapshot = x.snapshot;
+            if (patch.snapshot != null) {
+              const incoming = patch.snapshot as RunSnapshot;
+              const prevSteps = getSnapshotStepsCount(nextSnapshot as any);
+              const incomingSteps = getSnapshotStepsCount(incoming as any);
+              // 防降级：避免把已有 steps>0 的对话误写成 steps=0 的快照
+              nextSnapshot = prevSteps > 0 && incomingSteps === 0 ? nextSnapshot : incoming;
+            }
             return {
               ...x,
               ...(patch.title != null ? { title: clampTitle(patch.title) } : {}),
-              ...(patch.snapshot != null ? { snapshot: patch.snapshot } : {}),
+              ...(patch.snapshot != null ? { snapshot: nextSnapshot } : {}),
               updatedAt: Date.now(),
             };
           });
@@ -473,18 +522,39 @@ export const useConversationStore = create<ConversationState>()(
       },
       flushDraftSnapshotNow: async (snap) => {
         const base =
-          snap && typeof snap === "object" ? (snap as any) : snap === null ? null : buildCurrentSnapshot();
-        const next = base ? slimSnapshotForHistory(base as any) ?? base : null;
+          snap && typeof snap === "object"
+            ? (snap as any)
+            : snap === null
+              ? null
+              : buildCurrentSnapshot();
+        const candidate = base ? slimSnapshotForHistory(base as any) ?? base : null;
         const activeConvId = get().activeConvId;
         const prevConversations = get().conversations ?? [];
         const conversations = activeConvId
-          ? prevConversations.map((x) => (x.id === activeConvId ? { ...x, snapshot: next as any, updatedAt: Date.now() } : x))
+          ? prevConversations.map((x) => {
+              if (x.id !== activeConvId) return x;
+              const prevSnap = x.snapshot as any;
+              const prevSteps = getSnapshotStepsCount(prevSnap);
+              const candSteps = getSnapshotStepsCount(candidate as any);
+              // 防降级：已有 snapshot.steps>0 而候选 steps=0 时，保留旧 snapshot
+              const safeSnapshot =
+                prevSteps > 0 && candSteps === 0 ? prevSnap : (candidate as any);
+              return { ...x, snapshot: safeSnapshot, updatedAt: Date.now() };
+            })
           : prevConversations;
-        set({ draftSnapshot: next as any, conversations });
+
+        // draftSnapshot 也做防降级，避免从"有内容草稿"退化为"空草稿"
+        const prevDraft = get().draftSnapshot as any;
+        const prevDraftSteps = getSnapshotStepsCount(prevDraft);
+        const candDraftSteps = getSnapshotStepsCount(candidate as any);
+        const nextDraft =
+          prevDraftSteps > 0 && candDraftSteps === 0 ? prevDraft : (candidate as any);
+
+        set({ draftSnapshot: nextDraft as any, conversations });
 
         const api = window.desktop?.history;
         if (!api?.saveConversations || !diskWriteAllowed) {
-          schedulePersistToDisk({ conversations, draftSnapshot: next as any });
+          schedulePersistToDisk({ conversations, draftSnapshot: nextDraft as any });
           return;
         }
 
@@ -498,11 +568,11 @@ export const useConversationStore = create<ConversationState>()(
             version: 1,
             updatedAt: Date.now(),
             conversations: capConversations(conversations),
-            draftSnapshot: next as any,
+            draftSnapshot: nextDraft as any,
             activeConvId: activeConvId ?? null,
           });
         } catch {
-          schedulePersistToDisk({ conversations, draftSnapshot: next as any });
+          schedulePersistToDisk({ conversations, draftSnapshot: nextDraft as any });
         }
       },
       clearAll: () =>
