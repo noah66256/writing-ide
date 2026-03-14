@@ -195,7 +195,9 @@ const RECORDS: MarketplaceRecord[] = [
         name: "Lark/飞书 OpenAPI MCP",
         transport: "stdio",
         command: "npx",
-        args: ["-y", "lark-openapi-mcp"],
+        // 官方推荐用法：npx -y @larksuiteoapi/lark-mcp mcp
+        // 凭证通过环境变量 LARK_APP_ID / LARK_APP_SECRET 传入。
+        args: ["-y", "@larksuiteoapi/lark-mcp", "mcp"],
         enabled: false,
         env: {},
         configFields: [
