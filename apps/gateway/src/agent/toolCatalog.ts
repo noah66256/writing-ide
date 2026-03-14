@@ -92,7 +92,7 @@ const CAPABILITY_KEYWORDS: Array<{ capability: string; re: RegExp }> = [
   { capability: "code_exec", re: /(code\.exec|python\b|py脚本|python脚本|写(?:一个|一段)?(?:python|py)?(?:脚本|代码)|执行(?:一段)?代码|运行(?:一段)?代码|跑脚本|python-docx|python-pptx|openpyxl|entryfile|requirements)/i },
   { capability: "shell_exec", re: /(命令行|终端|shell|bash|zsh|ssh|\bnpm run\b|\bpnpm\b|\byarn\b|\bpytest\b|\bmake\b|编译|构建|打包|部署)/i },
   { capability: "delegate", re: /(委派|分派|指派|派给|delegate|sub[\s_-]?agent|agent\s*delegate)/i },
-  { capability: "browser_open", re: /(打开.*网页|打开网站|浏览器|网站|navigate|open\s+.*(baidu|google|url))/i },
+  { capability: "browser_open", re: /(打开.*(网页|网站|页面)|浏览器|网页|网站|页面|公众号|小红书|抖音|知乎|微博|后台|管理后台|扫码|扫码登录|登录.*页面|navigate|goto|open\s+.*(baidu|google|url|https?:\/\/))/i },
   { capability: "mcp_spreadsheet", re: /(excel|xlsx|表格|电子表格|spreadsheet|工作表)/i },
   { capability: "mcp_word_doc", re: /(word文档|docx|word\s*文件|写.*word|导出.*word|word.*版|生成.*word)/i },
   { capability: "mcp_pdf", re: /(pdf|转.*pdf|导出.*pdf)/i },

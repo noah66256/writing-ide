@@ -13,7 +13,7 @@ export type ToolRetrievalResult = {
   retrievedToolNames: string[];
 };
 
-const STRONG_BROWSER_RE = /(公众号|小红书|抖音|知乎|微博|后台|管理后台|扫码|扫码登录|登录|浏览器|网页|网站|打开.*(网页|网站)|navigate|goto|open\s+.*https?:\/\/)/i;
+const STRONG_BROWSER_RE = /(公众号|小红书|抖音|知乎|微博|后台|管理后台|扫码|扫码登录|登录|浏览器|网页|网站|页面|打开.*(网页|网站|页面)|navigate|goto|open\s+.*https?:\/\/)/i;
 const STRONG_WORD_RE = /(word|docx|文档|公文|报告|备忘录)/i;
 const STRONG_SHEET_RE = /(excel|xlsx|表格|电子表格|工作表)/i;
 

@@ -619,10 +619,26 @@ function listCatalogForDiscovery(args: {
   mode: "chat" | "agent";
   allowedToolNames: Set<string> | null;
   toolSidecar: ToolSidecar | null;
+  includeAllMcpTools?: boolean;
 }): ToolCatalogEntry[] {
   const allowed = args.allowedToolNames ?? new Set(TOOL_LIST.map((t) => String(t?.name ?? "").trim()).filter(Boolean));
   const sidecar = (args.toolSidecar ?? null) as any;
   const mcpTools = Array.isArray(sidecar?.mcpTools) ? (sidecar.mcpTools as any[]) : [];
+
+  if (args.includeAllMcpTools && mcpTools.length > 0) {
+    // tools.search 模式：内置工具仍按 allowed 过滤，但 MCP 工具使用全量目录。
+    const expandedAllowed = new Set(allowed);
+    for (const t of mcpTools) {
+      const name = String(t?.name ?? "").trim();
+      if (name) expandedAllowed.add(name);
+    }
+    return buildToolCatalog({
+      mode: args.mode,
+      allowedToolNames: expandedAllowed,
+      mcpTools,
+    });
+  }
+
   return buildToolCatalog({
     mode: args.mode,
     allowedToolNames: allowed,
@@ -647,6 +663,7 @@ function executeToolsSearchOnGateway(args: {
     mode: args.mode,
     allowedToolNames: args.allowedToolNames,
     toolSidecar: args.toolSidecar,
+    includeAllMcpTools: true,
   });
 
   const filteredCatalog = sources.size > 0

@@ -1416,6 +1416,18 @@ export class GatewayRuntime implements AgentRuntime {
       });
 
       if (ret.ok) {
+        // 记录 tools.search 发现的 MCP 工具名，供 computePerTurnAllowed 在后续 turn 放行
+        if (toolName === "tools.search") {
+          const output: any = (ret as any).output;
+          const tools = Array.isArray(output?.tools) ? output.tools : [];
+          const discovered: Set<string> =
+            (this.runState as any).discoveredMcpToolNames ??
+            ((this.runState as any).discoveredMcpToolNames = new Set<string>());
+          for (const t of tools) {
+            const name = String(t?.name ?? "").trim();
+            if (name) discovered.add(name);
+          }
+        }
         return {
           ok: true,
           output: (ret as { output: unknown }).output,

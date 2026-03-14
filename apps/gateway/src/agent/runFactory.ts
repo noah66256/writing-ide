@@ -2973,6 +2973,35 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
   // 兜底：确保 CORE_TOOLS 不被 B2 裁剪掉，只要它们在 baseAllowedToolNames 中。
   ensureCoreToolsSelected({ baseAllowedToolNames, selectedAllowedToolNames });
 
+  // MCP Server 粒度补齐：如果 selectToolSubset 选中了某个 MCP Server 的任一工具，
+  // 就把该 Server 的全部工具补入 selectedAllowedToolNames。
+  // 原理：MCP Server 的工具是功能上紧密耦合的整体（如 Playwright 的 navigate/click/type/fill），
+  // 只选部分工具会导致 Agent 能开始操作但无法完成（能导航但不能点击）。
+  if (mcpToolsForRun.length > 0) {
+    const serverToolMap = new Map<string, string[]>();
+    for (const t of mcpToolsForRun) {
+      const name = String((t as any)?.name ?? "").trim();
+      const serverName = String((t as any)?.serverName ?? "").trim();
+      if (!name || !serverName) continue;
+      if (!serverToolMap.has(serverName)) serverToolMap.set(serverName, []);
+      serverToolMap.get(serverName)!.push(name);
+    }
+    const selectedServers = new Set<string>();
+    for (const [server, tools] of serverToolMap) {
+      if (tools.some((n) => selectedAllowedToolNames.has(n))) {
+        selectedServers.add(server);
+      }
+    }
+    for (const server of selectedServers) {
+      const tools = serverToolMap.get(server) ?? [];
+      for (const name of tools) {
+        if (baseAllowedToolNames.has(name)) {
+          selectedAllowedToolNames.add(name);
+        }
+      }
+    }
+  }
+
   // 调试：观察经过 Tool Retrieval / Routing 收敛后的工具集合中，高危运行时工具是否仍然存在。
   try {
     const runtimeToolNames = ["shell.exec", "process.run", "process.list", "process.stop", "cron.create", "cron.list"];
@@ -3714,6 +3743,16 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
         for (const name of ALWAYS_ALLOW_TOOL_NAMES) {
           if (baseAllowedToolNames.has(name)) {
             allowed.add(name);
+          }
+        }
+        // tools.search 动态发现的 MCP 工具放行：Agent 通过 tools.search 发现了新工具后，
+        // 后续 turn 应允许调用这些工具，即使它们不在 run 启动时的 selectedAllowedToolNames 中。
+        const discovered = (state as any).discoveredMcpToolNames;
+        if (discovered instanceof Set && discovered.size > 0) {
+          for (const name of discovered) {
+            if (baseAllowedToolNames.has(name)) {
+              allowed.add(name);
+            }
           }
         }
       }
