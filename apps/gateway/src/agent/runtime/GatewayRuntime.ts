@@ -46,6 +46,7 @@ import {
   decideServerToolExecution,
   executeServerToolOnGateway,
 } from "../serverToolRunner.js";
+import { CORE_TOOL_NAME_SET } from "../coreTools.js";
 import { normalizeToolParametersSchema } from "../../llm/toolSchema.js";
 import { TurnEngine, type RunOutcome } from "../turnEngine.js";
 import type { ModelApiType, ToolResultPayload } from "../writingAgentRunner.js";
@@ -786,14 +787,41 @@ export class GatewayRuntime implements AgentRuntime {
     _signal?: AbortSignal,
   ): Promise<AgentMessage[]> {
     // 每轮重置为基线
-    this.effectiveAllowed = new Set(this.config.runCtx.allowedToolNames);
+    const baselineAllowed = new Set(this.config.runCtx.allowedToolNames);
+    this.effectiveAllowed = new Set(baselineAllowed);
     this.orchestratorMode = false;
 
     const gating = this.config.runCtx.computePerTurnAllowed?.(this.runState) ?? null;
     if (!gating) return messages;
 
     if (gating.allowed) {
-      this.effectiveAllowed = new Set(gating.allowed);
+      const nextAllowed = new Set(gating.allowed);
+      this.effectiveAllowed = nextAllowed;
+
+      // 观测 per-turn gating 效果，特别是 CORE_TOOLS 是否被剪掉
+      try {
+        const removedCore: string[] = [];
+        for (const name of CORE_TOOL_NAME_SET) {
+          if (baselineAllowed.has(name) && !nextAllowed.has(name)) {
+            removedCore.push(name);
+          }
+        }
+        this.config.runCtx.writeEvent("run.notice", {
+          turn: this.turn,
+          kind: removedCore.length > 0 ? "warn" : "debug",
+          title: "PerTurnToolGating",
+          message:
+            `per-turn gating：baseline=${baselineAllowed.size} / gated=${nextAllowed.size}` +
+            (removedCore.length ? ` / removedCore=${removedCore.join(",")}` : ""),
+          detail: {
+            baselineCount: baselineAllowed.size,
+            gatedCount: nextAllowed.size,
+            removedCoreTools: removedCore,
+          },
+        });
+      } catch {
+        // logging failures must not影响正常执行
+      }
     }
     if (gating.orchestratorMode) {
       this.orchestratorMode = true;
@@ -1760,13 +1788,25 @@ export class GatewayRuntime implements AgentRuntime {
         });
 
         // RunState（使用原始工具名做匹配）
-        this._updateRunState(rawToolName, snap?.args ?? {}, {
-          ok,
-          output,
-          meta,
-          executedBy,
-          dryRun,
-        });
+        // TOOL_NOT_ALLOWED_THIS_TURN 表示本轮 per-turn gating 拦截了调用，工具实际未执行。
+        // 不应将此类调用计入 hasAnyToolCall / stickyToolNames 等状态，否则 ExecutionContract 会
+        // 误判"已有工具调用"而过早结束 run。
+        const isGatingRejection =
+          !ok &&
+          executedBy === "gateway" &&
+          output &&
+          typeof output === "object" &&
+          (output as any).error === "TOOL_NOT_ALLOWED_THIS_TURN";
+
+        if (!isGatingRejection) {
+          this._updateRunState(rawToolName, snap?.args ?? {}, {
+            ok,
+            output,
+            meta,
+            executedBy,
+            dryRun,
+          });
+        }
 
         // 失败摘要
         if (!ok && !dryRun) {

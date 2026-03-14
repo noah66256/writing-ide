@@ -3383,8 +3383,10 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     },
   };
 
+  // ALWAYS_ALLOW_TOOL_NAMES：per-turn gating 的最终兜底层。
+  // 无论 boot / style orchestrator / 其他 gate 如何收窄工具集，这些核心工具永远不会被剪掉。
   const ALWAYS_ALLOW_TOOL_NAMES = new Set<string>(
-    CORE_WORKFLOW_TOOL_NAMES.filter((name) => selectedAllowedToolNames.has(name)),
+    Array.from(CORE_TOOL_NAME_SET).filter((name) => selectedAllowedToolNames.has(name)),
   );
   const DELETE_ONLY_ALLOWED_TOOL_NAMES = new Set<string>([
     ...DELETE_ROUTE_PINNED_TOOL_NAMES,
@@ -3570,7 +3572,16 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
             .filter(Boolean)
             .filter((n) => allowedNow.has(n)),
         );
-        hints.push("工具发现契约：用户明确表示不知道用哪些工具时，必须先 tools.search（必要时再 tools.describe），再继续执行。当前已将本回合工具收敛到工具发现启动集。");
+        // 兜底：工具发现启动阶段也不应剪掉 CORE_TOOLS（包括 memory / run.* / 基础读写等）。
+        // 只要这些工具在本轮基线 allowedNow 中，就强制并入 boot 集。
+        if (boot.size > 0) {
+          for (const name of CORE_TOOL_NAME_SET) {
+            if (allowedNow.has(name)) boot.add(name);
+          }
+        }
+        hints.push(
+          "工具发现契约：用户明确表示不知道用哪些工具时，必须先 tools.search（必要时再 tools.describe），再继续执行。当前已将本回合工具收敛到工具发现启动集（CORE_TOOLS 始终保留）。",
+        );
         return { allowed: boot.size ? boot : allowedNow, hint: hints.join("\n\n") };
       }
 
@@ -3666,6 +3677,12 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
         boot.delete("agent.delegate"); // 兜底清理
       }
       if (boot.size > 0) {
+        // 兜底：执行启动阶段同样不应剪掉 CORE_TOOLS。
+        // 只要 CORE_TOOLS 在基线 allowedNow 中，就强制并入 boot 集，
+        // 避免 memory / edit / file.open 等核心工具在首轮被 TOOL_NOT_ALLOWED。
+        for (const name of CORE_TOOL_NAME_SET) {
+          if (allowedNow.has(name)) boot.add(name);
+        }
         allowed = boot;
         hints.push(
           "执行启动阶段：请先调用首工具（优先 executionPreferred；默认先用 L0/L1），完成一次有效工具调用后再进入全工具阶段。",
@@ -3689,8 +3706,17 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       }
     }
 
-    // 构建返回值
+    // 构建返回值：最终一步兜底 ALWAYS_ALLOW_TOOL_NAMES，确保 CORE_TOOLS 不被任何 per-turn gate 剪掉。
     const perTurnResult = () => {
+      // delete-only 路由已经在前面 early return 或直接按 DELETE_ONLY_ALLOWED_TOOL_NAMES 收敛；
+      // 这里仅对普通路由做兜底。
+      if (!isDeleteOnlyRoute) {
+        for (const name of ALWAYS_ALLOW_TOOL_NAMES) {
+          if (baseAllowedToolNames.has(name)) {
+            allowed.add(name);
+          }
+        }
+      }
       const base = { allowed: allowed as Set<string>, hint: hints.join("\n\n") };
       return base;
     };
