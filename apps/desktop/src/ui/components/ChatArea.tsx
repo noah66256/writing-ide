@@ -231,13 +231,13 @@ export function ChatArea() {
   const [suggestText, setSuggestText] = useState<string>("");
   const [todoPanelCollapsed, setTodoPanelCollapsed] = useState(false);
   const [viewportRatio, setViewportRatio] = useState<{ start: number; height: number }>({ start: 0, height: 1 });
-  const controllerRef = useRef<RunController | null>(null);
-  const prevRunningRef = useRef(false);
-
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
   const loadingMoreHistoryRef = useRef(false);
+  const autoSaveDirtyRef = useRef(false);
+  const controllerRef = useRef<RunController | null>(null);
+  const prevRunningRef = useRef(false);
 
   const activeConvId = useConversationStore((s) => s.activeConvId);
   const hasMessages = steps.length > 0;
