@@ -635,7 +635,13 @@ function buildLegacyAppDataFileCandidates(args) {
 
   const relDirs = [relDir, ...legacyRelDirs.filter((d) => d && d !== relDir)];
   const out = [];
-  for (const name of getLegacyAppDataProductNames()) {
+  // 说明：
+  // - getLegacyAppDataProductNames() 仍然包含 "Electron"，用于启动阶段的一次性迁移（tryMigrateConversationHistory）。
+  // - 但运行时 history 读取只需要从已经迁移好的路径读数据，再去反复扫描 Electron 目录的大历史文件收益不高、代价很大。
+  // - 这里在 runtime 级别排除 "Electron"，降低每次 history.loadConversations / tryLoadConversationFromV1
+  //   时对超大 JSON 的重复读取风险（尤其是在 8GB 内存 + 多模型/浏览器会话并行时）。
+  const productNames = getLegacyAppDataProductNames().filter((name) => name !== "Electron");
+  for (const name of productNames) {
     for (const rd of relDirs) {
       out.push({
         used: `legacy:${name}/${rd}`,

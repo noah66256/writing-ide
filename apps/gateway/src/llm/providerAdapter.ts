@@ -255,6 +255,22 @@ export async function completionOnceViaProvider(args: ProviderStreamArgs): Promi
       timeoutMs: args.timeoutMs,
       signal: args.signal,
     });
+
+    // 诊断：上游 Anthropic messages 抛错时，统一格式化错误信息，便于服务器日志与 Desktop 对齐。
+    if (!r.ok) {
+      const msg = String((r as any)?.error ?? "");
+      const status = parseUpstreamStatusFromErrorText(msg);
+      const shaped =
+        msg && msg.includes("request ended without sending any chunks")
+          ? `ANTHROPIC_STREAM_ERROR: request ended without sending any chunks`
+          : msg || "UPSTREAM_ERROR";
+      return {
+        ok: false,
+        error: shaped,
+        ...(Number.isFinite(status as any) ? { status } : {}),
+        rawText: msg,
+      } as ChatCompletionOnceResult;
+    }
     return r as ChatCompletionOnceResult;
   }
 
