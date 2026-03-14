@@ -93,6 +93,15 @@ contextBridge.exposeInMainWorld("desktop", {
     saveConversations(payload) {
       return ipcRenderer.invoke("history.saveConversations", payload);
     },
+    saveConversationsSync(payload) {
+      try {
+        const text = typeof payload === "string" ? payload : JSON.stringify(payload ?? null);
+        // sendSync 返回值结构与 async handler 一致 { ok, error? }
+        return ipcRenderer.sendSync("history.saveConversationsSync", text);
+      } catch (e) {
+        return { ok: false, error: String(e?.message ?? e) };
+      }
+    },
     loadPendingConversations() {
       return ipcRenderer.invoke("history.loadPendingConversations");
     },

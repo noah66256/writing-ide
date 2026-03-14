@@ -328,8 +328,19 @@ export function ChatArea() {
     }
   }, [hasMoreHistoryBefore]);
 
+  // 自动保存：使用脏标记 + 固定间隔轮询，避免连续工具调用/流式输出饿死 timer
+  useEffect(() => {
+    autoSaveDirtyRef.current = true;
+  }, [steps, mainDoc, todoList, kbAttachedLibraryIds, ctxRefs, pendingArtifacts, mode, model, activeConvId]);
+
   // 自动保存草稿到 conversationStore，同时更新活跃对话（带防降级保护）
   useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (!autoSaveDirtyRef.current) return;
+
+      const convStore = useConversationStore.getState();
+      const convIdNow = convStore.activeConvId;
+
     const hasDraftState =
       steps.length > 0 ||
       todoList.length > 0 ||
@@ -342,13 +353,14 @@ export function ChatArea() {
         if (typeof v === "object") return Object.keys(v as Record<string, unknown>).length > 0;
         return true;
       });
-    const hasConversationContext = Boolean(activeConvId) || Boolean(model) || Boolean(mode);
-    if (!hasDraftState && !hasConversationContext) return;
+      const hasConversationContext = Boolean(convIdNow) || Boolean(model) || Boolean(mode);
+      if (!hasDraftState && !hasConversationContext) {
+        autoSaveDirtyRef.current = false;
+        return;
+      }
 
-    // 防降级：当前运行态完全为空，但 active 对话已有非空 snapshot 时，
-    // 跳过本轮自动保存，避免把历史对话误写成"空对话"快照。
-    const convStore = useConversationStore.getState();
-    const convIdNow = convStore.activeConvId;
+      // 防降级：当前运行态完全为空，但 active 对话已有非空 snapshot 时，
+      // 跳过本轮自动保存，避免把历史对话误写成"空对话"快照。
     const existingSnapshot =
       convIdNow
         ? convStore.conversations.find((c) => c.id === convIdNow)?.snapshot
@@ -357,21 +369,20 @@ export function ChatArea() {
       existingSnapshot && Array.isArray((existingSnapshot as any).steps)
         ? (existingSnapshot as any).steps.length
         : 0;
-    if (!hasDraftState && existingSteps > 0) {
-      return;
-    }
-
-    const timer = setTimeout(() => {
-      const snap = buildCurrentSnapshot();
-      const store = useConversationStore.getState();
-      store.setDraftSnapshot(snap);
-      const convId = store.activeConvId;
-      if (convId) {
-        store.updateConversation(convId, { snapshot: snap });
+      if (!hasDraftState && existingSteps > 0) {
+        autoSaveDirtyRef.current = false;
+        return;
       }
+
+      const snap = buildCurrentSnapshot();
+      convStore.setDraftSnapshot(snap);
+      if (convIdNow) {
+        convStore.updateConversation(convIdNow, { snapshot: snap });
+      }
+      autoSaveDirtyRef.current = false;
     }, 2000);
-    return () => clearTimeout(timer);
-  }, [steps, mainDoc, todoList, kbAttachedLibraryIds, ctxRefs, pendingArtifacts, mode, model, activeConvId]);
+    return () => window.clearInterval(timer);
+  }, [steps, mainDoc, todoList, kbAttachedLibraryIds, ctxRefs, pendingArtifacts, mode, model]);
 
   // 运行结束时立即刷盘一次，避免 dev/HMR/强制退出导致最后一轮没落盘
   useEffect(() => {

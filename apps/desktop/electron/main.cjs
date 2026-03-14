@@ -2503,14 +2503,32 @@ function registerIpc() {
         };
       }
 
-      // 多路径并存时，优先选择"会话更多"的文件；数量相同则选 updatedAt 更新的。
-      parsedList.sort((a, b) => {
-        const c1 = Number(a.conversations?.length ?? 0);
-        const c2 = Number(b.conversations?.length ?? 0);
-        if (c2 !== c1) return c2 - c1;
-        return Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0);
-      });
-      const picked = parsedList[0];
+      // 多路径并存时，优先选择 primary/fallback 主文件；主文件为空或不存在时才回退到 .bak/legacy。
+      const pickBestByFreshness = (list) => {
+        if (!Array.isArray(list) || list.length === 0) return null;
+        const sorted = [...list].sort((a, b) => {
+          const t1 = Number(a.updatedAt ?? 0) || 0;
+          const t2 = Number(b.updatedAt ?? 0) || 0;
+          return t2 - t1;
+        });
+        return sorted.find((x) => Array.isArray(x.conversations) && x.conversations.length > 0) || sorted[0] || null;
+      };
+
+      const mainCandidates = parsedList.filter((x) => x.used === "primary" || x.used === "fallback");
+      let picked = pickBestByFreshness(mainCandidates);
+      if (!picked) {
+        picked = pickBestByFreshness(parsedList);
+      }
+      if (!picked) {
+        return {
+          ok: true,
+          conversations: [],
+          draftSnapshot: null,
+          activeConvId: null,
+          used: "primary",
+          file: null,
+        };
+      }
 
       // 自愈：若最佳来源不是 primary，则回写一份到 primary，避免下次继续读到旧文件。
       if (primary) {
@@ -2600,6 +2618,47 @@ function registerIpc() {
       return { ok: true };
     } catch (e) {
       return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
+  // 同步写盘：仅在 beforeunload/卸载等关键路径使用
+  ipcMain.on("history.saveConversationsSync", (event, payload) => {
+    try {
+      const { primary, fallback } = historyCandidateDirs();
+      const dir = primary || fallback;
+      if (!dir) {
+        event.returnValue = { ok: false, error: "NO_HISTORY_DIR" };
+        return;
+      }
+      const file = path.join(dir, HISTORY_FILENAME);
+      const obj = typeof payload === "string" ? JSON.parse(String(payload ?? "null")) : (payload ?? {});
+      const text = typeof payload === "string" ? payload : JSON.stringify(obj ?? null);
+      const bak = file + HISTORY_BAK_SUFFIX;
+      try {
+        fs.copyFileSync(file, bak);
+      } catch {
+        // ignore
+      }
+      const tmp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+      fs.writeFileSync(tmp, text, "utf-8");
+      try {
+        fs.renameSync(tmp, file);
+      } catch (e) {
+        const code = String(e?.code ?? "");
+        if (code === "EPERM" || code === "EEXIST") {
+          try {
+            fs.unlinkSync(file);
+          } catch {
+            // ignore
+          }
+          fs.renameSync(tmp, file);
+        } else {
+          throw e;
+        }
+      }
+      event.returnValue = { ok: true, file };
+    } catch (e) {
+      event.returnValue = { ok: false, error: String(e?.message ?? e) };
     }
   });
 

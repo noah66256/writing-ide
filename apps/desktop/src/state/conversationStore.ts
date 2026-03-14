@@ -182,6 +182,7 @@ type ConversationState = {
   setActiveConvId: (id: string | null) => void;
   setDraftSnapshot: (snap: RunSnapshot | null) => void;
   flushDraftSnapshotNow: (snap?: RunSnapshot | null) => Promise<void>;
+  flushDraftSnapshotNowSync: (snap?: RunSnapshot | null) => void;
   clearAll: () => void;
 };
 
@@ -565,6 +566,54 @@ export const useConversationStore = create<ConversationState>()(
         pendingPayload = null;
         try {
           await api.saveConversations({
+            version: 1,
+            updatedAt: Date.now(),
+            conversations: capConversations(conversations),
+            draftSnapshot: nextDraft as any,
+            activeConvId: activeConvId ?? null,
+          });
+        } catch {
+          schedulePersistToDisk({ conversations, draftSnapshot: nextDraft as any });
+        }
+      },
+      flushDraftSnapshotNowSync: (snap) => {
+        const base =
+          snap && typeof snap === "object"
+            ? (snap as any)
+            : snap === null
+              ? null
+              : buildCurrentSnapshot();
+        const candidate = base ? slimSnapshotForHistory(base as any) ?? base : null;
+        const activeConvId = get().activeConvId;
+        const prevConversations = get().conversations ?? [];
+        const conversations = activeConvId
+          ? prevConversations.map((x) => {
+              if (x.id !== activeConvId) return x;
+              const prevSnap = x.snapshot as any;
+              const prevSteps = getSnapshotStepsCount(prevSnap);
+              const candSteps = getSnapshotStepsCount(candidate as any);
+              const safeSnapshot =
+                prevSteps > 0 && candSteps === 0 ? prevSnap : (candidate as any);
+              return { ...x, snapshot: safeSnapshot, updatedAt: Date.now() };
+            })
+          : prevConversations;
+
+        const prevDraft = get().draftSnapshot as any;
+        const prevDraftSteps = getSnapshotStepsCount(prevDraft);
+        const candDraftSteps = getSnapshotStepsCount(candidate as any);
+        const nextDraft =
+          prevDraftSteps > 0 && candDraftSteps === 0 ? prevDraft : (candidate as any);
+
+        set({ draftSnapshot: nextDraft as any, conversations });
+
+        const api = window.desktop?.history as any;
+        if (!api?.saveConversationsSync) {
+          schedulePersistToDisk({ conversations, draftSnapshot: nextDraft as any });
+          return;
+        }
+
+        try {
+          api.saveConversationsSync({
             version: 1,
             updatedAt: Date.now(),
             conversations: capConversations(conversations),

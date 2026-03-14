@@ -33,7 +33,14 @@ export function ConversationLayout() {
   useEffect(() => {
     const flush = () => {
       try {
-        void useConversationStore.getState().flushDraftSnapshotNow().catch(() => void 0);
+        const store = useConversationStore.getState();
+        // 优先同步写盘，确保 beforeunload 期间历史能真正落到磁盘；
+        // 若同步渠道不可用，则退回异步 flush。
+        if ((window as any).desktop?.history?.saveConversationsSync) {
+          store.flushDraftSnapshotNowSync();
+        } else {
+          void store.flushDraftSnapshotNow().catch(() => void 0);
+        }
       } catch {
         // ignore
       }
