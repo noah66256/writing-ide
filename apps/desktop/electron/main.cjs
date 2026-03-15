@@ -23,6 +23,7 @@ const fsp = require("node:fs/promises");
 const crypto = require("node:crypto");
 const http = require("node:http");
 const https = require("node:https");
+const YAML = require("yaml");
 const { spawn, exec } = require("node:child_process");
 
 // ======== Custom protocol（避免 packaged(file://) 环境下 fetch/XHR 跨域受限） ========
@@ -235,6 +236,57 @@ function normalizeRelPath(p) {
 function toFsPath(rootDir, relPath) {
   const rel = normalizeRelPath(relPath);
   return path.join(rootDir, ...rel.split("/"));
+}
+
+// 解析 SKILL.md frontmatter，用于 bundled skills 版本比对
+function parseSkillFrontmatter(text) {
+  const raw = String(text ?? "");
+  const lines = raw.split(/\r?\n/);
+  if (!lines.length || !/^---\s*$/.test(lines[0])) return {};
+  let end = -1;
+  for (let i = 1; i < lines.length; i++) {
+    if (/^---\s*$/.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  if (end === -1) return {};
+  const yamlText = lines.slice(1, end).join("\n");
+  if (!yamlText.trim()) return {};
+  try {
+    const data = YAML.parse(yamlText) ?? {};
+    return data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+// 从目录读取 skill 元信息（version / builtin），优先 SKILL.md，回退 skill.json
+async function readSkillMetaFromDir(dir) {
+  const result = {};
+  // 优先 SKILL.md
+  try {
+    const mdText = await fsp.readFile(path.join(dir, "SKILL.md"), "utf-8");
+    const fm = parseSkillFrontmatter(mdText);
+    if (fm && typeof fm === "object") {
+      if (typeof fm.version === "string") result.version = String(fm.version).trim();
+      if (typeof fm.builtin === "boolean") result.builtin = fm.builtin;
+      return result;
+    }
+  } catch {
+    // ignore, fallback to skill.json
+  }
+
+  try {
+    const json = JSON.parse(await fsp.readFile(path.join(dir, "skill.json"), "utf-8"));
+    if (json && typeof json === "object") {
+      if (typeof json.version === "string") result.version = String(json.version).trim();
+      if (typeof json.builtin === "boolean") result.builtin = json.builtin;
+    }
+  } catch {
+    // ignore
+  }
+  return result;
 }
 
 async function walkTextFiles(dir, rootDir, out) {
@@ -3484,15 +3536,18 @@ app.whenReady().then(async () => {
       const src = path.join(resolvedBundledDir, entry.name);
       const dest = path.join(userSkillsDir, entry.name);
       try {
-        const srcManifest = JSON.parse(await fsp.readFile(path.join(src, "skill.json"), "utf-8"));
+        const srcMeta = await readSkillMetaFromDir(src);
+        const destMeta = await readSkillMetaFromDir(dest);
         let skip = false;
-        try {
-          const destManifest = JSON.parse(await fsp.readFile(path.join(dest, "skill.json"), "utf-8"));
-          // 仅当版本相同且 builtin 标记已一致时才跳过
-          if (destManifest.version === srcManifest.version && destManifest.builtin === srcManifest.builtin) {
-            skip = true;
-          }
-        } catch { /* 目标不存在或读取失败，需要复制 */ }
+        // 仅当版本相同且 builtin 标记已一致时才跳过
+        if (
+          srcMeta.version &&
+          destMeta.version &&
+          srcMeta.version === destMeta.version &&
+          srcMeta.builtin === destMeta.builtin
+        ) {
+          skip = true;
+        }
         if (skip) continue;
         // 先删后拷，避免旧文件残留
         await fsp.rm(dest, { recursive: true, force: true }).catch(() => {});

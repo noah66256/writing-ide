@@ -15,11 +15,13 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
+import YAML from "yaml";
 
 // ── 常量 ─────────────────────────────────────────
 
 const SKILLS_DIR = "skills";
-const MANIFEST_FILE = "skill.json";
+const MANIFEST_FILE = "SKILL.md";
+const LEGACY_MANIFEST_FILE = "skill.json";
 const SYSTEM_PROMPT_FILE = "system-prompt.md";
 const CONTEXT_PROMPT_FILE = "context-prompt.md";
 
@@ -51,6 +53,76 @@ function finiteNum(v, fallback) {
 function deepClone(v) {
   if (v == null) return v;
   return JSON.parse(JSON.stringify(v));
+}
+
+// kebab-case → camelCase 键名转换
+function toCamelKey(k) {
+  return String(k ?? "").replace(/-([a-zA-Z0-9])/g, (_, c) => c.toUpperCase());
+}
+
+// 递归转换对象键名，便于前端 YAML frontmatter 使用 kebab-case
+function normalizeKeysDeep(v) {
+  if (Array.isArray(v)) return v.map((x) => normalizeKeysDeep(x));
+  if (!isObj(v)) return v;
+  const out = {};
+  for (const [k, val] of Object.entries(v)) {
+    out[toCamelKey(k)] = normalizeKeysDeep(val);
+  }
+  return out;
+}
+
+// 解析 SKILL.md：frontmatter + body
+function parseSkillMarkdown(text, dirName) {
+  const raw = String(text ?? "");
+  const lines = raw.split(/\r?\n/);
+  if (!lines.length || !/^---\s*$/.test(lines[0])) {
+    return { frontmatter: {}, body: raw };
+  }
+  let end = -1;
+  for (let i = 1; i < lines.length; i++) {
+    if (/^---\s*$/.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  if (end === -1) return { frontmatter: {}, body: raw };
+  const yamlText = lines.slice(1, end).join("\n");
+  const body = lines.slice(end + 1).join("\n");
+  let data = {};
+  if (yamlText.trim()) {
+    try {
+      data = YAML.parse(yamlText) ?? {};
+    } catch {
+      throw new Error(`SKILL_FRONTMATTER_PARSE_ERROR:${dirName}`);
+    }
+  }
+  return { frontmatter: isObj(data) ? data : {}, body };
+}
+
+// frontmatter → parseManifest 入参转换（同时解析 contextPrompt 字段）
+function buildManifestInputFromFrontmatter(frontmatter, dirName) {
+  const fm = normalizeKeysDeep(frontmatter ?? {});
+  const out = { ...fm };
+
+  const idFromName = norm(out.name);
+  const id = norm(out.id) || idFromName || norm(dirName);
+  if (!id) throw new Error("SKILL_ID_REQUIRED");
+  out.id = id;
+
+  const displayName = norm(out.displayName);
+  const derivedName = displayName || (idFromName && idFromName !== id ? idFromName : "") || norm(out.title);
+  if (derivedName) out.name = derivedName;
+
+  const trigger = norm(out.trigger);
+  if (trigger && !out.activationMode) {
+    const t = trigger.toLowerCase();
+    if (t === "manual") out.activationMode = "explicit";
+    else if (t === "auto" || t === "automatic") out.activationMode = "auto";
+    else if (t === "hybrid") out.activationMode = "hybrid";
+  }
+
+  const contextPrompt = norm(out.contextPrompt);
+  return { raw: out, contextPrompt };
 }
 
 async function exists(p) {
@@ -224,7 +296,7 @@ function parseManifest(raw, skillDir, fallbackId) {
  * 从子目录加载一个 skill。
  * @param {string} rootDir - skills 根目录
  * @param {string} dirName - 子目录名
- * @returns {Promise<LoadedSkill|null>} null 表示目录下无 skill.json
+ * @returns {Promise<LoadedSkill|null>} null 表示目录下无 manifest
  *
  * @typedef {Object} LoadedSkill
  * @property {string} id
@@ -235,23 +307,53 @@ function parseManifest(raw, skillDir, fallbackId) {
  */
 async function loadOne(rootDir, dirName) {
   const skillDir = path.join(rootDir, dirName);
-  const manifestPath = path.join(skillDir, MANIFEST_FILE);
+  const skillMdPath = path.join(skillDir, MANIFEST_FILE);
+  const legacyJsonPath = path.join(skillDir, LEGACY_MANIFEST_FILE);
 
-  if (!(await exists(manifestPath))) return null;
+  let manifest;
+  let contextPromptRel = "";
 
-  const jsonText = await fsp.readFile(manifestPath, "utf-8");
-  let raw;
-  try { raw = JSON.parse(jsonText); } catch {
-    throw new Error(`SKILL_JSON_PARSE_ERROR:${dirName}`);
+  if (await exists(skillMdPath)) {
+    // 新格式：SKILL.md（frontmatter + body）
+    const mdText = await fsp.readFile(skillMdPath, "utf-8");
+    const { frontmatter, body } = parseSkillMarkdown(mdText, dirName);
+    const { raw, contextPrompt } = buildManifestInputFromFrontmatter(frontmatter, dirName);
+    manifest = parseManifest(raw, skillDir, dirName);
+
+    const systemText = norm(body);
+    if (systemText) {
+      manifest.promptFragments.system = systemText;
+    }
+    contextPromptRel = contextPrompt;
+  } else if (await exists(legacyJsonPath)) {
+    // 旧格式：skill.json + system-prompt.md/context-prompt.md
+    const jsonText = await fsp.readFile(legacyJsonPath, "utf-8");
+    let raw;
+    try {
+      raw = JSON.parse(jsonText);
+    } catch {
+      throw new Error(`SKILL_JSON_PARSE_ERROR:${dirName}`);
+    }
+    manifest = parseManifest(raw, skillDir, dirName);
+
+    const sysMd = await readText(path.join(skillDir, SYSTEM_PROMPT_FILE));
+    const ctxMd = await readText(path.join(skillDir, CONTEXT_PROMPT_FILE));
+    if (sysMd != null) manifest.promptFragments.system = sysMd;
+    if (ctxMd != null) manifest.promptFragments.context = ctxMd;
+  } else {
+    return null;
   }
 
-  const manifest = parseManifest(raw, skillDir, dirName);
-
-  // 读取可选的 md 提示词文件（覆盖 json 中的 promptFragments）
-  const sysMd = await readText(path.join(skillDir, SYSTEM_PROMPT_FILE));
-  const ctxMd = await readText(path.join(skillDir, CONTEXT_PROMPT_FILE));
-  if (sysMd != null) manifest.promptFragments.system = sysMd;
-  if (ctxMd != null) manifest.promptFragments.context = ctxMd;
+  // SKILL.md 的 context-prompt 字段（指向同目录下额外的 context prompt 文件）
+  if (contextPromptRel) {
+    try {
+      const ctxPath = safeResolve(skillDir, contextPromptRel, `SKILL_CONTEXT_PROMPT_ESCAPE:${manifest.id}`);
+      const ctxMd = await readText(ctxPath);
+      if (ctxMd != null) manifest.promptFragments.context = ctxMd;
+    } catch (e) {
+      console.warn(`[SkillLoader] contextPrompt invalid: ${dirName} — ${e?.message ?? e}`);
+    }
+  }
 
   // stdio 入口文件存在性校验
   if (manifest.mcp?.transport === "stdio") {
