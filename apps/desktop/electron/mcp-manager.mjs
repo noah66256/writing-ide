@@ -509,6 +509,8 @@ export class McpManager {
     this._globalEnv = {};
     /** @type {Map<string, Array<{to:string,fromNorm:string,seenAt:number}>>} 按 schema 学习到的参数映射缓存 */
     this._toolArgRewriteCache = new Map();
+    /** @type {Map<string, string>} 最近一次 stdio MCP stderr 片段（用于诊断） */
+    this._lastStdioErrorSnippets = new Map();
   }
 
   _isWindows() {
@@ -1290,9 +1292,20 @@ export class McpManager {
               }，或在终端中运行 "which ${cmd}" 确认路径。`;
             } else if (rawError.includes("-32000") || rawError.includes("Connection closed")) {
               const argsText = Array.isArray(cfg.args) ? cfg.args.join(" ") : "";
+              let stderrExtra = "";
+              try {
+                const lastKey = String(cfg.id ?? serverId ?? "").trim();
+                const stderrSnippet = lastKey ? this._lastStdioErrorSnippets.get(lastKey) : "";
+                if (stderrSnippet) {
+                  stderrExtra = `\n\n子进程 stderr 输出：\n${String(stderrSnippet).slice(0, 2000)}`;
+                }
+              } catch {
+                // best-effort
+              }
               diagHint =
                 `MCP Server 进程已启动但协议握手失败。可能原因：(1) npm 首次下载包时 stdout 输出了非 JSON 内容；` +
-                `(2) Server 因凭证或网络问题提前退出。建议先在终端运行 "${cmd}${argsText ? " " + argsText : ""}" 确认能正常启动。`;
+                `(2) Server 因凭证或网络问题提前退出。建议先在终端运行 "${cmd}${argsText ? " " + argsText : ""}" 确认能正常启动。` +
+                stderrExtra;
             }
           }
         }
@@ -1502,19 +1515,28 @@ export class McpManager {
         let argvLower = args.map((x) => String(x ?? "").toLowerCase());
 
         // 兼容早期模板中误用的包名 "lark-openapi-mcp"：
-        // 将其重写为 "@larksuiteoapi/lark-mcp mcp"，避免 npm 404/ETIMEDOUT。
+        // 将其迁移为标准模板 ["-y", "@larksuiteoapi/lark-mcp", "mcp"]。
+        // 旧配置中的 CLI 专用参数（如 "--token-mode tenant"）不再保留，
+        // 由 env + 自动补齐 -a/-s 机制取代，避免与 npx 自身参数解析冲突。
         const hasLegacyPkg = argvLower.includes("lark-openapi-mcp");
         if (hasLegacyPkg && !argvLower.includes("@larksuiteoapi/lark-mcp")) {
-          const next = [];
-          for (let i = 0; i < args.length; i += 1) {
-            const token = String(args[i] ?? "");
-            const tokenLower = token.toLowerCase();
-            if (tokenLower === "lark-openapi-mcp") continue; // 丢弃错误包名
-            next.push(token);
-          }
-          next.push("@larksuiteoapi/lark-mcp", "mcp");
-          args = next;
+          const migratedArgs = ["-y", "@larksuiteoapi/lark-mcp", "mcp"];
+          args = migratedArgs;
           argvLower = args.map((x) => String(x ?? "").toLowerCase());
+
+          // 将迁移结果持久化到 mcp-servers.json，避免下次启动再走兼容分支
+          try {
+            if (!config.skillManaged) {
+              config.args = [...migratedArgs];
+              await this._saveConfig();
+              console.info("[McpManager] Lark MCP legacy args migrated", {
+                id: serverId,
+                newArgs: migratedArgs,
+              });
+            }
+          } catch {
+            // 持久化失败不影响本次启动
+          }
         }
 
         isLarkMcp = argvLower.includes("@larksuiteoapi/lark-mcp");
@@ -1601,9 +1623,16 @@ export class McpManager {
           stderr.on("data", (chunk) => {
             const text = String(chunk ?? "");
             if (!text.trim()) return;
+            const snippet = text.slice(0, 4000);
+            try {
+              const key = serverIdForLog || serverId;
+              if (key) this._lastStdioErrorSnippets.set(String(key), snippet);
+            } catch {
+              // best-effort
+            }
             console.info("[McpManager] MCP stderr", {
               id: serverIdForLog || serverId,
-              snippet: text.slice(0, 4000),
+              snippet,
             });
           });
         }
