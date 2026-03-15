@@ -1068,9 +1068,7 @@ export class GatewayRuntime implements AgentRuntime {
       // 检测最后一条 assistant 文本是否在向用户提问/确认。
       // 如果 Agent 已经抛出选择题或确认请求，应等用户回复，而不是继续被 pending_todo 催促。
       const lastText = this._getLastAssistantText();
-      const askingUserPattern =
-        /[？?]\s*$|要.*吗[？?]?|还是.*[？?]|你.*偏好|帮你.*[？?]|需要.*确认|请.*选择|告诉我/;
-      if (lastText && askingUserPattern.test(lastText.slice(-200))) {
+      if (lastText && this._detectAssistantAskingUser(lastText)) {
         return [];
       }
 
@@ -1106,6 +1104,61 @@ export class GatewayRuntime implements AgentRuntime {
       if (item.kind === "assistant_text") return item.text;
     }
     return "";
+  }
+
+  /**
+   * 检测 Agent 最后一条文本是否在向用户提问/等待用户做决定。
+   * 三层检测，避免"长文本中部有问句但尾部声明句"导致漏判。
+   */
+  private _detectAssistantAskingUser(text: string): boolean {
+    const t = String(text ?? "").trim();
+    if (!t) return false;
+
+    const tail = t.slice(-400);
+
+    // 层 1：尾部短窗直接命中提问模式（扩大到 400 字符）
+    const tailAskPattern =
+      /[？?]\s*$|要[^。\n]{0,12}吗[？?]?|还是[^。\n]{0,16}[？?]|(?:你|您)[^。\n]{0,16}(?:偏好|更倾向|选择|打算|决定)[^。\n]{0,12}[？?]?|帮你[^。\n]{0,16}[？?]|需要[^。\n]{0,12}确认|请[^。\n]{0,16}选择|请[^。\n]{0,16}告诉我|告诉我/;
+    if (tailAskPattern.test(tail)) return true;
+
+    // 层 2+3：全文有"向用户提问/选择"的句子 + 尾部处于"等待用户决策"语气
+    if (this._textHasUserDirectedQuestion(t) && this._textTailWaitsForUser(tail)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * 检测文本中是否包含向用户直接提问/请求选择的句子。
+   * 要求含第二人称（你/您）且有选择/确认类动词，排除引用/举例句式。
+   */
+  private _textHasUserDirectedQuestion(text: string): boolean {
+    const sentences = text.split(/(?<=[。！？!?\n])/);
+    for (const raw of sentences) {
+      const s = raw.trim();
+      if (!s || s.length < 4) continue;
+      // 排除引用/举例/说明类前缀
+      if (/^(?:例如|比如|举例|常见问题|用户(?:通常|可能)会问|注意|备注|提示)/.test(s)) continue;
+      // 要求第二人称 + 选择/确认类动词
+      if (/(你|您)/.test(s) && /(选择|确认|决定|告诉我|告知|偏好|倾向|需要.*吗|要.*吗|还是)/.test(s)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * 检测尾部文本是否处于"等待用户做决定"的语气。
+   * 用于与 _textHasUserDirectedQuestion 配合——
+   * 当全文曾问过问题且尾部在等待用户回应时，判定为 asking user。
+   */
+  private _textTailWaitsForUser(tail: string): boolean {
+    const t = String(tail ?? "").trim();
+    if (!t) return false;
+    const pattern =
+      /(?:你|您)(?:告诉我|选|决定|确认|回复)|(?:选好|确认|决定)(?:之后|后)(?:我再|再)|(?:以上|上面)(?:是|为).{0,20}(?:方案|选项|材料|清单)|先.*(?:确认|决定)|(?:个人|企业).*(?:备案|选择)/;
+    return pattern.test(t);
   }
 
   // ── 工具构建 ───────────────────────────────────

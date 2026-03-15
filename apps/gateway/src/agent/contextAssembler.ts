@@ -114,12 +114,17 @@ const EFFECTIVE_INPUT_BUDGET_RATIO = 0.8;
 
 // L3(runtime context) hard caps：防止大窗口模型无限塞历史导致成本爆炸
 const MIN_RUNTIME_CONTEXT_CHARS = 1800;
-const MAX_RUNTIME_CONTEXT_CHARS = 32_000;
+// 旧硬上限 32K 导致 200K 模型只有 ~8K tokens 对话预算（4% context window）。
+// 直接对标 OpenClaw（maxHistoryShare=0.5），给 L3 50% 的 effective input budget。
+const RUNTIME_CONTEXT_BUDGET_SHARE = 0.5;
+const HARD_MAX_RUNTIME_CONTEXT_CHARS = 400_000; // ~100K tokens 硬上限
+const LEGACY_MAX_RUNTIME_CONTEXT_CHARS = 32_000; // 无上下文窗口信息时的兜底值
 
 const MIN_RECENT_DIALOGUE_MSGS = 4;
 const MAX_RECENT_DIALOGUE_MSGS = 60;
 const DEFAULT_RECENT_DIALOGUE_ITEM_CHARS = 280;
-const MAX_RECENT_DIALOGUE_ITEM_CHARS = 900;
+// 旧 900 硬上限在大预算下是瓶颈，提升到 12000，让预算系统自然控制 per-message 分配。
+const MAX_RECENT_DIALOGUE_ITEM_CHARS = 12_000;
 
 const MAX_MEMORY_BLOCK_CHARS = 2200;
 const MEMORY_FULL_INJECT_THRESHOLD_CHARS = 2000;
@@ -614,7 +619,8 @@ function buildRuntimeContextMessage(args: BuildAssembledContextArgs, budgetChars
     };
   }
 
-  const summaryBudget = budget ? clampInt(Math.floor(budget * 0.45), 1200, 12_000) : 1200;
+  // 预算增大后调整比例：summary 35% / recent 65%（旧 45/55），summary 上限提升到 60K。
+  const summaryBudget = budget ? clampInt(Math.floor(budget * 0.35), 1200, 60_000) : 1200;
   const recentBudget = budget ? Math.max(1200, budget - summaryBudget) : 1600;
 
   let dialogueSummaryChars = 0;
@@ -745,8 +751,15 @@ export function buildAssembledContextMessages(args: BuildAssembledContextArgs): 
   const usedBeforeL3 = capabilityMessage.length + task.message.length + memory.message.length;
   const runtimeContextBudgetChars =
     effectiveInputBudgetChars !== null
-      ? Math.max(0, Math.min(MAX_RUNTIME_CONTEXT_CHARS, effectiveInputBudgetChars - usedBeforeL3))
-      : null;
+      ? Math.max(
+          MIN_RUNTIME_CONTEXT_CHARS,
+          Math.min(
+            HARD_MAX_RUNTIME_CONTEXT_CHARS,
+            Math.floor(effectiveInputBudgetChars * RUNTIME_CONTEXT_BUDGET_SHARE),
+            effectiveInputBudgetChars - usedBeforeL3,
+          ),
+        )
+      : LEGACY_MAX_RUNTIME_CONTEXT_CHARS;
   const runtimeContext = buildRuntimeContextMessage(args, runtimeContextBudgetChars);
   if (runtimeContext.message) {
     messages.push({ role: "system", content: runtimeContext.message });

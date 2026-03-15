@@ -1284,6 +1284,23 @@ function buildRecentDialogueJsonFromTurns(turns: DialogueTurn[], maxTurns: numbe
   const n = Number.isFinite(Number(maxTurns)) ? Math.max(0, Math.floor(Number(maxTurns))) : 0;
   if (n <= 0) return "";
   const recentTurns = t.slice(-n);
+  // per-message 预截断：按模型上下文窗口动态分配，避免在 Desktop 端过早丢失关键信息。
+  // 参照 Gateway 端 L3 预算：
+  // - 小窗口模型（<=50K tokens）：约 2400 chars
+  // - 中窗口模型（~100K tokens）：约 4800 chars
+  // - 大窗口模型（>=200K tokens）：约 9600 chars
+  const estimatePerMessageLimit = () => {
+    const runAny: any = useRunStore.getState();
+    const modelId = String(runAny.agentModel || runAny.model || "").trim();
+    const ctxTokensRaw = runAny.modelContextWindowTokens;
+    const ctxTokens = Number.isFinite(Number(ctxTokensRaw)) && Number(ctxTokensRaw) > 0 ? Math.floor(Number(ctxTokensRaw)) : null;
+    // 没有配置时按 131K 兜底
+    const tokens = ctxTokens ?? 131_072;
+    // 约按 contextWindow 的 4% 分给单条消息（粗估），上下限 800~12000。
+    const estimated = Math.floor(tokens * 0.04);
+    return Math.max(800, Math.min(12_000, estimated));
+  };
+  const perMessageLimit = estimatePerMessageLimit();
   const clip = (s: string, max: number) => {
     const v = String(s ?? "").trim();
     if (!v) return "";
@@ -1291,8 +1308,8 @@ function buildRecentDialogueJsonFromTurns(turns: DialogueTurn[], maxTurns: numbe
   };
   const msgs: Array<{ role: "user" | "assistant"; text: string }> = [];
   for (const one of recentTurns) {
-    const u = clip(one.user, 800);
-    const a = clip(one.assistant, 800);
+    const u = clip(one.user, perMessageLimit);
+    const a = clip(one.assistant, perMessageLimit);
     if (u) msgs.push({ role: "user", text: u });
     if (a) msgs.push({ role: "assistant", text: a });
   }
