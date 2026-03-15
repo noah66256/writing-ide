@@ -1636,8 +1636,10 @@ function McpServerCard({
   const [busy, setBusy] = useState(false);
 
   const fullErrorText = String(server.error ?? "").trim();
+  const errorFirstLine = fullErrorText.split(/\r?\n/)[0] ?? "";
+  const basePreview = errorFirstLine || fullErrorText;
   const errorPreview =
-    fullErrorText.length > 160 ? `${fullErrorText.slice(0, 160)}…` : fullErrorText;
+    basePreview.length > 80 ? `${basePreview.slice(0, 80)}…` : basePreview;
 
   const TIcon = TRANSPORT_ICONS[server.transport] ?? Terminal;
   const statusColor = STATUS_COLORS[server.status] ?? STATUS_COLORS.disconnected;
@@ -1737,8 +1739,11 @@ function McpServerCard({
             </div>
           )}
           {server.status === "error" && fullErrorText && (
-            <div className="text-[11px] text-red-500 mt-0.5 truncate" title={fullErrorText}>
-              {errorPreview}
+            <div className="text-[11px] text-red-500 mt-0.5 flex items-center gap-1">
+              <span className="shrink-0">!</span>
+              <span className="truncate" title={fullErrorText}>
+                {errorPreview}
+              </span>
             </div>
           )}
           {server.status === "connecting" && (
