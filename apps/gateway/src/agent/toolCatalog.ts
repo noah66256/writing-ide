@@ -118,7 +118,7 @@ export function inferCapabilities(name: string, description: string, source: Too
     if (n.includes("todo")) caps.add("todo");
   }
   if (n === "time.now") caps.add("time");
-  if (n.startsWith("doc.delete") || /\bdelete\b|\bremove\b/.test(n)) caps.add("file_delete");
+  if (n === "delete" || /\bdelete\b|\bremove\b/.test(n)) caps.add("file_delete");
   if (n.startsWith("project.list") || /listfiles|list_files|目录/.test(d)) caps.add("file_list");
   if (n.startsWith("read") || n.startsWith("project.read") || /\bread\b|\bparse\b/.test(n)) caps.add("file_read");
   if (isWriteLikeTool(name)) caps.add("file_write");

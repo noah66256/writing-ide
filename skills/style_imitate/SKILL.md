@@ -35,12 +35,12 @@
      - 优先使用结构化卡片（规则卡/写法卡），避免直接注入长原文段落；
    - RunState 标记：`hasStyleKbSearch = true`。
 
-2. **写出候选草稿：`doc.write`（draft）**  
+2. **写出候选草稿：`write`（draft）**
    - 目标：根据用户目标与风格样例，生成一版**候选草稿**，仅用于后续 lint/改写，不直接视为终稿。  
    - 约束：
      - 草稿应写入临时/草稿路径（例如 `output/draft-*.md`），避免覆盖最终交付文件；
      - 不允许在没有草稿的情况下直接写“终稿+交付文案”。  
-   - RunState 标记：`hasDraftText = true`（通常由 runtime 检测最近一轮 `doc.write` 内容长度与写作意图推导）。
+   - RunState 标记：`hasDraftText = true`（通常由 runtime 检测最近一轮 `write` 内容长度与写作意图推导）。
 
 3. **复述风险检查：`lint.copy`**  
    - 目标：检查候选草稿是否有明显“直接复述样例”的风险（大段连续重合、长句式照搬等）。  
@@ -65,14 +65,14 @@
      - 如果 `score >= STYLE_LINT_PASS_SCORE`（当前实现为 70），视为通过：`styleLintPassed = true`；
      - 否则：`styleLintPassed = false`，需要根据 `rewritePrompt` 进行一次或多次改写后重试。
 
-5. **根据 lint 建议改稿：`doc.applyEdits`（可多次）**  
+5. **根据 lint 建议改稿：`edit`（可多次）**
    - 目标：根据 `lint.copy` 与 `lint.style` 给出的 `issues + rewritePrompt`，对草稿进行结构化改写。  
    - 约束：
      - 尽量通过结构化 edits（如按段落/句子 patch）而非整篇重写，便于 diff 与用户审阅；
      - 每次改稿后可以再次跑 `lint.copy` / `lint.style`，直到通过或达到 `lintMaxRework` 上限。  
    - RunState：不会单独设置布尔标记，但会影响下一轮草稿内容与 lint 结果。
 
-6. **终稿落盘：`doc.write`（final）**  
+6. **终稿落盘：`write`（final）**
    - 目标：在 `copyLintPassed && styleLintPassed` 条件满足后，将最终稿写入明确的交付路径。  
    - 约束：
      - 终稿写入路径应与草稿区分（例如 `output/xxx_口播稿.md`）；
@@ -96,7 +96,7 @@ WorkflowSkills Runtime v0.1 中，对 `style_imitate` 的阶段映射如下：
 
 当 Runtime 检测到当前阶段与即将调用的工具不匹配时，会返回 `STYLE_WORKFLOW_VIOLATION`，并提示模型按
 
-> kb.search → 草稿 draft（doc.write）→ lint.copy → lint.style → doc.applyEdits → doc.write 终稿
+> kb.search → 草稿 draft（write）→ lint.copy → lint.style → edit → write 终稿
 
 的顺序补齐步骤。
 
@@ -107,7 +107,7 @@ WorkflowSkills Runtime v0.1 中，对 `style_imitate` 的阶段映射如下：
 当 `ACTIVE_SKILLS(JSON)` 中包含 `style_imitate`，且 `TASK_STATE(JSON).workflowSkills["style_imitate.v1"]` 显示状态为 `in_progress` / `degraded` 时：
 
 1. 模型必须先阅读本 SKILL 合同中的 Workflow 段，理解当前阶段缺少哪些步骤；
-2. 优先按 `missingSteps` 指示顺序调用对应工具（`kb.search` / `doc.write` / `lint.copy` / `lint.style` / `doc.applyEdits`）；
+2. 优先按 `missingSteps` 指示顺序调用对应工具（`kb.search` / `write` / `lint.copy` / `lint.style` / `edit`）；
 3. 在闭环完成前，不要直接输出“终稿完成”的口播稿/文案；
 4. 只有当 `copyLintPassed && styleLintPassed` 成立时，才允许写入终稿文件并在回答中给出交付路径。
 

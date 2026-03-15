@@ -353,7 +353,7 @@ async function main() {
         { id: "t2", text: "产出初稿", status: "todo" },
         { id: "t3", text: "二次 kb.search 结尾/金句", status: "todo" },
         { id: "t4", text: "lint.style", status: "todo" },
-        { id: "t5", text: "doc.write 写入", status: "todo" },
+        { id: "t5", text: "write 写入", status: "todo" },
       ];
       return postToolResult({ toolCallId, name, ok: true, output: { ok: true, todoList }, meta: { applyPolicy: "auto_apply", riskLevel: "low", hasApply: false } });
     }
@@ -546,10 +546,10 @@ async function main() {
       });
     }
 
-    if (name === "doc.write" || name === "doc.applyEdits" || name === "doc.replaceSelection") {
+    if (name === "write" || name === "edit") {
       const p = String(args0?.path ?? "drafts/smoke-output.md").trim() || "drafts/smoke-output.md";
       const text = typeof args0?.text === "string" ? String(args0.text) : "";
-      if (name === "doc.write" && text) lastWritten = { path: p, text };
+      if (name === "write" && text) lastWritten = { path: p, text };
       return postToolResult({
         toolCallId,
         name,
@@ -646,7 +646,7 @@ async function main() {
       .replace(/<tool_call[\s\S]*?<\/tool_call>/g, "")
       .trim();
   const draftText = stripToolXml(assistantText);
-  // 优先用 doc.write 捕获的“真实写入正文”（更接近最终落盘）
+  // 优先用 write 捕获的”真实写入正文”（更接近最终落盘）
   const finalText = lastWritten?.text && String(lastWritten.text).trim().length > 0 ? String(lastWritten.text) : draftText;
   const assistantChars = assistantText.length;
   const draftChars = finalText.length;
