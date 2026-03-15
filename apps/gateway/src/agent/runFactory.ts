@@ -1229,6 +1229,19 @@ export function looksLikeToolUncertaintyPrompt(text: string): boolean {
   return /(不知道用哪些工具|不知道用什么工具|有哪些工具|有什么工具|你有哪些工具|你能用哪些工具|能用哪些工具|能做什么|有哪些能力|我该用什么工具)/i.test(t);
 }
 
+export function looksLikeExplicitNewTaskPrompt(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  // 强信号：显式开启一个新任务，而不是继续上一轮浏览器/备案步骤。
+  if (/^(帮我|请|帮忙|我想|我要|能不能|可以帮我|写一个|做一个|新建|创建|分解|总结|重写)/.test(t) && t.length > 15) {
+    return true;
+  }
+  // 研究-only / 明确非任务型说明：视作新话题，不继承浏览器 sticky。
+  if (looksLikeResearchOnlyPrompt(t)) return true;
+  if (looksLikeExplicitNonTaskPrompt(t)) return true;
+  return false;
+}
+
 export function looksLikeExecuteOrWriteIntent(text: string): boolean {
   const t = String(text ?? "").trim();
   if (!t) return false;
