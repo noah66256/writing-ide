@@ -569,6 +569,20 @@ export function ChatArea() {
           >
             {/* spacer: 消息少时把内容推到底部 */}
             <div className="flex-1 min-h-6" />
+            {hasMoreHistoryBefore && (
+              <div className="max-w-[var(--chat-max-width)] mx-auto w-full px-6 pb-2">
+                <button
+                  type="button"
+                  className="w-full text-center py-2 text-[12px] text-text-faint hover:text-text-muted transition-colors"
+                  onClick={() => {
+                    const el = scrollRef.current;
+                    if (el) el.scrollTop = 0; // 触发顶部滚动加载
+                  }}
+                >
+                  ↑ 上滑加载更早的对话历史
+                </button>
+              </div>
+            )}
             <div className="max-w-[var(--chat-max-width)] mx-auto w-full px-6 pb-4 space-y-1">
               {renderRows.map((row) => (
                 row.kind === "tool_group"

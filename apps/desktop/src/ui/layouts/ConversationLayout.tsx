@@ -88,14 +88,61 @@ export function ConversationLayout() {
       draftSteps >= convSteps ? (draftSnapshot as any) : (conv?.snapshot as any);
     if (!snap) return;
 
-    st.loadSnapshot(snap);
-    // 恢复快照绑定的项目文件夹
-    const snapDir = (snap as any)?.projectDir ?? null;
-    const currentDir = useProjectStore.getState().rootDir;
-    if (snapDir && snapDir !== currentDir) {
-      void useProjectStore.getState().loadProjectFromDisk(snapDir).catch(() => {});
+    // 优先通过 loadConversationSegment 从 v2 per-conv 文件加载 steps，
+    // 与 NavSidebar handleLoadConversation 保持一致的数据源。
+    // v2 文件保留完整 steps；v1 snapshot 可能被退化到 ≤80 步或 steps=[]。
+    const historyApi = (window as any).desktop?.history?.loadConversationSegment;
+    const restoreConvId = activeConvId;
+
+    const doRestore = (finalSnap: any) => {
+      if (!finalSnap) return;
+      st.loadSnapshot(finalSnap);
+      const snapDir = finalSnap?.projectDir ?? null;
+      const currentDir = useProjectStore.getState().rootDir;
+      if (snapDir && snapDir !== currentDir) {
+        void useProjectStore.getState().loadProjectFromDisk(snapDir).catch(() => {});
+      }
+      restoredRef.current = true;
+    };
+
+    if (historyApi && restoreConvId) {
+      // Electron 环境：走 v2 路径加载 steps，limit 稍大一些，首次恢复尽量多显示一些历史。
+      void historyApi({ conversationId: restoreConvId, limit: 150 })
+        .then((res: any) => {
+          if (restoredRef.current) return;
+          const segmentSteps = Array.isArray(res?.steps) ? res.steps : [];
+          const hasMoreBefore = Boolean(res?.hasMoreBefore);
+          useRunStore.getState().setHistoryWindowHasMoreBefore(hasMoreBefore);
+
+          if (segmentSteps.length > 0) {
+            doRestore({ ...snap, steps: segmentSteps });
+          } else {
+            // v2 文件也没有 steps，退回 v1 snapshot（若其中确有步骤）
+            const snapSteps =
+              snap && Array.isArray((snap as any).steps) ? (snap as any).steps.length : 0;
+            if (snapSteps > 0) {
+              doRestore(snap);
+            }
+            // steps=[] 的空 snapshot 不标记 restoredRef，避免永久锁定
+          }
+        })
+        .catch(() => {
+          // IPC 失败，退回 v1 snapshot（若非空）
+          const snapSteps =
+            snap && Array.isArray((snap as any).steps) ? (snap as any).steps.length : 0;
+          if (snapSteps > 0) {
+            doRestore(snap);
+          }
+        });
+    } else {
+      // 非 Electron 环境或无 activeConvId：直接用 v1 snapshot，但仅在 snapshot 有步骤时才恢复。
+      const snapSteps =
+        snap && Array.isArray((snap as any).steps) ? (snap as any).steps.length : 0;
+      if (snapSteps > 0) {
+        doRestore(snap);
+      }
+      // steps=[] 的空 snapshot 不标记 restoredRef，避免永久锁定
     }
-    restoredRef.current = true;
   }, [draftSnapshot, activeConvId, conversations]);
 
   useEffect(() => {

@@ -259,7 +259,7 @@ export function NavSidebar() {
       }
 
       // Electron 环境：仅加载该会话最近一段 steps，避免一次性加载超长历史导致 UI 卡死
-      void historyApi({ conversationId: id, limit: 80 })
+      void historyApi({ conversationId: id, limit: 200 })
         .then((res: any) => {
           const segmentSteps = Array.isArray(res?.steps) ? res.steps : [];
           const hasMoreBefore = Boolean(res?.hasMoreBefore);

@@ -44,8 +44,9 @@ export type RunSnapshot = {
 
 // ─── 历史快照“瘦身”工具（对齐 Codex：历史只做入口，不当运行时缓存） ─────────────
 
-const MAX_TOOL_STDIO_HISTORY_CHARS = 4000;
-const MAX_TOOL_GENERIC_STRING_CHARS = 800;
+const MAX_TOOL_STDIO_HISTORY_CHARS = 8000;
+const MAX_TOOL_GENERIC_STRING_CHARS = 2000;
+const MAX_TOOL_MCP_OUTPUT_CHARS = 6000; // MCP 工具（如 Playwright browser_snapshot）输出更大
 const MAX_LOG_MESSAGE_HISTORY_CHARS = 400;
 const MAX_LOG_ENTRIES_HISTORY = 80;
 
@@ -58,12 +59,17 @@ function truncateForHistory(raw: unknown, max: number): string {
 
 function slimToolIoForHistory(toolName: string, io: unknown): unknown {
   if (!io || typeof io !== "object" || Array.isArray(io)) return io;
+  const isMcpTool = toolName.startsWith("mcp.");
   const src = io as Record<string, unknown>;
   const dst: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(src)) {
     if (typeof v === "string") {
       const limit =
-        k === "stdout" || k === "stderr" ? MAX_TOOL_STDIO_HISTORY_CHARS : MAX_TOOL_GENERIC_STRING_CHARS;
+        k === "stdout" || k === "stderr"
+          ? MAX_TOOL_STDIO_HISTORY_CHARS
+          : isMcpTool
+            ? MAX_TOOL_MCP_OUTPUT_CHARS
+            : MAX_TOOL_GENERIC_STRING_CHARS;
       dst[k] = truncateForHistory(v, limit);
     } else {
       dst[k] = v;
