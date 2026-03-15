@@ -1635,6 +1635,10 @@ function McpServerCard({
   const refresh = useMcpStore((s) => s.refresh);
   const [busy, setBusy] = useState(false);
 
+  const fullErrorText = String(server.error ?? "").trim();
+  const errorPreview =
+    fullErrorText.length > 160 ? `${fullErrorText.slice(0, 160)}…` : fullErrorText;
+
   const TIcon = TRANSPORT_ICONS[server.transport] ?? Terminal;
   const statusColor = STATUS_COLORS[server.status] ?? STATUS_COLORS.disconnected;
 
@@ -1732,9 +1736,9 @@ function McpServerCard({
               {server.resolvedToolProfile ? ` · ${server.resolvedToolProfile}` : ""}
             </div>
           )}
-          {server.status === "error" && server.error && (
-            <div className="text-[11px] text-red-500 mt-0.5 truncate" title={server.error}>
-              {server.error}
+          {server.status === "error" && fullErrorText && (
+            <div className="text-[11px] text-red-500 mt-0.5 truncate" title={fullErrorText}>
+              {errorPreview}
             </div>
           )}
           {server.status === "connecting" && (
