@@ -1160,6 +1160,20 @@ export function shouldSuppressSearchDuringBrowserContinuation(args: { mainDoc?: 
   return looksLikeWorkflowContinuationPrompt(prompt);
 }
 
+export function isBrowserSessionActive(mainDoc: unknown, userPrompt: string): boolean {
+  const wf = readWorkflowStickyState(mainDoc);
+  if (!wf.isFresh) return false;
+  const browserLike =
+    wf.routeId === "web_radar" ||
+    wf.kind === "browser_session" ||
+    wf.selectedServerIds.some((id) => /playwright|browser/i.test(id));
+  if (!browserLike) return false;
+  // 反转策略：确认续跑，显式“新任务”时才认为不是同一浏览器会话
+  const prompt = String(userPrompt ?? "").trim();
+  if (looksLikeExplicitNewTaskPrompt(prompt)) return false;
+  return true;
+}
+
 export function looksLikeExplicitShellExecIntent(text: string): boolean {
   const t = String(text ?? "").trim();
   if (!t) return false;
@@ -1197,7 +1211,8 @@ export function resolveStickyMcpServerIds(args: {
   const wf = readWorkflowStickyState(args.mainDoc);
   if (!wf.isFresh || !wf.selectedServerIds.length) return [];
   const prompt = String(args.userPrompt ?? "").trim();
-  if (!looksLikeWorkflowContinuationPrompt(prompt)) return [];
+  // 反转策略：确认续跑，只有显式“新任务”才清空 sticky serverIds
+  if (looksLikeExplicitNewTaskPrompt(prompt)) return [];
   if (looksLikeResearchOnlyPrompt(prompt) || looksLikeExplicitNonTaskPrompt(prompt)) return [];
   const currentRouteId = String(args.routeId ?? "").trim().toLowerCase();
   if (currentRouteId && wf.routeId && currentRouteId !== wf.routeId && currentRouteId !== "web_radar" && wf.routeId !== "web_radar") return [];
@@ -1601,7 +1616,7 @@ export function computeIntentRouteDecisionPhase0(args: {
   const stickyFollowUp =
     !looksLikeResearchOnly &&
     !looksLikeExplicitNonTaskPrompt(pTrim) &&
-    looksLikeWorkflowContinuationPrompt(pTrim);
+    !looksLikeExplicitNewTaskPrompt(pTrim);
   if (workflowSticky.isFresh && stickyFollowUp) {
     const workflowRouteId = workflowSticky.routeId;
     const stickyRoute = ROUTE_REGISTRY_V1.find((r) => r.routeId === workflowRouteId);
@@ -2950,6 +2965,18 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     new Set([...executionPreferredWithComposite, ...injectedRetrievalToolNames]),
   );
 
+  // 活跃会话的 sticky preferred tools：为当前 run 提升 Playwright/browser 工具选择概率（+420 权重）。
+  const stickyState = readWorkflowStickyState(mainDocFromPack);
+  if (stickyState.isFresh && !looksLikeExplicitNewTaskPrompt(userPrompt)) {
+    for (const name of stickyState.preferredToolNames) {
+      const trimmed = String(name ?? "").trim();
+      if (!trimmed) continue;
+      if (!preferredToolNamesWithRetrieval.includes(trimmed)) {
+        preferredToolNamesWithRetrieval.push(trimmed);
+      }
+    }
+  }
+
   const toolSelection = selectToolSubset({
     catalog: toolCatalog,
     routeId: routeIdLower || intentRoute.routeId,
@@ -3026,6 +3053,8 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     // logging failures must not影响正常执行
   }
 
+  const browserSessionActive = isBrowserSessionActive(mainDocFromPack, userPrompt);
+
   const toolRetrievalNotice = {
     routeId: routeIdLower || intentRoute.routeId || "unknown",
     promptCaps: toolRetrieval.promptCaps,
@@ -3045,6 +3074,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
 
   const allowBrowserToolsEffective =
     allowBrowserTools ||
+    browserSessionActive ||
     toolRetrieval.promptCaps.includes("browser_open") ||
     injectedRetrievalToolNames.some((name) => /^mcp\.[^.]*?(?:playwright|browser)[^.]*\./i.test(String(name ?? ""))) ||
     Array.from(selectedAllowedToolNames).some((name) => /^mcp\.[^.]*?(?:playwright|browser)[^.]*\./i.test(String(name ?? "")));
