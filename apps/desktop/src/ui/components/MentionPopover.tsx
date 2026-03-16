@@ -1,4 +1,4 @@
-import { Fragment, useState, useEffect, useCallback, useMemo } from "react";
+import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { BookOpen, ChevronLeft, ChevronRight, FileText, Folder, FolderOpen, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useKbStore } from "@/state/kbStore";
@@ -422,8 +422,11 @@ function SectionLabel({ text }: { text: string }) {
 }
 
 function MentionRow({ item, selected, onSelect, colorClass }: { item: MentionItem; selected: boolean; onSelect: (item: MentionItem) => void; colorClass: string }) {
+  const ref = useRef<HTMLButtonElement>(null);
+  useEffect(() => { if (selected) ref.current?.scrollIntoView({ block: "nearest" }); }, [selected]);
   return (
     <button
+      ref={ref}
       className={cn(
         "flex items-center gap-2.5 w-full px-3 py-1.5 text-left text-[13px]",
         "transition-colors duration-fast",
@@ -439,8 +442,11 @@ function MentionRow({ item, selected, onSelect, colorClass }: { item: MentionIte
 }
 
 function DrawerRow({ label, desc, icon, selected, colorClass, onClick }: { label: string; desc?: string; icon: React.ReactNode; selected: boolean; colorClass: string; onClick: () => void }) {
+  const ref = useRef<HTMLButtonElement>(null);
+  useEffect(() => { if (selected) ref.current?.scrollIntoView({ block: "nearest" }); }, [selected]);
   return (
     <button
+      ref={ref}
       className={cn(
         "flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-[13px]",
         "transition-colors duration-fast",

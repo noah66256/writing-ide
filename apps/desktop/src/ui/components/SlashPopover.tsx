@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Sparkles } from "lucide-react";
 import { listRegisteredSkills } from "@ohmycrab/agent-core";
 import { cn } from "@/lib/utils";
@@ -110,8 +110,11 @@ export function SlashPopover({ query, visible, onSelect, onClose }: Props) {
 /* ─── 子组件 ─── */
 
 function SlashRow({ entry, selected, onSelect }: { entry: SlashEntry; selected: boolean; onSelect: (item: MentionItem) => void }) {
+  const ref = useRef<HTMLButtonElement>(null);
+  useEffect(() => { if (selected) ref.current?.scrollIntoView({ block: "nearest" }); }, [selected]);
   return (
     <button
+      ref={ref}
       className={cn(
         "flex items-center gap-2.5 w-full px-3 py-1.5 text-left text-[13px]",
         "transition-colors duration-fast",
