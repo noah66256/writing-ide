@@ -1,8 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { BookOpen, Sparkles } from "lucide-react";
+import { Sparkles } from "lucide-react";
 import { listRegisteredSkills } from "@ohmycrab/agent-core";
 import { cn } from "@/lib/utils";
-import { useKbStore } from "@/state/kbStore";
 import { useSkillStore } from "@/state/skillStore";
 import type { MentionItem } from "./MentionPopover";
 
@@ -15,21 +14,13 @@ type Props = {
 
 type SlashEntry = {
   key: string;
-  group: "skills" | "kb";
   item: MentionItem;
   desc?: string;
   searchText: string;
 };
 
-const PURPOSE_LABEL: Record<string, string> = {
-  material: "素材库",
-  style: "风格库",
-  product: "产品库",
-};
-
 export function SlashPopover({ query, visible, onSelect, onClose }: Props) {
   const [selectedIdx, setSelectedIdx] = useState(0);
-  const libraries = useKbStore((s) => s.libraries);
   const skillOverrides = useSkillStore((s) => s.skillOverrides);
   const externalSkills = useSkillStore((s) => s.externalSkills);
 
@@ -44,12 +35,11 @@ export function SlashPopover({ query, visible, onSelect, onClose }: Props) {
 
   const q = query.toLowerCase().trim();
 
-  const skillEntries = useMemo<SlashEntry[]>(
+  const actions = useMemo<SlashEntry[]>(
     () =>
       enabledSkills
         .map((sk) => ({
           key: `skill:${sk.id}`,
-          group: "skills" as const,
           item: {
             id: sk.id,
             type: "skill" as const,
@@ -62,30 +52,6 @@ export function SlashPopover({ query, visible, onSelect, onClose }: Props) {
         .filter((e) => !q || e.searchText.includes(q)),
     [enabledSkills, q],
   );
-
-  const kbEntries = useMemo<SlashEntry[]>(
-    () =>
-      libraries
-        .map((lib) => {
-          const purpose = PURPOSE_LABEL[lib.purpose] ?? lib.purpose;
-          return {
-            key: `kb:${lib.id}`,
-            group: "kb" as const,
-            item: {
-              id: lib.id,
-              type: "kb" as const,
-              label: lib.name,
-              icon: <BookOpen size={14} />,
-            },
-            desc: `${purpose} · ${lib.docCount} 篇文档`,
-            searchText: `${lib.id} ${lib.name} ${lib.purpose} ${purpose}`.toLowerCase(),
-          };
-        })
-        .filter((e) => !q || e.searchText.includes(q)),
-    [libraries, q],
-  );
-
-  const actions = useMemo(() => [...skillEntries, ...kbEntries], [skillEntries, kbEntries]);
 
   // 重置选中
   useEffect(() => { setSelectedIdx(0); }, [query, actions.length]);
@@ -133,14 +99,8 @@ export function SlashPopover({ query, visible, onSelect, onClose }: Props) {
       )}
     >
       <div className="max-h-[240px] overflow-y-auto py-1.5">
-        {skillEntries.length > 0 && <SectionLabel text="技能" />}
-        {skillEntries.map((entry) => (
-          <SlashRow key={entry.key} entry={entry} selected={selectedKey === entry.key} colorClass="text-accent" onSelect={onSelect} />
-        ))}
-
-        {kbEntries.length > 0 && <SectionLabel text="知识库" />}
-        {kbEntries.map((entry) => (
-          <SlashRow key={entry.key} entry={entry} selected={selectedKey === entry.key} colorClass="text-blue-500" onSelect={onSelect} />
+        {actions.map((entry) => (
+          <SlashRow key={entry.key} entry={entry} selected={selectedKey === entry.key} onSelect={onSelect} />
         ))}
       </div>
     </div>
@@ -149,11 +109,7 @@ export function SlashPopover({ query, visible, onSelect, onClose }: Props) {
 
 /* ─── 子组件 ─── */
 
-function SectionLabel({ text }: { text: string }) {
-  return <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-text-faint font-medium">{text}</div>;
-}
-
-function SlashRow({ entry, selected, colorClass, onSelect }: { entry: SlashEntry; selected: boolean; colorClass: string; onSelect: (item: MentionItem) => void }) {
+function SlashRow({ entry, selected, onSelect }: { entry: SlashEntry; selected: boolean; onSelect: (item: MentionItem) => void }) {
   return (
     <button
       className={cn(
@@ -164,7 +120,7 @@ function SlashRow({ entry, selected, colorClass, onSelect }: { entry: SlashEntry
       onClick={() => onSelect(entry.item)}
       onMouseDown={(e) => e.preventDefault()}
     >
-      <span className={cn("shrink-0", colorClass)}>{entry.item.icon}</span>
+      <span className={cn("shrink-0", "text-accent")}>{entry.item.icon}</span>
       <span className="min-w-0 flex-1">
         <span className="block truncate">{entry.item.label}</span>
         {entry.desc && <span className="block truncate text-[11px] text-text-faint">{entry.desc}</span>}

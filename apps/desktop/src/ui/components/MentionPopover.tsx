@@ -368,7 +368,6 @@ export function MentionPopover({ query, visible, onSelect, onClose }: Props) {
               selected={selectedKey === `g:${entry.group}`}
               colorClass={entry.color}
               onClick={() => runAction({ key: `g:${entry.group}`, kind: "group", group: entry.group })}
-              onMouseEnter={() => runAction({ key: `g:${entry.group}`, kind: "group", group: entry.group })}
             />
           ))
         ) : activeGroup === "agents" ? (
@@ -397,7 +396,6 @@ export function MentionPopover({ query, visible, onSelect, onClose }: Props) {
                 selected={selectedKey === `d:${entry.path}`}
                 colorClass="text-amber-500"
                 onClick={() => runAction({ key: `d:${entry.path}`, kind: "dir", path: entry.path })}
-                onMouseEnter={() => runAction({ key: `d:${entry.path}`, kind: "dir", path: entry.path })}
               />
             ) : (
               <MentionRow
@@ -440,7 +438,7 @@ function MentionRow({ item, selected, onSelect, colorClass }: { item: MentionIte
   );
 }
 
-function DrawerRow({ label, desc, icon, selected, colorClass, onClick, onMouseEnter }: { label: string; desc?: string; icon: React.ReactNode; selected: boolean; colorClass: string; onClick: () => void; onMouseEnter?: () => void }) {
+function DrawerRow({ label, desc, icon, selected, colorClass, onClick }: { label: string; desc?: string; icon: React.ReactNode; selected: boolean; colorClass: string; onClick: () => void }) {
   return (
     <button
       className={cn(
@@ -449,7 +447,6 @@ function DrawerRow({ label, desc, icon, selected, colorClass, onClick, onMouseEn
         selected ? "bg-accent-soft text-text" : "text-text-muted hover:bg-surface-alt",
       )}
       onClick={onClick}
-      onMouseEnter={onMouseEnter}
       onMouseDown={(e) => e.preventDefault()}
     >
       <span className={cn("shrink-0", colorClass)}>{icon}</span>
