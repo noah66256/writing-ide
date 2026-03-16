@@ -101,6 +101,7 @@ const MAX_PROVIDER_TOOL_NAME_LEN = 64;
 
 const STYLE_LINT_PASS_SCORE = 70;
 const LINT_MAX_REWORK = 2;
+const MAX_TOOL_FAILURE_REPAIR_SERIES = 3;
 
 // ── 内部类型 ─────────────────────────────────────
 
@@ -902,19 +903,43 @@ export class GatewayRuntime implements AgentRuntime {
     }
 
     if (this.failureDigest.failedCount > this.lastSteeringFailureCount) {
-      const latest = this.failureDigest.failedTools[this.failureDigest.failedTools.length - 1];
+      const failures = this.failureDigest.failedTools;
+      const latest = failures[failures.length - 1];
       if (latest) {
+        // 统计尾部连续同工具失败次数（只按 name，不比较 error 文本，避免动态内容干扰）
+        let consecutive = 1;
+        for (let i = failures.length - 2; i >= 0; i -= 1) {
+          if (failures[i].name !== latest.name) break;
+          consecutive += 1;
+        }
+
         const nextActions =
           Array.isArray(latest.next_actions) && latest.next_actions.length > 0
             ? `\n建议下一步：${latest.next_actions.join("；")}`
             : "";
-        pushHint(
-          `刚刚有工具执行失败：${latest.name}（${latest.error}）。` +
-            (latest.message ? `失败原因：${latest.message}。` : "") +
-            "请先根据失败结果修复参数、补足前置条件或改用合适工具，不要重复同一失败调用。" +
-            nextActions,
-          ["tool_failure_repair"],
-        );
+
+        if (consecutive < MAX_TOOL_FAILURE_REPAIR_SERIES) {
+          // 正常修复提示（前 1~2 次）
+          pushHint(
+            `刚刚有工具执行失败：${latest.name}（${latest.error}）。` +
+              (latest.message ? `失败原因：${latest.message}。` : "") +
+              "请先根据失败结果修复参数、补足前置条件或改用合适工具，不要重复同一失败调用。" +
+              nextActions,
+            ["tool_failure_repair"],
+          );
+        } else if (consecutive === MAX_TOOL_FAILURE_REPAIR_SERIES) {
+          // 达到上限，明确要求放弃该工具
+          pushHint(
+            `工具 ${latest.name} 已连续 ${consecutive} 次失败（${latest.error}）。` +
+              (latest.message ? `失败原因：${latest.message}。` : "") +
+              "请不要再调用该工具；改为向用户说明当前限制或外部系统故障，" +
+              "并尝试使用其他可用工具或调整任务范围，如仍无法完成，请诚实说明本轮任务无法完成。" +
+              nextActions,
+            ["tool_failure_give_up"],
+          );
+        }
+        // consecutive > MAX_TOOL_FAILURE_REPAIR_SERIES: 不再注入任何 hint，
+        // 从 runtime 侧彻底停止驱动 \"再试一次\" 的循环
       }
       this.lastSteeringFailureCount = this.failureDigest.failedCount;
     }
@@ -1025,6 +1050,13 @@ export class GatewayRuntime implements AgentRuntime {
       this.lastSteeringFailureCount = this.failureDigest.failedCount;
     }
 
+    // 如果模型最后一条消息正在向用户提问/等待确认，则认为当前回合应交还控制权给用户，
+    // 不再追加任何软提示或追问，避免在"等待用户"场景下继续自言自语重试工具。
+    const lastText = this._getLastAssistantText();
+    if (lastText && this._detectAssistantAskingUser(lastText)) {
+      return [];
+    }
+
     const softGuidance = this._collectSoftGuidanceMessages();
     if (softGuidance.length > 0) return softGuidance;
 
@@ -1064,13 +1096,6 @@ export class GatewayRuntime implements AgentRuntime {
 
       // 有等待用户确认的项 → 不追问，让 run 自然结束
       if (hasWaiting) return [];
-
-      // 检测最后一条 assistant 文本是否在向用户提问/确认。
-      // 如果 Agent 已经抛出选择题或确认请求，应等用户回复，而不是继续被 pending_todo 催促。
-      const lastText = this._getLastAssistantText();
-      if (lastText && this._detectAssistantAskingUser(lastText)) {
-        return [];
-      }
 
       if (done < total) {
         const item: CanonicalTranscriptItem = {
