@@ -922,7 +922,16 @@ export class GatewayRuntime implements AgentRuntime {
             ? `\n建议下一步：${latest.next_actions.join("；")}`
             : "";
 
-        if (consecutive < MAX_TOOL_FAILURE_REPAIR_SERIES) {
+        if (latest.error === "FILE_OP_PERMISSION_TIMEOUT") {
+          if (consecutive === 1) {
+            pushHint(
+              "写入操作等待用户确认超时，已暂停。你可以告知用户此次文件操作需要手动确认；在用户明确允许前，不要重复发起同一文件操作。",
+              ["file_op_permission_timeout"],
+            );
+          }
+        } else if (latest.error === "FILE_OP_PERMISSION_DENIED") {
+          // 用户显式拒绝：不注入任何 soft guidance，尊重用户决策
+        } else if (consecutive < MAX_TOOL_FAILURE_REPAIR_SERIES) {
           // 正常修复提示（前 1~2 次）
           pushHint(
             `刚刚有工具执行失败：${latest.name}（${latest.error}）。` +
@@ -1049,12 +1058,24 @@ export class GatewayRuntime implements AgentRuntime {
           const budget = Math.max(0, Math.floor(Number(st.workflowRetryBudget ?? 0)));
           if (budget > 0) {
             st.workflowRetryBudget = budget - 1;
+            const currentPhase =
+              !st.hasStyleKbSearch ? "need_style_kb"
+              : !st.hasDraftText ? "need_draft"
+              : !st.copyLintPassed ? "need_copy_lint"
+              : !styleLintAccepted ? "need_style_lint"
+              : "completed";
+            const followUpText =
+              currentPhase === "need_style_kb"
+                ? "当前已启用 style_imitate，但风格样例检索还没完成。\n请先调用 kb.search，从 purpose=style 的风格库检索模板/规则卡；不要先写草稿，也不要直接交付终稿。"
+                : currentPhase === "need_draft"
+                  ? "当前已启用 style_imitate，风格样例已具备。\n请先调用 write 生成候选稿；不要直接把聊天文本当成终稿交付。"
+                  : currentPhase === "need_copy_lint"
+                    ? "你已经产出了候选稿，现在必须进入复述风险检查。\n请先调用 lint.copy 对候选稿做复述风险审计；在 copy lint 通过前，不要继续终稿写入。"
+                    : "copy lint 已通过，现在必须进入风格校验。\n请先调用 lint.style 检查结构、节奏和语气；在 style lint 通过前，不要继续终稿写入。";
             const item: CanonicalTranscriptItem = {
               kind: "runtime_hint",
-              text:
-                "当前已启用 style_imitate 风格仿写 Skill，但尚未按 kb.search 样例 → 草稿 draft → lint.copy → lint.style → write/edit 完整走完闭环。\n" +
-                "请按以下顺序执行工具：先调用 kb.search 从风格库检索模板/规则卡，再输出候选草稿，然后依次调用 lint.copy 和 lint.style 进行审计，最后再用 write 或 edit 落盘。",
-              reasonCodes: ["style_workflow_followup"],
+              text: followUpText,
+              reasonCodes: ["style_workflow_followup", "phase:" + currentPhase],
             };
             try {
               this.config.runCtx.writeEvent("run.notice", {
@@ -1062,7 +1083,7 @@ export class GatewayRuntime implements AgentRuntime {
                 kind: "warn",
                 title: "StyleWorkflowTextBlocked",
                 message:
-                  "检测到 style_imitate 已启用但尚未完成风格闭环，本轮纯文本收口已被拦截，将注入 runtime_hint 引导模型按闭环顺序补齐工具调用。",
+                  "检测到 style_imitate 已启用但尚未完成风格闭环（phase=" + currentPhase + "），本轮纯文本收口已被拦截，将注入 runtime_hint。",
               });
             } catch {
               // 非关键路径，忽略审计异常

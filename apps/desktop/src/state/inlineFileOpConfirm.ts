@@ -1,4 +1,4 @@
-export type FileOpConfirmChoice = "deny" | "allow_once" | "always_allow";
+export type FileOpConfirmChoice = "deny" | "allow_once" | "always_allow" | "timeout";
 
 type PendingConfirm = {
   settle: (choice: FileOpConfirmChoice) => void;
@@ -32,7 +32,7 @@ export function requestInlineFileOpConfirm(timeoutMs = 600_000): Promise<FileOpC
       timeoutMs > 0
         ? window.setTimeout(() => {
             if (!pending || pending.settle !== settle) return;
-            pending.settle("deny");
+            pending.settle("timeout");
             clearPending();
           }, timeoutMs)
         : null;

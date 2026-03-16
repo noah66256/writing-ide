@@ -103,8 +103,8 @@ function getFileOpActionLabel(toolName: string) {
 }
 
 async function ensureHighRiskFileOpPermission(toolName: string, args: Record<string, unknown>) {
-  if (!HIGH_RISK_FILE_OP_TOOL_NAMES.has(toolName)) return true;
-  if (useFileOpPermissionStore.getState().mode === "always_allow") return true;
+  if (!HIGH_RISK_FILE_OP_TOOL_NAMES.has(toolName)) return { allowed: true as const, reason: "not_required" as const };
+  if (useFileOpPermissionStore.getState().mode === "always_allow") return { allowed: true as const, reason: "always_allow" as const };
 
   const targetPath = getFileOpTargetPath(toolName, args);
   const action = getFileOpActionLabel(toolName);
@@ -120,15 +120,19 @@ async function ensureHighRiskFileOpPermission(toolName: string, args: Record<str
   if (choice === "always_allow") {
     useFileOpPermissionStore.getState().setMode("always_allow");
     useRunStore.getState().log("warn", "file_op.permission", { toolName, action: "always_allow", targetPath });
-    return true;
+    return { allowed: true as const, reason: "always_allow" as const };
   }
   if (choice === "allow_once") {
     useRunStore.getState().log("info", "file_op.permission", { toolName, action: "allow_once", targetPath });
-    return true;
+    return { allowed: true as const, reason: "allow_once" as const };
+  }
+  if (choice === "timeout") {
+    useRunStore.getState().log("warn", "file_op.permission", { toolName, action: "timeout", targetPath });
+    return { allowed: false as const, reason: "timeout" as const };
   }
 
   useRunStore.getState().log("warn", "file_op.permission", { toolName, action: "deny", targetPath });
-  return false;
+  return { allowed: false as const, reason: "deny" as const };
 }
 
 function normalizeTextForStats(text: string) {
@@ -4302,15 +4306,17 @@ export async function executeToolCall(args: {
     }
   }
 
-  const allowed = await ensureHighRiskFileOpPermission(def.name, parsedArgs);
-  if (!allowed) {
+  const permission = await ensureHighRiskFileOpPermission(def.name, parsedArgs);
+  if (!permission.allowed) {
     return {
       def,
       parsedArgs,
       result: failToolResult({
-        code: "FILE_OP_PERMISSION_DENIED",
-        message: "用户拒绝了本次高风险文件操作授权。",
-        nextActions: ["如需继续，请重新发起该文件操作并选择“允许”"],
+        code: permission.reason === "timeout" ? "FILE_OP_PERMISSION_TIMEOUT" : "FILE_OP_PERMISSION_DENIED",
+        message:
+          permission.reason === "timeout"
+            ? "等待用户确认高风险文件操作超时，本轮已暂停该文件操作。"
+            : "用户拒绝了本次高风险文件操作授权。",
       }),
     };
   }
