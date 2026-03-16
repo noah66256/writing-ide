@@ -37,8 +37,11 @@ import {
   parseKbSelectedLibrariesFromContextPack,
   parseMainDocFromContextPack,
   parseRunTodoFromContextPack,
+  resolveAllowedTools,
+  normalizeWorkflow,
   type RunState,
   type SubAgentDefinition,
+  type WorkflowDeclaration,
 } from "@ohmycrab/agent-core";
 import {
   deriveCompositeTaskPlanV1,
@@ -1962,6 +1965,8 @@ export type PreparedRun = {
   activeSkillIds: string[];
   rawActiveSkillIds: string[];
   suppressedSkillIds: string[];
+  /** v2 workflow skill 的声明式配置（skillId → WorkflowDeclaration） */
+  activeWorkflowDeclarations: Map<string, WorkflowDeclaration>;
   stageKeyForRun: string;
   billingSource: string;
   model: string;
@@ -2216,16 +2221,32 @@ export async function prepareAgentRun(args: {
   const suppressSkillsByToolPolicy =
     !modeFloorIsAllowTools && String((intentRoute as any)?.toolPolicy ?? "").trim() !== "allow_tools";
   const corpusIngestActive = rawActiveSkillIds.includes("corpus_ingest");
-  const suppressStyle = (suppressSkillsByToolPolicy && !mentionedSkillIdSet.has("style_imitate")) || corpusIngestActive;
+  const suppressStyle = (suppressSkillsByToolPolicy && !mentionedSkillIdSet.has("style_imitate") && !mentionedSkillIdSet.has("style_imitate_v2")) || corpusIngestActive;
   const suppressedSkillIds: string[] = [];
 
   let activeSkills = (rawActiveSkills ?? []) as any[];
   if (suppressStyle) {
-    if (rawActiveSkillIds.includes("style_imitate")) suppressedSkillIds.push("style_imitate");
-    activeSkills = activeSkills.filter((s: any) => String(s?.id ?? "").trim() !== "style_imitate");
+    for (const sid of rawActiveSkillIds) {
+      if (sid === "style_imitate" || sid === "style_imitate_v2") suppressedSkillIds.push(sid);
+    }
+    activeSkills = activeSkills.filter((s: any) => {
+      const id = String(s?.id ?? "").trim();
+      return id !== "style_imitate" && id !== "style_imitate_v2";
+    });
   }
 
   const activeSkillIds = (activeSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
+
+  // 构建活跃 Skill 的 workflow 声明映射（供 GatewayRuntime 使用）
+  const activeWorkflowDeclarations = new Map<string, WorkflowDeclaration>();
+  for (const sid of activeSkillIds) {
+    const manifest = skillManifestById.get(sid) as any;
+    if (manifest?.workflow) {
+      const wf = normalizeWorkflow(manifest.workflow);
+      if (wf) activeWorkflowDeclarations.set(sid, wf);
+    }
+  }
+
   const stageKeyForRun = (activeSkills.length
     ? (activeSkills as any[])
         .map((s: any) => String((s as any)?.stageKey ?? "").trim())
@@ -2784,9 +2805,10 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     }
   }
 
-  // Style 专用 lint 工具（lint.copy / lint.style）：默认不进入公共工具池，仅在 style_imitate 激活或风格 gate 生效时可用。
+  // Style 专用 lint 工具（lint.copy / lint.style）：默认不进入公共工具池，仅在 style_imitate / style_imitate_v2 激活或风格 gate 生效时可用。
   const styleSkillActive =
     activeSkillIds.includes("style_imitate") ||
+    activeSkillIds.includes("style_imitate_v2") ||
     (intent.isWritingTask && deriveStyleGate({ mode, kbSelected: kbSelectedList as any, intent, activeSkillIds }).styleGateEnabled);
   if (!styleSkillActive) {
     baseAllowedToolNames.delete("lint.copy");
@@ -3563,6 +3585,29 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       allowed = new Set(selectedAllowedToolNames);
     }
 
+    const needsWebFirst = webGate.enabled && webGate.needsSearch && !state.hasWebSearch;
+
+    // ── v2 workflow 分支：声明式 workflow 解释器优先于 v1 硬编码 ──
+    const v2SkillId = activeSkillIds.find((id: string) => id === "style_imitate_v2");
+    const v2Workflow = v2SkillId ? activeWorkflowDeclarations.get(v2SkillId) : null;
+    if (v2Workflow && !isDeleteOnlyRoute && !needsWebFirst) {
+      const v2Caps = resolveAllowedTools(v2Workflow, state, selectedAllowedToolNames);
+      if (v2Caps && v2Caps.allowed.size > 0) {
+        // 保留 CORE_TOOL_NAME_SET（run.* / memory 等始终可用）
+        for (const name of CORE_TOOL_NAME_SET) {
+          if (selectedAllowedToolNames.has(name)) v2Caps.allowed.add(name);
+        }
+        hints.push("style_imitate_v2 orchestrator：phase=" + v2Caps.snapshot.currentPhase + "。");
+        hints.push(v2Caps.hint);
+        return {
+          allowed: v2Caps.allowed,
+          hint: hints.join("\n\n"),
+          orchestratorMode: v2Caps.orchestratorMode,
+        };
+      }
+    }
+
+    // ── v1 硬编码分支 ──
     const styleTurnCaps = computeStyleTurnCaps({
       runState: state,
       runCtx: {
@@ -3572,7 +3617,6 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       } as any,
       baseAllowedToolNames: selectedAllowedToolNames,
     });
-    const needsWebFirst = webGate.enabled && webGate.needsSearch && !state.hasWebSearch;
     if (!isDeleteOnlyRoute && styleTurnCaps && !needsWebFirst) {
       const styleAllowed = new Set(styleTurnCaps.allowedToolNames);
       if (styleAllowed.size > 0) {
@@ -3900,6 +3944,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       activeSkillIds,
       rawActiveSkillIds,
       suppressedSkillIds,
+      activeWorkflowDeclarations,
       stageKeyForRun,
       billingSource,
       model,
@@ -3973,6 +4018,7 @@ export async function executeAgentRun(args: {
     activeSkillIds,
     rawActiveSkillIds,
     suppressedSkillIds,
+    activeWorkflowDeclarations,
     stageKeyForRun,
     model,
     endpoint,
@@ -4653,6 +4699,7 @@ export async function executeAgentRun(args: {
     intentRouteId: intentRoute.routeId ?? undefined,
     gates,
     activeSkills,
+    activeWorkflowDeclarations,  // v2 workflow skill 的声明式配置
     allowedToolNames: selectedAllowedToolNames,
     systemPrompt: fullSystemPrompt,
     targetAgentIds: runTargetAgentIds,

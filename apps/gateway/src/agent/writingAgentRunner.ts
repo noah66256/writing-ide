@@ -91,6 +91,8 @@ export type RunContext = {
   intent: RunIntent;
   gates: RunGates;
   activeSkills: ActiveSkill[];
+  /** v2 workflow skill 的声明式配置（skillId → WorkflowDeclaration） */
+  activeWorkflowDeclarations?: Map<string, any>;
   allowedToolNames: Set<string>;
   systemPrompt: string;
   toolSidecar: any;

@@ -286,6 +286,7 @@ function parseManifest(raw, skillDir, fallbackId) {
     source: "user",   // 外部扩展强制标记为 user
     ...(typeof raw.builtin === "boolean" ? { builtin: raw.builtin } : {}),
     ...(mcp ? { mcp } : {}),
+    ...(isObj(raw.workflow) ? { workflow: raw.workflow } : {}),
     ui: { badge, ...(color ? { color } : {}) },
   };
 }

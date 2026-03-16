@@ -57,6 +57,8 @@ export type SkillManifest = {
   mcp?: SkillMcpConfig;
   /** 是否为内置（随 app 捆绑），即使从文件系统加载也视为内置 */
   builtin?: boolean;
+  /** 可选：声明式 Workflow 配置（phases / exclusions / followUp） */
+  workflow?: import("./workflowPhaseInterpreter.js").WorkflowDeclaration;
   ui: { badge: string; color?: string };
 };
 

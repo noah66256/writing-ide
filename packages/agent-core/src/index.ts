@@ -48,6 +48,22 @@ export {
 export type { SubAgentDefinition, SubAgentBudget } from "./subAgent.js";
 export { BUILTIN_SUB_AGENTS } from "./subAgent.js";
 
+export type {
+  PhaseGate,
+  WorkflowPhaseDecl,
+  WorkflowFollowUp,
+  WorkflowDeclaration,
+} from "./workflowPhaseInterpreter.js";
+export {
+  matchGate,
+  resolvePhase,
+  resolveAllowedTools,
+  checkExclusions,
+  resolveFollowUp,
+  validateWorkflow,
+  normalizeWorkflow,
+} from "./workflowPhaseInterpreter.js";
+
 
 
 
