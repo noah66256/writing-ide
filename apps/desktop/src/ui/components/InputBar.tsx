@@ -608,8 +608,8 @@ export function InputBar({
     }
 
     const slashMatch = before.match(SLASH_QUERY_RE);
-    // 避免 URL/路径误触发：要求 / 在行首或前面是空白
-    if (slashMatch && (slashMatch.index === 0 || /\s/.test(before[slashMatch.index! - 1]))) {
+    // 只在输入最开头触发 /，避免路径中的 / 误唤起
+    if (slashMatch && slashMatch.index === 0) {
       setSlashQuery(slashMatch[1]);
       setSlashVisible(true);
       setMentionQuery("");
@@ -933,7 +933,7 @@ export function InputBar({
               className="pointer-events-none absolute inset-x-4 top-3 text-[14px] leading-relaxed text-text-faint select-none"
               aria-hidden="true"
             >
-              描述任务，@ 提及成员/文件/技能/知识库...
+              描述任务，@ 提及成员/文件/知识库，/ 唤起技能...
             </div>
           )}
 
@@ -944,7 +944,7 @@ export function InputBar({
             role="textbox"
             aria-multiline="true"
             aria-label="消息输入框"
-            aria-placeholder="描述任务，@ 提及成员/文件/技能/知识库..."
+            aria-placeholder="描述任务，@ 提及成员/文件/知识库，/ 唤起技能..."
             tabIndex={0}
             onInput={handleEditorInput}
             onKeyDown={handleKeyDown}
@@ -1110,7 +1110,7 @@ export function InputBar({
 
       <div className="text-center mt-2">
         <span className="text-[11px] text-text-faint">
-          Enter 发送 · Shift/⌘+Enter 换行 · @ 提及
+          Enter 发送 · Shift/⌘+Enter 换行 · @ 提及 · / 技能
         </span>
       </div>
     </div>
