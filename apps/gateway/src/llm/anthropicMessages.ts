@@ -435,7 +435,7 @@ export async function completionOnceAnthropicMessages(args: AnthropicOnceArgs): 
 
   // 组合 signal：外部传入的 + 可配置超时（取先触发的）
   let signal = args.signal;
-  const timeoutMs = Number.isFinite(Number(args.timeoutMs)) && Number(args.timeoutMs) > 0 ? Math.floor(Number(args.timeoutMs)) : 90_000;
+  const timeoutMs = Number.isFinite(Number(args.timeoutMs)) && Number(args.timeoutMs) > 0 ? Math.floor(Number(args.timeoutMs)) : 600_000;
   if (!signal) {
     signal = AbortSignal.timeout(timeoutMs);
   } else {

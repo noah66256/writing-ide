@@ -88,7 +88,7 @@ type MarketplaceState = {
 const DEFAULT_SUB_AGENT_BUDGET: SubAgentDefinition["budget"] = {
   maxTurns: 8,
   maxToolCalls: 16,
-  timeoutMs: 180_000,
+  timeoutMs: 600_000,
 };
 
 let lastSyncedSubAgentIds = new Set<string>();
@@ -165,7 +165,7 @@ function toBudget(raw: any): SubAgentDefinition["budget"] {
   return {
     maxTurns: Number.isFinite(maxTurns) ? Math.max(1, Math.min(30, Math.floor(maxTurns))) : DEFAULT_SUB_AGENT_BUDGET.maxTurns,
     maxToolCalls: Number.isFinite(maxToolCalls) ? Math.max(1, Math.min(100, Math.floor(maxToolCalls))) : DEFAULT_SUB_AGENT_BUDGET.maxToolCalls,
-    timeoutMs: Number.isFinite(timeoutMs) ? Math.max(5000, Math.min(300_000, Math.floor(timeoutMs))) : DEFAULT_SUB_AGENT_BUDGET.timeoutMs,
+    timeoutMs: Number.isFinite(timeoutMs) ? Math.max(5000, Math.min(600_000, Math.floor(timeoutMs))) : DEFAULT_SUB_AGENT_BUDGET.timeoutMs,
   };
 }
 

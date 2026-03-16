@@ -14,8 +14,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 const SERVER_INFO = { name: "web-search", version: "0.1.0" };
-const SEARCH_TIMEOUT = 15_000;
-const PAGE_TIMEOUT = 10_000;
+const SEARCH_TIMEOUT = 600_000;
+const PAGE_TIMEOUT = 600_000;
 const MAX_PAGE_CHARS = 8_000;
 
 // ── 工具函数 ──────────────────────────────────────────

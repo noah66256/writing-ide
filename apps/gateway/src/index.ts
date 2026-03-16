@@ -622,7 +622,7 @@ async function getLinterEnv(db?: Db) {
     const timeoutMsRaw = Number(
       String(process.env.LLM_LINTER_TIMEOUT_MS ?? process.env.LLM_LINTER_TIMEOUT ?? "").trim(),
     );
-    const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? Math.floor(timeoutMsRaw) : 60_000;
+    const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? Math.floor(timeoutMsRaw) : 600_000;
     return {
       baseUrl: r.baseURL,
       endpoint: r.endpoint || "/v1/chat/completions",
@@ -662,7 +662,7 @@ async function getLinterEnv(db?: Db) {
   const timeoutMs =
     Number.isFinite(timeoutMsCfg as any) && Number(timeoutMsCfg) > 0
       ? Number(timeoutMsCfg)
-      : Number(process.env.LLM_LINTER_TIMEOUT_MS ?? 60_000);
+      : Number(process.env.LLM_LINTER_TIMEOUT_MS ?? 600_000);
   return { baseUrl, endpoint: "/v1/chat/completions", apiKey, defaultModel, timeoutMs, ok: Boolean(baseUrl && apiKey && defaultModel) };
 }
 
@@ -3698,7 +3698,7 @@ fastify.post(
     const bodySchema = z.object({
       url: z.string().min(1),
       format: z.enum(["markdown", "text"]).optional(),
-      timeoutMs: z.number().int().min(1).max(120_000).optional(),
+      timeoutMs: z.number().int().min(1).max(600_000).optional(),
       maxChars: z.number().int().min(1000).max(200_000).optional(),
     });
     const body = bodySchema.parse((request as any).body ?? {});
@@ -3802,7 +3802,7 @@ fastify.post(
       ...sampled.map((p) => `[#${p.index}] ${brief(p.text)}`),
     ].join("\n");
 
-    const timeoutMs = Number.isFinite(Number(process.env.LLM_SPLIT_TIMEOUT_MS ?? "")) && Number(process.env.LLM_SPLIT_TIMEOUT_MS) > 0 ? Math.floor(Number(process.env.LLM_SPLIT_TIMEOUT_MS)) : 120_000;
+    const timeoutMs = Number.isFinite(Number(process.env.LLM_SPLIT_TIMEOUT_MS ?? "")) && Number(process.env.LLM_SPLIT_TIMEOUT_MS) > 0 ? Math.floor(Number(process.env.LLM_SPLIT_TIMEOUT_MS)) : 600_000;
     const t0 = Date.now();
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), timeoutMs);
@@ -3977,7 +3977,7 @@ fastify.post(
   const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 1);
   const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
   const timeoutMsCfg = Number(String(process.env.LLM_CARD_TIMEOUT_MS ?? "").trim());
-  const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 120_000;
+  const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 600_000;
   const defaultFacetIds = [
     "intro",
     "opening_design",
@@ -4350,7 +4350,7 @@ fastify.post(
   // 说明：前端/网络层常见“连接空闲超时”会在 ~60-120s 把连接掐断，导致 Desktop 看到 Failed to fetch。
   // 这里把单次上游调用限制在更短窗口，并在失败时返回“可用占位卡”（不中断整条风格手册生成）。
   const timeoutMsCfg = Number(String(process.env.LLM_PLAYBOOK_TIMEOUT_MS ?? "").trim());
-  const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 150_000;
+  const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 600_000;
 
   const facetIds = body.facetIds.slice(0, 80);
 
@@ -4879,7 +4879,7 @@ fastify.post(
     const retryMax = Number(process.env.LLM_CARD_RETRY_MAX ?? 3);
     const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
     const timeoutMsCfg = Number(String(process.env.LLM_PLAYBOOK_TIMEOUT_MS ?? "").trim());
-    const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 120_000;
+    const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 600_000;
 
     const libName = String(body.libraryName ?? "").trim();
     const clusters = body.clusters.slice(0, 3);
@@ -5157,7 +5157,7 @@ fastify.post(
   const retryBaseMs = Number(process.env.LLM_CARD_RETRY_BASE_MS ?? 800);
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const timeoutMsCfg = Number(String(process.env.LLM_GENRE_TIMEOUT_MS ?? "").trim());
-  const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 90_000;
+  const timeoutMs = Number.isFinite(timeoutMsCfg) && timeoutMsCfg > 0 ? Math.floor(timeoutMsCfg) : 600_000;
 
   const sys = [
     "你是写作 IDE 的「体裁/声音识别器」（开集分类，不要穷举）。",
@@ -5697,7 +5697,7 @@ fastify.post(
   }
   const maxIssues = Number.isFinite(body.maxIssues as any) ? Number(body.maxIssues) : 10;
   const env = await getLinterEnv();
-  const timeoutMs = env.ok ? env.timeoutMs : 60_000;
+  const timeoutMs = env.ok ? env.timeoutMs : 600_000;
 
   // A/B：是否把风格库“原句 reference”下发给模型/前端。
   // 背景：reference 会被模型当成可复用素材，极易导致“把库原文贴进正文”的污染。
@@ -5823,7 +5823,7 @@ fastify.post(
   // - 默认：快失败（默认 30s），避免每次都卡满 60s
   // - 若显式配置 LLM_LINTER_UPSTREAM_TIMEOUT_MS，则使用该值（但不超过 timeoutMs）
   const upstreamTimeoutMsCfg = Number(String(process.env.LLM_LINTER_UPSTREAM_TIMEOUT_MS ?? "").trim());
-  const upstreamTimeoutMsDefault = Math.max(10_000, Math.min(timeoutMs, 30_000));
+  const upstreamTimeoutMsDefault = Math.max(10_000, Math.min(timeoutMs, 600_000));
   const upstreamTimeoutMs =
     Number.isFinite(upstreamTimeoutMsCfg) && upstreamTimeoutMsCfg > 0
       ? Math.max(10_000, Math.min(timeoutMs, Math.floor(upstreamTimeoutMsCfg)))

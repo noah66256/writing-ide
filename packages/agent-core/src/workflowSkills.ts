@@ -53,19 +53,21 @@ function computeStylePhaseAndMissing(state: RunState): {
   const hasDraftText = Boolean((state as any).hasDraftText);
   const copyLintPassed = Boolean((state as any).copyLintPassed);
   const styleLintPassed = Boolean((state as any).styleLintPassed);
+  const lintGateDegraded = Boolean((state as any).lintGateDegraded);
+  const styleLintAccepted = styleLintPassed || lintGateDegraded;
 
   let currentPhase: string;
   if (!hasStyleKbSearch) currentPhase = "need_style_kb";
   else if (!hasDraftText) currentPhase = "need_draft";
   else if (!copyLintPassed) currentPhase = "need_copy_lint";
-  else if (!styleLintPassed) currentPhase = "need_style_lint";
+  else if (!styleLintAccepted) currentPhase = "need_style_lint";
   else currentPhase = "completed";
 
   const missingSteps: string[] = [];
   if (!hasStyleKbSearch) missingSteps.push("kb.search(style)");
   if (!hasDraftText) missingSteps.push("draft");
   if (!copyLintPassed) missingSteps.push("lint.copy");
-  if (!styleLintPassed) missingSteps.push("lint.style");
+  if (!styleLintAccepted) missingSteps.push("lint.style");
 
   return { phases, currentPhase, missingSteps };
 }

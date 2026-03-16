@@ -14,7 +14,7 @@ import { z } from "zod";
 
 const SERVER_INFO = { name: "bocha-search", version: "0.1.0" };
 const BOCHA_BASE = "https://api.bochaai.com/v1";
-const TIMEOUT_MS = 15_000;
+const TIMEOUT_MS = 600_000;
 
 // ── 工具函数 ──────────────────────────────────────────
 

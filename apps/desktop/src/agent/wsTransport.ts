@@ -498,14 +498,14 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       try {
         if (ended || abort.signal.aborted || !rt.getIsRunning()) return;
         const ms = Date.now() - lastProgressAt;
-        if (ms >= 180_000) {
+        if (ms >= 660_000) {
           log("error", "ws.run.stalled_timeout", { idleMs: ms, cancelReason });
           cancelReason = cancelReason || "stalled_timeout";
           try { (abort as any).abort("stalled_timeout"); } catch { abort.abort(); }
           setActivity(`连接已中断（已 ${Math.floor(ms / 1000)}s 无新事件）`, { resetTimer: false });
           return;
         }
-        if (ms < 120_000 || stalledLogged) return;
+        if (ms < 540_000 || stalledLogged) return;
         stalledLogged = true;
         log("warn", "ws.run.stalled", { idleMs: ms, cancelReason });
         setActivity(`连接可能中断…（已 ${Math.floor(ms / 1000)}s 无新事件，可尝试停止/重试）`, { resetTimer: false });

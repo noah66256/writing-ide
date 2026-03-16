@@ -221,7 +221,7 @@ function isUrlAllowed(
 }
 
 async function fetchWithTimeout(url: string, init: RequestInit & { timeoutMs?: number }) {
-  const timeoutMs = clampInt((init as any)?.timeoutMs, 1000, 120_000, 10_000);
+  const timeoutMs = clampInt((init as any)?.timeoutMs, 1000, 600_000, 10_000);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -255,7 +255,7 @@ export async function executeWebSearchOnGateway(args: { call: any }) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ query, freshness, count, summary }),
-      timeoutMs: 10_000,
+      timeoutMs: 600_000,
     } as any);
 
     const fetchedAt = new Date().toISOString();
@@ -316,7 +316,7 @@ export async function executeWebFetchOnGateway(args: { call: any }) {
 
   const formatRaw = String((call?.args as any)?.format ?? "markdown").trim().toLowerCase();
   const format: "markdown" | "text" = formatRaw === "text" ? "text" : "markdown";
-  const timeoutMs = clampInt((call?.args as any)?.timeoutMs, 1000, 120_000, 10_000);
+  const timeoutMs = clampInt((call?.args as any)?.timeoutMs, 1000, 600_000, 10_000);
   // 默认截断更保守：避免一次抓取把大量噪声 HTML 文本塞进上下文导致模型报错/超时
   const maxChars = clampInt((call?.args as any)?.maxChars, 1000, 200_000, 12_000);
 
