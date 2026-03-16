@@ -5642,7 +5642,7 @@ fastify.post(
   let apiKey = hasLlmOverride
     ? body.llmOverride!.apiKey
     : explicitRuntime?.apiKey ?? st?.apiKey ?? "";
-  const stageMaxTokens = st?.maxTokens ?? null;
+  const stageMaxTokens = st?.maxTokens ?? 4096;
   const temperature = st?.temperature ?? 0.2;
 
   if (!baseUrl || !apiKey || !model) {
@@ -5652,35 +5652,31 @@ fastify.post(
     });
   }
 
-  // NOTE(Boss要求)：lint.style 一律固定用 gpt-5.4，避免候选模型里夹 claude 抽风。
-  // 这里不再根据 stage.modelIds 轮询多模型，而是：
-  // - 若无 llmOverride/显式 modelId，则优先用环境变量 LLM_LINTER_MODEL；
-  // - 若未配置，则回退到硬编码 "gpt-5.4"；
-  // - 若显式传入 body.model 或 llmOverride，则仍尊重调用方。
-  // 这样可以保证 style_imitate 闭环里的 lint.style 永远跑在 gpt-5.4 上。
-  const forcedLinterModelId = !hasLlmOverride && !explicitRuntime
-    ? (String(process.env.LLM_LINTER_MODEL ?? "").trim() || "gpt-5.4")
-    : null;
-
-  // 备用模型：使用透传/显式模型时不走备用模型池（主模型已确定）
+  // 备用模型优先级：llmOverride（主 agent 透传）> 显式 body.model > lint.style stage 配置。
+  // 若无 llmOverride/显式 modelId，从 lint.style stage 构建候选列表，
+  // 并允许通过环境变量 LLM_LINTER_MODEL 追加最高优先级候选。
   const candidateModelIds = hasLlmOverride
     ? [body.llmOverride!.model]
     : explicitRuntime
       ? [String(body.model ?? explicitRuntime.modelId ?? explicitRuntime.model).trim()].filter(Boolean)
-      : forcedLinterModelId
-        ? [forcedLinterModelId]
-        : await (async () => {
+      : await (async () => {
     try {
       const stages = await aiConfig.listStages();
       const s = Array.isArray(stages) ? stages.find((x: any) => String(x?.stage ?? "") === "lint.style") : null;
       const ids = Array.isArray((s as any)?.modelIds) ? (((s as any).modelIds as any[]).map((x) => String(x ?? "").trim()).filter(Boolean) as string[]) : [];
       const primary = String((s as any)?.modelId ?? st?.modelId ?? "").trim();
-      const all = [primary, ...ids].filter(Boolean);
+      const envOverride = String(process.env.LLM_LINTER_MODEL ?? "").trim();
+      const all = [envOverride, primary, ...ids].filter(Boolean);
       const uniq: string[] = [];
       for (const x of all) if (!uniq.includes(x)) uniq.push(x);
       return uniq.slice(0, 12);
     } catch {
-      return [String(st?.modelId ?? "").trim()].filter(Boolean);
+      const envOverride = String(process.env.LLM_LINTER_MODEL ?? "").trim();
+      const fallback = [String(st?.modelId ?? "").trim()].filter(Boolean);
+      const all = [envOverride, ...fallback].filter(Boolean);
+      const uniq: string[] = [];
+      for (const x of all) if (!uniq.includes(x)) uniq.push(x);
+      return uniq;
     }
   })();
 
@@ -6239,8 +6235,9 @@ fastify.post(
   const maxAttempts = Math.min(totalCandidates, 1 + MAX_FALLBACK);
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const mid = candidateModelIds[attempt] ? String(candidateModelIds[attempt]).trim() : "";
-    // 可靠性：admin 也应参与备用模型切换（否则线上排障/冒烟时永远卡在主模型超时，误以为“fallback 无效”）
-    if (mid) {
+    // 可靠性：admin 也应参与备用模型切换（否则线上排障/冒烟时永远卡在主模型超时，误以为”fallback 无效”）
+    // 当 llmOverride 存在时跳过 resolveModel，直接使用透传的 baseUrl/apiKey/model
+    if (!hasLlmOverride && mid) {
       try {
         const m = await aiConfig.resolveModel(mid);
         const ep = String(m.endpoint || "").trim();

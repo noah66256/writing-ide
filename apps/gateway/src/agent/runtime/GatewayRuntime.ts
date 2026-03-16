@@ -1491,7 +1491,7 @@ export class GatewayRuntime implements AgentRuntime {
           ? cloneMainDoc(this.config.runCtx.mainDoc)
           : this.config.runCtx.mainDoc,
         llmOverride:
-          toolName === "lint.style" || !this.config.runCtx.baseUrl || !this.config.runCtx.apiKey || !this.config.runCtx.modelId
+          !this.config.runCtx.baseUrl || !this.config.runCtx.apiKey || !this.config.runCtx.modelId
             ? null
             : {
                 baseUrl: this.config.runCtx.baseUrl,
