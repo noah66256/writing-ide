@@ -55,18 +55,21 @@ function buildStyleSnapshot(state: RunState): WorkflowSkillPhaseSnapshot {
   const hasDraftText = Boolean((state as any).hasDraftText);
   const copyLintPassed = Boolean((state as any).copyLintPassed);
   const styleLintPassed = Boolean((state as any).styleLintPassed);
+  const lintGateDegraded = Boolean((state as any).lintGateDegraded);
+  // 降级视为"已尽力，可放行"：避免 lint.style 超时后 orchestrator 死循环重试
+  const styleLintAccepted = styleLintPassed || lintGateDegraded;
 
   let currentPhase = "completed";
   if (!hasStyleKbSearch) currentPhase = "need_style_kb";
   else if (!hasDraftText) currentPhase = "need_draft";
   else if (!copyLintPassed) currentPhase = "need_copy_lint";
-  else if (!styleLintPassed) currentPhase = "need_style_lint";
+  else if (!styleLintAccepted) currentPhase = "need_style_lint";
 
   const missingSteps: string[] = [];
   if (!hasStyleKbSearch) missingSteps.push("kb.search(style)");
   if (!hasDraftText) missingSteps.push("draft");
   if (!copyLintPassed) missingSteps.push("lint.copy");
-  if (!styleLintPassed) missingSteps.push("lint.style");
+  if (!styleLintAccepted) missingSteps.push("lint.style");
 
   return {
     id: "style_imitate",

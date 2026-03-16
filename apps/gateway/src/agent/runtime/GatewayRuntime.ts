@@ -1000,11 +1000,13 @@ export class GatewayRuntime implements AgentRuntime {
       runCtx.intent?.isWritingTask
     ) {
       const st: any = this.runState as any;
+      const lintGateDegraded = Boolean(st.lintGateDegraded);
+      const styleLintAccepted = Boolean(st.styleLintPassed || lintGateDegraded);
       const styleCompleted = Boolean(
         st.hasStyleKbSearch &&
         st.hasDraftText &&
         st.copyLintPassed &&
-        st.styleLintPassed,
+        styleLintAccepted,
       );
       if (!styleCompleted) {
         const budget = Math.max(0, Math.floor(Number(st.workflowRetryBudget ?? 0)));
