@@ -1004,6 +1004,26 @@ export const TOOL_LIST: ToolMeta[] = [
     inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: true },
   },
   {
+    name: "skill.install",
+    description:
+      "将 SKILL.md 写入用户技能目录（userData/skills/<name>/SKILL.md），使其被 SkillLoader 热加载。\n" +
+      "只用于安装/更新技能文件，不要用于普通文件写入。",
+    args: [
+      { name: "name", required: true, desc: "技能 ID（即目录名，如 weekly-report-writer）", type: "string" },
+      { name: "content", required: true, desc: "SKILL.md 完整内容（含 frontmatter + body）", type: "string" },
+    ],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        content: { type: "string" },
+      },
+      required: ["name", "content"],
+      additionalProperties: true,
+    },
+  },
+  {
     name: "rename",
     description: "重命名/移动 文件或目录（fromPath → toPath）。默认自动执行（可 Undo 回滚）。",
     args: [

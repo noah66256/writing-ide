@@ -2745,6 +2745,53 @@ const tools: ToolDefinition[] = [
     },
   },
   {
+    name: "skill.install",
+    description:
+      "将 SKILL.md 写入用户技能目录（userData/skills/<name>/SKILL.md），使其被 SkillLoader 热加载。\n" +
+      "只用于安装/更新技能文件，不要用于普通文件写入。",
+    args: [
+      { name: "name", required: true, desc: "技能 ID（即目录名，如 weekly-report-writer）", type: "string" },
+      { name: "content", required: true, desc: "SKILL.md 完整内容（含 frontmatter + body）", type: "string" },
+    ],
+    riskLevel: "medium",
+    applyPolicy: "auto_apply",
+    reversible: false,
+    run: async (args) => {
+      const name = String((args as any)?.name ?? "").trim();
+      const content = String((args as any)?.content ?? "").trim();
+      if (!name) return failToolResult({ code: "MISSING_NAME", message: "skill name is required" });
+      if (!content) return failToolResult({ code: "INVALID_CONTENT", message: "skill content is required" });
+      if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name)) {
+        return failToolResult({
+          code: "INVALID_NAME",
+          message: "name must be lowercase alphanumeric with hyphens",
+        });
+      }
+
+      const api = (window as any).desktop?.skills;
+      if (!api?.install) {
+        return failToolResult({ code: "SKILL_API_NOT_AVAILABLE", message: "技能安装 API 不可用" });
+      }
+
+      const result = await api.install({ name, content });
+      if (!result?.ok) {
+        return failToolResult({
+          code: result?.error ?? "INSTALL_FAILED",
+          message: result?.detail ?? "failed to install skill",
+        });
+      }
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          path: String(result.path ?? ""),
+          note: `技能已安装到 ${result.path}；SkillLoader 将自动热加载。`,
+        },
+        undoable: false,
+      };
+    },
+  },
+  {
     name: "doc.previewDiff",
     description:
       "生成 diff 预览（无副作用）。可以传入 newContent 或 edits；系统会和当前文件内容比较并返回 unified diff 文本。",

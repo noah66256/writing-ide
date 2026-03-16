@@ -279,6 +279,9 @@ contextBridge.exposeInMainWorld("desktop", {
     openDir() {
       return ipcRenderer.invoke("skills.openDir");
     },
+    install(payload) {
+      return ipcRenderer.invoke("skills.install", payload);
+    },
     onChange(handler) {
       if (typeof handler !== "function") return () => {};
       const listener = (_event, manifests) => handler(manifests);

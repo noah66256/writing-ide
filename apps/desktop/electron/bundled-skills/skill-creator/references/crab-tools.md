@@ -65,6 +65,7 @@
 | `mkdir` | 创建目录 |
 | `rename` | 重命名/移动文件或目录 |
 | `delete` | 删除文件或目录 |
+| `skill.install` | 安装/更新技能（写入 userData/skills/<name>/SKILL.md） |
 
 ### 辅助
 

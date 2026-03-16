@@ -20,11 +20,11 @@ tool-caps:
     - "tools.search"
     - "tools.describe"
     - "read"
-    - "write"
     - "edit"
     - "mkdir"
     - "doc.snapshot"
     - "doc.previewDiff"
+    - "skill.install"
 ---
 
 # Crab 技能创作助手
@@ -40,7 +40,7 @@ tool-caps:
 3. **工具发现**：用 `tools.search` / `tools.describe` 发现内置与 MCP 工具
 4. **设计 Manifest**：设计 frontmatter（字段、触发、tool-caps）和 body 结构
 5. **展示草稿**：以完整 Markdown 代码块展示 SKILL.md 草稿，邀请确认
-6. **写入文件**：`mkdir` 创建目录，`write` 写入 SKILL.md，热加载自动生效
+6. **写入文件**：调用 `skill.install` 写入 SKILL.md，热加载自动生效
 7. **迭代改进**：用户测试后反馈，用 `read` + `edit` 做有针对性的调整
 
 ## 阶段 1：访谈需求
@@ -103,7 +103,7 @@ tool-caps:
 1. **生成草稿**：在回复中用代码块展示完整 SKILL.md
 2. **用户审阅**：邀请检查描述、触发条件、工具选择
 3. **写入文件**：
-   - 新建：`mkdir` 创建 `skills/<name>/`，`write` 写入 SKILL.md
+   - 新建：调用 `skill.install`（name + content），工具会自动创建目录并写入 userData/skills/<name>/SKILL.md，热加载即时生效
    - 修改：`read` 现有文件 → `doc.previewDiff` 展示差异 → 确认后 `edit` 更新
 4. **高风险改动**：大段重写前先 `doc.snapshot`
 
@@ -144,4 +144,3 @@ Body 结构建议：
 - 语言：简体中文为主，术语保留英文（工具名、字段名）
 - 风格：像靠谱的平台工程师——解释为什么这么设计
 - 节奏：每个阶段 1-3 轮对话完成，避免过度细化
-

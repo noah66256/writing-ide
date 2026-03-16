@@ -1121,6 +1121,16 @@ export class GatewayRuntime implements AgentRuntime {
       /[？?]\s*$|要[^。\n]{0,12}吗[？?]?|还是[^。\n]{0,16}[？?]|(?:你|您)[^。\n]{0,16}(?:偏好|更倾向|选择|打算|决定)[^。\n]{0,12}[？?]?|帮你[^。\n]{0,16}[？?]|需要[^。\n]{0,12}确认|请[^。\n]{0,16}选择|请[^。\n]{0,16}告诉我|告诉我/;
     if (tailAskPattern.test(tail)) return true;
 
+    // 层 1.5：尾部"行动宣示"模式——Agent 表达"确认后我就/我直接 做某事"，
+    // 语义上在等用户确认，但文本不含问号也不含第二人称。
+    const tailActionPlanPattern =
+      /(?:确认|没问题|没有问题|觉得可以|ok|OK|可以的话|没问题的话|没有异议)[^。！？\n]{0,15}(?:我就|我会|我直接|我立即|我马上|我开始|就开始|我来|就来)/;
+    if (tailActionPlanPattern.test(tail)) return true;
+
+    const tailActionPlanPattern2 =
+      /(?:如果|等你?|待|一旦)[^。！？\n]{0,15}(?:确认|没问题|同意|认可)[^。！？\n]{0,15}(?:我就|我会|我直接|我立即|我马上|我开始|就开始|我来|就来)/;
+    if (tailActionPlanPattern2.test(tail)) return true;
+
     // 层 2+3：全文有"向用户提问/选择"的句子 + 尾部处于"等待用户决策"语气
     if (this._textHasUserDirectedQuestion(t) && this._textTailWaitsForUser(tail)) {
       return true;

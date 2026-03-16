@@ -3259,6 +3259,27 @@ function registerIpc() {
     if (!skillLoader) return { ok: false };
     try { await shell.openPath(skillLoader.rootDir); return { ok: true }; } catch { return { ok: false }; }
   });
+  ipcMain.handle("skills.install", async (_event, payload) => {
+    if (!skillLoader) return { ok: false, error: "SKILL_LOADER_NOT_READY" };
+    const { name, content } = payload ?? {};
+    if (!name || typeof name !== "string") return { ok: false, error: "INVALID_NAME" };
+    if (!content || typeof content !== "string") return { ok: false, error: "INVALID_CONTENT" };
+
+    // 安全校验：name 只允许小写字母、数字、短横线
+    if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name)) {
+      return { ok: false, error: "INVALID_NAME", detail: "name must be lowercase alphanumeric with hyphens" };
+    }
+
+    const skillDir = path.join(skillLoader.rootDir, name);
+    const skillFile = path.join(skillDir, "SKILL.md");
+    try {
+      await fsp.mkdir(skillDir, { recursive: true });
+      await fsp.writeFile(skillFile, content, "utf-8");
+      return { ok: true, path: skillFile };
+    } catch (e) {
+      return { ok: false, error: "WRITE_FAILED", detail: e?.message };
+    }
+  });
 
   // ── Marketplace（设置页能力市场） ──────────────────────────
   ipcMain.handle("marketplace.getInstalled", async () => {
