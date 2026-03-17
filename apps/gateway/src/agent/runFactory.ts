@@ -1024,13 +1024,20 @@ export function looksLikePendingResumeOverridePrompt(text: string): boolean {
   return /(别存了|不要存了|不存了|不用存了|取消保存|先别保存|先别继续|不用继续|别继续|先别写入|别写了|重写|重新写|重来|改成|换成|换个主题|另写|重新生成)/.test(t);
 }
 
-export function classifyDirectiveIntent(text: string): {
+export function hasExplicitSkillMention(mentionedSkillIds?: string[]): boolean {
+  return Array.isArray(mentionedSkillIds) && mentionedSkillIds.length > 0;
+}
+
+export function classifyDirectiveIntent(text: string, mentionedSkillIds?: string[]): {
   kind: "directive" | "inquiry" | "continuation";
   reason: string;
 } {
   const t = String(text ?? "").trim();
   if (!t) return { kind: "inquiry", reason: "empty_prompt" };
-  if (looksLikeWorkflowContinuationPrompt(t)) {
+  if (hasExplicitSkillMention(mentionedSkillIds)) {
+    return { kind: "directive", reason: "explicit_skill_invocation" };
+  }
+  if (looksLikeWorkflowContinuationPrompt(t, mentionedSkillIds)) {
     return { kind: "continuation", reason: "workflow_continuation" };
   }
   if (looksLikeExplicitNonTaskPrompt(t)) {
@@ -1072,8 +1079,10 @@ export function shouldPreferPendingWriteResumeFromTaskState(args: {
   userPrompt: string;
   projectDirAvailable: boolean;
   intent?: any;
+  mentionedSkillIds?: string[];
 }): boolean {
   if (!args.projectDirAvailable) return false;
+  if (hasExplicitSkillMention(args.mentionedSkillIds)) return false;
   const state = args.taskState && typeof args.taskState === "object" ? args.taskState : null;
   const resume = state && typeof (state as any).resume === "object" ? (state as any).resume : null;
   if (!resume || resume.canResumePendingWrite !== true || !String((resume as any).artifactId ?? "").trim()) return false;
@@ -1082,7 +1091,7 @@ export function shouldPreferPendingWriteResumeFromTaskState(args: {
   if (looksLikeExplicitNonTaskPrompt(prompt)) return false;
   if (looksLikePendingResumeOverridePrompt(prompt)) return false;
   const looksLikeFreshTask =
-    !looksLikeWorkflowContinuationPrompt(prompt) &&
+    !looksLikeWorkflowContinuationPrompt(prompt, args.mentionedSkillIds) &&
     prompt.length >= 16 &&
     Boolean(args.intent?.isWritingTask || args.intent?.wantsWrite || looksLikeResearchOnlyPrompt(prompt));
   if (looksLikeFreshTask) return false;
@@ -1095,8 +1104,10 @@ export function shouldPreferPendingWriteResume(args: {
   userPrompt: string;
   projectDirAvailable: boolean;
   intent?: any;
+  mentionedSkillIds?: string[];
 }): boolean {
   if (!args.projectDirAvailable) return false;
+  if (hasExplicitSkillMention(args.mentionedSkillIds)) return false;
   const state = readPendingWriteResumeState({ mainDoc: args.mainDoc, pendingArtifacts: args.pendingArtifacts });
   if (!state.waiting || !state.artifact) return false;
   const prompt = String(args.userPrompt ?? "").trim();
@@ -1104,14 +1115,15 @@ export function shouldPreferPendingWriteResume(args: {
   if (looksLikeExplicitNonTaskPrompt(prompt)) return false;
   if (looksLikePendingResumeOverridePrompt(prompt)) return false;
   const looksLikeFreshTask =
-    !looksLikeWorkflowContinuationPrompt(prompt) &&
+    !looksLikeWorkflowContinuationPrompt(prompt, args.mentionedSkillIds) &&
     prompt.length >= 16 &&
     Boolean(args.intent?.isWritingTask || args.intent?.wantsWrite || looksLikeResearchOnlyPrompt(prompt));
   if (looksLikeFreshTask) return false;
   return true;
 }
 
-export function looksLikeWorkflowContinuationPrompt(text: string): boolean {
+export function looksLikeWorkflowContinuationPrompt(text: string, mentionedSkillIds?: string[]): boolean {
+  if (hasExplicitSkillMention(mentionedSkillIds)) return false;
   const t = String(text ?? "").trim();
   if (!t) return false;
   if (looksLikeShortFollowUp(t)) return true;
@@ -1152,7 +1164,7 @@ export function readWorkflowStickyState(mainDoc: unknown): WorkflowStickyState {
   return { routeId, intentHint, kind, status, selectedServerIds, preferredToolNames, updatedAtMs, isFresh, lastEndReason };
 }
 
-export function shouldSuppressSearchDuringBrowserContinuation(args: { mainDoc?: unknown; userPrompt: string }): boolean {
+export function shouldSuppressSearchDuringBrowserContinuation(args: { mainDoc?: unknown; userPrompt: string; mentionedSkillIds?: string[] }): boolean {
   const wf = readWorkflowStickyState(args.mainDoc);
   if (!wf.isFresh) return false;
   const prompt = String(args.userPrompt ?? "").trim();
@@ -1160,7 +1172,7 @@ export function shouldSuppressSearchDuringBrowserContinuation(args: { mainDoc?: 
   if (looksLikeResearchOnlyPrompt(prompt) || looksLikeExplicitNonTaskPrompt(prompt)) return false;
   const browserLike = wf.routeId === "web_radar" || wf.kind === "browser_session" || wf.selectedServerIds.some((id) => /playwright|browser/i.test(id));
   if (!browserLike) return false;
-  return looksLikeWorkflowContinuationPrompt(prompt);
+  return looksLikeWorkflowContinuationPrompt(prompt, args.mentionedSkillIds);
 }
 
 export function isBrowserSessionActive(mainDoc: unknown, userPrompt: string): boolean {
@@ -1467,6 +1479,7 @@ export function buildClarifyQuestionSlotBased(args: {
 export function computeIntentRouteDecisionPhase0(args: {
   mode: AgentMode;
   userPrompt: string;
+  mentionedSkillIds?: string[];
   mainDocRunIntent?: unknown;
   mainDoc?: unknown;
   runTodo?: any[];
@@ -1477,7 +1490,7 @@ export function computeIntentRouteDecisionPhase0(args: {
   const p = String(args.userPrompt ?? "");
   const pTrim = p.trim();
   const mode = args.mode;
-  const directiveIntent = classifyDirectiveIntent(pTrim);
+  const directiveIntent = classifyDirectiveIntent(pTrim, args.mentionedSkillIds);
   derivedFrom.push(`intent_class:${directiveIntent.kind}`, `intent_reason:${directiveIntent.reason}`);
 
   if (mode === "chat") {
@@ -2117,9 +2130,15 @@ export async function prepareAgentRun(args: {
     recentDialogue: (recentDialogueFromPack as any) ?? undefined,
   });
 
+  const mentionedSkillIds = Array.isArray((body as any).activeSkillIds)
+    ? ((body as any).activeSkillIds as any[]).map((x: any) => String(x ?? "").trim()).filter(Boolean)
+    : [];
+  const mentionedSkillIdSet = new Set(mentionedSkillIds);
+
   let intentRoute = computeIntentRouteDecisionPhase0({
     mode,
     userPrompt,
+    mentionedSkillIds,
     mainDocRunIntent: (mainDocFromPack as any)?.runIntent,
     mainDoc: mainDocFromPack,
     runTodo: runTodoFromPack,
@@ -2133,12 +2152,14 @@ export async function prepareAgentRun(args: {
     userPrompt,
     projectDirAvailable: Boolean(projectDirCandidate),
     intent,
+    mentionedSkillIds,
   }) || shouldPreferPendingWriteResume({
     mainDoc: mainDocFromPack,
     pendingArtifacts: pendingArtifactsFromPack,
     userPrompt,
     projectDirAvailable: Boolean(projectDirCandidate),
     intent,
+    mentionedSkillIds,
   });
   if (preferPendingWriteResume) {
     intentRoute = {
@@ -2180,10 +2201,6 @@ export async function prepareAgentRun(args: {
   });
 
   // 合并 @ 提及但未自动激活的 Skill（须遵守 conflicts/requires）
-  const mentionedSkillIds = Array.isArray((body as any).activeSkillIds)
-    ? ((body as any).activeSkillIds as any[]).map((x: any) => String(x ?? "").trim()).filter(Boolean)
-    : [];
-  const mentionedSkillIdSet = new Set(mentionedSkillIds);
   const autoActivatedIds = new Set((rawActiveSkills ?? []).map((s: any) => String(s?.id ?? "").trim()));
   for (const sid of mentionedSkillIds) {
     if (autoActivatedIds.has(sid)) continue;
@@ -2806,7 +2823,11 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
   }
 
   // Style 专用 lint 工具（lint.copy / lint.style）：默认不进入公共工具池，仅在 style_imitate / style_imitate_v2 激活或风格 gate 生效时可用。
+  const styleSkillRequested =
+    mentionedSkillIdSet.has("style_imitate") ||
+    mentionedSkillIdSet.has("style_imitate_v2");
   const styleSkillActive =
+    styleSkillRequested ||
     activeSkillIds.includes("style_imitate") ||
     activeSkillIds.includes("style_imitate_v2") ||
     (intent.isWritingTask && deriveStyleGate({ mode, kbSelected: kbSelectedList as any, intent, activeSkillIds }).styleGateEnabled);
@@ -3118,6 +3139,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
   const suppressSearchDuringBrowserContinuation = shouldSuppressSearchDuringBrowserContinuation({
     mainDoc: mainDocFromPack,
     userPrompt,
+    mentionedSkillIds,
   });
   if (suppressSearchDuringBrowserContinuation) {
     for (const name of Array.from(selectedAllowedToolNames)) {
@@ -3270,12 +3292,14 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     userPrompt,
     projectDirAvailable: Boolean(projectDirFromSidecar),
     intent,
+    mentionedSkillIds,
   }) || shouldPreferPendingWriteResume({
     mainDoc: mainDocFromPack,
     pendingArtifacts: pendingArtifactsFromPack,
     userPrompt,
     projectDirAvailable: Boolean(projectDirFromSidecar),
     intent,
+    mentionedSkillIds,
   });
 
   const assembledContext = buildAssembledContextMessages({
