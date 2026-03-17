@@ -200,24 +200,25 @@ export const STYLE_IMITATE_SKILL: SkillManifest = {
   ],
   promptFragments: {
     system:
-      "\u5F53 skill=style_imitate \u6FC0\u6D3B\u65F6\uFF1A\n" +
-      "0) \u82E5 Context Pack \u63D0\u4F9B KB_STYLE_CLUSTERS(JSON)\uFF08\u5199\u6CD5\u5019\u9009/\u5B50\u7C07\uFF09\u6216 STYLE_SELECTOR(JSON)\uFF1A\u9ED8\u8BA4\u6309\u63A8\u8350/\u5DF2\u9009\u5199\u6CD5\u7EE7\u7EED\u5199\u4F5C\uFF1B\u7528\u6237\u53EF\u968F\u65F6\u6539\u53E3\u5207\u6362\u3002\u4E0D\u8981\u5728\u6B63\u6587\u524D\u6216\u5355\u72EC\u6D88\u606F\u91CC\u8F93\u51FA\u201C\u5DF2\u9009\u7528\u5199\u6CD5X/\u5907\u9009\u5199\u6CD5Y\u201D\u8FD9\u7C7B\u8BF4\u660E\uFF0C\u9664\u975E\u7528\u6237\u660E\u786E\u8981\u6C42\u6BD4\u8F83\u5199\u6CD5\u3002\n" +
-      "1) \u82E5 Main Doc \u5C1A\u672A\u5199\u5165 styleContractV1\uFF08\u6216\u7528\u6237\u6539\u53E3\u8981\u6C42\u5207\u5199\u6CD5\uFF09\uFF0C\u518D\u8C03\u7528 run.mainDoc.update \u5199\u5165/\u66F4\u65B0 mainDoc.styleContractV1\uFF08\u77ED JSON\uFF1A{v,libraryId,selectedCluster{id,label},anchors,evidence,softRanges,facetPlan,updatedAt}\uFF09\u3002\u82E5 Main Doc \u5DF2\u6709\u4E14\u7528\u6237\u672A\u8981\u6C42\u53D8\u66F4\uFF0C\u5219\u4E0D\u8981\u91CD\u590D\u5199\u5165\u3002\n" +
-      "2) \u82E5\u63D0\u4F9B STYLE_DIMENSIONS(JSON)\uFF1A\n" +
-      "- mustApply.facetIds \u4E3A MUST\uFF0C\u5FC5\u987B\u8986\u76D6\uFF08\u6BCF\u4E2A\u81F3\u5C11\u843D\u5730\u4E00\u6B21\uFF09\uFF0C\u4E0D\u8981\u81EA\u884C\u6269\u5C55\u5230\u5168\u90E8\u7EF4\u5EA6\uFF1B\n" +
-      "- shouldApply.softRanges \u4E3A SHOULD\uFF0C\u5C3D\u91CF\u8D34\u8FD1\u7EDF\u8BA1\u6307\u7EB9\uFF08\u53E5\u957F/\u95EE\u53E5\u7387/\u4EBA\u79F0\u5BC6\u5EA6\u7B49\uFF09\uFF1B\n" +
-      "- mayApply.cardTypesHint \u4EC5\u7528\u4E8E\u68C0\u7D22\u7D20\u6750\uFF08\u53EF\u9009\uFF09\u3002\n" +
-      "3) \u82E5\u63D0\u4F9B STYLE_SELECTOR(JSON)\uFF1A\u5FC5\u987B\u628A selectedFacetIds/selectedFacets \u5F53\u4F5C\u672C\u6B21\u8981\u6267\u884C\u7684\u201C\u7EF4\u5EA6\u5361\u5B50\u96C6\u201D\uFF08\u53EA\u6267\u884C\u8FD9\u4E9B\u5361\uFF0C\u4E0D\u8981\u81EA\u884C\u6269\u5C55\u5230\u5168\u90E8\u7EF4\u5EA6\uFF09\u3002\u82E5\u540C\u65F6\u63D0\u4F9B STYLE_DIMENSIONS(JSON)\uFF0C\u4EE5 mustApply.facetIds \u4E3A\u51C6\uFF1B\u82E5\u540C\u65F6\u63D0\u4F9B STYLE_FACETS_SELECTED(Markdown)\uFF0C\u4F18\u5148\u6309\u5176\u5361\u7247\u5185\u5BB9\u6267\u884C\uFF1B\u5E76\u5BF9\u6BCF\u5F20\u5165\u9009 facet \u7ED3\u5408 kbQueries\uFF08\u6216 facetId+\u8BDD\u9898\uFF09\u7528 kb.search \u62C9\u6837\u4F8B/\u8BC1\u636E\u518D\u843D\u7B14\u3002\n" +
-      "4) \u5355\u7BC7\u5199\u4F5C\u5EFA\u8BAE\u8D70\u201C\u4E24\u6BB5\u5F0F\u68C0\u7D22\u201D\uFF1A\n" +
-      "- \u7B2C\u4E00\u6BB5\uFF08\u5199\u524D\uFF09\uFF1Akb.search \u62C9\u89C4\u5219\u5361/\u7ED3\u6784\u9AA8\u67B6/\u5F00\u5934\u94A9\u5B50/\u7ED3\u5C3E\u6536\u675F\uFF08kind=card + \u663E\u5F0F cardTypes\uFF09\u3002\n" +
-      "- \u7B2C\u4E8C\u6BB5\uFF08\u521D\u7A3F\u540E\uFF09\uFF1A\u518D kb.search \u62C9\u91D1\u53E5/\u6536\u675F\u6A21\u677F\uFF08one_liner/ending\uFF09\uFF0C\u628A punchline \u4E0E\u6536\u5C3E\u8865\u9F50\u540E\u518D\u8FDB\u5165 lint\u3002\n" +
-      "5) \u5199\u4F5C\u65F6\u5FC5\u987B\u5148 kb.search\uFF08\u53EA\u641C\u98CE\u683C\u5E93\uFF09\u62C9\u6837\u4F8B/\u6A21\u677F\uFF1A\u4F18\u5148 kind=card\uFF08hook/one_liner/outline/thesis/ending \u7B49\uFF09\uFF0C\u4E0D\u8981\u4E00\u4E0A\u6765\u5C31\u7528 kind=paragraph \u5927\u8303\u56F4\u635E\u539F\u6587\u6BB5\u843D\u5F53\u6837\u4F8B\u3002\n" +
-      "6) \u53CD\u8D34\u539F\u6587\u8981\u6C42\uFF08\u5FC5\u987B\u9075\u5B88\uFF09\uFF1A\n" +
-      "- \u4E0D\u8981\u590D\u5236\u539F\u6587\u7684\u53E5\u5B50/\u6BB5\u843D\uFF1B\u4EFB\u4F55\u660E\u663E\u7684\u9010\u53E5\u6539\u5199/\u8FD1\u4F3C\u590D\u8FF0\u90FD\u89C6\u4E3A\u5931\u8D25\u3002\n" +
-      "- \u5728\u201C\u4E0D\u65B0\u589E\u4E8B\u5B9E\u201D\u7684\u524D\u63D0\u4E0B\uFF0C\u5FC5\u987B\u505A\u7ED3\u6784\u4E0E\u8868\u8FBE\u7684\u518D\u521B\u4F5C\uFF1A\u91CD\u6392\u6BB5\u843D\u3001\u6539\u53E5\u5F0F\u3001\u6362\u8854\u63A5\u3001\u6362\u6BD4\u55BB/\u7C7B\u6BD4\u3001\u628A\u6570\u5B57\u5806\u780C\u6539\u6210\u53D9\u4E8B\u5316\u89E3\u91CA\u3002\n" +
-      "- \u5982\u9700\u5F15\u7528\u539F\u6587\u4E2D\u7684\u4E13\u6709\u540D\u8BCD/\u5173\u952E\u7ED3\u8BBA\uFF1A\u53EA\u4FDD\u7559\u201C\u5FC5\u8981\u77ED\u8BED\u201D\uFF0C\u4E0D\u8981\u51FA\u73B0\u957F\u4E32\u8FDE\u7EED\u590D\u7528\u3002\n" +
-      "7) lint.style \u7528\u4E8E\u201C\u63D0\u793A/\u5BA1\u8BA1/\u95EE\u9898\u6E05\u5355\u201D\uFF1A\u672A\u901A\u8FC7\u65F6\u5FC5\u987B\u6309 rewritePrompt \u56DE\u7089\u6539\u5199\u5E76\u590D\u68C0\uFF1B\u4E0D\u8981\u628A\u5206\u6570\u5F53\u6210\u552F\u4E00\u95E8\u7981\u5BFC\u81F4\u5361\u6B7B\u3002\n" +
-      "8) \u68C0\u7D22/\u91CD\u8BD5/\u8D85\u65F6/\u964D\u7EA7\u7B49\u6267\u884C\u72B6\u6001\u4E0D\u8981\u7528\u81EA\u7136\u8BED\u8A00\u9010\u6761\u64AD\u62A5\u7ED9\u7528\u6237\uFF1B\u4F8B\u5982\u4E0D\u8981\u8F93\u51FA\u2018\u540C\u6B65\u542F\u52A8\u8D44\u6599\u641C\u7D22\u548C\u98CE\u683C\u68C0\u7D22\u2019\u3001\u2018kb.search\u8D85\u65F6\u2019\u3001\u2018\u6539\u7528\u8F83\u8F7B\u67E5\u8BE2\u91CD\u8BD5\u2019\u3001\u2018\u8DF3\u8FC7\u68C0\u7D22\u76F4\u63A5\u5199\u7A3F\u2019\u3002\u8FD9\u4E9B\u72B6\u6001\u7531\u7CFB\u7EDF\u8FDB\u5EA6 UI \u5C55\u793A\uFF1B\u9664\u975E\u9700\u8981\u7528\u6237\u51B3\u7B56\uFF0C\u5426\u5219\u76F4\u63A5\u7EE7\u7EED\u6267\u884C\u5E76\u7ED9\u6700\u7EC8\u7ED3\u679C\u3002",
+      "当 skill=style_imitate 激活时：\n" +
+      "0) 若 Context Pack 提供 KB_STYLE_CLUSTERS(JSON)（写法候选/子簇）或 STYLE_SELECTOR(JSON)：默认按推荐/已选写法继续写作；用户可随时改口切换。不要在正文前或单独消息里输出“已选用写法X/备选写法Y”这类说明，除非用户明确要求比较写法。\n" +
+      "1) 若 Main Doc 尚未写入 styleContractV1（或用户改口要求切写法），再调用 run.mainDoc.update 写入/更新 mainDoc.styleContractV1（短 JSON：{v,libraryId,selectedCluster{id,label},anchors,evidence,softRanges,facetPlan,updatedAt}）。若 Main Doc 已有且用户未要求变更，则不要重复写入。\n" +
+      "2) 若提供 STYLE_DIMENSIONS(JSON)：\n" +
+      "- mustApply.facetIds 为 MUST，必须覆盖（每个 facet 的核心写法都要在正文中至少体现一次），不要自行扩展到全部维度；\n" +
+      "- shouldApply.softRanges 为 SHOULD，尽量贴近统计指纹（句长/问句率/人称密度等）；\n" +
+      "- mayApply.cardTypesHint 仅用于检索素材（可选）。\n" +
+      "3) 若提供 STYLE_SELECTOR(JSON)：必须把 selectedFacetIds/selectedFacets 当作本次要执行的“维度卡子集”（只执行这些卡，不要自行扩展到全部维度）。若同时提供 STYLE_DIMENSIONS(JSON)，以 mustApply.facetIds 为准；若同时提供 STYLE_FACETS_SELECTED(Markdown)，要把它视为本轮执行规则卡全文：首稿前先静默提炼每个 MUST facet 的执行要点，不要向用户单独列清单，再落笔。若 STYLE_SELECTOR 提供 searchPlan，优先按 searchPlan 检索；否则再退回 kbQueries（或 facetId+话题）。\n" +
+      "4) 单篇写作建议走“两段式检索”：\n" +
+      "- 第一段（写前）：如果 Context Pack 已给 STYLE_FACETS_SELECTED(Markdown)，可直接按规则卡开写；kb.search 主要用于补当前话题下的规则卡/结构骨架/开头钩子/结尾收束（kind=card + 显式 cardTypes）。\n" +
+      "- 第二段（初稿后）：再 kb.search 拉金句/收束模板（one_liner/ending），把 punchline 与收尾补齐后再进入 lint。\n" +
+      "5) 写作时优先用 kb.search（只搜风格库）拉样例/模板：优先 kind=card（hook/one_liner/outline/thesis/ending 等），不要一上来就用 kind=paragraph 大范围捞原文段落当样例；若 kb.search 返回的 snippet / contentPreview 仍不足以判断具体表达方式，再用 kb.cite 拉局部证据。\n" +
+      "6) 反贴原文要求（必须遵守）：\n" +
+      "- 不要复制原文的句子/段落；任何明显的逐句改写/近似复述都视为失败。\n" +
+      "- 在“不新增事实”的前提下，必须做结构与表达的再创作：重排段落、改句式、换衔接、换比喻/类比、把数字堆砌改成叙事化解释。\n" +
+      "- 如需引用原文中的专有名词/关键结论：只保留“必要短语”，不要出现长串连续复用。\n" +
+      "- 不要只模仿表层标记（问号、破折号、短句、口头禅）；必须复刻段落推进、转折、视角、论证路径与声音节奏。\n" +
+      "7) lint.style 用于“提示/审计/问题清单”：未通过时必须按 rewritePrompt 回炉改写并复检；不要把分数当成唯一门禁导致卡死。\n" +
+      "8) 检索/重试/超时/降级等执行状态不要用自然语言逐条播报给用户；例如不要输出‘同步启动资料搜索和风格检索’、‘kb.search超时’、‘改用较轻查询重试’、‘跳过检索直接写稿’。这些状态由系统进度 UI 展示；除非需要用户决策，否则直接继续执行并给最终结果。",
     context: "ACTIVE_SKILLS: style_imitate\uFF08\u539F\u56E0\u89C1 reasonCodes\uFF1BUI \u9700\u53EF\u89C1\uFF09",
   },
   policies: ["StyleGatePolicy", "AutoRetryPolicy"],

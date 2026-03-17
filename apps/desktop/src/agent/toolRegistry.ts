@@ -1662,22 +1662,30 @@ const tools: ToolDefinition[] = [
       if (!ret.ok) return { ok: false, error: ret.error ?? "SEARCH_FAILED" };
 
       // 输出精简：按文档分组
+      let contentPreviewBudget = 4000;
       const groups = (ret.groups ?? []).map((g) => ({
         sourceDoc: g.sourceDoc,
         bestScore: g.bestScore,
-        hits: g.hits.map((h) => ({
-          score: h.score,
-          snippet: h.snippet,
-          artifact: {
-            id: h.artifact.id,
-            kind: h.artifact.kind,
-            title: h.artifact.title,
-            cardType: (h.artifact as any).cardType,
-            facetIds: h.artifact.facetIds ?? [],
-            anchor: h.artifact.anchor,
-            // 注意：不返回全文 content，避免 token 爆炸；需要全文由 read / kb 引用机制后续完善
-          },
-        })),
+        hits: g.hits.map((h) => {
+          const rawPreview = h.artifact.kind === "card" ? String((h as any).contentPreview ?? h.artifact.content ?? "").trim() : "";
+          const contentPreview = rawPreview && contentPreviewBudget > 0
+            ? rawPreview.slice(0, Math.min(800, contentPreviewBudget))
+            : "";
+          if (contentPreview) contentPreviewBudget = Math.max(0, contentPreviewBudget - contentPreview.length);
+          return {
+            score: h.score,
+            snippet: h.snippet,
+            artifact: {
+              id: h.artifact.id,
+              kind: h.artifact.kind,
+              title: h.artifact.title,
+              cardType: (h.artifact as any).cardType,
+              facetIds: h.artifact.facetIds ?? [],
+              anchor: h.artifact.anchor,
+              ...(contentPreview ? { contentPreview } : {}),
+            },
+          };
+        }),
       }));
 
       return { ok: true, output: { ok: true, query, kind, libraryIds, groups, debug: (ret as any).debug ?? null }, undoable: false };

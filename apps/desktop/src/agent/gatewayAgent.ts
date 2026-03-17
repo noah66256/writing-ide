@@ -553,8 +553,8 @@ function stageFacetWeightsV1(
       };
     // draft / unknown
     return {
-      essential: ["logic_framework", "narrative_structure", "narrative_perspective", "persuasion", "voice_rhythm", "emotion_mobilization", "values_embedding"],
-      supportive: ["reader_interaction", "scene_building", "one_liner_crafting", "rhetoric"],
+      essential: ["logic_framework", "narrative_structure", "narrative_perspective", "voice_rhythm"],
+      supportive: ["persuasion", "emotion_mobilization", "values_embedding", "reader_interaction", "scene_building", "one_liner_crafting", "rhetoric"],
       k: 8,
     };
   }
@@ -580,8 +580,20 @@ type SelectedFacetV1 = {
   basePlan: boolean;
   why: string;
   kbQueries: string[];
+  searchPlan?: Array<{ query: string; facetIds: string[]; cardTypes: string[]; priority: number }>;
   topicHits?: string[];
 };
+
+function deriveFacetCardTypesHintV1(facetId: string): string[] {
+  const fid = String(facetId ?? "").trim();
+  if (!fid) return [];
+  if (["opening_design", "intro", "question_design"].includes(fid)) return ["hook"];
+  if (["one_liner_crafting", "special_markers", "voice_rhythm", "language_style", "rhetoric"].includes(fid)) return ["one_liner"];
+  if (["narrative_structure", "structure_patterns", "logic_framework"].includes(fid)) return ["outline", "thesis"];
+  if (["values_embedding", "resonance"].includes(fid)) return ["ending", "thesis"];
+  if (["emotion_mobilization", "reader_interaction", "scene_building", "narrative_perspective", "persuasion"].includes(fid)) return ["thesis"];
+  return [];
+}
 
 function pickFacetsSelectorV1(args: {
   facetPackId: string;
@@ -702,6 +714,12 @@ function pickFacetsSelectorV1(args: {
       const q1 = base.slice(0, 96);
       const q2 = hint ? `${base} ${hint}`.trim().slice(0, 110) : "";
       const kbQueries = Array.from(new Set([q1, q2].map((s) => String(s ?? "").trim()).filter(Boolean))).slice(0, 2);
+      const searchPlan = kbQueries.map((query, index) => ({
+        query,
+        facetIds: [String(x.facetId ?? "").trim()].filter(Boolean),
+        cardTypes: deriveFacetCardTypesHintV1(x.facetId),
+        priority: index + 1,
+      }));
       const whyParts = [
         x.planWhy ? `plan:${x.planWhy}` : "",
         x.stageFit > 0.8 ? "stage:必备" : x.stageFit > 0.3 ? "stage:辅助" : "",
@@ -716,6 +734,7 @@ function pickFacetsSelectorV1(args: {
         basePlan: Boolean(x.basePlan),
         why: whyParts.join("；").slice(0, 220),
         kbQueries,
+        searchPlan,
         topicHits: Array.isArray(x.topicHits) ? x.topicHits.slice(0, 5) : undefined,
       } as SelectedFacetV1;
     });
@@ -742,40 +761,11 @@ export function pickClusterSelectorV1(args: {
   const d = String(args.defaultClusterId ?? "").trim();
   const hasDefault = Boolean(d && byId.get(d));
   const topicText = String(args.topicText ?? "").trim();
-
-  // 1) anchors 优先（更像原文）
-  let maxAnchors = 0;
-  for (const c of clusters) {
-    const n = Array.isArray(c?.anchors) ? c.anchors.length : 0;
-    if (n > maxAnchors) maxAnchors = n;
-  }
-  if (maxAnchors > 0) {
-    const picked = clusters
-      .slice()
-      .sort((a: any, b: any) => {
-        const na = Array.isArray(a?.anchors) ? a.anchors.length : 0;
-        const nb = Array.isArray(b?.anchors) ? b.anchors.length : 0;
-        if (nb !== na) return nb - na;
-        const sa = rankStabilityForSelectorV1(String(a?.stability ?? ""));
-        const sb = rankStabilityForSelectorV1(String(b?.stability ?? ""));
-        if (sb !== sa) return sb - sa;
-        const ca = Number(a?.docCoverageRate ?? 0) || 0;
-        const cb = Number(b?.docCoverageRate ?? 0) || 0;
-        if (cb !== ca) return cb - ca;
-        const sega = Number(a?.segmentCount ?? 0) || 0;
-        const segb = Number(b?.segmentCount ?? 0) || 0;
-        return segb - sega;
-      })[0];
-    const selectedId = String(picked?.id ?? "").trim() || (hasDefault ? d : String(clusters?.[0]?.id ?? "").trim());
-    return {
-      selectedId,
-      topicHits: [],
-      trace: { method: "selector_v1", pickedBy: "anchors", maxAnchors, defaultClusterId: hasDefault ? d : null },
-    };
+  if (!clusters.length) {
+    return { selectedId: hasDefault ? d : "", topicHits: [], trace: { method: "selector_v1", pickedBy: "none", defaultClusterId: hasDefault ? d : null } };
   }
 
-  // 2) topicFit（同库混题材时优先按话题匹配）
-  const topicScores: Array<{ id: string; score: number; hits: string[] }> = [];
+  const topicScores: Array<{ id: string; score: number; hits: string[]; anchors: number; stability: number; coverage: number; segmentCount: number; isDefault: boolean }> = [];
   for (const c of clusters) {
     const id = String(c?.id ?? "").trim();
     if (!id) continue;
@@ -784,64 +774,67 @@ export function pickClusterSelectorV1(args: {
     const label = String(c?.label ?? "").trim();
     const clusterText = [label, ...queries.slice(0, 8), ...quotes.slice(0, 5)].filter(Boolean).join("\n");
     const fit = topicText ? computeTopicFitV1(topicText, clusterText) : { score: 0, hits: [] };
-    topicScores.push({ id, score: fit.score, hits: fit.hits });
+    topicScores.push({
+      id,
+      score: fit.score,
+      hits: fit.hits,
+      anchors: Array.isArray(c?.anchors) ? c.anchors.length : 0,
+      stability: rankStabilityForSelectorV1(String(c?.stability ?? "")),
+      coverage: Number(c?.docCoverageRate ?? 0) || 0,
+      segmentCount: Number(c?.segmentCount ?? 0) || 0,
+      isDefault: hasDefault && id === d,
+    });
   }
   const maxTopic = topicScores.reduce((m, x) => Math.max(m, x.score), 0);
-  if (maxTopic > 0) {
-    const best = topicScores
-      .slice()
-      .sort((a, b) => {
-        if (b.score !== a.score) return b.score - a.score;
-        const ca = byId.get(a.id);
-        const cb = byId.get(b.id);
-        const sa = rankStabilityForSelectorV1(String(ca?.stability ?? ""));
-        const sb = rankStabilityForSelectorV1(String(cb?.stability ?? ""));
-        if (sb !== sa) return sb - sa;
-        const cova = Number(ca?.docCoverageRate ?? 0) || 0;
-        const covb = Number(cb?.docCoverageRate ?? 0) || 0;
-        if (covb !== cova) return covb - cova;
-        const sega = Number(ca?.segmentCount ?? 0) || 0;
-        const segb = Number(cb?.segmentCount ?? 0) || 0;
-        return segb - sega;
-      })[0];
-    const selectedId = best?.id || (hasDefault ? d : String(clusters?.[0]?.id ?? "").trim());
-    const hits = best?.hits ?? [];
-    return {
-      selectedId,
-      topicHits: hits,
-      trace: {
-        method: "selector_v1",
-        pickedBy: "topicFit",
-        maxTopicScore: maxTopic,
-        defaultClusterId: hasDefault ? d : null,
-        top: topicScores
-          .slice()
-          .sort((a, b) => b.score - a.score)
-          .slice(0, 3)
-          .map((x) => ({ id: x.id, score: x.score })),
-      },
-    };
-  }
+  const maxAnchors = topicScores.reduce((m, x) => Math.max(m, x.anchors), 0);
+  const maxSegments = topicScores.reduce((m, x) => Math.max(m, x.segmentCount), 0);
+  const scored = topicScores
+    .map((x) => {
+      const topicFit = maxTopic > 0 ? x.score / maxTopic : 0;
+      const anchorFit = maxAnchors > 0 ? x.anchors / maxAnchors : 0;
+      const stabilityFit = x.stability / 3;
+      const segmentFit = maxSegments > 0 ? x.segmentCount / maxSegments : 0;
+      const finalScore =
+        0.34 * topicFit +
+        0.24 * anchorFit +
+        0.18 * stabilityFit +
+        0.14 * x.coverage +
+        0.06 * segmentFit +
+        (x.isDefault ? 0.04 : 0);
+      return { ...x, topicFit, anchorFit, stabilityFit, segmentFit, finalScore };
+    })
+    .sort((a, b) => {
+      if (b.finalScore !== a.finalScore) return b.finalScore - a.finalScore;
+      if (b.topicFit !== a.topicFit) return b.topicFit - a.topicFit;
+      if (b.anchorFit !== a.anchorFit) return b.anchorFit - a.anchorFit;
+      if (b.coverage !== a.coverage) return b.coverage - a.coverage;
+      return b.segmentCount - a.segmentCount;
+    });
 
-  // 3) 无话题信号：默认写法（仅本库）优先，否则稳定性/覆盖率/段数
-  if (hasDefault) {
-    return { selectedId: d, topicHits: [], trace: { method: "selector_v1", pickedBy: "defaultCluster", defaultClusterId: d } };
-  }
-  const picked = clusters
-    .slice()
-    .sort((a: any, b: any) => {
-      const sa = rankStabilityForSelectorV1(String(a?.stability ?? ""));
-      const sb = rankStabilityForSelectorV1(String(b?.stability ?? ""));
-      if (sb !== sa) return sb - sa;
-      const ca = Number(a?.docCoverageRate ?? 0) || 0;
-      const cb = Number(b?.docCoverageRate ?? 0) || 0;
-      if (cb !== ca) return cb - ca;
-      const sega = Number(a?.segmentCount ?? 0) || 0;
-      const segb = Number(b?.segmentCount ?? 0) || 0;
-      return segb - sega;
-    })[0];
-  const selectedId = String(picked?.id ?? "").trim() || String(clusters?.[0]?.id ?? "").trim() || "";
-  return { selectedId, topicHits: [], trace: { method: "selector_v1", pickedBy: "stability", defaultClusterId: null } };
+  const best = scored[0];
+  const selectedId = String(best?.id ?? "").trim() || (hasDefault ? d : String(clusters?.[0]?.id ?? "").trim());
+  const pickedBy =
+    (best?.topicFit ?? 0) > 0.45 ? "weighted_topic"
+    : (best?.anchorFit ?? 0) > 0 ? "weighted_anchor"
+    : hasDefault && selectedId === d ? "defaultCluster"
+    : "weighted_stability";
+  return {
+    selectedId,
+    topicHits: best?.hits ?? [],
+    trace: {
+      method: "selector_v1",
+      pickedBy,
+      defaultClusterId: hasDefault ? d : null,
+      maxTopicScore: maxTopic,
+      maxAnchors,
+      top: scored.slice(0, 3).map((x) => ({
+        id: x.id,
+        score: Number(x.finalScore.toFixed(4)),
+        topicFit: Number(x.topicFit.toFixed(4)),
+        anchorFit: Number(x.anchorFit.toFixed(4)),
+      })),
+    },
+  };
 }
 
 function pickFacetIdsV1(cluster: any, max = 8): string[] {
@@ -1582,7 +1575,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   let styleSelectorSelectedFacetIds: string[] = [];
   const STYLE_PLAN_TOPK_V1 = { must: 6, should: 6, may: 4 };
 
-  const sanitizeRuleTextV1 = (md: string) => {
+  const sanitizeRuleTextForCatalogV1 = (md: string) => {
     // 去掉明显"证据段/原文示例"形态，保留规则/套路/清单类文本
     const raw = String(md ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     const lines = raw.split("\n");
@@ -1600,9 +1593,50 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     return out.join("\n").trim();
   };
 
+  const sanitizeRuleTextForExecutionV1 = (md: string, hintTitle?: string) => {
+    const raw = String(md ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    const lines = raw.split("\n");
+    const out: string[] = [];
+    const seen = new Set<string>();
+    const sectionSignalRe = /(写法|句式|表达|节奏|口语|语气|开头|开场|结尾|收束|转折|互动|金句|提问|场景|结构|推进|钩子|声音|叙事|视角|逻辑|说服)/;
+    const actionSignalRe = /(你|我们|其实|但是|反而|先.{0,8}再|不是.{0,10}而是|短句|长句|停顿|排比|递进|回扣|反问|设问|转折|铺垫|破题|收束|场景|视角|节奏)/;
+    let currentSection = String(hintTitle ?? "").trim();
+    let naturalCount = 0;
+    const push = (value: string) => {
+      const normalized = String(value ?? "").trimEnd();
+      if (!normalized.trim() || seen.has(normalized)) return;
+      seen.add(normalized);
+      out.push(normalized);
+    };
+    for (const line of lines) {
+      const rawLine = String(line ?? "");
+      const t = rawLine.trim();
+      if (!t) continue;
+      if (t.startsWith(">")) continue;
+      if (/^(证据|原文|摘录|引用|示例原句|参考原句)[:：]/.test(t)) continue;
+      if ((t.includes("“") && t.includes("”") && t.length >= 24) || (t.includes("\"") && t.length >= 28)) continue;
+      if (t.length >= 140) continue;
+      if (/^#{1,6}\s+/.test(t)) {
+        currentSection = t.replace(/^#{1,6}\s+/, "").trim();
+        push(t);
+        continue;
+      }
+      if (/^[-*]\s+/.test(t) || /^\d+\.\s+/.test(t) || /[:：=｜|]/.test(t)) {
+        push(rawLine);
+        continue;
+      }
+      if (t.length < 20 || t.length > 110) continue;
+      if (!(sectionSignalRe.test(currentSection) || actionSignalRe.test(t))) continue;
+      if (naturalCount >= 3) continue;
+      naturalCount += 1;
+      push(rawLine);
+    }
+    return out.join("\n").trim();
+  };
+
   const extractFacetOptionsV1 = (args: { facetId: string; content: string }) => {
     const max = 5;
-    const src = sanitizeRuleTextV1(args.content);
+    const src = sanitizeRuleTextForCatalogV1(args.content);
     const lines = src.split("\n").map((x) => x.trim());
     const cand: string[] = [];
     let inTrick = false;
@@ -1765,7 +1799,12 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
         .catch(() => ({ ok: false, cards: [] } as any));
       const cards = ret?.ok && Array.isArray(ret.cards) ? ret.cards : [];
       const body = cards
-        .map((c: any) => sanitizeRuleTextV1(String(c?.content ?? "")))
+        .map((c: any) => {
+          const title = String(c?.title ?? c?.facetId ?? "").trim();
+          const sanitized = sanitizeRuleTextForExecutionV1(String(c?.content ?? ""), title);
+          if (!sanitized) return "";
+          return title && !sanitized.startsWith("#") ? `## ${title}\n${sanitized}` : sanitized;
+        })
         .filter(Boolean)
         .join("\n\n");
       if (!body) return "";
@@ -1787,6 +1826,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
         label: f.label,
         why: f.why,
         kbQueries: f.kbQueries,
+        searchPlan: f.searchPlan,
         score: f.score,
       })),
       stage,
@@ -1839,6 +1879,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
             label: f.label,
             why: f.why,
             kbQueries: f.kbQueries,
+            searchPlan: f.searchPlan,
           }))
         : facetPlan
             .map((f: any) => ({
@@ -1846,6 +1887,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
               label: String(f?.label ?? f?.title ?? "").trim(),
               why: String(f?.why ?? "").trim(),
               kbQueries: Array.isArray(f?.kbQueries) ? f.kbQueries.map((q: any) => String(q ?? "").trim()).filter(Boolean) : [],
+              searchPlan: Array.isArray(f?.searchPlan) ? f.searchPlan : [],
             }))
             .filter((f: any) => Boolean((f as any).facetId))
             .slice(0, 10);

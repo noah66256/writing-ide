@@ -263,7 +263,7 @@ type KbDb = {
 export type KbSearchGroup = {
   sourceDoc: KbSourceDoc;
   bestScore: number;
-  hits: Array<{ artifact: KbArtifact; score: number; snippet: string }>;
+  hits: Array<{ artifact: KbArtifact; score: number; snippet: string; contentPreview?: string }>;
 };
 
 export type SettingsModalRequest = {
@@ -5755,6 +5755,17 @@ export const useKbStore = create<KbState>()(
         if (!libraryIds.length) return { ok: false, error: "NO_LIBRARY_SELECTED" };
 
         try {
+          const buildAgentPreview = (artifact: KbArtifact) => {
+            const text = String(artifact?.content ?? "").trim();
+            if (!text) return { snippet: "", contentPreview: undefined as string | undefined };
+            if (artifact.kind === "card") {
+              return { snippet: text.slice(0, 220), contentPreview: text.slice(0, 720) };
+            }
+            if (artifact.kind === "outline") {
+              return { snippet: text.slice(0, 220), contentPreview: undefined as string | undefined };
+            }
+            return { snippet: text.slice(0, 160), contentPreview: undefined as string | undefined };
+          };
           const run = useRunStore.getState();
           const setActivity = (text: string, opts?: { resetTimer?: boolean }) => {
             try { if (run.isRunning) run.setActivity(text, opts); } catch { /* ignore */ }
@@ -5855,11 +5866,15 @@ export const useKbStore = create<KbState>()(
                   return (Number.isFinite(bp) ? bp : -1) - (Number.isFinite(ap) ? ap : -1);
                 })
                 .slice(0, perDocTopN)
-                .map((a, idx) => ({
-                  artifact: a,
-                  score: Math.max(0, perDocTopN - idx),
-                  snippet: String(a.content ?? "").slice(0, 160),
-                }));
+                .map((a, idx) => {
+                  const preview = buildAgentPreview(a);
+                  return {
+                    artifact: a,
+                    score: Math.max(0, perDocTopN - idx),
+                    snippet: preview.snippet,
+                    ...(preview.contentPreview ? { contentPreview: preview.contentPreview } : {}),
+                  };
+                });
               if (!list.length) continue;
               groups.push({ sourceDoc: doc, bestScore: list[0]!.score, hits: list });
               if (groups.length >= topDocs) break;
@@ -5919,10 +5934,12 @@ export const useKbStore = create<KbState>()(
             const doc = docsById.get(artifact.sourceDocId);
             if (!doc) continue;
             const g = groupsByDoc.get(doc.id) ?? { sourceDoc: doc, bestScore: Number.NEGATIVE_INFINITY, hits: [] };
+            const preview = buildAgentPreview(artifact);
             g.hits.push({
               artifact,
               score: item.score,
-              snippet: String(artifact.content ?? "").slice(0, 160),
+              snippet: preview.snippet,
+              ...(preview.contentPreview ? { contentPreview: preview.contentPreview } : {}),
             });
             if (item.score > g.bestScore) g.bestScore = item.score;
             groupsByDoc.set(doc.id, g);
