@@ -225,7 +225,7 @@ html, body {
 
 .chat-markdown-body {
   font-size: 14px;
-  line-height: 1.75;
+  line-height: 1.82;
   white-space: normal;
   overflow-wrap: anywhere;
   word-break: break-word;
@@ -235,11 +235,11 @@ html, body {
 .chat-markdown-body h2,
 .chat-markdown-body h3,
 .chat-markdown-body h4 {
-  font-size: 1em;
-  font-weight: 600;
-  line-height: 1.6;
-  margin-top: 0.9em;
-  margin-bottom: 0.4em;
+  font-size: 1.02em;
+  font-weight: 700;
+  line-height: 1.55;
+  margin-top: 1.15em;
+  margin-bottom: 0.5em;
 }
 .chat-markdown-body p,
 .chat-markdown-body ul,
@@ -247,17 +247,80 @@ html, body {
 .chat-markdown-body blockquote,
 .chat-markdown-body table,
 .chat-markdown-body pre {
-  margin-top: 0.55em;
-  margin-bottom: 0.55em;
+  margin-top: 0.68em;
+  margin-bottom: 0.68em;
 }
 .chat-markdown-body li {
-  margin-top: 0.16em;
-  margin-bottom: 0.16em;
+  margin-top: 0.22em;
+  margin-bottom: 0.22em;
 }
 .chat-markdown-body code {
   font-size: 0.9em;
 }
+.chat-markdown-body p strong,
+.chat-markdown-body li strong,
+.chat-markdown-body blockquote strong,
+.chat-markdown-body td strong,
+.chat-markdown-body th strong {
+  font-weight: inherit;
+  color: inherit;
+}
 .chat-markdown-body pre {
   font-size: 0.9em;
   line-height: 1.65;
+  border: 1px solid var(--color-border-soft);
+}
+.chat-markdown-body blockquote {
+  border-left-width: 4px;
+  padding-left: 0.9em;
+}
+.chat-markdown-body table {
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
+}
+.chat-markdown-body th,
+.chat-markdown-body td {
+  min-width: 88px;
+  vertical-align: top;
+}
+.chat-markdown-body img {
+  display: block;
+  max-width: min(100%, 680px);
+  height: auto;
+}
+.chat-markdown-table-wrap {
+  margin: 0.8em 0;
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-surface-alt) 70%, transparent);
+  box-shadow: var(--shadow-sm);
+}
+.chat-markdown-image-figure {
+  margin: 0.9em 0;
+}
+.chat-markdown-image {
+  max-height: 420px;
+  border-radius: 12px;
+  border: 1px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-surface-alt) 82%, transparent);
+  box-shadow: var(--shadow-sm);
+  cursor: zoom-in;
+}
+.chat-markdown-image-placeholder {
+  display: grid;
+  place-items: center;
+  min-height: 96px;
+  padding: 16px;
+  border: 1px dashed var(--color-border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--color-surface-alt) 72%, transparent);
+  color: var(--color-text-faint);
+  font-size: 12px;
+}
+.chat-markdown-image-caption {
+  margin-top: 0.35em;
+  color: var(--color-text-faint);
+  font-size: 12px;
 }

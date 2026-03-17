@@ -91,6 +91,7 @@ declare global {
           dirs?: string[];
           error?: string;
         }>;
+        readImageDataUrl: (absPath: string) => Promise<{ ok: boolean; dataUrl?: string; error?: string }>;
         readIndex: (rootDir: string) => Promise<{ ok: boolean; data?: any; error?: string }>;
         writeIndex: (rootDir: string, data: any) => Promise<{ ok: boolean; error?: string }>;
         readFile: (rootDir: string, relPath: string) => Promise<{ ok: boolean; content?: string; error?: string }>;

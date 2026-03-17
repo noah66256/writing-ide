@@ -69,6 +69,18 @@ const INDEX_BINARY_EXT = new Set([
   ".exe", ".dmg", ".msi", ".deb", ".rpm",
   ".woff", ".woff2", ".ttf", ".otf", ".eot",
 ]);
+const RENDERABLE_IMAGE_MIME = new Map([
+  [".png", "image/png"],
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".gif", "image/gif"],
+  [".bmp", "image/bmp"],
+  [".ico", "image/x-icon"],
+  [".webp", "image/webp"],
+  [".svg", "image/svg+xml"],
+  [".avif", "image/avif"],
+]);
+const MAX_RENDERABLE_IMAGE_BYTES = 12 * 1024 * 1024;
 const MAX_INDEX_FILES = 10000;
 
 const HISTORY_DIRNAME = "ohmycrab-data";
@@ -2319,6 +2331,23 @@ function registerIpc() {
     const file = toFsPath(root, relPath);
     const content = await fsp.readFile(file, "utf-8");
     return { ok: true, content };
+  });
+
+  ipcMain.handle("readImageDataUrl", async (_event, absPath) => {
+    try {
+      const file = path.resolve(String(absPath ?? "").trim());
+      if (!file) return { ok: false, error: "MISSING_PATH" };
+      const ext = path.extname(file).toLowerCase();
+      const mime = RENDERABLE_IMAGE_MIME.get(ext);
+      if (!mime) return { ok: false, error: "UNSUPPORTED_IMAGE_TYPE" };
+      const stat = await fsp.stat(file);
+      if (!stat.isFile()) return { ok: false, error: "NOT_A_FILE" };
+      if (stat.size > MAX_RENDERABLE_IMAGE_BYTES) return { ok: false, error: "IMAGE_TOO_LARGE" };
+      const buf = await fsp.readFile(file);
+      return { ok: true, dataUrl: `data:${mime};base64,${buf.toString("base64")}` };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
   });
 
   ipcMain.handle("writeFile", async (_event, rootDir, relPath, content) => {

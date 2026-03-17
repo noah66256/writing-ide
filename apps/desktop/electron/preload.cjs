@@ -39,6 +39,9 @@ contextBridge.exposeInMainWorld("desktop", {
     readFile(rootDir, relPath) {
       return ipcRenderer.invoke("readFile", rootDir, relPath);
     },
+    readImageDataUrl(absPath) {
+      return ipcRenderer.invoke("readImageDataUrl", absPath);
+    },
     writeFile(rootDir, relPath, content) {
       return ipcRenderer.invoke("writeFile", rootDir, relPath, content);
     },

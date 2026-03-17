@@ -42,6 +42,9 @@ import {
 } from "@/utils/fileRefLink";
 
 type RunController = { cancel: (reason?: string) => void; done: Promise<void> };
+const MARKDOWN_IMAGE_EXT_RE = /\.(png|jpe?g|gif|svg|webp|bmp|ico|avif)$/i;
+const localImageDataUrlCache = new Map<string, string>();
+
 function parseAtMention(text: string): { agentId: string; cleanText: string } | null {
   const m = text.match(/^@(\S+)\s+/);
   if (!m) return null;
@@ -204,11 +207,18 @@ function formatTodoNote(note?: string): string {
 }
 
 function splitDenseParagraphForDisplay(line: string): string {
-  const text = String(line ?? "").trim();
+  let text = String(line ?? "").trim();
   if (!text) return "";
   if (text.length < 160) return text;
   if (/^(#{1,6}\s|[-*]\s|\d+\.\s|>|\|)/.test(text)) return text;
   if (text.includes("```")) return text;
+  text = text
+    .replace(/\s+((?:\d+[\.\)]|[一二三四五六七八九十]+、|（\d+）)\s+)/g, "\n$1")
+    .replace(/\s+(\*\*[^*\n]{2,40}\*\*[:：]?)/g, "\n$1")
+    .replace(/\s+(?=(?:结论|核心结论|一句话|建议|风险|判断|总结|要点|注意)[:：])/g, "\n");
+  if (text.includes("||")) {
+    text = text.replace(/\s*\|\|\s*/g, "\n");
+  }
   const sentences = text.match(/[^。！？；]+[。！？；]?/g) ?? [text];
   if (sentences.length < 3) return text;
   const parts: string[] = [];
@@ -237,16 +247,283 @@ function splitDenseParagraphForDisplay(line: string): string {
   return parts.length >= 2 ? parts.join("\n\n") : text;
 }
 
+function convertHtmlImgTagsToMarkdown(text: string): string {
+  return String(text ?? "").replace(/<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi, (full, src) => {
+    const alt = full.match(/\balt=["']([^"']*)["']/i)?.[1] ?? "";
+    const safeAlt = String(alt).replace(/[[\]]/g, "").trim();
+    return `![${safeAlt}](${String(src ?? "").trim()})`;
+  });
+}
+
+function isStandaloneImageSource(text: string): boolean {
+  const value = String(text ?? "").trim();
+  if (!value) return false;
+  if (/^!\[[^\]]*]\(([^)]+)\)$/.test(value)) return false;
+  if (/^https?:\/\/\S+\.(?:png|jpe?g|gif|svg|webp|bmp|ico|avif)(?:\?\S*)?$/i.test(value)) return true;
+  if (/^file-ref:[^\s)]+$/i.test(value)) return true;
+  if (/^(?:\/|[A-Za-z]:[\\/]).+\.(?:png|jpe?g|gif|svg|webp|bmp|ico|avif)$/i.test(value)) return true;
+  if (/^(?:\.{1,2}[\\/])?.+\.(?:png|jpe?g|gif|svg|webp|bmp|ico|avif)$/i.test(value)) return true;
+  return false;
+}
+
+function convertStandaloneImageLinesToMarkdown(text: string): string {
+  return String(text ?? "")
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!isStandaloneImageSource(trimmed)) return line;
+      return `![](${trimmed})`;
+    })
+    .join("\n");
+}
+
+function splitDenseHeadingLines(text: string): string {
+  return String(text ?? "")
+    .split("\n")
+    .map((line) => {
+      const matched = line.match(/^(#{1,6}\s*[^:\n]{2,80}[：:])([^\n]+)$/);
+      if (!matched) return line;
+      return `${String(matched[1] ?? "").trim()}\n${String(matched[2] ?? "").trim()}`;
+    })
+    .join("\n");
+}
+
+function expandDenseInlineBullets(text: string): string {
+  const bulletSepRe = /(?<![A-Za-z0-9])-(?=[\u4e00-\u9fa5A-Z`“"（(])/g;
+  return String(text ?? "")
+    .split("\n")
+    .map((line) => {
+      const raw = String(line ?? "");
+      const trimmed = raw.trim();
+      if (!trimmed || /^(#{1,6}\s|```|>|\|)/.test(trimmed)) return raw;
+      const matches = [...raw.matchAll(bulletSepRe)];
+      if (matches.length < 2) {
+        if (/[：:]\s*-(?=[\u4e00-\u9fa5A-Z`“"（(])/.test(raw)) {
+          return raw.replace(/[：:]\s*-(?=[\u4e00-\u9fa5A-Z`“"（(])/, (m) => `${m[0] === ":" ? ":" : "："}\n- `);
+        }
+        return raw;
+      }
+      let out = raw.replace(/[：:]\s*-(?=[\u4e00-\u9fa5A-Z`“"（(])/, (m) => `${m[0] === ":" ? ":" : "："}\n- `);
+      out = out.replace(bulletSepRe, "\n- ");
+      out = out.replace(/\n- \s+/g, "\n- ");
+      return out;
+    })
+    .join("\n");
+}
+
+function countStrongDelimiters(line: string): number {
+  const matches = String(line ?? "").match(/(?<!\\)\*\*/g);
+  return matches ? matches.length : 0;
+}
+
+function normalizeStandaloneStrongTitle(line: string): string {
+  const trimmed = String(line ?? "").trim();
+  const matched = trimmed.match(/^\*\*([^*\n]{2,60})\*\*[:：]?$/);
+  if (!matched) return line;
+  return `### ${String(matched[1] ?? "").trim()}`;
+}
+
+function balanceDanglingStrongMarkers(text: string): string {
+  const lines = String(text ?? "").split("\n");
+  const out: string[] = [];
+  let inFence = false;
+
+  for (const rawLine of lines) {
+    let line = String(rawLine ?? "");
+    const trimmed = line.trim();
+    if (/^```/.test(trimmed)) {
+      inFence = !inFence;
+      out.push(line);
+      continue;
+    }
+    if (inFence || !trimmed || /^(#{1,6}\s|>|\|)/.test(trimmed)) {
+      out.push(line);
+      continue;
+    }
+    line = normalizeStandaloneStrongTitle(line);
+    const delimiterCount = countStrongDelimiters(line);
+    if (delimiterCount % 2 === 1) {
+      line = `${line}**`;
+    }
+    out.push(line);
+  }
+
+  return out.join("\n");
+}
+
+function splitLeadingNarrativeFromTableHeader(cell: string): { prefix: string; header: string } {
+  const raw = String(cell ?? "").trim();
+  if (!raw) return { prefix: "", header: "" };
+  const punctuationMatches = [...raw.matchAll(/[。！？：:；;”"）)\]】]/g)];
+  const lastPunctuation = punctuationMatches.length ? punctuationMatches[punctuationMatches.length - 1] : null;
+  const punctuationIndex = typeof lastPunctuation?.index === "number" ? lastPunctuation.index : -1;
+  if (punctuationIndex >= 0 && punctuationIndex < raw.length - 1) {
+    const prefix = raw.slice(0, punctuationIndex + 1).trim();
+    const header = raw.slice(punctuationIndex + 1).trim();
+    if (header && header.length <= 24) return { prefix, header };
+  }
+  const spaced = raw.match(/^(.*\S)\s+(\S.{0,18})$/);
+  if (spaced && spaced[2]) {
+    return { prefix: String(spaced[1] ?? "").trim(), header: String(spaced[2] ?? "").trim() };
+  }
+  return { prefix: "", header: raw };
+}
+
+function unwrapStrongText(text: string): string {
+  const raw = String(text ?? "").trim();
+  const matched = raw.match(/^\*\*([\s\S]+)\*\*$/);
+  return matched ? String(matched[1] ?? "").trim() : raw;
+}
+
+function looksLikeShortTableHeaderCell(text: string): boolean {
+  const value = unwrapStrongText(text)
+    .replace(/[`"'“”‘’]/g, "")
+    .trim();
+  return Boolean(value) && value.length <= 14 && !/[。！？]/.test(value);
+}
+
+function looksLikeNarrativeTablePrefix(cell: string, remainingCells: string[]): boolean {
+  const value = unwrapStrongText(cell);
+  if (!value || remainingCells.length < 2) return false;
+  const shortHeaderCount = remainingCells.filter((part) => looksLikeShortTableHeaderCell(part)).length;
+  if (shortHeaderCount < Math.min(remainingCells.length, 3)) return false;
+  return value.length > 12 || /["“”]/.test(value);
+}
+
+function extractTableRowPrefixAndHeader(cells: string[]): { prefix: string; headerCells: string[] } {
+  const normalized = [...cells];
+  while (normalized.length > 1 && !String(normalized[0] ?? "").trim()) normalized.shift();
+  if (normalized.length >= 4 && looksLikeNarrativeTablePrefix(normalized[0] ?? "", normalized.slice(1))) {
+    return {
+      prefix: unwrapStrongText(normalized[0] ?? ""),
+      headerCells: normalized.slice(1),
+    };
+  }
+  const firstRow = [...normalized];
+  const { prefix, header } = splitLeadingNarrativeFromTableHeader(firstRow[0] ?? "");
+  if (prefix && header) firstRow[0] = header;
+  return { prefix, headerCells: firstRow };
+}
+
+function looksLikePipeDelimiterRow(cells: string[]): boolean {
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(String(cell ?? "").replace(/\s+/g, "")));
+}
+
+function parsePipeRow(line: string): string[] | null {
+  const raw = String(line ?? "").trim();
+  if (!raw) return null;
+  const normalized = raw.replace(/^\|+|\|+$/g, "");
+  if (!normalized || !normalized.includes("|")) return null;
+  const cells = normalized.split("|").map((cell) => cell.trim());
+  return cells.length >= 2 ? cells : null;
+}
+
+function formatPipeRow(cells: string[], columnCount: number): string {
+  const normalized = cells.slice(0, columnCount);
+  while (normalized.length < columnCount) normalized.push("");
+  return `| ${normalized.join(" | ")} |`;
+}
+
+function splitTrailingNarrativeFromTableRow(cells: string[], expectedColumnCount: number): { rowCells: string[]; suffix: string } {
+  if (cells.length <= expectedColumnCount) return { rowCells: cells, suffix: "" };
+  const rowCells = cells.slice(0, expectedColumnCount);
+  const suffixParts = cells.slice(expectedColumnCount).map((part) => String(part ?? "").trim()).filter(Boolean);
+  return {
+    rowCells,
+    suffix: suffixParts.join(" ").trim(),
+  };
+}
+
+function normalizePipeTableBlocks(text: string): string {
+  const expandedLines = String(text ?? "")
+    .split("\n")
+    .flatMap((line) => {
+      const raw = String(line ?? "");
+      if ((raw.match(/\|/g) ?? []).length < 4 || !raw.includes("||")) return [raw];
+      return raw.split(/\s*\|\|\s*/).map((part) => part.trim()).filter(Boolean);
+    });
+
+  const out: string[] = [];
+  for (let index = 0; index < expandedLines.length;) {
+    const current = expandedLines[index] ?? "";
+    const currentCells = parsePipeRow(current);
+    if (!currentCells) {
+      out.push(current);
+      index += 1;
+      continue;
+    }
+
+    const group: string[] = [current];
+    let cursor = index + 1;
+    while (cursor < expandedLines.length) {
+      const next = expandedLines[cursor] ?? "";
+      if (!parsePipeRow(next)) break;
+      group.push(next);
+      cursor += 1;
+    }
+
+    if (group.length < 2) {
+      out.push(current);
+      index += 1;
+      continue;
+    }
+
+    const parsedRows = group.map((row) => parsePipeRow(row)).filter((row): row is string[] => Array.isArray(row) && row.length >= 2);
+    if (parsedRows.length < 2) {
+      out.push(...group);
+      index = cursor;
+      continue;
+    }
+
+    const { prefix, headerCells } = extractTableRowPrefixAndHeader(parsedRows[0] ?? []);
+    const hasDelimiter = looksLikePipeDelimiterRow(parsedRows[1] ?? []);
+    const dataRows = [headerCells, ...parsedRows.slice(1)];
+    const columnCount = Math.max(...dataRows.map((row) => row.length), 2);
+    const tableLines: string[] = [];
+    if (prefix) tableLines.push(prefix, "");
+    tableLines.push(formatPipeRow(headerCells, columnCount));
+    tableLines.push(
+      hasDelimiter
+        ? formatPipeRow(parsedRows[1] ?? [], columnCount)
+        : formatPipeRow(Array.from({ length: columnCount }, () => "---"), columnCount),
+    );
+    const suffixNotes: string[] = [];
+    const startRow = hasDelimiter ? 2 : 1;
+    for (const row of parsedRows.slice(startRow)) {
+      const { rowCells, suffix } = splitTrailingNarrativeFromTableRow(row, columnCount);
+      tableLines.push(formatPipeRow(rowCells, columnCount));
+      if (suffix) suffixNotes.push(suffix);
+    }
+    if (suffixNotes.length) tableLines.push("", ...suffixNotes);
+    out.push(...tableLines);
+    index = cursor;
+  }
+
+  return out.join("\n");
+}
+
 function normalizeAssistantMarkdownForDisplay(raw: string): string {
   let text = String(raw ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
   if (!text) return "";
+  text = convertHtmlImgTagsToMarkdown(text);
+  text = text.replace(/(\*\*[^*\n]{2,120}\*\*)(?=\|[^|\n]+\|)/g, "$1\n\n");
+  text = text.replace(/(\|[^\n]*\|)(?=\*\*[^*\n]{2,80}\*\*[:：]?)/g, "$1\n\n");
   text = text.replace(/([^\n])\s*(---)\s*(?=#{1,6})/g, "$1\n\n$2\n\n");
   text = text.replace(/([^\n])\s*(#{1,6})(?=[^\s#])/g, "$1\n\n$2 ");
   text = text.replace(/(^|\n)(#{1,6})([^ \n#])/g, "$1$2 $3");
+  text = text.replace(/(^|\n)(\d+)\.(?=[^\s.\d])/g, "$1$2. ");
+  text = text.replace(/(^|\n)(\d+\))(?=[^\s])/g, "$1$2 ");
   text = text.replace(/([。！？；：])\s*((?:#{1,6}\s*)?\d+\.\s+)/g, "$1\n\n$2");
+  text = text.replace(/([。！？；：])\s*(\d+\)\s+)/g, "$1\n\n$2");
   text = text.replace(/([。！？；：])\s*([-*]\s+)/g, "$1\n\n$2");
   text = text.replace(/([。！？；：])\s*(>)/g, "$1\n\n$2");
+  text = text.replace(/([^\n])\n((?:\|[-: ]+\|)+)\n/g, "$1\n\n$2\n");
   text = text.replace(/\n{3,}/g, "\n\n");
+  text = splitDenseHeadingLines(text);
+  text = expandDenseInlineBullets(text);
+  text = normalizePipeTableBlocks(text);
+  text = convertStandaloneImageLinesToMarkdown(text);
+  text = balanceDanglingStrongMarkers(text);
   const lines = text.split("\n");
   const normalized = lines
     .map((line) => splitDenseParagraphForDisplay(line))
@@ -264,6 +541,120 @@ async function copyPlainText(text: string) {
     if (!api?.writeText) throw new Error("COPY_UNAVAILABLE");
     await api.writeText(text);
   }
+}
+
+function decodeFileUrlPath(src: string): string | null {
+  try {
+    const url = new URL(src);
+    if (url.protocol !== "file:") return null;
+    const pathname = decodeURIComponent(url.pathname || "");
+    if (!pathname) return null;
+    if (/^\/[A-Za-z]:\//.test(pathname)) return pathname.slice(1);
+    return pathname;
+  } catch {
+    return null;
+  }
+}
+
+function resolveMarkdownImageSource(rootDir: string | null | undefined, rawSrc: string | undefined): { kind: "remote"; src: string } | { kind: "local"; absPath: string } | null {
+  const src = String(rawSrc ?? "").trim();
+  if (!src) return null;
+  if (/^data:image\//i.test(src) || /^blob:/i.test(src) || /^https?:\/\//i.test(src)) {
+    return { kind: "remote", src };
+  }
+  const decodedFileRef = parseFileRefHref(src);
+  if (decodedFileRef) {
+    const abs = resolveOpenableFileRef(rootDir, decodedFileRef);
+    return abs ? { kind: "local", absPath: abs } : null;
+  }
+  const fileUrlPath = decodeFileUrlPath(src);
+  if (fileUrlPath) return { kind: "local", absPath: fileUrlPath };
+  if (MARKDOWN_IMAGE_EXT_RE.test(src)) {
+    const abs = resolveOpenableFileRef(rootDir, src) ?? (/^(\/|[A-Za-z]:[\\/])/.test(src) ? src.replaceAll("\\", "/") : null);
+    if (abs) return { kind: "local", absPath: abs };
+  }
+  return { kind: "remote", src };
+}
+
+function MarkdownImage({
+  src,
+  alt,
+  title,
+  rootDir,
+}: {
+  src?: string;
+  alt?: string;
+  title?: string;
+  rootDir: string | null | undefined;
+}) {
+  const resolved = useMemo(() => resolveMarkdownImageSource(rootDir, src), [rootDir, src]);
+  const [resolvedSrc, setResolvedSrc] = useState<string>(() => resolved?.kind === "remote" ? resolved.src : "");
+  const [loadError, setLoadError] = useState<string>("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadError("");
+    if (!resolved) {
+      setResolvedSrc("");
+      return;
+    }
+    if (resolved.kind === "remote") {
+      setResolvedSrc(resolved.src);
+      return;
+    }
+    const cached = localImageDataUrlCache.get(resolved.absPath);
+    if (cached) {
+      setResolvedSrc(cached);
+      return;
+    }
+    setResolvedSrc("");
+    const api = window.desktop?.fs?.readImageDataUrl;
+    if (!api) {
+      setLoadError("当前桌面端不支持本地图像预览");
+      return;
+    }
+    void api(resolved.absPath).then((ret) => {
+      if (cancelled) return;
+      if (!ret?.ok || !ret.dataUrl) {
+        setLoadError(String(ret?.error ?? "图片加载失败"));
+        return;
+      }
+      localImageDataUrlCache.set(resolved.absPath, ret.dataUrl);
+      setResolvedSrc(ret.dataUrl);
+    }).catch((err) => {
+      if (cancelled) return;
+      setLoadError(String((err as any)?.message ?? err ?? "图片加载失败"));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [resolved]);
+
+  const localAbsPath = resolved?.kind === "local" ? resolved.absPath : "";
+  const caption = String(alt ?? title ?? "").trim();
+
+  return (
+    <figure className="chat-markdown-image-figure">
+      {resolvedSrc ? (
+        <img
+          src={resolvedSrc}
+          alt={alt ?? ""}
+          title={title}
+          loading="lazy"
+          className="chat-markdown-image"
+          onClick={() => {
+            if (!localAbsPath) return;
+            void window.desktop?.exec?.openFile?.(localAbsPath);
+          }}
+        />
+      ) : (
+        <div className="chat-markdown-image-placeholder">
+          {loadError || "图片加载中…"}
+        </div>
+      )}
+      {caption ? <figcaption className="chat-markdown-image-caption">{caption}</figcaption> : null}
+    </figure>
+  );
 }
 
 export function ChatArea() {
@@ -1021,7 +1412,17 @@ function AssistantMessage({
             <div className="markdown-body chat-markdown-body max-w-none break-words">
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
-                urlTransform={(url) => url.startsWith("file-ref:") ? url : defaultUrlTransform(url)}
+                urlTransform={(url) => {
+                  if (
+                    url.startsWith("file-ref:")
+                    || /^data:image\//i.test(url)
+                    || /^file:\/\//i.test(url)
+                    || /^(\/|[A-Za-z]:[\\/])/.test(url)
+                  ) {
+                    return url;
+                  }
+                  return defaultUrlTransform(url);
+                }}
                 components={{
                   a: ({ href, children }) => {
                     const filePath = parseFileRefHref(href);
@@ -1054,6 +1455,14 @@ function AssistantMessage({
                       </a>
                     );
                   },
+                  table: ({ children }) => (
+                    <div className="chat-markdown-table-wrap">
+                      <table>{children}</table>
+                    </div>
+                  ),
+                  img: ({ src, alt, title }) => (
+                    <MarkdownImage src={src} alt={alt} title={title} rootDir={rootDir} />
+                  ),
                 }}
               >
                 {markdownText}
