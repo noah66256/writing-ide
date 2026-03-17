@@ -985,16 +985,9 @@ export class GatewayRuntime implements AgentRuntime {
     return [];
   }
 
-  /**
-   * getFollowUpMessages：循环即将结束时的追加消息（阻止过早结束）。
-   * - 如果 run.done 已触发，不追加（尊重显式终止信号）
-   * - 如果有未完成的 todo，注入追问让 Agent 继续
-   * - 如果 hasPlanCommitment 但无工具调用，提醒执行
-   */
-  private async _getFollowUpMessages(): Promise<AgentMessage[]> {
-    // run.done 已触发，不再追加
-    if (this.outcome.reason === "run_done") return [];
-
+  private _resolveStyleWorkflowFollowUp():
+    | { item: CanonicalTranscriptItem; phase: string; skillId: "style_imitate" | "style_imitate_v2" }
+    | null {
     const runCtx: any = this.config.runCtx;
     const gates: any = runCtx.gates ?? {};
     const activeSkills = Array.isArray(runCtx.activeSkills) ? runCtx.activeSkills : [];
@@ -1004,93 +997,90 @@ export class GatewayRuntime implements AgentRuntime {
       activeSkillIds.includes("style_imitate_v2") ||
       (gates.styleGateEnabled && runCtx.intent?.isWritingTask);
 
-    // Style_imitate（v1/v2）：当风格闭环未完成且仅产生纯文本输出时，禁止模型"自然结束"，注入 runtime_hint 促使其按 Skill 闭环补齐。
-    // - 仅在 style skill 激活且为写作任务时生效；
-    // - 依赖 RunState.workflowRetryBudget 控制最大重试次数，避免死循环；
-    // - 提示内容明确要求执行：kb.search → 草稿 draft → lint.copy → lint.style → write/edit。
-    if (
-      styleSkillActive &&
-      gates.styleGateEnabled &&
-      gates.lintGateEnabled &&
-      runCtx.intent?.isWritingTask
-    ) {
-      const st: any = this.runState as any;
+    if (!(styleSkillActive && gates.styleGateEnabled && gates.lintGateEnabled && runCtx.intent?.isWritingTask)) {
+      return null;
+    }
 
-      // ── v2 分支：使用声明式 workflow 的 followUp 消息 ──
-      const wfDecls: Map<string, WorkflowDeclaration> | undefined = runCtx.activeWorkflowDeclarations;
-      const v2Workflow = wfDecls?.get("style_imitate_v2");
-      if (v2Workflow) {
-        const followUpMsg = resolveFollowUp(v2Workflow, st);
-        if (followUpMsg) {
-          const budget = Math.max(0, Math.floor(Number(st.workflowRetryBudget ?? 0)));
-          if (budget > 0) {
-            st.workflowRetryBudget = budget - 1;
-            const snapshot = resolvePhase(v2Workflow, st);
-            const item: CanonicalTranscriptItem = {
-              kind: "runtime_hint",
-              text: followUpMsg,
-              reasonCodes: ["style_workflow_followup", "phase:" + snapshot.currentPhase],
-            };
-            try {
-              this.config.runCtx.writeEvent("run.notice", {
-                turn: this.turn,
-                kind: "warn",
-                title: "StyleWorkflowTextBlocked",
-                message: "检测到 style_imitate_v2 已启用但尚未完成风格闭环（phase=" + snapshot.currentPhase + "），注入 runtime_hint。",
-              });
-            } catch {
-              // 非关键路径，忽略审计异常
-            }
-            return [item as unknown as AgentMessage];
-          }
+    const st: any = this.runState as any;
+    const wfDecls: Map<string, WorkflowDeclaration> | undefined = runCtx.activeWorkflowDeclarations;
+    const v2Workflow = wfDecls?.get("style_imitate_v2");
+    if (v2Workflow) {
+      const followUpMsg = resolveFollowUp(v2Workflow, st);
+      if (!followUpMsg) return null;
+      const snapshot = resolvePhase(v2Workflow, st);
+      return {
+        skillId: "style_imitate_v2",
+        phase: String(snapshot.currentPhase ?? "unknown").trim() || "unknown",
+        item: {
+          kind: "runtime_hint",
+          text: followUpMsg,
+          reasonCodes: ["style_workflow_followup", "phase:" + String(snapshot.currentPhase ?? "unknown").trim()],
+        },
+      };
+    }
+
+    const lintGateDegraded = Boolean(st.lintGateDegraded);
+    const styleLintAccepted = Boolean(st.styleLintPassed || lintGateDegraded);
+    const styleCompleted = Boolean(
+      st.hasStyleKbSearch &&
+      st.hasDraftText &&
+      st.copyLintPassed &&
+      styleLintAccepted,
+    );
+    if (styleCompleted) return null;
+
+    const currentPhase =
+      !st.hasStyleKbSearch ? "need_style_kb"
+      : !st.hasDraftText ? "need_draft"
+      : !st.copyLintPassed ? "need_copy_lint"
+      : !styleLintAccepted ? "need_style_lint"
+      : "completed";
+    const followUpText =
+      currentPhase === "need_style_kb"
+        ? "当前已启用 style_imitate，但风格样例检索还没完成。\n请先调用 kb.search，从 purpose=style 的风格库检索模板/规则卡；不要先写草稿，也不要直接交付终稿。"
+        : currentPhase === "need_draft"
+          ? "当前已启用 style_imitate，风格样例已具备。\n请先调用 write 生成候选稿；不要直接把聊天文本当成终稿交付。"
+          : currentPhase === "need_copy_lint"
+            ? "你已经产出了候选稿，现在必须进入复述风险检查。\n请先调用 lint.copy 对候选稿做复述风险审计；在 copy lint 通过前，不要继续终稿写入。"
+            : "copy lint 已通过，现在必须进入风格校验。\n请先调用 lint.style 检查结构、节奏和语气；在 style lint 通过前，不要继续终稿写入。";
+    return {
+      skillId: "style_imitate",
+      phase: currentPhase,
+      item: {
+        kind: "runtime_hint",
+        text: followUpText,
+        reasonCodes: ["style_workflow_followup", "phase:" + currentPhase],
+      },
+    };
+  }
+
+  /**
+   * getFollowUpMessages：循环即将结束时的追加消息（阻止过早结束）。
+   * - 如果 run.done 已触发，不追加（尊重显式终止信号）
+   * - 如果有未完成的 todo，注入追问让 Agent 继续
+   * - 如果 hasPlanCommitment 但无工具调用，提醒执行
+   */
+  private async _getFollowUpMessages(): Promise<AgentMessage[]> {
+    // run.done 已触发，不再追加
+    if (this.outcome.reason === "run_done") return [];
+    const styleFollowUp = this._resolveStyleWorkflowFollowUp();
+    if (styleFollowUp) {
+      const st: any = this.runState as any;
+      const budget = Math.max(0, Math.floor(Number(st.workflowRetryBudget ?? 0)));
+      if (budget > 0) {
+        st.workflowRetryBudget = budget - 1;
+        try {
+          this.config.runCtx.writeEvent("run.notice", {
+            turn: this.turn,
+            kind: "warn",
+            title: "StyleWorkflowTextBlocked",
+            message:
+              `检测到 ${styleFollowUp.skillId} 已启用但尚未完成风格闭环（phase=${styleFollowUp.phase}），本轮纯文本收口已被拦截，将注入 runtime_hint。`,
+          });
+        } catch {
+          // 非关键路径，忽略审计异常
         }
-      } else {
-        // ── v1 分支：硬编码逻辑 ──
-        const lintGateDegraded = Boolean(st.lintGateDegraded);
-        const styleLintAccepted = Boolean(st.styleLintPassed || lintGateDegraded);
-        const styleCompleted = Boolean(
-          st.hasStyleKbSearch &&
-          st.hasDraftText &&
-          st.copyLintPassed &&
-          styleLintAccepted,
-        );
-        if (!styleCompleted) {
-          const budget = Math.max(0, Math.floor(Number(st.workflowRetryBudget ?? 0)));
-          if (budget > 0) {
-            st.workflowRetryBudget = budget - 1;
-            const currentPhase =
-              !st.hasStyleKbSearch ? "need_style_kb"
-              : !st.hasDraftText ? "need_draft"
-              : !st.copyLintPassed ? "need_copy_lint"
-              : !styleLintAccepted ? "need_style_lint"
-              : "completed";
-            const followUpText =
-              currentPhase === "need_style_kb"
-                ? "当前已启用 style_imitate，但风格样例检索还没完成。\n请先调用 kb.search，从 purpose=style 的风格库检索模板/规则卡；不要先写草稿，也不要直接交付终稿。"
-                : currentPhase === "need_draft"
-                  ? "当前已启用 style_imitate，风格样例已具备。\n请先调用 write 生成候选稿；不要直接把聊天文本当成终稿交付。"
-                  : currentPhase === "need_copy_lint"
-                    ? "你已经产出了候选稿，现在必须进入复述风险检查。\n请先调用 lint.copy 对候选稿做复述风险审计；在 copy lint 通过前，不要继续终稿写入。"
-                    : "copy lint 已通过，现在必须进入风格校验。\n请先调用 lint.style 检查结构、节奏和语气；在 style lint 通过前，不要继续终稿写入。";
-            const item: CanonicalTranscriptItem = {
-              kind: "runtime_hint",
-              text: followUpText,
-              reasonCodes: ["style_workflow_followup", "phase:" + currentPhase],
-            };
-            try {
-              this.config.runCtx.writeEvent("run.notice", {
-                turn: this.turn,
-                kind: "warn",
-                title: "StyleWorkflowTextBlocked",
-                message:
-                  "检测到 style_imitate 已启用但尚未完成风格闭环（phase=" + currentPhase + "），本轮纯文本收口已被拦截，将注入 runtime_hint。",
-              });
-            } catch {
-              // 非关键路径，忽略审计异常
-            }
-            return [item as unknown as AgentMessage];
-          }
-        }
+        return [styleFollowUp.item as unknown as AgentMessage];
       }
     }
 
@@ -2072,6 +2062,27 @@ export class GatewayRuntime implements AgentRuntime {
 
         // run.done 终止语义：与旧 runner 保持一致
         if (rawToolName === "run.done") {
+          const styleFollowUp = this._resolveStyleWorkflowFollowUp();
+          const budget = Math.max(0, Math.floor(Number((this.runState as any).workflowRetryBudget ?? 0)));
+          if (styleFollowUp && budget > 0) {
+            try {
+              this.config.runCtx.writeEvent("run.notice", {
+                turn: this.turn,
+                kind: "warn",
+                title: "StyleWorkflowRunDoneIntercepted",
+                message: `检测到 ${styleFollowUp.skillId} 闭环未完成（phase=${styleFollowUp.phase}），拦截 run.done，下一轮继续推进。`,
+                detail: {
+                  toolCallId: event.toolCallId,
+                  phase: styleFollowUp.phase,
+                  remainingBudget: budget,
+                },
+              });
+            } catch {
+              // 非关键路径，忽略审计异常
+            }
+            this.toolCallSnapshots.delete(event.toolCallId);
+            return;
+          }
           this._activateDeliveryLatch("run_done");
           this._setOutcome({
             status: "completed",

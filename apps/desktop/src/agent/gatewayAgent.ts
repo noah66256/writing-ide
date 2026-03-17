@@ -10,6 +10,7 @@ import { useSkillStore } from "../state/skillStore";
 import { useMemoryStore } from "../state/memoryStore";
 import { useModelStore } from "../state/modelStore";
 import { startGatewayRunWs } from "./wsTransport";
+import { resolveImplicitStyleLibraryIds } from "./kbSelection";
 
 export function authHeader(): Record<string, string> {
   const token = String(useAuthStore.getState().accessToken ?? "").trim();
@@ -1337,7 +1338,13 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   const preferModelId = String(runAny.agentModel || runAny.model || "").trim();
   // 仅使用本次消息 @提及的库（绑定机制已废弃）
   const kbMentionIds = Array.isArray(extra?.kbMentionIds) ? extra!.kbMentionIds : [];
-  const kbSelectedIds = Array.from(new Set(kbMentionIds));
+  const kbAttachedIds = useRunStore.getState().kbAttachedLibraryIds ?? [];
+  const kbSelectedIds = resolveImplicitStyleLibraryIds({
+    mentionedLibraryIds: kbMentionIds,
+    attachedLibraryIds: kbAttachedIds,
+    libraries: kbLibraries,
+    mainDoc: mainDocForPack as any,
+  });
   // PROJECT_STATE：只提供最小信息（避免"光标文件/全量文件列表"对模型产生过强暗示）
   const state = {
     fileCount: proj.files.length,

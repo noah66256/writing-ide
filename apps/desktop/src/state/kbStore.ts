@@ -86,6 +86,8 @@ export type KbLibrary = {
   updatedAt: string;
 };
 
+export type KbLibrarySelectionError = "STYLE_LIBRARY_AMBIGUOUS";
+
 export type KbLibraryTrashItem = {
   library: KbLibrary;
   deletedAt: string;

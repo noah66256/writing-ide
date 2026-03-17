@@ -37,6 +37,7 @@ import {
   applyTextEdits,
   unifiedDiff,
 } from "./gatewayAgent";
+import { resolveImplicitStyleLibraryIds } from "./kbSelection";
 
 function buildProjectMapSegmentV1(args: { rootDir: string | null; indexFiles: Array<{ path: string; mtime?: number; type?: string }> | null }) {
   const rootDir = args.rootDir ? String(args.rootDir) : "";
@@ -732,7 +733,12 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           ? Array.from(new Set(args.kbMentionIds.map((x) => String(x ?? "").trim()).filter(Boolean)))
           : [];
         const att = rt.getKbAttachedLibraryIds() ?? [];
-        const sidecarLibraryIds = mentionLibIds.length ? mentionLibIds : att;
+        const sidecarLibraryIds = resolveImplicitStyleLibraryIds({
+          mentionedLibraryIds: mentionLibIds,
+          attachedLibraryIds: att,
+          libraries: useKbStore.getState().libraries ?? [],
+          mainDoc: rt.getMainDoc() as any,
+        });
         let styleLinterLibraries: any[] | undefined;
         if (Array.isArray(sidecarLibraryIds) && sidecarLibraryIds.length) {
           const ret = await buildStyleLinterLibrariesSidecar({ libraryIds: sidecarLibraryIds, maxLibraries: 6 }).catch(() => ({ ok: false } as any));

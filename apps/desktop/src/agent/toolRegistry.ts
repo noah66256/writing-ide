@@ -9,6 +9,7 @@ import { requestInlineFileOpConfirm } from "../state/inlineFileOpConfirm";
 import { buildCurrentSnapshot, useConversationStore } from "../state/conversationStore";
 import { TOOL_LIST } from "@ohmycrab/tools";
 import { getGatewayBaseUrl } from "./gatewayUrl";
+import { resolveImplicitStyleLibrarySelection } from "./kbSelection";
 
 function authHeader(): Record<string, string> {
   const token = String(useAuthStore.getState().accessToken ?? "").trim();
@@ -389,15 +390,19 @@ export async function buildStyleLinterLibrariesSidecar(args?: {
   const explicit = Array.isArray(args?.libraryIds) ? args!.libraryIds.map((x) => String(x ?? "").trim()).filter(Boolean) : [];
   const mentioned = getKbMentionLibraryIdsFromLatestUserStep();
   const attached = useRunStore.getState().kbAttachedLibraryIds ?? [];
-
-  await useKbStore.getState().refreshLibraries().catch(() => void 0);
   const libsMeta = useKbStore.getState().libraries ?? [];
   const metaById = new Map(libsMeta.map((l: any) => [String(l.id ?? ""), l]));
-
-  const candidates = (explicit.length ? explicit : mentioned.length ? mentioned : attached).map((x: any) => String(x ?? "").trim()).filter(Boolean);
+  const selection = resolveImplicitStyleLibrarySelection({
+    preferredLibraryIds: explicit,
+    mentionedLibraryIds: mentioned,
+    attachedLibraryIds: attached,
+    libraries: libsMeta,
+    mainDoc: useRunStore.getState().mainDoc as any,
+  });
+  const candidates = selection.libraryIds.map((x: any) => String(x ?? "").trim()).filter(Boolean);
   const styleLibIds = candidates.filter((id: string) => String(metaById.get(id)?.purpose ?? "") === "style");
   const libraryIds = (styleLibIds.length ? styleLibIds : []).slice(0, maxLibraries);
-  if (!libraryIds.length) return { ok: false as const, error: "NO_STYLE_LIBRARY_SELECTED" as const };
+  if (!libraryIds.length) return { ok: false as const, error: selection.error ?? ("NO_STYLE_LIBRARY_SELECTED" as const) };
 
   const isPlaybookDoc = (doc: any) => {
     const rel = String(doc?.importedFrom?.kind === "project" ? doc?.importedFrom?.relPath ?? "" : "").trim();
@@ -1638,8 +1643,20 @@ const tools: ToolDefinition[] = [
         String(md?.styleContractV1?.libraryId ?? "").trim(),
         String(md?.stylePlanV1?.libraryId ?? "").trim(),
       ].filter(Boolean);
-      const libraryIds = explicitLibs.length ? explicitLibs : mentioned.length ? mentioned : attached.length ? attached : libFromMainDoc;
-      if (!libraryIds.length) return { ok: false, error: "NO_LIBRARY_SELECTED" };
+      const selection = resolveImplicitStyleLibrarySelection({
+        libraries: useKbStore.getState().libraries ?? [],
+        mainDoc: md,
+      });
+      const libraryIds = explicitLibs.length
+        ? explicitLibs
+        : mentioned.length
+          ? mentioned
+          : attached.length
+            ? attached
+            : libFromMainDoc.length
+              ? libFromMainDoc
+              : selection.libraryIds;
+      if (!libraryIds.length) return { ok: false, error: selection.error ?? "NO_LIBRARY_SELECTED" };
 
       const ret = await useKbStore.getState().searchForAgent({ query, kind, facetIds, cardTypes, anchorParagraphIndexMax, anchorFromEndMax, debug, libraryIds, perDocTopN, topDocs });
       if (!ret.ok) return { ok: false, error: ret.error ?? "SEARCH_FAILED" };
@@ -1753,7 +1770,7 @@ const tools: ToolDefinition[] = [
       // 选择风格库（优先 purpose=style；用于取少量样例作为对照源）
       const explicitLibs = Array.isArray(args.libraryIds) ? (args.libraryIds as any[]).map((x) => String(x ?? "").trim()).filter(Boolean) : [];
       const sidecar = await buildStyleLinterLibrariesSidecar({ libraryIds: explicitLibs, maxLibraries: 6 }).catch(() => ({ ok: false } as any));
-      if (!sidecar?.ok) return { ok: false, error: "NO_LIBRARY_SELECTED" };
+      if (!sidecar?.ok) return { ok: false, error: sidecar.error ?? "NO_LIBRARY_SELECTED" };
       const libraryIds = sidecar.libraryIds ?? [];
 
       const librariesPayload: any[] = Array.isArray(sidecar.libraries) ? sidecar.libraries : [];
@@ -1868,7 +1885,7 @@ const tools: ToolDefinition[] = [
       // 选择风格库（优先 purpose=style）
       const explicitLibs = Array.isArray(args.libraryIds) ? (args.libraryIds as any[]).map((x) => String(x ?? "").trim()).filter(Boolean) : [];
       const sidecar = await buildStyleLinterLibrariesSidecar({ libraryIds: explicitLibs, maxLibraries: 6 }).catch(() => ({ ok: false } as any));
-      if (!sidecar?.ok) return { ok: false, error: "NO_LIBRARY_SELECTED" };
+      if (!sidecar?.ok) return { ok: false, error: sidecar.error ?? "NO_LIBRARY_SELECTED" };
       const libraryIds = sidecar.libraryIds ?? [];
 
       const base = gatewayBaseUrl();
