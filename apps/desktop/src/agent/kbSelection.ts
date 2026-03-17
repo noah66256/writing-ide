@@ -1,11 +1,16 @@
-import type { KbLibrary, KbLibrarySelectionError } from "../state/kbStore";
+import type { KbLibrarySelectionError } from "../state/kbStore";
 import type { MainDoc } from "../state/runStore";
+
+type KbLibraryLike = {
+  id: string;
+  purpose?: string;
+};
 
 type ResolveImplicitStyleLibrarySelectionArgs = {
   preferredLibraryIds?: string[];
   mentionedLibraryIds?: string[];
   attachedLibraryIds?: string[];
-  libraries?: KbLibrary[];
+  libraries?: KbLibraryLike[];
   mainDoc?: MainDoc | null | undefined;
 };
 
@@ -19,7 +24,7 @@ function normalizeIds(ids?: string[]) {
   return Array.from(new Set((Array.isArray(ids) ? ids : []).map((x) => String(x ?? "").trim()).filter(Boolean)));
 }
 
-function mainDocStyleLibraryIds(mainDoc?: MainDoc | null, libraries?: KbLibrary[]) {
+function mainDocStyleLibraryIds(mainDoc?: MainDoc | null, libraries?: KbLibraryLike[]) {
   const metaById = new Map((Array.isArray(libraries) ? libraries : []).map((lib) => [String(lib?.id ?? "").trim(), lib]));
   return normalizeIds([
     String((mainDoc as any)?.styleContractV1?.libraryId ?? "").trim(),

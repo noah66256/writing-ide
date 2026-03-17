@@ -287,6 +287,7 @@ function parseManifest(raw, skillDir, fallbackId) {
     ...(typeof raw.builtin === "boolean" ? { builtin: raw.builtin } : {}),
     ...(mcp ? { mcp } : {}),
     ...(isObj(raw.workflow) ? { workflow: raw.workflow } : {}),
+    ...(isObj(raw.pipeline) ? { pipeline: raw.pipeline } : {}),
     ui: { badge, ...(color ? { color } : {}) },
   };
 }

@@ -1,4 +1,5 @@
 import type { AgentMode } from "./index.js";
+import type { PipelineArtifactsV1 } from "./styleWorkflowTypes.js";
 
 export type ParsedToolCall = {
   name: string;
@@ -181,6 +182,21 @@ export type RunState = {
   todoGateSatisfiedAtTurn: number | null;
   deliveryLatchActivatedAtTurn: number | null;
   toolLoopGuardReason: string | null;
+  pipelineStepIndex: number;
+  pipelineCompleted: boolean;
+  hasToneCard: boolean;
+  hasStructureOutline: boolean;
+  hasOpeningDraft: boolean;
+  hasBodyDraft: boolean;
+  hasStyledDraft: boolean;
+  hasPolishedDraft: boolean;
+  hasFinalDraft: boolean;
+  lintLoopCompleted: boolean;
+  bestStyleScore: number | null;
+  bestStyleArtifactId: string | null;
+  bestCopyScore: number | null;
+  bestCopyArtifactId: string | null;
+  pipelineArtifacts: PipelineArtifactsV1 | null;
 };
 
 /**
@@ -207,6 +223,21 @@ export const PERSISTABLE_STATE_KEYS: readonly (keyof RunState)[] = [
   "bestStyleDraft",
   "lastStyleLint",
   "lastCopyLint",
+  "pipelineStepIndex",
+  "pipelineCompleted",
+  "hasToneCard",
+  "hasStructureOutline",
+  "hasOpeningDraft",
+  "hasBodyDraft",
+  "hasStyledDraft",
+  "hasPolishedDraft",
+  "hasFinalDraft",
+  "lintLoopCompleted",
+  "bestStyleScore",
+  "bestStyleArtifactId",
+  "bestCopyScore",
+  "bestCopyArtifactId",
+  "pipelineArtifacts",
 ] as const;
 
 export function createInitialRunState(args?: { protocolRetryBudget?: number; workflowRetryBudget?: number; lintReworkBudget?: number }): RunState {
@@ -266,6 +297,21 @@ export function createInitialRunState(args?: { protocolRetryBudget?: number; wor
     todoGateSatisfiedAtTurn: null,
     deliveryLatchActivatedAtTurn: null,
     toolLoopGuardReason: null,
+    pipelineStepIndex: 0,
+    pipelineCompleted: false,
+    hasToneCard: false,
+    hasStructureOutline: false,
+    hasOpeningDraft: false,
+    hasBodyDraft: false,
+    hasStyledDraft: false,
+    hasPolishedDraft: false,
+    hasFinalDraft: false,
+    lintLoopCompleted: false,
+    bestStyleScore: null,
+    bestStyleArtifactId: null,
+    bestCopyScore: null,
+    bestCopyArtifactId: null,
+    pipelineArtifacts: null,
   };
 }
 
@@ -519,7 +565,9 @@ export function deriveStyleGate(args: {
   const hasStyleLibrary = args.mode !== "chat" && styleLibIds.length > 0;
   const hasNonStyleLibraries = args.mode !== "chat" && nonStyleLibIds.length > 0;
   const skillIds = Array.isArray(args.activeSkillIds) ? args.activeSkillIds.map((x) => String(x ?? "").trim()).filter(Boolean) : null;
-  const styleSkillActiveByIds = skillIds ? new Set(skillIds).has("style_imitate") : false;
+  const styleSkillActiveByIds = skillIds
+    ? ["style_imitate", "style_imitate_v2", "style_imitate_v3"].some((id) => new Set(skillIds).has(id))
+    : false;
   // Skill 激活判定（fail-close）：
   // - 只要当前有 purpose=style 的库且本轮为写作任务，就视为需要拉起 style_imitate Skill；
   // - ACTIVE_SKILLS(JSON) 中缺失 style_imitate 时，仍然按写作意图自动启用 Gate，防止因桌面侧遗漏导致风格闭环失效；

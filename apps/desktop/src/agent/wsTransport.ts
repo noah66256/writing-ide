@@ -616,7 +616,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             mode: args.mode as any, userPrompt: String(args.prompt ?? ""),
             mainDocRunIntent: main?.runIntent, kbSelected: [] as any,
           });
-          const hasStyleSkill = activeForThisRun.some((s: any) => String(s?.id ?? "") === "style_imitate");
+          const hasStyleSkill = activeForThisRun.some((s: any) => ["style_imitate", "style_imitate_v2", "style_imitate_v3"].includes(String(s?.id ?? "")));
           if (hasStyleSkill) {
             const fpRet = await useKbStore.getState().getLatestLibraryFingerprint(libId).catch(() => ({ ok: false } as any));
             const snapshot = fpRet?.ok ? (fpRet as any).snapshot : null;
@@ -955,6 +955,8 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           ...(args.images?.length ? { images: args.images } : {}),
           ...(targetAgentIds ? { targetAgentIds } : {}),
           ...(args.activeSkillIds?.length ? { activeSkillIds: args.activeSkillIds } : {}),
+          ...(args.styleExecutionMode ? { styleExecutionMode: args.styleExecutionMode } : {}),
+          ...(args.stylePipelinePayload ? { stylePipelinePayload: args.stylePipelinePayload } : {}),
           ...(userSkillManifests ? { userSkillManifests } : {}),
         },
       }));

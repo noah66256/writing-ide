@@ -3,7 +3,21 @@ import { useRunStore, type ImageAttachment, type Mode, type OpMode } from "../st
 import { useKbStore } from "../state/kbStore";
 import { useAuthStore } from "../state/authStore";
 import { facetLabel, getFacetPack } from "../kb/facets";
-import { activateSkills, detectRunIntent, listRegisteredSkills, BUILTIN_SUB_AGENTS, looksLikeFreshWritingTaskPrompt } from "@ohmycrab/agent-core";
+import {
+  activateSkills,
+  detectRunIntent,
+  listRegisteredSkills,
+  BUILTIN_SUB_AGENTS,
+  looksLikeFreshWritingTaskPrompt,
+  STYLE_WORKFLOW_PIPELINE_CONFIG_V1,
+  type ClusterRulesV1,
+  type PlaybookDimensionV1,
+  type StepMaterialsV1,
+  type StyleExecutionMode,
+  type StylePipelinePayloadV1,
+  type StyleWorkflowStepIdV1,
+  type TaskSpecV1,
+} from "@ohmycrab/agent-core";
 import { usePersonaStore } from "../state/personaStore";
 import { useTeamStore, getEffectiveAgents } from "../state/teamStore";
 import { useSkillStore } from "../state/skillStore";
@@ -45,9 +59,259 @@ export type GatewayRunArgs = {
   activeSkillIds?: string[];
   kbMentionIds?: string[];
   images?: ImageAttachment[];
+  styleExecutionMode?: StyleExecutionMode;
+  stylePipelinePayload?: StylePipelinePayloadV1;
   /** 本次 run 对应的对话 ID，用于多任务并发路由 */
   convId?: string;
 };
+
+function inferStylePipelineSubtype(stepId: StyleWorkflowStepIdV1, type: string) {
+  if (type !== "one_liner") return undefined;
+  if (stepId === "opening") return "hook" as const;
+  if (stepId === "polish") return "punchline" as const;
+  if (stepId === "closure") return "ending" as const;
+  return "generic" as const;
+}
+
+function normalizeClusterRulesV1(args: {
+  clusterId: string;
+  raw: any;
+  fallbackValues?: any;
+  fallbackAnalysisLenses?: any;
+}): ClusterRulesV1 | null {
+  const raw = args.raw && typeof args.raw === "object" && !Array.isArray(args.raw) ? args.raw : {};
+  const valuesRaw = raw.values && typeof raw.values === "object" && !Array.isArray(raw.values)
+    ? raw.values
+    : (args.fallbackValues && typeof args.fallbackValues === "object" ? args.fallbackValues : {});
+  const principles = Array.isArray(valuesRaw.principles) ? valuesRaw.principles.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
+  const preferredFrames = Array.isArray(valuesRaw.preferredFrames) ? valuesRaw.preferredFrames.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
+  const forbiddenFrames = Array.isArray(valuesRaw.forbiddenFrames) ? valuesRaw.forbiddenFrames.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
+  const toneKeywords = Array.isArray(valuesRaw.toneKeywords) ? valuesRaw.toneKeywords.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
+  const tabooClaims = Array.isArray(valuesRaw.tabooClaims) ? valuesRaw.tabooClaims.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
+  const lensesRaw = Array.isArray(raw.analysisLenses)
+    ? raw.analysisLenses
+    : (Array.isArray(args.fallbackAnalysisLenses) ? args.fallbackAnalysisLenses : []);
+  const analysisLenses = lensesRaw
+    .map((item: any, index: number) => ({
+      id: String(item?.id ?? `lens_${index + 1}`).trim(),
+      label: String(item?.label ?? item?.id ?? `视角${index + 1}`).trim(),
+      prompt: String(item?.prompt ?? item?.label ?? "").trim(),
+      priority: Number.isFinite(Number(item?.priority)) ? Number(item.priority) : null,
+    }))
+    .filter((item: any) => item.id && item.label && item.prompt);
+  if (!principles.length && !preferredFrames.length && !forbiddenFrames.length && !analysisLenses.length) return null;
+  return {
+    version: "cluster_rules_v1",
+    clusterId: String(args.clusterId ?? "").trim() || "cluster_0",
+    values: {
+      ...(String(valuesRaw.scope ?? "").trim() ? { scope: String(valuesRaw.scope ?? "").trim() } : {}),
+      principles,
+      preferredFrames,
+      forbiddenFrames,
+      ...(toneKeywords.length ? { toneKeywords } : {}),
+      ...(tabooClaims.length ? { tabooClaims } : {}),
+    },
+    analysisLenses,
+  };
+}
+
+async function buildStyleStepMaterialsV1(args: {
+  libraryId: string;
+  topicQuery: string;
+  taskSpec: TaskSpecV1;
+}): Promise<StylePipelinePayloadV1["materialsByStep"]> {
+  const materialsByStep: StylePipelinePayloadV1["materialsByStep"] = {};
+  const stepOrder = STYLE_WORKFLOW_PIPELINE_CONFIG_V1.stepOrder;
+  const kb = useKbStore.getState();
+
+  const styleProfileCard = await (async () => {
+    const ret = await kb.listCardsForLibrary({
+      libraryId: args.libraryId,
+      cardTypes: ["style_profile"],
+      limit: 1,
+      includeContent: true,
+    }).catch(() => ({ ok: false } as any));
+    if (!ret?.ok || !Array.isArray(ret.cards) || !ret.cards.length) return null;
+    const first = ret.cards[0];
+    const artifact = first?.artifact;
+    if (!artifact) return null;
+    return {
+      cardId: String(artifact.id ?? "").trim(),
+      title: String(artifact.title ?? "style_profile").trim() || "style_profile",
+      content: String(artifact.content ?? "").trim(),
+    };
+  })();
+
+  for (const stepId of stepOrder) {
+    const stepCfg = STYLE_WORKFLOW_PIPELINE_CONFIG_V1.steps[stepId];
+    const step: StepMaterialsV1 = {};
+    if (stepCfg.cards.includeClusterRules) {
+      step.clusterRules = args.taskSpec.clusterRules;
+    }
+    if (stepCfg.cards.includeStyleProfile && styleProfileCard) {
+      step.styleProfileCard = styleProfileCard;
+    }
+    if (Array.isArray(stepCfg.cards.playbookDimensions) && stepCfg.cards.playbookDimensions.length) {
+      const ret = await kb.getPlaybookFacetCardsForLibrary({
+        libraryId: args.libraryId,
+        facetIds: stepCfg.cards.playbookDimensions,
+        maxCharsPerCard: 1000,
+        maxTotalChars: 9000,
+      }).catch(() => ({ ok: false, cards: [] } as any));
+      step.playbookCards = ret?.ok && Array.isArray(ret.cards)
+        ? ret.cards
+            .map((card: any) => ({
+              cardId: String(card?.facetId ?? "").trim(),
+              dimension: String(card?.facetId ?? "").trim() as PlaybookDimensionV1,
+              title: String(card?.title ?? card?.facetId ?? "").trim(),
+              content: String(card?.content ?? "").trim(),
+            }))
+            .filter((card: any) => card.cardId && card.content)
+        : [];
+    }
+    if (Array.isArray(stepCfg.cards.elementCardTypes) && stepCfg.cards.elementCardTypes.length) {
+      const ret = await kb.searchForAgent({
+        query: args.topicQuery,
+        kind: "card",
+        cardTypes: stepCfg.cards.elementCardTypes,
+        libraryIds: [args.libraryId],
+        perDocTopN: 2,
+        topDocs: 6,
+        debug: false,
+      }).catch(() => ({ ok: false, groups: [] } as any));
+      step.elementCards = ret?.ok && Array.isArray(ret.groups)
+        ? ret.groups
+            .flatMap((group: any) => Array.isArray(group?.hits) ? group.hits : [])
+            .slice(0, 10)
+            .map((hit: any) => {
+              const artifact = hit?.artifact ?? {};
+              const type = String(artifact?.cardType ?? "").trim();
+              const rawContent = String(hit?.contentPreview ?? artifact?.content ?? hit?.snippet ?? "").trim();
+              return {
+                cardId: String(artifact?.id ?? "").trim(),
+                type: type as any,
+                subtype: inferStylePipelineSubtype(stepId, type),
+                title: String(artifact?.title ?? type ?? "card").trim() || "card",
+                content: rawContent,
+              };
+            })
+            .filter((card: any) => card.cardId && card.type && card.content)
+        : [];
+    }
+    materialsByStep[stepId] = step;
+  }
+
+  return materialsByStep;
+}
+
+export async function buildStylePipelinePayload(args: {
+  userPrompt: string;
+  activeSkillIds?: string[];
+  kbMentionIds?: string[];
+}): Promise<{ styleExecutionMode?: StyleExecutionMode; stylePipelinePayload?: StylePipelinePayloadV1 }> {
+  const activeSkillIds = Array.isArray(args.activeSkillIds) ? args.activeSkillIds.map((x) => String(x ?? "").trim()).filter(Boolean) : [];
+  if (!activeSkillIds.includes("style_imitate_v3")) return {};
+
+  const kb = useKbStore.getState();
+  const rt: any = useRunStore.getState() as any;
+  const mainDoc: any = rt.getMainDoc?.() ?? rt.mainDoc ?? {};
+  const mentionedLibraryIds = Array.isArray(args.kbMentionIds) ? args.kbMentionIds.map((x) => String(x ?? "").trim()).filter(Boolean) : [];
+  const attachedLibraryIds = rt.getKbAttachedLibraryIds?.() ?? [];
+  const [libraryId] = resolveImplicitStyleLibraryIds({
+    mentionedLibraryIds,
+    attachedLibraryIds,
+    libraries: kb.libraries ?? [],
+    mainDoc,
+  });
+  if (!libraryId) return {};
+
+  const libraryMeta = (kb.libraries ?? []).find((lib: any) => String(lib?.id ?? "").trim() === libraryId) as any;
+  const fpRet = await kb.getLatestLibraryFingerprint(libraryId).catch(() => ({ ok: false } as any));
+  const snapshot = fpRet?.ok ? (fpRet as any).snapshot : null;
+  const clustersRaw = Array.isArray(snapshot?.clustersV1) ? snapshot.clustersV1 : [];
+  const cfg = await kb.getLibraryStyleConfig(libraryId).catch(() => ({ ok: false } as any));
+  const defaultClusterId = cfg?.ok ? String((cfg as any).defaultClusterId ?? "").trim() : "";
+  const topicText = buildTopicTextForSelectorV1({ userPrompt: args.userPrompt, mainDoc });
+  const selectedClusterIdFromMainDoc =
+    String(mainDoc?.styleContractV1?.libraryId ?? "").trim() === libraryId
+      ? String(mainDoc?.styleContractV1?.selectedCluster?.id ?? "").trim()
+      : "";
+  const selectedClusterId = selectedClusterIdFromMainDoc || pickClusterSelectorV1({ clusters: clustersRaw, defaultClusterId, topicText }).selectedId || defaultClusterId || String(clustersRaw?.[0]?.id ?? "").trim();
+  if (!selectedClusterId) return {};
+  const selectedCluster = clustersRaw.find((item: any) => String(item?.id ?? "").trim() === selectedClusterId) ?? null;
+  const rawRules =
+    (cfg?.ok && (cfg as any)?.clusterRulesV1 && typeof (cfg as any).clusterRulesV1 === "object"
+      ? (cfg as any).clusterRulesV1?.[selectedClusterId]
+      : null) ??
+    mainDoc?.styleContractV1?.clusterRulesV1 ??
+    null;
+  const clusterRules = normalizeClusterRulesV1({
+    clusterId: selectedClusterId,
+    raw: rawRules,
+    fallbackValues: mainDoc?.styleContractV1?.values,
+    fallbackAnalysisLenses: mainDoc?.styleContractV1?.analysisLenses,
+  });
+  if (!clusterRules) return {};
+
+  const styleProfileCard = await (async () => {
+    const ret = await kb.listCardsForLibrary({
+      libraryId,
+      cardTypes: ["style_profile"],
+      limit: 1,
+      includeContent: true,
+    }).catch(() => ({ ok: false } as any));
+    if (!ret?.ok || !Array.isArray(ret.cards) || !ret.cards.length) return null;
+    return ret.cards[0]?.artifact ?? null;
+  })();
+
+  const selectionText = (() => {
+    const project = useProjectStore.getState();
+    const ed = project.editorRef;
+    const model = ed?.getModel?.();
+    const sel = ed?.getSelection?.();
+    if (!ed || !model || !sel) return "";
+    const text = String(model.getValueInRange(sel) ?? "").trim();
+    return text;
+  })();
+  const scene = selectionText || /(改写|润色|重写|改稿)/.test(args.userPrompt) ? "source_rewrite" : "topic_only";
+  const sourceMaterial = selectionText ? { title: mainDoc?.title ?? null, text: selectionText } : null;
+  const materialsTopicQuery = topicBriefForKbQueryV1({ userPrompt: args.userPrompt, mainDoc }) || args.userPrompt;
+  const taskSpec: TaskSpecV1 = {
+    version: "v1",
+    taskId: `style_pipeline_${Date.now()}`,
+    scene,
+    prompt: String(args.userPrompt ?? "").trim(),
+    platform: null,
+    audience: null,
+    wordCount: null,
+    factBoundary: scene === "source_rewrite" ? "preserve_source" : "only_from_values",
+    language: "zh-CN",
+    styleTarget: {
+      libraryId,
+      clusterId: selectedClusterId,
+      clusterRulesVersion: "cluster_rules_v1",
+      styleProfileCardId: styleProfileCard ? String(styleProfileCard.id ?? "").trim() || null : null,
+    },
+    clusterRules,
+    ...(sourceMaterial ? { sourceMaterial } : {}),
+  };
+
+  const materialsByStep = await buildStyleStepMaterialsV1({
+    libraryId,
+    topicQuery: materialsTopicQuery,
+    taskSpec,
+  });
+
+  return {
+    styleExecutionMode: "pipeline_v1",
+    stylePipelinePayload: {
+      version: "v1",
+      pipelineConfigId: STYLE_WORKFLOW_PIPELINE_CONFIG_V1.id,
+      taskSpec,
+      materialsByStep,
+    },
+  };
+}
 
 
 function coerceSseArgValue(v: unknown): unknown {
@@ -1485,13 +1749,13 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   const idSetRaw = new Set((activeSkillsRaw ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean));
 
   const activeSkills = pendingWriteResumeWaiting && !looksLikePendingResumeOverride
-    ? (activeSkillsRaw ?? []).filter((s: any) => String(s?.id ?? "").trim() !== "style_imitate")
+    ? (activeSkillsRaw ?? []).filter((s: any) => !["style_imitate", "style_imitate_v2", "style_imitate_v3"].includes(String(s?.id ?? "").trim()))
     : activeSkillsRaw;
 
   const skillsText = `ACTIVE_SKILLS(JSON):\n${JSON.stringify(activeSkills, null, 2)}\n\n`;
 
   const activeSkillIdSet = new Set((activeSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean));
-  const styleSkillActive = activeSkillIdSet.has("style_imitate");
+  const styleSkillActive = ["style_imitate", "style_imitate_v2", "style_imitate_v3"].some((id) => activeSkillIdSet.has(id));
 
   const kbHint = `提示：如需引用知识库内容，请调用工具 kb.search（默认只在已关联库中检索）。\n\n`;
   const kbText = `KB_SELECTED_LIBRARIES(JSON):\n${JSON.stringify(kbSelected, null, 2)}\n\n` + kbHint;
@@ -1733,7 +1997,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   const styleSelectorSection = await (async () => {
     // Selector v1：为"自动选簇/选卡"提供结构化输出，保证换生成模型也稳定可用
     if (!allowInjectStyleContext) return "";
-    const styleSkillActive = Array.isArray(activeSkills) && activeSkills.some((s: any) => String(s?.id ?? "") === "style_imitate");
+    const styleSkillActive = Array.isArray(activeSkills) && activeSkills.some((s: any) => ["style_imitate", "style_imitate_v2", "style_imitate_v3"].includes(String(s?.id ?? "")));
     if (!styleSkillActive) return "";
     const styleLibs = kbSelected.filter((l: any) => String(l?.purpose ?? "").trim() === "style").slice(0, 1);
     if (!styleLibs.length) return "";
@@ -2420,8 +2684,34 @@ export function startGatewayRun(args: {
   activeSkillIds?: string[];
   kbMentionIds?: string[];
   images?: ImageAttachment[];
+  styleExecutionMode?: StyleExecutionMode;
+  stylePipelinePayload?: StylePipelinePayloadV1;
   /** 本次 run 对应的对话 ID，用于多任务并发路由 */
   convId?: string;
 }): GatewayRunController {
-  return startGatewayRunWs(args as GatewayRunArgs);
+  let inner: GatewayRunController | null = null;
+  let cancelled = false;
+  let cancelReason = "CANCELLED";
+
+  const done = (async () => {
+    const pipelineArgs = args.styleExecutionMode || args.stylePipelinePayload
+      ? { styleExecutionMode: args.styleExecutionMode, stylePipelinePayload: args.stylePipelinePayload }
+      : await buildStylePipelinePayload({
+          userPrompt: args.prompt,
+          activeSkillIds: args.activeSkillIds,
+          kbMentionIds: args.kbMentionIds,
+        }).catch(() => ({}));
+    inner = startGatewayRunWs({ ...(args as GatewayRunArgs), ...pipelineArgs });
+    if (cancelled) inner.cancel(cancelReason);
+    await inner.done;
+  })();
+
+  return {
+    cancel: (reason?: string) => {
+      cancelled = true;
+      cancelReason = String(reason ?? "CANCELLED");
+      inner?.cancel(cancelReason);
+    },
+    done,
+  };
 }

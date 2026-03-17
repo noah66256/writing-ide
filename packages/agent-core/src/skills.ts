@@ -1,5 +1,6 @@
 import type { AgentMode } from "./index.js";
 import { detectRunIntent, type KbSelectedLibrary, type RunIntent } from "./runMachine.js";
+import type { StyleWorkflowStepIdV1 } from "./styleWorkflowTypes.js";
 
 export type TriggerWhen = "has_style_library" | "run_intent_in" | "mode_in" | "text_regex";
 
@@ -26,7 +27,30 @@ export type SkillMcpConfig = {
   env?: Record<string, string>;
 };
 
-export type SkillKind = "workflow" | "hint" | "service";
+export type PipelineStepDecl = {
+  id: StyleWorkflowStepIdV1;
+  index: number;
+  gate: import("./workflowPhaseInterpreter.js").PhaseGate;
+  executor: "llm_structured" | "llm_text" | "lint_loop";
+  outputArtifact?: string;
+  hint?: string;
+};
+
+export type PipelineLintConfig = {
+  maxCopyAttempts: number;
+  maxStyleAttempts: number;
+  pickBestOnExhaust: boolean;
+};
+
+export type PipelineDeclaration = {
+  configRef: string;
+  executionMode: string;
+  stateKeys: string[];
+  steps: PipelineStepDecl[];
+  lint: PipelineLintConfig;
+};
+
+export type SkillKind = "workflow" | "hint" | "service" | "pipeline";
 
 export type SkillActivationMode = "auto" | "explicit" | "hybrid";
 
@@ -59,6 +83,8 @@ export type SkillManifest = {
   builtin?: boolean;
   /** 可选：声明式 Workflow 配置（phases / exclusions / followUp） */
   workflow?: import("./workflowPhaseInterpreter.js").WorkflowDeclaration;
+  /** 可选：Pipeline 配置（kind=pipeline 使用） */
+  pipeline?: PipelineDeclaration;
   ui: { badge: string; color?: string };
 };
 

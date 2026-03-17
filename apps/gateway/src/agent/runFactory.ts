@@ -40,7 +40,10 @@ import {
   parseRunTodoFromContextPack,
   resolveAllowedTools,
   normalizeWorkflow,
+  STYLE_WORKFLOW_PIPELINE_CONFIG_V1,
   type RunState,
+  type StyleExecutionMode,
+  type StylePipelinePayloadV1,
   type SubAgentDefinition,
   type WorkflowDeclaration,
 } from "@ohmycrab/agent-core";
@@ -62,6 +65,7 @@ import {
 } from "./writingAgentRunner.js";
 import { createRuntime } from "./runtime/RuntimeFactory.js";
 import { computeStyleTurnCaps } from "./styleOrchestrator.js";
+import { PipelineExecutor } from "./pipelineExecutor.js";
 import {
   buildAssembledContextMessages,
   type AssembledContextSummary,
@@ -1878,6 +1882,8 @@ const agentRunBodySchema = z.object({
   prompt: z.string().min(1),
   targetAgentIds: z.array(z.string()).max(5).optional(),
   activeSkillIds: z.array(z.string()).max(10).optional(),
+  styleExecutionMode: z.enum(["agent_v1", "pipeline_v1"]).optional(),
+  stylePipelinePayload: z.any().optional(),
   /** Desktop 传来的外部扩展包 skill manifests */
   userSkillManifests: z.array(z.any()).max(20).optional(),
   contextPack: z.string().optional(),
@@ -1981,6 +1987,8 @@ export type PreparedRun = {
   suppressedSkillIds: string[];
   /** v2 workflow skill 的声明式配置（skillId → WorkflowDeclaration） */
   activeWorkflowDeclarations: Map<string, WorkflowDeclaration>;
+  styleExecutionMode?: StyleExecutionMode;
+  stylePipelinePayload?: StylePipelinePayloadV1;
   stageKeyForRun: string;
   billingSource: string;
   model: string;
@@ -2239,17 +2247,22 @@ export async function prepareAgentRun(args: {
   const suppressSkillsByToolPolicy =
     !modeFloorIsAllowTools && String((intentRoute as any)?.toolPolicy ?? "").trim() !== "allow_tools";
   const corpusIngestActive = rawActiveSkillIds.includes("corpus_ingest");
-  const suppressStyle = (suppressSkillsByToolPolicy && !mentionedSkillIdSet.has("style_imitate") && !mentionedSkillIdSet.has("style_imitate_v2")) || corpusIngestActive;
+  const suppressStyle =
+    (suppressSkillsByToolPolicy &&
+      !mentionedSkillIdSet.has("style_imitate") &&
+      !mentionedSkillIdSet.has("style_imitate_v2") &&
+      !mentionedSkillIdSet.has("style_imitate_v3")) ||
+    corpusIngestActive;
   const suppressedSkillIds: string[] = [];
 
   let activeSkills = (rawActiveSkills ?? []) as any[];
   if (suppressStyle) {
     for (const sid of rawActiveSkillIds) {
-      if (sid === "style_imitate" || sid === "style_imitate_v2") suppressedSkillIds.push(sid);
+      if (sid === "style_imitate" || sid === "style_imitate_v2" || sid === "style_imitate_v3") suppressedSkillIds.push(sid);
     }
     activeSkills = activeSkills.filter((s: any) => {
       const id = String(s?.id ?? "").trim();
-      return id !== "style_imitate" && id !== "style_imitate_v2";
+      return id !== "style_imitate" && id !== "style_imitate_v2" && id !== "style_imitate_v3";
     });
   }
 
@@ -2826,11 +2839,13 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
   // Style 专用 lint 工具（lint.copy / lint.style）：默认不进入公共工具池，仅在 style_imitate / style_imitate_v2 激活或风格 gate 生效时可用。
   const styleSkillRequested =
     mentionedSkillIdSet.has("style_imitate") ||
-    mentionedSkillIdSet.has("style_imitate_v2");
+    mentionedSkillIdSet.has("style_imitate_v2") ||
+    mentionedSkillIdSet.has("style_imitate_v3");
   const styleSkillActive =
     styleSkillRequested ||
     activeSkillIds.includes("style_imitate") ||
     activeSkillIds.includes("style_imitate_v2") ||
+    activeSkillIds.includes("style_imitate_v3") ||
     (intent.isWritingTask && deriveStyleGate({ mode, kbSelected: kbSelectedList as any, intent, activeSkillIds }).styleGateEnabled);
   if (!styleSkillActive) {
     baseAllowedToolNames.delete("lint.copy");
@@ -3988,6 +4003,8 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       rawActiveSkillIds,
       suppressedSkillIds,
       activeWorkflowDeclarations,
+      styleExecutionMode: body.styleExecutionMode,
+      stylePipelinePayload: body.stylePipelinePayload as StylePipelinePayloadV1 | undefined,
       stageKeyForRun,
       billingSource,
       model,
@@ -4062,6 +4079,8 @@ export async function executeAgentRun(args: {
     rawActiveSkillIds,
     suppressedSkillIds,
     activeWorkflowDeclarations,
+    styleExecutionMode,
+    stylePipelinePayload,
     stageKeyForRun,
     model,
     endpoint,
@@ -4623,7 +4642,7 @@ export async function executeAgentRun(args: {
   });
 
   try {
-    const hasStyleSkill = activeSkillIds.includes("style_imitate");
+    const hasStyleSkill = ["style_imitate", "style_imitate_v2", "style_imitate_v3"].some((id) => activeSkillIds.includes(id));
     const styleLibId = String(prepared.styleLibIds?.[0] ?? "").trim();
     const styleContract: any = (mainDocFromPack as any)?.styleContractV1 ?? null;
     const hasSelectedCluster =
@@ -4801,6 +4820,87 @@ export async function executeAgentRun(args: {
   }
 
   (runState as any).mainDocLatest = runCtx.mainDoc;
+
+  const shouldRunStylePipeline =
+    styleExecutionMode === "pipeline_v1" &&
+    activeSkillIds.includes("style_imitate_v3") &&
+    Boolean(stylePipelinePayload) &&
+    Boolean(gates?.styleGateEnabled) &&
+    Boolean(intent?.isWritingTask);
+
+  if (shouldRunStylePipeline && stylePipelinePayload) {
+    let pipelineOutcome:
+      | { status: "completed"; reason: string; reasonCodes: string[]; detail?: unknown }
+      | { status: "failed" | "aborted"; reason: string; reasonCodes: string[]; detail?: unknown };
+    let pipelineExecutionReport: any = null;
+    try {
+      const pipelineResult = await PipelineExecutor.run({
+        pipelineConfig: STYLE_WORKFLOW_PIPELINE_CONFIG_V1,
+        payload: stylePipelinePayload,
+        runCtx,
+        runState,
+      });
+      pipelineOutcome = pipelineResult.outcome;
+      pipelineExecutionReport = pipelineResult.executionReport;
+    } catch (err: any) {
+      const msg = String(err?.message ?? err ?? "STYLE_PIPELINE_ERROR");
+      writeEvent("error", { error: msg });
+      pipelineOutcome = {
+        status: "failed",
+        reason: "style_pipeline_exception",
+        reasonCodes: ["style_pipeline_exception"],
+        detail: { message: msg },
+      };
+      pipelineExecutionReport = {
+        providerApi: apiType,
+        runState,
+        stylePipeline: {
+          active: true,
+          executionMode: styleExecutionMode,
+          status: "failed",
+          currentStepId: null,
+          completed: false,
+        },
+      };
+    }
+
+    writeEvent("run.execution.report", {
+      runId,
+      ...(pipelineExecutionReport ?? {}),
+    });
+
+    const outcomeReasonCodes = Array.from(new Set(Array.isArray(pipelineOutcome.reasonCodes) ? pipelineOutcome.reasonCodes : []));
+    if (!outcomeReasonCodes.length) {
+      outcomeReasonCodes.push(pipelineOutcome.status === "completed" ? "completed" : "failed");
+    }
+    const runEndReason = String(pipelineOutcome.reason ?? "").trim() || pipelineOutcome.status;
+    if (pipelineOutcome.status !== "completed") {
+      writeEvent("run.notice", {
+        turn: 0,
+        kind: "error",
+        title: "StylePipeline",
+        message: "风格仿写 V3 管线未完成，可继续重试。",
+        detail: pipelineOutcome.detail ?? null,
+      });
+      writeEvent("assistant.delta", {
+        delta: "这次没有完成。你可以直接说“继续重试”，我会从 pipeline 断点接着跑。",
+        turn: 0,
+      });
+    }
+    writeEvent("run.end", {
+      runId,
+      reason: runEndReason,
+      reasonCodes: outcomeReasonCodes,
+      status: pipelineOutcome.status,
+      turn: 0,
+      executionReport: pipelineExecutionReport ?? { runState },
+      ...(pipelineOutcome.detail ? { detail: pipelineOutcome.detail } : {}),
+    });
+    writeEvent("assistant.done", { reason: runEndReason, status: pipelineOutcome.status, turn: 0 });
+
+    await persistOnce();
+    return;
+  }
 
   const runtime = createRuntime({ runCtx });
   let runnerOutcome = runtime.getOutcome();
