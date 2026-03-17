@@ -6,9 +6,9 @@ import { facetLabel, getFacetPack } from "../kb/facets";
 import {
   activateSkills,
   detectRunIntent,
-  listRegisteredSkills,
   BUILTIN_SUB_AGENTS,
   looksLikeFreshWritingTaskPrompt,
+  mergeSkillManifests,
   STYLE_WORKFLOW_PIPELINE_CONFIG_V1,
   type ClusterRulesV1,
   type PlaybookDimensionV1,
@@ -210,7 +210,11 @@ export async function buildStylePipelinePayload(args: {
   kbMentionIds?: string[];
 }): Promise<{ styleExecutionMode?: StyleExecutionMode; stylePipelinePayload?: StylePipelinePayloadV1 }> {
   const activeSkillIds = Array.isArray(args.activeSkillIds) ? args.activeSkillIds.map((x) => String(x ?? "").trim()).filter(Boolean) : [];
-  if (!activeSkillIds.includes("style_imitate_v3")) return {};
+  const { skillOverrides } = useSkillStore.getState();
+  const v3Requested =
+    activeSkillIds.includes("style_imitate_v3") ||
+    skillOverrides?.["style_imitate_v3"]?.enabled === true;
+  if (!v3Requested) return {};
 
   const kb = useKbStore.getState();
   const rt: any = useRunStore.getState() as any;
@@ -1728,7 +1732,16 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   const looksLikePendingResumeOverride = /(别存了|不要存了|不存了|不用存了|取消保存|先别保存|先别继续|不用继续|别继续|先别写入|别写了|重写|重新写|重来|改成|换成|换个主题|另写|重新生成)/.test(userPrompt);
 
   // 合并内置 + 外部扩展包的 skill manifests
-  const allManifests = [...listRegisteredSkills(), ...useSkillStore.getState().externalSkills];
+  const { externalSkills, skillOverrides } = useSkillStore.getState();
+  const builtinOverrides = Object.fromEntries(
+    Object.entries(skillOverrides ?? {})
+      .filter(([, override]) => typeof override?.enabled === "boolean")
+      .map(([id, override]) => [id, { enabled: override!.enabled }]),
+  );
+  const allManifests = mergeSkillManifests({
+    ...(Object.keys(builtinOverrides).length ? { builtinOverrides } : {}),
+    userSkills: externalSkills ?? [],
+  });
 
   const activeSkillsRaw = activateSkills({
     mode: useRunStore.getState().mode as any,
