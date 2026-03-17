@@ -191,6 +191,10 @@ function filterImageFiles(files: File[]): File[] {
   return files.filter((f) => String(f.type ?? "").startsWith("image/"));
 }
 
+function sanitizePastedPlainText(text: string): string {
+  return String(text ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\u00A0/g, " ");
+}
+
 // ─── 光标工具函数 ─────────────────────────────────────────────────────────────
 
 function placeCaretAtEnd(editor: HTMLElement) {
@@ -805,10 +809,15 @@ export function InputBar({
 
   const handlePaste = useCallback((e: ClipboardEvent<HTMLDivElement>) => {
     const files = filterImageFiles(Array.from(e.clipboardData?.files ?? []));
-    if (!files.length) return;
+    const plainText = sanitizePastedPlainText(e.clipboardData?.getData("text/plain") ?? "");
+    const types = Array.from(e.clipboardData?.types ?? []);
+    const hasRichPayload = types.includes("text/html") || types.includes("text/rtf");
+    if (!files.length && !plainText && !hasRichPayload) return;
     e.preventDefault();
-    setDroppedFiles((prev) => [...prev, ...files]);
-  }, []);
+    if (plainText) insertText(plainText);
+    if (files.length) setDroppedFiles((prev) => [...prev, ...files]);
+    requestAnimationFrame(() => updateTriggerQuery());
+  }, [insertText, updateTriggerQuery]);
 
   // ─── 文件选择 ──────────────────────────────────────────────────────────────
 
@@ -965,10 +974,12 @@ export function InputBar({
             className={cn(
               "w-full bg-transparent outline-none",
               "text-[14px] leading-relaxed text-text",
+              "font-sans [font-family:inherit]",
               "whitespace-pre-wrap break-words",
               "min-h-[24px] max-h-[200px] overflow-y-auto",
               disabled && "opacity-60 cursor-not-allowed",
             )}
+            style={{ fontFamily: "inherit" }}
           />
         </div>
 

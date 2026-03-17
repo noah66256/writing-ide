@@ -226,6 +226,10 @@ html, body {
 .chat-markdown-body {
   font-size: 14px;
   line-height: 1.75;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  text-wrap: pretty;
 }
 .chat-markdown-body h1,
 .chat-markdown-body h2,
@@ -234,8 +238,8 @@ html, body {
   font-size: 1em;
   font-weight: 600;
   line-height: 1.6;
-  margin-top: 0.75em;
-  margin-bottom: 0.35em;
+  margin-top: 0.9em;
+  margin-bottom: 0.4em;
 }
 .chat-markdown-body p,
 .chat-markdown-body ul,
@@ -243,12 +247,12 @@ html, body {
 .chat-markdown-body blockquote,
 .chat-markdown-body table,
 .chat-markdown-body pre {
-  margin-top: 0.45em;
-  margin-bottom: 0.45em;
+  margin-top: 0.55em;
+  margin-bottom: 0.55em;
 }
 .chat-markdown-body li {
-  margin-top: 0.12em;
-  margin-bottom: 0.12em;
+  margin-top: 0.16em;
+  margin-bottom: 0.16em;
 }
 .chat-markdown-body code {
   font-size: 0.9em;

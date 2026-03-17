@@ -203,6 +203,58 @@ function formatTodoNote(note?: string): string {
   return normalizeToolErrorText(raw);
 }
 
+function splitDenseParagraphForDisplay(line: string): string {
+  const text = String(line ?? "").trim();
+  if (!text) return "";
+  if (text.length < 160) return text;
+  if (/^(#{1,6}\s|[-*]\s|\d+\.\s|>|\|)/.test(text)) return text;
+  if (text.includes("```")) return text;
+  const sentences = text.match(/[^。！？；]+[。！？；]?/g) ?? [text];
+  if (sentences.length < 3) return text;
+  const parts: string[] = [];
+  let current = "";
+  let sentenceCount = 0;
+  for (const sentenceRaw of sentences) {
+    const sentence = String(sentenceRaw ?? "").trim();
+    if (!sentence) continue;
+    const next = current ? `${current}${sentence}` : sentence;
+    const ended = /[。！？；]$/.test(sentence);
+    if (current && next.length > 120) {
+      parts.push(current.trim());
+      current = sentence;
+      sentenceCount = ended ? 1 : 0;
+      continue;
+    }
+    current = next;
+    if (ended) sentenceCount += 1;
+    if (current.length >= 90 && sentenceCount >= 2) {
+      parts.push(current.trim());
+      current = "";
+      sentenceCount = 0;
+    }
+  }
+  if (current.trim()) parts.push(current.trim());
+  return parts.length >= 2 ? parts.join("\n\n") : text;
+}
+
+function normalizeAssistantMarkdownForDisplay(raw: string): string {
+  let text = String(raw ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  if (!text) return "";
+  text = text.replace(/([^\n])\s*(---)\s*(?=#{1,6})/g, "$1\n\n$2\n\n");
+  text = text.replace(/([^\n])\s*(#{1,6})(?=[^\s#])/g, "$1\n\n$2 ");
+  text = text.replace(/(^|\n)(#{1,6})([^ \n#])/g, "$1$2 $3");
+  text = text.replace(/([。！？；：])\s*((?:#{1,6}\s*)?\d+\.\s+)/g, "$1\n\n$2");
+  text = text.replace(/([。！？；：])\s*([-*]\s+)/g, "$1\n\n$2");
+  text = text.replace(/([。！？；：])\s*(>)/g, "$1\n\n$2");
+  text = text.replace(/\n{3,}/g, "\n\n");
+  const lines = text.split("\n");
+  const normalized = lines
+    .map((line) => splitDenseParagraphForDisplay(line))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n");
+  return normalized;
+}
+
 async function copyPlainText(text: string) {
   try {
     await navigator.clipboard.writeText(text);
@@ -928,7 +980,7 @@ function AssistantMessage({
   const rootDir = useProjectStore((s) => s.rootDir);
   const avatar = subAgent?.avatar;
   const markdownText = useMemo(
-    () => injectFileRefLinksInMarkdown(wrapBareUrlsInMarkdown(step.text)),
+    () => injectFileRefLinksInMarkdown(wrapBareUrlsInMarkdown(normalizeAssistantMarkdownForDisplay(step.text))),
     [step.text],
   );
 
@@ -966,7 +1018,7 @@ function AssistantMessage({
               思考中...
             </span>
           ) : (
-            <div className="markdown-body chat-markdown-body max-w-none whitespace-pre-wrap break-words">
+            <div className="markdown-body chat-markdown-body max-w-none break-words">
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 urlTransform={(url) => url.startsWith("file-ref:") ? url : defaultUrlTransform(url)}
