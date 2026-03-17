@@ -183,6 +183,32 @@ export type RunState = {
   toolLoopGuardReason: string | null;
 };
 
+/**
+ * workflow skill 的 RunState 中允许跨 run 持久化的字段白名单。
+ * 只有在此白名单中的 key 才会被 Desktop 保存到 mainDoc.workflowV1.runStatePatch，
+ * 并在下次 run 时被 Gateway merge 进 initialRunState。
+ */
+export const PERSISTABLE_STATE_KEYS: readonly (keyof RunState)[] = [
+  "hasStyleKbSearch",
+  "hasStyleKbHit",
+  "styleKbDegraded",
+  "hasDraftText",
+  "hasPostDraftStyleKbSearch",
+  "copyLintPassed",
+  "copyLintFailCount",
+  "copyGateDegraded",
+  "styleLintPassed",
+  "styleLintFailCount",
+  "lintGateDegraded",
+  "deliveryLatched",
+  "deliveredArtifactFamilies",
+  "draftCandidatesV1",
+  "bestDraft",
+  "bestStyleDraft",
+  "lastStyleLint",
+  "lastCopyLint",
+] as const;
+
 export function createInitialRunState(args?: { protocolRetryBudget?: number; workflowRetryBudget?: number; lintReworkBudget?: number }): RunState {
   return {
     hasTodoList: false,

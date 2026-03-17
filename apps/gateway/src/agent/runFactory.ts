@@ -33,6 +33,7 @@ import {
   deriveStyleGate,
   isContentWriteTool,
   isWriteLikeTool,
+  PERSISTABLE_STATE_KEYS,
   pickSkillStageKeyForAgentRun,
   parseKbSelectedLibrariesFromContextPack,
   parseMainDocFromContextPack,
@@ -3430,6 +3431,24 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     workflowRetryBudget: workflowRetryBudgetEffective,
     lintReworkBudget: lintMaxRework,
   });
+
+  const workflowSticky = readWorkflowStickyState(mainDocFromPack);
+  const isNewTask = looksLikeExplicitNewTaskPrompt(String(userPrompt ?? "").trim());
+  if (workflowSticky.isFresh && !isNewTask) {
+    const wfDoc = mainDocFromPack && typeof mainDocFromPack === "object"
+      ? (mainDocFromPack as any)?.workflowV1
+      : null;
+    const patch = wfDoc && typeof wfDoc === "object" && !Array.isArray(wfDoc)
+      ? (wfDoc as any).runStatePatch
+      : null;
+    if (patch && typeof patch === "object" && !Array.isArray(patch)) {
+      for (const key of PERSISTABLE_STATE_KEYS) {
+        if (key in patch && key in runState) {
+          (runState as any)[key] = (patch as any)[key];
+        }
+      }
+    }
+  }
 
   (runState as any).lengthRetryBudget = (() => {
     const t = Number(targetChars as any);

@@ -13,7 +13,7 @@ import { useKbStore } from "../state/kbStore";
 import { useAuthStore } from "../state/authStore";
 import { useRunStore } from "../state/runStore";
 import { cancelInlineFileOpConfirm } from "../state/inlineFileOpConfirm";
-import { activateSkills, looksLikeClarifyQuestions } from "@ohmycrab/agent-core";
+import { activateSkills, looksLikeClarifyQuestions, PERSISTABLE_STATE_KEYS } from "@ohmycrab/agent-core";
 import { buildStyleLinterLibrariesSidecar, executeToolCall, getTool } from "./toolRegistry";
 import { createRunTarget } from "./runTarget";
 import { cancelConvRun, setConvRunCancel } from "../state/runRegistry";
@@ -1161,6 +1161,24 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               } else {
                 updateWorkflowSticky({ lastEndReason: endReason });
               }
+            }
+            try {
+              const report = data?.executionReport;
+              const endRunState = report && typeof report === "object" ? (report as any).runState : null;
+              if (endRunState && typeof endRunState === "object" && !Array.isArray(endRunState)) {
+                const patch: Record<string, unknown> = {};
+                for (const key of PERSISTABLE_STATE_KEYS) {
+                  if (key in endRunState) patch[String(key)] = (endRunState as any)[key];
+                }
+                if (Object.keys(patch).length > 0) {
+                  const shouldClear = endReason === "completed" && !derivedWaitingPatch && !hitMaxTurns;
+                  updateWorkflowSticky({
+                    runStatePatch: shouldClear ? null : patch,
+                  });
+                }
+              }
+            } catch {
+              // runStatePatch 提取失败不影响主流程
             }
             const failedCount = Number(data?.failureDigest?.failedCount ?? 0) || 0;
             const shouldForceClearTodo = endReason === "completed" && !derivedWaitingPatch && !hitMaxTurns && failedCount <= 0;
