@@ -33,6 +33,7 @@ import {
   deriveStyleGate,
   isContentWriteTool,
   isWriteLikeTool,
+  mergeSkillManifests,
   PERSISTABLE_STATE_KEYS,
   pickSkillStageKeyForAgentRun,
   parseKbSelectedLibrariesFromContextPack,
@@ -1882,6 +1883,7 @@ const agentRunBodySchema = z.object({
   prompt: z.string().min(1),
   targetAgentIds: z.array(z.string()).max(5).optional(),
   activeSkillIds: z.array(z.string()).max(10).optional(),
+  builtinOverrides: z.record(z.string(), z.object({ enabled: z.boolean().optional() })).optional(),
   styleExecutionMode: z.enum(["agent_v1", "pipeline_v1"]).optional(),
   stylePipelinePayload: z.any().optional(),
   /** Desktop 传来的外部扩展包 skill manifests */
@@ -2188,15 +2190,17 @@ export async function prepareAgentRun(args: {
     capsForSkills && capsForSkills.disabledSkillIds ? Array.from(capsForSkills.disabledSkillIds as Set<string>) : [],
   );
   // 合并内置 + Desktop 传来的外部扩展包 manifests
-  const builtinSkills = (listRegisteredSkills() as any[]);
   const userSkills = Array.isArray((body as any).userSkillManifests)
     ? ((body as any).userSkillManifests as any[])
         .filter((m: any) => m && typeof m === "object" && String(m?.id ?? "").trim() && String(m?.name ?? "").trim())
-        .map((m: any) => ({ ...m, source: "user" }))
     : [];
-  // 去重：内置 id 优先，外部同 id 不覆盖
-  const builtinIdSet = new Set(builtinSkills.map((m: any) => String(m?.id ?? "").trim()));
-  const mergedSkills = [...builtinSkills, ...userSkills.filter((m: any) => !builtinIdSet.has(String(m?.id ?? "").trim()))];
+  const builtinOverrides = (body as any).builtinOverrides && typeof (body as any).builtinOverrides === "object"
+    ? ((body as any).builtinOverrides as Record<string, { enabled?: boolean }>)
+    : undefined;
+  const mergedSkills = mergeSkillManifests({
+    builtinOverrides,
+    userSkills,
+  });
   const skillManifestsEffective = mergedSkills.filter((m: any) => !disabledSkillIds.has(String(m?.id ?? "").trim()));
   const skillManifestById = new Map(skillManifestsEffective.map((m: any) => [String(m?.id ?? "").trim(), m] as const));
 

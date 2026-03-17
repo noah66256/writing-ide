@@ -938,8 +938,20 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
         : args.targetAgentId ? [args.targetAgentId] : undefined;
 
       // 外部扩展包 skill manifests（发给 Gateway，使其也能参与激活计算）
-      const externalSkills = (await import("../state/skillStore")).useSkillStore.getState().externalSkills;
-      const userSkillManifests = externalSkills?.length ? externalSkills : undefined;
+      const { externalSkills, skillOverrides } = (await import("../state/skillStore")).useSkillStore.getState();
+      const userSkillManifests = externalSkills?.length
+        ? externalSkills.map((manifest) => {
+            const override = skillOverrides[String(manifest?.id ?? "").trim()];
+            if (typeof override?.enabled === "boolean") return { ...manifest, autoEnable: override.enabled };
+            return manifest;
+          })
+        : undefined;
+      const builtinOverrides = Object.fromEntries(
+        Object.entries(skillOverrides ?? {})
+          .filter(([, override]) => typeof override?.enabled === "boolean")
+          .map(([id, override]) => [id, { enabled: override!.enabled }]),
+      );
+      const hasBuiltinOverrides = Object.keys(builtinOverrides).length > 0;
 
       socket.send(JSON.stringify({
         type: "run.request",
@@ -957,6 +969,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           ...(args.activeSkillIds?.length ? { activeSkillIds: args.activeSkillIds } : {}),
           ...(args.styleExecutionMode ? { styleExecutionMode: args.styleExecutionMode } : {}),
           ...(args.stylePipelinePayload ? { stylePipelinePayload: args.stylePipelinePayload } : {}),
+          ...(hasBuiltinOverrides ? { builtinOverrides } : {}),
           ...(userSkillManifests ? { userSkillManifests } : {}),
         },
       }));
