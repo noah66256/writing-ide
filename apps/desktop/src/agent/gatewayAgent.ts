@@ -239,8 +239,12 @@ export async function buildStylePipelinePayload(args: {
     v3Override === false
       ? false
       : activeSkillIds.includes("style_imitate_v3") || v3Override === true;
-  if (!v3Requested) return {};
+  // V3 已迁移为 agent 自驱动（kind: workflow），不再走 PipelineExecutor
+  // 风格库数据通过 context pack 的 STYLE_CATALOG / STYLE_DIMENSIONS 段传递
+  return {};
 
+  // --- 以下为保留的 pipeline_v1 构建逻辑（V3 不再触发） ---
+  // eslint-disable-next-line no-unreachable
   const kb = useKbStore.getState();
   const rt: any = useRunStore.getState() as any;
   const mainDoc: any = rt.getMainDoc?.() ?? rt.mainDoc ?? {};

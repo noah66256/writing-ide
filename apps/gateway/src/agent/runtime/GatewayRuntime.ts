@@ -986,7 +986,7 @@ export class GatewayRuntime implements AgentRuntime {
   }
 
   private _resolveStyleWorkflowFollowUp():
-    | { item: CanonicalTranscriptItem; phase: string; skillId: "style_imitate" | "style_imitate_v2" }
+    | { item: CanonicalTranscriptItem; phase: string; skillId: "style_imitate" | "style_imitate_v2" | "style_imitate_v3" }
     | null {
     const runCtx: any = this.config.runCtx;
     const gates: any = runCtx.gates ?? {};
@@ -995,6 +995,7 @@ export class GatewayRuntime implements AgentRuntime {
     const styleSkillActive =
       activeSkillIds.includes("style_imitate") ||
       activeSkillIds.includes("style_imitate_v2") ||
+      activeSkillIds.includes("style_imitate_v3") ||
       (gates.styleGateEnabled && runCtx.intent?.isWritingTask);
 
     if (!(styleSkillActive && gates.styleGateEnabled && gates.lintGateEnabled && runCtx.intent?.isWritingTask)) {
@@ -1003,13 +1004,14 @@ export class GatewayRuntime implements AgentRuntime {
 
     const st: any = this.runState as any;
     const wfDecls: Map<string, WorkflowDeclaration> | undefined = runCtx.activeWorkflowDeclarations;
-    const v2Workflow = wfDecls?.get("style_imitate_v2");
-    if (v2Workflow) {
-      const followUpMsg = resolveFollowUp(v2Workflow, st);
+    const wfSkillId = activeSkillIds.find((id: string) => (id === "style_imitate_v2" || id === "style_imitate_v3") && wfDecls?.has(id));
+    const wfWorkflow = wfSkillId ? wfDecls?.get(wfSkillId) : undefined;
+    if (wfWorkflow) {
+      const followUpMsg = resolveFollowUp(wfWorkflow, st);
       if (!followUpMsg) return null;
-      const snapshot = resolvePhase(v2Workflow, st);
+      const snapshot = resolvePhase(wfWorkflow, st);
       return {
-        skillId: "style_imitate_v2",
+        skillId: wfSkillId,
         phase: String(snapshot.currentPhase ?? "unknown").trim() || "unknown",
         item: {
           kind: "runtime_hint",
@@ -1891,11 +1893,12 @@ export class GatewayRuntime implements AgentRuntime {
         });
 
         if (!dryRun) {
-          // ── v2 分支：使用声明式 checkExclusions ──
+          // ── 声明式 workflow 分支：V2/V3 共用 checkExclusions ──
           const wfDecls: Map<string, WorkflowDeclaration> | undefined = runCtx.activeWorkflowDeclarations;
-          const v2Workflow = wfDecls?.get("style_imitate_v2");
-          if (v2Workflow) {
-            const violation = checkExclusions(v2Workflow, [rawToolName]);
+          const wfSkillIdExcl = activeSkillIds.find((id: string) => (id === "style_imitate_v2" || id === "style_imitate_v3") && wfDecls?.has(id));
+          const wfWorkflowExcl = wfSkillIdExcl ? wfDecls?.get(wfSkillIdExcl) : undefined;
+          if (wfWorkflowExcl) {
+            const violation = checkExclusions(wfWorkflowExcl, [rawToolName]);
             // checkExclusions 只检查同轮多工具互斥；单工具不会违规
             // 对于阶段性约束，由 computePerTurnAllowed 的工具白名单控制
             if (violation) {
@@ -1903,7 +1906,7 @@ export class GatewayRuntime implements AgentRuntime {
                 turn: this.turn,
                 kind: "info",
                 title: "StyleWorkflow",
-                message: "v2 工具调用提示（" + violation + "），已放行。",
+                message: "style workflow 工具调用提示（" + violation + "），已放行。",
               });
             }
           } else {

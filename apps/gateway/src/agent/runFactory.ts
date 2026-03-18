@@ -3658,22 +3658,22 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
 
     const needsWebFirst = webGate.enabled && webGate.needsSearch && !state.hasWebSearch;
 
-    // ── v2 workflow 分支：声明式 workflow 解释器优先于 v1 硬编码 ──
-    const v2SkillId = activeSkillIds.find((id: string) => id === "style_imitate_v2");
-    const v2Workflow = v2SkillId ? activeWorkflowDeclarations.get(v2SkillId) : null;
-    if (v2Workflow && !isDeleteOnlyRoute && !needsWebFirst) {
-      const v2Caps = resolveAllowedTools(v2Workflow, state, selectedAllowedToolNames);
-      if (v2Caps && v2Caps.allowed.size > 0) {
+    // ── 声明式 workflow 分支：V2/V3 共用解释器，优先于 v1 硬编码 ──
+    const wfSkillId = activeSkillIds.find((id: string) => id === "style_imitate_v2" || id === "style_imitate_v3");
+    const wfWorkflow = wfSkillId ? activeWorkflowDeclarations.get(wfSkillId) : null;
+    if (wfWorkflow && !isDeleteOnlyRoute && !needsWebFirst) {
+      const wfCaps = resolveAllowedTools(wfWorkflow, state, selectedAllowedToolNames);
+      if (wfCaps && wfCaps.allowed.size > 0) {
         // 保留 CORE_TOOL_NAME_SET（run.* / memory 等始终可用）
         for (const name of CORE_TOOL_NAME_SET) {
-          if (selectedAllowedToolNames.has(name)) v2Caps.allowed.add(name);
+          if (selectedAllowedToolNames.has(name)) wfCaps.allowed.add(name);
         }
-        hints.push("style_imitate_v2 orchestrator：phase=" + v2Caps.snapshot.currentPhase + "。");
-        hints.push(v2Caps.hint);
+        hints.push(wfSkillId + " orchestrator：phase=" + wfCaps.snapshot.currentPhase + "。");
+        hints.push(wfCaps.hint);
         return {
-          allowed: v2Caps.allowed,
+          allowed: wfCaps.allowed,
           hint: hints.join("\n\n"),
-          orchestratorMode: v2Caps.orchestratorMode,
+          orchestratorMode: wfCaps.orchestratorMode,
         };
       }
     }
