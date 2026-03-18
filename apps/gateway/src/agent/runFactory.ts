@@ -847,6 +847,7 @@ export function buildAgentProtocolPrompt(args: {
         `3) 直接执行：\n` +
         `   - 你需要亲自使用工具完成用户任务。\n` +
         `   - 联网搜索/信息收集：web.search / web.fetch / time.now。\n` +
+        `   - 若准备调用 web.search / web.fetch，且用户没有明确给出时间范围（如 2024年 / 去年 / 10年前 / 今天），默认先调用一次 time.now，再决定搜索词里的时间范围。\n` +
         `   - 内容创作/编辑/润色：kb.search / read / write / edit / lint.* 完成闭环。\n` +
         `   - MCP 工具：工具名形如 mcp_dot_*（其中 _dot_ 等于 .），来自外部 MCP Server。\n` +
         `     若当前工具列表中存在某类任务的专用 MCP 工具，优先使用 MCP 而非通用内置工具：\n` +
@@ -1409,6 +1410,14 @@ export function looksLikeFreshWebResearchTask(text: string): boolean {
   const isProjectOnly = /(项目|仓库|代码|文件|报错|bug|报错日志|本地)/.test(t) && !/(热点|新闻|财经|科技|时事)/.test(t);
   if (isProjectOnly) return false;
   return true;
+}
+
+export function hasExplicitTimeReference(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  return /(\d{2,4}\s*年|\d+\s*(?:天|周|个月|月|年)(?:前|后)|今天|今日|昨天|前天|明天|后天|本周|上周|下周|本月|上月|下月|今年|去年|前年|明年|后年|最近|最新|实时|刚刚|近期|近\s*\d+\s*(?:天|周|个月|月|年)|Q[1-4]|[一二三四1-4]季度|年代)/i.test(
+    t,
+  );
 }
 
 export function looksLikeInstallOrDeployTask(text: string): boolean {
@@ -3764,6 +3773,35 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       }
 
       const shouldStartWithWebResearch = routeIdLower === "task_execution" && webGate.enabled && webGate.needsSearch && !state.hasWebSearch;
+      const shouldPrimeCurrentTimeBeforeWebSearch =
+        webGate.enabled &&
+        webGate.needsSearch &&
+        !state.hasTimeNow &&
+        !state.hasWebSearch &&
+        !state.hasWebFetch &&
+        !hasExplicitTimeReference(userPrompt);
+      if (shouldPrimeCurrentTimeBeforeWebSearch) {
+        const boot = new Set<string>(
+          [
+            "time.now",
+            "run.mainDoc.get",
+            "run.mainDoc.update",
+            "run.setTodoList",
+            "run.todo",
+            "run.done",
+          ]
+            .map((x) => String(x ?? "").trim())
+            .filter(Boolean)
+            .filter((n) => allowedNow.has(n)),
+        );
+        if (boot.size > 0) {
+          for (const name of CORE_TOOL_NAME_SET) {
+            if (allowedNow.has(name)) boot.add(name);
+          }
+          hints.push("本轮需要联网搜索，且用户未给出明确时间范围：请先调用一次 time.now 获取当前日期/年份，再继续 web.search / web.fetch。");
+          return { allowed: boot, hint: hints.join("\n\n") };
+        }
+      }
       if (shouldStartWithWebResearch) {
         hints.push("本轮包含强时效联网研究要求：请先调用 time.now / web.search / web.fetch 补齐当天信息，再进入写作与交付。");
       }
