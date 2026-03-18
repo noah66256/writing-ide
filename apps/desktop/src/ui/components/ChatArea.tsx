@@ -66,6 +66,41 @@ function looksLikeKbPanelOnlyIntent(text: string): boolean {
   return true;
 }
 
+function tryPreAttachStyleLibraryFromPrompt(args: {
+  prompt: string;
+  activeSkillIds: string[];
+  kbMentionIds?: string[];
+}) {
+  const activeSkillIds = Array.isArray(args.activeSkillIds) ? args.activeSkillIds : [];
+  if (!activeSkillIds.includes("style_imitate_v3")) return;
+  const kbMentionIds = Array.isArray(args.kbMentionIds) ? args.kbMentionIds.filter(Boolean) : [];
+  if (kbMentionIds.length > 0) return;
+
+  const runState = useRunStore.getState();
+  const curAttached = runState.kbAttachedLibraryIds ?? [];
+  if (curAttached.length > 0) return;
+
+  const styleLibs = (useKbStore.getState().libraries ?? []).filter(
+    (lib: any) => String(lib?.purpose ?? "").trim() === "style",
+  );
+  if (styleLibs.length <= 1) return;
+
+  const normalizedText = String(args.prompt ?? "").trim();
+  if (!normalizedText) return;
+
+  const matched = styleLibs.filter((lib: any) => {
+    const name = String(lib?.name ?? "").trim();
+    if (!name) return false;
+    const coreName = name.replace(/风格库$/, "").replace(/库$/, "").trim();
+    return Boolean(coreName) && normalizedText.includes(coreName);
+  });
+  if (matched.length !== 1) return;
+
+  const libId = String(matched[0]?.id ?? "").trim();
+  if (!libId) return;
+  runState.setKbAttachedLibraries([libId]);
+}
+
 function fileToImageAttachment(file: File): Promise<ImageAttachment | null> {
   if (!String(file.type ?? "").startsWith("image/")) return Promise.resolve(null);
   return new Promise((resolve) => {
@@ -932,6 +967,11 @@ export function ChatArea() {
         useRunStore.getState().addStickyActiveSkills(mentionedSkillIds);
       }
       const kbMentionIds = meta?.mentions?.filter((m) => m.type === "kb").map((m) => m.id);
+      tryPreAttachStyleLibraryFromPrompt({
+        prompt: cleanPromptRaw,
+        activeSkillIds,
+        kbMentionIds,
+      });
       // 读取当前 activeConvId（此时可能刚被 setActiveConvId 更新）
       const runConvId = useConversationStore.getState().activeConvId ?? undefined;
       const c = startGatewayRun({
