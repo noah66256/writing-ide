@@ -566,7 +566,7 @@ export function deriveStyleGate(args: {
   const hasNonStyleLibraries = args.mode !== "chat" && nonStyleLibIds.length > 0;
   const skillIds = Array.isArray(args.activeSkillIds) ? args.activeSkillIds.map((x) => String(x ?? "").trim()).filter(Boolean) : null;
   const styleSkillActiveByIds = skillIds
-    ? ["style_imitate", "style_imitate_v2", "style_imitate_v3"].some((id) => new Set(skillIds).has(id))
+    ? ["style_imitate", "style_imitate_v3"].some((id) => new Set(skillIds).has(id))
     : false;
   // Skill 激活判定（fail-close）：
   // - 只要当前有 purpose=style 的库且本轮为写作任务，就视为需要拉起 style_imitate Skill；

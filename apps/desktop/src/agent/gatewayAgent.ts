@@ -1802,13 +1802,13 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   const idSetRaw = new Set((activeSkillsRaw ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean));
 
   const activeSkills = pendingWriteResumeWaiting && !looksLikePendingResumeOverride
-    ? (activeSkillsRaw ?? []).filter((s: any) => !["style_imitate", "style_imitate_v2", "style_imitate_v3"].includes(String(s?.id ?? "").trim()))
+    ? (activeSkillsRaw ?? []).filter((s: any) => !["style_imitate", "style_imitate_v3"].includes(String(s?.id ?? "").trim()))
     : activeSkillsRaw;
 
   const skillsText = `ACTIVE_SKILLS(JSON):\n${JSON.stringify(activeSkills, null, 2)}\n\n`;
 
   const activeSkillIdSet = new Set((activeSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean));
-  const styleSkillActive = ["style_imitate", "style_imitate_v2", "style_imitate_v3"].some((id) => activeSkillIdSet.has(id));
+  const styleSkillActive = ["style_imitate", "style_imitate_v3"].some((id) => activeSkillIdSet.has(id));
 
   const kbHint = `提示：如需引用知识库内容，请调用工具 kb.search（默认只在已关联库中检索）。\n\n`;
   const kbText = `KB_SELECTED_LIBRARIES(JSON):\n${JSON.stringify(kbSelected, null, 2)}\n\n` + kbHint;
@@ -2050,7 +2050,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   const styleSelectorSection = await (async () => {
     // Selector v1：为"自动选簇/选卡"提供结构化输出，保证换生成模型也稳定可用
     if (!allowInjectStyleContext) return "";
-    const styleSkillActive = Array.isArray(activeSkills) && activeSkills.some((s: any) => ["style_imitate", "style_imitate_v2", "style_imitate_v3"].includes(String(s?.id ?? "")));
+    const styleSkillActive = Array.isArray(activeSkills) && activeSkills.some((s: any) => ["style_imitate", "style_imitate_v3"].includes(String(s?.id ?? "")));
     if (!styleSkillActive) return "";
     const styleLibs = kbSelected.filter((l: any) => String(l?.purpose ?? "").trim() === "style").slice(0, 1);
     if (!styleLibs.length) return "";

@@ -986,7 +986,7 @@ export class GatewayRuntime implements AgentRuntime {
   }
 
   private _resolveStyleWorkflowFollowUp():
-    | { item: CanonicalTranscriptItem; phase: string; skillId: "style_imitate" | "style_imitate_v2" | "style_imitate_v3" }
+    | { item: CanonicalTranscriptItem; phase: string; skillId: "style_imitate" | "style_imitate_v3" }
     | null {
     const runCtx: any = this.config.runCtx;
     const gates: any = runCtx.gates ?? {};
@@ -994,7 +994,6 @@ export class GatewayRuntime implements AgentRuntime {
     const activeSkillIds = activeSkills.map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
     const styleSkillActive =
       activeSkillIds.includes("style_imitate") ||
-      activeSkillIds.includes("style_imitate_v2") ||
       activeSkillIds.includes("style_imitate_v3") ||
       (gates.styleGateEnabled && runCtx.intent?.isWritingTask);
 
@@ -1004,7 +1003,7 @@ export class GatewayRuntime implements AgentRuntime {
 
     const st: any = this.runState as any;
     const wfDecls: Map<string, WorkflowDeclaration> | undefined = runCtx.activeWorkflowDeclarations;
-    const wfSkillId = activeSkillIds.find((id: string) => (id === "style_imitate_v2" || id === "style_imitate_v3") && wfDecls?.has(id));
+    const wfSkillId = activeSkillIds.find((id: string) => id === "style_imitate_v3" && wfDecls?.has(id));
     const wfWorkflow = wfSkillId ? wfDecls?.get(wfSkillId) : undefined;
     if (wfWorkflow) {
       const followUpMsg = resolveFollowUp(wfWorkflow, st);
@@ -1895,7 +1894,7 @@ export class GatewayRuntime implements AgentRuntime {
         if (!dryRun) {
           // ── 声明式 workflow 分支：V2/V3 共用 checkExclusions ──
           const wfDecls: Map<string, WorkflowDeclaration> | undefined = runCtx.activeWorkflowDeclarations;
-          const wfSkillIdExcl = activeSkillIds.find((id: string) => (id === "style_imitate_v2" || id === "style_imitate_v3") && wfDecls?.has(id));
+          const wfSkillIdExcl = activeSkillIds.find((id: string) => id === "style_imitate_v3" && wfDecls?.has(id));
           const wfWorkflowExcl = wfSkillIdExcl ? wfDecls?.get(wfSkillIdExcl) : undefined;
           if (wfWorkflowExcl) {
             const violation = checkExclusions(wfWorkflowExcl, [rawToolName]);

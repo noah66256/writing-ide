@@ -2263,7 +2263,6 @@ export async function prepareAgentRun(args: {
   const suppressStyle =
     (suppressSkillsByToolPolicy &&
       !mentionedSkillIdSet.has("style_imitate") &&
-      !mentionedSkillIdSet.has("style_imitate_v2") &&
       !mentionedSkillIdSet.has("style_imitate_v3")) ||
     corpusIngestActive;
   const suppressedSkillIds: string[] = [];
@@ -2271,11 +2270,11 @@ export async function prepareAgentRun(args: {
   let activeSkills = (rawActiveSkills ?? []) as any[];
   if (suppressStyle) {
     for (const sid of rawActiveSkillIds) {
-      if (sid === "style_imitate" || sid === "style_imitate_v2" || sid === "style_imitate_v3") suppressedSkillIds.push(sid);
+      if (sid === "style_imitate" || sid === "style_imitate_v3") suppressedSkillIds.push(sid);
     }
     activeSkills = activeSkills.filter((s: any) => {
       const id = String(s?.id ?? "").trim();
-      return id !== "style_imitate" && id !== "style_imitate_v2" && id !== "style_imitate_v3";
+      return id !== "style_imitate" && id !== "style_imitate_v3";
     });
   }
 
@@ -2849,15 +2848,13 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     }
   }
 
-  // Style 专用 lint 工具（lint.copy / lint.style）：默认不进入公共工具池，仅在 style_imitate / style_imitate_v2 激活或风格 gate 生效时可用。
+  // Style 专用 lint 工具（lint.copy / lint.style）：默认不进入公共工具池，仅在 style_imitate / style_imitate_v3 激活或风格 gate 生效时可用。
   const styleSkillRequested =
     mentionedSkillIdSet.has("style_imitate") ||
-    mentionedSkillIdSet.has("style_imitate_v2") ||
     mentionedSkillIdSet.has("style_imitate_v3");
   const styleSkillActive =
     styleSkillRequested ||
     activeSkillIds.includes("style_imitate") ||
-    activeSkillIds.includes("style_imitate_v2") ||
     activeSkillIds.includes("style_imitate_v3") ||
     (intent.isWritingTask && deriveStyleGate({ mode, kbSelected: kbSelectedList as any, intent, activeSkillIds }).styleGateEnabled);
   if (!styleSkillActive) {
@@ -3658,8 +3655,8 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
 
     const needsWebFirst = webGate.enabled && webGate.needsSearch && !state.hasWebSearch;
 
-    // ── 声明式 workflow 分支：V2/V3 共用解释器，优先于 v1 硬编码 ──
-    const wfSkillId = activeSkillIds.find((id: string) => id === "style_imitate_v2" || id === "style_imitate_v3");
+    // ── 声明式 workflow 分支：V3 解释器优先于 v1 硬编码 ──
+    const wfSkillId = activeSkillIds.find((id: string) => id === "style_imitate_v3");
     const wfWorkflow = wfSkillId ? activeWorkflowDeclarations.get(wfSkillId) : null;
     if (wfWorkflow && !isDeleteOnlyRoute && !needsWebFirst) {
       const wfCaps = resolveAllowedTools(wfWorkflow, state, selectedAllowedToolNames);
@@ -4684,7 +4681,7 @@ export async function executeAgentRun(args: {
   });
 
   try {
-    const hasStyleSkill = ["style_imitate", "style_imitate_v2", "style_imitate_v3"].some((id) => activeSkillIds.includes(id));
+    const hasStyleSkill = ["style_imitate", "style_imitate_v3"].some((id) => activeSkillIds.includes(id));
     const styleLibId = String(prepared.styleLibIds?.[0] ?? "").trim();
     const styleContract: any = (mainDocFromPack as any)?.styleContractV1 ?? null;
     const hasSelectedCluster =

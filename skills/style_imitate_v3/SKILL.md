@@ -17,7 +17,7 @@ triggers:
   - when: run_intent_in
     args: { intents: ["writing", "rewrite", "polish"] }
 
-conflicts: ["style_imitate", "style_imitate_v2"]
+conflicts: ["style_imitate"]
 
 toolCaps:
   allowTools: ["kb.search", "kb.listLibraries", "write", "edit", "lint.copy", "lint.style"]
