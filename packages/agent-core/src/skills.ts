@@ -220,7 +220,7 @@ export const STYLE_IMITATE_SKILL: SkillManifest = {
       "lint.style",
     ],
   },
-  autoEnable: true,
+  autoEnable: false,
   triggers: [
     { when: "has_style_library", args: { purpose: "style" } },
   ],
