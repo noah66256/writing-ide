@@ -1,4 +1,4 @@
-import { planStyleNextStep, type RunState, type WorkflowSkillPhaseSnapshot } from "@ohmycrab/agent-core";
+import type { RunState, WorkflowSkillPhaseSnapshot } from "@ohmycrab/agent-core";
 import { CORE_TOOL_NAME_SET } from "./coreTools.js";
 import type { RunContext } from "./writingAgentRunner.js";
 
@@ -88,6 +88,16 @@ function uniq(items: string[]): string[] {
     out.push(value);
   }
   return out;
+}
+
+function planStyleNextStep(snapshot: WorkflowSkillPhaseSnapshot): string | null {
+  if (snapshot.id !== "style_imitate") return null;
+  const phase = String(snapshot.currentPhase ?? "").trim();
+  if (phase === "need_style_kb") return "kb.search";
+  if (phase === "need_draft") return "write";
+  if (phase === "need_copy_lint") return "lint.copy";
+  if (phase === "need_style_lint") return "lint.style";
+  return null;
 }
 
 function buildHint(snapshot: WorkflowSkillPhaseSnapshot, state: RunState, nextTool: string | null): string {

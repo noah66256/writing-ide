@@ -13,9 +13,7 @@ import { createHash } from "node:crypto";
  */
 
 import {
-  analyzeStyleWorkflowBatch,
   createInitialRunState,
-  getActiveWorkflowSkills,
   isContentWriteTool,
   isStyleExampleKbSearch,
   isWriteLikeTool,
@@ -986,7 +984,7 @@ export class GatewayRuntime implements AgentRuntime {
   }
 
   private _resolveStyleWorkflowFollowUp():
-    | { item: CanonicalTranscriptItem; phase: string; skillId: "style_imitate" | "style_imitate_v3" }
+    | { item: CanonicalTranscriptItem; phase: string; skillId: "style_imitate" }
     | null {
     const runCtx: any = this.config.runCtx;
     const gates: any = runCtx.gates ?? {};
@@ -994,7 +992,6 @@ export class GatewayRuntime implements AgentRuntime {
     const activeSkillIds = activeSkills.map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
     const styleSkillActive =
       activeSkillIds.includes("style_imitate") ||
-      activeSkillIds.includes("style_imitate_v3") ||
       (gates.styleGateEnabled && runCtx.intent?.isWritingTask);
 
     if (!(styleSkillActive && gates.styleGateEnabled && gates.lintGateEnabled && runCtx.intent?.isWritingTask)) {
@@ -1003,14 +1000,13 @@ export class GatewayRuntime implements AgentRuntime {
 
     const st: any = this.runState as any;
     const wfDecls: Map<string, WorkflowDeclaration> | undefined = runCtx.activeWorkflowDeclarations;
-    const wfSkillId = activeSkillIds.find((id: string) => id === "style_imitate_v3" && wfDecls?.has(id));
-    const wfWorkflow = wfSkillId ? wfDecls?.get(wfSkillId) : undefined;
+    const wfWorkflow = wfDecls?.get("style_imitate");
     if (wfWorkflow) {
       const followUpMsg = resolveFollowUp(wfWorkflow, st);
       if (!followUpMsg) return null;
       const snapshot = resolvePhase(wfWorkflow, st);
       return {
-        skillId: wfSkillId,
+        skillId: "style_imitate",
         phase: String(snapshot.currentPhase ?? "unknown").trim() || "unknown",
         item: {
           kind: "runtime_hint",
@@ -1064,6 +1060,13 @@ export class GatewayRuntime implements AgentRuntime {
   private async _getFollowUpMessages(): Promise<AgentMessage[]> {
     // run.done 已触发，不再追加
     if (this.outcome.reason === "run_done") return [];
+
+    // Agent 正在向用户提问/等待确认时，不注入任何 follow-up，交还控制权
+    const lastTextForFollowUp = this._getLastAssistantText();
+    if (lastTextForFollowUp && this._detectAssistantAskingUser(lastTextForFollowUp)) {
+      return [];
+    }
+
     const styleFollowUp = this._resolveStyleWorkflowFollowUp();
     if (styleFollowUp) {
       const st: any = this.runState as any;
@@ -1878,28 +1881,13 @@ export class GatewayRuntime implements AgentRuntime {
         const executedBy = details?.executedBy ?? snap?.executedBy ?? "gateway";
         const dryRun = Boolean(details?.dryRun ?? snap?.dryRun);
 
-        // Workflow Skills Gate：当存在激活的 workflow skill 时，按闭环顺序拦截违规调用
-        const runCtx: any = this.config.runCtx;
-        const activeSkillsRaw = Array.isArray(runCtx.activeSkills) ? runCtx.activeSkills : [];
-        const activeSkillIds = activeSkillsRaw.map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
-        const gates: any = runCtx.gates ?? {};
-
-        const workflowSkills = getActiveWorkflowSkills({
-          mode: runCtx.mode,
-          intent: runCtx.intent,
-          gates: runCtx.gates,
-          activeSkillIds,
-        });
-
         if (!dryRun) {
-          // ── 声明式 workflow 分支：V2/V3 共用 checkExclusions ──
+          // ── 声明式 workflow：checkExclusions ──
+          const runCtx: any = this.config.runCtx;
           const wfDecls: Map<string, WorkflowDeclaration> | undefined = runCtx.activeWorkflowDeclarations;
-          const wfSkillIdExcl = activeSkillIds.find((id: string) => id === "style_imitate_v3" && wfDecls?.has(id));
-          const wfWorkflowExcl = wfSkillIdExcl ? wfDecls?.get(wfSkillIdExcl) : undefined;
+          const wfWorkflowExcl = wfDecls?.get("style_imitate");
           if (wfWorkflowExcl) {
             const violation = checkExclusions(wfWorkflowExcl, [rawToolName]);
-            // checkExclusions 只检查同轮多工具互斥；单工具不会违规
-            // 对于阶段性约束，由 computePerTurnAllowed 的工具白名单控制
             if (violation) {
               this.config.runCtx.writeEvent("run.notice", {
                 turn: this.turn,
@@ -1907,91 +1895,6 @@ export class GatewayRuntime implements AgentRuntime {
                 title: "StyleWorkflow",
                 message: "style workflow 工具调用提示（" + violation + "），已放行。",
               });
-            }
-          } else {
-            // ── v1 分支：硬编码 analyzeBatch ──
-            for (const wf of workflowSkills) {
-              if (wf.id !== "style_imitate") continue;
-
-              const toolCalls: ParsedToolCall[] = [
-                { name: rawToolName, args: snap?.args ?? {} },
-              ];
-              const batch = wf.analyzeBatch({
-                mode: runCtx.mode,
-                intent: runCtx.intent,
-                gates: runCtx.gates,
-                state: this.runState,
-                lintMaxRework: LINT_MAX_REWORK,
-                toolCalls,
-              });
-
-              const shouldEnforceStyleGate =
-                batch.enforceCopy || batch.enforceLint || batch.needStyleKb || batch.needDraftText;
-              if (batch.violation && shouldEnforceStyleGate) {
-                const violation = String(batch.violation);
-                const note = [
-                  "【StyleWorkflow】检测到风格闭环步骤顺序不合理（violation=" + violation + "）。",
-                  "请按\"先从风格库拉模板 kb.search → 写出候选稿 → 运行 lint.copy（防复用）→ 运行 lint.style（风格校验）→ 最后 write/edit 落盘\"的顺序调整工具调用。",
-                ].join("\n");
-
-                this.config.runCtx.writeEvent("run.notice", {
-                  turn: this.turn,
-                  kind: "warn",
-                  title: "StyleWorkflowViolation",
-                  message: "StyleWorkflow violation=" + violation + "，本回合工具调用已被拦截，将返回错误结果提示模型按闭环顺序重试。",
-                  detail: { violation, enforceCopy: batch.enforceCopy, enforceLint: batch.enforceLint },
-                });
-
-                const errorOutput = {
-                  ok: false,
-                  error: "STYLE_WORKFLOW_VIOLATION",
-                  violation,
-                  message: note,
-                  toolName: rawToolName,
-                };
-
-                this.config.runCtx.writeEvent("tool.result", {
-                  toolCallId: event.toolCallId,
-                  name: rawToolName,
-                  ok: false,
-                  output: errorOutput,
-                  meta,
-                });
-
-                this.turnEngine.record({
-                  type: "tool_result",
-                  callId: event.toolCallId,
-                  name: rawToolName,
-                  ok: false,
-                  output: errorOutput,
-                  error: "STYLE_WORKFLOW_VIOLATION",
-                });
-
-                this.failureDigest.failedTools.push({
-                  toolCallId: event.toolCallId,
-                  name: rawToolName,
-                  error: "STYLE_WORKFLOW_VIOLATION",
-                  message: note,
-                  path: undefined,
-                  next_actions: [
-                    "按提示调整 kb.search / lint.copy / lint.style / write 的顺序",
-                  ],
-                  turn: this.turn,
-                });
-                this.failureDigest.failedCount = this.failureDigest.failedTools.length;
-
-                this.toolCallSnapshots.delete(event.toolCallId);
-                return;
-              }
-
-              if (batch.violation) {
-                this.config.runCtx.writeEvent("run.notice", {
-                  turn: this.turn,
-                  kind: "info",
-                  title: "StyleWorkflow",
-                  message: "工具调用顺序提示（" + String(batch.violation) + "），已放行，由 LLM 自行判断。",
-                });
-              }
             }
           }
         }
@@ -2064,9 +1967,13 @@ export class GatewayRuntime implements AgentRuntime {
 
         // run.done 终止语义：与旧 runner 保持一致
         if (rawToolName === "run.done") {
+          // Agent 向用户提问时调用 run.done → 放行，不拦截（让 agent 交还控制权等用户回复）
+          const lastTextForRunDone = this._getLastAssistantText();
+          const agentIsAskingUser = lastTextForRunDone && this._detectAssistantAskingUser(lastTextForRunDone);
+
           const styleFollowUp = this._resolveStyleWorkflowFollowUp();
           const budget = Math.max(0, Math.floor(Number((this.runState as any).workflowRetryBudget ?? 0)));
-          if (styleFollowUp && budget > 0) {
+          if (styleFollowUp && budget > 0 && !agentIsAskingUser) {
             try {
               this.config.runCtx.writeEvent("run.notice", {
                 turn: this.turn,
@@ -2685,17 +2592,17 @@ export class GatewayRuntime implements AgentRuntime {
 
     // Workflow skills snapshot（当前仅 style_imitate）
     const runCtx: any = this.config.runCtx;
-    const activeSkillsRaw = Array.isArray(runCtx.activeSkills) ? runCtx.activeSkills : [];
-    const activeSkillIds = activeSkillsRaw.map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
     const gates: any = runCtx.gates ?? {};
-    const workflowSkills = getActiveWorkflowSkills({
-      mode: runCtx.mode,
-      intent: runCtx.intent,
-      gates,
-      activeSkillIds,
-    }).map((wf) => wf.snapshot(this.runState));
+    const wfDecls: Map<string, WorkflowDeclaration> | undefined = runCtx.activeWorkflowDeclarations;
+    const workflowSkills = wfDecls
+      ? Array.from(wfDecls.entries()).map(([id, wf]) => {
+          const snap = resolvePhase(wf, this.runState as any);
+          return { ...snap, id };
+        })
+      : [];
 
     // Style_imitate 工作流摘要：保留旧字段，便于兼容既有审计逻辑
+    const activeSkillsRaw = Array.isArray(runCtx.activeSkills) ? runCtx.activeSkills : [];
     const styleSkillActive =
       activeSkillsRaw.some((s: any) => String(s?.id ?? "").trim() === "style_imitate") ||
       (gates.styleGateEnabled && runCtx.intent?.isWritingTask);

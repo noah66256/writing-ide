@@ -72,7 +72,7 @@ function tryPreAttachStyleLibraryFromPrompt(args: {
   kbMentionIds?: string[];
 }) {
   const activeSkillIds = Array.isArray(args.activeSkillIds) ? args.activeSkillIds : [];
-  if (!activeSkillIds.includes("style_imitate_v3")) return;
+  if (!activeSkillIds.includes("style_imitate")) return;
   const kbMentionIds = Array.isArray(args.kbMentionIds) ? args.kbMentionIds.filter(Boolean) : [];
   if (kbMentionIds.length > 0) return;
 
@@ -611,6 +611,17 @@ function resolveMarkdownImageSource(rootDir: string | null | undefined, rawSrc: 
   return { kind: "remote", src };
 }
 
+function resolveMarkdownImageCaption(alt?: string, title?: string): string {
+  const normalizedTitle = String(title ?? "").trim();
+  if (normalizedTitle) return normalizedTitle;
+  const normalizedAlt = String(alt ?? "").trim();
+  if (!normalizedAlt) return "";
+  if (/^(test|image|img|photo|figure|diagram)([-_ ]?\d+)?$/i.test(normalizedAlt)) return "";
+  if (/^(图片|截图|配图)([-_ ]?\d+)?$/i.test(normalizedAlt)) return "";
+  if (/[\u4e00-\u9fa5]/.test(normalizedAlt)) return normalizedAlt;
+  return normalizedAlt.length >= 8 ? normalizedAlt : "";
+}
+
 function MarkdownImage({
   src,
   alt,
@@ -623,42 +634,70 @@ function MarkdownImage({
   rootDir: string | null | undefined;
 }) {
   const resolved = useMemo(() => resolveMarkdownImageSource(rootDir, src), [rootDir, src]);
-  const [resolvedSrc, setResolvedSrc] = useState<string>(() => resolved?.kind === "remote" ? resolved.src : "");
+  const [resolvedSrc, setResolvedSrc] = useState<string>("");
   const [loadError, setLoadError] = useState<string>("");
+  const [isLoading, setIsLoading] = useState<boolean>(Boolean(resolved));
 
   useEffect(() => {
     let cancelled = false;
     setLoadError("");
+    setIsLoading(Boolean(resolved));
     if (!resolved) {
       setResolvedSrc("");
       return;
     }
     if (resolved.kind === "remote") {
-      setResolvedSrc(resolved.src);
-      return;
+      setResolvedSrc("");
+      const img = new window.Image();
+      img.onload = () => {
+        if (cancelled) return;
+        setResolvedSrc(resolved.src);
+        setIsLoading(false);
+      };
+      img.onerror = () => {
+        if (cancelled) return;
+        setResolvedSrc("");
+        setLoadError("图片加载失败");
+        setIsLoading(false);
+      };
+      img.src = resolved.src;
+      if (img.complete && img.naturalWidth > 0) {
+        setResolvedSrc(resolved.src);
+        setIsLoading(false);
+      }
+      return () => {
+        cancelled = true;
+        img.onload = null;
+        img.onerror = null;
+      };
     }
     const cached = localImageDataUrlCache.get(resolved.absPath);
     if (cached) {
       setResolvedSrc(cached);
+      setIsLoading(false);
       return;
     }
     setResolvedSrc("");
     const api = window.desktop?.fs?.readImageDataUrl;
     if (!api) {
       setLoadError("当前桌面端不支持本地图像预览");
+      setIsLoading(false);
       return;
     }
     void api(resolved.absPath).then((ret) => {
       if (cancelled) return;
       if (!ret?.ok || !ret.dataUrl) {
         setLoadError(String(ret?.error ?? "图片加载失败"));
+        setIsLoading(false);
         return;
       }
       localImageDataUrlCache.set(resolved.absPath, ret.dataUrl);
       setResolvedSrc(ret.dataUrl);
+      setIsLoading(false);
     }).catch((err) => {
       if (cancelled) return;
       setLoadError(String((err as any)?.message ?? err ?? "图片加载失败"));
+      setIsLoading(false);
     });
     return () => {
       cancelled = true;
@@ -666,7 +705,9 @@ function MarkdownImage({
   }, [resolved]);
 
   const localAbsPath = resolved?.kind === "local" ? resolved.absPath : "";
-  const caption = String(alt ?? title ?? "").trim();
+  const remoteSrc = resolved?.kind === "remote" ? resolved.src : "";
+  const caption = resolveMarkdownImageCaption(alt, title);
+  const placeholderText = loadError || (isLoading ? "图片加载中…" : "图片暂不可用");
 
   return (
     <figure className="chat-markdown-image-figure">
@@ -684,7 +725,12 @@ function MarkdownImage({
         />
       ) : (
         <div className="chat-markdown-image-placeholder">
-          {loadError || "图片加载中…"}
+          <span>{placeholderText}</span>
+          {remoteSrc ? (
+            <a href={remoteSrc} target="_blank" rel="noreferrer" className="chat-markdown-image-link">
+              打开原图
+            </a>
+          ) : null}
         </div>
       )}
       {caption ? <figcaption className="chat-markdown-image-caption">{caption}</figcaption> : null}

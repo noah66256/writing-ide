@@ -147,7 +147,7 @@ async function rewriteDraftWithMessages(args: {
 function derivePipelineTargetPath(args: { runCtx: RunContext; payload: StylePipelinePayloadV1 }) {
   const mainDocPath = String(((args.runCtx.mainDoc as any)?.path ?? "")).trim();
   const payloadOutputPath = String(((args.payload as any)?.taskSpec?.outputPath ?? "")).trim();
-  return payloadOutputPath || mainDocPath || `drafts/style_imitate_v3_${Date.now()}.md`;
+  return payloadOutputPath || mainDocPath || `drafts/style_imitate_${Date.now()}.md`;
 }
 
 function buildStepMessages(args: {

@@ -616,7 +616,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             mode: args.mode as any, userPrompt: String(args.prompt ?? ""),
             mainDocRunIntent: main?.runIntent, kbSelected: [] as any,
           });
-          const hasStyleSkill = activeForThisRun.some((s: any) => ["style_imitate", "style_imitate_v3"].includes(String(s?.id ?? "")));
+          const hasStyleSkill = activeForThisRun.some((s: any) => String(s?.id ?? "") === "style_imitate");
           if (hasStyleSkill) {
             const fpRet = await useKbStore.getState().getLatestLibraryFingerprint(libId).catch(() => ({ ok: false } as any));
             const snapshot = fpRet?.ok ? (fpRet as any).snapshot : null;
@@ -1302,7 +1302,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                 if (!s || typeof s !== "object") continue;
                 const id = String((s as any).id ?? "").trim();
                 if (!id) continue;
-                const key = id === "style_imitate" ? "style_imitate.v1" : id + ".v1";
+                const key = id;
                 const phase = String((s as any).currentPhase ?? "").trim();
                 let status: string = "not_started";
                 if (phase === "completed") status = "completed";

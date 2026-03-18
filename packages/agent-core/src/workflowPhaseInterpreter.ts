@@ -5,7 +5,14 @@
  * computeStyleTurnCaps / buildStyleSnapshot / analyzeStyleWorkflowBatch。
  */
 
-import type { WorkflowSkillPhaseSnapshot } from "./workflowSkills.js";
+export type WorkflowSkillPhaseSnapshot = {
+  /** skill id（例如 style_imitate） */
+  id: string;
+  active: boolean;
+  phases: string[];
+  currentPhase: string;
+  missingSteps: string[];
+};
 
 // ── 类型定义 ──────────────────────────────────────────
 
