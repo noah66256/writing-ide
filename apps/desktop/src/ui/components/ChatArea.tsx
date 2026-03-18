@@ -33,7 +33,7 @@ import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
 import { WelcomePage } from "./WelcomePage";
 import { InputBar } from "./InputBar";
 import { usePersonaStore } from "@/state/personaStore";
-import { BUILTIN_SUB_AGENTS, looksLikeFreshWritingTaskPrompt } from "@ohmycrab/agent-core";
+import { BUILTIN_SUB_AGENTS, looksLikeFreshWritingTaskPrompt, skillRegistry } from "@ohmycrab/agent-core";
 import {
   injectFileRefLinksInMarkdown,
   wrapBareUrlsInMarkdown,
@@ -1003,7 +1003,11 @@ export function ChatArea() {
       const userMentions = meta?.mentions?.length ? meta.mentions : undefined;
       const mentionedSkillIds = meta?.mentions?.filter((m) => m.type === "skill").map((m) => m.id) ?? [];
       // 合并 sticky skill（上轮 @mention 过的 skill，本轮自动延续）
-      const stickySkillIds = useRunStore.getState().stickyActiveSkillIds ?? [];
+      // 过滤掉 workflow 类型的 sticky skill（不应跨 run 自动延续）
+      const stickySkillIds = (useRunStore.getState().stickyActiveSkillIds ?? []).filter((id) => {
+        const m = skillRegistry.get(id);
+        return m?.kind !== "workflow";
+      });
       const activeSkillIds = Array.from(new Set([...stickySkillIds, ...mentionedSkillIds]));
       useRunStore.getState().addUser(text, baseline as any, userMentions, images.length ? images : undefined);
       const hasSkillOnlyInvocation =
@@ -1018,8 +1022,15 @@ export function ChatArea() {
             ? " "
             : cleanPromptRaw;
       // 新 @mention 的 skill 写入 sticky，后续 Run 自动携带
+      // workflow 类型的 skill 不写入 sticky（每次必须用户显式 @mention）
       if (mentionedSkillIds.length > 0) {
-        useRunStore.getState().addStickyActiveSkills(mentionedSkillIds);
+        const stickyIds = mentionedSkillIds.filter((id) => {
+          const m = skillRegistry.get(id);
+          return m?.kind !== "workflow";
+        });
+        if (stickyIds.length > 0) {
+          useRunStore.getState().addStickyActiveSkills(stickyIds);
+        }
       }
       const kbMentionIds = meta?.mentions?.filter((m) => m.type === "kb").map((m) => m.id);
       tryPreAttachStyleLibraryFromPrompt({
