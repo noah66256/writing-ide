@@ -1660,6 +1660,20 @@ const tools: ToolDefinition[] = [
 
       const ret = await useKbStore.getState().searchForAgent({ query, kind, facetIds, cardTypes, anchorParagraphIndexMax, anchorFromEndMax, debug, libraryIds, perDocTopN, topDocs });
       if (!ret.ok) return { ok: false, error: ret.error ?? "SEARCH_FAILED" };
+      if (libraryIds.length > 0) {
+        const libraries = useKbStore.getState().libraries ?? [];
+        const styleLibIds = libraryIds.filter((id) => {
+          const lib = libraries.find((item: any) => String(item?.id ?? "").trim() === id);
+          return String(lib?.purpose ?? "").trim() === "style";
+        });
+        if (styleLibIds.length > 0) {
+          const curAttached = useRunStore.getState().kbAttachedLibraryIds ?? [];
+          const toAttach = styleLibIds.filter((id) => !curAttached.includes(id));
+          if (toAttach.length > 0) {
+            useRunStore.getState().setKbAttachedLibraries([...curAttached, ...toAttach]);
+          }
+        }
+      }
 
       // 输出精简：按文档分组
       let contentPreviewBudget = 4000;

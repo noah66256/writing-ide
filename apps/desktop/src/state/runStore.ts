@@ -186,6 +186,13 @@ type RunState = {
   toggleKbAttachedLibrary: (id: string) => void;
   clearKbAttachedLibraries: () => void;
 
+  // 会话级 sticky skill：用户通过 @mention / slash 显式唤起的 skill，后续 Run 自动延续。
+  // 注意：这只是"显式唤起记忆"，最终激活仍由 Gateway 侧冲突裁决。
+  stickyActiveSkillIds: string[];
+  addStickyActiveSkills: (ids: string[]) => void;
+  removeStickyActiveSkill: (id: string) => void;
+  clearStickyActiveSkills: () => void;
+
   // Workflow Skills：上一轮运行时的闭环快照（写入 TASK_STATE，指导续跑补步骤）
   workflowSkills?: Record<string, { status: "not_started" | "in_progress" | "completed" | "degraded"; missingSteps?: string[] }>;
   setWorkflowSkills: (skills: Record<string, { status: "not_started" | "in_progress" | "completed" | "degraded"; missingSteps?: string[] }>) => void;
@@ -223,6 +230,7 @@ type RunState = {
     steps: Array<Step | Omit<ToolBlockStep, "apply" | "undo">>;
     logs: LogEntry[];
     kbAttachedLibraryIds: string[];
+    stickyActiveSkillIds?: string[];
     ctxRefs?: CtxRefItem[];
     pendingArtifacts?: PendingArtifact[];
   }) => void;
@@ -366,6 +374,7 @@ export const useRunStore = create<RunState>()(
   ctxRefs: [],
   pendingArtifacts: [],
   kbAttachedLibraryIds: [],
+  stickyActiveSkillIds: [],
   workflowSkills: {},
 
   setMode: (mode) =>
@@ -439,6 +448,7 @@ export const useRunStore = create<RunState>()(
       todoList: [],
       ctxRefs: [],
       pendingArtifacts: [],
+      stickyActiveSkillIds: [],
       workflowSkills: {},
       dialogueSummaryByMode: { agent: "", chat: "" },
       dialogueSummaryTurnCursorByMode: { agent: 0, chat: 0 },
@@ -528,7 +538,12 @@ export const useRunStore = create<RunState>()(
       todoList: Array.isArray(s.todoList) ? (s.todoList as TodoItem[]) : [],
       steps: normalized,
       logs: Array.isArray(s.logs) ? (s.logs as LogEntry[]) : [],
-      kbAttachedLibraryIds: [],
+      kbAttachedLibraryIds: Array.isArray((s as any).kbAttachedLibraryIds)
+        ? Array.from(new Set(((s as any).kbAttachedLibraryIds as any[]).map((x: any) => String(x ?? "").trim()).filter(Boolean)))
+        : [],
+      stickyActiveSkillIds: Array.isArray((s as any).stickyActiveSkillIds)
+        ? Array.from(new Set(((s as any).stickyActiveSkillIds as any[]).map((x: any) => String(x ?? "").trim()).filter(Boolean)))
+        : [],
       ctxRefs: Array.isArray((s as any).ctxRefs) ? dedupeCtxRefs((s as any).ctxRefs as any) : [],
       pendingArtifacts: Array.isArray((s as any).pendingArtifacts) ? dedupePendingArtifacts((s as any).pendingArtifacts as any) : [],
       isRunning: false,
@@ -567,6 +582,17 @@ export const useRunStore = create<RunState>()(
     set({ kbAttachedLibraryIds: next });
   },
   clearKbAttachedLibraries: () => set({ kbAttachedLibraryIds: [] }),
+
+  addStickyActiveSkills: (ids) =>
+    set((s) => {
+      const next = Array.from(new Set([...(s.stickyActiveSkillIds ?? []), ...(ids ?? []).map((x) => String(x ?? "").trim()).filter(Boolean)]));
+      return { stickyActiveSkillIds: next };
+    }),
+  removeStickyActiveSkill: (id) =>
+    set((s) => ({
+      stickyActiveSkillIds: (s.stickyActiveSkillIds ?? []).filter((x) => x !== String(id ?? "").trim()),
+    })),
+  clearStickyActiveSkills: () => set({ stickyActiveSkillIds: [] }),
 
   setWorkflowSkills: (skills) => {
     const safe = skills && typeof skills === "object" ? skills : {};
@@ -615,6 +641,7 @@ export const useRunStore = create<RunState>()(
       todoList: [],
       ctxRefs: [],
       pendingArtifacts: [],
+      stickyActiveSkillIds: [],
       isRunning: false,
       activity: null,
       mainDoc: {

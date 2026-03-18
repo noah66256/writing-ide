@@ -35,6 +35,7 @@ export type RunSnapshot = {
   steps: SerializableStep[];
   logs: LogEntry[];
   kbAttachedLibraryIds: string[];
+  stickyActiveSkillIds?: string[];
   ctxRefs?: CtxRefItem[];
   pendingArtifacts?: PendingArtifact[];
   projectDir?: string | null;
@@ -149,6 +150,7 @@ export function buildCurrentSnapshot(): RunSnapshot {
     steps: (s.steps ?? []) as any,
     logs: (s.logs ?? []) as any,
     kbAttachedLibraryIds: [...(s.kbAttachedLibraryIds ?? [])],
+    stickyActiveSkillIds: [...((s as any).stickyActiveSkillIds ?? [])],
     ctxRefs: [...(s.ctxRefs ?? [])],
     pendingArtifacts: [...(((s as any).pendingArtifacts ?? []) as PendingArtifact[])],
     projectDir,

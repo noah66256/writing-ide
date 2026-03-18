@@ -24,7 +24,7 @@ import { useSkillStore } from "../state/skillStore";
 import { useMemoryStore } from "../state/memoryStore";
 import { useModelStore } from "../state/modelStore";
 import { startGatewayRunWs } from "./wsTransport";
-import { resolveImplicitStyleLibraryIds } from "./kbSelection";
+import { resolveImplicitStyleLibraryIds, resolveImplicitStyleLibrarySelection } from "./kbSelection";
 
 export function authHeader(): Record<string, string> {
   const token = String(useAuthStore.getState().accessToken ?? "").trim();
@@ -211,23 +211,35 @@ export async function buildStylePipelinePayload(args: {
 }): Promise<{ styleExecutionMode?: StyleExecutionMode; stylePipelinePayload?: StylePipelinePayloadV1 }> {
   const activeSkillIds = Array.isArray(args.activeSkillIds) ? args.activeSkillIds.map((x) => String(x ?? "").trim()).filter(Boolean) : [];
   const { skillOverrides } = useSkillStore.getState();
+  const v3Override = skillOverrides?.["style_imitate_v3"]?.enabled;
+  // enabled === false 是 hard-stop：即使 sticky 仍在，Settings 关闭就不走 V3
   const v3Requested =
-    activeSkillIds.includes("style_imitate_v3") ||
-    skillOverrides?.["style_imitate_v3"]?.enabled === true;
+    v3Override === false
+      ? false
+      : activeSkillIds.includes("style_imitate_v3") || v3Override === true;
   if (!v3Requested) return {};
 
   const kb = useKbStore.getState();
   const rt: any = useRunStore.getState() as any;
   const mainDoc: any = rt.getMainDoc?.() ?? rt.mainDoc ?? {};
   const mentionedLibraryIds = Array.isArray(args.kbMentionIds) ? args.kbMentionIds.map((x) => String(x ?? "").trim()).filter(Boolean) : [];
-  const attachedLibraryIds = rt.getKbAttachedLibraryIds?.() ?? [];
-  const [libraryId] = resolveImplicitStyleLibraryIds({
+  const attachedLibraryIds = Array.isArray(rt.kbAttachedLibraryIds)
+    ? rt.kbAttachedLibraryIds.map((x: any) => String(x ?? "").trim()).filter(Boolean)
+    : [];
+  const resolved = resolveImplicitStyleLibrarySelection({
     mentionedLibraryIds,
     attachedLibraryIds,
     libraries: kb.libraries ?? [],
     mainDoc,
   });
-  if (!libraryId) return {};
+  const [libraryId] = resolved.libraryIds;
+  if (!libraryId) {
+    const styleLibCount = (kb.libraries ?? []).filter((lib: any) => String(lib?.purpose ?? "").trim() === "style").length;
+    console.warn(
+      `[buildStylePipelinePayload] pipeline blocked: ${resolved.error ?? "NO_LIBRARY_SELECTED"} source=${resolved.source} styleLibCount=${styleLibCount} attachedCount=${attachedLibraryIds.length}`,
+    );
+    return {};
+  }
 
   const libraryMeta = (kb.libraries ?? []).find((lib: any) => String(lib?.id ?? "").trim() === libraryId) as any;
   const fpRet = await kb.getLatestLibraryFingerprint(libraryId).catch(() => ({ ok: false } as any));

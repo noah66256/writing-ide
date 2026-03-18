@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 import { TeamModal } from "@/components/TeamModal";
 import { listRegisteredSkills, type SkillManifest } from "@ohmycrab/agent-core";
 import { useSkillStore } from "@/state/skillStore";
+import { useRunStore } from "@/state/runStore";
 import { usePersonaStore } from "@/state/personaStore";
 import { useKbStore } from "@/state/kbStore";
 import { useDialogStore } from "@/state/dialogStore";
@@ -859,7 +860,12 @@ function SkillTabContent() {
                 <input
                   type="checkbox"
                   checked={enabled}
-                  onChange={(e) => setSkillEnabled(skill.id, e.target.checked)}
+                  onChange={(e) => {
+                    const nextEnabled = e.target.checked;
+                    setSkillEnabled(skill.id, nextEnabled);
+                    // 关闭 skill 时同步清除 sticky，防止旧 sticky 覆盖 Settings 意图
+                    if (!nextEnabled) useRunStore.getState().removeStickyActiveSkill(skill.id);
+                  }}
                 />
                 <span className="teamToggleSlider" />
               </label>

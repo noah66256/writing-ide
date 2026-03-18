@@ -663,6 +663,7 @@ export function ChatArea() {
   const todoList = useRunStore((s) => s.todoList);
   const mainDoc = useRunStore((s) => s.mainDoc);
   const kbAttachedLibraryIds = useRunStore((s) => s.kbAttachedLibraryIds);
+  const stickyActiveSkillIds = useRunStore((s) => s.stickyActiveSkillIds);
   const ctxRefs = useRunStore((s) => s.ctxRefs);
   const pendingArtifacts = useRunStore((s) => s.pendingArtifacts);
   const mode = useRunStore((s) => s.mode);
@@ -774,7 +775,7 @@ export function ChatArea() {
   // 自动保存：使用脏标记 + 固定间隔轮询，避免连续工具调用/流式输出饿死 timer
   useEffect(() => {
     autoSaveDirtyRef.current = true;
-  }, [steps, mainDoc, todoList, kbAttachedLibraryIds, ctxRefs, pendingArtifacts, mode, model, activeConvId]);
+  }, [steps, mainDoc, todoList, kbAttachedLibraryIds, stickyActiveSkillIds, ctxRefs, pendingArtifacts, mode, model, activeConvId]);
 
   // 自动保存草稿到 conversationStore，同时更新活跃对话（带防降级保护）
   useEffect(() => {
@@ -790,6 +791,7 @@ export function ChatArea() {
       pendingArtifacts.length > 0 ||
       ctxRefs.length > 0 ||
       kbAttachedLibraryIds.length > 0 ||
+      stickyActiveSkillIds.length > 0 ||
       Object.values(mainDoc ?? {}).some((v) => {
         if (v == null) return false;
         if (typeof v === "string") return Boolean(v.trim());
@@ -825,7 +827,7 @@ export function ChatArea() {
       autoSaveDirtyRef.current = false;
     }, 2000);
     return () => window.clearInterval(timer);
-  }, [steps, mainDoc, todoList, kbAttachedLibraryIds, ctxRefs, pendingArtifacts, mode, model]);
+  }, [steps, mainDoc, todoList, kbAttachedLibraryIds, stickyActiveSkillIds, ctxRefs, pendingArtifacts, mode, model]);
 
   // 运行结束时立即刷盘一次，避免 dev/HMR/强制退出导致最后一轮没落盘
   useEffect(() => {
@@ -921,7 +923,14 @@ export function ChatArea() {
       useRunStore.getState().addUser(text, baseline as any, userMentions, images.length ? images : undefined);
       // 纯图片消息时 prompt 不能为空（Gateway schema min(1)），用空格占位
       const cleanPrompt = cleanPromptRaw.trim().length > 0 ? cleanPromptRaw : images.length > 0 ? " " : cleanPromptRaw;
-      const activeSkillIds = meta?.mentions?.filter((m) => m.type === "skill").map((m) => m.id);
+      const mentionedSkillIds = meta?.mentions?.filter((m) => m.type === "skill").map((m) => m.id) ?? [];
+      // 合并 sticky skill（上轮 @mention 过的 skill，本轮自动延续）
+      const stickySkillIds = useRunStore.getState().stickyActiveSkillIds ?? [];
+      const activeSkillIds = Array.from(new Set([...stickySkillIds, ...mentionedSkillIds]));
+      // 新 @mention 的 skill 写入 sticky，后续 Run 自动携带
+      if (mentionedSkillIds.length > 0) {
+        useRunStore.getState().addStickyActiveSkills(mentionedSkillIds);
+      }
       const kbMentionIds = meta?.mentions?.filter((m) => m.type === "kb").map((m) => m.id);
       // 读取当前 activeConvId（此时可能刚被 setActiveConvId 更新）
       const runConvId = useConversationStore.getState().activeConvId ?? undefined;
