@@ -88,6 +88,7 @@ export type TaskSpecV1 = {
   taskId: string;
   scene: StyleSceneV1;
   prompt: string;
+  outputPath?: string | null;
   platform: string | null;
   audience: string | null;
   wordCount: number | null;

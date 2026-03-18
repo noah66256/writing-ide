@@ -4871,6 +4871,12 @@ export async function executeAgentRun(args: {
     Boolean(intent?.isWritingTask);
 
   if (shouldRunStylePipeline && stylePipelinePayload) {
+    writeEvent("run.execution.mode", {
+      runId,
+      executionMode: "pipeline_v1",
+      pipelineId: "style_imitate_v3",
+      turn: 0,
+    });
     let pipelineOutcome:
       | { status: "completed"; reason: string; reasonCodes: string[]; detail?: unknown }
       | { status: "failed" | "aborted"; reason: string; reasonCodes: string[]; detail?: unknown };

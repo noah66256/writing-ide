@@ -5,7 +5,7 @@ import {
 } from "../llm/providerAdapter.js";
 import type { ChatCompletionOnceResult, OpenAiChatMessage } from "../llm/openaiCompat.js";
 import type { RunContext } from "./writingAgentRunner.js";
-import type { RunState } from "@ohmycrab/agent-core";
+import { parseStyleLintResult, type RunState } from "@ohmycrab/agent-core";
 import type {
   PipelineConfigV1,
   DraftTextPayloadV1,
@@ -61,6 +61,93 @@ function extractJsonObject(content: string): string | null {
 
 function normalizeText(content: string) {
   return String(content ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+}
+
+function truncateForPrompt(value: unknown, maxChars = 1600) {
+  const text = typeof value === "string" ? value : JSON.stringify(value ?? null, null, 2);
+  const normalized = String(text ?? "").trim();
+  if (!normalized) return "";
+  return normalized.length <= maxChars ? normalized : `${normalized.slice(0, maxChars)}\n…`;
+}
+
+function buildCopyRewriteMessages(args: { draft: string; lintOutput: any }): OpenAiChatMessage[] {
+  const output = args.lintOutput && typeof args.lintOutput === "object" ? args.lintOutput : {};
+  const feedback = {
+    riskLevel: String(output?.riskLevel ?? "").trim() || null,
+    maxOverlapChars: Number(output?.maxOverlapChars ?? 0) || 0,
+    maxChar5gramJaccard: Number(output?.maxChar5gramJaccard ?? 0) || 0,
+    topOverlaps: Array.isArray(output?.topOverlaps) ? output.topOverlaps.slice(0, 3) : [],
+  };
+  return [
+    {
+      role: "system",
+      content:
+        "你是风格仿写管线中的 copy-lint 修稿器。\n" +
+        "- 目标：降低复述/重合风险，但保留原信息结构与事实。\n" +
+        "- 严禁新增事实、数字、案例、结论。\n" +
+        "- 优先改写高重合片段：换句式、拆句、改转折、改表达顺序。\n" +
+        "- 只输出改写后的全文，不要解释。",
+    },
+    {
+      role: "user",
+      content:
+        `当前草稿：\n${args.draft}\n\n` +
+        `copy lint 反馈（精简）：\n${truncateForPrompt(feedback, 1200)}`,
+    },
+  ];
+}
+
+function buildStyleRewriteMessages(args: { draft: string; lintOutput: any }): OpenAiChatMessage[] {
+  const parsed = parseStyleLintResult(args.lintOutput);
+  const issues = Array.isArray(args.lintOutput?.issues) ? args.lintOutput.issues.slice(0, 5) : [];
+  const feedback = {
+    score: parsed.score,
+    highIssues: parsed.highIssues,
+    summary: parsed.summary,
+    missingDimensions: parsed.missingDimensions,
+    issues,
+    rewritePrompt: parsed.rewritePrompt,
+  };
+  return [
+    {
+      role: "system",
+      content:
+        "你是风格仿写管线中的 style-lint 修稿器。\n" +
+        "- 目标：在不新增事实/案例/数字的前提下，让草稿更贴近目标风格。\n" +
+        "- 必须优先解决高优先级 issue 与 missingDimensions。\n" +
+        "- 保留原主题、原信息点、原结构，不要重起炉灶。\n" +
+        "- 只输出改写后的全文，不要解释。",
+    },
+    {
+      role: "user",
+      content:
+        `当前草稿：\n${args.draft}\n\n` +
+        `style lint 反馈（精简）：\n${truncateForPrompt(feedback, 2200)}`,
+    },
+  ];
+}
+
+async function rewriteDraftWithMessages(args: {
+  runCtx: RunContext;
+  messages: OpenAiChatMessage[];
+  temperature?: number;
+  maxTokens?: number;
+}) {
+  const { ret } = await completionOnce(args.runCtx, {
+    messages: args.messages,
+    temperature: typeof args.temperature === "number" ? args.temperature : 0.4,
+    maxTokens: typeof args.maxTokens === "number" ? args.maxTokens : 2200,
+  });
+  if (!ret.ok) throw new Error(String(ret.error ?? "PIPELINE_REWRITE_FAILED"));
+  const text = normalizeText(ret.content);
+  if (!text) throw new Error("PIPELINE_REWRITE_EMPTY");
+  return text;
+}
+
+function derivePipelineTargetPath(args: { runCtx: RunContext; payload: StylePipelinePayloadV1 }) {
+  const mainDocPath = String(((args.runCtx.mainDoc as any)?.path ?? "")).trim();
+  const payloadOutputPath = String(((args.payload as any)?.taskSpec?.outputPath ?? "")).trim();
+  return payloadOutputPath || mainDocPath || `drafts/style_imitate_v3_${Date.now()}.md`;
 }
 
 function buildStepMessages(args: {
@@ -314,65 +401,130 @@ export class PipelineExecutor {
         markStep(stepId, { status: "running", attempts: (stepStates[stepId]?.attempts ?? 0) + 1 });
 
         if (stepId === "lint_loop") {
-          const finalDraft = getLatestDraftForStep(runState, "closure");
+          let finalDraft = getLatestDraftForStep(runState, "closure");
           if (!finalDraft) throw new Error("PIPELINE_MISSING_FINAL_DRAFT");
 
-          // copy lint
-          const copyRes = await waitForDesktopToolResult({
-            runCtx,
-            toolName: "lint.copy",
-            toolArgs: { text: finalDraft },
-            turn: 0,
-          });
-          runCtx.writeEvent("tool.result", {
-            toolCallId: copyRes.toolCallId,
-            name: "lint.copy",
-            output: copyRes.output,
-            ok: copyRes.ok,
-            executedBy: "desktop",
-            turn: 0,
-          });
-          if (!copyRes.ok) {
-            markStep(stepId, { status: "failed", error: copyRes.output?.error ?? "lint.copy_failed" });
-            throw new Error(String(copyRes.output?.error ?? "LINT_COPY_FAILED"));
+          const lintCfg = pipelineConfig.global?.lint ?? { maxCopyAttempts: 1, maxStyleAttempts: 1, pickBestOnExhaust: true };
+          let copyAttempt = 0;
+          let copyPassed = false;
+          setBool("copyGateDegraded", false);
+          (runState as any).copyLintPassed = false;
+          while (copyAttempt < Math.max(1, lintCfg.maxCopyAttempts) && !copyPassed) {
+            copyAttempt += 1;
+            const copyRes = await waitForDesktopToolResult({
+              runCtx,
+              toolName: "lint.copy",
+              toolArgs: { text: finalDraft },
+              turn: 0,
+            });
+            runCtx.writeEvent("tool.result", {
+              toolCallId: copyRes.toolCallId,
+              name: "lint.copy",
+              output: copyRes.output,
+              ok: copyRes.ok,
+              executedBy: "desktop",
+              turn: 0,
+            });
+            if (!copyRes.ok) {
+              markStep(stepId, { status: "failed", error: copyRes.output?.error ?? "lint.copy_failed" });
+              throw new Error(String(copyRes.output?.error ?? "LINT_COPY_FAILED"));
+            }
+            copyPassed = Boolean(copyRes.output?.passed ?? copyRes.output?.ok?.passed ?? copyRes.output?.output?.passed);
+            (runState as any).copyLintPassed = copyPassed;
+            (runState as any).copyLintFailCount = copyPassed ? 0 : copyAttempt;
+            (runState as any).lastCopyLint = {
+              riskLevel: String(copyRes.output?.riskLevel ?? "medium").trim().toLowerCase() || "medium",
+              maxOverlapChars: Number(copyRes.output?.maxOverlapChars ?? 0) || 0,
+              maxChar5gramJaccard: Number(copyRes.output?.maxChar5gramJaccard ?? 0) || 0,
+              topOverlaps: Array.isArray(copyRes.output?.topOverlaps) ? copyRes.output.topOverlaps : [],
+              sources: copyRes.output?.sources ?? null,
+            };
+            (runState as any).bestCopyScore = null;
+            (runState as any).bestCopyArtifactId = null;
+            if (!copyPassed && copyAttempt < Math.max(1, lintCfg.maxCopyAttempts)) {
+              finalDraft = await rewriteDraftWithMessages({
+                runCtx,
+                messages: buildCopyRewriteMessages({ draft: finalDraft, lintOutput: copyRes.output }),
+                temperature: 0.35,
+                maxTokens: 2200,
+              });
+              setArtifactText(runState, "closure", finalDraft);
+            }
           }
-          const copyPassed = Boolean(copyRes.output?.passed ?? copyRes.output?.ok?.passed ?? copyRes.output?.output?.passed);
-          (runState as any).bestCopyScore = null;
-          (runState as any).bestCopyArtifactId = null;
           if (!copyPassed) {
-            // v1：先不重写循环，直接降级继续 style lint（copy lint 只是风险提示）
             setBool("copyGateDegraded", true);
           }
 
-          // style lint
-          const styleRes = await waitForDesktopToolResult({
-            runCtx,
-            toolName: "lint.style",
-            toolArgs: { text: finalDraft },
-            turn: 0,
-          });
-          runCtx.writeEvent("tool.result", {
-            toolCallId: styleRes.toolCallId,
-            name: "lint.style",
-            output: styleRes.output,
-            ok: styleRes.ok,
-            executedBy: "desktop",
-            turn: 0,
-          });
-          if (!styleRes.ok) {
-            markStep(stepId, { status: "failed", error: styleRes.output?.error ?? "lint.style_failed" });
-            throw new Error(String(styleRes.output?.error ?? "LINT_STYLE_FAILED"));
+          let styleAttempt = 0;
+          let stylePassed = false;
+          let bestStyleScore: number | null = null;
+          let bestStyleDraft = finalDraft;
+          setBool("lintGateDegraded", false);
+          (runState as any).styleLintPassed = false;
+          while (styleAttempt < Math.max(1, lintCfg.maxStyleAttempts) && !stylePassed) {
+            styleAttempt += 1;
+            const styleRes = await waitForDesktopToolResult({
+              runCtx,
+              toolName: "lint.style",
+              toolArgs: { text: finalDraft },
+              turn: 0,
+            });
+            runCtx.writeEvent("tool.result", {
+              toolCallId: styleRes.toolCallId,
+              name: "lint.style",
+              output: styleRes.output,
+              ok: styleRes.ok,
+              executedBy: "desktop",
+              turn: 0,
+            });
+            if (!styleRes.ok) {
+              markStep(stepId, { status: "failed", error: styleRes.output?.error ?? "lint.style_failed" });
+              throw new Error(String(styleRes.output?.error ?? "LINT_STYLE_FAILED"));
+            }
+            const parsedStyle = parseStyleLintResult(styleRes.output);
+            stylePassed = Boolean(styleRes.output?.passed ?? styleRes.output?.ok?.passed ?? styleRes.output?.output?.passed);
+            (runState as any).styleLintPassed = stylePassed;
+            (runState as any).styleLintFailCount = stylePassed ? 0 : styleAttempt;
+            (runState as any).lastStyleLint = parsedStyle;
+            (runState as any).bestStyleScore = parsedStyle.score;
+            (runState as any).bestStyleArtifactId = null;
+            if (parsedStyle.score !== null && (bestStyleScore === null || parsedStyle.score > bestStyleScore)) {
+              bestStyleScore = parsedStyle.score;
+              bestStyleDraft = finalDraft;
+              (runState as any).bestStyleDraft = {
+                score: parsedStyle.score,
+                highIssues: parsedStyle.highIssues,
+                text: finalDraft,
+              };
+            }
+            if (!stylePassed && styleAttempt < Math.max(1, lintCfg.maxStyleAttempts)) {
+              finalDraft = await rewriteDraftWithMessages({
+                runCtx,
+                messages: buildStyleRewriteMessages({ draft: finalDraft, lintOutput: styleRes.output }),
+                temperature: 0.45,
+                maxTokens: 2600,
+              });
+              setArtifactText(runState, "closure", finalDraft);
+            }
           }
-          const stylePassed = Boolean(styleRes.output?.passed ?? styleRes.output?.ok?.passed ?? styleRes.output?.output?.passed);
-          const styleScore = Number(styleRes.output?.score ?? styleRes.output?.ok?.score ?? styleRes.output?.output?.score);
-          (runState as any).bestStyleScore = Number.isFinite(styleScore) ? styleScore : null;
-          (runState as any).bestStyleArtifactId = null;
           if (!stylePassed) {
             setBool("lintGateDegraded", true);
+            if (lintCfg.pickBestOnExhaust && bestStyleDraft) {
+              finalDraft = bestStyleDraft;
+              setArtifactText(runState, "closure", finalDraft);
+            }
+          }
+          (runState as any).bestStyleScore = bestStyleScore;
+          if (bestStyleScore !== null && bestStyleDraft) {
+            (runState as any).bestStyleDraft = {
+              score: bestStyleScore,
+              highIssues: Number((runState as any).bestStyleDraft?.highIssues ?? 0) || 0,
+              text: bestStyleDraft,
+            };
           }
 
-          // write: 落盘草稿（沿用 write tool 契约，path 由 agent 决定）
-          const targetPath = `drafts/style_imitate_v3_${Date.now()}.md`;
+          // write: 落盘草稿（优先 payload/mainDoc 路径）
+          const targetPath = derivePipelineTargetPath({ runCtx, payload });
           const writeRes = await waitForDesktopToolResult({
             runCtx,
             toolName: "write",
@@ -390,6 +542,9 @@ export class PipelineExecutor {
           if (!writeRes.ok) {
             markStep(stepId, { status: "failed", error: writeRes.output?.error ?? "write_failed" });
             throw new Error(String(writeRes.output?.error ?? "WRITE_FAILED"));
+          }
+          if (runCtx.mainDoc && typeof runCtx.mainDoc === "object") {
+            (runCtx.mainDoc as any).path = targetPath;
           }
 
           setBool("lintLoopCompleted", true);

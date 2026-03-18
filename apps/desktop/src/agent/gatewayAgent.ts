@@ -115,6 +115,28 @@ function normalizeClusterRulesV1(args: {
   };
 }
 
+function sanitizeStylePipelineFileStem(raw: string): string {
+  return String(raw ?? "")
+    .replace(/\r?\n/g, " ")
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 48);
+}
+
+function deriveStylePipelineOutputPath(args: { userPrompt: string; mainDoc: any }): string | null {
+  const mainDocPath = String(args.mainDoc?.path ?? "").trim();
+  if (mainDocPath) return mainDocPath;
+  const candidates = [
+    String(args.mainDoc?.title ?? "").trim(),
+    String(args.mainDoc?.topic ?? "").trim(),
+    String(args.mainDoc?.goal ?? "").trim(),
+    String(args.userPrompt ?? "").trim(),
+  ].filter(Boolean);
+  const stem = sanitizeStylePipelineFileStem(candidates[0] ?? "");
+  return stem ? `output/${stem}.md` : null;
+}
+
 async function buildStyleStepMaterialsV1(args: {
   libraryId: string;
   topicQuery: string;
@@ -292,11 +314,13 @@ export async function buildStylePipelinePayload(args: {
   const scene = selectionText || /(改写|润色|重写|改稿)/.test(args.userPrompt) ? "source_rewrite" : "topic_only";
   const sourceMaterial = selectionText ? { title: mainDoc?.title ?? null, text: selectionText } : null;
   const materialsTopicQuery = topicBriefForKbQueryV1({ userPrompt: args.userPrompt, mainDoc }) || args.userPrompt;
+  const outputPath = deriveStylePipelineOutputPath({ userPrompt: args.userPrompt, mainDoc });
   const taskSpec: TaskSpecV1 = {
     version: "v1",
     taskId: `style_pipeline_${Date.now()}`,
     scene,
     prompt: String(args.userPrompt ?? "").trim(),
+    ...(outputPath ? { outputPath } : {}),
     platform: null,
     audience: null,
     wordCount: null,
