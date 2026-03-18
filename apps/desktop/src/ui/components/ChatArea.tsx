@@ -955,13 +955,22 @@ export function ChatArea() {
         ctxRefs: JSON.parse(JSON.stringify(useRunStore.getState().ctxRefs ?? [])),
       };
       const userMentions = meta?.mentions?.length ? meta.mentions : undefined;
-      useRunStore.getState().addUser(text, baseline as any, userMentions, images.length ? images : undefined);
-      // 纯图片消息时 prompt 不能为空（Gateway schema min(1)），用空格占位
-      const cleanPrompt = cleanPromptRaw.trim().length > 0 ? cleanPromptRaw : images.length > 0 ? " " : cleanPromptRaw;
       const mentionedSkillIds = meta?.mentions?.filter((m) => m.type === "skill").map((m) => m.id) ?? [];
       // 合并 sticky skill（上轮 @mention 过的 skill，本轮自动延续）
       const stickySkillIds = useRunStore.getState().stickyActiveSkillIds ?? [];
       const activeSkillIds = Array.from(new Set([...stickySkillIds, ...mentionedSkillIds]));
+      useRunStore.getState().addUser(text, baseline as any, userMentions, images.length ? images : undefined);
+      const hasSkillOnlyInvocation =
+        activeSkillIds.length > 0 &&
+        cleanPromptRaw.trim().length === 0 &&
+        images.length === 0;
+      // 纯图片消息 / 纯 skill 唤起时 prompt 不能为空（Gateway schema min(1)），用空格占位
+      const cleanPrompt =
+        cleanPromptRaw.trim().length > 0
+          ? cleanPromptRaw
+          : images.length > 0 || hasSkillOnlyInvocation
+            ? " "
+            : cleanPromptRaw;
       // 新 @mention 的 skill 写入 sticky，后续 Run 自动携带
       if (mentionedSkillIds.length > 0) {
         useRunStore.getState().addStickyActiveSkills(mentionedSkillIds);

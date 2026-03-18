@@ -1108,11 +1108,16 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           try { msg = JSON.parse(String(e.data)); } catch { return; }
 
           if (msg.type === "error") {
-            const errMsg = String(msg.payload?.message ?? msg.payload?.error ?? "unknown");
+            const errCode = String(msg.payload?.error ?? "").trim();
+            const errDetail = String(msg.payload?.detail ?? msg.payload?.message ?? "").trim();
+            const errMsg = errDetail || errCode || "unknown";
             log("error", "ws.server_error", msg.payload);
             const id = ensureAssistant();
             patchAssistant(id, { hidden: false });
-            appendAssistantDelta(id, `\n\n[服务端错误] ${errMsg}`);
+            appendAssistantDelta(
+              id,
+              `\n\n[服务端错误] ${errMsg}${errCode && errDetail ? `\n错误码：${errCode}` : ""}`,
+            );
             finishAssistant(id);
             setRunning(false); setActivity(null);
             finish();
