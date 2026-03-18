@@ -12,6 +12,7 @@ type ResolveImplicitStyleLibrarySelectionArgs = {
   attachedLibraryIds?: string[];
   libraries?: KbLibraryLike[];
   mainDoc?: MainDoc | null | undefined;
+  allowHistoricalFallback?: boolean;
 };
 
 type WorkflowSkillsLike = Record<string, { status?: string } | null | undefined>;
@@ -25,6 +26,8 @@ export type ResolvedImplicitStyleLibrarySelection = {
 function normalizeIds(ids?: string[]) {
   return Array.from(new Set((Array.isArray(ids) ? ids : []).map((x) => String(x ?? "").trim()).filter(Boolean)));
 }
+
+const STYLE_SKILL_IDS = new Set(["style_imitate", "style_imitate_v2", "style_imitate_v3"]);
 
 function mainDocStyleLibraryIds(mainDoc?: MainDoc | null, libraries?: KbLibraryLike[]) {
   const metaById = new Map((Array.isArray(libraries) ? libraries : []).map((lib) => [String(lib?.id ?? "").trim(), lib]));
@@ -50,14 +53,17 @@ export function resolveImplicitStyleLibrarySelection(
     return { libraryIds: mentionedLibraryIds, source: "mentioned" };
   }
 
-  const attachedLibraryIds = normalizeIds(args?.attachedLibraryIds);
-  if (attachedLibraryIds.length) {
-    return { libraryIds: attachedLibraryIds, source: "attached" };
-  }
+  const allowHistoricalFallback = args?.allowHistoricalFallback !== false;
+  if (allowHistoricalFallback) {
+    const attachedLibraryIds = normalizeIds(args?.attachedLibraryIds);
+    if (attachedLibraryIds.length) {
+      return { libraryIds: attachedLibraryIds, source: "attached" };
+    }
 
-  const fromMainDoc = mainDocStyleLibraryIds(args?.mainDoc, args?.libraries);
-  if (fromMainDoc.length) {
-    return { libraryIds: [fromMainDoc[0]], source: "main_doc" };
+    const fromMainDoc = mainDocStyleLibraryIds(args?.mainDoc, args?.libraries);
+    if (fromMainDoc.length) {
+      return { libraryIds: [fromMainDoc[0]], source: "main_doc" };
+    }
   }
 
   const styleLibraryIds = normalizeIds(
@@ -84,7 +90,7 @@ function normalizeStatus(v: unknown) {
 
 function hasStyleSkillSignal(activeSkillIds?: string[]) {
   const ids = normalizeIds(activeSkillIds);
-  return ids.some((id) => id === "style_imitate" || id === "style_imitate_v2" || id === "style_imitate_v3");
+  return ids.some((id) => STYLE_SKILL_IDS.has(id));
 }
 
 function hasMentionedStyleLibrary(args?: { mentionedLibraryIds?: string[]; libraries?: KbLibraryLike[] }) {
@@ -117,4 +123,17 @@ export function isStyleWorkflowRequestedForRun(args?: {
     hasMentionedStyleLibrary({ mentionedLibraryIds: args?.mentionedLibraryIds, libraries: args?.libraries }) ||
     hasActiveStyleWorkflow({ mainDoc: args?.mainDoc, workflowSkills: args?.workflowSkills })
   );
+}
+
+export function shouldAllowHistoricalStyleFallback(args?: {
+  activeSkillIds?: string[];
+  mentionedLibraryIds?: string[];
+}): boolean {
+  const activeSkillIds = normalizeIds(args?.activeSkillIds);
+  const mentionedLibraryIds = normalizeIds(args?.mentionedLibraryIds);
+  const explicitStyleSkillRequested = activeSkillIds.some((id) => STYLE_SKILL_IDS.has(id));
+  if (explicitStyleSkillRequested && mentionedLibraryIds.length === 0) {
+    return false;
+  }
+  return true;
 }

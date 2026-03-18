@@ -9,7 +9,7 @@ import { requestInlineFileOpConfirm } from "../state/inlineFileOpConfirm";
 import { buildCurrentSnapshot, useConversationStore } from "../state/conversationStore";
 import { TOOL_LIST } from "@ohmycrab/tools";
 import { getGatewayBaseUrl } from "./gatewayUrl";
-import { resolveImplicitStyleLibrarySelection } from "./kbSelection";
+import { resolveImplicitStyleLibrarySelection, shouldAllowHistoricalStyleFallback } from "./kbSelection";
 
 function authHeader(): Record<string, string> {
   const token = String(useAuthStore.getState().accessToken ?? "").trim();
@@ -76,6 +76,21 @@ function getKbMentionLibraryIdsFromLatestUserStep(): string[] {
     const mentions = Array.isArray(st.mentions) ? st.mentions : [];
     const ids = mentions
       .filter((m: any) => String(m?.type ?? "").trim() === "kb")
+      .map((m: any) => String(m?.id ?? "").trim())
+      .filter(Boolean);
+    return Array.from(new Set(ids));
+  }
+  return [];
+}
+
+function getSkillMentionIdsFromLatestUserStep(): string[] {
+  const steps = Array.isArray(useRunStore.getState().steps) ? (useRunStore.getState().steps as any[]) : [];
+  for (let i = steps.length - 1; i >= 0; i -= 1) {
+    const st = steps[i];
+    if (!st || st.type !== "user") continue;
+    const mentions = Array.isArray(st.mentions) ? st.mentions : [];
+    const ids = mentions
+      .filter((m: any) => String(m?.type ?? "").trim() === "skill")
       .map((m: any) => String(m?.id ?? "").trim())
       .filter(Boolean);
     return Array.from(new Set(ids));
@@ -389,6 +404,7 @@ export async function buildStyleLinterLibrariesSidecar(args?: {
   const maxLibraries = typeof args?.maxLibraries === "number" ? Math.max(1, Math.min(6, Math.floor(args!.maxLibraries))) : 6;
   const explicit = Array.isArray(args?.libraryIds) ? args!.libraryIds.map((x) => String(x ?? "").trim()).filter(Boolean) : [];
   const mentioned = getKbMentionLibraryIdsFromLatestUserStep();
+  const mentionedSkillIds = getSkillMentionIdsFromLatestUserStep();
   const attached = useRunStore.getState().kbAttachedLibraryIds ?? [];
   const libsMeta = useKbStore.getState().libraries ?? [];
   const metaById = new Map(libsMeta.map((l: any) => [String(l.id ?? ""), l]));
@@ -398,6 +414,10 @@ export async function buildStyleLinterLibrariesSidecar(args?: {
     attachedLibraryIds: attached,
     libraries: libsMeta,
     mainDoc: useRunStore.getState().mainDoc as any,
+    allowHistoricalFallback: shouldAllowHistoricalStyleFallback({
+      activeSkillIds: mentionedSkillIds,
+      mentionedLibraryIds: mentioned,
+    }),
   });
   const candidates = selection.libraryIds.map((x: any) => String(x ?? "").trim()).filter(Boolean);
   const styleLibIds = candidates.filter((id: string) => String(metaById.get(id)?.purpose ?? "") === "style");
@@ -1637,6 +1657,7 @@ const tools: ToolDefinition[] = [
       const topDocs = typeof args.topDocs === "number" ? Math.max(1, Math.floor(args.topDocs)) : 12;
       const explicitLibs = Array.isArray(args.libraryIds) ? (args.libraryIds as any[]).map((x) => String(x ?? "").trim()).filter(Boolean) : [];
       const mentioned = getKbMentionLibraryIdsFromLatestUserStep();
+      const mentionedSkillIds = getSkillMentionIdsFromLatestUserStep();
       const attached = useRunStore.getState().kbAttachedLibraryIds ?? [];
       const md: any = useRunStore.getState().mainDoc ?? {};
       const libFromMainDoc = [
@@ -1646,6 +1667,10 @@ const tools: ToolDefinition[] = [
       const selection = resolveImplicitStyleLibrarySelection({
         libraries: useKbStore.getState().libraries ?? [],
         mainDoc: md,
+        allowHistoricalFallback: shouldAllowHistoricalStyleFallback({
+          activeSkillIds: mentionedSkillIds,
+          mentionedLibraryIds: mentioned,
+        }),
       });
       const libraryIds = explicitLibs.length
         ? explicitLibs

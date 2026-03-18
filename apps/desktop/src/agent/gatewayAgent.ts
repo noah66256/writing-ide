@@ -24,7 +24,12 @@ import { useSkillStore } from "../state/skillStore";
 import { useMemoryStore } from "../state/memoryStore";
 import { useModelStore } from "../state/modelStore";
 import { startGatewayRunWs } from "./wsTransport";
-import { isStyleWorkflowRequestedForRun, resolveImplicitStyleLibraryIds, resolveImplicitStyleLibrarySelection } from "./kbSelection";
+import {
+  isStyleWorkflowRequestedForRun,
+  resolveImplicitStyleLibraryIds,
+  resolveImplicitStyleLibrarySelection,
+  shouldAllowHistoricalStyleFallback,
+} from "./kbSelection";
 
 export function authHeader(): Record<string, string> {
   const token = String(useAuthStore.getState().accessToken ?? "").trim();
@@ -251,6 +256,10 @@ export async function buildStylePipelinePayload(args: {
     attachedLibraryIds,
     libraries: kb.libraries ?? [],
     mainDoc,
+    allowHistoricalFallback: shouldAllowHistoricalStyleFallback({
+      activeSkillIds,
+      mentionedLibraryIds,
+    }),
   });
   const [libraryId] = resolved.libraryIds;
   if (!libraryId) {
@@ -1647,6 +1656,10 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
         attachedLibraryIds: kbAttachedIds,
         libraries: kbLibraries,
         mainDoc: mainDocForPack as any,
+        allowHistoricalFallback: shouldAllowHistoricalStyleFallback({
+          activeSkillIds: extra?.activeSkillIds,
+          mentionedLibraryIds: kbMentionIds,
+        }),
       })
     : kbMentionIds;
   // PROJECT_STATE：只提供最小信息（避免"光标文件/全量文件列表"对模型产生过强暗示）

@@ -37,7 +37,7 @@ import {
   applyTextEdits,
   unifiedDiff,
 } from "./gatewayAgent";
-import { isStyleWorkflowRequestedForRun, resolveImplicitStyleLibraryIds } from "./kbSelection";
+import { isStyleWorkflowRequestedForRun, resolveImplicitStyleLibraryIds, shouldAllowHistoricalStyleFallback } from "./kbSelection";
 
 function buildProjectMapSegmentV1(args: { rootDir: string | null; indexFiles: Array<{ path: string; mtime?: number; type?: string }> | null }) {
   const rootDir = args.rootDir ? String(args.rootDir) : "";
@@ -746,6 +746,10 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               attachedLibraryIds: att,
               libraries: useKbStore.getState().libraries ?? [],
               mainDoc: rt.getMainDoc() as any,
+              allowHistoricalFallback: shouldAllowHistoricalStyleFallback({
+                activeSkillIds: args.activeSkillIds,
+                mentionedLibraryIds: mentionLibIds,
+              }),
             })
           : [];
         let styleLinterLibraries: any[] | undefined;

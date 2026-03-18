@@ -995,6 +995,10 @@ export class GatewayRuntime implements AgentRuntime {
       activeSkillIds.includes("style_imitate") ||
       (styleWorkflowRequested && gates.styleGateEnabled && runCtx.intent?.isWritingTask);
 
+    if (this._isStyleWorkflowWaitingForUser({ styleSkillActive })) {
+      return null;
+    }
+
     if (!(styleSkillActive && gates.styleGateEnabled && gates.lintGateEnabled && runCtx.intent?.isWritingTask)) {
       return null;
     }
@@ -1050,6 +1054,48 @@ export class GatewayRuntime implements AgentRuntime {
         reasonCodes: ["style_workflow_followup", "phase:" + currentPhase],
       },
     };
+  }
+
+  private _isStyleWorkflowWaitingForUser(args?: { styleSkillActive?: boolean }): boolean {
+    const runCtx: any = this.config.runCtx;
+    const mainDoc: any = runCtx?.mainDoc && typeof runCtx.mainDoc === "object" ? runCtx.mainDoc : {};
+    const workflowRaw = mainDoc?.workflowV1;
+    const workflowObj = workflowRaw && typeof workflowRaw === "object" && !Array.isArray(workflowRaw) ? workflowRaw : null;
+    const workflowStatus = String(
+      typeof workflowRaw === "string"
+        ? workflowRaw
+        : workflowObj?.status ?? "",
+    ).trim().toLowerCase();
+    const workflowKind = String(
+      workflowObj?.kind ?? mainDoc?.workflowKind ?? "",
+    ).trim().toLowerCase();
+    const currentPhase = String(
+      mainDoc?.currentPhase ?? workflowObj?.currentPhase ?? "",
+    ).trim().toLowerCase();
+    const waitingQuestion = String(
+      mainDoc?.constraint ??
+      workflowObj?.constraint ??
+      workflowObj?.waiting?.question ??
+      "",
+    ).trim();
+    const waitingStatuses = new Set(["waiting_user", "waiting", "clarify_waiting", "proposal_waiting"]);
+    const waitingPhases = new Set([
+      "need_topic",
+      "need_style_library",
+      "need_style_library_choice",
+      "need_library",
+      "need_clarification",
+      "await_user_input",
+    ]);
+    const styleSkillActive = Boolean(args?.styleSkillActive);
+    const styleWorkflowLike =
+      styleSkillActive ||
+      /style_imitate/.test(workflowKind) ||
+      currentPhase.startsWith("need_");
+    if (!styleWorkflowLike) return false;
+    if (waitingPhases.has(currentPhase)) return true;
+    if (waitingStatuses.has(workflowStatus) && (Boolean(waitingQuestion) || Boolean(currentPhase))) return true;
+    return false;
   }
 
   /**
