@@ -1182,6 +1182,16 @@ export function shouldSuppressSearchDuringBrowserContinuation(args: { mainDoc?: 
   return looksLikeWorkflowContinuationPrompt(prompt, args.mentionedSkillIds);
 }
 
+function looksLikeAssistantWaitingForUserText(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  const tail = t.slice(-400);
+  const tailAskPattern =
+    /[？?]\s*$|要[^。\n]{0,12}吗[？?]?|还是[^。\n]{0,16}[？?]|(?:你|您)[^。\n]{0,16}(?:偏好|更倾向|选择|打算|决定)[^。\n]{0,12}[？?]?|帮你[^。\n]{0,16}[？?]|需要[^。\n]{0,12}确认|请[^。\n]{0,16}选择|请[^。\n]{0,16}告诉我|告诉我/;
+  if (tailAskPattern.test(tail)) return true;
+  return /(请先|请直接|请选择|请告诉我|发我|回复我|你这次要按哪个|按哪个库|选哪个库|给我一个写作主题|主题：|补充主题|确认一下|定一下风格库)/.test(t);
+}
+
 export function isBrowserSessionActive(mainDoc: unknown, userPrompt: string): boolean {
   const wf = readWorkflowStickyState(mainDoc);
   if (!wf.isFresh) return false;
@@ -5031,11 +5041,25 @@ export async function executeAgentRun(args: {
     ...executionReport,
   });
 
+  const lastAssistantText = String((executionReport as any)?.transcriptSummary?.lastAssistantText ?? "").trim();
+  const styleWorkflowWaitingForUser =
+    styleWorkflowIncomplete &&
+    failureDigest.failedCount === 0 &&
+    looksLikeAssistantWaitingForUserText(lastAssistantText);
+
   // 风格闭环未完成时，将本轮视为"未完成"：
   // - 将 runnerOutcome.status 标记为 failed；
   // - reason 置为 style_workflow_incomplete；
   // - 追加 reasonCodes: style_workflow_incomplete。
-  if (styleWorkflowIncomplete && runnerOutcome.status === 'completed') {
+  if (styleWorkflowWaitingForUser && runnerOutcome.status === 'completed') {
+    const baseCodes = Array.isArray(runnerOutcome.reasonCodes) ? runnerOutcome.reasonCodes : [];
+    runnerOutcome = {
+      ...runnerOutcome,
+      status: 'completed',
+      reason: 'clarify_waiting',
+      reasonCodes: [...baseCodes, 'clarify_waiting', 'style_workflow_waiting_user'],
+    };
+  } else if (styleWorkflowIncomplete && runnerOutcome.status === 'completed') {
     writeEvent('run.notice', {
       turn: runtime.getTurn(),
       kind: 'warn',
