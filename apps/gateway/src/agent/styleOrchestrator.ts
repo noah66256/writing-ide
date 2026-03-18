@@ -160,14 +160,17 @@ function buildHint(snapshot: WorkflowSkillPhaseSnapshot, state: RunState, nextTo
 
 export function computeStyleTurnCaps(args: {
   runState: RunState;
-  runCtx: Pick<RunContext, "intent" | "gates" | "activeSkills">;
+  runCtx: Pick<RunContext, "intent" | "gates" | "activeSkills" | "styleWorkflowRequested">;
   baseAllowedToolNames: Set<string>;
 }): StyleTurnCaps | null {
   const gates: any = args.runCtx.gates ?? {};
   const intent: any = args.runCtx.intent ?? {};
   const activeSkillsRaw = Array.isArray((args.runCtx as any).activeSkills) ? (args.runCtx as any).activeSkills : [];
   const activeSkillIds = activeSkillsRaw.map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
-  const styleSkillActive = activeSkillIds.includes("style_imitate") || Boolean(gates.styleGateEnabled && intent?.isWritingTask);
+  const styleWorkflowRequested = Boolean((args.runCtx as any).styleWorkflowRequested);
+  const styleSkillActive =
+    activeSkillIds.includes("style_imitate") ||
+    Boolean(styleWorkflowRequested && gates.styleGateEnabled && intent?.isWritingTask);
   if (!styleSkillActive || !intent?.isWritingTask) return null;
 
   const snapshot = buildStyleSnapshot(args.runState);

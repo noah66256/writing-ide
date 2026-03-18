@@ -91,6 +91,7 @@ export type RunContext = {
   intent: RunIntent;
   gates: RunGates;
   activeSkills: ActiveSkill[];
+  styleWorkflowRequested?: boolean;
   /** v2 workflow skill 的声明式配置（skillId → WorkflowDeclaration） */
   activeWorkflowDeclarations?: Map<string, any>;
   allowedToolNames: Set<string>;
@@ -2183,7 +2184,7 @@ export class AgentRunner {
     const styleSkillActiveById = Array.isArray(this.ctx.activeSkills)
       ? this.ctx.activeSkills.some((s: any) => String(s?.id ?? "").trim() === "style_imitate")
       : false;
-    const styleSkillActiveByGate = Boolean(this.ctx.gates?.styleGateEnabled && this.ctx.intent?.isWritingTask);
+    const styleSkillActiveByGate = Boolean(this.ctx.styleWorkflowRequested && this.ctx.gates?.styleGateEnabled && this.ctx.intent?.isWritingTask);
     const styleSkillActive = styleSkillActiveById || styleSkillActiveByGate;
     const shouldEnforceStyleGate = styleSkillActive && (batch.enforceCopy || batch.enforceLint);
 

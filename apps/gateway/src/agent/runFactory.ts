@@ -1892,6 +1892,7 @@ const agentRunBodySchema = z.object({
   prompt: z.string().min(1),
   targetAgentIds: z.array(z.string()).max(5).optional(),
   activeSkillIds: z.array(z.string()).max(10).optional(),
+  styleWorkflowRequested: z.boolean().optional(),
   builtinOverrides: z.record(z.string(), z.object({ enabled: z.boolean().optional() })).optional(),
   styleExecutionMode: z.enum(["agent_v1", "pipeline_v1"]).optional(),
   stylePipelinePayload: z.any().optional(),
@@ -1996,6 +1997,7 @@ export type PreparedRun = {
   activeSkillIds: string[];
   rawActiveSkillIds: string[];
   suppressedSkillIds: string[];
+  styleWorkflowRequested: boolean;
   /** v2 workflow skill 的声明式配置（skillId → WorkflowDeclaration） */
   activeWorkflowDeclarations: Map<string, WorkflowDeclaration>;
   styleExecutionMode?: StyleExecutionMode;
@@ -2154,6 +2156,7 @@ export async function prepareAgentRun(args: {
     ? ((body as any).activeSkillIds as any[]).map((x: any) => String(x ?? "").trim()).filter(Boolean)
     : [];
   const mentionedSkillIdSet = new Set(mentionedSkillIds);
+  const styleWorkflowRequested = Boolean((body as any).styleWorkflowRequested);
 
   let intentRoute = computeIntentRouteDecisionPhase0({
     mode,
@@ -2853,7 +2856,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
   const styleSkillActive =
     styleSkillRequested ||
     activeSkillIds.includes("style_imitate") ||
-    (intent.isWritingTask && deriveStyleGate({ mode, kbSelected: kbSelectedList as any, intent, activeSkillIds }).styleGateEnabled);
+    (styleWorkflowRequested && intent.isWritingTask && deriveStyleGate({ mode, kbSelected: kbSelectedList as any, intent, activeSkillIds }).styleGateEnabled);
   if (!styleSkillActive) {
     baseAllowedToolNames.delete("lint.copy");
     baseAllowedToolNames.delete("lint.style");
@@ -3679,6 +3682,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
         intent,
         gates,
         activeSkills,
+        styleWorkflowRequested,
       } as any,
       baseAllowedToolNames: selectedAllowedToolNames,
     });
@@ -4038,6 +4042,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       activeSkillIds,
       rawActiveSkillIds,
       suppressedSkillIds,
+      styleWorkflowRequested,
       activeWorkflowDeclarations,
       styleExecutionMode: body.styleExecutionMode,
       stylePipelinePayload: body.stylePipelinePayload as StylePipelinePayloadV1 | undefined,

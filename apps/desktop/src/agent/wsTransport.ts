@@ -37,7 +37,7 @@ import {
   applyTextEdits,
   unifiedDiff,
 } from "./gatewayAgent";
-import { resolveImplicitStyleLibraryIds } from "./kbSelection";
+import { isStyleWorkflowRequestedForRun, resolveImplicitStyleLibraryIds } from "./kbSelection";
 
 function buildProjectMapSegmentV1(args: { rootDir: string | null; indexFiles: Array<{ path: string; mtime?: number; type?: string }> | null }) {
   const rootDir = args.rootDir ? String(args.rootDir) : "";
@@ -733,12 +733,21 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           ? Array.from(new Set(args.kbMentionIds.map((x) => String(x ?? "").trim()).filter(Boolean)))
           : [];
         const att = rt.getKbAttachedLibraryIds() ?? [];
-        const sidecarLibraryIds = resolveImplicitStyleLibraryIds({
+        const styleWorkflowRequested = Boolean((args as any)?.styleWorkflowRequested) || isStyleWorkflowRequestedForRun({
+          activeSkillIds: args.activeSkillIds,
           mentionedLibraryIds: mentionLibIds,
-          attachedLibraryIds: att,
           libraries: useKbStore.getState().libraries ?? [],
           mainDoc: rt.getMainDoc() as any,
+          workflowSkills: (rt as any).getWorkflowSkills?.() ?? (useRunStore.getState() as any).workflowSkills ?? {},
         });
+        const sidecarLibraryIds = styleWorkflowRequested
+          ? resolveImplicitStyleLibraryIds({
+              mentionedLibraryIds: mentionLibIds,
+              attachedLibraryIds: att,
+              libraries: useKbStore.getState().libraries ?? [],
+              mainDoc: rt.getMainDoc() as any,
+            })
+          : [];
         let styleLinterLibraries: any[] | undefined;
         if (Array.isArray(sidecarLibraryIds) && sidecarLibraryIds.length) {
           const ret = await buildStyleLinterLibrariesSidecar({ libraryIds: sidecarLibraryIds, maxLibraries: 6 }).catch(() => ({ ok: false } as any));
@@ -831,7 +840,12 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       const contextPack =
         args.mode === "chat"
           ? buildChatContextPack({ referencesText, userPrompt: promptForGateway })
-          : await buildContextPack({ referencesText, userPrompt: promptForGateway, kbMentionIds: args.kbMentionIds });
+          : await buildContextPack({
+              referencesText,
+              userPrompt: promptForGateway,
+              kbMentionIds: args.kbMentionIds,
+              activeSkillIds: args.activeSkillIds,
+            });
 
       // P3：结构化 contextSegments（优先）+ contextPack 兼容（fallback）。
       // 当前 buildContextPack 返回的大字符串内部已是段落结构（NAME(JSON/Markdown):\n...），
@@ -967,6 +981,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           ...(args.images?.length ? { images: args.images } : {}),
           ...(targetAgentIds ? { targetAgentIds } : {}),
           ...(args.activeSkillIds?.length ? { activeSkillIds: args.activeSkillIds } : {}),
+          ...(typeof (args as any).styleWorkflowRequested === "boolean" ? { styleWorkflowRequested: Boolean((args as any).styleWorkflowRequested) } : {}),
           ...(args.styleExecutionMode ? { styleExecutionMode: args.styleExecutionMode } : {}),
           ...(args.stylePipelinePayload ? { stylePipelinePayload: args.stylePipelinePayload } : {}),
           ...(hasBuiltinOverrides ? { builtinOverrides } : {}),

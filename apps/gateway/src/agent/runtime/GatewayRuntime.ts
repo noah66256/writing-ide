@@ -990,9 +990,10 @@ export class GatewayRuntime implements AgentRuntime {
     const gates: any = runCtx.gates ?? {};
     const activeSkills = Array.isArray(runCtx.activeSkills) ? runCtx.activeSkills : [];
     const activeSkillIds = activeSkills.map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
+    const styleWorkflowRequested = Boolean(runCtx.styleWorkflowRequested);
     const styleSkillActive =
       activeSkillIds.includes("style_imitate") ||
-      (gates.styleGateEnabled && runCtx.intent?.isWritingTask);
+      (styleWorkflowRequested && gates.styleGateEnabled && runCtx.intent?.isWritingTask);
 
     if (!(styleSkillActive && gates.styleGateEnabled && gates.lintGateEnabled && runCtx.intent?.isWritingTask)) {
       return null;
@@ -2603,9 +2604,10 @@ export class GatewayRuntime implements AgentRuntime {
 
     // Style_imitate 工作流摘要：保留旧字段，便于兼容既有审计逻辑
     const activeSkillsRaw = Array.isArray(runCtx.activeSkills) ? runCtx.activeSkills : [];
+    const styleWorkflowRequested = Boolean(runCtx.styleWorkflowRequested);
     const styleSkillActive =
       activeSkillsRaw.some((s: any) => String(s?.id ?? "").trim() === "style_imitate") ||
-      (gates.styleGateEnabled && runCtx.intent?.isWritingTask);
+      (styleWorkflowRequested && gates.styleGateEnabled && runCtx.intent?.isWritingTask);
     const styleWorkflow = styleSkillActive && runCtx.intent?.isWritingTask
       ? {
           active: true,

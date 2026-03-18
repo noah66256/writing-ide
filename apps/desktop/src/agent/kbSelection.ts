@@ -14,6 +14,8 @@ type ResolveImplicitStyleLibrarySelectionArgs = {
   mainDoc?: MainDoc | null | undefined;
 };
 
+type WorkflowSkillsLike = Record<string, { status?: string } | null | undefined>;
+
 export type ResolvedImplicitStyleLibrarySelection = {
   libraryIds: string[];
   error?: KbLibrarySelectionError;
@@ -74,4 +76,45 @@ export function resolveImplicitStyleLibrarySelection(
 
 export function resolveImplicitStyleLibraryIds(args?: ResolveImplicitStyleLibrarySelectionArgs): string[] {
   return resolveImplicitStyleLibrarySelection(args).libraryIds;
+}
+
+function normalizeStatus(v: unknown) {
+  return String(v ?? "").trim().toLowerCase();
+}
+
+function hasStyleSkillSignal(activeSkillIds?: string[]) {
+  const ids = normalizeIds(activeSkillIds);
+  return ids.some((id) => id === "style_imitate" || id === "style_imitate_v2" || id === "style_imitate_v3");
+}
+
+function hasMentionedStyleLibrary(args?: { mentionedLibraryIds?: string[]; libraries?: KbLibraryLike[] }) {
+  const mentionedIds = normalizeIds(args?.mentionedLibraryIds);
+  if (!mentionedIds.length) return false;
+  const metaById = new Map((Array.isArray(args?.libraries) ? args!.libraries : []).map((lib) => [String(lib?.id ?? "").trim(), lib]));
+  return mentionedIds.some((id) => String(metaById.get(id)?.purpose ?? "").trim() === "style");
+}
+
+function hasActiveStyleWorkflow(args?: { mainDoc?: MainDoc | null | undefined; workflowSkills?: WorkflowSkillsLike }) {
+  const workflowKind = String((args?.mainDoc as any)?.workflowV1?.kind ?? "").trim().toLowerCase();
+  const workflowStatus = normalizeStatus((args?.mainDoc as any)?.workflowV1?.status);
+  if (/style_imitate/.test(workflowKind) && ["running", "waiting", "waiting_user", "clarify_waiting", "proposal_waiting"].includes(workflowStatus)) {
+    return true;
+  }
+  const styleWorkflow = args?.workflowSkills?.["style_imitate.v1"];
+  const styleWorkflowStatus = normalizeStatus(styleWorkflow?.status);
+  return styleWorkflowStatus === "in_progress" || styleWorkflowStatus === "degraded";
+}
+
+export function isStyleWorkflowRequestedForRun(args?: {
+  activeSkillIds?: string[];
+  mentionedLibraryIds?: string[];
+  libraries?: KbLibraryLike[];
+  mainDoc?: MainDoc | null | undefined;
+  workflowSkills?: WorkflowSkillsLike;
+}): boolean {
+  return (
+    hasStyleSkillSignal(args?.activeSkillIds) ||
+    hasMentionedStyleLibrary({ mentionedLibraryIds: args?.mentionedLibraryIds, libraries: args?.libraries }) ||
+    hasActiveStyleWorkflow({ mainDoc: args?.mainDoc, workflowSkills: args?.workflowSkills })
+  );
 }

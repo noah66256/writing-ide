@@ -24,7 +24,7 @@ import { useSkillStore } from "../state/skillStore";
 import { useMemoryStore } from "../state/memoryStore";
 import { useModelStore } from "../state/modelStore";
 import { startGatewayRunWs } from "./wsTransport";
-import { resolveImplicitStyleLibraryIds, resolveImplicitStyleLibrarySelection } from "./kbSelection";
+import { isStyleWorkflowRequestedForRun, resolveImplicitStyleLibraryIds, resolveImplicitStyleLibrarySelection } from "./kbSelection";
 
 export function authHeader(): Record<string, string> {
   const token = String(useAuthStore.getState().accessToken ?? "").trim();
@@ -57,6 +57,7 @@ export type GatewayRunArgs = {
   targetAgentId?: string;
   targetAgentIds?: string[];
   activeSkillIds?: string[];
+  styleWorkflowRequested?: boolean;
   kbMentionIds?: string[];
   images?: ImageAttachment[];
   styleExecutionMode?: StyleExecutionMode;
@@ -1611,7 +1612,7 @@ function buildRecentDialogueJsonFromTurns(turns: DialogueTurn[], maxTurns: numbe
   return msgs.length ? `RECENT_DIALOGUE(JSON):\n${JSON.stringify(msgs, null, 2)}\n\n` : "";
 }
 
-export async function buildContextPack(extra?: { referencesText?: string; userPrompt?: string; kbMentionIds?: string[] }) {
+export async function buildContextPack(extra?: { referencesText?: string; userPrompt?: string; kbMentionIds?: string[]; activeSkillIds?: string[] }) {
   const mainDoc = useRunStore.getState().mainDoc;
   const freshWritingBoundary = useRunStore.getState().mode === "agent" && looksLikeFreshWritingTaskPrompt(String(extra?.userPrompt ?? ""));
   const sanitizeMainDocForFreshWriting = (raw: any) => ({
@@ -1633,12 +1634,21 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   // 仅使用本次消息 @提及的库（绑定机制已废弃）
   const kbMentionIds = Array.isArray(extra?.kbMentionIds) ? extra!.kbMentionIds : [];
   const kbAttachedIds = useRunStore.getState().kbAttachedLibraryIds ?? [];
-  const kbSelectedIds = resolveImplicitStyleLibraryIds({
+  const styleWorkflowRequested = isStyleWorkflowRequestedForRun({
+    activeSkillIds: extra?.activeSkillIds,
     mentionedLibraryIds: kbMentionIds,
-    attachedLibraryIds: kbAttachedIds,
     libraries: kbLibraries,
     mainDoc: mainDocForPack as any,
+    workflowSkills: (useRunStore.getState() as any).workflowSkills ?? {},
   });
+  const kbSelectedIds = styleWorkflowRequested
+    ? resolveImplicitStyleLibraryIds({
+        mentionedLibraryIds: kbMentionIds,
+        attachedLibraryIds: kbAttachedIds,
+        libraries: kbLibraries,
+        mainDoc: mainDocForPack as any,
+      })
+    : kbMentionIds;
   // PROJECT_STATE：只提供最小信息（避免"光标文件/全量文件列表"对模型产生过强暗示）
   const state = {
     fileCount: proj.files.length,
@@ -2728,6 +2738,7 @@ export function startGatewayRun(args: {
   targetAgentId?: string;
   targetAgentIds?: string[];
   activeSkillIds?: string[];
+  styleWorkflowRequested?: boolean;
   kbMentionIds?: string[];
   images?: ImageAttachment[];
   styleExecutionMode?: StyleExecutionMode;
@@ -2740,6 +2751,13 @@ export function startGatewayRun(args: {
   let cancelReason = "CANCELLED";
 
   const done = (async () => {
+    const styleWorkflowRequested = args.styleWorkflowRequested ?? isStyleWorkflowRequestedForRun({
+      activeSkillIds: args.activeSkillIds,
+      mentionedLibraryIds: args.kbMentionIds,
+      libraries: useKbStore.getState().libraries ?? [],
+      mainDoc: useRunStore.getState().mainDoc as any,
+      workflowSkills: (useRunStore.getState() as any).workflowSkills ?? {},
+    });
     const pipelineArgs = args.styleExecutionMode || args.stylePipelinePayload
       ? { styleExecutionMode: args.styleExecutionMode, stylePipelinePayload: args.stylePipelinePayload }
       : await buildStylePipelinePayload({
@@ -2747,7 +2765,7 @@ export function startGatewayRun(args: {
           activeSkillIds: args.activeSkillIds,
           kbMentionIds: args.kbMentionIds,
         }).catch(() => ({}));
-    inner = startGatewayRunWs({ ...(args as GatewayRunArgs), ...pipelineArgs });
+    inner = startGatewayRunWs({ ...(args as GatewayRunArgs), styleWorkflowRequested, ...pipelineArgs });
     if (cancelled) inner.cancel(cancelReason);
     await inner.done;
   })();
