@@ -7,7 +7,6 @@ import type {
   ToolApplyPolicy,
   ToolBlockStep,
   ToolRiskLevel,
-  UserStep,
 } from "../state/runStore";
 
 type RuntimeStateLike = {
@@ -79,12 +78,6 @@ function buildApprovalText(item: any) {
   const note = String(item?.note ?? "").trim();
   if (question && note) return `${question}\n\n${note}`;
   return question || note || "等待确认";
-}
-
-function looksLikeWaitingAssistantText(text: string) {
-  const t = String(text ?? "").trim();
-  if (!t) return false;
-  return /(请直接回一句|请选择|选哪个库|按哪个库|哪个风格库|风格库已经定好了|只差主题|库名\s*\+\s*主题|请告诉我|回复我|确认一下|定一下风格库|还没给我)/.test(t);
 }
 
 function projectItemToStep(item: ItemRecord): Step | null {
@@ -193,28 +186,6 @@ function projectItemToStep(item: ItemRecord): Step | null {
   return null;
 }
 
-function isAssistantFallbackStep(step: AssistantStep, hasProjectedAssistantItems: boolean) {
-  if (!hasProjectedAssistantItems) return true;
-  if (Array.isArray(step.quickActions) && step.quickActions.length > 0) return true;
-  if (String(step.agentId ?? "").trim()) return true;
-  if (/\[模型错误\]/.test(String(step.text ?? ""))) return true;
-  if (looksLikeWaitingAssistantText(String(step.text ?? ""))) return true;
-  return false;
-}
-
-function isLegacyFallbackStep(
-  step: Step,
-  projectedItemIds: Set<string>,
-  hasProjectedAssistantItems: boolean,
-) {
-  if (step.type === "user") return true;
-  if (projectedItemIds.has(String(step.id ?? "").trim())) return false;
-  if (step.type === "assistant") {
-    return isAssistantFallbackStep(step, hasProjectedAssistantItems);
-  }
-  return true;
-}
-
 export function projectRuntimeItemsToSteps(args?: RuntimeStateLike): Step[] {
   const existingSteps = Array.isArray(args?.steps) ? args!.steps : [];
   const items = Array.isArray(args?.items) ? args!.items : [];
@@ -231,32 +202,55 @@ export function projectRuntimeItemsToSteps(args?: RuntimeStateLike): Step[] {
 
   if (!projectedPairs.length) return existingSteps;
 
-  const projectedItemIds = new Set(projectedPairs.map((entry) => String((entry.item as any)?.id ?? "").trim()).filter(Boolean));
-  const hasProjectedAssistantItems = projectedPairs.some((entry) => entry.step.type === "assistant");
-  const userSteps = existingSteps.filter((step): step is UserStep => step.type === "user");
-  const legacyFallback = existingSteps.filter((step) => isLegacyFallbackStep(step, projectedItemIds, hasProjectedAssistantItems) && step.type !== "user");
+  if (!existingSteps.length) {
+    return projectedPairs
+      .sort((a, b) => {
+        if (a.ts !== b.ts) return a.ts - b.ts;
+        return a.index - b.index;
+      })
+      .map((entry) => entry.step);
+  }
 
-  const merged = [
-    ...userSteps.map((step, index) => ({ step, order: index, ts: toEpochMs(step.ts, index), lane: 0 })),
-    ...legacyFallback.map((step, index) => ({ step, order: 10_000 + index, ts: Number.MAX_SAFE_INTEGER - 10_000 + index, lane: 2 })),
-    ...projectedPairs.map((entry, index) => ({ step: entry.step, order: 1000 + index, ts: entry.ts, lane: 1 })),
-  ]
+  // 运行时 items 负责“覆盖同 id 的最新状态 + 补充 step 流中没有的新条目”，
+  // 但绝不能反向删除已经加载出来的历史 transcript。
+  const projectedById = new Map(
+    projectedPairs
+      .map((entry) => [String((entry.item as any)?.id ?? "").trim(), entry.step] as const)
+      .filter(([id]) => Boolean(id)),
+  );
+
+  const merged: Step[] = [];
+  const seen = new Set<string>();
+  for (const step of existingSteps) {
+    if (!step || typeof step !== "object") continue;
+    const id = String(step.id ?? "").trim();
+    if (!id) {
+      merged.push(step);
+      continue;
+    }
+    if (seen.has(id)) continue;
+    seen.add(id);
+    merged.push(projectedById.get(id) ?? step);
+  }
+
+  const appended = projectedPairs
+    .filter((entry) => {
+      const id = String((entry.item as any)?.id ?? "").trim();
+      return Boolean(id) && !seen.has(id);
+    })
     .sort((a, b) => {
       if (a.ts !== b.ts) return a.ts - b.ts;
-      if (a.lane !== b.lane) return a.lane - b.lane;
-      return a.order - b.order;
-    })
-    .map((entry) => entry.step);
+      return a.index - b.index;
+    });
 
-  const deduped: Step[] = [];
-  const seen = new Set<string>();
-  for (const step of merged) {
-    const id = String(step?.id ?? "").trim();
+  for (const entry of appended) {
+    const id = String((entry.item as any)?.id ?? "").trim();
     if (!id || seen.has(id)) continue;
     seen.add(id);
-    deduped.push(step);
+    merged.push(entry.step);
   }
-  return deduped;
+
+  return merged;
 }
 
 export function getProjectedStepsFromRuntime(args?: RuntimeStateLike): Step[] {

@@ -111,7 +111,10 @@ export function NavSidebar() {
   const openLoginModal = useAuthStore((s) => s.openLoginModal);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const [settingsModalState, setSettingsModalState] = useState<{ open: boolean; initialTab?: string }>({
+    open: false,
+    initialTab: undefined,
+  });
   const settingsModalRequest = useKbStore((s) => s.settingsModalRequest);
   const settingsRef = useRef<HTMLDivElement>(null);
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
@@ -478,7 +481,10 @@ export function NavSidebar() {
           <SettingsPopover
             onLogout={() => { logout(); setSettingsOpen(false); }}
             onLogin={() => { openLoginModal(); setSettingsOpen(false); }}
-            onOpenTeam={() => { setSettingsModalOpen(true); setSettingsOpen(false); }}
+            onOpenSettings={(initialTab) => {
+              setSettingsModalState({ open: true, initialTab });
+              setSettingsOpen(false);
+            }}
             isLoggedIn={!!user}
           />
         )}
@@ -519,32 +525,28 @@ export function NavSidebar() {
             className="min-w-0 flex-1 text-left"
           >
             <div className="text-[13px] font-medium text-text truncate">{displayName}</div>
-            {user && (
-              <div className="text-[11px] text-text-faint truncate">
-                {user.pointsBalance.toLocaleString()} 积分
-              </div>
-            )}
+            {!user ? <div className="text-[11px] text-text-faint truncate">点击登录</div> : null}
           </button>
         </div>
       </div>
 
-      {(settingsModalOpen || settingsModalRequest) && (
+      {(settingsModalState.open || settingsModalRequest) && (
         <SettingsModal
           onClose={() => {
             // 关闭时取消库选择请求
             if (settingsModalRequest) {
               useKbStore.getState().clearSettingsModalRequest();
             }
-            setSettingsModalOpen(false);
+            setSettingsModalState({ open: false, initialTab: undefined });
           }}
-          initialTab={settingsModalRequest?.tab}
+          initialTab={settingsModalRequest?.tab ?? settingsModalState.initialTab}
           kbSelectMode={settingsModalRequest?.kbSelectMode
             ? {
                 onSelect: (id: string) => {
                   const req = useKbStore.getState().settingsModalRequest;
                   req?.kbSelectMode?.resolve?.(id);
                   useKbStore.getState().setSettingsModalRequest(null);
-                  setSettingsModalOpen(false);
+                  setSettingsModalState({ open: false, initialTab: undefined });
                 },
               }
             : undefined}
@@ -559,12 +561,12 @@ export function NavSidebar() {
 function SettingsPopover({
   onLogout,
   onLogin,
-  onOpenTeam,
+  onOpenSettings,
   isLoggedIn,
 }: {
   onLogout: () => void;
   onLogin: () => void;
-  onOpenTeam: () => void;
+  onOpenSettings: (initialTab?: string) => void;
   isLoggedIn: boolean;
 }) {
   const theme = useThemeStore((s) => s.theme);
@@ -583,7 +585,7 @@ function SettingsPopover({
       )}
     >
       {/* 设置 */}
-      <MenuItem icon={<Settings size={15} />} label="设置" onClick={onOpenTeam} />
+      <MenuItem icon={<Settings size={15} />} label="设置" onClick={() => onOpenSettings("account")} />
 
       {/* 主题 — hover 展开 */}
       <SubMenu

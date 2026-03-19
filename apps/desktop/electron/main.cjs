@@ -619,6 +619,53 @@ async function tryLoadConversationFromV1(historyDir, convId) {
   }
 }
 
+async function tryLoadConversationFromV2(historyDir, convId) {
+  const dir = String(historyDir ?? "").trim();
+  const id = String(convId ?? "").trim();
+  if (!dir || !id) return null;
+  try {
+    const safeId = normalizeConversationIdForFilename(id);
+    const convFile = path.join(dir, HISTORY_CONV_DIRNAME_V2, `conv_${safeId}.json`);
+    if (!(await fileExists(convFile))) return null;
+    const raw = await fsp.readFile(convFile, "utf-8");
+    const parsed = JSON.parse(String(raw ?? ""));
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function repairConversationSnapshotFromV2(rawConv, v2Payload) {
+  const conv = rawConv && typeof rawConv === "object" ? rawConv : null;
+  const parsed = v2Payload && typeof v2Payload === "object" ? v2Payload : null;
+  if (!conv || !parsed) return { changed: false, conversation: rawConv };
+  const snapshot = conv.snapshot && typeof conv.snapshot === "object" ? conv.snapshot : null;
+  if (!snapshot) return { changed: false, conversation: rawConv };
+
+  const prevSteps = Array.isArray(snapshot.steps) ? snapshot.steps : [];
+  const prevLogs = Array.isArray(snapshot.logs) ? snapshot.logs : [];
+  const nextSteps = Array.isArray(parsed.steps) ? parsed.steps : [];
+  const nextLogs = Array.isArray(parsed.logs) ? parsed.logs : [];
+
+  const shouldRepairSteps = nextSteps.length > prevSteps.length;
+  const shouldRepairLogs = nextLogs.length > prevLogs.length;
+  if (!shouldRepairSteps && !shouldRepairLogs) {
+    return { changed: false, conversation: rawConv };
+  }
+
+  return {
+    changed: true,
+    conversation: {
+      ...conv,
+      snapshot: {
+        ...snapshot,
+        ...(shouldRepairSteps ? { steps: nextSteps } : {}),
+        ...(shouldRepairLogs ? { logs: nextLogs } : {}),
+      },
+    },
+  };
+}
+
 async function saveSingleConversationFileV2(historyDir, rawConv) {
   const dir = String(historyDir ?? "");
   if (!dir || !rawConv || typeof rawConv !== "object") return;
@@ -2613,6 +2660,32 @@ function registerIpc() {
         };
       }
 
+      const pickedDir = (() => {
+        try {
+          return picked.file ? path.dirname(String(picked.file)) : null;
+        } catch {
+          return null;
+        }
+      })();
+
+      let repairedConversations = Array.isArray(picked.conversations) ? picked.conversations : [];
+      let repairedAny = false;
+      if (pickedDir && repairedConversations.length > 0) {
+        const next = [];
+        for (const conv of repairedConversations) {
+          const convId = String(conv?.id ?? "").trim();
+          if (!convId) {
+            next.push(conv);
+            continue;
+          }
+          const v2Payload = await tryLoadConversationFromV2(pickedDir, convId);
+          const repaired = repairConversationSnapshotFromV2(conv, v2Payload);
+          repairedAny = repairedAny || repaired.changed;
+          next.push(repaired.conversation);
+        }
+        repairedConversations = next;
+      }
+
       // 自愈：若最佳来源不是 primary，则回写一份到 primary，避免下次继续读到旧文件。
       if (primary) {
         const primaryFile = path.join(primary, HISTORY_FILENAME);
@@ -2624,11 +2697,29 @@ function registerIpc() {
             // ignore
           }
         }
+        if (repairedAny) {
+          try {
+            await fsp.mkdir(primary, { recursive: true });
+            await fsp.writeFile(
+              primaryFile,
+              JSON.stringify({
+                version: 1,
+                updatedAt: Date.now(),
+                conversations: repairedConversations,
+                draftSnapshot: picked.draftSnapshot,
+                activeConvId: picked.activeConvId,
+              }),
+              "utf-8",
+            );
+          } catch {
+            // ignore
+          }
+        }
       }
 
       return {
         ok: true,
-        conversations: picked.conversations,
+        conversations: repairedConversations,
         draftSnapshot: picked.draftSnapshot,
         activeConvId: picked.activeConvId,
         used: picked.used,

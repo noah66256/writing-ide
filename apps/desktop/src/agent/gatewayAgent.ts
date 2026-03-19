@@ -1178,11 +1178,15 @@ export function summarizeQuoteAsFeatureV1(quote: string): string {
   return `[${features.join(";")}](${chars}字/${sentences.length}句)`;
 }
 
-type DialogueTurn = { user: string; assistant: string };
+type DialogueTurn = { user: string; assistant: string; pressureTokens?: number };
 
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 131_072;
 const RAW_KEEP_TURNS_MIN = 5;
 const RAW_KEEP_TURNS_MAX = 30;
+const TOOL_PRESSURE_MAX_CHARS = 6000;
+const STRUCTURED_PREVIEW_MAX_DEPTH = 3;
+const STRUCTURED_PREVIEW_MAX_ITEMS = 12;
+const STRUCTURED_PREVIEW_MAX_STRING_CHARS = 1600;
 
 function getModelContextWindowTokens(modelId: string): number | null {
   const id = String(modelId ?? "").trim();
@@ -1197,7 +1201,9 @@ function getModelContextWindowTokens(modelId: string): number | null {
 function computeDialogueCompactionConfig(preferModelId: string) {
   const ctx = getModelContextWindowTokens(preferModelId) ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
   const rawKeepTurns = Math.max(RAW_KEEP_TURNS_MIN, Math.min(RAW_KEEP_TURNS_MAX, Math.floor(ctx / 8000)));
-  const triggerRatio = ctx >= 100_000 ? 0.85 : ctx >= 50_000 ? 0.8 : 0.75;
+  // 触发阈值按 L3 对话预算，而不是整模型窗口。
+  // 否则工具轮次很多时，历史已经明显挤压主线了，但 85% 整窗阈值几乎永远打不到。
+  const triggerRatio = ctx >= 200_000 ? 0.42 : ctx >= 100_000 ? 0.38 : ctx >= 50_000 ? 0.34 : 0.3;
   const compactTriggerTokens = Math.floor(ctx * triggerRatio);
   return { contextWindowTokens: ctx, rawKeepTurns, compactTriggerTokens, triggerRatio };
 }
@@ -1444,10 +1450,91 @@ function estimateTokensApprox(raw: string) {
   return cjk + Math.ceil(nonCjk / 4);
 }
 
-function estimateDialogueTokens(turns: DialogueTurn[], summaryText: string) {
-  let total = estimateTokensApprox(summaryText);
-  for (const t of turns) total += estimateTokensApprox(`${t.user}\n${t.assistant}`);
-  return total;
+function buildImageAttachmentNote(images: ImageAttachment[] | undefined) {
+  const list = Array.isArray(images) ? images : [];
+  if (!list.length) return "";
+  const names = list
+    .slice(0, 3)
+    .map((img) => String(img?.name ?? "").trim())
+    .filter(Boolean);
+  const namesText = names.length ? `：${names.join("、")}${list.length > names.length ? "等" : ""}` : "";
+  return `【附图 ${list.length} 张${namesText}】`;
+}
+
+function buildUserDialogueText(step: any) {
+  const text = String(step?.text ?? "").trim();
+  const imageNote = buildImageAttachmentNote(step?.images as ImageAttachment[] | undefined);
+  if (text && imageNote) return `${text}\n${imageNote}`;
+  return text || imageNote;
+}
+
+function sanitizeStructuredValueForPressure(raw: unknown, depth = 0): unknown {
+  if (raw == null) return raw;
+  if (typeof raw === "string") {
+    return raw.length > STRUCTURED_PREVIEW_MAX_STRING_CHARS
+      ? `${raw.slice(0, STRUCTURED_PREVIEW_MAX_STRING_CHARS).trimEnd()}…`
+      : raw;
+  }
+  if (typeof raw === "number" || typeof raw === "boolean") return raw;
+  if (depth >= STRUCTURED_PREVIEW_MAX_DEPTH) {
+    if (Array.isArray(raw)) return `[Array(${raw.length})]`;
+    return "[Object]";
+  }
+  if (Array.isArray(raw)) {
+    const list = raw
+      .slice(0, STRUCTURED_PREVIEW_MAX_ITEMS)
+      .map((item) => sanitizeStructuredValueForPressure(item, depth + 1));
+    if (raw.length > STRUCTURED_PREVIEW_MAX_ITEMS) list.push(`…(${raw.length - STRUCTURED_PREVIEW_MAX_ITEMS} more)`);
+    return list;
+  }
+  if (typeof raw === "object") {
+    const out: Record<string, unknown> = {};
+    const entries = Object.entries(raw as Record<string, unknown>).slice(0, STRUCTURED_PREVIEW_MAX_ITEMS);
+    for (const [key, value] of entries) {
+      if (/^(data|base64|image|screenshot|blob|bytes)$/i.test(key)) {
+        out[key] = "[omitted]";
+        continue;
+      }
+      out[key] = sanitizeStructuredValueForPressure(value, depth + 1);
+    }
+    const totalEntries = Object.keys(raw as Record<string, unknown>).length;
+    if (totalEntries > entries.length) out.__truncated__ = `${totalEntries - entries.length} more keys`;
+    return out;
+  }
+  return String(raw);
+}
+
+function renderStructuredValueForPressure(raw: unknown, maxChars = TOOL_PRESSURE_MAX_CHARS) {
+  if (typeof raw === "string") return clipContextText(raw, maxChars);
+  if (raw == null) return "";
+  try {
+    return clipContextText(JSON.stringify(sanitizeStructuredValueForPressure(raw)), maxChars);
+  } catch {
+    return clipContextText(String(raw), maxChars);
+  }
+}
+
+function buildToolPressureText(step: any) {
+  const toolName = String(step?.toolName ?? "").trim() || "tool";
+  const status = String(step?.status ?? "").trim().toLowerCase() || "success";
+  const inputText = renderStructuredValueForPressure(step?.input, TOOL_PRESSURE_MAX_CHARS);
+  const outputText = renderStructuredValueForPressure(step?.output, TOOL_PRESSURE_MAX_CHARS);
+  return [
+    `【工具 ${toolName}】`,
+    `状态：${status}`,
+    inputText ? `输入：${inputText}` : "",
+    outputText ? `输出：${outputText}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function readLatestTurnPromptTokens(turns: any[]) {
+  const list = Array.isArray(turns) ? turns : [];
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const turn = list[i];
+    const value = Number(turn?.usage?.promptTokens);
+    if (Number.isFinite(value) && value > 0) return Math.max(0, Math.floor(value));
+  }
+  return null;
 }
 
 export function buildDialogueTurnsFromSteps(steps: any[], opts?: BuildDialogueTurnOptions): DialogueTurn[] {
@@ -1459,20 +1546,23 @@ export function buildDialogueTurnsFromSteps(steps: any[], opts?: BuildDialogueTu
   const turns: DialogueTurn[] = [];
   let curUser = "";
   let curAssistant = "";
+  let curPressureTokens = 0;
   const flush = () => {
     const u = String(curUser ?? "").trim();
     const a = String(curAssistant ?? "").trim();
-    if (u) turns.push({ user: u, assistant: a });
+    if (u) turns.push({ user: u, assistant: a, pressureTokens: curPressureTokens });
     curUser = "";
     curAssistant = "";
+    curPressureTokens = 0;
   };
 
   for (const st of all) {
     if (!st || typeof st !== "object") continue;
     if (st.type === "user") {
       if (curUser) flush();
-      curUser = String(st.text ?? "").trim();
+      curUser = buildUserDialogueText(st);
       curAssistant = "";
+      curPressureTokens = estimateTokensApprox(curUser);
       continue;
     }
     if (st.type === "assistant") {
@@ -1481,13 +1571,17 @@ export function buildDialogueTurnsFromSteps(steps: any[], opts?: BuildDialogueTu
       const t = String(st.text ?? "").trim();
       if (!t) continue;
       curAssistant = curAssistant ? `${curAssistant}\n${t}` : t;
+      curPressureTokens += estimateTokensApprox(t);
       continue;
     }
-    if (includeToolSummaries && st.type === "tool") {
+    if (st.type === "tool") {
       if (!curUser) continue;
-      const s = summarizeToolStepForContext(st, maxToolSummaryChars);
-      if (!s) continue;
-      curAssistant = curAssistant ? `${curAssistant}\n${s}` : s;
+      curPressureTokens += estimateTokensApprox(buildToolPressureText(st));
+      if (includeToolSummaries) {
+        const s = summarizeToolStepForContext(st, maxToolSummaryChars);
+        if (!s) continue;
+        curAssistant = curAssistant ? `${curAssistant}\n${s}` : s;
+      }
     }
   }
   if (curUser) flush();
@@ -1541,6 +1635,14 @@ function buildRecentDialogueJsonFromTurns(turns: DialogueTurn[], maxTurns: numbe
   return msgs.length ? `RECENT_DIALOGUE(JSON):\n${JSON.stringify(msgs, null, 2)}\n\n` : "";
 }
 
+function hasWaitingWorkflowThread(thread: any): boolean {
+  if (!thread || typeof thread !== "object") return false;
+  const waitingFor = String(thread?.waitingFor ?? "").trim().toLowerCase();
+  if (waitingFor === "user" || waitingFor === "approval") return true;
+  const workflowStatus = String(thread?.taskState?.workflow?.status ?? "").trim().toLowerCase();
+  return workflowStatus === "running" || workflowStatus === "waiting_user" || workflowStatus === "waiting_approval";
+}
+
 export async function buildContextPack(extra?: {
   referencesText?: string;
   userPrompt?: string;
@@ -1549,7 +1651,10 @@ export async function buildContextPack(extra?: {
 }) {
   const mainDoc = useRunStore.getState().mainDoc;
   const thread = (useRunStore.getState() as any).thread ?? null;
-  const freshWritingBoundary = useRunStore.getState().mode === "agent" && looksLikeFreshWritingTaskPrompt(String(extra?.userPrompt ?? ""));
+  const freshWritingBoundary =
+    useRunStore.getState().mode === "agent" &&
+    looksLikeFreshWritingTaskPrompt(String(extra?.userPrompt ?? "")) &&
+    !hasWaitingWorkflowThread(thread);
   const sanitizeMainDocForFreshWriting = (raw: any) => ({
     audience: raw?.audience,
     persona: raw?.persona,
@@ -1673,7 +1778,7 @@ export async function buildContextPack(extra?: {
   // 最近对话片段（注入最后 RAW_KEEP_TURNS 个完整回合；关键决策仍应写入 Main Doc/Run Todo）
   const recentDialogue = (() => {
     if (freshWritingBoundary) return undefined;
-    const turnsAll = buildDialogueTurnsFromSteps(getRuntimeProjectedSteps(), { includeToolSummaries: true });
+    const turnsAll = buildDialogueTurnsFromSteps(getRuntimeProjectedSteps(), { includeToolSummaries: false });
     const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
     return buildRecentDialogueJsonFromTurns(completeTurns, computeDialogueCompactionConfig(preferModelId).rawKeepTurns);
   })();
@@ -2488,7 +2593,7 @@ export function buildChatContextPack(extra?: { referencesText?: string; userProm
     return s ? `DIALOGUE_SUMMARY(Markdown):\n${s}\n\n` : "";
   })();
   const chatRecentDialogue = (() => {
-    const turnsAll = buildDialogueTurnsFromSteps(getRuntimeProjectedSteps(), { includeToolSummaries: true });
+    const turnsAll = buildDialogueTurnsFromSteps(getRuntimeProjectedSteps(), { includeToolSummaries: false });
     const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
     return buildRecentDialogueJsonFromTurns(completeTurns, computeDialogueCompactionConfig(preferModelId).rawKeepTurns);
   })();
@@ -2587,12 +2692,13 @@ export async function rollDialogueSummaryIfNeeded(args: {
   log: (level: "info" | "warn" | "error", message: string, data?: unknown) => void;
 }) {
   const run: any = useRunStore.getState();
-  const turnsAll = buildDialogueTurnsFromSteps(getProjectedStepsFromRuntime({
+  const projectedSteps = getProjectedStepsFromRuntime({
     steps: run.steps ?? [],
     items: run.items ?? [],
     activeItemIds: run.activeItemIds ?? [],
     collabSessions: run.collabSessions ?? [],
-  }), { includeToolSummaries: true });
+  });
+  const turnsAll = buildDialogueTurnsFromSteps(projectedSteps, { includeToolSummaries: false });
   const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
 
   const summaryByMode: any = run.dialogueSummaryByMode ?? {};
@@ -2600,15 +2706,26 @@ export async function rollDialogueSummaryIfNeeded(args: {
   const runAny: any = useRunStore.getState();
   const preferModelId = String(runAny.agentModel || runAny.model || "").trim();
   const cfg = computeDialogueCompactionConfig(preferModelId);
-
-  const approxTokens = estimateDialogueTokens(completeTurns, previousSummary);
+  const cursorByMode: any = run.dialogueSummaryTurnCursorByMode ?? {};
+  const cursorRaw = Number.isFinite(Number(cursorByMode?.[args.mode])) ? Math.max(0, Math.floor(Number(cursorByMode[args.mode]))) : 0;
+  const cursor = Math.min(cursorRaw, completeTurns.length);
+  const pendingTurn = turnsAll.length > completeTurns.length ? turnsAll[turnsAll.length - 1] : null;
+  const pendingTurnTokens = pendingTurn && !String(pendingTurn.assistant ?? "").trim()
+    ? Math.max(0, Math.floor(Number(pendingTurn.pressureTokens ?? 0) || 0))
+    : 0;
+  const rawPressureTokens =
+    estimateTokensApprox(previousSummary) +
+    completeTurns
+      .slice(cursor)
+      .reduce((sum, turn) => sum + Math.max(0, Math.floor(Number(turn?.pressureTokens ?? 0) || 0)), 0) +
+    pendingTurnTokens;
+  const latestPromptTokens = readLatestTurnPromptTokens(run.turns ?? []);
+  const approxTokens = Math.max(rawPressureTokens, latestPromptTokens ?? 0);
   if (approxTokens < cfg.compactTriggerTokens) {
     return { ok: true as const, rolled: false as const };
   }
 
   const turnsToSummarize = Math.max(0, completeTurns.length - cfg.rawKeepTurns);
-  const cursorByMode: any = run.dialogueSummaryTurnCursorByMode ?? {};
-  const cursor = Number.isFinite(Number(cursorByMode?.[args.mode])) ? Math.max(0, Math.floor(Number(cursorByMode[args.mode]))) : 0;
   if (turnsToSummarize <= cursor) return { ok: true as const, rolled: false as const };
 
   const delta = completeTurns.slice(cursor, turnsToSummarize).slice(0, 12);
@@ -2623,6 +2740,9 @@ export async function rollDialogueSummaryIfNeeded(args: {
     turnsToSummarize,
     deltaTurns: delta.length,
     approxTokens,
+    rawPressureTokens,
+    latestPromptTokens,
+    pendingTurnTokens,
     contextWindowTokens: cfg.contextWindowTokens,
     rawKeepTurns: cfg.rawKeepTurns,
     triggerTokens: cfg.compactTriggerTokens,

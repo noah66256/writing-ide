@@ -10,6 +10,35 @@ export type AuthUser = {
   pointsBalance: number;
 };
 
+export type AccountUsageBucket = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  chargedPoints: number;
+  runCount: number;
+};
+
+export type AccountUsageSummary = {
+  generatedAt: string;
+  recentWindowDays: number;
+  recentWindowStart: string;
+  lifetime: AccountUsageBucket;
+  recent30d: AccountUsageBucket;
+  byMode: Record<"chat" | "agent", AccountUsageBucket>;
+  recentRuns: Array<{
+    id: string;
+    kind: string;
+    mode: "chat" | "agent";
+    model: string | null;
+    startedAt: string;
+    endedAt: string | null;
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    chargedPoints: number;
+  }>;
+};
+
 type PhoneRequestRet = { requestId: string; expiresInSeconds: number; devCode?: string };
 type EmailRequestRet = { requestId: string; expiresInSeconds: number; devCode?: string };
 
@@ -31,6 +60,7 @@ type AuthState = {
   init: () => Promise<void>;
   refreshMe: () => Promise<void>;
   refreshPoints: () => Promise<void>;
+  fetchUsageSummary: () => Promise<AccountUsageSummary>;
 
   requestPhoneCode: (args: { phoneNumber: string; countryCode?: string }) => Promise<PhoneRequestRet>;
   verifyPhoneCode: (args: { phoneNumber: string; countryCode?: string; requestId: string; code: string }) => Promise<void>;
@@ -134,6 +164,59 @@ export const useAuthStore = create<AuthState>()(
         } catch {
           // ignore
         }
+      },
+
+      fetchUsageSummary: async () => {
+        const r = await apiFetchJson<AccountUsageSummary>("/api/account/usage-summary", { method: "GET" });
+        return {
+          generatedAt: String(r?.generatedAt ?? ""),
+          recentWindowDays: Number(r?.recentWindowDays ?? 30) || 30,
+          recentWindowStart: String(r?.recentWindowStart ?? ""),
+          lifetime: {
+            promptTokens: Number(r?.lifetime?.promptTokens ?? 0) || 0,
+            completionTokens: Number(r?.lifetime?.completionTokens ?? 0) || 0,
+            totalTokens: Number(r?.lifetime?.totalTokens ?? 0) || 0,
+            chargedPoints: Number(r?.lifetime?.chargedPoints ?? 0) || 0,
+            runCount: Number(r?.lifetime?.runCount ?? 0) || 0,
+          },
+          recent30d: {
+            promptTokens: Number(r?.recent30d?.promptTokens ?? 0) || 0,
+            completionTokens: Number(r?.recent30d?.completionTokens ?? 0) || 0,
+            totalTokens: Number(r?.recent30d?.totalTokens ?? 0) || 0,
+            chargedPoints: Number(r?.recent30d?.chargedPoints ?? 0) || 0,
+            runCount: Number(r?.recent30d?.runCount ?? 0) || 0,
+          },
+          byMode: {
+            chat: {
+              promptTokens: Number(r?.byMode?.chat?.promptTokens ?? 0) || 0,
+              completionTokens: Number(r?.byMode?.chat?.completionTokens ?? 0) || 0,
+              totalTokens: Number(r?.byMode?.chat?.totalTokens ?? 0) || 0,
+              chargedPoints: Number(r?.byMode?.chat?.chargedPoints ?? 0) || 0,
+              runCount: Number(r?.byMode?.chat?.runCount ?? 0) || 0,
+            },
+            agent: {
+              promptTokens: Number(r?.byMode?.agent?.promptTokens ?? 0) || 0,
+              completionTokens: Number(r?.byMode?.agent?.completionTokens ?? 0) || 0,
+              totalTokens: Number(r?.byMode?.agent?.totalTokens ?? 0) || 0,
+              chargedPoints: Number(r?.byMode?.agent?.chargedPoints ?? 0) || 0,
+              runCount: Number(r?.byMode?.agent?.runCount ?? 0) || 0,
+            },
+          },
+          recentRuns: Array.isArray(r?.recentRuns)
+            ? r.recentRuns.map((row) => ({
+                id: String(row?.id ?? ""),
+                kind: String(row?.kind ?? ""),
+                mode: row?.mode === "chat" ? "chat" : "agent",
+                model: row?.model ? String(row.model) : null,
+                startedAt: String(row?.startedAt ?? ""),
+                endedAt: row?.endedAt ? String(row.endedAt) : null,
+                promptTokens: Number(row?.promptTokens ?? 0) || 0,
+                completionTokens: Number(row?.completionTokens ?? 0) || 0,
+                totalTokens: Number(row?.totalTokens ?? 0) || 0,
+                chargedPoints: Number(row?.chargedPoints ?? 0) || 0,
+              }))
+            : [],
+        };
       },
 
       requestPhoneCode: async (args) => {
@@ -252,4 +335,3 @@ export const useAuthStore = create<AuthState>()(
     { name: "writing-ide.auth.v1", partialize: (s) => ({ accessToken: s.accessToken, user: s.user, userAvatarDataUrl: s.userAvatarDataUrl }) },
   ),
 );
-

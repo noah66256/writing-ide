@@ -2451,6 +2451,104 @@ fastify.get(
   }
 );
 
+type UsageBucketSummary = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  chargedPoints: number;
+  runCount: number;
+};
+
+function createEmptyUsageBucket(): UsageBucketSummary {
+  return {
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    chargedPoints: 0,
+    runCount: 0,
+  };
+}
+
+function addRunAuditToUsageBucket(bucket: UsageBucketSummary, run: RunAudit | null | undefined) {
+  if (!bucket || !run) return;
+  const promptTokens = Math.max(0, Math.floor(Number(run.usage?.promptTokens ?? 0) || 0));
+  const completionTokens = Math.max(0, Math.floor(Number(run.usage?.completionTokens ?? 0) || 0));
+  const totalTokensRaw = Number(run.usage?.totalTokens ?? promptTokens + completionTokens);
+  const totalTokens = Math.max(0, Math.floor(Number.isFinite(totalTokensRaw) ? totalTokensRaw : promptTokens + completionTokens));
+  const chargedPoints = Math.max(0, Math.floor(Number(run.chargedPoints ?? 0) || 0));
+  bucket.promptTokens += promptTokens;
+  bucket.completionTokens += completionTokens;
+  bucket.totalTokens += totalTokens;
+  bucket.chargedPoints += chargedPoints;
+  bucket.runCount += 1;
+}
+
+fastify.get(
+  "/api/account/usage-summary",
+  {
+    preHandler: (fastify as any).authenticate,
+  },
+  async (request: any) => {
+    const db = await loadDb();
+    const userId = String(request.user?.sub ?? "").trim();
+    const recentWindowDays = 30;
+    const recentWindowStartDate = new Date(Date.now() - recentWindowDays * 24 * 60 * 60 * 1000);
+    const recentWindowStartMs = recentWindowStartDate.getTime();
+    const allRuns = Array.isArray((db as any).runAudits) ? (((db as any).runAudits as any[]) ?? []) : [];
+    const runs = allRuns
+      .filter((row) => String((row as any)?.userId ?? "").trim() === userId)
+      .map((row) => row as RunAudit);
+
+    const lifetime = createEmptyUsageBucket();
+    const recent30d = createEmptyUsageBucket();
+    const byMode: Record<"chat" | "agent", UsageBucketSummary> = {
+      chat: createEmptyUsageBucket(),
+      agent: createEmptyUsageBucket(),
+    };
+
+    for (const run of runs) {
+      addRunAuditToUsageBucket(lifetime, run);
+      addRunAuditToUsageBucket(run.mode === "chat" ? byMode.chat : byMode.agent, run);
+      const startedAtMs = Date.parse(String(run.startedAt ?? ""));
+      if (Number.isFinite(startedAtMs) && startedAtMs >= recentWindowStartMs) {
+        addRunAuditToUsageBucket(recent30d, run);
+      }
+    }
+
+    const recentRuns = runs
+      .slice()
+      .sort((a, b) => String(b?.startedAt ?? "").localeCompare(String(a?.startedAt ?? "")))
+      .slice(0, 12)
+      .map((run) => {
+        const promptTokens = Math.max(0, Math.floor(Number(run.usage?.promptTokens ?? 0) || 0));
+        const completionTokens = Math.max(0, Math.floor(Number(run.usage?.completionTokens ?? 0) || 0));
+        const totalTokensRaw = Number(run.usage?.totalTokens ?? promptTokens + completionTokens);
+        return {
+          id: String(run.id ?? ""),
+          kind: String(run.kind ?? ""),
+          mode: run.mode === "chat" ? "chat" : "agent",
+          model: run.model ? String(run.model) : null,
+          startedAt: String(run.startedAt ?? ""),
+          endedAt: run.endedAt ? String(run.endedAt) : null,
+          promptTokens,
+          completionTokens,
+          totalTokens: Math.max(0, Math.floor(Number.isFinite(totalTokensRaw) ? totalTokensRaw : promptTokens + completionTokens)),
+          chargedPoints: Math.max(0, Math.floor(Number(run.chargedPoints ?? 0) || 0)),
+        };
+      });
+
+    return {
+      generatedAt: new Date().toISOString(),
+      recentWindowDays,
+      recentWindowStart: recentWindowStartDate.toISOString(),
+      lifetime,
+      recent30d,
+      byMode,
+      recentRuns,
+    };
+  },
+);
+
 // ======== Admin：用户管理 + 充值积分（B端使用） ========
 
 fastify.get(

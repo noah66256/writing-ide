@@ -3,10 +3,11 @@ import { createPortal } from "react-dom";
 import {
   X, Users, Plug, Sparkles, ChevronDown, ChevronRight, Plus,
   Bot, BookOpen, FolderOpen, RefreshCw, Pencil, Trash2, Terminal, Globe, Radio,
-  Eye, EyeOff, Monitor, ExternalLink, Package, Link2, Wrench, Store, ImagePlus, Upload,
+  Eye, EyeOff, Monitor, ExternalLink, Package, Link2, Wrench, Store, ImagePlus, Upload, User,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TeamModal } from "@/components/TeamModal";
+import { AccountSettingsPanel } from "@/components/AccountSettingsPanel";
 import { listRegisteredSkills, type SkillManifest } from "@ohmycrab/agent-core";
 import { useSkillStore } from "@/state/skillStore";
 import { useRunStore } from "@/state/runStore";
@@ -17,9 +18,10 @@ import { useMcpStore, type McpServerState } from "@/state/mcpStore";
 import { useMarketplaceStore, type MarketplaceCatalogItem } from "@/state/marketplaceStore";
 import { readImageFileAsDataUrl } from "@/utils/avatar";
 
-type Tab = "persona" | "team" | "mcp" | "skill" | "kb" | "marketplace";
+type Tab = "account" | "persona" | "team" | "mcp" | "skill" | "kb" | "marketplace";
 
 const TABS: { id: Tab; label: string; icon: typeof Users }[] = [
+  { id: "account", label: "账号", icon: User },
   { id: "persona", label: "负责人", icon: Bot },
   { id: "kb", label: "知识库", icon: BookOpen },
   { id: "team", label: "团队管理", icon: Users },
@@ -35,13 +37,13 @@ export function SettingsModal({ onClose, initialTab, kbSelectMode }: {
 }) {
   const [tab, setTab] = useState<Tab>(() => {
     const t = initialTab as Tab;
-    return TABS.some((x) => x.id === t) ? t : "persona";
+    return TABS.some((x) => x.id === t) ? t : "account";
   });
 
-  // kbSelectMode 请求到达时强制切换到 KB tab
   useEffect(() => {
-    if (kbSelectMode && initialTab === "kb") setTab("kb");
-  }, [kbSelectMode, initialTab]);
+    const t = initialTab as Tab;
+    if (TABS.some((x) => x.id === t)) setTab(t);
+  }, [initialTab]);
 
   return createPortal(
     <div
@@ -85,6 +87,7 @@ export function SettingsModal({ onClose, initialTab, kbSelectMode }: {
             </button>
           </div>
           <div className="flex-1 overflow-y-auto p-6">
+            {tab === "account" && <AccountTabContent />}
             {tab === "persona" && <PersonaTabContent />}
             {tab === "kb" && <KbTabContent kbSelectMode={kbSelectMode} onClose={onClose} />}
             {tab === "team" && <TeamTabContent />}
@@ -97,6 +100,10 @@ export function SettingsModal({ onClose, initialTab, kbSelectMode }: {
     </div>,
     document.body,
   );
+}
+
+function AccountTabContent() {
+  return <AccountSettingsPanel />;
 }
 
 /* ─── Marketplace Tab ─── */

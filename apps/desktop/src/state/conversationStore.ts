@@ -141,6 +141,65 @@ function getSnapshotStepsCount(raw: unknown): number {
   return Array.isArray(steps) ? steps.length : 0;
 }
 
+function mergeListById<T extends { id?: string | number }>(prevList: T[] | undefined | null, incomingList: T[] | undefined | null): T[] {
+  const prev = Array.isArray(prevList) ? prevList : [];
+  const incoming = Array.isArray(incomingList) ? incomingList : [];
+  if (!prev.length) return incoming;
+  if (!incoming.length) return prev;
+
+  const incomingById = new Map<string, T>();
+  for (const item of incoming) {
+    const id = String(item?.id ?? "").trim();
+    if (!id) continue;
+    incomingById.set(id, item);
+  }
+
+  const merged: T[] = [];
+  const seen = new Set<string>();
+
+  for (const item of prev) {
+    const id = String(item?.id ?? "").trim();
+    if (!id) {
+      merged.push(item);
+      continue;
+    }
+    if (seen.has(id)) continue;
+    seen.add(id);
+    merged.push(incomingById.get(id) ?? item);
+  }
+
+  for (const item of incoming) {
+    const id = String(item?.id ?? "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    merged.push(item);
+  }
+
+  return merged;
+}
+
+function mergeSnapshotForHistory(prev: RunSnapshot | null | undefined, incoming: RunSnapshot | null | undefined): RunSnapshot | null {
+  if (!incoming || typeof incoming !== "object") return incoming ?? null;
+  if (!prev || typeof prev !== "object") return incoming;
+  return {
+    ...incoming,
+    steps: mergeListById(prev.steps as SerializableStep[] | undefined, incoming.steps as SerializableStep[] | undefined),
+    logs: mergeListById(prev.logs as LogEntry[] | undefined, incoming.logs as LogEntry[] | undefined),
+    turns: mergeListById(prev.turns as RuntimeTurnRecord[] | undefined, incoming.turns as RuntimeTurnRecord[] | undefined),
+    items: mergeListById(prev.items as RuntimeItemRecord[] | undefined, incoming.items as RuntimeItemRecord[] | undefined),
+    collabSessions: mergeListById(
+      prev.collabSessions as RuntimeCollabSessionRecord[] | undefined,
+      incoming.collabSessions as RuntimeCollabSessionRecord[] | undefined,
+    ),
+    activeItemIds: Array.from(
+      new Set([
+        ...(Array.isArray(prev.activeItemIds) ? prev.activeItemIds : []),
+        ...(Array.isArray(incoming.activeItemIds) ? incoming.activeItemIds : []),
+      ].map((x) => String(x ?? "").trim()).filter(Boolean)),
+    ),
+  };
+}
+
 /**
  * 从当前 runStore + projectStore 构建可序列化的 RunSnapshot。
  * 替代 NavSidebar / ChatArea 中的 inline buildSnapshot()。
@@ -517,10 +576,7 @@ export const useConversationStore = create<ConversationState>()(
             let nextSnapshot = x.snapshot;
             if (patch.snapshot != null) {
               const incoming = patch.snapshot as RunSnapshot;
-              const prevSteps = getSnapshotStepsCount(nextSnapshot as any);
-              const incomingSteps = getSnapshotStepsCount(incoming as any);
-              // 防降级：避免把已有 steps>0 的对话误写成 steps=0 的快照
-              nextSnapshot = prevSteps > 0 && incomingSteps === 0 ? nextSnapshot : incoming;
+              nextSnapshot = mergeSnapshotForHistory(nextSnapshot as RunSnapshot | null, incoming) ?? incoming;
             }
             return {
               ...x,
@@ -541,7 +597,9 @@ export const useConversationStore = create<ConversationState>()(
       },
       setDraftSnapshot: (snap) => {
         const nextRaw = snap && typeof snap === "object" ? (snap as any) : null;
-        const next = nextRaw ? slimSnapshotForHistory(nextRaw) ?? nextRaw : null;
+        const prevDraft = get().draftSnapshot ?? null;
+        const merged = nextRaw ? mergeSnapshotForHistory(prevDraft, nextRaw as RunSnapshot) ?? nextRaw : null;
+        const next = merged ? slimSnapshotForHistory(merged) ?? merged : null;
         set(() => {
           const conversations = get().conversations ?? [];
           schedulePersistToDisk({ conversations, draftSnapshot: next });
@@ -562,21 +620,19 @@ export const useConversationStore = create<ConversationState>()(
           ? prevConversations.map((x) => {
               if (x.id !== activeConvId) return x;
               const prevSnap = x.snapshot as any;
-              const prevSteps = getSnapshotStepsCount(prevSnap);
-              const candSteps = getSnapshotStepsCount(candidate as any);
-              // 防降级：已有 snapshot.steps>0 而候选 steps=0 时，保留旧 snapshot
               const safeSnapshot =
-                prevSteps > 0 && candSteps === 0 ? prevSnap : (candidate as any);
+                candidate == null
+                  ? null
+                  : mergeSnapshotForHistory(prevSnap as RunSnapshot | null, candidate as RunSnapshot) ?? candidate;
               return { ...x, snapshot: safeSnapshot, updatedAt: Date.now() };
             })
           : prevConversations;
 
-        // draftSnapshot 也做防降级，避免从"有内容草稿"退化为"空草稿"
         const prevDraft = get().draftSnapshot as any;
-        const prevDraftSteps = getSnapshotStepsCount(prevDraft);
-        const candDraftSteps = getSnapshotStepsCount(candidate as any);
         const nextDraft =
-          prevDraftSteps > 0 && candDraftSteps === 0 ? prevDraft : (candidate as any);
+          candidate == null
+            ? null
+            : mergeSnapshotForHistory(prevDraft as RunSnapshot | null, candidate as RunSnapshot) ?? candidate;
 
         set({ draftSnapshot: nextDraft as any, conversations });
 
@@ -617,19 +673,19 @@ export const useConversationStore = create<ConversationState>()(
           ? prevConversations.map((x) => {
               if (x.id !== activeConvId) return x;
               const prevSnap = x.snapshot as any;
-              const prevSteps = getSnapshotStepsCount(prevSnap);
-              const candSteps = getSnapshotStepsCount(candidate as any);
               const safeSnapshot =
-                prevSteps > 0 && candSteps === 0 ? prevSnap : (candidate as any);
+                candidate == null
+                  ? null
+                  : mergeSnapshotForHistory(prevSnap as RunSnapshot | null, candidate as RunSnapshot) ?? candidate;
               return { ...x, snapshot: safeSnapshot, updatedAt: Date.now() };
             })
           : prevConversations;
 
         const prevDraft = get().draftSnapshot as any;
-        const prevDraftSteps = getSnapshotStepsCount(prevDraft);
-        const candDraftSteps = getSnapshotStepsCount(candidate as any);
         const nextDraft =
-          prevDraftSteps > 0 && candDraftSteps === 0 ? prevDraft : (candidate as any);
+          candidate == null
+            ? null
+            : mergeSnapshotForHistory(prevDraft as RunSnapshot | null, candidate as RunSnapshot) ?? candidate;
 
         set({ draftSnapshot: nextDraft as any, conversations });
 

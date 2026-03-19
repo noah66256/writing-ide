@@ -213,6 +213,60 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       collabSessions: rt.getCollabSessions() ?? [],
     });
 
+  const preferNonEmptyString = (incoming: unknown, previous: unknown) => {
+    const next = typeof incoming === "string" ? incoming : "";
+    if (next.trim()) return next;
+    const prev = typeof previous === "string" ? previous : "";
+    return prev;
+  };
+
+  const mergeRuntimeItem = (previous: any, incoming: any) => {
+    if (!previous || typeof previous !== "object") return incoming;
+    if (!incoming || typeof incoming !== "object") return previous;
+    return {
+      ...previous,
+      ...incoming,
+      text: preferNonEmptyString(incoming?.text, previous?.text),
+      message: preferNonEmptyString(incoming?.message, previous?.message),
+      summary: preferNonEmptyString(incoming?.summary, previous?.summary),
+      content: preferNonEmptyString(incoming?.content, previous?.content),
+    };
+  };
+
+  const mergeRuntimeItems = (previousItems: any[], incomingItems: any[]) => {
+    const prev = Array.isArray(previousItems) ? previousItems : [];
+    const incoming = Array.isArray(incomingItems) ? incomingItems : [];
+    if (!prev.length) return incoming;
+    if (!incoming.length) return prev;
+
+    const incomingById = new Map<string, any>();
+    for (const item of incoming) {
+      const id = String(item?.id ?? "").trim();
+      if (!id) continue;
+      incomingById.set(id, item);
+    }
+
+    const merged: any[] = [];
+    const seen = new Set<string>();
+    for (const item of prev) {
+      const id = String(item?.id ?? "").trim();
+      if (!id) {
+        merged.push(item);
+        continue;
+      }
+      if (seen.has(id)) continue;
+      seen.add(id);
+      merged.push(mergeRuntimeItem(item, incomingById.get(id)));
+    }
+    for (const item of incoming) {
+      const id = String(item?.id ?? "").trim();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      merged.push(item);
+    }
+    return merged;
+  };
+
   const applyThreadSnapshot = (payload: any) => {
     const thread = payload?.thread && typeof payload.thread === "object" ? payload.thread : null;
     const currentTurn = payload?.currentTurn && typeof payload.currentTurn === "object" ? payload.currentTurn : null;
@@ -226,7 +280,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       rt.setThread(thread);
     }
     if (currentTurn?.id) rt.upsertTurn(currentTurn);
-    rt.setItems(snapshotItems);
+    rt.setItems(mergeRuntimeItems(rt.getItems() ?? [], snapshotItems));
     if (collabSessions) rt.setCollabSessions(collabSessions);
     if (activeItemIds) rt.setActiveItemIds(activeItemIds);
   };
@@ -254,7 +308,8 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
     }
     const item = payload?.item && typeof payload.item === "object" ? payload.item : null;
     if (!item?.id) return;
-    rt.upsertItem(item);
+    const existing = items.find((entry: any) => String(entry?.id ?? "") === String(item.id));
+    rt.upsertItem(mergeRuntimeItem(existing, item));
     const itemId = String(item.id);
     if (kind === "started") {
       rt.setActiveItemIds([...activeItemIds, itemId]);
