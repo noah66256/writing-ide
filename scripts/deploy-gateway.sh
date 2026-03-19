@@ -92,7 +92,10 @@ node -e 'try{require("@esbuild/linux-x64")}catch{process.exit(1)}' 2>/dev/null \
 node -e 'try{require("@rollup/rollup-linux-x64-gnu")}catch{process.exit(1)}' 2>/dev/null \
   || npm i --no-save --force --no-audit --no-fund @rollup/rollup-linux-x64-gnu 2>&1 | tail -3
 
-# ── 构建 Gateway ──
+# ── 构建共享包 + Gateway ──
+echo "[remote] build shared"
+npm -w @ohmycrab/shared run build
+
 echo "[remote] build gateway"
 npm -w @ohmycrab/gateway run build
 

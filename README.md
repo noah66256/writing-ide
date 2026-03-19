@@ -120,7 +120,7 @@ Desktop dev 使用 Vite proxy 将 `/api/*` 转发到 Gateway，避免跨域问�
 bash scripts/deploy-gateway.sh
 ```
 
-走 git pull → npm install → build → pm2 restart → health check。
+走 git pull → npm install → `npm -w @ohmycrab/shared run build` → gateway build → pm2 restart → health check。
 
 ### Desktop 打包
 

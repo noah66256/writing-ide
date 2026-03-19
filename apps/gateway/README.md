@@ -65,4 +65,4 @@ npm run dev:gateway
 bash scripts/deploy-gateway.sh
 ```
 
-走 git pull → npm install → build → pm2 restart → health check。
+走 git pull → npm install → `npm -w @ohmycrab/shared run build` → gateway build → pm2 restart → health check。
