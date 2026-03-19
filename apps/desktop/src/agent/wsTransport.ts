@@ -658,9 +658,15 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
         const mentionLibIds = Array.isArray(args.kbMentionIds)
           ? Array.from(new Set(args.kbMentionIds.map((x) => String(x ?? "").trim()).filter(Boolean)))
           : [];
-        const requestedSkillIds = Array.isArray(args.skillRefs) && args.skillRefs.length > 0
-          ? args.skillRefs.map((item) => String(item?.id ?? "").trim()).filter(Boolean)
+        const threadSkillIds = Array.isArray(rt.getThread()?.activeSkillRefs)
+          ? (rt.getThread()!.activeSkillRefs as any[]).map((item: any) => String(item?.id ?? "").trim()).filter(Boolean)
           : [];
+        const requestedSkillIds = Array.from(new Set([
+          ...(Array.isArray(args.skillRefs) && args.skillRefs.length > 0
+            ? args.skillRefs.map((item) => String(item?.id ?? "").trim()).filter(Boolean)
+            : []),
+          ...threadSkillIds,
+        ]));
         const att = rt.getKbAttachedLibraryIds() ?? [];
         const styleWorkflowRequested = Boolean((args as any)?.styleWorkflowRequested) || isStyleWorkflowRequestedForRun({
           activeSkillIds: requestedSkillIds,
@@ -903,9 +909,14 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
 
       const runStateAny: any = useRunStore.getState();
       const threadState = runStateAny?.thread && typeof runStateAny.thread === "object" ? runStateAny.thread : null;
-      const derivedSkillRefs = Array.isArray(args.skillRefs) && args.skillRefs.length > 0
-        ? args.skillRefs
-            .map((item) => ({
+      const skillRefSource = [
+        ...(Array.isArray(threadState?.activeSkillRefs) ? threadState.activeSkillRefs : []),
+        ...(Array.isArray(args.skillRefs) ? args.skillRefs : []),
+      ];
+      const derivedSkillRefs = Array.from(
+        new Map(
+          skillRefSource
+            .map((item: any) => ({
               id: String(item?.id ?? "").trim(),
               source: item?.source === "admin" ? "admin" : item?.source === "user" ? "user" : "builtin",
               activation: item?.activation === "auto" ? "auto" : item?.activation === "sticky" ? "sticky" : "explicit",
@@ -914,7 +925,9 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               enabled: item?.enabled !== false,
             }))
             .filter((item) => item.id)
-        : [];
+            .map((item) => [item.id, item] as const),
+        ).values(),
+      );
 
       socket.send(JSON.stringify({
         type: "run.request",

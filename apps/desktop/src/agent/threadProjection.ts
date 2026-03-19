@@ -81,6 +81,12 @@ function buildApprovalText(item: any) {
   return question || note || "等待确认";
 }
 
+function looksLikeWaitingAssistantText(text: string) {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  return /(请直接回一句|请选择|选哪个库|按哪个库|哪个风格库|风格库已经定好了|只差主题|库名\s*\+\s*主题|请告诉我|回复我|确认一下|定一下风格库|还没给我)/.test(t);
+}
+
 function projectItemToStep(item: ItemRecord): Step | null {
   if (!item || typeof item !== "object") return null;
   if (item.type === "agentMessage") {
@@ -192,6 +198,7 @@ function isAssistantFallbackStep(step: AssistantStep, hasProjectedAssistantItems
   if (Array.isArray(step.quickActions) && step.quickActions.length > 0) return true;
   if (String(step.agentId ?? "").trim()) return true;
   if (/\[模型错误\]/.test(String(step.text ?? ""))) return true;
+  if (looksLikeWaitingAssistantText(String(step.text ?? ""))) return true;
   return false;
 }
 

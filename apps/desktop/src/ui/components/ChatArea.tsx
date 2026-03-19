@@ -132,6 +132,21 @@ function buildSkillRefs(args: {
   return Array.from(refs.values());
 }
 
+function ensureStyleSkillRef(refs: SkillRef[], activation: SkillRef["activation"] = "sticky"): SkillRef[] {
+  if (refs.some((item) => String(item?.id ?? "").trim() === "style_imitate")) return refs;
+  return [
+    ...refs,
+    {
+      id: "style_imitate",
+      source: "builtin",
+      activation,
+      scope: "thread",
+      configPath: null,
+      enabled: true,
+    },
+  ];
+}
+
 function hasWaitingWorkflowThread(thread: RuntimeThreadRecord | null | undefined): boolean {
   if (!thread || typeof thread !== "object") return false;
   const waitingFor = String(thread.waitingFor ?? "").trim().toLowerCase();
@@ -264,6 +279,12 @@ function enterLocalStyleWorkflowWaiting(args: {
     },
   } as any);
   runStore.addAssistant(args.question);
+  const snapshot = buildCurrentSnapshot();
+  if (convId) {
+    useConversationStore.getState().updateConversation(convId, { snapshot });
+  } else {
+    useConversationStore.getState().setDraftSnapshot(snapshot);
+  }
 }
 
 function fileToImageAttachment(file: File): Promise<ImageAttachment | null> {
@@ -1197,15 +1218,21 @@ export function ChatArea() {
         .map((item) => String(item?.id ?? "").trim())
         .filter((id) => {
           const m = skillRegistry.get(id);
-          return m?.kind !== "workflow";
+          return m?.kind !== "workflow" || id === "style_imitate";
         });
       const skillRefs = buildSkillRefs({ persistedThreadSkillIds, mentionedSkillIds });
-      const requestedSkillIds = skillRefs.map((item) => item.id);
       useRunStore.getState().addUser(text, baseline as any, userMentions, images.length ? images : undefined);
       const latestThread = useRunStore.getState().thread;
       const styleRequested =
         mode === "agent" &&
-        (requestedSkillIds.includes("style_imitate") || isStyleWorkflowThread(latestThread));
+        (skillRefs.some((item) => item.id === "style_imitate") || isStyleWorkflowThread(latestThread));
+      const effectiveSkillRefs = styleRequested
+        ? ensureStyleSkillRef(
+            skillRefs.length ? skillRefs : normalizeThreadSkillRefs(latestThread?.activeSkillRefs),
+            skillRefs.some((item) => item.id === "style_imitate") ? "explicit" : "sticky",
+          )
+        : skillRefs;
+      const requestedSkillIds = effectiveSkillRefs.map((item) => item.id);
       tryPreAttachStyleLibraryFromPrompt({
         prompt: cleanPromptRaw,
         activeSkillIds: styleRequested ? Array.from(new Set([...requestedSkillIds, "style_imitate"])) : requestedSkillIds,
@@ -1223,7 +1250,7 @@ export function ChatArea() {
             ? `要继续风格仿写，还差一步：你要我用哪个风格库？\n${styleLibraries.slice(0, 8).map((lib: any) => `- ${String(lib?.name ?? "").trim() || String(lib?.id ?? "").trim()}`).join("\n")}`
             : "要继续风格仿写，先挂一个 style 知识库给我，不然我没有可用的风格库。";
           enterLocalStyleWorkflowWaiting({
-            activeSkillRefs: skillRefs.length ? skillRefs : normalizeThreadSkillRefs(latestThread?.activeSkillRefs),
+            activeSkillRefs: effectiveSkillRefs,
             question,
             replyHint: styleLibraries.length > 0 ? "直接回复库名即可" : "先挂载 style 库后再回复我",
             waitingReason: "style_library",
@@ -1236,7 +1263,7 @@ export function ChatArea() {
           .filter(Boolean);
         if (!isStyleTopicConfirmed({ prompt: cleanPromptRaw, styleLibraryNames })) {
           enterLocalStyleWorkflowWaiting({
-            activeSkillRefs: skillRefs.length ? skillRefs : normalizeThreadSkillRefs(latestThread?.activeSkillRefs),
+            activeSkillRefs: effectiveSkillRefs,
             question: "风格库已经定好了。现在只差主题，你直接回我一句题目或核心观点就行。",
             replyHint: "例如：AI 会不会取代人类",
             waitingReason: "topic",
@@ -1262,7 +1289,8 @@ export function ChatArea() {
         gatewayUrl, mode, model, prompt: cleanPrompt, opMode,
         ...(images.length ? { images } : {}),
         ...(targetAgentIds?.length ? { targetAgentIds } : {}),
-        ...(skillRefs.length ? { skillRefs } : {}),
+        ...(effectiveSkillRefs.length ? { skillRefs: effectiveSkillRefs } : {}),
+        ...(styleRequested ? { styleWorkflowRequested: true } : {}),
         ...(kbMentionIds?.length ? { kbMentionIds } : {}),
         ...(runConvId ? { convId: runConvId } : {}),
       });
