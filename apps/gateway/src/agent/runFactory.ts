@@ -2218,7 +2218,8 @@ export async function prepareAgentRun(args: {
   services: RunServices;
 }): Promise<PrepareAgentRunResult> {
   const { request, body: rawBody, services } = args;
-  if (!services.IS_DEV) return { error: { statusCode: 404, body: { error: "NOT_AVAILABLE" } } };
+  // 主对话运行时在 production 也必须可用；
+  // IS_DEV 仅用于调试便利和默认策略，不再作为可用性总开关。
 
   const body = agentRunBodySchema.parse(rawBody);
   const toolSidecar = (body as any)?.toolSidecar ?? null;

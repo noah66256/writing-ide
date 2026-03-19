@@ -1293,8 +1293,6 @@ fastify.post(
   "/api/llm/chat/stream",
   { preHandler: [(fastify as any).authenticate, requirePositivePointsForLlm] },
   async (request: any, reply) => {
-  if (!IS_DEV) return reply.code(404).send({ error: "NOT_AVAILABLE" });
-
   const msgSchema = z.object({
     role: z.enum(["system", "user", "assistant"]),
     content: z.string()
@@ -1587,8 +1585,6 @@ fastify.post(
   "/api/agent/conv/title",
   { preHandler: [authenticateSse, requirePositivePointsForLlm] },
   async (request: any, reply) => {
-  if (!IS_DEV) return reply.code(404).send({ error: "NOT_AVAILABLE" });
-
   const bodySchema = z.object({
     firstMessage: z.string().min(1).max(2000),
     preferModelId: z.string().optional(),
@@ -1654,8 +1650,6 @@ fastify.post(
   "/api/agent/context/summary",
   { preHandler: [authenticateSse, requirePositivePointsForLlm] },
   async (request: any, reply) => {
-  if (!IS_DEV) return reply.code(404).send({ error: "NOT_AVAILABLE" });
-
   const bodySchema = z.object({
     /** 优先使用的 modelId（通常传 Desktop 当前选用的 agentModel）；若不在 stage allowlist 内会被忽略 */
     preferModelId: z.string().optional(),
