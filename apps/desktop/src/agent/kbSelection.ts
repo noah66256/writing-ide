@@ -34,7 +34,7 @@ function normalizeIds(ids?: string[]) {
   return Array.from(new Set((Array.isArray(ids) ? ids : []).map((x) => String(x ?? "").trim()).filter(Boolean)));
 }
 
-const STYLE_SKILL_IDS = new Set(["style_imitate", "style_imitate_v2", "style_imitate_v3"]);
+const STYLE_SKILL_IDS = new Set(["style_imitate"]);
 
 function mainDocStyleLibraryIds(mainDoc?: MainDoc | null, libraries?: KbLibraryLike[]) {
   const metaById = new Map((Array.isArray(libraries) ? libraries : []).map((lib) => [String(lib?.id ?? "").trim(), lib]));

@@ -13,6 +13,7 @@ function baseAllowed(): Set<string> {
     "run.setTodoList",
     "run.todo",
     "run.done",
+    "kb.listLibraries",
     "kb.search",
     "write",
     "edit",
@@ -56,15 +57,36 @@ function main() {
 
   console.log("[Phase B] 阶段化工具暴露");
   runCase(
-    "need_style_kb",
+    "need_style_library",
     () => {},
+    "need_style_library",
+    ["kb.listLibraries"],
+    ["kb.search", "write", "lint.copy", "lint.style"],
+  );
+  runCase(
+    "need_topic",
+    (s) => { s.hasSelectedStyleLibrary = true; },
+    "need_topic",
+    ["run.done"],
+    ["kb.search", "write", "lint.copy", "lint.style"],
+  );
+  runCase(
     "need_style_kb",
-    ["kb.search", "run.done"],
-    ["lint.copy", "lint.style"],
+    (s) => { s.hasSelectedStyleLibrary = true; s.topicConfirmed = true; },
+    "need_style_kb",
+    ["kb.search"],
+    ["run.done", "lint.copy", "lint.style"],
+  );
+  runCase(
+    "need_tone_outline",
+    (s) => { s.hasSelectedStyleLibrary = true; s.topicConfirmed = true; s.hasStyleKbSearch = true; },
+    "need_tone_outline",
+    ["write"],
+    ["kb.search", "lint.copy", "lint.style"],
   );
   runCase(
     "need_draft",
-    (s) => { s.hasStyleKbSearch = true; },
+    (s) => { s.hasSelectedStyleLibrary = true; s.topicConfirmed = true; s.hasStyleKbSearch = true; s.hasStylePlan = true; },
     "need_draft",
     ["write"],
     ["lint.copy", "lint.style"],
@@ -73,38 +95,62 @@ function main() {
   console.log("[Phase C] lint / 改稿阶段状态机");
   runCase(
     "need_copy_lint_first_pass",
-    (s) => { s.hasStyleKbSearch = true; s.hasDraftText = true; },
+    (s) => { s.hasSelectedStyleLibrary = true; s.topicConfirmed = true; s.hasStyleKbSearch = true; s.hasStylePlan = true; s.hasDraftText = true; },
     "need_copy_lint",
     ["lint.copy"],
     ["lint.style"],
   );
   runCase(
     "need_copy_lint_rework",
-    (s) => { s.hasStyleKbSearch = true; s.hasDraftText = true; s.lastCopyLint = { riskLevel: "high" }; },
+    (s) => { s.hasSelectedStyleLibrary = true; s.topicConfirmed = true; s.hasStyleKbSearch = true; s.hasStylePlan = true; s.hasDraftText = true; s.lastCopyLint = { riskLevel: "high" }; },
     "need_copy_lint",
     ["lint.copy", "edit", "write"],
   );
   runCase(
     "need_style_lint_first_pass",
-    (s) => { s.hasStyleKbSearch = true; s.hasDraftText = true; s.copyLintPassed = true; },
+    (s) => { s.hasSelectedStyleLibrary = true; s.topicConfirmed = true; s.hasStyleKbSearch = true; s.hasStylePlan = true; s.hasDraftText = true; s.copyLintSatisfied = true; },
     "need_style_lint",
     ["lint.style"],
     ["lint.copy"],
   );
   runCase(
     "need_style_lint_rework",
-    (s) => { s.hasStyleKbSearch = true; s.hasDraftText = true; s.copyLintPassed = true; s.lastStyleLint = { score: 61 }; },
+    (s) => { s.hasSelectedStyleLibrary = true; s.topicConfirmed = true; s.hasStyleKbSearch = true; s.hasStylePlan = true; s.hasDraftText = true; s.copyLintSatisfied = true; s.lastStyleLint = { score: 61 }; },
     "need_style_lint",
     ["lint.style", "edit", "write"],
   );
 
   console.log("[Phase D] 完成态只做交付");
   runCase(
+    "need_final_write",
+    (s) => {
+      s.hasSelectedStyleLibrary = true;
+      s.topicConfirmed = true;
+      s.hasStyleKbSearch = true;
+      s.hasStylePlan = true;
+      s.hasDraftText = true;
+      s.copyLintSatisfied = true;
+      s.styleLintSatisfied = true;
+    },
+    "need_final_write",
+    ["write", "edit", "run.mainDoc.update"],
+    ["lint.copy", "lint.style"],
+  );
+  runCase(
     "completed",
-    (s) => { s.hasStyleKbSearch = true; s.hasDraftText = true; s.copyLintPassed = true; s.styleLintPassed = true; },
+    (s) => {
+      s.hasSelectedStyleLibrary = true;
+      s.topicConfirmed = true;
+      s.hasStyleKbSearch = true;
+      s.hasStylePlan = true;
+      s.hasDraftText = true;
+      s.copyLintSatisfied = true;
+      s.styleLintSatisfied = true;
+      s.finalWritten = true;
+    },
     "completed",
     ["write", "edit", "run.done"],
-    ["lint.copy", "lint.style", "kb.search"],
+    ["lint.copy", "lint.style"],
   );
 
   console.log("[Phase E] 非风格任务不介入");

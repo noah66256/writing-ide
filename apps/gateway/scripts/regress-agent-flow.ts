@@ -24,6 +24,23 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, "../../..");
+const STYLE_SKILL_MANIFEST = {
+  id: "style_imitate",
+  name: "style_imitate",
+  description: "style workflow regression manifest",
+  priority: 120,
+  stageKey: "agent.skill.style_imitate",
+  autoEnable: true,
+  kind: "workflow",
+  activationMode: "hybrid",
+  triggers: [
+    { when: "has_style_library", args: { purpose: "style" } },
+    { when: "run_intent_in", args: { intents: ["writing", "rewrite", "polish"] } },
+  ],
+  promptFragments: {},
+  policies: ["StyleGatePolicy"],
+  ui: { badge: "STYLE" },
+} as any;
 
 async function readRepoFile(rel: string) {
   return fs.readFile(path.resolve(ROOT, rel), "utf-8");
@@ -55,17 +72,19 @@ async function main() {
     assert.equal(batch.violation, "WRITE_BEFORE_KB");
   }
   {
-    // V2：copy gate 默认启用：KB 已完成但未通过 lint.copy 时，不允许直接写入
+    // 统一 spec：KB 已完成但还没草稿时，首轮 write 允许作为“候选稿”进入闭环
     const mode = "agent" as const;
     const userPrompt = "按风格库仿写一段，并写入 a.md";
     const intent = detectRunIntent({ mode, userPrompt });
     const active = activateSkills({ mode, userPrompt, kbSelected: [{ id: "style-1", purpose: "style" }], intent });
     const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }], activeSkillIds: active.map((s) => s.id) });
     const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
+    state.hasSelectedStyleLibrary = true;
+    state.topicConfirmed = true;
     state.hasStyleKbSearch = true;
     const toolCalls: ParsedToolCall[] = [{ name: "write", args: { path: "a.md", content: "x" } }];
     const batch = analyzeStyleWorkflowBatch({ mode, intent, gates, state, lintMaxRework: 2, toolCalls });
-    assert.equal(batch.violation, "WRITE_BEFORE_DRAFT");
+    assert.equal(batch.violation, null);
   }
   {
     const mode = "agent" as const;
@@ -74,6 +93,8 @@ async function main() {
     const active = activateSkills({ mode, userPrompt, kbSelected: [{ id: "style-1", purpose: "style" }], intent });
     const gates = deriveStyleGate({ mode, intent, kbSelected: [{ id: "style-1", purpose: "style" }], activeSkillIds: active.map((s) => s.id) });
     const state = createInitialRunState({ protocolRetryBudget: 2, workflowRetryBudget: 3, lintReworkBudget: 2 });
+    state.hasSelectedStyleLibrary = true;
+    state.topicConfirmed = true;
     state.hasStyleKbSearch = true;
     const toolCalls: ParsedToolCall[] = [{ name: "write", args: { path: "a.md", content: "x" } }];
     const batch = analyzeStyleWorkflowBatch({ mode, intent, gates, state, lintMaxRework: 2, toolCalls });
@@ -151,7 +172,7 @@ async function main() {
     const mode = "agent" as const;
     const userPrompt = "按风格库仿写一段";
     const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: "auto" });
-    const skills = activateSkills({ mode, userPrompt, mainDocRunIntent: "auto", kbSelected: [{ id: "style-1", purpose: "style" }], intent });
+    const skills = activateSkills({ mode, userPrompt, mainDocRunIntent: "auto", kbSelected: [{ id: "style-1", purpose: "style" }], intent, manifests: [STYLE_SKILL_MANIFEST] });
     assert.equal(skills.some((s) => s.id === "style_imitate"), true);
     assert.equal(pickSkillStageKeyForAgentRun(skills), "agent.skill.style_imitate");
     assert.ok(Array.isArray(skills[0]?.activatedBy?.reasonCodes));
@@ -162,7 +183,7 @@ async function main() {
     const userPrompt = "严格用绑定风格库的口吻写@{示例.md}，1200字左右";
     const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: "auto" });
     assert.equal(intent.isWritingTask, true);
-    const skills = activateSkills({ mode, userPrompt, mainDocRunIntent: "auto", kbSelected: [{ id: "style-1", purpose: "style" }], intent });
+    const skills = activateSkills({ mode, userPrompt, mainDocRunIntent: "auto", kbSelected: [{ id: "style-1", purpose: "style" }], intent, manifests: [STYLE_SKILL_MANIFEST] });
     assert.equal(skills.some((s) => s.id === "style_imitate"), true);
   }
   {
@@ -182,6 +203,7 @@ async function main() {
       mainDocRunIntent: "auto",
       kbSelected: [{ id: "style-1", purpose: "style" }],
       intent,
+      manifests: [STYLE_SKILL_MANIFEST],
     });
     assert.equal(skills.some((s) => s.id === "style_imitate"), true);
   }
@@ -203,6 +225,7 @@ async function main() {
       mainDocRunIntent: "auto",
       kbSelected: [{ id: "style-1", purpose: "style" }],
       intent,
+      manifests: [STYLE_SKILL_MANIFEST],
     });
     assert.equal(skills.some((s) => s.id === "style_imitate"), true);
   }
@@ -223,6 +246,7 @@ async function main() {
       mainDocRunIntent: "auto",
       kbSelected: [{ id: "style-1", purpose: "style" }],
       intent,
+      manifests: [STYLE_SKILL_MANIFEST],
     });
     assert.equal(skills.some((s) => s.id === "style_imitate"), false);
   }
@@ -230,7 +254,7 @@ async function main() {
     const mode = "agent" as const;
     const userPrompt = "帮我分析一下这段话";
     const intent = detectRunIntent({ mode, userPrompt, mainDocRunIntent: "analysis" });
-    const skills = activateSkills({ mode, userPrompt, mainDocRunIntent: "analysis", kbSelected: [{ id: "style-1", purpose: "style" }], intent });
+    const skills = activateSkills({ mode, userPrompt, mainDocRunIntent: "analysis", kbSelected: [{ id: "style-1", purpose: "style" }], intent, manifests: [STYLE_SKILL_MANIFEST] });
     assert.equal(skills.length, 0);
   }
   ok("skills.activation");
@@ -372,10 +396,16 @@ async function main() {
     assert.ok(run.includes("styleContractV1"), "MainDoc 缺少 styleContractV1 字段（M3 回退）");
   }
   {
-    const skills = await readRepoFile("packages/agent-core/src/skills.ts");
-    assert.ok(skills.includes("KB_STYLE_CLUSTERS"), "style_imitate 未提示写法候选（M3 回退）");
-    assert.ok(skills.includes("STYLE_SELECTOR(JSON)"), "style_imitate 未提示 STYLE_SELECTOR(JSON)（Selector v1 回退）");
-    assert.ok(skills.includes("styleContractV1"), "style_imitate 未要求写入 styleContractV1（M3 回退）");
+    const skillDoc = await readRepoFile("apps/desktop/electron/bundled-skills/style_imitate/SKILL.md");
+    assert.ok(skillDoc.includes("Phase 0A: 选库"), "style_imitate 未收敛到统一 spec 的选库阶段");
+    assert.ok(skillDoc.includes("Phase 0B: 题面确认"), "style_imitate 未收敛到统一 spec 的题面确认阶段");
+    assert.ok(skillDoc.includes("toneCard + structureOutline"), "style_imitate 未要求保留定调与骨架产物");
+    assert.ok(skillDoc.includes("不得跳过 lint.copy 和 lint.style"), "style_imitate lint 双闭环合同缺失");
+  }
+  {
+    const runtime = await readRepoFile("apps/gateway/src/agent/runtime/GatewayRuntime.ts");
+    assert.ok(runtime.includes("best_draft_mismatch"), "GatewayRuntime 未对终稿写入执行 bestDraft 一致性门禁");
+    assert.ok(runtime.includes("extractFinalDraftTextFromToolArgs"), "GatewayRuntime 缺少终稿文本提取 helper（bestDraft 门禁可能回退）");
   }
   {
     const ai = await readRepoFile("apps/gateway/src/aiConfig.ts");
@@ -503,4 +533,3 @@ main().catch((e) => {
     assert.equal(ok, true);
   }
   ok("routing.directive_inquiry_and_resume_state");
-

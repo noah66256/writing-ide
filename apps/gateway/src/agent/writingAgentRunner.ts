@@ -2638,10 +2638,14 @@ export class AgentRunner {
       if (styleGateEnabled) {
         const st: any = this.runState as any;
         const styleCompleted = Boolean(
+          st.hasSelectedStyleLibrary &&
+          st.topicConfirmed &&
           st.hasStyleKbSearch &&
+          st.hasStylePlan &&
           st.hasDraftText &&
-          st.copyLintPassed &&
-          st.styleLintPassed,
+          (st.copyLintSatisfied || st.copyLintPassed || st.copyGateDegraded) &&
+          (st.styleLintSatisfied || st.styleLintPassed || st.lintGateDegraded) &&
+          st.finalWritten,
         );
         if (!styleCompleted) {
           const budget = Math.max(0, Math.floor(Number(st.workflowRetryBudget ?? 0)));
@@ -2649,8 +2653,8 @@ export class AgentRunner {
             st.workflowRetryBudget = budget - 1;
             const hint =
               "当前已启用 style_imitate 风格仿写 Skill，" +
-              "但尚未按“kb.search 样例 → 草稿 draft → lint.copy → lint.style → write”完整走完闭环。\n" +
-              "请按以下顺序执行：先 kb.search 取风格模板/规则卡，再输出草稿，然后调用 lint.copy 和 lint.style 审计，最后再用 write/edit 落盘。";
+              "但尚未按“选库 → 题面确认 → kb.search 样例 → 定调骨架 → 草稿 draft → lint.copy → lint.style → write”完整走完闭环。\n" +
+              "请按以下顺序执行：先确认风格库和主题，再 kb.search 取规则卡，补齐 toneCard/structureOutline，然后输出草稿，调用 lint.copy 和 lint.style 审计，最后再用 write/edit 落盘。";
             this._pushHistory({ role: 'user_hint', text: hint });
             this.ctx.writeEvent('run.notice', {
               turn: this.turn,

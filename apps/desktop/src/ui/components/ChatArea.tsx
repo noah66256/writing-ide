@@ -18,6 +18,7 @@ import {
   type AssistantStep,
   type ToolBlockStep,
   type ImageAttachment,
+  type RuntimeThreadRecord,
   type TodoItem,
   setActiveRunCancel,
   cancelActiveRun,
@@ -85,6 +86,11 @@ function tryPreAttachStyleLibraryFromPrompt(args: {
   const styleLibs = (useKbStore.getState().libraries ?? []).filter(
     (lib: any) => String(lib?.purpose ?? "").trim() === "style",
   );
+  if (styleLibs.length === 1) {
+    const libId = String(styleLibs[0]?.id ?? "").trim();
+    if (libId) runState.setKbAttachedLibraries([libId]);
+    return;
+  }
   if (styleLibs.length <= 1) return;
 
   const normalizedText = String(args.prompt ?? "").trim();
@@ -124,6 +130,140 @@ function buildSkillRefs(args: {
   for (const id of args.persistedThreadSkillIds) upsert(id, "sticky", "thread");
   for (const id of args.mentionedSkillIds) upsert(id, "explicit", "turn");
   return Array.from(refs.values());
+}
+
+function hasWaitingWorkflowThread(thread: RuntimeThreadRecord | null | undefined): boolean {
+  if (!thread || typeof thread !== "object") return false;
+  const waitingFor = String(thread.waitingFor ?? "").trim().toLowerCase();
+  if (waitingFor === "user" || waitingFor === "approval") return true;
+  const workflowStatus = String(thread.taskState?.workflow?.status ?? "").trim().toLowerCase();
+  return workflowStatus === "running" || workflowStatus === "waiting_user" || workflowStatus === "waiting_approval";
+}
+
+function normalizeStyleLibraryName(name: string) {
+  return String(name ?? "").trim().replace(/风格库$/, "").replace(/知识库$/, "").replace(/库$/, "").trim();
+}
+
+function extractStyleTopicCandidate(args: { prompt: string; styleLibraryNames: string[] }) {
+  let text = String(args.prompt ?? "").trim();
+  if (!text) return "";
+  for (const name of args.styleLibraryNames) {
+    const normalized = normalizeStyleLibraryName(name);
+    if (!normalized) continue;
+    text = text.replaceAll(name, " ");
+    text = text.replaceAll(normalized, " ");
+  }
+  text = text
+    .replace(/[@#]/g, " ")
+    .replace(/\b(style_imitate|风格仿写)\b/gi, " ")
+    .replace(/(用|按|走|给我|帮我|请|来个|来一篇|写一篇|写一条|写一个|写个|口播稿|文案|文章|脚本|主题是|题目是|风格|字左右|字上下|左右|大概|约|差不多)/g, " ")
+    .replace(/\d+\s*字/g, " ")
+    .replace(/[，。,.!?！？:：;；()（）【】\[\]\-_/\\]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text;
+}
+
+function isStyleTopicConfirmed(args: { prompt: string; styleLibraryNames: string[] }) {
+  const topic = extractStyleTopicCandidate(args);
+  if (!topic) return false;
+  if (topic.length >= 6) return true;
+  if (/(为什么|如何|怎么|是否|能不能|该不该|会不会|关于|主题)/.test(topic)) return true;
+  const meaningful = topic.replace(/\s+/g, "");
+  return meaningful.length >= 4 && !/^(好的|行|继续|开始|就这|这个|那个|李叔|曲曲)$/.test(meaningful);
+}
+
+function isStyleWorkflowThread(thread: RuntimeThreadRecord | null | undefined) {
+  const workflowKind = String(thread?.taskState?.workflow?.kind ?? "").trim().toLowerCase();
+  if (/style_imitate/.test(workflowKind)) return true;
+  return Array.isArray(thread?.activeSkillRefs)
+    ? thread!.activeSkillRefs.some((item) => String(item?.id ?? "").trim() === "style_imitate")
+    : false;
+}
+
+function normalizeThreadSkillRefs(refs?: Array<Partial<SkillRef> | null | undefined>): SkillRef[] {
+  return (Array.isArray(refs) ? refs : []).reduce<SkillRef[]>((acc, item) => {
+      const id = String(item?.id ?? "").trim();
+      if (!id) return acc;
+      const source = item?.source === "admin" || item?.source === "user" || item?.source === "builtin"
+        ? item.source
+        : "builtin";
+      acc.push({
+        id,
+        source,
+        activation: item?.activation === "explicit" || item?.activation === "sticky" || item?.activation === "auto"
+          ? item.activation
+          : "sticky",
+        scope: item?.scope === "turn" || item?.scope === "thread" ? item.scope : "thread",
+        configPath: item?.configPath ?? null,
+        enabled: item?.enabled !== false,
+      } satisfies SkillRef);
+      return acc;
+    }, []);
+}
+
+function enterLocalStyleWorkflowWaiting(args: {
+  activeSkillRefs: SkillRef[];
+  question: string;
+  replyHint: string;
+  waitingReason: "style_library" | "topic";
+  missingSteps: string[];
+}) {
+  const runStore = useRunStore.getState();
+  const convId = useConversationStore.getState().activeConvId ?? null;
+  const prevThread = runStore.thread;
+  const nowIso = new Date().toISOString();
+  const nextThread: RuntimeThreadRecord = {
+    id: String(prevThread?.id ?? convId ?? `local-thread:${Date.now()}`),
+    convId,
+    status: "waiting",
+    waitingFor: "user",
+    waiting: {
+      kind: "clarify",
+      question: args.question,
+      replyHint: args.replyHint,
+      updatedAt: nowIso,
+    },
+    activeSkillRefs: args.activeSkillRefs,
+    activeCollabAgents: Array.isArray(prevThread?.activeCollabAgents) ? prevThread!.activeCollabAgents : [],
+    pendingProposalIds: Array.isArray(prevThread?.pendingProposalIds) ? prevThread!.pendingProposalIds : [],
+    pendingApprovalIds: Array.isArray(prevThread?.pendingApprovalIds) ? prevThread!.pendingApprovalIds : [],
+    taskState: {
+      ...(prevThread?.taskState ?? {}),
+      workflow: {
+        kind: "style_imitate",
+        status: "waiting_user",
+        updatedAt: nowIso,
+      },
+    },
+    createdAt: String(prevThread?.createdAt ?? nowIso),
+    updatedAt: nowIso,
+  };
+  runStore.setThread(nextThread);
+  runStore.setWorkflowSkills({
+    ...(runStore.workflowSkills ?? {}),
+    "style_imitate.v1": {
+      status: "in_progress",
+      missingSteps: args.missingSteps,
+    },
+  });
+  runStore.setMainDoc({
+    ...(runStore.mainDoc ?? {}),
+    threadWaitingFor: "user",
+    taskStateV2: {
+      ...(((runStore.mainDoc as any)?.taskStateV2 ?? {}) as Record<string, unknown>),
+      workflow: {
+        kind: "style_imitate",
+        status: "waiting_user",
+        updatedAt: nowIso,
+        waiting: {
+          reason: args.waitingReason,
+          question: args.question,
+        },
+      },
+    },
+  } as any);
+  runStore.addAssistant(args.question);
 }
 
 function fileToImageAttachment(file: File): Promise<ImageAttachment | null> {
@@ -1034,7 +1174,11 @@ export function ChatArea() {
       const parsed = parseAtMention(text);
       const targetAgentIds = meta?.targetAgentIds ?? (parsed ? [parsed.agentId] : undefined);
       const cleanPromptRaw = !meta?.targetAgentIds && parsed ? parsed.cleanText : text;
-      const shouldStartFreshWritingBoundary = mode === "agent" && looksLikeFreshWritingTaskPrompt(cleanPromptRaw);
+      const currentThread = useRunStore.getState().thread;
+      const shouldStartFreshWritingBoundary =
+        mode === "agent" &&
+        looksLikeFreshWritingTaskPrompt(cleanPromptRaw) &&
+        !hasWaitingWorkflowThread(currentThread);
       if (shouldStartFreshWritingBoundary) {
         useRunStore.getState().startFreshWritingTaskBoundary();
       }
@@ -1047,6 +1191,7 @@ export function ChatArea() {
       };
       const userMentions = meta?.mentions?.length ? meta.mentions : undefined;
       const mentionedSkillIds = meta?.mentions?.filter((m) => m.type === "skill").map((m) => m.id) ?? [];
+      const kbMentionIds = meta?.mentions?.filter((m) => m.type === "kb").map((m) => m.id) ?? [];
       const persistedThreadSkillIds = ((((useRunStore.getState() as any).thread?.activeSkillRefs ?? []) as SkillRef[]))
         .filter((item) => item?.scope === "thread" && item?.activation !== "auto" && item?.enabled !== false)
         .map((item) => String(item?.id ?? "").trim())
@@ -1057,6 +1202,49 @@ export function ChatArea() {
       const skillRefs = buildSkillRefs({ persistedThreadSkillIds, mentionedSkillIds });
       const requestedSkillIds = skillRefs.map((item) => item.id);
       useRunStore.getState().addUser(text, baseline as any, userMentions, images.length ? images : undefined);
+      const latestThread = useRunStore.getState().thread;
+      const styleRequested =
+        mode === "agent" &&
+        (requestedSkillIds.includes("style_imitate") || isStyleWorkflowThread(latestThread));
+      tryPreAttachStyleLibraryFromPrompt({
+        prompt: cleanPromptRaw,
+        activeSkillIds: styleRequested ? Array.from(new Set([...requestedSkillIds, "style_imitate"])) : requestedSkillIds,
+        kbMentionIds,
+      });
+      if (styleRequested) {
+        const libraries = useKbStore.getState().libraries ?? [];
+        const styleLibraries = libraries.filter((lib: any) => String(lib?.purpose ?? "").trim() === "style");
+        const styleLibById = new Map(styleLibraries.map((lib: any) => [String(lib?.id ?? "").trim(), lib] as const));
+        const attachedStyleIds = (useRunStore.getState().kbAttachedLibraryIds ?? []).filter((id) => styleLibById.has(String(id ?? "").trim()));
+        const mentionedStyleIds = kbMentionIds.filter((id) => styleLibById.has(String(id ?? "").trim()));
+        const selectedStyleIds = mentionedStyleIds.length > 0 ? mentionedStyleIds : attachedStyleIds;
+        if (selectedStyleIds.length === 0) {
+          const question = styleLibraries.length > 0
+            ? `要继续风格仿写，还差一步：你要我用哪个风格库？\n${styleLibraries.slice(0, 8).map((lib: any) => `- ${String(lib?.name ?? "").trim() || String(lib?.id ?? "").trim()}`).join("\n")}`
+            : "要继续风格仿写，先挂一个 style 知识库给我，不然我没有可用的风格库。";
+          enterLocalStyleWorkflowWaiting({
+            activeSkillRefs: skillRefs.length ? skillRefs : normalizeThreadSkillRefs(latestThread?.activeSkillRefs),
+            question,
+            replyHint: styleLibraries.length > 0 ? "直接回复库名即可" : "先挂载 style 库后再回复我",
+            waitingReason: "style_library",
+            missingSteps: ["select_style_library"],
+          });
+          return;
+        }
+        const styleLibraryNames = selectedStyleIds
+          .map((id) => String(styleLibById.get(String(id ?? "").trim())?.name ?? "").trim())
+          .filter(Boolean);
+        if (!isStyleTopicConfirmed({ prompt: cleanPromptRaw, styleLibraryNames })) {
+          enterLocalStyleWorkflowWaiting({
+            activeSkillRefs: skillRefs.length ? skillRefs : normalizeThreadSkillRefs(latestThread?.activeSkillRefs),
+            question: "风格库已经定好了。现在只差主题，你直接回我一句题目或核心观点就行。",
+            replyHint: "例如：AI 会不会取代人类",
+            waitingReason: "topic",
+            missingSteps: ["confirm_topic"],
+          });
+          return;
+        }
+      }
       const hasSkillOnlyInvocation =
         skillRefs.length > 0 &&
         cleanPromptRaw.trim().length === 0 &&
@@ -1068,12 +1256,6 @@ export function ChatArea() {
           : images.length > 0 || hasSkillOnlyInvocation
             ? " "
             : cleanPromptRaw;
-      const kbMentionIds = meta?.mentions?.filter((m) => m.type === "kb").map((m) => m.id);
-      tryPreAttachStyleLibraryFromPrompt({
-        prompt: cleanPromptRaw,
-        activeSkillIds: requestedSkillIds,
-        kbMentionIds,
-      });
       // 读取当前 activeConvId（此时可能刚被 setActiveConvId 更新）
       const runConvId = useConversationStore.getState().activeConvId ?? undefined;
       const c = startGatewayRun({

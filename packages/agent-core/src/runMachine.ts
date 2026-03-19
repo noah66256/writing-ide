@@ -112,9 +112,23 @@ export type RunState = {
   lastToolNotAllowedName: string | null;
   // 编排者对各子 Agent 的委派次数（用于重复委派预警）
   delegationCounts: Record<string, number>;
+  hasSelectedStyleLibrary: boolean;
+  selectedStyleLibraryId: string | null;
+  styleLibraryOptionIds: string[];
+  topicConfirmed: boolean;
+  styleTopic: string | null;
   hasStyleKbSearch: boolean; // 风格库样例检索是否已完成（以”已尝试检索”为准；0 命中也算完成，避免卡死）
   hasStyleKbHit: boolean; // 风格库样例检索是否曾命中（groups>0）；用于避免“后续某次 0 命中”误触发降级提示
   styleKbDegraded: boolean; // 风格样例检索 0 命中降级（仅警告，不再卡死）
+  styleEvidencePack:
+    | null
+    | {
+        query: string;
+        libraryIds: string[];
+        groupCount: number;
+        hitCount: number;
+        topArtifacts?: Array<{ id: string; title: string; cardType: string }>;
+      };
   // V2：draft 阶段是否已产出“候选正文”（纯文本，不是 tool_calls）
   // 说明：用于让闭环严格走 templates -> draft -> copy -> style -> write
   hasDraftText: boolean;
@@ -135,6 +149,7 @@ export type RunState = {
         topArtifacts?: Array<{ id: string; title: string; cardType: string }>;
       };
   styleLintPassed: boolean;
+  styleLintSatisfied: boolean;
   styleLintFailCount: number;
   lintGateDegraded: boolean;
   bestStyleDraft: null | { score: number; highIssues: number; text: string };
@@ -144,6 +159,7 @@ export type RunState = {
   lastStyleLint: null | StyleLintParsed;
   // copy lint（gate）：用于“防贴原文”阶段闸门
   copyLintPassed: boolean;
+  copyLintSatisfied: boolean;
   copyLintFailCount: number;
   copyGateDegraded: boolean;
   lastCopyLint:
@@ -186,6 +202,7 @@ export type RunState = {
   pipelineCompleted: boolean;
   hasToneCard: boolean;
   hasStructureOutline: boolean;
+  hasStylePlan: boolean;
   hasOpeningDraft: boolean;
   hasBodyDraft: boolean;
   hasStyledDraft: boolean;
@@ -196,6 +213,7 @@ export type RunState = {
   bestStyleArtifactId: string | null;
   bestCopyScore: number | null;
   bestCopyArtifactId: string | null;
+  finalWritten: boolean;
   pipelineArtifacts: PipelineArtifactsV1 | null;
 };
 
@@ -226,13 +244,20 @@ export function createInitialRunState(args?: { protocolRetryBudget?: number; wor
     stickyToolNames: [],
     lastToolNotAllowedName: null,
     delegationCounts: {},
+    hasSelectedStyleLibrary: false,
+    selectedStyleLibraryId: null,
+    styleLibraryOptionIds: [],
+    topicConfirmed: false,
+    styleTopic: null,
     hasStyleKbSearch: false,
     hasStyleKbHit: false,
     styleKbDegraded: false,
+    styleEvidencePack: null,
     hasDraftText: false,
     hasPostDraftStyleKbSearch: false,
     lastStyleKbSearch: null,
     styleLintPassed: false,
+    styleLintSatisfied: false,
     styleLintFailCount: 0,
     lintGateDegraded: false,
     bestStyleDraft: null,
@@ -240,6 +265,7 @@ export function createInitialRunState(args?: { protocolRetryBudget?: number; wor
     bestDraft: null,
     lastStyleLint: null,
     copyLintPassed: false,
+    copyLintSatisfied: false,
     copyLintFailCount: 0,
     copyGateDegraded: false,
     lastCopyLint: null,
@@ -260,6 +286,7 @@ export function createInitialRunState(args?: { protocolRetryBudget?: number; wor
     pipelineCompleted: false,
     hasToneCard: false,
     hasStructureOutline: false,
+    hasStylePlan: false,
     hasOpeningDraft: false,
     hasBodyDraft: false,
     hasStyledDraft: false,
@@ -270,6 +297,7 @@ export function createInitialRunState(args?: { protocolRetryBudget?: number; wor
     bestStyleArtifactId: null,
     bestCopyScore: null,
     bestCopyArtifactId: null,
+    finalWritten: false,
     pipelineArtifacts: null,
   };
 }

@@ -1276,6 +1276,39 @@ function looksLikeAssistantWaitingForUserText(text: string): boolean {
   return /(请先|请直接|请选择|请告诉我|发我|回复我|你这次要按哪个|按哪个库|选哪个库|给我一个写作主题|主题：|补充主题|确认一下|定一下风格库)/.test(t);
 }
 
+function normalizeStyleLibraryName(name: unknown) {
+  return String(name ?? "").trim().replace(/风格库$/, "").replace(/知识库$/, "").replace(/库$/, "").trim();
+}
+
+function extractStyleTopicCandidate(args: { userPrompt: string; styleLibraryNames?: string[] }) {
+  let text = String(args.userPrompt ?? "").trim();
+  if (!text) return "";
+  for (const rawName of Array.isArray(args.styleLibraryNames) ? args.styleLibraryNames : []) {
+    const name = String(rawName ?? "").trim();
+    const normalized = normalizeStyleLibraryName(name);
+    if (name) text = text.replaceAll(name, " ");
+    if (normalized) text = text.replaceAll(normalized, " ");
+  }
+  text = text
+    .replace(/[@#]/g, " ")
+    .replace(/\b(style_imitate|风格仿写)\b/gi, " ")
+    .replace(/(用|按|走|给我|帮我|请|来个|来一篇|写一篇|写一条|写一个|写个|口播稿|文案|文章|脚本|主题是|题目是|风格|字左右|字上下|左右|大概|约|差不多)/g, " ")
+    .replace(/\d+\s*字/g, " ")
+    .replace(/[，。,.!?！？:：;；()（）【】\[\]\-_/\\]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text;
+}
+
+function isStyleTopicConfirmed(args: { userPrompt: string; styleLibraryNames?: string[] }) {
+  const topic = extractStyleTopicCandidate(args);
+  if (!topic) return false;
+  if (topic.length >= 6) return true;
+  if (/(为什么|如何|怎么|是否|能不能|该不该|会不会|关于|主题)/.test(topic)) return true;
+  const meaningful = topic.replace(/\s+/g, "");
+  return meaningful.length >= 4 && !/^(好的|行|继续|开始|就这|这个|那个)$/.test(meaningful);
+}
+
 export function isBrowserSessionActive(mainDoc: unknown, userPrompt: string): boolean {
   const wf = readWorkflowStickyState(mainDoc);
   if (!wf.isFresh) return false;
@@ -3547,6 +3580,19 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     workflowRetryBudget: workflowRetryBudgetEffective,
     lintReworkBudget: lintMaxRework,
   });
+  const selectedStyleLibraryId = Array.isArray(styleLibIds) && styleLibIds.length === 1
+    ? String(styleLibIds[0] ?? "").trim() || null
+    : null;
+  const styleLibraryNames = (kbSelectedList as any[])
+    .filter((item: any) => String(item?.purpose ?? "").trim() === "style")
+    .map((item: any) => String(item?.name ?? "").trim())
+    .filter(Boolean);
+  const initialStyleTopic = extractStyleTopicCandidate({ userPrompt, styleLibraryNames });
+  runState.hasSelectedStyleLibrary = Boolean(selectedStyleLibraryId);
+  runState.selectedStyleLibraryId = selectedStyleLibraryId;
+  runState.styleLibraryOptionIds = selectedStyleLibraryId ? [selectedStyleLibraryId] : [];
+  runState.topicConfirmed = isStyleTopicConfirmed({ userPrompt, styleLibraryNames });
+  runState.styleTopic = initialStyleTopic || null;
 
   const workflowSticky = readWorkflowStickyState(mainDocFromPack);
 
@@ -4812,7 +4858,9 @@ export async function executeAgentRun(args: {
       workflow: normalizeTaskStateWorkflow({
         ...workflowPrev,
         kind:
-          intentRoute.routeId === "web_radar"
+          activeSkillIds.includes("style_imitate")
+            ? "style_imitate"
+            : intentRoute.routeId === "web_radar"
             ? "browser_session"
             : String(workflowPrev.kind ?? "").trim() || "task_workflow",
         status: "running",
@@ -4999,13 +5047,23 @@ export async function executeAgentRun(args: {
     webFetchCount: runState.webFetchCount,
     webSearchUniqueQueries: Array.isArray(runState.webSearchUniqueQueries) ? runState.webSearchUniqueQueries.slice(0, 6) : [],
     webFetchUniqueDomains: Array.isArray(runState.webFetchUniqueDomains) ? runState.webFetchUniqueDomains.slice(0, 6) : [],
+    hasSelectedStyleLibrary: runState.hasSelectedStyleLibrary === true,
+    selectedStyleLibraryId: (runState as any).selectedStyleLibraryId ?? null,
+    styleLibraryOptionIds: Array.isArray((runState as any).styleLibraryOptionIds) ? (runState as any).styleLibraryOptionIds.slice(0, 8) : [],
+    topicConfirmed: (runState as any).topicConfirmed === true,
+    styleTopic: String((runState as any).styleTopic ?? "").trim() || null,
     hasStyleKbSearch: runState.hasStyleKbSearch,
     hasStyleKbHit: (runState as any).hasStyleKbHit === true,
     styleKbDegraded: runState.styleKbDegraded,
+    styleEvidencePack: (runState as any).styleEvidencePack ?? null,
+    hasStylePlan: (runState as any).hasStylePlan === true,
+    hasToneCard: (runState as any).hasToneCard === true,
+    hasStructureOutline: (runState as any).hasStructureOutline === true,
     hasDraftText: runState.hasDraftText === true,
     hasPostDraftStyleKbSearch: runState.hasPostDraftStyleKbSearch === true,
     lastStyleKbSearch: runState.lastStyleKbSearch ?? null,
     styleLintPassed: runState.styleLintPassed,
+    styleLintSatisfied: (runState as any).styleLintSatisfied === true,
     styleLintFailCount: runState.styleLintFailCount,
     lintGateDegraded: runState.lintGateDegraded,
     bestStyleDraft: runState.bestStyleDraft
@@ -5026,11 +5084,13 @@ export async function executeAgentRun(args: {
         }
       : null,
     copyLintPassed: runState.copyLintPassed,
+    copyLintSatisfied: (runState as any).copyLintSatisfied === true,
     copyLintFailCount: runState.copyLintFailCount,
     copyGateDegraded: runState.copyGateDegraded,
     lastCopyLint: runState.lastCopyLint ?? null,
     copyLintObservedCount: (runState as any).copyLintObservedCount ?? 0,
     lastCopyRisk: (runState as any).lastCopyRisk ?? null,
+    finalWritten: (runState as any).finalWritten === true,
     multiWrite:
       (runState as any).multiWrite && typeof (runState as any).multiWrite === "object"
         ? {
@@ -5149,6 +5209,49 @@ export async function executeAgentRun(args: {
     await persistOnce();
     services.agentRunWaiters.delete(runId);
     return;
+  }
+
+  const styleSkillActive =
+    activeSkillIds.includes("style_imitate") ||
+    Boolean(prepared.styleWorkflowRequested && prepared.effectiveGates.styleGateEnabled && intent.isWritingTask);
+  if (mode !== "chat" && styleSkillActive && prepared.effectiveGates.styleGateEnabled) {
+    const turn = 0;
+    if (!runState.hasSelectedStyleLibrary) {
+      writeEvent("assistant.start", { runId, turn });
+      writePolicyDecision({
+        turn,
+        policy: "StyleWorkflowPreflight",
+        decision: "wait_user",
+        reasonCodes: ["clarify_waiting", "style_library_required"],
+        detail: { skillId: "style_imitate", missing: "style_library" },
+      });
+      writeEvent("assistant.delta", {
+        delta: "要继续风格仿写，先告诉我你要用哪个风格库。直接回我库名就行。",
+      });
+      writeEvent("run.end", { runId, reason: "clarify_waiting", reasonCodes: ["clarify_waiting", "style_library_required"], turn });
+      writeEvent("assistant.done", { reason: "clarify_waiting", turn });
+      await persistOnce();
+      services.agentRunWaiters.delete(runId);
+      return;
+    }
+    if (!runState.topicConfirmed) {
+      writeEvent("assistant.start", { runId, turn });
+      writePolicyDecision({
+        turn,
+        policy: "StyleWorkflowPreflight",
+        decision: "wait_user",
+        reasonCodes: ["clarify_waiting", "style_topic_required"],
+        detail: { skillId: "style_imitate", missing: "topic" },
+      });
+      writeEvent("assistant.delta", {
+        delta: "风格库已经确定了。现在只差主题，你直接回我一句题目或核心观点就行。",
+      });
+      writeEvent("run.end", { runId, reason: "clarify_waiting", reasonCodes: ["clarify_waiting", "style_topic_required"], turn });
+      writeEvent("assistant.done", { reason: "clarify_waiting", turn });
+      await persistOnce();
+      services.agentRunWaiters.delete(runId);
+      return;
+    }
   }
 
   writePolicyDecision({
@@ -5490,14 +5593,34 @@ export async function executeAgentRun(args: {
     if (styleWorkflow && styleWorkflow.active) {
       const sw: any = styleWorkflow;
       const missingSteps: string[] = [];
+      if (!sw.hasSelectedStyleLibrary) missingSteps.push("select_style_library");
+      if (!sw.topicConfirmed) missingSteps.push("confirm_topic");
       if (!sw.hasStyleKbSearch) missingSteps.push('kb.search(style)');
+      if (!sw.hasStylePlan) missingSteps.push('tone_and_outline');
       if (!sw.hasDraftText) missingSteps.push('draft');
-      if (!sw.copyLintPassed) missingSteps.push('lint.copy');
-      if (!sw.styleLintPassed) missingSteps.push('lint.style');
+      if (!sw.copyLintSatisfied) missingSteps.push('lint.copy');
+      if (!sw.styleLintSatisfied) missingSteps.push('lint.style');
+      if (!sw.finalWritten) missingSteps.push('final_write');
       styleWorkflowMissingSteps = missingSteps;
 
-      const started = sw.hasStyleKbSearch || sw.hasDraftText || sw.copyLintPassed || sw.styleLintPassed;
-      const completed = sw.hasStyleKbSearch && sw.hasDraftText && sw.copyLintPassed && sw.styleLintPassed;
+      const started =
+        sw.hasSelectedStyleLibrary ||
+        sw.topicConfirmed ||
+        sw.hasStyleKbSearch ||
+        sw.hasStylePlan ||
+        sw.hasDraftText ||
+        sw.copyLintSatisfied ||
+        sw.styleLintSatisfied ||
+        sw.finalWritten;
+      const completed =
+        sw.hasSelectedStyleLibrary &&
+        sw.topicConfirmed &&
+        sw.hasStyleKbSearch &&
+        sw.hasStylePlan &&
+        sw.hasDraftText &&
+        sw.copyLintSatisfied &&
+        sw.styleLintSatisfied &&
+        sw.finalWritten;
       const runState: any = (executionReport as any)?.runState ?? null;
       const degraded = Boolean(
         runState && (
@@ -5515,11 +5638,13 @@ export async function executeAgentRun(args: {
       const skillStatusRaw: any = (audit.meta as any).skillStatus && typeof (audit.meta as any).skillStatus === 'object'
         ? (audit.meta as any).skillStatus
         : {};
-      skillStatusRaw['style_imitate.v1'] = sanitizeForAudit({
+      const styleSkillSnapshot = sanitizeForAudit({
         status,
         missingSteps: missingSteps.length ? missingSteps : undefined,
         styleWorkflow: sw,
       });
+      skillStatusRaw['style_imitate'] = styleSkillSnapshot;
+      skillStatusRaw['style_imitate.v1'] = styleSkillSnapshot;
       (audit.meta as any).skillStatus = skillStatusRaw;
 
       // 只要 style skill 激活且未进入 completed，都视为本轮风格闭环未完成：
@@ -5559,7 +5684,7 @@ export async function executeAgentRun(args: {
       kind: 'warn',
       title: 'StyleWorkflowIncomplete',
       message:
-        '本轮已激活 style_imitate，但未完整走完风格仿写闭环（缺少 lint.copy / lint.style）。\n建议按"kb.search → 草稿 draft → lint.copy → lint.style → 最终 write" 的顺序重试。',
+        '本轮已激活 style_imitate，但未完整走完风格仿写闭环。\n建议按"选库 → 题面确认 → kb.search → 定调骨架 → 草稿 → lint.copy → lint.style → 最终 write" 的顺序补齐。',
       detail: {
         styleWorkflow,
         missingSteps: styleWorkflowMissingSteps,

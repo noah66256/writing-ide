@@ -218,6 +218,155 @@ function extractDomain(rawUrl: unknown): string {
   }
 }
 
+function normalizeStyleLibraryName(name: unknown) {
+  return String(name ?? "").trim().replace(/风格库$/, "").replace(/知识库$/, "").replace(/库$/, "").trim();
+}
+
+function collectTopStyleArtifacts(output: unknown) {
+  const groups = Array.isArray((output as any)?.groups) ? ((output as any).groups as any[]) : [];
+  return groups
+    .flatMap((group: any) => (Array.isArray(group?.hits) ? group.hits : []))
+    .slice(0, 8)
+    .map((hit: any) => ({
+      id: String(hit?.artifact?.id ?? "").trim(),
+      title: String(hit?.artifact?.title ?? "").trim(),
+      cardType: String(hit?.artifact?.cardType ?? "").trim(),
+    }))
+    .filter((item) => item.id && item.title);
+}
+
+function ensureStylePlanningArtifacts(runState: RunState) {
+  const state = runState as any;
+  if (state.hasStylePlan && state.hasToneCard && state.hasStructureOutline) return;
+  const styleTopic = String(state.styleTopic ?? "").trim() || "当前主题";
+  const selectedStyleLibraryId = String(state.selectedStyleLibraryId ?? "").trim();
+  const evidence = state.styleEvidencePack && typeof state.styleEvidencePack === "object" ? state.styleEvidencePack : null;
+  const topTitles = Array.isArray(evidence?.topArtifacts)
+    ? evidence.topArtifacts.map((item: any) => String(item?.title ?? "").trim()).filter(Boolean).slice(0, 4)
+    : [];
+  state.pipelineArtifacts = state.pipelineArtifacts && typeof state.pipelineArtifacts === "object"
+    ? state.pipelineArtifacts
+    : {};
+  state.pipelineArtifacts.toneCard = {
+    version: "v1",
+    scene: "topic_only",
+    stance: selectedStyleLibraryId ? `沿用风格库 ${selectedStyleLibraryId} 的表达视角` : "沿用目标风格的表达视角",
+    stanceSource: "user",
+    valuesConstraintMode: "dominant",
+    activeAnalysisLenses: [],
+    readerEffectGoal: `围绕“${styleTopic}”输出贴合目标风格的成稿`,
+    preferredFrames: topTitles,
+    forbiddenFrames: [],
+    mustPreserveClaims: [styleTopic],
+    step3GuardrailBrief: "先按结构写完整草稿，不要只模仿单个口头禅。",
+    step6ClosureBrief: "结尾回扣主题，并保持目标风格的价值落点。",
+    sourceProtection: null,
+  };
+  state.pipelineArtifacts.structureOutline = {
+    version: "v1",
+    thesis: styleTopic,
+    argumentPath: {
+      openingMove: topTitles[0] || "直接破题",
+      supportChain: topTitles.slice(1),
+      closingMove: topTitles[topTitles.length - 1] || "回扣主题并完成收束",
+    },
+    sections: [
+      {
+        id: "opening",
+        role: "opening",
+        title: "开头",
+        objective: "快速立住主题与语气",
+        keyPoints: [topTitles[0] || styleTopic],
+        paragraphTarget: 1,
+      },
+      {
+        id: "body",
+        role: "body",
+        title: "主体",
+        objective: "展开核心论证与推进",
+        keyPoints: topTitles.slice(1).length ? topTitles.slice(1) : [styleTopic],
+        paragraphTarget: 3,
+      },
+      {
+        id: "closing",
+        role: "closing",
+        title: "收束",
+        objective: "完成价值回扣与结尾",
+        keyPoints: [topTitles[topTitles.length - 1] || "收束回扣"],
+        paragraphTarget: 1,
+      },
+    ],
+    transitions: [
+      {
+        fromSectionId: "opening",
+        toSectionId: "body",
+        bridge: "从开头判断转入机制拆解",
+      },
+      {
+        fromSectionId: "body",
+        toSectionId: "closing",
+        bridge: "从论证推进过渡到收束回扣",
+      },
+    ],
+  };
+  state.hasToneCard = true;
+  state.hasStructureOutline = true;
+  state.hasStylePlan = true;
+}
+
+function rankDraftCandidates(a: any, b: any) {
+  const aHighRisk = String(a?.copy?.riskLevel ?? "").trim().toLowerCase() === "high";
+  const bHighRisk = String(b?.copy?.riskLevel ?? "").trim().toLowerCase() === "high";
+  if (aHighRisk !== bHighRisk) return aHighRisk ? 1 : -1;
+  const styleDelta = Number(b?.styleScore ?? 0) - Number(a?.styleScore ?? 0);
+  if (styleDelta !== 0) return styleDelta;
+  const overlapDelta = Number(a?.copy?.maxOverlapChars ?? 0) - Number(b?.copy?.maxOverlapChars ?? 0);
+  if (overlapDelta !== 0) return overlapDelta;
+  return Number(a?.highIssues ?? 0) - Number(b?.highIssues ?? 0);
+}
+
+function upsertBestDraftCandidate(args: {
+  runState: RunState;
+  text: string;
+  styleScore?: number | null;
+  highIssues?: number | null;
+  copy?: Record<string, unknown> | null;
+}) {
+  const text = String(args.text ?? "").trim();
+  if (!text) return;
+  const runState = args.runState as any;
+  const current = Array.isArray(runState.draftCandidatesV1) ? runState.draftCandidatesV1 : [];
+  const candidate = {
+    text,
+    styleScore: Number.isFinite(Number(args.styleScore)) ? Number(args.styleScore) : 0,
+    highIssues: Number.isFinite(Number(args.highIssues)) ? Math.max(0, Math.floor(Number(args.highIssues))) : 0,
+    copy: args.copy && typeof args.copy === "object" ? args.copy : null,
+  };
+  const next = [...current.filter((item: any) => String(item?.text ?? "") !== text), candidate]
+    .slice(-6)
+    .sort(rankDraftCandidates);
+  runState.draftCandidatesV1 = next;
+  runState.bestDraft = next.length > 0 ? next[0] : null;
+  if (candidate.styleScore > 0) {
+    runState.bestStyleDraft = {
+      score: candidate.styleScore,
+      highIssues: candidate.highIssues,
+      text: candidate.text,
+    };
+  }
+}
+
+function extractFinalDraftTextFromToolArgs(toolName: string, toolArgs: Record<string, unknown>): string {
+  if (toolName === "write") {
+    return String(toolArgs.content ?? "").trim();
+  }
+  if (toolName === "edit") {
+    if (typeof toolArgs.newContent === "string") return String(toolArgs.newContent).trim();
+    if (typeof toolArgs.content === "string") return String(toolArgs.content).trim();
+  }
+  return "";
+}
+
 /**
  * 合并工具 → Desktop 原名翻译表。
  * LLM 看到一个合并工具（如 memory），Desktop 仍处理原名（如 memory.read）。
@@ -1051,29 +1200,46 @@ export class GatewayRuntime implements AgentRuntime {
     }
 
     const lintGateDegraded = Boolean(st.lintGateDegraded);
-    const styleLintAccepted = Boolean(st.styleLintPassed || lintGateDegraded);
+    const styleLintAccepted = Boolean(st.styleLintSatisfied || st.styleLintPassed || lintGateDegraded);
+    const copyLintAccepted = Boolean(st.copyLintSatisfied || st.copyLintPassed || st.copyGateDegraded);
     const styleCompleted = Boolean(
+      st.hasSelectedStyleLibrary &&
+      st.topicConfirmed &&
       st.hasStyleKbSearch &&
+      st.hasStylePlan &&
       st.hasDraftText &&
-      st.copyLintPassed &&
-      styleLintAccepted,
+      copyLintAccepted &&
+      styleLintAccepted &&
+      st.finalWritten,
     );
     if (styleCompleted) return null;
 
     const currentPhase =
-      !st.hasStyleKbSearch ? "need_style_kb"
+      !st.hasSelectedStyleLibrary ? "need_style_library"
+      : !st.topicConfirmed ? "need_topic"
+      : !st.hasStyleKbSearch ? "need_style_kb"
+      : !st.hasStylePlan ? "need_tone_outline"
       : !st.hasDraftText ? "need_draft"
-      : !st.copyLintPassed ? "need_copy_lint"
+      : !copyLintAccepted ? "need_copy_lint"
       : !styleLintAccepted ? "need_style_lint"
+      : !st.finalWritten ? "need_final_write"
       : "completed";
     const followUpText =
-      currentPhase === "need_style_kb"
+      currentPhase === "need_style_library"
+        ? "当前已启用 style_imitate，但风格库尚未唯一确定。\n请先确认使用哪个 style 库；如果有多个库，不要默认取第一个。"
+        : currentPhase === "need_topic"
+          ? "当前已启用 style_imitate，但还缺少写作主题。\n请先向用户确认题目或核心观点，再继续后续检索与写作。"
+        : currentPhase === "need_style_kb"
         ? "当前已启用 style_imitate，但风格样例检索还没完成。\n请先调用 kb.search，从 purpose=style 的风格库检索模板/规则卡；不要先写草稿，也不要直接交付终稿。"
+        : currentPhase === "need_tone_outline"
+          ? "风格规则卡已经就位，但定调与骨架还没形成。\n请先整理 toneCard / structureOutline，再进入正文写作。"
         : currentPhase === "need_draft"
           ? "当前已启用 style_imitate，风格样例已具备。\n请先调用 write 生成候选稿；不要直接把聊天文本当成终稿交付。"
           : currentPhase === "need_copy_lint"
             ? "你已经产出了候选稿，现在必须进入复述风险检查。\n请先调用 lint.copy 对候选稿做复述风险审计；在 copy lint 通过前，不要继续终稿写入。"
-            : "copy lint 已通过，现在必须进入风格校验。\n请先调用 lint.style 检查结构、节奏和语气；在 style lint 通过前，不要继续终稿写入。";
+            : currentPhase === "need_style_lint"
+              ? "copy lint 已通过，现在必须进入风格校验。\n请先调用 lint.style 检查结构、节奏和语气；在 style lint 通过前，不要继续终稿写入。"
+              : "lint 已满足，现在请把 best draft 落成终稿，再 run.done 完成本轮。";
     return {
       skillId: "style_imitate",
       phase: currentPhase,
@@ -2398,6 +2564,20 @@ export class GatewayRuntime implements AgentRuntime {
       return;
     }
 
+    if (toolName === "kb.listLibraries") {
+      const libraries = Array.isArray((result.output as any)?.libraries) ? ((result.output as any).libraries as any[]) : [];
+      const styleLibraryIds = libraries
+        .filter((lib: any) => String(lib?.purpose ?? "").trim() === "style")
+        .map((lib: any) => String(lib?.id ?? "").trim())
+        .filter(Boolean);
+      (this.runState as any).styleLibraryOptionIds = styleLibraryIds.slice(0, 8);
+      if (!this.runState.hasSelectedStyleLibrary && styleLibraryIds.length === 1) {
+        this.runState.hasSelectedStyleLibrary = true;
+        this.runState.selectedStyleLibraryId = styleLibraryIds[0];
+      }
+      return;
+    }
+
     if (toolName === "kb.search") {
       this.runState.hasKbSearch = true;
 
@@ -2419,6 +2599,13 @@ export class GatewayRuntime implements AgentRuntime {
       });
 
       if (isStyleKb) {
+        const callLibraryIds = Array.isArray(toolArgs.libraryIds)
+          ? (toolArgs.libraryIds as unknown[]).map((id) => String(id ?? "").trim()).filter(Boolean)
+          : [];
+        if (callLibraryIds.length === 1) {
+          this.runState.hasSelectedStyleLibrary = true;
+          this.runState.selectedStyleLibraryId = callLibraryIds[0];
+        }
         this.runState.hasStyleKbSearch = true;
 
         const groupsRaw = (result.output as any)?.groups;
@@ -2432,6 +2619,24 @@ export class GatewayRuntime implements AgentRuntime {
           this.runState.hasStyleKbHit = true;
         } else if (!this.runState.hasStyleKbHit) {
           this.runState.styleKbDegraded = true;
+        }
+        const topArtifacts = collectTopStyleArtifacts(result.output);
+        const query = String(toolArgs.query ?? "").trim();
+        const libraryIds = callLibraryIds.length
+          ? callLibraryIds
+          : (this.config.runCtx.styleLibIds ?? []).map((id: unknown) => String(id ?? "").trim()).filter(Boolean);
+        (this.runState as any).styleEvidencePack = {
+          query,
+          libraryIds,
+          groupCount,
+          hitCount: topArtifacts.length,
+          ...(topArtifacts.length ? { topArtifacts } : {}),
+        };
+        if (Array.isArray((this.runState as any).styleLibraryOptionIds) && (this.runState as any).styleLibraryOptionIds.length === 0) {
+          (this.runState as any).styleLibraryOptionIds = libraryIds.slice(0, 8);
+        }
+        if (String((this.runState as any).styleTopic ?? "").trim()) {
+          ensureStylePlanningArtifacts(this.runState);
         }
 
         if (this.runState.hasDraftText) {
@@ -2464,12 +2669,29 @@ export class GatewayRuntime implements AgentRuntime {
         mustCovered;
 
       this.runState.styleLintPassed = passed;
+      if (passed) {
+        this.runState.styleLintFailCount = 0;
+      }
+      this.runState.styleLintSatisfied = passed || Boolean(this.runState.lintGateDegraded);
       if (!passed) {
         this.runState.styleLintFailCount = Math.max(
           0,
           Math.floor(Number(this.runState.styleLintFailCount ?? 0)),
         ) + 1;
+        const lintBudget = Math.max(0, Math.floor(Number((this.runState as any).lintReworkBudget ?? 0)));
+        if (!this.runState.lintGateDegraded && lintBudget > 0 && this.runState.styleLintFailCount >= lintBudget) {
+          this.runState.lintGateDegraded = true;
+          this.runState.styleLintSatisfied = true;
+        }
+        this.runState.finalWritten = false;
       }
+      upsertBestDraftCandidate({
+        runState: this.runState,
+        text: String(toolArgs.text ?? "").trim(),
+        styleScore: parsed.score,
+        highIssues: parsed.highIssues,
+        copy: (this.runState as any).lastCopyLint ?? null,
+      });
 
       return;
     }
@@ -2482,12 +2704,18 @@ export class GatewayRuntime implements AgentRuntime {
 
       const passed = (out as any)?.passed === true;
       this.runState.copyLintPassed = passed;
+      this.runState.copyLintSatisfied = passed;
 
       if (passed) {
         this.runState.copyLintFailCount = 0;
       } else {
         this.runState.copyLintFailCount =
           Math.max(0, Math.floor(Number(this.runState.copyLintFailCount ?? 0))) + 1;
+        const lintBudget = Math.max(0, Math.floor(Number((this.runState as any).lintReworkBudget ?? 0)));
+        if (!this.runState.copyGateDegraded && lintBudget > 0 && this.runState.copyLintFailCount >= lintBudget) {
+          this.runState.copyGateDegraded = true;
+          this.runState.copyLintSatisfied = true;
+        }
       }
 
       const riskRaw = String((out as any)?.riskLevel ?? "").trim().toLowerCase();
@@ -2514,6 +2742,16 @@ export class GatewayRuntime implements AgentRuntime {
         topOverlaps,
         sources,
       };
+      upsertBestDraftCandidate({
+        runState: this.runState,
+        text: String(toolArgs.text ?? "").trim(),
+        styleScore: (this.runState as any).lastStyleLint?.score ?? 0,
+        highIssues: (this.runState as any).lastStyleLint?.highIssues ?? 0,
+        copy: this.runState.lastCopyLint as any,
+      });
+      if (!passed && !this.runState.copyGateDegraded) {
+        this.runState.finalWritten = false;
+      }
 
       return;
     }
@@ -2534,6 +2772,30 @@ export class GatewayRuntime implements AgentRuntime {
         const gates: any = this.config.runCtx.gates ?? {};
         if (!this.runState.hasDraftText && gates.styleGateEnabled && gates.lintGateEnabled && this.runState.hasStyleKbSearch) {
           this.runState.hasDraftText = true;
+        }
+        if (gates.styleGateEnabled && String((this.runState as any).styleTopic ?? "").trim()) {
+          ensureStylePlanningArtifacts(this.runState);
+        }
+        const styleClosed = Boolean(
+          this.runState.hasStyleKbSearch &&
+          (this.runState as any).hasStylePlan &&
+          this.runState.hasDraftText &&
+          ((this.runState as any).copyLintSatisfied || this.runState.copyLintPassed || this.runState.copyGateDegraded) &&
+          ((this.runState as any).styleLintSatisfied || this.runState.styleLintPassed || this.runState.lintGateDegraded),
+        );
+        if (styleClosed) {
+          const bestDraftText = String((this.runState as any).bestDraft?.text ?? "").trim();
+          const finalDraftText = extractFinalDraftTextFromToolArgs(toolName, toolArgs);
+          (this.runState as any).finalWritten = Boolean(bestDraftText) && finalDraftText === bestDraftText;
+          if (!(this.runState as any).finalWritten) {
+            (this.runState as any).finalWriteMismatch = {
+              toolName,
+              reason: bestDraftText ? "best_draft_mismatch" : "best_draft_missing",
+              matchedBestDraft: false,
+            };
+          } else {
+            (this.runState as any).finalWriteMismatch = null;
+          }
         }
       } catch {
         // 若 runCtx 缺失 gate 信息，不影响主流程
@@ -2703,10 +2965,24 @@ export class GatewayRuntime implements AgentRuntime {
     const styleWorkflow = styleSkillActive && runCtx.intent?.isWritingTask
       ? {
           active: true,
+          hasSelectedStyleLibrary: Boolean((this.runState as any)?.hasSelectedStyleLibrary),
+          selectedStyleLibraryId: String((this.runState as any)?.selectedStyleLibraryId ?? "").trim() || null,
+          styleLibraryOptionIds: Array.isArray((this.runState as any)?.styleLibraryOptionIds)
+            ? ((this.runState as any).styleLibraryOptionIds as unknown[]).map((item) => String(item ?? "").trim()).filter(Boolean).slice(0, 8)
+            : [],
+          topicConfirmed: Boolean((this.runState as any)?.topicConfirmed),
+          styleTopic: String((this.runState as any)?.styleTopic ?? "").trim() || null,
           hasStyleKbSearch: Boolean((this.runState as any)?.hasStyleKbSearch),
+          styleEvidencePack: (this.runState as any)?.styleEvidencePack ?? null,
+          hasStylePlan: Boolean((this.runState as any)?.hasStylePlan),
+          hasToneCard: Boolean((this.runState as any)?.hasToneCard),
+          hasStructureOutline: Boolean((this.runState as any)?.hasStructureOutline),
           hasDraftText: Boolean((this.runState as any)?.hasDraftText),
           copyLintPassed: Boolean((this.runState as any)?.copyLintPassed),
+          copyLintSatisfied: Boolean((this.runState as any)?.copyLintSatisfied),
           styleLintPassed: Boolean((this.runState as any)?.styleLintPassed),
+          styleLintSatisfied: Boolean((this.runState as any)?.styleLintSatisfied),
+          finalWritten: Boolean((this.runState as any)?.finalWritten),
         }
       : undefined;
 

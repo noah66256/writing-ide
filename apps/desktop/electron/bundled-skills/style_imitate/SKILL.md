@@ -8,7 +8,7 @@ priority: 120
 stage-key: agent.skill.style_imitate
 kind: workflow
 activation-mode: hybrid
-auto-enable: false
+auto-enable: true
 builtin: true
 triggers:
   - when: has_style_library
@@ -28,67 +28,103 @@ policies:
   - "StyleGatePolicy"
 workflow:
   state-keys:
+    - hasSelectedStyleLibrary
+    - topicConfirmed
     - hasStyleKbSearch
+    - hasStylePlan
     - hasDraftText
-    - copyLintPassed
-    - styleLintPassed
-    - lintGateDegraded
+    - copyLintSatisfied
+    - styleLintSatisfied
+    - finalWritten
   phases:
+    - id: need_style_library
+      gate:
+        allFalse:
+          - hasSelectedStyleLibrary
+      tools:
+        - "kb.listLibraries"
+      hint: "Spec 4.0A：当前先确认唯一风格库。若只有一个 style 库可直接使用；若有多个，先列库并等待用户确认，不要默认取第一个。"
+    - id: need_topic
+      gate:
+        allTrue:
+          - hasSelectedStyleLibrary
+        allFalse:
+          - topicConfirmed
+      tools:
+        - "run.done"
+      hint: "Spec 4.0B：当前缺少写作主题或关键题面。先向用户提一个最小必要问题，然后 run.done 等待回复。"
     - id: need_style_kb
       gate:
+        allTrue:
+          - hasSelectedStyleLibrary
+          - topicConfirmed
         allFalse:
           - hasStyleKbSearch
       tools:
         - "kb.search"
-        - "kb.listLibraries"
-      hint: "当前先做风格样例检索。调用 kb.search 检索写法模板/规则卡。"
+      hint: "Spec 4.1：当前先做风格规则卡检索。只查已选 style 库，优先 hook/outline/ending 等 card，不要直接捞 paragraph。"
+    - id: need_tone_outline
+      gate:
+        allTrue:
+          - hasSelectedStyleLibrary
+          - topicConfirmed
+          - hasStyleKbSearch
+        allFalse:
+          - hasStylePlan
+      tools:
+        - "write"
+      hint: "Spec 4.2：检索后先完成定调与骨架，再进入正文写作。toneCard 和 structureOutline 必须在 runtime state 中可见。"
     - id: need_draft
       gate:
         allTrue:
+          - hasSelectedStyleLibrary
+          - topicConfirmed
           - hasStyleKbSearch
+          - hasStylePlan
         allFalse:
           - hasDraftText
       tools:
         - "write"
-      hint: "风格样例已具备，产出候选草稿。"
+      hint: "Spec 4.3：风格样例与骨架已具备，产出候选草稿。文件名需反映主题，不要用无意义时间戳路径。"
     - id: need_copy_lint
       gate:
         allTrue:
-          - hasStyleKbSearch
           - hasDraftText
+          - hasStylePlan
         allFalse:
-          - copyLintPassed
+          - copyLintSatisfied
       tools:
         - "lint.copy"
         - "edit"
         - "write"
-      hint: "草稿已完成，做复述风险检查。lint.copy 不通过则改稿后复检。"
+      hint: "Spec 4.4：草稿已完成，必须先过 lint.copy。未通过就 edit/write 改稿后复检，最多 3 次。"
     - id: need_style_lint
       gate:
         allTrue:
-          - hasStyleKbSearch
           - hasDraftText
-          - copyLintPassed
+          - copyLintSatisfied
         allFalse:
-          - styleLintPassed
-          - lintGateDegraded
+          - styleLintSatisfied
       tools:
         - "lint.style"
         - "edit"
         - "write"
-      hint: "copy lint 已通过，做风格校验。lint.style 不通过则改稿后复检。"
+      hint: "Spec 4.5：copy lint 已满足，必须做 lint.style。重点对齐结构、节奏、价值落点，不要只加口头禅。"
     - id: completed
       gate:
         allTrue:
+          - hasSelectedStyleLibrary
+          - topicConfirmed
           - hasStyleKbSearch
+          - hasStylePlan
           - hasDraftText
-          - copyLintPassed
-        anyTrue:
-          - styleLintPassed
-          - lintGateDegraded
+          - copyLintSatisfied
+          - styleLintSatisfied
+          - finalWritten
       tools:
         - "write"
         - "edit"
+        - "run.mainDoc.update"
       hint: "闭环完成，落盘终稿。"
   exclusions:
     - ["kb.search", "write"]
@@ -96,7 +132,7 @@ workflow:
     - ["kb.search", "lint.style"]
     - ["lint.copy", "lint.style"]
   follow-up:
-    message: "风格仿写尚未完成闭环，请按 kb.search → 草稿 → lint.copy → lint.style → write 顺序补齐。"
+    message: "风格仿写尚未完成闭环，请按 选库 → 题面确认 → kb.search → 定调骨架 → 草稿 → lint.copy → lint.style → write 顺序补齐。"
 ui:
   badge: "STYLE"
   color: "purple"
@@ -106,33 +142,49 @@ ui:
 
 **严格按以下阶段顺序执行。不得跳过 lint.copy 和 lint.style。**
 
-**强制规则：Phase 0 必须先完成风格样例检索，再进入写作阶段。不要直接开始写稿。**
+**强制规则：Phase 0A/0B 必须先完成选库和题面确认，再进入检索。**
 
 **当需要用户回答问题时**（确认主题、选择风格库等）：输出问题后立即调用 `run.done` 结束当前轮次，等待用户回复。**不要在同一轮中反复询问。**
 
 ---
 
-## Phase 0: 风格样例检索
+## Phase 0A: 选库
+
+**目的**：确定唯一风格库。
+
+1. 如果只有 1 个 style 库，直接使用
+2. 如果有多个：
+   - 先看用户消息里有没有明确库名
+   - 无法唯一确定时，先问用户选哪个库，然后 `run.done`
+3. **不要默认使用系统自动注入的第一个库**
+
+---
+
+## Phase 0B: 题面确认
+
+**目的**：确认主题与最低写作约束。
+
+1. 如果用户只说了“@风格仿写”或只给了库名，没有主题：
+   - 先问主题，然后 `run.done`
+2. 如果主题已给出但体裁/篇幅缺得太厉害，导致无法开写：
+   - 只追问一个最小必要问题，然后 `run.done`
+
+---
+
+## Phase 1: 风格样例检索
 
 **目的**：从风格库中获取写法规则卡和样例，建立风格基准。
 
 **执行步骤**：
 
-0. **前置检查，用户消息中是否包含写作主题**：
-   - 如果用户只说了“@风格仿写”而没有给出主题，先询问主题，然后 `run.done`，等用户回复后再继续
-   - 不要在没有主题的情况下启动检索和写作
 1. 如果 Context Pack 已提供 STYLE_FACETS_SELECTED(Markdown)：
    - 已有规则卡全文，可直接按规则卡开写
    - `kb.search` 仅用于补充当前话题下的结构骨架、开头钩子、结尾收束
-2. **风格库选择**（即使 STYLE_CATALOG 已自动注入也要检查）：
-   - 调用 `kb.listLibraries` 查看可用风格库
-   - 如果只有 1 个 style 库，直接使用
-   - 如果有多个：先看用户消息中是否提及库名；无法确定时询问用户选哪个库，然后 `run.done` 等待回复
-   - **不要默认使用系统自动注入的第一个库而跳过确认**
-3. 调用 `kb.search`：
+2. 调用 `kb.search`：
    - 限定 `purpose=style` 的风格库
    - 优先 `kind=card`（hook / one_liner / outline / thesis / ending 等规则卡）
    - 不要一上来就用 `kind=paragraph` 大范围捞原文段落
+   - query 同时包含：风格标识 + 结构词 + 当前题面
 4. 如果 Context Pack 提供了 STYLE_DIMENSIONS(JSON)：
    - `mustApply.facetIds` 为 MUST，每个 facet 的核心写法都要在正文中至少体现一次
    - `shouldApply.softRanges` 为 SHOULD，尽量贴近统计指纹
@@ -141,11 +193,11 @@ ui:
    - `selectedFacetIds` / `selectedFacets` 是本次执行的维度卡子集
    - 若提供 `searchPlan`，优先按 `searchPlan` 检索
 
-**退出条件**：至少获得 3 条风格样例或规则卡。然后进入 Phase 1。
+**退出条件**：至少获得 3 条风格样例或规则卡，并覆盖 hook / outline / ending 中至少 2 类。然后进入 Phase 2。
 
 ---
 
-## Phase 1: 定调与骨架（心中规划，不需输出给用户）
+## Phase 2: 定调与骨架（可写入 runtime state，不需输出给用户）
 
 **目的**：基于风格样例确定基调和文章结构。写作前的内部思考，不需要调用工具。
 
@@ -158,11 +210,11 @@ ui:
    - 主体段落推进逻辑（论点顺序、转折点、视角切换）
    - 收束方式（金句 / 行动号召 / 余韵 / 回扣开头）
 
-**退出条件**：心中有明确的基调和结构方案。进入 Phase 2。
+**退出条件**：`toneCard + structureOutline` 已形成。进入 Phase 3。
 
 ---
 
-## Phase 2: 写作
+## Phase 3: 写作
 
 **目的**：一次性产出完整草稿。
 
@@ -179,7 +231,7 @@ ui:
 
 ---
 
-## Phase 3: lint.copy 复述风险检查
+## Phase 4: lint.copy 复述风险检查
 
 **目的**：确保草稿没有复述原文的风险。
 
@@ -197,7 +249,7 @@ ui:
 
 ---
 
-## Phase 4: lint.style 风格校验
+## Phase 5: lint.style 风格校验
 
 **目的**：确保草稿在结构、节奏、语气上贴合目标风格。
 
@@ -215,9 +267,10 @@ ui:
 
 ---
 
-## Phase 5: 终稿落盘
+## Phase 6: 终稿落盘
 
-1. 如果 Phase 3-4 中有改稿，用 `write` 更新终稿文件
+1. 如果 Phase 4-5 中有改稿，用 `write` 更新终稿文件
+2. 最终落盘优先使用 best draft，不要把更差的最后一版覆盖进去
 2. 完成后调用 `run.done`
 
 ---

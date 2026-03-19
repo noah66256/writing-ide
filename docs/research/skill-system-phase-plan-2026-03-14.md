@@ -2,7 +2,7 @@
 
 > 范围：统一「工具 / MCP / Skill」三层的职责与触发范式，避免 skill 抢路由、挤掉基础工具；以现有 `style_imitate` 为首个 Workflow Skill 样板，对齐 OpenClaw / Claude Skills 等实践。
 >
-> 时间点：2026-03-14（基于当前代码状态、`workflow-skills-runtime-v0.2-orchestrated-style-imitate.md`、`tooling-platformization-phased-plan-2026-03-11.md` 等文档）。
+> 时间点：2026-03-14（基于当前代码状态、`style-imitate-unified-workflow-skill-v1.md`、`tooling-platformization-phased-plan-2026-03-11.md` 等文档）。
 
 ---
 
@@ -36,7 +36,7 @@
     - GatewayRuntime 在工具执行后跑 `analyzeStyleWorkflowBatch`，发现顺序错误 → `STYLE_WORKFLOW_VIOLATION`；
     - RunOutcome 对未完成闭环的 run 统一收口为 `workflow_skill_incomplete`；
     - Desktop 把 `workflowSkills` 写入 `TASK_STATE(JSON)`（支持续跑补课）。
-  - v0.2 草案：`workflow-skills-runtime-v0.2-orchestrated-style-imitate.md`
+  - 统一规范：`style-imitate-unified-workflow-skill-v1.md`
     - 提出 Orchestrated Workflow：对上暴露 `style_imitate.run` / 子 Agent，对内用状态机管 `kb.search → draft → lint.copy → lint.style → applyEdits → final write`。
     - 当前代码已经有 `computeStyleTurnCaps` + `runOrchestratedStyleImitate()` 占位。
 
@@ -208,7 +208,7 @@
 
 **2.1 完成 style_imitate 的 Orchestrated 实现**
 
-- 按 `workflow-skills-runtime-v0.2-orchestrated-style-imitate.md`：
+- 按 `style-imitate-unified-workflow-skill-v1.md`：
   - 在 Gateway 层实现 `runOrchestratedStyleImitate(args)`：
     - 对上暴露为一个高阶工具 `style_imitate.run` 或一个子 Agent；
     - 对内按状态机控制工具序列（kb.search → draft → lint.copy → lint.style → applyEdits → final write）。

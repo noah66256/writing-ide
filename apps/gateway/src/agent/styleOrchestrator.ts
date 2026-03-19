@@ -1,5 +1,4 @@
 import type { RunState, WorkflowSkillPhaseSnapshot } from "@ohmycrab/agent-core";
-import { CORE_TOOL_NAME_SET } from "./coreTools.js";
 import type { RunContext } from "./writingAgentRunner.js";
 
 export type StyleOrchestratorTask = {
@@ -51,30 +50,49 @@ export type StyleTurnCaps = {
 };
 
 function buildStyleSnapshot(state: RunState): WorkflowSkillPhaseSnapshot {
+  const hasSelectedStyleLibrary = Boolean((state as any).hasSelectedStyleLibrary);
+  const topicConfirmed = Boolean((state as any).topicConfirmed);
   const hasStyleKbSearch = Boolean((state as any).hasStyleKbSearch);
+  const hasStylePlan = Boolean((state as any).hasStylePlan);
   const hasDraftText = Boolean((state as any).hasDraftText);
-  const copyLintPassed = Boolean((state as any).copyLintPassed);
-  const styleLintPassed = Boolean((state as any).styleLintPassed);
-  const lintGateDegraded = Boolean((state as any).lintGateDegraded);
-  // 降级视为"已尽力，可放行"：避免 lint.style 超时后 orchestrator 死循环重试
-  const styleLintAccepted = styleLintPassed || lintGateDegraded;
+  const copyLintAccepted = Boolean((state as any).copyLintSatisfied || (state as any).copyLintPassed || (state as any).copyGateDegraded);
+  const styleLintAccepted = Boolean((state as any).styleLintSatisfied || (state as any).styleLintPassed || (state as any).lintGateDegraded);
+  const finalWritten = Boolean((state as any).finalWritten);
 
   let currentPhase = "completed";
-  if (!hasStyleKbSearch) currentPhase = "need_style_kb";
+  if (!hasSelectedStyleLibrary) currentPhase = "need_style_library";
+  else if (!topicConfirmed) currentPhase = "need_topic";
+  else if (!hasStyleKbSearch) currentPhase = "need_style_kb";
+  else if (!hasStylePlan) currentPhase = "need_tone_outline";
   else if (!hasDraftText) currentPhase = "need_draft";
-  else if (!copyLintPassed) currentPhase = "need_copy_lint";
+  else if (!copyLintAccepted) currentPhase = "need_copy_lint";
   else if (!styleLintAccepted) currentPhase = "need_style_lint";
+  else if (!finalWritten) currentPhase = "need_final_write";
 
   const missingSteps: string[] = [];
+  if (!hasSelectedStyleLibrary) missingSteps.push("select_style_library");
+  if (!topicConfirmed) missingSteps.push("confirm_topic");
   if (!hasStyleKbSearch) missingSteps.push("kb.search(style)");
+  if (!hasStylePlan) missingSteps.push("tone_and_outline");
   if (!hasDraftText) missingSteps.push("draft");
-  if (!copyLintPassed) missingSteps.push("lint.copy");
+  if (!copyLintAccepted) missingSteps.push("lint.copy");
   if (!styleLintAccepted) missingSteps.push("lint.style");
+  if (!finalWritten) missingSteps.push("final_write");
 
   return {
     id: "style_imitate",
     active: true,
-    phases: ["need_style_kb", "need_draft", "need_copy_lint", "need_style_lint", "completed"],
+    phases: [
+      "need_style_library",
+      "need_topic",
+      "need_style_kb",
+      "need_tone_outline",
+      "need_draft",
+      "need_copy_lint",
+      "need_style_lint",
+      "need_final_write",
+      "completed",
+    ],
     currentPhase,
     missingSteps: currentPhase === "completed" ? [] : missingSteps,
   };
@@ -93,10 +111,13 @@ function uniq(items: string[]): string[] {
 function planStyleNextStep(snapshot: WorkflowSkillPhaseSnapshot): string | null {
   if (snapshot.id !== "style_imitate") return null;
   const phase = String(snapshot.currentPhase ?? "").trim();
+  if (phase === "need_style_library") return "kb.listLibraries";
+  if (phase === "need_topic") return "run.done";
   if (phase === "need_style_kb") return "kb.search";
   if (phase === "need_draft") return "write";
   if (phase === "need_copy_lint") return "lint.copy";
   if (phase === "need_style_lint") return "lint.style";
+  if (phase === "need_final_write") return "write";
   return null;
 }
 
@@ -105,11 +126,32 @@ function buildHint(snapshot: WorkflowSkillPhaseSnapshot, state: RunState, nextTo
   const lastCopyLint = (state as any).lastCopyLint ?? null;
   const lastStyleLint = (state as any).lastStyleLint ?? null;
 
+  if (phase === "need_style_library") {
+    return [
+      "style_imitate 编排阶段：当前先确认风格库。",
+      "- 优先列出 style 库并等待用户确认；不要默认使用第一个库。",
+    ].join("\n");
+  }
+
+  if (phase === "need_topic") {
+    return [
+      "style_imitate 编排阶段：当前缺少写作主题。",
+      "- 先向用户确认题目或核心观点，然后 run.done 等待回复。",
+    ].join("\n");
+  }
+
   if (phase === "need_style_kb") {
     return [
       "style_imitate 编排阶段：当前先做风格样例检索。",
       "- 只调用 kb.search，并限定在 purpose=style 的风格库中检索写法模板/规则卡。",
       "- 不要先写草稿，不要先跑 lint。",
+    ].join("\n");
+  }
+
+  if (phase === "need_tone_outline") {
+    return [
+      "style_imitate 编排阶段：风格规则卡已具备，先完成定调与骨架。",
+      "- toneCard / structureOutline 必须先进入 runtime state，再继续正文写作。",
     ].join("\n");
   }
 
@@ -151,6 +193,13 @@ function buildHint(snapshot: WorkflowSkillPhaseSnapshot, state: RunState, nextTo
     ].join("\n");
   }
 
+  if (phase === "need_final_write") {
+    return [
+      "style_imitate 编排阶段：lint 已满足，现在把 best draft 落成终稿。",
+      "- 优先 write / edit 更新终稿，再 run.done 收口。",
+    ].join("\n");
+  }
+
   return [
     "style_imitate 编排阶段：闭环已完成，可以进入交付。",
     "- 允许调用 write / edit 落盘终稿，并最终 run.done。",
@@ -181,16 +230,14 @@ export function computeStyleTurnCaps(args: {
     if (args.baseAllowedToolNames.has(toolName)) allowed.add(toolName);
   };
 
-  // CORE_TOOLS：无论当前处于 style_imitate 的哪个阶段，只要在 baseAllowed 里，就不应被 per-turn gate 剪掉。
-  // 这样可以确保 run.* / memory / 基础读写/检索 等核心能力始终可用。
-  for (const name of CORE_TOOL_NAME_SET) {
-    if (args.baseAllowedToolNames.has(name)) {
-      allowed.add(name);
-    }
-  }
-
-  if (phase === "need_style_kb") {
+  if (phase === "need_style_library") {
+    addIfAllowed("kb.listLibraries");
+  } else if (phase === "need_topic") {
+    addIfAllowed("run.done");
+  } else if (phase === "need_style_kb") {
     addIfAllowed("kb.search");
+  } else if (phase === "need_tone_outline") {
+    addIfAllowed("write");
   } else if (phase === "need_draft") {
     addIfAllowed("write");
   } else if (phase === "need_copy_lint") {
@@ -207,9 +254,15 @@ export function computeStyleTurnCaps(args: {
       addIfAllowed("write");
     }
     addIfAllowed("lint.style");
+  } else if (phase === "need_final_write") {
+    addIfAllowed("write");
+    addIfAllowed("edit");
+    addIfAllowed("run.mainDoc.update");
   } else {
     addIfAllowed("write");
     addIfAllowed("edit");
+    addIfAllowed("run.mainDoc.update");
+    addIfAllowed("run.done");
   }
 
   const ordered = uniq(Array.from(allowed));
