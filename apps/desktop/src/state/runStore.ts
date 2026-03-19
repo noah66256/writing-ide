@@ -1107,13 +1107,22 @@ export const useRunStore = create<RunState>()(
       ),
     })),
   finishAssistant: (stepId) =>
-    set((s) => ({
-      steps: s.steps.map((step) =>
-        step.id === stepId && step.type === "assistant"
-          ? { ...step, streaming: false }
-          : step,
-      ),
-    })),
+    set((s) => {
+      const cur = s.steps.find((step) => step.id === stepId);
+      if (!cur || cur.type !== "assistant") return {};
+      const hasText = String(cur.text ?? "").trim().length > 0;
+      const hasQuickActions = Array.isArray(cur.quickActions) && cur.quickActions.length > 0;
+      if (!hasText && !hasQuickActions) {
+        return { steps: s.steps.filter((step) => step.id !== stepId) };
+      }
+      return {
+        steps: s.steps.map((step) =>
+          step.id === stepId && step.type === "assistant"
+            ? { ...step, streaming: false }
+            : step,
+        ),
+      };
+    }),
   patchAssistant: (stepId, patch) =>
     set((s) => ({
       steps: s.steps.map((step) =>

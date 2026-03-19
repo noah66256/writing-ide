@@ -1661,6 +1661,7 @@ const tools: ToolDefinition[] = [
       const mentionedSkillIds = getSkillMentionIdsFromLatestUserStep();
       const attached = useRunStore.getState().kbAttachedLibraryIds ?? [];
       const md: any = useRunStore.getState().mainDoc ?? {};
+      const libraries = useKbStore.getState().libraries ?? [];
       const libFromMainDoc = [
         String(md?.styleContractV1?.libraryId ?? "").trim(),
         String(md?.stylePlanV1?.libraryId ?? "").trim(),
@@ -1670,10 +1671,32 @@ const tools: ToolDefinition[] = [
         mentionedLibraryIds: mentioned,
       });
       const selection = resolveImplicitStyleLibrarySelection({
-        libraries: useKbStore.getState().libraries ?? [],
+        libraries,
         mainDoc: md,
         allowHistoricalFallback,
       });
+      const styleLibById = new Map(
+        libraries
+          .filter((lib: any) => String(lib?.purpose ?? "").trim() === "style")
+          .map((lib: any) => [String(lib?.id ?? "").trim(), lib] as const),
+      );
+      const explicitStyleLibs = explicitLibs.filter((id) => styleLibById.has(id));
+      const hasUserSelectedStyleLibrary =
+        mentioned.length > 0 ||
+        (allowHistoricalFallback && (attached.length > 0 || libFromMainDoc.length > 0)) ||
+        selection.source === "unique_style";
+      if (explicitStyleLibs.length > 0 && selection.error === "STYLE_LIBRARY_AMBIGUOUS" && !hasUserSelectedStyleLibrary) {
+        return {
+          ok: false,
+          error: "STYLE_LIBRARY_AMBIGUOUS",
+          output: {
+            ok: false,
+            error: "STYLE_LIBRARY_AMBIGUOUS",
+            message: "当前有多个风格库，用户还没有明确选择；请先询问用户使用哪个风格库，再继续检索。",
+            libraryIds: Array.from(styleLibById.keys()),
+          },
+        };
+      }
       const libraryIds = explicitLibs.length
         ? explicitLibs
         : mentioned.length
@@ -1688,7 +1711,6 @@ const tools: ToolDefinition[] = [
       const ret = await useKbStore.getState().searchForAgent({ query, kind, facetIds, cardTypes, anchorParagraphIndexMax, anchorFromEndMax, debug, libraryIds, perDocTopN, topDocs });
       if (!ret.ok) return { ok: false, error: ret.error ?? "SEARCH_FAILED" };
       if (libraryIds.length > 0) {
-        const libraries = useKbStore.getState().libraries ?? [];
         const styleLibIds = libraryIds.filter((id) => {
           const lib = libraries.find((item: any) => String(item?.id ?? "").trim() === id);
           return String(lib?.purpose ?? "").trim() === "style";
