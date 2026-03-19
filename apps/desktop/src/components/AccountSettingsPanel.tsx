@@ -81,14 +81,14 @@ function SectionCard(props: {
 }) {
   return (
     <section className="rounded-2xl border border-border bg-surface-alt/40 p-4">
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-[13px] font-semibold text-text">{props.title}</div>
           {props.description ? (
             <div className="mt-1 text-[12px] leading-relaxed text-text-muted">{props.description}</div>
           ) : null}
         </div>
-        {props.actions ? <div className="shrink-0">{props.actions}</div> : null}
+        {props.actions ? <div className="flex max-w-full flex-wrap justify-end gap-2">{props.actions}</div> : null}
       </div>
       <div className="mt-4">{props.children}</div>
     </section>
@@ -442,7 +442,7 @@ export function AccountSettingsPanel() {
             title="账号"
             description="账号身份、积分和核心使用量一屏查看。"
             actions={
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center justify-end gap-2">
                 <ActionButton tone="secondary" disabled={busy} onClick={() => void refreshPoints()}>
                   <RefreshCw size={13} className={busy ? "animate-spin" : ""} />
                   刷新积分
@@ -460,8 +460,8 @@ export function AccountSettingsPanel() {
           >
             <div className="flex flex-col gap-4">
               <div className="rounded-2xl border border-border bg-surface p-4">
-                <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-                  <div className="flex items-center gap-4">
+                <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(260px,1fr))]">
+                  <div className="flex min-w-0 items-center gap-4">
                     <div className="flex h-16 w-16 items-center justify-center overflow-hidden rounded-2xl border border-border bg-accent-soft text-accent">
                       {userAvatarDataUrl ? (
                         <img src={userAvatarDataUrl} alt={displayName} className="h-full w-full object-cover" />
@@ -469,14 +469,14 @@ export function AccountSettingsPanel() {
                         <span className="text-[22px] font-semibold">{(displayName[0] ?? "我").toUpperCase()}</span>
                       )}
                     </div>
-                    <div>
-                      <div className="text-[18px] font-semibold tracking-tight text-text">{displayName}</div>
+                    <div className="min-w-0">
+                      <div className="truncate text-[18px] font-semibold tracking-tight text-text">{displayName}</div>
                       <div className="mt-1 text-[12px] text-text-muted">
                         {usageSummary.generatedAt ? `上次汇总：${fmtTime(usageSummary.generatedAt)}` : "按 run 审计实时汇总"}
                       </div>
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-2 md:min-w-[280px]">
+                  <div className="grid gap-2 [grid-template-columns:repeat(auto-fit,minmax(180px,1fr))]">
                     <KeyValueRow icon={<Smartphone size={15} />} label="手机号" value={user.phone ?? "未绑定"} />
                     <KeyValueRow icon={<Mail size={15} />} label="邮箱" value={user.email ?? "未绑定"} />
                     <KeyValueRow icon={<Shield size={15} />} label="角色" value={user.role} />
@@ -485,7 +485,7 @@ export function AccountSettingsPanel() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+              <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(180px,1fr))]">
                 <StatCard icon={<Coins size={14} />} label="积分余额" value={fmtInt(user.pointsBalance)} tone="accent" />
                 <StatCard
                   icon={<Activity size={14} />}
@@ -507,7 +507,7 @@ export function AccountSettingsPanel() {
             title="使用量"
             description="展示 lifetime、近 30 天、Chat 与 Agent 的真实 usage 汇总。"
           >
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(220px,1fr))]">
               <StatCard
                 icon={<Activity size={14} />}
                 label="累计总览"
@@ -545,7 +545,7 @@ export function AccountSettingsPanel() {
             ) : usageSummary.recentRuns.length > 0 ? (
               <div className="flex flex-col gap-2">
                 {usageSummary.recentRuns.map((run) => (
-                  <div key={run.id} className="flex items-start justify-between gap-3 rounded-xl border border-border bg-surface px-3 py-3">
+                  <div key={run.id} className="grid gap-3 rounded-xl border border-border bg-surface px-3 py-3 [grid-template-columns:minmax(0,1fr)]">
                     <div className="min-w-0">
                       <div className="truncate text-[13px] font-medium text-text">
                         {run.mode === "chat" ? "Chat" : "Agent"}
@@ -556,7 +556,7 @@ export function AccountSettingsPanel() {
                         {run.kind ? ` · ${run.kind}` : ""}
                       </div>
                     </div>
-                    <div className="shrink-0 text-right">
+                    <div className="min-w-0 text-left">
                       <div className="text-[13px] font-medium text-text" style={{ fontVariantNumeric: "tabular-nums" }}>
                         {fmtInt(run.totalTokens)} tokens
                       </div>
@@ -596,8 +596,8 @@ export function AccountSettingsPanel() {
               ) : txs.length > 0 ? (
                 <div className="flex flex-col gap-2">
                   {txs.map((tx) => (
-                    <div key={String(tx.id)} className="flex items-start justify-between gap-3 rounded-xl border border-border bg-surface px-3 py-3">
-                      <div>
+                    <div key={String(tx.id)} className="grid gap-3 rounded-xl border border-border bg-surface px-3 py-3 [grid-template-columns:minmax(0,1fr)]">
+                      <div className="min-w-0">
                         <div className="text-[13px] font-medium text-text">{String(tx.type ?? "")}</div>
                         <div className="mt-1 text-[11px] text-text-faint">
                           {fmtTime(String(tx.createdAt ?? ""))}
@@ -644,7 +644,7 @@ export function AccountSettingsPanel() {
               {rechargeError ? <Banner tone="error" text={rechargeError} /> : null}
 
               {rechargeProducts.length > 0 ? (
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(220px,1fr))]">
                   {rechargeProducts.map((product) => (
                     <div key={product.id} className="rounded-xl border border-border bg-surface p-3">
                       <div className="flex items-start justify-between gap-3">
@@ -672,8 +672,8 @@ export function AccountSettingsPanel() {
 
               {activePay ? (
                 <div className="rounded-2xl border border-accent/20 bg-accent-soft/30 p-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
                       <div className="text-[13px] font-semibold text-text">待支付订单</div>
                       <div className="mt-1 text-[12px] text-text-muted">
                         订单 {activePay.orderId} · 金额 {fmtCny(activePay.amountCent)} · 预计到账 {fmtInt(activePay.pointsToCredit)} 积分
@@ -682,15 +682,15 @@ export function AccountSettingsPanel() {
                         <div className="mt-1 text-[11px] text-text-faint">过期时间：{fmtTime(activePay.expireAt)}</div>
                       ) : null}
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <ActionButton tone="secondary" onClick={() => { setActivePay(null); setQrUrl(""); }}>
                         取消本次
                       </ActionButton>
                     </div>
                   </div>
 
-                  <div className="mt-4 flex flex-col gap-4 md:flex-row">
-                    <div className="flex h-[240px] w-[240px] shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-border bg-white">
+                  <div className="mt-4 grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(240px,1fr))]">
+                    <div className="flex h-[240px] w-full max-w-[240px] items-center justify-center overflow-hidden rounded-2xl border border-border bg-white">
                       {qrUrl ? (
                         <img src={qrUrl} alt="pay_qr" className="h-full w-full object-cover" />
                       ) : (

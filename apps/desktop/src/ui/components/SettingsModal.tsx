@@ -47,10 +47,10 @@ export function SettingsModal({ onClose, initialTab, kbSelectMode }: {
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 backdrop-blur-sm overflow-y-auto py-8"
+      className="fixed inset-0 z-[9999] flex items-center justify-center overflow-y-auto bg-black/40 px-4 py-8 backdrop-blur-sm"
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div className="w-[680px] max-h-[calc(100vh-4rem)] bg-surface rounded-2xl border border-border shadow-2xl flex overflow-hidden my-auto">
+      <div className="my-auto flex max-h-[calc(100vh-4rem)] w-[min(1100px,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-border bg-surface shadow-2xl">
         {/* Left tabs */}
         <div className="w-[180px] shrink-0 border-r border-border bg-surface-alt py-4 px-2 flex flex-col gap-1">
           <div className="text-[11px] uppercase tracking-wider text-text-faint font-medium px-3 mb-2">
@@ -74,7 +74,7 @@ export function SettingsModal({ onClose, initialTab, kbSelectMode }: {
         </div>
 
         {/* Right content */}
-        <div className="flex-1 flex flex-col min-h-0">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <div className="flex items-center justify-between px-6 py-4 border-b border-border">
             <h2 className="text-[16px] font-semibold text-text">
               {TABS.find((t) => t.id === tab)?.label}
@@ -86,7 +86,7 @@ export function SettingsModal({ onClose, initialTab, kbSelectMode }: {
               <X size={16} />
             </button>
           </div>
-          <div className="flex-1 overflow-y-auto p-6">
+          <div className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-6">
             {tab === "account" && <AccountTabContent />}
             {tab === "persona" && <PersonaTabContent />}
             {tab === "kb" && <KbTabContent kbSelectMode={kbSelectMode} onClose={onClose} />}
