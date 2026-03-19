@@ -1142,6 +1142,7 @@ fastify.post(
     query: z.string().min(1),
     candidates: z.array(candidateSchema).min(1).max(1200),
     topN: z.number().int().min(1).max(200).optional(),
+    model: z.string().optional(),
   });
 
   let body: z.infer<typeof bodySchema>;
@@ -1153,16 +1154,15 @@ fastify.post(
 
   const topN = body.topN ?? 20;
 
-  // 获取 LLM 配置（复用 chat 的 baseUrl/apiKey）
-  const env = await getLlmEnv();
-  if (!env.ok) {
-    return reply.code(500).send({
-      error: "LLM_NOT_CONFIGURED",
-      hint: "LLM chat \u914D\u7F6E\u4E0D\u53EF\u7528\uFF0C\u65E0\u6CD5\u6267\u884C KB \u8BED\u4E49\u641C\u7D22\u3002",
+  const runtime = await resolveRequiredKbTaskRuntime(body.model);
+  if (!runtime.ok) {
+    return reply.code(runtime.status).send({
+      error: runtime.error,
+      hint: runtime.hint,
     });
   }
-
-  const model = "claude-haiku-4-5-20251001";
+  const model = runtime.model;
+  const modelIdUsed = runtime.modelId;
 
   // \u6784\u9020\u5019\u9009\u5217\u8868\u6587\u672C
   const candidateLines = body.candidates.map((c, i) => {
@@ -1192,9 +1192,9 @@ fastify.post(
 
   try {
     const ret = await completionOnceViaProvider({
-      baseUrl: env.baseUrl.replace(/\/+$/g, ""),
-      endpoint: env.endpoint || "/v1/chat/completions",
-      apiKey: env.apiKey,
+      baseUrl: runtime.baseUrl.replace(/\/+$/g, ""),
+      endpoint: runtime.endpoint || "/v1/chat/completions",
+      apiKey: runtime.apiKey,
       model,
       temperature: 0,
       maxTokens: 2000,
@@ -1261,7 +1261,7 @@ fastify.post(
       if (jwtUser?.id && jwtUser.role !== "admin" && usage) {
         await chargeUserForLlmUsage({
           userId: jwtUser.id,
-          modelId: model,
+          modelId: modelIdUsed,
           usage: {
             promptTokens: usage.prompt_tokens ?? usage.promptTokens ?? 0,
             completionTokens: usage.completion_tokens ?? usage.completionTokens ?? 0,
@@ -1277,6 +1277,7 @@ fastify.post(
     return {
       ok: true,
       results,
+      modelUsed: modelIdUsed,
       usage: usage ? {
         promptTokens: usage.prompt_tokens ?? usage.promptTokens ?? 0,
         completionTokens: usage.completion_tokens ?? usage.completionTokens ?? 0,

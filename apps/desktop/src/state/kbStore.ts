@@ -2156,6 +2156,7 @@ async function llmSearch(args: {
   query: string;
   candidates: Array<{ id: string; title?: string; content: string; kind: string; cardType?: string }>;
   topN?: number;
+  modelId?: string;
 }): Promise<{ ok: true; results: Array<{ id: string; score: number }> } | { ok: false; error: string }> {
   const gatewayUrl = getGatewayUrl();
   const url = gatewayUrl ? `${gatewayUrl}/api/kb/llm-search` : "/api/kb/llm-search";
@@ -2166,6 +2167,10 @@ async function llmSearch(args: {
     } catch { /* ignore */ }
     return { ok: false, error: "AUTH_REQUIRED" };
   }
+  const modelId = String(args.modelId ?? "").trim() || requirePreferredKbModelId("KB 语义搜索");
+  if (!modelId) {
+    return { ok: false, error: "AGENT_MODEL_REQUIRED" };
+  }
   try {
     const res = await fetch(url, {
       method: "POST",
@@ -2174,6 +2179,7 @@ async function llmSearch(args: {
         query: String(args.query ?? ""),
         candidates: Array.isArray(args.candidates) ? args.candidates : [],
         topN: typeof args.topN === "number" ? Math.max(1, Math.floor(args.topN)) : undefined,
+        model: modelId,
       }),
     });
     const json = await res.json().catch(() => null);
