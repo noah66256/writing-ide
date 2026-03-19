@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export NODE_ENV=production
+
 # 一键部署 Gateway + Admin-web
 #
 # 设计目标：
@@ -66,6 +68,7 @@ fi
 remote_cmd="$(cat <<EOF
 set -euo pipefail
 export PATH=${NODE_BIN}:\$PATH
+export NODE_ENV=production
 cd ${DIR}
 
 # ── 安全检查：确保 data/ 目录存在且不会被意外操作 ──
