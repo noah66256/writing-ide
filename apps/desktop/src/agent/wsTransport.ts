@@ -13,11 +13,10 @@ import { useKbStore } from "../state/kbStore";
 import { useAuthStore } from "../state/authStore";
 import { useRunStore } from "../state/runStore";
 import { cancelInlineFileOpConfirm } from "../state/inlineFileOpConfirm";
-import { activateSkills, looksLikeClarifyQuestions, PERSISTABLE_STATE_KEYS } from "@ohmycrab/agent-core";
+import { activateSkills } from "@ohmycrab/agent-core";
 import { buildStyleLinterLibrariesSidecar, executeToolCall, getTool } from "./toolRegistry";
 import { createRunTarget } from "./runTarget";
 import { cancelConvRun, setConvRunCancel } from "../state/runRegistry";
-import { mergeWorkflowStickyFromMcpSuccess } from "./mcpWorkflowSticky";
 import { buildContextManifestV1, renderContextPackV1, type ContextSegmentV1 } from "@ohmycrab/shared";
 import {
   type GatewayRunController,
@@ -38,6 +37,7 @@ import {
   unifiedDiff,
 } from "./gatewayAgent";
 import { isStyleWorkflowRequestedForRun, resolveImplicitStyleLibraryIds, shouldAllowHistoricalStyleFallback } from "./kbSelection";
+import { getProjectedStepsFromRuntime } from "./threadProjection";
 
 function buildProjectMapSegmentV1(args: { rootDir: string | null; indexFiles: Array<{ path: string; mtime?: number; type?: string }> | null }) {
   const rootDir = args.rootDir ? String(args.rootDir) : "";
@@ -205,6 +205,71 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
     log,
   } = rt;
 
+  const getProjectedRtSteps = () =>
+    getProjectedStepsFromRuntime({
+      steps: rt.getSteps() ?? [],
+      items: rt.getItems() ?? [],
+      activeItemIds: rt.getActiveItemIds() ?? [],
+      collabSessions: rt.getCollabSessions() ?? [],
+    });
+
+  const applyThreadSnapshot = (payload: any) => {
+    const thread = payload?.thread && typeof payload.thread === "object" ? payload.thread : null;
+    const currentTurn = payload?.currentTurn && typeof payload.currentTurn === "object" ? payload.currentTurn : null;
+    const snapshotItems = Array.isArray(payload?.items) ? payload.items : [];
+    const collabSessions = Array.isArray(payload?.collabSessions) ? payload.collabSessions : null;
+    const activeItemIds = Array.isArray(payload?.activeItemIds) ? payload.activeItemIds : null;
+    const currentRootThreadId = String(rt.getThread()?.id ?? "").trim();
+    const incomingThreadId = String(thread?.id ?? "").trim();
+    const isRootSnapshot = Boolean(thread && (!currentRootThreadId || !incomingThreadId || currentRootThreadId === incomingThreadId));
+    if (isRootSnapshot) {
+      rt.setThread(thread);
+    }
+    if (currentTurn?.id) rt.upsertTurn(currentTurn);
+    rt.setItems(snapshotItems);
+    if (collabSessions) rt.setCollabSessions(collabSessions);
+    if (activeItemIds) rt.setActiveItemIds(activeItemIds);
+  };
+
+  const applyTurnRecord = (turn: any) => {
+    if (!turn?.id) return;
+    rt.upsertTurn(turn);
+  };
+
+  const applyItemEvent = (kind: "started" | "completed" | "delta", payload: any) => {
+    const items = rt.getItems();
+    const activeItemIds = rt.getActiveItemIds();
+    if (kind === "delta") {
+      const itemId = String(payload?.itemId ?? "").trim();
+      if (!itemId) return;
+      const idx = items.findIndex((item: any) => String(item?.id ?? "") === itemId);
+      if (idx >= 0) {
+        const current = items[idx];
+        rt.upsertItem({
+          ...current,
+          text: `${String(current?.text ?? "")}${String(payload?.delta ?? "")}`,
+        });
+      }
+      return;
+    }
+    const item = payload?.item && typeof payload.item === "object" ? payload.item : null;
+    if (!item?.id) return;
+    rt.upsertItem(item);
+    const itemId = String(item.id);
+    if (kind === "started") {
+      rt.setActiveItemIds([...activeItemIds, itemId]);
+    } else if (kind === "completed") {
+      rt.setActiveItemIds(activeItemIds.filter((id) => id !== itemId));
+    }
+  };
+
+  const getSubAgentStreamKey = (payload: any) => {
+    const threadId = String(payload?.threadId ?? payload?.runId ?? payload?.childThreadId ?? "").trim();
+    if (threadId) return threadId;
+    const agentId = String(payload?.agentId ?? "").trim();
+    return agentId || null;
+  };
+
   setRunning(true);
   setActivity("正在构建上下文…", { resetTimer: true });
 
@@ -321,145 +386,6 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
     }
     return null;
   };
-  const updateWorkflowSticky = (patch: Record<string, unknown>) => {
-    try {
-      const main = (rt.getMainDoc() ?? {}) as any;
-      const prev = main?.workflowV1 && typeof main.workflowV1 === "object" && !Array.isArray(main.workflowV1)
-        ? (main.workflowV1 as any)
-        : {};
-      const nextSelectedServerIds = Array.isArray((patch as any)?.selectedServerIds)
-        ? Array.from(new Set(((patch as any).selectedServerIds as any[]).map((id) => String(id ?? "").trim()).filter(Boolean))).slice(0, 8)
-        : Array.isArray(prev?.selectedServerIds)
-          ? (prev.selectedServerIds as any[]).map((id) => String(id ?? "").trim()).filter(Boolean).slice(0, 8)
-          : [];
-      const nextPreferredToolNames = Array.isArray((patch as any)?.preferredToolNames)
-        ? Array.from(new Set(((patch as any).preferredToolNames as any[]).map((name) => String(name ?? "").trim()).filter(Boolean))).slice(0, 16)
-        : Array.isArray(prev?.preferredToolNames)
-          ? (prev.preferredToolNames as any[]).map((name) => String(name ?? "").trim()).filter(Boolean).slice(0, 16)
-          : [];
-      updateMainDoc({
-        workflowV1: {
-          ...prev,
-          ...patch,
-          v: 1,
-          selectedServerIds: nextSelectedServerIds,
-          preferredToolNames: nextPreferredToolNames,
-          updatedAt: new Date().toISOString(),
-        },
-      });
-    } catch {
-      // noop
-    }
-  };
-  const updateCompositeTask = (patch: Record<string, unknown>) => {
-    try {
-      const main = (rt.getMainDoc() ?? {}) as any;
-      const prev = main?.compositeTaskV1 && typeof main.compositeTaskV1 === "object" && !Array.isArray(main.compositeTaskV1)
-        ? (main.compositeTaskV1 as any)
-        : {};
-      updateMainDoc({
-        compositeTaskV1: {
-          ...prev,
-          ...patch,
-          v: 1,
-          updatedAt: new Date().toISOString(),
-        },
-      });
-    } catch {
-      // noop
-    }
-  };
-  const markCompositeTaskWaitingOnMaxTurns = () => {
-    try {
-      const main = (rt.getMainDoc() ?? {}) as any;
-      const plan = main?.compositeTaskV1 && typeof main.compositeTaskV1 === "object" && !Array.isArray(main.compositeTaskV1)
-        ? (main.compositeTaskV1 as any)
-        : null;
-      if (!plan) return;
-      const phases = Array.isArray(plan?.phases) ? (plan.phases as any[]) : [];
-      const currentPhase = phases.find((phase: any) => String(phase?.id ?? "") === String(plan?.currentPhaseId ?? "")) ?? phases[0] ?? null;
-      const phaseId = String(currentPhase?.id ?? plan?.currentPhaseId ?? "phase_current").trim() || "phase_current";
-      const phaseTitle = String(currentPhase?.title ?? "当前阶段").trim() || "当前阶段";
-      updateCompositeTask({
-        status: "waiting_user",
-        pendingInput: {
-          id: `pending_${Date.now()}`,
-          phaseId,
-          kind: "resume_or_narrow",
-          question: `已达到${phaseTitle}的回合上限。请继续、缩小范围，或切换到交付阶段。`,
-          replyHint: "continue_or_narrow",
-        },
-      });
-    } catch {
-      // noop
-    }
-  };
-  const deriveWaitingWorkflowPatchFromAssistant = () => {
-    try {
-      const steps = (rt.getSteps() ?? []).slice(runStartStepCount) as any[];
-      const lastAssistant = [...steps].reverse().find((step) => step && step.type === "assistant" && step.variant !== "progress" && String(step.text ?? "").trim());
-      const lastText = String(lastAssistant?.text ?? "").trim();
-      if (!lastText) return null;
-      const main = (rt.getMainDoc() ?? {}) as any;
-      const workflow = main?.workflowV1 && typeof main.workflowV1 === "object" ? main.workflowV1 : {};
-      const workflowKind = String(workflow?.kind ?? "").trim().toLowerCase();
-      const workflowRouteId = String(workflow?.routeId ?? "").trim().toLowerCase();
-      const browserLike = workflowRouteId === "web_radar" || workflowKind === "browser_session" || Array.isArray(workflow?.selectedServerIds) && workflow.selectedServerIds.some((id: any) => /playwright|browser/i.test(String(id ?? "")));
-      const asksForReply = /(请直接回复|回复我|回复[A-Da-d]|A：|B：|你回复|完成后告诉我|登录完成后告诉我|告诉我你下一步|选一个|请回我)/.test(lastText);
-      const asksForLoginFollowUp = /(你先登录|完成登录|登录成功后|已登录|创作中心后台|左侧菜单|数据看板)/.test(lastText);
-      const isGenericClarify = looksLikeClarifyQuestions(lastText);
-
-      // 进入 waiting_user 的三类场景：
-      // 1）浏览器/登录类任务 + 明确“完成后告诉我/选一个”等提示；
-      // 2）浏览器/登录类任务 + 登录类跟进提示；
-      // 3）通用澄清/确认问题（looksLikeClarifyQuestions=true），即便不是 browserLike。
-      const shouldWait =
-        (browserLike && (asksForReply || asksForLoginFollowUp)) ||
-        isGenericClarify;
-      if (!shouldWait) return null;
-
-      return {
-        status: "waiting_user",
-        waiting: {
-          question: lastText.length > 500 ? `${lastText.slice(0, 500).trimEnd()}…` : lastText,
-          replyHint: asksForLoginFollowUp ? "login_or_choice" : "choice",
-        },
-      };
-    } catch {
-      return null;
-    }
-  };
-
-  const noteSuccessfulMcpExecution = (serverId: string, toolName: string) => {
-    try {
-      const main = (rt.getMainDoc() ?? {}) as any;
-      const prevWorkflow = main?.workflowV1;
-      const nextWorkflow = mergeWorkflowStickyFromMcpSuccess(prevWorkflow, { serverId, toolName });
-      updateMainDoc({ workflowV1: nextWorkflow });
-      log("info", "workflow.sticky.mcp_success", {
-        serverId,
-        toolName,
-        prev: {
-          routeId: String(prevWorkflow?.routeId ?? ""),
-          kind: String(prevWorkflow?.kind ?? ""),
-          status: String(prevWorkflow?.status ?? ""),
-          selectedServerIds: Array.isArray(prevWorkflow?.selectedServerIds) ? prevWorkflow.selectedServerIds : [],
-          preferredToolNames: Array.isArray(prevWorkflow?.preferredToolNames) ? prevWorkflow.preferredToolNames : [],
-        },
-        next: {
-          routeId: String(nextWorkflow?.routeId ?? ""),
-          kind: String(nextWorkflow?.kind ?? ""),
-          status: String(nextWorkflow?.status ?? ""),
-          selectedServerIds: Array.isArray(nextWorkflow?.selectedServerIds) ? nextWorkflow.selectedServerIds : [],
-          preferredToolNames: Array.isArray(nextWorkflow?.preferredToolNames) ? nextWorkflow.preferredToolNames : [],
-        },
-      });
-    } catch {
-      // noop
-    }
-  };
-
-
   const syncTodoFailureStateFromRunEnd = (runEndData?: any) => {
     try {
       const failedCount = Number(runEndData?.failureDigest?.failedCount ?? 0) || 0;
@@ -732,12 +658,16 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
         const mentionLibIds = Array.isArray(args.kbMentionIds)
           ? Array.from(new Set(args.kbMentionIds.map((x) => String(x ?? "").trim()).filter(Boolean)))
           : [];
+        const requestedSkillIds = Array.isArray(args.skillRefs) && args.skillRefs.length > 0
+          ? args.skillRefs.map((item) => String(item?.id ?? "").trim()).filter(Boolean)
+          : [];
         const att = rt.getKbAttachedLibraryIds() ?? [];
         const styleWorkflowRequested = Boolean((args as any)?.styleWorkflowRequested) || isStyleWorkflowRequestedForRun({
-          activeSkillIds: args.activeSkillIds,
+          activeSkillIds: requestedSkillIds,
           mentionedLibraryIds: mentionLibIds,
           libraries: useKbStore.getState().libraries ?? [],
           mainDoc: rt.getMainDoc() as any,
+          thread: rt.getThread() as any,
           workflowSkills: (rt as any).getWorkflowSkills?.() ?? (useRunStore.getState() as any).workflowSkills ?? {},
         });
         const sidecarLibraryIds = styleWorkflowRequested
@@ -747,7 +677,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               libraries: useKbStore.getState().libraries ?? [],
               mainDoc: rt.getMainDoc() as any,
               allowHistoricalFallback: shouldAllowHistoricalStyleFallback({
-                activeSkillIds: args.activeSkillIds,
+                activeSkillIds: requestedSkillIds,
                 mentionedLibraryIds: mentionLibIds,
               }),
             })
@@ -848,7 +778,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               referencesText,
               userPrompt: promptForGateway,
               kbMentionIds: args.kbMentionIds,
-              activeSkillIds: args.activeSkillIds,
+              skillRefs: args.skillRefs,
             });
 
       // P3：结构化 contextSegments（优先）+ contextPack 兼容（fallback）。
@@ -971,9 +901,26 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       );
       const hasBuiltinOverrides = Object.keys(builtinOverrides).length > 0;
 
+      const runStateAny: any = useRunStore.getState();
+      const threadState = runStateAny?.thread && typeof runStateAny.thread === "object" ? runStateAny.thread : null;
+      const derivedSkillRefs = Array.isArray(args.skillRefs) && args.skillRefs.length > 0
+        ? args.skillRefs
+            .map((item) => ({
+              id: String(item?.id ?? "").trim(),
+              source: item?.source === "admin" ? "admin" : item?.source === "user" ? "user" : "builtin",
+              activation: item?.activation === "auto" ? "auto" : item?.activation === "sticky" ? "sticky" : "explicit",
+              scope: item?.scope === "turn" ? "turn" : "thread",
+              configPath: typeof item?.configPath === "string" ? item.configPath : null,
+              enabled: item?.enabled !== false,
+            }))
+            .filter((item) => item.id)
+        : [];
+
       socket.send(JSON.stringify({
         type: "run.request",
         payload: {
+          ...(args.convId ? { convId: args.convId } : {}),
+          ...(threadState?.id ? { threadId: threadState.id } : {}),
           model: args.model,
           mode: args.mode,
           opMode: args.opMode ?? "creative",
@@ -984,7 +931,29 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           toolSidecar,
           ...(args.images?.length ? { images: args.images } : {}),
           ...(targetAgentIds ? { targetAgentIds } : {}),
-          ...(args.activeSkillIds?.length ? { activeSkillIds: args.activeSkillIds } : {}),
+          ...(derivedSkillRefs.length ? { skillRefs: derivedSkillRefs } : {}),
+          ...(threadState
+            ? {
+                threadSnapshotHint: {
+                  threadId: threadState.id,
+                  activeSkillRefs: Array.isArray(threadState.activeSkillRefs)
+                    ? threadState.activeSkillRefs
+                    : undefined,
+                  waitingFor: typeof threadState.waitingFor === "string" ? threadState.waitingFor : undefined,
+                  pendingArtifactIds: Array.isArray((runStateAny as any)?.pendingArtifacts)
+                    ? (runStateAny as any).pendingArtifacts
+                        .map((item: any) => String(item?.id ?? "").trim())
+                        .filter(Boolean)
+                    : undefined,
+                  collabSessionIds: Array.isArray(runStateAny?.collabSessions)
+                    ? runStateAny.collabSessions.map((item: any) => String(item?.id ?? "").trim()).filter(Boolean)
+                    : undefined,
+                  collabSessions: Array.isArray(runStateAny?.collabSessions)
+                    ? runStateAny.collabSessions
+                    : undefined,
+                },
+              }
+            : {}),
           ...(typeof (args as any).styleWorkflowRequested === "boolean" ? { styleWorkflowRequested: Boolean((args as any).styleWorkflowRequested) } : {}),
           ...(args.styleExecutionMode ? { styleExecutionMode: args.styleExecutionMode } : {}),
           ...(args.stylePipelinePayload ? { stylePipelinePayload: args.stylePipelinePayload } : {}),
@@ -1148,32 +1117,70 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           const event: string = msg.payload.event;
           const data: any = msg.payload.data ?? {};
 
+          if (event === "thread.snapshot") {
+            log("info", "thread.snapshot", data);
+            applyThreadSnapshot(data);
+            return;
+          }
+
+          if (event === "turn.started" || event === "turn.completed") {
+            log("info", event, data);
+            applyTurnRecord(data?.turn ?? null);
+            return;
+          }
+
+          if (event === "item.started") {
+            applyItemEvent("started", data);
+            return;
+          }
+
+          if (event === "item.delta") {
+            applyItemEvent("delta", data);
+            return;
+          }
+
+          if (event === "item.completed") {
+            applyItemEvent("completed", data);
+            return;
+          }
+
+          if (event === "thread.waiting.updated") {
+            const rootThreadId = String(rt.getThread()?.id ?? "").trim();
+            const eventThreadId = String(data?.threadId ?? "").trim();
+            if (rootThreadId && eventThreadId && rootThreadId !== eventThreadId) return;
+            const prev = rt.getThread() ?? {};
+            rt.setThread({
+              ...prev,
+              waitingFor: data?.waitingFor,
+              waiting: data?.waiting ?? null,
+            } as any);
+            return;
+          }
+
+          if (event === "skills.updated") {
+            const rootThreadId = String(rt.getThread()?.id ?? "").trim();
+            const eventThreadId = String(data?.threadId ?? "").trim();
+            if (rootThreadId && eventThreadId && rootThreadId !== eventThreadId) return;
+            const activeSkillRefs = Array.isArray(data?.activeSkillRefs) ? data.activeSkillRefs : [];
+            const prev = rt.getThread() ?? {};
+            rt.setThread({
+              ...prev,
+              activeSkillRefs,
+            } as any);
+            return;
+          }
+
+          if (event === "collab.session.updated") {
+            const session = data?.session && typeof data.session === "object" ? data.session : null;
+            if (session?.id) rt.upsertCollabSession(session);
+            return;
+          }
+
           // ---- run.start ----
           if (event === "run.start") {
             runId = data?.runId ? String(data.runId) : runId;
             log("info", "agent.run.start", data);
             emitProgressCheckpoint("planning", "先梳理一下这轮任务。", { force: true });
-          }
-
-          // ---- subagent.start ----
-          if (event === "subagent.start") {
-            const agName = String(data?.agentName ?? data?.agentId ?? "");
-            log("info", "subagent.start", data);
-            emitProgressCheckpoint("subagent", agName ? `先让${agName}处理这一段。` : "先分一段给子 Agent 处理。");
-            if (rt.getIsRunning()) {
-              setActivity(agName ? `${agName} 正在执行任务…` : "子 Agent 正在执行任务…", { resetTimer: true });
-            }
-          }
-
-          // ---- subagent.done ----
-          if (event === "subagent.done") {
-            const doneAgId = data?.agentId ? String(data.agentId) : null;
-            if (doneAgId) {
-              const bid = subAgentBubbles.get(doneAgId);
-              if (bid) { finishAssistant(bid); subAgentBubbles.delete(doneAgId); }
-            }
-            log("info", "subagent.done", data);
-            if (rt.getIsRunning()) setActivity("正在汇总结果…");
           }
 
           // ---- run.end ----
@@ -1186,41 +1193,9 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               ? (data.reasonCodes as any[]).map((item) => String(item ?? "").trim().toLowerCase()).filter(Boolean)
               : [];
             const hitMaxTurns = sawMaxTurnsExceeded || endReason === "max_turns" || endReasonCodes.includes("max_turns");
-            const derivedWaitingPatch = endReason === "completed" ? deriveWaitingWorkflowPatchFromAssistant() : null;
             syncTodoFailureStateFromRunEnd(data);
-            if (hitMaxTurns) {
-              updateWorkflowSticky({ status: "waiting_user", lastEndReason: "max_turns" });
-              markCompositeTaskWaitingOnMaxTurns();
-            } else if (endReason === "clarify_waiting" || endReason === "proposal_waiting") {
-              updateWorkflowSticky({ status: "waiting_user", lastEndReason: endReason });
-            } else if (endReason) {
-              if (derivedWaitingPatch) {
-                updateWorkflowSticky({ ...derivedWaitingPatch, lastEndReason: endReason });
-                log("info", "workflow.waiting.derived", derivedWaitingPatch);
-              } else {
-                updateWorkflowSticky({ lastEndReason: endReason });
-              }
-            }
-            try {
-              const report = data?.executionReport;
-              const endRunState = report && typeof report === "object" ? (report as any).runState : null;
-              if (endRunState && typeof endRunState === "object" && !Array.isArray(endRunState)) {
-                const patch: Record<string, unknown> = {};
-                for (const key of PERSISTABLE_STATE_KEYS) {
-                  if (key in endRunState) patch[String(key)] = (endRunState as any)[key];
-                }
-                if (Object.keys(patch).length > 0) {
-                  const shouldClear = endReason === "completed" && !derivedWaitingPatch && !hitMaxTurns;
-                  updateWorkflowSticky({
-                    runStatePatch: shouldClear ? null : patch,
-                  });
-                }
-              }
-            } catch {
-              // runStatePatch 提取失败不影响主流程
-            }
             const failedCount = Number(data?.failureDigest?.failedCount ?? 0) || 0;
-            const shouldForceClearTodo = endReason === "completed" && !derivedWaitingPatch && !hitMaxTurns && failedCount <= 0;
+            const shouldForceClearTodo = endReason === "completed" && !hitMaxTurns && failedCount <= 0;
             clearSettledTodoListIfNeeded({ force: shouldForceClearTodo });
 
             // 兜底记忆提取（异步，不阻塞 UI）：
@@ -1232,7 +1207,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               const mode = (rt.getMode() ?? "chat") as "agent" | "chat";
               const memoryCursor = readMemoryExtractCursor(mode);
 
-              const completeTurns = buildDialogueTurnsFromSteps(rt.getSteps() ?? [])
+              const completeTurns = buildDialogueTurnsFromSteps(getProjectedRtSteps())
                 .filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
 
               if (completeTurns.length > memoryCursor) {
@@ -1271,40 +1246,16 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             const title = String(data?.title ?? "").trim();
             const detail = data?.detail ?? null;
             if (title === "ExecutionContract") {
-              const routeId = String((detail as any)?.routeDecision?.routeId ?? "").trim().toLowerCase();
-              const required = Boolean((detail as any)?.required);
-              if (routeId && required) {
-                const runIntent = String((rt.getMainDoc() as any)?.runIntent ?? "").trim().toLowerCase();
-                updateWorkflowSticky({
-                  status: "running",
-                  routeId,
-                  kind: routeId === "web_radar" ? "browser_session" : "task_workflow",
-                  intentHint: ["writing", "rewrite", "polish", "analysis", "ops"].includes(runIntent) ? runIntent : "ops",
-                  preferredToolNames: Array.isArray((detail as any)?.preferredToolNames) ? (detail as any).preferredToolNames : [],
-                });
-              }
-            }
-            if (title === "McpServerSelection") {
-              const selectedServerIds = Array.isArray((detail as any)?.selectedServerIds)
-                ? ((detail as any).selectedServerIds as any[]).map((id) => String(id ?? "").trim()).filter(Boolean)
-                : [];
-              if (selectedServerIds.length > 0) {
-                updateWorkflowSticky({ status: "running", selectedServerIds });
-              }
+              emitProgressCheckpoint("planning", "先把执行路径梳理一下。");
             }
             if (title === "CompositeTaskPlan") {
-              const plan = detail && typeof detail === "object" ? (detail as any).plan : null;
-              if (plan && typeof plan === "object" && !Array.isArray(plan)) {
-                updateMainDoc({ compositeTaskV1: plan });
-              }
+              emitProgressCheckpoint("planning", "先把执行路径梳理一下。");
+            }
+            if (title === "McpServerSelection") {
+              emitProgressCheckpoint("planning", "先把执行路径梳理一下。");
             }
             if (title === "MaxTurnsExceeded") {
               sawMaxTurnsExceeded = true;
-              updateWorkflowSticky({ status: "waiting_user", lastEndReason: "max_turns" });
-              markCompositeTaskWaitingOnMaxTurns();
-            }
-            if (title === "ExecutionContract" || title === "McpServerSelection" || title === "CompositeTaskPlan") {
-              emitProgressCheckpoint("planning", "先把执行路径梳理一下。");
             }
             if (rt.getIsRunning() && title) {
               setActivity(`系统：${title}`, { resetTimer: true });
@@ -1341,15 +1292,15 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
 
           // ---- assistant.start ----
           if (event === "assistant.start") {
-            const evtAgentId = data?.agentId ? String(data.agentId) : null;
+            const streamKey = getSubAgentStreamKey(data);
             log("info", "assistant.start", data);
-            if (!evtAgentId && sawExternalToolPhase) {
+            if (!streamKey && sawExternalToolPhase) {
               emitProgressCheckpoint("synthesis", "先把拿到的信息整理一下。");
               sawExternalToolPhase = false;
             }
-            if (evtAgentId) {
-              const prev = subAgentBubbles.get(evtAgentId);
-              if (prev) { finishAssistant(prev); subAgentBubbles.delete(evtAgentId); }
+            if (streamKey) {
+              const prev = subAgentBubbles.get(streamKey);
+              if (prev) { finishAssistant(prev); subAgentBubbles.delete(streamKey); }
             } else {
               if (assistantId) finishAssistant(assistantId);
               assistantId = null;
@@ -1360,10 +1311,10 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           // ---- assistant.delta ----
           if (event === "assistant.delta") {
             const delta = data?.delta;
-            const deltaAgentId = data?.agentId ? String(data.agentId) : null;
+            const streamKey = getSubAgentStreamKey(data);
             const deltaAgentName = data?.agentName ? String(data.agentName) : null;
             if (typeof delta === "string" && delta.length) {
-              if (!deltaAgentId) {
+              if (!streamKey) {
                 const narration = classifyNarrationDelta(delta);
                 if (narration) {
                   if (narration.mode === "progress" && narration.text) {
@@ -1373,8 +1324,8 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                 }
               }
               setActivity("正在生成…");
-              if (deltaAgentId) {
-                appendAssistantDelta(ensureSubAgentBubble(deltaAgentId, deltaAgentName ?? undefined), delta);
+              if (streamKey) {
+                appendAssistantDelta(ensureSubAgentBubble(streamKey, deltaAgentName ?? undefined), delta);
               } else {
                 appendAssistantDelta(ensureAssistant(), delta);
               }
@@ -1383,10 +1334,10 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
 
           // ---- assistant.done ----
           if (event === "assistant.done") {
-            const doneAgentId = data?.agentId ? String(data.agentId) : null;
-            if (doneAgentId) {
-              const bid = subAgentBubbles.get(doneAgentId);
-              if (bid) { finishAssistant(bid); subAgentBubbles.delete(doneAgentId); }
+            const streamKey = getSubAgentStreamKey(data);
+            if (streamKey) {
+              const bid = subAgentBubbles.get(streamKey);
+              if (bid) { finishAssistant(bid); subAgentBubbles.delete(streamKey); }
             } else {
               if (assistantId) finishAssistant(assistantId);
               assistantId = null;
@@ -1460,7 +1411,6 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                       ? result.output
                       : { ok: false, error: result?.error ?? "MCP_TOOL_FAILED" };
                   patchTool(stepId, { status: result.ok ? "success" : "failed", output: result.ok ? result.output : failureOutput });
-                  if (result.ok) noteSuccessfulMcpExecution(serverId, name);
                   submitToolResult({
                     toolCallId, name,
                     ok: result.ok,
@@ -1555,7 +1505,6 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                   status: result.ok ? "success" : "failed",
                   output: result.ok ? result.output : failureOutput,
                 });
-                if (result.ok) noteSuccessfulMcpExecution(serverId, name);
                 submitToolResult({
                   toolCallId, name,
                   ok: result.ok,
@@ -1651,7 +1600,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             const failedOutput =
               !exec.result.ok && exec.result.output !== undefined
                 ? exec.result.output
-                : { ok: false, error: exec.result.error };
+                : { ok: false, error: "error" in exec.result ? exec.result.error : "TOOL_EXEC_FAILED" };
 
             patchTool(stepId, {
               status: exec.result.ok ? "success" : "failed",
@@ -1707,7 +1656,6 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                 if (ok0 && st.toolName === "run.done" && out && typeof out === "object") {
                   const note = String((out as any).note ?? "").trim();
                   if (note) runDoneNote = note.slice(0, 200);
-                  updateWorkflowSticky({ status: "done", lastEndReason: "run_done" });
                 }
 
                 // lint.style patch 增强
@@ -1738,7 +1686,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                       const d = unifiedDiff({ path: targetPath, before, after });
                       const preview = {
                         diffUnified: d.diff, truncated: d.truncated, stats: d.stats ?? null, path: targetPath,
-                        note: "lint.style（patch）已生成局部修改提案：点击 Keep 应用 edits；Undo 可回滚。",
+                        note: "lint.style（patch）已生成局部修改提案：点击“应用更改”执行 edits；之后可“回滚更改”。",
                       };
                       const apply = () => {
                         const snap = useProjectStore.getState().snapshot();
@@ -1763,7 +1711,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                       const outPath = `drafts/lint-style-${Date.now()}.md`;
                       const preview = {
                         diffUnified: d.diff, truncated: d.truncated, stats: d.stats ?? null, path: pseudoPath,
-                        note: `lint.style（patch）已生成"纯文本草稿"的局部修改提案：点击 Keep 会写入新文件 ${outPath}；Undo 可回滚。`,
+                        note: `lint.style（patch）已生成"纯文本草稿"的局部修改提案：点击“应用更改”会写入新文件 ${outPath}；之后可“回滚更改”。`,
                       };
                       const apply = () => {
                         const snap = useProjectStore.getState().snapshot();
@@ -1824,10 +1772,6 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           patchAssistant(a, { hidden: false });
           appendAssistantDelta(a, `\n\n[连接中断] 长时间未收到新事件，本轮已停止。请重试一次；若仍复现，再看工具调用审计。\n`);
           finishAssistant(a);
-        }
-        if (sawMaxTurnsExceeded) {
-          updateWorkflowSticky({ status: "waiting_user", lastEndReason: "max_turns" });
-          markCompositeTaskWaitingOnMaxTurns();
         }
         cancelInlineFileOpConfirm();
         setRunning(false); setActivity(null);

@@ -76,7 +76,7 @@ import {
 import { getProviderCapabilities, type ProviderCapabilities } from "./provider/providerCapabilities.js";
 import { PiLoopKernel } from "./kernel/PiLoopKernel.js";
 import type { LoopKernel } from "./kernel/LoopKernel.types.js";
-import { LegacySubAgentBridge } from "./LegacySubAgentBridge.js";
+import { CollabRuntime } from "./collabRuntime.js";
 
 // ── 常量 ─────────────────────────────────────────
 
@@ -253,6 +253,33 @@ function stripMergedActionField(args: Record<string, unknown>): Record<string, u
   return rest;
 }
 
+function translateSpawnAgentArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const roleOrType = String(args.agent_type ?? args.agentId ?? "").trim();
+  const message = String(args.message ?? "").trim();
+  const items = Array.isArray(args.items) ? args.items : [];
+  const itemText = items
+    .map((item: any) => {
+      if (!item || typeof item !== "object") return "";
+      if (typeof item.text === "string" && item.text.trim()) return item.text.trim();
+      if (typeof item.path === "string" && item.path.trim()) return `path: ${item.path.trim()}`;
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
+  const task = [message, itemText].filter(Boolean).join("\n\n").trim();
+  return {
+    agentId: roleOrType,
+    task,
+    prompt: task,
+    context: {
+      role: roleOrType || undefined,
+      model: typeof args.model === "string" ? args.model : undefined,
+      reasoning_effort: typeof args.reasoning_effort === "string" ? args.reasoning_effort : undefined,
+      fork_context: args.fork_context === true,
+    },
+  };
+}
+
 /** 检查是否为 pi-ai 的 Message（user / assistant / toolResult） */
 function isPiMessage(message: unknown): message is Message {
   const role = String((message as any)?.role ?? "");
@@ -326,6 +353,7 @@ export class GatewayRuntime implements AgentRuntime {
   private orchestratorMode = false;
   /** 软提示上次处理时的失败工具计数（避免重复提示） */
   private lastSteeringFailureCount = 0;
+  private readonly collabRuntime: CollabRuntime;
 
   constructor(
     private readonly config: RuntimeConfig & {
@@ -336,6 +364,7 @@ export class GatewayRuntime implements AgentRuntime {
   ) {
     this.mode = config.mode;
     this.shadowMode = config.shadowMode ?? "off";
+    this.collabRuntime = new CollabRuntime(this.config.runCtx);
     this.providerCapabilities = getProviderCapabilities(
       inferProviderApi(this.config),
       { baseUrl: this.config.runCtx.baseUrl, endpoint: this.config.runCtx.endpoint },
@@ -898,7 +927,7 @@ export class GatewayRuntime implements AgentRuntime {
     const lastText = this._getLastAssistantText();
     if (this.orchestratorMode && lastText.length > 300) {
       pushHint(
-        "你是编排者（负责人），禁止直接输出长文内容。请改为通过 agent.delegate 委派给合适成员执行；" +
+        "你是编排者（负责人），禁止直接输出长文内容。请改为通过 spawn_agent 委派给合适成员执行；" +
           "如需联网搜索先委派 topic_planner，写作任务委派 copywriter。",
         ["orchestrator_long_text_blocked"],
       );
@@ -1059,12 +1088,18 @@ export class GatewayRuntime implements AgentRuntime {
   private _isStyleWorkflowWaitingForUser(args?: { styleSkillActive?: boolean }): boolean {
     const runCtx: any = this.config.runCtx;
     const mainDoc: any = runCtx?.mainDoc && typeof runCtx.mainDoc === "object" ? runCtx.mainDoc : {};
-    const workflowRaw = mainDoc?.workflowV1;
+    const taskState = mainDoc?.taskStateV2 && typeof mainDoc.taskStateV2 === "object" ? mainDoc.taskStateV2 : null;
+    const workflowRaw = taskState?.workflow ?? null;
     const workflowObj = workflowRaw && typeof workflowRaw === "object" && !Array.isArray(workflowRaw) ? workflowRaw : null;
+    const threadWaitingFor = String(mainDoc?.threadWaitingFor ?? mainDoc?.waitingFor ?? "").trim().toLowerCase();
     const workflowStatus = String(
-      typeof workflowRaw === "string"
-        ? workflowRaw
-        : workflowObj?.status ?? "",
+      threadWaitingFor === "user"
+        ? "waiting_user"
+        : threadWaitingFor === "approval"
+          ? "waiting_approval"
+          : typeof workflowRaw === "string"
+            ? workflowRaw
+            : workflowObj?.status ?? "",
     ).trim().toLowerCase();
     const workflowKind = String(
       workflowObj?.kind ?? mainDoc?.workflowKind ?? "",
@@ -1498,17 +1533,28 @@ export class GatewayRuntime implements AgentRuntime {
       };
     }
 
-    // agent.delegate：通过子运行 bridge 执行子 Agent
-    // shadow 模式下保持 stub，避免绕过 Desktop dry-run 保护
-    if (toolName === "agent.delegate") {
+    if (toolName === "spawn_agent") {
+      const delegateArgs = translateSpawnAgentArgs(toolArgs);
       if (this.shadowMode === "shadow") {
-        return this._handleDelegateStub(toolCallId, toolArgs);
+        return this._handleDelegateStub(toolCallId, delegateArgs, toolName);
       }
-      return new LegacySubAgentBridge(this.config.runCtx).execute(
-        toolCallId,
-        toolArgs,
-        this.turn,
-      );
+      return this.collabRuntime.spawn(toolCallId, delegateArgs, this.turn);
+    }
+
+    if (toolName === "send_input") {
+      return this.collabRuntime.sendInput(toolArgs);
+    }
+
+    if (toolName === "resume_agent") {
+      return this.collabRuntime.resumeAgent(toolCallId, toolArgs, this.turn);
+    }
+
+    if (toolName === "wait_agent") {
+      return this.collabRuntime.waitAgent(toolArgs);
+    }
+
+    if (toolName === "close_agent") {
+      return this.collabRuntime.closeAgent(toolArgs);
     }
 
     const decision = decideServerToolExecution({
@@ -2329,9 +2375,9 @@ export class GatewayRuntime implements AgentRuntime {
       return;
     }
 
-    if (toolName === "agent.delegate") {
+    if (toolName === "spawn_agent") {
       this.runState.hasPlanCommitment = true;
-      const agentId = String(toolArgs.agentId ?? "").trim();
+      const agentId = String(toolArgs.agentId ?? toolArgs.agent_type ?? "").trim();
       if (agentId) {
         this.runState.delegationCounts = {
           ...this.runState.delegationCounts,
@@ -2495,16 +2541,16 @@ export class GatewayRuntime implements AgentRuntime {
     }
   }
 
-  // ── agent.delegate stub（仅 shadow 模式） ──────
+  // ── spawn_agent stub（仅 shadow 模式） ──────
 
   /**
-   * agent.delegate 占位实现（仅 shadow 模式使用）。
+   * spawn_agent 占位实现（仅 shadow 模式使用）。
    * 记录委派请求和审计事件，但不真正启动子 Agent 循环。
-   * 非 shadow 模式走 LegacySubAgentBridge。
    */
   private _handleDelegateStub(
     toolCallId: string,
     toolArgs: Record<string, unknown>,
+    toolName = "spawn_agent",
   ): GatewayToolExecResult {
     const agentId = String(toolArgs.agentId ?? "").trim();
     const task = String(toolArgs.task ?? toolArgs.prompt ?? "").trim();
@@ -2512,7 +2558,7 @@ export class GatewayRuntime implements AgentRuntime {
     // 审计事件：记录委派请求
     this.config.runCtx.writeEvent("tool.call", {
       toolCallId,
-      name: "agent.delegate",
+      name: toolName,
       args: toolArgs,
       executedBy: "gateway",
       turn: this.turn,

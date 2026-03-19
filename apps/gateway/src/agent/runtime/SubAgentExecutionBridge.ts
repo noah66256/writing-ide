@@ -1,7 +1,7 @@
 /**
- * LegacySubAgentBridge — 子 Agent 委派桥接层
+ * SubAgentExecutionBridge — 子 Agent 执行桥接层
  *
- * 当前由 GatewayRuntime 的 agent.delegate 调用，并继续使用独立 sub-run 的预算/SSE 包装。
+ * 当前由协作运行时调用，并继续使用独立 sub-run 的预算/SSE 包装。
  * 文件名暂保留，仅为减少迁移噪音；内部已不再依赖旧 AgentRunner。
  */
 
@@ -38,7 +38,7 @@ const AGENT_ALIASES: Record<string, string> = {
 
 // ── 导出类型 ─────────────────────────────────────
 
-export type LegacySubAgentBridgeResult = {
+export type SubAgentExecutionBridgeResult = {
   ok: boolean;
   output: unknown;
   meta?: Record<string, unknown> | null;
@@ -195,9 +195,9 @@ function buildTaskMessage(toolArgs: Record<string, unknown>): string {
   return taskMessage;
 }
 
-// ── LegacySubAgentBridge ─────────────────────────
+// ── SubAgentExecutionBridge ──────────────────────
 
-export class LegacySubAgentBridge {
+export class SubAgentExecutionBridge {
   constructor(private readonly parentCtx: RunContext) {}
 
   /**
@@ -208,7 +208,10 @@ export class LegacySubAgentBridge {
     toolCallId: string,
     toolArgs: Record<string, unknown>,
     turn: number,
-  ): Promise<LegacySubAgentBridgeResult> {
+    options?: {
+      extraAbortSignal?: AbortSignal;
+    },
+  ): Promise<SubAgentExecutionBridgeResult> {
     const agentId = String(toolArgs.agentId ?? "").trim();
     const task = String(toolArgs.task ?? toolArgs.prompt ?? "").trim();
 
@@ -255,7 +258,11 @@ export class LegacySubAgentBridge {
     const subAllowedToolNames = new Set(
       (subAgent.tools ?? []).map((n) => String(n ?? "").trim()).filter(Boolean),
     );
-    subAllowedToolNames.delete("agent.delegate"); // 禁止子 Agent 嵌套委派
+    subAllowedToolNames.delete("spawn_agent");
+    subAllowedToolNames.delete("send_input");
+    subAllowedToolNames.delete("resume_agent");
+    subAllowedToolNames.delete("wait_agent");
+    subAllowedToolNames.delete("close_agent");
 
     // ── Abort 控制 ──
     const subAbort = new AbortController();
@@ -266,10 +273,20 @@ export class LegacySubAgentBridge {
     const onParentAbort = () => {
       if (!subAbort.signal.aborted) subAbort.abort();
     };
+    const onExternalAbort = () => {
+      if (!subAbort.signal.aborted) subAbort.abort();
+    };
     if (this.parentCtx.abortSignal.aborted) {
       onParentAbort();
     } else {
       this.parentCtx.abortSignal.addEventListener("abort", onParentAbort, { once: true });
+    }
+    if (options?.extraAbortSignal) {
+      if (options.extraAbortSignal.aborted) {
+        onExternalAbort();
+      } else {
+        options.extraAbortSignal.addEventListener("abort", onExternalAbort, { once: true });
+      }
     }
 
     const budgetTimeout = setTimeout(() => {
@@ -283,6 +300,9 @@ export class LegacySubAgentBridge {
     const subWriteEvent: SseWriter = (event, data) => {
       // 过滤子 Agent 的 run.end 防止 UI 提前终止
       if (event === "run.end") return;
+      // 子线程自己的 thread snapshot / waiting / skills 目前不直接透给父线程主 reducer，
+      // 避免覆盖 parent thread；父线程侧统一以 collab session + child turn/item 感知子任务状态。
+      if (event === "thread.snapshot" || event === "thread.waiting.updated" || event === "skills.updated") return;
 
       if (event === "assistant.delta") {
         const delta = typeof (data as any)?.delta === "string" ? String((data as any).delta) : "";
@@ -300,7 +320,13 @@ export class LegacySubAgentBridge {
       // 注入 agentId/agentName 供 Desktop 路由
       const enriched =
         data && typeof data === "object"
-          ? { ...(data as Record<string, unknown>), agentId: subAgent.id, agentName: subAgent.name }
+          ? {
+              ...(data as Record<string, unknown>),
+              agentId: subAgent.id,
+              agentName: subAgent.name,
+              threadId: subRunId,
+              runId: subRunId,
+            }
           : data;
       this.parentCtx.writeEvent(event, enriched);
     };
@@ -308,6 +334,8 @@ export class LegacySubAgentBridge {
     // ── 构造 sub RunContext ──
     const subCtx: RunContext = {
       runId: subRunId,
+      threadId: subRunId,
+      convId: this.parentCtx.convId ?? null,
       mode: "agent",
       intent: {
         forceProceed: true,
@@ -371,17 +399,6 @@ export class LegacySubAgentBridge {
     const startedAt = Date.now();
     const taskMessage = buildTaskMessage(toolArgs);
 
-    this.parentCtx.writeEvent("subagent.start", {
-      turn,
-      toolCallId,
-      parentRunId: this.parentCtx.runId,
-      runId: subRunId,
-      agentId: subAgent.id,
-      agentName: subAgent.name,
-      budget,
-      modelId: this.parentCtx.modelId,
-    });
-
     let status: "completed" | "error" | "timeout" = "completed";
     let errorDetail: string | null = null;
     let turnsUsed = 0;
@@ -415,6 +432,7 @@ export class LegacySubAgentBridge {
     } finally {
       clearTimeout(budgetTimeout);
       this.parentCtx.abortSignal.removeEventListener("abort", onParentAbort);
+      options?.extraAbortSignal?.removeEventListener("abort", onExternalAbort);
     }
 
     if (toolBudgetExceeded && !errorDetail) {
@@ -428,22 +446,6 @@ export class LegacySubAgentBridge {
 ...[artifact 已截断，共 ${artifact.length} 字符]`;
     }
     const toolCallsUsedFinal = toolCallsUsed;
-
-    this.parentCtx.writeEvent("subagent.done", {
-      turn,
-      toolCallId,
-      parentRunId: this.parentCtx.runId,
-      runId: subRunId,
-      agentId: subAgent.id,
-      agentName: subAgent.name,
-      status,
-      artifact,
-      turnsUsed,
-      toolCallsUsed: toolCallsUsedFinal,
-      budget,
-      durationMs: Math.max(0, Date.now() - startedAt),
-      error: errorDetail ?? undefined,
-    });
 
     return {
       ok: true,

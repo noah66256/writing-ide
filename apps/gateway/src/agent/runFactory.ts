@@ -34,7 +34,6 @@ import {
   isContentWriteTool,
   isWriteLikeTool,
   mergeSkillManifests,
-  PERSISTABLE_STATE_KEYS,
   pickSkillStageKeyForAgentRun,
   parseKbSelectedLibrariesFromContextPack,
   parseMainDocFromContextPack,
@@ -58,6 +57,14 @@ import {
   type CompositeTaskPlanV1,
 } from "./compositeTask.js";
 import { collectToolSchemaIssues } from "@ohmycrab/tools";
+import type {
+  CollabAgentSessionRecord,
+  ItemRecord,
+  SkillRef,
+  TaskStateV2,
+  ThreadRecord,
+  TurnRecord,
+} from "@ohmycrab/shared";
 import {
   type RunContext,
   type SseWriter,
@@ -65,6 +72,15 @@ import {
   type ModelApiType,
 } from "./writingAgentRunner.js";
 import { createRuntime } from "./runtime/RuntimeFactory.js";
+import { ItemEmitter } from "./runtime/itemEmitter.js";
+import {
+  createThreadState,
+  setThreadStatus,
+  upsertCollabAgent,
+  updateActiveSkills,
+  updateTaskState,
+  updateThreadWaiting,
+} from "./runtime/threadState.js";
 import { computeStyleTurnCaps } from "./styleOrchestrator.js";
 import { PipelineExecutor } from "./pipelineExecutor.js";
 import {
@@ -279,7 +295,15 @@ type ToolLayer = "L0_CONTROL" | "L1_LOCAL" | "L2_MCP" | "L3_SUB_AGENT";
 function classifyToolLayer(name: string): ToolLayer {
   const n = String(name ?? "").trim();
   if (!n) return "L1_LOCAL";
-  if (n === "agent.delegate") return "L3_SUB_AGENT"; // 保留分类，当前工具已移除
+  if (
+    n === "spawn_agent" ||
+    n === "send_input" ||
+    n === "resume_agent" ||
+    n === "wait_agent" ||
+    n === "close_agent"
+  ) {
+    return "L3_SUB_AGENT";
+  }
   if (n.startsWith("mcp.")) return "L2_MCP";
   if (n.startsWith("run.") || n === "time.now") return "L0_CONTROL";
   return "L1_LOCAL";
@@ -301,6 +325,21 @@ function inferApiType(endpoint?: string): ModelApiType {
   if (isGeminiLikeEndpoint(ep)) return "gemini";
   if (ep.endsWith("/responses") || ep === "/responses") return "openai-responses";
   return "openai-completions";
+}
+
+function parseSkillRefs(raw: unknown): SkillRef[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((item) => item && typeof item === "object")
+    .map((item: any): SkillRef => ({
+      id: String(item?.id ?? "").trim(),
+      source: item?.source === "admin" ? "admin" : item?.source === "user" ? "user" : "builtin",
+      activation: item?.activation === "auto" ? "auto" : item?.activation === "sticky" ? "sticky" : "explicit",
+      scope: item?.scope === "turn" ? "turn" : "thread",
+      configPath: typeof item?.configPath === "string" ? item.configPath : null,
+      enabled: item?.enabled !== false,
+    }))
+    .filter((item) => item.id);
 }
 
 function buildRouteDecisionV1(args: {
@@ -820,7 +859,7 @@ export function buildAgentProtocolPrompt(args: {
       : `当前模式：Agent（直接执行）。\n` +
         `工作流程：\n` +
         `- 收到任务后：分析需求 → 拆解任务 → 制定 Todo → 直接执行 → 自检 → 交付。\n` +
-        `- 仅在会产生现实后果时才先确认：发布到平台、花钱/投流、群发消息、删除用户已有文件。确认用自然语言一句话（例如”确定进行删除操作吗？”），不要提 Keep/Diff，不要弹窗。\n` +
+        `- 仅在会产生现实后果时才先确认：发布到平台、花钱/投流、群发消息、删除用户已有文件。确认用自然语言一句话（例如”确定进行删除操作吗？”），不要提内部按钮名或 diff 交互，不要弹窗。\n` +
         `- 先判断这轮属于哪类：Directive（明确要求执行/操作） / Inquiry（询问、讨论、分析、解释） / ContinueExistingTask（继续上一轮任务）。\n` +
         `- 默认按 Inquiry 处理；只有明确执行动作、已有任务续跑证据、或工具型目标清晰时，才进入任务闭环。\n` +
         `- 用户若明确要求只回一句/只回 OK/只答是或否，且不需要工具，严格短答并结束。\n` +
@@ -858,7 +897,7 @@ export function buildAgentProtocolPrompt(args: {
         `     只要 Playwright/browser MCP 工具出现在工具列表中，就表示当前已授权可用，直接使用即可。\n` +
         `   - 组合任务：根据需要组合多种工具完成复杂流程，不要跳过必要步骤直接臆造。\n` +
         `   - 修改/延续任务：先读取当前内容，再按用户要求修改；如已有检查结果，一并纳入参考。\n` +
-        `4) 续跑契约（workflowV1）：当你提出”请选择/请确认”并准备结束本轮等待用户时，先写入 mainDoc.workflowV1=waiting_user；用户回复后更新为 running/done。\n` +
+        `4) 续跑契约：当你提出“请选择/请确认”并准备结束本轮等待用户时，通过结构化工具结果或 run.done(reason=clarify_waiting/proposal_waiting) 表达等待意图；不要要求模型自己改写旧状态镜像。\n` +
         `输出约束：\n` +
         `- 给用户看的文字输出必须是 Markdown，不要输出 JSON。\n` +
         `- 不要输出思维链/自言自语（例如"我将…""下一步我会…"）；只输出对用户有用的内容。\n` +
@@ -866,7 +905,7 @@ export function buildAgentProtocolPrompt(args: {
         `- 如果用户要求把结果写入项目，你必须调用相关工具真正写入；不要只在文本里声称"已完成"。\n` +
         `- 若需要调用工具：直接使用工具，不要在工具调用消息中夹带不相关的 Markdown。\n` +
         `- 如需更新多个 Todo/Main Doc：在同一轮中批量调用多个工具，减少回合。\n` +
-        `- 写入类操作遵守系统的 proposal-first / Keep/Undo 机制。\n` +
+        `- 写入类操作遵守系统的 proposal-first 机制：先给出提案，再由用户决定是否应用或回滚。\n` +
         `- 交付文件导航：任务产出了文件（write/code.exec 等写入的文件）时，在最终交付文字中列出所有产出文件的相对路径（如 output/report.md），供用户点击打开。路径直接写纯文本，不要用反引号或代码格式包裹。不要主动调用 file.open 自动打开文件，除非用户明确要求"打开"或"预览"。\n` +
         `- 写作产出格式：写作类任务默认用 write 输出 .md 文件（Markdown 省 token、可 diff、可 proposal-first）。write 只能写纯文本文件（.md/.txt/.json 等），不能创建真实的 .docx/.xlsx/.pptx/.pdf。用户要求 Office/PDF 格式时，优先用对应 MCP 工具（Word MCP / Excel MCP）；仅当工具列表中无对应 MCP 时才退回 code.exec。\n\n` +
         `Skills（必须执行）：\n` +
@@ -1065,20 +1104,87 @@ export function classifyDirectiveIntent(text: string, mentionedSkillIds?: string
   return { kind: "inquiry", reason: "default_inquiry" };
 }
 
-export function readPendingWriteResumeState(args: { mainDoc?: unknown; pendingArtifacts?: any[] | null }) {
-  const doc = args.mainDoc && typeof args.mainDoc === "object" && !Array.isArray(args.mainDoc) ? (args.mainDoc as any) : null;
-  const wf = doc?.workflowV1 && typeof doc.workflowV1 === "object" && !Array.isArray(doc.workflowV1) ? (doc.workflowV1 as any) : null;
-  const kind = String(wf?.kind ?? "").trim().toLowerCase();
-  const status = String(wf?.status ?? "").trim().toLowerCase();
-  const resumeAction = wf?.resumeAction && typeof wf.resumeAction === "object" ? (wf.resumeAction as any) : null;
-  const artifactId = String(resumeAction?.artifactId ?? "").trim();
-  const pathHint = String(resumeAction?.pathHint ?? "").trim();
+function normalizeTaskStateWorkflow(input: unknown): NonNullable<TaskStateV2["workflow"]> | null {
+  const wf = input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : null;
+  if (!wf) return null;
+  const statusRaw = String(wf.status ?? "").trim();
+  const status: NonNullable<TaskStateV2["workflow"]>["status"] | undefined =
+    statusRaw === "running" ||
+    statusRaw === "waiting_user" ||
+    statusRaw === "waiting_approval" ||
+    statusRaw === "done" ||
+    statusRaw === "failed"
+      ? statusRaw
+      : undefined;
+  const selectedServerIds = Array.from(
+    new Set((Array.isArray(wf.selectedServerIds) ? wf.selectedServerIds : []).map((item) => String(item ?? "").trim()).filter(Boolean)),
+  ).slice(0, 8);
+  const preferredToolNames = Array.from(
+    new Set((Array.isArray(wf.preferredToolNames) ? wf.preferredToolNames : []).map((item) => String(item ?? "").trim()).filter(Boolean)),
+  ).slice(0, 16);
+  return {
+    ...(String(wf.kind ?? "").trim() ? { kind: String(wf.kind).trim() } : {}),
+    ...(status ? { status } : {}),
+    ...(String(wf.routeId ?? "").trim() ? { routeId: String(wf.routeId).trim() } : {}),
+    ...(String(wf.intentHint ?? "").trim() ? { intentHint: String(wf.intentHint).trim() } : {}),
+    ...(String(wf.updatedAt ?? "").trim() ? { updatedAt: String(wf.updatedAt).trim() } : {}),
+    ...(String(wf.lastEndReason ?? "").trim() ? { lastEndReason: String(wf.lastEndReason).trim() } : {}),
+    ...(selectedServerIds.length ? { selectedServerIds } : {}),
+    ...(preferredToolNames.length ? { preferredToolNames } : {}),
+    ...(wf.resumeAction && typeof wf.resumeAction === "object" && !Array.isArray(wf.resumeAction) ? { resumeAction: wf.resumeAction as Record<string, unknown> } : {}),
+    ...(wf.waiting && typeof wf.waiting === "object" && !Array.isArray(wf.waiting) ? { waiting: wf.waiting as Record<string, unknown> } : {}),
+  };
+}
+
+function normalizeTaskStatePendingArtifacts(input: unknown): NonNullable<TaskStateV2["pendingArtifacts"]> {
+  return (Array.isArray(input) ? input : [])
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const statusRaw = String((item as any)?.status ?? "pending").trim().toLowerCase();
+      const status = statusRaw === "used" || statusRaw === "discarded" ? statusRaw : "pending";
+      const id = String((item as any)?.id ?? "").trim();
+      const kind = String((item as any)?.kind ?? "").trim();
+      if (!id || !kind) return null;
+      return {
+        id,
+        kind,
+        status,
+        ...(String((item as any)?.pathHint ?? "").trim() ? { pathHint: String((item as any).pathHint).trim() } : {}),
+        ...(String((item as any)?.updatedAt ?? "").trim() ? { updatedAt: String((item as any).updatedAt).trim() } : {}),
+      };
+    })
+    .filter((item): item is NonNullable<TaskStateV2["pendingArtifacts"]>[number] => Boolean(item));
+}
+
+function upsertThreadPendingArtifact(
+  items: NonNullable<TaskStateV2["pendingArtifacts"]>,
+  artifact: NonNullable<TaskStateV2["pendingArtifacts"]>[number],
+): NonNullable<TaskStateV2["pendingArtifacts"]> {
+  const next = [...items];
+  const idx = next.findIndex((item) => item.id === artifact.id);
+  if (idx >= 0) next[idx] = { ...next[idx], ...artifact };
+  else next.push(artifact);
+  return next;
+}
+
+export function readPendingWriteResumeState(args: { taskState?: unknown; pendingArtifacts?: any[] | null }) {
+  const state = args.taskState && typeof args.taskState === "object" && !Array.isArray(args.taskState) ? (args.taskState as any) : null;
+  const resume = state?.resume && typeof state.resume === "object" && !Array.isArray(state.resume) ? (state.resume as any) : null;
+  const workflow = state?.workflow && typeof state.workflow === "object" && !Array.isArray(state.workflow) ? (state.workflow as any) : null;
+  const kind = String(workflow?.kind ?? "").trim().toLowerCase();
+  const status = String(workflow?.status ?? "").trim().toLowerCase();
+  const artifactId = String(resume?.artifactId ?? "").trim();
+  const pathHint = String(resume?.pathHint ?? "").trim();
   const pendingList = Array.isArray(args.pendingArtifacts) ? args.pendingArtifacts : [];
   const artifact = artifactId
     ? pendingList.find((x: any) => x && typeof x === "object" && String(x?.id ?? "").trim() === artifactId && String(x?.status ?? "pending").trim().toLowerCase() === "pending")
     : pendingList.find((x: any) => x && typeof x === "object" && String(x?.status ?? "pending").trim().toLowerCase() === "pending" && (!pathHint || String(x?.pathHint ?? "").trim() === pathHint));
-  const waiting = kind === "project_open_resume_write" && status === "waiting_user";
-  return { waiting, kind, status, resumeAction, artifact: artifact ?? null, pathHint };
+  const waiting =
+    resume?.canResumePendingWrite === true &&
+    Boolean(artifact) &&
+    (!kind || kind === "project_open_resume_write") &&
+    (!status || status === "waiting_user");
+  return { waiting, kind, status, resume, artifact: artifact ?? null, pathHint };
 }
 
 export function shouldPreferPendingWriteResumeFromTaskState(args: {
@@ -1090,33 +1196,8 @@ export function shouldPreferPendingWriteResumeFromTaskState(args: {
 }): boolean {
   if (!args.projectDirAvailable) return false;
   if (hasExplicitSkillMention(args.mentionedSkillIds)) return false;
-  const state = args.taskState && typeof args.taskState === "object" ? args.taskState : null;
-  const resume = state && typeof (state as any).resume === "object" ? (state as any).resume : null;
-  if (!resume || resume.canResumePendingWrite !== true || !String((resume as any).artifactId ?? "").trim()) return false;
-  const prompt = String(args.userPrompt ?? "").trim();
-  if (!prompt) return true;
-  if (looksLikeExplicitNonTaskPrompt(prompt)) return false;
-  if (looksLikePendingResumeOverridePrompt(prompt)) return false;
-  const looksLikeFreshTask =
-    !looksLikeWorkflowContinuationPrompt(prompt, args.mentionedSkillIds) &&
-    prompt.length >= 16 &&
-    Boolean(args.intent?.isWritingTask || args.intent?.wantsWrite || looksLikeResearchOnlyPrompt(prompt));
-  if (looksLikeFreshTask) return false;
-  return true;
-}
-
-export function shouldPreferPendingWriteResume(args: {
-  mainDoc?: unknown;
-  pendingArtifacts?: any[] | null;
-  userPrompt: string;
-  projectDirAvailable: boolean;
-  intent?: any;
-  mentionedSkillIds?: string[];
-}): boolean {
-  if (!args.projectDirAvailable) return false;
-  if (hasExplicitSkillMention(args.mentionedSkillIds)) return false;
-  const state = readPendingWriteResumeState({ mainDoc: args.mainDoc, pendingArtifacts: args.pendingArtifacts });
-  if (!state.waiting || !state.artifact) return false;
+  const state = readPendingWriteResumeState({ taskState: args.taskState, pendingArtifacts: [] });
+  if (!state.waiting && !String((state.resume as any)?.artifactId ?? "").trim()) return false;
   const prompt = String(args.userPrompt ?? "").trim();
   if (!prompt) return true;
   if (looksLikeExplicitNonTaskPrompt(prompt)) return false;
@@ -1145,11 +1226,14 @@ export function looksLikeWorkflowContinuationPrompt(text: string, mentionedSkill
 
 export function readWorkflowStickyState(mainDoc: unknown): WorkflowStickyState {
   const doc = mainDoc && typeof mainDoc === "object" && !Array.isArray(mainDoc) ? (mainDoc as any) : null;
-  const wf = doc?.workflowV1 && typeof doc.workflowV1 === "object" && !Array.isArray(doc.workflowV1)
-    ? (doc.workflowV1 as any)
+  const taskState = doc?.taskStateV2 && typeof doc.taskStateV2 === "object" && !Array.isArray(doc.taskStateV2)
+    ? (doc.taskStateV2 as TaskStateV2)
+    : null;
+  const wf = taskState?.workflow && typeof taskState.workflow === "object" && !Array.isArray(taskState.workflow)
+    ? (taskState.workflow as any)
     : null;
   const routeId = String(wf?.routeId ?? "").trim().toLowerCase();
-  const intentHint = String(wf?.intentHint ?? wf?.stickyIntent ?? "").trim().toLowerCase();
+  const intentHint = String(wf?.intentHint ?? "").trim().toLowerCase();
   const kind = String(wf?.kind ?? "").trim().toLowerCase();
   const status = String(wf?.status ?? "").trim().toLowerCase();
   const selectedServerIds: string[] = Array.from(new Set(
@@ -1685,8 +1769,8 @@ export function computeIntentRouteDecisionPhase0(args: {
         nextAction: "enter_workflow",
         todoPolicy: "required",
         toolPolicy: "allow_readonly",
-        reason: "sticky：继承 workflowV1 浏览器/网页执行上下文",
-        derivedFrom: ["workflowV1:web_radar", ...derivedFrom],
+        reason: "sticky：继承 taskState.workflow 浏览器/网页执行上下文",
+        derivedFrom: ["taskState.workflow:web_radar", ...derivedFrom],
         routeId: "web_radar",
       };
     }
@@ -1697,8 +1781,8 @@ export function computeIntentRouteDecisionPhase0(args: {
         nextAction: stickyRoute.nextAction,
         todoPolicy: stickyRoute.todoPolicy,
         toolPolicy: stickyRoute.toolPolicy,
-        reason: "sticky：继承 workflowV1 执行上下文（" + stickyRoute.routeId + "）",
-        derivedFrom: ["workflowV1:" + stickyRoute.routeId, ...derivedFrom],
+        reason: "sticky：继承 taskState.workflow 执行上下文（" + stickyRoute.routeId + "）",
+        derivedFrom: ["taskState.workflow:" + stickyRoute.routeId, ...derivedFrom],
         routeId: stickyRoute.routeId,
       };
     }
@@ -1896,12 +1980,14 @@ export function normalizeIntentRouteFromRouterAny(d0: any): IntentRouteDecision 
 }
 
 const agentRunBodySchema = z.object({
+  convId: z.string().min(1).max(200).optional(),
+  threadId: z.string().min(1).max(200).optional(),
   model: z.string().optional(),
   mode: z.enum(["agent", "chat"]).optional(),
   opMode: z.enum(["creative", "assistant"]).optional(),
   prompt: z.string().min(1),
   targetAgentIds: z.array(z.string()).max(5).optional(),
-  activeSkillIds: z.array(z.string()).max(10).optional(),
+  skillRefs: z.array(z.any()).max(20).optional(),
   styleWorkflowRequested: z.boolean().optional(),
   builtinOverrides: z.record(z.string(), z.object({ enabled: z.boolean().optional() })).optional(),
   styleExecutionMode: z.enum(["agent_v1", "pipeline_v1"]).optional(),
@@ -1912,6 +1998,14 @@ const agentRunBodySchema = z.object({
   /** P3：结构化上下文段落（优先于 contextPack） */
   contextSegments: z.array(z.any()).max(200).optional(),
   contextManifest: z.any().optional(),
+  threadSnapshotHint: z.object({
+    threadId: z.string().min(1).max(200).optional(),
+    activeSkillRefs: z.array(z.any()).max(20).optional(),
+    waitingFor: z.enum(["none", "user", "approval"]).optional(),
+    pendingArtifactIds: z.array(z.string().min(1).max(200)).max(20).optional(),
+    collabSessionIds: z.array(z.string().min(1).max(200)).max(20).optional(),
+    collabSessions: z.array(z.any()).max(20).optional(),
+  }).optional(),
   images: z.array(z.object({
     mediaType: z.string().min(1).max(200),
     data: z.string().min(1),
@@ -2004,6 +2098,7 @@ export type PreparedRun = {
   effectiveToolPolicy: ToolPolicy;
   intentRouterTrace: any;
   activeSkills: any[];
+  explicitSkillRefs: SkillRef[];
   activeSkillIds: string[];
   rawActiveSkillIds: string[];
   suppressedSkillIds: string[];
@@ -2162,9 +2257,9 @@ export async function prepareAgentRun(args: {
     recentDialogue: (recentDialogueFromPack as any) ?? undefined,
   });
 
-  const mentionedSkillIds = Array.isArray((body as any).activeSkillIds)
-    ? ((body as any).activeSkillIds as any[]).map((x: any) => String(x ?? "").trim()).filter(Boolean)
-    : [];
+  const explicitSkillRefs = parseSkillRefs((body as any).skillRefs);
+  const explicitSkillIds = explicitSkillRefs.filter((item) => item.enabled !== false).map((item) => item.id);
+  const mentionedSkillIds = explicitSkillIds;
   const mentionedSkillIdSet = new Set(mentionedSkillIds);
   const styleWorkflowRequested = Boolean((body as any).styleWorkflowRequested);
 
@@ -2182,13 +2277,6 @@ export async function prepareAgentRun(args: {
   const projectDirCandidate = normalizeIdeMeta({ ideSummary: ideSummaryFromSidecar, contextPack: contextPackForParsing, kbSelected: kbSelectedList }).projectDir;
   const preferPendingWriteResume = shouldPreferPendingWriteResumeFromTaskState({
     taskState: taskStateFromPack,
-    userPrompt,
-    projectDirAvailable: Boolean(projectDirCandidate),
-    intent,
-    mentionedSkillIds,
-  }) || shouldPreferPendingWriteResume({
-    mainDoc: mainDocFromPack,
-    pendingArtifacts: pendingArtifactsFromPack,
     userPrompt,
     projectDirAvailable: Boolean(projectDirCandidate),
     intent,
@@ -2233,6 +2321,7 @@ export async function prepareAgentRun(args: {
     kbSelected: kbSelectedList as any,
     intent,
     manifests: skillManifestsEffective as any,
+    explicitSkillIds,
   });
 
   // 合并 @ 提及但未自动激活的 Skill（须遵守 conflicts/requires）
@@ -3321,17 +3410,9 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
   }
 
   const compositeTaskSummary = summarizeCompositeTaskPlan(compositeTaskPlan);
-  const workflowFromPack = mainDocFromPack && typeof mainDocFromPack === "object" ? (mainDocFromPack as any)?.workflowV1 ?? null : null;
-  const pendingResumeState = readPendingWriteResumeState({ mainDoc: mainDocFromPack, pendingArtifacts: pendingArtifactsFromPack });
+  const pendingResumeState = readPendingWriteResumeState({ taskState: taskStateFromPack, pendingArtifacts: pendingArtifactsFromPack });
   const shouldResumePendingWrite = shouldPreferPendingWriteResumeFromTaskState({
     taskState: taskStateFromPack,
-    userPrompt,
-    projectDirAvailable: Boolean(projectDirFromSidecar),
-    intent,
-    mentionedSkillIds,
-  }) || shouldPreferPendingWriteResume({
-    mainDoc: mainDocFromPack,
-    pendingArtifacts: pendingArtifactsFromPack,
     userPrompt,
     projectDirAvailable: Boolean(projectDirFromSidecar),
     intent,
@@ -3382,7 +3463,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       ? ([{ role: "system", content: `用户当前已打开项目目录：${projectDirFromSidecar}\n项目内的文件操作（read/write/project.search 等）均基于此目录。` }] as OpenAiChatMessage[])
       : ([{ role: "system", content: `当前没有打开项目文件夹。文件写入工具（write/doc.splitToDir/mkdir 等）和代码执行工具（code.exec）需要项目目录才能正常工作。\n如果任务需要写入文件或执行代码，请在第一步提醒用户点击输入框左下角的文件夹按钮选择或创建一个项目文件夹。` }] as OpenAiChatMessage[])),
     ...(shouldResumePendingWrite
-      ? ([{ role: "system", content: `检测到这是一次“恢复上轮未落盘写入”的续跑：上轮因未打开项目目录而阻塞，现在项目目录已可用。\n你必须优先复用 Context Pack 中的 PENDING_ARTIFACTS 里的现成正文，直接调用 write 保存到 workflowV1.resumeAction.pathHint；不要重新调研，不要重新生成正文。\n写入成功后，把 workflowV1.status 更新为 done。` }] as OpenAiChatMessage[])
+      ? ([{ role: "system", content: `检测到这是一次“恢复上轮未落盘写入”的续跑：上轮因未打开项目目录而阻塞，现在项目目录已可用。\n你必须优先复用 Context Pack 中的 PENDING_ARTIFACTS 里的现成正文，直接调用 write 保存到 ${pendingResumeState.pathHint || "TASK_STATE.resume.pathHint"}；不要重新调研，不要重新生成正文。\n写入成功后，结束这次恢复写入，不要再把同一份待恢复产物重复保存一遍。` }] as OpenAiChatMessage[])
       : []),
     ...assembledContext.messages,
     { role: "user", content: body.prompt },
@@ -3468,22 +3549,6 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
   });
 
   const workflowSticky = readWorkflowStickyState(mainDocFromPack);
-  const isNewTask = looksLikeExplicitNewTaskPrompt(String(userPrompt ?? "").trim());
-  if (workflowSticky.isFresh && !isNewTask) {
-    const wfDoc = mainDocFromPack && typeof mainDocFromPack === "object"
-      ? (mainDocFromPack as any)?.workflowV1
-      : null;
-    const patch = wfDoc && typeof wfDoc === "object" && !Array.isArray(wfDoc)
-      ? (wfDoc as any).runStatePatch
-      : null;
-    if (patch && typeof patch === "object" && !Array.isArray(patch)) {
-      for (const key of PERSISTABLE_STATE_KEYS) {
-        if (key in patch && key in runState) {
-          (runState as any)[key] = (patch as any)[key];
-        }
-      }
-    }
-  }
 
   (runState as any).lengthRetryBudget = (() => {
     const t = Number(targetChars as any);
@@ -3898,7 +3963,9 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
           }
         }
         // 启动阶段先做一次本地/受控动作建立上下文
-        boot.delete("agent.delegate"); // 兜底清理
+        for (const name of Array.from(boot)) {
+          if (classifyToolLayer(name) === "L3_SUB_AGENT") boot.delete(name);
+        }
       }
       if (boot.size > 0) {
         // 兜底：执行启动阶段同样不应剪掉 CORE_TOOLS。
@@ -4049,6 +4116,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       effectiveToolPolicy,
       intentRouterTrace,
       activeSkills,
+      explicitSkillRefs,
       activeSkillIds,
       rawActiveSkillIds,
       suppressedSkillIds,
@@ -4295,7 +4363,162 @@ export async function executeAgentRun(args: {
     }
   };
 
+  const threadId = String((body as any).threadId ?? (body as any).convId ?? runId).trim() || runId;
+  const hintedSkillRefs = parseSkillRefs((body as any)?.threadSnapshotHint?.activeSkillRefs);
+  const hintedSkillRefById = new Map(hintedSkillRefs.map((item) => [item.id, item] as const));
+  const activeSkillRefById = new Map([
+    ...hintedSkillRefById.entries(),
+    ...prepared.explicitSkillRefs.map((item) => [item.id, item] as const),
+  ]);
+  const hintedSkillIds = hintedSkillRefs.map((item) => item.id);
+  const activeSkillRefsSeed: SkillRef[] = prepared.activeSkillIds.map(
+    (id): SkillRef =>
+      activeSkillRefById.get(id) ?? {
+        id,
+        source: "builtin",
+        activation: hintedSkillIds.includes(id) ? "sticky" : "auto",
+        scope: "thread",
+        configPath: null,
+        enabled: true,
+      },
+  );
+  const taskStateFromPack =
+    prepared.mainDocFromPack?.taskStateV2 && typeof prepared.mainDocFromPack.taskStateV2 === "object"
+      ? (prepared.mainDocFromPack.taskStateV2 as TaskStateV2)
+      : null;
+  const initialTaskState: TaskStateV2 = {
+    runIntent: prepared.intent?.isWritingTask
+      ? "writing"
+      : taskStateFromPack?.runIntent === "analysis" || String(prepared.mainDocFromPack?.runIntent ?? "").trim() === "analysis"
+        ? "analysis"
+        : "auto",
+    workflow: normalizeTaskStateWorkflow(taskStateFromPack?.workflow ?? null),
+    compositeTask: taskStateFromPack?.compositeTask && typeof taskStateFromPack.compositeTask === "object"
+      ? (taskStateFromPack.compositeTask as Record<string, unknown>)
+      : null,
+    pendingArtifacts: normalizeTaskStatePendingArtifacts(taskStateFromPack?.pendingArtifacts ?? null),
+  };
+  let threadState: ThreadRecord = createThreadState({
+    threadId,
+    convId: typeof (body as any).convId === "string" ? (body as any).convId : null,
+    activeSkillRefs: activeSkillRefsSeed,
+    taskState: initialTaskState,
+  });
+  const threadSnapshotHint =
+    (body as any).threadSnapshotHint && typeof (body as any).threadSnapshotHint === "object"
+      ? ((body as any).threadSnapshotHint as Record<string, unknown>)
+      : null;
+  if (threadSnapshotHint?.waitingFor === "user" || threadSnapshotHint?.waitingFor === "approval") {
+    threadState = updateThreadWaiting({
+      thread: threadState,
+      waitingFor: threadSnapshotHint.waitingFor,
+      waiting: {
+        kind: threadSnapshotHint.waitingFor === "approval" ? "approval" : "clarify",
+        updatedAt: new Date().toISOString(),
+      },
+    });
+  }
+  let collabSessions: CollabAgentSessionRecord[] = Array.isArray(threadSnapshotHint?.collabSessions)
+    ? (threadSnapshotHint.collabSessions as CollabAgentSessionRecord[]).filter((item) => item && typeof item === "object")
+    : [];
+  for (const session of collabSessions) {
+    threadState = upsertCollabAgent(threadState, {
+      threadId: session.childThreadId,
+      agentId: session.agentId,
+      role: session.role,
+      status: session.status,
+    });
+  }
+  let activeItemIds: string[] = [];
+  let snapshotItems: ItemRecord[] = [];
+  const itemEmitter = new ItemEmitter(threadId);
+  let turnRecord: TurnRecord = {
+    id: `${threadId}:turn:0`,
+    threadId,
+    seq: 0,
+    status: "in_progress",
+    startedAt: new Date().toISOString(),
+    reasonCodes: [],
+    itemIds: [],
+    executionReport: null,
+  };
+  let snapshotSeq = 0;
   let currentTurn = 0;
+  const emitRaw = (event: string, payload: unknown) => {
+    transport.writeEventRaw(event, payload);
+    if (event !== "assistant.delta") recordRunAuditEvent(audit, event, payload);
+  };
+  const emitThreadSnapshot = (extra?: Partial<TurnRecord>) => {
+    snapshotSeq += 1;
+    const current = extra ? { ...turnRecord, ...extra } : turnRecord;
+    emitRaw("thread.snapshot", {
+      thread: threadState,
+      currentTurn: current,
+      items: snapshotItems,
+      collabSessions,
+      activeItemIds,
+      stream: {
+        snapshotSeq,
+        cursor: `${threadId}:${snapshotSeq}`,
+        replaceStrategy: "replace",
+      },
+      emittedAt: new Date().toISOString(),
+    });
+  };
+  const emitThreadWaitingUpdated = () => {
+    emitRaw("thread.waiting.updated", {
+      threadId,
+      waitingFor: threadState.waitingFor,
+      waiting: threadState.waiting ?? null,
+      emittedAt: new Date().toISOString(),
+    });
+  };
+  const clearThreadWaiting = () => {
+    if (threadState.waitingFor === "none" && !threadState.waiting) return;
+    threadState = updateThreadWaiting({
+      thread: threadState,
+      waitingFor: "none",
+    });
+    emitThreadWaitingUpdated();
+  };
+  const patchThreadTaskState = (updater: (prev: TaskStateV2 | null) => TaskStateV2 | null) => {
+    threadState = updateTaskState(threadState, updater(threadState.taskState ?? null));
+  };
+  const patchThreadWorkflow = (patch: Record<string, unknown> | null) => {
+    patchThreadTaskState((prev) => {
+      const workflow = {
+        ...((prev?.workflow && typeof prev.workflow === "object") ? (prev.workflow as Record<string, unknown>) : {}),
+        ...(patch ?? {}),
+      };
+      return {
+        ...(prev ?? {}),
+        workflow: normalizeTaskStateWorkflow(workflow),
+      };
+    });
+  };
+  const setThreadPendingArtifacts = (items: NonNullable<TaskStateV2["pendingArtifacts"]>) => {
+    patchThreadTaskState((prev) => ({
+      ...(prev ?? {}),
+      pendingArtifacts: items,
+    }));
+  };
+  const emitSkillsUpdated = () => {
+    emitRaw("skills.updated", {
+      threadId,
+      activeSkillRefs: threadState.activeSkillRefs,
+      reasonCodes: ["thread_snapshot_sync"],
+      emittedAt: new Date().toISOString(),
+    });
+  };
+  const upsertCollabSessionRecord = (session: CollabAgentSessionRecord) => {
+    const nextSession = { ...session };
+    const idx = collabSessions.findIndex((item) => item.id === nextSession.id);
+    if (idx >= 0) {
+      collabSessions = collabSessions.map((item, index) => (index === idx ? nextSession : item));
+    } else {
+      collabSessions = [...collabSessions, nextSession];
+    }
+  };
   const writeEvent = (event: string, data: unknown) => {
     const payload = (() => {
       if (!String(event ?? "").startsWith("assistant.")) return data;
@@ -4304,8 +4527,234 @@ export async function executeAgentRun(args: {
       if (p.turn !== undefined) return data;
       return { ...p, turn: currentTurn };
     })();
-    transport.writeEventRaw(event, payload);
-    if (event !== "assistant.delta") recordRunAuditEvent(audit, event, payload);
+    const payloadTurn = Number((payload as any)?.turn);
+    if (Number.isFinite(payloadTurn) && payloadTurn >= 0 && payloadTurn !== currentTurn) {
+      currentTurn = Math.floor(payloadTurn);
+      turnRecord = {
+        ...turnRecord,
+        id: `${threadId}:turn:${currentTurn}`,
+        seq: currentTurn,
+      };
+    }
+    for (const itemEvent of itemEmitter.onLegacyEvent(event, payload)) {
+      emitRaw(itemEvent.event, itemEvent.data);
+      const item = (itemEvent.data as any)?.item;
+      const itemId = String(item?.id ?? "");
+      if (itemId && !turnRecord.itemIds.includes(itemId)) {
+        turnRecord = { ...turnRecord, itemIds: [...turnRecord.itemIds, itemId] };
+      }
+      if (item && typeof item === "object" && itemId) {
+        snapshotItems = [...snapshotItems.filter((entry) => entry.id !== itemId), item as ItemRecord];
+      }
+      if (itemEvent.event === "item.started" && itemId && !activeItemIds.includes(itemId)) {
+        activeItemIds = [...activeItemIds, itemId];
+      }
+      if (itemEvent.event === "item.completed" && itemId) {
+        activeItemIds = activeItemIds.filter((id) => id !== itemId);
+      }
+    }
+    if (event === "tool.result") {
+      const p: any = payload && typeof payload === "object" ? (payload as any) : null;
+      const toolName = String(p?.name ?? "").trim();
+      const output = p?.output && typeof p.output === "object" ? (p.output as Record<string, unknown>) : null;
+      const ok = p?.ok === true;
+      if (toolName.startsWith("mcp.") && ok) {
+        const serverId = String(toolName.split(".")[1] ?? "").trim();
+        const workflowState = (threadState.taskState?.workflow ?? {}) as Record<string, unknown>;
+        const selectedServerIds = Array.isArray(workflowState.selectedServerIds)
+          ? (workflowState.selectedServerIds as unknown[]).map((item) => String(item ?? "").trim()).filter(Boolean)
+          : [];
+        const preferredToolNames = Array.isArray(workflowState.preferredToolNames)
+          ? (workflowState.preferredToolNames as unknown[]).map((item) => String(item ?? "").trim()).filter(Boolean)
+          : [];
+        patchThreadWorkflow({
+          status: "running",
+          routeId: /playwright|browser/i.test(toolName) ? "web_radar" : String(workflowState.routeId ?? "task_execution"),
+          kind: /playwright|browser/i.test(toolName) ? "browser_session" : String(workflowState.kind ?? "task_workflow"),
+          updatedAt: new Date().toISOString(),
+          selectedServerIds: Array.from(
+            new Set([...selectedServerIds, ...(serverId ? [serverId] : [])]),
+          ).slice(0, 8),
+          preferredToolNames: Array.from(
+            new Set([...preferredToolNames, toolName]),
+          ).slice(0, 16),
+        });
+      }
+      if (toolName === "write") {
+        const workflowState = (threadState.taskState?.workflow ?? {}) as Record<string, unknown>;
+        const errorCode = String(output?.error ?? "").trim().toUpperCase();
+        if (!ok && errorCode === "NO_PROJECT") {
+          const artifactId = String(output?.pending_artifact_id ?? "").trim();
+          const pathHint = String(output?.path ?? "").trim();
+          const nowIso = new Date().toISOString();
+          const nextPendingArtifacts = artifactId
+            ? upsertThreadPendingArtifact(
+                normalizeTaskStatePendingArtifacts(threadState.taskState?.pendingArtifacts),
+                {
+                  id: artifactId,
+                  kind: "doc_write",
+                  status: "pending",
+                  ...(pathHint ? { pathHint } : {}),
+                  updatedAt: nowIso,
+                },
+              )
+            : normalizeTaskStatePendingArtifacts(threadState.taskState?.pendingArtifacts);
+          setThreadPendingArtifacts(nextPendingArtifacts);
+          patchThreadWorkflow({
+            kind: "project_open_resume_write",
+            status: "waiting_user",
+            updatedAt: nowIso,
+            lastEndReason: "no_project",
+            resumeAction: {
+              type: "write",
+              artifactId: artifactId || undefined,
+              pathHint: pathHint || undefined,
+            },
+          });
+          threadState = updateThreadWaiting({
+            thread: threadState,
+            waitingFor: "user",
+            waiting: {
+              kind: "resume_or_narrow",
+              question: String(output?.message ?? "请先打开项目文件夹，之后我会继续保存上轮结果。").trim() || "请先打开项目文件夹，之后我会继续保存上轮结果。",
+              replyHint: "open_project",
+              updatedAt: nowIso,
+            },
+          });
+          emitThreadWaitingUpdated();
+        } else if (ok && String(workflowState.kind ?? "").trim() === "project_open_resume_write") {
+          const nowIso = new Date().toISOString();
+          const resumeAction = workflowState.resumeAction && typeof workflowState.resumeAction === "object"
+            ? (workflowState.resumeAction as Record<string, unknown>)
+            : null;
+          const artifactId = String(resumeAction?.artifactId ?? "").trim();
+          const nextPendingArtifacts = normalizeTaskStatePendingArtifacts(threadState.taskState?.pendingArtifacts).map((item) =>
+            artifactId && item.id === artifactId ? ({ ...item, status: "used" as const, updatedAt: nowIso }) : item,
+          );
+          setThreadPendingArtifacts(nextPendingArtifacts);
+          patchThreadWorkflow({
+            status: "done",
+            updatedAt: nowIso,
+            lastEndReason: "resumed_write_done",
+          });
+        }
+      }
+    }
+    if (event === "collab.session.updated") {
+      const session =
+        payload && typeof payload === "object" && (payload as any).session && typeof (payload as any).session === "object"
+          ? ((payload as any).session as CollabAgentSessionRecord)
+          : null;
+      if (session?.id) {
+        upsertCollabSessionRecord(session);
+        threadState = upsertCollabAgent(threadState, {
+          threadId: session.childThreadId,
+          agentId: session.agentId,
+          role: session.role,
+          status: session.status,
+        });
+        emitThreadSnapshot();
+      }
+    }
+    if (event === "run.start") {
+      clearThreadWaiting();
+      threadState = setThreadStatus(threadState, "running");
+      turnRecord = {
+        ...turnRecord,
+        id: `${threadId}:turn:${currentTurn}`,
+        seq: currentTurn,
+        status: "in_progress",
+        startedAt: new Date().toISOString(),
+        reasonCodes: [],
+      };
+      emitRaw("turn.started", { turn: turnRecord, emittedAt: new Date().toISOString() });
+      emitSkillsUpdated();
+      emitThreadSnapshot();
+    }
+    if (event === "run.end") {
+      const p: any = payload && typeof payload === "object" ? (payload as any) : null;
+      const reason = String(p?.reason ?? "").trim().toLowerCase();
+      const reasonCodes = Array.isArray(p?.reasonCodes)
+        ? (p.reasonCodes as any[]).map((item) => String(item ?? "").trim()).filter(Boolean)
+        : [];
+      const nowIso = new Date().toISOString();
+      if (reason === "clarify_waiting" || reason === "proposal_waiting") {
+        patchThreadWorkflow({
+          status: "waiting_user",
+          updatedAt: nowIso,
+          lastEndReason: reason,
+        });
+        threadState = updateThreadWaiting({
+          thread: threadState,
+          waitingFor: "user",
+          waiting: {
+            kind: reason === "proposal_waiting" ? "proposal" : "clarify",
+            updatedAt: nowIso,
+          },
+        });
+        emitThreadWaitingUpdated();
+      } else if (reason === "max_turns") {
+        patchThreadWorkflow({
+          status: "waiting_user",
+          updatedAt: nowIso,
+          lastEndReason: "max_turns",
+        });
+        threadState = updateThreadWaiting({
+          thread: threadState,
+          waitingFor: "user",
+          waiting: {
+            kind: "resume_or_narrow",
+            updatedAt: nowIso,
+          },
+        });
+        emitThreadWaitingUpdated();
+      } else if (reason === "completed") {
+        patchThreadWorkflow({
+          status: "done",
+          updatedAt: nowIso,
+          lastEndReason: "completed",
+        });
+        clearThreadWaiting();
+        threadState = setThreadStatus(threadState, "completed");
+      } else if (reason) {
+        if (threadState.waitingFor === "none") {
+          patchThreadWorkflow({
+            status: "failed",
+            updatedAt: nowIso,
+            lastEndReason: reason,
+          });
+          clearThreadWaiting();
+          threadState = setThreadStatus(threadState, "failed");
+        } else {
+          patchThreadWorkflow({
+            status: "waiting_user",
+            updatedAt: nowIso,
+            lastEndReason: reason,
+          });
+          threadState = setThreadStatus(threadState, "waiting");
+        }
+      }
+      if (p?.executionReport && typeof p.executionReport === "object") {
+        turnRecord = { ...turnRecord, executionReport: p.executionReport as Record<string, unknown> };
+      }
+      turnRecord = {
+        ...turnRecord,
+        status:
+          reason === "completed"
+            ? "completed"
+            : reason === "aborted" || reason === "cancelled"
+              ? "aborted"
+              : reason === "interrupted"
+                ? "interrupted"
+                : "failed",
+        completedAt: new Date().toISOString(),
+        reason,
+        reasonCodes,
+      };
+      emitRaw("turn.completed", { turn: turnRecord, emittedAt: new Date().toISOString() });
+      emitThreadSnapshot(turnRecord);
+    }
+    emitRaw(event, payload);
     if (event === "run.end") {
       const p: any = payload && typeof payload === "object" ? (payload as any) : null;
       ensureRunAuditEnded(audit, {
@@ -4351,6 +4800,36 @@ export async function executeAgentRun(args: {
   };
 
   try {
+  patchThreadTaskState((prev) => {
+    const workflowPrev = (prev?.workflow ?? {}) as Record<string, unknown>;
+    return {
+      ...(prev ?? {}),
+      runIntent: prepared.intent?.isWritingTask
+        ? "writing"
+        : taskStateFromPack?.runIntent === "analysis" || String(prepared.mainDocFromPack?.runIntent ?? "").trim() === "analysis"
+          ? "analysis"
+          : prev?.runIntent ?? "auto",
+      workflow: normalizeTaskStateWorkflow({
+        ...workflowPrev,
+        kind:
+          intentRoute.routeId === "web_radar"
+            ? "browser_session"
+            : String(workflowPrev.kind ?? "").trim() || "task_workflow",
+        status: "running",
+        routeId: intentRoute.routeId ?? (String(workflowPrev.routeId ?? "").trim() || undefined),
+        intentHint:
+          prepared.intent?.isWritingTask
+            ? "writing"
+            : String(workflowPrev.intentHint ?? "").trim() || "ops",
+        updatedAt: new Date().toISOString(),
+        lastEndReason: null,
+        selectedServerIds: mcpServerSelectionSummary.selectedServerIds,
+        preferredToolNames: Array.from(selectedAllowedToolNames).slice(0, 12),
+      }),
+      compositeTask: compositeTaskPlan ?? prev?.compositeTask ?? null,
+      pendingArtifacts: normalizeTaskStatePendingArtifacts(taskStateFromPack?.pendingArtifacts ?? prev?.pendingArtifacts ?? null),
+    };
+  });
   writeEvent("run.start", { runId, model, mode });
   if (!TOOL_SCHEMA_NOTICE_EMITTED && TOOL_SCHEMA_ISSUES.length > 0) {
     TOOL_SCHEMA_NOTICE_EMITTED = true;
@@ -4806,6 +5285,8 @@ export async function executeAgentRun(args: {
 
   const runCtx: RunContext = {
     runId,
+    threadId,
+    convId: typeof (body as any).convId === "string" ? (body as any).convId : null,
     mode: mode as "agent" | "chat",
     opMode: ((body as any).opMode === "assistant" ? "assistant" : "creative"),
     intent,
@@ -4851,6 +5332,7 @@ export async function executeAgentRun(args: {
     computePerTurnAllowed,
     targetChars: targetChars ?? null,
     resolveSubAgentModel,
+    threadSnapshotHint: (body as any).threadSnapshotHint ?? undefined,
     mainDoc: mainDocFromPack && typeof mainDocFromPack === "object" ? { ...(mainDocFromPack as Record<string, unknown>) } : {},
     customAgentDefinitions: personaFromPack?.customAgentDefinitions ?? [],
     l1Memory: l1MemoryFromPack || "",

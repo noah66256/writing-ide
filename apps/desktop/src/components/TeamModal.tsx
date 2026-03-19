@@ -40,7 +40,7 @@ const DEFAULT_FORM: FormData = {
 };
 
 const AVAILABLE_TOOLS = TOOL_LIST.filter(
-  (t) => t.name !== "agent.delegate" && !t.name.startsWith("agent.config."),
+  (t) => !t.name.startsWith("agent.config."),
 ).map((t) => t.name);
 
 function defToForm(def: SubAgentDefinition): FormData {

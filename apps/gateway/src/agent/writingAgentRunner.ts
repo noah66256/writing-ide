@@ -86,6 +86,8 @@ export type ModelApiType =
 
 export type RunContext = {
   runId: string;
+  threadId?: string;
+  convId?: string | null;
   mode: "agent" | "chat";
   opMode?: "creative" | "assistant";
   intent: RunIntent;
@@ -119,6 +121,15 @@ export type RunContext = {
   ) => Promise<{ modelId: string; apiKey: string; baseUrl: string; endpoint?: string; toolResultFormat?: "xml" | "text" } | null>;
   /** 初始运行状态：由 gateway 从 contextPack 预初始化（hasTodoList、multiWrite 等），供 runner 继承。 */
   initialRunState?: RunState;
+  /** Desktop 传回的 thread 快照摘要，供 gateway 恢复/纠偏 live state。 */
+  threadSnapshotHint?: {
+    threadId?: string;
+    activeSkillRefs?: Array<Record<string, unknown>>;
+    waitingFor?: "none" | "user" | "approval";
+    pendingArtifactIds?: string[];
+    collabSessionIds?: string[];
+    collabSessions?: Array<Record<string, unknown>>;
+  };
   /** 用户通过 @mention 指定的目标子 Agent ID 列表 */
   targetAgentIds?: string[];
   /** 子 Agent ID（设置后 writeEvent 自动注入 agentId 到每条 SSE 事件） */
@@ -154,7 +165,7 @@ export type RunContext = {
     reason?: string;
   };
 
-  /** Custom agent definitions from Desktop (for agent.delegate to resolve custom agents) */
+  /** Custom agent definitions from Desktop (for spawn_agent to resolve custom agents) */
   customAgentDefinitions?: SubAgentDefinition[];
   /** 注入给子 Agent 的 L1 全局记忆（裁剪过的 section 子集） */
   l1Memory?: string;
@@ -608,7 +619,14 @@ function inferAgentNeededCapabilities(toolNames: Iterable<string>): Set<string> 
   const needed = new Set<string>();
   for (const rawName of toolNames) {
     const name = String(rawName ?? "").trim();
-    if (!name || name === "agent.delegate") continue;
+    if (
+      !name ||
+      name === "spawn_agent" ||
+      name === "send_input" ||
+      name === "resume_agent" ||
+      name === "wait_agent" ||
+      name === "close_agent"
+    ) continue;
     const meta = TOOL_LIST.find((t) => t.name === name);
     const caps = inferCapabilities(name, String(meta?.description ?? ""), "builtin");
     for (const cap of caps) {
@@ -2028,9 +2046,9 @@ export class AgentRunner {
     // Build synthetic tool_use blocks for each target agent
     const toolUses = validAgents.map((agent: any, i: number) => ({
       type: "tool_use" as const,
-      id: `bootstrap_delegate_${i}_${Date.now()}`,
-      name: "agent.delegate",
-      input: { agentId: agent.id, task: userMessage } as Record<string, unknown>,
+      id: `bootstrap_spawn_agent_${i}_${Date.now()}`,
+      name: "spawn_agent",
+      input: { agent_type: agent.id, message: userMessage, fork_context: true } as Record<string, unknown>,
     }));
 
     // Push synthetic assistant message with delegation calls
@@ -2255,23 +2273,23 @@ export class AgentRunner {
       });
     }
 
-    const delegateCalls: { index: number; toolUse: ContentBlockToolUse }[] = [];
+    const collabCalls: { index: number; toolUse: ContentBlockToolUse }[] = [];
     const regularCalls: { index: number; toolUse: ContentBlockToolUse }[] = [];
     completedToolUses.forEach((toolUse, i) => {
       if (this._isDeliveryCandidateTool(toolUse.name)) {
         this.hasDeliveryWriteAttempt = true;
         this.deliverabilityNoWriteTurns = 0;
       }
-      if (toolUse.name === "agent.delegate") delegateCalls.push({ index: i, toolUse });
+      if (toolUse.name === "spawn_agent") collabCalls.push({ index: i, toolUse });
       else regularCalls.push({ index: i, toolUse });
     });
 
     const orderedResults: { index: number; toolUse: ContentBlockToolUse; result: ToolExecResult }[] = [];
     const presetResults = opts?.presetResults ?? new Map<string, ToolExecResult>();
 
-    if (delegateCalls.length > 0) {
+    if (collabCalls.length > 0) {
       const delegateResults = await Promise.all(
-        delegateCalls.map(async ({ index, toolUse }) => {
+        collabCalls.map(async ({ index, toolUse }) => {
           const preset = presetResults.get(toolUse.id);
           const result = preset ?? (await this._executeTool(toolUse));
           return { index, toolUse, result };
@@ -3050,7 +3068,7 @@ export class AgentRunner {
     }
 
     // Sub-agent delegation: intercept before generic server tool routing
-    if (toolUse.name === "agent.delegate") {
+    if (toolUse.name === "spawn_agent") {
       this.ctx.writeEvent("tool.call", {
         toolCallId: toolUse.id,
         name: toolUse.name,
@@ -3396,8 +3414,8 @@ export class AgentRunner {
     toolUse: ContentBlockToolUse,
     rawArgs: Record<string, unknown>,
   ): Promise<ToolExecResult> {
-    const agentId = String(rawArgs.agentId ?? "").trim();
-    const task = String(rawArgs.task ?? "").trim();
+    const agentId = String(rawArgs.agentId ?? rawArgs.agent_type ?? "").trim();
+    const task = String(rawArgs.task ?? rawArgs.message ?? "").trim();
 
     if (!agentId) {
       return { ok: false, output: { ok: false, error: "VALIDATION_ERROR", detail: "agentId is required" } };
@@ -3469,11 +3487,15 @@ export class AgentRunner {
       inherited: { modelId: subModelId, endpoint: subEndpoint, apiType: inferApiType(subEndpoint) },
     });
 
-    // Sub-agent tools: from definition, exclude agent.delegate (prevent nesting)
+    // Sub-agent tools: from definition, exclude collab tools (prevent nesting)
     const subAllowedToolNames = new Set(
       (subAgent.tools ?? []).map((n) => String(n ?? "").trim()).filter(Boolean),
     );
-    subAllowedToolNames.delete("agent.delegate");
+    subAllowedToolNames.delete("spawn_agent");
+    subAllowedToolNames.delete("send_input");
+    subAllowedToolNames.delete("resume_agent");
+    subAllowedToolNames.delete("wait_agent");
+    subAllowedToolNames.delete("close_agent");
 
     // 仅注入与子 Agent 角色能力匹配的 MCP 工具，避免全量注入导致上下文膨胀
     const mcpTools: any[] = Array.isArray((this.ctx as any).mcpTools) ? (this.ctx as any).mcpTools : [];
@@ -3734,17 +3756,6 @@ export class AgentRunner {
       taskMessage += `\n\n## 验收标准\n${acceptanceCriteria}`;
     }
 
-    this.ctx.writeEvent("subagent.start", {
-      turn: this.turn,
-      toolCallId: toolUse.id,
-      parentRunId: this.ctx.runId,
-      runId: subRunId,
-      agentId: subAgent.id,
-      agentName: subAgent.name,
-      budget,
-      modelId: subModelId,
-    });
-
     let status: "completed" | "error" | "timeout" = "completed";
     let errorDetail: string | null = null;
 
@@ -3774,22 +3785,6 @@ export class AgentRunner {
     const artifact = extractLastAssistantText(messages);
     const turnsUsed = subRunner.getTurn();
     const toolCallsUsedFinal = Math.max(toolCallsUsed, countAssistantToolUses(messages));
-
-    this.ctx.writeEvent("subagent.done", {
-      turn: this.turn,
-      toolCallId: toolUse.id,
-      parentRunId: this.ctx.runId,
-      runId: subRunId,
-      agentId: subAgent.id,
-      agentName: subAgent.name,
-      status,
-      artifact,
-      turnsUsed,
-      toolCallsUsed: toolCallsUsedFinal,
-      budget,
-      durationMs: Math.max(0, Date.now() - startedAt),
-      error: errorDetail ?? undefined,
-    });
 
     this.runState.hasPlanCommitment = true;
 
@@ -3889,10 +3884,10 @@ export class AgentRunner {
       return;
     }
 
-    if (name === "agent.delegate") {
+    if (name === "spawn_agent") {
       this.runState.hasPlanCommitment = true;
       // 累加委派计数
-      const agentId = String((toolUse.input as any)?.agentId ?? "").trim();
+      const agentId = String((toolUse.input as any)?.agentId ?? (toolUse.input as any)?.agent_type ?? "").trim();
       if (agentId) {
         const counts = this.runState.delegationCounts ?? {};
         counts[agentId] = (counts[agentId] ?? 0) + 1;
@@ -4069,7 +4064,7 @@ export class AgentRunner {
 
     // 若当前输出本身就是一条面向用户的澄清/确认问题（clarify question），
     // 则本轮应以“等待用户”结束，而不是继续强行重试 Todo/写入等契约。
-    // 这里不直接设置 outcome（由上层 runFactory/桌面端通过 run.end + workflowV1.waiting 来对齐），
+    // 这里不直接设置 outcome（由上层 runFactory/线程 waiting 状态统一收口），
     // 但通过关闭 AutoRetry，避免在“问你但仍继续跑”场景下再次触发工具调用或二次模型请求。
     if (assistantHasText && this._looksLikeClarifyQuestion(assistantText)) {
       return false;

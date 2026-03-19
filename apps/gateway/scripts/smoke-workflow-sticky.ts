@@ -8,15 +8,16 @@ function ok(name: string) {
 const freshIso = new Date().toISOString();
 
 const browserMainDoc = {
-  workflowV1: {
-    v: 1,
-    status: "running",
-    routeId: "web_radar",
-    kind: "browser_session",
-    intentHint: "ops",
-    selectedServerIds: ["playwright"],
-    preferredToolNames: ["mcp.playwright.browser_navigate"],
-    updatedAt: freshIso,
+  taskStateV2: {
+    workflow: {
+      status: "running",
+      routeId: "web_radar",
+      kind: "browser_session",
+      intentHint: "ops",
+      selectedServerIds: ["playwright"],
+      preferredToolNames: ["mcp.playwright.browser_navigate"],
+      updatedAt: freshIso,
+    },
   },
 };
 
@@ -33,13 +34,14 @@ assert.equal(browserRoute.routeId, "web_radar");
 ok("sticky.browser_route");
 
 const taskMainDoc = {
-  workflowV1: {
-    v: 1,
-    status: "running",
-    routeId: "task_execution",
-    kind: "task_workflow",
-    intentHint: "writing",
-    updatedAt: freshIso,
+  taskStateV2: {
+    workflow: {
+      status: "running",
+      routeId: "task_execution",
+      kind: "task_workflow",
+      intentHint: "writing",
+      updatedAt: freshIso,
+    },
   },
 };
 

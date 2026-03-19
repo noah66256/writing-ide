@@ -18,6 +18,7 @@ import {
   type StyleWorkflowStepIdV1,
   type TaskSpecV1,
 } from "@ohmycrab/agent-core";
+import type { SkillRef } from "@ohmycrab/shared";
 import { usePersonaStore } from "../state/personaStore";
 import { useTeamStore, getEffectiveAgents } from "../state/teamStore";
 import { useSkillStore } from "../state/skillStore";
@@ -30,6 +31,7 @@ import {
   resolveImplicitStyleLibrarySelection,
   shouldAllowHistoricalStyleFallback,
 } from "./kbSelection";
+import { buildPendingFileProposalsFromItems, getProjectedStepsFromRuntime } from "./threadProjection";
 
 export function authHeader(): Record<string, string> {
   const token = String(useAuthStore.getState().accessToken ?? "").trim();
@@ -61,7 +63,7 @@ export type GatewayRunArgs = {
   opMode?: OpMode;
   targetAgentId?: string;
   targetAgentIds?: string[];
-  activeSkillIds?: string[];
+  skillRefs?: SkillRef[];
   styleWorkflowRequested?: boolean;
   kbMentionIds?: string[];
   images?: ImageAttachment[];
@@ -234,130 +236,11 @@ async function buildStyleStepMaterialsV1(args: {
 
 export async function buildStylePipelinePayload(args: {
   userPrompt: string;
-  activeSkillIds?: string[];
   kbMentionIds?: string[];
 }): Promise<{ styleExecutionMode?: StyleExecutionMode; stylePipelinePayload?: StylePipelinePayloadV1 }> {
-  const activeSkillIds = Array.isArray(args.activeSkillIds) ? args.activeSkillIds.map((x) => String(x ?? "").trim()).filter(Boolean) : [];
   // 风格仿写已迁移为 agent 自驱动（kind: workflow），不再走 PipelineExecutor
   // 风格库数据通过 context pack 的 STYLE_CATALOG / STYLE_DIMENSIONS 段传递
   return {};
-
-  // --- 以下为保留的 pipeline_v1 构建逻辑（V3 不再触发） ---
-  // eslint-disable-next-line no-unreachable
-  const kb = useKbStore.getState();
-  const rt: any = useRunStore.getState() as any;
-  const mainDoc: any = rt.getMainDoc?.() ?? rt.mainDoc ?? {};
-  const mentionedLibraryIds = Array.isArray(args.kbMentionIds) ? args.kbMentionIds.map((x) => String(x ?? "").trim()).filter(Boolean) : [];
-  const attachedLibraryIds = Array.isArray(rt.kbAttachedLibraryIds)
-    ? rt.kbAttachedLibraryIds.map((x: any) => String(x ?? "").trim()).filter(Boolean)
-    : [];
-  const resolved = resolveImplicitStyleLibrarySelection({
-    mentionedLibraryIds,
-    attachedLibraryIds,
-    libraries: kb.libraries ?? [],
-    mainDoc,
-    allowHistoricalFallback: shouldAllowHistoricalStyleFallback({
-      activeSkillIds,
-      mentionedLibraryIds,
-    }),
-  });
-  const [libraryId] = resolved.libraryIds;
-  if (!libraryId) {
-    const styleLibCount = (kb.libraries ?? []).filter((lib: any) => String(lib?.purpose ?? "").trim() === "style").length;
-    console.warn(
-      `[buildStylePipelinePayload] pipeline blocked: ${resolved.error ?? "NO_LIBRARY_SELECTED"} source=${resolved.source} styleLibCount=${styleLibCount} attachedCount=${attachedLibraryIds.length}`,
-    );
-    return {};
-  }
-
-  const libraryMeta = (kb.libraries ?? []).find((lib: any) => String(lib?.id ?? "").trim() === libraryId) as any;
-  const fpRet = await kb.getLatestLibraryFingerprint(libraryId).catch(() => ({ ok: false } as any));
-  const snapshot = fpRet?.ok ? (fpRet as any).snapshot : null;
-  const clustersRaw = Array.isArray(snapshot?.clustersV1) ? snapshot.clustersV1 : [];
-  const cfg = await kb.getLibraryStyleConfig(libraryId).catch(() => ({ ok: false } as any));
-  const defaultClusterId = cfg?.ok ? String((cfg as any).defaultClusterId ?? "").trim() : "";
-  const topicText = buildTopicTextForSelectorV1({ userPrompt: args.userPrompt, mainDoc });
-  const selectedClusterIdFromMainDoc =
-    String(mainDoc?.styleContractV1?.libraryId ?? "").trim() === libraryId
-      ? String(mainDoc?.styleContractV1?.selectedCluster?.id ?? "").trim()
-      : "";
-  const selectedClusterId = selectedClusterIdFromMainDoc || pickClusterSelectorV1({ clusters: clustersRaw, defaultClusterId, topicText }).selectedId || defaultClusterId || String(clustersRaw?.[0]?.id ?? "").trim();
-  if (!selectedClusterId) return {};
-  const selectedCluster = clustersRaw.find((item: any) => String(item?.id ?? "").trim() === selectedClusterId) ?? null;
-  const rawRules =
-    (cfg?.ok && (cfg as any)?.clusterRulesV1 && typeof (cfg as any).clusterRulesV1 === "object"
-      ? (cfg as any).clusterRulesV1?.[selectedClusterId]
-      : null) ??
-    mainDoc?.styleContractV1?.clusterRulesV1 ??
-    null;
-  const clusterRules = normalizeClusterRulesV1({
-    clusterId: selectedClusterId,
-    raw: rawRules,
-    fallbackValues: mainDoc?.styleContractV1?.values,
-    fallbackAnalysisLenses: mainDoc?.styleContractV1?.analysisLenses,
-  });
-  if (!clusterRules) return {};
-
-  const styleProfileCard = await (async () => {
-    const ret = await kb.listCardsForLibrary({
-      libraryId,
-      cardTypes: ["style_profile"],
-      limit: 1,
-      includeContent: true,
-    }).catch(() => ({ ok: false } as any));
-    if (!ret?.ok || !Array.isArray(ret.cards) || !ret.cards.length) return null;
-    return ret.cards[0]?.artifact ?? null;
-  })();
-
-  const selectionText = (() => {
-    const project = useProjectStore.getState();
-    const ed = project.editorRef;
-    const model = ed?.getModel?.();
-    const sel = ed?.getSelection?.();
-    if (!ed || !model || !sel) return "";
-    const text = String(model.getValueInRange(sel) ?? "").trim();
-    return text;
-  })();
-  const scene = selectionText || /(改写|润色|重写|改稿)/.test(args.userPrompt) ? "source_rewrite" : "topic_only";
-  const sourceMaterial = selectionText ? { title: mainDoc?.title ?? null, text: selectionText } : null;
-  const materialsTopicQuery = topicBriefForKbQueryV1({ userPrompt: args.userPrompt, mainDoc }) || args.userPrompt;
-  const outputPath = deriveStylePipelineOutputPath({ userPrompt: args.userPrompt, mainDoc });
-  const taskSpec: TaskSpecV1 = {
-    version: "v1",
-    taskId: `style_pipeline_${Date.now()}`,
-    scene,
-    prompt: String(args.userPrompt ?? "").trim(),
-    ...(outputPath ? { outputPath } : {}),
-    platform: null,
-    audience: null,
-    wordCount: null,
-    factBoundary: scene === "source_rewrite" ? "preserve_source" : "only_from_values",
-    language: "zh-CN",
-    styleTarget: {
-      libraryId,
-      clusterId: selectedClusterId,
-      clusterRulesVersion: "cluster_rules_v1",
-      styleProfileCardId: styleProfileCard ? String(styleProfileCard.id ?? "").trim() || null : null,
-    },
-    clusterRules,
-    ...(sourceMaterial ? { sourceMaterial } : {}),
-  };
-
-  const materialsByStep = await buildStyleStepMaterialsV1({
-    libraryId,
-    topicQuery: materialsTopicQuery,
-    taskSpec,
-  });
-
-  return {
-    styleExecutionMode: "pipeline_v1",
-    stylePipelinePayload: {
-      version: "v1",
-      pipelineConfigId: STYLE_WORKFLOW_PIPELINE_CONFIG_V1.id,
-      taskSpec,
-      materialsByStep,
-    },
-  };
 }
 
 
@@ -581,8 +464,8 @@ export function humanizeToolActivity(name: string, args: Record<string, unknown>
   }
   if (tool === "lint.style") return "正在做风格校验…";
   if (tool === "lint.copy") return "正在做抄袭/复述风险检查…";
-  if (tool === "agent.delegate") {
-    const agentId = String((args as any)?.agentId ?? (args as any)?.targetAgentId ?? "").trim();
+  if (tool === "spawn_agent") {
+    const agentId = String((args as any)?.agentId ?? (args as any)?.agent_type ?? "").trim();
     const agentName = BUILTIN_SUB_AGENTS.find((a) => a.id === agentId)?.name ?? agentId;
     return agentName ? `正在委派${agentName}…` : "正在委派子 Agent…";
   }
@@ -1191,9 +1074,22 @@ function renderContextManifestV1(args: { mode: Mode; segments: ContextManifestSe
   return `CONTEXT_MANIFEST(JSON):\n${JSON.stringify(payload, null, 2)}\n\n`;
 }
 
-function renderTaskStateV1(args: { mainDoc: any; todoList: any[]; pendingArtifacts: any[]; workflowSkills?: any }) {
+function renderTaskStateV1(args: { mainDoc: any; todoList: any[]; pendingArtifacts: any[]; workflowSkills?: any; thread?: any }) {
   const mainDoc = args.mainDoc && typeof args.mainDoc === "object" ? args.mainDoc : {};
-  const workflow = mainDoc && typeof (mainDoc as any).workflowV1 === "object" ? (mainDoc as any).workflowV1 : null;
+  const thread = args.thread && typeof args.thread === "object" ? args.thread : null;
+  const taskState = thread?.taskState && typeof thread.taskState === "object" ? thread.taskState : null;
+  const workflow =
+    taskState?.workflow && typeof taskState.workflow === "object"
+      ? {
+          ...taskState.workflow,
+          status:
+            String(thread?.waitingFor ?? "").trim().toLowerCase() === "user"
+              ? "waiting_user"
+              : String(thread?.waitingFor ?? "").trim().toLowerCase() === "approval"
+                ? "waiting_approval"
+                : (taskState.workflow as any)?.status,
+        }
+      : null;
   const todo = Array.isArray(args.todoList) ? args.todoList : [];
   const pendingArtifacts = (Array.isArray(args.pendingArtifacts) ? args.pendingArtifacts : [])
     .filter((x) => x && typeof x === "object")
@@ -1245,6 +1141,20 @@ function renderTaskStateV1(args: { mainDoc: any; todoList: any[]; pendingArtifac
     payload.workflowSkills = args.workflowSkills;
   }
   return `TASK_STATE(JSON):\n${JSON.stringify(payload, null, 2)}\n\n`;
+}
+
+function projectMainDocFromThreadState(rawMainDoc: any, thread: any) {
+  const mainDoc = rawMainDoc && typeof rawMainDoc === "object" ? { ...(rawMainDoc as any) } : {};
+  const taskState = thread?.taskState && typeof thread.taskState === "object"
+    ? (thread.taskState as any)
+    : null;
+  if (taskState) {
+    mainDoc.taskStateV2 = taskState;
+  }
+  if (typeof thread?.waitingFor === "string") {
+    mainDoc.threadWaitingFor = thread.waitingFor;
+  }
+  return mainDoc;
 }
 
 /** 将证据原文/anchor 降级为"句式特征描述"，防止模型照抄原文。 */
@@ -1584,6 +1494,16 @@ export function buildDialogueTurnsFromSteps(steps: any[], opts?: BuildDialogueTu
   return turns;
 }
 
+function getRuntimeProjectedSteps() {
+  const run = useRunStore.getState() as any;
+  return getProjectedStepsFromRuntime({
+    steps: run.steps ?? [],
+    items: run.items ?? [],
+    activeItemIds: run.activeItemIds ?? [],
+    collabSessions: run.collabSessions ?? [],
+  });
+}
+
 function buildRecentDialogueJsonFromTurns(turns: DialogueTurn[], maxTurns: number) {
   const t = Array.isArray(turns) ? turns : [];
   const n = Number.isFinite(Number(maxTurns)) ? Math.max(0, Math.floor(Number(maxTurns))) : 0;
@@ -1621,8 +1541,14 @@ function buildRecentDialogueJsonFromTurns(turns: DialogueTurn[], maxTurns: numbe
   return msgs.length ? `RECENT_DIALOGUE(JSON):\n${JSON.stringify(msgs, null, 2)}\n\n` : "";
 }
 
-export async function buildContextPack(extra?: { referencesText?: string; userPrompt?: string; kbMentionIds?: string[]; activeSkillIds?: string[] }) {
+export async function buildContextPack(extra?: {
+  referencesText?: string;
+  userPrompt?: string;
+  kbMentionIds?: string[];
+  skillRefs?: SkillRef[];
+}) {
   const mainDoc = useRunStore.getState().mainDoc;
+  const thread = (useRunStore.getState() as any).thread ?? null;
   const freshWritingBoundary = useRunStore.getState().mode === "agent" && looksLikeFreshWritingTaskPrompt(String(extra?.userPrompt ?? ""));
   const sanitizeMainDocForFreshWriting = (raw: any) => ({
     audience: raw?.audience,
@@ -1633,7 +1559,9 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     styleLintFailPolicy: raw?.styleLintFailPolicy,
     runIntent: "auto",
   });
-  const mainDocForPack = freshWritingBoundary ? sanitizeMainDocForFreshWriting(mainDoc as any) : mainDoc;
+  const mainDocForPack = freshWritingBoundary
+    ? sanitizeMainDocForFreshWriting(mainDoc as any)
+    : projectMainDocFromThreadState(mainDoc as any, thread);
   const todoList = useRunStore.getState().todoList;
   const proj = useProjectStore.getState();
   const kbLibraries = useKbStore.getState().libraries ?? [];
@@ -1643,11 +1571,24 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   // 仅使用本次消息 @提及的库（绑定机制已废弃）
   const kbMentionIds = Array.isArray(extra?.kbMentionIds) ? extra!.kbMentionIds : [];
   const kbAttachedIds = useRunStore.getState().kbAttachedLibraryIds ?? [];
+  const threadActiveSkillIds = Array.isArray(thread?.activeSkillRefs)
+    ? thread.activeSkillRefs.map((item: any) => String(item?.id ?? "").trim()).filter(Boolean)
+    : [];
+  const explicitSkillIds = Array.isArray(extra?.skillRefs)
+    ? extra.skillRefs.map((item) => String(item?.id ?? "").trim()).filter(Boolean)
+    : [];
+  const effectiveActiveSkillIds = Array.from(
+    new Set([
+      ...explicitSkillIds,
+      ...threadActiveSkillIds,
+    ]),
+  );
   const styleWorkflowRequested = isStyleWorkflowRequestedForRun({
-    activeSkillIds: extra?.activeSkillIds,
+    activeSkillIds: effectiveActiveSkillIds,
     mentionedLibraryIds: kbMentionIds,
     libraries: kbLibraries,
     mainDoc: mainDocForPack as any,
+    thread: thread as any,
     workflowSkills: (useRunStore.getState() as any).workflowSkills ?? {},
   });
   const kbSelectedIds = styleWorkflowRequested
@@ -1657,7 +1598,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
         libraries: kbLibraries,
         mainDoc: mainDocForPack as any,
         allowHistoricalFallback: shouldAllowHistoricalStyleFallback({
-          activeSkillIds: extra?.activeSkillIds,
+          activeSkillIds: effectiveActiveSkillIds,
           mentionedLibraryIds: kbMentionIds,
         }),
       })
@@ -1732,7 +1673,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   // 最近对话片段（注入最后 RAW_KEEP_TURNS 个完整回合；关键决策仍应写入 Main Doc/Run Todo）
   const recentDialogue = (() => {
     if (freshWritingBoundary) return undefined;
-    const turnsAll = buildDialogueTurnsFromSteps(useRunStore.getState().steps ?? [], { includeToolSummaries: true });
+    const turnsAll = buildDialogueTurnsFromSteps(getRuntimeProjectedSteps(), { includeToolSummaries: true });
     const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
     return buildRecentDialogueJsonFromTurns(completeTurns, computeDialogueCompactionConfig(preferModelId).rawKeepTurns);
   })();
@@ -1766,7 +1707,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   // recentDialogue（仅用于本地意图/skills 的"续跑判定"，不注入模型 messages）
   const recentDialogueForIntent = (() => {
     if (freshWritingBoundary) return undefined;
-    const turnsAll = buildDialogueTurnsFromSteps(useRunStore.getState().steps ?? [], { includeToolSummaries: true });
+    const turnsAll = buildDialogueTurnsFromSteps(getRuntimeProjectedSteps(), { includeToolSummaries: true });
     const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
     const tail = completeTurns.slice(-3);
     const out: Array<{ role: "user" | "assistant"; text: string }> = [];
@@ -1781,9 +1722,13 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
 
   const pendingArtifactsForResume = (((useRunStore.getState() as any).pendingArtifacts ?? []) as any[])
     .filter((x) => x && typeof x === "object" && String(x?.status ?? "pending").trim().toLowerCase() === "pending");
-  const workflowV1 = mainDocForPack && typeof mainDocForPack === "object" ? (mainDocForPack as any)?.workflowV1 ?? null : null;
-  const resumeKind = String((workflowV1 as any)?.kind ?? "").trim().toLowerCase();
-  const resumeStatus = String((workflowV1 as any)?.status ?? "").trim().toLowerCase();
+  const taskStateV2 = mainDocForPack && typeof mainDocForPack === "object" ? (mainDocForPack as any)?.taskStateV2 ?? null : null;
+  const resumeWorkflow =
+    taskStateV2?.workflow && typeof taskStateV2.workflow === "object"
+      ? (taskStateV2.workflow as any)
+      : null;
+  const resumeKind = String((resumeWorkflow as any)?.kind ?? "").trim().toLowerCase();
+  const resumeStatus = String((resumeWorkflow as any)?.status ?? "").trim().toLowerCase();
   const pendingWriteResumeWaiting = resumeKind === "project_open_resume_write" && resumeStatus === "waiting_user" && pendingArtifactsForResume.length > 0;
   const looksLikePendingResumeOverride = /(别存了|不要存了|不存了|不用存了|取消保存|先别保存|先别继续|不用继续|别继续|先别写入|别写了|重写|重新写|重来|改成|换成|换个主题|另写|重新生成)/.test(userPrompt);
 
@@ -2255,54 +2200,10 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
   })();
 
   // Pending proposals：用于"proposal-first 不落盘"但仍可继续下一步（避免下一轮说‘没有初稿’）
-  const pendingProposals = (() => {
-    const steps = useRunStore.getState().steps ?? [];
-    const out: Array<{ toolName: string; path?: string; note?: string }> = [];
-    for (const st of steps as any[]) {
-      if (!st || typeof st !== "object") continue;
-      if (st.type !== "tool") continue;
-      if (st.status !== "success") continue;
-      if (st.applyPolicy !== "proposal") continue;
-      if (st.applied === true) continue;
-      if (st.status === "undone") continue;
-      if (st.toolName === "write") {
-        out.push({
-          toolName: "write",
-          path: typeof st.input?.path === "string" ? st.input.path : typeof st.output?.path === "string" ? st.output.path : undefined,
-          note: typeof st.output?.preview?.note === "string" ? st.output.preview.note : undefined,
-        });
-        continue;
-      }
-      if (st.toolName === "edit") {
-        out.push({
-          toolName: "edit",
-          path: typeof st.output?.path === "string" ? st.output.path : typeof st.input?.path === "string" ? st.input.path : undefined,
-          note: typeof st.output?.preview?.note === "string" ? st.output.preview.note : undefined,
-        });
-        continue;
-      }
-      if (st.toolName === "doc.splitToDir") {
-        out.push({
-          toolName: "doc.splitToDir",
-          path: typeof st.output?.targetDir === "string" ? st.output.targetDir : undefined,
-          note: typeof st.output?.note === "string" ? st.output.note : undefined,
-        });
-        continue;
-      }
-      if (st.toolName === "doc.restoreSnapshot") {
-        out.push({
-          toolName: "doc.restoreSnapshot",
-          path: typeof st.output?.preview?.path === "string" ? st.output.preview.path : undefined,
-          note: typeof st.output?.note === "string" ? st.output.note : undefined,
-        });
-        continue;
-      }
-    }
-    return out.slice(-20);
-  })();
+  const pendingProposals = buildPendingFileProposalsFromItems(((useRunStore.getState() as any).items ?? []) as any[]);
   const pendingSection = pendingProposals.length
     ? `PENDING_FILE_PROPOSALS(JSON):\n${JSON.stringify(pendingProposals, null, 2)}\n\n` +
-      `提示：存在未 Keep 的"文件提案"。后续若调用 read 读取对应文件，系统会优先返回"提案态最新内容"（不要求先 Keep）。\n\n`
+      `提示：存在尚未应用的"文件提案"。后续若调用 read 读取对应文件，系统会优先返回"提案态最新内容"（不要求先应用更改）。\n\n`
     : "";
 
   const pendingArtifactsRaw = (((useRunStore.getState() as any).pendingArtifacts ?? []) as any[])
@@ -2326,6 +2227,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
     mainDoc: mainDocForPack,
     todoList: runTodoForPack,
     pendingArtifacts: pendingArtifactsRaw,
+    thread,
     workflowSkills: (useRunStore.getState() as any).workflowSkills ?? {},
   });
 
@@ -2363,7 +2265,7 @@ export async function buildContextPack(extra?: { referencesText?: string; userPr
       avatar: a.avatar,
       description: a.description,
     }));
-    // Full definitions for custom agents — gateway needs them for agent.delegate
+    // Full definitions for custom agents — gateway needs them for spawn_agent resolution
     const customAgentDefinitions = Object.values(useTeamStore.getState().customAgents);
     return {
       agentName: persona.agentName || "",
@@ -2551,6 +2453,7 @@ export function buildChatContextPack(extra?: { referencesText?: string; userProm
     mainDoc: (useRunStore.getState() as any).mainDoc ?? {},
     todoList: (useRunStore.getState() as any).todoList ?? [],
     pendingArtifacts: pendingArtifactsRaw,
+    thread: (useRunStore.getState() as any).thread ?? null,
     workflowSkills: (useRunStore.getState() as any).workflowSkills ?? {},
   });
 
@@ -2585,7 +2488,7 @@ export function buildChatContextPack(extra?: { referencesText?: string; userProm
     return s ? `DIALOGUE_SUMMARY(Markdown):\n${s}\n\n` : "";
   })();
   const chatRecentDialogue = (() => {
-    const turnsAll = buildDialogueTurnsFromSteps(useRunStore.getState().steps ?? [], { includeToolSummaries: true });
+    const turnsAll = buildDialogueTurnsFromSteps(getRuntimeProjectedSteps(), { includeToolSummaries: true });
     const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
     return buildRecentDialogueJsonFromTurns(completeTurns, computeDialogueCompactionConfig(preferModelId).rawKeepTurns);
   })();
@@ -2684,7 +2587,12 @@ export async function rollDialogueSummaryIfNeeded(args: {
   log: (level: "info" | "warn" | "error", message: string, data?: unknown) => void;
 }) {
   const run: any = useRunStore.getState();
-  const turnsAll = buildDialogueTurnsFromSteps(run.steps ?? [], { includeToolSummaries: true });
+  const turnsAll = buildDialogueTurnsFromSteps(getProjectedStepsFromRuntime({
+    steps: run.steps ?? [],
+    items: run.items ?? [],
+    activeItemIds: run.activeItemIds ?? [],
+    collabSessions: run.collabSessions ?? [],
+  }), { includeToolSummaries: true });
   const completeTurns = turnsAll.filter((t) => String(t.user ?? "").trim() && String(t.assistant ?? "").trim());
 
   const summaryByMode: any = run.dialogueSummaryByMode ?? {};
@@ -2750,7 +2658,7 @@ export function startGatewayRun(args: {
   opMode?: OpMode;
   targetAgentId?: string;
   targetAgentIds?: string[];
-  activeSkillIds?: string[];
+  skillRefs?: SkillRef[];
   styleWorkflowRequested?: boolean;
   kbMentionIds?: string[];
   images?: ImageAttachment[];
@@ -2764,18 +2672,21 @@ export function startGatewayRun(args: {
   let cancelReason = "CANCELLED";
 
   const done = (async () => {
+    const requestedSkillIds = Array.isArray(args.skillRefs) && args.skillRefs.length > 0
+      ? args.skillRefs.map((item) => String(item?.id ?? "").trim()).filter(Boolean)
+      : [];
     const styleWorkflowRequested = args.styleWorkflowRequested ?? isStyleWorkflowRequestedForRun({
-      activeSkillIds: args.activeSkillIds,
+      activeSkillIds: requestedSkillIds,
       mentionedLibraryIds: args.kbMentionIds,
       libraries: useKbStore.getState().libraries ?? [],
       mainDoc: useRunStore.getState().mainDoc as any,
+      thread: (useRunStore.getState() as any).thread ?? null,
       workflowSkills: (useRunStore.getState() as any).workflowSkills ?? {},
     });
     const pipelineArgs = args.styleExecutionMode || args.stylePipelinePayload
       ? { styleExecutionMode: args.styleExecutionMode, stylePipelinePayload: args.stylePipelinePayload }
       : await buildStylePipelinePayload({
           userPrompt: args.prompt,
-          activeSkillIds: args.activeSkillIds,
           kbMentionIds: args.kbMentionIds,
         }).catch(() => ({}));
     inner = startGatewayRunWs({ ...(args as GatewayRunArgs), styleWorkflowRequested, ...pipelineArgs });

@@ -199,47 +199,6 @@ export type RunState = {
   pipelineArtifacts: PipelineArtifactsV1 | null;
 };
 
-/**
- * workflow skill 的 RunState 中允许跨 run 持久化的字段白名单。
- * 只有在此白名单中的 key 才会被 Desktop 保存到 mainDoc.workflowV1.runStatePatch，
- * 并在下次 run 时被 Gateway merge 进 initialRunState。
- */
-export const PERSISTABLE_STATE_KEYS: readonly (keyof RunState)[] = [
-  "hasStyleKbSearch",
-  "hasStyleKbHit",
-  "styleKbDegraded",
-  "hasDraftText",
-  "hasPostDraftStyleKbSearch",
-  "copyLintPassed",
-  "copyLintFailCount",
-  "copyGateDegraded",
-  "styleLintPassed",
-  "styleLintFailCount",
-  "lintGateDegraded",
-  "deliveryLatched",
-  "deliveredArtifactFamilies",
-  "draftCandidatesV1",
-  "bestDraft",
-  "bestStyleDraft",
-  "lastStyleLint",
-  "lastCopyLint",
-  "pipelineStepIndex",
-  "pipelineCompleted",
-  "hasToneCard",
-  "hasStructureOutline",
-  "hasOpeningDraft",
-  "hasBodyDraft",
-  "hasStyledDraft",
-  "hasPolishedDraft",
-  "hasFinalDraft",
-  "lintLoopCompleted",
-  "bestStyleScore",
-  "bestStyleArtifactId",
-  "bestCopyScore",
-  "bestCopyArtifactId",
-  "pipelineArtifacts",
-] as const;
-
 export function createInitialRunState(args?: { protocolRetryBudget?: number; workflowRetryBudget?: number; lintReworkBudget?: number }): RunState {
   return {
     hasTodoList: false,
@@ -373,10 +332,10 @@ export function detectRunIntent(args: {
   mode: AgentMode;
   userPrompt: string;
   mainDocRunIntent?: unknown;
-  /** 可选：完整 Main Doc（用于读取 goal/workflowV1 等续跑契约；保持向后兼容） */
+  /** 可选：完整 Main Doc（用于读取 goal/taskStateV2/threadWaitingFor 等续跑契约） */
   mainDoc?: unknown;
   runTodo?: any[];
-  /** 可选：最近对话（用于“无 RUN_TODO 的续跑/编号回答”意图继承；保持向后兼容） */
+  /** 可选：最近对话（用于“无 RUN_TODO 的续跑/编号回答”意图继承） */
   recentDialogue?: Array<{ role?: string; text?: string }>;
 }): RunIntent {
   const { mode } = args;
@@ -461,14 +420,14 @@ export function detectRunIntent(args: {
 
   // 关键增强：当用户在回答“澄清问题/等待确认”的续跑对话时，userPrompt 往往非常短（例如“继续/视频脚本/按这个来”），
   // 仅靠正则会误判为非写作任务，导致 style_imitate/写作闭环不激活。
-  // 这里在 mainDocIntent=auto 且当前未判为写作任务时，参考 RUN_TODO / MainDoc.workflowV1 / 最近对话 来判断是否应继承“写作闭环”意图。
+  // 这里在 mainDocIntent=auto 且当前未判为写作任务时，参考 RUN_TODO / taskStateV2 / 最近对话 来判断是否应继承“写作闭环”意图。
   if (!mainDocIntent && !isWritingTaskFinal) {
     const todoRaw = Array.isArray(args.runTodo) ? args.runTodo : [];
     const todo = todoRaw.slice(0, 50);
     const promptTrim = String(userPrompt ?? "").trim();
     // 注意：这里的“弱 sticky”只用于承接“写作闭环”的续跑（避免用户回一句“继续/视频脚本”导致写作闭环掉线）。
     // 但不能把“查一下/搜一下/全网+GitHub 大搜”这类研究/检索请求误判为写作（否则会触发 style_imitate 抢跑，污染检索阶段）。
-    const looksLikeExplicitContinue = /^(继续|好|可以|行|没问题|确认|按这个来|就这样|ok|OK)\b/i.test(promptTrim);
+    const looksLikeExplicitContinue = /^(继续|继续吧|好|可以|行|没问题|确认|按这个来|就这样|ok|OK)\s*[。！!]?$/i.test(promptTrim);
     // “把稿子放这里/直接输出文稿/贴出来”等：通常是“继续把结果给我”的续跑指令
     const looksLikeDeliverDraft =
       /(直接|就)\s*(生成|输出|给我|发我|贴出|贴出来|放这|放在这|放在这里|发出来|把(?:生成的)?(?:文稿|稿子|文章|文案|口播稿|脚本).{0,6}(?:放在这|放在这里|贴出来|发出来))/i.test(
@@ -512,10 +471,19 @@ export function detectRunIntent(args: {
         !/(写|仿写|改写|润色|脚本|文案|终稿|写入)/.test(promptTrim)) ||
         looksLikeResearchOnly);
 
-    // 续跑证据 A：MainDoc.workflowV1（通用工作流契约）
+    // 续跑证据 A：taskStateV2.workflow + threadWaitingFor（当前线程事实源）
     const mainDoc = args.mainDoc && typeof args.mainDoc === "object" ? (args.mainDoc as any) : null;
-    const wf = mainDoc && (mainDoc as any).workflowV1 && typeof (mainDoc as any).workflowV1 === "object" ? (mainDoc as any).workflowV1 : null;
-    const wfStatus = wf ? String((wf as any).status ?? "").trim().toLowerCase() : "";
+    const taskState = mainDoc?.taskStateV2 && typeof mainDoc.taskStateV2 === "object" ? mainDoc.taskStateV2 : null;
+    const wf = taskState?.workflow && typeof taskState.workflow === "object" ? taskState.workflow : null;
+    const threadWaitingFor = String(mainDoc?.threadWaitingFor ?? mainDoc?.waitingFor ?? "").trim().toLowerCase();
+    const wfStatus =
+      threadWaitingFor === "user"
+        ? "waiting_user"
+        : threadWaitingFor === "approval"
+          ? "waiting_approval"
+          : wf
+            ? String((wf as any).status ?? "").trim().toLowerCase()
+            : "";
     const wfIntentHint = wf ? String((wf as any).intentHint ?? (wf as any).stickyIntent ?? "").trim().toLowerCase() : "";
     const wfKind = wf ? String((wf as any).kind ?? "").trim().toLowerCase() : "";
     const wfWaiting = wfStatus === "waiting_user" || wfStatus === "waiting" || wfStatus === "clarify_waiting";
@@ -538,7 +506,7 @@ export function detectRunIntent(args: {
     if (!looksNonWriting && !looksLikeFileOpsTask && todoLooksWriting && (hasWaiting || shortFollowUpLike)) {
       isWritingTaskFinal = true;
     }
-    // 2) 无 RUN_TODO 的续跑（新逻辑）：靠 workflowV1 或 recent dialogue 保持写作闭环连续性
+    // 2) 无 RUN_TODO 的续跑（新逻辑）：靠 taskStateV2 或 recent dialogue 保持写作闭环连续性
     if (!isWritingTaskFinal && !looksNonWriting && !looksLikeFileOpsTask && shortFollowUpLike && hasContinuationEvidence) {
       isWritingTaskFinal = true;
     }

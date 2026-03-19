@@ -16,6 +16,13 @@ type ResolveImplicitStyleLibrarySelectionArgs = {
 };
 
 type WorkflowSkillsLike = Record<string, { status?: string } | null | undefined>;
+type ThreadLike = {
+  waitingFor?: string;
+  activeSkillRefs?: Array<{ id?: string }>;
+  taskState?: {
+    workflow?: { kind?: string; status?: string } | null;
+  } | null;
+};
 
 export type ResolvedImplicitStyleLibrarySelection = {
   libraryIds: string[];
@@ -88,8 +95,9 @@ function normalizeStatus(v: unknown) {
   return String(v ?? "").trim().toLowerCase();
 }
 
-function hasStyleSkillSignal(activeSkillIds?: string[]) {
-  const ids = normalizeIds(activeSkillIds);
+function hasStyleSkillSignal(activeSkillIds?: string[], thread?: ThreadLike | null) {
+  const threadIds = normalizeIds((Array.isArray(thread?.activeSkillRefs) ? thread!.activeSkillRefs : []).map((item) => String(item?.id ?? "").trim()));
+  const ids = normalizeIds([...(activeSkillIds ?? []), ...threadIds]);
   return ids.some((id) => STYLE_SKILL_IDS.has(id));
 }
 
@@ -100,9 +108,19 @@ function hasMentionedStyleLibrary(args?: { mentionedLibraryIds?: string[]; libra
   return mentionedIds.some((id) => String(metaById.get(id)?.purpose ?? "").trim() === "style");
 }
 
-function hasActiveStyleWorkflow(args?: { mainDoc?: MainDoc | null | undefined; workflowSkills?: WorkflowSkillsLike }) {
-  const workflowKind = String((args?.mainDoc as any)?.workflowV1?.kind ?? "").trim().toLowerCase();
-  const workflowStatus = normalizeStatus((args?.mainDoc as any)?.workflowV1?.status);
+function hasActiveStyleWorkflow(args?: { mainDoc?: MainDoc | null | undefined; workflowSkills?: WorkflowSkillsLike; thread?: ThreadLike | null }) {
+  const threadWorkflow = args?.thread?.taskState?.workflow && typeof args.thread.taskState.workflow === "object"
+    ? (args.thread.taskState.workflow as any)
+    : null;
+  const workflowKind = String(threadWorkflow?.kind ?? (args?.mainDoc as any)?.taskStateV2?.workflow?.kind ?? "").trim().toLowerCase();
+  const waitingFor = String(args?.thread?.waitingFor ?? "").trim().toLowerCase();
+  const workflowStatus = normalizeStatus(
+    waitingFor === "user"
+      ? "waiting_user"
+      : waitingFor === "approval"
+        ? "waiting_approval"
+        : threadWorkflow?.status ?? (args?.mainDoc as any)?.taskStateV2?.workflow?.status,
+  );
   if (/style_imitate/.test(workflowKind) && ["running", "waiting", "waiting_user", "clarify_waiting", "proposal_waiting"].includes(workflowStatus)) {
     return true;
   }
@@ -117,11 +135,12 @@ export function isStyleWorkflowRequestedForRun(args?: {
   libraries?: KbLibraryLike[];
   mainDoc?: MainDoc | null | undefined;
   workflowSkills?: WorkflowSkillsLike;
+  thread?: ThreadLike | null;
 }): boolean {
   return (
-    hasStyleSkillSignal(args?.activeSkillIds) ||
+    hasStyleSkillSignal(args?.activeSkillIds, args?.thread) ||
     hasMentionedStyleLibrary({ mentionedLibraryIds: args?.mentionedLibraryIds, libraries: args?.libraries }) ||
-    hasActiveStyleWorkflow({ mainDoc: args?.mainDoc, workflowSkills: args?.workflowSkills })
+    hasActiveStyleWorkflow({ mainDoc: args?.mainDoc, workflowSkills: args?.workflowSkills, thread: args?.thread })
   );
 }
 

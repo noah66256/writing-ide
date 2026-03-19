@@ -14,7 +14,12 @@ import {
   type ToolBlockStep,
   type CtxRefItem,
   type PendingArtifact,
+  type RuntimeThreadRecord,
+  type RuntimeTurnRecord,
+  type RuntimeItemRecord,
+  type RuntimeCollabSessionRecord,
 } from "./runStore";
+import { getProjectedStepsFromRuntime } from "../agent/threadProjection";
 
 export type SerializableToolStep = Omit<ToolBlockStep, "apply" | "undo"> & {
   // 历史会话只做展示/续聊入口，不保留可执行的 apply/undo 函数
@@ -35,9 +40,13 @@ export type RunSnapshot = {
   steps: SerializableStep[];
   logs: LogEntry[];
   kbAttachedLibraryIds: string[];
-  stickyActiveSkillIds?: string[];
   ctxRefs?: CtxRefItem[];
   pendingArtifacts?: PendingArtifact[];
+  thread?: RuntimeThreadRecord | null;
+  turns?: RuntimeTurnRecord[];
+  items?: RuntimeItemRecord[];
+  collabSessions?: RuntimeCollabSessionRecord[];
+  activeItemIds?: string[];
   projectDir?: string | null;
   dialogueSummaryByMode?: Record<Mode, string>;
   dialogueSummaryTurnCursorByMode?: Record<Mode, number>;
@@ -139,6 +148,12 @@ function getSnapshotStepsCount(raw: unknown): number {
 export function buildCurrentSnapshot(): RunSnapshot {
   const s = useRunStore.getState();
   const projectDir = useProjectStore.getState().rootDir ?? null;
+  const projectedSteps = getProjectedStepsFromRuntime({
+    steps: s.steps ?? [],
+    items: ((s as any).items ?? []) as RuntimeItemRecord[],
+    activeItemIds: ((s as any).activeItemIds ?? []) as string[],
+    collabSessions: ((s as any).collabSessions ?? []) as RuntimeCollabSessionRecord[],
+  });
 
   const rawSnapshot: RunSnapshot = {
     mode: s.mode,
@@ -147,12 +162,16 @@ export function buildCurrentSnapshot(): RunSnapshot {
     mainDoc: { ...(s.mainDoc ?? {}) },
     todoList: [...(s.todoList ?? [])],
     // steps / logs 统一交给 slimSnapshotForHistory 处理，避免 JSON 深拷贝大对象。
-    steps: (s.steps ?? []) as any,
+    steps: projectedSteps as any,
     logs: (s.logs ?? []) as any,
     kbAttachedLibraryIds: [...(s.kbAttachedLibraryIds ?? [])],
-    stickyActiveSkillIds: [...((s as any).stickyActiveSkillIds ?? [])],
     ctxRefs: [...(s.ctxRefs ?? [])],
     pendingArtifacts: [...(((s as any).pendingArtifacts ?? []) as PendingArtifact[])],
+    thread: (s.thread && typeof s.thread === "object") ? JSON.parse(JSON.stringify(s.thread)) : null,
+    turns: Array.isArray((s as any).turns) ? JSON.parse(JSON.stringify((s as any).turns)) : [],
+    items: Array.isArray((s as any).items) ? JSON.parse(JSON.stringify((s as any).items)) : [],
+    collabSessions: Array.isArray((s as any).collabSessions) ? JSON.parse(JSON.stringify((s as any).collabSessions)) : [],
+    activeItemIds: Array.from(new Set(((s as any).activeItemIds ?? []).map((x: any) => String(x ?? "").trim()).filter(Boolean))),
     projectDir,
     dialogueSummaryByMode: { ...(s.dialogueSummaryByMode ?? { agent: "", chat: "" }) },
     dialogueSummaryTurnCursorByMode: {

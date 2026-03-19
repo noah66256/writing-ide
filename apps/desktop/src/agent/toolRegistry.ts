@@ -32,6 +32,7 @@ export type ToolArgSpec = {
   name: string;
   required?: boolean;
   desc: string;
+  type?: string;
 };
 
 export type ToolExecOk = {
@@ -2591,7 +2592,7 @@ const tools: ToolDefinition[] = [
         return failToolResult({
           code: "FILE_NOT_FOUND",
           message: "未找到目标文件。",
-          nextActions: ["确认路径是否正确", "如果刚创建了提案文件，请先 Keep 再读取"],
+          nextActions: ["确认路径是否正确", "如果这是刚生成的提案文件，可直接继续 read 提案态内容"],
           extra: { path },
         });
       }
@@ -2653,7 +2654,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "rename",
-    description: "重命名/移动 文件或目录（fromPath → toPath）。默认自动执行（可 Undo 回滚）。",
+    description: "重命名/移动 文件或目录（fromPath → toPath）。默认自动执行，之后可回滚更改。",
     args: [
       { name: "fromPath", required: true, desc: "源路径（文件或目录）" },
       { name: "toPath", required: true, desc: "目标路径（文件或目录）" },
@@ -2716,7 +2717,7 @@ const tools: ToolDefinition[] = [
           kind: isFile ? "file" : "dir",
           filesCount,
           previewMappings,
-          note: "已执行重命名/移动（可 Undo 回滚）。",
+          note: "已执行重命名/移动；可回滚更改。",
         },
         riskLevel: "medium",
         applyPolicy: "auto_apply",
@@ -2727,7 +2728,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "delete",
-    description: "删除文件或目录（path）。执行前会在对话中确认，确认后自动删除；支持 Undo 回滚。",
+    description: "删除文件或目录（path）。执行前会在对话中确认，确认后自动删除；之后可回滚更改。",
     args: [{ name: "path", required: true, desc: "文件或目录路径" }],
     riskLevel: "high",
     applyPolicy: "auto_apply",
@@ -2803,7 +2804,7 @@ const tools: ToolDefinition[] = [
           filesCount,
           previewFiles,
           ...(previewResolved ? { preview: previewResolved } : {}),
-          note: "已执行删除；可用 Undo 回滚。",
+          note: "已执行删除；可回滚更改。",
         },
         riskLevel: "high",
         applyPolicy: "auto_apply",
@@ -2956,7 +2957,7 @@ const tools: ToolDefinition[] = [
         : undefined;
       const noteParts = [
         resolved.renamedFrom ? "已自动改名新建，避免覆盖原文件。" : "",
-        hasChange ? "这是写入提案，点击 Keep 写入文件；Undo 可回滚。" : "",
+        hasChange ? "这是写入提案，点击“应用更改”写入文件；之后可“回滚更改”。" : "",
       ].filter(Boolean);
       return {
         ok: true,
@@ -2977,7 +2978,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "doc.commitSnapshot",
-    description: "创建一个项目快照（用于回滚/Undo）。",
+    description: "创建一个项目快照（用于回滚更改）。",
     args: [{ name: "label", required: false, desc: "快照备注（可选）" }],
     riskLevel: "low",
     applyPolicy: "auto_apply",
@@ -3019,7 +3020,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "doc.restoreSnapshot",
-    description: "恢复到指定快照。执行前会在对话中确认，确认后自动恢复；支持 Undo 回滚。",
+    description: "恢复到指定快照。执行前会在对话中确认，确认后自动恢复；之后可再次回滚更改。",
     args: [{ name: "snapshotId", required: true, desc: "快照 ID（doc.commitSnapshot 的返回）" }],
     riskLevel: "high",
     applyPolicy: "auto_apply",
@@ -3060,7 +3061,7 @@ const tools: ToolDefinition[] = [
           label: rec.label,
           createdAt: rec.createdAt,
           filesCount: rec.snap.files.length,
-          note: "已恢复到指定快照；可用 Undo 回滚。",
+          note: "已恢复到指定快照；可回滚更改。",
           changedFiles,
           preview: {
             path: previewPath,
@@ -3079,7 +3080,7 @@ const tools: ToolDefinition[] = [
   {
     name: "write",
     description:
-      "写入文件（path, content）。高风险写入会先在对话中确认，确认后自动执行；支持 Undo 回滚。",
+      "写入文件（path, content）。高风险写入会先在对话中确认，确认后自动执行；之后可回滚更改。",
     args: [
       { name: "path", required: true, desc: "新文件路径（如 drafts/run-xxx.md）" },
       { name: "content", required: true, desc: "文件全文内容" },
@@ -3117,30 +3118,6 @@ const tools: ToolDefinition[] = [
             sourceTask: String(((useRunStore.getState().mainDoc as any)?.goal ?? "")).trim() || undefined,
             createdAt: Date.now(),
             updatedAt: Date.now(),
-          });
-          (useRunStore.getState() as any).updateMainDoc({
-            workflowV1: {
-              v: 1,
-              kind: "project_open_resume_write",
-              status: "waiting_user",
-              waiting: {
-                kind: "open_project",
-                message: "请先打开项目文件夹，之后我会继续保存上轮结果。",
-              },
-              resumeAction: {
-                type: "write",
-                artifactId,
-                pathHint: pathRaw,
-                ifExists: (String((args as any).ifExists ?? "").trim().toLowerCase() === "overwrite"
-                  ? "overwrite"
-                  : String((args as any).ifExists ?? "").trim().toLowerCase() === "error"
-                    ? "error"
-                    : "rename"),
-                suggestedName: String((args as any).suggestedName ?? "").trim() || undefined,
-              },
-              lastEndReason: "no_project",
-              updatedAt: new Date().toISOString(),
-            },
           });
           try {
             await useConversationStore.getState().flushDraftSnapshotNow(buildCurrentSnapshot());
@@ -3183,8 +3160,8 @@ const tools: ToolDefinition[] = [
         const fileName = path.split("/").pop() || path;
         const ext = fileName.includes(".") ? fileName.split(".").pop()!.toLowerCase() : "";
         const note = resolved.renamedFrom
-          ? "已自动改名并写入新文件（避免覆盖原文件）；可用 Undo 回滚。"
-          : "已写入新文件；可用 Undo 回滚。";
+          ? "已自动改名并写入新文件（避免覆盖原文件）；可回滚更改。"
+          : "已写入新文件；可回滚更改。";
         const apply = () => {
           const snap = useProjectStore.getState().snapshot();
           useProjectStore.getState().createFile(path, content);
@@ -3196,10 +3173,6 @@ const tools: ToolDefinition[] = [
           const rs: any = useRunStore.getState();
           const matched = Array.isArray(rs.pendingArtifacts) ? rs.pendingArtifacts.find((x: any) => x && (x.pathHint === path || x.pathHint === pathRaw)) : null;
           if (matched?.id) rs.removePendingArtifact(matched.id);
-          const wf: any = rs.mainDoc?.workflowV1 ?? null;
-          if (wf && String(wf.kind ?? "").trim().toLowerCase() === "project_open_resume_write") {
-            rs.updateMainDoc({ workflowV1: { status: "done", lastEndReason: "resumed_write_done", updatedAt: new Date().toISOString() } });
-          }
           try {
             await useConversationStore.getState().flushDraftSnapshotNow(buildCurrentSnapshot());
           } catch {}
@@ -3254,10 +3227,6 @@ const tools: ToolDefinition[] = [
         const rs: any = useRunStore.getState();
         const matched = Array.isArray(rs.pendingArtifacts) ? rs.pendingArtifacts.find((x: any) => x && (x.pathHint === path || x.pathHint === pathRaw)) : null;
         if (matched?.id) rs.removePendingArtifact(matched.id);
-        const wf: any = rs.mainDoc?.workflowV1 ?? null;
-        if (wf && String(wf.kind ?? "").trim().toLowerCase() === "project_open_resume_write") {
-          rs.updateMainDoc({ workflowV1: { status: "done", lastEndReason: "resumed_write_done", updatedAt: new Date().toISOString() } });
-        }
         try {
           await useConversationStore.getState().flushDraftSnapshotNow(buildCurrentSnapshot());
         } catch {}
@@ -3269,7 +3238,7 @@ const tools: ToolDefinition[] = [
           ok: true,
           path,
           created: false,
-          preview: { note: "已覆盖写入文件；可用 Undo 回滚。", diffUnified: d.diff, truncated: d.truncated, stats: d.stats ?? null },
+          preview: { note: "已覆盖写入文件；可回滚更改。", diffUnified: d.diff, truncated: d.truncated, stats: d.stats ?? null },
           artifact: { absPath: absPath2, relPath: path, name: fileName2, ext: ext2, sizeBytes: new Blob([content]).size },
         },
         applyPolicy: "auto_apply",
@@ -3282,7 +3251,7 @@ const tools: ToolDefinition[] = [
   {
     name: "doc.splitToDir",
     description:
-      "将一个大文档按“标题/文案(正文)”块分割成多篇，并写入目标文件夹（中风险默认自动写入，支持 Undo 回滚）。",
+      "将一个大文档按“标题/文案(正文)”块分割成多篇，并写入目标文件夹（中风险默认自动写入，之后可回滚更改）。",
     args: [
       { name: "path", required: true, desc: "源文件路径（如 直男财经.md）" },
       { name: "targetDir", required: true, desc: "目标目录（如 直男财经/）" },
@@ -3375,7 +3344,7 @@ const tools: ToolDefinition[] = [
         sourcePath: srcPath,
         targetDir: `${targetDir}/`,
         count: out.length,
-        note: `已写入 ${out.length} 个新文件到 ${targetDir}/；可用 Undo 回滚。`,
+        note: `已写入 ${out.length} 个新文件到 ${targetDir}/；可回滚更改。`,
         files: out.map((f) => ({
           path: f.path,
           title: f.title,
@@ -3432,7 +3401,7 @@ const tools: ToolDefinition[] = [
   {
     name: "edit",
     description:
-      "对当前活动文件应用一组文本编辑（edits）。中风险默认自动写入，支持 Undo 回滚。",
+      "对当前活动文件应用一组文本编辑（edits）。中风险默认自动写入，之后可回滚更改。",
     args: [
       { name: "path", required: false, desc: "文件路径（默认 activePath；MVP 仅支持 activePath）" },
       {
@@ -3544,7 +3513,7 @@ const tools: ToolDefinition[] = [
           path,
           editsCount: normalized.length,
           preview: {
-            note: "已应用到编辑器；可用 Undo 回滚。",
+            note: "已应用到编辑器；可回滚更改。",
             diffUnified: d.diff,
             truncated: d.truncated,
             stats: d.stats ?? null,
@@ -4201,7 +4170,7 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "memory.update",
-    description: "更新记忆内容（中低风险默认自动写入，可 Undo 回滚）。",
+    description: "更新记忆内容（中低风险默认自动写入，之后可回滚更改）。",
     args: [
       { name: "level", required: true, desc: "'global' 或 'project'" },
       { name: "section", required: true, desc: "section 标题（如'项目决策'、'用户画像'）" },
@@ -4268,7 +4237,7 @@ const tools: ToolDefinition[] = [
 
       return {
         ok: true,
-        output: { ok: true, level, section, updated: true, note: "记忆已自动更新（可 Undo 回滚）。" },
+        output: { ok: true, level, section, updated: true, note: "记忆已自动更新；可回滚更改。" },
         applyPolicy: "auto_apply",
         riskLevel: "medium",
         undoable: true,

@@ -15,7 +15,6 @@
 import assert from "node:assert/strict";
 import { createRuntime } from "../src/agent/runtime/RuntimeFactory.js";
 import { GatewayRuntime } from "../src/agent/runtime/GatewayRuntime.js";
-import { LegacySubAgentBridge } from "../src/agent/runtime/LegacySubAgentBridge.js";
 import type { LoopKernel } from "../src/agent/runtime/kernel/LoopKernel.types.js";
 import {
   createTranscript,
@@ -365,9 +364,9 @@ async function scenario9_softGatingReject() {
 }
 
 // ---------------------------------------------------------------------------
-// 场景 10: agent.delegate stub 行为
+// 场景 10: spawn_agent stub 行为
 // ---------------------------------------------------------------------------
-async function scenario10_delegateStub() {
+async function scenario10_spawnAgentStub() {
   const events: Array<{ event: string; data: unknown }> = [];
   const mockKernel = new MockKernel();
   const mockCtx = createMockRunContext((event, data) => {
@@ -380,11 +379,11 @@ async function scenario10_delegateStub() {
   );
   await runtime.run("test prompt");
 
-  // 直接调用 _handleDelegateStub
+  // 直接调用 _handleDelegateStub（等价于 shadow 模式下的 spawn_agent 兜底）
   const result = (runtime as any)._handleDelegateStub("tc_d1", {
     agentId: "copywriter",
     task: "写一篇文章",
-  });
+  }, "spawn_agent");
 
   assert.equal(result.ok, true);
   assert.equal(result.output.status, "stub");
@@ -393,12 +392,12 @@ async function scenario10_delegateStub() {
 
   // 验证标准 tool.call 审计事件
   const toolCallEvent = events.find(
-    (e) => e.event === "tool.call" && (e.data as any).name === "agent.delegate",
+    (e) => e.event === "tool.call" && (e.data as any).name === "spawn_agent",
   );
-  assert.ok(toolCallEvent, "should emit standard tool.call event for delegate stub");
+  assert.ok(toolCallEvent, "should emit standard tool.call event for spawn_agent stub");
   assert.equal((toolCallEvent!.data as any).stub, true);
 
-  ok("scenario10.delegate_stub");
+  ok("scenario10.spawn_agent_stub");
 }
 
 // ---------------------------------------------------------------------------
@@ -498,62 +497,6 @@ async function scenario12b_softGuidanceNotSteering() {
 }
 
 // ---------------------------------------------------------------------------
-// 场景 13: LegacySubAgentBridge 校验路径
-// ---------------------------------------------------------------------------
-async function scenario13_bridgeValidation() {
-  const mockCtx = createMockRunContext();
-
-  const bridge = new LegacySubAgentBridge(mockCtx as any);
-
-  // 13a: agentId 为空 → VALIDATION_ERROR
-  const r1 = await bridge.execute("tc_v1", { agentId: "", task: "写文章" }, 1);
-  assert.equal(r1.ok, false);
-  assert.equal((r1.output as any).error, "VALIDATION_ERROR");
-  assert.ok((r1.output as any).detail.includes("agentId"));
-
-  // 13b: task 为空 → VALIDATION_ERROR
-  const r2 = await bridge.execute("tc_v2", { agentId: "copywriter", task: "" }, 1);
-  assert.equal(r2.ok, false);
-  assert.equal((r2.output as any).error, "VALIDATION_ERROR");
-  assert.ok((r2.output as any).detail.includes("task"));
-
-  // 13c: 不存在的 agentId → NOT_FOUND
-  const r3 = await bridge.execute("tc_v3", { agentId: "nonexistent_agent", task: "写文章" }, 1);
-  assert.equal(r3.ok, false);
-  assert.equal((r3.output as any).error, "NOT_FOUND");
-  assert.ok((r3.output as any).detail.includes("nonexistent_agent"));
-
-  ok("scenario13.bridge_validation");
-}
-
-// ---------------------------------------------------------------------------
-// 场景 14: LegacySubAgentBridge 别名查找
-// ---------------------------------------------------------------------------
-async function scenario14_bridgeAliasLookup() {
-  const events: Array<{ event: string; data: unknown }> = [];
-  const mockCtx = createMockRunContext((event, data) => {
-    events.push({ event, data });
-  });
-
-  const bridge = new LegacySubAgentBridge(mockCtx as any);
-
-  // 使用 "writer" 别名应解析到 copywriter
-  // 注意：实际执行会因 mock 环境失败，但 subagent.start 事件能验证别名解析成功
-  try {
-    await bridge.execute("tc_alias1", { agentId: "writer", task: "写一篇文章" }, 1);
-  } catch {
-    // 预期：AgentRunner 在 mock 环境下可能失败
-  }
-
-  // 验证 subagent.start 发出了正确的 agentId
-  const startEvent = events.find((e) => e.event === "subagent.start");
-  assert.ok(startEvent, "should emit subagent.start");
-  assert.equal((startEvent!.data as any).agentId, "copywriter", "alias 'writer' should resolve to 'copywriter'");
-
-  ok("scenario14.bridge_alias_lookup");
-}
-
-// ---------------------------------------------------------------------------
 // 场景 15: SubAgentBridge shadow 模式仍走 stub
 // ---------------------------------------------------------------------------
 async function scenario15_bridgeShadowStub() {
@@ -562,8 +505,8 @@ async function scenario15_bridgeShadowStub() {
   const mockCtx = createMockRunContext((event, data) => {
     events.push({ event, data });
   });
-  // 需要将 agent.delegate 加入白名单，否则软 gating 会先拒绝
-  mockCtx.allowedToolNames.add("agent.delegate");
+  // 需要将协作工具加入白名单，否则软 gating 会先拒绝
+  mockCtx.allowedToolNames.add("spawn_agent");
 
   // 创建 shadow 模式的 GatewayRuntime
   const runtime = new GatewayRuntime(
@@ -575,8 +518,8 @@ async function scenario15_bridgeShadowStub() {
   // 通过 _executeAgentTool 测试 shadow 模式
   const result = await (runtime as any)._executeAgentTool(
     "tc_shadow1",
-    "agent.delegate",
-    { agentId: "copywriter", task: "写文章" },
+    "spawn_agent",
+    { agent_type: "copywriter", message: "写文章" },
   );
 
   // shadow 模式应走 stub 而非 bridge
@@ -589,7 +532,7 @@ async function scenario15_bridgeShadowStub() {
 
   // 验证 tool.call 事件标记了 stub
   const toolCallEvent = events.find(
-    (e) => e.event === "tool.call" && (e.data as any).name === "agent.delegate",
+    (e) => e.event === "tool.call" && (e.data as any).name === "spawn_agent",
   );
   assert.ok(toolCallEvent, "shadow stub should emit tool.call");
   assert.equal((toolCallEvent!.data as any).stub, true);
@@ -828,12 +771,10 @@ async function main() {
   await scenario7_providerCapabilities();
   await scenario8_transformContextHint();
   await scenario9_softGatingReject();
-  await scenario10_delegateStub();
+  await scenario10_spawnAgentStub();
   await scenario11_followUpPendingTodo();
   await scenario12_followUpWaitingNoChase();
   await scenario12b_softGuidanceNotSteering();
-  await scenario13_bridgeValidation();
-  await scenario14_bridgeAliasLookup();
   await scenario15_bridgeShadowStub();
   await scenario16_providerParityTodoOptional();
   await scenario17_providerParitySingleArtifactWriteOnce();

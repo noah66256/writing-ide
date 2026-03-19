@@ -74,10 +74,10 @@ const ROUTE_CAPABILITY_MAP: Record<string, string[]> = {
   project_search: ["run_control", "project_search", "file_read", "kb_search"],
   web_radar: ["run_control", "web_search", "web_fetch", "time"],
   file_ops: ["run_control", "todo", "file_write", "file_delete", "file_read"],
-  task_execution: ["run_control", "todo", "file_write", "project_search", "kb_search"],
+  task_execution: ["run_control", "todo", "file_write", "project_search", "kb_search", "collab"],
   analysis_readonly: ["file_read", "project_search", "kb_search", "time"],
-  discussion: ["time"],
-  unclear: ["run_control", "todo", "project_search"],
+  discussion: ["time", "collab"],
+  unclear: ["run_control", "todo", "project_search", "collab"],
 };
 
 const CAPABILITY_KEYWORDS: Array<{ capability: string; re: RegExp }> = [
@@ -91,7 +91,7 @@ const CAPABILITY_KEYWORDS: Array<{ capability: string; re: RegExp }> = [
   { capability: "kb_search", re: /(知识库|kb|风格库|语料|检索|抽卡|learn|ingest)/i },
   { capability: "code_exec", re: /(code\.exec|python\b|py脚本|python脚本|写(?:一个|一段)?(?:python|py)?(?:脚本|代码)|执行(?:一段)?代码|运行(?:一段)?代码|跑脚本|python-docx|python-pptx|openpyxl|entryfile|requirements)/i },
   { capability: "shell_exec", re: /(命令行|终端|shell|bash|zsh|ssh|\bnpm run\b|\bpnpm\b|\byarn\b|\bpytest\b|\bmake\b|编译|构建|打包|部署)/i },
-  { capability: "delegate", re: /(委派|分派|指派|派给|delegate|sub[\s_-]?agent|agent\s*delegate)/i },
+  { capability: "collab", re: /(委派|分派|指派|派给|delegate|sub[\s_-]?agent|agent\s*delegate|spawn[_\s-]?agent|send[_\s-]?input|resume[_\s-]?agent|wait[_\s-]?agent|close[_\s-]?agent|协作|编排)/i },
   { capability: "browser_open", re: /(打开.*(网页|网站|页面)|浏览器|网页|网站|页面|公众号|小红书|抖音|知乎|微博|后台|管理后台|扫码|扫码登录|登录.*页面|navigate|goto|open\s+.*(baidu|google|url|https?:\/\/))/i },
   { capability: "mcp_spreadsheet", re: /(excel|xlsx|表格|电子表格|spreadsheet|工作表)/i },
   { capability: "mcp_word_doc", re: /(word文档|docx|word\s*文件|写.*word|导出.*word|word.*版|生成.*word)/i },
@@ -127,14 +127,18 @@ export function inferCapabilities(name: string, description: string, source: Too
     caps.add("file_write");
   }
   if (n === "memory") caps.add("kb_search");
-  if (n === "agent.config") caps.add("delegate");
+  if (n === "agent.config") {
+    caps.add("collab");
+  }
   if (n.startsWith("project.search") || n.startsWith("project.find")) caps.add("project_search");
   if (n.startsWith("web.search")) caps.add("web_search");
   if (n.startsWith("web.fetch")) caps.add("web_fetch");
   if (n.startsWith("kb.")) caps.add("kb_search");
   if (n === "code.exec") caps.add("code_exec");
   if (n === "shell.exec" || /^mcp\.[^.]*?(terminal|ssh)[^.]*\./i.test(n)) caps.add("shell_exec");
-  if (n === "agent.delegate") caps.add("delegate");
+  if (n === "spawn_agent" || n === "send_input" || n === "resume_agent" || n === "wait_agent" || n === "close_agent") {
+    caps.add("collab");
+  }
 
   if (source === "mcp") {
     caps.add("mcp");

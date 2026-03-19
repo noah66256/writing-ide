@@ -283,6 +283,7 @@ async function readSkillMetaFromDir(dir) {
     if (fm && typeof fm === "object") {
       if (typeof fm.version === "string") result.version = String(fm.version).trim();
       if (typeof fm.builtin === "boolean") result.builtin = fm.builtin;
+      result.format = "skill.md";
       return result;
     }
   } catch {
@@ -295,6 +296,7 @@ async function readSkillMetaFromDir(dir) {
       if (typeof json.version === "string") result.version = String(json.version).trim();
       if (typeof json.builtin === "boolean") result.builtin = json.builtin;
     }
+    result.format = "skill.json";
   } catch {
     // ignore
   }
@@ -3551,7 +3553,10 @@ app.whenReady().then(async () => {
     mcpManager.onStatusChange((payload) => {
       try { mainWindow?.webContents?.send("mcp.statusChange", payload); } catch { /* ignore */ }
     });
-    await mcpManager.connectEnabled();
+    // MCP 连接后台进行，不阻塞后续初始化（避免 Lark 等慢连接卡住 SkillLoader）
+    mcpManager.connectEnabled().catch((e) => {
+      console.warn("[electron] MCP connectEnabled error:", e?.message);
+    });
   } catch (e) {
     console.error("[electron] MCP Manager 初始化失败:", e);
   }
@@ -3589,12 +3594,13 @@ app.whenReady().then(async () => {
         const srcMeta = await readSkillMetaFromDir(src);
         const destMeta = await readSkillMetaFromDir(dest);
         let skip = false;
-        // 仅当版本相同且 builtin 标记已一致时才跳过
+        // 仅当版本相同、builtin 标记一致、文件格式一致时才跳过
         if (
           srcMeta.version &&
           destMeta.version &&
           srcMeta.version === destMeta.version &&
-          srcMeta.builtin === destMeta.builtin
+          srcMeta.builtin === destMeta.builtin &&
+          srcMeta.format === destMeta.format
         ) {
           skip = true;
         }

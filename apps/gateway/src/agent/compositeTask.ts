@@ -252,7 +252,8 @@ export function deriveCompositeTaskPlanV1(args: {
   const prompt = String(args.userPrompt ?? "").trim();
   const routeId = String(args.routeId ?? "").trim().toLowerCase();
   const mainDoc = args.mainDoc && typeof args.mainDoc === "object" && !Array.isArray(args.mainDoc) ? (args.mainDoc as any) : null;
-  const existing = normalizeCompositeTaskPlan(mainDoc?.compositeTaskV1);
+  const taskState = mainDoc?.taskStateV2 && typeof mainDoc.taskStateV2 === "object" ? mainDoc.taskStateV2 : null;
+  const existing = normalizeCompositeTaskPlan(taskState?.compositeTask);
   const inferredKinds = inferCompositePhaseKinds({
     userPrompt: prompt,
     routeId,

@@ -918,6 +918,108 @@ export const TOOL_LIST: ToolMeta[] = [
     },
   },
   {
+    name: "spawn_agent",
+    description:
+      "创建并启动一个子 Agent 会话（Codex-style collab 工具）。\n" +
+      "用于把子任务委派给专门角色，并通过 send_input/resume_agent/wait_agent/close_agent 协调其生命周期。",
+    args: [
+      { name: "agent_type", required: false, desc: "子 Agent 类型/角色标识（如 copywriter/topic_planner）", type: "string" },
+      { name: "message", required: false, desc: "发给子 Agent 的主要任务说明", type: "string" },
+      { name: "items", required: false, desc: "结构化输入项（可含 text/path/image_url/name）", type: "array" },
+      { name: "model", required: false, desc: "可选：子 Agent 指定模型", type: "string" },
+      { name: "reasoning_effort", required: false, desc: "可选：推理强度 low|medium|high|xhigh", type: "string" },
+      { name: "fork_context", required: false, desc: "是否继承父会话上下文（默认 true）", type: "boolean" },
+    ],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        agent_type: { type: "string" },
+        message: { type: "string" },
+        items: { type: "array", items: { type: "object" } },
+        model: { type: "string" },
+        reasoning_effort: { type: "string" },
+        fork_context: { type: "boolean" },
+      },
+      additionalProperties: true,
+    },
+    outputSchema: {
+      type: "object",
+      description: "Sub-agent spawn result",
+      properties: {
+        ok: { type: "boolean" },
+        id: { type: "string", description: "子 Agent 会话 ID" },
+        agentId: { type: "string", description: "子 Agent 标识" },
+        threadId: { type: "string", description: "子会话 Thread ID" },
+        status: { type: "string", description: "running|waiting|completed|failed|closed" },
+      },
+    },
+  },
+  {
+    name: "send_input",
+    description: "向已存在的子 Agent 会话发送新输入（Codex-style collab 工具）。",
+    args: [
+      { name: "id", required: true, desc: "子 Agent 会话 ID", type: "string" },
+      { name: "message", required: false, desc: "补充指令文本", type: "string" },
+      { name: "items", required: false, desc: "结构化输入项", type: "array" },
+      { name: "interrupt", required: false, desc: "是否中断当前执行并切换到新输入", type: "boolean" },
+    ],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string" },
+        message: { type: "string" },
+        items: { type: "array", items: { type: "object" } },
+        interrupt: { type: "boolean" },
+      },
+      required: ["id"],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: "resume_agent",
+    description: "恢复一个已暂停/等待态的子 Agent 会话（Codex-style collab 工具）。",
+    args: [{ name: "id", required: true, desc: "子 Agent 会话 ID", type: "string" }],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string" } },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "wait_agent",
+    description: "等待一个或多个子 Agent 会话完成或进入下一状态（Codex-style collab 工具）。",
+    args: [
+      { name: "ids", required: true, desc: "要等待的子 Agent 会话 ID 数组", type: "array" },
+      { name: "timeout_ms", required: false, desc: "超时毫秒（默认由运行时决定）", type: "number" },
+    ],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        ids: { type: "array", items: { type: "string" } },
+        timeout_ms: { type: "number" },
+      },
+      required: ["ids"],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: "close_agent",
+    description: "关闭一个子 Agent 会话并释放其协作上下文（Codex-style collab 工具）。",
+    args: [{ name: "id", required: true, desc: "子 Agent 会话 ID", type: "string" }],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string" } },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "project.listFiles",
     description: "列出当前项目文件列表（path）。",
     args: [],
@@ -1165,7 +1267,7 @@ export const TOOL_LIST: ToolMeta[] = [
       additionalProperties: true,
     },
   },
-  // agent.delegate / agent.config 已移除（单 Agent 模式，子 Agent 委派暂停开发）
+  // Collab 工具已收敛到 spawn_agent/send_input/resume_agent/wait_agent/close_agent。
   // ── 代码执行 ──────────────────────────────────────
   {
     name: "code.exec",

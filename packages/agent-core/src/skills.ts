@@ -483,12 +483,14 @@ export function activateSkills(args: {
   kbSelected?: KbSelectedLibrary[];
   intent?: RunIntent;
   manifests?: SkillManifest[];
+  explicitSkillIds?: string[];
 }): ActiveSkill[] {
   const mode = args.mode;
   const userPrompt = normStr(args.userPrompt);
   const kbSelected = Array.isArray(args.kbSelected) ? (args.kbSelected as any[]) : [];
   const intent = args.intent ?? detectRunIntent({ mode, userPrompt, mainDocRunIntent: args.mainDocRunIntent });
   const manifests = args.manifests?.length ? args.manifests : listRegisteredSkills();
+  const explicitSkillIds = new Set(normalizeStringArray(args.explicitSkillIds));
 
   // 按 priority 降序排序后再迭代，确保高优先级 Skill 优先激活（影响 conflicts 裁决）
   const sorted = [...manifests].sort(
@@ -499,9 +501,10 @@ export function activateSkills(args: {
   const activeSkillIds = new Set<string>();
   const blockedByConflict = new Set<string>();
   for (const m of sorted) {
-    if (!m?.autoEnable) continue;
     const skillId = normStr(m.id);
     if (!skillId) continue;
+    const isExplicit = explicitSkillIds.has(skillId);
+    if (!m?.autoEnable && !isExplicit) continue;
     // conflicts 互斥：被已激活 Skill 声明为冲突的，或自身声明与已激活 Skill 冲突的，跳过
     if (blockedByConflict.has(skillId)) continue;
     const conflicts = normalizeStringArray(m.conflicts);
@@ -513,20 +516,25 @@ export function activateSkills(args: {
     const reasonCodes: string[] = [`skill:${m.id}`];
     const detail: Record<string, unknown> = { stageKey: m.stageKey };
     let ok = true;
-    for (const rule of m.triggers ?? []) {
-      const r = matchTrigger({
-        rule,
-        mode,
-        userPrompt,
-        mainDocRunIntent: args.mainDocRunIntent,
-        intent,
-        kbSelected: kbSelected as any,
-      });
-      if (r.reasonCodes?.length) reasonCodes.push(...r.reasonCodes);
-      if (r.detail && Object.keys(r.detail).length) detail[`trigger:${rule.when}`] = r.detail;
-      if (!r.ok) {
-        ok = false;
-        break;
+    if (isExplicit) {
+      reasonCodes.push("explicit_skill_ref");
+      detail.activation = "explicit";
+    } else {
+      for (const rule of m.triggers ?? []) {
+        const r = matchTrigger({
+          rule,
+          mode,
+          userPrompt,
+          mainDocRunIntent: args.mainDocRunIntent,
+          intent,
+          kbSelected: kbSelected as any,
+        });
+        if (r.reasonCodes?.length) reasonCodes.push(...r.reasonCodes);
+        if (r.detail && Object.keys(r.detail).length) detail[`trigger:${rule.when}`] = r.detail;
+        if (!r.ok) {
+          ok = false;
+          break;
+        }
       }
     }
     if (!ok) continue;

@@ -311,6 +311,7 @@ html, body {
 .chat-markdown-image-placeholder {
   display: grid;
   place-items: center;
+  gap: 8px;
   min-height: 96px;
   padding: 16px;
   border: 1px dashed var(--color-border);
@@ -318,6 +319,14 @@ html, body {
   background: color-mix(in srgb, var(--color-surface-alt) 72%, transparent);
   color: var(--color-text-faint);
   font-size: 12px;
+}
+.chat-markdown-image-link {
+  color: var(--color-primary, var(--color-accent));
+  text-decoration: none;
+  font-weight: 500;
+}
+.chat-markdown-image-link:hover {
+  text-decoration: underline;
 }
 .chat-markdown-image-caption {
   margin-top: 0.35em;

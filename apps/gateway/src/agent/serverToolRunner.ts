@@ -34,7 +34,7 @@ function getServerToolAllowlist(): Set<string> {
        "tools.search", "tools.describe",
        "web.search", "web.fetch",
        "run.done", "run.setTodoList", "run.todo", "run.mainDoc.update", "run.mainDoc.get",
-       "agent.delegate"];
+       "spawn_agent", "send_input", "resume_agent", "wait_agent", "close_agent"];
   return new Set(list.map((x) => String(x ?? "").trim()).filter(Boolean));
 }
 
@@ -80,7 +80,9 @@ export function decideServerToolExecution(args: {
   if (name === "web.search" || name === "web.fetch") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "web_gateway_first"] };
   // run.*：系统编排类工具（无副作用，但会影响 run 生命周期），应 server-side 执行
   if (name === "run.done") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "run_done_server_side"] };
-  if (name === "agent.delegate") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "agent_delegate_server_side"] };
+  if (name === "spawn_agent" || name === "send_input" || name === "resume_agent" || name === "wait_agent" || name === "close_agent") {
+    return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "collab_tool_server_side"] };
+  }
   if (name.startsWith("run.")) return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "run_orchestration_server_side"] };
 
   // 逐步迁回：先落地 lint.style(text=...)（只读；需要 Desktop sidecar 提供指纹/样例）。
@@ -575,7 +577,15 @@ export async function executeServerToolOnGateway(args: {
     });
   }
   if (name === "project.listFiles") return executeProjectListFilesOnGateway({ toolSidecar: args.toolSidecar });
-  if (name === "agent.delegate") return { ok: false as const, error: "HANDLED_BY_RUNNER" };
+  if (
+    name === "spawn_agent" ||
+    name === "send_input" ||
+    name === "resume_agent" ||
+    name === "wait_agent" ||
+    name === "close_agent"
+  ) {
+    return { ok: false as const, error: "HANDLED_BY_RUNNER" };
+  }
   return { ok: false as const, error: "SERVER_TOOL_NOT_IMPLEMENTED" };
 }
 

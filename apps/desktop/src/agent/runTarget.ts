@@ -13,22 +13,38 @@
 import { useConversationStore, type RunSnapshot } from "../state/conversationStore";
 import { useRunRegistry, type RunBuffer } from "../state/runRegistry";
 import {
+  createShadowItemFromToolStep,
   useRunStore,
   type AssistantStep,
   type CtxRefItem,
   type LogEntry,
   type MainDoc,
   type Mode,
+  type RuntimeCollabSessionRecord,
+  type RuntimeItemRecord,
+  type RuntimeThreadRecord,
+  type RuntimeTurnRecord,
   type Step,
   type TodoItem,
   type ToolBlockStep,
 } from "../state/runStore";
+import { getProjectedStepsFromRuntime } from "./threadProjection";
 
 // ─── 内部类型别名 ──────────────────────────────────────────────────────────────
 
 type RunStoreState = ReturnType<typeof useRunStore.getState>;
 type AddAssistantOpts = Parameters<RunStoreState["addAssistant"]>[3];
 type AddToolInput = Parameters<RunStoreState["addTool"]>[0];
+
+type RuntimeEntityBuffer = {
+  thread: RuntimeThreadRecord | null;
+  turns: RuntimeTurnRecord[];
+  items: RuntimeItemRecord[];
+  collabSessions: RuntimeCollabSessionRecord[];
+  activeItemIds: string[];
+};
+
+const extendedBufferByConvId = new Map<string, RuntimeEntityBuffer>();
 
 // ─── 内部工具函数 ──────────────────────────────────────────────────────────────
 
@@ -107,6 +123,50 @@ function mergeStepsFromBuffer(
   return merged;
 }
 
+function normalizeRuntimeEntityBuffer(
+  raw?: Partial<RuntimeEntityBuffer> | null,
+): RuntimeEntityBuffer {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const thread =
+    src.thread && typeof src.thread === "object"
+      ? ({ ...(src.thread as any) } as RuntimeThreadRecord)
+      : null;
+  const turns = Array.isArray(src.turns)
+    ? src.turns
+        .filter((x) => x && typeof x === "object" && String((x as any).id ?? "").trim())
+        .map((x) => ({ ...(x as any) } as RuntimeTurnRecord))
+    : [];
+  const items = Array.isArray(src.items)
+    ? src.items
+        .filter((x) => x && typeof x === "object" && String((x as any).id ?? "").trim())
+        .map((x) => ({ ...(x as any) } as RuntimeItemRecord))
+    : [];
+  const collabSessions = Array.isArray(src.collabSessions)
+    ? src.collabSessions
+        .filter((x) => x && typeof x === "object" && String((x as any).id ?? "").trim())
+        .map((x) => ({ ...(x as any) } as RuntimeCollabSessionRecord))
+    : [];
+  const activeItemIds = Array.from(
+    new Set(
+      (Array.isArray(src.activeItemIds) ? src.activeItemIds : [])
+        .map((x) => String(x ?? "").trim())
+        .filter(Boolean),
+    ),
+  );
+  return { thread, turns, items, collabSessions, activeItemIds };
+}
+
+function upsertById<T extends { id: string }>(list: T[], nextItem: T): T[] {
+  const arr = Array.isArray(list) ? list : [];
+  const id = String(nextItem?.id ?? "").trim();
+  if (!id) return arr;
+  const idx = arr.findIndex((x) => String(x?.id ?? "") === id);
+  if (idx < 0) return [...arr, nextItem];
+  const out = arr.slice();
+  out[idx] = nextItem;
+  return out;
+}
+
 // ─── 工厂函数 ─────────────────────────────────────────────────────────────────
 
 /**
@@ -138,11 +198,11 @@ export function createRunTarget(convId: string) {
   const ensureEntry = () => {
     if (!hasConv) return;
     const reg = useRunRegistry.getState();
+    const base = isActive() ? useRunStore.getState() : null;
+    const snap = !isActive() ? getConv()?.snapshot : null;
     if (!reg.runs[cid]) {
       // 不预填 steps——active 阶段通过镜像写入，background 阶段直接追加
       // mainDoc/todoList/ctxRefs 从当前状态或快照初始化，供后台 run 读取上下文
-      const base = isActive() ? useRunStore.getState() : null;
-      const snap = !isActive() ? getConv()?.snapshot : null;
       reg.start(cid, {
         steps: [],
         logs: [],
@@ -153,10 +213,51 @@ export function createRunTarget(convId: string) {
         activity: base ? (base.activity ? { ...base.activity } : null) : null,
       });
     }
+    if (!extendedBufferByConvId.has(cid)) {
+      const seed = base
+        ? normalizeRuntimeEntityBuffer({
+            thread: (base as any).thread ?? null,
+            turns: (base as any).turns ?? [],
+            items: (base as any).items ?? [],
+            collabSessions: (base as any).collabSessions ?? [],
+            activeItemIds: (base as any).activeItemIds ?? [],
+          })
+        : normalizeRuntimeEntityBuffer({
+            thread: (snap as any)?.thread ?? null,
+            turns: (snap as any)?.turns ?? [],
+            items: (snap as any)?.items ?? [],
+            collabSessions: (snap as any)?.collabSessions ?? [],
+            activeItemIds: (snap as any)?.activeItemIds ?? [],
+          });
+      extendedBufferByConvId.set(cid, seed);
+    }
   };
 
   const getBuffer = (): RunBuffer | null =>
     useRunRegistry.getState().runs[cid]?.buffer ?? null;
+
+  const getRuntimeBuffer = (): RuntimeEntityBuffer | null => {
+    if (!hasConv) return null;
+    return extendedBufferByConvId.get(cid) ?? null;
+  };
+
+  const updateRuntimeBuffer = (patch: Partial<RuntimeEntityBuffer>) => {
+    if (!hasConv) return;
+    ensureEntry();
+    const prev = getRuntimeBuffer() ?? normalizeRuntimeEntityBuffer();
+    const next = normalizeRuntimeEntityBuffer({
+      thread: Object.prototype.hasOwnProperty.call(patch, "thread") ? (patch.thread ?? null) : prev.thread,
+      turns: Object.prototype.hasOwnProperty.call(patch, "turns") ? (patch.turns ?? []) : prev.turns,
+      items: Object.prototype.hasOwnProperty.call(patch, "items") ? (patch.items ?? []) : prev.items,
+      collabSessions: Object.prototype.hasOwnProperty.call(patch, "collabSessions")
+        ? (patch.collabSessions ?? [])
+        : prev.collabSessions,
+      activeItemIds: Object.prototype.hasOwnProperty.call(patch, "activeItemIds")
+        ? (patch.activeItemIds ?? [])
+        : prev.activeItemIds,
+    });
+    extendedBufferByConvId.set(cid, next);
+  };
 
   // ── 把后台 buffer 合并到 conversationStore snapshot ──
   const flushBufferToSnapshot = () => {
@@ -165,16 +266,28 @@ export function createRunTarget(convId: string) {
     const conv = getConv();
     if (!entry?.buffer || !conv) return;
     const base = conv.snapshot;
+    const runtime = getRuntimeBuffer();
+    const projectedSteps = getProjectedStepsFromRuntime({
+      steps: mergeStepsFromBuffer(base.steps, entry.buffer.steps ?? []) as Step[],
+      items: (runtime?.items ?? (base as any)?.items ?? []) as RuntimeItemRecord[],
+      activeItemIds: (runtime?.activeItemIds ?? (base as any)?.activeItemIds ?? []) as string[],
+      collabSessions: (runtime?.collabSessions ?? (base as any)?.collabSessions ?? []) as RuntimeCollabSessionRecord[],
+    });
     const next: RunSnapshot = {
       ...base,
       mainDoc: JSON.parse(JSON.stringify(entry.buffer.mainDoc ?? base.mainDoc ?? {})),
       todoList: JSON.parse(JSON.stringify(entry.buffer.todoList ?? base.todoList ?? [])),
-      steps: mergeStepsFromBuffer(base.steps, entry.buffer.steps ?? []),
+      steps: toSerializableSteps(projectedSteps),
       logs: JSON.parse(JSON.stringify(
         entry.buffer.logs?.length ? entry.buffer.logs : (base.logs ?? [])
       )),
       ctxRefs: JSON.parse(JSON.stringify(entry.buffer.ctxRefs ?? base.ctxRefs ?? [])),
       pendingArtifacts: JSON.parse(JSON.stringify((entry.buffer as any).pendingArtifacts ?? (base as any).pendingArtifacts ?? [])),
+      thread: JSON.parse(JSON.stringify(runtime?.thread ?? (base as any).thread ?? null)),
+      turns: JSON.parse(JSON.stringify(runtime?.turns ?? (base as any).turns ?? [])),
+      items: JSON.parse(JSON.stringify(runtime?.items ?? (base as any).items ?? [])),
+      collabSessions: JSON.parse(JSON.stringify(runtime?.collabSessions ?? (base as any).collabSessions ?? [])),
+      activeItemIds: JSON.parse(JSON.stringify(runtime?.activeItemIds ?? (base as any).activeItemIds ?? [])),
     };
     useConversationStore.getState().updateConversation(cid, { snapshot: next });
   };
@@ -248,6 +361,31 @@ export function createRunTarget(convId: string) {
     return (getConv()?.snapshot.kbAttachedLibraryIds ?? frozenKb) as string[];
   };
 
+  const getThread = (): RuntimeThreadRecord | null => {
+    if (isActive()) return (useRunStore.getState() as any).thread ?? null;
+    return (getRuntimeBuffer()?.thread ?? (getConv()?.snapshot as any)?.thread ?? null) as RuntimeThreadRecord | null;
+  };
+
+  const getTurns = (): RuntimeTurnRecord[] => {
+    if (isActive()) return ((useRunStore.getState() as any).turns ?? []) as RuntimeTurnRecord[];
+    return (getRuntimeBuffer()?.turns ?? (getConv()?.snapshot as any)?.turns ?? []) as RuntimeTurnRecord[];
+  };
+
+  const getItems = (): RuntimeItemRecord[] => {
+    if (isActive()) return ((useRunStore.getState() as any).items ?? []) as RuntimeItemRecord[];
+    return (getRuntimeBuffer()?.items ?? (getConv()?.snapshot as any)?.items ?? []) as RuntimeItemRecord[];
+  };
+
+  const getCollabSessions = (): RuntimeCollabSessionRecord[] => {
+    if (isActive()) return ((useRunStore.getState() as any).collabSessions ?? []) as RuntimeCollabSessionRecord[];
+    return (getRuntimeBuffer()?.collabSessions ?? (getConv()?.snapshot as any)?.collabSessions ?? []) as RuntimeCollabSessionRecord[];
+  };
+
+  const getActiveItemIds = (): string[] => {
+    if (isActive()) return ((useRunStore.getState() as any).activeItemIds ?? []) as string[];
+    return (getRuntimeBuffer()?.activeItemIds ?? (getConv()?.snapshot as any)?.activeItemIds ?? []) as string[];
+  };
+
   const getIsRunning = (): boolean => {
     if (!hasConv) return Boolean(useRunStore.getState().isRunning);
     return Boolean(useRunRegistry.getState().runs[cid]?.isRunning);
@@ -266,6 +404,11 @@ export function createRunTarget(convId: string) {
     getTodoList,
     getDialogueSummaryByMode,
     getKbAttachedLibraryIds,
+    getThread,
+    getTurns,
+    getItems,
+    getCollabSessions,
+    getActiveItemIds,
 
     // ---- setRunning ----
     setRunning: (running: boolean) => {
@@ -384,7 +527,15 @@ export function createRunTarget(convId: string) {
         const rid = useRunStore.getState().addTool(tool);
         step.id = rid;
       }
+      const runtimeBefore = getRuntimeBuffer();
+      const shadowItem = createShadowItemFromToolStep({
+        step,
+        existingItem: runtimeBefore?.items.find((item) => item.id === step.id) ?? null,
+        threadId: String(runtimeBefore?.thread?.id ?? "").trim() || "local-thread",
+        turnId: String((runtimeBefore?.turns ?? []).slice(-1)[0]?.id ?? "").trim() || "local-turn",
+      });
       mirrorAddStep(step);
+      updateRuntimeBuffer({ items: upsertById(runtimeBefore?.items ?? [], shadowItem) });
       return step.id;
     },
 
@@ -396,6 +547,18 @@ export function createRunTarget(convId: string) {
       // 注意：apply/undo 函数不应写入 registry（无法序列化）
       const { apply: _a, undo: _u, ...safePatch } = patch as any;
       mirrorPatchStep(stepId, safePatch);
+      const baseStep = ((getBuffer()?.steps ?? []).find((s) => s.id === stepId && s.type === "tool") ?? null) as ToolBlockStep | null;
+      if (baseStep) {
+        const nextTool = { ...baseStep, ...patch };
+        const runtimeBefore = getRuntimeBuffer();
+        const shadowItem = createShadowItemFromToolStep({
+          step: nextTool,
+          existingItem: runtimeBefore?.items.find((item) => item.id === stepId) ?? null,
+          threadId: String(runtimeBefore?.thread?.id ?? "").trim() || "local-thread",
+          turnId: String((runtimeBefore?.turns ?? []).slice(-1)[0]?.id ?? "").trim() || "local-turn",
+        });
+        updateRuntimeBuffer({ items: upsertById(runtimeBefore?.items ?? [], shadowItem) });
+      }
     },
 
     // ---- updateMainDoc ----
@@ -482,6 +645,76 @@ export function createRunTarget(convId: string) {
       }
       const next = dedupeCtxRefs([...(getCtxRefs() ?? []), item]);
       mirrorUpdateBuffer({ ctxRefs: next });
+    },
+
+    // ---- runtime entities ----
+    setThread: (thread: RuntimeThreadRecord | null) => {
+      if (isActive()) {
+        (useRunStore.getState() as any).setThread?.(thread ?? null);
+      }
+      updateRuntimeBuffer({ thread: thread ?? null });
+    },
+
+    setTurns: (turns: RuntimeTurnRecord[]) => {
+      const next = normalizeRuntimeEntityBuffer({ turns }).turns;
+      if (isActive()) {
+        (useRunStore.getState() as any).setTurns?.(next);
+      }
+      updateRuntimeBuffer({ turns: next });
+    },
+
+    upsertTurn: (turn: RuntimeTurnRecord) => {
+      if (!turn || typeof turn !== "object" || !String((turn as any).id ?? "").trim()) return;
+      const nextTurn = { ...(turn as any) } as RuntimeTurnRecord;
+      if (isActive()) {
+        (useRunStore.getState() as any).upsertTurn?.(nextTurn);
+      }
+      const prev = getTurns();
+      updateRuntimeBuffer({ turns: upsertById(prev, nextTurn) });
+    },
+
+    setItems: (items: RuntimeItemRecord[]) => {
+      const next = normalizeRuntimeEntityBuffer({ items }).items;
+      if (isActive()) {
+        (useRunStore.getState() as any).setItems?.(next);
+      }
+      updateRuntimeBuffer({ items: next });
+    },
+
+    upsertItem: (item: RuntimeItemRecord) => {
+      if (!item || typeof item !== "object" || !String((item as any).id ?? "").trim()) return;
+      const nextItem = { ...(item as any) } as RuntimeItemRecord;
+      if (isActive()) {
+        (useRunStore.getState() as any).upsertItem?.(nextItem);
+      }
+      const prev = getItems();
+      updateRuntimeBuffer({ items: upsertById(prev, nextItem) });
+    },
+
+    setCollabSessions: (sessions: RuntimeCollabSessionRecord[]) => {
+      const next = normalizeRuntimeEntityBuffer({ collabSessions: sessions }).collabSessions;
+      if (isActive()) {
+        (useRunStore.getState() as any).setCollabSessions?.(next);
+      }
+      updateRuntimeBuffer({ collabSessions: next });
+    },
+
+    upsertCollabSession: (session: RuntimeCollabSessionRecord) => {
+      if (!session || typeof session !== "object" || !String((session as any).id ?? "").trim()) return;
+      const nextSession = { ...(session as any) } as RuntimeCollabSessionRecord;
+      if (isActive()) {
+        (useRunStore.getState() as any).upsertCollabSession?.(nextSession);
+      }
+      const prev = getCollabSessions();
+      updateRuntimeBuffer({ collabSessions: upsertById(prev, nextSession) });
+    },
+
+    setActiveItemIds: (itemIds: string[]) => {
+      const next = normalizeRuntimeEntityBuffer({ activeItemIds: itemIds }).activeItemIds;
+      if (isActive()) {
+        (useRunStore.getState() as any).setActiveItemIds?.(next);
+      }
+      updateRuntimeBuffer({ activeItemIds: next });
     },
   };
 }

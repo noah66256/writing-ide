@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useProjectStore } from "../state/projectStore";
-import { useRunStore, type ToolBlockStep } from "../state/runStore";
+import { getItemActionRuntime, useRunStore, type ToolBlockStep } from "../state/runStore";
 import type { TopicCandidate, TopicLabOutput } from "../agent/topicLab";
 
 function findDiffInfo(output: any): { path?: string; diff: string; truncated?: boolean; stats?: any; note?: string } | null {
@@ -133,6 +133,8 @@ function buildDraft(candidate: TopicCandidate) {
 export function ToolBlock(props: { step: ToolBlockStep }) {
   const { step } = props;
   const mode = useRunStore((s) => s.mode);
+  const items = useRunStore((s) => s.items);
+  const dispatchItemAction = useRunStore((s) => s.dispatchItemAction);
   const keepStep = useRunStore((s) => s.keepStep);
   const undoStep = useRunStore((s) => s.undoStep);
 
@@ -209,6 +211,80 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
 
   const canApplyPick = mode !== "chat" && step.status === "success" && !!topicOutput;
   const isMac = (window as any).desktop?.platform === "darwin";
+  const boundItem = useMemo(
+    () => items.find((item) => String((item as any)?.id ?? "") === String(step.id ?? "")) ?? null,
+    [items, step.id],
+  );
+  const runtimeAction = getItemActionRuntime(step.id);
+  const itemOwnsAction = Boolean(boundItem && ((boundItem as any).type === "fileChange" || (boundItem as any).type === "approval"));
+  const actionUnavailableAfterReload =
+    itemOwnsAction &&
+    (boundItem as any)?.actionSpec?.canReplayAfterReload === false &&
+    !runtimeAction;
+  const itemType = String((boundItem as any)?.type ?? "").trim();
+  const itemStatus = String((boundItem as any)?.status ?? "").trim();
+  const primaryCompleted = itemOwnsAction
+    ? Boolean((boundItem as any)?.applied ?? (boundItem as any)?.kept)
+    : Boolean(step.kept);
+  const secondaryCompleted = itemOwnsAction ? itemStatus === "declined" : step.status === "undone";
+  const actionRunning = itemOwnsAction ? itemStatus === "in_progress" : step.status === "running";
+  const actionLabels = useMemo(() => {
+    const itemType = String((boundItem as any)?.type ?? "").trim();
+    const applied = Boolean((boundItem as any)?.applied ?? step.applied);
+    if (itemType === "approval") {
+      return {
+        primary: "批准",
+        secondary: "驳回",
+        primaryTitle: "批准该请求",
+        secondaryTitle: "驳回该请求",
+      };
+    }
+    if (itemType === "fileChange") {
+      return applied
+        ? {
+            primary: "应用更改",
+            secondary: "回滚更改",
+            primaryTitle: "应用这份更改提案",
+            secondaryTitle: "回滚已应用的更改",
+          }
+        : {
+            primary: "应用更改",
+            secondary: "放弃提案",
+            primaryTitle: "应用这份更改提案",
+            secondaryTitle: "放弃这份更改提案",
+          };
+    }
+    if (step.applyPolicy === "proposal") {
+      return {
+        primary: "采纳",
+        secondary: "放弃",
+        primaryTitle: "采纳该步产物进入上下文",
+        secondaryTitle: "放弃该步提案",
+      };
+    }
+    return {
+      primary: "采纳",
+      secondary: step.undoable ? "回滚更改" : "放弃",
+      primaryTitle: "采纳该步产物进入上下文",
+      secondaryTitle: step.undoable ? "回滚该步副作用并从上下文移除" : "从上下文移除（无副作用）",
+    };
+  }, [boundItem, step.applied, step.applyPolicy, step.undoable]);
+
+  const handleUndo = () => {
+    if (itemOwnsAction) {
+      dispatchItemAction(step.id, itemType === "approval" ? "decline" : "undo");
+      return;
+    }
+    undoStep(step.id);
+  };
+
+  const handleKeep = () => {
+    if (itemOwnsAction) {
+      dispatchItemAction(step.id, itemType === "approval" ? "approve" : "keep");
+      return;
+    }
+    keepStep(step.id);
+  };
 
   const applyPick = (candidate: TopicCandidate, idx: number) => {
     if (!canApplyPick) return;
@@ -235,7 +311,7 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
       applied: true,
     });
 
-    // 2) write（新建草稿文件，low auto-apply，Undo=回到执行前快照）
+    // 2) write（新建草稿文件，low auto-apply，回滚=回到执行前快照）
     const snap = useProjectStore.getState().snapshot();
     const path = `drafts/run-${Date.now()}.md`;
     useProjectStore.getState().createFile(path, buildDraft(candidate));
@@ -254,7 +330,7 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
       applied: true,
     });
 
-    // 3) 选题工具本身标记 Keep（表示采纳其结果进入上下文）
+    // 3) 选题工具本身标记为已采纳（表示其结果进入上下文）
     keepStep(step.id);
 
     // 避免 TS 抱怨未使用（mainDocStepId 只是示意）
@@ -282,7 +358,7 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
         {topicOutput ? (
           <div style={{ display: "grid", gap: 10 }}>
             <div style={{ color: "var(--text)" }}>
-              候选选题（点击“采用”会写入 Main Doc 并新建草稿，可 Undo）
+              候选选题（点击“采用”会写入 Main Doc 并新建草稿，之后可回滚更改）
             </div>
             <div style={{ display: "grid", gap: 8 }}>
               {topicOutput.topics.slice(0, 6).map((t, idx) => (
@@ -551,26 +627,29 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
         )}
 
         <div className="btnRow">
+          {actionUnavailableAfterReload ? (
+            <div style={{ color: "var(--muted)", fontSize: 12 }}>
+              该提案来自历史快照，当前仅可查看，不能继续执行提案动作。
+            </div>
+          ) : null}
           <button
             className="btn btnDanger"
-            onClick={() => undoStep(step.id)}
-            disabled={step.status === "running" || step.status === "undone"}
-            title={step.undoable ? "撤销该步副作用并从上下文移除" : "从上下文移除（无副作用）"}
+            onClick={handleUndo}
+            disabled={actionUnavailableAfterReload || actionRunning || secondaryCompleted}
+            title={actionLabels.secondaryTitle}
           >
-            Undo
+            {actionLabels.secondary}
           </button>
           <button
             className="btn btnPrimary"
-            onClick={() => keepStep(step.id)}
-            disabled={step.status === "running" || step.status === "undone" || step.kept}
-            title="采纳该步产物进入上下文"
+            onClick={handleKeep}
+            disabled={actionUnavailableAfterReload || actionRunning || secondaryCompleted || primaryCompleted}
+            title={actionLabels.primaryTitle}
           >
-            Keep
+            {actionLabels.primary}
           </button>
         </div>
       </div>
     </div>
   );
 }
-
-

@@ -148,6 +148,18 @@ declare global {
           detail?: string;
         }>;
         saveConversations: (payload: any) => Promise<{ ok: boolean; used?: "primary" | "fallback"; file?: string; error?: string }>;
+        saveConversationsSync?: (payload: any) => { ok: boolean; used?: "primary" | "fallback"; file?: string; error?: string };
+        loadConversationSegment?: (params: {
+          conversationId: string;
+          beforeStepId?: string;
+          limit?: number;
+        }) => Promise<{
+          ok: boolean;
+          steps?: any[];
+          hasMoreBefore?: boolean;
+          error?: string;
+          detail?: string;
+        }>;
         loadPendingConversations: () => Promise<{ ok: boolean; payload?: any | null; used?: "primary" | "fallback"; file?: string; error?: string }>;
         savePendingConversations: (payload: any) => Promise<{ ok: boolean; used?: "primary" | "fallback"; file?: string; error?: string }>;
         clearPendingConversations: () => Promise<{ ok: boolean; error?: string }>;

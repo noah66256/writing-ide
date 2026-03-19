@@ -1,10 +1,44 @@
 import assert from "node:assert/strict";
 import { buildMcpServerCatalog, type McpSidecarServer, type McpSidecarTool } from "../src/agent/toolCatalog.js";
-import { mergeWorkflowStickyFromMcpSuccess } from "../../../apps/desktop/src/agent/mcpWorkflowSticky.ts";
 import { shouldAttemptMcpSessionRecovery } from "../../../apps/desktop/electron/mcp-session-recovery.mjs";
 
 function ok(name: string) {
   console.log(`[smoke-mcp-session-reliability] OK: ${name}`);
+}
+
+type StickyWorkflow = {
+  routeId?: string;
+  kind?: string;
+  status?: string;
+  intentHint?: string;
+  selectedServerIds?: string[];
+  preferredToolNames?: string[];
+  updatedAt?: string;
+};
+
+function mergeTaskStateWorkflowFromMcpSuccess(
+  prevWorkflow: StickyWorkflow,
+  args: { serverId: string; toolName: string; nowIso: string },
+): StickyWorkflow {
+  const serverId = String(args.serverId ?? "").trim();
+  const toolName = String(args.toolName ?? "").trim();
+  const nextSelectedServerIds = Array.from(
+    new Set([...(Array.isArray(prevWorkflow.selectedServerIds) ? prevWorkflow.selectedServerIds : []), ...(serverId ? [serverId] : [])]),
+  ).slice(0, 8);
+  const nextPreferredToolNames = Array.from(
+    new Set([...(Array.isArray(prevWorkflow.preferredToolNames) ? prevWorkflow.preferredToolNames : []), ...(toolName ? [toolName] : [])]),
+  ).slice(0, 16);
+  const browserLike = /playwright|browser/i.test(`${serverId} ${toolName}`);
+  return {
+    ...prevWorkflow,
+    routeId: browserLike ? "web_radar" : prevWorkflow.routeId ?? "task_execution",
+    kind: browserLike ? "browser_session" : prevWorkflow.kind ?? "task_workflow",
+    status: "running",
+    intentHint: prevWorkflow.intentHint ?? "ops",
+    selectedServerIds: nextSelectedServerIds,
+    preferredToolNames: nextPreferredToolNames,
+    updatedAt: args.nowIso,
+  };
 }
 
 function buildFixtures(): { servers: McpSidecarServer[]; tools: McpSidecarTool[] } {
@@ -25,7 +59,7 @@ function buildFixtures(): { servers: McpSidecarServer[]; tools: McpSidecarTool[]
 }
 
 function scenarioStickyMerge() {
-  const next = mergeWorkflowStickyFromMcpSuccess({}, {
+  const next = mergeTaskStateWorkflowFromMcpSuccess({}, {
     serverId: "playwright",
     toolName: "mcp.playwright.browser_navigate",
     nowIso: "2026-03-08T10:00:00.000Z",
@@ -38,8 +72,7 @@ function scenarioStickyMerge() {
 }
 
 function scenarioStickyAppend() {
-  const next = mergeWorkflowStickyFromMcpSuccess({
-    v: 1,
+  const next = mergeTaskStateWorkflowFromMcpSuccess({
     routeId: "task_execution",
     kind: "task_workflow",
     status: "running",

@@ -93,7 +93,7 @@ const DEFAULT_SUB_AGENT_BUDGET: SubAgentDefinition["budget"] = {
 
 let lastSyncedSubAgentIds = new Set<string>();
 
-function authHeader() {
+function authHeader(): Record<string, string> {
   const token = String(useAuthStore.getState().accessToken ?? "").trim();
   return token ? { Authorization: `Bearer ${token}` } : {};
 }

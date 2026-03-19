@@ -863,8 +863,6 @@ function SkillTabContent() {
                   onChange={(e) => {
                     const nextEnabled = e.target.checked;
                     setSkillEnabled(skill.id, nextEnabled);
-                    // 关闭 skill 时同步清除 sticky，防止旧 sticky 覆盖 Settings 意图
-                    if (!nextEnabled) useRunStore.getState().removeStickyActiveSkill(skill.id);
                   }}
                 />
                 <span className="teamToggleSlider" />

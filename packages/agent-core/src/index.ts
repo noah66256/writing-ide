@@ -28,7 +28,6 @@ export type {
 
 export {
   createInitialRunState,
-  PERSISTABLE_STATE_KEYS,
   parseMainDocFromContextPack,
   parseKbSelectedLibrariesFromContextPack,
   parseRunTodoFromContextPack,

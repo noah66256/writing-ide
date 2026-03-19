@@ -30,6 +30,7 @@ import { useConversationStore, buildCurrentSnapshot } from "@/state/conversation
 import { resolveInlineFileOpConfirm } from "@/state/inlineFileOpConfirm";
 import { startGatewayRun, humanizeToolActivity } from "@/agent/gatewayAgent";
 import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
+import { getProjectedStepsFromRuntime } from "@/agent/threadProjection";
 import { WelcomePage } from "./WelcomePage";
 import { InputBar } from "./InputBar";
 import { usePersonaStore } from "@/state/personaStore";
@@ -40,6 +41,7 @@ import {
   parseFileRefHref,
   resolveOpenableFileRef,
 } from "@/utils/fileRefLink";
+import type { SkillRef } from "@ohmycrab/shared";
 
 type RunController = { cancel: (reason?: string) => void; done: Promise<void> };
 const MARKDOWN_IMAGE_EXT_RE = /\.(png|jpe?g|gif|svg|webp|bmp|ico|avif)$/i;
@@ -99,6 +101,29 @@ function tryPreAttachStyleLibraryFromPrompt(args: {
   const libId = String(matched[0]?.id ?? "").trim();
   if (!libId) return;
   runState.setKbAttachedLibraries([libId]);
+}
+
+function buildSkillRefs(args: {
+  persistedThreadSkillIds: string[];
+  mentionedSkillIds: string[];
+}): SkillRef[] {
+  const refs = new Map<string, SkillRef>();
+  const upsert = (rawId: string, activation: SkillRef["activation"], scope: SkillRef["scope"]) => {
+    const id = String(rawId ?? "").trim();
+    if (!id) return;
+    const manifest = skillRegistry.get(id);
+    refs.set(id, {
+      id,
+      source: manifest?.source === "user" ? "user" : "builtin",
+      activation,
+      scope,
+      configPath: null,
+      enabled: true,
+    });
+  };
+  for (const id of args.persistedThreadSkillIds) upsert(id, "sticky", "thread");
+  for (const id of args.mentionedSkillIds) upsert(id, "explicit", "turn");
+  return Array.from(refs.values());
 }
 
 function fileToImageAttachment(file: File): Promise<ImageAttachment | null> {
@@ -740,11 +765,14 @@ function MarkdownImage({
 
 export function ChatArea() {
   const steps = useRunStore((s) => s.steps);
+  const items = useRunStore((s) => s.items);
+  const activeItemIds = useRunStore((s) => s.activeItemIds);
+  const collabSessions = useRunStore((s) => s.collabSessions);
   const isRunning = useRunStore((s) => s.isRunning);
   const todoList = useRunStore((s) => s.todoList);
   const mainDoc = useRunStore((s) => s.mainDoc);
   const kbAttachedLibraryIds = useRunStore((s) => s.kbAttachedLibraryIds);
-  const stickyActiveSkillIds = useRunStore((s) => s.stickyActiveSkillIds);
+  const thread = useRunStore((s) => s.thread);
   const ctxRefs = useRunStore((s) => s.ctxRefs);
   const pendingArtifacts = useRunStore((s) => s.pendingArtifacts);
   const mode = useRunStore((s) => s.mode);
@@ -764,31 +792,42 @@ export function ChatArea() {
   const controllerRef = useRef<RunController | null>(null);
   const prevRunningRef = useRef(false);
 
+  const renderSteps = useMemo(
+    () =>
+      getProjectedStepsFromRuntime({
+        steps,
+        items,
+        activeItemIds,
+        collabSessions,
+      }),
+    [steps, items, activeItemIds, collabSessions],
+  );
+
   const activeConvId = useConversationStore((s) => s.activeConvId);
-  const hasMessages = steps.length > 0;
+  const hasMessages = renderSteps.length > 0;
   const hasPendingTodo = useMemo(
     () => todoList.some((item) => item.status !== "done" && item.status !== "skipped"),
     [todoList],
   );
   const showWorkflowTodoPanel = todoList.length > 0 && (isRunning || hasPendingTodo);
-  const renderRows = useMemo(() => buildRenderRows(steps), [steps]);
+  const renderRows = useMemo(() => buildRenderRows(renderSteps), [renderSteps]);
 
   // 自动滚动到底部
   useEffect(() => {
     if (!stickRef.current) return;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [steps]);
+  }, [renderSteps]);
 
   // 初始化当前会话是否存在更早历史（用于顶部“加载更多”判断）
   useEffect(() => {
     const convId = activeConvId;
-    if (!convId || steps.length === 0) {
+    if (!convId || renderSteps.length === 0) {
       useRunStore.getState().setHistoryWindowHasMoreBefore(false);
       return;
     }
     const api = window.desktop?.history?.loadConversationSegment;
     if (!api) return;
-    const first = steps[0];
+    const first = renderSteps[0];
     if (!first?.id) return;
     let cancelled = false;
     void api({ conversationId: convId, beforeStepId: first.id, limit: 1 })
@@ -802,7 +841,7 @@ export function ChatArea() {
     return () => {
       cancelled = true;
     };
-  }, [activeConvId, steps.length]);
+  }, [activeConvId, renderSteps]);
 
   // 滚动事件：判断是否 stick to bottom + 顶部触发历史加载
   const handleScroll = useCallback(() => {
@@ -822,7 +861,13 @@ export function ChatArea() {
     if (el.scrollTop < threshold && hasMoreHistoryBefore && !loadingMoreHistoryRef.current) {
       const api = window.desktop?.history?.loadConversationSegment;
       const convId = useConversationStore.getState().activeConvId;
-      const currentSteps = useRunStore.getState().steps ?? [];
+      const runState = useRunStore.getState();
+      const currentSteps = getProjectedStepsFromRuntime({
+        steps: runState.steps ?? [],
+        items: runState.items ?? [],
+        activeItemIds: runState.activeItemIds ?? [],
+        collabSessions: runState.collabSessions ?? [],
+      });
       const first = currentSteps[0];
       if (!api || !convId || !first) return;
 
@@ -856,7 +901,7 @@ export function ChatArea() {
   // 自动保存：使用脏标记 + 固定间隔轮询，避免连续工具调用/流式输出饿死 timer
   useEffect(() => {
     autoSaveDirtyRef.current = true;
-  }, [steps, mainDoc, todoList, kbAttachedLibraryIds, stickyActiveSkillIds, ctxRefs, pendingArtifacts, mode, model, activeConvId]);
+  }, [renderSteps, mainDoc, todoList, kbAttachedLibraryIds, thread, ctxRefs, pendingArtifacts, mode, model, activeConvId]);
 
   // 自动保存草稿到 conversationStore，同时更新活跃对话（带防降级保护）
   useEffect(() => {
@@ -867,12 +912,12 @@ export function ChatArea() {
       const convIdNow = convStore.activeConvId;
 
     const hasDraftState =
-      steps.length > 0 ||
+      renderSteps.length > 0 ||
       todoList.length > 0 ||
       pendingArtifacts.length > 0 ||
       ctxRefs.length > 0 ||
       kbAttachedLibraryIds.length > 0 ||
-      stickyActiveSkillIds.length > 0 ||
+      (Array.isArray(thread?.activeSkillRefs) && thread.activeSkillRefs.length > 0) ||
       Object.values(mainDoc ?? {}).some((v) => {
         if (v == null) return false;
         if (typeof v === "string") return Boolean(v.trim());
@@ -908,7 +953,7 @@ export function ChatArea() {
       autoSaveDirtyRef.current = false;
     }, 2000);
     return () => window.clearInterval(timer);
-  }, [steps, mainDoc, todoList, kbAttachedLibraryIds, stickyActiveSkillIds, ctxRefs, pendingArtifacts, mode, model]);
+  }, [renderSteps, mainDoc, todoList, kbAttachedLibraryIds, thread, ctxRefs, pendingArtifacts, mode, model]);
 
   // 运行结束时立即刷盘一次，避免 dev/HMR/强制退出导致最后一轮没落盘
   useEffect(() => {
@@ -1002,16 +1047,18 @@ export function ChatArea() {
       };
       const userMentions = meta?.mentions?.length ? meta.mentions : undefined;
       const mentionedSkillIds = meta?.mentions?.filter((m) => m.type === "skill").map((m) => m.id) ?? [];
-      // 合并 sticky skill（上轮 @mention 过的 skill，本轮自动延续）
-      // 过滤掉 workflow 类型的 sticky skill（不应跨 run 自动延续）
-      const stickySkillIds = (useRunStore.getState().stickyActiveSkillIds ?? []).filter((id) => {
-        const m = skillRegistry.get(id);
-        return m?.kind !== "workflow";
-      });
-      const activeSkillIds = Array.from(new Set([...stickySkillIds, ...mentionedSkillIds]));
+      const persistedThreadSkillIds = ((((useRunStore.getState() as any).thread?.activeSkillRefs ?? []) as SkillRef[]))
+        .filter((item) => item?.scope === "thread" && item?.activation !== "auto" && item?.enabled !== false)
+        .map((item) => String(item?.id ?? "").trim())
+        .filter((id) => {
+          const m = skillRegistry.get(id);
+          return m?.kind !== "workflow";
+        });
+      const skillRefs = buildSkillRefs({ persistedThreadSkillIds, mentionedSkillIds });
+      const requestedSkillIds = skillRefs.map((item) => item.id);
       useRunStore.getState().addUser(text, baseline as any, userMentions, images.length ? images : undefined);
       const hasSkillOnlyInvocation =
-        activeSkillIds.length > 0 &&
+        skillRefs.length > 0 &&
         cleanPromptRaw.trim().length === 0 &&
         images.length === 0;
       // 纯图片消息 / 纯 skill 唤起时 prompt 不能为空（Gateway schema min(1)），用空格占位
@@ -1021,21 +1068,10 @@ export function ChatArea() {
           : images.length > 0 || hasSkillOnlyInvocation
             ? " "
             : cleanPromptRaw;
-      // 新 @mention 的 skill 写入 sticky，后续 Run 自动携带
-      // workflow 类型的 skill 不写入 sticky（每次必须用户显式 @mention）
-      if (mentionedSkillIds.length > 0) {
-        const stickyIds = mentionedSkillIds.filter((id) => {
-          const m = skillRegistry.get(id);
-          return m?.kind !== "workflow";
-        });
-        if (stickyIds.length > 0) {
-          useRunStore.getState().addStickyActiveSkills(stickyIds);
-        }
-      }
       const kbMentionIds = meta?.mentions?.filter((m) => m.type === "kb").map((m) => m.id);
       tryPreAttachStyleLibraryFromPrompt({
         prompt: cleanPromptRaw,
-        activeSkillIds,
+        activeSkillIds: requestedSkillIds,
         kbMentionIds,
       });
       // 读取当前 activeConvId（此时可能刚被 setActiveConvId 更新）
@@ -1044,7 +1080,7 @@ export function ChatArea() {
         gatewayUrl, mode, model, prompt: cleanPrompt, opMode,
         ...(images.length ? { images } : {}),
         ...(targetAgentIds?.length ? { targetAgentIds } : {}),
-        ...(activeSkillIds?.length ? { activeSkillIds } : {}),
+        ...(skillRefs.length ? { skillRefs } : {}),
         ...(kbMentionIds?.length ? { kbMentionIds } : {}),
         ...(runConvId ? { convId: runConvId } : {}),
       });
@@ -1150,7 +1186,7 @@ export function ChatArea() {
               <div ref={bottomRef} />
             </div>
           </div>
-          <MiniMap steps={steps} viewport={viewportRatio} scrollRef={scrollRef} />
+          <MiniMap steps={renderSteps} viewport={viewportRatio} scrollRef={scrollRef} />
         </div>
       ) : (
         /* 欢迎页 */
@@ -1167,7 +1203,7 @@ export function ChatArea() {
       )}
 
       {/* 后台进程 / 终端状态行（贴在输入框上方） */}
-      <BackgroundProcessSummary steps={steps} />
+      <BackgroundProcessSummary steps={renderSteps} />
 
       {/* 输入栏（始终可见） */}
       <InputBar
@@ -1322,7 +1358,7 @@ function MiniMap({
 }: {
   steps: Step[];
   viewport: { start: number; height: number };
-  scrollRef: React.RefObject<HTMLDivElement>;
+  scrollRef: React.RefObject<HTMLDivElement | null>;
 }) {
   const total = steps.length || 1;
 
@@ -1586,7 +1622,7 @@ function AssistantMessage({
           )}
         </div>
 
-        {step.variant !== "progress" && !step.streaming && step.text && (
+        {String(step.variant ?? "default") !== "progress" && !step.streaming && step.text && (
           <div className="mt-3 flex items-center gap-1 opacity-0 transition-opacity duration-fast hover:opacity-100">
             <button
               className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-faint transition-colors duration-fast hover:bg-surface-alt hover:text-text-muted"
@@ -1882,9 +1918,9 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
 function toolDisplayName(toolName: string, input: unknown): string {
   const mcpLabel = humanizeMcpToolDisplayName(toolName);
   if (mcpLabel) return mcpLabel;
-  if (toolName === "agent.delegate") {
+  if (toolName === "spawn_agent") {
     const args = _asRecord(input);
-    const agentId = String(args.agentId ?? args.targetAgentId ?? "").trim();
+    const agentId = String(args.agentId ?? args.agent_type ?? "").trim();
     const agent = BUILTIN_SUB_AGENTS.find((a) => a.id === agentId);
     return agent ? `委派${agent.name}` : agentId ? `委派 ${agentId}` : "委派子 Agent";
   }

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import type { ItemActionSpec } from "@ohmycrab/shared";
 import type { ProjectSnapshot } from "./projectStore";
 
 export type Mode = "agent" | "chat";
@@ -30,13 +31,8 @@ export type MainDoc = {
   // M3：风格契约（由“写法候选/anchors/默认写法”生成；跨回合注入，作为仿写的硬约束地基）
   // 说明：保持短小可验证，不要塞长原文。
   styleContractV1?: any;
-  // Workflow Contract（v0.1）：跨回合“续跑/等待确认/恢复”的通用契约。
-  // 说明：用于修复短回复（OK/继续/选3/1..2..3..）导致的意图掉线；优先让 Router/skills 依据该字段保持工作流连续性。
-  // 形态示例（建议，不强约束）：{ v:1, kind:"style_imitate", status:"waiting_user"|"running"|"done", waiting:{question,options?}, intentHint:"writing", updatedAt }
-  workflowV1?: any;
-  // Composite Task Runtime（v0.1）：复合任务的阶段图、结构化中间产物、pending input 与排队续跑。
-  // 说明：用于把“浏览/检索/提取/交付”等多能力任务拆成阶段化执行，而不是压进单一 route。
-  compositeTaskV1?: any;
+  taskStateV2?: RuntimeTaskStateV2 | null;
+  threadWaitingFor?: RuntimeThreadRecord["waitingFor"];
 };
 
 export type TodoStatus = "todo" | "in_progress" | "done" | "blocked" | "skipped";
@@ -140,8 +136,121 @@ export type PendingArtifact = {
   updatedAt: number;
 };
 
+export type RuntimeSkillRef = {
+  id: string;
+  source?: "builtin" | "user" | "admin";
+  activation?: "explicit" | "auto" | "sticky";
+  scope?: "thread" | "turn";
+  configPath?: string | null;
+  enabled?: boolean;
+};
+
+export type RuntimeCollabAgentRef = {
+  threadId: string;
+  agentId: string;
+  agentName?: string;
+  role?: string;
+  status?: "running" | "waiting" | "completed" | "failed" | "closed";
+};
+
+export type RuntimeTaskStateV2 = {
+  runIntent?: "auto" | "writing" | "rewrite" | "polish" | "analysis" | "ops";
+  workflow?: {
+    kind?: string;
+    status?: "running" | "waiting_user" | "waiting_approval" | "done" | "failed";
+    updatedAt?: string;
+  } | null;
+  compositeTask?: Record<string, unknown> | null;
+  pendingArtifacts?: Array<{
+    id: string;
+    kind: string;
+    status: "pending" | "used" | "discarded";
+    pathHint?: string;
+    updatedAt?: string;
+  }>;
+};
+
+export type RuntimeThreadRecord = {
+  id: string;
+  convId?: string | null;
+  status?: "idle" | "running" | "waiting" | "completed" | "failed";
+  waitingFor?: "none" | "user" | "approval";
+  waiting?: {
+    kind?: "clarify" | "proposal" | "approval" | "resume_or_narrow" | "login_or_choice";
+    question?: string;
+    replyHint?: string;
+    sourceTurnId?: string;
+    updatedAt?: string;
+  } | null;
+  activeSkillRefs?: RuntimeSkillRef[];
+  activeCollabAgents?: RuntimeCollabAgentRef[];
+  pendingProposalIds?: string[];
+  pendingApprovalIds?: string[];
+  taskState?: RuntimeTaskStateV2 | null;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type RuntimeTurnRecord = {
+  id: string;
+  threadId: string;
+  seq?: number;
+  status?: "in_progress" | "completed" | "failed" | "aborted" | "interrupted";
+  startedAt?: string;
+  completedAt?: string;
+  reason?: string;
+  reasonCodes?: string[];
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+  } | null;
+  itemIds?: string[];
+  executionReport?: Record<string, unknown> | null;
+};
+
+export type RuntimeItemRecord = {
+  id: string;
+  threadId: string;
+  turnId: string;
+  type?: string;
+  status?: "in_progress" | "completed" | "failed" | "declined";
+  createdAt?: string;
+  updatedAt?: string;
+  [key: string]: unknown;
+};
+
+type ItemActionRuntime = {
+  spec?: ItemActionSpec | null;
+  apply?: () => void | { undo?: () => void } | Promise<void | { undo?: () => void }>;
+  undo?: () => void | Promise<void>;
+};
+
+export type RuntimeCollabSessionRecord = {
+  id: string;
+  parentThreadId: string;
+  childThreadId: string;
+  agentId: string;
+  role?: string;
+  status?: "running" | "waiting" | "completed" | "failed" | "closed";
+  inbox?: Array<{
+    id: string;
+    createdAt: string;
+    kind: "user_message" | "system_message" | "tool_result";
+    payload: Record<string, unknown>;
+  }>;
+  lastDeliveredInboxItemId?: string;
+  waitState?: {
+    kind: "join" | "user" | "approval";
+    updatedAt: string;
+  } | null;
+  closeReason?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
 // ─── 全局 Run 取消句柄（不放 store state，避免序列化问题） ─────────────────
 let _activeRunCancel: ((reason?: string) => void) | null = null;
+const _itemActionRuntimeById = new Map<string, ItemActionRuntime>();
 
 export function setActiveRunCancel(fn: ((reason?: string) => void) | null) {
   _activeRunCancel = fn;
@@ -152,6 +261,39 @@ export function cancelActiveRun(reason = "manual_cancel") {
   const cancel = _activeRunCancel;
   _activeRunCancel = null;
   try { cancel(reason); } catch { /* ignore */ }
+}
+
+export function registerItemActionRuntime(
+  itemId: string,
+  runtime: ItemActionRuntime | null | undefined,
+) {
+  const id = String(itemId ?? "").trim();
+  if (!id) return;
+  if (!runtime) {
+    _itemActionRuntimeById.delete(id);
+    return;
+  }
+  const prev = _itemActionRuntimeById.get(id) ?? {};
+  _itemActionRuntimeById.set(id, {
+    ...prev,
+    ...(runtime.spec !== undefined ? { spec: runtime.spec } : {}),
+    ...(runtime.apply ? { apply: runtime.apply } : {}),
+    ...(runtime.undo ? { undo: runtime.undo } : {}),
+  });
+}
+
+export function getItemActionRuntime(itemId: string): ItemActionRuntime | null {
+  const id = String(itemId ?? "").trim();
+  return id ? (_itemActionRuntimeById.get(id) ?? null) : null;
+}
+
+export function clearItemActionRuntime(itemId?: string) {
+  const id = String(itemId ?? "").trim();
+  if (id) {
+    _itemActionRuntimeById.delete(id);
+    return;
+  }
+  _itemActionRuntimeById.clear();
 }
 
 type RunState = {
@@ -173,6 +315,11 @@ type RunState = {
   todoList: TodoItem[];
   steps: Step[];
   logs: LogEntry[];
+  thread: RuntimeThreadRecord | null;
+  turns: RuntimeTurnRecord[];
+  items: RuntimeItemRecord[];
+  collabSessions: RuntimeCollabSessionRecord[];
+  activeItemIds: string[];
   isRunning: boolean;
   activity: RunActivity | null;
 
@@ -186,13 +333,6 @@ type RunState = {
   setKbAttachedLibraries: (ids: string[]) => void;
   toggleKbAttachedLibrary: (id: string) => void;
   clearKbAttachedLibraries: () => void;
-
-  // 会话级 sticky skill：用户通过 @mention / slash 显式唤起的 skill，后续 Run 自动延续。
-  // 注意：这只是"显式唤起记忆"，最终激活仍由 Gateway 侧冲突裁决。
-  stickyActiveSkillIds: string[];
-  addStickyActiveSkills: (ids: string[]) => void;
-  removeStickyActiveSkill: (id: string) => void;
-  clearStickyActiveSkills: () => void;
 
   // Workflow Skills：上一轮运行时的闭环快照（写入 TASK_STATE，指导续跑补步骤）
   workflowSkills?: Record<string, { status: "not_started" | "in_progress" | "completed" | "degraded"; missingSteps?: string[] }>;
@@ -218,6 +358,14 @@ type RunState = {
   setDialogueSummary: (mode: Mode, summary: string, cursorTurns: number) => void;
   setMemoryExtractTurnCursor: (mode: Mode, cursorTurns: number) => void;
   setMainDoc: (mainDoc: MainDoc) => void;
+  setThread: (thread: RuntimeThreadRecord | null) => void;
+  setTurns: (turns: RuntimeTurnRecord[]) => void;
+  upsertTurn: (turn: RuntimeTurnRecord) => void;
+  setItems: (items: RuntimeItemRecord[]) => void;
+  upsertItem: (item: RuntimeItemRecord) => void;
+  setCollabSessions: (sessions: RuntimeCollabSessionRecord[]) => void;
+  upsertCollabSession: (session: RuntimeCollabSessionRecord) => void;
+  setActiveItemIds: (itemIds: string[]) => void;
   resetRun: () => void;
   /** 仅清空对话步骤/日志（保留 MainDoc/Todo/Refs/绑定库），用于“清空当前对话但不丢计划” */
   clearConversationSteps: () => void;
@@ -231,9 +379,13 @@ type RunState = {
     steps: Array<Step | Omit<ToolBlockStep, "apply" | "undo">>;
     logs: LogEntry[];
     kbAttachedLibraryIds: string[];
-    stickyActiveSkillIds?: string[];
     ctxRefs?: CtxRefItem[];
     pendingArtifacts?: PendingArtifact[];
+    thread?: RuntimeThreadRecord | null;
+    turns?: RuntimeTurnRecord[];
+    items?: RuntimeItemRecord[];
+    collabSessions?: RuntimeCollabSessionRecord[];
+    activeItemIds?: string[];
   }) => void;
 
   /** 在当前 steps 前面追加一段更早的历史步骤，用于滚动加载 */
@@ -264,6 +416,7 @@ type RunState = {
   ) => string;
   patchTool: (stepId: string, patch: Partial<ToolBlockStep>) => void;
 
+  dispatchItemAction: (itemId: string, action: "keep" | "undo" | "approve" | "decline") => void;
   keepStep: (stepId: string) => void;
   undoStep: (stepId: string) => void;
   keepAllProposals: () => void;
@@ -354,6 +507,158 @@ function dedupePendingArtifacts(items: PendingArtifact[]) {
   return Array.from(map.values()).sort((a, b) => a.updatedAt - b.updatedAt).slice(-3);
 }
 
+function upsertById<T extends { id: string }>(list: T[], nextItem: T): T[] {
+  const arr = Array.isArray(list) ? list : [];
+  const id = String(nextItem?.id ?? "").trim();
+  if (!id) return arr;
+  const idx = arr.findIndex((x) => String(x?.id ?? "") === id);
+  if (idx < 0) return [...arr, nextItem];
+  const out = arr.slice();
+  out[idx] = nextItem;
+  return out;
+}
+
+function stepStatusToItemStatus(step: ToolBlockStep): RuntimeItemRecord["status"] {
+  if (step.status === "running") return "in_progress";
+  if (step.status === "failed") return "failed";
+  if (step.status === "undone") return "declined";
+  return "completed";
+}
+
+function extractProposalPreview(step: ToolBlockStep) {
+  const output = step.output && typeof step.output === "object" ? (step.output as any) : null;
+  const input = step.input && typeof step.input === "object" ? (step.input as any) : null;
+  const preview = output?.preview && typeof output.preview === "object" ? output.preview : null;
+  const path =
+    String(
+      preview?.path ??
+        output?.path ??
+        output?.targetDir ??
+        output?.artifact?.relPath ??
+        output?.artifact?.absPath ??
+        input?.path ??
+        "",
+    ).trim() || undefined;
+  const diffUnified =
+    typeof output?.diffUnified === "string"
+      ? output.diffUnified
+      : typeof preview?.diffUnified === "string"
+        ? preview.diffUnified
+        : undefined;
+  const note =
+    String(preview?.note ?? output?.note ?? "").trim() || undefined;
+  return {
+    preview: preview
+      ? { ...preview, ...(path ? { path } : {}) }
+      : path || diffUnified || note
+        ? {
+            ...(path ? { path } : {}),
+            ...(diffUnified ? { diffUnified } : {}),
+            ...(note ? { note } : {}),
+          }
+        : null,
+    changes:
+      path || diffUnified
+        ? [
+            {
+              path: path ?? "",
+              diff: diffUnified,
+            },
+          ]
+        : [],
+    note,
+    path,
+  };
+}
+
+function buildItemActionSpecFromToolStep(step: ToolBlockStep): ItemActionSpec | null {
+  const meta = extractProposalPreview(step);
+  if (step.applyPolicy !== "proposal" && !step.undoable) return null;
+  return {
+    executor: step.applyPolicy === "proposal" || step.undoable ? "desktop.fs" : "gateway.noop",
+    applyOp: {
+      toolName: step.toolName,
+      ...(meta.path ? { path: meta.path } : {}),
+    },
+    undoOp: step.undoable
+      ? {
+          toolName: step.toolName,
+          ...(meta.path ? { path: meta.path } : {}),
+        }
+      : undefined,
+    canReplayAfterReload: false,
+  };
+}
+
+function buildShadowItemFromToolStep(args: {
+  step: ToolBlockStep;
+  existingItem?: RuntimeItemRecord | null;
+  threadId?: string | null;
+  turnId?: string | null;
+}): RuntimeItemRecord {
+  const step = args.step;
+  const existing = args.existingItem && typeof args.existingItem === "object" ? args.existingItem : null;
+  const nowIso = new Date().toISOString();
+  const threadId = String(args.threadId ?? existing?.threadId ?? "").trim() || "local-thread";
+  const turnId = String(args.turnId ?? existing?.turnId ?? "").trim() || "local-turn";
+  const looksLikeFileMutationTool =
+    step.toolName === "write" ||
+    step.toolName === "edit" ||
+    step.toolName === "doc.restoreSnapshot" ||
+    step.toolName === "doc.splitToDir" ||
+    step.toolName === "lint.style" ||
+    Boolean((step.output as any)?.preview?.diffUnified);
+  if (step.applyPolicy === "proposal" || (step.undoable && looksLikeFileMutationTool)) {
+    const meta = extractProposalPreview(step);
+    return {
+      id: step.id,
+      threadId,
+      turnId,
+      type: "fileChange",
+      status: stepStatusToItemStatus(step),
+      createdAt: String((existing as any)?.createdAt ?? nowIso),
+      updatedAt: nowIso,
+      sourceToolName: step.toolName,
+      riskLevel: step.riskLevel,
+      applyPolicy: step.applyPolicy,
+      preview: meta.preview,
+      changes: meta.changes,
+      note: meta.note,
+      actionSpec: buildItemActionSpecFromToolStep(step),
+      kept: step.kept,
+      applied: step.applied,
+      undoable: step.undoable,
+      canUndo: step.undoable,
+    } as RuntimeItemRecord;
+  }
+  return {
+    id: step.id,
+    threadId,
+    turnId,
+    type: "toolCall",
+    status: stepStatusToItemStatus(step),
+    createdAt: String((existing as any)?.createdAt ?? nowIso),
+    updatedAt: nowIso,
+    toolCallId: step.id,
+    name: step.toolName,
+    args: step.input && typeof step.input === "object" && !Array.isArray(step.input) ? (step.input as Record<string, unknown>) : {},
+    executedBy: "desktop",
+    result: step.output,
+    error: step.status === "failed" ? String((step.output as any)?.error ?? "TOOL_FAILED") : undefined,
+    riskLevel: step.riskLevel,
+    applyPolicy: step.applyPolicy,
+  } as RuntimeItemRecord;
+}
+
+export function createShadowItemFromToolStep(args: {
+  step: ToolBlockStep;
+  existingItem?: RuntimeItemRecord | null;
+  threadId?: string | null;
+  turnId?: string | null;
+}) {
+  return buildShadowItemFromToolStep(args);
+}
+
 export const useRunStore = create<RunState>()(
   persist(
     (set, get) => ({
@@ -369,13 +674,17 @@ export const useRunStore = create<RunState>()(
   todoList: [],
   steps: [],
   logs: [],
+  thread: null,
+  turns: [],
+  items: [],
+  collabSessions: [],
+  activeItemIds: [],
   isRunning: false,
   activity: null,
   historyWindow: { hasMoreBefore: false },
   ctxRefs: [],
   pendingArtifacts: [],
   kbAttachedLibraryIds: [],
-  stickyActiveSkillIds: [],
   workflowSkills: {},
 
   setMode: (mode) =>
@@ -397,6 +706,55 @@ export const useRunStore = create<RunState>()(
       return { agentModel: v, ...(s.mode !== "chat" ? { model: v } : {}) };
     }),
   setMainDoc: (mainDoc) => set({ mainDoc }),
+  setThread: (thread) => set({ thread: thread && typeof thread === "object" ? ({ ...(thread as any) } as RuntimeThreadRecord) : null }),
+  setTurns: (turns) =>
+    set({
+      turns: Array.isArray(turns)
+        ? turns
+            .filter((x) => x && typeof x === "object" && String((x as any).id ?? "").trim())
+            .map((x) => ({ ...(x as any) } as RuntimeTurnRecord))
+        : [],
+    }),
+  upsertTurn: (turn) =>
+    set((s) => {
+      if (!turn || typeof turn !== "object" || !String((turn as any).id ?? "").trim()) return {};
+      const nextTurn = { ...(turn as any) } as RuntimeTurnRecord;
+      return { turns: upsertById(s.turns, nextTurn) };
+    }),
+  setItems: (items) =>
+    set({
+      items: Array.isArray(items)
+        ? items
+            .filter((x) => x && typeof x === "object" && String((x as any).id ?? "").trim())
+            .map((x) => ({ ...(x as any) } as RuntimeItemRecord))
+        : [],
+    }),
+  upsertItem: (item) =>
+    set((s) => {
+      if (!item || typeof item !== "object" || !String((item as any).id ?? "").trim()) return {};
+      const nextItem = { ...(item as any) } as RuntimeItemRecord;
+      return { items: upsertById(s.items, nextItem) };
+    }),
+  setCollabSessions: (sessions) =>
+    set({
+      collabSessions: Array.isArray(sessions)
+        ? sessions
+            .filter((x) => x && typeof x === "object" && String((x as any).id ?? "").trim())
+            .map((x) => ({ ...(x as any) } as RuntimeCollabSessionRecord))
+        : [],
+    }),
+  upsertCollabSession: (session) =>
+    set((s) => {
+      if (!session || typeof session !== "object" || !String((session as any).id ?? "").trim()) return {};
+      const nextSession = { ...(session as any) } as RuntimeCollabSessionRecord;
+      return { collabSessions: upsertById(s.collabSessions, nextSession) };
+    }),
+  setActiveItemIds: (itemIds) =>
+    set({
+      activeItemIds: Array.from(
+        new Set((Array.isArray(itemIds) ? itemIds : []).map((x) => String(x ?? "").trim()).filter(Boolean)),
+      ),
+    }),
   setDialogueSummary: (mode, summary, cursorTurns) =>
     set((s) => {
       const m: Mode = mode === "chat" ? "chat" : "agent";
@@ -439,7 +797,8 @@ export const useRunStore = create<RunState>()(
         },
       };
     }),
-  resetRun: () =>
+  resetRun: () => {
+    clearItemActionRuntime();
     set({
       steps: [],
       logs: [],
@@ -449,26 +808,39 @@ export const useRunStore = create<RunState>()(
       todoList: [],
       ctxRefs: [],
       pendingArtifacts: [],
-      stickyActiveSkillIds: [],
+      thread: null,
+      turns: [],
+      items: [],
+      collabSessions: [],
+      activeItemIds: [],
       workflowSkills: {},
       dialogueSummaryByMode: { agent: "", chat: "" },
       dialogueSummaryTurnCursorByMode: { agent: 0, chat: 0 },
       memoryExtractTurnCursorByMode: { agent: 0, chat: 0 },
       historyWindow: { hasMoreBefore: false },
-    }),
-  clearConversationSteps: () =>
+    });
+  },
+  clearConversationSteps: () => {
+    clearItemActionRuntime();
     set({
       steps: [],
       logs: [],
       isRunning: false,
       activity: null,
       workflowSkills: {},
+      thread: null,
+      turns: [],
+      items: [],
+      collabSessions: [],
+      activeItemIds: [],
       // 对话清空后摘要无意义：一并清掉，避免旧摘要被注入 Context Pack 造成跑偏
       dialogueSummaryByMode: { agent: "", chat: "" },
       dialogueSummaryTurnCursorByMode: { agent: 0, chat: 0 },
       memoryExtractTurnCursorByMode: { agent: 0, chat: 0 },
-    }),
+    });
+  },
   loadSnapshot: (snap) => {
+    clearItemActionRuntime();
     const s = snap && typeof snap === "object" ? snap : ({} as any);
     const cleanSteps = Array.isArray(s.steps) ? s.steps : [];
     // 历史快照不携带可执行函数，统一清掉 apply/undo，并标记 undoable=false。
@@ -542,11 +914,30 @@ export const useRunStore = create<RunState>()(
       kbAttachedLibraryIds: Array.isArray((s as any).kbAttachedLibraryIds)
         ? Array.from(new Set(((s as any).kbAttachedLibraryIds as any[]).map((x: any) => String(x ?? "").trim()).filter(Boolean)))
         : [],
-      stickyActiveSkillIds: Array.isArray((s as any).stickyActiveSkillIds)
-        ? Array.from(new Set(((s as any).stickyActiveSkillIds as any[]).map((x: any) => String(x ?? "").trim()).filter(Boolean)))
-        : [],
       ctxRefs: Array.isArray((s as any).ctxRefs) ? dedupeCtxRefs((s as any).ctxRefs as any) : [],
       pendingArtifacts: Array.isArray((s as any).pendingArtifacts) ? dedupePendingArtifacts((s as any).pendingArtifacts as any) : [],
+      thread:
+        (s as any).thread && typeof (s as any).thread === "object"
+          ? ({ ...((s as any).thread as any) } as RuntimeThreadRecord)
+          : null,
+      turns: Array.isArray((s as any).turns)
+        ? ((s as any).turns as any[])
+            .filter((x) => x && typeof x === "object" && String((x as any).id ?? "").trim())
+            .map((x) => ({ ...(x as any) } as RuntimeTurnRecord))
+        : [],
+      items: Array.isArray((s as any).items)
+        ? ((s as any).items as any[])
+            .filter((x) => x && typeof x === "object" && String((x as any).id ?? "").trim())
+            .map((x) => ({ ...(x as any) } as RuntimeItemRecord))
+        : [],
+      collabSessions: Array.isArray((s as any).collabSessions)
+        ? ((s as any).collabSessions as any[])
+            .filter((x) => x && typeof x === "object" && String((x as any).id ?? "").trim())
+            .map((x) => ({ ...(x as any) } as RuntimeCollabSessionRecord))
+        : [],
+      activeItemIds: Array.from(
+        new Set((Array.isArray((s as any).activeItemIds) ? (s as any).activeItemIds : []).map((x: any) => String(x ?? "").trim()).filter(Boolean)),
+      ),
       isRunning: false,
       activity: null,
       historyWindow: { hasMoreBefore: false },
@@ -583,17 +974,6 @@ export const useRunStore = create<RunState>()(
     set({ kbAttachedLibraryIds: next });
   },
   clearKbAttachedLibraries: () => set({ kbAttachedLibraryIds: [] }),
-
-  addStickyActiveSkills: (ids) =>
-    set((s) => {
-      const next = Array.from(new Set([...(s.stickyActiveSkillIds ?? []), ...(ids ?? []).map((x) => String(x ?? "").trim()).filter(Boolean)]));
-      return { stickyActiveSkillIds: next };
-    }),
-  removeStickyActiveSkill: (id) =>
-    set((s) => ({
-      stickyActiveSkillIds: (s.stickyActiveSkillIds ?? []).filter((x) => x !== String(id ?? "").trim()),
-    })),
-  clearStickyActiveSkills: () => set({ stickyActiveSkillIds: [] }),
 
   setWorkflowSkills: (skills) => {
     const safe = skills && typeof skills === "object" ? skills : {};
@@ -637,12 +1017,17 @@ export const useRunStore = create<RunState>()(
       ),
     })),
   clearPendingArtifacts: () => set({ pendingArtifacts: [] }),
-  startFreshWritingTaskBoundary: () =>
+  startFreshWritingTaskBoundary: () => {
+    clearItemActionRuntime();
     set((s) => ({
       todoList: [],
       ctxRefs: [],
       pendingArtifacts: [],
-      stickyActiveSkillIds: [],
+      thread: null,
+      turns: [],
+      items: [],
+      collabSessions: [],
+      activeItemIds: [],
       isRunning: false,
       activity: null,
       mainDoc: {
@@ -657,7 +1042,8 @@ export const useRunStore = create<RunState>()(
       dialogueSummaryByMode: { agent: "", chat: "" },
       dialogueSummaryTurnCursorByMode: { agent: 0, chat: 0 },
       memoryExtractTurnCursorByMode: { agent: 0, chat: 0 },
-    })),
+    }));
+  },
 
   addUser: (text, baseline, mentions, images) => {
     const id = makeId("u");
@@ -753,85 +1139,161 @@ export const useRunStore = create<RunState>()(
       undo: tool.undo,
       ...(tool.agentId ? { agentId: tool.agentId } : {}),
     };
-    set((s) => ({ steps: [...s.steps, step] }));
+    const threadId = String((get().thread as any)?.id ?? "").trim() || "local-thread";
+    const latestTurnId =
+      String((get().turns ?? []).slice(-1)[0]?.id ?? "").trim() || "local-turn";
+    const shadowItem = buildShadowItemFromToolStep({ step, threadId, turnId: latestTurnId });
+    if (tool.applyPolicy === "proposal" || tool.undoable || tool.apply || tool.undo) {
+      registerItemActionRuntime(id, {
+        spec: buildItemActionSpecFromToolStep(step),
+        ...(tool.apply ? { apply: tool.apply } : {}),
+        ...(tool.undo ? { undo: tool.undo } : {}),
+      });
+    }
+    set((s) => ({ steps: [...s.steps, step], items: upsertById(s.items, shadowItem) }));
     return id;
   },
   patchTool: (stepId, patch) =>
-    set((s) => ({
-      steps: s.steps.map((step) =>
-        step.id === stepId && step.type === "tool" ? { ...step, ...patch } : step,
-      ),
-    })),
-
-  keepStep: (stepId) => {
-    const step = get().steps.find((s) => s.id === stepId);
-    if (!step || step.type !== "tool") return;
-    if (step.status === "running" || step.status === "undone" || step.kept) return;
-
-    // proposal-first：Keep 时执行 apply（并补齐 undo）
-    if (step.applyPolicy === "proposal" && !step.applied && step.apply) {
-      try {
-        const finalize = (ret: void | { undo?: () => void }) => {
-          const undo = (ret as any)?.undo as (() => void) | undefined;
-          set((s) => ({
-            steps: s.steps.map((x) =>
-              x.id === stepId && x.type === "tool"
-                ? {
-                    ...x,
-                    status: "success",
-                    kept: true,
-                    applied: true,
-                    undoable: Boolean(undo) || x.undoable,
-                    undo: undo ?? x.undo,
-                  }
-                : x,
-            ),
-          }));
-        };
-
-        const fail = (e: any) => {
-          const msg = e?.message ? String(e.message) : String(e);
-          set((s) => ({
-            steps: s.steps.map((x) =>
-              x.id === stepId && x.type === "tool"
-                ? { ...x, status: "failed", output: { ok: false, error: msg } }
-                : x,
-            ),
-          }));
-        };
-
-        const ret = step.apply();
-        if (ret && typeof (ret as Promise<any>).then === "function") {
-          set((s) => ({
-            steps: s.steps.map((x) =>
-              x.id === stepId && x.type === "tool"
-                ? { ...x, status: "running" }
-                : x,
-            ),
-          }));
-          void (ret as Promise<void | { undo?: () => void }>).then(finalize).catch(fail);
-          return;
+    set((s) => {
+      let nextTool: ToolBlockStep | null = null;
+      const nextSteps = s.steps.map((step) => {
+        if (step.id === stepId && step.type === "tool") {
+          nextTool = { ...step, ...patch };
+          return nextTool;
         }
-        finalize(ret as void | { undo?: () => void });
-      } catch (e: any) {
-        const msg = e?.message ? String(e.message) : String(e);
-        set((s) => ({
-          steps: s.steps.map((x) =>
-            x.id === stepId && x.type === "tool"
-              ? { ...x, status: "failed", output: { ok: false, error: msg } }
-              : x,
-          ),
-        }));
+        return step;
+      });
+      const resolvedTool = nextTool as ToolBlockStep | null;
+      if (resolvedTool && (resolvedTool.applyPolicy === "proposal" || resolvedTool.undoable || resolvedTool.apply || resolvedTool.undo)) {
+        registerItemActionRuntime(stepId, {
+          spec: buildItemActionSpecFromToolStep(resolvedTool),
+          ...(resolvedTool.apply ? { apply: resolvedTool.apply } : {}),
+          ...(resolvedTool.undo ? { undo: resolvedTool.undo } : {}),
+        });
       }
+      const nextItems = resolvedTool
+        ? upsertById(
+            s.items,
+            buildShadowItemFromToolStep({
+              step: resolvedTool,
+              existingItem: s.items.find((item) => item.id === stepId) ?? null,
+              threadId: String((s.thread as any)?.id ?? "").trim() || "local-thread",
+              turnId: String((s.turns ?? []).slice(-1)[0]?.id ?? "").trim() || "local-turn",
+            }),
+          )
+        : s.items;
+      return { steps: nextSteps, items: nextItems };
+    }),
+
+  dispatchItemAction: (itemId, action) => {
+    const id = String(itemId ?? "").trim();
+    if (!id) return;
+    const item = get().items.find((entry) => String(entry?.id ?? "") === id);
+    if (!item) return;
+    const runtime = getItemActionRuntime(id);
+    const spec = runtime?.spec ?? ((item as any)?.actionSpec as ItemActionSpec | null | undefined) ?? null;
+    const canReplay = spec?.canReplayAfterReload !== false;
+    const noopExecutor = spec?.executor === "gateway.noop";
+    const runApply = action === "keep" || action === "approve";
+    const handler = runApply ? runtime?.apply : runtime?.undo;
+    if (!handler && !noopExecutor && !canReplay) {
+      get().log("warn", "item.action.unavailable", { itemId: id, action });
       return;
     }
 
-    // 默认：仅采纳进入上下文
+    const setRunningState = () =>
+      set((s) => ({
+        steps: s.steps.map((step) =>
+          step.id === id && step.type === "tool" ? { ...step, status: "running" } : step,
+        ),
+        items: s.items.map((entry) =>
+          entry.id === id ? { ...entry, status: "in_progress", updatedAt: new Date().toISOString() } : entry,
+        ),
+      }));
+
+    const finalize = (ret?: void | { undo?: () => void }) => {
+      const undo = (ret as any)?.undo as (() => void) | undefined;
+      if (undo) {
+        registerItemActionRuntime(id, { undo });
+      }
+      const nowIso = new Date().toISOString();
+      set((s) => ({
+        steps: s.steps.map((step) => {
+          if (step.id !== id || step.type !== "tool") return step;
+          if (runApply) {
+            return {
+              ...step,
+              status: "success",
+              kept: true,
+              applied: true,
+              undoable: Boolean(undo) || step.undoable,
+              undo: undo ?? step.undo,
+            };
+          }
+          return { ...step, status: "undone", kept: false, applied: false };
+        }),
+        items: s.items.map((entry) => {
+          if (entry.id !== id) return entry;
+          return {
+            ...entry,
+            status: runApply ? "completed" : "declined",
+            updatedAt: nowIso,
+            ...(runApply ? { kept: true, applied: true, undoable: Boolean(undo) || Boolean((entry as any).undoable), canUndo: Boolean(undo) || Boolean((entry as any).canUndo) } : { kept: false, applied: false }),
+          };
+        }),
+      }));
+    };
+
+    const fail = (error: unknown) => {
+      const msg = error instanceof Error ? error.message : String(error ?? "ITEM_ACTION_FAILED");
+      const nowIso = new Date().toISOString();
+      set((s) => ({
+        steps: s.steps.map((step) =>
+          step.id === id && step.type === "tool" ? { ...step, status: "failed", output: { ok: false, error: msg } } : step,
+        ),
+        items: s.items.map((entry) =>
+          entry.id === id ? { ...entry, status: "failed", updatedAt: nowIso, error: msg } as RuntimeItemRecord : entry,
+        ),
+      }));
+      get().log("error", "item.action.failed", { itemId: id, action, error: msg });
+    };
+
+    if (!handler) {
+      finalize();
+      return;
+    }
+
+    try {
+      const ret = handler();
+      if (ret && typeof (ret as Promise<unknown>).then === "function") {
+        setRunningState();
+        void (ret as Promise<void | { undo?: () => void }>).then(finalize).catch(fail);
+        return;
+      }
+      finalize(ret as void | { undo?: () => void });
+    } catch (error) {
+      fail(error);
+    }
+  },
+  keepStep: (stepId) => {
+    const item = get().items.find((entry) => String(entry?.id ?? "") === String(stepId ?? "").trim());
+    if (item) {
+      get().dispatchItemAction(stepId, "keep");
+      return;
+    }
+    const step = get().steps.find((s) => s.id === stepId);
+    if (!step || step.type !== "tool") return;
+    if (step.status === "running" || step.status === "undone" || step.kept) return;
     set((s) => ({
       steps: s.steps.map((x) => (x.id === stepId && x.type === "tool" ? { ...x, kept: true } : x)),
     }));
   },
   undoStep: (stepId) => {
+    const item = get().items.find((entry) => String(entry?.id ?? "") === String(stepId ?? "").trim());
+    if (item) {
+      get().dispatchItemAction(stepId, "undo");
+      return;
+    }
     const step = get().steps.find((s) => s.id === stepId);
     if (!step || step.type !== "tool") return;
     if (step.undoable && step.undo) step.undo();
@@ -844,11 +1306,23 @@ export const useRunStore = create<RunState>()(
     }));
   },
   keepAllProposals: () => {
+    const pendingItems = (get().items ?? [])
+      .filter((item: any) => item && item.type === "fileChange")
+      .filter((item: any) => item.applyPolicy === "proposal" && !item.applied && item.status !== "declined");
+    if (pendingItems.length > 0) {
+      for (const item of pendingItems) {
+        try {
+          get().dispatchItemAction(String((item as any).id ?? ""), "keep");
+        } catch {
+          // ignore：单个提案失败不应影响其它提案
+        }
+      }
+      return;
+    }
     const steps = get().steps ?? [];
     const pending = steps
       .filter((s: any) => s && s.type === "tool")
-      .filter((s: any) => s.applyPolicy === "proposal" && s.status === "success" && !s.kept)
-      .filter((s: any) => typeof s.apply === "function"); // 只处理“真的需要 Keep 才会应用”的提案
+      .filter((s: any) => s.applyPolicy === "proposal" && s.status === "success" && !s.kept);
     for (const st of pending) {
       try {
         get().keepStep(String((st as any).id ?? ""));
@@ -861,21 +1335,10 @@ export const useRunStore = create<RunState>()(
   updateMainDoc: (patch) => {
     const prev = get().mainDoc;
     const rawPatch = patch && typeof patch === "object" ? patch : {};
-    const mergeObjectField = (fieldName: "workflowV1" | "compositeTaskV1") =>
-      rawPatch && Object.prototype.hasOwnProperty.call(rawPatch, fieldName)
-        ? {
-            ...(prev?.[fieldName] && typeof prev[fieldName] === "object" && !Array.isArray(prev[fieldName]) ? prev[fieldName] : {}),
-            ...(((rawPatch as any)[fieldName] && typeof (rawPatch as any)[fieldName] === "object" && !Array.isArray((rawPatch as any)[fieldName])) ? (rawPatch as any)[fieldName] : {}),
-          }
-        : prev?.[fieldName];
-    const nextWorkflow = mergeObjectField("workflowV1");
-    const nextCompositeTask = mergeObjectField("compositeTaskV1");
     set({
       mainDoc: {
         ...prev,
         ...rawPatch,
-        ...(Object.prototype.hasOwnProperty.call(rawPatch, "workflowV1") ? { workflowV1: nextWorkflow } : {}),
-        ...(Object.prototype.hasOwnProperty.call(rawPatch, "compositeTaskV1") ? { compositeTaskV1: nextCompositeTask } : {}),
       },
     });
     return { undo: () => set({ mainDoc: prev }) };
