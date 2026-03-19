@@ -11,7 +11,7 @@ export type {
 } from "./skills.js";
 export {
   SkillRegistry, skillRegistry, listRegisteredSkills,
-  SKILL_MANIFESTS_V1, STYLE_IMITATE_SKILL,
+  SKILL_MANIFESTS_V1,
   activateSkills, pickSkillStageKeyForAgentRun, parseActiveSkillsFromContextPack, mergeSkillManifests,
 } from "./skills.js";
 
