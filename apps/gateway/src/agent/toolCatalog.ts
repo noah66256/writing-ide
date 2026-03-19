@@ -91,7 +91,7 @@ const CAPABILITY_KEYWORDS: Array<{ capability: string; re: RegExp }> = [
   { capability: "kb_search", re: /(知识库|kb|风格库|语料|检索|抽卡|learn|ingest)/i },
   { capability: "code_exec", re: /(code\.exec|python\b|py脚本|python脚本|写(?:一个|一段)?(?:python|py)?(?:脚本|代码)|执行(?:一段)?代码|运行(?:一段)?代码|跑脚本|python-docx|python-pptx|openpyxl|entryfile|requirements)/i },
   { capability: "shell_exec", re: /(命令行|终端|shell|bash|zsh|ssh|\bnpm run\b|\bpnpm\b|\byarn\b|\bpytest\b|\bmake\b|编译|构建|打包|部署)/i },
-  { capability: "collab", re: /(委派|分派|指派|派给|delegate|sub[\s_-]?agent|agent\s*delegate|spawn[_\s-]?agent|send[_\s-]?input|resume[_\s-]?agent|wait[_\s-]?agent|close[_\s-]?agent|协作|编排)/i },
+  { capability: "collab", re: /(委派|分派|指派|派给|delegate|sub[\s_-]?agent|agent\s*delegate|spawn[_\s-]?agent|send[_\s-]?input|resume[_\s-]?agent|wait[_\s-]?agent|close[_\s-]?agent|子\s*(agent|代理|智能体)|子agent|子代理|子智能体|协作|编排)/i },
   { capability: "browser_open", re: /(打开.*(网页|网站|页面)|浏览器|网页|网站|页面|公众号|小红书|抖音|知乎|微博|后台|管理后台|扫码|扫码登录|登录.*页面|navigate|goto|open\s+.*(baidu|google|url|https?:\/\/))/i },
   { capability: "mcp_spreadsheet", re: /(excel|xlsx|表格|电子表格|spreadsheet|工作表)/i },
   { capability: "mcp_word_doc", re: /(word文档|docx|word\s*文件|写.*word|导出.*word|word.*版|生成.*word)/i },

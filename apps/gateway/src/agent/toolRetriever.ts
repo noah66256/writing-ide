@@ -16,6 +16,48 @@ export type ToolRetrievalResult = {
 const STRONG_BROWSER_RE = /(公众号|小红书|抖音|知乎|微博|后台|管理后台|扫码|扫码登录|登录|浏览器|网页|网站|页面|打开.*(网页|网站|页面)|navigate|goto|open\s+.*https?:\/\/)/i;
 const STRONG_WORD_RE = /(word|docx|文档|公文|报告|备忘录)/i;
 const STRONG_SHEET_RE = /(excel|xlsx|表格|电子表格|工作表)/i;
+const COLLAB_TOOL_ORDER = ["spawn_agent", "send_input", "wait_agent", "resume_agent", "close_agent"] as const;
+
+type CollabIntent = "spawn" | "send" | "wait" | "resume" | "close" | "generic" | null;
+
+function isCollabToolName(name: string): boolean {
+  return COLLAB_TOOL_ORDER.includes(name as (typeof COLLAB_TOOL_ORDER)[number]);
+}
+
+function inferCollabIntent(text: string): CollabIntent {
+  const raw = String(text ?? "").trim().toLowerCase();
+  if (!raw) return null;
+  const normalized = raw.replace(/\s+/g, "");
+  const hasCollabTarget =
+    /(sub[\s_-]?agent|spawn[_\s-]?agent|子\s*(agent|代理|智能体)|子agent|子代理|子智能体)/i.test(raw);
+  if (!hasCollabTarget) return null;
+  if (/(关闭|关掉|结束|回收|删掉|清掉|停掉|停用|释放|close|stop|terminate)/i.test(raw)) return "close";
+  if (/(等待|等下|等一等|join|wait)/i.test(raw)) return "wait";
+  if (/(恢复|继续跑|续跑|resume)/i.test(raw)) return "resume";
+  if (/(发消息|补充|追发|追加|send|message|input)/i.test(raw)) return "send";
+  if (/(创建|新建|启动|拉个|拉起|起个|开个|开一个|来个|试试拉个|spawn|start)/i.test(raw) || /拉个子agent/.test(normalized)) {
+    return "spawn";
+  }
+  return "generic";
+}
+
+function collabIntentToolOrder(intent: CollabIntent): string[] {
+  switch (intent) {
+    case "close":
+      return ["close_agent", "wait_agent", "resume_agent", "send_input", "spawn_agent"];
+    case "wait":
+      return ["wait_agent", "send_input", "resume_agent", "close_agent", "spawn_agent"];
+    case "resume":
+      return ["resume_agent", "send_input", "wait_agent", "close_agent", "spawn_agent"];
+    case "send":
+      return ["send_input", "wait_agent", "resume_agent", "close_agent", "spawn_agent"];
+    case "spawn":
+    case "generic":
+      return [...COLLAB_TOOL_ORDER];
+    default:
+      return [];
+  }
+}
 
 function tokenize(text: string): string[] {
   const s = String(text ?? "").toLowerCase();
@@ -120,6 +162,8 @@ export function retrieveToolsForRun(args: {
   if (STRONG_BROWSER_RE.test(userPrompt)) caps.add("browser_open");
   if (STRONG_WORD_RE.test(userPrompt)) caps.add("mcp_word_doc");
   if (STRONG_SHEET_RE.test(userPrompt)) caps.add("mcp_spreadsheet");
+  const collabIntent = inferCollabIntent(userPrompt);
+  if (collabIntent) caps.add("collab");
 
   const promptCaps = Array.from(caps);
 
@@ -143,6 +187,24 @@ export function retrieveToolsForRun(args: {
       if (!caps.has(cap)) continue;
       score += 2.2;
       reasons.push(`cap:${cap}`);
+    }
+
+    if (collabIntent && isCollabToolName(entry.name)) {
+      score += 2.8;
+      reasons.push("collab_family");
+      if (
+        (collabIntent === "spawn" && entry.name === "spawn_agent") ||
+        (collabIntent === "send" && entry.name === "send_input") ||
+        (collabIntent === "wait" && entry.name === "wait_agent") ||
+        (collabIntent === "resume" && entry.name === "resume_agent") ||
+        (collabIntent === "close" && entry.name === "close_agent")
+      ) {
+        score += 8.5;
+        reasons.push(`collab_intent:${collabIntent}`);
+      } else if (collabIntent === "generic" && entry.name === "spawn_agent") {
+        score += 6.5;
+        reasons.push("collab_default_spawn");
+      }
     }
 
     // 浏览器意图：优先保留 playwright 的入口工具（navigate/click/snapshot）。
@@ -176,6 +238,18 @@ export function retrieveToolsForRun(args: {
   for (const item of candidates) {
     if (retrieved.length >= desired) break;
     if (!retrieved.includes(item.name)) retrieved.push(item.name);
+  }
+
+  if (collabIntent) {
+    const collabNames = new Set(
+      catalog
+        .filter((entry) => isCollabToolName(entry.name))
+        .map((entry) => entry.name),
+    );
+    for (const name of collabIntentToolOrder(collabIntent)) {
+      if (!collabNames.has(name)) continue;
+      if (!retrieved.includes(name)) retrieved.push(name);
+    }
   }
 
   return {
