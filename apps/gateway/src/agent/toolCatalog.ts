@@ -127,9 +127,6 @@ export function inferCapabilities(name: string, description: string, source: Too
     caps.add("file_write");
   }
   if (n === "memory") caps.add("kb_search");
-  if (n === "agent.config") {
-    caps.add("collab");
-  }
   if (n.startsWith("project.search") || n.startsWith("project.find")) caps.add("project_search");
   if (n.startsWith("web.search")) caps.add("web_search");
   if (n.startsWith("web.fetch")) caps.add("web_fetch");

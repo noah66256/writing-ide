@@ -14,7 +14,7 @@
 ### 工具分类
 
 - `run.*`：编排工具（setTodoList / done / mainDoc）
-- `agent.*`：子 Agent 委派（delegate / config）
+- `spawn_agent` / `send_input` / `resume_agent` / `wait_agent` / `close_agent`：协作会话生命周期工具
 - `doc.*`：文档读写（read / write / applyEdits / getSelection / replaceSelection）
 - `kb.*`：知识库检索（search / cite）
 - `lint.*`：风格/质量检查（style）

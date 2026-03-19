@@ -20,7 +20,6 @@ import {
 } from "@ohmycrab/agent-core";
 import type { SkillRef } from "@ohmycrab/shared";
 import { usePersonaStore } from "../state/personaStore";
-import { useTeamStore, getEffectiveAgents } from "../state/teamStore";
 import { useSkillStore } from "../state/skillStore";
 import { useMemoryStore } from "../state/memoryStore";
 import { useModelStore } from "../state/modelStore";
@@ -61,8 +60,6 @@ export type GatewayRunArgs = {
   model: string;
   prompt: string;
   opMode?: OpMode;
-  targetAgentId?: string;
-  targetAgentIds?: string[];
   skillRefs?: SkillRef[];
   styleWorkflowRequested?: boolean;
   kbMentionIds?: string[];
@@ -469,10 +466,6 @@ export function humanizeToolActivity(name: string, args: Record<string, unknown>
     const agentName = BUILTIN_SUB_AGENTS.find((a) => a.id === agentId)?.name ?? agentId;
     return agentName ? `正在委派${agentName}…` : "正在委派子 Agent…";
   }
-  if (tool === "agent.config.create") return "正在创建团队成员…";
-  if (tool === "agent.config.list") return "正在查看团队成员列表…";
-  if (tool === "agent.config.update") return "正在更新团队成员配置…";
-  if (tool === "agent.config.remove") return "正在移除团队成员…";
   if (tool.startsWith("mcp.")) {
     const parts = tool.split(".");
     const toolId = parts.slice(2).join(".").toLowerCase();
@@ -2360,23 +2353,12 @@ export async function buildContextPack(extra?: {
     });
   };
 
-  // p0: Agent 身份与团队花名册（可信）
+  // p0: Agent 身份（可信）
   const agentPersona = (() => {
     const persona = usePersonaStore.getState();
-    const agents = getEffectiveAgents().filter((a) => a.effectiveEnabled);
-    const teamRoster = agents.map((a) => ({
-      id: a.id,
-      name: a.name,
-      avatar: a.avatar,
-      description: a.description,
-    }));
-    // Full definitions for custom agents — gateway needs them for spawn_agent resolution
-    const customAgentDefinitions = Object.values(useTeamStore.getState().customAgents);
     return {
       agentName: persona.agentName || "",
       personaPrompt: persona.personaPrompt || "",
-      teamRoster,
-      customAgentDefinitions,
     };
   })();
   pushSeg({
@@ -2776,8 +2758,6 @@ export function startGatewayRun(args: {
   model: string;
   prompt: string;
   opMode?: OpMode;
-  targetAgentId?: string;
-  targetAgentIds?: string[];
   skillRefs?: SkillRef[];
   styleWorkflowRequested?: boolean;
   kbMentionIds?: string[];

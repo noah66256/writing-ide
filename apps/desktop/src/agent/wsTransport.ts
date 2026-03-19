@@ -355,7 +355,6 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
   const resolveDoneOnce = () => { if (resolveDone) { const r = resolveDone; resolveDone = null; r(); } };
 
   let currentAssistantId: string | null = null;
-  let assistantId: string | null = null;
   const subAgentBubbles = new Map<string, string>();
   const runStartStepCount = (rt.getSteps() ?? []).length;
   let runDoneNote = "";
@@ -942,10 +941,6 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       // 3. Send run.request
       // ====================================================================
 
-      const targetAgentIds = args.targetAgentIds?.length
-        ? args.targetAgentIds
-        : args.targetAgentId ? [args.targetAgentId] : undefined;
-
       // 外部扩展包 skill manifests（发给 Gateway，使其也能参与激活计算）
       const { externalSkills, skillOverrides } = (await import("../state/skillStore")).useSkillStore.getState();
       const userSkillManifests = externalSkills?.length
@@ -998,7 +993,6 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           contextManifest,
           toolSidecar,
           ...(args.images?.length ? { images: args.images } : {}),
-          ...(targetAgentIds ? { targetAgentIds } : {}),
           ...(derivedSkillRefs.length ? { skillRefs: derivedSkillRefs } : {}),
           ...(threadState
             ? {
@@ -1037,14 +1031,25 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       // ====================================================================
 
       let runId: string | null = null;
-      let assistantId: string | null = null;
       const gatewayToolStepIdsByCallId = new Map<string, string[]>();
 
       const ensureAssistant = () => {
-        if (assistantId) return assistantId;
-        assistantId = addAssistant("", true, false);
-        currentAssistantId = assistantId;
-        return assistantId;
+        if (currentAssistantId) return currentAssistantId;
+        currentAssistantId = addAssistant("", true, false);
+        return currentAssistantId;
+      };
+
+      const finishAssistantBubble = (stepId?: string | null) => {
+        const id = String(stepId ?? "").trim();
+        if (!id) return;
+        finishAssistant(id);
+        if (currentAssistantId === id) currentAssistantId = null;
+      };
+
+      const finishOpenAssistantBubbles = () => {
+        finishAssistantBubble(currentAssistantId);
+        for (const [, bid] of subAgentBubbles) finishAssistantBubble(bid);
+        subAgentBubbles.clear();
       };
 
       const ensureSubAgentBubble = (agentId: string, agentName?: string) => {
@@ -1131,13 +1136,26 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
         // Sequential message queue (tool execution is async)
         const queue: MessageEvent[] = [];
         let busy = false;
+        let transportSettled = false;
+
+        const finishWhenIdle = () => {
+          if (!transportSettled) return;
+          if (busy || queue.length > 0) return;
+          finish();
+        };
 
         socket.onmessage = (e) => {
           queue.push(e);
           if (!busy) void drainQueue();
         };
-        socket.onclose = () => finish();
-        socket.onerror = () => finish();
+        socket.onclose = () => {
+          transportSettled = true;
+          finishWhenIdle();
+        };
+        socket.onerror = () => {
+          transportSettled = true;
+          finishWhenIdle();
+        };
 
         // If user cancels while waiting
         abort.signal.addEventListener("abort", () => {
@@ -1155,6 +1173,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             }
           }
           busy = false;
+          finishWhenIdle();
         }
 
         async function handleMessage(e: MessageEvent) {
@@ -1255,6 +1274,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           if (event === "run.end") {
             log("info", "agent.run.end", data);
             setRunning(false); setActivity(null);
+            finishOpenAssistantBubbles();
             maybeAppendRunEndFeedback(data);
             const endReason = String(data?.reason ?? "").trim().toLowerCase();
             const endReasonCodes = Array.isArray(data?.reasonCodes)
@@ -1368,10 +1388,12 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             }
             if (streamKey) {
               const prev = subAgentBubbles.get(streamKey);
-              if (prev) { finishAssistant(prev); subAgentBubbles.delete(streamKey); }
+              if (prev) {
+                finishAssistantBubble(prev);
+                subAgentBubbles.delete(streamKey);
+              }
             } else {
-              if (assistantId) finishAssistant(assistantId);
-              assistantId = null;
+              finishAssistantBubble(currentAssistantId);
             }
             if (rt.getIsRunning()) setActivity("正在生成…");
           }
@@ -1405,10 +1427,12 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             const streamKey = getSubAgentStreamKey(data);
             if (streamKey) {
               const bid = subAgentBubbles.get(streamKey);
-              if (bid) { finishAssistant(bid); subAgentBubbles.delete(streamKey); }
+              if (bid) {
+                finishAssistantBubble(bid);
+                subAgentBubbles.delete(streamKey);
+              }
             } else {
-              if (assistantId) finishAssistant(assistantId);
-              assistantId = null;
+              finishAssistantBubble(currentAssistantId);
             }
             if (rt.getIsRunning()) setActivity("正在汇总结果…");
           }
@@ -1523,7 +1547,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             }
 
             setActivity(humanizeToolActivity(name, parsedArgsPreview), { resetTimer: true });
-            if (assistantId) { finishAssistant(assistantId); assistantId = null; }
+            finishAssistantBubble(currentAssistantId);
 
             // -- MCP 工具路由：name 格式 "mcp.<serverId>.<toolName>" --
             if (name.startsWith("mcp.")) {
@@ -1822,6 +1846,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       });
 
       // If we get here without run.end having set running=false, clean up
+      finishOpenAssistantBubbles();
       if (rt.getIsRunning()) {
         setRunning(false);
         setActivity(null);
@@ -1843,9 +1868,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
         }
         cancelInlineFileOpConfirm();
         setRunning(false); setActivity(null);
-        if (currentAssistantId) { finishAssistant(currentAssistantId); currentAssistantId = null; }
-        for (const [, bid] of subAgentBubbles) finishAssistant(bid);
-        subAgentBubbles.clear();
+        finishOpenAssistantBubbles();
         return;
       }
 
@@ -1857,8 +1880,8 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       patchAssistant(a, { hidden: false });
       appendAssistantDelta(a, `\n\n[网络错误] ${msg}`);
       finishAssistant(a);
-      for (const [, bid] of subAgentBubbles) finishAssistant(bid);
-      subAgentBubbles.clear();
+      currentAssistantId = null;
+      finishOpenAssistantBubbles();
       setRunning(false); setActivity(null);
     } finally {
       ended = true;
@@ -1883,9 +1906,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       cancelInlineFileOpConfirm();
       try { (abort as any).abort(r); } catch { abort.abort(); }
       setRunning(false); setActivity(null);
-      if (currentAssistantId) { finishAssistant(currentAssistantId); currentAssistantId = null; }
-      for (const [, bid] of subAgentBubbles) finishAssistant(bid);
-      subAgentBubbles.clear();
+      finishOpenAssistantBubbles();
     },
   };
   // 注册到每对话取消注册表（用于同一对话发新消息时取消旧 run）

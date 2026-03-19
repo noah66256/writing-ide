@@ -44,7 +44,6 @@ import {
   type RunState,
   type StyleExecutionMode,
   type StylePipelinePayloadV1,
-  type SubAgentDefinition,
   type WorkflowDeclaration,
 } from "@ohmycrab/agent-core";
 import {
@@ -692,8 +691,6 @@ export function clipForPrompt(raw: unknown, maxChars: number, suffix = "\n…（
 type AgentPersonaFromPack = {
   agentName: string;
   personaPrompt: string;
-  teamRoster: Array<{ id: string; name: string; avatar?: string; description: string }>;
-  customAgentDefinitions?: SubAgentDefinition[];
 };
 
 export function parseAgentPersonaFromContextPack(ctx?: string): AgentPersonaFromPack | null {
@@ -708,8 +705,6 @@ export function parseAgentPersonaFromContextPack(ctx?: string): AgentPersonaFrom
     return {
       agentName: typeof j.agentName === "string" ? j.agentName : "",
       personaPrompt: typeof j.personaPrompt === "string" ? j.personaPrompt : "",
-      teamRoster: Array.isArray(j.teamRoster) ? j.teamRoster : [],
-      customAgentDefinitions: Array.isArray(j.customAgentDefinitions) ? j.customAgentDefinitions : [],
     };
   } catch {
     return null;
@@ -2019,7 +2014,6 @@ const agentRunBodySchema = z.object({
   mode: z.enum(["agent", "chat"]).optional(),
   opMode: z.enum(["creative", "assistant"]).optional(),
   prompt: z.string().min(1),
-  targetAgentIds: z.array(z.string()).max(5).optional(),
   skillRefs: z.array(z.any()).max(20).optional(),
   styleWorkflowRequested: z.boolean().optional(),
   builtinOverrides: z.record(z.string(), z.object({ enabled: z.boolean().optional() })).optional(),
@@ -4345,8 +4339,6 @@ export async function executeAgentRun(args: {
         allowedPoolSize: baseAllowedToolNames.size,
         selectedPoolSize: selectedAllowedToolNames.size,
         selectedToolNames: Array.from(selectedAllowedToolNames).slice(0, 36),
-        hasTeamRoster: (personaFromPack?.teamRoster?.length ?? 0) > 0,
-        teamRosterCount: personaFromPack?.teamRoster?.length ?? 0,
         summary: toolCatalogSummary,
       },
       toolSidecar: {
@@ -5362,10 +5354,6 @@ export async function executeAgentRun(args: {
     .filter(Boolean)
     .join("\n\n");
 
-  const explicitTargetAgentIds = Array.isArray(body.targetAgentIds)
-    ? (body.targetAgentIds as string[]).map((id) => String(id ?? "").trim()).filter(Boolean)
-    : [];
-  const runTargetAgentIds = explicitTargetAgentIds.length > 0 ? explicitTargetAgentIds : undefined;
   const jsonToolFallbackEnabled = String(process.env.WRITING_IDE_ENABLE_JSON_TOOL_FALLBACK ?? "").trim() === "1";
 
   const runtimeMcpServerIdSet = new Set(
@@ -5412,7 +5400,6 @@ export async function executeAgentRun(args: {
     activeWorkflowDeclarations,  // v2 workflow skill 的声明式配置
     allowedToolNames: selectedAllowedToolNames,
     systemPrompt: fullSystemPrompt,
-    targetAgentIds: runTargetAgentIds,
     toolSidecar: runtimeToolSidecar,
     styleLinterLibraries,
     fastify: services.fastify,
@@ -5450,7 +5437,6 @@ export async function executeAgentRun(args: {
     resolveSubAgentModel,
     threadSnapshotHint: (body as any).threadSnapshotHint ?? undefined,
     mainDoc: mainDocFromPack && typeof mainDocFromPack === "object" ? { ...(mainDocFromPack as Record<string, unknown>) } : {},
-    customAgentDefinitions: personaFromPack?.customAgentDefinitions ?? [],
     l1Memory: l1MemoryFromPack || "",
     l2Memory: l2MemoryFromPack || "",
     ctxDialogueSummary: ctxDialogueSummaryFromPack || "",

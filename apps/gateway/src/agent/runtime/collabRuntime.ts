@@ -7,6 +7,17 @@ import {
   SubAgentExecutionBridge,
   type SubAgentExecutionBridgeResult,
 } from "./SubAgentExecutionBridge.js";
+import {
+  buildCloseAgentToolOutput,
+  buildResumeAgentToolOutput,
+  buildSendInputToolOutput,
+  buildSpawnAgentToolOutput,
+  buildWaitAgentToolOutput,
+  getCollabSessionExternalId,
+  normalizeCollabInput,
+  normalizeSpawnAgentArgs,
+  resolveCollabSessionByExternalId,
+} from "./collabCompat.js";
 
 type CollabToolExecResult = {
   ok: boolean;
@@ -59,22 +70,17 @@ export class CollabRuntime {
     toolArgs: Record<string, unknown>,
     turn: number,
   ): Promise<CollabToolExecResult> {
-    const agentId = String(toolArgs.agentId ?? "").trim();
-    const task = String(toolArgs.task ?? toolArgs.prompt ?? "").trim();
-    if (!agentId) {
+    const normalized = normalizeSpawnAgentArgs(toolArgs);
+    if (!normalized.ok) {
       return {
         ok: false,
-        output: { ok: false, error: "VALIDATION_ERROR", detail: "agentId is required" },
+        output: { ok: false, error: "VALIDATION_ERROR", detail: normalized.error },
         executedBy: "gateway",
       };
     }
-    if (!task) {
-      return {
-        ok: false,
-        output: { ok: false, error: "VALIDATION_ERROR", detail: "task is required" },
-        executedBy: "gateway",
-      };
-    }
+    const spawnArgs = normalized.value;
+    const agentId = spawnArgs.agentId;
+    const task = spawnArgs.task;
 
     const sessionId = makeId("collab");
     const childThreadId = `${this.parentCtx.runId}:sub:${toolCallId}`;
@@ -85,8 +91,8 @@ export class CollabRuntime {
         createdAt,
         kind: "system_message" as const,
         payload: buildInboxPayload({
-          message: toolArgs.task ?? toolArgs.prompt,
-          items: [],
+          message: spawnArgs.message,
+          items: spawnArgs.items,
         }),
       },
     ];
@@ -95,7 +101,7 @@ export class CollabRuntime {
       parentThreadId: String(this.parentCtx.threadId ?? this.parentCtx.runId).trim() || this.parentCtx.runId,
       childThreadId,
       agentId,
-      role: typeof toolArgs.context === "object" ? String((toolArgs.context as any)?.role ?? "").trim() || undefined : undefined,
+      role: spawnArgs.context.requested_role ?? spawnArgs.context.role ?? undefined,
       status: "running",
       inbox,
       lastDeliveredInboxItemId: inbox[0]?.id,
@@ -109,7 +115,7 @@ export class CollabRuntime {
       abortController: new AbortController(),
       promise: null,
       lastResult: null,
-      spawnArgs: { ...toolArgs },
+      spawnArgs: { ...spawnArgs },
       turn,
     };
     this.sessions.set(sessionId, live);
@@ -117,7 +123,7 @@ export class CollabRuntime {
 
     const bridge = new SubAgentExecutionBridge(this.parentCtx);
     live.promise = bridge
-      .execute(toolCallId, toolArgs, turn, { extraAbortSignal: live.abortController.signal })
+      .execute(toolCallId, spawnArgs, turn, { extraAbortSignal: live.abortController.signal })
       .then((result) => {
         live.lastResult = result;
         const output = asObject(result.output);
@@ -162,23 +168,39 @@ export class CollabRuntime {
 
     return {
       ok: true,
-      output: {
-        ok: true,
-        id: sessionId,
-        agentId,
-        threadId: childThreadId,
-        status: "running",
-      },
+      output: buildSpawnAgentToolOutput(record),
       meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
       executedBy: "gateway",
     };
   }
 
   async sendInput(toolArgs: Record<string, unknown>): Promise<CollabToolExecResult> {
-    const id = String(toolArgs.id ?? "").trim();
-    const session = this.sessions.get(id);
+    const id = String(toolArgs.id ?? toolArgs.agent_id ?? "").trim();
+    if (!id) {
+      return {
+        ok: false,
+        output: { ok: false, error: "VALIDATION_ERROR", detail: "id is required" },
+        executedBy: "gateway",
+      };
+    }
+    const session = this.findSession(id);
     if (!session) return this.notFound(id);
-    const payload = buildInboxPayload(toolArgs);
+    const normalizedInput = normalizeCollabInput({
+      message: toolArgs.message,
+      items: toolArgs.items,
+    });
+    if (!normalizedInput.ok) {
+      return {
+        ok: false,
+        output: { ok: false, error: "VALIDATION_ERROR", detail: normalizedInput.error },
+        executedBy: "gateway",
+      };
+    }
+    const payload = buildInboxPayload({
+      message: normalizedInput.value.message,
+      items: normalizedInput.value.items,
+      interrupt: toolArgs.interrupt,
+    });
     const createdAt = nowIso();
     const inboxItem = {
       id: makeId("inbox"),
@@ -202,12 +224,7 @@ export class CollabRuntime {
     });
     return {
       ok: true,
-      output: {
-        ok: true,
-        id,
-        status: this.sessions.get(id)?.record.status ?? session.record.status,
-        inboxCount: this.sessions.get(id)?.record.inbox.length ?? session.record.inbox.length,
-      },
+      output: buildSendInputToolOutput(this.findSession(id)?.record ?? session.record, inboxItem.id),
       meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
       executedBy: "gateway",
     };
@@ -218,13 +235,20 @@ export class CollabRuntime {
     toolArgs: Record<string, unknown>,
     turn: number,
   ): Promise<CollabToolExecResult> {
-    const id = String(toolArgs.id ?? "").trim();
-    const session = this.sessions.get(id);
+    const id = String(toolArgs.id ?? toolArgs.agent_id ?? "").trim();
+    if (!id) {
+      return {
+        ok: false,
+        output: { ok: false, error: "VALIDATION_ERROR", detail: "id is required" },
+        executedBy: "gateway",
+      };
+    }
+    const session = this.findSession(id);
     if (!session) return this.notFound(id);
     if (session.record.status === "running") {
       return {
         ok: true,
-        output: { ok: true, id, status: "running", resumed: false },
+        output: buildResumeAgentToolOutput(session.record, { resumed: false }),
         meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
         executedBy: "gateway",
       };
@@ -238,19 +262,21 @@ export class CollabRuntime {
     }
 
     const latestInbox = session.record.inbox.at(-1);
-    const message = String(latestInbox?.payload?.message ?? "").trim();
-    if (!message) {
+    const normalizedInput = normalizeCollabInput(asObject(latestInbox?.payload));
+    if (!normalizedInput.ok) {
       return {
         ok: false,
-        output: { ok: false, error: "SESSION_NOT_RESUMABLE", detail: "missing queued input" },
+        output: { ok: false, error: "SESSION_NOT_RESUMABLE", detail: normalizedInput.error },
         executedBy: "gateway",
       };
     }
 
     const nextArgs = {
       ...session.spawnArgs,
-      task: message,
-      prompt: message,
+      message: normalizedInput.value.message,
+      items: normalizedInput.value.items,
+      task: normalizedInput.value.prompt,
+      prompt: normalizedInput.value.prompt,
       inputArtifacts: undefined,
       acceptanceCriteria: undefined,
     };
@@ -299,12 +325,7 @@ export class CollabRuntime {
 
     return {
       ok: true,
-      output: {
-        ok: true,
-        id,
-        status: "running",
-        resumed: true,
-      },
+      output: buildResumeAgentToolOutput(this.findSession(id)?.record ?? session.record, { resumed: true }),
       meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
       executedBy: "gateway",
     };
@@ -322,12 +343,35 @@ export class CollabRuntime {
       };
     }
     const timeoutMs = Math.max(0, Math.floor(Number(toolArgs.timeout_ms ?? 30_000) || 30_000));
-    const sessions = ids.map((id) => this.sessions.get(id)).filter((item): item is LiveSession => Boolean(item));
-    if (!sessions.length) return this.notFound(ids[0] ?? "");
+    const resolvedSessions: LiveSession[] = [];
+    const seenSessionIds = new Set<string>();
+    const unresolvedIds: string[] = [];
+    for (const id of ids) {
+      const session = this.findSession(id);
+      if (!session) {
+        unresolvedIds.push(id);
+        continue;
+      }
+      if (seenSessionIds.has(session.record.id)) continue;
+      seenSessionIds.add(session.record.id);
+      resolvedSessions.push(session);
+    }
+    if (!resolvedSessions.length) {
+      return {
+        ok: true,
+        output: buildWaitAgentToolOutput({
+          resolved: [],
+          unresolvedIds,
+          timedOut: false,
+        }),
+        meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
+        executedBy: "gateway",
+      };
+    }
 
-    const terminal = sessions.filter((session) => this.isTerminal(session.record.status));
+    const terminal = resolvedSessions.filter((session) => this.isTerminal(session.record.status));
     if (!terminal.length) {
-      const pendingPromises = sessions
+      const pendingPromises = resolvedSessions
         .map((session) => session.promise)
         .filter((promise): promise is Promise<SubAgentExecutionBridgeResult> => Boolean(promise));
       if (pendingPromises.length) {
@@ -340,38 +384,37 @@ export class CollabRuntime {
       }
     }
 
-    const completed = ids
-      .map((id) => this.sessions.get(id)?.record)
-      .filter((record): record is CollabAgentSessionRecord => Boolean(record))
-      .filter((record) => this.isTerminal(record.status));
-    const pending = ids.filter((id) => {
-      const record = this.sessions.get(id)?.record;
-      return record ? !this.isTerminal(record.status) : false;
-    });
+    const currentRecords = resolvedSessions
+      .map((session) => this.findSession(session.record.id)?.record ?? session.record)
+      .filter((record): record is CollabAgentSessionRecord => Boolean(record));
+    const pending = currentRecords
+      .filter((record) => !this.isTerminal(record.status))
+      .map((record) => getCollabSessionExternalId(record));
 
     return {
       ok: true,
-      output: {
-        ok: true,
-        completed: completed.map((record) => ({
-          id: record.id,
-          agentId: record.agentId,
-          threadId: record.childThreadId,
-          status: record.status,
-          closeReason: record.closeReason ?? null,
-        })),
-        pending,
+      output: buildWaitAgentToolOutput({
+        resolved: currentRecords,
+        unresolvedIds,
         timedOut: pending.length > 0,
-      },
+      }),
       meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
       executedBy: "gateway",
     };
   }
 
   async closeAgent(toolArgs: Record<string, unknown>): Promise<CollabToolExecResult> {
-    const id = String(toolArgs.id ?? "").trim();
-    const session = this.sessions.get(id);
+    const id = String(toolArgs.id ?? toolArgs.agent_id ?? "").trim();
+    if (!id) {
+      return {
+        ok: false,
+        output: { ok: false, error: "VALIDATION_ERROR", detail: "id is required" },
+        executedBy: "gateway",
+      };
+    }
+    const session = this.findSession(id);
     if (!session) return this.notFound(id);
+    const previousStatus = session.record.status;
     session.abortController.abort();
     this.updateSession(id, {
       status: "closed",
@@ -380,11 +423,7 @@ export class CollabRuntime {
     });
     return {
       ok: true,
-      output: {
-        ok: true,
-        id,
-        status: "closed",
-      },
+      output: buildCloseAgentToolOutput(this.findSession(id)?.record ?? session.record, previousStatus),
       meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
       executedBy: "gateway",
     };
@@ -403,12 +442,22 @@ export class CollabRuntime {
         abortController: new AbortController(),
         promise: null,
         lastResult: null,
-        spawnArgs: {
-          agentId: session.agentId,
-          task: String(session.inbox.at(-1)?.payload?.message ?? "").trim(),
-          prompt: String(session.inbox.at(-1)?.payload?.message ?? "").trim(),
-          context: session.role ? { role: session.role } : undefined,
-        },
+        spawnArgs: (() => {
+          const latestPayload = asObject(session.inbox.at(-1)?.payload);
+          const normalizedInput = normalizeCollabInput(latestPayload);
+          const prompt = normalizedInput.ok
+            ? normalizedInput.value.prompt
+            : String(latestPayload.message ?? "").trim();
+          return {
+            agentId: session.agentId,
+            requestedAgentType: session.role,
+            message: normalizedInput.ok ? normalizedInput.value.message : cleanMessage(latestPayload.message),
+            items: normalizedInput.ok ? normalizedInput.value.items : undefined,
+            task: prompt,
+            prompt,
+            context: session.role ? { role: session.role, requested_role: session.role } : undefined,
+          };
+        })(),
         turn: 0,
       };
       this.sessions.set(session.id, live);
@@ -427,7 +476,7 @@ export class CollabRuntime {
     if (!id || !childThreadId || !agentId) return null;
     const statusRaw = String(session.status ?? "").trim().toLowerCase();
     const status: CollabAgentSessionRecord["status"] =
-      statusRaw === "completed" || statusRaw === "failed" || statusRaw === "closed" || statusRaw === "waiting"
+      statusRaw === "running" || statusRaw === "completed" || statusRaw === "failed" || statusRaw === "closed" || statusRaw === "waiting"
         ? statusRaw
         : "waiting";
     const inbox = Array.isArray(session.inbox)
@@ -479,7 +528,7 @@ export class CollabRuntime {
   }
 
   private updateSession(id: string, patch: Partial<CollabAgentSessionRecord>) {
-    const session = this.sessions.get(id);
+    const session = this.findSession(id);
     if (!session) return;
     session.record = {
       ...session.record,
@@ -501,6 +550,10 @@ export class CollabRuntime {
     return status === "completed" || status === "failed" || status === "closed";
   }
 
+  private findSession(id: string): LiveSession | null {
+    return resolveCollabSessionByExternalId(this.sessions.values(), id);
+  }
+
   private notFound(id: string): CollabToolExecResult {
     return {
       ok: false,
@@ -508,4 +561,8 @@ export class CollabRuntime {
       executedBy: "gateway",
     };
   }
+}
+
+function cleanMessage(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }

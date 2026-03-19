@@ -119,7 +119,7 @@ export async function adminGetAuditRun(args: { runId: string }) {
 
 export type MarketplaceManifestDto = {
   id: string;
-  type: "skill" | "mcp_server" | "sub_agent" | string;
+  type: "skill" | "mcp_server" | string;
   name: string;
   version: string;
   publisher: string;

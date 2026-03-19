@@ -1,12 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import {
-  X, Users, Plug, Sparkles, ChevronDown, ChevronRight, Plus,
+  X, Plug, Sparkles, ChevronDown, ChevronRight, Plus,
   Bot, BookOpen, FolderOpen, RefreshCw, Pencil, Trash2, Terminal, Globe, Radio,
   Eye, EyeOff, Monitor, ExternalLink, Package, Link2, Wrench, Store, ImagePlus, Upload, User,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { TeamModal } from "@/components/TeamModal";
 import { AccountSettingsPanel } from "@/components/AccountSettingsPanel";
 import { listRegisteredSkills, type SkillManifest } from "@ohmycrab/agent-core";
 import { useSkillStore } from "@/state/skillStore";
@@ -18,13 +17,12 @@ import { useMcpStore, type McpServerState } from "@/state/mcpStore";
 import { useMarketplaceStore, type MarketplaceCatalogItem } from "@/state/marketplaceStore";
 import { readImageFileAsDataUrl } from "@/utils/avatar";
 
-type Tab = "account" | "persona" | "team" | "mcp" | "skill" | "kb" | "marketplace";
+type Tab = "account" | "persona" | "mcp" | "skill" | "kb" | "marketplace";
 
-const TABS: { id: Tab; label: string; icon: typeof Users }[] = [
+const TABS: { id: Tab; label: string; icon: typeof User }[] = [
   { id: "account", label: "账号", icon: User },
   { id: "persona", label: "负责人", icon: Bot },
   { id: "kb", label: "知识库", icon: BookOpen },
-  { id: "team", label: "团队管理", icon: Users },
   { id: "mcp", label: "MCP", icon: Plug },
   { id: "skill", label: "技能", icon: Sparkles },
   { id: "marketplace", label: "市场", icon: Store },
@@ -90,7 +88,6 @@ export function SettingsModal({ onClose, initialTab, kbSelectMode }: {
             {tab === "account" && <AccountTabContent />}
             {tab === "persona" && <PersonaTabContent />}
             {tab === "kb" && <KbTabContent kbSelectMode={kbSelectMode} onClose={onClose} />}
-            {tab === "team" && <TeamTabContent />}
             {tab === "mcp" && <McpTabContent />}
             {tab === "skill" && <SkillTabContent />}
             {tab === "marketplace" && <MarketplaceTabContent />}
@@ -123,7 +120,7 @@ function MarketplaceTabContent() {
   const fetchManifest = useMarketplaceStore((s) => s.fetchManifest);
   const installItem = useMarketplaceStore((s) => s.installItem);
   const uninstallItem = useMarketplaceStore((s) => s.uninstallItem);
-  const [typeFilter, setTypeFilter] = useState<"all" | "skill" | "mcp_server" | "sub_agent">("all");
+  const [typeFilter, setTypeFilter] = useState<"all" | "skill" | "mcp_server">("all");
   const [statusFilter, setStatusFilter] = useState<"all" | "not_installed" | "installed" | "upgradable">("all");
   const [selectedItemId, setSelectedItemId] = useState("");
 
@@ -146,7 +143,7 @@ function MarketplaceTabContent() {
   return (
     <div className="flex flex-col gap-4">
       <div className="text-[12px] text-text-muted leading-relaxed">
-        官方精选能力市场。支持 Skill / MCP / Sub-Agent 一键安装并即时生效；安装失败会自动回滚。
+        官方精选能力市场。支持 Skill / MCP 一键安装并即时生效；安装失败会自动回滚。
       </div>
 
       <div className="flex items-center justify-between gap-2">
@@ -155,7 +152,6 @@ function MarketplaceTabContent() {
             ["all", "全部"],
             ["skill", "Skill"],
             ["mcp_server", "MCP"],
-            ["sub_agent", "Sub-Agent"],
           ] as const).map(([v, label]) => (
             <button
               key={v}
@@ -296,8 +292,7 @@ function MarketplaceItemCard({
   const isInstalled = Boolean(installed);
   const typeLabel =
     item.type === "skill" ? "Skill" :
-    item.type === "mcp_server" ? "MCP" :
-    "Sub-Agent";
+    "MCP";
   return (
     <div className="border border-border rounded-lg p-3 bg-surface">
       <div className="flex items-start justify-between gap-3">
@@ -793,14 +788,6 @@ function KbTabContent({ kbSelectMode, onClose }: {
           )}
         </div>
       )}
-    </div>
-  );
-}
-
-function TeamTabContent() {
-  return (
-    <div className="-m-6">
-      <TeamModal onClose={() => {}} embedded />
     </div>
   );
 }

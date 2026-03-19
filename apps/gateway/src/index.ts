@@ -761,6 +761,11 @@ function mergeSeededMarketplaceRecords(existing: MarketplaceRecord[], seeded: Ma
   return out;
 }
 
+function isSupportedMarketplaceRecord(record: MarketplaceRecord | null | undefined): record is MarketplaceRecord {
+  const type = String(record?.manifest?.type ?? "").trim();
+  return type === "skill" || type === "mcp_server";
+}
+
 async function loadMarketplaceRecordsFromDb(): Promise<{
   source: "db" | "seeded";
   updatedAt: string;
@@ -768,13 +773,16 @@ async function loadMarketplaceRecordsFromDb(): Promise<{
 }> {
   const db = await loadDb();
   const records = Array.isArray((db as any)?.marketplaceCatalog?.records)
-    ? (((db as any).marketplaceCatalog.records as MarketplaceRecord[]) ?? [])
+    ? (((db as any).marketplaceCatalog.records as MarketplaceRecord[]) ?? []).filter(isSupportedMarketplaceRecord)
     : [];
   const updatedAtRaw = String((db as any)?.marketplaceCatalog?.updatedAt ?? "").trim();
   const seeded = getDefaultMarketplaceRecords();
   if (records.length > 0) {
+    const rawRecordCount = Array.isArray((db as any)?.marketplaceCatalog?.records)
+      ? (db as any).marketplaceCatalog.records.length
+      : 0;
     const merged = mergeSeededMarketplaceRecords(records, seeded);
-    const changed = merged.length !== records.length;
+    const changed = merged.length !== rawRecordCount;
     const effectiveUpdatedAt = changed ? new Date().toISOString() : (updatedAtRaw || new Date().toISOString());
     if (changed) {
       await updateDb((draft) => {
@@ -854,7 +862,7 @@ fastify.get(
   { preHandler: [(fastify as any).authenticate, requireAdmin] },
   async (_request, reply) => {
     const { source, updatedAt, records } = await loadMarketplaceRecordsFromDb();
-    const view = records.map((r) => ({
+    const view = records.filter(isSupportedMarketplaceRecord).map((r) => ({
       manifest: r.manifest,
       payloadKind: (r.payload as any)?.kind ?? "unknown",
       payloadSummary:
@@ -866,12 +874,7 @@ fastify.get(
                 command: (r.payload as any)?.config?.command ?? "",
                 endpoint: (r.payload as any)?.config?.endpoint ?? "",
               }
-            : (r.payload as any)?.kind === "sub_agent"
-              ? {
-                  agentId: (r.payload as any)?.agent?.id ?? "",
-                  model: (r.payload as any)?.agent?.model ?? "",
-                }
-              : {},
+            : {},
     }));
     reply.header("Cache-Control", "no-store");
     return { ok: true, source, updatedAt, records: view };

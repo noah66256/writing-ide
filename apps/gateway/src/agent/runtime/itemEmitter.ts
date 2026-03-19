@@ -130,7 +130,7 @@ export class ItemEmitter {
         if (!item) return [];
         if (toolName === "spawn_agent") {
           const output = data.output && typeof data.output === "object" ? (data.output as Record<string, unknown>) : {};
-          const childThreadId = String(output.threadId ?? output.childThreadId ?? "").trim();
+          const childThreadId = String(output.threadId ?? output.childThreadId ?? output.agent_id ?? "").trim();
           if (childThreadId && !item.receiverThreadIds.includes(childThreadId)) {
             item.receiverThreadIds = [...item.receiverThreadIds, childThreadId];
           }

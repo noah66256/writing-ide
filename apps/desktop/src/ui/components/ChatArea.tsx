@@ -48,15 +48,6 @@ type RunController = { cancel: (reason?: string) => void; done: Promise<void> };
 const MARKDOWN_IMAGE_EXT_RE = /\.(png|jpe?g|gif|svg|webp|bmp|ico|avif)$/i;
 const localImageDataUrlCache = new Map<string, string>();
 
-function parseAtMention(text: string): { agentId: string; cleanText: string } | null {
-  const m = text.match(/^@(\S+)\s+/);
-  if (!m) return null;
-  const mention = m[1];
-  const agent = BUILTIN_SUB_AGENTS.find(a => a.enabled && (a.id === mention || a.name === mention));
-  if (!agent) return null;
-  return { agentId: agent.id, cleanText: text.slice(m[0].length) };
-}
-
 function looksLikeKbPanelOnlyIntent(text: string): boolean {
   const t = String(text ?? "").trim();
   if (!t) return false;
@@ -945,6 +936,7 @@ export function ChatArea() {
   const [suggestText, setSuggestText] = useState<string>("");
   const [todoPanelCollapsed, setTodoPanelCollapsed] = useState(false);
   const [viewportRatio, setViewportRatio] = useState<{ start: number; height: number }>({ start: 0, height: 1 });
+  const [isLoadingOlderHistory, setIsLoadingOlderHistory] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
@@ -1004,6 +996,53 @@ export function ChatArea() {
     };
   }, [activeConvId, renderSteps]);
 
+  const loadOlderHistory = useCallback((opts?: { preserveViewport?: boolean }) => {
+    if (loadingMoreHistoryRef.current) return;
+    const api = window.desktop?.history?.loadConversationSegment;
+    const convId = useConversationStore.getState().activeConvId;
+    const runState = useRunStore.getState();
+    const currentSteps = getProjectedStepsFromRuntime({
+      steps: runState.steps ?? [],
+      items: runState.items ?? [],
+      activeItemIds: runState.activeItemIds ?? [],
+      collabSessions: runState.collabSessions ?? [],
+    });
+    const first = currentSteps[0];
+    if (!api || !convId || !first) return;
+
+    const node = scrollRef.current;
+    const preserveViewport = opts?.preserveViewport !== false;
+    const prevScrollHeight = preserveViewport && node ? node.scrollHeight : 0;
+    const prevScrollTop = preserveViewport && node ? node.scrollTop : 0;
+
+    loadingMoreHistoryRef.current = true;
+    setIsLoadingOlderHistory(true);
+
+    void api({ conversationId: convId, beforeStepId: first.id, limit: 50 })
+      .then((res: any) => {
+        if (!res || res.ok === false) {
+          useRunStore.getState().setHistoryWindowHasMoreBefore(false);
+          return;
+        }
+        const older = Array.isArray(res.steps) ? res.steps : [];
+        if (older.length > 0) {
+          useRunStore.getState().prependSteps(older as any);
+        }
+        useRunStore.getState().setHistoryWindowHasMoreBefore(Boolean(res.hasMoreBefore));
+        if (!preserveViewport) return;
+        requestAnimationFrame(() => {
+          const currentNode = scrollRef.current;
+          if (!currentNode) return;
+          const delta = currentNode.scrollHeight - prevScrollHeight;
+          currentNode.scrollTop = prevScrollTop + delta;
+        });
+      })
+      .finally(() => {
+        loadingMoreHistoryRef.current = false;
+        setIsLoadingOlderHistory(false);
+      });
+  }, []);
+
   // 滚动事件：判断是否 stick to bottom + 顶部触发历史加载
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -1020,44 +1059,9 @@ export function ChatArea() {
     setViewportRatio({ start, height });
 
     if (el.scrollTop < threshold && hasMoreHistoryBefore && !loadingMoreHistoryRef.current) {
-      const api = window.desktop?.history?.loadConversationSegment;
-      const convId = useConversationStore.getState().activeConvId;
-      const runState = useRunStore.getState();
-      const currentSteps = getProjectedStepsFromRuntime({
-        steps: runState.steps ?? [],
-        items: runState.items ?? [],
-        activeItemIds: runState.activeItemIds ?? [],
-        collabSessions: runState.collabSessions ?? [],
-      });
-      const first = currentSteps[0];
-      if (!api || !convId || !first) return;
-
-      loadingMoreHistoryRef.current = true;
-      const prevScrollHeight = el.scrollHeight;
-      void api({ conversationId: convId, beforeStepId: first.id, limit: 50 })
-        .then((res: any) => {
-          if (!res || res.ok === false) {
-            useRunStore.getState().setHistoryWindowHasMoreBefore(false);
-            return;
-          }
-          const older = Array.isArray(res.steps) ? res.steps : [];
-          if (older.length > 0) {
-            useRunStore.getState().prependSteps(older as any);
-          }
-          useRunStore.getState().setHistoryWindowHasMoreBefore(Boolean(res.hasMoreBefore));
-          requestAnimationFrame(() => {
-            const node = scrollRef.current;
-            if (!node) return;
-            const newScrollHeight = node.scrollHeight;
-            const delta = newScrollHeight - prevScrollHeight;
-            node.scrollTop = node.scrollTop + delta;
-          });
-        })
-        .finally(() => {
-          loadingMoreHistoryRef.current = false;
-        });
+      loadOlderHistory({ preserveViewport: true });
     }
-  }, [hasMoreHistoryBefore]);
+  }, [hasMoreHistoryBefore, loadOlderHistory]);
 
   // 自动保存：使用脏标记 + 固定间隔轮询，避免连续工具调用/流式输出饿死 timer
   useEffect(() => {
@@ -1138,7 +1142,7 @@ export function ChatArea() {
   }, []);
 
   const handleSend = useCallback(
-    async (text: string, meta?: { mentions?: Array<{ id: string; label: string; type: string }>; files?: File[]; targetAgentIds?: string[] }) => {
+    async (text: string, meta?: { mentions?: Array<{ id: string; label: string; type: string }>; files?: File[] }) => {
       const imageFiles = (meta?.files ?? []).filter((f) => String(f.type ?? "").startsWith("image/"));
       const images = (
         await Promise.all(imageFiles.map((f) => fileToImageAttachment(f)))
@@ -1192,9 +1196,7 @@ export function ChatArea() {
       }
 
       const gatewayUrl = getGatewayBaseUrl();
-      const parsed = parseAtMention(text);
-      const targetAgentIds = meta?.targetAgentIds ?? (parsed ? [parsed.agentId] : undefined);
-      const cleanPromptRaw = !meta?.targetAgentIds && parsed ? parsed.cleanText : text;
+      const cleanPromptRaw = text;
       const currentThread = useRunStore.getState().thread;
       const shouldStartFreshWritingBoundary =
         mode === "agent" &&
@@ -1288,7 +1290,6 @@ export function ChatArea() {
       const c = startGatewayRun({
         gatewayUrl, mode, model, prompt: cleanPrompt, opMode,
         ...(images.length ? { images } : {}),
-        ...(targetAgentIds?.length ? { targetAgentIds } : {}),
         ...(effectiveSkillRefs.length ? { skillRefs: effectiveSkillRefs } : {}),
         ...(styleRequested ? { styleWorkflowRequested: true } : {}),
         ...(kbMentionIds?.length ? { kbMentionIds } : {}),
@@ -1377,13 +1378,13 @@ export function ChatArea() {
               <div className="max-w-[var(--chat-max-width)] mx-auto w-full px-6 pb-2">
                 <button
                   type="button"
-                  className="w-full text-center py-2 text-[12px] text-text-faint hover:text-text-muted transition-colors"
+                  className="w-full rounded-2xl border border-border-soft bg-surface/80 px-4 py-2 text-[12px] text-text-faint transition-colors hover:border-border hover:bg-surface-alt hover:text-text disabled:cursor-not-allowed disabled:opacity-60"
                   onClick={() => {
-                    const el = scrollRef.current;
-                    if (el) el.scrollTop = 0; // 触发顶部滚动加载
+                    void loadOlderHistory({ preserveViewport: true });
                   }}
+                  disabled={isLoadingOlderHistory}
                 >
-                  ↑ 上滑加载更早的对话历史
+                  {isLoadingOlderHistory ? "正在加载更早消息..." : "加载更早消息"}
                 </button>
               </div>
             )}
@@ -2118,11 +2119,6 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   "cron.create": "创建定时任务",
   "cron.list": "查看定时任务",
   "memory": "读写记忆",
-  "agent.config": "管理团队配置",
-  "agent.config.create": "创建团队成员",
-  "agent.config.list": "查看团队成员",
-  "agent.config.update": "更新成员配置",
-  "agent.config.remove": "移除团队成员",
 };
 
 function toolDisplayName(toolName: string, input: unknown): string {
@@ -2159,14 +2155,6 @@ function summarizeToolInput(toolName: string, input: unknown): string {
   if (toolName === "run.setTodoList") {
     const n = Array.isArray(args.items) ? args.items.length : 0;
     return n > 0 ? `${n} 项` : "";
-  }
-  if (toolName === "agent.config.create") {
-    return _trunc(args.name, 20);
-  }
-  if (toolName === "agent.config.update" || toolName === "agent.config.remove") {
-    const agentId = String(args.agentId ?? "").trim();
-    const agent = BUILTIN_SUB_AGENTS.find((a) => a.id === agentId);
-    return agent?.name ?? agentId;
   }
   return "";
 }

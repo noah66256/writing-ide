@@ -921,7 +921,8 @@ export const TOOL_LIST: ToolMeta[] = [
     name: "spawn_agent",
     description:
       "创建并启动一个子 Agent 会话（Codex-style collab 工具）。\n" +
-      "用于把子任务委派给专门角色，并通过 send_input/resume_agent/wait_agent/close_agent 协调其生命周期。",
+      "用于把子任务委派给专门角色，并通过 send_input/resume_agent/wait_agent/close_agent 协调其生命周期。\n" +
+      "结果中的 `agent_id` / `id` 就是后续协作工具应继续使用的主键。",
     args: [
       { name: "agent_type", required: false, desc: "子 Agent 类型/角色标识（如 copywriter/topic_planner）", type: "string" },
       { name: "message", required: false, desc: "发给子 Agent 的主要任务说明", type: "string" },
@@ -957,7 +958,7 @@ export const TOOL_LIST: ToolMeta[] = [
   },
   {
     name: "send_input",
-    description: "向已存在的子 Agent 会话发送新输入（Codex-style collab 工具）。",
+    description: "向已存在的子 Agent 会话发送新输入（Codex-style collab 工具）。`id` 使用 spawn_agent 返回的 `agent_id` / `id`。",
     args: [
       { name: "id", required: true, desc: "子 Agent 会话 ID", type: "string" },
       { name: "message", required: false, desc: "补充指令文本", type: "string" },
@@ -979,7 +980,7 @@ export const TOOL_LIST: ToolMeta[] = [
   },
   {
     name: "resume_agent",
-    description: "恢复一个已暂停/等待态的子 Agent 会话（Codex-style collab 工具）。",
+    description: "恢复一个已暂停/等待态的子 Agent 会话（Codex-style collab 工具）。`id` 使用 spawn_agent 返回的 `agent_id` / `id`。",
     args: [{ name: "id", required: true, desc: "子 Agent 会话 ID", type: "string" }],
     modes: ["agent"],
     inputSchema: {
@@ -991,7 +992,7 @@ export const TOOL_LIST: ToolMeta[] = [
   },
   {
     name: "wait_agent",
-    description: "等待一个或多个子 Agent 会话完成或进入下一状态（Codex-style collab 工具）。",
+    description: "等待一个或多个子 Agent 会话完成或进入下一状态（Codex-style collab 工具）。`ids` 使用 spawn_agent 返回的 `agent_id` / `id`。",
     args: [
       { name: "ids", required: true, desc: "要等待的子 Agent 会话 ID 数组", type: "array" },
       { name: "timeout_ms", required: false, desc: "超时毫秒（默认由运行时决定）", type: "number" },
@@ -1009,7 +1010,7 @@ export const TOOL_LIST: ToolMeta[] = [
   },
   {
     name: "close_agent",
-    description: "关闭一个子 Agent 会话并释放其协作上下文（Codex-style collab 工具）。",
+    description: "关闭一个子 Agent 会话并释放其协作上下文（Codex-style collab 工具）。`id` 使用 spawn_agent 返回的 `agent_id` / `id`。",
     args: [{ name: "id", required: true, desc: "子 Agent 会话 ID", type: "string" }],
     modes: ["agent"],
     inputSchema: {

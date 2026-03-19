@@ -42,7 +42,7 @@ function humanizeActivityLine(text: string | undefined, isRunning: boolean): str
 }
 
 type InputBarProps = {
-  onSend: (text: string, meta?: { mentions?: MentionItem[]; files?: File[]; targetAgentIds?: string[] }) => void;
+  onSend: (text: string, meta?: { mentions?: MentionItem[]; files?: File[] }) => void;
   onStop?: () => void;
   isRunning: boolean;
   disabled?: boolean;
@@ -76,7 +76,6 @@ function isMentionChip(node: Node | null): node is HTMLSpanElement {
 function mentionChipColorClass(type: MentionItem["type"]): string {
   if (type === "skill") return "bg-accent-soft text-accent";
   if (type === "kb") return "bg-blue-50 text-blue-600 dark:bg-blue-950/40 dark:text-blue-400";
-  if (type === "agent") return "bg-emerald-50 text-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-400";
   return "bg-surface-alt text-text-muted";
 }
 
@@ -684,12 +683,10 @@ export function InputBar({
     if (!normalizedText && mentions.length === 0 && droppedFiles.length === 0) return;
 
     const uniqueMentions = dedupeMentions(mentions);
-    const agentMentions = uniqueMentions.filter((m) => m.type === "agent");
 
     onSend(normalizedText, {
       mentions: uniqueMentions.length > 0 ? uniqueMentions : undefined,
       files: droppedFiles.length > 0 ? droppedFiles : undefined,
-      targetAgentIds: agentMentions.length > 0 ? agentMentions.map((m) => m.id) : undefined,
     });
 
     clearEditor();

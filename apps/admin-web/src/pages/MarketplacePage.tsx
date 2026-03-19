@@ -8,7 +8,7 @@ export function MarketplacePage() {
   const [records, setRecords] = useState<MarketplaceRecordViewDto[]>([]);
   const [source, setSource] = useState<"db" | "seeded" | "">("");
   const [updatedAt, setUpdatedAt] = useState("");
-  const [typeFilter, setTypeFilter] = useState<"all" | "skill" | "mcp_server" | "sub_agent">("all");
+  const [typeFilter, setTypeFilter] = useState<"all" | "skill" | "mcp_server">("all");
   const [selectedId, setSelectedId] = useState("");
 
   const refresh = async () => {
@@ -52,7 +52,6 @@ export function MarketplacePage() {
           <button className="btn" type="button" onClick={() => setTypeFilter("all")}>全部</button>
           <button className="btn" type="button" onClick={() => setTypeFilter("skill")}>Skill</button>
           <button className="btn" type="button" onClick={() => setTypeFilter("mcp_server")}>MCP</button>
-          <button className="btn" type="button" onClick={() => setTypeFilter("sub_agent")}>Sub-Agent</button>
           <button className="btn primary" type="button" disabled={busy} onClick={() => { void refresh(); }}>
             {busy ? "刷新中..." : "刷新"}
           </button>
@@ -122,4 +121,3 @@ export function MarketplacePage() {
     </div>
   );
 }
-

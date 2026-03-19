@@ -28,12 +28,22 @@ const AGENT_ALIASES: Record<string, string> = {
   researcher: "topic_planner",
   research: "topic_planner",
   planner: "topic_planner",
+  explorer: "topic_planner",
   search: "topic_planner",
   searcher: "topic_planner",
   writer: "copywriter",
   copy: "copywriter",
   editor: "copywriter",
+  worker: "copywriter",
+  default: "copywriter",
+  general: "copywriter",
+  generic: "copywriter",
+  custom: "copywriter",
   seo: "seo_specialist",
+  learning: "learning_specialist",
+  learner: "learning_specialist",
+  ingest: "learning_specialist",
+  ingester: "learning_specialist",
 };
 
 // ── 导出类型 ─────────────────────────────────────
@@ -127,12 +137,8 @@ function normalizeDelegationTask(rawTask: unknown): string {
 
 function resolveSubAgent(
   requestedAgentId: string,
-  customAgentDefinitions: SubAgentDefinition[],
 ): SubAgentDefinition | undefined {
-  const allAgents = [
-    ...BUILTIN_SUB_AGENTS.filter((a) => a.enabled),
-    ...customAgentDefinitions.filter((a) => a.enabled),
-  ];
+  const allAgents = BUILTIN_SUB_AGENTS.filter((a) => a.enabled);
 
   // 精确匹配
   const exact = allAgents.find((a) => a.id === requestedAgentId);
@@ -232,13 +238,9 @@ export class SubAgentExecutionBridge {
     }
 
     // ── Agent 查找 ──
-    const customAgents = this.parentCtx.customAgentDefinitions ?? [];
-    const subAgent = resolveSubAgent(agentId, customAgents);
+    const subAgent = resolveSubAgent(agentId);
     if (!subAgent) {
-      const knownIds = [
-        ...BUILTIN_SUB_AGENTS.filter((a) => a.enabled),
-        ...customAgents.filter((a) => a.enabled),
-      ].map((a) => a.id);
+      const knownIds = BUILTIN_SUB_AGENTS.filter((a) => a.enabled).map((a) => a.id);
       return {
         ok: false,
         output: {
@@ -391,7 +393,6 @@ export class SubAgentExecutionBridge {
       maxTurns: budget.maxTurns,
       toolChoiceFirstTurn: undefined, // 不强制首轮工具
       mainDoc: this.parentCtx.mainDoc,
-      customAgentDefinitions: this.parentCtx.customAgentDefinitions,
       jsonToolFallbackEnabled: this.parentCtx.jsonToolFallbackEnabled ?? false,
     };
 

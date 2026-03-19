@@ -272,7 +272,6 @@ export type StartGatewayRunPayloadV2 = {
     path?: string;
     base64DataUrl?: string;
   }>;
-  targetAgentIds?: string[];
   kbMentionIds?: string[];
   skillRefs?: SkillRef[];
   builtinOverrides?: Record<string, { enabled?: boolean }>;

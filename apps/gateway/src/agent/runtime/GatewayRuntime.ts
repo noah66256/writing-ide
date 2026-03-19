@@ -77,6 +77,7 @@ import { getProviderCapabilities, type ProviderCapabilities } from "./provider/p
 import { PiLoopKernel } from "./kernel/PiLoopKernel.js";
 import type { LoopKernel } from "./kernel/LoopKernel.types.js";
 import { CollabRuntime } from "./collabRuntime.js";
+import { normalizeSpawnAgentArgs } from "./collabCompat.js";
 
 // ── 常量 ─────────────────────────────────────────
 
@@ -382,12 +383,6 @@ const MERGED_TOOL_MAP: Record<string, Record<string, string>> = {
     read: "memory.read",
     update: "memory.update",
   },
-  "agent.config": {
-    list: "agent.config.list",
-    create: "agent.config.create",
-    update: "agent.config.update",
-    remove: "agent.config.remove",
-  },
 };
 
 function expandMergedToolName(name: string, args: Record<string, unknown>): string {
@@ -400,33 +395,6 @@ function expandMergedToolName(name: string, args: Record<string, unknown>): stri
 function stripMergedActionField(args: Record<string, unknown>): Record<string, unknown> {
   const { action: _action, ...rest } = args;
   return rest;
-}
-
-function translateSpawnAgentArgs(args: Record<string, unknown>): Record<string, unknown> {
-  const roleOrType = String(args.agent_type ?? args.agentId ?? "").trim();
-  const message = String(args.message ?? "").trim();
-  const items = Array.isArray(args.items) ? args.items : [];
-  const itemText = items
-    .map((item: any) => {
-      if (!item || typeof item !== "object") return "";
-      if (typeof item.text === "string" && item.text.trim()) return item.text.trim();
-      if (typeof item.path === "string" && item.path.trim()) return `path: ${item.path.trim()}`;
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
-  const task = [message, itemText].filter(Boolean).join("\n\n").trim();
-  return {
-    agentId: roleOrType,
-    task,
-    prompt: task,
-    context: {
-      role: roleOrType || undefined,
-      model: typeof args.model === "string" ? args.model : undefined,
-      reasoning_effort: typeof args.reasoning_effort === "string" ? args.reasoning_effort : undefined,
-      fork_context: args.fork_context === true,
-    },
-  };
 }
 
 /** 检查是否为 pi-ai 的 Message（user / assistant / toolResult） */
@@ -1700,11 +1668,10 @@ export class GatewayRuntime implements AgentRuntime {
     }
 
     if (toolName === "spawn_agent") {
-      const delegateArgs = translateSpawnAgentArgs(toolArgs);
       if (this.shadowMode === "shadow") {
-        return this._handleDelegateStub(toolCallId, delegateArgs, toolName);
+        return this._handleDelegateStub(toolCallId, toolArgs, toolName);
       }
-      return this.collabRuntime.spawn(toolCallId, delegateArgs, this.turn);
+      return this.collabRuntime.spawn(toolCallId, toolArgs, this.turn);
     }
 
     if (toolName === "send_input") {
@@ -2814,8 +2781,9 @@ export class GatewayRuntime implements AgentRuntime {
     toolArgs: Record<string, unknown>,
     toolName = "spawn_agent",
   ): GatewayToolExecResult {
-    const agentId = String(toolArgs.agentId ?? "").trim();
-    const task = String(toolArgs.task ?? toolArgs.prompt ?? "").trim();
+    const normalized = normalizeSpawnAgentArgs(toolArgs);
+    const agentId = normalized.ok ? normalized.value.agentId : "";
+    const task = normalized.ok ? normalized.value.task : "";
 
     // 审计事件：记录委派请求
     this.config.runCtx.writeEvent("tool.call", {

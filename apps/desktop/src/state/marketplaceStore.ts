@@ -1,10 +1,12 @@
 import { create } from "zustand";
 import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
 import { useAuthStore } from "@/state/authStore";
-import { useTeamStore } from "@/state/teamStore";
-import type { SubAgentDefinition } from "@ohmycrab/agent-core";
 
-export type MarketplaceItemType = "skill" | "mcp_server" | "sub_agent";
+export type MarketplaceItemType = "skill" | "mcp_server";
+
+function isMarketplaceItemType(value: unknown): value is MarketplaceItemType {
+  return value === "skill" || value === "mcp_server";
+}
 
 export type MarketplaceCatalogItem = {
   id: string;
@@ -85,14 +87,6 @@ type MarketplaceState = {
   uninstallItem: (itemId: string) => Promise<{ ok: boolean; error?: string }>;
 };
 
-const DEFAULT_SUB_AGENT_BUDGET: SubAgentDefinition["budget"] = {
-  maxTurns: 8,
-  maxToolCalls: 16,
-  timeoutMs: 600_000,
-};
-
-let lastSyncedSubAgentIds = new Set<string>();
-
 function authHeader(): Record<string, string> {
   const token = String(useAuthStore.getState().accessToken ?? "").trim();
   return token ? { Authorization: `Bearer ${token}` } : {};
@@ -146,97 +140,6 @@ function isPlatformCompatible(targetsRaw: string[], platformRaw: string, archRaw
   return false;
 }
 
-function slugify(raw: string) {
-  const v = String(raw ?? "").trim().toLowerCase();
-  return v.replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 36) || "agent";
-}
-
-function toStringArray(raw: unknown) {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .map((x) => String(x ?? "").trim())
-    .filter(Boolean);
-}
-
-function toBudget(raw: any): SubAgentDefinition["budget"] {
-  const maxTurns = Number(raw?.maxTurns);
-  const maxToolCalls = Number(raw?.maxToolCalls);
-  const timeoutMs = Number(raw?.timeoutMs);
-  return {
-    maxTurns: Number.isFinite(maxTurns) ? Math.max(1, Math.min(30, Math.floor(maxTurns))) : DEFAULT_SUB_AGENT_BUDGET.maxTurns,
-    maxToolCalls: Number.isFinite(maxToolCalls) ? Math.max(1, Math.min(100, Math.floor(maxToolCalls))) : DEFAULT_SUB_AGENT_BUDGET.maxToolCalls,
-    timeoutMs: Number.isFinite(timeoutMs) ? Math.max(5000, Math.min(600_000, Math.floor(timeoutMs))) : DEFAULT_SUB_AGENT_BUDGET.timeoutMs,
-  };
-}
-
-function toSubAgentDefinition(installed: MarketplaceInstalledItem): SubAgentDefinition | null {
-  const meta = installed?.meta && typeof installed.meta === "object" ? installed.meta : {};
-  const raw = (meta as any).agentDef ?? (meta as any).agent;
-  if (!raw || typeof raw !== "object") return null;
-
-  const rawId = String((raw as any).id ?? "").trim();
-  const finalId = rawId
-    ? (rawId.startsWith("custom_") ? rawId : `custom_${slugify(rawId)}`)
-    : `custom_market_${slugify(installed.itemId)}`;
-  const name = String((raw as any).name ?? installed.name ?? "市场子 Agent").trim() || "市场子 Agent";
-  const description = String((raw as any).description ?? "").trim() || `${name}（由 Marketplace 安装）`;
-  const systemPrompt =
-    String((raw as any).systemPrompt ?? "").trim() ||
-    `你是「${name}」，请在你的职责范围内完成任务，并严格基于可用工具执行。`;
-  const toolPolicyRaw = String((raw as any).toolPolicy ?? "").trim();
-  const toolPolicy =
-    toolPolicyRaw === "proposal_first" || toolPolicyRaw === "auto_apply" || toolPolicyRaw === "readonly"
-      ? toolPolicyRaw
-      : "readonly";
-  const model = String((raw as any).model ?? "").trim() || "haiku";
-  return {
-    id: finalId,
-    name,
-    avatar: String((raw as any).avatar ?? "").trim() || undefined,
-    description,
-    systemPrompt,
-    tools: toStringArray((raw as any).tools),
-    skills: toStringArray((raw as any).skills),
-    mcpServers: toStringArray((raw as any).mcpServers),
-    model,
-    fallbackModels: toStringArray((raw as any).fallbackModels),
-    toolPolicy,
-    budget: toBudget((raw as any).budget),
-    triggerPatterns: toStringArray((raw as any).triggerPatterns),
-    priority: Number.isFinite(Number((raw as any).priority)) ? Number((raw as any).priority) : 50,
-    enabled: Boolean((raw as any).enabled ?? true),
-    version: String((raw as any).version ?? installed.version ?? "1.0.0"),
-  };
-}
-
-function syncInstalledSubAgents(installedMap: Record<string, MarketplaceInstalledItem>) {
-  const team = useTeamStore.getState();
-  const addCustomAgent = team.addCustomAgent;
-  const updateCustomAgent = team.updateCustomAgent;
-  const removeCustomAgent = team.removeCustomAgent;
-  const nextIds = new Set<string>();
-  const rows = Object.values(installedMap);
-  for (const row of rows) {
-    if (String(row?.type ?? "") !== "sub_agent") continue;
-    const def = toSubAgentDefinition(row);
-    if (!def) continue;
-    nextIds.add(def.id);
-    if (useTeamStore.getState().customAgents[def.id]) {
-      const { id: _id, ...patch } = def;
-      updateCustomAgent(def.id, patch);
-    } else {
-      addCustomAgent(def);
-    }
-  }
-
-  for (const prevId of lastSyncedSubAgentIds) {
-    if (!nextIds.has(prevId) && useTeamStore.getState().customAgents[prevId]) {
-      removeCustomAgent(prevId);
-    }
-  }
-  lastSyncedSubAgentIds = nextIds;
-}
-
 async function fetchJson<T>(url: string): Promise<T> {
   const finalUrl = resolveApiUrl(url);
   const res = await fetch(finalUrl, {
@@ -267,7 +170,9 @@ export const useMarketplaceStore = create<MarketplaceState>((set, get) => ({
     set({ loadingCatalog: true, error: "" });
     try {
       const payload = await fetchJson<{ items?: MarketplaceCatalogItem[] }>("/api/marketplace/catalog");
-      const items = Array.isArray(payload?.items) ? payload.items : [];
+      const items = Array.isArray(payload?.items)
+        ? payload.items.filter((item): item is MarketplaceCatalogItem => isMarketplaceItemType(item?.type))
+        : [];
       set({ items, loadingCatalog: false });
     } catch (e: any) {
       set({ loadingCatalog: false, error: `获取市场列表失败：${String(e?.message ?? e)}` });
@@ -278,7 +183,6 @@ export const useMarketplaceStore = create<MarketplaceState>((set, get) => ({
     const api = window.desktop?.marketplace;
     if (!api) {
       set({ installedMap: {}, loadingInstalled: false });
-      syncInstalledSubAgents({});
       return;
     }
     set({ loadingInstalled: true });
@@ -288,10 +192,11 @@ export const useMarketplaceStore = create<MarketplaceState>((set, get) => ({
       const map: Record<string, MarketplaceInstalledItem> = {};
       for (const row of list) {
         const key = String(row?.itemId ?? "").trim();
-        if (key) map[key] = row as MarketplaceInstalledItem;
+        if (key && isMarketplaceItemType(row?.type)) {
+          map[key] = row as MarketplaceInstalledItem;
+        }
       }
       set({ installedMap: map, loadingInstalled: false });
-      syncInstalledSubAgents(map);
     } catch (e: any) {
       set({ loadingInstalled: false, error: `读取已安装列表失败：${String(e?.message ?? e)}` });
     }

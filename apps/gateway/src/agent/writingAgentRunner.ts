@@ -131,8 +131,6 @@ export type RunContext = {
     collabSessionIds?: string[];
     collabSessions?: Array<Record<string, unknown>>;
   };
-  /** 用户通过 @mention 指定的目标子 Agent ID 列表 */
-  targetAgentIds?: string[];
   /** 子 Agent ID（设置后 writeEvent 自动注入 agentId 到每条 SSE 事件） */
   agentId?: string;
   /** 允许覆盖默认最大回合数（子 Agent 可用） */
@@ -166,8 +164,6 @@ export type RunContext = {
     reason?: string;
   };
 
-  /** Custom agent definitions from Desktop (for spawn_agent to resolve custom agents) */
-  customAgentDefinitions?: SubAgentDefinition[];
   /** 注入给子 Agent 的 L1 全局记忆（裁剪过的 section 子集） */
   l1Memory?: string;
   /** 注入给子 Agent 的 L2 项目记忆（裁剪过的 section 子集） */
@@ -570,15 +566,9 @@ function clampIntLocal(value: unknown, min: number, max: number, fallback: numbe
 
 /**
  * 合并工具 → Desktop 原名翻译表。
- * LLM 看到一个合并工具（如 agent.config），Desktop 仍处理原名（如 agent.config.create）。
+ * LLM 看到一个合并工具（如 memory），Desktop 仍处理原名（如 memory.read）。
  */
 const MERGED_TOOL_MAP: Record<string, Record<string, string>> = {
-  "agent.config": {
-    list: "agent.config.list",
-    create: "agent.config.create",
-    update: "agent.config.update",
-    remove: "agent.config.remove",
-  },
   "doc.snapshot": {
     create: "doc.commitSnapshot",
     list: "doc.listSnapshots",
@@ -1981,18 +1971,6 @@ export class AgentRunner {
     this._setOutcome({ status: "completed", reason: "completed", reasonCodes: ["completed"] });
     this._pushHistory({ role: "user", text: userMessage, images });
 
-    // If user @mentioned specific agents, auto-delegate before main loop
-    if (this.ctx.targetAgentIds?.length) {
-      await this._bootstrapTargetDelegation(userMessage);
-      if (this.ctx.abortSignal.aborted) {
-        this._setOutcome({ status: "aborted", reason: "aborted", reasonCodes: ["aborted"] });
-      } else if (this.turnEngine.getOutcome().reason === "completed") {
-        this._setOutcome({ status: "completed", reason: "delegation_completed", reasonCodes: ["delegation_completed"] });
-      }
-      this._finalizeOutcomeBeforeReturn();
-      return;
-    }
-
     while (this.turn < this.maxTurns) {
       if (this.ctx.abortSignal.aborted) {
         this._setOutcome({ status: "aborted", reason: "aborted", reasonCodes: ["aborted"] });
@@ -2016,104 +1994,6 @@ export class AgentRunner {
       reasonCodes: ["max_turns"],
       detail: { turn: this.turn, maxTurns: this.maxTurns },
     });
-  }
-
-  /**
-   * When user @mentions specific agents, bypass the main LLM loop and directly
-   * delegate to the specified sub-agents (in parallel if multiple).
-   */
-  private async _bootstrapTargetDelegation(userMessage: string): Promise<void> {
-    const ids = (this.ctx.targetAgentIds ?? []).filter(Boolean);
-    const allAgents = [
-      ...BUILTIN_SUB_AGENTS,
-      ...(this.ctx.customAgentDefinitions ?? []),
-    ];
-    const validAgents = ids
-      .map((id) => allAgents.find((a) => a.id === id))
-      .filter(Boolean);
-
-    if (validAgents.length === 0) {
-      // No valid agents found, fall back to normal run
-      while (this.turn < this.maxTurns) {
-        if (this.ctx.abortSignal.aborted) return;
-        this.turn += 1;
-        this.turnEngine.setTurn(this.turn);
-        const shouldContinue = await this._runOneTurn();
-        if (!shouldContinue) return;
-      }
-      return;
-    }
-
-    // Build synthetic tool_use blocks for each target agent
-    const toolUses = validAgents.map((agent: any, i: number) => ({
-      type: "tool_use" as const,
-      id: `bootstrap_spawn_agent_${i}_${Date.now()}`,
-      name: "spawn_agent",
-      input: { agent_type: agent.id, message: userMessage, fork_context: true } as Record<string, unknown>,
-    }));
-
-    // Push synthetic assistant message with delegation calls
-    this._pushHistory({
-      role: "assistant",
-      blocks: toolUses,
-    });
-
-    // Execute all delegations in parallel
-    const results = await Promise.all(
-      toolUses.map(async (toolUse) => {
-        const result = await this._executeTool(toolUse);
-        return { toolUse, result };
-      }),
-    );
-
-    // Build canonical tool results and emit events
-    const canonicalResults: CanonicalToolResult[] = [];
-    const MAX_TOOL_RESULT_CHARS = 60_000;
-    for (const { toolUse, result } of results) {
-      const output = result.output;
-      this._updateRunState(toolUse, { ok: result.ok, output });
-      this.ctx.writeEvent("tool.result", {
-        toolCallId: toolUse.id,
-        name: toolUse.name,
-        ok: result.ok,
-        output,
-      });
-      const outObj = output && typeof output === "object" ? (output as Record<string, unknown>) : null;
-      this.turnEngine.record({
-        type: "tool_result",
-        callId: String(toolUse.id ?? ""),
-        name: String(toolUse.name ?? ""),
-        ok: result.ok,
-        output,
-        error: result.ok ? undefined : String(outObj?.error ?? "UNKNOWN_ERROR"),
-      });
-      const rawContent = typeof output === "string" ? output : JSON.stringify(output);
-      const content = rawContent.length > MAX_TOOL_RESULT_CHARS
-        ? rawContent.slice(0, MAX_TOOL_RESULT_CHARS) + `\n...[工具结果已截断，共 ${rawContent.length} 字符]`
-        : rawContent;
-      canonicalResults.push({
-        toolUseId: toolUse.id,
-        toolName: toolUse.name,
-        content,
-        isError: result.ok ? undefined : true,
-      });
-    }
-
-    if (canonicalResults.length > 0) {
-      this._pushHistory({
-        role: "tool_result",
-        results: canonicalResults,
-      });
-    }
-
-    // After delegation, let main agent continue normally to summarize
-    while (this.turn < this.maxTurns) {
-      if (this.ctx.abortSignal.aborted) return;
-      this.turn += 1;
-      this.turnEngine.setTurn(this.turn);
-      const shouldContinue = await this._runOneTurn();
-      if (!shouldContinue) return;
-    }
   }
 
   private _buildXmlToolProtocolPrompt(allowed: Set<string>): string {
@@ -3430,8 +3310,7 @@ export class AgentRunner {
     }
 
     let subAgent: SubAgentDefinition | undefined =
-      BUILTIN_SUB_AGENTS.find((a) => a.id === agentId && a.enabled)
-      ?? (this.ctx.customAgentDefinitions ?? []).find((a) => a.id === agentId && a.enabled);
+      BUILTIN_SUB_AGENTS.find((a) => a.id === agentId && a.enabled);
 
     // 别名兜底：模型可能用中文名、自然语言名或缩写调用 agent
     if (!subAgent) {
@@ -3449,7 +3328,6 @@ export class AgentRunner {
       };
       const allAgents = [
         ...BUILTIN_SUB_AGENTS.filter((a) => a.enabled),
-        ...(this.ctx.customAgentDefinitions ?? []).filter((a) => a.enabled),
       ];
       const lower = agentId.toLowerCase();
       // 先查别名表
@@ -3468,7 +3346,6 @@ export class AgentRunner {
     if (!subAgent) {
       const allAgents = [
         ...BUILTIN_SUB_AGENTS.filter((a) => a.enabled),
-        ...(this.ctx.customAgentDefinitions ?? []).filter((a) => a.enabled),
       ];
       const knownIds = allAgents.map((a) => a.id);
       return {

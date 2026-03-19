@@ -1,14 +1,13 @@
 import { Fragment, useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { BookOpen, ChevronLeft, ChevronRight, FileText, Folder, FolderOpen, Users } from "lucide-react";
+import { BookOpen, ChevronLeft, ChevronRight, FileText, Folder, FolderOpen } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useKbStore } from "@/state/kbStore";
 import { useProjectStore } from "@/state/projectStore";
 import { useProjectIndexStore } from "@/state/projectIndexStore";
-import { useTeamStore, getEffectiveAgents } from "@/state/teamStore";
 
 export type MentionItem = {
   id: string;
-  type: "skill" | "kb" | "file" | "agent";
+  type: "skill" | "kb" | "file";
   label: string;
   icon: React.ReactNode;
 };
@@ -20,11 +19,11 @@ type Props = {
   onClose: () => void;
 };
 
-type ActiveGroup = null | "agents" | "files" | "kb";
+type ActiveGroup = null | "files" | "kb";
 
 /** 统一 action 模型：键盘导航不区分分组入口 / 目录 / mention 选项 */
 type PopoverAction =
-  | { key: string; kind: "group"; group: "agents" | "files" | "kb" }
+  | { key: string; kind: "group"; group: "files" | "kb" }
   | { key: string; kind: "dir"; path: string }
   | { key: string; kind: "mention"; item: MentionItem };
 
@@ -99,22 +98,7 @@ export function MentionPopover({ query, visible, onSelect, onClose }: Props) {
   const indexDirs = useProjectIndexStore((s) => s.index?.dirs);
   const storeFiles = useProjectStore((s) => s.files);
   const storeDirs = useProjectStore((s) => s.dirs);
-  const agentOverrides = useTeamStore((s) => s.agentOverrides);
-  const customAgentsKeys = useTeamStore((s) => Object.keys(s.customAgents).join(","));
   const libraries = useKbStore((s) => s.libraries);
-
-  const enabledAgents = useMemo(
-    () =>
-      getEffectiveAgents()
-        .filter((a) => a.effectiveEnabled)
-        .map((a) => ({
-          id: a.id,
-          type: "agent" as const,
-          label: `${a.avatar ?? "🤖"} ${a.name}`,
-          icon: <Users size={14} />,
-        })),
-    [agentOverrides, customAgentsKeys],
-  );
 
   const kbItems = useMemo<MentionItem[]>(
     () =>
@@ -150,10 +134,6 @@ export function MentionPopover({ query, visible, onSelect, onClose }: Props) {
   const q = query.toLowerCase().trim();
   const searching = q.length > 0;
 
-  const searchAgents = useMemo(
-    () => (searching ? enabledAgents.filter((it) => it.label.toLowerCase().includes(q) || it.id.toLowerCase().includes(q)) : []),
-    [searching, q, enabledAgents],
-  );
   const searchFiles = useMemo(
     () =>
       searching && rootDir
@@ -178,11 +158,10 @@ export function MentionPopover({ query, visible, onSelect, onClose }: Props) {
   const groupEntries = useMemo(
     () =>
       [
-        ...(enabledAgents.length ? [{ group: "agents" as const, label: "团队成员", desc: `${enabledAgents.length} 位成员`, icon: <Users size={14} />, color: "text-emerald-500" }] : []),
         ...(rootDir ? [{ group: "files" as const, label: "项目文件", desc: "浏览项目目录", icon: <FolderOpen size={14} />, color: "text-amber-500" }] : []),
         ...(kbItems.length ? [{ group: "kb" as const, label: "知识库", desc: `${kbItems.length} 个知识库`, icon: <BookOpen size={14} />, color: "text-blue-500" }] : []),
       ],
-    [enabledAgents.length, rootDir, kbItems.length],
+    [rootDir, kbItems.length],
   );
 
   // 当前目录层级
@@ -207,16 +186,12 @@ export function MentionPopover({ query, visible, onSelect, onClose }: Props) {
   const actions = useMemo<PopoverAction[]>(() => {
     if (searching) {
       return [
-        ...searchAgents.map((it) => ({ key: `m:${it.type}:${it.id}`, kind: "mention" as const, item: it })),
         ...searchFiles.map((it) => ({ key: `m:${it.type}:${it.id}`, kind: "mention" as const, item: it })),
         ...searchKb.map((it) => ({ key: `m:${it.type}:${it.id}`, kind: "mention" as const, item: it })),
       ];
     }
     if (activeGroup === null) {
       return groupEntries.map((e) => ({ key: `g:${e.group}`, kind: "group" as const, group: e.group }));
-    }
-    if (activeGroup === "agents") {
-      return enabledAgents.map((it) => ({ key: `m:${it.type}:${it.id}`, kind: "mention" as const, item: it }));
     }
     if (activeGroup === "kb") {
       return kbItems.map((it) => ({ key: `m:${it.type}:${it.id}`, kind: "mention" as const, item: it }));
@@ -227,7 +202,7 @@ export function MentionPopover({ query, visible, onSelect, onClose }: Props) {
         ? { key: `d:${e.path}`, kind: "dir" as const, path: e.path }
         : { key: `m:file:${e.path}`, kind: "mention" as const, item: { id: e.path, type: "file" as const, label: e.name, icon: <FileText size={14} /> } },
     );
-  }, [searching, searchAgents, searchFiles, searchKb, activeGroup, groupEntries, enabledAgents, kbItems, curEntries]);
+  }, [searching, searchFiles, searchKb, activeGroup, groupEntries, kbItems, curEntries]);
 
   // 重置选中
   useEffect(() => { setSelectedIdx(0); }, [query, activeGroup, currentDir, actions.length]);
@@ -305,9 +280,7 @@ export function MentionPopover({ query, visible, onSelect, onClose }: Props) {
           >
             <ChevronLeft size={14} />
           </button>
-          {activeGroup === "agents" ? (
-            <span className="text-[12px] font-medium text-text-muted">团队成员</span>
-          ) : activeGroup === "kb" ? (
+          {activeGroup === "kb" ? (
             <span className="text-[12px] font-medium text-text-muted">知识库</span>
           ) : (
             <div className="flex min-w-0 items-center gap-1">
@@ -339,12 +312,6 @@ export function MentionPopover({ query, visible, onSelect, onClose }: Props) {
       <div className="max-h-[240px] overflow-y-auto py-1.5">
         {searching ? (
           <>
-            {searchAgents.length > 0 && (
-              <SectionLabel text="团队成员" />
-            )}
-            {searchAgents.map((item) => (
-              <MentionRow key={item.id} item={item} selected={selectedKey === `m:${item.type}:${item.id}`} onSelect={onSelect} colorClass="text-emerald-500" />
-            ))}
             {searchFiles.length > 0 && (
               <SectionLabel text="项目文件" />
             )}
@@ -370,14 +337,6 @@ export function MentionPopover({ query, visible, onSelect, onClose }: Props) {
               onClick={() => runAction({ key: `g:${entry.group}`, kind: "group", group: entry.group })}
             />
           ))
-        ) : activeGroup === "agents" ? (
-          enabledAgents.length > 0 ? (
-            enabledAgents.map((item) => (
-              <MentionRow key={item.id} item={item} selected={selectedKey === `m:${item.type}:${item.id}`} onSelect={onSelect} colorClass="text-emerald-500" />
-            ))
-          ) : (
-            <EmptyHint text="暂无可用成员" />
-          )
         ) : activeGroup === "kb" ? (
           kbItems.length > 0 ? (
             kbItems.map((item) => (

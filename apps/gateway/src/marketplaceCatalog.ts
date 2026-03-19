@@ -1,4 +1,4 @@
-export type MarketplaceItemType = "skill" | "mcp_server" | "sub_agent";
+export type MarketplaceItemType = "skill" | "mcp_server";
 export type MarketplaceSource = "official" | "reviewed";
 
 export type MarketplaceCatalogItem = {
@@ -55,15 +55,9 @@ export type MarketplaceMcpPayload = {
   };
 };
 
-export type MarketplaceSubAgentPayload = {
-  kind: "sub_agent";
-  agent: Record<string, unknown>;
-};
-
 export type MarketplaceDownloadPayload =
   | MarketplaceSkillPayload
-  | MarketplaceMcpPayload
-  | MarketplaceSubAgentPayload;
+  | MarketplaceMcpPayload;
 
 export type MarketplaceRecord = {
   manifest: MarketplaceManifest;
@@ -169,62 +163,6 @@ const RECORDS: MarketplaceRecord[] = [
             required: true,
           },
         ],
-      },
-    },
-  },
-  {
-    manifest: {
-      id: "official.live-ops-sub-agent",
-      type: "sub_agent",
-      name: "直播运营教练",
-      version: "0.1.0",
-      publisher: "Friday Official",
-      source: "official",
-      description: "专注直播内容节奏与转化动作拆解，适配口播/直播复盘。",
-      minAppVersion: "0.1.0",
-      platforms: ["darwin-arm64", "darwin-x64", "win32-x64"],
-      tags: ["sub-agent", "live", "growth"],
-      install: { kind: "sub_agent" },
-      permissions: {},
-      changelog: [
-        "首个版本：支持直播脚本结构建议与复盘提纲。",
-        "内置低成本模型默认配置（haiku）。",
-      ],
-    },
-    payload: {
-      kind: "sub_agent",
-      agent: {
-        id: "custom_live_ops_coach",
-        name: "直播运营教练",
-        avatar: "🎯",
-        description: "负责直播内容节奏、转化节点和复盘建议。",
-        systemPrompt: [
-          "你是「直播运营教练」，负责直播内容运营与转化节奏设计。",
-          "",
-          "你的职责：",
-          "- 识别直播脚本中的关键转化节点（钩子、案例、行动指令）",
-          "- 输出可执行的开场/过渡/收口建议",
-          "- 给出复盘提纲（留存、互动、转化）并标注优先级",
-          "",
-          "规则：",
-          "- 优先给短句、可直接口播的建议",
-          "- 不编造数据，无法确认时要明确说明",
-        ].join("\n"),
-        tools: ["kb.search", "project.listFiles", "time.now"],
-        skills: [],
-        mcpServers: [],
-        model: "haiku",
-        fallbackModels: ["sonnet"],
-        toolPolicy: "readonly",
-        budget: {
-          maxTurns: 10,
-          maxToolCalls: 18,
-          timeoutMs: 180000,
-        },
-        triggerPatterns: ["直播", "口播", "复盘", "转化", "运营"],
-        priority: 88,
-        enabled: true,
-        version: "0.1.0",
       },
     },
   },
