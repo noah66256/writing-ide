@@ -1665,21 +1665,22 @@ const tools: ToolDefinition[] = [
         String(md?.styleContractV1?.libraryId ?? "").trim(),
         String(md?.stylePlanV1?.libraryId ?? "").trim(),
       ].filter(Boolean);
+      const allowHistoricalFallback = shouldAllowHistoricalStyleFallback({
+        activeSkillIds: mentionedSkillIds,
+        mentionedLibraryIds: mentioned,
+      });
       const selection = resolveImplicitStyleLibrarySelection({
         libraries: useKbStore.getState().libraries ?? [],
         mainDoc: md,
-        allowHistoricalFallback: shouldAllowHistoricalStyleFallback({
-          activeSkillIds: mentionedSkillIds,
-          mentionedLibraryIds: mentioned,
-        }),
+        allowHistoricalFallback,
       });
       const libraryIds = explicitLibs.length
         ? explicitLibs
         : mentioned.length
           ? mentioned
-          : attached.length
+          : allowHistoricalFallback && attached.length
             ? attached
-            : libFromMainDoc.length
+            : allowHistoricalFallback && libFromMainDoc.length
               ? libFromMainDoc
               : selection.libraryIds;
       if (!libraryIds.length) return { ok: false, error: selection.error ?? "NO_LIBRARY_SELECTED" };
