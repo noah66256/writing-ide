@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-export NODE_ENV=production
-
 # 一键部署 Gateway + Admin-web
 #
 # 设计目标：
@@ -68,7 +66,6 @@ fi
 remote_cmd="$(cat <<EOF
 set -euo pipefail
 export PATH=${NODE_BIN}:\$PATH
-export NODE_ENV=production
 cd ${DIR}
 
 # ── 安全检查：确保 data/ 目录存在且不会被意外操作 ──
@@ -103,7 +100,7 @@ echo "[remote] build gateway"
 npm -w @ohmycrab/gateway run build
 
 # ── 重启 Gateway ──
-pm2 restart ${PM2_APP} --update-env
+NODE_ENV=production pm2 restart ${PM2_APP} --update-env
 
 # ── 构建 + 部署 Admin-web（可选） ──
 if [[ "${ADMIN_WEB}" == "1" ]]; then
