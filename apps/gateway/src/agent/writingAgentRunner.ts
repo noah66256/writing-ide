@@ -33,8 +33,8 @@ import {
   type RunGates,
   type RunState,
   type ActiveSkill,
+  type SkillManifest,
   type ParsedToolCall,
-  STYLE_IMITATE_SKILL,
   BUILTIN_SUB_AGENTS,
   type SubAgentBudget,
   type SubAgentDefinition,
@@ -93,6 +93,7 @@ export type RunContext = {
   intent: RunIntent;
   gates: RunGates;
   activeSkills: ActiveSkill[];
+  skillManifestById?: Map<string, SkillManifest>;
   styleWorkflowRequested?: boolean;
   /** v2 workflow skill 的声明式配置（skillId → WorkflowDeclaration） */
   activeWorkflowDeclarations?: Map<string, any>;
@@ -3585,7 +3586,9 @@ export class AgentRunner {
 
     let subSystemPrompt = String(subAgent.systemPrompt ?? "").trim() || this.ctx.systemPrompt;
     if (shouldInjectStyleImitate) {
-      const styleFragment = String(STYLE_IMITATE_SKILL.promptFragments?.system ?? "").trim();
+      const styleFragment = String(
+        this.ctx.skillManifestById?.get("style_imitate")?.promptFragments?.system ?? "",
+      ).trim();
       if (styleFragment) {
         subSystemPrompt += `\n\n【Active Skills】style_imitate\n- ${styleFragment}`;
       }
@@ -3611,6 +3614,7 @@ export class AgentRunner {
       intent: subIntent,
       gates: subGates,
       activeSkills: subActiveSkills,
+      skillManifestById: this.ctx.skillManifestById,
       allowedToolNames: subAllowedToolNames,
       systemPrompt: subSystemPrompt,
       toolSidecar: this.ctx.toolSidecar,

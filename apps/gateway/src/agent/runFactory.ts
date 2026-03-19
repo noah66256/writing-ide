@@ -5282,6 +5282,17 @@ export async function executeAgentRun(args: {
           ...(mcpToolsForRun.length ? { mcpTools: mcpToolsForRun } : { mcpTools: [] }),
         }
       : toolSidecar;
+  const runtimeSkillManifestById = new Map<string, any>();
+  for (const manifest of SKILL_MANIFESTS_V1) {
+    const id = String((manifest as any)?.id ?? "").trim();
+    if (!id) continue;
+    runtimeSkillManifestById.set(id, manifest);
+  }
+  for (const manifest of Array.isArray((body as any).userSkillManifests) ? (body as any).userSkillManifests : []) {
+    const id = String((manifest as any)?.id ?? "").trim();
+    if (!id || !String((manifest as any)?.name ?? "").trim()) continue;
+    runtimeSkillManifestById.set(id, manifest);
+  }
 
   const runCtx: RunContext = {
     runId,
@@ -5293,6 +5304,7 @@ export async function executeAgentRun(args: {
     intentRouteId: intentRoute.routeId ?? undefined,
     gates,
     activeSkills,
+    skillManifestById: runtimeSkillManifestById,
     activeWorkflowDeclarations,  // v2 workflow skill 的声明式配置
     allowedToolNames: selectedAllowedToolNames,
     systemPrompt: fullSystemPrompt,
