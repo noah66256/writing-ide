@@ -49,8 +49,19 @@ try {
   // ignore
 }
 
-const IGNORE_DIRS = new Set(["node_modules", ".git", "dist", "out", "build", ".next", ".ohmycrab"]);
-const IGNORE_ALL_DIRS = new Set([...IGNORE_DIRS, ".ohmycrab"]);
+const PROJECT_METADATA_DIRNAME = "ohmycrab";
+const LEGACY_PROJECT_METADATA_DIRNAME = ".ohmycrab";
+const IGNORE_DIRS = new Set([
+  "node_modules",
+  ".git",
+  "dist",
+  "out",
+  "build",
+  ".next",
+  LEGACY_PROJECT_METADATA_DIRNAME,
+  PROJECT_METADATA_DIRNAME,
+]);
+const IGNORE_ALL_DIRS = new Set([...IGNORE_DIRS, LEGACY_PROJECT_METADATA_DIRNAME, PROJECT_METADATA_DIRNAME]);
 const TEXT_EXT = new Set([".md", ".mdx", ".txt"]);
 
 // 全量索引用的文件类型分类
@@ -248,6 +259,16 @@ function normalizeRelPath(p) {
 function toFsPath(rootDir, relPath) {
   const rel = normalizeRelPath(relPath);
   return path.join(rootDir, ...rel.split("/"));
+}
+
+function getProjectMetadataPaths(rootDir, filename) {
+  const root = String(rootDir ?? "").trim();
+  return {
+    visibleDir: path.join(root, PROJECT_METADATA_DIRNAME),
+    visiblePath: path.join(root, PROJECT_METADATA_DIRNAME, filename),
+    legacyDir: path.join(root, LEGACY_PROJECT_METADATA_DIRNAME),
+    legacyPath: path.join(root, LEGACY_PROJECT_METADATA_DIRNAME, filename),
+  };
 }
 
 // 解析 SKILL.md frontmatter，用于 bundled skills 版本比对
@@ -2304,15 +2325,21 @@ function registerIpc() {
     const root = String(rootDir ?? "");
     if (!root) return { ok: false, error: "MISSING_ROOT" };
     try {
-      const indexDir = path.join(root, ".ohmycrab");
-      const indexPathV2 = path.join(indexDir, "project-index.v2.json");
-      const legacyIndexPath = path.join(indexDir, "project-index.json");
+      const { visibleDir, visiblePath, legacyPath } = getProjectMetadataPaths(root, "project-index.v2.json");
+      const legacyIndexPath = path.join(path.join(root, LEGACY_PROJECT_METADATA_DIRNAME), "project-index.json");
       let raw = "";
       try {
-        raw = await fsp.readFile(indexPathV2, "utf-8");
+        raw = await fsp.readFile(visiblePath, "utf-8");
       } catch (err) {
         if (err?.code !== "ENOENT") throw err;
-        raw = await fsp.readFile(legacyIndexPath, "utf-8");
+        try {
+          raw = await fsp.readFile(legacyPath, "utf-8");
+          await fsp.mkdir(visibleDir, { recursive: true });
+          await fsp.writeFile(visiblePath, raw, "utf-8").catch(() => void 0);
+        } catch (legacyErr) {
+          if (legacyErr?.code !== "ENOENT") throw legacyErr;
+          raw = await fsp.readFile(legacyIndexPath, "utf-8");
+        }
       }
       const data = JSON.parse(raw);
       return { ok: true, data };
@@ -2326,10 +2353,10 @@ function registerIpc() {
   ipcMain.handle("project.writeIndex", async (_event, rootDir, data) => {
     const root = String(rootDir ?? "");
     if (!root) return { ok: false, error: "MISSING_ROOT" };
-    const indexDir = path.join(root, ".ohmycrab");
+    const { visibleDir, visiblePath } = getProjectMetadataPaths(root, "project-index.v2.json");
+    const indexDir = visibleDir;
     await fsp.mkdir(indexDir, { recursive: true });
-    const indexPath = path.join(indexDir, "project-index.v2.json");
-    await fsp.writeFile(indexPath, JSON.stringify(data, null, 2), "utf-8");
+    await fsp.writeFile(visiblePath, JSON.stringify(data, null, 2), "utf-8");
     return { ok: true };
   });
 
@@ -2339,9 +2366,17 @@ function registerIpc() {
   ipcMain.handle("memory.readProject", async (_event, rootDir) => {
     const root = String(rootDir ?? "");
     if (!root) return { ok: false, error: "MISSING_ROOT" };
-    const memPath = path.join(root, ".ohmycrab", "project-memory.md");
     try {
-      const content = await fsp.readFile(memPath, "utf-8");
+      const { visibleDir, visiblePath, legacyPath } = getProjectMetadataPaths(root, "project-memory.md");
+      let content = "";
+      try {
+        content = await fsp.readFile(visiblePath, "utf-8");
+      } catch (err) {
+        if (err?.code !== "ENOENT") throw err;
+        content = await fsp.readFile(legacyPath, "utf-8");
+        await fsp.mkdir(visibleDir, { recursive: true });
+        await fsp.writeFile(visiblePath, content, "utf-8").catch(() => void 0);
+      }
       return { ok: true, content };
     } catch (e) {
       if (e?.code === "ENOENT") return { ok: true, content: "" };
@@ -2352,9 +2387,10 @@ function registerIpc() {
   ipcMain.handle("memory.writeProject", async (_event, rootDir, content) => {
     const root = String(rootDir ?? "");
     if (!root) return { ok: false, error: "MISSING_ROOT" };
-    const memDir = path.join(root, ".ohmycrab");
+    const { visibleDir, visiblePath } = getProjectMetadataPaths(root, "project-memory.md");
+    const memDir = visibleDir;
     await fsp.mkdir(memDir, { recursive: true });
-    await fsp.writeFile(path.join(memDir, "project-memory.md"), String(content ?? ""), "utf-8");
+    await fsp.writeFile(visiblePath, String(content ?? ""), "utf-8");
     return { ok: true };
   });
 
