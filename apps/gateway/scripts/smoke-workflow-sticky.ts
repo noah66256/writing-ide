@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import { computeIntentRouteDecisionPhase0, resolveStickyMcpServerIds } from "../src/agent/runFactory";
+import {
+  computeIntentRouteDecisionPhase0,
+  looksLikeDeleteOnlyIntent,
+  looksLikeExplicitNewTaskPrompt,
+  resolveStickyMcpServerIds,
+} from "../src/agent/runFactory";
 
 function ok(name: string) {
   console.log(`ok ${name}`);
@@ -88,3 +93,64 @@ const noStickyServerIds = resolveStickyMcpServerIds({
 });
 assert.deepEqual(noStickyServerIds, []);
 ok("sticky.mcp_fallback_respects_non_task");
+
+assert.equal(
+  looksLikeDeleteOnlyIntent("李叔挽回课直播稿.txt 不是，那8round+draft我手动删了以免你误解，目前要的是对比md，以及spec"),
+  false,
+);
+ok("routing.delete_only_excludes_md_spec_delivery");
+
+assert.equal(
+  looksLikeExplicitNewTaskPrompt("我的意思是拿我们卖智能体这个项目和李一舟的对比md，以及spec"),
+  true,
+);
+ok("routing.correction_prompt_breaks_sticky");
+
+const todoShouldNotForceContinuation = computeIntentRouteDecisionPhase0({
+  mode: "agent",
+  userPrompt: "为什么",
+  mainDocRunIntent: "auto",
+  mainDoc: {},
+  runTodo: [{ id: "t1", text: "等待用户确认", status: "blocked", note: "等待你确认" }],
+  intent: { wantsWrite: false, isWritingTask: false, wantsOkOnly: false },
+  ideSummary: null,
+});
+assert.notEqual(todoShouldNotForceContinuation.routeId, "task_execution");
+ok("sticky.todo_does_not_resume_without_explicit_continue");
+
+const todoExplicitContinue = computeIntentRouteDecisionPhase0({
+  mode: "agent",
+  userPrompt: "继续",
+  mainDocRunIntent: "auto",
+  mainDoc: {},
+  runTodo: [{ id: "t1", text: "等待用户确认", status: "blocked", note: "等待你确认" }],
+  intent: { wantsWrite: false, isWritingTask: false, wantsOkOnly: false },
+  ideSummary: null,
+});
+assert.equal(todoExplicitContinue.routeId, "task_execution");
+ok("sticky.todo_requires_explicit_continue");
+
+const deleteStickyMainDoc = {
+  taskStateV2: {
+    workflow: {
+      status: "running",
+      routeId: "file_delete_only",
+      kind: "task_workflow",
+      intentHint: "ops",
+      updatedAt: freshIso,
+    },
+  },
+};
+
+const correctionRoute = computeIntentRouteDecisionPhase0({
+  mode: "agent",
+  userPrompt: "我的意思是拿我们卖智能体这个项目和李一舟的对比md，以及spec",
+  mainDocRunIntent: "auto",
+  mainDoc: deleteStickyMainDoc,
+  runTodo: [{ id: "t1", text: "删除显式目标 /智能体（若存在）", status: "in_progress" }],
+  intent: { wantsWrite: true, isWritingTask: true, wantsOkOnly: false },
+  ideSummary: null,
+});
+assert.notEqual(correctionRoute.routeId, "file_delete_only");
+assert.equal(correctionRoute.routeId, "task_execution");
+ok("sticky.delete_route_broken_by_explicit_correction");

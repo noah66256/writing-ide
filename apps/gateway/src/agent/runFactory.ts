@@ -1182,6 +1182,13 @@ export function looksLikeShortFollowUp(text: string): boolean {
   return /^(现在呢|那呢|这样呢|这下呢|然后呢|继续|继续吧|继续做|开始|开始吧|保存吧|写吧|行吗|可以吗|可以了|可以|好|行|没问题|确认)\s*[?？]?$/.test(t);
 }
 
+export function looksLikeStrictContinuationPrompt(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  if (t.length > 24) return false;
+  return /^(继续|继续吧|继续做|接着|接着做|下一步|然后呢|往下|按这个来|照这个来|就这样继续|开始吧|写吧|保存吧)\s*[?？]?$/.test(t);
+}
+
 const WORKFLOW_STICKY_MAX_AGE_MS = 45 * 60 * 1000;
 
 export type WorkflowStickyState = {
@@ -1527,6 +1534,12 @@ export function looksLikeToolUncertaintyPrompt(text: string): boolean {
 export function looksLikeExplicitNewTaskPrompt(text: string): boolean {
   const t = String(text ?? "").trim();
   if (!t) return false;
+  if (
+    /^(我的意思是|我说的是|我要的是|不是这个意思|不是让你|不是要你|不是叫你|这里是要你|我现在要你)/.test(t) &&
+    looksLikeDocumentWritingDeliverableIntent(t)
+  ) {
+    return true;
+  }
   // 强信号：显式开启一个新任务，而不是继续上一轮浏览器/备案步骤。
   if (/^(帮我|请|帮忙|我想|我要|能不能|可以帮我|写一个|做一个|新建|创建|分解|总结|重写)/.test(t) && t.length > 15) {
     return true;
@@ -1575,10 +1588,21 @@ export function looksLikeProjectSearchIntent(text: string): boolean {
   return true;
 }
 
+function looksLikeDocumentWritingDeliverableIntent(text: string): boolean {
+  const t = String(text ?? "").trim();
+  if (!t) return false;
+  return (
+    /(对比\s*md|对比文档|方案文档|写作spec|round写作spec|\bspec\b|markdown\b)/i.test(t) ||
+    /(写|生成|输出|做|整理|落成|沉淀).{0,12}(对比|方案|文档|md|spec)/i.test(t) ||
+    /(对比|方案).{0,12}(文档|md|spec)/i.test(t)
+  );
+}
+
 export function looksLikeDeleteOnlyIntent(text: string): boolean {
   const t = String(text ?? "").trim();
   if (!t) return false;
   if (/(删减|精简|压缩|删到\d{2,6}字|删成\d{2,6}字)/.test(t)) return false;
+  if (looksLikeDocumentWritingDeliverableIntent(t)) return false;
 
   // 写作/仿写/改写类意图不是删除任务（即使 Context Pack 展开后的引用文章含"删"字）
   if (/(写一篇|仿写|改写|润色|续写|扩写|撰写|写作|写稿|草拟|起草|文案|按.*风格.*写|按.*口吻.*写)/.test(t)) return false;
@@ -1638,6 +1662,7 @@ export function looksLikeFileOpsIntent(text: string): boolean {
   const t = String(text ?? "").trim();
   if (!t) return false;
   if (/(删减|精简|压缩|删到\d{2,6}字|删成\d{2,6}字)/.test(t)) return false;
+  if (looksLikeDocumentWritingDeliverableIntent(t)) return false;
   const hasVerb = /(删除|删掉|删|移除|清理|清空|重命名|改名|移动|迁移|挪到|放到|新建(文件夹|目录)|创建(文件夹|目录)|mkdir|rename|move|delete|rm\b|del\b)/i.test(
     t,
   );
@@ -1967,26 +1992,18 @@ export function computeIntentRouteDecisionPhase0(args: {
     }
   }
 
-  const hasWaiting = todo.some((t: any) => {
-    const status = String(t?.status ?? "").trim().toLowerCase();
-    const note = String(t?.note ?? "").trim();
-    if (status === "blocked") return true;
-    if (/^blocked\b/i.test(note)) return true;
-    if (/(等待用户|等待你|待确认|等你确认|需要你确认|请确认)/.test(note)) return true;
-    return false;
-  });
-  const shortOrContinue =
+  const explicitTodoContinuation =
     !looksLikeResearchOnly &&
-    (looksLikeShortFollowUp(pTrim) || looksLikeExplicitContinue || looksLikeChoice || looksLikeFormatSwitch || (hasWaiting && pTrim.length <= 24));
+    (looksLikeStrictContinuationPrompt(pTrim) || looksLikeExplicitContinue);
   const looksExplicitNonTask = looksLikeExplicitNonTaskPrompt(pTrim);
-  if (todo.length && shortOrContinue && !looksExplicitNonTask) {
+  if (todo.length && explicitTodoContinuation && !looksExplicitNonTask) {
     return {
       intentType: "task_execution",
       confidence: 0.82,
       nextAction: "enter_workflow",
       todoPolicy: "required",
       toolPolicy: "allow_tools",
-      reason: "弱 sticky：存在 RUN_TODO 且用户输入短（继续/确认类），延续任务流",
+      reason: "弱 sticky：存在 RUN_TODO 且用户显式要求继续，延续任务流",
       derivedFrom: ["weakSticky:runTodo", ...derivedFrom],
       routeId: "task_execution",
     };
