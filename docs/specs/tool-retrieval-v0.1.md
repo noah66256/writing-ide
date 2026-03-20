@@ -6,6 +6,10 @@
 > - B2 阶段对 `CORE_TOOLS` 不再做裁剪，仅在 MCP/插件工具空间内做检索/扩展；  
 > - opMode（创作/助手）通过 `getAllowedToolsForOpMode` 控制基础工具与高危工具（`HIGH_RISK_TOOLS`）的暴露。  
 > 本文的其余部分（尤其是 B0/B1/B2 分段观测与自愈策略）依然有效，具体实现以上述新文档为准。
+>
+> TIP（2026-03-20）：本文关于“retrievalCatalog 仅在 MCP / 非核心 builtin 空间内扩展”的表述，已被  
+> `docs/specs/tool-retrieval-v0.2-codex-parity.md` 覆盖。  
+> 新结论是：需要严格区分 `modelVisibleCatalog` 与 `discoveryCatalog`；run 级 retrieval 必须基于统一的 model-visible catalog，不能再使用“有 MCP 就 MCP-only”的互斥逻辑。
 
 > 目标：对齐 Codex/OpenClaw 的“工具可用性/选择”范式，降低“工具接了但本轮看不到”的随机性；同时不与现有 L1/L2/L3 上下文分槽与 compact 机制冲突。
 

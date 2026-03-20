@@ -202,13 +202,14 @@ export const TOOL_LIST: ToolMeta[] = [
   {
     name: "tools.search",
     description:
-      "在本轮可用工具池中搜索工具（内置 + MCP），返回候选工具名与参数摘要。\n" +
-      "当工具很多、不确定该用哪个时：先 tools.search，再 tools.describe，再调用具体工具。\n" +
+      "搜索当前可用能力目录，返回候选项。\n" +
+      "结果既可能是具体工具（内置 + MCP），也可能是 MCP 能力卡片或未激活的 Skill 卡片。\n" +
+      "当工具很多、不确定该用哪个时：先 tools.search，再 tools.describe，再调用具体工具或确认是否要激活某项能力。\n" +
       "只读、无副作用。",
     args: [
       { name: "query", required: true, desc: "搜索问题/想要的能力（自然语言即可）", type: "string" },
       { name: "limit", desc: "返回数量（默认 8，最大 20）", type: "number" },
-      { name: "sources", desc: "可选：限制来源（builtin/mcp）", type: "array" },
+      { name: "sources", desc: "可选：限制来源（builtin/mcp/skill/mcp_capability）", type: "array" },
       { name: "includeSchemas", desc: "是否附带 inputSchema（默认 false）", type: "boolean" },
     ],
     modes: ["chat", "agent"],
@@ -230,12 +231,14 @@ export const TOOL_LIST: ToolMeta[] = [
         ok: { type: "boolean", description: "success" },
         tools: {
           type: "array",
-          description: "matched tools",
+          description: "matched tools or capability cards",
           items: {
             type: "object",
             properties: {
+              resultType: { type: "string" },
               name: { type: "string" },
               source: { type: "string" },
+              title: { type: "string" },
               description: { type: "string" },
               riskLevel: { type: "string" },
               capabilities: { type: "array", items: { type: "string" } },
@@ -250,11 +253,12 @@ export const TOOL_LIST: ToolMeta[] = [
   {
     name: "tools.describe",
     description:
-      "获取某个工具的详细说明与参数 schema（内置 + MCP）。\n" +
-      "建议用法：tools.search 找到候选后，再 tools.describe 确认参数，再调用工具。\n" +
+      "获取某个候选能力的详细说明。\n" +
+      "既支持具体工具（内置 + MCP），也支持 MCP 能力卡片和 Skill 卡片。\n" +
+      "建议用法：tools.search 找到候选后，再 tools.describe 确认参数、能力边界或激活线索；对 MCP/Skill 卡片，runtime 会把它记入当前线程的活跃能力集，便于后续续跑。\n" +
       "只读、无副作用。",
     args: [
-      { name: "name", required: true, desc: "工具名（例如 write 或 mcp.playwright.browser_snapshot）", type: "string" },
+      { name: "name", required: true, desc: "工具名或能力卡片 ID（例如 write、mcp.playwright.browser_snapshot、mcp:playwright/browser、skill:style_imitate）", type: "string" },
       { name: "includeSchema", desc: "是否附带完整 schema（默认 true）", type: "boolean" },
     ],
     modes: ["chat", "agent"],

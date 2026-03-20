@@ -9,7 +9,6 @@ import { toolNamesForMode, type AgentMode } from "./toolRegistry.js";
 import { applyOpModeToBaseAllowedTools, ensureCoreToolsSelected, CORE_TOOL_NAME_SET, type OpMode } from "./coreTools.js";
 import {
   buildMcpServerCatalog,
-  buildToolCatalog,
   filterMcpToolsByServerIds,
   selectMcpServerSubset,
   selectToolSubset,
@@ -18,6 +17,22 @@ import {
   type ToolCatalogSummary,
 } from "./toolCatalog.js";
 import { retrieveToolsForRun, type ToolRetrievalResult } from "./toolRetriever.js";
+import { buildMcpCapabilityCards, buildSkillCards, type McpCapabilityCard } from "./capabilityIndex.js";
+import {
+  activateMcpCapability,
+  activateSkillCapability,
+  clearThreadCapabilityStateForNewTask,
+  findMcpCapabilityIdForToolName,
+  normalizeThreadCapabilityState,
+  resolveMcpServerIdsForCapabilityIds,
+  resolveMcpToolNamesForCapabilityIds,
+} from "./threadCapabilityState.js";
+import {
+  buildDiscoveryCatalogForToolSearch,
+  buildModelVisibleCatalog,
+  buildSelectionCatalog,
+  summarizeCatalogBySource,
+} from "./toolCatalogViews.js";
 import {
   ensureRunAuditEnded,
   persistRunAudit,
@@ -60,6 +75,7 @@ import type {
   CollabAgentSessionRecord,
   ItemRecord,
   SkillRef,
+  ThreadCapabilityState,
   TaskStateV2,
   ThreadRecord,
   TurnRecord,
@@ -77,6 +93,7 @@ import {
   createThreadState,
   setThreadStatus,
   upsertCollabAgent,
+  updateThreadCapabilityState,
   updateActiveSkills,
   updateTaskState,
   updateThreadWaiting,
@@ -1001,6 +1018,7 @@ export function buildAgentProtocolPrompt(args: {
         `- 如果没有任何 Skill 明显适用，可以按常规 Agent 流程处理，本轮不强制执行 Skill 工作流。\n\n` +
         `执行机制：\n` +
         `- TASK_STATE(JSON) 中可能包含 workflowSkills 字段（例如 style_imitate.v1），表示上一轮 workflow skill 的阶段与缺失步骤。\n` +
+        `- 上层能力采用渐进式暴露：L0 基础工具始终可见；某些 MCP / 未激活 Skill 可能只先以能力卡片摘要出现。需要具体参数、工具名或详情时，先使用 tools.search / tools.describe。\n` +
         `- 如果 workflowSkills 中某个 Skill 标记为 in_progress/degraded，且 missingSteps 非空，本轮必须优先按 missingSteps 顺序补跑对应工具（如先 write 草稿、再 lint.copy / lint.style），补完闭环后再输出最终正文。\n` +
         `- 当 style_imitate 进入 orchestrator 阶段化工具暴露时，以当前回合可见工具作为权威阶段信号：若本回合只暴露了 kb.search / lint.copy / lint.style / write 中的某一个或少量工具，只能用这些工具推进当前阶段，不要要求隐藏工具。\n\n` +
         `1) Todo（任务清单）：进入执行流后默认维护 Todo。\n` +
@@ -2261,6 +2279,7 @@ export type PreparedRun = {
   activeSkills: any[];
   explicitSkillRefs: SkillRef[];
   activeSkillIds: string[];
+  threadCapabilityState: ThreadCapabilityState;
   rawActiveSkillIds: string[];
   suppressedSkillIds: string[];
   styleWorkflowRequested: boolean;
@@ -2321,6 +2340,7 @@ export type PreparedRun = {
   runnerStyleLibIds: string[];
   mcpServersFromSidecar: McpSidecarServer[];
   mcpToolsFromSidecar: Array<{ name: string; description: string; inputSchema?: any; serverId: string; serverName: string; originalName: string }>;
+  mcpCapabilityCards: McpCapabilityCard[];
   mcpToolsForRun: Array<{ name: string; description: string; inputSchema?: any; serverId: string; serverName: string; originalName: string }>;
   mcpServerSelectionSummary: McpServerSelectionSummary;
   mcpServerStickyFallbackUsed: boolean;
@@ -2425,6 +2445,16 @@ export async function prepareAgentRun(args: {
     recentDialogue: (recentDialogueFromPack as any) ?? undefined,
   });
 
+  const threadSnapshotHint =
+    (body as any).threadSnapshotHint && typeof (body as any).threadSnapshotHint === "object"
+      ? ((body as any).threadSnapshotHint as Record<string, unknown>)
+      : null;
+  const threadCapabilityState = (() => {
+    const normalized = normalizeThreadCapabilityState(threadSnapshotHint?.capabilityState);
+    return looksLikeExplicitNewTaskPrompt(userPrompt)
+      ? clearThreadCapabilityStateForNewTask(normalized)
+      : normalized;
+  })();
   const explicitSkillRefs = parseSkillRefs((body as any).skillRefs);
   const skillInvocations = parseSkillInvocations((body as any).skillInvocations);
   const invocationBySkillId = new Map(
@@ -2433,6 +2463,7 @@ export async function prepareAgentRun(args: {
   const explicitSkillIds = Array.from(new Set([
     ...explicitSkillRefs.filter((item) => item.enabled !== false).map((item) => item.id),
     ...skillInvocations.map((item) => item.id),
+    ...threadCapabilityState.activeSkillIds,
   ]));
   const mentionedSkillIds = explicitSkillIds;
   const mentionedSkillIdSet = new Set(mentionedSkillIds);
@@ -3098,6 +3129,31 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       .map((t) => String(t?.name ?? "").trim())
       .filter(Boolean),
   );
+  const discoveryMcpCatalog = buildModelVisibleCatalog({
+    mode,
+    allowedToolNames: new Set(
+      mcpToolsFromSidecar
+        .map((tool) => String(tool?.name ?? "").trim())
+        .filter(Boolean),
+    ),
+    mcpTools: mcpToolsFromSidecar,
+  }).filter((entry) => entry.source === "mcp");
+  const mcpCapabilityCards = buildMcpCapabilityCards({
+    mcpCatalog: discoveryMcpCatalog,
+    mcpServers: mcpServersFromSidecar,
+  });
+  const threadActiveMcpToolNames = resolveMcpToolNamesForCapabilityIds({
+    capabilityIds: threadCapabilityState.activeMcpCapabilityIds,
+    cards: mcpCapabilityCards,
+  });
+  const threadActiveMcpServerIds = resolveMcpServerIdsForCapabilityIds({
+    capabilityIds: threadCapabilityState.activeMcpCapabilityIds,
+    cards: mcpCapabilityCards,
+  });
+  const skillCapabilityCards = buildSkillCards({
+    skillManifests: skillManifestsEffective as any,
+    activeSkillIds,
+  });
   const enforceMcpFirstForBinaryRead = binaryReadIntent && binaryReadMcpToolNames.size > 0;
 
   // 已激活 Skill 声明的 toolCaps.allowTools：即使 toolPolicy=deny 也应放行
@@ -3199,6 +3255,29 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       },
     };
   }
+  if (threadActiveMcpServerIds.length > 0) {
+    const mergedSelectedServerIds: string[] = [];
+    for (const serverId of threadActiveMcpServerIds) {
+      if (!mergedSelectedServerIds.includes(serverId)) mergedSelectedServerIds.push(serverId);
+    }
+    for (const serverId of mcpServerSelection.summary.selectedServerIds) {
+      if (!mergedSelectedServerIds.includes(serverId)) mergedSelectedServerIds.push(serverId);
+    }
+    const maxServerCount = Math.max(compositeMaxServers, threadActiveMcpServerIds.length);
+    const limitedSelectedServerIds = mergedSelectedServerIds.slice(0, maxServerCount);
+    const mergedSelectedSet = new Set(limitedSelectedServerIds);
+    const prunedServerIds = mcpServerCatalog
+      .map((server) => String(server?.serverId ?? "").trim())
+      .filter((id) => id && !mergedSelectedSet.has(id));
+    mcpServerSelection = {
+      selectedServerIds: mergedSelectedSet,
+      summary: {
+        ...mcpServerSelection.summary,
+        selectedServerIds: limitedSelectedServerIds,
+        prunedServerIds: prunedServerIds.slice(0, 24),
+      },
+    };
+  }
   const compositePreferredServerIds = getCompositePreferredServerIds({
     plan: compositeTaskPlan,
     serverCatalog: mcpServerCatalog,
@@ -3249,9 +3328,12 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     serverCatalog: mcpServerCatalog,
     tools: mcpToolsForRun,
   });
-  const executionPreferredWithComposite = Array.from(new Set([...compositePreferredToolNames, ...executionPreferred]));
+  const executionPreferredWithComposite = Array.from(
+    new Set([...threadActiveMcpToolNames, ...compositePreferredToolNames, ...executionPreferred]),
+  );
   const preserveToolNamesWithComposite = new Set<string>([
     ...Array.from(preserveToolNames),
+    ...threadActiveMcpToolNames,
     ...compositePreferredToolNames,
   ]);
 
@@ -3268,10 +3350,13 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     }
   }
 
-  const toolCatalog = buildToolCatalog({
+  const modelVisibleCatalog = buildModelVisibleCatalog({
     mode,
     allowedToolNames: baseAllowedToolNames,
     mcpTools: mcpToolsForRun,
+  });
+  const selectionCatalog = buildSelectionCatalog({
+    modelVisibleCatalog,
   });
 
   // [B0/B1] 工具检索（Tool Retrieval）：先给出候选，再以 preferred 方式影响 top-K 选择。
@@ -3288,13 +3373,9 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
 
   const maxToolsForMode = mode === "agent" ? 30 : 20;
 
-  // Tool Retrieval 仅在 MCP / 非核心内置工具空间内做扩展，避免用检索来“发现”基础工具。
-  const retrievalCatalog = (() => {
-    const mcpEntries = toolCatalog.filter((entry) => entry.source === "mcp");
-    if (mcpEntries.length > 0) return mcpEntries;
-    // 没有 MCP 时，退而求其次：只在非 CORE_TOOLS 的 builtin 里做检索。
-    return toolCatalog.filter((entry) => entry.source === "mcp" || !CORE_TOOL_NAME_SET.has(entry.name));
-  })();
+  // v0.2：run-level retrieval 直接基于本轮 model-visible catalog。
+  // 不再使用“有 MCP 就 MCP-only”的互斥裁剪，避免 builtin/collab 因 source 被错误排除。
+  const retrievalCatalog = selectionCatalog;
 
   const toolRetrieval: ToolRetrievalResult = retrieveToolsForRun({
     catalog: retrievalCatalog,
@@ -3330,7 +3411,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
   }
 
   const toolSelection = selectToolSubset({
-    catalog: toolCatalog,
+    catalog: modelVisibleCatalog,
     routeId: routeIdLower || intentRoute.routeId,
     userPrompt,
     preferredToolNames: preferredToolNamesWithRetrieval,
@@ -3531,7 +3612,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
   }
 
   const toolCatalogSummary: ToolCatalogSummary = (() => {
-    const allNames = toolCatalog.map((entry) => String(entry.name ?? "").trim()).filter(Boolean);
+    const allNames = modelVisibleCatalog.map((entry) => String(entry.name ?? "").trim()).filter(Boolean);
     const selectedNames = Array.from(selectedAllowedToolNames).filter((name) => allNames.includes(name));
     const prunedNames = allNames.filter((name) => !selectedAllowedToolNames.has(name));
     return {
@@ -3542,6 +3623,22 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       prunedToolNames: prunedNames.slice(0, 48),
     };
   })();
+  const discoveryCatalogSummary = summarizeCatalogBySource(
+    buildDiscoveryCatalogForToolSearch({
+      mode,
+      allowedToolNames: selectedAllowedToolNames,
+      mcpTools: mcpToolsFromSidecar,
+      includeAllMcpTools: true,
+    }),
+  );
+  Object.assign(toolRetrievalNotice, {
+    modelVisibleCatalogCount: modelVisibleCatalog.length,
+    modelVisibleBySource: summarizeCatalogBySource(modelVisibleCatalog),
+    selectionCatalogCount: selectionCatalog.length,
+    selectionCatalogBySource: summarizeCatalogBySource(selectionCatalog),
+    discoveryCatalogCount: discoveryCatalogSummary.total,
+    discoveryCatalogBySource: discoveryCatalogSummary,
+  });
   const deleteTargetsHint =
     routeIdLower === "file_delete_only"
       ? extractDeleteTargetsHint(userPrompt)
@@ -3614,6 +3711,9 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     ctxDialogueSummaryFromPack,
     kbSelectedList,
     webSearchHint: webSearchHint || undefined,
+    mcpCapabilityCards,
+    skillCapabilityCards,
+    threadCapabilityState,
   });
 
   const messages: OpenAiChatMessage[] = [
@@ -3970,6 +4070,45 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     for (const n of healTools) allowed.add(n);
     for (const n of expansionTools) allowed.add(n);
 
+    if (threadActiveMcpToolNames.length > 0) {
+      const scopedMcpTools = new Set<string>(threadActiveMcpToolNames);
+      const discovered = (state as any).discoveredMcpToolNames;
+      if (discovered instanceof Set) {
+        for (const name of discovered) {
+          const trimmed = String(name ?? "").trim();
+          if (trimmed) scopedMcpTools.add(trimmed);
+        }
+      }
+      if (allowed.has("web.search") || allowed.has("web.fetch")) {
+        for (const tool of mcpToolsForRun) {
+          const name = String((tool as any)?.name ?? "").trim();
+          const originalName = String((tool as any)?.originalName ?? (tool as any)?.name ?? "").trim().toLowerCase();
+          if (!name) continue;
+          if (
+            /browser_navigate/.test(originalName) ||
+            /get_page_content/.test(originalName) ||
+            /bocha_web_search/.test(originalName) ||
+            /\bweb_search\b/.test(originalName)
+          ) {
+            scopedMcpTools.add(name);
+          }
+        }
+      }
+      let removedCount = 0;
+      for (const name of Array.from(allowed)) {
+        if (!String(name ?? "").startsWith("mcp.")) continue;
+        if (scopedMcpTools.has(name)) continue;
+        if (!allowed.delete(name)) continue;
+        removedCount += 1;
+      }
+      for (const name of scopedMcpTools) {
+        if (baseAllowedToolNames.has(name)) allowed.add(name);
+      }
+      hints.push(
+        `线程活跃能力集已生效：MCP 具体工具优先收敛到已激活能力（active=${threadActiveMcpToolNames.length}，expanded=${scopedMcpTools.size}，pruned=${removedCount}）。`,
+      );
+    }
+
     // 自愈触发时：若补齐的是浏览器 MCP，则视作浏览器意图信号（避免再次被屏蔽）
     const shouldForceAllowBrowser = Array.from(healTools).some((n) => /^mcp\.[^.]*?(?:playwright|browser)[^.]*\./i.test(n));
     const allowBrowserForTurn = allowBrowserToolsEffective || shouldForceAllowBrowser;
@@ -4303,6 +4442,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       activeSkills,
       explicitSkillRefs,
       activeSkillIds,
+      threadCapabilityState,
       rawActiveSkillIds,
       suppressedSkillIds,
       styleWorkflowRequested,
@@ -4345,6 +4485,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       runnerStyleLibIds,
       mcpServersFromSidecar,
       mcpToolsFromSidecar,
+      mcpCapabilityCards,
       mcpToolsForRun,
       mcpServerSelectionSummary: mcpServerSelection.summary,
       mcpServerStickyFallbackUsed: mcpServerSelectionUsedStickyFallback,
@@ -4380,6 +4521,7 @@ export async function executeAgentRun(args: {
     messages,
     activeSkills,
     activeSkillIds,
+    threadCapabilityState,
     rawActiveSkillIds,
     suppressedSkillIds,
     activeWorkflowDeclarations,
@@ -4413,6 +4555,7 @@ export async function executeAgentRun(args: {
     personaFromPack,
     mcpServersFromSidecar,
     mcpToolsFromSidecar,
+    mcpCapabilityCards,
     mcpToolsForRun,
     mcpServerSelectionSummary,
     mcpServerStickyFallbackUsed,
@@ -4547,6 +4690,17 @@ export async function executeAgentRun(args: {
   };
 
   const threadId = String((body as any).threadId ?? (body as any).convId ?? runId).trim() || runId;
+  const threadSnapshotHint =
+    (body as any).threadSnapshotHint && typeof (body as any).threadSnapshotHint === "object"
+      ? ((body as any).threadSnapshotHint as Record<string, unknown>)
+      : null;
+  const jsonSig = (value: unknown) => {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value ?? "");
+    }
+  };
   const hintedSkillRefs = parseSkillRefs((body as any)?.threadSnapshotHint?.activeSkillRefs);
   const hintedSkillRefById = new Map(hintedSkillRefs.map((item) => [item.id, item] as const));
   const activeSkillRefById = new Map([
@@ -4586,11 +4740,8 @@ export async function executeAgentRun(args: {
     convId: typeof (body as any).convId === "string" ? (body as any).convId : null,
     activeSkillRefs: activeSkillRefsSeed,
     taskState: initialTaskState,
+    capabilityState: threadCapabilityState,
   });
-  const threadSnapshotHint =
-    (body as any).threadSnapshotHint && typeof (body as any).threadSnapshotHint === "object"
-      ? ((body as any).threadSnapshotHint as Record<string, unknown>)
-      : null;
   if (threadSnapshotHint?.waitingFor === "user" || threadSnapshotHint?.waitingFor === "approval") {
     threadState = updateThreadWaiting({
       thread: threadState,
@@ -4741,7 +4892,69 @@ export async function executeAgentRun(args: {
       const toolName = String(p?.name ?? "").trim();
       const output = p?.output && typeof p.output === "object" ? (p.output as Record<string, unknown>) : null;
       const ok = p?.ok === true;
+      let threadCapabilitiesChanged = false;
+      let threadSkillsChanged = false;
+      if (ok && toolName === "tools.describe" && output) {
+        const targetType = String(output?.targetType ?? "").trim();
+        if (targetType === "mcp_capability") {
+          const capabilityId = String((output as any)?.capability?.id ?? "").trim();
+          if (capabilityId) {
+            const nextCapabilityState = activateMcpCapability({
+              state: threadState.capabilityState,
+              capabilityId,
+            });
+            if (jsonSig(nextCapabilityState) !== jsonSig(threadState.capabilityState ?? null)) {
+              threadState = updateThreadCapabilityState(threadState, nextCapabilityState);
+              threadCapabilitiesChanged = true;
+            }
+          }
+        } else if (targetType === "skill") {
+          const skillId = String((output as any)?.skill?.id ?? "").trim();
+          if (skillId) {
+            const nextCapabilityState = activateSkillCapability({
+              state: threadState.capabilityState,
+              skillId,
+            });
+            if (jsonSig(nextCapabilityState) !== jsonSig(threadState.capabilityState ?? null)) {
+              threadState = updateThreadCapabilityState(threadState, nextCapabilityState);
+              threadCapabilitiesChanged = true;
+            }
+            const nextSkillRef =
+              activeSkillRefById.get(skillId) ?? {
+                id: skillId,
+                source: "builtin" as const,
+                activation: "sticky" as const,
+                scope: "thread" as const,
+                configPath: null,
+                enabled: true,
+              };
+            activeSkillRefById.set(skillId, nextSkillRef);
+            const nextActiveSkillRefs = [
+              ...threadState.activeSkillRefs.filter((item) => String(item?.id ?? "").trim() !== skillId),
+              nextSkillRef,
+            ];
+            if (jsonSig(nextActiveSkillRefs) !== jsonSig(threadState.activeSkillRefs ?? [])) {
+              threadState = updateActiveSkills(threadState, nextActiveSkillRefs);
+              threadSkillsChanged = true;
+            }
+          }
+        }
+      }
       if (toolName.startsWith("mcp.") && ok) {
+        const capabilityId = findMcpCapabilityIdForToolName({
+          toolName,
+          cards: mcpCapabilityCards,
+        });
+        if (capabilityId) {
+          const nextCapabilityState = activateMcpCapability({
+            state: threadState.capabilityState,
+            capabilityId,
+          });
+          if (jsonSig(nextCapabilityState) !== jsonSig(threadState.capabilityState ?? null)) {
+            threadState = updateThreadCapabilityState(threadState, nextCapabilityState);
+            threadCapabilitiesChanged = true;
+          }
+        }
         const serverId = String(toolName.split(".")[1] ?? "").trim();
         const workflowState = (threadState.taskState?.workflow ?? {}) as Record<string, unknown>;
         const selectedServerIds = Array.isArray(workflowState.selectedServerIds)
@@ -4820,8 +5033,14 @@ export async function executeAgentRun(args: {
             updatedAt: nowIso,
             lastEndReason: "resumed_write_done",
           });
-        }
       }
+      if (threadSkillsChanged) {
+        emitSkillsUpdated();
+      }
+      if (threadCapabilitiesChanged || threadSkillsChanged) {
+        emitThreadSnapshot();
+      }
+    }
     }
     if (event === "collab.session.updated") {
       const session =

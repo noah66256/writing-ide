@@ -4,8 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "npm run -w @ohmycrab/kb-core build && npm run -w @ohmycrab/tools build && npm run -w @ohmycrab/agent-core build && tsx watch src/index.ts",
-    "build": "npm run -w @ohmycrab/kb-core build && npm run -w @ohmycrab/tools build && npm run -w @ohmycrab/agent-core build && tsc -p tsconfig.json",
+    "dev": "npm run -w @ohmycrab/shared build && npm run -w @ohmycrab/kb-core build && npm run -w @ohmycrab/tools build && npm run -w @ohmycrab/agent-core build && tsx watch src/index.ts",
+    "build": "npm run -w @ohmycrab/shared build && npm run -w @ohmycrab/kb-core build && npm run -w @ohmycrab/tools build && npm run -w @ohmycrab/agent-core build && tsc -p tsconfig.json",
     "audit:ai": "tsx scripts/audit-ai-stages.ts",
     "regress:agent": "npm run -w @ohmycrab/agent-core build && tsx scripts/regress-agent-flow.ts",
     "smoke:endpoints": "npm run -w @ohmycrab/tools build && npm run -w @ohmycrab/agent-core build && tsx scripts/smoke-messages-responses.ts",
@@ -15,7 +15,8 @@
     "smoke:mcp-server-first": "tsx scripts/smoke-mcp-server-first.ts",
     "smoke:workflow-sticky": "tsx scripts/smoke-workflow-sticky.ts",
     "smoke:mcp-session-reliability": "tsx scripts/smoke-mcp-session-reliability.ts",
-    "smoke:style-orchestrator": "tsx scripts/smoke-style-orchestrator.ts"
+    "smoke:style-orchestrator": "tsx scripts/smoke-style-orchestrator.ts",
+    "smoke:capability-exposure": "npm run -w @ohmycrab/shared build && npm run -w @ohmycrab/tools build && npm run -w @ohmycrab/agent-core build && tsx scripts/smoke-capability-exposure.ts"
   },
   "dependencies": {
     "@alicloud/dypnsapi20170525": "^2.0.0",

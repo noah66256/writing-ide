@@ -1782,6 +1782,10 @@ export class GatewayRuntime implements AgentRuntime {
               },
         mode: this.config.runCtx.mode,
         allowedToolNames: this.config.runCtx.allowedToolNames,
+        skillManifestById: this.config.runCtx.skillManifestById ?? null,
+        activeSkillIds: Array.isArray(this.config.runCtx.activeSkills)
+          ? this.config.runCtx.activeSkills.map((s: any) => String(s?.id ?? "").trim()).filter(Boolean)
+          : [],
       });
 
       if (ret.ok) {
@@ -1793,8 +1797,22 @@ export class GatewayRuntime implements AgentRuntime {
             (this.runState as any).discoveredMcpToolNames ??
             ((this.runState as any).discoveredMcpToolNames = new Set<string>());
           for (const t of tools) {
+            if (String(t?.resultType ?? "tool").trim() !== "tool") continue;
+            if (String(t?.source ?? "").trim() !== "mcp") continue;
             const name = String(t?.name ?? "").trim();
             if (name) discovered.add(name);
+          }
+        } else if (toolName === "tools.describe") {
+          const output: any = (ret as any).output;
+          if (String(output?.targetType ?? "").trim() === "mcp_capability") {
+            const tools = Array.isArray(output?.capability?.tools) ? output.capability.tools : [];
+            const discovered: Set<string> =
+              (this.runState as any).discoveredMcpToolNames ??
+              ((this.runState as any).discoveredMcpToolNames = new Set<string>());
+            for (const tool of tools) {
+              const name = String(tool?.name ?? "").trim();
+              if (name) discovered.add(name);
+            }
           }
         }
         return {

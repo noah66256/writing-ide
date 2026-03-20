@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { ItemActionSpec } from "@ohmycrab/shared";
+import type { ItemActionSpec, ThreadCapabilityState } from "@ohmycrab/shared";
 import type { ProjectSnapshot } from "./projectStore";
 
 export type Mode = "agent" | "chat";
@@ -187,6 +187,7 @@ export type RuntimeThreadRecord = {
   pendingProposalIds?: string[];
   pendingApprovalIds?: string[];
   taskState?: RuntimeTaskStateV2 | null;
+  capabilityState?: ThreadCapabilityState | null;
   createdAt?: string;
   updatedAt?: string;
 };

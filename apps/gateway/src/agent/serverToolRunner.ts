@@ -3,8 +3,17 @@ import { createHash } from "node:crypto";
 import { computeDraftStatsForStyleLint } from "../kb/styleLintDraftStats.js";
 import { toolConfig } from "../toolConfig.js";
 import { TOOL_LIST } from "@ohmycrab/tools";
-import { buildToolCatalog, type ToolCatalogEntry } from "./toolCatalog.js";
+import { type ToolCatalogEntry } from "./toolCatalog.js";
 import { retrieveToolsForRun } from "./toolRetriever.js";
+import {
+  buildMcpCapabilityCards,
+  buildSkillCards,
+  findCapabilityCardById,
+  searchCapabilityCards,
+  type CapabilityCard,
+} from "./capabilityIndex.js";
+import type { SkillManifest } from "@ohmycrab/agent-core";
+import { buildDiscoveryCatalogForToolSearch } from "./toolCatalogViews.js";
 
 export type ServerToolExecutionDecision = {
   executedBy: "gateway" | "desktop";
@@ -468,6 +477,8 @@ export async function executeServerToolOnGateway(args: {
   llmOverride?: { baseUrl: string; endpoint?: string; apiKey: string; model: string } | null;
   mode: "chat" | "agent";
   allowedToolNames?: Set<string> | null;
+  skillManifestById?: Map<string, SkillManifest> | null;
+  activeSkillIds?: string[];
 }) {
   const name = String(args.call?.name ?? "").trim();
   if (name === "run.done") return { ok: true as const, output: { ok: true } };
@@ -546,6 +557,8 @@ export async function executeServerToolOnGateway(args: {
       toolSidecar: args.toolSidecar,
       mode: args.mode,
       allowedToolNames: args.allowedToolNames ?? null,
+      skillManifestById: args.skillManifestById ?? null,
+      activeSkillIds: args.activeSkillIds,
     });
   }
   if (name === "tools.describe") {
@@ -554,6 +567,8 @@ export async function executeServerToolOnGateway(args: {
       toolSidecar: args.toolSidecar,
       mode: args.mode,
       allowedToolNames: args.allowedToolNames ?? null,
+      skillManifestById: args.skillManifestById ?? null,
+      activeSkillIds: args.activeSkillIds,
     });
   }
   if (name === "web.search") {
@@ -625,7 +640,7 @@ function requiredArgsFromSchema(schema: any): string[] {
   return req.map((x: any) => String(x ?? "").trim()).filter(Boolean);
 }
 
-function listCatalogForDiscovery(args: {
+function buildDiscoveryCatalog(args: {
   mode: "chat" | "agent";
   allowedToolNames: Set<string> | null;
   toolSidecar: ToolSidecar | null;
@@ -634,26 +649,38 @@ function listCatalogForDiscovery(args: {
   const allowed = args.allowedToolNames ?? new Set(TOOL_LIST.map((t) => String(t?.name ?? "").trim()).filter(Boolean));
   const sidecar = (args.toolSidecar ?? null) as any;
   const mcpTools = Array.isArray(sidecar?.mcpTools) ? (sidecar.mcpTools as any[]) : [];
-
-  if (args.includeAllMcpTools && mcpTools.length > 0) {
-    // tools.search 模式：内置工具仍按 allowed 过滤，但 MCP 工具使用全量目录。
-    const expandedAllowed = new Set(allowed);
-    for (const t of mcpTools) {
-      const name = String(t?.name ?? "").trim();
-      if (name) expandedAllowed.add(name);
-    }
-    return buildToolCatalog({
-      mode: args.mode,
-      allowedToolNames: expandedAllowed,
-      mcpTools,
-    });
-  }
-
-  return buildToolCatalog({
+  return buildDiscoveryCatalogForToolSearch({
     mode: args.mode,
     allowedToolNames: allowed,
     mcpTools,
+    includeAllMcpTools: args.includeAllMcpTools,
   });
+}
+
+function listCapabilityCardsForDiscovery(args: {
+  toolCatalog: ToolCatalogEntry[];
+  toolSidecar: ToolSidecar | null;
+  skillManifestById?: Map<string, SkillManifest> | null;
+  activeSkillIds?: string[];
+}) {
+  const sidecar = (args.toolSidecar ?? null) as any;
+  const mcpServers = Array.isArray(sidecar?.mcpServers) ? sidecar.mcpServers : [];
+  const mcpCapabilityCards = buildMcpCapabilityCards({
+    mcpCatalog: args.toolCatalog.filter((entry) => entry.source === "mcp"),
+    mcpServers,
+  });
+  const skillManifests = args.skillManifestById instanceof Map
+    ? Array.from(args.skillManifestById.values())
+    : [];
+  const skillCards = buildSkillCards({
+    skillManifests,
+    activeSkillIds: Array.isArray(args.activeSkillIds) ? args.activeSkillIds : [],
+  });
+  return {
+    mcpCapabilityCards,
+    skillCards,
+    allCards: [...mcpCapabilityCards, ...skillCards] as CapabilityCard[],
+  };
 }
 
 function executeToolsSearchOnGateway(args: {
@@ -661,6 +688,8 @@ function executeToolsSearchOnGateway(args: {
   toolSidecar: ToolSidecar | null;
   mode: "chat" | "agent";
   allowedToolNames: Set<string> | null;
+  skillManifestById?: Map<string, SkillManifest> | null;
+  activeSkillIds?: string[];
 }) {
   const query = String(args.call?.args?.query ?? "").trim();
   if (!query) return { ok: false as const, error: "MISSING_QUERY" };
@@ -669,16 +698,28 @@ function executeToolsSearchOnGateway(args: {
   const includeSchemas = clampBool(args.call?.args?.includeSchemas, false);
   const sources = new Set(normalizeStringArray(args.call?.args?.sources).map((x) => x.toLowerCase()));
 
-  const catalog = listCatalogForDiscovery({
+  const catalog = buildDiscoveryCatalog({
     mode: args.mode,
     allowedToolNames: args.allowedToolNames,
     toolSidecar: args.toolSidecar,
     includeAllMcpTools: true,
   });
+  const capabilityCards = listCapabilityCardsForDiscovery({
+    toolCatalog: catalog,
+    toolSidecar: args.toolSidecar,
+    skillManifestById: args.skillManifestById ?? null,
+    activeSkillIds: args.activeSkillIds,
+  });
 
   const filteredCatalog = sources.size > 0
     ? catalog.filter((e) => sources.has(String(e.source ?? "").toLowerCase()))
     : catalog;
+  const filteredCards = capabilityCards.allCards.filter((card) => {
+    if (sources.size === 0) return true;
+    if (card.resultType === "mcp_capability") return sources.has("mcp") || sources.has("mcp_capability");
+    if (card.resultType === "skill") return sources.has("skill");
+    return true;
+  });
 
   const retrieval = retrieveToolsForRun({
     catalog: filteredCatalog,
@@ -687,21 +728,76 @@ function executeToolsSearchOnGateway(args: {
     maxCandidates: Math.max(12, limit * 2),
     desired: limit,
   });
+  const cardRetrieval = searchCapabilityCards({
+    query,
+    cards: filteredCards,
+    limit: Math.max(12, limit * 2),
+  });
 
   const byName = new Map(filteredCatalog.map((e) => [e.name, e] as const));
-  const tools = retrieval.retrievedToolNames
-    .map((name) => byName.get(name))
-    .filter(Boolean)
-    .slice(0, limit)
-    .map((e) => ({
-      name: e!.name,
-      source: e!.source,
-      description: e!.description,
-      riskLevel: e!.riskLevel,
-      capabilities: e!.capabilities,
-      requiredArgs: requiredArgsFromSchema(e!.inputSchema),
-      schemaSummary: includeSchemas ? (e!.inputSchema ?? null) : summarizeInputSchema(e!.inputSchema, 10),
-    }));
+  const toolItems = retrieval.candidates
+    .map((candidate) => {
+      const entry = byName.get(candidate.name);
+      if (!entry) return null;
+      return {
+        resultType: "tool" as const,
+        name: entry.name,
+        source: entry.source,
+        description: entry.description,
+        riskLevel: entry.riskLevel,
+        capabilities: entry.capabilities,
+        requiredArgs: requiredArgsFromSchema(entry.inputSchema),
+        schemaSummary: includeSchemas ? (entry.inputSchema ?? null) : summarizeInputSchema(entry.inputSchema, 10),
+        score: candidate.score,
+        reasons: candidate.reasons,
+      };
+    })
+    .filter(Boolean);
+  const cardItems = cardRetrieval.map(({ card, score, reasons }) => ({
+    resultType: card.resultType,
+    name: card.id,
+    source: card.resultType === "skill" ? "skill" : "mcp",
+    title: card.title,
+    description: card.summary,
+    riskLevel: card.riskLevel,
+    capabilities: card.tags,
+    tags: card.tags,
+    examples: card.examples,
+    score,
+    reasons,
+    ...(card.resultType === "mcp_capability"
+      ? {
+          serverId: card.serverId,
+          serverName: card.serverName,
+          family: card.family,
+          authState: card.authState,
+          toolCount: card.toolCount,
+        }
+      : {
+          skillId: card.skillId,
+          skillKind: card.skillKind,
+          activationMode: card.activationMode,
+          autoEnable: card.autoEnable,
+          userInvocable: card.userInvocable,
+        }),
+  }));
+  const looksToolSpecificQuery = /(?:^|[\s`"'（(])(mcp\.|run\.|web\.|kb\.|tools\.|read\b|write\b|edit\b|delete\b|spawn_agent|send_input|wait_agent|resume_agent|close_agent)/i.test(query);
+  const tools = [...toolItems, ...cardItems]
+    .sort((a, b) => {
+      if (!looksToolSpecificQuery) {
+        const aIsCard = String((a as any).resultType ?? "") !== "tool";
+        const bIsCard = String((b as any).resultType ?? "") !== "tool";
+        if (aIsCard !== bIsCard) return aIsCard ? -1 : 1;
+      }
+      const byScore = Number((b as any).score ?? 0) - Number((a as any).score ?? 0);
+      if (byScore !== 0) return byScore;
+      if (String((a as any).resultType ?? "") !== String((b as any).resultType ?? "")) {
+        if (String((a as any).resultType ?? "") !== "tool") return -1;
+        if (String((b as any).resultType ?? "") !== "tool") return 1;
+      }
+      return String((a as any).name ?? "").localeCompare(String((b as any).name ?? ""));
+    })
+    .slice(0, limit);
 
   return {
     ok: true as const,
@@ -717,30 +813,99 @@ function executeToolsDescribeOnGateway(args: {
   toolSidecar: ToolSidecar | null;
   mode: "chat" | "agent";
   allowedToolNames: Set<string> | null;
+  skillManifestById?: Map<string, SkillManifest> | null;
+  activeSkillIds?: string[];
 }) {
   const name = String(args.call?.args?.name ?? "").trim();
   if (!name) return { ok: false as const, error: "MISSING_NAME" };
   const includeSchema = clampBool(args.call?.args?.includeSchema, true);
 
-  const catalog = listCatalogForDiscovery({
+  const catalog = buildDiscoveryCatalog({
     mode: args.mode,
     allowedToolNames: args.allowedToolNames,
     toolSidecar: args.toolSidecar,
+    includeAllMcpTools: true,
   });
   const entry = catalog.find((e) => e.name === name) ?? null;
-  if (!entry) return { ok: false as const, error: "TOOL_NOT_FOUND", detail: { name } };
+  if (entry) {
+    return {
+      ok: true as const,
+      output: {
+        ok: true,
+        targetType: "tool",
+        tool: {
+          name: entry.name,
+          source: entry.source,
+          description: entry.description,
+          riskLevel: entry.riskLevel,
+          capabilities: entry.capabilities,
+          inputSchema: includeSchema ? (entry.inputSchema ?? null) : summarizeInputSchema(entry.inputSchema, 20),
+        },
+      },
+    };
+  }
+
+  const capabilityCards = listCapabilityCardsForDiscovery({
+    toolCatalog: catalog,
+    toolSidecar: args.toolSidecar,
+    skillManifestById: args.skillManifestById ?? null,
+    activeSkillIds: args.activeSkillIds,
+  });
+  const card = findCapabilityCardById({ id: name, cards: capabilityCards.allCards });
+  if (!card) return { ok: false as const, error: "TOOL_NOT_FOUND", detail: { name } };
+
+  if (card.resultType === "mcp_capability") {
+    return {
+      ok: true as const,
+      output: {
+        ok: true,
+        targetType: "mcp_capability",
+        capability: {
+          id: card.id,
+          title: card.title,
+          summary: card.summary,
+          serverId: card.serverId,
+          serverName: card.serverName,
+          family: card.family,
+          authState: card.authState,
+          riskLevel: card.riskLevel,
+          tags: card.tags,
+          examples: card.examples,
+          toolCount: card.toolCount,
+          tools: card.tools.map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            riskLevel: tool.riskLevel,
+            capabilities: tool.capabilities,
+            requiredArgs: requiredArgsFromSchema(tool.inputSchema),
+            inputSchema: includeSchema ? (tool.inputSchema ?? null) : summarizeInputSchema(tool.inputSchema, 12),
+          })),
+        },
+      },
+    };
+  }
 
   return {
     ok: true as const,
     output: {
       ok: true,
-      tool: {
-        name: entry.name,
-        source: entry.source,
-        description: entry.description,
-        riskLevel: entry.riskLevel,
-        capabilities: entry.capabilities,
-        inputSchema: includeSchema ? (entry.inputSchema ?? null) : summarizeInputSchema(entry.inputSchema, 20),
+      targetType: "skill",
+      skill: {
+        id: card.skillId,
+        cardId: card.id,
+        name: card.title,
+        description: card.summary,
+        kind: card.skillKind,
+        activationMode: card.activationMode,
+        source: card.source,
+        autoEnable: card.autoEnable,
+        userInvocable: card.userInvocable,
+        tags: card.tags,
+        examples: card.examples,
+        requires: card.requires,
+        conflicts: card.conflicts,
+        promptSummary: card.promptSummary ?? null,
+        workflowSummary: card.workflowSummary ?? null,
       },
     },
   };

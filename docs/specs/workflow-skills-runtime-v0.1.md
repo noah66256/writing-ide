@@ -6,6 +6,10 @@
 > - Skill 层负责“如何补闭环”和具体步骤，合同写在 SKILL.md 里。
 >
 > 本文先抽象 workflow skill 的通用模型，再落地当前的 `style_imitate` 三个 Phase，并说明与现有 M0/M1/M2 的关系。
+>
+> TIP（2026-03-20）：本文处理的是“skill 一旦激活后，如何强制执行合同”。  
+> 对于“尚未激活的 skills 如何以轻量卡片形式暴露、再按需读取详情并激活”，以后续文档  
+> `docs/specs/thread-first-progressive-capability-exposure-v0.1.md` 为准。二者是上下两层，不冲突。
 
 ---
 
@@ -85,7 +89,7 @@ type WorkflowSkillContract = {
 
 ### 2. 三个 Phase 的落地计划（本仓库）
 
-#### Phase 1：Runtime 收敛为通用 Workflow Skills Runtime（当前进行中）
+#### Phase 1：Runtime 收敛为通用 Workflow Skills Runtime（已完成）
 
 目标：把现有 style_imitate 的 Gate/收口逻辑抽象成通用 runtime，不再散落在多处 if/特例中。
 
@@ -309,4 +313,3 @@ type WorkflowSkillContract = {
 - 真正的“节点式 workflow 编排”（即上文 4.2 所述）不在 v0.1 的 DoD 内，
   - 会在单独的 v0.2 / Phase 4 规格中详细展开；
   - 包括是否用子 Agent、子图（subgraph）或专用 orchestrator 来承载 style_imitate 内部状态机。
-

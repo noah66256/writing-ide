@@ -71,6 +71,16 @@ export type TaskStateV2 = {
   }>;
 };
 
+export type ThreadCapabilityState = {
+  v: 1;
+  activeMcpCapabilityIds: string[];
+  activeSkillIds: string[];
+  stickyCapabilityIds: string[];
+  stickySkillIds: string[];
+  recentlyDescribedIds: string[];
+  lastActivatedAt?: Record<string, number>;
+};
+
 export type ThreadRecord = {
   id: string;
   convId?: string | null;
@@ -88,6 +98,7 @@ export type ThreadRecord = {
   pendingProposalIds: string[];
   pendingApprovalIds: string[];
   taskState?: TaskStateV2 | null;
+  capabilityState?: ThreadCapabilityState | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -283,5 +294,6 @@ export type StartGatewayRunPayloadV2 = {
     pendingArtifactIds?: string[];
     collabSessionIds?: string[];
     collabSessions?: CollabAgentSessionRecord[];
+    capabilityState?: ThreadCapabilityState | null;
   };
 };

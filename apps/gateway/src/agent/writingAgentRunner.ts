@@ -3150,6 +3150,10 @@ export class AgentRunner {
             : { baseUrl: this.ctx.baseUrl, endpoint: this.ctx.endpoint, apiKey: this.ctx.apiKey, model: this.ctx.modelId },
           mode: this.ctx.mode,
           allowedToolNames: this.ctx.allowedToolNames,
+          skillManifestById: this.ctx.skillManifestById ?? null,
+          activeSkillIds: Array.isArray(this.ctx.activeSkills)
+            ? this.ctx.activeSkills.map((s: any) => String(s?.id ?? "").trim()).filter(Boolean)
+            : [],
         });
 
         if (ret.ok) {
@@ -3767,6 +3771,20 @@ export class AgentRunner {
       const nowIso = String((result.output as { nowIso?: unknown })?.nowIso ?? "").trim();
       this.runState.lastTimeNowIso = nowIso || null;
       return;
+    }
+
+    if (name === "tools.describe") {
+      const output: any = result.output;
+      if (String(output?.targetType ?? "").trim() === "mcp_capability") {
+        const tools = Array.isArray(output?.capability?.tools) ? output.capability.tools : [];
+        const discovered: Set<string> =
+          (this.runState as any).discoveredMcpToolNames ??
+          ((this.runState as any).discoveredMcpToolNames = new Set<string>());
+        for (const tool of tools) {
+          const toolName = String(tool?.name ?? "").trim();
+          if (toolName) discovered.add(toolName);
+        }
+      }
     }
 
     if (name === "spawn_agent") {

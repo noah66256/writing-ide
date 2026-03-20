@@ -1,10 +1,12 @@
 import type {
   CollabAgentRef,
   SkillRef,
+  ThreadCapabilityState,
   TaskStateV2,
   ThreadRecord,
   ThreadWaitingFor,
 } from "@ohmycrab/shared";
+import { normalizeThreadCapabilityState } from "../threadCapabilityState.js";
 
 function nowIso() {
   return new Date().toISOString();
@@ -15,6 +17,7 @@ export function createThreadState(args: {
   convId?: string | null;
   activeSkillRefs?: SkillRef[];
   taskState?: TaskStateV2 | null;
+  capabilityState?: ThreadCapabilityState | null;
 }): ThreadRecord {
   const now = nowIso();
   return {
@@ -28,6 +31,7 @@ export function createThreadState(args: {
     pendingProposalIds: [],
     pendingApprovalIds: [],
     taskState: args.taskState ?? null,
+    capabilityState: normalizeThreadCapabilityState(args.capabilityState),
     createdAt: now,
     updatedAt: now,
   };
@@ -49,6 +53,14 @@ export function cloneThreadState(thread: ThreadRecord): ThreadRecord {
           pendingArtifacts: Array.isArray(thread.taskState.pendingArtifacts)
             ? thread.taskState.pendingArtifacts.map((item) => ({ ...item }))
             : thread.taskState.pendingArtifacts,
+        }
+      : null,
+    capabilityState: thread.capabilityState
+      ? {
+          ...normalizeThreadCapabilityState(thread.capabilityState),
+          lastActivatedAt: thread.capabilityState.lastActivatedAt
+            ? { ...thread.capabilityState.lastActivatedAt }
+            : undefined,
         }
       : null,
   };
@@ -118,6 +130,17 @@ export function updateTaskState(
   return {
     ...cloneThreadState(thread),
     taskState: taskState ?? null,
+    updatedAt: nowIso(),
+  };
+}
+
+export function updateThreadCapabilityState(
+  thread: ThreadRecord,
+  capabilityState: ThreadCapabilityState | null | undefined,
+): ThreadRecord {
+  return {
+    ...cloneThreadState(thread),
+    capabilityState: normalizeThreadCapabilityState(capabilityState),
     updatedAt: nowIso(),
   };
 }

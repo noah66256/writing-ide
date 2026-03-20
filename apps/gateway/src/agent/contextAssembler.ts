@@ -1,6 +1,8 @@
 import { type OpenAiChatMessage } from "../llm/openaiCompat.js";
+import type { ThreadCapabilityState } from "@ohmycrab/shared";
 import { type McpServerSelectionSummary, type ToolCatalogSummary } from "./toolCatalog.js";
 import { TOOL_LIST, type AgentMode } from "./toolRegistry.js";
+import type { McpCapabilityCard, SkillCard } from "./capabilityIndex.js";
 
 type ContextPackSegment = {
   name: string;
@@ -80,6 +82,9 @@ export type BuildAssembledContextArgs = {
   ctxDialogueSummaryFromPack: string;
   kbSelectedList: any[];
   webSearchHint?: string;
+  mcpCapabilityCards?: McpCapabilityCard[];
+  skillCapabilityCards?: SkillCard[];
+  threadCapabilityState?: ThreadCapabilityState | null;
 };
 
 export function parseContextSegmentsV1(
@@ -459,6 +464,22 @@ function buildCapabilitySummaryMessage(args: BuildAssembledContextArgs): string 
     `- 模式：${args.mode === "chat" ? "Chat（只读协作）" : "Agent（直接执行）"}`,
     `- 本轮真实工具池：${args.toolCatalogSummary.selected}/${args.toolCatalogSummary.total}（内置 ${args.toolCatalogSummary.builtin} / MCP ${args.toolCatalogSummary.mcp}）`,
   ];
+  const threadCaps = args.threadCapabilityState && typeof args.threadCapabilityState === "object"
+    ? args.threadCapabilityState
+    : null;
+  const activeMcpCapabilityIds = Array.isArray(threadCaps?.activeMcpCapabilityIds) ? threadCaps!.activeMcpCapabilityIds : [];
+  const activeSkillIds = Array.isArray(threadCaps?.activeSkillIds) ? threadCaps!.activeSkillIds : [];
+  if (activeMcpCapabilityIds.length > 0 || activeSkillIds.length > 0) {
+    lines.push(
+      `- 当前线程活跃能力：MCP ${activeMcpCapabilityIds.length} 项 / Skill ${activeSkillIds.length} 项`,
+    );
+    if (activeMcpCapabilityIds.length > 0) {
+      lines.push(`- 活跃 MCP 能力：${activeMcpCapabilityIds.slice(0, 6).join("、")}`);
+    }
+    if (activeSkillIds.length > 0) {
+      lines.push(`- 活跃 Skills：${activeSkillIds.slice(0, 6).join("、")}`);
+    }
+  }
   if (args.webSearchHint?.trim()) {
     lines.push(`- 联网/浏览器提示：${args.webSearchHint.trim()}`);
   }
@@ -470,10 +491,27 @@ function buildCapabilitySummaryMessage(args: BuildAssembledContextArgs): string 
     lines.push("- 已接入 MCP Servers：");
     lines.push(...mcp.serverLines);
   }
+  const mcpCards = Array.isArray(args.mcpCapabilityCards) ? args.mcpCapabilityCards : [];
+  if (mcpCards.length > 0) {
+    lines.push("- 可按需展开的 MCP 能力卡片：");
+    for (const card of mcpCards.slice(0, 6)) {
+      lines.push(`- ${card.id}：${card.title}；${card.summary}`);
+    }
+  }
   if (mcp.families.length > 0) {
     lines.push(`- 本轮可直接使用的 MCP 能力家族：${mcp.families.join("；")}`);
   } else {
     lines.push("- 本轮未选中任何专用 MCP 家族；优先使用当前已列出的内置工具。");
+  }
+  const skillCards = Array.isArray(args.skillCapabilityCards) ? args.skillCapabilityCards : [];
+  if (skillCards.length > 0) {
+    lines.push("- 可按需激活的 Skills（未激活）：");
+    for (const card of skillCards.slice(0, 6)) {
+      lines.push(`- ${card.id}：${card.title}；${card.summary}`);
+    }
+  }
+  if (mcpCards.length > 0 || skillCards.length > 0) {
+    lines.push("- 若某类能力当前只以卡片摘要出现、没有具体工具参数，先 tools.search，再 tools.describe 查看详情。");
   }
   lines.push("- 若某类专用 MCP 工具已在工具清单中出现，优先用它，不要退回通用伪流程。");
   return lines.join("\n");
@@ -493,6 +531,27 @@ function buildTaskStateMessage(args: BuildAssembledContextArgs, segments: Contex
   if (args.taskStateFromPack && typeof args.taskStateFromPack === "object") {
     blocks.push(renderJsonSection("TASK_STATE", args.taskStateFromPack, MAX_JSON_BLOCK_CHARS));
     retained.add("TASK_STATE");
+  }
+  if (args.threadCapabilityState && typeof args.threadCapabilityState === "object") {
+    const compactThreadCapabilities = {
+      activeMcpCapabilityIds: Array.isArray(args.threadCapabilityState.activeMcpCapabilityIds)
+        ? args.threadCapabilityState.activeMcpCapabilityIds.slice(0, 8)
+        : [],
+      activeSkillIds: Array.isArray(args.threadCapabilityState.activeSkillIds)
+        ? args.threadCapabilityState.activeSkillIds.slice(0, 6)
+        : [],
+      stickyCapabilityIds: Array.isArray(args.threadCapabilityState.stickyCapabilityIds)
+        ? args.threadCapabilityState.stickyCapabilityIds.slice(0, 8)
+        : [],
+      stickySkillIds: Array.isArray(args.threadCapabilityState.stickySkillIds)
+        ? args.threadCapabilityState.stickySkillIds.slice(0, 6)
+        : [],
+      recentlyDescribedIds: Array.isArray(args.threadCapabilityState.recentlyDescribedIds)
+        ? args.threadCapabilityState.recentlyDescribedIds.slice(0, 12)
+        : [],
+    };
+    blocks.push(renderJsonSection("THREAD_CAPABILITIES", compactThreadCapabilities, 1400));
+    retained.add("THREAD_CAPABILITIES");
   }
   const pending = compactPendingArtifacts(args.pendingArtifactsFromPack);
   if (pending.length > 0) {

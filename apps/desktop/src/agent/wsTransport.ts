@@ -924,6 +924,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                   activeSkillRefs: Array.isArray(threadState.activeSkillRefs)
                     ? threadState.activeSkillRefs
                     : undefined,
+                  capabilityState: threadState.capabilityState ?? undefined,
                   waitingFor: typeof threadState.waitingFor === "string" ? threadState.waitingFor : undefined,
                   pendingArtifactIds: Array.isArray((runStateAny as any)?.pendingArtifacts)
                     ? (runStateAny as any).pendingArtifacts
