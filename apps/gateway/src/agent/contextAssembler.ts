@@ -516,16 +516,31 @@ function buildTaskStateMessage(args: BuildAssembledContextArgs, segments: Contex
     }
   }
 
-  const projectMapSeg = getSegment(segments, "PROJECT_MAP", "JSON");
+  const projectMapSeg =
+    getSegment(segments, "PROJECT_MAP_V2", "JSON") ??
+    getSegment(segments, "PROJECT_MAP", "JSON");
   if (projectMapSeg) {
     const parsed = tryParseJson(projectMapSeg.content);
     if (parsed && typeof parsed === "object") {
-      blocks.push(renderJsonSection("PROJECT_MAP", parsed, MAX_PROJECT_MAP_CHARS));
+      blocks.push(renderJsonSection(projectMapSeg.name, parsed, MAX_PROJECT_MAP_CHARS));
     } else {
       const clipped = clipText(projectMapSeg.content, MAX_PROJECT_MAP_CHARS, "\n…");
-      blocks.push(renderMarkdownSection("PROJECT_MAP", `\n\n\`\`\`json\n${clipped}\n\`\`\`\n`, MAX_PROJECT_MAP_CHARS + 200));
+      blocks.push(renderMarkdownSection(projectMapSeg.name, `\n\n\`\`\`json\n${clipped}\n\`\`\`\n`, MAX_PROJECT_MAP_CHARS + 200));
     }
-    retained.add("PROJECT_MAP");
+    retained.add(projectMapSeg.name);
+  }
+
+  for (const segmentName of ["DIR_SUMMARY", "FILE_SUMMARY"] as const) {
+    const seg = getSegment(segments, segmentName, "JSON");
+    if (!seg) continue;
+    const parsed = tryParseJson(seg.content);
+    if (parsed && typeof parsed === "object") {
+      blocks.push(renderJsonSection(segmentName, parsed, 1100));
+    } else {
+      const clipped = clipText(seg.content, 1100, "\n…");
+      blocks.push(renderMarkdownSection(segmentName, `\n\n\`\`\`json\n${clipped}\n\`\`\`\n`, 1300));
+    }
+    retained.add(segmentName);
   }
 
   if (blocks.length === 0) return { message: "", retained };

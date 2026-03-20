@@ -1,24 +1,23 @@
 import { create } from "zustand";
+import {
+  buildProjectIndexV2,
+  buildProjectSummaryIndexesV1,
+  coerceProjectIndexV2,
+  type DirSummaryV1,
+  type FileSummaryV1,
+  type ProjectIndexV2,
+  type ProjectKind,
+  type ProjectSummaryIndexesV1,
+} from "../lib/projectIndexing";
 
 // ── 类型 ──
-
-export type IndexedFile = {
-  path: string;       // 相对路径
-  size: number;
-  mtime: number;
-  type: "text" | "binary" | "other";
-};
-
-export type ProjectIndex = {
-  version: 1;
-  rootDir: string;
-  updatedAt: number;
-  files: IndexedFile[];
-  dirs: string[];
-};
+export type ProjectIndex = ProjectIndexV2;
 
 type ProjectIndexState = {
   index: ProjectIndex | null;
+  projectKind: ProjectKind | null;
+  dirSummaries: DirSummaryV1[];
+  fileSummaries: FileSummaryV1[];
   isIndexing: boolean;
 
   /** 全量构建索引（扫描磁盘 + 持久化） */
@@ -61,6 +60,9 @@ function scheduleDebounce(rootDir: string): Promise<string> {
 
 export const useProjectIndexStore = create<ProjectIndexState>((set, get) => ({
   index: null,
+  projectKind: null,
+  dirSummaries: [],
+  fileSummaries: [],
   isIndexing: false,
 
   async buildIndex(rootDir: string) {
@@ -73,21 +75,31 @@ export const useProjectIndexStore = create<ProjectIndexState>((set, get) => ({
         return;
       }
       const now = Date.now();
-      const idx: ProjectIndex = {
-        version: 1,
+      const idx: ProjectIndex = buildProjectIndexV2({
         rootDir,
-        updatedAt: now,
         files: res.files,
         dirs: res.dirs ?? [],
-      };
+        updatedAt: now,
+      });
+      const summaries = buildProjectSummaryIndexesV1({ index: idx });
       // 写入前校验：当前项目可能已切换
       const currentIdx = get().index;
       if (currentIdx && currentIdx.rootDir !== rootDir) return;
-      set({ index: idx });
+      set({
+        index: idx,
+        projectKind: summaries?.projectKind ?? null,
+        dirSummaries: summaries?.dirs ?? [],
+        fileSummaries: summaries?.files ?? [],
+      });
       // 持久化到磁盘（异步，不阻塞）
       window.desktop.fs.writeIndex(rootDir, idx).catch((e) => {
         console.warn("[ProjectIndex] writeIndex failed:", e);
       });
+      if (summaries) {
+        persistProjectSummaries(rootDir, summaries).catch((e) => {
+          console.warn("[ProjectIndex] write summaries failed:", e);
+        });
+      }
     } catch (e) {
       console.warn("[ProjectIndex] buildIndex error:", e);
     } finally {
@@ -113,10 +125,17 @@ export const useProjectIndexStore = create<ProjectIndexState>((set, get) => ({
     // 尝试读磁盘缓存（可能是另一个对话写入的）
     try {
       const cached = await window.desktop.fs.readIndex(effectiveRoot);
-      if (cached?.ok && cached.data && cached.data.version === 1 && cached.data.rootDir === effectiveRoot) {
-        const age = Date.now() - (cached.data.updatedAt ?? 0);
+      const cachedIndex = cached?.ok ? coerceProjectIndexV2(cached.data, effectiveRoot) : null;
+      if (cachedIndex) {
+        const age = Date.now() - (cachedIndex.updatedAt ?? 0);
+        const summaries = buildProjectSummaryIndexesV1({ index: cachedIndex });
         if (age < 30_000) {
-          set({ index: cached.data as ProjectIndex });
+          set({
+            index: cachedIndex,
+            projectKind: summaries?.projectKind ?? null,
+            dirSummaries: summaries?.dirs ?? [],
+            fileSummaries: summaries?.files ?? [],
+          });
           return;
         }
       }
@@ -133,11 +152,11 @@ export const useProjectIndexStore = create<ProjectIndexState>((set, get) => ({
   },
 
   allDirs() {
-    return get().index?.dirs ?? [];
+    return get().index?.dirs?.map((d) => d.path) ?? [];
   },
 
   clear() {
-    set({ index: null, isIndexing: false });
+    set({ index: null, projectKind: null, dirSummaries: [], fileSummaries: [], isIndexing: false });
     if (_refreshTimer) {
       clearTimeout(_refreshTimer);
       _refreshTimer = null;
@@ -148,3 +167,32 @@ export const useProjectIndexStore = create<ProjectIndexState>((set, get) => ({
     for (const r of resolvers) r();
   },
 }));
+
+async function persistProjectSummaries(rootDir: string, summaries: ProjectSummaryIndexesV1) {
+  const api = window.desktop?.fs;
+  if (!rootDir || !api) return;
+  await Promise.all([
+    api.writeFile(
+      rootDir,
+      ".ohmycrab/dir-summaries.v1.json",
+      JSON.stringify({
+        version: 1,
+        rootDir: summaries.rootDir,
+        updatedAt: summaries.updatedAt,
+        projectKind: summaries.projectKind,
+        dirs: summaries.dirs,
+      }, null, 2),
+    ),
+    api.writeFile(
+      rootDir,
+      ".ohmycrab/file-summaries.v1.json",
+      JSON.stringify({
+        version: 1,
+        rootDir: summaries.rootDir,
+        updatedAt: summaries.updatedAt,
+        projectKind: summaries.projectKind,
+        files: summaries.files,
+      }, null, 2),
+    ),
+  ]);
+}

@@ -128,6 +128,10 @@ export function inferCapabilities(name: string, description: string, source: Too
   }
   if (n === "memory") caps.add("kb_search");
   if (n.startsWith("project.search") || n.startsWith("project.find")) caps.add("project_search");
+  if (n.startsWith("project.dir.") || n.startsWith("project.file.")) {
+    caps.add("project_search");
+    caps.add("file_read");
+  }
   if (n.startsWith("web.search")) caps.add("web_search");
   if (n.startsWith("web.fetch")) caps.add("web_fetch");
   if (n.startsWith("kb.")) caps.add("kb_search");

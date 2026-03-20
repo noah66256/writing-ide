@@ -95,7 +95,7 @@ export function MentionPopover({ query, visible, onSelect, onClose }: Props) {
   // 数据源
   const rootDir = useProjectStore((s) => s.rootDir);
   const indexFiles = useProjectIndexStore((s) => s.index?.files);
-  const indexDirs = useProjectIndexStore((s) => s.index?.dirs);
+  const indexDirs = useProjectIndexStore((s) => s.index?.dirs?.map((dir) => dir.path));
   const storeFiles = useProjectStore((s) => s.files);
   const storeDirs = useProjectStore((s) => s.dirs);
   const libraries = useKbStore((s) => s.libraries);

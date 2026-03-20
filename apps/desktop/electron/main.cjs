@@ -2303,9 +2303,17 @@ function registerIpc() {
   ipcMain.handle("project.readIndex", async (_event, rootDir) => {
     const root = String(rootDir ?? "");
     if (!root) return { ok: false, error: "MISSING_ROOT" };
-    const indexPath = path.join(root, ".ohmycrab", "project-index.json");
     try {
-      const raw = await fsp.readFile(indexPath, "utf-8");
+      const indexDir = path.join(root, ".ohmycrab");
+      const indexPathV2 = path.join(indexDir, "project-index.v2.json");
+      const legacyIndexPath = path.join(indexDir, "project-index.json");
+      let raw = "";
+      try {
+        raw = await fsp.readFile(indexPathV2, "utf-8");
+      } catch (err) {
+        if (err?.code !== "ENOENT") throw err;
+        raw = await fsp.readFile(legacyIndexPath, "utf-8");
+      }
       const data = JSON.parse(raw);
       return { ok: true, data };
     } catch (e) {
@@ -2320,7 +2328,7 @@ function registerIpc() {
     if (!root) return { ok: false, error: "MISSING_ROOT" };
     const indexDir = path.join(root, ".ohmycrab");
     await fsp.mkdir(indexDir, { recursive: true });
-    const indexPath = path.join(indexDir, "project-index.json");
+    const indexPath = path.join(indexDir, "project-index.v2.json");
     await fsp.writeFile(indexPath, JSON.stringify(data, null, 2), "utf-8");
     return { ok: true };
   });

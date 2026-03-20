@@ -9,6 +9,7 @@ import { buildCurrentSnapshot, useConversationStore } from "../state/conversatio
 import { TOOL_LIST } from "@ohmycrab/tools";
 import { getGatewayBaseUrl } from "./gatewayUrl";
 import { resolveImplicitStyleLibrarySelection, shouldAllowHistoricalStyleFallback } from "./kbSelection";
+import { searchDirSummaries, searchFileSummaries, searchProjectPaths } from "../lib/projectIndexing";
 
 function authHeader(): Record<string, string> {
   const token = String(useAuthStore.getState().accessToken ?? "").trim();
@@ -2095,6 +2096,142 @@ const tools: ToolDefinition[] = [
       // 回退：项目尚未加载完成时，使用索引内容兜底
       const files = (idxFiles ?? []).map((f) => ({ path: f.path, type: f.type, size: f.size }));
       return { ok: true, output: { ok: true, files }, undoable: false };
+    },
+  },
+  {
+    name: "project.searchPaths",
+    description: "按路径/文件名/目录名在当前项目索引中做模糊搜索，不读取文件正文；适合先缩圈。",
+    args: [
+      { name: "query", required: true, desc: "路径、文件名、目录名或关键词" },
+      { name: "kind", required: false, desc: "可选：all/file/dir，默认 all" },
+      { name: "maxResults", required: false, desc: "可选：返回条数，默认 12，最大 50" },
+    ],
+    riskLevel: "low",
+    applyPolicy: "proposal",
+    reversible: false,
+    run: async (args) => {
+      const query = String(args.query ?? "").trim();
+      if (!query) return { ok: false, error: "EMPTY_QUERY" };
+
+      const rootDir = String(useProjectStore.getState().rootDir ?? "").trim();
+      if (!rootDir) return { ok: false, error: "NO_PROJECT_OPEN" };
+
+      const { useProjectIndexStore } = await import("../state/projectIndexStore");
+      const store = useProjectIndexStore.getState();
+      if (!store.index || store.index.rootDir !== rootDir) {
+        await store.refreshIfStale(rootDir);
+      }
+      const current = useProjectIndexStore.getState().index;
+      if (!current || current.rootDir !== rootDir) {
+        return { ok: false, error: "PROJECT_INDEX_UNAVAILABLE" };
+      }
+
+      const kind = args.kind === "file" || args.kind === "dir" ? args.kind : "all";
+      const maxResults = typeof args.maxResults === "number"
+        ? Math.max(1, Math.min(50, Math.floor(args.maxResults)))
+        : 12;
+      const result = searchProjectPaths({ index: current, query, kind, maxResults });
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          query: result.query,
+          matches: result.matches,
+        },
+        undoable: false,
+      };
+    },
+  },
+  {
+    name: "project.dir.summary",
+    description: "查询项目目录摘要，适合先判断某类内容或模块大概率在哪个目录。",
+    args: [
+      { name: "query", required: true, desc: "目录名、用途关键词或内容关键词" },
+      { name: "maxResults", required: false, desc: "可选：返回条数，默认 8，最大 20" },
+    ],
+    riskLevel: "low",
+    applyPolicy: "proposal",
+    reversible: false,
+    run: async (args) => {
+      const query = String(args.query ?? "").trim();
+      if (!query) return { ok: false, error: "EMPTY_QUERY" };
+      const rootDir = String(useProjectStore.getState().rootDir ?? "").trim();
+      if (!rootDir) return { ok: false, error: "NO_PROJECT_OPEN" };
+      const { useProjectIndexStore } = await import("../state/projectIndexStore");
+      const store = useProjectIndexStore.getState();
+      if (!store.index || store.index.rootDir !== rootDir) {
+        await store.refreshIfStale(rootDir);
+      }
+      const current = useProjectIndexStore.getState();
+      if (!current.index || current.index.rootDir !== rootDir) {
+        return { ok: false, error: "PROJECT_INDEX_UNAVAILABLE" };
+      }
+      const maxResults = typeof args.maxResults === "number"
+        ? Math.max(1, Math.min(20, Math.floor(args.maxResults)))
+        : 8;
+      const result = searchDirSummaries({
+        summaries: {
+          version: 1,
+          rootDir,
+          updatedAt: current.index.updatedAt,
+          projectKind: current.projectKind ?? "content",
+          dirs: current.dirSummaries,
+          files: current.fileSummaries,
+        },
+        query,
+        maxResults,
+      });
+      return {
+        ok: true,
+        output: { ok: true, query: result.query, matches: result.matches },
+        undoable: false,
+      };
+    },
+  },
+  {
+    name: "project.file.summary",
+    description: "查询项目文件摘要，适合先缩圈到最可能相关的文档、配置或入口文件。",
+    args: [
+      { name: "query", required: true, desc: "文件名、主题关键词、文档类型或模块关键词" },
+      { name: "maxResults", required: false, desc: "可选：返回条数，默认 8，最大 20" },
+    ],
+    riskLevel: "low",
+    applyPolicy: "proposal",
+    reversible: false,
+    run: async (args) => {
+      const query = String(args.query ?? "").trim();
+      if (!query) return { ok: false, error: "EMPTY_QUERY" };
+      const rootDir = String(useProjectStore.getState().rootDir ?? "").trim();
+      if (!rootDir) return { ok: false, error: "NO_PROJECT_OPEN" };
+      const { useProjectIndexStore } = await import("../state/projectIndexStore");
+      const store = useProjectIndexStore.getState();
+      if (!store.index || store.index.rootDir !== rootDir) {
+        await store.refreshIfStale(rootDir);
+      }
+      const current = useProjectIndexStore.getState();
+      if (!current.index || current.index.rootDir !== rootDir) {
+        return { ok: false, error: "PROJECT_INDEX_UNAVAILABLE" };
+      }
+      const maxResults = typeof args.maxResults === "number"
+        ? Math.max(1, Math.min(20, Math.floor(args.maxResults)))
+        : 8;
+      const result = searchFileSummaries({
+        summaries: {
+          version: 1,
+          rootDir,
+          updatedAt: current.index.updatedAt,
+          projectKind: current.projectKind ?? "content",
+          dirs: current.dirSummaries,
+          files: current.fileSummaries,
+        },
+        query,
+        maxResults,
+      });
+      return {
+        ok: true,
+        output: { ok: true, query: result.query, matches: result.matches },
+        undoable: false,
+      };
     },
   },
   {

@@ -1028,6 +1028,62 @@ export const TOOL_LIST: ToolMeta[] = [
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
+    name: "project.searchPaths",
+    description: "按路径/文件名/目录名在当前项目索引中做模糊搜索，不读取文件正文；适合先缩圈到可能文件/目录，再决定是否 read。",
+    args: [
+      { name: "query", required: true, desc: "路径、文件名、目录名或关键词", type: "string" },
+      { name: "kind", required: false, desc: "可选：all/file/dir，默认 all", type: "string" },
+      { name: "maxResults", required: false, desc: "可选：返回条数，默认 12，最大 50", type: "number" },
+    ],
+    modes: ["chat", "agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        kind: { type: "string" },
+        maxResults: { type: "number" },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "project.dir.summary",
+    description: "查询项目目录摘要，适合回答“哪个目录大概率负责什么 / 某类内容通常在哪块”。不读取文件正文。",
+    args: [
+      { name: "query", required: true, desc: "目录名、用途关键词或内容关键词", type: "string" },
+      { name: "maxResults", required: false, desc: "可选：返回条数，默认 8，最大 20", type: "number" },
+    ],
+    modes: ["chat", "agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        maxResults: { type: "number" },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "project.file.summary",
+    description: "查询项目文件摘要，适合回答“哪类文件最相关 / 某个文档或入口文件大概率是哪一个”。不读取文件正文。",
+    args: [
+      { name: "query", required: true, desc: "文件名、用途关键词、文档主题或模块关键词", type: "string" },
+      { name: "maxResults", required: false, desc: "可选：返回条数，默认 8，最大 20", type: "number" },
+    ],
+    modes: ["chat", "agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        maxResults: { type: "number" },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "project.search",
     description:
       "[已弃用] 在当前项目中搜索文本（跨文件）。\n" +
