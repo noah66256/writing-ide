@@ -80,13 +80,46 @@ function buildApprovalText(item: any) {
   return question || note || "等待确认";
 }
 
+function isDerivedRuntimeProjectionStepId(id: unknown) {
+  return String(id ?? "").trim().startsWith("item_");
+}
+
+function hasRenderableAssistantStep(step: Step): boolean {
+  if (!step || step.type !== "assistant") return false;
+  if (String((step as AssistantStep).variant ?? "default") === "progress") return false;
+  const text = String((step as AssistantStep).text ?? "").trim();
+  const quickActionsCount = Array.isArray((step as AssistantStep).quickActions)
+    ? (step as AssistantStep).quickActions!.length
+    : 0;
+  return text.length > 0 || quickActionsCount > 0 || Boolean((step as AssistantStep).streaming);
+}
+
+function stripDerivedRuntimeProjectionSteps(steps: Step[]): Step[] {
+  const list = Array.isArray(steps) ? steps : [];
+  const hasLocalAssistantTranscript = list.some(
+    (step) => step?.type === "assistant" && !isDerivedRuntimeProjectionStepId(step.id) && hasRenderableAssistantStep(step),
+  );
+  const hasLocalToolTranscript = list.some(
+    (step) => step?.type === "tool" && !isDerivedRuntimeProjectionStepId(step.id),
+  );
+  return list.filter((step) => {
+    if (!step || typeof step !== "object") return false;
+    if (!isDerivedRuntimeProjectionStepId(step.id)) return true;
+    if (step.type === "assistant" && hasLocalAssistantTranscript) return false;
+    if (step.type === "tool" && hasLocalToolTranscript) return false;
+    return true;
+  });
+}
+
 function projectItemToStep(item: ItemRecord): Step | null {
   if (!item || typeof item !== "object") return null;
   if (item.type === "agentMessage") {
+    const text = String((item as any).text ?? "");
+    if (!text.trim()) return null;
     return {
       id: item.id,
       type: "assistant",
-      text: String((item as any).text ?? ""),
+      text,
       streaming: item.status === "in_progress",
       hidden: false,
       variant: "default",
@@ -186,12 +219,35 @@ function projectItemToStep(item: ItemRecord): Step | null {
   return null;
 }
 
+function hasLocalAssistantTranscriptStep(steps: Step[]): boolean {
+  return steps.some(
+    (step) =>
+      step?.type === "assistant"
+      && String((step as AssistantStep).variant ?? "default") !== "progress",
+  );
+}
+
+function hasLocalToolTranscriptStep(steps: Step[]): boolean {
+  return steps.some((step) => step?.type === "tool");
+}
+
 export function projectRuntimeItemsToSteps(args?: RuntimeStateLike): Step[] {
-  const existingSteps = Array.isArray(args?.steps) ? args!.steps : [];
+  const existingSteps = stripDerivedRuntimeProjectionSteps(Array.isArray(args?.steps) ? args!.steps : []);
   const items = Array.isArray(args?.items) ? args!.items : [];
   if (!items.length) return existingSteps;
 
+  const shouldSuppressAgentMessageItems = hasLocalAssistantTranscriptStep(existingSteps);
+  const shouldSuppressToolCallItems = hasLocalToolTranscriptStep(existingSteps);
+
   const projectedPairs = items
+    .filter((item) => {
+      if (!item || typeof item !== "object") return false;
+      if (item.type === "progress") return false;
+      if (item.type === "agentMessage" && shouldSuppressAgentMessageItems) return false;
+      if (item.type === "toolCall" && shouldSuppressToolCallItems) return false;
+      if (item.type === "collabAgentToolCall" && shouldSuppressToolCallItems) return false;
+      return true;
+    })
     .map((item, index) => ({
       item,
       index,

@@ -195,13 +195,12 @@ export function repairConversationSnapshotForDisplay(
     return !itemBacked;
   }) as SerializableStep[];
 
-  const projectedSteps = getProjectedStepsFromRuntime({
-    steps: [],
+  const repairedSteps = getProjectedStepsFromRuntime({
+    steps: filteredSteps,
     items: filteredItems,
     activeItemIds: filteredActiveItemIds,
     collabSessions: filteredCollabSessions,
   }) as SerializableStep[];
-  const repairedSteps = mergeListById(filteredSteps, projectedSteps);
 
   const hadForeignRuntime =
     filteredTurns.length !== turnsRaw.length ||
