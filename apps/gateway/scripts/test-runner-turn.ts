@@ -524,6 +524,177 @@ async function scenario10_deliveryLatchNormalizesVersionedPaths() {
 }
 
 // ---------------------------------------------------------------------------
+// 场景 11: OpenAI 路径 - run.mainDoc.update 缺少 patch 外层时自动归一化
+// ---------------------------------------------------------------------------
+async function scenario11_openAiMainDocUpdateAutoWrapPatch() {
+  const argsJson = JSON.stringify({
+    status: "writing_script_4",
+    target_topic: "AI生成虚假战争视频",
+  });
+  const chunk1 = argsJson.slice(0, 18);
+  const chunk2 = argsJson.slice(18);
+  const streamLines = [
+    `data: ${JSON.stringify({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            id: "call_test_main_doc_wrap_1",
+            type: "function",
+            function: { name: "run.mainDoc.update", arguments: "" },
+          }],
+        },
+      }],
+    })}`,
+    `data: ${JSON.stringify({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            function: { arguments: chunk1 },
+          }],
+        },
+      }],
+    })}`,
+    `data: ${JSON.stringify({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            function: { arguments: chunk2 },
+          }],
+        },
+      }],
+    })}`,
+    `data: ${JSON.stringify({ choices: [{ finish_reason: "tool_calls" }] })}`,
+    "data: [DONE]",
+  ];
+
+  await withMockFetch(async (input) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.includes("/chat/completions")) return sseResponse(streamLines);
+    return new Response("unexpected", { status: 500 });
+  }, async () => {
+    const { runner, events } = buildRunner({
+      apiType: "openai-completions",
+      endpoint: "/v1/chat/completions",
+      allowedToolNames: ["run.mainDoc.update"],
+    });
+    await runner.run("update main doc");
+    assert.equal(hasToolCallEvent(events, "run.mainDoc.update"), true, "should emit tool.call for run.mainDoc.update");
+
+    const toolCallEvent = events.find(
+      (e) => e.event === "tool.call" && String((e.data as any)?.name ?? "") === "run.mainDoc.update",
+    );
+    assert.ok(toolCallEvent, "should have tool.call event");
+    const callArgs = (toolCallEvent!.data as any)?.args ?? {};
+    assert.deepEqual(callArgs, {
+      patch: {
+        status: "writing_script_4",
+        target_topic: "AI生成虚假战争视频",
+      },
+    });
+
+    const toolResultEvent = events.find(
+      (e) => e.event === "tool.result" && String((e.data as any)?.name ?? "") === "run.mainDoc.update",
+    );
+    assert.equal(Boolean((toolResultEvent?.data as any)?.ok), true, "mainDoc.update should succeed after auto-wrap");
+  });
+  ok("scenario11.openai.mainDoc_update_auto_wrap_patch");
+}
+
+// ---------------------------------------------------------------------------
+// 场景 12: OpenAI 路径 - run.setTodoList 顶层数组时自动包裹为 items
+// ---------------------------------------------------------------------------
+async function scenario12_openAiSetTodoListAutoWrapItems() {
+  const argsJson = JSON.stringify([
+    { text: "先梳理李一舟直播转化机制", status: "in_progress" },
+    { text: "再对照现有8round缺口", status: "todo" },
+  ]);
+  const chunk1 = argsJson.slice(0, 20);
+  const chunk2 = argsJson.slice(20, 48);
+  const chunk3 = argsJson.slice(48);
+  const streamLines = [
+    `data: ${JSON.stringify({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            id: "call_test_todo_wrap_1",
+            type: "function",
+            function: { name: "run.setTodoList", arguments: "" },
+          }],
+        },
+      }],
+    })}`,
+    `data: ${JSON.stringify({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            function: { arguments: chunk1 },
+          }],
+        },
+      }],
+    })}`,
+    `data: ${JSON.stringify({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            function: { arguments: chunk2 },
+          }],
+        },
+      }],
+    })}`,
+    `data: ${JSON.stringify({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            index: 0,
+            function: { arguments: chunk3 },
+          }],
+        },
+      }],
+    })}`,
+    `data: ${JSON.stringify({ choices: [{ finish_reason: "tool_calls" }] })}`,
+    "data: [DONE]",
+  ];
+
+  await withMockFetch(async (input) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.includes("/chat/completions")) return sseResponse(streamLines);
+    return new Response("unexpected", { status: 500 });
+  }, async () => {
+    const { runner, events } = buildRunner({
+      apiType: "openai-completions",
+      endpoint: "/v1/chat/completions",
+      allowedToolNames: ["run.setTodoList"],
+    });
+    await runner.run("set todo list");
+    assert.equal(hasToolCallEvent(events, "run.setTodoList"), true, "should emit tool.call for run.setTodoList");
+
+    const toolCallEvent = events.find(
+      (e) => e.event === "tool.call" && String((e.data as any)?.name ?? "") === "run.setTodoList",
+    );
+    assert.ok(toolCallEvent, "should have tool.call event");
+    const callArgs = (toolCallEvent!.data as any)?.args ?? {};
+    assert.deepEqual(callArgs, {
+      items: [
+        { text: "先梳理李一舟直播转化机制", status: "in_progress" },
+        { text: "再对照现有8round缺口", status: "todo" },
+      ],
+    });
+
+    const toolResultEvent = events.find(
+      (e) => e.event === "tool.result" && String((e.data as any)?.name ?? "") === "run.setTodoList",
+    );
+    assert.equal(Boolean((toolResultEvent?.data as any)?.ok), true, "setTodoList should succeed after auto-wrap");
+  });
+  ok("scenario12.openai.setTodoList_auto_wrap_items");
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 async function main() {
@@ -537,6 +708,8 @@ async function main() {
   await scenario8_openAiNativeToolCallsStreaming();
   await scenario9_todoGateFailsWithoutTodo();
   await scenario10_deliveryLatchNormalizesVersionedPaths();
+  await scenario11_openAiMainDocUpdateAutoWrapPatch();
+  await scenario12_openAiSetTodoListAutoWrapItems();
   console.log("[test-runner-turn] ALL PASSED");
 }
 

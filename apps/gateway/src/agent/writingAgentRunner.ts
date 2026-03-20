@@ -523,14 +523,16 @@ function normalizeToolNameAlias(name: string): string {
   }
 }
 
-function normalizeToolCallForValidation(nameRaw: string, argsRaw: Record<string, unknown>): {
+function normalizeToolCallForValidation(nameRaw: string, argsRaw: unknown): {
   name: string;
   args: Record<string, unknown>;
   sanitized: boolean;
 } {
   const name = normalizeToolNameAlias(decodeToolName(String(nameRaw ?? "").trim()));
   const meta = TOOL_LIST.find((t) => t.name === name);
-  const baseArgs = argsRaw && typeof argsRaw === "object" && !Array.isArray(argsRaw) ? argsRaw : {};
+  const baseArgs = argsRaw && typeof argsRaw === "object" && !Array.isArray(argsRaw)
+    ? argsRaw as Record<string, unknown>
+    : {};
   if (!meta) return { name, args: baseArgs, sanitized: false };
 
   const metaArgs = Array.isArray(meta.args) ? meta.args : [];
@@ -542,7 +544,67 @@ function normalizeToolCallForValidation(nameRaw: string, argsRaw: Record<string,
     };
   }
 
-  const normalizedInput: Record<string, unknown> = { ...baseArgs };
+  let normalizedUnknown: unknown = argsRaw;
+  let repairedSingleWrapper = false;
+  const soleArg = metaArgs.length === 1 && metaArgs[0]?.required ? metaArgs[0] : null;
+  if (soleArg) {
+    const soleArgName = String(soleArg.name ?? "").trim();
+    const soleArgType = String(soleArg.type ?? "string").trim().toLowerCase();
+    const rawObj = argsRaw && typeof argsRaw === "object" && !Array.isArray(argsRaw)
+      ? argsRaw as Record<string, unknown>
+      : null;
+    const hasWrappedKey = rawObj ? Object.prototype.hasOwnProperty.call(rawObj, soleArgName) : false;
+    const rawArray = Array.isArray(argsRaw) ? argsRaw : null;
+    const rawString = typeof argsRaw === "string" ? argsRaw : null;
+    const rawNumber = typeof argsRaw === "number" ? argsRaw : null;
+    const rawBoolean = typeof argsRaw === "boolean" ? argsRaw : null;
+    const carrierValue =
+      rawObj &&
+      !hasWrappedKey &&
+      Object.keys(rawObj).length === 1 &&
+      Object.prototype.hasOwnProperty.call(rawObj, "input")
+        ? rawObj.input
+        : undefined;
+    const carrierObj = carrierValue && typeof carrierValue === "object" && !Array.isArray(carrierValue)
+      ? carrierValue as Record<string, unknown>
+      : null;
+    const carrierArray = Array.isArray(carrierValue) ? carrierValue : null;
+    const carrierString = typeof carrierValue === "string" ? carrierValue : null;
+    const carrierNumber = typeof carrierValue === "number" ? carrierValue : null;
+    const carrierBoolean = typeof carrierValue === "boolean" ? carrierValue : null;
+    const shouldWrapObject =
+      Boolean(rawObj) &&
+      !hasWrappedKey &&
+      (
+        (soleArgType === "object" && Object.keys(rawObj!).length > 0) ||
+        soleArgType === "array"
+      );
+    const shouldWrapArray = Array.isArray(rawArray) && soleArgType === "array" && rawArray.length > 0;
+    const shouldWrapScalar =
+      (rawString !== null && rawString.trim().length > 0 && (soleArgType === "string" || soleArgType === "array")) ||
+      (rawNumber !== null && (soleArgType === "number" || soleArgType === "array")) ||
+      (rawBoolean !== null && (soleArgType === "boolean" || soleArgType === "array"));
+    const shouldWrapCarrier =
+      carrierValue !== undefined &&
+      (
+        (soleArgType === "object" && carrierObj !== null && Object.keys(carrierObj).length > 0) ||
+        (soleArgType === "array" && ((carrierArray !== null && carrierArray.length > 0) || carrierObj !== null || carrierString !== null || carrierNumber !== null || carrierBoolean !== null)) ||
+        (soleArgType === "string" && carrierString !== null && carrierString.trim().length > 0) ||
+        (soleArgType === "number" && carrierNumber !== null) ||
+        (soleArgType === "boolean" && carrierBoolean !== null)
+      );
+    if (shouldWrapCarrier) {
+      normalizedUnknown = { [soleArgName]: carrierValue };
+      repairedSingleWrapper = true;
+    } else if (shouldWrapObject || shouldWrapArray || shouldWrapScalar) {
+      normalizedUnknown = { [soleArgName]: argsRaw };
+      repairedSingleWrapper = true;
+    }
+  }
+  const normalizedInput: Record<string, unknown> =
+    normalizedUnknown && typeof normalizedUnknown === "object" && !Array.isArray(normalizedUnknown)
+      ? { ...(normalizedUnknown as Record<string, unknown>) }
+      : {};
   if (name === "project.search" && normalizedInput.path !== undefined && normalizedInput.paths === undefined) {
     normalizedInput.paths = Array.isArray(normalizedInput.path) ? normalizedInput.path : [normalizedInput.path];
   }
@@ -553,7 +615,11 @@ function normalizeToolCallForValidation(nameRaw: string, argsRaw: Record<string,
     if (!allowed.has(k)) continue;
     sanitizedArgs[k] = coerceToolArgByType(v, allowed.get(k));
   }
-  const sanitized = Object.keys(sanitizedArgs).length !== Object.keys(baseArgs).length;
+  const baseComparableKeyCount =
+    argsRaw && typeof argsRaw === "object" && !Array.isArray(argsRaw)
+      ? Object.keys(argsRaw as Record<string, unknown>).length
+      : 0;
+  const sanitized = repairedSingleWrapper || Object.keys(sanitizedArgs).length !== baseComparableKeyCount;
   return { name, args: sanitizedArgs, sanitized };
 }
 
@@ -1397,7 +1463,7 @@ export class AgentRunner {
         let plainText = "";
         let wrapperCount = 0;
         let hasToolCallMarker = false;
-        const parsedCalls: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
+        const parsedCalls: Array<{ id: string; name: string; args: unknown }> = [];
         let streamErrored = false;
         let lastStreamError = "";
         let promptTokens = 0;
@@ -1454,7 +1520,7 @@ export class AgentRunner {
             parsedCalls.push({
               id: String(ev.id ?? "").trim(),
               name: String(ev.name ?? "").trim(),
-              args: ev.args && typeof ev.args === "object" && !Array.isArray(ev.args) ? ev.args : {},
+              args: ev.args,
             });
             continue;
           }
@@ -1473,8 +1539,7 @@ export class AgentRunner {
         const completedToolUses: ContentBlockToolUse[] = [];
         const presetResults = new Map<string, ToolExecResult>();
         for (const c of parsedCalls) {
-          const rawInput = c.args && typeof c.args === "object" && !Array.isArray(c.args) ? c.args : {};
-          const normalized = normalizeToolCallForValidation(c.name, rawInput);
+          const normalized = normalizeToolCallForValidation(c.name, c.args);
           const input = normalized.args;
           const normalizedName = normalized.name;
           const v = validateToolCallArgs({ name: normalizedName, toolArgs: input });
