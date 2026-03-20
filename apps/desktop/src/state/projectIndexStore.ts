@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import {
   buildProjectIndexV2,
+  coerceDirSummariesFileV1,
+  coerceFileSummariesFileV1,
   buildProjectSummaryIndexesV1,
   coerceProjectIndexV2,
   type DirSummaryV1,
@@ -41,6 +43,11 @@ type ProjectIndexState = {
 let _refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let _refreshResolvers: Array<() => void> = [];
 const DEBOUNCE_MS = 500;
+const PROJECT_METADATA_DIRNAME = "ohmycrab";
+const LEGACY_PROJECT_METADATA_DIRNAME = ".ohmycrab";
+const DIR_SUMMARIES_FILENAME = "dir-summaries.v1.json";
+const FILE_SUMMARIES_FILENAME = "file-summaries.v1.json";
+const SUMMARY_FRESHNESS_SLACK_MS = 1_500;
 
 function scheduleDebounce(rootDir: string): Promise<string> {
   return new Promise<string>((resolve) => {
@@ -128,7 +135,8 @@ export const useProjectIndexStore = create<ProjectIndexState>((set, get) => ({
       const cachedIndex = cached?.ok ? coerceProjectIndexV2(cached.data, effectiveRoot) : null;
       if (cachedIndex) {
         const age = Date.now() - (cachedIndex.updatedAt ?? 0);
-        const summaries = buildProjectSummaryIndexesV1({ index: cachedIndex });
+        void window.desktop.fs.writeIndex(effectiveRoot, cachedIndex).catch(() => void 0);
+        const summaries = await loadPersistedProjectSummaries(effectiveRoot, cachedIndex);
         if (age < 30_000) {
           set({
             index: cachedIndex,
@@ -174,7 +182,7 @@ async function persistProjectSummaries(rootDir: string, summaries: ProjectSummar
   await Promise.all([
     api.writeFile(
       rootDir,
-      ".ohmycrab/dir-summaries.v1.json",
+      `${PROJECT_METADATA_DIRNAME}/${DIR_SUMMARIES_FILENAME}`,
       JSON.stringify({
         version: 1,
         rootDir: summaries.rootDir,
@@ -185,7 +193,7 @@ async function persistProjectSummaries(rootDir: string, summaries: ProjectSummar
     ),
     api.writeFile(
       rootDir,
-      ".ohmycrab/file-summaries.v1.json",
+      `${PROJECT_METADATA_DIRNAME}/${FILE_SUMMARIES_FILENAME}`,
       JSON.stringify({
         version: 1,
         rootDir: summaries.rootDir,
@@ -195,4 +203,75 @@ async function persistProjectSummaries(rootDir: string, summaries: ProjectSummar
       }, null, 2),
     ),
   ]);
+}
+
+async function readProjectMetadataJsonWithFallback(rootDir: string, fileName: string) {
+  const api = window.desktop?.fs;
+  if (!rootDir || !api) return null;
+  const candidates = [
+    { relPath: `${PROJECT_METADATA_DIRNAME}/${fileName}`, legacy: false },
+    { relPath: `${LEGACY_PROJECT_METADATA_DIRNAME}/${fileName}`, legacy: true },
+  ];
+  for (const candidate of candidates) {
+    try {
+      const res = await api.readFile(rootDir, candidate.relPath);
+      if (!res?.ok || !String(res.content ?? "").trim()) continue;
+      const parsed = JSON.parse(String(res.content ?? ""));
+      return { data: parsed, fromLegacy: candidate.legacy };
+    } catch {
+      // ignore
+    }
+  }
+  return null;
+}
+
+async function loadPersistedProjectSummaries(rootDir: string, index: ProjectIndex | null): Promise<ProjectSummaryIndexesV1 | null> {
+  const built = buildProjectSummaryIndexesV1({ index });
+  if (!rootDir) return built;
+
+  const [dirRaw, fileRaw] = await Promise.all([
+    readProjectMetadataJsonWithFallback(rootDir, DIR_SUMMARIES_FILENAME),
+    readProjectMetadataJsonWithFallback(rootDir, FILE_SUMMARIES_FILENAME),
+  ]);
+  const dirPayload = coerceDirSummariesFileV1(dirRaw?.data, rootDir);
+  const filePayload = coerceFileSummariesFileV1(fileRaw?.data, rootDir);
+  const summariesUpdatedAt = Math.max(dirPayload?.updatedAt ?? 0, filePayload?.updatedAt ?? 0);
+  const indexUpdatedAt = Number(index?.updatedAt ?? 0) || 0;
+  const persistedLooksFresh = summariesUpdatedAt > 0 && summariesUpdatedAt + SUMMARY_FRESHNESS_SLACK_MS >= indexUpdatedAt;
+
+  if (persistedLooksFresh && (dirPayload || filePayload)) {
+    const summary: ProjectSummaryIndexesV1 = {
+      version: 1,
+      rootDir,
+      updatedAt: Math.max(indexUpdatedAt, summariesUpdatedAt),
+      projectKind: dirPayload?.projectKind ?? filePayload?.projectKind ?? built?.projectKind ?? "content",
+      dirs: dirPayload?.dirs ?? built?.dirs ?? [],
+      files: filePayload?.files ?? built?.files ?? [],
+    };
+    if (dirRaw?.fromLegacy || fileRaw?.fromLegacy) {
+      void persistProjectSummaries(rootDir, summary).catch(() => void 0);
+    }
+    return summary;
+  }
+
+  if (built) {
+    if (!dirPayload || !filePayload || dirRaw?.fromLegacy || fileRaw?.fromLegacy) {
+      void persistProjectSummaries(rootDir, built).catch(() => void 0);
+    }
+    return built;
+  }
+
+  if (!dirPayload && !filePayload) return null;
+  const fallbackSummary: ProjectSummaryIndexesV1 = {
+    version: 1,
+    rootDir,
+    updatedAt: summariesUpdatedAt,
+    projectKind: dirPayload?.projectKind ?? filePayload?.projectKind ?? "content",
+    dirs: dirPayload?.dirs ?? [],
+    files: filePayload?.files ?? [],
+  };
+  if (dirRaw?.fromLegacy || fileRaw?.fromLegacy) {
+    void persistProjectSummaries(rootDir, fallbackSummary).catch(() => void 0);
+  }
+  return fallbackSummary;
 }

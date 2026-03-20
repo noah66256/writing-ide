@@ -26,7 +26,6 @@ function normalizeGatewayUrlOrEmpty(raw: string): string {
  *
  * - dev（http://localhost:5173）：默认返回 ""，让 fetch 走相对路径 /api（由 Vite proxy 转发）
  * - packaged（file://）：若未配置 VITE_GATEWAY_URL，则默认回落到 DEFAULT_GATEWAY_URL
- * - 允许用 localStorage 临时覆盖（便于用户/开发快速切换，不必重打包）
  */
 export function getGatewayBaseUrl(): string {
   // 1) build-time env（打包时注入）
@@ -37,15 +36,7 @@ export function getGatewayBaseUrl(): string {
     // ignore
   }
 
-  // 2) runtime override（用户本机临时切换）
-  try {
-    const fromLs = normalizeGatewayUrlOrEmpty(String(window?.localStorage?.getItem("writing-ide.gatewayUrl") ?? ""));
-    if (fromLs) return fromLs;
-  } catch {
-    // ignore
-  }
-
-  // 3) packaged（production build）：没有 Vite /api proxy，必须走绝对地址
+  // 2) packaged（production build）：没有 Vite /api proxy，必须走绝对地址
   try {
     if ((import.meta as any).env?.PROD) {
       return normalizeGatewayUrlOrEmpty(DEFAULT_GATEWAY_URL);
@@ -54,15 +45,14 @@ export function getGatewayBaseUrl(): string {
     // ignore
   }
 
-  // 4) dev：留空 => 相对 /api（Vite proxy）
+  // 3) dev：留空 => 相对 /api（Vite proxy）
   return "";
 }
 
 /**
  * Auth 专用 Gateway baseURL。
  *
- * 典型用途：打包时主业务指向本地 Gateway（127.0.0.1:8000），
- * 但验证码/登录仍走远端（避免本地未配置短信/邮箱服务）。
+ * 默认与主 Gateway 保持一致；如需拆分只走 env，不再开放用户侧运行时覆盖。
  */
 export function getAuthGatewayBaseUrl(): string {
   // 1) build-time env（打包时注入）
@@ -73,15 +63,7 @@ export function getAuthGatewayBaseUrl(): string {
     // ignore
   }
 
-  // 2) runtime override（用户本机临时切换）
-  try {
-    const fromLs = normalizeGatewayUrlOrEmpty(String(window?.localStorage?.getItem("writing-ide.authGatewayUrl") ?? ""));
-    if (fromLs) return fromLs;
-  } catch {
-    // ignore
-  }
-
-  // 3) 默认与主 Gateway 一致（避免 token/账号体系割裂）
+  // 2) 默认与主 Gateway 一致（避免 token/账号体系割裂）
   try {
     const gw = getGatewayBaseUrl();
     if (gw) return gw;
@@ -89,7 +71,7 @@ export function getAuthGatewayBaseUrl(): string {
     // ignore
   }
 
-  // 4) packaged：兜底为默认远端
+  // 3) packaged：兜底为默认远端
   try {
     if ((import.meta as any).env?.PROD) {
       return normalizeGatewayUrlOrEmpty(DEFAULT_AUTH_GATEWAY_URL);
@@ -98,7 +80,14 @@ export function getAuthGatewayBaseUrl(): string {
     // ignore
   }
 
-  // 5) dev：留空 => 相对 /api（Vite proxy）
+  // 4) dev：留空 => 相对 /api（Vite proxy）
   return "";
 }
 
+export function buildGatewayApiUrl(pathname: string): string {
+  const path = String(pathname ?? "").trim();
+  if (!path) return getGatewayBaseUrl() || "";
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  const base = getGatewayBaseUrl();
+  return base ? `${base}${normalizedPath}` : normalizedPath;
+}

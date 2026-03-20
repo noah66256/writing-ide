@@ -210,7 +210,7 @@
 
 ### 7.1 交付物
 
-- `.ohmycrab/project-index.v2.json`
+- `ohmycrab/project-index.v2.json`
 - 运行时 context segment：`PROJECT_MAP_V2`
 - 新工具：`project.searchPaths`
 
@@ -290,7 +290,7 @@
 
 ### 7.5 验收
 
-- 项目打开后，索引写入 `.ohmycrab/project-index.v2.json`
+- 项目打开后，索引写入 `ohmycrab/project-index.v2.json`
 - 新 run 中 `ContextAssembly.detail.retainedSegmentNames` 能看到 `PROJECT_MAP_V2`
 - Agent 在项目搜索场景优先暴露 `project.searchPaths`
 - 用户给出文件名/目录名/关键词时，Agent 能先缩圈，再决定是否 `read`

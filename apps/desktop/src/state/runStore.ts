@@ -248,6 +248,63 @@ export type RuntimeCollabSessionRecord = {
   updatedAt?: string;
 };
 
+function isActiveCollabAgentStatus(status: unknown): boolean {
+  const value = String(status ?? "").trim().toLowerCase();
+  return value === "running" || value === "waiting";
+}
+
+function isActiveCollabSessionStatus(status: unknown): boolean {
+  const value = String(status ?? "").trim().toLowerCase();
+  return value === "running" || value === "waiting";
+}
+
+export function sanitizeThreadCollabState(
+  thread: RuntimeThreadRecord | null | undefined,
+  collabSessions?: RuntimeCollabSessionRecord[] | null,
+): RuntimeThreadRecord | null {
+  if (!thread || typeof thread !== "object") return null;
+  const nextThread = { ...(thread as any) } as RuntimeThreadRecord;
+  const rawAgents = Array.isArray(thread.activeCollabAgents) ? thread.activeCollabAgents : [];
+  if (rawAgents.length <= 0) {
+    nextThread.activeCollabAgents = [];
+    return nextThread;
+  }
+
+  const normalizedSessions = Array.isArray(collabSessions) ? collabSessions : [];
+  const liveSessionByChildThreadId = new Set(
+    normalizedSessions
+      .filter((session) => isActiveCollabSessionStatus(session?.status))
+      .map((session) => String(session?.childThreadId ?? "").trim())
+      .filter(Boolean),
+  );
+  const terminalSessionByChildThreadId = new Set(
+    normalizedSessions
+      .filter((session) => !isActiveCollabSessionStatus(session?.status))
+      .map((session) => String(session?.childThreadId ?? "").trim())
+      .filter(Boolean),
+  );
+
+  const threadStatus = String(thread.status ?? "").trim().toLowerCase();
+  const waitingFor = String(thread.waitingFor ?? "").trim().toLowerCase();
+  const parentIsTerminal = (threadStatus === "completed" || threadStatus === "failed" || threadStatus === "idle")
+    && waitingFor !== "user"
+    && waitingFor !== "approval";
+
+  nextThread.activeCollabAgents = rawAgents
+    .filter((agent) => {
+      const childThreadId = String(agent?.threadId ?? "").trim();
+      if (!childThreadId) return false;
+      if (!isActiveCollabAgentStatus(agent?.status)) return false;
+      if (parentIsTerminal) return false;
+      if (liveSessionByChildThreadId.has(childThreadId)) return true;
+      if (terminalSessionByChildThreadId.has(childThreadId)) return false;
+      return true;
+    })
+    .map((agent) => ({ ...(agent as any) }));
+
+  return nextThread;
+}
+
 // ─── 全局 Run 取消句柄（不放 store state，避免序列化问题） ─────────────────
 let _activeRunCancel: ((reason?: string) => void) | null = null;
 const _itemActionRuntimeById = new Map<string, ItemActionRuntime>();
@@ -874,6 +931,11 @@ export const useRunStore = create<RunState>()(
     const model = typeof s.model === "string" ? s.model : get().model;
     const opModeRaw = (s as any).opMode;
     const opMode: OpMode = opModeRaw === "assistant" ? "assistant" : "creative";
+    const normalizedCollabSessions = Array.isArray((s as any).collabSessions)
+      ? ((s as any).collabSessions as any[])
+          .filter((x) => x && typeof x === "object" && String((x as any).id ?? "").trim())
+          .map((x) => ({ ...(x as any) } as RuntimeCollabSessionRecord))
+      : [];
     const prev = get();
     const chatModel = mode === "chat" ? model : prev.chatModel;
     const agentModel = mode !== "chat" ? model : prev.agentModel;
@@ -916,10 +978,12 @@ export const useRunStore = create<RunState>()(
         : [],
       ctxRefs: Array.isArray((s as any).ctxRefs) ? dedupeCtxRefs((s as any).ctxRefs as any) : [],
       pendingArtifacts: Array.isArray((s as any).pendingArtifacts) ? dedupePendingArtifacts((s as any).pendingArtifacts as any) : [],
-      thread:
+      thread: sanitizeThreadCollabState(
         (s as any).thread && typeof (s as any).thread === "object"
           ? ({ ...((s as any).thread as any) } as RuntimeThreadRecord)
           : null,
+        normalizedCollabSessions,
+      ),
       turns: Array.isArray((s as any).turns)
         ? ((s as any).turns as any[])
             .filter((x) => x && typeof x === "object" && String((x as any).id ?? "").trim())
@@ -930,11 +994,7 @@ export const useRunStore = create<RunState>()(
             .filter((x) => x && typeof x === "object" && String((x as any).id ?? "").trim())
             .map((x) => ({ ...(x as any) } as RuntimeItemRecord))
         : [],
-      collabSessions: Array.isArray((s as any).collabSessions)
-        ? ((s as any).collabSessions as any[])
-            .filter((x) => x && typeof x === "object" && String((x as any).id ?? "").trim())
-            .map((x) => ({ ...(x as any) } as RuntimeCollabSessionRecord))
-        : [],
+      collabSessions: normalizedCollabSessions,
       activeItemIds: Array.from(
         new Set((Array.isArray((s as any).activeItemIds) ? (s as any).activeItemIds : []).map((x: any) => String(x ?? "").trim()).filter(Boolean)),
       ),

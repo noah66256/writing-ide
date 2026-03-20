@@ -21,6 +21,7 @@ import {
   streamChatCompletionViaProvider,
 } from "./llm/providerAdapter.js";
 import { prepareAgentRun, executeAgentRun, type RunServices, type TransportAdapter } from "./agent/runFactory.js";
+import { closeLiveCollabSession } from "./agent/runtime/collabRuntime.js";
 import { createAiConfigService } from "./aiConfig.js";
 import { toolConfig } from "./toolConfig.js";
 import { checkSmsVerifyCode, normalizeCnPhone, sendSmsVerifyCode } from "./smsVerify.js";
@@ -1581,6 +1582,33 @@ type ToolResultPayload = {
 };
 
 const agentRunWaiters = new Map<string, Map<string, (payload: ToolResultPayload) => void>>();
+
+fastify.post(
+  "/api/agent/collab/close",
+  { preHandler: [(fastify as any).authenticate] },
+  async (request: any, reply) => {
+    const body = z.object({
+      threadId: z.string().min(1),
+      sessionId: z.string().min(1),
+    }).parse((request as any).body ?? {});
+
+    const result = await closeLiveCollabSession({
+      threadId: body.threadId,
+      sessionId: body.sessionId,
+    });
+
+    if (!result.ok && result.error === "VALIDATION_ERROR") {
+      return reply.code(400).send(result);
+    }
+    if (!result.ok && result.error === "NOT_AVAILABLE") {
+      return reply.code(409).send(result);
+    }
+    if (!result.ok) {
+      return reply.code(404).send(result);
+    }
+    return result;
+  },
+);
 
 
 

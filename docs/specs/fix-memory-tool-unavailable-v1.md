@@ -111,7 +111,7 @@ executionContract.required && !state.hasAnyToolCall
 
 Codex 确认 `memory` 被路由到 Desktop 执行（`serverToolRunner.ts` 的 `GATEWAY_SERVER_TOOL_ALLOWLIST` 不含 memory，返回 `executedBy: "desktop"`）是**合理设计**——memory 数据完全存在 Desktop 本地：
 - L1 全局记忆：`userData/memory/global.md`
-- L2 项目记忆：`<projectRoot>/.ohmycrab/project-memory.md`
+- L2 项目记忆：`<projectRoot>/ohmycrab/project-memory.md`
 
 问题不在路由层，纯在 per-turn gating 层（`_executeAgentTool` L1140-1166 在到达路由之前就拦截了调用）。
 

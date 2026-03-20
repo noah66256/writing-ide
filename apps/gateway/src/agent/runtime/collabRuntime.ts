@@ -36,6 +36,8 @@ type LiveSession = {
   turn: number;
 };
 
+const liveCollabRuntimeByThread = new Map<string, CollabRuntime>();
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -58,10 +60,48 @@ function buildInboxPayload(args: Record<string, unknown>) {
   return payload;
 }
 
+function runtimeThreadKey(parentCtx: Pick<RunContext, "threadId" | "runId">) {
+  return String(parentCtx.threadId ?? parentCtx.runId ?? "").trim() || String(parentCtx.runId ?? "").trim();
+}
+
+export async function closeLiveCollabSession(args: { threadId: string; sessionId: string }) {
+  const threadId = String(args.threadId ?? "").trim();
+  const sessionId = String(args.sessionId ?? "").trim();
+  if (!threadId || !sessionId) {
+    return {
+      ok: false as const,
+      error: "VALIDATION_ERROR",
+      detail: "threadId and sessionId are required",
+    };
+  }
+  const runtime = liveCollabRuntimeByThread.get(threadId);
+  if (!runtime) {
+    return {
+      ok: false as const,
+      error: "NOT_AVAILABLE",
+      detail: threadId,
+    };
+  }
+  const result = await runtime.closeAgent({ id: sessionId });
+  return {
+    ok: Boolean(result.ok),
+    output: result.output,
+    detail: result.ok ? undefined : sessionId,
+  };
+}
+
+export function releaseLiveCollabRuntime(threadId: string) {
+  const key = String(threadId ?? "").trim();
+  if (!key) return;
+  liveCollabRuntimeByThread.delete(key);
+}
+
 export class CollabRuntime {
   private readonly sessions = new Map<string, LiveSession>();
 
   constructor(private readonly parentCtx: RunContext) {
+    const threadKey = runtimeThreadKey(parentCtx);
+    if (threadKey) liveCollabRuntimeByThread.set(threadKey, this);
     this.hydrateFromHint();
   }
 

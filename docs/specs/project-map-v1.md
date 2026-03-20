@@ -12,7 +12,7 @@
 
 - `PROJECT_MAP` 必须轻量：默认注入 **<= 1200 chars**，硬上限 **1600 chars**，超出直接裁剪。
 - 禁止注入：全量文件列表、任何文件正文、长段落说明。
-- 数据来源：本地 FS 扫描索引 `/.ohmycrab/project-index.json`（可信）。
+- 数据来源：本地 FS 扫描索引 `/ohmycrab/project-index.v2.json`（可信）。
 
 ## 数据形态
 
@@ -88,4 +88,3 @@
 - 每次 run 的 `ContextAssembly.detail.retainedSegmentNames` 中能看到 `PROJECT_MAP`（当项目已打开且索引可用）。
 - `PROJECT_MAP` 文本长度稳定（<= 1200 chars），不会把上下文撑爆。
 - Agent 不读文件也能说出项目大概结构（顶层目录、关键入口文件），并能提示“要看具体内容请用 doc.read/project.search”。
-

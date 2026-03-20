@@ -5,6 +5,7 @@ import {
   Loader2,
   Copy,
   Bot,
+  Square,
   ChevronDown,
   ChevronRight,
 } from "lucide-react";
@@ -34,6 +35,7 @@ import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
 import { getProjectedStepsFromRuntime } from "@/agent/threadProjection";
 import { WelcomePage } from "./WelcomePage";
 import { InputBar } from "./InputBar";
+import { ActiveRuntimeStrips } from "./ActiveRuntimeStrips";
 import { usePersonaStore } from "@/state/personaStore";
 import { BUILTIN_SUB_AGENTS, looksLikeFreshWritingTaskPrompt, skillRegistry } from "@ohmycrab/agent-core";
 import {
@@ -1410,11 +1412,15 @@ export function ChatArea() {
           isRunning={isRunning}
           collapsed={todoPanelCollapsed}
           onToggle={() => setTodoPanelCollapsed((prev) => !prev)}
+          onStop={handleStop}
         />
       )}
 
-      {/* 后台进程 / 终端状态行（贴在输入框上方） */}
-      <BackgroundProcessSummary steps={renderSteps} />
+      <ActiveRuntimeStrips
+        thread={thread}
+        collabSessions={collabSessions}
+        isRunning={isRunning}
+      />
 
       {/* 输入栏（始终可见） */}
       <InputBar
@@ -1434,11 +1440,13 @@ function WorkflowTodoPanel({
   isRunning,
   collapsed,
   onToggle,
+  onStop,
 }: {
   items: TodoItem[];
   isRunning: boolean;
   collapsed: boolean;
   onToggle: () => void;
+  onStop: () => void;
 }) {
   const total = items.length;
   const done = items.filter((item) => item.status === "done" || item.status === "skipped").length;
@@ -1456,6 +1464,20 @@ function WorkflowTodoPanel({
             <div className="text-[14px] font-semibold text-text">任务清单</div>
           </div>
           <div className="flex items-center gap-3 shrink-0">
+            {isRunning ? (
+              <button
+                type="button"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-error/10 text-error transition-colors hover:bg-error/20"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onStop();
+                }}
+                title="停止当前任务"
+                aria-label="停止当前任务"
+              >
+                <Square size={11} fill="currentColor" />
+              </button>
+            ) : null}
             <div className="text-[13px] text-text-muted whitespace-nowrap">
               {done >= total ? ("已完成 " + done + "/" + total + (isRunning ? " · 收尾中" : "")) : ("已完成 " + done + "/" + total)}
             </div>
@@ -1496,65 +1518,6 @@ function WorkflowTodoPanel({
             })}
           </div>
         ) : null}
-      </div>
-    </div>
-  );
-}
-
-/* ─── 后台进程状态行（process.run/list/stop 汇总） ─── */
-
-function BackgroundProcessSummary({ steps }: { steps: Step[] }) {
-  const summary = useMemo(() => {
-    const processes = new Map<string, { command: string; status: string }>();
-    for (const step of steps) {
-      if (step.type !== "tool" || !step.output) continue;
-      const name = step.toolName;
-      const out = _asRecord(step.output);
-      if (name === "process.run" && step.status === "success") {
-        const id = String((out as any).processId ?? (out as any).id ?? "").trim();
-        if (!id) continue;
-        const command = String((out as any).command ?? "").trim();
-        const status = String((out as any).status ?? "").trim() || "running";
-        processes.set(id, { command, status });
-      } else if (name === "process.list" && step.status === "success") {
-        const list = Array.isArray((out as any).processes) ? ((out as any).processes as any[]) : [];
-        for (const p of list) {
-          const id = String((p as any).processId ?? (p as any).id ?? "").trim();
-          if (!id) continue;
-          const command = String((p as any).command ?? "").trim();
-          const status = String((p as any).status ?? "").trim() || "running";
-          processes.set(id, { command, status });
-        }
-      } else if (name === "process.stop" && step.status === "success") {
-        const id = String((out as any).processId ?? (out as any).id ?? "").trim();
-        if (!id) continue;
-        const status = String((out as any).status ?? "").trim() || "stopped";
-        const prev = processes.get(id);
-        const command = prev?.command ?? "";
-        processes.set(id, { command, status });
-      }
-    }
-    let total = 0;
-    let running = 0;
-    for (const { status } of processes.values()) {
-      total += 1;
-      if (status === "running" || status === "stopping") running += 1;
-    }
-    return { total, running };
-  }, [steps]);
-
-  if (summary.running <= 0) return null;
-
-  const { total, running } = summary;
-  const text =
-    total === running
-      ? `${running} 个后台终端会话运行中`
-      : `${running} 个后台终端会话运行中 · 共 ${total} 个会话`;
-
-  return (
-    <div className="w-full max-w-[var(--chat-max-width)] mx-auto px-4 pt-1">
-      <div className="text-[11px] text-text-faint border-t border-border/40 mt-1 pt-1.5">
-        {text}
       </div>
     </div>
   );

@@ -8,7 +8,7 @@ import { useRunStore } from "@/state/runStore";
 import { useProjectStore } from "@/state/projectStore";
 import { useKbStore } from "@/state/kbStore";
 import { useLayoutStore } from "@/state/layoutStore";
-import { useConversationStore } from "@/state/conversationStore";
+import { pickPreferredHistorySteps, useConversationStore } from "@/state/conversationStore";
 
 /**
  * 主布局：左侧导航（240px 固定）+ 中央对话区
@@ -106,16 +106,22 @@ export function ConversationLayout() {
     };
 
     if (historyApi && restoreConvId) {
+      const restoreLimit = 150;
       // Electron 环境：走 v2 路径加载 steps，limit 稍大一些，首次恢复尽量多显示一些历史。
-      void historyApi({ conversationId: restoreConvId, limit: 150 })
+      void historyApi({ conversationId: restoreConvId, limit: restoreLimit })
         .then((res: any) => {
           if (restoredRef.current) return;
           const segmentSteps = Array.isArray(res?.steps) ? res.steps : [];
-          const hasMoreBefore = Boolean(res?.hasMoreBefore);
-          useRunStore.getState().setHistoryWindowHasMoreBefore(hasMoreBefore);
+          const preferred = pickPreferredHistorySteps({
+            snapshot: snap as any,
+            segmentSteps: segmentSteps as any,
+            limit: restoreLimit,
+            hasMoreBefore: Boolean(res?.hasMoreBefore),
+          });
+          useRunStore.getState().setHistoryWindowHasMoreBefore(preferred.hasMoreBefore);
 
-          if (segmentSteps.length > 0) {
-            doRestore({ ...snap, steps: segmentSteps });
+          if (preferred.steps.length > 0) {
+            doRestore({ ...snap, steps: preferred.steps });
           } else {
             // v2 文件也没有 steps，退回 v1 snapshot（若其中确有步骤）
             const snapSteps =

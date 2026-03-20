@@ -71,6 +71,7 @@ import {
   type ModelApiType,
 } from "./writingAgentRunner.js";
 import { createRuntime } from "./runtime/RuntimeFactory.js";
+import { releaseLiveCollabRuntime } from "./runtime/collabRuntime.js";
 import { ItemEmitter } from "./runtime/itemEmitter.js";
 import {
   createThreadState,
@@ -5836,6 +5837,7 @@ export async function executeAgentRun(args: {
   await persistOnce();
   } finally {
     await persistOnce().catch(() => {}); // 幂等：确保异常路径也落盘
+    releaseLiveCollabRuntime(String(threadId ?? runId).trim() || runId);
     services.agentRunWaiters.delete(runId);
   }
 }

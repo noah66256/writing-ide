@@ -88,6 +88,22 @@ export type ProjectSummaryIndexesV1 = {
   files: FileSummaryV1[];
 };
 
+export type DirSummariesFileV1 = {
+  version: 1;
+  rootDir: string;
+  updatedAt: number;
+  projectKind: ProjectKind;
+  dirs: DirSummaryV1[];
+};
+
+export type FileSummariesFileV1 = {
+  version: 1;
+  rootDir: string;
+  updatedAt: number;
+  projectKind: ProjectKind;
+  files: FileSummaryV1[];
+};
+
 export type DirSummaryMatch = DirSummaryV1 & {
   score: number;
   reasons: string[];
@@ -169,6 +185,18 @@ function inferProjectKind(extTop: Array<{ ext: string; count: number }>): Projec
 
 function sortByPath<T extends { path: string }>(list: T[]): T[] {
   return [...list].sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function coerceProjectKind(raw: unknown): ProjectKind | null {
+  const value = String(raw ?? "").trim().toLowerCase();
+  if (value === "content" || value === "code" || value === "hybrid") return value;
+  return null;
+}
+
+function coerceStringArray(raw: unknown): string[] {
+  return Array.isArray(raw)
+    ? raw.map((item) => String(item ?? "").trim()).filter(Boolean)
+    : [];
 }
 
 export function buildProjectIndexV2(args: {
@@ -291,6 +319,84 @@ export function coerceProjectIndexV2(raw: unknown, expectedRootDir?: string | nu
     dirs: dirsRaw,
     updatedAt: Number(data.updatedAt ?? Date.now()),
   });
+}
+
+export function coerceDirSummariesFileV1(raw: unknown, expectedRootDir?: string | null): DirSummariesFileV1 | null {
+  const data = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as any) : null;
+  if (!data) return null;
+  const rootDir = String(expectedRootDir ?? data.rootDir ?? "").trim();
+  if (!rootDir) return null;
+  if (String(data.rootDir ?? "").trim() && String(data.rootDir ?? "").trim() !== rootDir) return null;
+  const projectKind = coerceProjectKind(data.projectKind) ?? "content";
+  const dirsRaw = Array.isArray(data.dirs) ? data.dirs : [];
+  const dirs = sortByPath<DirSummaryV1>(
+    dirsRaw
+      .map((item: any) => {
+        const path = normalizeRelPath(item?.path);
+        if (!path) return null;
+        const normalized: DirSummaryV1 = {
+          path,
+          parentDir: normalizeRelPath(item?.parentDir) || getParentDir(path),
+          depth: Number.isFinite(Number(item?.depth)) ? Math.max(0, Math.floor(Number(item.depth))) : getDepth(path),
+          role: String(item?.role ?? "").trim() || "folder",
+          summary: String(item?.summary ?? "").trim(),
+          keyFiles: coerceStringArray(item?.keyFiles).map((one) => normalizeRelPath(one)).filter(Boolean),
+          fileCount: Number.isFinite(Number(item?.fileCount)) ? Math.max(0, Math.floor(Number(item.fileCount))) : 0,
+          subdirCount: Number.isFinite(Number(item?.subdirCount)) ? Math.max(0, Math.floor(Number(item.subdirCount))) : 0,
+          latestMtime: Number.isFinite(Number(item?.latestMtime)) ? Math.max(0, Math.floor(Number(item.latestMtime))) : 0,
+          keywords: coerceStringArray(item?.keywords),
+        };
+        return normalized;
+      })
+      .filter((item: DirSummaryV1 | null): item is DirSummaryV1 => Boolean(item)),
+  );
+  return {
+    version: 1,
+    rootDir,
+    updatedAt: Number.isFinite(Number(data.updatedAt)) ? Math.max(0, Math.floor(Number(data.updatedAt))) : 0,
+    projectKind,
+    dirs,
+  };
+}
+
+export function coerceFileSummariesFileV1(raw: unknown, expectedRootDir?: string | null): FileSummariesFileV1 | null {
+  const data = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as any) : null;
+  if (!data) return null;
+  const rootDir = String(expectedRootDir ?? data.rootDir ?? "").trim();
+  if (!rootDir) return null;
+  if (String(data.rootDir ?? "").trim() && String(data.rootDir ?? "").trim() !== rootDir) return null;
+  const projectKind = coerceProjectKind(data.projectKind) ?? "content";
+  const validKinds = new Set(["doc", "code", "config", "data", "asset", "output", "other"]);
+  const filesRaw = Array.isArray(data.files) ? data.files : [];
+  const files = sortByPath<FileSummaryV1>(
+    filesRaw
+      .map((item: any) => {
+        const path = normalizeRelPath(item?.path);
+        if (!path) return null;
+        const kindRaw = String(item?.kind ?? "").trim();
+        const kind = validKinds.has(kindRaw) ? (kindRaw as FileSummaryV1["kind"]) : "other";
+        const normalized: FileSummaryV1 = {
+          path,
+          dirPath: normalizeRelPath(item?.dirPath) || getParentDir(path),
+          ext: String(item?.ext ?? "").trim() || getExt(path),
+          kind,
+          role: String(item?.role ?? "").trim() || kind,
+          title: String(item?.title ?? "").trim() || humanizeStem(getBaseName(path)) || getBaseName(path),
+          summary: String(item?.summary ?? "").trim(),
+          updatedAt: Number.isFinite(Number(item?.updatedAt)) ? Math.max(0, Math.floor(Number(item.updatedAt))) : 0,
+          keywords: coerceStringArray(item?.keywords),
+        };
+        return normalized;
+      })
+      .filter((item: FileSummaryV1 | null): item is FileSummaryV1 => Boolean(item)),
+  );
+  return {
+    version: 1,
+    rootDir,
+    updatedAt: Number.isFinite(Number(data.updatedAt)) ? Math.max(0, Math.floor(Number(data.updatedAt))) : 0,
+    projectKind,
+    files,
+  };
 }
 
 function compactJsonWithinLimit<T extends Record<string, unknown>>(payload: T, maxChars: number, shrinkKeys?: string[]) {

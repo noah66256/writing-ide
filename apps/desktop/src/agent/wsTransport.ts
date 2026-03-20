@@ -251,6 +251,17 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
 
   let currentAssistantId: string | null = null;
   const subAgentBubbles = new Map<string, string>();
+  const finishAssistantBubble = (stepId?: string | null) => {
+    const id = String(stepId ?? "").trim();
+    if (!id) return;
+    finishAssistant(id);
+    if (currentAssistantId === id) currentAssistantId = null;
+  };
+  const finishOpenAssistantBubbles = () => {
+    finishAssistantBubble(currentAssistantId);
+    for (const [, bid] of subAgentBubbles) finishAssistantBubble(bid);
+    subAgentBubbles.clear();
+  };
   const runStartStepCount = (rt.getSteps() ?? []).length;
   let runDoneNote = "";
   let sawMaxTurnsExceeded = false;
