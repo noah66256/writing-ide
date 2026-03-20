@@ -172,6 +172,7 @@ declare global {
         list: () => Promise<any[]>;
         errors: () => Promise<Array<{ dirName: string; error: string; ts: number }>>;
         reload: () => Promise<any[]>;
+        setProjectRoots?: (roots: string[]) => Promise<any[]>;
         openDir: () => Promise<{ ok: boolean }>;
         onChange: (handler: (payload: { manifests: any[]; errors: Array<{ dirName: string; error: string; ts: number }> } | any[]) => void) => () => void;
       };

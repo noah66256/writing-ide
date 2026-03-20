@@ -15,6 +15,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
+import os from "node:os";
 import YAML from "yaml";
 
 // ── 常量 ─────────────────────────────────────────
@@ -27,6 +28,53 @@ const CONTEXT_PROMPT_FILE = "context-prompt.md";
 
 const VALID_TRIGGER_WHEN = new Set(["has_style_library", "run_intent_in", "mode_in", "text_regex"]);
 const VALID_MCP_TRANSPORT = new Set(["stdio", "streamable-http", "sse"]);
+const CLAUDE_TOOL_ALIAS_MAP = new Map([
+  ["read", "read"],
+  ["write", "write"],
+  ["edit", "edit"],
+  ["glob", "project.searchPaths"],
+  ["grep", "project.search"],
+  ["bash", "shell.exec"],
+  ["webfetch", "web.fetch"],
+  ["task", "spawn_agent"],
+]);
+const KNOWN_MANIFEST_KEYS = new Set([
+  "id",
+  "name",
+  "title",
+  "displayName",
+  "description",
+  "priority",
+  "stageKey",
+  "autoEnable",
+  "trigger",
+  "activationMode",
+  "kind",
+  "triggers",
+  "toolCaps",
+  "policies",
+  "conflicts",
+  "requires",
+  "mcp",
+  "builtin",
+  "workflow",
+  "pipeline",
+  "ui",
+  "promptFragments",
+  "contextPrompt",
+  "version",
+  "license",
+  "argumentHint",
+  "disableModelInvocation",
+  "userInvocable",
+  "allowedTools",
+  "model",
+  "context",
+  "agent",
+  "hooks",
+  "inputSchema",
+  "portable",
+]);
 
 /** debounce 延迟（ms），避免批量文件操作触发大量重载 */
 const RELOAD_DEBOUNCE_MS = 200;
@@ -55,6 +103,10 @@ function deepClone(v) {
   return JSON.parse(JSON.stringify(v));
 }
 
+function uniq(arr) {
+  return Array.from(new Set(arr.filter(Boolean)));
+}
+
 // kebab-case → camelCase 键名转换
 function toCamelKey(k) {
   return String(k ?? "").replace(/-([a-zA-Z0-9])/g, (_, c) => c.toUpperCase());
@@ -69,6 +121,106 @@ function normalizeKeysDeep(v) {
     out[toCamelKey(k)] = normalizeKeysDeep(val);
   }
   return out;
+}
+
+function normalizeProjectRoots(projectRoots) {
+  return uniq(
+    (Array.isArray(projectRoots) ? projectRoots : [])
+      .map((root) => String(root ?? "").trim())
+      .filter(Boolean)
+      .map((root) => path.resolve(root)),
+  );
+}
+
+function buildProjectSkillRoots(projectRoots) {
+  return normalizeProjectRoots(projectRoots).flatMap((root) => [
+    path.join(root, ".claude", "skills"),
+    path.join(root, ".agents", "skills"),
+  ]);
+}
+
+function buildScanRoots(primaryRoot, projectRoots = []) {
+  return uniq([
+    path.resolve(String(primaryRoot ?? "")),
+    path.join(os.homedir(), ".claude", "skills"),
+    path.join(os.homedir(), ".agents", "skills"),
+    ...buildProjectSkillRoots(projectRoots),
+  ]);
+}
+
+function arraysEqual(a, b) {
+  if (a === b) return true;
+  if (!Array.isArray(a) || !Array.isArray(b)) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function toPortableSkillId(raw) {
+  const text = norm(raw);
+  if (!text) return "";
+  const normalized = text
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}._-]+/gu, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-_.]+|[-_.]+$/g, "");
+  return normalized;
+}
+
+function normalizeAllowedTools(raw) {
+  return Array.isArray(raw) ? raw.map((x) => norm(x)).filter(Boolean).slice(0, 100) : [];
+}
+
+function normalizePortableToolName(raw) {
+  const text = norm(raw);
+  if (!text) return "";
+  const base = text.replace(/\(.*$/, "").trim();
+  return base.toLowerCase();
+}
+
+function mapPortableAllowedTools(allowedTools) {
+  const out = [];
+  for (const item of allowedTools) {
+    const mapped = CLAUDE_TOOL_ALIAS_MAP.get(normalizePortableToolName(item));
+    if (mapped) out.push(mapped);
+  }
+  return uniq(out);
+}
+
+function isPortableSkillLike(raw) {
+  if (!isObj(raw)) return false;
+  if (
+    raw.allowedTools != null ||
+    raw.argumentHint != null ||
+    raw.disableModelInvocation != null ||
+    raw.userInvocable != null ||
+    raw.inputSchema != null ||
+    raw.context != null ||
+    raw.agent != null ||
+    raw.hooks != null ||
+    raw.license != null
+  ) {
+    return true;
+  }
+  const hasRuntimeSpecificFields =
+    raw.toolCaps != null ||
+    raw.workflow != null ||
+    raw.pipeline != null ||
+    (Array.isArray(raw.triggers) && raw.triggers.length > 0);
+  return !hasRuntimeSpecificFields;
+}
+
+function extractVendorMetadata(raw) {
+  if (!isObj(raw)) return undefined;
+  const out = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (KNOWN_MANIFEST_KEYS.has(k)) continue;
+    out[k] = v;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 // 解析 SKILL.md：frontmatter + body
@@ -105,7 +257,7 @@ function buildManifestInputFromFrontmatter(frontmatter, dirName) {
   const out = { ...fm };
 
   const idFromName = norm(out.name);
-  const id = norm(out.id) || idFromName || norm(dirName);
+  const id = norm(out.id) || toPortableSkillId(dirName) || toPortableSkillId(idFromName) || norm(dirName) || idFromName;
   if (!id) throw new Error("SKILL_ID_REQUIRED");
   out.id = id;
 
@@ -224,7 +376,12 @@ function parseManifest(raw, skillDir, fallbackId) {
   const description = norm(raw.description) || name;
   const priority = finiteNum(raw.priority, 50);
   const stageKey = norm(raw.stageKey) || `agent.skill.user.${id}`;
-  const autoEnable = typeof raw.autoEnable === "boolean" ? raw.autoEnable : true;
+  const portable = typeof raw.portable === "boolean" ? raw.portable : isPortableSkillLike(raw);
+  const hasStructuredTriggers = Array.isArray(raw.triggers) && raw.triggers.length > 0;
+  const disableModelInvocation = typeof raw.disableModelInvocation === "boolean" ? raw.disableModelInvocation : undefined;
+  const autoEnable = typeof raw.autoEnable === "boolean"
+    ? (disableModelInvocation ? false : raw.autoEnable)
+    : (hasStructuredTriggers ? true : portable ? false : true);
 
   // triggers
   if (raw.triggers != null && !Array.isArray(raw.triggers)) {
@@ -260,6 +417,12 @@ function parseManifest(raw, skillDir, fallbackId) {
       if (deny.length) toolCaps.denyTools = deny;
     }
   }
+  const allowedTools = normalizeAllowedTools(raw.allowedTools);
+  const mappedAllowedTools = mapPortableAllowedTools(allowedTools);
+  if (mappedAllowedTools.length) {
+    toolCaps = toolCaps ?? {};
+    toolCaps.allowTools = uniq([...(Array.isArray(toolCaps.allowTools) ? toolCaps.allowTools : []), ...mappedAllowedTools]);
+  }
 
   const version = norm(raw.version) || "1.0.0";
   const conflicts = normArr(raw.conflicts);
@@ -273,6 +436,15 @@ function parseManifest(raw, skillDir, fallbackId) {
 
   const kind = norm(raw.kind) || undefined;
   const activationMode = norm(raw.activationMode) || undefined;
+  const license = norm(raw.license) || undefined;
+  const argumentHint = norm(raw.argumentHint) || undefined;
+  const userInvocable = typeof raw.userInvocable === "boolean" ? raw.userInvocable : undefined;
+  const model = norm(raw.model) || undefined;
+  const context = norm(raw.context) || undefined;
+  const agent = norm(raw.agent) || undefined;
+  const hooks = raw.hooks !== undefined ? raw.hooks : undefined;
+  const inputSchema = raw.inputSchema !== undefined ? raw.inputSchema : undefined;
+  const vendorMetadata = extractVendorMetadata(raw);
 
   return {
     id, name, description, priority, stageKey, autoEnable,
@@ -286,6 +458,18 @@ function parseManifest(raw, skillDir, fallbackId) {
     source: "user",   // 外部扩展强制标记为 user
     ...(typeof raw.builtin === "boolean" ? { builtin: raw.builtin } : {}),
     ...(mcp ? { mcp } : {}),
+    ...(license ? { license } : {}),
+    ...(argumentHint ? { argumentHint } : {}),
+    ...(typeof disableModelInvocation === "boolean" ? { disableModelInvocation } : {}),
+    ...(typeof userInvocable === "boolean" ? { userInvocable } : {}),
+    ...(allowedTools.length ? { allowedTools } : {}),
+    ...(model ? { model } : {}),
+    ...(context ? { context } : {}),
+    ...(agent ? { agent } : {}),
+    ...(hooks !== undefined ? { hooks } : {}),
+    ...(inputSchema !== undefined ? { inputSchema } : {}),
+    ...(vendorMetadata ? { vendorMetadata } : {}),
+    ...(portable ? { portable } : {}),
     ...(isObj(raw.workflow) ? { workflow: raw.workflow } : {}),
     ...(isObj(raw.pipeline) ? { pipeline: raw.pipeline } : {}),
     ui: { badge, ...(color ? { color } : {}) },
@@ -405,14 +589,16 @@ export class SkillLoader {
    */
   constructor(userDataPath) {
     this.rootDir = path.join(String(userDataPath), SKILLS_DIR);
+    this._projectRoots = [];
+    this.scanRoots = buildScanRoots(this.rootDir, this._projectRoots);
     /** @type {LoadedSkill[]} */
     this._skills = [];
     /** @type {Array<{dirName:string, error:string, ts:number}>} */
     this._errors = [];
     /** @type {Set<(event:any)=>void>} */
     this._listeners = new Set();
-    /** @type {import("node:fs").FSWatcher|null} */
-    this._rootWatcher = null;
+    /** @type {Map<string, import("node:fs").FSWatcher>} */
+    this._rootWatchers = new Map();
     /** @type {Map<string, import("node:fs").FSWatcher>} */
     this._dirWatchers = new Map();
     this._reloadTimer = null;
@@ -442,17 +628,23 @@ export class SkillLoader {
     // 确保 skills 目录存在
     await fsp.mkdir(this.rootDir, { recursive: true });
 
-    const dirNames = await this._listDirs();
+    const roots = Array.isArray(this.scanRoots) && this.scanRoots.length ? this.scanRoots.slice() : buildScanRoots(this.rootDir, this._projectRoots);
+    const rootEntries = [];
     const nextSkills = [];
     const nextErrors = [];
 
-    for (const dirName of dirNames) {
-      try {
-        const loaded = await loadOne(this.rootDir, dirName);
-        if (loaded) nextSkills.push(loaded);
-      } catch (e) {
-        nextErrors.push({ dirName, error: String(e?.message ?? e), ts: Date.now() });
-        console.warn(`[SkillLoader] load failed: ${dirName} — ${e?.message ?? e}`);
+    for (const root of roots) {
+      const dirNames = await this._listDirs(root);
+      rootEntries.push({ root, dirNames });
+      for (const dirName of dirNames) {
+        try {
+          const loaded = await loadOne(root, dirName);
+          if (loaded) nextSkills.push(loaded);
+        } catch (e) {
+          const label = `${dirName} @ ${root}`;
+          nextErrors.push({ dirName: label, error: String(e?.message ?? e), ts: Date.now() });
+          console.warn(`[SkillLoader] load failed: ${label} — ${e?.message ?? e}`);
+        }
       }
     }
 
@@ -472,10 +664,29 @@ export class SkillLoader {
     this._errors = nextErrors;
 
     // 同步子目录 watcher
-    if (this._watching) this._syncDirWatchers(dirNames);
+    if (this._watching) {
+      this._syncRootWatchers(roots);
+      this._syncDirWatchers(rootEntries);
+    }
 
     this._emit();
     return this.getSkills();
+  }
+
+  /**
+   * 同步当前项目根目录，用于发现项目级 .claude/skills / .agents/skills。
+   * @param {string[]} projectRoots
+   * @returns {Promise<LoadedSkill[]>}
+   */
+  async setProjectRoots(projectRoots = []) {
+    const nextProjectRoots = normalizeProjectRoots(projectRoots);
+    const nextScanRoots = buildScanRoots(this.rootDir, nextProjectRoots);
+    if (arraysEqual(nextProjectRoots, this._projectRoots) && arraysEqual(nextScanRoots, this.scanRoots)) {
+      return this.getSkills();
+    }
+    this._projectRoots = nextProjectRoots;
+    this.scanRoots = nextScanRoots;
+    return this.reload();
   }
 
   /** 获取已加载的 skill 列表（深拷贝） */
@@ -507,8 +718,10 @@ export class SkillLoader {
       clearTimeout(this._reloadTimer);
       this._reloadTimer = null;
     }
-    try { this._rootWatcher?.close(); } catch { /* */ }
-    this._rootWatcher = null;
+    for (const w of this._rootWatchers.values()) {
+      try { w.close(); } catch { /* */ }
+    }
+    this._rootWatchers.clear();
     for (const w of this._dirWatchers.values()) {
       try { w.close(); } catch { /* */ }
     }
@@ -525,10 +738,10 @@ export class SkillLoader {
     }
   }
 
-  async _listDirs() {
+  async _listDirs(rootDir = this.rootDir) {
     let entries;
     try {
-      entries = await fsp.readdir(this.rootDir, { withFileTypes: true });
+      entries = await fsp.readdir(rootDir, { withFileTypes: true });
     } catch {
       return [];
     }
@@ -538,32 +751,54 @@ export class SkillLoader {
       .sort();
   }
 
-  _startRootWatcher() {
-    if (this._rootWatcher) return;
-    try {
-      this._rootWatcher = fs.watch(this.rootDir, () => this._scheduleReload());
-    } catch (e) {
-      console.warn(`[SkillLoader] root watcher failed: ${e?.message}`);
+  _syncRootWatchers(roots) {
+    const next = new Set(roots);
+    for (const [root, w] of this._rootWatchers) {
+      if (!next.has(root)) {
+        try { w.close(); } catch { /* */ }
+        this._rootWatchers.delete(root);
+      }
+    }
+    for (const root of next) {
+      if (this._rootWatchers.has(root)) continue;
+      try {
+        const w = fs.watch(root, () => this._scheduleReload());
+        this._rootWatchers.set(root, w);
+      } catch (e) {
+        // 非主目录允许不存在；此时仅跳过 watcher
+        if (root === this.rootDir) {
+          console.warn(`[SkillLoader] root watcher failed: ${e?.message}`);
+        }
+      }
     }
   }
 
-  _syncDirWatchers(dirNames) {
-    const next = new Set(dirNames);
-    // 移除不再存在的
-    for (const [name, w] of this._dirWatchers) {
-      if (!next.has(name)) {
+  _startRootWatcher() {
+    this._syncRootWatchers(Array.isArray(this.scanRoots) ? this.scanRoots : [this.rootDir]);
+  }
+
+  _syncDirWatchers(rootEntries) {
+    const next = new Set(
+      (Array.isArray(rootEntries) ? rootEntries : []).flatMap(({ root, dirNames }) =>
+        (Array.isArray(dirNames) ? dirNames : []).map((name) => `${root}::${name}`),
+      ),
+    );
+    for (const [key, w] of this._dirWatchers) {
+      if (!next.has(key)) {
         try { w.close(); } catch { /* */ }
-        this._dirWatchers.delete(name);
+        this._dirWatchers.delete(key);
       }
     }
-    // 添加新的
-    for (const name of next) {
-      if (this._dirWatchers.has(name)) continue;
-      try {
-        const w = fs.watch(path.join(this.rootDir, name), () => this._scheduleReload());
-        this._dirWatchers.set(name, w);
-      } catch (e) {
-        console.warn(`[SkillLoader] dir watcher failed: ${name} — ${e?.message}`);
+    for (const { root, dirNames } of Array.isArray(rootEntries) ? rootEntries : []) {
+      for (const name of Array.isArray(dirNames) ? dirNames : []) {
+        const key = `${root}::${name}`;
+        if (this._dirWatchers.has(key)) continue;
+        try {
+          const w = fs.watch(path.join(root, name), () => this._scheduleReload());
+          this._dirWatchers.set(key, w);
+        } catch (e) {
+          console.warn(`[SkillLoader] dir watcher failed: ${name} @ ${root} — ${e?.message}`);
+        }
       }
     }
   }

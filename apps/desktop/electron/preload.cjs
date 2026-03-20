@@ -279,6 +279,9 @@ contextBridge.exposeInMainWorld("desktop", {
     reload() {
       return ipcRenderer.invoke("skills.reload");
     },
+    setProjectRoots(roots) {
+      return ipcRenderer.invoke("skills.setProjectRoots", roots);
+    },
     openDir() {
       return ipcRenderer.invoke("skills.openDir");
     },

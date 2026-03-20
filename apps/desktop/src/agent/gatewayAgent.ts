@@ -61,6 +61,7 @@ export type GatewayRunArgs = {
   prompt: string;
   opMode?: OpMode;
   skillRefs?: SkillRef[];
+  skillInvocations?: Array<{ id: string; arguments?: string; source?: "slash" }>;
   styleWorkflowRequested?: boolean;
   kbMentionIds?: string[];
   images?: ImageAttachment[];
@@ -2759,6 +2760,7 @@ export function startGatewayRun(args: {
   prompt: string;
   opMode?: OpMode;
   skillRefs?: SkillRef[];
+  skillInvocations?: Array<{ id: string; arguments?: string; source?: "slash" }>;
   styleWorkflowRequested?: boolean;
   kbMentionIds?: string[];
   images?: ImageAttachment[];

@@ -29,7 +29,11 @@ export function SlashPopover({ query, visible, onSelect, onClose }: Props) {
     [externalSkills],
   );
   const enabledSkills = useMemo(
-    () => allSkills.filter((sk) => skillOverrides[sk.id]?.enabled ?? sk.autoEnable),
+    () =>
+      allSkills.filter((sk) =>
+        (skillOverrides[sk.id]?.enabled ?? true) &&
+        sk.userInvocable !== false,
+      ),
     [allSkills, skillOverrides],
   );
 
@@ -43,10 +47,10 @@ export function SlashPopover({ query, visible, onSelect, onClose }: Props) {
           item: {
             id: sk.id,
             type: "skill" as const,
-            label: sk.name,
+            label: `/${sk.id}`,
             icon: <Sparkles size={14} />,
           },
-          desc: `${sk.ui.badge} · ${sk.description}`,
+          desc: `${sk.ui.badge} · ${sk.description}${sk.argumentHint ? ` · 参数：${sk.argumentHint}` : ""}`,
           searchText: `${sk.id} ${sk.name} ${sk.description} ${sk.ui.badge}`.toLowerCase(),
         }))
         .filter((e) => !q || e.searchText.includes(q)),

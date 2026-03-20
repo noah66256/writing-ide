@@ -23,6 +23,7 @@ import "./state/fontScaleStore"; // side-effect: apply font scale on load
 export default function App() {
   const setUpdateCheckResult = useUpdateStore((s) => s.setCheckResult);
   const setDownload = useUpdateStore((s) => s.setDownload);
+  const rootDir = useProjectStore((s) => s.rootDir);
 
   const initStatus = useAuthStore((s) => s.initStatus);
   const user = useAuthStore((s) => s.user);
@@ -50,6 +51,12 @@ export default function App() {
     if (!last) return;
     void useProjectStore.getState().loadProjectFromDisk(last);
   }, []);
+
+  useEffect(() => {
+    const skillsApi = window.desktop?.skills;
+    if (!skillsApi?.setProjectRoots) return;
+    void skillsApi.setProjectRoots(rootDir ? [rootDir] : []);
+  }, [rootDir]);
 
   // 最近项目：同步到主进程（用于动态菜单）
   const recentProjectDirs = useWorkspaceStore((s) => s.recentProjectDirs);

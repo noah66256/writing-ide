@@ -916,6 +916,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           toolSidecar,
           ...(args.images?.length ? { images: args.images } : {}),
           ...(derivedSkillRefs.length ? { skillRefs: derivedSkillRefs } : {}),
+          ...(Array.isArray(args.skillInvocations) && args.skillInvocations.length ? { skillInvocations: args.skillInvocations } : {}),
           ...(threadState
             ? {
                 threadSnapshotHint: {

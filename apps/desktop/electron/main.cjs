@@ -3421,6 +3421,11 @@ function registerIpc() {
     const skills = await skillLoader.reload();
     return skills.map((s) => s.manifest);
   });
+  ipcMain.handle("skills.setProjectRoots", async (_event, roots) => {
+    if (!skillLoader) return [];
+    const skills = await skillLoader.setProjectRoots(Array.isArray(roots) ? roots : []);
+    return skills.map((s) => s.manifest);
+  });
   ipcMain.handle("skills.openDir", async () => {
     if (!skillLoader) return { ok: false };
     try { await shell.openPath(skillLoader.rootDir); return { ok: true }; } catch { return { ok: false }; }

@@ -1144,7 +1144,15 @@ export function ChatArea() {
   }, []);
 
   const handleSend = useCallback(
-    async (text: string, meta?: { mentions?: Array<{ id: string; label: string; type: string }>; files?: File[] }) => {
+    async (
+      text: string,
+      meta?: {
+        mentions?: Array<{ id: string; label: string; type: string }>;
+        files?: File[];
+        promptOverride?: string;
+        skillInvocations?: Array<{ id: string; arguments?: string; source?: "slash" }>;
+      },
+    ) => {
       const imageFiles = (meta?.files ?? []).filter((f) => String(f.type ?? "").startsWith("image/"));
       const images = (
         await Promise.all(imageFiles.map((f) => fileToImageAttachment(f)))
@@ -1198,7 +1206,7 @@ export function ChatArea() {
       }
 
       const gatewayUrl = getGatewayBaseUrl();
-      const cleanPromptRaw = text;
+      const cleanPromptRaw = typeof meta?.promptOverride === "string" ? meta.promptOverride : text;
       const currentThread = useRunStore.getState().thread;
       const shouldStartFreshWritingBoundary =
         mode === "agent" &&
@@ -1293,6 +1301,7 @@ export function ChatArea() {
         gatewayUrl, mode, model, prompt: cleanPrompt, opMode,
         ...(images.length ? { images } : {}),
         ...(effectiveSkillRefs.length ? { skillRefs: effectiveSkillRefs } : {}),
+        ...(meta?.skillInvocations?.length ? { skillInvocations: meta.skillInvocations } : {}),
         ...(styleRequested ? { styleWorkflowRequested: true } : {}),
         ...(kbMentionIds?.length ? { kbMentionIds } : {}),
         ...(runConvId ? { convId: runConvId } : {}),

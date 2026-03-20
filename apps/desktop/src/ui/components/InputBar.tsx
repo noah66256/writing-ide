@@ -16,10 +16,12 @@ import { useRunStore } from "@/state/runStore";
 import { useModelStore, type AvailableModel } from "@/state/modelStore";
 import { buildCurrentSnapshot, useConversationStore } from "@/state/conversationStore";
 import { useWorkspaceStore } from "@/state/workspaceStore";
+import { useSkillStore } from "@/state/skillStore";
 import { MentionPopover, type MentionItem } from "./MentionPopover";
 import { SlashPopover } from "./SlashPopover";
 import { ModelPickerModal } from "@/components/ModelPickerModal";
 import { ProviderLogo, resolveProviderBrand } from "@/components/ProviderLogo";
+import { listRegisteredSkills, type SkillManifest } from "@ohmycrab/agent-core";
 
 // ─── 内部 AST ────────────────────────────────────────────────────────────────
 
@@ -30,7 +32,12 @@ type Segment =
 // ─── Props ───────────────────────────────────────────────────────────────────
 
 type InputBarProps = {
-  onSend: (text: string, meta?: { mentions?: MentionItem[]; files?: File[] }) => void;
+  onSend: (text: string, meta?: {
+    mentions?: MentionItem[];
+    files?: File[];
+    promptOverride?: string;
+    skillInvocations?: Array<{ id: string; arguments?: string; source?: "slash" }>;
+  }) => void;
   onStop?: () => void;
   isRunning: boolean;
   disabled?: boolean;
@@ -180,6 +187,46 @@ function filterImageFiles(files: File[]): File[] {
 
 function sanitizePastedPlainText(text: string): string {
   return String(text ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\u00A0/g, " ");
+}
+
+function normalizeSkillSlashToken(raw: string) {
+  return String(raw ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}._-]+/gu, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-_.]+|[-_.]+$/g, "");
+}
+
+function buildSkillSlashAliases(skill: SkillManifest) {
+  const aliases = new Set<string>();
+  const push = (value: string | undefined) => {
+    const token = normalizeSkillSlashToken(String(value ?? ""));
+    if (token) aliases.add(token);
+  };
+  push(String(skill.id ?? ""));
+  push(String(skill.name ?? ""));
+  return aliases;
+}
+
+function parseLeadingSkillCommand(text: string, skills: SkillManifest[]) {
+  const raw = String(text ?? "").trim();
+  if (!raw.startsWith("/")) return null;
+  const m = raw.match(/^\/([^\s/]+)(?:\s+([\s\S]*))?$/);
+  if (!m) return null;
+  const command = normalizeSkillSlashToken(String(m[1] ?? ""));
+  const args = String(m[2] ?? "").trim();
+  if (!command) return null;
+
+  const byCommand = skills.find((skill) => buildSkillSlashAliases(skill).has(command));
+  if (!byCommand) return null;
+  if (byCommand.userInvocable === false) return null;
+  return {
+    id: String(byCommand.id ?? "").trim(),
+    label: String(byCommand.name ?? byCommand.id ?? "").trim() || command,
+    arguments: args,
+    raw,
+  };
 }
 
 // ─── 光标工具函数 ─────────────────────────────────────────────────────────────
@@ -378,13 +425,13 @@ function useSegments(editorRef: RefObject<HTMLDivElement | null>) {
 
     working.deleteContents();
 
-    const chip = createChipElement(item);
-    working.insertNode(chip);
+    const textNode = document.createTextNode(`/${item.id} `);
+    working.insertNode(textNode);
 
     const sel = window.getSelection();
     if (sel) {
       const r = document.createRange();
-      r.setStartAfter(chip);
+      r.setStart(textNode, textNode.data.length);
       r.collapse(true);
       sel.removeAllRanges();
       sel.addRange(r);
@@ -422,6 +469,16 @@ export function InputBar({
   const agentDefaultModelId = useModelStore((s) => s.agentDefaultModelId);
 
   const rootDir = useProjectStore((s) => s.rootDir);
+  const externalSkills = useSkillStore((s) => s.externalSkills);
+  const skillOverrides = useSkillStore((s) => s.skillOverrides);
+  const enabledSlashSkills = useMemo(
+    () =>
+      [...listRegisteredSkills(), ...externalSkills].filter((skill) =>
+        (skillOverrides[String(skill?.id ?? "").trim()]?.enabled ?? true) &&
+        skill.userInvocable !== false,
+      ),
+    [externalSkills, skillOverrides],
+  );
   const projectName = useMemo(() => {
     if (!rootDir) return "";
     const normalized = rootDir.replace(/[\\/]+$/g, "");
@@ -669,11 +726,30 @@ export function InputBar({
     const normalizedText = text.trim();
     if (!normalizedText && mentions.length === 0 && droppedFiles.length === 0) return;
 
-    const uniqueMentions = dedupeMentions(mentions);
+    const slashSkillCommand = parseLeadingSkillCommand(normalizedText, enabledSlashSkills);
+    const uniqueMentions = dedupeMentions(
+      slashSkillCommand
+        ? [
+            ...mentions,
+            {
+              id: slashSkillCommand.id,
+              type: "skill" as const,
+              label: slashSkillCommand.label,
+              icon: null,
+            },
+          ]
+        : mentions,
+    );
+    const promptOverride = slashSkillCommand ? slashSkillCommand.arguments : undefined;
+    const skillInvocations = slashSkillCommand
+      ? [{ id: slashSkillCommand.id, arguments: slashSkillCommand.arguments, source: "slash" as const }]
+      : undefined;
 
     onSend(normalizedText, {
       mentions: uniqueMentions.length > 0 ? uniqueMentions : undefined,
       files: droppedFiles.length > 0 ? droppedFiles : undefined,
+      ...(typeof promptOverride === "string" ? { promptOverride } : {}),
+      ...(skillInvocations?.length ? { skillInvocations } : {}),
     });
 
     clearEditor();
@@ -687,7 +763,7 @@ export function InputBar({
     mentionJustSelected.current = false;
 
     requestAnimationFrame(() => editorRef.current?.focus());
-  }, [segments, droppedFiles, onSend, clearEditor, conversationId]);
+  }, [segments, droppedFiles, onSend, clearEditor, conversationId, enabledSlashSkills]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLDivElement>) => {

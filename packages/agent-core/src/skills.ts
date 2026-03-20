@@ -54,6 +54,8 @@ export type SkillKind = "workflow" | "hint" | "service" | "pipeline";
 
 export type SkillActivationMode = "auto" | "explicit" | "hybrid";
 
+export type PortableSkillContextMode = "inline" | "fork";
+
 export type SkillManifest = {
   id: string;
   name: string;
@@ -81,6 +83,19 @@ export type SkillManifest = {
   mcp?: SkillMcpConfig;
   /** 是否为内置（随 app 捆绑），即使从文件系统加载也视为内置 */
   builtin?: boolean;
+  /** 兼容 Agent Skills / Claude Code 的附加字段 */
+  license?: string;
+  argumentHint?: string;
+  disableModelInvocation?: boolean;
+  userInvocable?: boolean;
+  allowedTools?: string[];
+  model?: string;
+  context?: PortableSkillContextMode | string;
+  agent?: string;
+  hooks?: unknown;
+  inputSchema?: unknown;
+  vendorMetadata?: Record<string, unknown>;
+  portable?: boolean;
   /** 可选：声明式 Workflow 配置（phases / exclusions / followUp） */
   workflow?: import("./workflowPhaseInterpreter.js").WorkflowDeclaration;
   /** 可选：Pipeline 配置（kind=pipeline 使用） */

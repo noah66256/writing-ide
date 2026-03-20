@@ -409,6 +409,64 @@ function parseSkillRefs(raw: unknown): SkillRef[] {
     .filter((item) => item.id);
 }
 
+function parseSkillInvocations(raw: unknown): Array<{ id: string; arguments?: string; source?: string }> {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((item) => item && typeof item === "object")
+    .map((item: any) => ({
+      id: String(item?.id ?? "").trim(),
+      arguments: typeof item?.arguments === "string" ? item.arguments : undefined,
+      source: typeof item?.source === "string" ? item.source : undefined,
+    }))
+    .filter((item) => item.id);
+}
+
+function buildSkillToolAliasNotice(manifest: any): string {
+  const allowedTools = Array.isArray(manifest?.allowedTools) ? manifest.allowedTools.map((x: any) => String(x ?? "").trim()).filter(Boolean) : [];
+  if (!(manifest?.portable || allowedTools.length > 0)) return "";
+  return [
+    "Claude Code tool aliases in this environment:",
+    "- Read -> read",
+    "- Write -> write",
+    "- Edit -> edit",
+    "- Glob -> project.searchPaths",
+    "- Grep -> project.search",
+    "- Bash -> shell.exec",
+    "- WebFetch -> web.fetch",
+    "- Task -> spawn_agent",
+  ].join("\n");
+}
+
+function renderSkillPromptTemplate(text: string, args?: string) {
+  const raw = String(text ?? "");
+  const value = String(args ?? "");
+  if (!raw) return "";
+  return raw
+    .replace(/\$ARGUMENTS/g, value)
+    .replace(/\$1\b/g, value);
+}
+
+function formatAvailableSkillLine(manifest: any): string {
+  const id = String(manifest?.id ?? "").trim();
+  const name = String(manifest?.name ?? "").trim() || id;
+  const desc = String(manifest?.description ?? "").trim();
+  const brief = desc.length > 80 ? desc.slice(0, 80) + "…" : desc;
+  const tags: string[] = [];
+  tags.push(manifest?.autoEnable ? "自动" : "手动");
+  if (manifest?.portable) tags.push("portable");
+  if (manifest?.disableModelInvocation === true || (manifest?.portable && manifest?.autoEnable !== true)) {
+    tags.push("仅显式");
+  }
+  if (manifest?.userInvocable === false) {
+    tags.push("不可 slash");
+  } else {
+    tags.push(`/${id}`);
+  }
+  const argumentHint = String(manifest?.argumentHint ?? "").trim();
+  const argumentText = argumentHint ? ` 参数：${argumentHint.length > 40 ? `${argumentHint.slice(0, 40)}…` : argumentHint}` : "";
+  return `  - ${id}（${name}，${tags.join(" / ")}）：${brief}${argumentText}`;
+}
+
 function buildRouteDecisionV1(args: {
   routeId: string;
   mode: AgentMode;
@@ -2090,6 +2148,7 @@ const agentRunBodySchema = z.object({
   opMode: z.enum(["creative", "assistant"]).optional(),
   prompt: z.string().min(1),
   skillRefs: z.array(z.any()).max(20).optional(),
+  skillInvocations: z.array(z.any()).max(20).optional(),
   styleWorkflowRequested: z.boolean().optional(),
   builtinOverrides: z.record(z.string(), z.object({ enabled: z.boolean().optional() })).optional(),
   styleExecutionMode: z.enum(["agent_v1", "pipeline_v1"]).optional(),
@@ -2367,7 +2426,14 @@ export async function prepareAgentRun(args: {
   });
 
   const explicitSkillRefs = parseSkillRefs((body as any).skillRefs);
-  const explicitSkillIds = explicitSkillRefs.filter((item) => item.enabled !== false).map((item) => item.id);
+  const skillInvocations = parseSkillInvocations((body as any).skillInvocations);
+  const invocationBySkillId = new Map(
+    skillInvocations.map((item) => [item.id, item] as const),
+  );
+  const explicitSkillIds = Array.from(new Set([
+    ...explicitSkillRefs.filter((item) => item.enabled !== false).map((item) => item.id),
+    ...skillInvocations.map((item) => item.id),
+  ]));
   const mentionedSkillIds = explicitSkillIds;
   const mentionedSkillIdSet = new Set(mentionedSkillIds);
   const styleWorkflowRequested = Boolean((body as any).styleWorkflowRequested);
@@ -2512,14 +2578,7 @@ export async function prepareAgentRun(args: {
     const parts: string[] = [];
 
     // 1) 可用 Skill 清单——让负责人知道有哪些能力可建议用户使用
-    const availableLines = skillManifestsEffective.map((m: any) => {
-      const id = String(m?.id ?? "").trim();
-      const name = String(m?.name ?? "").trim() || id;
-      const desc = String(m?.description ?? "").trim();
-      const brief = desc.length > 80 ? desc.slice(0, 80) + "…" : desc;
-      const mode0 = m?.autoEnable ? "自动" : "手动";
-      return `  - ${id}（${name}，${mode0}）：${brief}`;
-    });
+    const availableLines = skillManifestsEffective.map((m: any) => formatAvailableSkillLine(m));
     if (availableLines.length) {
       parts.push(`【可用 Skills】共 ${availableLines.length} 个已注册能力：\n${availableLines.join("\n")}`);
     }
@@ -2529,7 +2588,9 @@ export async function prepareAgentRun(args: {
       const frags = activeSkillIds
         .map((id: string) => {
           const m: any = skillManifestById.get(id);
-          return String(m?.promptFragments?.system ?? "").trim();
+          const rendered = renderSkillPromptTemplate(String(m?.promptFragments?.system ?? "").trim(), invocationBySkillId.get(id)?.arguments);
+          const aliasNotice = buildSkillToolAliasNotice(m);
+          return [aliasNotice, rendered].filter(Boolean).join("\n\n").trim();
         })
         .filter(Boolean);
       const header = `【Active Skills】${activeSkillIds.join(", ")}（stageKey=${stageKeyForRun}）`;
