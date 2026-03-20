@@ -779,6 +779,11 @@ function executeToolsSearchOnGateway(args: {
           activationMode: card.activationMode,
           autoEnable: card.autoEnable,
           userInvocable: card.userInvocable,
+          portable: card.portable,
+          disableModelInvocation: card.disableModelInvocation,
+          slashCommand: card.slashCommand,
+          argumentHint: card.argumentHint,
+          allowedTools: card.allowedTools,
         }),
   }));
   const looksToolSpecificQuery = /(?:^|[\s`"'（(])(mcp\.|run\.|web\.|kb\.|tools\.|read\b|write\b|edit\b|delete\b|spawn_agent|send_input|wait_agent|resume_agent|close_agent)/i.test(query);
@@ -900,6 +905,11 @@ function executeToolsDescribeOnGateway(args: {
         source: card.source,
         autoEnable: card.autoEnable,
         userInvocable: card.userInvocable,
+        portable: card.portable,
+        disableModelInvocation: card.disableModelInvocation,
+        slashCommand: card.slashCommand ?? null,
+        argumentHint: card.argumentHint ?? null,
+        allowedTools: card.allowedTools,
         tags: card.tags,
         examples: card.examples,
         requires: card.requires,

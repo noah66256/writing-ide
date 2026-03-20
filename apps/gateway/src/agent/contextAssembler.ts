@@ -507,7 +507,18 @@ function buildCapabilitySummaryMessage(args: BuildAssembledContextArgs): string 
   if (skillCards.length > 0) {
     lines.push("- 可按需激活的 Skills（未激活）：");
     for (const card of skillCards.slice(0, 6)) {
-      lines.push(`- ${card.id}：${card.title}；${card.summary}`);
+      const invokeParts: string[] = [];
+      if (card.slashCommand) invokeParts.push(card.slashCommand);
+      if (card.argumentHint) invokeParts.push(`参数：${card.argumentHint}`);
+      if (card.portable) invokeParts.push("portable");
+      if (card.disableModelInvocation) invokeParts.push("仅显式");
+      if (!card.userInvocable) invokeParts.push("不可 slash");
+      if (card.allowedTools.length > 0) {
+        invokeParts.push(`allowed-tools=${card.allowedTools.slice(0, 4).join(", ")}${card.allowedTools.length > 4 ? "…" : ""}`);
+      }
+      lines.push(
+        `- ${card.id}：${card.title}；${card.summary}${invokeParts.length > 0 ? `；${invokeParts.join(" / ")}` : ""}`,
+      );
     }
   }
   if (mcpCards.length > 0 || skillCards.length > 0) {

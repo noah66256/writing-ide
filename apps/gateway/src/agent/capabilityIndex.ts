@@ -44,6 +44,11 @@ export type SkillCard = SearchableCardBase & {
   conflicts: string[];
   autoEnable: boolean;
   userInvocable: boolean;
+  portable: boolean;
+  disableModelInvocation: boolean;
+  slashCommand?: string;
+  argumentHint?: string;
+  allowedTools: string[];
   promptSummary?: string;
   workflowSummary?: string;
 };
@@ -208,6 +213,12 @@ function summarizeText(text: unknown, maxChars: number): string | undefined {
   return `${s.slice(0, Math.max(0, maxChars - 1)).trim()}…`;
 }
 
+function buildSkillSlashCommand(skillId: string, userInvocable: boolean): string | undefined {
+  const id = String(skillId ?? "").trim();
+  if (!id || !userInvocable) return undefined;
+  return `/${id}`;
+}
+
 export function buildMcpCapabilityCards(args: {
   mcpCatalog: ToolCatalogEntry[];
   mcpServers?: McpSidecarServer[];
@@ -314,14 +325,28 @@ export function buildSkillCards(args: {
     })
     .map((manifest) => {
       const skillId = String(manifest.id ?? "").trim();
+      const userInvocable = manifest.userInvocable !== false;
+      const portable = manifest.portable === true;
+      const disableModelInvocation = manifest.disableModelInvocation === true || (portable && manifest.autoEnable !== true);
+      const slashCommand = buildSkillSlashCommand(skillId, userInvocable);
+      const argumentHint = summarizeText(manifest.argumentHint, 80);
+      const allowedTools = Array.isArray(manifest.allowedTools)
+        ? manifest.allowedTools.map((x) => String(x ?? "").trim()).filter(Boolean).slice(0, 12)
+        : [];
       const tags = Array.from(
         new Set([
           String(manifest.kind ?? "unknown").trim(),
           String(manifest.activationMode ?? "unknown").trim(),
+          ...(portable ? ["portable"] : []),
+          ...(disableModelInvocation ? ["explicit_only"] : []),
+          ...(userInvocable ? ["slash_invocable"] : ["slash_hidden"]),
+          ...(allowedTools.length ? allowedTools.map((name) => `allowed:${name}`) : []),
           ...(Array.isArray(manifest.policies) ? manifest.policies.map((x) => String(x ?? "").trim()) : []),
         ].filter(Boolean)),
       ).slice(0, 12);
       const examples = (() => {
+        if (slashCommand && argumentHint) return [slashCommand, `${slashCommand} ${argumentHint}`];
+        if (slashCommand) return [slashCommand];
         if (skillId === "style_imitate") return ["风格仿写", "口播稿", "按李叔风格写"];
         if (String(manifest.kind ?? "").trim() === "workflow") return ["按工作流执行", "补完整闭环"];
         return ["按需激活技能"];
@@ -352,17 +377,28 @@ export function buildSkillCards(args: {
         requires: Array.isArray(manifest.requires) ? manifest.requires.map((x) => String(x ?? "").trim()).filter(Boolean).slice(0, 8) : [],
         conflicts: Array.isArray(manifest.conflicts) ? manifest.conflicts.map((x) => String(x ?? "").trim()).filter(Boolean).slice(0, 8) : [],
         autoEnable: manifest.autoEnable !== false,
-        userInvocable: manifest.userInvocable !== false,
+        userInvocable,
+        portable,
+        disableModelInvocation,
+        ...(slashCommand ? { slashCommand } : {}),
+        ...(argumentHint ? { argumentHint } : {}),
+        allowedTools,
         tags,
         examples,
         promptSummary,
         workflowSummary,
         searchText: [
+          slashCommand,
+          argumentHint,
           skillId,
           manifest.name,
           manifest.description,
           manifest.kind,
           manifest.activationMode,
+          portable ? "portable skill" : "",
+          disableModelInvocation ? "disable model invocation" : "",
+          userInvocable ? "slash command" : "not slash invocable",
+          ...allowedTools,
           ...tags,
           ...examples,
           ...(Array.isArray(manifest.triggers) ? manifest.triggers.map((x) => JSON.stringify(x)) : []),
