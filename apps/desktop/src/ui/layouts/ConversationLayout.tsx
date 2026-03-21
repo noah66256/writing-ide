@@ -32,12 +32,18 @@ export function ConversationLayout() {
 
   // Dev/HMR/关闭窗口时容易丢失最新对话：卸载/隐藏前强制刷盘一次。
   useEffect(() => {
-    const flush = () => {
+    const flush = (mode: "background" | "shutdown") => {
       try {
         const store = useConversationStore.getState();
+        const hasHistoryState =
+          (store.conversations?.length ?? 0) > 0 ||
+          Boolean(store.activeConvId) ||
+          Boolean(store.draftSnapshot) ||
+          Boolean(store.draftSnapshotOwnerId);
+        if (!hasHistoryState) return;
         // 优先同步写盘，确保 beforeunload 期间历史能真正落到磁盘；
         // 若同步渠道不可用，则退回异步 flush。
-        if ((window as any).desktop?.history?.saveConversationsSync) {
+        if (mode === "shutdown" && (window as any).desktop?.history?.saveConversationsSync) {
           store.flushDraftSnapshotNowSync();
         } else {
           void store.flushDraftSnapshotNow().catch(() => void 0);
@@ -47,16 +53,18 @@ export function ConversationLayout() {
       }
     };
     const onVisibility = () => {
-      if (document.visibilityState === "hidden") flush();
+      if (document.visibilityState === "hidden") flush("background");
     };
-    window.addEventListener("beforeunload", flush);
-    window.addEventListener("pagehide", flush);
+    const onBeforeUnload = () => flush("shutdown");
+    const onPageHide = () => flush("background");
+    window.addEventListener("beforeunload", onBeforeUnload);
+    window.addEventListener("pagehide", onPageHide);
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
-      window.removeEventListener("beforeunload", flush);
-      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      window.removeEventListener("pagehide", onPageHide);
       document.removeEventListener("visibilitychange", onVisibility);
-      flush();
+      flush("background");
     };
   }, []);
 

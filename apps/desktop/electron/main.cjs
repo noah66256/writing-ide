@@ -1027,6 +1027,147 @@ function buildConversationIndexEntry(rawConv, previousEntry) {
   };
 }
 
+function pickNonEmptyHistoryString(nextValue, fallbackValue) {
+  const next = String(nextValue ?? "").trim();
+  if (next) return next;
+  return String(fallbackValue ?? "").trim();
+}
+
+function pickHistoryObject(nextValue, fallbackValue) {
+  const next =
+    nextValue && typeof nextValue === "object" && !Array.isArray(nextValue)
+      ? nextValue
+      : null;
+  if (next && Object.keys(next).length > 0) return next;
+  const fallback =
+    fallbackValue && typeof fallbackValue === "object" && !Array.isArray(fallbackValue)
+      ? fallbackValue
+      : null;
+  return fallback ?? nextValue ?? null;
+}
+
+function pickHistoryArray(nextValue, fallbackValue) {
+  if (Array.isArray(nextValue) && nextValue.length > 0) return nextValue;
+  if (Array.isArray(fallbackValue)) return fallbackValue;
+  return Array.isArray(nextValue) ? nextValue : [];
+}
+
+function mergeConversationSnapshotPreservingHistory(previousSnapshot, incomingSnapshot) {
+  const prev = previousSnapshot && typeof previousSnapshot === "object" ? previousSnapshot : null;
+  const incoming = incomingSnapshot && typeof incomingSnapshot === "object" ? incomingSnapshot : null;
+  if (!prev) return incoming ?? null;
+  if (!incoming) return prev;
+  return normalizeCompactSnapshot({
+    ...prev,
+    ...incoming,
+    model: pickNonEmptyHistoryString(incoming.model, prev.model),
+    opMode: incoming.opMode ?? prev.opMode,
+    mainDoc: pickHistoryObject(incoming.mainDoc, prev.mainDoc) ?? {},
+    todoList: pickHistoryArray(incoming.todoList, prev.todoList),
+    kbAttachedLibraryIds: pickHistoryArray(incoming.kbAttachedLibraryIds, prev.kbAttachedLibraryIds),
+    ctxRefs: pickHistoryArray(incoming.ctxRefs, prev.ctxRefs),
+    pendingArtifacts: pickHistoryArray(incoming.pendingArtifacts, prev.pendingArtifacts),
+    projectDir:
+      typeof incoming.projectDir === "string" && incoming.projectDir.trim()
+        ? incoming.projectDir
+        : (typeof prev.projectDir === "string" ? prev.projectDir : null),
+    dialogueSummaryByMode: pickHistoryObject(incoming.dialogueSummaryByMode, prev.dialogueSummaryByMode),
+    dialogueSummaryTurnCursorByMode: pickHistoryObject(
+      incoming.dialogueSummaryTurnCursorByMode,
+      prev.dialogueSummaryTurnCursorByMode,
+    ),
+    steps: Array.isArray(prev.steps) ? prev.steps : [],
+    logs: Array.isArray(prev.logs) ? prev.logs : [],
+    thread:
+      incoming.thread && typeof incoming.thread === "object"
+        ? incoming.thread
+        : (prev.thread && typeof prev.thread === "object" ? prev.thread : null),
+    turns: Array.isArray(prev.turns) ? prev.turns : [],
+    items: Array.isArray(prev.items) ? prev.items : [],
+    collabSessions: Array.isArray(prev.collabSessions) ? prev.collabSessions : [],
+    activeItemIds: Array.isArray(prev.activeItemIds) ? prev.activeItemIds : [],
+  });
+}
+
+function sanitizeConversationForPersist(rawConv, previousConv) {
+  const raw = rawConv && typeof rawConv === "object" ? rawConv : null;
+  if (!raw) return null;
+  const prev = previousConv && typeof previousConv === "object" ? previousConv : null;
+  const incomingSnapshot =
+    raw.snapshot && typeof raw.snapshot === "object"
+      ? normalizeCompactSnapshot(raw.snapshot)
+      : null;
+  const previousSnapshot =
+    prev?.snapshot && typeof prev.snapshot === "object"
+      ? normalizeCompactSnapshot(prev.snapshot)
+      : null;
+  const incomingStepsLen = Array.isArray(incomingSnapshot?.steps) ? incomingSnapshot.steps.length : 0;
+  const previousStepsLen = Array.isArray(previousSnapshot?.steps) ? previousSnapshot.steps.length : 0;
+  const shouldPreserveHistory =
+    Boolean(previousSnapshot) &&
+    (
+      raw.snapshotLoaded === false ||
+      (incomingSnapshot && incomingStepsLen === 0 && previousStepsLen > 0)
+    );
+  const snapshot = shouldPreserveHistory
+    ? mergeConversationSnapshotPreservingHistory(previousSnapshot, incomingSnapshot)
+    : (incomingSnapshot ?? previousSnapshot ?? null);
+  const snapshotLoaded =
+    raw.snapshotLoaded !== false ||
+    (Array.isArray(snapshot?.steps) && snapshot.steps.length > 0);
+  return {
+    ...(prev ?? {}),
+    ...raw,
+    snapshot,
+    snapshotLoaded,
+  };
+}
+
+function sanitizeHistoryPayloadForPersist(payloadObj, previousPayload) {
+  const payload = payloadObj && typeof payloadObj === "object" ? payloadObj : {};
+  const previous = previousPayload && typeof previousPayload === "object" ? previousPayload : {};
+  const allowEmptyConversations = payload.allowEmptyConversations === true;
+  const previousConversations = Array.isArray(previous.conversations) ? previous.conversations : [];
+  const previousById = new Map();
+  for (const conv of previousConversations) {
+    const id = String(conv?.id ?? "").trim();
+    if (!id) continue;
+    previousById.set(id, conv);
+  }
+
+  const nextConversations = [];
+  const rawConversations = Array.isArray(payload.conversations) ? payload.conversations : [];
+  const preservePreviousConversations =
+    !allowEmptyConversations &&
+    rawConversations.length === 0 &&
+    previousConversations.length > 0;
+  const sourceConversations = preservePreviousConversations ? previousConversations : rawConversations;
+  for (const rawConv of sourceConversations) {
+    const id = String(rawConv?.id ?? "").trim();
+    if (!id) continue;
+    const sanitized = sanitizeConversationForPersist(rawConv, previousById.get(id));
+    if (sanitized) nextConversations.push(sanitized);
+  }
+
+  const draftSnapshot =
+    payload.draftSnapshot && typeof payload.draftSnapshot === "object"
+      ? normalizeCompactSnapshot(payload.draftSnapshot)
+      : null;
+
+  return {
+    ...payload,
+    conversations: nextConversations,
+    draftSnapshot,
+    activeConvId: preservePreviousConversations ? (payload.activeConvId ?? previous.activeConvId ?? null) : (payload.activeConvId ?? null),
+    allowEmptyConversations,
+    __historyGuard: {
+      preservedPreviousConversations: preservePreviousConversations,
+      incomingConversationCount: rawConversations.length,
+      previousConversationCount: previousConversations.length,
+    },
+  };
+}
+
 function getLegacyAppDataProductNames() {
   // 兼容历史产品名/包名（含最新 ASCII 名），避免 dev/packaged 切换后"看不到历史与记忆"
   return ["OhMyCrab", "WritingIDE", "writing-ide", "写作IDE", "@writing-ide/desktop", "@ohmycrab/desktop", "Electron"];
@@ -1606,6 +1747,30 @@ async function resolveHistoryFileForWrite() {
     return { dir: fallback, file: p2, used: "fallback" };
   }
   throw new Error("NO_HISTORY_DIR");
+}
+
+async function readHistoryPayloadFile(file) {
+  const target = String(file ?? "").trim();
+  if (!target) return null;
+  try {
+    const raw = await fsp.readFile(target, "utf-8");
+    const parsed = JSON.parse(String(raw ?? ""));
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function readHistoryPayloadFileSync(file) {
+  const target = String(file ?? "").trim();
+  if (!target) return null;
+  try {
+    const raw = fs.readFileSync(target, "utf-8");
+    const parsed = JSON.parse(String(raw ?? ""));
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 async function saveConversationsV2(historyDir, payloadObj) {
@@ -3974,9 +4139,26 @@ function registerIpc() {
   ipcMain.handle("history.savePendingConversations", async (_event, payload) => {
     try {
       const { file, used } = await resolveHistoryPendingFileForWrite();
-      const text = typeof payload === "string" ? payload : JSON.stringify(payload ?? null);
+      const rawObj = typeof payload === "string" ? JSON.parse(String(payload ?? "null")) : (payload ?? {});
+      const mainHistory = await resolveHistoryFileForRead().catch(() => null);
+      const previousPayload =
+        (mainHistory?.file ? await readHistoryPayloadFile(mainHistory.file) : null) ??
+        (await readHistoryPayloadFile(file));
+      const sanitized = sanitizeHistoryPayloadForPersist(rawObj, previousPayload);
+      const guard = sanitized.__historyGuard && typeof sanitized.__historyGuard === "object" ? sanitized.__historyGuard : null;
+      const { __historyGuard: _historyGuard, allowEmptyConversations: _allowEmptyConversations, ...obj } = sanitized;
+      const text = JSON.stringify(obj ?? null);
+      if (guard?.preservedPreviousConversations) {
+        recordMainEvent("history.guard.preserve_previous_conversations", {
+          scope: "pending",
+          file,
+          incomingConversationCount: Number(guard.incomingConversationCount ?? 0) || 0,
+          previousConversationCount: Number(guard.previousConversationCount ?? 0) || 0,
+        });
+      }
       recordMainEvent("history.savePending.start", {
         file,
+        convCount: Array.isArray(obj?.conversations) ? obj.conversations.length : 0,
         bytes: Buffer.byteLength(text, "utf-8"),
       });
       const tmp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
@@ -4033,8 +4215,25 @@ function registerIpc() {
         return;
       }
       const file = path.join(dir, HISTORY_FILENAME);
-      const obj = typeof payload === "string" ? JSON.parse(String(payload ?? "null")) : (payload ?? {});
-      const text = typeof payload === "string" ? payload : JSON.stringify(obj ?? null);
+      const rawObj = typeof payload === "string" ? JSON.parse(String(payload ?? "null")) : (payload ?? {});
+      const previousPayload = readHistoryPayloadFileSync(file);
+      const sanitized = sanitizeHistoryPayloadForPersist(rawObj, previousPayload);
+      const guard = sanitized.__historyGuard && typeof sanitized.__historyGuard === "object" ? sanitized.__historyGuard : null;
+      const { __historyGuard: _historyGuard, allowEmptyConversations: _allowEmptyConversations, ...obj } = sanitized;
+      const text = JSON.stringify(obj ?? null);
+      if (guard?.preservedPreviousConversations) {
+        recordMainEvent("history.guard.preserve_previous_conversations", {
+          scope: "sync",
+          file,
+          incomingConversationCount: Number(guard.incomingConversationCount ?? 0) || 0,
+          previousConversationCount: Number(guard.previousConversationCount ?? 0) || 0,
+        });
+      }
+      recordMainEvent("history.save.sync.start", {
+        file,
+        convCount: Array.isArray(obj?.conversations) ? obj.conversations.length : 0,
+        bytes: Buffer.byteLength(text, "utf-8"),
+      });
       const bak = file + HISTORY_BAK_SUFFIX;
       try {
         fs.copyFileSync(file, bak);
@@ -4061,8 +4260,20 @@ function registerIpc() {
   ipcMain.handle("history.saveConversations", async (_event, payload) => {
     try {
       const { dir, file, used } = await resolveHistoryFileForWrite();
-      const obj = typeof payload === "string" ? JSON.parse(String(payload ?? "null")) : (payload ?? {});
-      const text = typeof payload === "string" ? payload : JSON.stringify(obj ?? null);
+      const rawObj = typeof payload === "string" ? JSON.parse(String(payload ?? "null")) : (payload ?? {});
+      const previousPayload = await readHistoryPayloadFile(file);
+      const sanitized = sanitizeHistoryPayloadForPersist(rawObj, previousPayload);
+      const guard = sanitized.__historyGuard && typeof sanitized.__historyGuard === "object" ? sanitized.__historyGuard : null;
+      const { __historyGuard: _historyGuard, allowEmptyConversations: _allowEmptyConversations, ...obj } = sanitized;
+      const text = JSON.stringify(obj ?? null);
+      if (guard?.preservedPreviousConversations) {
+        recordMainEvent("history.guard.preserve_previous_conversations", {
+          scope: "main",
+          file,
+          incomingConversationCount: Number(guard.incomingConversationCount ?? 0) || 0,
+          previousConversationCount: Number(guard.previousConversationCount ?? 0) || 0,
+        });
+      }
       recordMainEvent("history.save.start", {
         file,
         convCount: Array.isArray(obj?.conversations) ? obj.conversations.length : 0,

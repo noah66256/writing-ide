@@ -775,6 +775,30 @@ function createHistoryPlaceholderSnapshot(raw?: Partial<RunSnapshot> | null): Ru
   };
 }
 
+function mergeConversationSnapshotFromDisk(
+  current: Conversation | null,
+  incoming: RunSnapshot | null | undefined,
+  opts?: { includeSteps?: boolean },
+): { snapshot: RunSnapshot; snapshotLoaded: boolean } | null {
+  if (!incoming || typeof incoming !== "object") return null;
+  const currentSnapshot = current?.snapshot && typeof current.snapshot === "object" ? (current.snapshot as RunSnapshot) : null;
+  const merged =
+    repairConversationSnapshotForDisplay(
+      current?.id ?? null,
+      mergeSnapshotForHistory(currentSnapshot, incoming) ?? incoming,
+    ) ?? incoming;
+  const snapshotLoaded =
+    opts?.includeSteps === true ||
+    current?.snapshotLoaded !== false ||
+    getSnapshotStepsCount(merged) > 0;
+  return {
+    snapshot: snapshotLoaded
+      ? (slimSnapshotForHistory(merged) ?? merged)
+      : createHistoryPlaceholderSnapshot(merged),
+    snapshotLoaded,
+  };
+}
+
 let diskHydrated = false;
 /** 水化完成前禁止写盘，防止 hydrateFromDisk IPC 未返回时把 conversations:[] 覆盖掉已有数据 */
 let diskWriteAllowed = false;
@@ -827,6 +851,7 @@ function schedulePersistToDisk(args: {
   conversations: Conversation[];
   draftSnapshot: RunSnapshot | null;
   draftSnapshotOwnerId?: string | null;
+  allowEmptyConversations?: boolean;
 }) {
   const api = window.desktop?.history;
   if (!api?.saveConversations && !api?.savePendingConversations) return;
@@ -846,6 +871,7 @@ function schedulePersistToDisk(args: {
     draftSnapshot,
     draftSnapshotOwnerId,
     activeConvId,
+    ...(args.allowEmptyConversations === true ? { allowEmptyConversations: true } : {}),
   };
 
   // crash-safe：无论是否允许写主历史文件，都尽量先把最新 payload 写到 pending 文件。
@@ -1203,14 +1229,16 @@ export const useConversationStore = create<ConversationState>()(
           if (!res || res.ok === false || !res.snapshot || typeof res.snapshot !== "object") {
             return current?.snapshotLoaded !== false ? (current?.snapshot ?? null) : null;
           }
-          const repaired = repairConversationSnapshotForDisplay(convId, res.snapshot as RunSnapshot) ?? (res.snapshot as RunSnapshot);
-          const slim = slimSnapshotForHistory(repaired) ?? repaired;
+          const merged = mergeConversationSnapshotFromDisk(current, res.snapshot as RunSnapshot, { includeSteps });
+          if (!merged) {
+            return current?.snapshotLoaded !== false ? (current?.snapshot ?? null) : null;
+          }
           set((s) => ({
             conversations: (s.conversations ?? []).map((item) =>
-              item.id === convId ? { ...item, snapshot: slim, snapshotLoaded: true } : item,
+              item.id === convId ? { ...item, snapshot: merged.snapshot, snapshotLoaded: merged.snapshotLoaded } : item,
             ),
           }));
-          return slim;
+          return merged.snapshot;
         } catch {
           return current?.snapshotLoaded !== false ? (current?.snapshot ?? null) : null;
         }
@@ -1352,7 +1380,7 @@ export const useConversationStore = create<ConversationState>()(
         set({ draftSnapshot: nextDraft as any, draftSnapshotOwnerId: ownerId, conversations });
 
         const api = window.desktop?.history as any;
-        if (!api?.saveConversationsSync) {
+        if (!api?.saveConversationsSync || !diskWriteAllowed) {
           schedulePersistToDisk({ conversations, draftSnapshot: nextDraft as any, draftSnapshotOwnerId: ownerId });
           return;
         }
@@ -1372,7 +1400,12 @@ export const useConversationStore = create<ConversationState>()(
       },
       clearAll: () =>
         set(() => {
-          schedulePersistToDisk({ conversations: [], draftSnapshot: null, draftSnapshotOwnerId: null });
+          schedulePersistToDisk({
+            conversations: [],
+            draftSnapshot: null,
+            draftSnapshotOwnerId: null,
+            allowEmptyConversations: true,
+          });
           return { conversations: [], draftSnapshot: null, draftSnapshotOwnerId: null, activeConvId: null };
         }),
     }),
