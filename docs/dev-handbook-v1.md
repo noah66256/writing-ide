@@ -271,7 +271,7 @@ npm run dev:admin
 #### 9.1 Gateway 部署
 
 - 入口脚本：`scripts/deploy-gateway.sh`
-- 行为：push → ssh → remote `git pull` → `npm install` → `npm -w @writing-ide/gateway run build` → `pm2 restart writing-gateway` → `/api/health` 验证
+- 行为：push → ssh → remote `git pull` → workspace-scoped `npm install -w @ohmycrab/gateway -w @ohmycrab/admin-web` → `npm -w @ohmycrab/gateway run build` → `pm2 restart ohmycrab-gateway` → `/api/health` 验证
 
 #### 9.2 Admin-Web 部署（注意：需要 build + 重启）
 
@@ -405,5 +405,4 @@ Admin-Web 是静态资源 + 轻量 server：
 - 网关健康检查：`/api/health`
 - 工具配置（B 端）：Admin → 工具配置 → `Web Search / SMS Verify / Tools / Skills`
 - LOCKED 工具（永远启用）：`run.setTodoList`、`run.todo.*`、`run.mainDoc.*`（用于写作闭环锚点）
-
 

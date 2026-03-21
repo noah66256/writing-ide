@@ -155,8 +155,8 @@ path.write_text("\\n".join(out) + "\\n", encoding="utf-8")
 print("env updated:", ", ".join(sorted(want.keys())))
 PY
 
-echo "[gateway] npm install"
-npm install --no-audit --no-fund
+echo "[gateway] npm install (workspace-scoped)"
+npm install -w @ohmycrab/gateway -w @ohmycrab/admin-web --no-audit --no-fund --force
 
 echo "[gateway] build"
 npm -w @ohmycrab/gateway run build
@@ -169,4 +169,3 @@ echo "[gateway] health"
 curl -fsS -m 2 "http://127.0.0.1:${GATEWAY_PORT}/api/health" || true
 
 echo "[done] tool-call repair is enabled"
-
