@@ -63,6 +63,8 @@ export type PipelineConfigV1 = {
   steps: Record<StyleWorkflowStepIdV1, WorkflowStepConfig>;
   global: {
     effectiveInputBudgetRatio: number;
+    artifactMode?: "ref_first";
+    draftStorage?: "item_payload_only";
     stylePass: {
       mode: "full_then_chunked_fallback";
       fullPassMaxInputRatio: number;
@@ -93,6 +95,8 @@ export const STYLE_WORKFLOW_PIPELINE_CONFIG_V1: PipelineConfigV1 = {
   ],
   global: {
     effectiveInputBudgetRatio: 0.8,
+    artifactMode: "ref_first",
+    draftStorage: "item_payload_only",
     stylePass: {
       mode: "full_then_chunked_fallback",
       fullPassMaxInputRatio: 0.45,

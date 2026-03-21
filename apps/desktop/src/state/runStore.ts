@@ -164,7 +164,15 @@ export type RuntimeTaskStateV2 = {
   workflow?: {
     kind?: string;
     status?: "running" | "waiting_user" | "waiting_approval" | "done" | "failed";
+    routeId?: string;
+    intentHint?: string;
     updatedAt?: string;
+    lastEndReason?: string;
+    selectedServerIds?: string[];
+    preferredToolNames?: string[];
+    resumeAction?: Record<string, unknown> | null;
+    waiting?: Record<string, unknown> | null;
+    checkpoint?: Record<string, unknown> | null;
   } | null;
   compositeTask?: Record<string, unknown> | null;
   pendingArtifacts?: Array<{

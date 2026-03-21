@@ -62,6 +62,7 @@ export type TaskStateV2 = {
     preferredToolNames?: string[];
     resumeAction?: Record<string, unknown> | null;
     waiting?: Record<string, unknown> | null;
+    checkpoint?: Record<string, unknown> | null;
   } | null;
   compositeTask?: Record<string, unknown> | null;
   pendingArtifacts?: Array<{

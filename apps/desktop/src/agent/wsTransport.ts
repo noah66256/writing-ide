@@ -84,6 +84,70 @@ function readMemoryExtractCursor(mode: "agent" | "chat"): number {
   return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
 }
 
+function summarizeThreadSnapshotForLog(payload: any) {
+  const thread = payload?.thread && typeof payload.thread === "object" ? payload.thread : null;
+  const currentTurn = payload?.currentTurn && typeof payload.currentTurn === "object" ? payload.currentTurn : null;
+  const items = Array.isArray(payload?.items) ? payload.items : [];
+  const activeItemIds = Array.isArray(payload?.activeItemIds) ? payload.activeItemIds : [];
+  const collabSessions = Array.isArray(payload?.collabSessions) ? payload.collabSessions : [];
+  const itemTypeCounts = items.reduce((acc: Record<string, number>, item: any) => {
+    const type = String(item?.type ?? "unknown").trim() || "unknown";
+    acc[type] = (acc[type] ?? 0) + 1;
+    return acc;
+  }, {});
+  return {
+    threadId: String(thread?.id ?? "").trim() || null,
+    currentTurnId: String(currentTurn?.id ?? "").trim() || null,
+    waitingFor: thread?.waitingFor ?? null,
+    activeSkillIds: Array.isArray(thread?.activeSkillRefs)
+      ? thread.activeSkillRefs.map((item: any) => String(item?.id ?? "").trim()).filter(Boolean)
+      : [],
+    itemCount: items.length,
+    itemTypeCounts,
+    activeItemCount: activeItemIds.length,
+    collabSessionCount: collabSessions.length,
+    replaceStrategy: String(payload?.stream?.replaceStrategy ?? "").trim() || null,
+  };
+}
+
+function summarizeExecutionReportForLog(payload: any) {
+  const workflowSkills = Array.isArray(payload?.workflowSkills) ? payload.workflowSkills : [];
+  const styleWorkflow = payload?.styleWorkflow && typeof payload.styleWorkflow === "object" ? payload.styleWorkflow : null;
+  return {
+    runId: String(payload?.runId ?? "").trim() || null,
+    threadId: String(payload?.threadId ?? "").trim() || null,
+    status: String(payload?.status ?? "").trim() || null,
+    endReason: String(payload?.endReason ?? "").trim() || null,
+    toolCallCount: Number(payload?.toolCallCount ?? 0) || 0,
+    toolSuccessCount: Number(payload?.toolSuccessCount ?? 0) || 0,
+    toolFailureCount: Number(payload?.toolFailureCount ?? 0) || 0,
+    workflowSkills: workflowSkills.map((item: any) => ({
+      id: String(item?.id ?? "").trim(),
+      currentPhase: String(item?.currentPhase ?? "").trim(),
+      completed: Boolean(item?.completed),
+      degraded: Boolean(item?.degraded),
+      waitingForUser: Boolean(item?.waitingForUser),
+      missingSteps: Array.isArray(item?.missingSteps)
+        ? item.missingSteps.map((x: any) => String(x ?? "").trim()).filter(Boolean)
+        : [],
+    })).filter((item: any) => item.id),
+    styleWorkflow: styleWorkflow ? {
+      currentPhase: String(styleWorkflow?.currentPhase ?? "").trim() || null,
+      hasStyleKbHit: Boolean(styleWorkflow?.hasStyleKbHit),
+      hasBestDraft: Boolean(styleWorkflow?.bestDraft?.artifactId),
+      hasBestStyleDraft: Boolean(styleWorkflow?.bestStyleDraft?.artifactId),
+      copyLintFailCount: Number(styleWorkflow?.copyLintFailCount ?? 0) || 0,
+      styleLintFailCount: Number(styleWorkflow?.styleLintFailCount ?? 0) || 0,
+      copyGateDegraded: Boolean(styleWorkflow?.copyGateDegraded),
+      lintGateDegraded: Boolean(styleWorkflow?.lintGateDegraded),
+      finalWrittenPath: String(styleWorkflow?.finalWrittenPath ?? "").trim() || null,
+      stepArtifactRefCount: styleWorkflow?.stepArtifactRefs && typeof styleWorkflow.stepArtifactRefs === "object"
+        ? Object.keys(styleWorkflow.stepArtifactRefs).length
+        : 0,
+    } : null,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -1178,7 +1242,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           const data: any = msg.payload.data ?? {};
 
           if (event === "thread.snapshot") {
-            log("info", "thread.snapshot", data);
+            log("info", "thread.snapshot", summarizeThreadSnapshotForLog(data));
             applyThreadSnapshot(data);
             return;
           }
@@ -1325,7 +1389,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
 
           // ---- run.execution.report ----
           if (event === "run.execution.report") {
-            log("info", "run.execution.report", data);
+            log("info", "run.execution.report", summarizeExecutionReportForLog(data));
             try {
               const skills = Array.isArray((data as any)?.workflowSkills) ? (data as any).workflowSkills : [];
               const map: Record<string, { status: string; missingSteps?: string[] }> = {};

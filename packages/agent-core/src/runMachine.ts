@@ -1,5 +1,5 @@
 import type { AgentMode } from "./index.js";
-import type { PipelineArtifactsV1 } from "./styleWorkflowTypes.js";
+import type { ArtifactRefV1, StyleWorkflowStepIdV1 } from "./styleWorkflowTypes.js";
 
 export type ParsedToolCall = {
   name: string;
@@ -59,7 +59,8 @@ export type CopyLintMetaV1 = {
   sources?: { total: number; selectionIncluded: boolean; styleSampleCount: number } | null;
 };
 export type DraftCandidateV1 = {
-  text: string;
+  artifactId: string;
+  charCount: number;
   styleScore: number;
   highIssues: number;
   copy: CopyLintMetaV1 | null;
@@ -152,7 +153,7 @@ export type RunState = {
   styleLintSatisfied: boolean;
   styleLintFailCount: number;
   lintGateDegraded: boolean;
-  bestStyleDraft: null | { score: number; highIssues: number; text: string };
+  bestStyleDraft: null | { score: number; highIssues: number; artifactId: string; charCount: number };
   // V2：bestDraft（多目标）：在候选集中做“styleScore+copyRisk”选择，write 阶段强制使用它
   draftCandidatesV1: DraftCandidateV1[];
   bestDraft: DraftCandidateV1 | null;
@@ -214,7 +215,8 @@ export type RunState = {
   bestCopyScore: number | null;
   bestCopyArtifactId: string | null;
   finalWritten: boolean;
-  pipelineArtifacts: PipelineArtifactsV1 | null;
+  finalWrittenPath: string | null;
+  stepArtifactRefs: Partial<Record<StyleWorkflowStepIdV1, ArtifactRefV1>> | null;
 };
 
 export function createInitialRunState(args?: { protocolRetryBudget?: number; workflowRetryBudget?: number; lintReworkBudget?: number }): RunState {
@@ -298,7 +300,8 @@ export function createInitialRunState(args?: { protocolRetryBudget?: number; wor
     bestCopyScore: null,
     bestCopyArtifactId: null,
     finalWritten: false,
-    pipelineArtifacts: null,
+    finalWrittenPath: null,
+    stepArtifactRefs: null,
   };
 }
 

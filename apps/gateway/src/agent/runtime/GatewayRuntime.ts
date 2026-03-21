@@ -17,7 +17,6 @@ import {
   isContentWriteTool,
   isStyleExampleKbSearch,
   isWriteLikeTool,
-  looksLikeDraftText,
   parseStyleLintResult,
   checkExclusions,
   resolveFollowUp,
@@ -85,6 +84,7 @@ import { PiLoopKernel } from "./kernel/PiLoopKernel.js";
 import type { LoopKernel } from "./kernel/LoopKernel.types.js";
 import { CollabRuntime } from "./collabRuntime.js";
 import { normalizeSpawnAgentArgs } from "./collabCompat.js";
+import { runOrchestratedStyleImitate } from "../styleOrchestrator.js";
 import {
   buildPortableSkillActivationInstructions,
   collectPortableActivationToolNames,
@@ -433,80 +433,81 @@ function collectTopStyleArtifacts(output: unknown) {
     .filter((item) => item.id && item.title);
 }
 
-function ensureStylePlanningArtifacts(runState: RunState) {
-  const state = runState as any;
-  if (state.hasStylePlan && state.hasToneCard && state.hasStructureOutline) return;
-  const styleTopic = String(state.styleTopic ?? "").trim() || "当前主题";
-  const selectedStyleLibraryId = String(state.selectedStyleLibraryId ?? "").trim();
-  const evidence = state.styleEvidencePack && typeof state.styleEvidencePack === "object" ? state.styleEvidencePack : null;
-  const topTitles = Array.isArray(evidence?.topArtifacts)
-    ? evidence.topArtifacts.map((item: any) => String(item?.title ?? "").trim()).filter(Boolean).slice(0, 4)
+function summarizeStyleEvidencePack(input: unknown) {
+  const pack = input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : null;
+  if (!pack) return null;
+  const topArtifacts = Array.isArray(pack.topArtifacts)
+    ? pack.topArtifacts
+        .map((item: any) => ({
+          id: String(item?.id ?? "").trim(),
+          title: String(item?.title ?? "").trim(),
+          cardType: String(item?.cardType ?? "").trim(),
+        }))
+        .filter((item) => item.id && item.title)
+        .slice(0, 6)
     : [];
-  state.pipelineArtifacts = state.pipelineArtifacts && typeof state.pipelineArtifacts === "object"
-    ? state.pipelineArtifacts
-    : {};
-  state.pipelineArtifacts.toneCard = {
-    version: "v1",
-    scene: "topic_only",
-    stance: selectedStyleLibraryId ? `沿用风格库 ${selectedStyleLibraryId} 的表达视角` : "沿用目标风格的表达视角",
-    stanceSource: "user",
-    valuesConstraintMode: "dominant",
-    activeAnalysisLenses: [],
-    readerEffectGoal: `围绕“${styleTopic}”输出贴合目标风格的成稿`,
-    preferredFrames: topTitles,
-    forbiddenFrames: [],
-    mustPreserveClaims: [styleTopic],
-    step3GuardrailBrief: "先按结构写完整草稿，不要只模仿单个口头禅。",
-    step6ClosureBrief: "结尾回扣主题，并保持目标风格的价值落点。",
-    sourceProtection: null,
+  return {
+    query: String(pack.query ?? "").trim() || null,
+    libraryIds: Array.isArray(pack.libraryIds)
+      ? (pack.libraryIds as unknown[]).map((id) => String(id ?? "").trim()).filter(Boolean).slice(0, 8)
+      : [],
+    groupCount: Number.isFinite(Number(pack.groupCount)) ? Math.max(0, Math.floor(Number(pack.groupCount))) : 0,
+    hitCount: Number.isFinite(Number(pack.hitCount)) ? Math.max(0, Math.floor(Number(pack.hitCount))) : topArtifacts.length,
+    ...(topArtifacts.length ? { topArtifacts } : {}),
   };
-  state.pipelineArtifacts.structureOutline = {
-    version: "v1",
-    thesis: styleTopic,
-    argumentPath: {
-      openingMove: topTitles[0] || "直接破题",
-      supportChain: topTitles.slice(1),
-      closingMove: topTitles[topTitles.length - 1] || "回扣主题并完成收束",
-    },
-    sections: [
-      {
-        id: "opening",
-        role: "opening",
-        title: "开头",
-        objective: "快速立住主题与语气",
-        keyPoints: [topTitles[0] || styleTopic],
-        paragraphTarget: 1,
-      },
-      {
-        id: "body",
-        role: "body",
-        title: "主体",
-        objective: "展开核心论证与推进",
-        keyPoints: topTitles.slice(1).length ? topTitles.slice(1) : [styleTopic],
-        paragraphTarget: 3,
-      },
-      {
-        id: "closing",
-        role: "closing",
-        title: "收束",
-        objective: "完成价值回扣与结尾",
-        keyPoints: [topTitles[topTitles.length - 1] || "收束回扣"],
-        paragraphTarget: 1,
-      },
-    ],
-    transitions: [
-      {
-        fromSectionId: "opening",
-        toSectionId: "body",
-        bridge: "从开头判断转入机制拆解",
-      },
-      {
-        fromSectionId: "body",
-        toSectionId: "closing",
-        bridge: "从论证推进过渡到收束回扣",
-      },
-    ],
+}
+
+function fingerprintTextContent(text: string) {
+  return createHash("sha1").update(text).digest("hex").slice(0, 16);
+}
+
+function ensureStyleArtifactRefMap(runState: RunState) {
+  const state = runState as any;
+  const current =
+    state.stepArtifactRefs && typeof state.stepArtifactRefs === "object" && !Array.isArray(state.stepArtifactRefs)
+      ? (state.stepArtifactRefs as Record<string, unknown>)
+      : {};
+  state.stepArtifactRefs = current;
+  return current as Record<string, any>;
+}
+
+function buildStyleArtifactRef(args: {
+  stepId: string;
+  kind: string;
+  textOrSeed: string;
+  attempt?: number | null;
+}) {
+  const seed = String(args.textOrSeed ?? "").trim();
+  if (!seed) return null;
+  return {
+    artifactId: `${String(args.stepId)}_${fingerprintTextContent(seed)}`,
+    stepId: String(args.stepId),
+    kind: String(args.kind),
+    attempt: Number.isFinite(Number(args.attempt)) ? Math.max(1, Math.floor(Number(args.attempt))) : 1,
   };
+}
+
+function ensureStylePlanCheckpoint(runState: RunState, detail?: { topic?: string | null }) {
+  const state = runState as any;
+  const refs = ensureStyleArtifactRefMap(runState);
+  const topic =
+    String(detail?.topic ?? state.styleTopic ?? "").trim() ||
+    String(state.selectedStyleLibraryId ?? "").trim() ||
+    "style_plan";
+  if (!refs.tone_setting) {
+    refs.tone_setting = buildStyleArtifactRef({
+      stepId: "tone_setting",
+      kind: "tone_card",
+      textOrSeed: `tone:${topic}`,
+    });
+  }
+  if (!refs.structure) {
+    refs.structure = buildStyleArtifactRef({
+      stepId: "structure",
+      kind: "structure_outline",
+      textOrSeed: `structure:${topic}`,
+    });
+  }
   state.hasToneCard = true;
   state.hasStructureOutline = true;
   state.hasStylePlan = true;
@@ -533,23 +534,34 @@ function upsertBestDraftCandidate(args: {
   const text = String(args.text ?? "").trim();
   if (!text) return;
   const runState = args.runState as any;
+  const artifactRef = buildStyleArtifactRef({
+    stepId: "closure",
+    kind: "draft_text",
+    textOrSeed: text,
+  });
+  if (!artifactRef) return;
+  const refs = ensureStyleArtifactRefMap(args.runState);
   const current = Array.isArray(runState.draftCandidatesV1) ? runState.draftCandidatesV1 : [];
   const candidate = {
-    text,
+    artifactId: artifactRef.artifactId,
+    charCount: text.length,
     styleScore: Number.isFinite(Number(args.styleScore)) ? Number(args.styleScore) : 0,
     highIssues: Number.isFinite(Number(args.highIssues)) ? Math.max(0, Math.floor(Number(args.highIssues))) : 0,
     copy: args.copy && typeof args.copy === "object" ? args.copy : null,
   };
-  const next = [...current.filter((item: any) => String(item?.text ?? "") !== text), candidate]
+  const next = [...current.filter((item: any) => String(item?.artifactId ?? "") !== artifactRef.artifactId), candidate]
     .slice(-6)
     .sort(rankDraftCandidates);
   runState.draftCandidatesV1 = next;
   runState.bestDraft = next.length > 0 ? next[0] : null;
+  runState.hasDraftText = true;
+  refs.closure = artifactRef;
   if (candidate.styleScore > 0) {
     runState.bestStyleDraft = {
       score: candidate.styleScore,
       highIssues: candidate.highIssues,
-      text: candidate.text,
+      artifactId: artifactRef.artifactId,
+      charCount: candidate.charCount,
     };
   }
 }
@@ -558,11 +570,63 @@ function extractFinalDraftTextFromToolArgs(toolName: string, toolArgs: Record<st
   if (toolName === "write") {
     return String(toolArgs.content ?? "").trim();
   }
-  if (toolName === "edit") {
-    if (typeof toolArgs.newContent === "string") return String(toolArgs.newContent).trim();
-    if (typeof toolArgs.content === "string") return String(toolArgs.content).trim();
-  }
   return "";
+}
+
+function summarizeRunStateForExecutionReport(runState: RunState) {
+  const state = runState as any;
+  const refs =
+    state.stepArtifactRefs && typeof state.stepArtifactRefs === "object" && !Array.isArray(state.stepArtifactRefs)
+      ? Object.fromEntries(
+          Object.entries(state.stepArtifactRefs as Record<string, any>)
+            .map(([key, value]) => {
+              const ref = value && typeof value === "object" ? value : null;
+              if (!ref) return null;
+              return [
+                key,
+                {
+                  artifactId: String(ref.artifactId ?? "").trim() || null,
+                  stepId: String(ref.stepId ?? key).trim() || key,
+                  kind: String(ref.kind ?? "").trim() || null,
+                  attempt: Number.isFinite(Number(ref.attempt)) ? Math.max(1, Math.floor(Number(ref.attempt))) : 1,
+                },
+              ];
+            })
+            .filter(Boolean) as Array<[string, Record<string, unknown>]>,
+        )
+      : null;
+  return {
+    ...state,
+    styleEvidencePack: summarizeStyleEvidencePack(state.styleEvidencePack),
+    bestStyleDraft: state.bestStyleDraft
+      ? {
+          score: Number(state.bestStyleDraft.score ?? 0) || 0,
+          highIssues: Number(state.bestStyleDraft.highIssues ?? 0) || 0,
+          artifactId: String(state.bestStyleDraft.artifactId ?? "").trim() || null,
+          charCount: Number(state.bestStyleDraft.charCount ?? 0) || 0,
+        }
+      : null,
+    draftCandidatesV1: Array.isArray(state.draftCandidatesV1)
+      ? state.draftCandidatesV1.map((item: any) => ({
+          artifactId: String(item?.artifactId ?? "").trim() || null,
+          charCount: Number(item?.charCount ?? 0) || 0,
+          styleScore: Number(item?.styleScore ?? 0) || 0,
+          highIssues: Number(item?.highIssues ?? 0) || 0,
+          copy: item?.copy ?? null,
+        }))
+      : [],
+    bestDraft: state.bestDraft
+      ? {
+          artifactId: String(state.bestDraft.artifactId ?? "").trim() || null,
+          charCount: Number(state.bestDraft.charCount ?? 0) || 0,
+          styleScore: Number(state.bestDraft.styleScore ?? 0) || 0,
+          highIssues: Number(state.bestDraft.highIssues ?? 0) || 0,
+          copy: state.bestDraft.copy ?? null,
+        }
+      : null,
+    finalWrittenPath: String(state.finalWrittenPath ?? "").trim() || null,
+    stepArtifactRefs: refs,
+  };
 }
 
 /**
@@ -1824,10 +1888,7 @@ export class GatewayRuntime implements AgentRuntime {
     const gates: any = runCtx.gates ?? {};
     const activeSkills = Array.isArray(runCtx.activeSkills) ? runCtx.activeSkills : [];
     const activeSkillIds = activeSkills.map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
-    const styleWorkflowRequested = Boolean(runCtx.styleWorkflowRequested);
-    const styleSkillActive =
-      activeSkillIds.includes("style_imitate") ||
-      (styleWorkflowRequested && gates.styleGateEnabled && runCtx.intent?.isWritingTask);
+    const styleSkillActive = activeSkillIds.includes("style_imitate");
 
     if (this._isStyleWorkflowWaitingForUser({ styleSkillActive })) {
       return null;
@@ -3193,6 +3254,89 @@ export class GatewayRuntime implements AgentRuntime {
       return finalizeToolResult(await this.collabRuntime.closeAgent(toolArgs));
     }
 
+    if (toolName === "style_imitate.run") {
+      const args = toolArgs && typeof toolArgs === "object" && !Array.isArray(toolArgs)
+        ? (toolArgs as Record<string, unknown>)
+        : {};
+      const task = String(args.task ?? args.description ?? this.config.runCtx.mainDoc?.goal ?? "").trim();
+      const draft = String(args.draft ?? "").trim();
+      const outputPath = String(args.outputPath ?? "").trim();
+      const lengthHint = String(args.lengthHint ?? "").trim();
+      if (!task || !draft) {
+        return finalizeToolResult({
+          ok: false,
+          output: {
+            ok: false,
+            error: "VALIDATION_ERROR",
+            message: !task
+              ? "style_imitate.run 需要 task（写作任务描述）。"
+              : "style_imitate.run 需要 draft（候选稿文本）。",
+          },
+          executedBy: "gateway",
+        });
+      }
+
+      const execTool = async (name: string, argsForTool: Record<string, unknown>): Promise<GatewayToolExecResult> => {
+        const nestedToolCallId = `${toolCallId}::${name}:${Date.now()}`;
+        if (!this.effectiveAllowed) this.effectiveAllowed = new Set(this.config.runCtx.allowedToolNames);
+        this.effectiveAllowed.add(name);
+        const result = await this._executeAgentTool(nestedToolCallId, name, argsForTool);
+        const outputEnvelope = compactToolResultEnvelope(name, result.output);
+        this.config.runCtx.writeEvent("tool.result", {
+          toolCallId: nestedToolCallId,
+          name,
+          ok: result.ok,
+          output: outputEnvelope,
+          meta: result.meta ?? null,
+          turn: this.turn,
+        });
+        this.turnEngine.record({
+          type: "tool_result",
+          callId: nestedToolCallId,
+          name,
+          ok: result.ok,
+          output: outputEnvelope,
+          error: result.ok ? undefined : String(((result.output as any)?.error ?? "UNKNOWN_ERROR")),
+        });
+        this._updateRunState(name, argsForTool, {
+          ok: result.ok,
+          output: result.output,
+          meta: result.meta ?? null,
+          executedBy: result.executedBy,
+          dryRun: result.dryRun,
+        });
+        return result;
+      };
+
+      const orchestratorResult = await runOrchestratedStyleImitate({
+        ctx: this.config.runCtx as any,
+        runState: this.runState,
+        task: {
+          description: task,
+          draft,
+          lengthHint: lengthHint || undefined,
+          outputPathHint: outputPath || undefined,
+        },
+        executeTool: execTool,
+      });
+      return finalizeToolResult({
+        ok: orchestratorResult.ok,
+        output: orchestratorResult.ok
+          ? {
+              ok: true,
+              path: orchestratorResult.path ?? null,
+              summary: orchestratorResult.summary ?? "",
+            }
+          : {
+              ok: false,
+              error: orchestratorResult.error ?? "STYLE_ORCHESTRATOR_FAILED",
+              summary: orchestratorResult.summary ?? "",
+            },
+        meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
+        executedBy: "gateway",
+      });
+    }
+
     const decision = decideServerToolExecution({
       name: toolName,
       toolArgs,
@@ -3811,15 +3955,6 @@ export class GatewayRuntime implements AgentRuntime {
             kind: "assistant_text",
             text: sanitized.text,
           });
-
-          // 写作类任务：检测是否已产出 draft 文本（用于 style_imitate 闭环）
-          try {
-            if (this.config.runCtx.intent?.isWritingTask && looksLikeDraftText(sanitized.text)) {
-              this.runState.hasDraftText = true;
-            }
-          } catch {
-            // 兜底：intent 缺失时忽略 draft 标记
-          }
         }
         continue;
       }
@@ -4155,10 +4290,6 @@ export class GatewayRuntime implements AgentRuntime {
         if (Array.isArray((this.runState as any).styleLibraryOptionIds) && (this.runState as any).styleLibraryOptionIds.length === 0) {
           (this.runState as any).styleLibraryOptionIds = libraryIds.slice(0, 8);
         }
-        if (String((this.runState as any).styleTopic ?? "").trim()) {
-          ensureStylePlanningArtifacts(this.runState);
-        }
-
         if (this.runState.hasDraftText) {
           this.runState.hasPostDraftStyleKbSearch = true;
         }
@@ -4287,14 +4418,20 @@ export class GatewayRuntime implements AgentRuntime {
       this._recordSideEffect(toolName, toolArgs, result);
       this.runState.toolLoopGuardReason = null;
 
-      // Style_imitate：允许首轮 write/edit 作为“候选稿”，视为已产生 draft
       try {
         const gates: any = this.config.runCtx.gates ?? {};
-        if (!this.runState.hasDraftText && gates.styleGateEnabled && gates.lintGateEnabled && this.runState.hasStyleKbSearch) {
-          this.runState.hasDraftText = true;
-        }
-        if (gates.styleGateEnabled && String((this.runState as any).styleTopic ?? "").trim()) {
-          ensureStylePlanningArtifacts(this.runState);
+        const finalDraftText = extractFinalDraftTextFromToolArgs(toolName, toolArgs);
+        if (toolName === "write" && result.ok && finalDraftText && gates.styleGateEnabled && gates.lintGateEnabled && this.runState.hasStyleKbSearch) {
+          ensureStylePlanCheckpoint(this.runState, {
+            topic: String((this.runState as any).styleTopic ?? "").trim() || null,
+          });
+          upsertBestDraftCandidate({
+            runState: this.runState,
+            text: finalDraftText,
+            styleScore: (this.runState as any).lastStyleLint?.score ?? 0,
+            highIssues: (this.runState as any).lastStyleLint?.highIssues ?? 0,
+            copy: (this.runState as any).lastCopyLint ?? null,
+          });
         }
         const styleClosed = Boolean(
           this.runState.hasStyleKbSearch &&
@@ -4304,13 +4441,20 @@ export class GatewayRuntime implements AgentRuntime {
           ((this.runState as any).styleLintSatisfied || this.runState.styleLintPassed || this.runState.lintGateDegraded),
         );
         if (styleClosed) {
-          const bestDraftText = String((this.runState as any).bestDraft?.text ?? "").trim();
-          const finalDraftText = extractFinalDraftTextFromToolArgs(toolName, toolArgs);
-          (this.runState as any).finalWritten = Boolean(bestDraftText) && finalDraftText === bestDraftText;
+          const finalDraftRef = buildStyleArtifactRef({
+            stepId: "closure",
+            kind: "draft_text",
+            textOrSeed: finalDraftText,
+          });
+          const bestDraftArtifactId = String((this.runState as any).bestDraft?.artifactId ?? "").trim();
+          (this.runState as any).finalWritten = Boolean(bestDraftArtifactId) && bestDraftArtifactId === String(finalDraftRef?.artifactId ?? "").trim();
+          if ((this.runState as any).finalWritten) {
+            (this.runState as any).finalWrittenPath = String((result.output as any)?.path ?? "").trim() || null;
+          }
           if (!(this.runState as any).finalWritten) {
             (this.runState as any).finalWriteMismatch = {
               toolName,
-              reason: bestDraftText ? "best_draft_mismatch" : "best_draft_missing",
+              reason: bestDraftArtifactId ? "best_draft_mismatch" : "best_draft_missing",
               matchedBestDraft: false,
             };
           } else {
@@ -4479,10 +4623,7 @@ export class GatewayRuntime implements AgentRuntime {
 
     // Style_imitate 工作流摘要：保留旧字段，便于兼容既有审计逻辑
     const activeSkillsRaw = Array.isArray(runCtx.activeSkills) ? runCtx.activeSkills : [];
-    const styleWorkflowRequested = Boolean(runCtx.styleWorkflowRequested);
-    const styleSkillActive =
-      activeSkillsRaw.some((s: any) => String(s?.id ?? "").trim() === "style_imitate") ||
-      (styleWorkflowRequested && gates.styleGateEnabled && runCtx.intent?.isWritingTask);
+    const styleSkillActive = activeSkillsRaw.some((s: any) => String(s?.id ?? "").trim() === "style_imitate");
     const styleWorkflow = styleSkillActive && runCtx.intent?.isWritingTask
       ? {
           active: true,
@@ -4494,16 +4635,44 @@ export class GatewayRuntime implements AgentRuntime {
           topicConfirmed: Boolean((this.runState as any)?.topicConfirmed),
           styleTopic: String((this.runState as any)?.styleTopic ?? "").trim() || null,
           hasStyleKbSearch: Boolean((this.runState as any)?.hasStyleKbSearch),
-          styleEvidencePack: (this.runState as any)?.styleEvidencePack ?? null,
+          hasStyleKbHit: Boolean((this.runState as any)?.hasStyleKbHit),
+          styleEvidencePack: summarizeStyleEvidencePack((this.runState as any)?.styleEvidencePack),
           hasStylePlan: Boolean((this.runState as any)?.hasStylePlan),
           hasToneCard: Boolean((this.runState as any)?.hasToneCard),
           hasStructureOutline: Boolean((this.runState as any)?.hasStructureOutline),
           hasDraftText: Boolean((this.runState as any)?.hasDraftText),
+          draftArtifactId: String((this.runState as any)?.bestDraft?.artifactId ?? "").trim() || null,
+          draftChars: Number((this.runState as any)?.bestDraft?.charCount ?? 0) || 0,
           copyLintPassed: Boolean((this.runState as any)?.copyLintPassed),
           copyLintSatisfied: Boolean((this.runState as any)?.copyLintSatisfied),
+          copyLintFailCount: Number((this.runState as any)?.copyLintFailCount ?? 0) || 0,
+          copyGateDegraded: Boolean((this.runState as any)?.copyGateDegraded),
+          lastCopyLint:
+            (this.runState as any)?.lastCopyLint && typeof (this.runState as any).lastCopyLint === "object"
+              ? (this.runState as any).lastCopyLint
+              : null,
           styleLintPassed: Boolean((this.runState as any)?.styleLintPassed),
           styleLintSatisfied: Boolean((this.runState as any)?.styleLintSatisfied),
+          styleLintFailCount: Number((this.runState as any)?.styleLintFailCount ?? 0) || 0,
+          lintGateDegraded: Boolean((this.runState as any)?.lintGateDegraded),
+          lastStyleLint:
+            (this.runState as any)?.lastStyleLint && typeof (this.runState as any).lastStyleLint === "object"
+              ? (this.runState as any).lastStyleLint
+              : null,
+          bestStyleDraft:
+            (this.runState as any)?.bestStyleDraft && typeof (this.runState as any).bestStyleDraft === "object"
+              ? (this.runState as any).bestStyleDraft
+              : null,
+          bestDraft:
+            (this.runState as any)?.bestDraft && typeof (this.runState as any).bestDraft === "object"
+              ? (this.runState as any).bestDraft
+              : null,
           finalWritten: Boolean((this.runState as any)?.finalWritten),
+          finalWrittenPath: String((this.runState as any)?.finalWrittenPath ?? "").trim() || null,
+          stepArtifactRefs:
+            (this.runState as any)?.stepArtifactRefs && typeof (this.runState as any).stepArtifactRefs === "object"
+              ? (this.runState as any).stepArtifactRefs
+              : null,
         }
       : undefined;
     const portablePolicy = runCtx.portableSkillContext?.allowedToolPolicy ?? null;
@@ -4564,7 +4733,7 @@ export class GatewayRuntime implements AgentRuntime {
       ...(portableSkillRuntime ? { portableSkillRuntime } : {}),
       ...(styleWorkflow ? { styleWorkflow } : {}),
       transcriptSummary: summarizeTranscript(this.transcript),
-      runState: this.runState,
+      runState: summarizeRunStateForExecutionReport(this.runState),
       ...snapshot,
     };
   }

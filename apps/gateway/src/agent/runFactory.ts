@@ -55,7 +55,6 @@ import {
   parseRunTodoFromContextPack,
   resolveAllowedTools,
   normalizeWorkflow,
-  STYLE_WORKFLOW_PIPELINE_CONFIG_V1,
   type RunState,
   type StyleExecutionMode,
   type StylePipelinePayloadV1,
@@ -102,8 +101,6 @@ import {
   updateTaskState,
   updateThreadWaiting,
 } from "./runtime/threadState.js";
-import { computeStyleTurnCaps } from "./styleOrchestrator.js";
-import { PipelineExecutor } from "./pipelineExecutor.js";
 import {
   buildAssembledContextMessages,
   type AssembledContextSummary,
@@ -1536,7 +1533,226 @@ function normalizeTaskStateWorkflow(input: unknown): NonNullable<TaskStateV2["wo
     ...(preferredToolNames.length ? { preferredToolNames } : {}),
     ...(wf.resumeAction && typeof wf.resumeAction === "object" && !Array.isArray(wf.resumeAction) ? { resumeAction: wf.resumeAction as Record<string, unknown> } : {}),
     ...(wf.waiting && typeof wf.waiting === "object" && !Array.isArray(wf.waiting) ? { waiting: wf.waiting as Record<string, unknown> } : {}),
+    ...(wf.checkpoint && typeof wf.checkpoint === "object" && !Array.isArray(wf.checkpoint) ? { checkpoint: wf.checkpoint as Record<string, unknown> } : {}),
   };
+}
+
+function deriveStyleWorkflowCheckpointPhase(checkpoint: Record<string, unknown>): string {
+  const bool = (key: string) => Boolean(checkpoint[key]);
+  const copyLintAccepted = bool("copyLintSatisfied") || bool("copyLintPassed") || bool("copyGateDegraded");
+  const styleLintAccepted = bool("styleLintSatisfied") || bool("styleLintPassed") || bool("lintGateDegraded");
+  if (!bool("hasSelectedStyleLibrary")) return "need_style_library";
+  if (!bool("topicConfirmed")) return "need_topic";
+  if (!bool("hasStyleKbSearch")) return "need_style_kb";
+  if (!bool("hasStylePlan")) return "need_tone_outline";
+  if (!bool("hasDraftText")) return "need_draft";
+  if (!copyLintAccepted) return "need_copy_lint";
+  if (!styleLintAccepted) return "need_style_lint";
+  if (!bool("finalWritten")) return "need_final_write";
+  return "completed";
+}
+
+function readStyleWorkflowCheckpoint(input: unknown): Record<string, unknown> | null {
+  const workflow = input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : null;
+  const checkpoint =
+    workflow?.checkpoint && typeof workflow.checkpoint === "object" && !Array.isArray(workflow.checkpoint)
+      ? (workflow.checkpoint as Record<string, unknown>)
+      : null;
+  if (!checkpoint) return null;
+  const skillId = String(checkpoint.skillId ?? "style_imitate").trim();
+  if (skillId && skillId !== "style_imitate") return null;
+  const stepArtifactRefs =
+    checkpoint.stepArtifactRefs && typeof checkpoint.stepArtifactRefs === "object" && !Array.isArray(checkpoint.stepArtifactRefs)
+      ? Object.fromEntries(
+          Object.entries(checkpoint.stepArtifactRefs as Record<string, any>)
+            .map(([key, value]) => {
+              const ref = value && typeof value === "object" ? value : null;
+              if (!ref) return null;
+              return [
+                key,
+                {
+                  artifactId: String(ref.artifactId ?? "").trim(),
+                  stepId: String(ref.stepId ?? key).trim() || key,
+                  kind: String(ref.kind ?? "").trim(),
+                  attempt: Number.isFinite(Number(ref.attempt)) ? Math.max(1, Math.floor(Number(ref.attempt))) : 1,
+                },
+              ];
+            })
+            .filter(Boolean) as Array<[string, Record<string, unknown>]>,
+        )
+      : null;
+  const normalized: Record<string, unknown> = {
+    skillId: "style_imitate",
+    phase:
+      String(checkpoint.phase ?? "").trim() ||
+      deriveStyleWorkflowCheckpointPhase(checkpoint),
+    hasSelectedStyleLibrary: Boolean(checkpoint.hasSelectedStyleLibrary),
+    selectedStyleLibraryId: String(checkpoint.selectedStyleLibraryId ?? "").trim() || null,
+    styleLibraryOptionIds: Array.isArray(checkpoint.styleLibraryOptionIds)
+      ? (checkpoint.styleLibraryOptionIds as unknown[]).map((item) => String(item ?? "").trim()).filter(Boolean).slice(0, 8)
+      : [],
+    topicConfirmed: Boolean(checkpoint.topicConfirmed),
+    styleTopic: String(checkpoint.styleTopic ?? "").trim() || null,
+    hasStyleKbSearch: Boolean(checkpoint.hasStyleKbSearch),
+    hasStyleKbHit: Boolean(checkpoint.hasStyleKbHit),
+    styleEvidencePack:
+      checkpoint.styleEvidencePack && typeof checkpoint.styleEvidencePack === "object" && !Array.isArray(checkpoint.styleEvidencePack)
+        ? checkpoint.styleEvidencePack
+        : null,
+    hasStylePlan: Boolean(checkpoint.hasStylePlan),
+    hasToneCard: Boolean(checkpoint.hasToneCard),
+    hasStructureOutline: Boolean(checkpoint.hasStructureOutline),
+    hasDraftText: Boolean(checkpoint.hasDraftText),
+    copyLintPassed: Boolean(checkpoint.copyLintPassed),
+    copyLintSatisfied: Boolean(checkpoint.copyLintSatisfied),
+    copyLintFailCount: Number.isFinite(Number(checkpoint.copyLintFailCount)) ? Math.max(0, Math.floor(Number(checkpoint.copyLintFailCount))) : 0,
+    copyGateDegraded: Boolean(checkpoint.copyGateDegraded),
+    lastCopyLint:
+      checkpoint.lastCopyLint && typeof checkpoint.lastCopyLint === "object" && !Array.isArray(checkpoint.lastCopyLint)
+        ? checkpoint.lastCopyLint
+        : null,
+    styleLintPassed: Boolean(checkpoint.styleLintPassed),
+    styleLintSatisfied: Boolean(checkpoint.styleLintSatisfied),
+    styleLintFailCount: Number.isFinite(Number(checkpoint.styleLintFailCount)) ? Math.max(0, Math.floor(Number(checkpoint.styleLintFailCount))) : 0,
+    lintGateDegraded: Boolean(checkpoint.lintGateDegraded),
+    lastStyleLint:
+      checkpoint.lastStyleLint && typeof checkpoint.lastStyleLint === "object" && !Array.isArray(checkpoint.lastStyleLint)
+        ? checkpoint.lastStyleLint
+        : null,
+    bestStyleDraft:
+      checkpoint.bestStyleDraft && typeof checkpoint.bestStyleDraft === "object" && !Array.isArray(checkpoint.bestStyleDraft)
+        ? checkpoint.bestStyleDraft
+        : null,
+    bestDraft:
+      checkpoint.bestDraft && typeof checkpoint.bestDraft === "object" && !Array.isArray(checkpoint.bestDraft)
+        ? checkpoint.bestDraft
+        : null,
+    stepArtifactRefs,
+    finalWritten: Boolean(checkpoint.finalWritten),
+    finalWrittenPath: String(checkpoint.finalWrittenPath ?? "").trim() || null,
+    updatedAt: String(checkpoint.updatedAt ?? "").trim() || new Date().toISOString(),
+  };
+  return normalized;
+}
+
+function applyStyleWorkflowCheckpointToRunState(runState: RunState, checkpoint: Record<string, unknown>) {
+  const state = runState as any;
+  state.hasSelectedStyleLibrary = Boolean(checkpoint.hasSelectedStyleLibrary) || state.hasSelectedStyleLibrary;
+  if (!String(state.selectedStyleLibraryId ?? "").trim()) {
+    state.selectedStyleLibraryId = String(checkpoint.selectedStyleLibraryId ?? "").trim() || (state.selectedStyleLibraryId ?? null);
+  }
+  if (!Array.isArray(state.styleLibraryOptionIds) || state.styleLibraryOptionIds.length === 0) {
+    state.styleLibraryOptionIds = Array.isArray(checkpoint.styleLibraryOptionIds) ? checkpoint.styleLibraryOptionIds : [];
+  }
+  state.topicConfirmed = Boolean(checkpoint.topicConfirmed) || state.topicConfirmed;
+  if (!String(state.styleTopic ?? "").trim()) {
+    state.styleTopic = String(checkpoint.styleTopic ?? "").trim() || (state.styleTopic ?? null);
+  }
+  state.hasStyleKbSearch = Boolean(checkpoint.hasStyleKbSearch) || state.hasStyleKbSearch;
+  state.hasStyleKbHit = Boolean(checkpoint.hasStyleKbHit) || state.hasStyleKbHit;
+  if (!state.styleEvidencePack && checkpoint.styleEvidencePack && typeof checkpoint.styleEvidencePack === "object") {
+    state.styleEvidencePack = checkpoint.styleEvidencePack;
+  }
+  state.hasStylePlan = Boolean(checkpoint.hasStylePlan) || state.hasStylePlan;
+  state.hasToneCard = Boolean(checkpoint.hasToneCard) || state.hasToneCard;
+  state.hasStructureOutline = Boolean(checkpoint.hasStructureOutline) || state.hasStructureOutline;
+  state.hasDraftText = Boolean(checkpoint.hasDraftText) || state.hasDraftText;
+  state.copyLintPassed = Boolean(checkpoint.copyLintPassed) || state.copyLintPassed;
+  state.copyLintSatisfied = Boolean(checkpoint.copyLintSatisfied) || state.copyLintSatisfied;
+  state.copyLintFailCount = Math.max(
+    Number(state.copyLintFailCount ?? 0) || 0,
+    Number(checkpoint.copyLintFailCount ?? 0) || 0,
+  );
+  state.copyGateDegraded = Boolean(checkpoint.copyGateDegraded) || state.copyGateDegraded;
+  if (!state.lastCopyLint && checkpoint.lastCopyLint && typeof checkpoint.lastCopyLint === "object") {
+    state.lastCopyLint = checkpoint.lastCopyLint;
+  }
+  state.styleLintPassed = Boolean(checkpoint.styleLintPassed) || state.styleLintPassed;
+  state.styleLintSatisfied = Boolean(checkpoint.styleLintSatisfied) || state.styleLintSatisfied;
+  state.styleLintFailCount = Math.max(
+    Number(state.styleLintFailCount ?? 0) || 0,
+    Number(checkpoint.styleLintFailCount ?? 0) || 0,
+  );
+  state.lintGateDegraded = Boolean(checkpoint.lintGateDegraded) || state.lintGateDegraded;
+  if (!state.lastStyleLint && checkpoint.lastStyleLint && typeof checkpoint.lastStyleLint === "object") {
+    state.lastStyleLint = checkpoint.lastStyleLint;
+  }
+  if (!state.bestStyleDraft && checkpoint.bestStyleDraft && typeof checkpoint.bestStyleDraft === "object") {
+    state.bestStyleDraft = checkpoint.bestStyleDraft;
+  }
+  if (!state.bestDraft && checkpoint.bestDraft && typeof checkpoint.bestDraft === "object") {
+    state.bestDraft = checkpoint.bestDraft;
+  }
+  if (!state.stepArtifactRefs && checkpoint.stepArtifactRefs && typeof checkpoint.stepArtifactRefs === "object") {
+    state.stepArtifactRefs = checkpoint.stepArtifactRefs;
+  }
+  state.finalWritten = Boolean(checkpoint.finalWritten) || state.finalWritten;
+  if (!String(state.finalWrittenPath ?? "").trim()) {
+    state.finalWrittenPath = String(checkpoint.finalWrittenPath ?? "").trim() || (state.finalWrittenPath ?? null);
+  }
+}
+
+function buildStyleWorkflowCheckpointFromExecutionReport(executionReport: Record<string, unknown> | null | undefined) {
+  const report = executionReport && typeof executionReport === "object" ? (executionReport as Record<string, unknown>) : null;
+  const styleWorkflow =
+    report?.styleWorkflow && typeof report.styleWorkflow === "object" && !Array.isArray(report.styleWorkflow)
+      ? (report.styleWorkflow as Record<string, unknown>)
+      : null;
+  if (!styleWorkflow?.active) return null;
+  const workflowSkills = report && Array.isArray(report.workflowSkills) ? (report.workflowSkills as any[]) : [];
+  const styleSkill = workflowSkills.find((item) => item && typeof item === "object" && String((item as any).id ?? "").trim() === "style_imitate");
+  return readStyleWorkflowCheckpoint({
+    checkpoint: {
+      skillId: "style_imitate",
+      phase: String((styleSkill as any)?.currentPhase ?? "").trim() || undefined,
+      hasSelectedStyleLibrary: Boolean(styleWorkflow.hasSelectedStyleLibrary),
+      selectedStyleLibraryId: String(styleWorkflow.selectedStyleLibraryId ?? "").trim() || null,
+      styleLibraryOptionIds: Array.isArray(styleWorkflow.styleLibraryOptionIds) ? styleWorkflow.styleLibraryOptionIds : [],
+      topicConfirmed: Boolean(styleWorkflow.topicConfirmed),
+      styleTopic: String(styleWorkflow.styleTopic ?? "").trim() || null,
+      hasStyleKbSearch: Boolean(styleWorkflow.hasStyleKbSearch),
+      hasStyleKbHit: Boolean(styleWorkflow.hasStyleKbHit),
+      styleEvidencePack:
+        styleWorkflow.styleEvidencePack && typeof styleWorkflow.styleEvidencePack === "object"
+          ? styleWorkflow.styleEvidencePack
+          : null,
+      hasStylePlan: Boolean(styleWorkflow.hasStylePlan),
+      hasToneCard: Boolean(styleWorkflow.hasToneCard),
+      hasStructureOutline: Boolean(styleWorkflow.hasStructureOutline),
+      hasDraftText: Boolean(styleWorkflow.hasDraftText),
+      copyLintPassed: Boolean(styleWorkflow.copyLintPassed),
+      copyLintSatisfied: Boolean(styleWorkflow.copyLintSatisfied),
+      copyLintFailCount: Number(styleWorkflow.copyLintFailCount ?? 0) || 0,
+      copyGateDegraded: Boolean(styleWorkflow.copyGateDegraded),
+      lastCopyLint:
+        styleWorkflow.lastCopyLint && typeof styleWorkflow.lastCopyLint === "object"
+          ? styleWorkflow.lastCopyLint
+          : null,
+      styleLintPassed: Boolean(styleWorkflow.styleLintPassed),
+      styleLintSatisfied: Boolean(styleWorkflow.styleLintSatisfied),
+      styleLintFailCount: Number(styleWorkflow.styleLintFailCount ?? 0) || 0,
+      lintGateDegraded: Boolean(styleWorkflow.lintGateDegraded),
+      lastStyleLint:
+        styleWorkflow.lastStyleLint && typeof styleWorkflow.lastStyleLint === "object"
+          ? styleWorkflow.lastStyleLint
+          : null,
+      bestStyleDraft:
+        styleWorkflow.bestStyleDraft && typeof styleWorkflow.bestStyleDraft === "object"
+          ? styleWorkflow.bestStyleDraft
+          : null,
+      bestDraft:
+        styleWorkflow.bestDraft && typeof styleWorkflow.bestDraft === "object"
+          ? styleWorkflow.bestDraft
+          : null,
+      stepArtifactRefs:
+        styleWorkflow.stepArtifactRefs && typeof styleWorkflow.stepArtifactRefs === "object"
+          ? styleWorkflow.stepArtifactRefs
+          : null,
+      finalWritten: Boolean(styleWorkflow.finalWritten),
+      finalWrittenPath: String(styleWorkflow.finalWrittenPath ?? "").trim() || null,
+      updatedAt: new Date().toISOString(),
+    },
+  });
 }
 
 function normalizeTaskStatePendingArtifacts(input: unknown): NonNullable<TaskStateV2["pendingArtifacts"]> {
@@ -1667,16 +1883,6 @@ export function shouldSuppressSearchDuringBrowserContinuation(args: { mainDoc?: 
   const browserLike = wf.routeId === "web_radar" || wf.kind === "browser_session" || wf.selectedServerIds.some((id) => /playwright|browser/i.test(id));
   if (!browserLike) return false;
   return looksLikeWorkflowContinuationPrompt(prompt, args.mentionedSkillIds);
-}
-
-function looksLikeAssistantWaitingForUserText(text: string): boolean {
-  const t = String(text ?? "").trim();
-  if (!t) return false;
-  const tail = t.slice(-400);
-  const tailAskPattern =
-    /[？?]\s*$|要[^。\n]{0,12}吗[？?]?|还是[^。\n]{0,16}[？?]|(?:你|您)[^。\n]{0,16}(?:偏好|更倾向|选择|打算|决定)[^。\n]{0,12}[？?]?|帮你[^。\n]{0,16}[？?]|需要[^。\n]{0,12}确认|请[^。\n]{0,16}选择|请[^。\n]{0,16}告诉我|告诉我/;
-  if (tailAskPattern.test(tail)) return true;
-  return /(请先|请直接|请选择|请告诉我|发我|回复我|你这次要按哪个|按哪个库|选哪个库|给我一个写作主题|主题：|补充主题|确认一下|定一下风格库)/.test(t);
 }
 
 function normalizeStyleLibraryName(name: unknown) {
@@ -3647,8 +3853,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     mentionedSkillIdSet.has("style_imitate");
   const styleSkillActive =
     styleSkillRequested ||
-    activeSkillIds.includes("style_imitate") ||
-    (styleWorkflowRequested && intent.isWritingTask && deriveStyleGate({ mode, kbSelected: kbSelectedList as any, intent, activeSkillIds }).styleGateEnabled);
+    activeSkillIds.includes("style_imitate");
   if (!styleSkillActive) {
     baseAllowedToolNames.delete("lint.copy");
     baseAllowedToolNames.delete("lint.style");
@@ -4320,6 +4525,14 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
   runState.styleTopic = initialStyleTopic || null;
 
   const workflowSticky = readWorkflowStickyState(mainDocFromPack);
+  const styleWorkflowCheckpoint = readStyleWorkflowCheckpoint((mainDocFromPack as any)?.taskStateV2?.workflow ?? null);
+  const shouldResumeStyleWorkflow = Boolean(styleWorkflowCheckpoint) &&
+    workflowSticky.isFresh &&
+    (workflowSticky.kind === "style_imitate" || workflowSticky.routeId === "style_imitate") &&
+    looksLikeWorkflowContinuationPrompt(userPrompt);
+  if (shouldResumeStyleWorkflow && styleWorkflowCheckpoint) {
+    applyStyleWorkflowCheckpointToRunState(runState, styleWorkflowCheckpoint);
+  }
 
   (runState as any).lengthRetryBudget = (() => {
     const t = Number(targetChars as any);
@@ -4517,30 +4730,6 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
           allowed: wfCaps.allowed,
           hint: hints.join("\n\n"),
           orchestratorMode: wfCaps.orchestratorMode,
-        };
-      }
-    }
-
-    // ── v1 硬编码分支 ──
-    const styleTurnCaps = computeStyleTurnCaps({
-      runState: state,
-      runCtx: {
-        intent,
-        gates,
-        activeSkills,
-        styleWorkflowRequested,
-      } as any,
-      baseAllowedToolNames: selectedAllowedToolNames,
-    });
-    if (!isDeleteOnlyRoute && styleTurnCaps && !needsWebFirst) {
-      const styleAllowed = new Set(styleTurnCaps.allowedToolNames);
-      if (styleAllowed.size > 0) {
-        hints.push("style_imitate orchestrator：phase=" + String(styleTurnCaps.snapshot.currentPhase ?? "") + "。");
-        hints.push(styleTurnCaps.hint);
-        return {
-          allowed: styleAllowed,
-          hint: hints.join("\n\n"),
-          orchestratorMode: styleTurnCaps.orchestratorMode,
         };
       }
     }
@@ -5221,13 +5410,26 @@ export async function executeAgentRun(args: {
     prepared.mainDocFromPack?.taskStateV2 && typeof prepared.mainDocFromPack.taskStateV2 === "object"
       ? (prepared.mainDocFromPack.taskStateV2 as TaskStateV2)
       : null;
+  const taskStateStyleCheckpoint = readStyleWorkflowCheckpoint(taskStateFromPack?.workflow ?? null);
+  const workflowStickyForTaskState = readWorkflowStickyState(prepared.mainDocFromPack);
+  const shouldResumeTaskStateStyleWorkflow = Boolean(taskStateStyleCheckpoint) &&
+    workflowStickyForTaskState.isFresh &&
+    (workflowStickyForTaskState.kind === "style_imitate" || workflowStickyForTaskState.routeId === "style_imitate") &&
+    looksLikeWorkflowContinuationPrompt(prepared.userPrompt);
+  const workflowSeed =
+    !shouldResumeTaskStateStyleWorkflow && taskStateStyleCheckpoint
+      ? {
+          ...((taskStateFromPack?.workflow as Record<string, unknown> | null) ?? {}),
+          checkpoint: null,
+        }
+      : taskStateFromPack?.workflow ?? null;
   const initialTaskState: TaskStateV2 = {
     runIntent: prepared.intent?.isWritingTask
       ? "writing"
       : taskStateFromPack?.runIntent === "analysis" || String(prepared.mainDocFromPack?.runIntent ?? "").trim() === "analysis"
         ? "analysis"
         : "auto",
-    workflow: normalizeTaskStateWorkflow(taskStateFromPack?.workflow ?? null),
+    workflow: normalizeTaskStateWorkflow(workflowSeed),
     compositeTask: taskStateFromPack?.compositeTask && typeof taskStateFromPack.compositeTask === "object"
       ? (taskStateFromPack.compositeTask as Record<string, unknown>)
       : null,
@@ -6045,13 +6247,19 @@ export async function executeAgentRun(args: {
     styleLintFailCount: runState.styleLintFailCount,
     lintGateDegraded: runState.lintGateDegraded,
     bestStyleDraft: runState.bestStyleDraft
-      ? { score: runState.bestStyleDraft.score, highIssues: runState.bestStyleDraft.highIssues, chars: runState.bestStyleDraft.text.length }
+      ? {
+          score: runState.bestStyleDraft.score,
+          highIssues: runState.bestStyleDraft.highIssues,
+          artifactId: runState.bestStyleDraft.artifactId,
+          chars: runState.bestStyleDraft.charCount,
+        }
       : null,
     bestDraft: runState.bestDraft
       ? {
+          artifactId: runState.bestDraft.artifactId,
           styleScore: runState.bestDraft.styleScore,
           highIssues: runState.bestDraft.highIssues,
-          chars: runState.bestDraft.text.length,
+          chars: runState.bestDraft.charCount,
           copy: runState.bestDraft.copy
             ? {
                 riskLevel: runState.bestDraft.copy.riskLevel,
@@ -6061,6 +6269,11 @@ export async function executeAgentRun(args: {
             : null,
         }
       : null,
+    stepArtifactRefs:
+      (runState as any).stepArtifactRefs && typeof (runState as any).stepArtifactRefs === "object"
+        ? (runState as any).stepArtifactRefs
+        : null,
+    finalWrittenPath: String((runState as any).finalWrittenPath ?? "").trim() || null,
     copyLintPassed: runState.copyLintPassed,
     copyLintSatisfied: (runState as any).copyLintSatisfied === true,
     copyLintFailCount: runState.copyLintFailCount,
@@ -6214,8 +6427,7 @@ export async function executeAgentRun(args: {
   }
 
   const styleSkillActive =
-    activeSkillIds.includes("style_imitate") ||
-    Boolean(prepared.styleWorkflowRequested && prepared.effectiveGates.styleGateEnabled && intent.isWritingTask);
+    activeSkillIds.includes("style_imitate");
   if (mode !== "chat" && styleSkillActive && prepared.effectiveGates.styleGateEnabled) {
     const turn = 0;
     if (!runState.hasSelectedStyleLibrary) {
@@ -6662,91 +6874,19 @@ export async function executeAgentRun(args: {
     return;
   }
 
-  const shouldRunStylePipeline =
-    styleExecutionMode === "pipeline_v1" &&
-    activeSkillIds.includes("style_imitate") &&
-    Boolean(stylePipelinePayload) &&
-    Boolean(gates?.styleGateEnabled) &&
-    Boolean(intent?.isWritingTask);
-
-  if (shouldRunStylePipeline && stylePipelinePayload) {
-    writeEvent("run.execution.mode", {
-      runId,
-      executionMode: "pipeline_v1",
-      pipelineId: "style_imitate",
+  const requestedLegacyStylePipeline =
+    styleExecutionMode === "pipeline_v1" || Boolean(stylePipelinePayload);
+  if (requestedLegacyStylePipeline) {
+    writeEvent("run.notice", {
       turn: 0,
+      kind: "warn",
+      title: "StylePipelineLegacyIgnored",
+      message: "style_imitate 已切到 builtin workflow runtime；忽略 legacy pipeline 请求。",
+      detail: {
+        executionMode: styleExecutionMode ?? null,
+        hasPayload: Boolean(stylePipelinePayload),
+      },
     });
-    let pipelineOutcome:
-      | { status: "completed"; reason: string; reasonCodes: string[]; detail?: unknown }
-      | { status: "failed" | "aborted"; reason: string; reasonCodes: string[]; detail?: unknown };
-    let pipelineExecutionReport: any = null;
-    try {
-      const pipelineResult = await PipelineExecutor.run({
-        pipelineConfig: STYLE_WORKFLOW_PIPELINE_CONFIG_V1,
-        payload: stylePipelinePayload,
-        runCtx,
-        runState,
-      });
-      pipelineOutcome = pipelineResult.outcome;
-      pipelineExecutionReport = pipelineResult.executionReport;
-    } catch (err: any) {
-      const msg = String(err?.message ?? err ?? "STYLE_PIPELINE_ERROR");
-      writeEvent("error", { error: msg });
-      pipelineOutcome = {
-        status: "failed",
-        reason: "style_pipeline_exception",
-        reasonCodes: ["style_pipeline_exception"],
-        detail: { message: msg },
-      };
-      pipelineExecutionReport = {
-        providerApi: apiType,
-        runState,
-        stylePipeline: {
-          active: true,
-          executionMode: styleExecutionMode,
-          status: "failed",
-          currentStepId: null,
-          completed: false,
-        },
-      };
-    }
-
-    writeEvent("run.execution.report", {
-      runId,
-      ...(pipelineExecutionReport ?? {}),
-    });
-
-    const outcomeReasonCodes = Array.from(new Set(Array.isArray(pipelineOutcome.reasonCodes) ? pipelineOutcome.reasonCodes : []));
-    if (!outcomeReasonCodes.length) {
-      outcomeReasonCodes.push(pipelineOutcome.status === "completed" ? "completed" : "failed");
-    }
-    const runEndReason = String(pipelineOutcome.reason ?? "").trim() || pipelineOutcome.status;
-    if (pipelineOutcome.status !== "completed") {
-      writeEvent("run.notice", {
-        turn: 0,
-        kind: "error",
-        title: "StylePipeline",
-        message: "风格仿写 V3 管线未完成，可继续重试。",
-        detail: pipelineOutcome.detail ?? null,
-      });
-      writeEvent("assistant.delta", {
-        delta: "这次没有完成。你可以直接说“继续重试”，我会从 pipeline 断点接着跑。",
-        turn: 0,
-      });
-    }
-    writeEvent("run.end", {
-      runId,
-      reason: runEndReason,
-      reasonCodes: outcomeReasonCodes,
-      status: pipelineOutcome.status,
-      turn: 0,
-      executionReport: pipelineExecutionReport ?? { runState },
-      ...(pipelineOutcome.detail ? { detail: pipelineOutcome.detail } : {}),
-    });
-    writeEvent("assistant.done", { reason: runEndReason, status: pipelineOutcome.status, turn: 0 });
-
-    await persistOnce();
-    return;
   }
 
   const runtime = createRuntime({ runCtx });
@@ -6848,16 +6988,21 @@ export async function executeAgentRun(args: {
   } catch {
     // ignore audit summary mutation failures
   }
+  const styleWorkflowCheckpointPatch = buildStyleWorkflowCheckpointFromExecutionReport(
+    executionReport && typeof executionReport === "object" ? (executionReport as Record<string, unknown>) : null,
+  );
+  if (styleWorkflowCheckpointPatch) {
+    patchThreadWorkflow({ checkpoint: styleWorkflowCheckpointPatch });
+  }
   writeEvent("run.execution.report", {
     runId,
     ...executionReport,
   });
 
-  const lastAssistantText = String((executionReport as any)?.transcriptSummary?.lastAssistantText ?? "").trim();
   const styleWorkflowWaitingForUser =
     styleWorkflowIncomplete &&
     failureDigest.failedCount === 0 &&
-    looksLikeAssistantWaitingForUserText(lastAssistantText);
+    threadState.waitingFor === "user";
 
   // 风格闭环未完成时，将本轮视为"未完成"：
   // - 将 runnerOutcome.status 标记为 failed；

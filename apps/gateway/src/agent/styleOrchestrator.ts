@@ -207,6 +207,42 @@ function buildHint(snapshot: WorkflowSkillPhaseSnapshot, state: RunState, nextTo
   ].join("\n");
 }
 
+function makeSyntheticArtifactId(prefix: string): string {
+  return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function ensureStylePlanCheckpoint(runState: RunState, detail?: { task?: string | null }) {
+  const state = runState as any;
+  const refs =
+    state.stepArtifactRefs && typeof state.stepArtifactRefs === "object" && !Array.isArray(state.stepArtifactRefs)
+      ? { ...(state.stepArtifactRefs as Record<string, unknown>) }
+      : {};
+  if (!refs.tone_setting) {
+    refs.tone_setting = {
+      artifactId: makeSyntheticArtifactId("style_tone"),
+      stepId: "tone_setting",
+      kind: "tone_card",
+      attempt: 1,
+    };
+  }
+  if (!refs.structure) {
+    refs.structure = {
+      artifactId: makeSyntheticArtifactId("style_structure"),
+      stepId: "structure",
+      kind: "structure_outline",
+      attempt: 1,
+    };
+  }
+  state.stepArtifactRefs = refs;
+  state.hasToneCard = true;
+  state.hasStructureOutline = true;
+  state.hasStylePlan = true;
+  if (!String(state.styleTopic ?? "").trim()) {
+    const task = String(detail?.task ?? "").trim();
+    if (task) state.styleTopic = task;
+  }
+}
+
 export function computeStyleTurnCaps(args: {
   runState: RunState;
   runCtx: Pick<RunContext, "intent" | "gates" | "activeSkills" | "styleWorkflowRequested">;
@@ -216,10 +252,7 @@ export function computeStyleTurnCaps(args: {
   const intent: any = args.runCtx.intent ?? {};
   const activeSkillsRaw = Array.isArray((args.runCtx as any).activeSkills) ? (args.runCtx as any).activeSkills : [];
   const activeSkillIds = activeSkillsRaw.map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
-  const styleWorkflowRequested = Boolean((args.runCtx as any).styleWorkflowRequested);
-  const styleSkillActive =
-    activeSkillIds.includes("style_imitate") ||
-    Boolean(styleWorkflowRequested && gates.styleGateEnabled && intent?.isWritingTask);
+  const styleSkillActive = activeSkillIds.includes("style_imitate");
   if (!styleSkillActive || !intent?.isWritingTask) return null;
 
   const snapshot = buildStyleSnapshot(args.runState);
@@ -306,6 +339,24 @@ export async function runOrchestratedStyleImitate(
     ? ctx.styleLibIds.map((id) => String(id ?? "").trim()).filter(Boolean)
     : [];
 
+  (runState as any).hasDraftText = Boolean((runState as any).hasDraftText) || Boolean(draft);
+  if (!(runState as any).bestDraft && draft) {
+    const artifactId = makeSyntheticArtifactId("style_draft");
+    (runState as any).bestDraft = {
+      artifactId,
+      charCount: draft.length,
+      styleScore: 0,
+      highIssues: 0,
+      copy: null,
+    };
+    (runState as any).bestStyleDraft = {
+      artifactId,
+      charCount: draft.length,
+      score: 0,
+      highIssues: 0,
+    };
+  }
+
   // S0：若尚未完成风格样例检索，先做一轮 kb.search(card) 以满足 hasStyleKbSearch，
   // 避免 workflowSkills snapshot 长期停留在 need_style_kb。
   if (!runState.hasStyleKbSearch && styleLibIds.length > 0) {
@@ -326,6 +377,9 @@ export async function runOrchestratedStyleImitate(
         summary: "风格样例检索失败，未能进入 lint 阶段。",
       };
     }
+  }
+  if (runState.hasStyleKbSearch) {
+    ensureStylePlanCheckpoint(runState, { task: description || null });
   }
 
   // S1：copy lint（anti-regurgitation）

@@ -2802,10 +2802,7 @@ export function startGatewayRun(args: {
     });
     const pipelineArgs = args.styleExecutionMode || args.stylePipelinePayload
       ? { styleExecutionMode: args.styleExecutionMode, stylePipelinePayload: args.stylePipelinePayload }
-      : await buildStylePipelinePayload({
-          userPrompt: args.prompt,
-          kbMentionIds: args.kbMentionIds,
-        }).catch(() => ({}));
+      : {};
     inner = startGatewayRunWs({ ...(args as GatewayRunArgs), styleWorkflowRequested, ...pipelineArgs });
     if (cancelled) inner.cancel(cancelReason);
     await inner.done;
