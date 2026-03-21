@@ -294,9 +294,20 @@ export type StartGatewayRunPayloadV2 = {
     threadId?: string;
     activeSkillRefs?: SkillRef[];
     waitingFor?: ThreadWaitingFor;
+    pendingApprovalIds?: string[];
     pendingArtifactIds?: string[];
     collabSessionIds?: string[];
     collabSessions?: CollabAgentSessionRecord[];
     capabilityState?: ThreadCapabilityState | null;
+  };
+  portablePreRunCompact?: {
+    trigger?: "auto" | "manual";
+    scope?: "dialogue_summary";
+    compactSummary?: string;
+    customInstructions?: string;
+    previousSummaryChars?: number;
+    deltaTurns?: number;
+    mode?: "agent" | "chat";
+    performedAt?: string;
   };
 };

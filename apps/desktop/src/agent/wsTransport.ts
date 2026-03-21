@@ -755,6 +755,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       })();
 
       // -- dialogue summary ---
+      let portablePreRunCompact: Record<string, unknown> | null = null;
       try {
         const r = await rollDialogueSummaryIfNeeded({ gatewayUrl: args.gatewayUrl, mode: args.mode, abort, log });
         if (r?.rolled) {
@@ -763,6 +764,10 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           const rolledResult = r as { rolled: true; delta: Array<{ user: string; assistant: string }>; newCursor: number };
           const dialogueText = formatDialogueTurnsForMemoryExtract(rolledResult.delta ?? []);
           enqueueMemoryExtract(dialogueText, rolledResult.newCursor ?? 0);
+          portablePreRunCompact =
+            r?.portablePreRunCompact && typeof r.portablePreRunCompact === "object" && !Array.isArray(r.portablePreRunCompact)
+              ? (r.portablePreRunCompact as Record<string, unknown>)
+              : null;
         }
       } catch (e: any) {
         log("warn", "context.summary.exception", { error: e?.message ? String(e.message) : String(e) });
@@ -964,6 +969,9 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                     : undefined,
                   capabilityState: threadState.capabilityState ?? undefined,
                   waitingFor: typeof threadState.waitingFor === "string" ? threadState.waitingFor : undefined,
+                  pendingApprovalIds: Array.isArray(threadState.pendingApprovalIds)
+                    ? threadState.pendingApprovalIds.map((item: any) => String(item ?? "").trim()).filter(Boolean)
+                    : undefined,
                   pendingArtifactIds: Array.isArray((runStateAny as any)?.pendingArtifacts)
                     ? (runStateAny as any).pendingArtifacts
                         .map((item: any) => String(item?.id ?? "").trim())
@@ -978,6 +986,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                 },
               }
             : {}),
+          ...(portablePreRunCompact ? { portablePreRunCompact } : {}),
           ...(typeof (args as any).styleWorkflowRequested === "boolean" ? { styleWorkflowRequested: Boolean((args as any).styleWorkflowRequested) } : {}),
           ...(args.styleExecutionMode ? { styleExecutionMode: args.styleExecutionMode } : {}),
           ...(args.stylePipelinePayload ? { stylePipelinePayload: args.stylePipelinePayload } : {}),

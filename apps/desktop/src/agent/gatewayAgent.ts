@@ -2750,7 +2750,22 @@ export async function rollDialogueSummaryIfNeeded(args: {
   } catch {
     // ignore
   }
-  return { ok: true as const, rolled: true as const, delta: delta.map((t) => ({ user: t.user, assistant: t.assistant })), newCursor: cursor + delta.length };
+  return {
+    ok: true as const,
+    rolled: true as const,
+    delta: delta.map((t) => ({ user: t.user, assistant: t.assistant })),
+    newCursor: cursor + delta.length,
+    portablePreRunCompact: {
+      trigger: "auto" as const,
+      scope: "dialogue_summary" as const,
+      compactSummary: ret.summary,
+      customInstructions: "",
+      previousSummaryChars: previousSummary.length,
+      deltaTurns: delta.length,
+      mode: args.mode,
+      performedAt: new Date().toISOString(),
+    },
+  };
 }
 
 export function startGatewayRun(args: {

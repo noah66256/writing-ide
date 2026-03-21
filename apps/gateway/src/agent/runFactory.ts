@@ -73,7 +73,9 @@ import {
 } from "./compositeTask.js";
 import { collectToolSchemaIssues } from "@ohmycrab/tools";
 import type {
+  ApprovalItem,
   CollabAgentSessionRecord,
+  ItemActionSpec,
   ItemRecord,
   SkillRef,
   ThreadCapabilityState,
@@ -2448,9 +2450,20 @@ const agentRunBodySchema = z.object({
     threadId: z.string().min(1).max(200).optional(),
     activeSkillRefs: z.array(z.any()).max(20).optional(),
     waitingFor: z.enum(["none", "user", "approval"]).optional(),
+    pendingApprovalIds: z.array(z.string().min(1).max(200)).max(20).optional(),
     pendingArtifactIds: z.array(z.string().min(1).max(200)).max(20).optional(),
     collabSessionIds: z.array(z.string().min(1).max(200)).max(20).optional(),
     collabSessions: z.array(z.any()).max(20).optional(),
+  }).optional(),
+  portablePreRunCompact: z.object({
+    trigger: z.enum(["auto", "manual"]).optional(),
+    scope: z.enum(["dialogue_summary"]).optional(),
+    compactSummary: z.string().optional(),
+    customInstructions: z.string().optional(),
+    previousSummaryChars: z.number().int().nonnegative().optional(),
+    deltaTurns: z.number().int().nonnegative().optional(),
+    mode: z.enum(["agent", "chat"]).optional(),
+    performedAt: z.string().optional(),
   }).optional(),
   images: z.array(z.object({
     mediaType: z.string().min(1).max(200),
@@ -5223,6 +5236,14 @@ export async function executeAgentRun(args: {
       },
     });
   }
+  if (Array.isArray(threadSnapshotHint?.pendingApprovalIds)) {
+    threadState = {
+      ...threadState,
+      pendingApprovalIds: Array.from(
+        new Set(threadSnapshotHint.pendingApprovalIds.map((item) => String(item ?? "").trim()).filter(Boolean)),
+      ).slice(0, 20),
+    };
+  }
   let collabSessions: CollabAgentSessionRecord[] = Array.isArray(threadSnapshotHint?.collabSessions)
     ? (threadSnapshotHint.collabSessions as CollabAgentSessionRecord[]).filter((item) => item && typeof item === "object")
     : [];
@@ -5277,6 +5298,22 @@ export async function executeAgentRun(args: {
       waiting: threadState.waiting ?? null,
       emittedAt: new Date().toISOString(),
     });
+  };
+  const upsertSnapshotItem = (item: ItemRecord, options?: { active?: boolean }) => {
+    const itemId = String(item?.id ?? "").trim();
+    if (!itemId) return;
+    snapshotItems = [...snapshotItems.filter((entry) => entry.id !== itemId), item];
+    if (!turnRecord.itemIds.includes(itemId)) {
+      turnRecord = {
+        ...turnRecord,
+        itemIds: [...turnRecord.itemIds, itemId],
+      };
+    }
+    if (options?.active) {
+      if (!activeItemIds.includes(itemId)) activeItemIds = [...activeItemIds, itemId];
+    } else {
+      activeItemIds = activeItemIds.filter((id) => id !== itemId);
+    }
   };
   const clearThreadWaiting = () => {
     if (threadState.waitingFor === "none" && !threadState.waiting) return;
@@ -5532,6 +5569,13 @@ export async function executeAgentRun(args: {
       }
     }
     if (event === "run.start") {
+      if (Array.isArray(threadState.pendingApprovalIds) && threadState.pendingApprovalIds.length > 0) {
+        threadState = {
+          ...threadState,
+          pendingApprovalIds: [],
+          updatedAt: new Date().toISOString(),
+        };
+      }
       clearThreadWaiting();
       threadState = setThreadStatus(threadState, "running");
       turnRecord = {
@@ -5546,6 +5590,84 @@ export async function executeAgentRun(args: {
       emitSkillsUpdated();
       emitThreadSnapshot();
     }
+    if (event === "portable.permission.requested") {
+      const p: any = payload && typeof payload === "object" ? (payload as any) : null;
+      const approvalId = String(p?.approvalId ?? "").trim() || `approval_${randomUUID()}`;
+      const question = String(p?.question ?? p?.message ?? "").trim() || "需要你确认后我再继续。";
+      const note = String(p?.note ?? "").trim();
+      const sourceToolName = String(p?.sourceToolName ?? "").trim() || undefined;
+      const nowIso = new Date().toISOString();
+      const preview =
+        p?.detail && typeof p.detail === "object" && !Array.isArray(p.detail)
+          ? (p.detail as Record<string, unknown>)
+          : p?.detail !== undefined
+            ? ({ detail: p.detail } as Record<string, unknown>)
+            : null;
+      const actionSpec: ItemActionSpec = {
+        executor: "gateway.noop",
+        applyOp: {
+          approvalId,
+          action: "approve",
+          ...(sourceToolName ? { toolName: sourceToolName } : {}),
+        },
+        undoOp: {
+          approvalId,
+          action: "decline",
+          ...(sourceToolName ? { toolName: sourceToolName } : {}),
+        },
+        canReplayAfterReload: true,
+      };
+      const approvalItem: ApprovalItem = {
+        id: approvalId,
+        type: "approval",
+        threadId,
+        turnId: turnRecord.id,
+        status: "in_progress",
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        kind: "approval",
+        ...(sourceToolName ? { sourceToolName } : {}),
+        approvalId,
+        question,
+        ...(note ? { note } : {}),
+        ...(preview ? { preview } : {}),
+        actionSpec,
+        kept: false,
+        applied: false,
+      };
+      threadState = {
+        ...threadState,
+        pendingApprovalIds: Array.from(new Set([...(threadState.pendingApprovalIds ?? []), approvalId])).slice(0, 20),
+        updatedAt: nowIso,
+      };
+      patchThreadWorkflow({
+        status: "waiting_approval",
+        updatedAt: nowIso,
+        lastEndReason: "approval_waiting",
+        waiting: {
+          kind: "approval",
+          approvalId,
+          question,
+          ...(sourceToolName ? { sourceToolName } : {}),
+          ...(String(p?.decisionSource ?? "").trim() ? { decisionSource: String(p.decisionSource).trim() } : {}),
+          ...(String(p?.requestKind ?? "").trim() ? { requestKind: String(p.requestKind).trim() } : {}),
+        },
+      });
+      threadState = updateThreadWaiting({
+        thread: threadState,
+        waitingFor: "approval",
+        waiting: {
+          kind: "approval",
+          question,
+          sourceTurnId: turnRecord.id,
+          updatedAt: nowIso,
+        },
+      });
+      emitRaw("item.started", { item: approvalItem });
+      upsertSnapshotItem(approvalItem, { active: true });
+      emitThreadWaitingUpdated();
+      emitThreadSnapshot();
+    }
     if (event === "run.end") {
       const p: any = payload && typeof payload === "object" ? (payload as any) : null;
       const reason = String(p?.reason ?? "").trim().toLowerCase();
@@ -5553,17 +5675,30 @@ export async function executeAgentRun(args: {
         ? (p.reasonCodes as any[]).map((item) => String(item ?? "").trim()).filter(Boolean)
         : [];
       const nowIso = new Date().toISOString();
-      if (reason === "clarify_waiting" || reason === "proposal_waiting") {
+      if (reason === "clarify_waiting" || reason === "proposal_waiting" || reason === "approval_waiting") {
+        const existingWaiting =
+          threadState.waiting && typeof threadState.waiting === "object"
+            ? (threadState.waiting as Record<string, unknown>)
+            : null;
         patchThreadWorkflow({
-          status: "waiting_user",
+          status: reason === "approval_waiting" ? "waiting_approval" : "waiting_user",
           updatedAt: nowIso,
           lastEndReason: reason,
+          ...(reason === "approval_waiting" && existingWaiting ? { waiting: existingWaiting } : {}),
         });
         threadState = updateThreadWaiting({
           thread: threadState,
-          waitingFor: "user",
+          waitingFor: reason === "approval_waiting" ? "approval" : "user",
           waiting: {
-            kind: reason === "proposal_waiting" ? "proposal" : "clarify",
+            kind:
+              reason === "approval_waiting"
+                ? "approval"
+                : reason === "proposal_waiting"
+                  ? "proposal"
+                  : "clarify",
+            ...(String(existingWaiting?.question ?? "").trim() ? { question: String(existingWaiting?.question).trim() } : {}),
+            ...(String(existingWaiting?.replyHint ?? "").trim() ? { replyHint: String(existingWaiting?.replyHint).trim() } : {}),
+            ...(String(existingWaiting?.sourceTurnId ?? "").trim() ? { sourceTurnId: String(existingWaiting?.sourceTurnId).trim() } : {}),
             updatedAt: nowIso,
           },
         });
@@ -6296,6 +6431,10 @@ export async function executeAgentRun(args: {
     targetChars: targetChars ?? null,
     resolveSubAgentModel,
     threadSnapshotHint: (body as any).threadSnapshotHint ?? undefined,
+    portablePreRunCompact:
+      (body as any).portablePreRunCompact && typeof (body as any).portablePreRunCompact === "object"
+        ? ((body as any).portablePreRunCompact as Record<string, unknown>)
+        : null,
     mainDoc: mainDocFromPack && typeof mainDocFromPack === "object" ? { ...(mainDocFromPack as Record<string, unknown>) } : {},
     l1Memory: l1MemoryFromPack || "",
     l2Memory: l2MemoryFromPack || "",

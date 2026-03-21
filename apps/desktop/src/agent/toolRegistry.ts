@@ -4042,6 +4042,119 @@ const tools: ToolDefinition[] = [
     },
   },
   {
+    name: "portable.hook.command",
+    description: "内部工具：在本地执行 portable hook command，并返回 stdout/stderr/exitCode。",
+    args: [
+      { name: "skillId", required: true, desc: "skill id" },
+      { name: "eventName", required: true, desc: "hook event name" },
+      { name: "projectDir", required: true, desc: "本地执行 cwd" },
+      { name: "command", required: true, desc: "要执行的 shell command" },
+      { name: "stdinJson", required: false, desc: "写入 stdin 的 JSON 输入" },
+      { name: "timeoutMs", required: false, desc: "超时毫秒数" },
+      { name: "shellRules", required: false, desc: "从 allowed-tools 推导出的 Bash 允许规则" },
+      { name: "opMode", required: false, desc: "当前运行模式 creative/assistant" },
+    ],
+    riskLevel: "low" as ToolRiskLevel,
+    applyPolicy: "auto_apply" as ToolApplyPolicy,
+    reversible: false,
+    run: async (args: Record<string, unknown>) => {
+      const skillId = String(args.skillId ?? "").trim() || "portable-skill";
+      const eventName = String(args.eventName ?? "").trim() || "Hook";
+      const projectDir = String(args.projectDir ?? "").trim();
+      const command = String(args.command ?? "").trim();
+      const timeoutMsRaw = Number(args.timeoutMs ?? 20_000);
+      const timeoutMs = Number.isFinite(timeoutMsRaw) ? Math.max(1000, Math.min(120_000, Math.floor(timeoutMsRaw))) : 20_000;
+      const opMode = String(args.opMode ?? "creative").trim().toLowerCase() === "assistant" ? "assistant" : "creative";
+      const shellRules = Array.isArray(args.shellRules)
+        ? (args.shellRules as any[]).map((item) => ({
+            raw: String(item?.raw ?? "").trim(),
+            kind: String(item?.kind ?? "").trim(),
+            specifier: String(item?.specifier ?? "").trim(),
+          }))
+        : [];
+      if (!projectDir) {
+        return {
+          ok: false,
+          error: "MISSING_PROJECT_DIR",
+          output: { ok: false, error: "MISSING_PROJECT_DIR", message: "portable.hook.command 需要提供 projectDir。" },
+        } as any;
+      }
+      if (!command) {
+        return {
+          ok: false,
+          error: "MISSING_COMMAND",
+          output: { ok: false, error: "MISSING_COMMAND", message: "portable.hook.command 需要提供 command。" },
+        } as any;
+      }
+      const shellApi = (window as any).desktop?.shell;
+      if (!shellApi?.exec) {
+        return {
+          ok: false,
+          error: "SHELL_API_NOT_AVAILABLE",
+          output: { ok: false, error: "SHELL_API_NOT_AVAILABLE", message: "桌面端 shell 服务未就绪。" },
+        } as any;
+      }
+
+      const ruleCheck = matchesPortableCommandRule(command, shellRules);
+      if (!ruleCheck.ok) {
+        const message =
+          opMode === "assistant"
+            ? `[portable hook command blocked: ${skillId}/${eventName} 未通过 allowed-tools 的 Bash 规则：${command}]`
+            : `[portable hook command blocked: ${skillId}/${eventName} 在 ${opMode} 模式下未声明允许执行 Bash 命令：${command}]`;
+        return {
+          ok: false,
+          error: "HOOK_COMMAND_NOT_ALLOWED",
+          output: {
+            ok: false,
+            error: "HOOK_COMMAND_NOT_ALLOWED",
+            message,
+            blocked: true,
+            matchedRule: null,
+            stdout: "",
+            stderr: message,
+            exitCode: null,
+            timedOut: false,
+            outputPreview: truncatePortablePreview(message),
+          },
+        } as any;
+      }
+
+      const result = await shellApi.exec({
+        projectDir,
+        command,
+        args: [],
+        stdin: JSON.stringify(args.stdinJson ?? {}, null, 2),
+        timeoutMs,
+      });
+      const stdout = String(result?.stdout ?? "");
+      const stderr = String(result?.stderr ?? "");
+      const timedOut = Boolean(result?.timedOut);
+      const exitCode = typeof result?.exitCode === "number" ? result.exitCode : null;
+      const ok = Boolean(result?.ok) && !timedOut && exitCode === 0;
+      return {
+        ok,
+        output: {
+          ok,
+          stdout,
+          stderr,
+          timedOut,
+          exitCode,
+          durationMs:
+            typeof result?.durationMs === "number" && Number.isFinite(result.durationMs)
+              ? Math.max(0, Math.floor(result.durationMs))
+              : undefined,
+          error: ok ? undefined : String(result?.error ?? ""),
+          matchedRule: ruleCheck.matchedRule?.raw ?? null,
+          stdoutPreview: truncatePortablePreview(stdout),
+          stderrPreview: truncatePortablePreview(stderr),
+        },
+        undoable: false,
+        applyPolicy: "auto_apply",
+        riskLevel: "low",
+      } as any;
+    },
+  },
+  {
     name: "process.run",
     description: "启动一个由 Crab 管理的本地进程（助手模式下使用）。",
     args: [

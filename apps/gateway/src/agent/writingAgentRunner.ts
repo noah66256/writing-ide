@@ -86,6 +86,17 @@ export type ModelApiType =
   | "openai-responses"
   | "gemini";
 
+export type PortablePreRunCompactHint = {
+  trigger?: "auto" | "manual";
+  scope?: "dialogue_summary";
+  compactSummary?: string;
+  customInstructions?: string;
+  previousSummaryChars?: number;
+  deltaTurns?: number;
+  mode?: "agent" | "chat";
+  performedAt?: string;
+};
+
 export type RunContext = {
   runId: string;
   threadId?: string;
@@ -129,10 +140,13 @@ export type RunContext = {
     threadId?: string;
     activeSkillRefs?: Array<Record<string, unknown>>;
     waitingFor?: "none" | "user" | "approval";
+    pendingApprovalIds?: string[];
     pendingArtifactIds?: string[];
     collabSessionIds?: string[];
     collabSessions?: Array<Record<string, unknown>>;
   };
+  /** Desktop 在 run.request 前真实发生的 dialogue summary compact 信息。 */
+  portablePreRunCompact?: PortablePreRunCompactHint | null;
   /** 子 Agent ID（设置后 writeEvent 自动注入 agentId 到每条 SSE 事件） */
   agentId?: string;
   /** 允许覆盖默认最大回合数（子 Agent 可用） */

@@ -4155,6 +4155,7 @@ function registerIpc() {
         let settled = false;
         const child = spawn(commandRaw, args, { cwd: projectDir, shell: true });
         const maxLen = 60_000;
+        const stdinText = typeof p.stdin === "string" ? p.stdin : "";
         const timer = setTimeout(() => {
           timedOut = true;
           try { child.kill("SIGKILL"); } catch {}
@@ -4184,6 +4185,12 @@ function registerIpc() {
         }
         if (child.stderr) {
           child.stderr.on("data", (d) => { stderr += String(d ?? ""); });
+        }
+        if (stdinText && child.stdin) {
+          try { child.stdin.write(stdinText); } catch {}
+        }
+        if (child.stdin) {
+          try { child.stdin.end(); } catch {}
         }
         child.on("error", (e) => { finish(null, String(e && e.message ? e.message : e)); });
         child.on("close", (code) => {

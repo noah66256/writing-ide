@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
 
 /**
  * GatewayRuntime — Phase 3：基于 pi-agent-core 的新运行时
@@ -107,6 +106,7 @@ const EMPTY_FAILURE_DIGEST: RuntimeFailureDigest = {
 
 /** Desktop 工具结果超时（10 分钟） */
 const TOOL_RESULT_TIMEOUT_MS = 600_000;
+const PORTABLE_HOOK_COMMAND_TOOL_NAME = "portable.hook.command";
 
 /** 工具结果文本截断上限 */
 const MAX_TOOL_RESULT_CHARS = 60_000;
@@ -119,6 +119,7 @@ const COMPLETED_OUTCOME: RunOutcome = {
 
 /** 默认最大回合数，防止无限循环 */
 const DEFAULT_MAX_TURNS = 200;
+const PORTABLE_STOP_BLOCK_MAX_RETRIES = 3;
 const MAX_PROVIDER_TOOL_NAME_LEN = 64;
 
 const STYLE_LINT_PASS_SCORE = 70;
@@ -179,6 +180,24 @@ type PortableHookInvocationResult = {
   decision?: { decision?: string; reason?: string };
   hookSpecificOutput?: Record<string, unknown> | null;
 };
+
+type PortablePermissionBehavior = "allow" | "deny";
+
+type PortablePermissionRequestResult = {
+  hookMessage?: string;
+  updatedArgs?: Record<string, unknown>;
+  permissionBehavior?: PortablePermissionBehavior;
+  approvalRequested?: boolean;
+  approvalId?: string;
+  approvalQuestion?: string;
+};
+
+const PORTABLE_HOOK_IMMEDIATE_CONTEXT_EVENTS = new Set<PortableHookEventName>([
+  "SessionStart",
+  "UserPromptSubmit",
+  "PostToolUse",
+  "PostToolUseFailure",
+]);
 
 function appendUniqueBounded(list: string[], item: string, limit: number): string[] {
   const value = String(item ?? "").trim();
@@ -300,6 +319,13 @@ function normalizePortableHookResult(raw: unknown): PortableHookInvocationResult
       : undefined,
     hookSpecificOutput,
   };
+}
+
+function normalizePortablePermissionBehavior(raw: unknown): PortablePermissionBehavior | undefined {
+  const value = String(raw ?? "").trim().toLowerCase();
+  if (value === "allow" || value === "approve") return "allow";
+  if (value === "deny" || value === "block" || value === "reject") return "deny";
+  return undefined;
 }
 
 // ── 辅助函数 ─────────────────────────────────────
@@ -643,8 +669,14 @@ export class GatewayRuntime implements AgentRuntime {
   /** 软提示上次处理时的失败工具计数（避免重复提示） */
   private lastSteeringFailureCount = 0;
   private readonly collabRuntime: CollabRuntime;
+  private pendingImmediateItems: CanonicalTranscriptItem[] = [];
   private pendingFollowUpItems: CanonicalTranscriptItem[] = [];
   private executedPortableHookOnceKeys = new Set<string>();
+  private activePortableHookEventStack: PortableHookEventName[] = [];
+  private portableSessionStartSource = "startup";
+  private portableHookInvocationSeq = 0;
+  private portableApprovalSeq = 0;
+  private portableStopBlockRetryCount = 0;
 
   constructor(
     private readonly config: RuntimeConfig & {
@@ -700,6 +732,7 @@ export class GatewayRuntime implements AgentRuntime {
 
   async run(userPrompt: string, images?: RuntimeRunImages): Promise<RuntimeResult> {
     this._resetForRun();
+    this.portableSessionStartSource = this._derivePortableSessionStartSource();
 
     const providerApi = inferProviderApi(this.config);
     const maxTurns = this.config.runCtx.maxTurns ?? DEFAULT_MAX_TURNS;
@@ -713,8 +746,41 @@ export class GatewayRuntime implements AgentRuntime {
       source: "runtime.bootstrap",
     });
 
+    const preRunCompact =
+      this.config.runCtx.portablePreRunCompact &&
+      typeof this.config.runCtx.portablePreRunCompact === "object" &&
+      !Array.isArray(this.config.runCtx.portablePreRunCompact)
+        ? (this.config.runCtx.portablePreRunCompact as Record<string, unknown>)
+        : null;
+    if (preRunCompact && String(preRunCompact.scope ?? "").trim().toLowerCase() === "dialogue_summary") {
+      await this._runPortableHookEvent({
+        eventName: "PreCompact",
+        compact: {
+          trigger: String(preRunCompact.trigger ?? "auto").trim() || "auto",
+          scope: "dialogue_summary",
+          custom_instructions: String(preRunCompact.customInstructions ?? "").trim(),
+          compact_summary: "",
+          compact: preRunCompact,
+        } as Record<string, unknown>,
+      });
+      await this._runPortableHookEvent({
+        eventName: "PostCompact",
+        compact: {
+          trigger: String(preRunCompact.trigger ?? "auto").trim() || "auto",
+          scope: "dialogue_summary",
+          custom_instructions: String(preRunCompact.customInstructions ?? "").trim(),
+          compact_summary: String(preRunCompact.compactSummary ?? "").trim(),
+          compact: preRunCompact,
+        } as Record<string, unknown>,
+      });
+    }
+
     await this._runPortableHookEvent({ eventName: "UserPromptSubmit", userPrompt });
-    await this._runPortableHookEvent({ eventName: "SessionStart", userPrompt });
+    await this._runPortableHookEvent({
+      eventName: "SessionStart",
+      userPrompt,
+      sessionSource: this.portableSessionStartSource,
+    });
 
     // 内部 AbortController：链接外部 signal + maxTurns / run.done 保护
     const ac = new AbortController();
@@ -817,7 +883,7 @@ export class GatewayRuntime implements AgentRuntime {
       await stream.result();
 
       // 最终 outcome（run.done 在 tool_execution_end 中已设置 outcome，此处不覆盖）
-      if (this.outcome.reason === "run_done") {
+      if (this.outcome.reason === "run_done" || this.outcome.reason === "approval_waiting") {
         // 已由 run.done 处理器设置，保持不变
       } else if (ac.signal.aborted) {
         this._setOutcome({
@@ -842,7 +908,7 @@ export class GatewayRuntime implements AgentRuntime {
       }
       this.turnEngine.record({ type: "model_error", error: message });
       // run.done 触发的 abort 不覆盖 outcome
-      if (this.outcome.reason !== "run_done") {
+      if (this.outcome.reason !== "run_done" && this.outcome.reason !== "approval_waiting") {
         this._setOutcome({
           status: ac.signal.aborted ? "aborted" : "failed",
           reason: ac.signal.aborted
@@ -855,7 +921,9 @@ export class GatewayRuntime implements AgentRuntime {
         });
       }
     } finally {
-      await this._runPortableHookEvent({ eventName: "Stop", stopReason: this.outcome.reason });
+      if (this.outcome.reason !== "completed") {
+        await this._runPortableHookEvent({ eventName: "Stop", stopReason: this.outcome.reason });
+      }
       await this._runPortableHookEvent({ eventName: "SessionEnd", stopReason: this.outcome.reason });
       this.config.runCtx.abortSignal.removeEventListener("abort", onExternalAbort);
       this.internalAc = null;
@@ -919,8 +987,14 @@ export class GatewayRuntime implements AgentRuntime {
     this.executionNoToolTurns = 0;
     this.consecutiveTextOnlyTurns = 0;
     this.currentTurnToolCalls = 0;
+    this.pendingImmediateItems = [];
     this.pendingFollowUpItems = [];
     this.executedPortableHookOnceKeys.clear();
+    this.activePortableHookEventStack = [];
+    this.portableSessionStartSource = "startup";
+    this.portableHookInvocationSeq = 0;
+    this.portableApprovalSeq = 0;
+    this.portableStopBlockRetryCount = 0;
     this.toolCallSnapshots.clear();
     this.turnLocalRawToolResults.clear();
     if (!Array.isArray(this.runState.deliveredArtifactFamilies)) this.runState.deliveredArtifactFamilies = [];
@@ -973,6 +1047,85 @@ export class GatewayRuntime implements AgentRuntime {
     });
   }
 
+  private _queuePortableImmediateHint(text: string, reasonCodes: string[]) {
+    const content = String(text ?? "").trim();
+    if (!content) return;
+    this.pendingImmediateItems.push({
+      kind: "runtime_hint",
+      text: content,
+      reasonCodes: Array.isArray(reasonCodes) ? reasonCodes.filter(Boolean) : [],
+    });
+  }
+
+  private _queuePortableHookContext(eventName: PortableHookEventName, text: string, reasonCodes: string[]) {
+    if (PORTABLE_HOOK_IMMEDIATE_CONTEXT_EVENTS.has(eventName)) {
+      this._queuePortableImmediateHint(text, reasonCodes);
+      return;
+    }
+    this._queueRuntimeHint(text, reasonCodes);
+  }
+
+  private async _schedulePortableStopContinuation(args: {
+    eventName: "Stop" | "SubagentStop";
+    blockMessage?: string;
+    detail?: Record<string, unknown>;
+  }): Promise<boolean> {
+    const blockMessage = String(args.blockMessage ?? "").trim();
+    if (this.portableStopBlockRetryCount >= PORTABLE_STOP_BLOCK_MAX_RETRIES) {
+      await this._writePortableNotificationNotice({
+        turn: this.turn,
+        kind: "warn",
+        title: "PortableHookStopBlockLimitReached",
+        message:
+          `portable hook 已连续 ${this.portableStopBlockRetryCount} 次阻止 ${args.eventName} 收口，` +
+          "为避免死循环，本次改为允许自然结束。",
+        detail: {
+          eventName: args.eventName,
+          limit: PORTABLE_STOP_BLOCK_MAX_RETRIES,
+          reason: blockMessage || null,
+          ...(args.detail ?? {}),
+        },
+        source: "portable_hook.stop_guard",
+      });
+      return false;
+    }
+
+    this.portableStopBlockRetryCount += 1;
+    const hintText =
+      args.eventName === "SubagentStop"
+        ? "子 Agent 已返回，但 portable hook 要求父 run 继续推进。\n" +
+          (blockMessage || "请结合子 Agent 结果继续补齐遗漏项，再决定是否结束。")
+        : "portable hook 阻止了当前回合自然结束。\n" +
+          (blockMessage || "请继续推进剩余检查/收口动作，确认完成后再结束。");
+    this._queueRuntimeHint(hintText, [
+      "portable_hook_stop_block",
+      `hook:${args.eventName.toLowerCase()}`,
+      `retry:${this.portableStopBlockRetryCount}`,
+    ]);
+    await this._writePortableNotificationNotice({
+      turn: this.turn,
+      kind: "info",
+      title: "PortableHookStopBlocked",
+      message: `portable hook 阻止 ${args.eventName} 收口，已注入 follow-up 继续下一轮。`,
+      detail: {
+        eventName: args.eventName,
+        retryCount: this.portableStopBlockRetryCount,
+        limit: PORTABLE_STOP_BLOCK_MAX_RETRIES,
+        reason: blockMessage || null,
+        ...(args.detail ?? {}),
+      },
+      source: "portable_hook.stop_guard",
+    });
+    return true;
+  }
+
+  private _drainPortableImmediateItems(): AgentMessage[] {
+    if (this.pendingImmediateItems.length <= 0) return [];
+    return this.pendingImmediateItems
+      .splice(0, this.pendingImmediateItems.length)
+      .map((item) => item as unknown as AgentMessage);
+  }
+
   private async _writePortableNotificationNotice(args: {
     turn?: number;
     kind: string;
@@ -980,7 +1133,10 @@ export class GatewayRuntime implements AgentRuntime {
     message: string;
     detail?: unknown;
     source?: string;
+    notificationType?: string;
+    skipPortableHook?: boolean;
   }) {
+    const notificationType = String(args.notificationType ?? args.title ?? "").trim();
     const notice: Record<string, unknown> = {
       turn: Number.isFinite(Number(args.turn)) ? Math.floor(Number(args.turn)) : this.turn,
       kind: String(args.kind ?? "info").trim() || "info",
@@ -988,12 +1144,16 @@ export class GatewayRuntime implements AgentRuntime {
       message: String(args.message ?? "").trim(),
     };
     if (args.detail !== undefined) notice.detail = args.detail ?? null;
+    if (notificationType) notice.notification_type = notificationType;
     this.config.runCtx.writeEvent("run.notice", notice);
+    if (args.skipPortableHook === true) return;
+    if (this.activePortableHookEventStack[this.activePortableHookEventStack.length - 1] === "Notification") return;
     await this._runPortableHookEvent({
       eventName: "Notification",
       notification: {
         ...notice,
         source: String(args.source ?? "run.notice").trim() || "run.notice",
+        notification_type: notificationType || undefined,
       },
     });
   }
@@ -1006,7 +1166,9 @@ export class GatewayRuntime implements AgentRuntime {
     message: string;
     detail?: unknown;
     requestKind?: string;
-  }): Promise<string | undefined> {
+    approvalEligible?: boolean;
+    allowCanProceed?: boolean;
+  }): Promise<PortablePermissionRequestResult> {
     const result = await this._runPortableHookEvent({
       eventName: "PermissionRequest",
       toolName: args.toolName,
@@ -1020,7 +1182,65 @@ export class GatewayRuntime implements AgentRuntime {
         detail: args.detail ?? null,
       },
     });
-    return result.hookMessage;
+    const updatedArgs =
+      result.updatedArgs && typeof result.updatedArgs === "object" && !Array.isArray(result.updatedArgs)
+        ? result.updatedArgs
+        : args.toolArgs;
+    if (result.approvalRequest && args.approvalEligible) {
+      const approval = result.approvalRequest;
+      const question =
+        String(approval.question ?? approval.prompt ?? result.hookMessage ?? args.message).trim() ||
+        "需要你确认后我再继续。";
+      const note =
+        String(approval.note ?? approval.reason ?? "").trim() ||
+        (result.hookMessage && result.hookMessage !== question ? result.hookMessage : "");
+      const approvalId = `${this.config.runCtx.runId}:portable-approval:${++this.portableApprovalSeq}`;
+      this.config.runCtx.writeEvent("portable.permission.requested", {
+        turn: this.turn,
+        approvalId,
+        sourceToolName: args.toolName,
+        question,
+        note,
+        detail: approval.detail ?? args.detail ?? null,
+        requestKind: String(args.requestKind ?? "tool_use").trim() || "tool_use",
+        decisionSource: String(args.decisionSource ?? "").trim(),
+        updatedArgs,
+      });
+      this._setOutcome({
+        status: "completed",
+        reason: "approval_waiting",
+        reasonCodes: [
+          "approval_waiting",
+          `tool:${args.toolName}`,
+          `decision_source:${String(args.decisionSource ?? "").trim() || "portable_permission_request"}`,
+        ],
+        detail: {
+          approvalId,
+          toolName: args.toolName,
+          question,
+        },
+      });
+      this.internalAc?.abort();
+      return {
+        hookMessage: question,
+        updatedArgs,
+        approvalRequested: true,
+        approvalId,
+        approvalQuestion: question,
+      };
+    }
+    if (result.permissionBehavior === "allow" && args.allowCanProceed) {
+      return {
+        hookMessage: result.hookMessage,
+        updatedArgs,
+        permissionBehavior: "allow",
+      };
+    }
+    return {
+      hookMessage: result.hookMessage,
+      updatedArgs,
+      permissionBehavior: result.permissionBehavior,
+    };
   }
 
   private async _compactToolResultWithPortableHooks(args: {
@@ -1039,6 +1259,9 @@ export class GatewayRuntime implements AgentRuntime {
       before_chars: preview.length,
       preview: preview.slice(0, 2000),
       mode: "tool_result_envelope",
+      scope: "tool_result_envelope",
+      trigger: "auto",
+      custom_instructions: "",
     };
     await this._runPortableHookEvent({
       eventName: "PreCompact",
@@ -1057,6 +1280,7 @@ export class GatewayRuntime implements AgentRuntime {
         reduced: compactedText.length < preview.length,
         output_mode: envelope.mode,
         preview: compactedText.slice(0, 2000),
+        compact_summary: compactedText.slice(0, 2000),
       },
     });
     return envelope;
@@ -1083,7 +1307,7 @@ export class GatewayRuntime implements AgentRuntime {
     return out;
   }
 
-  private _applyDynamicSkillActivation(output: any) {
+  private async _applyDynamicSkillActivation(output: any) {
     const skillId =
       String(output?.activation?.skillId ?? "").trim() ||
       String(output?.skill?.id ?? "").trim();
@@ -1207,7 +1431,7 @@ export class GatewayRuntime implements AgentRuntime {
     }
     this._queueRuntimeHint(notes.filter(Boolean).join("\n\n"), ["skills_activate", `skill:${skillId}`]);
 
-    this.config.runCtx.writeEvent("run.notice", {
+    await this._writePortableNotificationNotice({
       turn: this.turn,
       kind: "info",
       title: "DynamicSkillActivated",
@@ -1219,6 +1443,7 @@ export class GatewayRuntime implements AgentRuntime {
         modelOverride: modelOverride || null,
         addedToolNames: Array.isArray(output?.activation?.toolNames) ? output.activation.toolNames : [],
       },
+      source: "skills.activate",
     });
   }
 
@@ -1348,7 +1573,7 @@ export class GatewayRuntime implements AgentRuntime {
     return false;
   }
 
-  private _activateDeliveryLatch(reason: "assistant_text" | "run_done", detail?: Record<string, unknown>): void {
+  private async _activateDeliveryLatch(reason: "assistant_text" | "run_done", detail?: Record<string, unknown>): Promise<void> {
     if (this.runState.deliveryLatched) return;
     const families = Array.isArray(this.runState.deliveredArtifactFamilies)
       ? this.runState.deliveredArtifactFamilies.filter(Boolean)
@@ -1358,7 +1583,7 @@ export class GatewayRuntime implements AgentRuntime {
     if (this.runState.deliveryLatchActivatedAtTurn == null) {
       this.runState.deliveryLatchActivatedAtTurn = this.turn;
     }
-    this.config.runCtx.writeEvent("run.notice", {
+    await this._writePortableNotificationNotice({
       turn: this.turn,
       kind: "info",
       title: "DeliveryLatchActivated",
@@ -1369,11 +1594,12 @@ export class GatewayRuntime implements AgentRuntime {
         sideEffectLedgerSize: this.runState.sideEffectLedger.length,
         ...(detail ?? {}),
       },
+      source: "runtime.delivery_latch",
     });
   }
 
 
-  private _enforceTurnLevelGuards(ac: AbortController): void {
+  private async _enforceTurnLevelGuards(ac: AbortController): Promise<void> {
     const executionContract = this._getExecutionContract();
     if (!executionContract.required) return;
 
@@ -1392,12 +1618,13 @@ export class GatewayRuntime implements AgentRuntime {
           reasonCodes: ["execution_contract_unsatisfied"],
           detail: { turn: this.turn, retries: this.executionNoToolTurns },
         });
-        this.config.runCtx.writeEvent("run.notice", {
+        await this._writePortableNotificationNotice({
           turn: this.turn,
           kind: "error",
           title: "ExecutionContractFailed",
           message: "执行达成约束失败：连续重试后仍未触发工具调用。",
           detail: { retries: this.executionNoToolTurns, providerContinuationMode: this.providerCapabilities.continuationMode },
+          source: "runtime.execution_contract",
         });
         ac.abort();
       }
@@ -1416,6 +1643,20 @@ export class GatewayRuntime implements AgentRuntime {
     messages: AgentMessage[],
     _signal?: AbortSignal,
   ): Promise<AgentMessage[]> {
+    const immediateItems = this._drainPortableImmediateItems();
+    if (immediateItems.length > 0) {
+      const last = messages[messages.length - 1];
+      const shouldInsertBeforeTrailingUser = Boolean(last) && (
+        (isCanonicalItem(last) && last.kind === "user")
+        || (isPiMessage(last) && isUserMsg(last as Message))
+      );
+      if (shouldInsertBeforeTrailingUser) {
+        messages.splice(messages.length - 1, 0, ...immediateItems);
+      } else {
+        messages.push(...immediateItems);
+      }
+    }
+
     // 每轮重置为基线
     const baselineAllowed = new Set(this.config.runCtx.allowedToolNames);
     this.effectiveAllowed = new Set(baselineAllowed);
@@ -1436,7 +1677,7 @@ export class GatewayRuntime implements AgentRuntime {
             removedCore.push(name);
           }
         }
-        this.config.runCtx.writeEvent("run.notice", {
+        await this._writePortableNotificationNotice({
           turn: this.turn,
           kind: removedCore.length > 0 ? "warn" : "debug",
           title: "PerTurnToolGating",
@@ -1448,6 +1689,7 @@ export class GatewayRuntime implements AgentRuntime {
             gatedCount: nextAllowed.size,
             removedCoreTools: removedCore,
           },
+          source: "runtime.per_turn_gating",
         });
       } catch {
         // logging failures must not影响正常执行
@@ -1693,7 +1935,7 @@ export class GatewayRuntime implements AgentRuntime {
       workflowObj?.waiting?.question ??
       "",
     ).trim();
-    const waitingStatuses = new Set(["waiting_user", "waiting", "clarify_waiting", "proposal_waiting"]);
+    const waitingStatuses = new Set(["waiting_user", "waiting", "clarify_waiting", "proposal_waiting", "approval_waiting", "waiting_approval"]);
     const waitingPhases = new Set([
       "need_topic",
       "need_style_library",
@@ -1721,8 +1963,28 @@ export class GatewayRuntime implements AgentRuntime {
    */
   private async _getFollowUpMessages(): Promise<AgentMessage[]> {
     // run.done 已触发，不再追加
-    if (this.outcome.reason === "run_done") return [];
+    if (this.outcome.reason === "run_done" || this.outcome.reason === "approval_waiting") return [];
 
+    if (this.pendingFollowUpItems.length > 0) {
+      const items = this.pendingFollowUpItems
+        .splice(0, this.pendingFollowUpItems.length)
+        .map((item) => item as unknown as AgentMessage);
+      if (items.length > 0) return items;
+    }
+
+    const stopHook = await this._runPortableHookEvent({
+      eventName: "Stop",
+      stopReason: this.outcome.reason || "completed",
+    });
+    if (stopHook.blocked) {
+      await this._schedulePortableStopContinuation({
+        eventName: "Stop",
+        blockMessage: stopHook.blockMessage,
+        detail: {
+          stopReason: this.outcome.reason || "completed",
+        },
+      });
+    }
     if (this.pendingFollowUpItems.length > 0) {
       const items = this.pendingFollowUpItems
         .splice(0, this.pendingFollowUpItems.length)
@@ -1743,12 +2005,13 @@ export class GatewayRuntime implements AgentRuntime {
       if (budget > 0) {
         st.workflowRetryBudget = budget - 1;
         try {
-          this.config.runCtx.writeEvent("run.notice", {
+          await this._writePortableNotificationNotice({
             turn: this.turn,
             kind: "warn",
             title: "StyleWorkflowTextBlocked",
             message:
               `检测到 ${styleFollowUp.skillId} 已启用但尚未完成风格闭环（phase=${styleFollowUp.phase}），本轮纯文本收口已被拦截，将注入 runtime_hint。`,
+            source: "runtime.follow_up",
           });
         } catch {
           // 非关键路径，忽略审计异常
@@ -1929,12 +2192,109 @@ export class GatewayRuntime implements AgentRuntime {
     return projectDir || process.cwd();
   }
 
-  private _selectPortableHookMatchers(eventName: PortableHookEventName, toolName?: string) {
+  private _derivePortableSessionStartSource(): string {
+    const compactHint =
+      this.config.runCtx.portablePreRunCompact &&
+      typeof this.config.runCtx.portablePreRunCompact === "object" &&
+      !Array.isArray(this.config.runCtx.portablePreRunCompact)
+        ? (this.config.runCtx.portablePreRunCompact as Record<string, unknown>)
+        : null;
+    if (String(compactHint?.scope ?? "").trim().toLowerCase() === "dialogue_summary") return "compact";
+    const waitingFor = String(
+      this.config.runCtx.threadSnapshotHint?.waitingFor ??
+      this.config.runCtx.mainDoc?.threadWaitingFor ??
+      this.config.runCtx.mainDoc?.waitingFor ??
+      "",
+    ).trim().toLowerCase();
+    if (waitingFor === "user" || waitingFor === "approval") return "resume";
+    const workflow =
+      this.config.runCtx.mainDoc?.taskStateV2 &&
+      typeof this.config.runCtx.mainDoc.taskStateV2 === "object" &&
+      !Array.isArray(this.config.runCtx.mainDoc.taskStateV2)
+        ? (this.config.runCtx.mainDoc.taskStateV2 as Record<string, unknown>).workflow
+        : null;
+    const workflowObj = workflow && typeof workflow === "object" && !Array.isArray(workflow)
+      ? (workflow as Record<string, unknown>)
+      : null;
+    const workflowStatus = String(workflowObj?.status ?? "").trim().toLowerCase();
+    if (workflowStatus === "waiting_user" || workflowStatus === "waiting_approval") return "resume";
+    const resumeAction = workflowObj?.resumeAction;
+    if (resumeAction && typeof resumeAction === "object" && !Array.isArray(resumeAction)) return "resume";
+    return "startup";
+  }
+
+  private _portableHookMatcherTargets(args: {
+    eventName: PortableHookEventName;
+    toolName?: string;
+    notification?: Record<string, unknown> | null;
+    compact?: Record<string, unknown> | null;
+    subagent?: Record<string, unknown> | null;
+    permissionRequest?: Record<string, unknown> | null;
+    sessionSource?: string;
+  }): string[] {
+    const out: string[] = [];
+    const push = (value: unknown) => {
+      const text = String(value ?? "").trim();
+      if (!text) return;
+      if (!out.some((item) => item.toLowerCase() === text.toLowerCase())) out.push(text);
+    };
+    if (args.toolName) {
+      push(toPortableToolAliasName(args.toolName));
+      push(args.toolName);
+    }
+    switch (args.eventName) {
+      case "SessionStart":
+        push(args.sessionSource ?? this.portableSessionStartSource);
+        break;
+      case "Notification":
+        push(args.notification?.notification_type);
+        push(args.notification?.title);
+        push(args.notification?.source);
+        push(args.notification?.kind);
+        break;
+      case "PreCompact":
+      case "PostCompact":
+        push(args.compact?.trigger);
+        push(args.compact?.scope);
+        break;
+      case "PermissionRequest":
+        push(args.permissionRequest?.request_kind);
+        break;
+      case "SubagentStart":
+      case "SubagentStop":
+        push(args.subagent?.agent);
+        break;
+      default:
+        break;
+    }
+    return out;
+  }
+
+  private _portableHookCommandShellRules(skillId: string): Array<{
+    raw: string;
+    kind: "any" | "command_pattern";
+    specifier?: string;
+  }> {
+    const manifest = this.config.runCtx.skillManifestById?.get(skillId);
+    const policy = parsePortableAllowedToolPolicy(manifest ? [manifest] : []);
+    if (!policy?.rules?.length) return [];
+    return policy.rules
+      .filter((rule) => rule.toolName === "shell.exec" && (rule.kind === "any" || rule.kind === "command_pattern"))
+      .map((rule) => ({
+        raw: String(rule.raw ?? "").trim(),
+        kind: rule.kind === "command_pattern" ? "command_pattern" : "any",
+        ...(typeof rule.specifier === "string" && rule.specifier.trim() ? { specifier: rule.specifier.trim() } : {}),
+      }));
+  }
+
+  private _selectPortableHookMatchers(args: {
+    eventName: PortableHookEventName;
+    matcherTargets?: string[];
+  }) {
     const skillIds = Array.isArray(this.config.runCtx.portableSkillContext?.activeSkillIds)
       ? this.config.runCtx.portableSkillContext!.activeSkillIds
       : [];
-    const portableAlias = toolName ? toPortableToolAliasName(toolName) : "";
-    const actualToolName = String(toolName ?? "").trim();
+    const matcherTargets = Array.isArray(args.matcherTargets) ? args.matcherTargets.filter(Boolean) : [];
     const selected: Array<{ skillId: string; hooks: PortableHookHandler[] }> = [];
 
     for (const skillIdRaw of skillIds) {
@@ -1943,14 +2303,13 @@ export class GatewayRuntime implements AgentRuntime {
       const manifest = this.config.runCtx.skillManifestById?.get(skillId);
       if (!manifest?.portable || manifest.hooks === undefined || !manifest.hooks || typeof manifest.hooks !== "object") {
         continue;
-      }
-      const rawEventHooks = (manifest.hooks as Record<string, unknown>)[eventName];
+        }
+      const rawEventHooks = (manifest.hooks as Record<string, unknown>)[args.eventName];
       const matchers = normalizePortableHookMatchers(rawEventHooks);
       for (const matcher of matchers) {
         const targetHit =
-          !actualToolName ||
-          portableHookMatcherMatches(matcher.matcher, portableAlias) ||
-          portableHookMatcherMatches(matcher.matcher, actualToolName);
+          matcherTargets.length === 0 ||
+          matcherTargets.some((target) => portableHookMatcherMatches(matcher.matcher, target));
         if (!targetHit) continue;
         if (matcher.hooks.length > 0) {
           selected.push({ skillId, hooks: matcher.hooks });
@@ -1969,6 +2328,7 @@ export class GatewayRuntime implements AgentRuntime {
     toolError?: unknown;
     userPrompt?: string;
     subagent?: Record<string, unknown> | null;
+    sessionSource?: string;
     stopReason?: string;
     notification?: Record<string, unknown> | null;
     permissionRequest?: Record<string, unknown> | null;
@@ -1985,12 +2345,20 @@ export class GatewayRuntime implements AgentRuntime {
     switch (args.eventName) {
       case "UserPromptSubmit":
         return { ...base, prompt: String(args.userPrompt ?? "") };
+      case "SessionStart":
+        return {
+          ...base,
+          prompt: String(args.userPrompt ?? ""),
+          source: String(args.sessionSource ?? this.portableSessionStartSource).trim() || "startup",
+        };
       case "Notification":
         return {
           ...base,
           title: String(args.notification?.title ?? "").trim(),
           message: String(args.notification?.message ?? "").trim(),
           kind: String(args.notification?.kind ?? "").trim(),
+          source: String(args.notification?.source ?? "").trim(),
+          notification_type: String(args.notification?.notification_type ?? args.notification?.title ?? "").trim(),
           detail: args.notification?.detail ?? null,
           notification: args.notification ?? null,
         };
@@ -1999,6 +2367,7 @@ export class GatewayRuntime implements AgentRuntime {
           ...base,
           tool_name: toolAlias || args.toolName || "",
           tool_input: args.toolArgs ?? {},
+          request_kind: String(args.permissionRequest?.request_kind ?? "").trim(),
           reason: String(args.permissionRequest?.reason ?? "").trim(),
           message: String(args.permissionRequest?.message ?? "").trim(),
           decision_source: String(args.permissionRequest?.decision_source ?? "").trim(),
@@ -2025,6 +2394,10 @@ export class GatewayRuntime implements AgentRuntime {
         return {
           ...base,
           tool_name: toolAlias || args.toolName || "",
+          trigger: String(args.compact?.trigger ?? "").trim(),
+          scope: String(args.compact?.scope ?? "").trim(),
+          custom_instructions: String(args.compact?.custom_instructions ?? "").trim(),
+          compact_summary: String(args.compact?.compact_summary ?? "").trim(),
           compact: args.compact ?? null,
           tool_response: args.toolResult ?? null,
         };
@@ -2062,39 +2435,36 @@ export class GatewayRuntime implements AgentRuntime {
     if (args.handler.type === "command") {
       const command = String(args.handler.command ?? "").trim();
       if (!command) return {};
-      const shell = process.env.SHELL || "/bin/sh";
-      const env = {
-        ...process.env,
-        CLAUDE_PROJECT_DIR: this._portableHookProjectDir(),
-        CLAUDE_HOOK_EVENT_NAME: args.eventName,
-      };
-      const child = spawn(shell, ["-lc", command], {
-        cwd: this._portableHookProjectDir(),
-        env,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
       const timeoutMs = Math.max(1000, Math.min(120_000, Math.floor(Number(args.handler.timeoutMs ?? 20_000) || 20_000)));
-      let stdout = "";
-      let stderr = "";
-      child.stdout.on("data", (chunk) => {
-        stdout += String(chunk ?? "");
-        if (stdout.length > 64_000) stdout = stdout.slice(0, 64_000);
-      });
-      child.stderr.on("data", (chunk) => {
-        stderr += String(chunk ?? "");
-        if (stderr.length > 32_000) stderr = stderr.slice(0, 32_000);
-      });
-      child.stdin.write(JSON.stringify(args.input, null, 2));
-      child.stdin.end();
-      const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
-        const timer = setTimeout(() => {
-          try { child.kill("SIGTERM"); } catch {}
-        }, timeoutMs);
-        child.on("close", (code, signal) => {
-          clearTimeout(timer);
-          resolve({ code, signal });
+      if (this.shadowMode === "shadow") {
+        await this._writePortableNotificationNotice({
+          turn: this.turn,
+          kind: "info",
+          title: "PortableHookCommandShadowDryRun",
+          message: `shadow 模式跳过 portable hook command（${args.skillId}/${args.eventName}）。`,
+          detail: { command, timeoutMs },
+          source: "portable_hook.internal",
         });
+        return {};
+      }
+      const toolCallId = `${this.config.runCtx.runId}:portable-hook:${++this.portableHookInvocationSeq}`;
+      const result = await this._waitForDesktopToolResult(toolCallId, PORTABLE_HOOK_COMMAND_TOOL_NAME, {
+        skillId: args.skillId,
+        eventName: args.eventName,
+        projectDir: this._portableHookProjectDir(),
+        command,
+        stdinJson: args.input,
+        timeoutMs,
+        shellRules: this._portableHookCommandShellRules(args.skillId),
+        opMode: (this.config.runCtx.opMode === "assistant" ? "assistant" : "creative"),
       });
+      const output = result.output && typeof result.output === "object" && !Array.isArray(result.output)
+        ? (result.output as Record<string, unknown>)
+        : {};
+      const stdout = String(output.stdout ?? "");
+      const stderr = String(output.stderr ?? "");
+      const exitCode = typeof output.exitCode === "number" ? output.exitCode : null;
+      const timedOut = output.timedOut === true;
       const jsonText = extractJsonObjectLoose(stdout);
       if (jsonText) {
         try {
@@ -2105,22 +2475,37 @@ export class GatewayRuntime implements AgentRuntime {
           // ignore malformed JSON and fall through
         }
       }
-      if (result.code === 2) {
+      if (exitCode === 2) {
         commitOnce();
         return {
           continue: false,
           systemMessage: stderr.trim() || `Portable hook blocked ${args.eventName}.`,
         };
       }
-      if (result.code && result.code !== 0) {
-        this.config.runCtx.writeEvent("run.notice", {
+      if (!result.ok || timedOut || (exitCode !== null && exitCode !== 0)) {
+        await this._writePortableNotificationNotice({
           turn: this.turn,
           kind: "warn",
           title: "PortableHookCommandFailed",
           message: `Portable hook command failed (${args.skillId}/${args.eventName}).`,
-          detail: { code: result.code, signal: result.signal, stderr: stderr.trim().slice(0, 1000) },
+          detail: {
+            exitCode,
+            timedOut,
+            stderr: stderr.trim().slice(0, 1000),
+            error: String(output.error ?? "").trim() || null,
+          },
+          source: "portable_hook.internal",
         });
         return {};
+      }
+      const stdoutText = stdout.trim();
+      if (stdoutText && (args.eventName === "SessionStart" || args.eventName === "UserPromptSubmit")) {
+        commitOnce();
+        return {
+          hookSpecificOutput: {
+            additionalContext: stdoutText,
+          },
+        };
       }
       commitOnce();
       return {};
@@ -2155,24 +2540,26 @@ export class GatewayRuntime implements AgentRuntime {
           }
         }
         if (!res.ok) {
-          this.config.runCtx.writeEvent("run.notice", {
+          await this._writePortableNotificationNotice({
             turn: this.turn,
             kind: "warn",
             title: "PortableHookHttpFailed",
             message: `Portable hook HTTP failed (${args.skillId}/${args.eventName}).`,
             detail: { status: res.status, url },
+            source: "portable_hook.internal",
           });
         }
         commitOnce();
         return {};
       } catch (error) {
         clearTimeout(timer);
-        this.config.runCtx.writeEvent("run.notice", {
+        await this._writePortableNotificationNotice({
           turn: this.turn,
           kind: "warn",
           title: "PortableHookHttpFailed",
           message: `Portable hook HTTP failed (${args.skillId}/${args.eventName}).`,
           detail: { url, error: toErrorMessage(error) },
+          source: "portable_hook.internal",
         });
         return {};
       }
@@ -2222,79 +2609,154 @@ export class GatewayRuntime implements AgentRuntime {
     toolError?: unknown;
     userPrompt?: string;
     subagent?: Record<string, unknown> | null;
+    sessionSource?: string;
     stopReason?: string;
     notification?: Record<string, unknown> | null;
     permissionRequest?: Record<string, unknown> | null;
     compact?: Record<string, unknown> | null;
-  }): Promise<{ blocked?: boolean; blockMessage?: string; updatedArgs?: Record<string, unknown>; hookMessage?: string }> {
-    const selected = this._selectPortableHookMatchers(args.eventName, args.toolName);
+  }): Promise<{
+    blocked?: boolean;
+    blockMessage?: string;
+    updatedArgs?: Record<string, unknown>;
+    hookMessage?: string;
+    permissionBehavior?: PortablePermissionBehavior;
+    approvalRequest?: Record<string, unknown>;
+  }> {
+    const selected = this._selectPortableHookMatchers({
+      eventName: args.eventName,
+      matcherTargets: this._portableHookMatcherTargets(args),
+    });
     if (selected.length === 0) {
       return { updatedArgs: args.toolArgs && typeof args.toolArgs === "object" ? { ...args.toolArgs } : {} };
     }
     let updatedArgs = args.toolArgs && typeof args.toolArgs === "object" ? { ...args.toolArgs } : {};
     let hookMessage = "";
-    for (const entry of selected) {
-      for (const handler of entry.hooks) {
-        const input = this._buildPortableHookInput({
-          ...args,
-          toolArgs: updatedArgs,
-        });
-        const result = await this._executePortableHookHandler({
-          skillId: entry.skillId,
-          eventName: args.eventName,
-          handler,
-          input,
-        });
-        if (result.systemMessage) {
-          this._queueRuntimeHint(
-            `[Portable Hook:${entry.skillId}/${args.eventName}]\n${result.systemMessage}`,
-            ["portable_hook", `hook:${args.eventName.toLowerCase()}`, `skill:${entry.skillId}`],
-          );
-        }
-        const hookOutput =
-          result.hookSpecificOutput && typeof result.hookSpecificOutput === "object"
-            ? result.hookSpecificOutput
-            : null;
-        const additionalContext = String(hookOutput?.additionalContext ?? "").trim();
-        if (additionalContext) {
-          this._queueRuntimeHint(
-            `[Portable Hook Context:${entry.skillId}/${args.eventName}]\n${additionalContext}`,
-            ["portable_hook_context", `skill:${entry.skillId}`],
-          );
-        }
-        const hookMessageCandidate =
-          String(hookOutput?.permissionDecisionReason ?? "").trim() ||
-          String(hookOutput?.message ?? "").trim() ||
-          String(result.decision?.reason ?? "").trim() ||
-          "";
-        if (args.eventName === "PermissionRequest" && hookMessageCandidate) {
-          hookMessage = hookMessageCandidate;
-        }
-        if (args.eventName === "PreToolUse") {
+    this.activePortableHookEventStack.push(args.eventName);
+    try {
+      for (const entry of selected) {
+        for (const handler of entry.hooks) {
+          const input = this._buildPortableHookInput({
+            ...args,
+            toolArgs: updatedArgs,
+          });
+          const result = await this._executePortableHookHandler({
+            skillId: entry.skillId,
+            eventName: args.eventName,
+            handler,
+            input,
+          });
+          if (result.systemMessage) {
+            this._queuePortableHookContext(
+              args.eventName,
+              `[Portable Hook:${entry.skillId}/${args.eventName}]\n${result.systemMessage}`,
+              ["portable_hook", `hook:${args.eventName.toLowerCase()}`, `skill:${entry.skillId}`],
+            );
+          }
+          const hookOutput =
+            result.hookSpecificOutput && typeof result.hookSpecificOutput === "object"
+              ? result.hookSpecificOutput
+              : null;
+          const additionalContext = String(hookOutput?.additionalContext ?? "").trim();
+          if (additionalContext) {
+            this._queuePortableHookContext(
+              args.eventName,
+              `[Portable Hook Context:${entry.skillId}/${args.eventName}]\n${additionalContext}`,
+              ["portable_hook_context", `skill:${entry.skillId}`],
+            );
+          }
+          const hookMessageCandidate =
+            String(hookOutput?.permissionDecisionReason ?? "").trim() ||
+            String(hookOutput?.message ?? "").trim() ||
+            String(result.decision?.reason ?? "").trim() ||
+            "";
           const updatedInput =
             hookOutput?.updatedInput && typeof hookOutput.updatedInput === "object" && !Array.isArray(hookOutput.updatedInput)
               ? (hookOutput.updatedInput as Record<string, unknown>)
               : null;
           if (updatedInput) updatedArgs = updatedInput;
-          const permissionDecision = String(hookOutput?.permissionDecision ?? "").trim().toLowerCase();
-          const permissionDecisionReason = String(hookOutput?.permissionDecisionReason ?? "").trim();
-          const blockedByDecision =
-            result.continue === false ||
-            permissionDecision === "deny" ||
-            String(result.decision?.decision ?? "").trim().toLowerCase() === "block";
-          if (blockedByDecision) {
-            return {
-              blocked: true,
-              blockMessage:
-                permissionDecisionReason ||
-                String(result.decision?.reason ?? "").trim() ||
-                result.systemMessage ||
-                `Portable hook blocked ${args.toolName ?? "tool"}.`,
-              updatedArgs,
-            };
+          if (args.eventName === "PermissionRequest") {
+            const decisionObject =
+              hookOutput?.decision && typeof hookOutput.decision === "object" && !Array.isArray(hookOutput.decision)
+                ? (hookOutput.decision as Record<string, unknown>)
+                : hookOutput?.approvalRequest && typeof hookOutput.approvalRequest === "object" && !Array.isArray(hookOutput.approvalRequest)
+                  ? (hookOutput.approvalRequest as Record<string, unknown>)
+                  : null;
+            const permissionBehavior = normalizePortablePermissionBehavior(
+              hookOutput?.permissionDecision ??
+              decisionObject?.behavior ??
+              decisionObject?.action ??
+              decisionObject?.decision ??
+              result.decision?.decision,
+            );
+            const approvalRequest =
+              decisionObject &&
+              (
+                Boolean(String(decisionObject.question ?? decisionObject.prompt ?? "").trim()) ||
+                Boolean(String(decisionObject.note ?? "").trim()) ||
+                decisionObject.detail !== undefined ||
+                decisionObject.updatedInput !== undefined ||
+                ["approval", "ask", "request_approval", "approval_required", "wait_user", "defer"].includes(
+                  String(decisionObject.behavior ?? decisionObject.action ?? decisionObject.decision ?? "").trim().toLowerCase(),
+                )
+              )
+                ? decisionObject
+                : null;
+            if (permissionBehavior) {
+              return {
+                updatedArgs,
+                hookMessage: hookMessageCandidate || undefined,
+                permissionBehavior,
+                ...(approvalRequest ? { approvalRequest } : {}),
+              };
+            }
+            if (approvalRequest) {
+              return {
+                updatedArgs,
+                hookMessage: hookMessageCandidate || undefined,
+                approvalRequest,
+              };
+            }
+            if (hookMessageCandidate) hookMessage = hookMessageCandidate;
+          }
+          if (args.eventName === "Stop" || args.eventName === "SubagentStop") {
+            const blockedByDecision =
+              result.continue === false ||
+              String(result.decision?.decision ?? "").trim().toLowerCase() === "block";
+            if (blockedByDecision) {
+              return {
+                blocked: true,
+                blockMessage:
+                  hookMessageCandidate ||
+                  String(result.decision?.reason ?? "").trim() ||
+                  result.systemMessage ||
+                  `Portable hook blocked ${args.eventName}.`,
+                updatedArgs,
+              };
+            }
+          }
+          if (args.eventName === "PreToolUse") {
+            const permissionDecision = String(hookOutput?.permissionDecision ?? "").trim().toLowerCase();
+            const permissionDecisionReason = String(hookOutput?.permissionDecisionReason ?? "").trim();
+            const blockedByDecision =
+              result.continue === false ||
+              permissionDecision === "deny" ||
+              String(result.decision?.decision ?? "").trim().toLowerCase() === "block";
+            if (blockedByDecision) {
+              return {
+                blocked: true,
+                blockMessage:
+                  permissionDecisionReason ||
+                  String(result.decision?.reason ?? "").trim() ||
+                  result.systemMessage ||
+                  `Portable hook blocked ${args.toolName ?? "tool"}.`,
+                updatedArgs,
+              };
+            }
           }
         }
       }
+    } finally {
+      this.activePortableHookEventStack.pop();
     }
     return { updatedArgs, hookMessage: hookMessage || undefined };
   }
@@ -2436,7 +2898,7 @@ export class GatewayRuntime implements AgentRuntime {
     ) {
       (this.runState as any).lastToolNotAllowedName = String(toolName ?? "").trim() || null;
       const deniedMessage = `工具 "${toolName}" 在当前阶段不可用，请使用其他工具。`;
-      const permissionHookMessage = await this._emitPortablePermissionRequest({
+      const permissionHook = await this._emitPortablePermissionRequest({
         toolName,
         toolArgs,
         errorCode: "TOOL_NOT_ALLOWED_THIS_TURN",
@@ -2446,6 +2908,8 @@ export class GatewayRuntime implements AgentRuntime {
           toolName,
           effectiveAllowedCount: this.effectiveAllowed?.size ?? 0,
         },
+        approvalEligible: false,
+        allowCanProceed: false,
       });
       await this._writePortableNotificationNotice({
         turn: this.turn,
@@ -2455,7 +2919,7 @@ export class GatewayRuntime implements AgentRuntime {
         detail: {
           toolName,
           effectiveAllowedCount: this.effectiveAllowed?.size ?? 0,
-          permissionHookMessage: permissionHookMessage ?? null,
+          permissionHookMessage: permissionHook.hookMessage ?? null,
         },
         source: "tool.permission_denied",
       });
@@ -2464,7 +2928,7 @@ export class GatewayRuntime implements AgentRuntime {
         output: {
           ok: false,
           error: "TOOL_NOT_ALLOWED_THIS_TURN",
-          message: permissionHookMessage || deniedMessage,
+          message: permissionHook.hookMessage || deniedMessage,
         },
         executedBy: "gateway",
       };
@@ -2480,20 +2944,37 @@ export class GatewayRuntime implements AgentRuntime {
     }
     if (preHook.blocked) {
       const deniedMessage = preHook.blockMessage || `Portable hook blocked tool "${toolName}".`;
-      const permissionHookMessage = await this._emitPortablePermissionRequest({
+      const permissionHook = await this._emitPortablePermissionRequest({
         toolName,
         toolArgs,
         errorCode: "PORTABLE_SKILL_HOOK_DENIED",
         decisionSource: "portable_hook_pre_tool_use",
         message: deniedMessage,
         detail: { toolName, toolArgs },
+        approvalEligible: true,
+        allowCanProceed: true,
       });
+      if (permissionHook.approvalRequested) {
+        return finalizeToolResult({
+          ok: false,
+          output: {
+            ok: false,
+            error: "APPROVAL_REQUIRED",
+            message: permissionHook.approvalQuestion || permissionHook.hookMessage || deniedMessage,
+            approvalId: permissionHook.approvalId ?? null,
+          },
+          executedBy: "gateway",
+        });
+      }
+      if (permissionHook.permissionBehavior === "allow") {
+        toolArgs = permissionHook.updatedArgs ?? toolArgs;
+      } else {
       await this._writePortableNotificationNotice({
         turn: this.turn,
         kind: "warn",
         title: "PortableHookBlockedTool",
-        message: permissionHookMessage || deniedMessage,
-        detail: { toolName, toolArgs, permissionHookMessage: permissionHookMessage ?? null },
+        message: permissionHook.hookMessage || deniedMessage,
+        detail: { toolName, toolArgs, permissionHookMessage: permissionHook.hookMessage ?? null },
         source: "tool.permission_denied",
       });
       return {
@@ -2501,17 +2982,18 @@ export class GatewayRuntime implements AgentRuntime {
         output: {
           ok: false,
           error: "PORTABLE_SKILL_HOOK_DENIED",
-          message: permissionHookMessage || deniedMessage,
+          message: permissionHook.hookMessage || deniedMessage,
         },
         executedBy: "gateway",
       };
+      }
     }
 
     const portableToolPolicy = this.config.runCtx.portableSkillContext?.allowedToolPolicy ?? null;
     const portableDecision = evaluatePortableAllowedToolPolicy(portableToolPolicy, toolName, toolArgs);
     if (!portableDecision.ok) {
       const deniedMessage = portableDecision.message || `Portable skill guardrails blocked tool "${toolName}".`;
-      const permissionHookMessage = await this._emitPortablePermissionRequest({
+      const permissionHook = await this._emitPortablePermissionRequest({
         toolName,
         toolArgs,
         errorCode: "PORTABLE_SKILL_TOOL_POLICY_DENIED",
@@ -2522,17 +3004,19 @@ export class GatewayRuntime implements AgentRuntime {
           reason: portableDecision.reason ?? "portable_skill_tool_denied",
           matchedRule: portableDecision.matchedRule ?? null,
         },
+        approvalEligible: false,
+        allowCanProceed: false,
       });
       await this._writePortableNotificationNotice({
         turn: this.turn,
         kind: "warn",
         title: "PortableSkillToolDenied",
-        message: permissionHookMessage || deniedMessage,
+        message: permissionHook.hookMessage || deniedMessage,
         detail: {
           toolName,
           reason: portableDecision.reason ?? "portable_skill_tool_denied",
           matchedRule: portableDecision.matchedRule ?? null,
-          permissionHookMessage: permissionHookMessage ?? null,
+          permissionHookMessage: permissionHook.hookMessage ?? null,
         },
         source: "tool.permission_denied",
       });
@@ -2541,7 +3025,7 @@ export class GatewayRuntime implements AgentRuntime {
         output: {
           ok: false,
           error: "PORTABLE_SKILL_TOOL_POLICY_DENIED",
-          message: permissionHookMessage || deniedMessage,
+          message: permissionHook.hookMessage || deniedMessage,
           detail: {
             toolName,
             reason: portableDecision.reason ?? "portable_skill_tool_denied",
@@ -2563,20 +3047,22 @@ export class GatewayRuntime implements AgentRuntime {
       Boolean(portableToolPolicy?.allowedToolNames?.has(toolName));
     if (opMode !== "assistant" && runtimeHighRiskTools.has(toolName) && !portableHighRiskOverride) {
       const deniedMessage = "当前为创作模式，禁止执行 shell.exec / process.* / cron.* 等高风险本机操作；如确需执行，请先在桌面端切换到“助手模式”后再重试。";
-      const permissionHookMessage = await this._emitPortablePermissionRequest({
+      const permissionHook = await this._emitPortablePermissionRequest({
         toolName,
         toolArgs,
         errorCode: "ASSISTANT_MODE_REQUIRED",
         decisionSource: "op_mode_high_risk_gate",
         message: deniedMessage,
         detail: { toolName, opMode },
+        approvalEligible: false,
+        allowCanProceed: false,
       });
       await this._writePortableNotificationNotice({
         turn: this.turn,
         kind: "warn",
         title: "AssistantModeRequired",
         message: "当前为创作模式(opMode=" + opMode + ")，已拦截高风险运行时工具调用：" + toolName,
-        detail: { toolName, opMode, permissionHookMessage: permissionHookMessage ?? null },
+        detail: { toolName, opMode, permissionHookMessage: permissionHook.hookMessage ?? null },
         source: "tool.permission_denied",
       });
       return finalizeToolResult({
@@ -2584,7 +3070,7 @@ export class GatewayRuntime implements AgentRuntime {
         output: {
           ok: false,
           error: "ASSISTANT_MODE_REQUIRED",
-          message: permissionHookMessage || deniedMessage,
+          message: permissionHook.hookMessage || deniedMessage,
           next_actions: [
             "如确需执行命令，请先在桌面端显式开启助手模式",
             "助手模式开启后，可明确说明要执行的命令及目的",
@@ -2600,7 +3086,7 @@ export class GatewayRuntime implements AgentRuntime {
     if (this.runState.deliveryLatched && matchedSideEffect) {
       this._recordToolLoopGuard("delivery_latch_blocked");
       const deniedMessage = "该逻辑产物已完成交付，禁止重复写入同一产物族。";
-      const permissionHookMessage = await this._emitPortablePermissionRequest({
+      const permissionHook = await this._emitPortablePermissionRequest({
         toolName,
         toolArgs,
         errorCode: "DELIVERY_LATCHED",
@@ -2611,6 +3097,8 @@ export class GatewayRuntime implements AgentRuntime {
           toolName,
           sideEffectLedgerSize: this.runState.sideEffectLedger.length,
         },
+        approvalEligible: false,
+        allowCanProceed: false,
       });
       await this._writePortableNotificationNotice({
         turn: this.turn,
@@ -2621,7 +3109,7 @@ export class GatewayRuntime implements AgentRuntime {
           logicalTarget: matchedSideEffect.logicalTarget,
           toolName,
           sideEffectLedgerSize: this.runState.sideEffectLedger.length,
-          permissionHookMessage: permissionHookMessage ?? null,
+          permissionHookMessage: permissionHook.hookMessage ?? null,
         },
         source: "tool.permission_denied",
       });
@@ -2630,7 +3118,7 @@ export class GatewayRuntime implements AgentRuntime {
         output: {
           ok: false,
           error: "DELIVERY_LATCHED",
-          message: permissionHookMessage || deniedMessage,
+          message: permissionHook.hookMessage || deniedMessage,
           detail: {
             logicalTarget: matchedSideEffect.logicalTarget,
             providerContinuationMode: this.providerCapabilities.continuationMode,
@@ -2659,7 +3147,7 @@ export class GatewayRuntime implements AgentRuntime {
         return finalizeToolResult(await this._handleDelegateStub(toolCallId, toolArgs, toolName));
       }
       const result = await this.collabRuntime.spawn(toolCallId, toolArgs, this.turn);
-      await this._runPortableHookEvent({
+      const subagentStopHook = await this._runPortableHookEvent({
         eventName: "SubagentStop",
         toolName,
         toolArgs,
@@ -2669,6 +3157,17 @@ export class GatewayRuntime implements AgentRuntime {
           ok: result.ok,
         },
       });
+      if (subagentStopHook.blocked) {
+        await this._schedulePortableStopContinuation({
+          eventName: "SubagentStop",
+          blockMessage: subagentStopHook.blockMessage,
+          detail: {
+            toolName,
+            subagent: toolArgs.agent ?? toolArgs.agentId ?? toolArgs.agent_type ?? null,
+            ok: result.ok,
+          },
+        });
+      }
       return finalizeToolResult(result);
     }
 
@@ -2706,12 +3205,13 @@ export class GatewayRuntime implements AgentRuntime {
         executedBy: "desktop",
         dryRun: true,
       });
-      this.config.runCtx.writeEvent("run.notice", {
+      await this._writePortableNotificationNotice({
         turn: this.turn,
         kind: "info",
         title: "ShadowDryRun",
         message: `shadow 模式跳过 Desktop 工具：${toolName}`,
         detail: { toolCallId, name: toolName },
+        source: "runtime.shadow",
       });
       return finalizeToolResult({
         ok: false,
@@ -2815,7 +3315,7 @@ export class GatewayRuntime implements AgentRuntime {
             }
           }
         } else if (toolName === "skills.activate") {
-          this._applyDynamicSkillActivation((ret as any).output);
+          await this._applyDynamicSkillActivation((ret as any).output);
         }
         return {
           ok: true,
@@ -3069,7 +3569,7 @@ export class GatewayRuntime implements AgentRuntime {
         if (isAssistantMsg(msg)) {
           this._pushAssistantToTranscript(msg);
           if (msg.stopReason !== "error" && msg.stopReason !== "aborted" && this._assistantHasVisibleText(msg)) {
-            this._activateDeliveryLatch("assistant_text", { stopReason: msg.stopReason ?? null });
+            await this._activateDeliveryLatch("assistant_text", { stopReason: msg.stopReason ?? null });
           }
           // 上报 token usage
           this.config.runCtx.onTurnUsage?.(
@@ -3105,6 +3605,7 @@ export class GatewayRuntime implements AgentRuntime {
         const rawToolName = this._decodeRuntimeToolName(event.toolName);
         this.totalToolCalls += 1;
         this.currentTurnToolCalls += 1;
+        this.portableStopBlockRetryCount = 0;
         this.turnEngine.record({
           type: "model_tool_call",
           callId: event.toolCallId,
@@ -3144,11 +3645,12 @@ export class GatewayRuntime implements AgentRuntime {
           if (wfWorkflowExcl) {
             const violation = checkExclusions(wfWorkflowExcl, [rawToolName]);
             if (violation) {
-              this.config.runCtx.writeEvent("run.notice", {
+              await this._writePortableNotificationNotice({
                 turn: this.turn,
                 kind: "info",
                 title: "StyleWorkflow",
                 message: "style workflow 工具调用提示（" + violation + "），已放行。",
+                source: "runtime.style_workflow",
               });
             }
           }
@@ -3200,12 +3702,13 @@ export class GatewayRuntime implements AgentRuntime {
           if (m?.[1]) {
             const raw = this._decodeRuntimeToolName(String(m[1]));
             (this.runState as any).lastToolNotFoundName = raw || null;
-            this.config.runCtx.writeEvent("run.notice", {
+            await this._writePortableNotificationNotice({
               turn: this.turn,
               kind: "warn",
               title: "ToolNotFound",
               message: `检测到 TOOL_NOT_FOUND：${raw || m[1]}，下一回合将自愈补齐工具池。`,
               detail: { toolName: raw || m[1], rawError: flat.slice(0, 240) },
+              source: "runtime.tool_recovery",
             });
           }
           this.failureDigest.failedTools.push({
@@ -3230,7 +3733,7 @@ export class GatewayRuntime implements AgentRuntime {
           const budget = Math.max(0, Math.floor(Number((this.runState as any).workflowRetryBudget ?? 0)));
           if (styleFollowUp && budget > 0 && !agentIsAskingUser) {
             try {
-              this.config.runCtx.writeEvent("run.notice", {
+              await this._writePortableNotificationNotice({
                 turn: this.turn,
                 kind: "warn",
                 title: "StyleWorkflowRunDoneIntercepted",
@@ -3240,6 +3743,7 @@ export class GatewayRuntime implements AgentRuntime {
                   phase: styleFollowUp.phase,
                   remainingBudget: budget,
                 },
+                source: "runtime.run_done_intercept",
               });
             } catch {
               // 非关键路径，忽略审计异常
@@ -3247,7 +3751,7 @@ export class GatewayRuntime implements AgentRuntime {
             this.toolCallSnapshots.delete(event.toolCallId);
             return;
           }
-          this._activateDeliveryLatch("run_done");
+          await this._activateDeliveryLatch("run_done");
           this._setOutcome({
             status: "completed",
             reason: "run_done",
@@ -3269,7 +3773,7 @@ export class GatewayRuntime implements AgentRuntime {
         } else {
           this.consecutiveTextOnlyTurns = 0;
         }
-        this._enforceTurnLevelGuards(ac);
+        await this._enforceTurnLevelGuards(ac);
         return;
       case "message_start":
       case "tool_execution_update":
