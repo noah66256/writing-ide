@@ -69,6 +69,28 @@ function gatewayBaseUrl() {
   return getGatewayBaseUrl();
 }
 
+function absoluteGatewayBaseUrlForLocalExec(): string {
+  const base = String(gatewayBaseUrl() ?? "").trim();
+  if (base) return base.replace(/\/+$/g, "");
+  try {
+    const origin = String(window.location.origin ?? "").trim();
+    if (/^https?:\/\//i.test(origin)) return origin.replace(/\/+$/g, "");
+  } catch {
+    // ignore
+  }
+  return "";
+}
+
+function buildClaudeBridgePayload(): Record<string, string> | null {
+  const accessToken = String(useAuthStore.getState().accessToken ?? "").trim();
+  const gatewayBase = absoluteGatewayBaseUrlForLocalExec();
+  if (!accessToken || !gatewayBase) return null;
+  return {
+    accessToken,
+    gatewayBaseUrl: gatewayBase,
+  };
+}
+
 function getKbMentionLibraryIdsFromLatestUserStep(): string[] {
   const steps = Array.isArray(useRunStore.getState().steps) ? (useRunStore.getState().steps as any[]) : [];
   for (let i = steps.length - 1; i >= 0; i -= 1) {
@@ -3000,25 +3022,54 @@ const tools: ToolDefinition[] = [
   {
     name: "skill.install",
     description:
-      "将 SKILL.md 写入用户技能目录（userData/skills/<name>/SKILL.md），使其被 SkillLoader 热加载。\n" +
+      "安装或更新一个技能到用户全局技能目录（不是当前项目目录），使其被 SkillLoader 热加载。\n" +
+      "该操作会写入 Desktop 管理的用户 skills 根目录，通常只应在助手模式下使用。\n" +
+      "支持 inline 模式（name + content）和 GitHub 模式（source=github + owner/repo/subdir/ref）。\n" +
       "只用于安装/更新技能文件，不要用于普通文件写入。",
     args: [
-      { name: "name", required: true, desc: "技能 ID（即目录名，如 weekly-report-writer）", type: "string" },
-      { name: "content", required: true, desc: "SKILL.md 完整内容（含 frontmatter + body）", type: "string" },
+      { name: "name", required: false, desc: "inline 模式下的技能 ID（即目录名，如 weekly-report-writer）", type: "string" },
+      { name: "content", required: false, desc: "inline 模式下的 SKILL.md 完整内容（含 frontmatter + body）", type: "string" },
+      { name: "source", required: false, desc: "来源类型；github 表示从 GitHub 仓库目录安装", type: "string" },
+      { name: "owner", required: false, desc: "GitHub owner", type: "string" },
+      { name: "repo", required: false, desc: "GitHub repo", type: "string" },
+      { name: "subdir", required: false, desc: "仓库内 skill 子目录（如 skills/skill-creator）", type: "string" },
+      { name: "ref", required: false, desc: "可选 git ref（branch/tag/sha）", type: "string" },
     ],
     riskLevel: "medium",
     applyPolicy: "auto_apply",
     reversible: false,
     run: async (args) => {
-      const name = String((args as any)?.name ?? "").trim();
-      const content = String((args as any)?.content ?? "").trim();
-      if (!name) return failToolResult({ code: "MISSING_NAME", message: "skill name is required" });
-      if (!content) return failToolResult({ code: "INVALID_CONTENT", message: "skill content is required" });
-      if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name)) {
-        return failToolResult({
-          code: "INVALID_NAME",
-          message: "name must be lowercase alphanumeric with hyphens",
-        });
+      const payloadRaw = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+      const source = String(payloadRaw?.source ?? "").trim().toLowerCase();
+      const inlineName = String(payloadRaw?.name ?? "").trim();
+      const inlineContent = String(payloadRaw?.content ?? "").trim();
+      const githubOwner = String(payloadRaw?.owner ?? "").trim();
+      const githubRepo = String(payloadRaw?.repo ?? "").trim();
+      const githubSubdir = String(payloadRaw?.subdir ?? "").trim();
+      const githubRef = String(payloadRaw?.ref ?? "").trim();
+
+      let payload: Record<string, unknown>;
+      if (source === "github") {
+        if (!githubOwner) return failToolResult({ code: "GITHUB_OWNER_REQUIRED", message: "github owner is required" });
+        if (!githubRepo) return failToolResult({ code: "GITHUB_REPO_REQUIRED", message: "github repo is required" });
+        if (!githubSubdir) return failToolResult({ code: "GITHUB_SUBDIR_REQUIRED", message: "github subdir is required" });
+        payload = {
+          source: "github",
+          owner: githubOwner,
+          repo: githubRepo,
+          subdir: githubSubdir,
+          ...(githubRef ? { ref: githubRef } : {}),
+        };
+      } else {
+        if (!inlineName) return failToolResult({ code: "MISSING_NAME", message: "skill name is required" });
+        if (!inlineContent) return failToolResult({ code: "INVALID_CONTENT", message: "skill content is required" });
+        if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(inlineName)) {
+          return failToolResult({
+            code: "INVALID_NAME",
+            message: "name must be lowercase alphanumeric with hyphens",
+          });
+        }
+        payload = { name: inlineName, content: inlineContent };
       }
 
       const api = (window as any).desktop?.skills;
@@ -3026,7 +3077,7 @@ const tools: ToolDefinition[] = [
         return failToolResult({ code: "SKILL_API_NOT_AVAILABLE", message: "技能安装 API 不可用" });
       }
 
-      const result = await api.install({ name, content });
+      const result = await api.install(payload);
       if (!result?.ok) {
         return failToolResult({
           code: result?.error ?? "INSTALL_FAILED",
@@ -3037,8 +3088,19 @@ const tools: ToolDefinition[] = [
         ok: true,
         output: {
           ok: true,
+          skillId: String(result.skillId ?? ""),
           path: String(result.path ?? ""),
-          note: `技能已安装到 ${result.path}；SkillLoader 将自动热加载。`,
+          dir: String(result.dir ?? ""),
+          fileCount:
+            typeof result.fileCount === "number" && Number.isFinite(result.fileCount)
+              ? Math.max(0, Math.floor(result.fileCount))
+              : undefined,
+          replacedExisting: Boolean(result.replacedExisting),
+          sourceMeta: result.sourceMeta ?? null,
+          note:
+            source === "github"
+              ? `技能已从 GitHub 安装到 ${result.path}；SkillLoader 将自动热加载。`
+              : `技能已安装到 ${result.path}；SkillLoader 将自动热加载。`,
         },
         undoable: false,
       };
@@ -3901,7 +3963,14 @@ const tools: ToolDefinition[] = [
         return { ok: false, error: "SHELL_API_NOT_AVAILABLE" } as any;
       }
 
-      const result = await shellApi.exec({ projectDir, command: commandRaw, args: argv, timeoutMs });
+      const claudeBridge = buildClaudeBridgePayload();
+      const result = await shellApi.exec({
+        projectDir,
+        command: commandRaw,
+        args: argv,
+        timeoutMs,
+        ...(claudeBridge ? { claudeBridge } : {}),
+      });
       if (!result) return { ok: false, error: "SHELL_EXEC_IPC_FAILED" } as any;
 
       const exitCode = typeof result.exitCode === "number" ? result.exitCode : null;
@@ -4119,12 +4188,14 @@ const tools: ToolDefinition[] = [
         } as any;
       }
 
+      const claudeBridge = buildClaudeBridgePayload();
       const result = await shellApi.exec({
         projectDir,
         command,
         args: [],
         stdin: JSON.stringify(args.stdinJson ?? {}, null, 2),
         timeoutMs,
+        ...(claudeBridge ? { claudeBridge } : {}),
       });
       const stdout = String(result?.stdout ?? "");
       const stderr = String(result?.stderr ?? "");
@@ -4188,7 +4259,14 @@ const tools: ToolDefinition[] = [
         } as any;
       }
 
-      const result = await api.run({ projectDir, command: commandRaw, args: argv, cwd });
+      const claudeBridge = buildClaudeBridgePayload();
+      const result = await api.run({
+        projectDir,
+        command: commandRaw,
+        args: argv,
+        cwd,
+        ...(claudeBridge ? { claudeBridge } : {}),
+      });
       if (!result || result.ok === false) {
         return {
           ok: false,

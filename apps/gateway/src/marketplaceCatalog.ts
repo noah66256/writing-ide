@@ -29,7 +29,11 @@ export type MarketplaceManifest = MarketplaceCatalogItem & {
 export type MarketplaceSkillPayload = {
   kind: "skill";
   skillId?: string;
-  files: Record<string, string>;
+  files: Array<{
+    path: string;
+    encoding?: "utf8" | "base64";
+    content: string;
+  }> | Record<string, string>;
 };
 
 export type MarketplaceMcpPayload = {

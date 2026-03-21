@@ -117,6 +117,7 @@ let watchChanged = new Set();
 let mcpManager = null;
 let skillLoader = null;  // Skill 扩展包加载器
 let marketplaceManager = null;  // Marketplace 安装管理器
+let claudeCliBridgeManager = null;  // shell.exec 内嵌 claude -p 受限 bridge
 let appSettings = {};  // 应用级设置（含浏览器路径等）
 let appSettingsModules = null;  // { loadSettings, saveSettings, detectBrowser }
 let codeExecManager = null;  // 代码执行管理器（Python 沙箱执行）
@@ -187,6 +188,56 @@ function getRendererSendTarget() {
   const wc = win.webContents;
   if (!wc || typeof wc.isDestroyed !== "function" || wc.isDestroyed()) return null;
   return { win, wc };
+}
+
+function sanitizeShellEnvObject(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const envKey = String(key ?? "").trim();
+    if (!envKey || envKey.includes("=") || envKey.includes("\0")) continue;
+    if (value == null) continue;
+    out[envKey] = String(value);
+  }
+  return out;
+}
+
+function buildShellExecEnv(args = {}) {
+  const baseEnv = args.baseEnv && typeof args.baseEnv === "object" ? { ...args.baseEnv } : {};
+  const overlayEnv = sanitizeShellEnvObject(args.overlayEnv);
+  const prependPath = Array.isArray(args.prependPath)
+    ? args.prependPath.map((item) => String(item ?? "").trim()).filter(Boolean)
+    : [];
+  const nextEnv = { ...baseEnv, ...overlayEnv };
+  if (prependPath.length > 0) {
+    const currentPath = String(nextEnv.PATH ?? nextEnv.Path ?? nextEnv.path ?? "");
+    nextEnv.PATH = [...prependPath, currentPath].filter(Boolean).join(path.delimiter);
+  }
+  return nextEnv;
+}
+
+async function ensureClaudeCliBridgeManager() {
+  if (claudeCliBridgeManager) return claudeCliBridgeManager;
+  const { ClaudeCliBridgeManager } = await import("./claude-cli-bridge.mjs");
+  claudeCliBridgeManager = new ClaudeCliBridgeManager({
+    userDataPath: app.getPath("userData"),
+    getInstalledSkills: () => (skillLoader?.getSkills ? skillLoader.getSkills() : []),
+  });
+  return claudeCliBridgeManager;
+}
+
+async function createClaudeBridgeSession(rawConfig) {
+  const bridgeConfig = rawConfig && typeof rawConfig === "object" ? rawConfig : null;
+  if (!bridgeConfig) return null;
+  const accessToken = String(bridgeConfig.accessToken ?? "").trim();
+  const gatewayBaseUrl = String(bridgeConfig.gatewayBaseUrl ?? "").trim();
+  if (!accessToken || !gatewayBaseUrl) return null;
+  const manager = await ensureClaudeCliBridgeManager();
+  return manager.createSession({ accessToken, gatewayBaseUrl });
+}
+
+function disposeClaudeBridgeSession(session) {
+  try { session?.dispose?.(); } catch {}
 }
 
 function isWindowForeground(win) {
@@ -4153,17 +4204,35 @@ function registerIpc() {
         let stderr = "";
         let timedOut = false;
         let settled = false;
-        const child = spawn(commandRaw, args, { cwd: projectDir, shell: true });
+        let claudeBridgeSession = null;
+        const startChild = async () => {
+          try {
+            claudeBridgeSession = await createClaudeBridgeSession(p.claudeBridge);
+          } catch (e) {
+            claudeBridgeSession = null;
+            stderr += String(e?.message ?? e);
+          }
+
+          const mergedEnv = buildShellExecEnv({
+            baseEnv: process.env,
+            overlayEnv: {
+              ...(p.env && typeof p.env === "object" ? p.env : {}),
+              ...(claudeBridgeSession?.env && typeof claudeBridgeSession.env === "object" ? claudeBridgeSession.env : {}),
+            },
+            prependPath: [
+              ...(Array.isArray(p.prependPath) ? p.prependPath : []),
+              ...(Array.isArray(claudeBridgeSession?.prependPath) ? claudeBridgeSession.prependPath : []),
+            ],
+          });
+          return spawn(commandRaw, args, { cwd: projectDir, shell: true, env: mergedEnv });
+        };
         const maxLen = 60_000;
         const stdinText = typeof p.stdin === "string" ? p.stdin : "";
-        const timer = setTimeout(() => {
-          timedOut = true;
-          try { child.kill("SIGKILL"); } catch {}
-        }, timeoutMs);
         const finish = (exitCode, error) => {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
+          disposeClaudeBridgeSession(claudeBridgeSession);
           if (stdout.length > maxLen) stdout = stdout.slice(0, maxLen) + "\n...[stdout truncated]";
           if (stderr.length > maxLen) stderr = stderr.slice(0, maxLen) + "\n...[stderr truncated]";
           const durationMs = Date.now() - startedAt;
@@ -4180,23 +4249,33 @@ function registerIpc() {
             error: error ?? (timedOut ? "TIMEOUT" : undefined),
           });
         };
-        if (child.stdout) {
-          child.stdout.on("data", (d) => { stdout += String(d ?? ""); });
-        }
-        if (child.stderr) {
-          child.stderr.on("data", (d) => { stderr += String(d ?? ""); });
-        }
-        if (stdinText && child.stdin) {
-          try { child.stdin.write(stdinText); } catch {}
-        }
-        if (child.stdin) {
-          try { child.stdin.end(); } catch {}
-        }
-        child.on("error", (e) => { finish(null, String(e && e.message ? e.message : e)); });
-        child.on("close", (code) => {
-          const exitCode = typeof code === "number" ? code : null;
-          finish(exitCode);
-        });
+        let child = null;
+        const timer = setTimeout(() => {
+          timedOut = true;
+          try { child?.kill("SIGKILL"); } catch {}
+        }, timeoutMs);
+        startChild()
+          .then((spawned) => {
+            child = spawned;
+            if (child.stdout) {
+              child.stdout.on("data", (d) => { stdout += String(d ?? ""); });
+            }
+            if (child.stderr) {
+              child.stderr.on("data", (d) => { stderr += String(d ?? ""); });
+            }
+            if (stdinText && child.stdin) {
+              try { child.stdin.write(stdinText); } catch {}
+            }
+            if (child.stdin) {
+              try { child.stdin.end(); } catch {}
+            }
+            child.on("error", (e) => { finish(null, String(e && e.message ? e.message : e)); });
+            child.on("close", (code) => {
+              const exitCode = typeof code === "number" ? code : null;
+              finish(exitCode);
+            });
+          })
+          .catch((e) => finish(null, String(e?.message ?? e)));
       });
     } catch (e) {
       return { ok: false, error: String(e && e.message ? e.message : e) };
@@ -4213,9 +4292,33 @@ function registerIpc() {
       const args = Array.isArray(p.args) ? p.args.map((x) => String(x ?? "")) : [];
       const cwdRaw = String(p.cwd ?? "").trim();
       const cwd = cwdRaw || projectDir || process.cwd();
+      let claudeBridgeSession = null;
+      try {
+        claudeBridgeSession = await createClaudeBridgeSession(p.claudeBridge);
+      } catch (e) {
+        return { ok: false, error: `CLAUDE_BRIDGE_INIT_FAILED:${String(e?.message ?? e)}` };
+      }
+
+      const mergedEnv = buildShellExecEnv({
+        baseEnv: process.env,
+        overlayEnv: {
+          ...(p.env && typeof p.env === "object" ? p.env : {}),
+          ...(claudeBridgeSession?.env && typeof claudeBridgeSession.env === "object" ? claudeBridgeSession.env : {}),
+        },
+        prependPath: [
+          ...(Array.isArray(p.prependPath) ? p.prependPath : []),
+          ...(Array.isArray(claudeBridgeSession?.prependPath) ? claudeBridgeSession.prependPath : []),
+        ],
+      });
 
       const id = "proc_" + Date.now().toString(36) + "_" + (processSeq++).toString(36);
-      const child = spawn(commandRaw, args, { cwd, shell: true });
+      let child = null;
+      try {
+        child = spawn(commandRaw, args, { cwd, shell: true, env: mergedEnv });
+      } catch (e) {
+        disposeClaudeBridgeSession(claudeBridgeSession);
+        return { ok: false, error: String(e && e.message ? e.message : e) };
+      }
       const entry = {
         id,
         pid: child && typeof child.pid === "number" ? child.pid : null,
@@ -4228,6 +4331,7 @@ function registerIpc() {
         signal: null,
         lastError: null,
         child,
+        claudeBridgeSession,
       };
       processTable.set(id, entry);
 
@@ -4238,12 +4342,16 @@ function registerIpc() {
         rec.endedAt = Date.now();
         rec.exitCode = typeof code === "number" ? code : null;
         rec.signal = signal || null;
+        disposeClaudeBridgeSession(rec.claudeBridgeSession);
+        rec.claudeBridgeSession = null;
       });
       child.on("error", (e) => {
         const rec = processTable.get(id);
         if (!rec) return;
         rec.status = "error";
         rec.lastError = String(e && e.message ? e.message : e);
+        disposeClaudeBridgeSession(rec.claudeBridgeSession);
+        rec.claudeBridgeSession = null;
       });
 
       return {
@@ -4593,23 +4701,16 @@ function registerIpc() {
   });
   ipcMain.handle("skills.install", async (_event, payload) => {
     if (!skillLoader) return { ok: false, error: "SKILL_LOADER_NOT_READY" };
-    const { name, content } = payload ?? {};
-    if (!name || typeof name !== "string") return { ok: false, error: "INVALID_NAME" };
-    if (!content || typeof content !== "string") return { ok: false, error: "INVALID_CONTENT" };
-
-    // 安全校验：name 只允许小写字母、数字、短横线
-    if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name)) {
-      return { ok: false, error: "INVALID_NAME", detail: "name must be lowercase alphanumeric with hyphens" };
-    }
-
-    const skillDir = path.join(skillLoader.rootDir, name);
-    const skillFile = path.join(skillDir, "SKILL.md");
     try {
-      await fsp.mkdir(skillDir, { recursive: true });
-      await fsp.writeFile(skillFile, content, "utf-8");
-      return { ok: true, path: skillFile };
+      const { installSkillFromPayload } = await import("./skill-install-manager.mjs");
+      return await installSkillFromPayload({
+        payload,
+        rootDir: skillLoader.rootDir,
+        reload: reloadSkillsAndBroadcast,
+      });
     } catch (e) {
-      return { ok: false, error: "WRITE_FAILED", detail: e?.message };
+      const code = String(e?.message ?? e ?? "SKILL_INSTALL_FAILED");
+      return { ok: false, error: code, detail: code };
     }
   });
 
@@ -5026,6 +5127,11 @@ app.on("will-quit", () => {
   recordMainEvent("app.will-quit", {
     hasPendingUpdate: Boolean(pendingUpdate),
   });
+  for (const rec of processTable.values()) {
+    disposeClaudeBridgeSession(rec?.claudeBridgeSession);
+    if (rec && typeof rec === "object") rec.claudeBridgeSession = null;
+  }
+  try { claudeCliBridgeManager?.dispose?.(); } catch { /* ignore */ }
   // 清理 Electron 的 SingleInstanceLock 文件（防止安装器误报）
   // 同时清理旧版 "写作IDE" 和新版 "WritingIDE" 两个路径
   const lockDirs = new Set();

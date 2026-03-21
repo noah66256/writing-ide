@@ -3041,12 +3041,14 @@ export class GatewayRuntime implements AgentRuntime {
     }
 
     const opMode = (this.config.runCtx as any).opMode === "assistant" ? "assistant" : "creative";
-    const runtimeHighRiskTools = new Set<string>(["shell.exec", "process.run", "process.list", "process.stop", "cron.create", "cron.list"]);
+    const runtimeHighRiskTools = new Set<string>(["shell.exec", "process.run", "process.list", "process.stop", "cron.create", "cron.list", "skill.install"]);
     const portableHighRiskOverride =
       runtimeHighRiskTools.has(toolName) &&
       Boolean(portableToolPolicy?.allowedToolNames?.has(toolName));
     if (opMode !== "assistant" && runtimeHighRiskTools.has(toolName) && !portableHighRiskOverride) {
-      const deniedMessage = "当前为创作模式，禁止执行 shell.exec / process.* / cron.* 等高风险本机操作；如确需执行，请先在桌面端切换到“助手模式”后再重试。";
+      const deniedMessage = toolName === "skill.install"
+        ? "当前为创作模式，禁止直接安装到用户全局技能目录；请先在当前项目或临时 workspace 中完成 skill 草稿，再切到“助手模式”后调用 skill.install。"
+        : "当前为创作模式，禁止执行 shell.exec / process.* / cron.* 等高风险本机操作；如确需执行，请先在桌面端切换到“助手模式”后再重试。";
       const permissionHook = await this._emitPortablePermissionRequest({
         toolName,
         toolArgs,
@@ -3072,8 +3074,12 @@ export class GatewayRuntime implements AgentRuntime {
           error: "ASSISTANT_MODE_REQUIRED",
           message: permissionHook.hookMessage || deniedMessage,
           next_actions: [
-            "如确需执行命令，请先在桌面端显式开启助手模式",
-            "助手模式开启后，可明确说明要执行的命令及目的",
+            toolName === "skill.install"
+              ? "先在当前项目或临时 workspace 中整理好 skill 内容"
+              : "如确需执行命令，请先在桌面端显式开启助手模式",
+            toolName === "skill.install"
+              ? "切到助手模式后，再调用 skill.install 安装到用户全局 skills 目录"
+              : "助手模式开启后，可明确说明要执行的命令及目的",
           ],
         },
         executedBy: "desktop",

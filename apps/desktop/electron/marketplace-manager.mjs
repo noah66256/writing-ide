@@ -1,6 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
+import {
+  installSkillBundle,
+  normalizeMarketplaceSkillPayloadToBundle,
+  normalizeSkillRelativePath,
+} from "./skill-install-manager.mjs";
 
 const STATE_FILE = "marketplace.v1.json";
 const MAX_LOGS = 200;
@@ -156,50 +161,20 @@ export class MarketplaceManager {
   }
 
   async _installSkill(manifest, payload) {
-    const p = payload && typeof payload === "object" ? payload : null;
-    if (!p || p.kind !== "skill") throw new Error("SKILL_PAYLOAD_INVALID");
-    const files = p.files && typeof p.files === "object" ? p.files : null;
-    const entries = files ? Object.entries(files) : [];
-    if (entries.length === 0) throw new Error("SKILL_FILES_EMPTY");
-
     const loader = this._getSkillLoader();
     const rootDir = loader?.rootDir ? String(loader.rootDir) : path.join(this._userDataPath, "skills");
-    await fs.mkdir(rootDir, { recursive: true });
-
-    const skillId = String(p.skillId ?? manifest.id ?? "").trim() || String(manifest.id ?? "");
-    const skillDirName = toSafeSlug(skillId);
-    const targetDir = path.join(rootDir, skillDirName);
-    const tmpDir = path.join(rootDir, `.${skillDirName}.tmp-${Date.now()}`);
-    const backupDir = path.join(rootDir, `.${skillDirName}.bak-${Date.now()}`);
-    let movedBackup = false;
-    let movedTmp = false;
-    try {
-      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => void 0);
-      await fs.mkdir(tmpDir, { recursive: true });
-      for (const [rawRel, rawContent] of entries) {
-        const rel = this._normalizeSkillRelativePath(rawRel);
-        const abs = path.join(tmpDir, ...rel.split("/"));
-        await fs.mkdir(path.dirname(abs), { recursive: true });
-        await fs.writeFile(abs, String(rawContent ?? ""), "utf-8");
-      }
-
-      if (await this._exists(targetDir)) {
-        await fs.rm(backupDir, { recursive: true, force: true }).catch(() => void 0);
-        await fs.rename(targetDir, backupDir);
-        movedBackup = true;
-      }
-
-      await fs.rename(tmpDir, targetDir);
-      movedTmp = true;
-      await this._reloadSkillsAndBroadcast();
-      if (movedBackup) await fs.rm(backupDir, { recursive: true, force: true }).catch(() => void 0);
-      return { skillId, skillDirName };
-    } catch (e) {
-      if (!movedTmp) await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => void 0);
-      if (movedTmp) await fs.rm(targetDir, { recursive: true, force: true }).catch(() => void 0);
-      if (movedBackup) await fs.rename(backupDir, targetDir).catch(() => void 0);
-      throw e;
-    }
+    const bundle = normalizeMarketplaceSkillPayloadToBundle(manifest, payload);
+    const installed = await installSkillBundle({
+      rootDir,
+      bundle,
+      reload: this._reloadSkillsAndBroadcast,
+    });
+    return {
+      skillId: installed.skillId,
+      skillDirName: installed.skillDirName,
+      fileCount: installed.fileCount,
+      path: installed.path,
+    };
   }
 
   async _uninstallSkill(installed) {
@@ -287,15 +262,7 @@ export class MarketplaceManager {
   }
 
   _normalizeSkillRelativePath(raw) {
-    const s = String(raw ?? "")
-      .replace(/\\/g, "/")
-      .trim();
-    if (!s || s.startsWith("/") || s.includes("\0")) throw new Error("SKILL_FILE_PATH_INVALID");
-    const norm = path.posix.normalize(s);
-    if (!norm || norm === "." || norm.startsWith("../") || norm.includes("/../")) {
-      throw new Error("SKILL_FILE_PATH_ESCAPE");
-    }
-    return norm;
+    return normalizeSkillRelativePath(raw);
   }
 
   _appendLog(state, log) {

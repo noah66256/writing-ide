@@ -53,6 +53,18 @@ export type SkillCard = SearchableCardBase & {
   workflowSummary?: string;
 };
 
+export type BridgeSkillDescriptor = {
+  id: string;
+  title?: string;
+  description: string;
+  allowedTools?: string[];
+  portable?: boolean;
+  disableModelInvocation?: boolean;
+  userInvocable?: boolean;
+  activationMode?: SkillCard["activationMode"];
+  source?: SkillCard["source"];
+};
+
 export type CapabilityCard = McpCapabilityCard | SkillCard;
 
 export type CapabilitySearchResult = {
@@ -406,6 +418,83 @@ export function buildSkillCards(args: {
       };
     })
     .sort((a, b) => a.skillId.localeCompare(b.skillId));
+}
+
+export function buildBridgeSkillCards(args: {
+  skills: BridgeSkillDescriptor[];
+  defaultSource?: SkillCard["source"];
+  synthetic?: boolean;
+}): SkillCard[] {
+  const list = Array.isArray(args.skills) ? args.skills : [];
+  const defaultSource = args.defaultSource ?? "user";
+  const synthetic = args.synthetic === true;
+  const cards: SkillCard[] = [];
+  for (const item of list) {
+      const skillId = String(item?.id ?? "").trim();
+      const description = String(item?.description ?? "").trim();
+      if (!skillId || !description) continue;
+      const title = String(item?.title ?? "").trim() || skillId;
+      const portable = item?.portable === true;
+      const disableModelInvocation = item?.disableModelInvocation === true;
+      const userInvocable = item?.userInvocable === true;
+      const activationMode: SkillCard["activationMode"] = item?.activationMode && ["auto", "explicit", "hybrid"].includes(String(item.activationMode))
+        ? (item.activationMode as SkillCard["activationMode"])
+        : "explicit";
+      const allowedTools = Array.isArray(item?.allowedTools)
+        ? item.allowedTools.map((x) => String(x ?? "").trim()).filter(Boolean).slice(0, 12)
+        : [];
+      const slashCommand = buildSkillSlashCommand(skillId, userInvocable);
+      const tags = Array.from(
+        new Set([
+          "bridge",
+          synthetic ? "synthetic" : "installed",
+          activationMode,
+          portable ? "portable" : "",
+          disableModelInvocation ? "explicit_only" : "",
+          userInvocable ? "slash_invocable" : "slash_hidden",
+          ...allowedTools.map((name) => `allowed:${name}`),
+        ].filter(Boolean)),
+      );
+      const examples = slashCommand ? [slashCommand] : ["按需激活技能"];
+      const source: SkillCard["source"] = item?.source && ["builtin", "standard", "user", "admin", "unknown"].includes(String(item.source))
+        ? (item.source as SkillCard["source"])
+        : defaultSource;
+      cards.push({
+        id: `skill:${skillId}`,
+        resultType: "skill" as const,
+        title,
+        summary: summarizeText(description, 180) ?? "可按需激活的 Skill 能力。",
+        riskLevel: "low" as const,
+        skillId,
+        skillKind: "unknown" as const,
+        activationMode,
+        source,
+        requires: [],
+        conflicts: [],
+        autoEnable: false,
+        userInvocable,
+        portable,
+        disableModelInvocation,
+        ...(slashCommand ? { slashCommand } : {}),
+        allowedTools,
+        tags,
+        examples,
+        promptSummary: summarizeText(description, 280),
+        searchText: [
+          skillId,
+          title,
+          description,
+          synthetic ? "synthetic skill" : "installed skill",
+          portable ? "portable skill" : "",
+          disableModelInvocation ? "disable model invocation" : "",
+          userInvocable ? "slash command" : "not slash invocable",
+          ...allowedTools,
+          ...tags,
+          ...examples,
+        ].join(" "),
+      });
+    }
+  return cards.sort((a, b) => a.skillId.localeCompare(b.skillId));
 }
 
 export function searchCapabilityCards(args: {

@@ -1243,11 +1243,18 @@ export const TOOL_LIST: ToolMeta[] = [
   {
     name: "skill.install",
     description:
-      "将 SKILL.md 写入用户技能目录（userData/skills/<name>/SKILL.md），使其被 SkillLoader 热加载。\n" +
+      "安装或更新一个技能到用户全局技能目录（不是当前项目目录），使其被 SkillLoader 热加载。\n" +
+      "该操作会写入 Desktop 管理的用户 skills 根目录，通常只应在助手模式下使用。\n" +
+      "支持 inline 模式（name + content）和 GitHub 模式（source=github + owner/repo/subdir/ref）。\n" +
       "只用于安装/更新技能文件，不要用于普通文件写入。",
     args: [
-      { name: "name", required: true, desc: "技能 ID（即目录名，如 weekly-report-writer）", type: "string" },
-      { name: "content", required: true, desc: "SKILL.md 完整内容（含 frontmatter + body）", type: "string" },
+      { name: "name", required: false, desc: "inline 模式下的技能 ID（目录名，如 weekly-report-writer）", type: "string" },
+      { name: "content", required: false, desc: "inline 模式下的 SKILL.md 完整内容（含 frontmatter + body）", type: "string" },
+      { name: "source", required: false, desc: "来源类型；github 表示从 GitHub 仓库目录安装", type: "string" },
+      { name: "owner", required: false, desc: "GitHub owner", type: "string" },
+      { name: "repo", required: false, desc: "GitHub repo", type: "string" },
+      { name: "subdir", required: false, desc: "仓库内 skill 子目录（如 skills/skill-creator）", type: "string" },
+      { name: "ref", required: false, desc: "可选 git ref（branch/tag/sha）", type: "string" },
     ],
     modes: ["agent"],
     inputSchema: {
@@ -1255,8 +1262,13 @@ export const TOOL_LIST: ToolMeta[] = [
       properties: {
         name: { type: "string" },
         content: { type: "string" },
+        source: { type: "string" },
+        owner: { type: "string" },
+        repo: { type: "string" },
+        subdir: { type: "string" },
+        ref: { type: "string" },
       },
-      required: ["name", "content"],
+      oneOfRequired: [{ required: ["name", "content"] }, { required: ["source", "owner", "repo", "subdir"] }],
       additionalProperties: true,
     },
   },

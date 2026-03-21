@@ -32,6 +32,9 @@ import {
   executeServerToolOnGateway,
   executeWebFetchOnGateway,
 } from "./agent/serverToolRunner.js";
+import {
+  buildClaudeCliBridgeSelectionContext,
+} from "./agent/claudeCliBridge.js";
 import { ensureRunAuditEnded, persistRunAudit, recordRunAuditEvent, sanitizeForAudit } from "./audit/runAudit.js";
 import {
   SKILL_MANIFESTS_V1,
@@ -362,6 +365,22 @@ function normStr(v: any) {
 
 function normUrl(v: any) {
   return normStr(v).replace(/\/+$/g, "");
+}
+
+function extractFirstJsonObject(raw: unknown) {
+  const text = String(raw ?? "").trim();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match?.[0]) return null;
+    try {
+      return JSON.parse(match[0]);
+    } catch {
+      return null;
+    }
+  }
 }
 
 function parseCsv(v: any) {
@@ -868,7 +887,11 @@ fastify.get(
       payloadKind: (r.payload as any)?.kind ?? "unknown",
       payloadSummary:
         (r.payload as any)?.kind === "skill"
-          ? { files: Object.keys(((r.payload as any)?.files ?? {})).length }
+          ? {
+              files: Array.isArray((r.payload as any)?.files)
+                ? ((r.payload as any)?.files?.length ?? 0)
+                : Object.keys(((r.payload as any)?.files ?? {})).length,
+            }
           : (r.payload as any)?.kind === "mcp_server"
             ? {
                 transport: (r.payload as any)?.config?.transport ?? "",
@@ -1566,6 +1589,130 @@ fastify.post(
     reply.raw.end();
   }
 });
+
+fastify.post(
+  "/api/agent/skills/claude-bridge/select",
+  { preHandler: [(fastify as any).authenticate, requirePositivePointsForLlm] },
+  async (request: any, reply) => {
+    const skillSchema = z.object({
+      id: z.string().min(1).max(120),
+      title: z.string().min(1).max(200).optional(),
+      description: z.string().min(1).max(4000),
+      allowedTools: z.array(z.string().min(1).max(120)).max(20).optional(),
+      portable: z.boolean().optional(),
+      disableModelInvocation: z.boolean().optional(),
+      userInvocable: z.boolean().optional(),
+      activationMode: z.enum(["auto", "explicit", "hybrid"]).optional(),
+      source: z.enum(["builtin", "standard", "user", "admin", "unknown"]).optional(),
+    });
+    const bodySchema = z.object({
+      query: z.string().min(1).max(4000),
+      model: z.string().optional(),
+      installedSkills: z.array(skillSchema).max(80).optional(),
+      syntheticSkills: z.array(skillSchema).max(80).optional(),
+    });
+
+    let body: z.infer<typeof bodySchema>;
+    try {
+      body = bodySchema.parse((request as any).body ?? {});
+    } catch (e: any) {
+      return reply.code(400).send({ error: "INVALID_BODY", detail: e?.message ?? String(e) });
+    }
+
+    const selectionContext = buildClaudeCliBridgeSelectionContext({
+      query: body.query,
+      installedSkills: body.installedSkills ?? [],
+      syntheticSkills: body.syntheticSkills ?? [],
+    });
+    if (selectionContext.mergedCards.length === 0) {
+      return {
+        ok: true,
+        decision: "none",
+        skill: "",
+        reason: "no skills available",
+        evaluatedSkillCount: 0,
+      };
+    }
+
+    const env = await getLlmEnv();
+    if (!env.ok) return reply.code(500).send({ error: "LLM_NOT_CONFIGURED" });
+
+    let stageAllowedIds: string[] | null = null;
+    let stageDefaultId: string | null = null;
+    try {
+      const stages = await aiConfig.listStages();
+      const st = (stages as any[]).find((s: any) => s.stage === "llm.chat") || null;
+      stageAllowedIds = Array.isArray(st?.modelIds) ? (st.modelIds as string[]).filter(Boolean) : null;
+      stageDefaultId = typeof st?.modelId === "string" ? String(st.modelId) : null;
+    } catch {
+      // ignore
+    }
+
+    const requestedIdRaw = body.model ? String(body.model).trim() : "";
+    const pickedId =
+      requestedIdRaw || stageDefaultId || (stageAllowedIds?.length ? stageAllowedIds[0] : "") || env.defaultModel || "";
+
+    let model = pickedId || env.defaultModel;
+    let baseUrl = env.baseUrl;
+    let apiKey = env.apiKey;
+    let endpoint = "/v1/chat/completions";
+    if (pickedId) {
+      try {
+        const m = await aiConfig.resolveModel(pickedId);
+        model = m.model;
+        baseUrl = m.baseURL;
+        apiKey = m.apiKey || apiKey;
+        endpoint = m.endpoint || endpoint;
+      } catch {
+        // ignore
+      }
+    }
+
+    const ret = await completionOnceViaProvider({
+      baseUrl,
+      endpoint,
+      apiKey,
+      model,
+      temperature: 0,
+      maxTokens: 250,
+      messages: selectionContext.messages,
+    });
+
+    if (!ret.ok) {
+      return reply.code(ret.status ?? 502).send({
+        error: "CLAUDE_BRIDGE_SELECTION_FAILED",
+        detail: ret.error ?? "upstream_error",
+      });
+    }
+
+    const parsedRaw = extractFirstJsonObject((ret as any).content ?? "");
+    const parsedSchema = z.object({
+      decision: z.enum(["skill", "none"]),
+      skill: z.string().optional(),
+      reason: z.string().optional(),
+    });
+    const parsed = parsedSchema.safeParse(parsedRaw);
+    if (!parsed.success) {
+      return reply.code(500).send({
+        error: "INVALID_MODEL_OUTPUT",
+        detail: "模型未返回合法的 skill 选择 JSON",
+      });
+    }
+
+    const chosenSkillId = String(parsed.data.skill ?? "").trim();
+    const selected = parsed.data.decision === "skill"
+      ? selectionContext.mergedCards.find((card) => card.skillId === chosenSkillId) ?? null
+      : null;
+
+    return {
+      ok: true,
+      decision: selected ? "skill" : "none",
+      skill: selected?.skillId ?? "",
+      reason: String(parsed.data.reason ?? "").trim(),
+      evaluatedSkillCount: selectionContext.mergedCards.length,
+    };
+  },
+);
 
 // ======== Agent（ReAct：Gateway 负责模型对话与 tool.call 事件；工具由 Desktop 执行并回传 tool_result） ========
 

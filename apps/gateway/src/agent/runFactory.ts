@@ -1238,7 +1238,7 @@ export function buildAgentProtocolPrompt(args: {
           }
           return (
             `当前助手权限：创作模式（安全）。\n` +
-            `- 你可以自由使用写作/检索/KB/风格相关工具，但禁止执行任何本机命令（如 shell.exec / process.* / cron.*）。\n` +
+            `- 你可以自由使用写作/检索/KB/风格相关工具，但禁止执行任何本机命令或全局技能安装（如 shell.exec / process.* / cron.* / skill.install）。\n` +
             `- 不要建议用户你“已经”执行了命令或安装了软件；在创作模式下，你只能给出命令建议，由用户自行执行。\n\n`
           );
         })()
@@ -3011,6 +3011,7 @@ export async function prepareAgentRun(args: {
   // 构建系统提示词：可用 Skill 清单 + 已激活 Skill 的 promptFragments
   const skillsSystemPrompt = (() => {
     const parts: string[] = [];
+    const hasSkillCreatorActive = activeSkillIds.includes("skill-creator");
 
     // 1) 可用 Skill 清单——让负责人知道有哪些能力可建议用户使用
     const availableLines = skillManifestsEffective.map((m: any) => formatAvailableSkillLine(m));
@@ -3060,6 +3061,19 @@ export async function prepareAgentRun(args: {
       } else {
         parts.push(header);
       }
+    }
+
+    if (hasSkillCreatorActive) {
+      parts.push(
+        [
+          "【Skill Creator Runtime Notice】",
+          "- skill 草稿、eval workspace、临时副本可以放在当前项目目录或临时 workspace 中。",
+          "- 最终安装到用户可用的全局 skills 目录时，必须调用 skill.install；它写入的是 Desktop 管理的用户 skills 根目录，不是当前项目目录。",
+          runOpMode === "assistant"
+            ? "- 当前为助手模式：当用户明确要安装最终版 skill 时，可以直接调用 skill.install。"
+            : "- 当前为创作模式：禁止直接调用 skill.install。若用户要把最终版 skill 装到全局 skills 目录，先整理好草稿，再提醒用户切到助手模式。",
+        ].join("\n"),
+      );
     }
 
     return parts.join("\n\n");
@@ -3495,7 +3509,7 @@ export async function prepareAgentRun(args: {
         : new Set(allToolNamesForModeEffective);
 
   // 基础工具集先按 opMode（创作/助手）做一次硬兜底：
-  // - 创作模式：剔除 shell.exec / code.exec / process.* / cron.* 等高危工具；
+  // - 创作模式：剔除 shell.exec / code.exec / process.* / cron.* / skill.install 等高危工具；
   // - 助手模式：完整保留（后续仍有 code.exec 等细粒度 gate）。
   const opModeForRun: OpMode =
     mode === "agent" && (body as any)?.opMode === "assistant" ? "assistant" : "creative";
@@ -4777,11 +4791,11 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       }
     }
 
-    // 基于创作/助手模式裁剪高风险 runtime 工具（shell.exec / process.* / cron.*）
+    // 基于创作/助手模式裁剪高风险 runtime 工具（shell.exec / process.* / cron.* / skill.install）
     const opModeForTurn: "creative" | "assistant" =
       (body as any).opMode === "assistant" ? "assistant" : "creative";
     if (opModeForTurn !== "assistant") {
-      const runtimeHighRiskTools = ["shell.exec", "process.run", "process.list", "process.stop", "cron.create", "cron.list"];
+      const runtimeHighRiskTools = ["shell.exec", "process.run", "process.list", "process.stop", "cron.create", "cron.list", "skill.install"];
       const removed: string[] = [];
       for (const name of runtimeHighRiskTools) {
         if (portableAllowedToolPolicy?.allowedToolNames.has(name)) continue;
@@ -4789,7 +4803,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       }
       if (removed.length > 0) {
         hints.push(
-          "当前为创作模式：已临时禁用 shell.exec / process.* / cron.* 等高风险运行时工具；如需执行本机命令，请在桌面端切换到“助手模式”。",
+          "当前为创作模式：已临时禁用 shell.exec / process.* / cron.* / skill.install 等高风险运行时工具；如需执行本机命令或安装到用户全局技能目录，请在桌面端切换到“助手模式”。",
         );
       }
     }

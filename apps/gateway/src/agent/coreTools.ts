@@ -51,6 +51,7 @@ export const HIGH_RISK_TOOL_NAMES = [
   "process.stop",
   "cron.create",
   "cron.list",
+  "skill.install",
 ] as const;
 
 export type HighRiskToolName = (typeof HIGH_RISK_TOOL_NAMES)[number];

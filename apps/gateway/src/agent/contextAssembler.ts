@@ -84,6 +84,7 @@ export type BuildAssembledContextArgs = {
   webSearchHint?: string;
   mcpCapabilityCards?: McpCapabilityCard[];
   skillCapabilityCards?: SkillCard[];
+  syntheticSkillCapabilityCards?: SkillCard[];
   threadCapabilityState?: ThreadCapabilityState | null;
 };
 
@@ -446,6 +447,43 @@ function compactRecentDialogue(
   };
 }
 
+function renderSkillCapabilityCardLines(cards: SkillCard[]): string[] {
+  const lines: string[] = [];
+  for (const card of cards) {
+    const invokeParts: string[] = [];
+    if (card.slashCommand) invokeParts.push(card.slashCommand);
+    if (card.argumentHint) invokeParts.push(`参数：${card.argumentHint}`);
+    if (card.portable) invokeParts.push("portable");
+    if (card.disableModelInvocation) invokeParts.push("仅显式");
+    if (!card.userInvocable) invokeParts.push("不可 slash");
+    if (card.allowedTools.length > 0) {
+      invokeParts.push(`allowed-tools=${card.allowedTools.slice(0, 4).join(", ")}${card.allowedTools.length > 4 ? "…" : ""}`);
+    }
+    lines.push(
+      `- ${card.id}：${card.title}；${card.summary}${invokeParts.length > 0 ? `；${invokeParts.join(" / ")}` : ""}`,
+    );
+  }
+  return lines;
+}
+
+export function buildSkillCapabilitySummary(args: {
+  skillCapabilityCards?: SkillCard[];
+  syntheticSkillCapabilityCards?: SkillCard[];
+}): string {
+  const installed = Array.isArray(args.skillCapabilityCards) ? args.skillCapabilityCards : [];
+  const synthetic = Array.isArray(args.syntheticSkillCapabilityCards) ? args.syntheticSkillCapabilityCards : [];
+  const lines: string[] = [];
+  if (installed.length > 0) {
+    lines.push("- 可按需激活的 Skills（未激活）：");
+    lines.push(...renderSkillCapabilityCardLines(installed.slice(0, 6)));
+  }
+  if (synthetic.length > 0) {
+    lines.push("- 临时 Skills（仅本次 bridge 可见）：");
+    lines.push(...renderSkillCapabilityCardLines(synthetic.slice(0, 6)));
+  }
+  return lines.join("\n");
+}
+
 function buildCapabilitySummaryMessage(args: BuildAssembledContextArgs): string {
   const builtinGroups = groupBuiltinTools(args.selectedAllowedToolNames);
   const builtinLines = builtinGroups
@@ -503,25 +541,14 @@ function buildCapabilitySummaryMessage(args: BuildAssembledContextArgs): string 
   } else {
     lines.push("- 本轮未选中任何专用 MCP 家族；优先使用当前已列出的内置工具。");
   }
-  const skillCards = Array.isArray(args.skillCapabilityCards) ? args.skillCapabilityCards : [];
-  if (skillCards.length > 0) {
-    lines.push("- 可按需激活的 Skills（未激活）：");
-    for (const card of skillCards.slice(0, 6)) {
-      const invokeParts: string[] = [];
-      if (card.slashCommand) invokeParts.push(card.slashCommand);
-      if (card.argumentHint) invokeParts.push(`参数：${card.argumentHint}`);
-      if (card.portable) invokeParts.push("portable");
-      if (card.disableModelInvocation) invokeParts.push("仅显式");
-      if (!card.userInvocable) invokeParts.push("不可 slash");
-      if (card.allowedTools.length > 0) {
-        invokeParts.push(`allowed-tools=${card.allowedTools.slice(0, 4).join(", ")}${card.allowedTools.length > 4 ? "…" : ""}`);
-      }
-      lines.push(
-        `- ${card.id}：${card.title}；${card.summary}${invokeParts.length > 0 ? `；${invokeParts.join(" / ")}` : ""}`,
-      );
-    }
+  const skillSummary = buildSkillCapabilitySummary({
+    skillCapabilityCards: args.skillCapabilityCards,
+    syntheticSkillCapabilityCards: args.syntheticSkillCapabilityCards,
+  });
+  if (skillSummary) {
+    lines.push(skillSummary);
   }
-  if (mcpCards.length > 0 || skillCards.length > 0) {
+  if (mcpCards.length > 0 || skillSummary) {
     lines.push("- 若某类能力当前只以卡片摘要出现、没有具体工具参数，先 tools.search，再 tools.describe 查看详情。");
   }
   lines.push("- 若某类专用 MCP 工具已在工具清单中出现，优先用它，不要退回通用伪流程。");
