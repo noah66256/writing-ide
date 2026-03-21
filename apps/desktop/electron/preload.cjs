@@ -90,6 +90,17 @@ contextBridge.exposeInMainWorld("desktop", {
     },
   },
   history: {
+    applyOperations(batch) {
+      return ipcRenderer.invoke("history.applyOperations", batch);
+    },
+    applyOperationsSync(batch) {
+      try {
+        const text = typeof batch === "string" ? batch : JSON.stringify(batch ?? null);
+        return ipcRenderer.sendSync("history.applyOperationsSync", text);
+      } catch (e) {
+        return { ok: false, error: String(e?.message ?? e) };
+      }
+    },
     loadConversationIndex() {
       return ipcRenderer.invoke("history.loadConversationIndex");
     },

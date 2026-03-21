@@ -136,6 +136,8 @@ declare global {
         clearRecentProjects: () => Promise<{ ok: boolean; error?: string }>;
       };
       history?: {
+        applyOperations?: (batch: any) => Promise<{ ok: boolean; used?: "primary" | "fallback"; file?: string; error?: string }>;
+        applyOperationsSync?: (batch: any) => { ok: boolean; used?: "primary" | "fallback"; file?: string; error?: string };
         getInfo: () => Promise<{ ok: boolean; primaryDir?: string | null; fallbackDir?: string | null; filename?: string; error?: string }>;
         loadConversationIndex?: () => Promise<{
           ok: boolean;

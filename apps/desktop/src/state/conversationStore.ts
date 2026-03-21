@@ -714,6 +714,33 @@ export type Conversation = {
   archived?: boolean;
 };
 
+type HistoryWriteSource = "autosave" | "switch" | "shutdown" | "hydrate-repair" | "manual";
+
+type HistoryOperation =
+  | { type: "sync-order"; conversationIds: string[] }
+  | {
+      type: "upsert-meta";
+      conversationId: string;
+      patch: {
+        title?: string;
+        pinned?: boolean;
+        archived?: boolean;
+        createdAt?: number;
+        updatedAt?: number;
+      };
+    }
+  | { type: "write-body"; conversationId: string; snapshot: RunSnapshot; source: HistoryWriteSource }
+  | { type: "write-draft"; draftSnapshot: RunSnapshot | null; draftSnapshotOwnerId?: string | null }
+  | { type: "set-active"; conversationId: string | null }
+  | { type: "delete-conversation"; conversationId: string }
+  | { type: "clear-all" };
+
+type HistoryOperationBatch = {
+  version: 1;
+  updatedAt: number;
+  ops: HistoryOperation[];
+};
+
 type ConversationState = {
   conversations: Conversation[];
   /** 当前"草稿对话"（未归档到历史，也无需点 +），用于重启后自动恢复右侧内容 */
@@ -803,11 +830,15 @@ let diskHydrated = false;
 /** 水化完成前禁止写盘，防止 hydrateFromDisk IPC 未返回时把 conversations:[] 覆盖掉已有数据 */
 let diskWriteAllowed = false;
 let persistTimer: any = null;
-let pendingPayload: any = null;
+let pendingHistoryBatch: HistoryOperationBatch | null = null;
 
 function hasDiskHistoryApi() {
   try {
-    return Boolean(window.desktop?.history?.saveConversations && window.desktop?.history?.loadConversations);
+    const historyApi = window.desktop?.history;
+    return Boolean(
+      (historyApi?.applyOperations || historyApi?.saveConversations) &&
+      (historyApi?.loadConversationIndex || historyApi?.loadConversations),
+    );
   } catch {
     return false;
   }
@@ -851,48 +882,129 @@ function schedulePersistToDisk(args: {
   conversations: Conversation[];
   draftSnapshot: RunSnapshot | null;
   draftSnapshotOwnerId?: string | null;
-  allowEmptyConversations?: boolean;
+  activeConvIdOverride?: string | null;
+  touchedConversationIds?: string[];
+  deletedConversationIds?: string[];
+  clearAll?: boolean;
+  source?: HistoryWriteSource;
+  sync?: boolean;
 }) {
   const api = window.desktop?.history;
-  if (!api?.saveConversations && !api?.savePendingConversations) return;
+  if (!api?.applyOperations && !api?.saveConversations) return;
 
   const conversations = capConversations(args.conversations);
   const draftSnapshot = args.draftSnapshot ?? null;
-  // activeConvId 自动从 store 读取（避免改动所有调用处）
-  const activeConvId = useConversationStore?.getState?.()?.activeConvId ?? null;
+  const activeConvId =
+    args.activeConvIdOverride !== undefined
+      ? normalizeId(args.activeConvIdOverride) || null
+      : (useConversationStore?.getState?.()?.activeConvId ?? null);
   const draftSnapshotOwnerId =
     args.draftSnapshotOwnerId !== undefined
       ? normalizeId(args.draftSnapshotOwnerId) || null
       : normalizeId(useConversationStore?.getState?.()?.draftSnapshotOwnerId) || null;
-  const payload = {
-    version: 1,
-    updatedAt: Date.now(),
-    conversations,
+  const touchedConversationIds = new Set(
+    (Array.isArray(args.touchedConversationIds) ? args.touchedConversationIds : [])
+      .map((id) => String(id ?? "").trim())
+      .filter(Boolean),
+  );
+  const deletedConversationIds = Array.from(
+    new Set(
+      (Array.isArray(args.deletedConversationIds) ? args.deletedConversationIds : [])
+        .map((id) => String(id ?? "").trim())
+        .filter(Boolean),
+    ),
+  );
+  const source = args.source ?? "manual";
+  const ops: HistoryOperation[] = [];
+  if (args.clearAll === true) {
+    ops.push({ type: "clear-all" });
+  }
+  ops.push({
+    type: "sync-order",
+    conversationIds: conversations.map((conv) => String(conv.id ?? "").trim()).filter(Boolean),
+  });
+  for (const conv of conversations) {
+    const convId = String(conv.id ?? "").trim();
+    if (!convId) continue;
+    ops.push({
+      type: "upsert-meta",
+      conversationId: convId,
+      patch: {
+        title: clampTitle(conv.title),
+        pinned: Boolean(conv.pinned),
+        archived: Boolean(conv.archived),
+        createdAt: Number(conv.createdAt ?? Date.now()) || Date.now(),
+        updatedAt: Number(conv.updatedAt ?? Date.now()) || Date.now(),
+      },
+    });
+    if (touchedConversationIds.has(convId) && conv.snapshotLoaded !== false && conv.snapshot && typeof conv.snapshot === "object") {
+      ops.push({
+        type: "write-body",
+        conversationId: convId,
+        snapshot: conv.snapshot,
+        source,
+      });
+    }
+  }
+  for (const convId of deletedConversationIds) {
+    ops.push({ type: "delete-conversation", conversationId: convId });
+  }
+  ops.push({
+    type: "write-draft",
     draftSnapshot,
     draftSnapshotOwnerId,
-    activeConvId,
-    ...(args.allowEmptyConversations === true ? { allowEmptyConversations: true } : {}),
+  });
+  ops.push({
+    type: "set-active",
+    conversationId: normalizeId(activeConvId) || null,
+  });
+  const batch: HistoryOperationBatch = {
+    version: 1,
+    updatedAt: Date.now(),
+    ops,
   };
 
-  // crash-safe：无论是否允许写主历史文件，都尽量先把最新 payload 写到 pending 文件。
-  // 这样 dev/HMR/强制退出时，即使主历史还没来得及落盘，也能在下次启动时被 hydrate 合并回来。
-  if (api?.savePendingConversations) {
-    void api.savePendingConversations(payload).catch(() => void 0);
-  }
+  pendingHistoryBatch = pendingHistoryBatch
+    ? {
+        version: 1,
+        updatedAt: batch.updatedAt,
+        ops: [...pendingHistoryBatch.ops, ...batch.ops],
+      }
+    : batch;
 
-  // 水化未完成时不写主历史文件，避免以 conversations:[] 覆盖已有数据。
-  // 但上面的 pending 文件仍会保留最新 payload，供下一次启动合并。
-  if (!api?.saveConversations) return;
   if (!diskWriteAllowed) return;
 
-  pendingPayload = payload;
+  const flush = () => {
+    const next = pendingHistoryBatch;
+    pendingHistoryBatch = null;
+    persistTimer = null;
+    if (!next || next.ops.length === 0) return;
+    if (args.sync === true && api?.applyOperationsSync) {
+      try {
+        api.applyOperationsSync(next);
+      } catch {
+        void api.applyOperations?.(next).catch(() => void 0);
+      }
+      return;
+    }
+    if (api?.applyOperations) {
+      void api.applyOperations(next).catch(() => void 0);
+      return;
+    }
+  };
+
+  if (args.sync === true) {
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+    }
+    flush();
+    return;
+  }
 
   if (persistTimer) return;
   persistTimer = setTimeout(() => {
-    const next = pendingPayload;
-    pendingPayload = null;
-    persistTimer = null;
-    void api.saveConversations(next).catch(() => void 0);
+    flush();
   }, 220);
 }
 
@@ -1075,6 +1187,9 @@ export const useConversationStore = create<ConversationState>()(
               conversations: merged,
               draftSnapshot: (finalDraft as any) ?? null,
               draftSnapshotOwnerId: finalDraftOwnerId,
+              touchedConversationIds: merged.filter((item) => item.snapshotLoaded !== false).map((item) => item.id),
+              clearAll: true,
+              source: "hydrate-repair",
             });
           }
           void api.clearPendingConversations?.().catch(() => void 0);
@@ -1115,6 +1230,8 @@ export const useConversationStore = create<ConversationState>()(
             conversations: capped,
             draftSnapshot: get().draftSnapshot ?? null,
             draftSnapshotOwnerId: get().draftSnapshotOwnerId ?? null,
+            touchedConversationIds: [id],
+            source: "manual",
           });
           return { conversations: capped };
         });
@@ -1127,13 +1244,18 @@ export const useConversationStore = create<ConversationState>()(
           const next = (s.conversations ?? []).filter((x) => x.id !== v);
           const nextDraftOwnerId = get().draftSnapshotOwnerId === v ? null : get().draftSnapshotOwnerId;
           const nextDraft = nextDraftOwnerId ? get().draftSnapshot : null;
+          const nextActiveConvId = get().activeConvId === v ? null : get().activeConvId;
           schedulePersistToDisk({
             conversations: next,
             draftSnapshot: nextDraft ?? null,
             draftSnapshotOwnerId: nextDraftOwnerId,
+            activeConvIdOverride: nextActiveConvId,
+            deletedConversationIds: [v],
+            source: "manual",
           });
           return {
             conversations: next,
+            activeConvId: nextActiveConvId,
             ...(nextDraftOwnerId ? {} : { draftSnapshot: null, draftSnapshotOwnerId: null }),
           };
         });
@@ -1149,6 +1271,7 @@ export const useConversationStore = create<ConversationState>()(
             conversations: next,
             draftSnapshot: get().draftSnapshot ?? null,
             draftSnapshotOwnerId: get().draftSnapshotOwnerId ?? null,
+            source: "manual",
           });
           return { conversations: next };
         });
@@ -1164,6 +1287,7 @@ export const useConversationStore = create<ConversationState>()(
             conversations: next,
             draftSnapshot: get().draftSnapshot ?? null,
             draftSnapshotOwnerId: get().draftSnapshotOwnerId ?? null,
+            source: "manual",
           });
           return { conversations: next };
         });
@@ -1177,6 +1301,7 @@ export const useConversationStore = create<ConversationState>()(
             conversations: next,
             draftSnapshot: get().draftSnapshot ?? null,
             draftSnapshotOwnerId: get().draftSnapshotOwnerId ?? null,
+            source: "manual",
           });
           return { conversations: next };
         });
@@ -1206,6 +1331,8 @@ export const useConversationStore = create<ConversationState>()(
             conversations: next,
             draftSnapshot: get().draftSnapshot ?? null,
             draftSnapshotOwnerId: get().draftSnapshotOwnerId ?? null,
+            touchedConversationIds: patch.snapshot != null ? [v] : [],
+            source: patch.snapshot != null ? "autosave" : "manual",
           });
           return { conversations: next };
         });
@@ -1251,6 +1378,7 @@ export const useConversationStore = create<ConversationState>()(
           conversations: s.conversations ?? [],
           draftSnapshot: s.draftSnapshot ?? null,
           draftSnapshotOwnerId: s.draftSnapshotOwnerId ?? null,
+          source: "manual",
         });
       },
       setDraftSnapshot: (snap) => {
@@ -1269,7 +1397,12 @@ export const useConversationStore = create<ConversationState>()(
         const next = repaired ? slimSnapshotForHistory(repaired) ?? repaired : null;
         set(() => {
           const conversations = get().conversations ?? [];
-          schedulePersistToDisk({ conversations, draftSnapshot: next, draftSnapshotOwnerId: ownerId });
+          schedulePersistToDisk({
+            conversations,
+            draftSnapshot: next,
+            draftSnapshotOwnerId: ownerId,
+            source: "autosave",
+          });
           return { draftSnapshot: next, draftSnapshotOwnerId: ownerId };
         });
       },
@@ -1314,29 +1447,14 @@ export const useConversationStore = create<ConversationState>()(
 
         set({ draftSnapshot: nextDraft as any, draftSnapshotOwnerId: ownerId, conversations });
 
-        const api = window.desktop?.history;
-        if (!api?.saveConversations || !diskWriteAllowed) {
-          schedulePersistToDisk({ conversations, draftSnapshot: nextDraft as any, draftSnapshotOwnerId: ownerId });
-          return;
-        }
-
-        if (persistTimer) {
-          clearTimeout(persistTimer);
-          persistTimer = null;
-        }
-        pendingPayload = null;
-        try {
-          await api.saveConversations({
-            version: 1,
-            updatedAt: Date.now(),
-            conversations: capConversations(conversations),
-            draftSnapshot: nextDraft as any,
-            draftSnapshotOwnerId: ownerId,
-            activeConvId: activeConvId ?? null,
-          });
-        } catch {
-          schedulePersistToDisk({ conversations, draftSnapshot: nextDraft as any, draftSnapshotOwnerId: ownerId });
-        }
+        schedulePersistToDisk({
+          conversations,
+          draftSnapshot: nextDraft as any,
+          draftSnapshotOwnerId: ownerId,
+          touchedConversationIds: activeConvId ? [activeConvId] : [],
+          source: "shutdown",
+          sync: true,
+        });
       },
       flushDraftSnapshotNowSync: (snap) => {
         const base =
@@ -1379,24 +1497,14 @@ export const useConversationStore = create<ConversationState>()(
 
         set({ draftSnapshot: nextDraft as any, draftSnapshotOwnerId: ownerId, conversations });
 
-        const api = window.desktop?.history as any;
-        if (!api?.saveConversationsSync || !diskWriteAllowed) {
-          schedulePersistToDisk({ conversations, draftSnapshot: nextDraft as any, draftSnapshotOwnerId: ownerId });
-          return;
-        }
-
-        try {
-          api.saveConversationsSync({
-            version: 1,
-            updatedAt: Date.now(),
-            conversations: capConversations(conversations),
-            draftSnapshot: nextDraft as any,
-            draftSnapshotOwnerId: ownerId,
-            activeConvId: activeConvId ?? null,
-          });
-        } catch {
-          schedulePersistToDisk({ conversations, draftSnapshot: nextDraft as any, draftSnapshotOwnerId: ownerId });
-        }
+        schedulePersistToDisk({
+          conversations,
+          draftSnapshot: nextDraft as any,
+          draftSnapshotOwnerId: ownerId,
+          touchedConversationIds: activeConvId ? [activeConvId] : [],
+          source: "shutdown",
+          sync: true,
+        });
       },
       clearAll: () =>
         set(() => {
@@ -1404,7 +1512,9 @@ export const useConversationStore = create<ConversationState>()(
             conversations: [],
             draftSnapshot: null,
             draftSnapshotOwnerId: null,
-            allowEmptyConversations: true,
+            activeConvIdOverride: null,
+            clearAll: true,
+            source: "manual",
           });
           return { conversations: [], draftSnapshot: null, draftSnapshotOwnerId: null, activeConvId: null };
         }),

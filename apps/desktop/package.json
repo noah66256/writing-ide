@@ -10,6 +10,7 @@
     "dev:electron": "node scripts/dev-electron.cjs",
     "mcp:prepare-runtime": "node scripts/prepare-mcp-runtime.cjs",
     "mcp:smoke-runtime": "node scripts/mcp-runtime-smoke.cjs --commands uv,uvx,node,npm,npx,python,python3",
+    "smoke:history": "node scripts/smoke-history-persistence.cjs",
     "build": "npm run -w @ohmycrab/shared build && npm run -w @ohmycrab/agent-core build && npm run -w @ohmycrab/tools build && vite build",
     "preview": "vite preview",
     "dist:win": "npm run mcp:prepare-runtime && npm run build && electron-builder --win nsis --x64",
