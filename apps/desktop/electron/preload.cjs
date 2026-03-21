@@ -90,6 +90,12 @@ contextBridge.exposeInMainWorld("desktop", {
     },
   },
   history: {
+    loadConversationIndex() {
+      return ipcRenderer.invoke("history.loadConversationIndex");
+    },
+    readConversationSnapshot(params) {
+      return ipcRenderer.invoke("history.readConversationSnapshot", params);
+    },
     loadConversations() {
       return ipcRenderer.invoke("history.loadConversations");
     },
@@ -293,6 +299,11 @@ contextBridge.exposeInMainWorld("desktop", {
       const listener = (_event, manifests) => handler(manifests);
       ipcRenderer.on("skills.changed", listener);
       return () => ipcRenderer.removeListener("skills.changed", listener);
+    },
+  },
+  agents: {
+    list(options) {
+      return ipcRenderer.invoke("agents.list", options ?? {});
     },
   },
   browser: {

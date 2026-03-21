@@ -1,4 +1,4 @@
-import { BUILTIN_SUB_AGENTS } from "@ohmycrab/agent-core";
+import { BUILTIN_SUB_AGENTS, type SubAgentDefinition } from "@ohmycrab/agent-core";
 import type { CollabAgentSessionRecord } from "@ohmycrab/shared";
 
 type CollabItem = Record<string, unknown>;
@@ -114,18 +114,28 @@ function normalizeRoleKey(value: string) {
   return value.trim().toLowerCase().replace(/[\s-]+/g, "_");
 }
 
-export function resolveSpawnAgentRole(raw: unknown): {
+export function resolveSpawnAgentRole(
+  raw: unknown,
+  registry?: Map<string, SubAgentDefinition> | null,
+): {
   requestedAgentType?: string;
   agentId: string;
 } {
   const requestedAgentType = cleanText(raw);
   if (!requestedAgentType) return { agentId: DEFAULT_AGENT_ID };
+  const externalAgents = registry instanceof Map
+    ? Array.from(registry.values()).filter((agent) => agent.enabled !== false)
+    : [];
 
   const exact = BUILTIN_SUB_AGENTS.find((agent) => agent.id === requestedAgentType);
   if (exact) return { requestedAgentType, agentId: exact.id };
+  const externalExact = externalAgents.find((agent) => agent.id === requestedAgentType);
+  if (externalExact) return { requestedAgentType, agentId: externalExact.id };
 
   const byName = BUILTIN_SUB_AGENTS.find((agent) => agent.name === requestedAgentType);
   if (byName) return { requestedAgentType, agentId: byName.id };
+  const externalByName = externalAgents.find((agent) => agent.name === requestedAgentType);
+  if (externalByName) return { requestedAgentType, agentId: externalByName.id };
 
   const alias = ROLE_ALIASES[normalizeRoleKey(requestedAgentType)];
   return {
@@ -136,15 +146,17 @@ export function resolveSpawnAgentRole(raw: unknown): {
 
 export function normalizeSpawnAgentArgs(
   rawArgs: Record<string, unknown>,
+  registry?: Map<string, SubAgentDefinition> | null,
 ): { ok: true; value: NormalizedSpawnAgentArgs } | { ok: false; error: string } {
   const input = normalizeCollabInput({
-    message: rawArgs.message,
+    message: rawArgs.message ?? rawArgs.task,
     items: rawArgs.items,
   });
   if (!input.ok) return input;
 
   const role = resolveSpawnAgentRole(
     rawArgs.agent_type ?? rawArgs.agentId ?? rawArgs.role ?? rawArgs.agent ?? rawArgs.agent_type_id,
+    registry,
   );
   const model = cleanText(rawArgs.model);
   const reasoningEffort = cleanText(rawArgs.reasoning_effort);
@@ -172,8 +184,12 @@ export function getCollabSessionExternalId(session: Pick<CollabAgentSessionRecor
   return cleanText(session.childThreadId) || cleanText(session.id);
 }
 
-export function getCollabAgentNickname(agentId: string): string | null {
-  return BUILTIN_SUB_AGENTS.find((agent) => agent.id === agentId)?.name ?? null;
+export function getCollabAgentNickname(
+  agentId: string,
+  registry?: Map<string, SubAgentDefinition> | null,
+): string | null {
+  return BUILTIN_SUB_AGENTS.find((agent) => agent.id === agentId)?.name
+    ?? (registry instanceof Map ? registry.get(agentId)?.name ?? null : null);
 }
 
 export function resolveCollabSessionByExternalId<T extends { record: CollabAgentSessionRecord }>(
@@ -205,9 +221,12 @@ function mapSessionStatusForModel(status: CollabAgentSessionRecord["status"] | s
   }
 }
 
-export function buildSpawnAgentToolOutput(session: CollabAgentSessionRecord) {
+export function buildSpawnAgentToolOutput(
+  session: CollabAgentSessionRecord,
+  registry?: Map<string, SubAgentDefinition> | null,
+) {
   const externalId = getCollabSessionExternalId(session);
-  const nickname = getCollabAgentNickname(session.agentId);
+  const nickname = getCollabAgentNickname(session.agentId, registry);
   return {
     ok: true,
     agent_id: externalId,

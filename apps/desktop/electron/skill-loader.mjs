@@ -65,6 +65,7 @@ const KNOWN_MANIFEST_KEYS = new Set([
   "version",
   "license",
   "argumentHint",
+  "effort",
   "disableModelInvocation",
   "userInvocable",
   "allowedTools",
@@ -73,6 +74,8 @@ const KNOWN_MANIFEST_KEYS = new Set([
   "agent",
   "hooks",
   "inputSchema",
+  "compatibility",
+  "metadata",
   "portable",
 ]);
 
@@ -148,6 +151,41 @@ function buildScanRoots(primaryRoot, projectRoots = []) {
   ]);
 }
 
+function getScanRootPrecedence(rootDir, primaryRoot, projectRoots = []) {
+  const root = path.resolve(String(rootDir ?? ""));
+  const userDataRoot = path.resolve(String(primaryRoot ?? ""));
+  if (root === userDataRoot) return 100;
+
+  const homeClaudeRoot = path.join(os.homedir(), ".claude", "skills");
+  if (root === homeClaudeRoot) return 300;
+
+  const homeAgentsRoot = path.join(os.homedir(), ".agents", "skills");
+  if (root === homeAgentsRoot) return 290;
+
+  const projects = normalizeProjectRoots(projectRoots);
+  for (let i = 0; i < projects.length; i++) {
+    const projectRoot = projects[i];
+    const projectClaudeRoot = path.join(projectRoot, ".claude", "skills");
+    if (root === projectClaudeRoot) return 500 - i;
+    const projectAgentsRoot = path.join(projectRoot, ".agents", "skills");
+    if (root === projectAgentsRoot) return 490 - i;
+  }
+
+  return 0;
+}
+
+function shouldPreferLoadedSkill(candidate, incumbent, options = {}) {
+  const candidateRoot = path.dirname(candidate?.dir ?? "");
+  const incumbentRoot = path.dirname(incumbent?.dir ?? "");
+  const candidateRank = getScanRootPrecedence(candidateRoot, options.primaryRoot, options.projectRoots);
+  const incumbentRank = getScanRootPrecedence(incumbentRoot, options.primaryRoot, options.projectRoots);
+  if (candidateRank !== incumbentRank) return candidateRank > incumbentRank;
+
+  const candidateIndex = Number.isFinite(candidate?._scanIndex) ? candidate._scanIndex : Number.MAX_SAFE_INTEGER;
+  const incumbentIndex = Number.isFinite(incumbent?._scanIndex) ? incumbent._scanIndex : Number.MAX_SAFE_INTEGER;
+  return candidateIndex < incumbentIndex;
+}
+
 function arraysEqual(a, b) {
   if (a === b) return true;
   if (!Array.isArray(a) || !Array.isArray(b)) return false;
@@ -170,8 +208,31 @@ function toPortableSkillId(raw) {
   return normalized;
 }
 
+function splitAllowedToolsText(text) {
+  const out = [];
+  let current = "";
+  let depth = 0;
+  for (const ch of String(text ?? "")) {
+    if (ch === "(") depth += 1;
+    if (ch === ")") depth = Math.max(0, depth - 1);
+    if (ch === "," && depth === 0) {
+      const value = norm(current);
+      if (value) out.push(value);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  const tail = norm(current);
+  if (tail) out.push(tail);
+  return out;
+}
+
 function normalizeAllowedTools(raw) {
-  return Array.isArray(raw) ? raw.map((x) => norm(x)).filter(Boolean).slice(0, 100) : [];
+  if (Array.isArray(raw)) return raw.map((x) => norm(x)).filter(Boolean).slice(0, 100);
+  const text = norm(raw);
+  if (!text) return [];
+  return splitAllowedToolsText(text).slice(0, 100);
 }
 
 function normalizePortableToolName(raw) {
@@ -435,15 +496,19 @@ function parseManifest(raw, skillDir, fallbackId) {
   const color = norm(uiRaw.color) || undefined;
 
   const kind = norm(raw.kind) || undefined;
-  const activationMode = norm(raw.activationMode) || undefined;
+  const activationModeRaw = norm(raw.activationMode) || undefined;
+  const activationMode = activationModeRaw || (portable ? "explicit" : undefined);
   const license = norm(raw.license) || undefined;
   const argumentHint = norm(raw.argumentHint) || undefined;
+  const effort = norm(raw.effort) || undefined;
   const userInvocable = typeof raw.userInvocable === "boolean" ? raw.userInvocable : undefined;
   const model = norm(raw.model) || undefined;
   const context = norm(raw.context) || undefined;
   const agent = norm(raw.agent) || undefined;
   const hooks = raw.hooks !== undefined ? raw.hooks : undefined;
   const inputSchema = raw.inputSchema !== undefined ? raw.inputSchema : undefined;
+  const compatibility = isObj(raw.compatibility) ? raw.compatibility : undefined;
+  const metadata = isObj(raw.metadata) ? raw.metadata : undefined;
   const vendorMetadata = extractVendorMetadata(raw);
 
   return {
@@ -460,6 +525,7 @@ function parseManifest(raw, skillDir, fallbackId) {
     ...(mcp ? { mcp } : {}),
     ...(license ? { license } : {}),
     ...(argumentHint ? { argumentHint } : {}),
+    ...(effort ? { effort } : {}),
     ...(typeof disableModelInvocation === "boolean" ? { disableModelInvocation } : {}),
     ...(typeof userInvocable === "boolean" ? { userInvocable } : {}),
     ...(allowedTools.length ? { allowedTools } : {}),
@@ -468,6 +534,8 @@ function parseManifest(raw, skillDir, fallbackId) {
     ...(agent ? { agent } : {}),
     ...(hooks !== undefined ? { hooks } : {}),
     ...(inputSchema !== undefined ? { inputSchema } : {}),
+    ...(compatibility ? { compatibility } : {}),
+    ...(metadata ? { metadata } : {}),
     ...(vendorMetadata ? { vendorMetadata } : {}),
     ...(portable ? { portable } : {}),
     ...(isObj(raw.workflow) ? { workflow: raw.workflow } : {}),
@@ -498,6 +566,7 @@ async function loadOne(rootDir, dirName) {
 
   let manifest;
   let contextPromptRel = "";
+  let manifestPath = "";
 
   if (await exists(skillMdPath)) {
     // 新格式：SKILL.md（frontmatter + body）
@@ -505,6 +574,7 @@ async function loadOne(rootDir, dirName) {
     const { frontmatter, body } = parseSkillMarkdown(mdText, dirName);
     const { raw, contextPrompt } = buildManifestInputFromFrontmatter(frontmatter, dirName);
     manifest = parseManifest(raw, skillDir, dirName);
+    manifestPath = skillMdPath;
 
     const systemText = norm(body);
     if (systemText) {
@@ -521,6 +591,7 @@ async function loadOne(rootDir, dirName) {
       throw new Error(`SKILL_JSON_PARSE_ERROR:${dirName}`);
     }
     manifest = parseManifest(raw, skillDir, dirName);
+    manifestPath = legacyJsonPath;
 
     const sysMd = await readText(path.join(skillDir, SYSTEM_PROMPT_FILE));
     const ctxMd = await readText(path.join(skillDir, CONTEXT_PROMPT_FILE));
@@ -545,6 +616,14 @@ async function loadOne(rootDir, dirName) {
   if (manifest.mcp?.transport === "stdio") {
     const abs = safeResolve(skillDir, manifest.mcp.entry, `SKILL_MCP_ENTRY_ESCAPE:${manifest.id}`);
     if (!(await exists(abs))) throw new Error(`SKILL_MCP_ENTRY_NOT_FOUND:${manifest.id}`);
+  }
+
+  if (manifest.portable) {
+    manifest.portableRuntime = {
+      skillDir,
+      ...(manifestPath ? { manifestPath } : {}),
+      scanRoot: rootDir,
+    };
   }
 
   const digest = crypto.createHash("sha1").update(JSON.stringify(manifest)).digest("hex");
@@ -639,7 +718,9 @@ export class SkillLoader {
       for (const dirName of dirNames) {
         try {
           const loaded = await loadOne(root, dirName);
-          if (loaded) nextSkills.push(loaded);
+          if (loaded) {
+            nextSkills.push({ ...loaded, _scanIndex: nextSkills.length });
+          }
         } catch (e) {
           const label = `${dirName} @ ${root}`;
           nextErrors.push({ dirName: label, error: String(e?.message ?? e), ts: Date.now() });
@@ -649,16 +730,32 @@ export class SkillLoader {
     }
 
     // id 去重：同 id 只保留第一个
-    const seen = new Set();
-    const deduped = [];
+    const dedupedById = new Map();
     for (const s of nextSkills) {
-      if (seen.has(s.id)) {
-        nextErrors.push({ dirName: path.basename(s.dir), error: `SKILL_ID_DUPLICATE:${s.id}`, ts: Date.now() });
+      const existing = dedupedById.get(s.id);
+      if (!existing) {
+        dedupedById.set(s.id, s);
         continue;
       }
-      seen.add(s.id);
-      deduped.push(s);
+      if (shouldPreferLoadedSkill(s, existing, { primaryRoot: this.rootDir, projectRoots: this._projectRoots })) {
+        const kept = `${path.dirname(s.dir)} > ${path.dirname(existing.dir)}`;
+        nextErrors.push({ dirName: path.basename(existing.dir), error: `SKILL_ID_DUPLICATE:${s.id}:replaced_by_higher_scope:${kept}`, ts: Date.now() });
+        dedupedById.set(s.id, s);
+        continue;
+      }
+      nextErrors.push({ dirName: path.basename(s.dir), error: `SKILL_ID_DUPLICATE:${s.id}`, ts: Date.now() });
     }
+
+    const deduped = Array.from(dedupedById.values())
+      .sort((a, b) => {
+        const aIndex = Number.isFinite(a?._scanIndex) ? a._scanIndex : Number.MAX_SAFE_INTEGER;
+        const bIndex = Number.isFinite(b?._scanIndex) ? b._scanIndex : Number.MAX_SAFE_INTEGER;
+        return aIndex - bIndex;
+      })
+      .map((item) => {
+        const { _scanIndex, ...rest } = item;
+        return rest;
+      });
 
     this._skills = deduped;
     this._errors = nextErrors;

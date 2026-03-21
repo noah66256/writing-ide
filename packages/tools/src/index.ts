@@ -281,6 +281,80 @@ export const TOOL_LIST: ToolMeta[] = [
     },
   },
   {
+    name: "skills.list",
+    description:
+      "列出当前可由模型按需激活的 Skills。\n" +
+      "优先用于 Claude Code / portable skill 兼容场景：先 skills.list 看有哪些技能，再 skills.activate 加载具体 skill 合同。\n" +
+      "只读、无副作用。",
+    args: [
+      { name: "query", desc: "可选：按主题/描述过滤（自然语言即可）", type: "string" },
+      { name: "limit", desc: "返回数量（默认 8，最大 20）", type: "number" },
+      { name: "includePromptSummary", desc: "是否附带 prompt 摘要（默认 false）", type: "boolean" },
+    ],
+    modes: ["chat", "agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        limit: { type: "number" },
+        includePromptSummary: { type: "boolean" },
+      },
+      additionalProperties: false,
+    },
+    outputSchema: {
+      type: "object",
+      description: "Model-invocable skill list",
+      properties: {
+        ok: { type: "boolean" },
+        skills: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string" },
+              name: { type: "string" },
+              description: { type: "string" },
+              activationMode: { type: "string" },
+              portable: { type: "boolean" },
+              slashCommand: { type: "string" },
+              argumentHint: { type: "string" },
+            },
+          },
+        },
+      },
+    },
+  },
+  {
+    name: "skills.activate",
+    description:
+      "激活一个 Skill，并把它的完整合同加载进当前 run。\n" +
+      "适用于模型自主触发 skill 的场景：给出 skill 名称和可选参数后，runtime 会返回 skill 正文、参数渲染结果、allowed-tools / hooks / fork 等运行时元信息，并让该 skill 在当前 run 后续轮次生效。",
+    args: [
+      { name: "name", required: true, desc: "skill id / 卡片 id / slash 名（如 docx、skill:docx、/docx）", type: "string" },
+      { name: "arguments", desc: "可选：传给 skill 的原始参数文本", type: "string" },
+    ],
+    modes: ["chat", "agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string" },
+        arguments: { type: "string" },
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+    outputSchema: {
+      type: "object",
+      description: "Skill activation result",
+      properties: {
+        ok: { type: "boolean" },
+        targetType: { type: "string" },
+        skill: { type: "object" },
+        activation: { type: "object" },
+      },
+    },
+  },
+  {
     name: "web.search",
     description:
       "联网搜索。用于热点追踪、关键词研究、竞品分析、实时信息获取。\n" +

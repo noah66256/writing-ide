@@ -137,6 +137,27 @@ declare global {
       };
       history?: {
         getInfo: () => Promise<{ ok: boolean; primaryDir?: string | null; fallbackDir?: string | null; filename?: string; error?: string }>;
+        loadConversationIndex?: () => Promise<{
+          ok: boolean;
+          conversations?: any[];
+          draftSnapshot?: any | null;
+          draftSnapshotOwnerId?: string | null;
+          activeConvId?: string | null;
+          used?: string;
+          file?: string | null;
+          error?: string;
+          detail?: string;
+        }>;
+        readConversationSnapshot?: (params: {
+          conversationId: string;
+          includeSteps?: boolean;
+        }) => Promise<{
+          ok: boolean;
+          snapshot?: any | null;
+          used?: string;
+          error?: string;
+          detail?: string;
+        }>;
         loadConversations: () => Promise<{
           ok: boolean;
           conversations?: any[];
@@ -175,6 +196,9 @@ declare global {
         setProjectRoots?: (roots: string[]) => Promise<any[]>;
         openDir: () => Promise<{ ok: boolean }>;
         onChange: (handler: (payload: { manifests: any[]; errors: Array<{ dirName: string; error: string; ts: number }> } | any[]) => void) => () => void;
+      };
+      agents?: {
+        list: (options?: { projectRoots?: string[] }) => Promise<any[]>;
       };
       mcp?: {
         getServers: () => Promise<any[]>;

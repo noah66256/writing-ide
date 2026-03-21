@@ -17,7 +17,14 @@ import { activateSkills } from "@ohmycrab/agent-core";
 import { buildStyleLinterLibrariesSidecar, executeToolCall, getTool } from "./toolRegistry";
 import { createRunTarget } from "./runTarget";
 import { cancelConvRun, setConvRunCancel } from "../state/runRegistry";
-import { buildContextManifestV1, renderContextPackV1, type ContextSegmentV1 } from "@ohmycrab/shared";
+import {
+  buildContextManifestV1,
+  compactToolResultEnvelope,
+  getToolResultEnvelopePayload,
+  isToolResultEnvelope,
+  renderContextPackV1,
+  type ContextSegmentV1,
+} from "@ohmycrab/shared";
 import { buildProjectMapSegmentV2, buildProjectSummarySegmentsV1 } from "../lib/projectIndexing";
 import {
   type GatewayRunController,
@@ -128,36 +135,53 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
     };
   };
 
+  const normalizeIncomingToolOutput = (toolName: string, output: unknown) => {
+    if (output === undefined) return output;
+    return isToolResultEnvelope(output) ? output : compactToolResultEnvelope(toolName, output);
+  };
+
+  const normalizeIncomingRuntimeItem = (item: any) => {
+    if (!item || typeof item !== "object") return item;
+    if (String(item?.type ?? "").trim() !== "toolCall") return item;
+    const toolName = String(item?.name ?? "").trim();
+    if (!toolName || item?.result === undefined) return item;
+    return {
+      ...item,
+      result: normalizeIncomingToolOutput(toolName, item.result),
+    };
+  };
+
+  const upsertRuntimeItemByLogicalKey = (items: any[], incomingItem: any) => {
+    const normalizedIncoming = normalizeIncomingRuntimeItem(incomingItem);
+    const nextItems = Array.isArray(items) ? items.slice() : [];
+    const logicalToolCallId =
+      String(normalizedIncoming?.type ?? "").trim() === "toolCall"
+        ? String(normalizedIncoming?.toolCallId ?? "").trim()
+        : "";
+    const existingIndex = logicalToolCallId
+      ? nextItems.findIndex((entry) => String((entry as any)?.toolCallId ?? "").trim() === logicalToolCallId)
+      : nextItems.findIndex((entry) => String((entry as any)?.id ?? "").trim() === String(normalizedIncoming?.id ?? "").trim());
+    if (existingIndex < 0) {
+      nextItems.push(normalizedIncoming);
+      return { items: nextItems, replacedId: null as string | null, itemId: String(normalizedIncoming?.id ?? "").trim() };
+    }
+    const existing = nextItems[existingIndex];
+    const merged = mergeRuntimeItem(existing, normalizedIncoming);
+    const replacedId = String((existing as any)?.id ?? "").trim();
+    nextItems.splice(existingIndex, 1);
+    const deduped = nextItems.filter((entry) => String((entry as any)?.id ?? "").trim() !== String((merged as any)?.id ?? "").trim());
+    deduped.push(merged);
+    return { items: deduped, replacedId: replacedId || null, itemId: String((merged as any)?.id ?? "").trim() };
+  };
+
   const mergeRuntimeItems = (previousItems: any[], incomingItems: any[]) => {
     const prev = Array.isArray(previousItems) ? previousItems : [];
     const incoming = Array.isArray(incomingItems) ? incomingItems : [];
-    if (!prev.length) return incoming;
+    if (!prev.length) return incoming.map((item) => normalizeIncomingRuntimeItem(item));
     if (!incoming.length) return prev;
-
-    const incomingById = new Map<string, any>();
+    let merged = prev.slice();
     for (const item of incoming) {
-      const id = String(item?.id ?? "").trim();
-      if (!id) continue;
-      incomingById.set(id, item);
-    }
-
-    const merged: any[] = [];
-    const seen = new Set<string>();
-    for (const item of prev) {
-      const id = String(item?.id ?? "").trim();
-      if (!id) {
-        merged.push(item);
-        continue;
-      }
-      if (seen.has(id)) continue;
-      seen.add(id);
-      merged.push(mergeRuntimeItem(item, incomingById.get(id)));
-    }
-    for (const item of incoming) {
-      const id = String(item?.id ?? "").trim();
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-      merged.push(item);
+      merged = upsertRuntimeItemByLogicalKey(merged, item).items;
     }
     return merged;
   };
@@ -168,6 +192,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
     const snapshotItems = Array.isArray(payload?.items) ? payload.items : [];
     const collabSessions = Array.isArray(payload?.collabSessions) ? payload.collabSessions : null;
     const activeItemIds = Array.isArray(payload?.activeItemIds) ? payload.activeItemIds : null;
+    const replaceStrategy = String(payload?.stream?.replaceStrategy ?? "").trim();
     const currentRootThreadId = String(rt.getThread()?.id ?? "").trim();
     const incomingThreadId = String(thread?.id ?? "").trim();
     const isRootSnapshot = Boolean(thread && (!currentRootThreadId || !incomingThreadId || currentRootThreadId === incomingThreadId));
@@ -175,7 +200,11 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       rt.setThread(thread);
     }
     if (currentTurn?.id) rt.upsertTurn(currentTurn);
-    rt.setItems(mergeRuntimeItems(rt.getItems() ?? [], snapshotItems));
+    rt.setItems(
+      replaceStrategy === "replace" && isRootSnapshot
+        ? snapshotItems.map((item: any) => normalizeIncomingRuntimeItem(item))
+        : mergeRuntimeItems(rt.getItems() ?? [], snapshotItems),
+    );
     if (collabSessions) rt.setCollabSessions(collabSessions);
     if (activeItemIds) rt.setActiveItemIds(activeItemIds);
   };
@@ -203,13 +232,16 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
     }
     const item = payload?.item && typeof payload.item === "object" ? payload.item : null;
     if (!item?.id) return;
-    const existing = items.find((entry: any) => String(entry?.id ?? "") === String(item.id));
-    rt.upsertItem(mergeRuntimeItem(existing, item));
-    const itemId = String(item.id);
+    const upserted = upsertRuntimeItemByLogicalKey(items, item);
+    rt.setItems(upserted.items);
+    const itemId = upserted.itemId;
+    const replacedId = upserted.replacedId;
     if (kind === "started") {
-      rt.setActiveItemIds([...activeItemIds, itemId]);
+      rt.setActiveItemIds(Array.from(new Set(
+        [...activeItemIds.filter((id) => id !== replacedId), itemId].filter(Boolean),
+      )));
     } else if (kind === "completed") {
-      rt.setActiveItemIds(activeItemIds.filter((id) => id !== itemId));
+      rt.setActiveItemIds(activeItemIds.filter((id) => id !== itemId && id !== replacedId));
     }
   };
 
@@ -872,6 +904,12 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             return manifest;
           })
         : undefined;
+      const projectRootForAgents = String(useProjectStore.getState().rootDir ?? "").trim();
+      const userAgentDefinitions = window.desktop?.agents?.list
+        ? await window.desktop.agents.list({
+            projectRoots: projectRootForAgents ? [projectRootForAgents] : [],
+          }).catch(() => [])
+        : undefined;
       const builtinOverrides = Object.fromEntries(
         Object.entries(skillOverrides ?? {})
           .filter(([, override]) => typeof override?.enabled === "boolean")
@@ -945,6 +983,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           ...(args.stylePipelinePayload ? { stylePipelinePayload: args.stylePipelinePayload } : {}),
           ...(hasBuiltinOverrides ? { builtinOverrides } : {}),
           ...(userSkillManifests ? { userSkillManifests } : {}),
+          ...(Array.isArray(userAgentDefinitions) && userAgentDefinitions.length ? { userAgentDefinitions } : {}),
         },
       }));
 
@@ -987,7 +1026,8 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       const summarizeStepFailure = (step: any) => {
         const toolName = String(step?.toolName ?? "unknown");
         const input = step?.input && typeof step.input === "object" ? (step.input as any) : null;
-        const output = step?.output && typeof step.output === "object" ? (step.output as any) : null;
+        const outputRaw = getToolResultEnvelopePayload(step?.output);
+        const output = outputRaw && typeof outputRaw === "object" ? (outputRaw as any) : null;
         const errorCode = String(output?.error ?? "").trim() || "UNKNOWN_ERROR";
         const message = String(output?.message ?? output?.detail ?? "").trim();
         const path = String(output?.path ?? input?.path ?? input?.fromPath ?? "").trim();
@@ -1399,7 +1439,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                 const mcpToolName = parts.slice(2).join(".");
                 log("info", "tool.call.subagent.mcp", { toolCallId, serverId, mcpToolName, agentId: toolAgentId });
                 const stepId = addTool({
-                  toolName: name, status: "running", input: parsedArgsPreview, output: null,
+                  toolName: name, toolCallId, status: "running", input: parsedArgsPreview, output: null,
                   riskLevel: "low", applyPolicy: "auto_apply", undoable: false, kept: true, applied: true,
                   agentId: toolAgentId,
                 });
@@ -1426,7 +1466,10 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                     result?.output !== undefined
                       ? result.output
                       : { ok: false, error: result?.error ?? "MCP_TOOL_FAILED" };
-                  patchTool(stepId, { status: result.ok ? "success" : "failed", output: result.ok ? result.output : failureOutput });
+                  patchTool(stepId, {
+                    status: result.ok ? "success" : "failed",
+                    output: normalizeIncomingToolOutput(name, result.ok ? result.output : failureOutput),
+                  });
                   submitToolResult({
                     toolCallId, name,
                     ok: result.ok,
@@ -1447,16 +1490,20 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               // Desktop-executed tool for sub-agent
               log("info", "tool.call.subagent.exec", { toolCallId, name, agentId: toolAgentId });
               const stepId = addTool({
-                toolName: name, status: "running", input: parsedArgsPreview, output: null,
+                toolName: name, toolCallId, status: "running", input: parsedArgsPreview, output: null,
                 riskLevel: "low", applyPolicy: "auto_apply", undoable: false, kept: true, applied: true,
                 agentId: toolAgentId,
               });
               const exec = await executeToolCall({ toolName: name, rawArgs, mode: args.mode });
-              patchTool(stepId, { status: exec.result.ok ? "success" : "failed", output: exec.result.ok ? exec.result.output : null });
               const failedOutput =
                 !exec.result.ok && exec.result.output !== undefined
                   ? exec.result.output
                   : { ok: false, error: (exec.result as any).error };
+              patchTool(stepId, {
+                status: exec.result.ok ? "success" : "failed",
+                toolCallId,
+                output: normalizeIncomingToolOutput(name, exec.result.ok ? exec.result.output : failedOutput),
+              });
               submitToolResult({
                 toolCallId, name,
                 ok: exec.result.ok,
@@ -1481,6 +1528,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               log("info", "tool.call.mcp", { toolCallId, serverId, mcpToolName });
               const stepId = addTool({
                 toolName: name,
+                toolCallId,
                 status: "running",
                 input: parsedArgsPreview,
                 output: null,
@@ -1519,7 +1567,8 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                     : { ok: false, error: result?.error ?? "MCP_TOOL_FAILED" };
                 patchTool(stepId, {
                   status: result.ok ? "success" : "failed",
-                  output: result.ok ? result.output : failureOutput,
+                  toolCallId,
+                  output: normalizeIncomingToolOutput(name, result.ok ? result.output : failureOutput),
                 });
                 submitToolResult({
                   toolCallId, name,
@@ -1529,7 +1578,11 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                 });
               } catch (e: any) {
                 const failureOutput = { ok: false, error: String(e?.message ?? e) };
-                patchTool(stepId, { status: "failed", output: failureOutput });
+                patchTool(stepId, {
+                  status: "failed",
+                  toolCallId,
+                  output: normalizeIncomingToolOutput(name, failureOutput),
+                });
                 submitToolResult({
                   toolCallId, name,
                   ok: false,
@@ -1557,9 +1610,10 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                 try { if (def) localResult = await def.run(parsedArgsPreview, { mode: args.mode }); } catch {}
                 const stepId = addTool({
                   toolName: name,
+                  toolCallId,
                   status: localResult?.ok ? "success" : "running",
                   input: parsedArgsPreview,
-                  output: localResult?.ok ? localResult.output : null,
+                  output: localResult?.ok ? normalizeIncomingToolOutput(name, localResult.output) : null,
                   riskLevel: def?.riskLevel ?? "low",
                   applyPolicy: def?.applyPolicy ?? "auto_apply",
                   undoable: localResult?.ok ? localResult.undoable ?? false : false,
@@ -1576,7 +1630,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               // Other gateway-executed: placeholder
               const def = getTool(name);
               const stepId = addTool({
-                toolName: name, status: "running", input: parsedArgsPreview, output: null,
+                toolName: name, toolCallId, status: "running", input: parsedArgsPreview, output: null,
                 riskLevel: def?.riskLevel ?? "high",
                 applyPolicy: def?.applyPolicy ?? "proposal",
                 undoable: false, kept: false, applied: false,
@@ -1594,6 +1648,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             const def0 = getTool(name);
             const stepId = addTool({
               toolName: name,
+              toolCallId,
               status: "running",
               input: parsedArgsPreview,
               output: null,
@@ -1620,8 +1675,9 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
 
             patchTool(stepId, {
               status: exec.result.ok ? "success" : "failed",
+              toolCallId,
               input: exec.parsedArgs,
-              output: exec.result.ok ? exec.result.output : failedOutput,
+              output: normalizeIncomingToolOutput(name, exec.result.ok ? exec.result.output : failedOutput),
               riskLevel: stepRiskLevel,
               applyPolicy: stepApplyPolicy,
               undoable: exec.result.ok ? exec.result.undoable : false,
@@ -1664,7 +1720,8 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               if (st && st.type === "tool" && st.status === "running") {
                 patchTool(stepId, {
                   status: ok0 ? "success" : "failed",
-                  output: out,
+                  toolCallId,
+                  output: normalizeIncomingToolOutput(st.toolName, out),
                   ...(meta && typeof meta === "object"
                     ? { applyPolicy: (meta as any).applyPolicy ?? st.applyPolicy, riskLevel: (meta as any).riskLevel ?? st.riskLevel }
                     : {}),

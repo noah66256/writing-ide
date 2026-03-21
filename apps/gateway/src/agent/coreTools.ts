@@ -5,6 +5,8 @@ export const CORE_TOOL_NAMES = [
   "time.now",
   "tools.search",
   "tools.describe",
+  "skills.list",
+  "skills.activate",
 
   // Web / KB
   "web.search",
@@ -82,4 +84,3 @@ export function ensureCoreToolsSelected(args: {
     }
   }
 }
-

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Activity,
   Clock3,
@@ -19,7 +19,6 @@ import {
 } from "lucide-react";
 import * as QRCode from "qrcode";
 import { cn } from "@/lib/utils";
-import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
 import { useAuthStore, type AccountUsageBucket, type AccountUsageSummary } from "@/state/authStore";
 
 function fmtCny(amountCent: number) {
@@ -36,16 +35,6 @@ function fmtTime(iso: string) {
 
 function fmtInt(value: number) {
   return Math.max(0, Math.floor(Number(value) || 0)).toLocaleString();
-}
-
-function normalizeGatewayUrlOrEmpty(raw: string) {
-  let s = String(raw ?? "").trim();
-  if (!s) return "";
-  s = s.replace(/\s+/g, "");
-  s = s.replace(/^http:\/(?!\/)/i, "http://").replace(/^https:\/(?!\/)/i, "https://");
-  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(s)) s = `http://${s}`;
-  s = s.replace(/\/api\/?$/i, "");
-  return s.replace(/\/+$/g, "");
 }
 
 function emptyUsageBucket(): AccountUsageBucket {
@@ -196,7 +185,6 @@ export function AccountSettingsPanel() {
   const createRechargeOrder = useAuthStore((s) => s.createRechargeOrder);
   const getRechargePayStatus = useAuthStore((s) => s.getRechargePayStatus);
 
-  const [gatewayOverride, setGatewayOverride] = useState("");
   const [txOpen, setTxOpen] = useState(false);
   const [txBusy, setTxBusy] = useState(false);
   const [txs, setTxs] = useState<any[]>([]);
@@ -212,7 +200,6 @@ export function AccountSettingsPanel() {
   const [activePay, setActivePay] = useState<null | { orderId: string; payUrl: string; expireAt: string; pointsToCredit: number; amountCent: number }>(null);
   const [qrUrl, setQrUrl] = useState("");
 
-  const gateway = useMemo(() => getGatewayBaseUrl() || "(dev proxy: /api)", []);
   const displayName = user?.phone ?? user?.email ?? "未登录";
 
   const refreshUsage = async () => {
@@ -253,11 +240,6 @@ export function AccountSettingsPanel() {
   };
 
   useEffect(() => {
-    try {
-      setGatewayOverride(String(window.localStorage.getItem("writing-ide.gatewayUrl") ?? ""));
-    } catch {
-      setGatewayOverride("");
-    }
     setTxOpen(false);
     setTxs([]);
     setTxBusy(false);
@@ -309,17 +291,6 @@ export function AccountSettingsPanel() {
       stopped = true;
     };
   }, [user?.id, activePay, getRechargePayStatus, refreshPoints]);
-
-  const saveGatewayOverride = () => {
-    const normalized = normalizeGatewayUrlOrEmpty(gatewayOverride);
-    try {
-      if (!normalized) window.localStorage.removeItem("writing-ide.gatewayUrl");
-      else window.localStorage.setItem("writing-ide.gatewayUrl", normalized);
-    } catch {
-      // ignore
-    }
-    window.setTimeout(() => window.location.reload(), 80);
-  };
 
   const loadTransactions = async () => {
     setTxBusy(true);
@@ -387,31 +358,6 @@ export function AccountSettingsPanel() {
       </div>
 
       {error ? <Banner tone="error" text={error} /> : null}
-
-      <SectionCard
-        title="连接设置"
-        description="切换 Desktop 连接的 Gateway。保存后会自动刷新当前应用。"
-        actions={
-          <ActionButton tone="secondary" onClick={saveGatewayOverride}>
-            <Link2 size={13} />
-            保存并重载
-          </ActionButton>
-        }
-      >
-        <div className="flex flex-col gap-3">
-          <div className="rounded-xl border border-border bg-surface px-3 py-2.5">
-            <div className="text-[11px] uppercase tracking-[0.08em] text-text-faint">当前 Gateway</div>
-            <div className="mt-1 break-all text-[13px] text-text">{gateway}</div>
-          </div>
-          <input
-            type="text"
-            value={gatewayOverride}
-            onChange={(e) => setGatewayOverride(e.target.value)}
-            placeholder="覆盖 Gateway URL（留空 = 默认）"
-            className="w-full rounded-xl border border-border bg-surface px-3 py-2 text-[13px] text-text placeholder:text-text-faint focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/20"
-          />
-        </div>
-      </SectionCard>
 
       {!user ? (
         <SectionCard

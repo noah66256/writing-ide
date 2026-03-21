@@ -110,7 +110,7 @@ export class CollabRuntime {
     toolArgs: Record<string, unknown>,
     turn: number,
   ): Promise<CollabToolExecResult> {
-    const normalized = normalizeSpawnAgentArgs(toolArgs);
+    const normalized = normalizeSpawnAgentArgs(toolArgs, this.parentCtx.subAgentDefinitionById ?? null);
     if (!normalized.ok) {
       return {
         ok: false,
@@ -208,7 +208,7 @@ export class CollabRuntime {
 
     return {
       ok: true,
-      output: buildSpawnAgentToolOutput(record),
+      output: buildSpawnAgentToolOutput(record, this.parentCtx.subAgentDefinitionById ?? null),
       meta: { applyPolicy: "proposal", riskLevel: "low", hasApply: false },
       executedBy: "gateway",
     };

@@ -6,6 +6,7 @@ import {
   type ContentBlockToolUse,
   type MsgStreamEvent,
 } from "../llm/anthropicMessages.js";
+import { compactToolResultEnvelope } from "@ohmycrab/shared";
 import {
   buildInjectedToolResultMessages,
   getAdapterByEndpoint,
@@ -50,6 +51,7 @@ import { runOrchestratedStyleImitate } from "./styleOrchestrator.js";
 import { inferCapabilities } from "./toolCatalog.js";
 import { TurnEngine, type RunOutcome } from "./turnEngine.js";
 import { buildShellExecTranscriptBlock } from "./runFactory.js";
+import type { PortableSkillRunContext } from "./portableSkillCompat.js";
 
 export type SseWriter = (event: string, data: unknown) => void;
 
@@ -180,6 +182,10 @@ export type RunContext = {
   textBlobPool?: Map<string, string>;
   /** 首轮图片附件（base64，Anthropic image block 格式） */
   images?: Array<{ mediaType: string; data: string }>;
+  /** Claude/Anthropic portable skill 兼容运行时上下文。 */
+  portableSkillContext?: PortableSkillRunContext | null;
+  /** 当前 run 可见的子 Agent 注册表（内置 + 外部 Claude agents）。 */
+  subAgentDefinitionById?: Map<string, SubAgentDefinition>;
 };
 
 type ToolExecResult = {
@@ -2180,12 +2186,13 @@ export class AgentRunner {
         };
 
         this._recordToolFailure(toolUse, errorOutput);
+        const outputEnvelope = compactToolResultEnvelope(toolUse.name, errorOutput.output);
 
         this.ctx.writeEvent("tool.result", {
           toolCallId: toolUse.id,
           name: toolUse.name,
           ok: false,
-          output: errorOutput.output,
+          output: outputEnvelope,
           meta: null,
           turn: this.turn,
         });
@@ -2256,12 +2263,13 @@ export class AgentRunner {
     for (const { toolUse, result } of orderedResults) {
       this._updateRunState(toolUse, { ok: result.ok, output: result.output });
       this._recordToolAttempt(toolUse, result);
+      const outputEnvelope = compactToolResultEnvelope(toolUse.name, result.output);
 
       this.ctx.writeEvent("tool.result", {
         toolCallId: toolUse.id,
         name: toolUse.name,
         ok: result.ok,
-        output: result.output,
+        output: outputEnvelope,
         meta: result.meta ?? null,
         turn: this.turn,
       });
@@ -2273,7 +2281,7 @@ export class AgentRunner {
         callId: String(toolUse.id ?? ""),
         name: String(toolUse.name ?? ""),
         ok: result.ok,
-        output: result.output,
+        output: outputEnvelope,
         error: result.ok ? undefined : String(outObj?.error ?? "UNKNOWN_ERROR"),
       });
 
@@ -2959,12 +2967,13 @@ export class AgentRunner {
         // 内部调用同样需要更新 RunState、事件与审计记录
         this._updateRunState(internalToolUse, { ok: result.ok, output: result.output });
         this._recordToolAttempt(internalToolUse, result);
+        const outputEnvelope = compactToolResultEnvelope(name, result.output);
 
         this.ctx.writeEvent("tool.result", {
           toolCallId: internalToolUse.id,
           name,
           ok: result.ok,
-          output: result.output,
+          output: outputEnvelope,
           meta: result.meta ?? null,
           turn: this.turn,
         });
@@ -2975,7 +2984,7 @@ export class AgentRunner {
           callId: String(internalToolUse.id ?? ""),
           name,
           ok: result.ok,
-          output: result.output,
+          output: outputEnvelope,
           error: result.ok ? undefined : String(outObj?.error ?? "UNKNOWN_ERROR"),
         });
 
@@ -3208,12 +3217,14 @@ export class AgentRunner {
           toolSidecar: this.ctx.toolSidecar,
           styleLinterLibraries: this.ctx.styleLinterLibraries,
           authorization: this.ctx.authorization ?? null,
+          runId: this.ctx.runId,
           mainDoc: this.ctx.mainDoc,
           // lint.style 使用自身阶段配置；其它工具可共用主 Agent 的 LLM 配置
           llmOverride: toolUse.name === "lint.style" || !this.ctx.baseUrl || !this.ctx.apiKey || !this.ctx.modelId
             ? null
             : { baseUrl: this.ctx.baseUrl, endpoint: this.ctx.endpoint, apiKey: this.ctx.apiKey, model: this.ctx.modelId },
           mode: this.ctx.mode,
+          subAgentDefinitionById: this.ctx.subAgentDefinitionById ?? null,
           allowedToolNames: this.ctx.allowedToolNames,
           skillManifestById: this.ctx.skillManifestById ?? null,
           activeSkillIds: Array.isArray(this.ctx.activeSkills)
@@ -3378,8 +3389,12 @@ export class AgentRunner {
       return { ok: false, output: { ok: false, error: "VALIDATION_ERROR", detail: "task is required" } };
     }
 
+    const externalAgents = this.ctx.subAgentDefinitionById instanceof Map
+      ? Array.from(this.ctx.subAgentDefinitionById.values()).filter((a) => a.enabled !== false)
+      : [];
     let subAgent: SubAgentDefinition | undefined =
-      BUILTIN_SUB_AGENTS.find((a) => a.id === agentId && a.enabled);
+      BUILTIN_SUB_AGENTS.find((a) => a.id === agentId && a.enabled) ??
+      externalAgents.find((a) => a.id === agentId);
 
     // 别名兜底：模型可能用中文名、自然语言名或缩写调用 agent
     if (!subAgent) {
@@ -3397,6 +3412,7 @@ export class AgentRunner {
       };
       const allAgents = [
         ...BUILTIN_SUB_AGENTS.filter((a) => a.enabled),
+        ...externalAgents,
       ];
       const lower = agentId.toLowerCase();
       // 先查别名表
@@ -3415,6 +3431,7 @@ export class AgentRunner {
     if (!subAgent) {
       const allAgents = [
         ...BUILTIN_SUB_AGENTS.filter((a) => a.enabled),
+        ...externalAgents,
       ];
       const knownIds = allAgents.map((a) => a.id);
       return {

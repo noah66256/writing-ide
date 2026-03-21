@@ -70,7 +70,8 @@ export default function App() {
       const rootDir = String(payload?.rootDir ?? "");
       const cur = useProjectStore.getState().rootDir;
       if (!rootDir || !cur || rootDir !== cur) return;
-      void useProjectStore.getState().refreshFromDisk("fs.watch");
+      const paths = Array.isArray(payload?.paths) ? payload.paths : [];
+      void useProjectStore.getState().refreshFromDisk(paths, "fs.watch");
       void useProjectIndexStore.getState().refreshIfStale(rootDir);
     });
     return () => {

@@ -17,6 +17,7 @@ import { pickPreferredHistorySteps, useConversationStore } from "@/state/convers
 export function ConversationLayout() {
   const fetchModels = useModelStore((s) => s.fetchModels);
   const hydrateFromDisk = useConversationStore((s) => s.hydrateFromDisk);
+  const loadConversationSnapshot = useConversationStore((s) => s.loadConversationSnapshot);
   const draftSnapshot = useConversationStore((s) => s.draftSnapshot);
   const activeConvId = useConversationStore((s) => s.activeConvId);
   const conversations = useConversationStore((s) => s.conversations);
@@ -81,11 +82,13 @@ export function ConversationLayout() {
         ? (draftSnapshot as any).steps.length
         : 0;
     const convSteps =
-      conv && conv.snapshot && Array.isArray((conv.snapshot as any).steps)
+      conv && conv.snapshotLoaded !== false && conv.snapshot && Array.isArray((conv.snapshot as any).steps)
         ? (conv.snapshot as any).steps.length
         : 0;
     const snap =
-      draftSteps >= convSteps ? (draftSnapshot as any) : (conv?.snapshot as any);
+      draftSteps >= convSteps
+        ? (draftSnapshot as any)
+        : (conv?.snapshotLoaded !== false ? (conv?.snapshot as any) : null);
     if (!snap) return;
 
     // 优先通过 loadConversationSegment 从 v2 per-conv 文件加载 steps，
@@ -108,12 +111,19 @@ export function ConversationLayout() {
     if (historyApi && restoreConvId) {
       const restoreLimit = 150;
       // Electron 环境：走 v2 路径加载 steps，limit 稍大一些，首次恢复尽量多显示一些历史。
-      void historyApi({ conversationId: restoreConvId, limit: restoreLimit })
-        .then((res: any) => {
+      void loadConversationSnapshot(restoreConvId, { includeSteps: false })
+        .then((loadedSnapshot) => {
+          const baseSnapshot = (loadedSnapshot as any) ?? snap;
+          if (!baseSnapshot) {
+            throw new Error("SNAPSHOT_UNAVAILABLE");
+          }
+          return historyApi({ conversationId: restoreConvId, limit: restoreLimit }).then((res: any) => ({ res, baseSnapshot }));
+        })
+        .then(({ res, baseSnapshot }: any) => {
           if (restoredRef.current) return;
           const segmentSteps = Array.isArray(res?.steps) ? res.steps : [];
           const preferred = pickPreferredHistorySteps({
-            snapshot: snap as any,
+            snapshot: baseSnapshot as any,
             segmentSteps: segmentSteps as any,
             limit: restoreLimit,
             hasMoreBefore: Boolean(res?.hasMoreBefore),
@@ -121,13 +131,13 @@ export function ConversationLayout() {
           useRunStore.getState().setHistoryWindowHasMoreBefore(preferred.hasMoreBefore);
 
           if (preferred.steps.length > 0) {
-            doRestore({ ...snap, steps: preferred.steps });
+            doRestore({ ...baseSnapshot, steps: preferred.steps });
           } else {
             // v2 文件也没有 steps，退回 v1 snapshot（若其中确有步骤）
             const snapSteps =
-              snap && Array.isArray((snap as any).steps) ? (snap as any).steps.length : 0;
+              baseSnapshot && Array.isArray((baseSnapshot as any).steps) ? (baseSnapshot as any).steps.length : 0;
             if (snapSteps > 0) {
-              doRestore(snap);
+              doRestore(baseSnapshot);
             }
             // steps=[] 的空 snapshot 不标记 restoredRef，避免永久锁定
           }
@@ -149,7 +159,7 @@ export function ConversationLayout() {
       }
       // steps=[] 的空 snapshot 不标记 restoredRef，避免永久锁定
     }
-  }, [draftSnapshot, activeConvId, conversations]);
+  }, [draftSnapshot, activeConvId, conversations, loadConversationSnapshot]);
 
   useEffect(() => {
     let cancelled = false;

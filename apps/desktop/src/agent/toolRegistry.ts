@@ -119,6 +119,31 @@ function getFileOpActionLabel(toolName: string) {
   return "写入文件";
 }
 
+function portableEscapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function matchesPortableCommandRule(command: string, rules: Array<{ raw?: string; kind?: string; specifier?: string }>) {
+  const normalizedCommand = String(command ?? "").trim();
+  const normalizedRules = Array.isArray(rules) ? rules : [];
+  for (const rule of normalizedRules) {
+    const kind = String(rule?.kind ?? "").trim();
+    if (kind === "any") return { ok: true as const, matchedRule: rule };
+    if (kind === "command_pattern") {
+      const pattern = String(rule?.specifier ?? "").trim();
+      if (!pattern) continue;
+      const re = new RegExp(`^${portableEscapeRegExp(pattern).replace(/\\\*/g, ".*")}$`, "i");
+      if (re.test(normalizedCommand)) return { ok: true as const, matchedRule: rule };
+    }
+  }
+  return { ok: false as const, matchedRule: null };
+}
+
+function truncatePortablePreview(value: unknown, maxChars = 600) {
+  const text = String(value ?? "");
+  return text.length > maxChars ? `${text.slice(0, maxChars)}\n...[truncated]` : text;
+}
+
 async function ensureHighRiskFileOpPermission(toolName: string, args: Record<string, unknown>) {
   if (!HIGH_RISK_FILE_OP_TOOL_NAMES.has(toolName)) return { allowed: true as const, reason: "not_required" as const };
   if (useFileOpPermissionStore.getState().mode === "always_allow") return { allowed: true as const, reason: "always_allow" as const };
@@ -3899,6 +3924,120 @@ const tools: ToolDefinition[] = [
           error: exitCode === 0 && !timedOut ? undefined : String(result.error ?? ""),
         },
         undoable: false,
+      } as any;
+    },
+  },
+  {
+    name: "portable.skill.preprocess",
+    description: "内部工具：在本地执行 portable skill 的 !`command` 预处理，并把输出嵌回 prompt。",
+    args: [
+      { name: "skillId", required: true, desc: "skill id" },
+      { name: "skillDir", required: true, desc: "skill 根目录（本地执行 cwd）" },
+      { name: "text", required: true, desc: "待预处理的完整文本" },
+      { name: "shellRules", required: false, desc: "从 allowed-tools 推导出的 Bash 允许规则" },
+      { name: "opMode", required: false, desc: "当前运行模式 creative/assistant" },
+    ],
+    riskLevel: "low" as ToolRiskLevel,
+    applyPolicy: "auto_apply" as ToolApplyPolicy,
+    reversible: false,
+    run: async (args: Record<string, unknown>) => {
+      const skillId = String(args.skillId ?? "").trim() || "portable-skill";
+      const skillDir = String(args.skillDir ?? "").trim();
+      const text = String(args.text ?? "");
+      const opMode = String(args.opMode ?? "creative").trim().toLowerCase() === "assistant" ? "assistant" : "creative";
+      const shellRules = Array.isArray(args.shellRules)
+        ? (args.shellRules as any[]).map((item) => ({
+            raw: String(item?.raw ?? "").trim(),
+            kind: String(item?.kind ?? "").trim(),
+            specifier: String(item?.specifier ?? "").trim(),
+          }))
+        : [];
+      if (!skillDir) {
+        return { ok: false, error: "MISSING_SKILL_DIR", output: { ok: false, error: "MISSING_SKILL_DIR" } } as any;
+      }
+      const shellApi = (window as any).desktop?.shell;
+      if (!shellApi?.exec) {
+        return { ok: false, error: "SHELL_API_NOT_AVAILABLE", output: { ok: false, error: "SHELL_API_NOT_AVAILABLE" } } as any;
+      }
+
+      const re = /!`([^`\r\n]+)`/g;
+      let transformed = "";
+      let lastIndex = 0;
+      const commands: any[] = [];
+      let match: RegExpExecArray | null = null;
+
+      while ((match = re.exec(text))) {
+        const rawMatch = String(match[0] ?? "");
+        const command = String(match[1] ?? "").trim();
+        transformed += text.slice(lastIndex, match.index);
+        lastIndex = match.index + rawMatch.length;
+        if (!command) {
+          transformed += "";
+          continue;
+        }
+
+        const ruleCheck = matchesPortableCommandRule(command, shellRules);
+        if (!ruleCheck.ok) {
+          const message =
+            opMode === "assistant"
+              ? `[portable skill command blocked: ${skillId} 未通过 allowed-tools 的 Bash 规则：${command}]`
+              : `[portable skill command blocked: ${skillId} 在 ${opMode} 模式下未声明允许执行 Bash 命令：${command}]`;
+          transformed += message;
+          commands.push({
+            command,
+            ok: false,
+            blocked: true,
+            reason: "bash_not_allowed",
+            matchedRule: null,
+            outputPreview: truncatePortablePreview(message),
+          });
+          continue;
+        }
+
+        const result = await shellApi.exec({
+          projectDir: skillDir,
+          command,
+          args: [],
+          timeoutMs: 30_000,
+        });
+        const stdout = String(result?.stdout ?? "");
+        const stderr = String(result?.stderr ?? "");
+        const timedOut = Boolean(result?.timedOut);
+        const exitCode = typeof result?.exitCode === "number" ? result.exitCode : null;
+        const ok = Boolean(result?.ok) && !timedOut && exitCode === 0;
+        const replacement = ok
+          ? stdout
+          : stderr || String(result?.error ?? "PORTABLE_PREPROCESS_FAILED");
+        transformed += replacement;
+        commands.push({
+          command,
+          ok,
+          blocked: false,
+          exitCode,
+          timedOut,
+          durationMs:
+            typeof result?.durationMs === "number" && Number.isFinite(result.durationMs)
+              ? Math.max(0, Math.floor(result.durationMs))
+              : undefined,
+          matchedRule: ruleCheck.matchedRule?.raw ?? null,
+          stdoutPreview: truncatePortablePreview(stdout),
+          stderrPreview: truncatePortablePreview(stderr),
+          outputPreview: truncatePortablePreview(replacement),
+        });
+      }
+
+      transformed += text.slice(lastIndex);
+
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          transformedText: transformed,
+          commands,
+        },
+        undoable: false,
+        applyPolicy: "auto_apply",
+        riskLevel: "low",
       } as any;
     },
   },

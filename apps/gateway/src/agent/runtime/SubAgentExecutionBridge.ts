@@ -137,8 +137,14 @@ function normalizeDelegationTask(rawTask: unknown): string {
 
 function resolveSubAgent(
   requestedAgentId: string,
+  registry?: Map<string, SubAgentDefinition> | null,
 ): SubAgentDefinition | undefined {
-  const allAgents = BUILTIN_SUB_AGENTS.filter((a) => a.enabled);
+  const allAgents = [
+    ...BUILTIN_SUB_AGENTS.filter((a) => a.enabled),
+    ...(registry instanceof Map
+      ? Array.from(registry.values()).filter((a) => a.enabled !== false)
+      : []),
+  ];
 
   // 精确匹配
   const exact = allAgents.find((a) => a.id === requestedAgentId);
@@ -216,6 +222,9 @@ export class SubAgentExecutionBridge {
     turn: number,
     options?: {
       extraAbortSignal?: AbortSignal;
+      definitionOverride?: SubAgentDefinition;
+      cleanRoom?: boolean;
+      inheritSkillRuntime?: boolean;
     },
   ): Promise<SubAgentExecutionBridgeResult> {
     const agentId = String(toolArgs.agentId ?? "").trim();
@@ -238,9 +247,18 @@ export class SubAgentExecutionBridge {
     }
 
     // ── Agent 查找 ──
-    const subAgent = resolveSubAgent(agentId);
+    const subAgent = options?.definitionOverride
+      ? options.definitionOverride
+      : resolveSubAgent(agentId, this.parentCtx.subAgentDefinitionById ?? null);
     if (!subAgent) {
-      const knownIds = BUILTIN_SUB_AGENTS.filter((a) => a.enabled).map((a) => a.id);
+      const knownIds = [
+        ...BUILTIN_SUB_AGENTS.filter((a) => a.enabled).map((a) => a.id),
+        ...(this.parentCtx.subAgentDefinitionById instanceof Map
+          ? Array.from(this.parentCtx.subAgentDefinitionById.values())
+              .filter((a) => a.enabled !== false)
+              .map((a) => a.id)
+          : []),
+      ];
       return {
         ok: false,
         output: {
@@ -255,6 +273,14 @@ export class SubAgentExecutionBridge {
     // ── Budget ──
     const budget = resolveSubAgentBudget(subAgent.budget, toolArgs.budget);
     const subRunId = `${this.parentCtx.runId}:sub:${toolCallId}`;
+    const requestedModel = String(toolArgs.model ?? "").trim();
+    const resolvedModel = await this.parentCtx.resolveSubAgentModel?.(
+      [
+        requestedModel,
+        String(subAgent.model ?? "").trim(),
+        ...(Array.isArray(subAgent.fallbackModels) ? subAgent.fallbackModels.map((item) => String(item ?? "").trim()) : []),
+      ].filter(Boolean),
+    );
 
     // ── 工具白名单 ──
     const subAllowedToolNames = new Set(
@@ -357,19 +383,21 @@ export class SubAgentExecutionBridge {
         nonStyleLibIds: [] as string[],
         styleLibIdSet: new Set<string>(),
       } as any,
-      activeSkills: [],
+      activeSkills: options?.inheritSkillRuntime ? [...this.parentCtx.activeSkills] : [],
+      skillManifestById: options?.inheritSkillRuntime ? this.parentCtx.skillManifestById : undefined,
+      activeWorkflowDeclarations: options?.inheritSkillRuntime ? this.parentCtx.activeWorkflowDeclarations : undefined,
       allowedToolNames: subAllowedToolNames,
       systemPrompt: String(subAgent.systemPrompt ?? "").trim() || this.parentCtx.systemPrompt,
       toolSidecar: this.parentCtx.toolSidecar,
       styleLinterLibraries: this.parentCtx.styleLinterLibraries,
       fastify: this.parentCtx.fastify,
       authorization: this.parentCtx.authorization,
-      modelId: this.parentCtx.modelId,
-      apiKey: this.parentCtx.apiKey,
-      baseUrl: this.parentCtx.baseUrl,
-      endpoint: this.parentCtx.endpoint,
+      modelId: resolvedModel?.modelId || this.parentCtx.modelId,
+      apiKey: resolvedModel?.apiKey || this.parentCtx.apiKey,
+      baseUrl: resolvedModel?.baseUrl || this.parentCtx.baseUrl,
+      endpoint: resolvedModel?.endpoint || this.parentCtx.endpoint,
       apiType: this.parentCtx.apiType,
-      toolResultFormat: this.parentCtx.toolResultFormat,
+      toolResultFormat: resolvedModel?.toolResultFormat || this.parentCtx.toolResultFormat,
       styleLibIds: this.parentCtx.styleLibIds,
       writeEvent: subWriteEvent,
       // 复用父 ctx 的 waiters Map（当前安全：父子串行 + toolCallId 唯一；
@@ -392,8 +420,13 @@ export class SubAgentExecutionBridge {
       agentId: subAgent.id,
       maxTurns: budget.maxTurns,
       toolChoiceFirstTurn: undefined, // 不强制首轮工具
-      mainDoc: this.parentCtx.mainDoc,
+      mainDoc: options?.cleanRoom ? {} : this.parentCtx.mainDoc,
       jsonToolFallbackEnabled: this.parentCtx.jsonToolFallbackEnabled ?? false,
+      l1Memory: options?.cleanRoom ? "" : this.parentCtx.l1Memory,
+      l2Memory: options?.cleanRoom ? "" : this.parentCtx.l2Memory,
+      ctxDialogueSummary: options?.cleanRoom ? "" : this.parentCtx.ctxDialogueSummary,
+      portableSkillContext: options?.inheritSkillRuntime ? (this.parentCtx.portableSkillContext ?? null) : null,
+      subAgentDefinitionById: this.parentCtx.subAgentDefinitionById,
     };
 
     // ── 执行 ──

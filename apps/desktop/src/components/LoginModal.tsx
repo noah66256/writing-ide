@@ -1,5 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
-import { getGatewayBaseUrl } from "../agent/gatewayUrl";
+import { useEffect, useState } from "react";
 import { useAuthStore } from "../state/authStore";
 
 export function LoginModal(props: { open: boolean; onClose: () => void }) {
@@ -47,8 +46,6 @@ export function LoginModal(props: { open: boolean; onClose: () => void }) {
     return () => window.clearInterval(id);
   }, [open, cooldown]);
 
-  const gateway = useMemo(() => getGatewayBaseUrl() || "(dev proxy: /api)", []);
-
   if (!open) return null;
 
   return (
@@ -59,10 +56,6 @@ export function LoginModal(props: { open: boolean; onClose: () => void }) {
           <button className="btn" type="button" onClick={() => props.onClose()}>
             关闭
           </button>
-        </div>
-
-        <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-          Gateway：{gateway}
         </div>
 
         {error ? (
@@ -191,5 +184,4 @@ export function LoginModal(props: { open: boolean; onClose: () => void }) {
     </div>
   );
 }
-
 

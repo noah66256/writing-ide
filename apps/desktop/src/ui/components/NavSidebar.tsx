@@ -19,7 +19,13 @@ import {
   ImagePlus,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { buildCurrentSnapshot, useConversationStore, type Conversation, type RunSnapshot } from "@/state/conversationStore";
+import {
+  buildCurrentSnapshot,
+  pickPreferredHistorySteps,
+  useConversationStore,
+  type Conversation,
+  type RunSnapshot,
+} from "@/state/conversationStore";
 import { useRunStore, cancelActiveRun, type ToolBlockStep } from "@/state/runStore";
 import { useRunRegistry } from "@/state/runRegistry";
 import { cancelConvRun } from "@/state/runRegistry";
@@ -101,6 +107,7 @@ export function NavSidebar() {
   const pinConversation = useConversationStore((s) => s.pinConversation);
   const archiveConversation = useConversationStore((s) => s.archiveConversation);
   const renameConversation = useConversationStore((s) => s.renameConversation);
+  const loadConversationSnapshot = useConversationStore((s) => s.loadConversationSnapshot);
   const resetRun = useRunStore((s) => s.resetRun);
   const loadSnapshot = useRunStore((s) => s.loadSnapshot);
   const steps = useRunStore((s) => s.steps);
@@ -232,79 +239,19 @@ export function NavSidebar() {
       }
       const conv = conversations.find((c) => c.id === id);
       if (!conv) return;
-
-      const runEntry = useRunRegistry.getState().runs[id];
-      const baseSnapshot = runEntry?.buffer
-        ? buildSnapshotFromBuffer(conv.snapshot, runEntry.buffer)
-        : conv.snapshot;
-
       const historyApi = window.desktop?.history?.loadConversationSegment;
-      if (!historyApi) {
-        loadSnapshot(baseSnapshot);
-        const snapDir = baseSnapshot?.projectDir ?? null;
-        const currentDir = useProjectStore.getState().rootDir;
-        if (snapDir !== currentDir) {
-          if (snapDir) {
-            void useProjectStore.getState().loadProjectFromDisk(snapDir).catch(() => void 0);
-          } else {
-            useProjectStore.getState().clearProject();
-          }
-        }
-        if (runEntry?.isRunning) {
-          useRunStore.getState().setRunning(true);
-          const actText = runEntry.buffer?.activity?.text;
-          if (actText) useRunStore.getState().setActivity(actText, { resetTimer: false });
-        } else {
-          useRunStore.getState().setRunning(false);
-        }
-        storeSetActiveConvId(id);
-        return;
-      }
+      const loadConversation = async () => {
+        const loadedSnapshot =
+          (await loadConversationSnapshot(id, { includeSteps: false })) ??
+          (conv.snapshotLoaded !== false ? conv.snapshot : null);
+        if (!loadedSnapshot) return;
+        const runEntry = useRunRegistry.getState().runs[id];
+        const baseSnapshot = runEntry?.buffer
+          ? buildSnapshotFromBuffer(loadedSnapshot, runEntry.buffer)
+          : loadedSnapshot;
 
-      // Electron 环境：仅加载该会话最近一段 steps，避免一次性加载超长历史导致 UI 卡死
-      void historyApi({ conversationId: id, limit: 200 })
-        .then((res: any) => {
-          const segmentSteps = Array.isArray(res?.steps) ? res.steps : [];
-          const hasMoreBefore = Boolean(res?.hasMoreBefore);
-          useRunStore.getState().setHistoryWindowHasMoreBefore(hasMoreBefore);
-
-          const snapshotToLoad = {
-            ...baseSnapshot,
-            steps: segmentSteps.length ? segmentSteps : (baseSnapshot?.steps ?? []),
-          } as any;
-
-          loadSnapshot(snapshotToLoad);
-
-          if (runEntry?.isRunning) {
-            useRunStore.getState().setRunning(true);
-            const actText = runEntry.buffer?.activity?.text;
-            if (actText) useRunStore.getState().setActivity(actText, { resetTimer: false });
-          } else {
-            useRunStore.getState().setRunning(false);
-          }
-
-          const snapDir = snapshotToLoad?.projectDir ?? null;
-          const currentDir = useProjectStore.getState().rootDir;
-          if (snapDir !== currentDir) {
-            if (snapDir) {
-              void useProjectStore.getState().loadProjectFromDisk(snapDir).catch(() => void 0);
-            } else {
-              useProjectStore.getState().clearProject();
-            }
-          }
-          storeSetActiveConvId(id);
-        })
-        .catch(() => {
-          // 失败时退回到原有 snapshot 全量加载，避免硬错误
+        if (!historyApi) {
           loadSnapshot(baseSnapshot);
-          useRunStore.getState().setHistoryWindowHasMoreBefore(false);
-          if (runEntry?.isRunning) {
-            useRunStore.getState().setRunning(true);
-            const actText = runEntry.buffer?.activity?.text;
-            if (actText) useRunStore.getState().setActivity(actText, { resetTimer: false });
-          } else {
-            useRunStore.getState().setRunning(false);
-          }
           const snapDir = baseSnapshot?.projectDir ?? null;
           const currentDir = useProjectStore.getState().rootDir;
           if (snapDir !== currentDir) {
@@ -314,10 +261,81 @@ export function NavSidebar() {
               useProjectStore.getState().clearProject();
             }
           }
+          if (runEntry?.isRunning) {
+            useRunStore.getState().setRunning(true);
+            const actText = runEntry.buffer?.activity?.text;
+            if (actText) useRunStore.getState().setActivity(actText, { resetTimer: false });
+          } else {
+            useRunStore.getState().setRunning(false);
+          }
           storeSetActiveConvId(id);
-        });
+          return;
+        }
+
+        // Electron 环境：仅加载该会话最近一段 steps，避免一次性加载超长历史导致 UI 卡死
+        const historyLimit = 200;
+        void historyApi({ conversationId: id, limit: historyLimit })
+          .then((res: any) => {
+            const segmentSteps = Array.isArray(res?.steps) ? res.steps : [];
+            const preferred = pickPreferredHistorySteps({
+              snapshot: baseSnapshot as any,
+              segmentSteps: segmentSteps as any,
+              limit: historyLimit,
+              hasMoreBefore: Boolean(res?.hasMoreBefore),
+            });
+            useRunStore.getState().setHistoryWindowHasMoreBefore(preferred.hasMoreBefore);
+
+            const snapshotToLoad = {
+              ...baseSnapshot,
+              steps: preferred.steps.length ? preferred.steps : (baseSnapshot?.steps ?? []),
+            } as any;
+
+            loadSnapshot(snapshotToLoad);
+
+            if (runEntry?.isRunning) {
+              useRunStore.getState().setRunning(true);
+              const actText = runEntry.buffer?.activity?.text;
+              if (actText) useRunStore.getState().setActivity(actText, { resetTimer: false });
+            } else {
+              useRunStore.getState().setRunning(false);
+            }
+
+            const snapDir = snapshotToLoad?.projectDir ?? null;
+            const currentDir = useProjectStore.getState().rootDir;
+            if (snapDir !== currentDir) {
+              if (snapDir) {
+                void useProjectStore.getState().loadProjectFromDisk(snapDir).catch(() => void 0);
+              } else {
+                useProjectStore.getState().clearProject();
+              }
+            }
+            storeSetActiveConvId(id);
+          })
+          .catch(() => {
+            loadSnapshot(baseSnapshot);
+            useRunStore.getState().setHistoryWindowHasMoreBefore(false);
+            if (runEntry?.isRunning) {
+              useRunStore.getState().setRunning(true);
+              const actText = runEntry.buffer?.activity?.text;
+              if (actText) useRunStore.getState().setActivity(actText, { resetTimer: false });
+            } else {
+              useRunStore.getState().setRunning(false);
+            }
+            const snapDir = baseSnapshot?.projectDir ?? null;
+            const currentDir = useProjectStore.getState().rootDir;
+            if (snapDir !== currentDir) {
+              if (snapDir) {
+                void useProjectStore.getState().loadProjectFromDisk(snapDir).catch(() => void 0);
+              } else {
+                useProjectStore.getState().clearProject();
+              }
+            }
+            storeSetActiveConvId(id);
+          });
+      };
+      void loadConversation();
     },
-    [hasCurrentContent, activeConvId, conversations, addConversation, loadSnapshot, storeSetActiveConvId],
+    [hasCurrentContent, activeConvId, conversations, addConversation, loadSnapshot, loadConversationSnapshot, storeSetActiveConvId],
   );
 
   const handleDeleteConversation = useCallback(

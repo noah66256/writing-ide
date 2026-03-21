@@ -1,21 +1,23 @@
 import { useMemo, useState } from "react";
+import { getToolResultEnvelopePayload } from "@ohmycrab/shared";
 import { useProjectStore } from "../state/projectStore";
 import { getItemActionRuntime, useRunStore, type ToolBlockStep } from "../state/runStore";
 import type { TopicCandidate, TopicLabOutput } from "../agent/topicLab";
 
 function findDiffInfo(output: any): { path?: string; diff: string; truncated?: boolean; stats?: any; note?: string } | null {
-  if (!output || typeof output !== "object") return null;
-  if (typeof output.diffUnified === "string") {
-    return { diff: output.diffUnified, truncated: output.truncated, stats: output.stats, path: output.path };
+  const rawOutput = getToolResultEnvelopePayload(output);
+  if (!rawOutput || typeof rawOutput !== "object") return null;
+  if (typeof (rawOutput as any).diffUnified === "string") {
+    return { diff: (rawOutput as any).diffUnified, truncated: (rawOutput as any).truncated, stats: (rawOutput as any).stats, path: (rawOutput as any).path };
   }
-  const preview = (output as any).preview;
+  const preview = (rawOutput as any).preview;
   if (preview && typeof preview === "object" && typeof preview.diffUnified === "string") {
     return {
       diff: preview.diffUnified,
       truncated: preview.truncated,
       stats: preview.stats,
-      path: preview.path ?? output.path,
-      note: typeof preview.note === "string" ? preview.note : typeof output.note === "string" ? output.note : undefined,
+      path: preview.path ?? (rawOutput as any).path,
+      note: typeof preview.note === "string" ? preview.note : typeof (rawOutput as any).note === "string" ? (rawOutput as any).note : undefined,
     };
   }
   return null;
@@ -42,7 +44,7 @@ function fileKindLabel(p?: string) {
 
 function diffStatus(step: ToolBlockStep): "new" | "modified" {
   if (step.toolName === "write") {
-    const out = step.output as any;
+    const out = getToolResultEnvelopePayload(step.output) as any;
     if (out && typeof out.created === "boolean") return out.created ? "new" : "modified";
   }
   return "modified";
@@ -143,7 +145,7 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
 
   const topicOutput = useMemo(() => {
     if (step.toolName !== "topic.generate") return null;
-    const out = step.output as TopicLabOutput | undefined;
+    const out = getToolResultEnvelopePayload(step.output) as TopicLabOutput | undefined;
     if (!out?.topics?.length) return null;
     return out;
   }, [step.output, step.toolName]);
@@ -152,7 +154,7 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
 
   const codeExecInfo = useMemo(() => {
     if (step.toolName !== "code.exec") return null;
-    const out = step.output as any;
+    const out = getToolResultEnvelopePayload(step.output) as any;
     if (!out || typeof out !== "object") return null;
     const artifacts = (Array.isArray(out.artifacts) ? out.artifacts : [])
       .map((a: any, idx: number) => ({
@@ -179,7 +181,7 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
 
   // 统一提取产出文件（code.exec + write）
   const toolArtifacts = useMemo(() => {
-    const out = step.output as any;
+    const out = getToolResultEnvelopePayload(step.output) as any;
     if (!out || typeof out !== "object") return [];
     if (step.toolName === "code.exec" && Array.isArray(out.artifacts)) {
       return out.artifacts

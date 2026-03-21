@@ -12,8 +12,16 @@ import {
   searchCapabilityCards,
   type CapabilityCard,
 } from "./capabilityIndex.js";
-import type { SkillManifest } from "@ohmycrab/agent-core";
+import type { SkillManifest, SubAgentDefinition } from "@ohmycrab/agent-core";
 import { buildDiscoveryCatalogForToolSearch } from "./toolCatalogViews.js";
+import {
+  buildPortableSkillActivationInstructions,
+  collectPortableActivationToolNames,
+  normalizePortableContextMode,
+  parsePortableAllowedToolPolicy,
+  parsePortableSkillInvocationInput,
+  resolvePortableSkillAgent,
+} from "./portableSkillCompat.js";
 
 export type ServerToolExecutionDecision = {
   executedBy: "gateway" | "desktop";
@@ -40,7 +48,7 @@ function getServerToolAllowlist(): Set<string> {
   const list = cfg
     ? parseCsv(cfg)
     : ["lint.style", "time.now",
-       "tools.search", "tools.describe",
+       "tools.search", "tools.describe", "skills.list", "skills.activate",
        "web.search", "web.fetch",
        "run.done", "run.setTodoList", "run.todo", "run.mainDoc.update", "run.mainDoc.get",
        "spawn_agent", "send_input", "resume_agent", "wait_agent", "close_agent"];
@@ -84,6 +92,10 @@ export function decideServerToolExecution(args: {
   // tools.*：工具发现（只读）
   if (name === "tools.search" || name === "tools.describe") {
     return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "tool_discovery_server_side"] };
+  }
+  // skills.*：skill 目录发现/激活（只读激活合同，由 runtime 消费）
+  if (name === "skills.list" || name === "skills.activate") {
+    return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "skill_runtime_server_side"] };
   }
   // web.*：优先 Gateway 执行（Bocha API / 直接 HTTP）；若不可用，Runner 层回退到 MCP
   if (name === "web.search" || name === "web.fetch") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "web_gateway_first"] };
@@ -476,6 +488,8 @@ export async function executeServerToolOnGateway(args: {
   mainDoc: Record<string, unknown>;
   llmOverride?: { baseUrl: string; endpoint?: string; apiKey: string; model: string } | null;
   mode: "chat" | "agent";
+  runId?: string | null;
+  subAgentDefinitionById?: Map<string, SubAgentDefinition> | null;
   allowedToolNames?: Set<string> | null;
   skillManifestById?: Map<string, SkillManifest> | null;
   activeSkillIds?: string[];
@@ -569,6 +583,21 @@ export async function executeServerToolOnGateway(args: {
       allowedToolNames: args.allowedToolNames ?? null,
       skillManifestById: args.skillManifestById ?? null,
       activeSkillIds: args.activeSkillIds,
+    });
+  }
+  if (name === "skills.list") {
+    return executeSkillsListOnGateway({
+      call: args.call,
+      skillManifestById: args.skillManifestById ?? null,
+      activeSkillIds: args.activeSkillIds,
+    });
+  }
+  if (name === "skills.activate") {
+    return executeSkillsActivateOnGateway({
+      call: args.call,
+      runId: args.runId ?? null,
+      skillManifestById: args.skillManifestById ?? null,
+      subAgentDefinitionById: args.subAgentDefinitionById ?? null,
     });
   }
   if (name === "web.search") {
@@ -916,6 +945,172 @@ function executeToolsDescribeOnGateway(args: {
         conflicts: card.conflicts,
         promptSummary: card.promptSummary ?? null,
         workflowSummary: card.workflowSummary ?? null,
+      },
+    },
+  };
+}
+
+function normalizeSkillLookupName(raw: unknown) {
+  let text = String(raw ?? "").trim();
+  if (text.startsWith("skill:")) text = text.slice("skill:".length).trim();
+  if (text.startsWith("/")) text = text.slice(1).trim();
+  return text;
+}
+
+function findSkillManifestForActivation(args: {
+  name: unknown;
+  skillManifestById?: Map<string, SkillManifest> | null;
+}) {
+  const wantedRaw = normalizeSkillLookupName(args.name);
+  if (!wantedRaw) return null;
+  const wanted = wantedRaw.toLowerCase();
+  const manifests = args.skillManifestById instanceof Map
+    ? Array.from(args.skillManifestById.values())
+    : [];
+  for (const manifest of manifests) {
+    const id = String(manifest?.id ?? "").trim();
+    if (id && id.toLowerCase() === wanted) return manifest;
+  }
+  for (const manifest of manifests) {
+    const name = String(manifest?.name ?? "").trim();
+    if (name && name.toLowerCase() === wanted) return manifest;
+  }
+  return null;
+}
+
+function executeSkillsListOnGateway(args: {
+  call: any;
+  skillManifestById?: Map<string, SkillManifest> | null;
+  activeSkillIds?: string[];
+}) {
+  const limit = clampInt(args.call?.args?.limit, 1, 20, 8);
+  const query = String(args.call?.args?.query ?? "").trim();
+  const includePromptSummary = clampBool(args.call?.args?.includePromptSummary, false);
+  const cards = buildSkillCards({
+    skillManifests: args.skillManifestById instanceof Map ? Array.from(args.skillManifestById.values()) : [],
+    activeSkillIds: Array.isArray(args.activeSkillIds) ? args.activeSkillIds : [],
+  }).filter((card) => !card.disableModelInvocation);
+  const picked = query
+    ? searchCapabilityCards({ query, cards, limit: Math.max(limit, limit * 2) })
+        .map((item) => item.card)
+        .filter((card): card is (typeof cards)[number] => card.resultType === "skill")
+        .slice(0, limit)
+    : cards.slice(0, limit);
+  return {
+    ok: true as const,
+    output: {
+      ok: true,
+      skills: picked.map((card) => ({
+        id: card.skillId,
+        name: card.title,
+        description: card.summary,
+        activationMode: card.activationMode,
+        portable: card.portable,
+        slashCommand: card.slashCommand ?? null,
+        argumentHint: card.argumentHint ?? null,
+        ...(includePromptSummary ? { promptSummary: card.promptSummary ?? null } : {}),
+      })),
+    },
+  };
+}
+
+function executeSkillsActivateOnGateway(args: {
+  call: any;
+  runId?: string | null;
+  skillManifestById?: Map<string, SkillManifest> | null;
+  subAgentDefinitionById?: Map<string, SubAgentDefinition> | null;
+}) {
+  const manifest = findSkillManifestForActivation({
+    name: args.call?.args?.name,
+    skillManifestById: args.skillManifestById ?? null,
+  });
+  if (!manifest) {
+    return { ok: false as const, error: "SKILL_NOT_FOUND", detail: { name: String(args.call?.args?.name ?? "") } };
+  }
+  if (manifest.disableModelInvocation === true) {
+    return {
+      ok: false as const,
+      error: "SKILL_MODEL_INVOCATION_DISABLED",
+      detail: { skillId: String(manifest.id ?? "").trim() || null },
+    };
+  }
+
+  const rawArguments = typeof args.call?.args?.arguments === "string"
+    ? String(args.call.args.arguments)
+    : "";
+  const skillId = String(manifest.id ?? "").trim();
+  const inputState = parsePortableSkillInvocationInput({
+    skillId,
+    rawArguments,
+    inputSchema: manifest.inputSchema,
+  });
+  const portableAllowedToolPolicy = manifest.portable ? parsePortableAllowedToolPolicy([manifest]) : null;
+  const resolvedAgent = manifest.portable
+    ? resolvePortableSkillAgent(manifest.agent, args.subAgentDefinitionById ?? null)
+    : {};
+  const activationToolNames = new Set<string>();
+  if (Array.isArray((manifest as any)?.toolCaps?.allowTools)) {
+    for (const name of (manifest as any).toolCaps.allowTools) {
+      const normalized = String(name ?? "").trim();
+      if (normalized) activationToolNames.add(normalized);
+    }
+  }
+  for (const name of collectPortableActivationToolNames([manifest], args.subAgentDefinitionById ?? null)) {
+    activationToolNames.add(name);
+  }
+  const renderedPrompt = manifest.portable
+    ? buildPortableSkillActivationInstructions({
+        manifest,
+        rawArguments,
+        inputState,
+        allowedToolPolicy: portableAllowedToolPolicy,
+        includeHooksNotice: true,
+        sessionId: String(args.runId ?? "").trim(),
+      })
+    : String(manifest.promptFragments?.system ?? "").trim();
+
+  return {
+    ok: true as const,
+    output: {
+      ok: true,
+      targetType: "skill",
+      skill: {
+        id: skillId,
+        name: String(manifest.name ?? skillId).trim() || skillId,
+        description: String(manifest.description ?? "").trim(),
+        kind: String(manifest.kind ?? "").trim() || null,
+        activationMode: String(manifest.activationMode ?? "").trim() || null,
+        portable: manifest.portable === true,
+        slashCommand: manifest.userInvocable === false ? null : `/${skillId}`,
+        argumentHint: String(manifest.argumentHint ?? "").trim() || null,
+        effort: String(manifest.effort ?? "").trim() || null,
+        compatibility:
+          manifest.compatibility && typeof manifest.compatibility === "object"
+            ? manifest.compatibility
+            : null,
+        metadata:
+          manifest.metadata && typeof manifest.metadata === "object"
+            ? manifest.metadata
+            : null,
+      },
+      activation: {
+        skillId,
+        rawArguments,
+        renderedPrompt,
+        portable: manifest.portable === true,
+        contextMode: normalizePortableContextMode(manifest.context),
+        modelOverride: String(manifest.model ?? "").trim() || null,
+        requestedAgent: resolvedAgent.requestedAgent ?? null,
+        agentId: resolvedAgent.agentId ?? null,
+        inputState: inputState ?? null,
+        toolNames: Array.from(activationToolNames).filter(Boolean),
+        allowedToolPolicy: portableAllowedToolPolicy
+          ? {
+              activeSkillIds: portableAllowedToolPolicy.activeSkillIds,
+              allowedToolNames: Array.from(portableAllowedToolPolicy.allowedToolNames),
+              rules: portableAllowedToolPolicy.rules,
+            }
+          : null,
       },
     },
   };

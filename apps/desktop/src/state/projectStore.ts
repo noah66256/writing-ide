@@ -55,7 +55,7 @@ type ProjectState = {
   getFileByPath: (path: string) => ProjectFile | undefined;
 
   loadProjectFromDisk: (rootDir: string) => Promise<void>;
-  refreshFromDisk: (reason?: string) => Promise<void>;
+  refreshFromDisk: (pathsOrReason?: string[] | string, reason?: string) => Promise<void>;
   mkdir: (dirPath: string) => Promise<void>;
   renamePath: (fromPath: string, toPath: string) => Promise<{ ok: boolean; error?: string; detail?: string }>;
 
@@ -77,7 +77,8 @@ type ProjectState = {
 
 const saveTimers = new Map<string, number>();
 let refreshInFlight: Promise<void> | null = null;
-let refreshQueuedReason: string | null = null;
+type RefreshRequest = { paths: string[] | null; reason: string | null };
+let refreshQueuedRequest: RefreshRequest | null = null;
 
 const SUPPORTED_TEXT_EXT = new Set([".md", ".mdx", ".txt"]);
 
@@ -127,6 +128,85 @@ function mapRecordKeys<T>(rec: Record<string, T>, mapKey: (k: string) => string)
     out[nk] = v;
   }
   return out;
+}
+
+function normalizeRefreshPaths(paths?: string[] | null): string[] | null {
+  if (!Array.isArray(paths)) return null;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of paths) {
+    const rel = normalizeRel(String(raw ?? ""));
+    if (!rel) continue;
+    if (rel === "__all__") return null;
+    if (seen.has(rel)) continue;
+    seen.add(rel);
+    out.push(rel);
+  }
+  return out.length ? out : null;
+}
+
+function normalizeRefreshRequest(
+  pathsOrReason?: string[] | string,
+  reason?: string,
+): RefreshRequest {
+  if (Array.isArray(pathsOrReason)) {
+    return {
+      paths: normalizeRefreshPaths(pathsOrReason),
+      reason: typeof reason === "string" ? reason : null,
+    };
+  }
+  return {
+    paths: null,
+    reason:
+      typeof pathsOrReason === "string"
+        ? pathsOrReason
+        : typeof reason === "string"
+          ? reason
+          : null,
+  };
+}
+
+function mergeRefreshRequests(
+  prev: RefreshRequest | null,
+  next: RefreshRequest,
+): RefreshRequest {
+  if (!prev) return next;
+  const reason = next.reason ?? prev.reason ?? null;
+  if (!prev.paths || !next.paths) {
+    return { paths: null, reason };
+  }
+  const merged = new Set<string>([...prev.paths, ...next.paths]);
+  return { paths: Array.from(merged), reason };
+}
+
+function takeQueuedRefreshRequest(): RefreshRequest | null {
+  const next = refreshQueuedRequest;
+  refreshQueuedRequest = null;
+  return next;
+}
+
+function pickPreferredProjectPath(
+  files: string[],
+  preferredPath?: string | null,
+): string {
+  const preferred = normalizeRel(String(preferredPath ?? ""));
+  if (preferred && files.includes(preferred)) return preferred;
+  if (files.includes("README.md")) return "README.md";
+  return files[0] ?? "";
+}
+
+async function readProjectFileContent(rootDir: string, path: string) {
+  const api = window.desktop?.fs;
+  if (!api || !rootDir || !path) return { ok: false, content: "" };
+  try {
+    const res = await api.readFile(rootDir, path);
+    return {
+      ok: Boolean(res?.ok),
+      content: res?.ok ? String(res.content ?? "") : "",
+    };
+  } catch {
+    return { ok: false, content: "" };
+  }
 }
 
 export const useProjectStore = create<ProjectState>((set, get) => ({
@@ -367,6 +447,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       return;
     }
 
+    const prevState = get();
+    const sameRoot = prevState.rootDir === rootDir;
     set({ rootDir, isLoading: true, error: null });
     const list = await (api.listEntries ? api.listEntries(rootDir) : api.listFiles(rootDir));
     const filesList = (list as any).files;
@@ -378,27 +460,69 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
     let files = filesList.slice();
     let dirs = Array.isArray(dirsList) ? dirsList.slice() : [];
+    const prevMap = sameRoot ? new Map(prevState.files.map((f) => [f.path, f])) : new Map<string, ProjectFile>();
+    const preservedOpenPaths = sameRoot
+      ? prevState.openPaths.filter((p) => files.includes(p))
+      : [];
+    const active = pickPreferredProjectPath(files, sameRoot ? prevState.activePath : null);
+    const openPaths = active
+      ? Array.from(new Set([...(preservedOpenPaths.length ? preservedOpenPaths : []), active]))
+      : [];
+    const previewPath =
+      sameRoot && prevState.previewPath && openPaths.includes(prevState.previewPath)
+        ? prevState.previewPath
+        : active || null;
 
-    const projFiles: ProjectFile[] = [];
-    for (const p of files) {
-      try {
-        const r = await api.readFile(rootDir, p);
-        projFiles.push({ path: p, content: r.ok ? (r.content ?? "") : "", loaded: true, dirty: false });
-      } catch {
-        projFiles.push({ path: p, content: "", loaded: true, dirty: false });
+    let preloadedActiveOk = false;
+    let preloadedActiveContent = "";
+    if (active) {
+      const prevActive = prevMap.get(active);
+      if (prevActive?.dirty || prevActive?.loaded) {
+        preloadedActiveOk = true;
+        preloadedActiveContent = prevActive.content;
+      } else {
+        const read = await readProjectFileContent(rootDir, active);
+        preloadedActiveOk = read.ok;
+        preloadedActiveContent = read.content;
       }
     }
-    const active = files.includes("README.md") ? "README.md" : files[0] ?? "";
+
+    const projFiles: ProjectFile[] = files.map((p) => {
+      const prev = prevMap.get(p);
+      if (prev?.dirty) {
+        return { ...prev, path: p, loaded: true };
+      }
+      if (p === active) {
+        if (prev?.loaded) {
+          return { ...prev, path: p, dirty: false };
+        }
+        return {
+          path: p,
+          content: preloadedActiveOk ? preloadedActiveContent : "",
+          loaded: preloadedActiveOk,
+          dirty: false,
+        };
+      }
+      if (sameRoot && prev) {
+        return { ...prev, path: p, dirty: false };
+      }
+      return { path: p, content: "", loaded: false, dirty: false };
+    });
+
     set({
       dirs,
       files: projFiles,
-      openPaths: active ? [active] : [],
+      openPaths,
       activePath: active,
-      previewPath: active || null,
+      previewPath,
       snapshots: [],
       isLoading: false,
       error: null,
     });
+
+    if (active && !preloadedActiveOk) {
+      void get().ensureLoaded(active).catch(() => void 0);
+    }
 
     // 启动文件监听
     try {
@@ -452,73 +576,101 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }).catch(() => void 0);
   },
 
-  refreshFromDisk: async (reason) => {
+  refreshFromDisk: async (pathsOrReason, reason) => {
+    const request = normalizeRefreshRequest(pathsOrReason, reason);
     if (refreshInFlight) {
-      refreshQueuedReason = reason ?? "queued";
+      refreshQueuedRequest = mergeRefreshRequests(refreshQueuedRequest, request);
       return;
     }
-    refreshQueuedReason = null;
+    refreshQueuedRequest = null;
     refreshInFlight = (async () => {
-    const api = window.desktop?.fs;
-    const rootDir = get().rootDir;
-    if (!api || !rootDir) return;
+      const api = window.desktop?.fs;
+      const rootDir = get().rootDir;
+      if (!api || !rootDir) return;
 
-    const list = await (api.listEntries ? api.listEntries(rootDir) : api.listFiles(rootDir));
-    const diskFiles: string[] = Array.isArray((list as any).files) ? (list as any).files.slice() : [];
-    const diskDirs: string[] = Array.isArray((list as any).dirs) ? (list as any).dirs.slice() : [];
-    diskFiles.sort((a, b) => a.localeCompare(b));
-    diskDirs.sort((a, b) => a.localeCompare(b));
+      const list = await (api.listEntries ? api.listEntries(rootDir) : api.listFiles(rootDir));
+      const diskFiles: string[] = Array.isArray((list as any).files) ? (list as any).files.slice() : [];
+      const diskDirs: string[] = Array.isArray((list as any).dirs) ? (list as any).dirs.slice() : [];
+      diskFiles.sort((a, b) => a.localeCompare(b));
+      diskDirs.sort((a, b) => a.localeCompare(b));
 
-    const prevFiles = get().files;
-    const prevMap = new Map(prevFiles.map((f) => [f.path, f]));
-    const diskSet = new Set(diskFiles);
+      const prevState = get();
+      const prevFiles = prevState.files;
+      const prevMap = new Map(prevFiles.map((f) => [f.path, f]));
+      const diskSet = new Set(diskFiles);
+      const changedSet = request.paths ? new Set(request.paths) : null;
+      const externallyChangedDirty: string[] = [];
 
-    const nextFiles: ProjectFile[] = [];
-    for (const p of diskFiles) {
-      const prev = prevMap.get(p);
-      if (prev?.dirty) {
-        // 本地未保存：不覆盖
-        nextFiles.push({ ...prev, loaded: true });
-        continue;
+      const nextFiles: ProjectFile[] = [];
+      for (const p of diskFiles) {
+        const prev = prevMap.get(p);
+        if (prev?.dirty) {
+          nextFiles.push({ ...prev, loaded: true });
+          if (changedSet?.has(p)) externallyChangedDirty.push(p);
+          continue;
+        }
+        if (changedSet?.has(p)) {
+          const read = await readProjectFileContent(rootDir, p);
+          if (read.ok) {
+            nextFiles.push({ path: p, content: read.content, loaded: true, dirty: false });
+            continue;
+          }
+        }
+        if (prev) {
+          nextFiles.push({ ...prev, path: p, dirty: false });
+          continue;
+        }
+        nextFiles.push({ path: p, content: "", loaded: false, dirty: false });
       }
-      try {
-        const r = await api.readFile(rootDir, p);
-        nextFiles.push({ path: p, content: r.ok ? (r.content ?? "") : "", loaded: true, dirty: false });
-      } catch {
-        nextFiles.push({ path: p, content: prev?.content ?? "", loaded: true, dirty: false });
-      }
-    }
 
-    // 处理被外部删除的文件：dirty 的先保留（避免丢内容），否则移除并关闭 tab
-    const removed = prevFiles.filter((f) => !diskSet.has(f.path));
-    const removedDirty = removed.filter((f) => f.dirty);
-    for (const f of removedDirty) nextFiles.push({ ...f, loaded: true });
+      const removed = prevFiles.filter((f) => !diskSet.has(f.path));
+      const removedDirty = removed.filter((f) => f.dirty);
+      for (const f of removedDirty) nextFiles.push({ ...f, loaded: true });
 
-    set((s) => {
-      const removedSet = new Set(removed.filter((x) => !x.dirty).map((x) => x.path));
-      const openPaths = s.openPaths.filter((p) => !removedSet.has(p));
-      const activePath = removedSet.has(s.activePath) ? (openPaths[0] ?? nextFiles[0]?.path ?? "") : s.activePath;
-      const previewPath = s.previewPath && removedSet.has(s.previewPath) ? null : s.previewPath;
-      return { dirs: diskDirs, files: nextFiles, openPaths, activePath, previewPath };
-    });
-
-    if (removedDirty.length) {
-      useRunStore.getState().log("warn", "检测到外部删除，但本地有未保存内容：已保留内存版本（请手动另存）", {
-        reason: reason ?? "unknown",
-        paths: removedDirty.map((x) => x.path),
+      set((s) => {
+        const removedSet = new Set(removed.filter((x) => !x.dirty).map((x) => x.path));
+        let openPaths = s.openPaths.filter((p) => !removedSet.has(p));
+        let activePath = removedSet.has(s.activePath) ? (openPaths[0] ?? nextFiles[0]?.path ?? "") : s.activePath;
+        let previewPath = s.previewPath && removedSet.has(s.previewPath) ? null : s.previewPath;
+        if (activePath && !openPaths.includes(activePath)) {
+          openPaths = [activePath, ...openPaths.filter((p) => p !== activePath)];
+        }
+        if (!openPaths.length) {
+          const fallback = activePath || nextFiles[0]?.path || "";
+          if (fallback) {
+            openPaths = [fallback];
+            activePath = fallback;
+            previewPath = previewPath ?? fallback;
+          }
+        }
+        return { dirs: diskDirs, files: nextFiles, openPaths, activePath, previewPath };
       });
-    }
-    // dirty 文件如被外部修改，这里无法精准判断是否变化；保持“本地优先”，避免覆盖
+
+      if (removedDirty.length) {
+        useRunStore.getState().log("warn", "检测到外部删除，但本地有未保存内容：已保留内存版本（请手动另存）", {
+          reason: request.reason ?? "unknown",
+          paths: removedDirty.map((x) => x.path),
+        });
+      }
+      if (externallyChangedDirty.length) {
+        useRunStore.getState().log("warn", "检测到外部修改，但本地有未保存内容：已保留本地版本", {
+          reason: request.reason ?? "unknown",
+          paths: externallyChangedDirty,
+        });
+      }
     })();
     try {
       await refreshInFlight;
     } finally {
       refreshInFlight = null;
     }
-    if (refreshQueuedReason) {
-      const nextReason = refreshQueuedReason;
-      refreshQueuedReason = null;
-      void get().refreshFromDisk(nextReason);
+    const nextRequest = takeQueuedRefreshRequest();
+    if (nextRequest) {
+      if (nextRequest.paths) {
+        void get().refreshFromDisk(nextRequest.paths, nextRequest.reason ?? undefined);
+      } else {
+        void get().refreshFromDisk(nextRequest.reason ?? undefined);
+      }
     }
   },
 

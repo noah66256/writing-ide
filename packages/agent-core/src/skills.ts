@@ -56,6 +56,12 @@ export type SkillActivationMode = "auto" | "explicit" | "hybrid";
 
 export type PortableSkillContextMode = "inline" | "fork";
 
+export type PortableSkillRuntimeMeta = {
+  skillDir?: string;
+  manifestPath?: string;
+  scanRoot?: string;
+};
+
 export type SkillManifest = {
   id: string;
   name: string;
@@ -86,6 +92,7 @@ export type SkillManifest = {
   /** 兼容 Agent Skills / Claude Code 的附加字段 */
   license?: string;
   argumentHint?: string;
+  effort?: string;
   disableModelInvocation?: boolean;
   userInvocable?: boolean;
   allowedTools?: string[];
@@ -94,8 +101,11 @@ export type SkillManifest = {
   agent?: string;
   hooks?: unknown;
   inputSchema?: unknown;
+  compatibility?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
   vendorMetadata?: Record<string, unknown>;
   portable?: boolean;
+  portableRuntime?: PortableSkillRuntimeMeta;
   /** 可选：声明式 Workflow 配置（phases / exclusions / followUp） */
   workflow?: import("./workflowPhaseInterpreter.js").WorkflowDeclaration;
   /** 可选：Pipeline 配置（kind=pipeline 使用） */

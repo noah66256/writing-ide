@@ -1,3 +1,5 @@
+import type { ToolResultEnvelope } from "./toolResultEnvelope";
+
 export type ThreadWaitingFor = "none" | "user" | "approval";
 
 export type SkillRef = {
@@ -150,10 +152,11 @@ export type ToolCallItem = ItemBase & {
   executedBy?: "gateway" | "desktop";
   agentId?: string;
   agentName?: string;
-  result?: unknown;
+  result?: ToolResultEnvelope | unknown;
   error?: string;
   riskLevel?: "low" | "medium" | "high";
   applyPolicy?: "proposal" | "auto_apply";
+  shadowSource?: "tool_step";
 };
 
 export type FileChangeItem = ItemBase & {

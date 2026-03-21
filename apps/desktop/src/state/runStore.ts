@@ -1,6 +1,11 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { ItemActionSpec, ThreadCapabilityState } from "@ohmycrab/shared";
+import {
+  getToolResultEnvelopePayload,
+  type ItemActionSpec,
+  type ThreadCapabilityState,
+  type ToolResultEnvelope,
+} from "@ohmycrab/shared";
 import type { ProjectSnapshot } from "./projectStore";
 
 export type Mode = "agent" | "chat";
@@ -88,8 +93,9 @@ export type ToolBlockStep = {
   type: "tool";
   toolName: string;
   status: "running" | "success" | "failed" | "undone";
+  toolCallId?: string;
   input?: unknown;
-  output?: unknown;
+  output?: ToolResultEnvelope | unknown;
   riskLevel: ToolRiskLevel;
   applyPolicy: ToolApplyPolicy;
 
@@ -584,7 +590,8 @@ function stepStatusToItemStatus(step: ToolBlockStep): RuntimeItemRecord["status"
 }
 
 function extractProposalPreview(step: ToolBlockStep) {
-  const output = step.output && typeof step.output === "object" ? (step.output as any) : null;
+  const unwrappedOutput = getToolResultEnvelopePayload(step.output);
+  const output = unwrappedOutput && typeof unwrappedOutput === "object" ? (unwrappedOutput as any) : null;
   const input = step.input && typeof step.input === "object" ? (step.input as any) : null;
   const preview = output?.preview && typeof output.preview === "object" ? output.preview : null;
   const path =
@@ -665,7 +672,7 @@ function buildShadowItemFromToolStep(args: {
     step.toolName === "doc.restoreSnapshot" ||
     step.toolName === "doc.splitToDir" ||
     step.toolName === "lint.style" ||
-    Boolean((step.output as any)?.preview?.diffUnified);
+    Boolean((getToolResultEnvelopePayload(step.output) as any)?.preview?.diffUnified);
   if (step.applyPolicy === "proposal" || (step.undoable && looksLikeFileMutationTool)) {
     const meta = extractProposalPreview(step);
     return {
@@ -697,12 +704,16 @@ function buildShadowItemFromToolStep(args: {
     status: stepStatusToItemStatus(step),
     createdAt: String((existing as any)?.createdAt ?? nowIso),
     updatedAt: nowIso,
-    toolCallId: step.id,
+    toolCallId: String(step.toolCallId ?? step.id),
     name: step.toolName,
     args: step.input && typeof step.input === "object" && !Array.isArray(step.input) ? (step.input as Record<string, unknown>) : {},
     executedBy: "desktop",
     result: step.output,
-    error: step.status === "failed" ? String((step.output as any)?.error ?? "TOOL_FAILED") : undefined,
+    shadowSource: "tool_step",
+    error:
+      step.status === "failed"
+        ? String((getToolResultEnvelopePayload(step.output) as any)?.error ?? "TOOL_FAILED")
+        : undefined,
     riskLevel: step.riskLevel,
     applyPolicy: step.applyPolicy,
   } as RuntimeItemRecord;
@@ -1197,6 +1208,7 @@ export const useRunStore = create<RunState>()(
       id,
       type: "tool",
       toolName: tool.toolName,
+      ...(tool.toolCallId ? { toolCallId: tool.toolCallId } : {}),
       status: tool.status,
       input: tool.input,
       output: tool.output,

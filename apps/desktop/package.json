@@ -39,8 +39,8 @@
     "react-dom": "^19.2.0",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
-    "yaml": "^2.6.0",
     "tailwind-merge": "^3.5.0",
+    "yaml": "^2.6.0",
     "zod": "^4.3.6",
     "zustand": "^5.0.3"
   },
@@ -53,7 +53,7 @@
     "@vitejs/plugin-react": "^5.1.1",
     "concurrently": "^9.1.2",
     "cross-env": "^7.0.3",
-    "electron": "34.5.8",
+    "electron": "41.0.3",
     "electron-builder": "^24.13.3",
     "tailwindcss": "^4.2.0",
     "typescript": "~5.9.3",

@@ -59,6 +59,7 @@ import {
   type RunState,
   type StyleExecutionMode,
   type StylePipelinePayloadV1,
+  type SubAgentDefinition,
   type WorkflowDeclaration,
 } from "@ohmycrab/agent-core";
 import {
@@ -88,6 +89,7 @@ import {
 } from "./writingAgentRunner.js";
 import { createRuntime } from "./runtime/RuntimeFactory.js";
 import { releaseLiveCollabRuntime } from "./runtime/collabRuntime.js";
+import { SubAgentExecutionBridge } from "./runtime/SubAgentExecutionBridge.js";
 import { ItemEmitter } from "./runtime/itemEmitter.js";
 import {
   createThreadState,
@@ -104,6 +106,21 @@ import {
   buildAssembledContextMessages,
   type AssembledContextSummary,
 } from "./contextAssembler.js";
+import {
+  buildPortableAllowedToolPolicyNotice,
+  rewritePortableSkillRelativePaths,
+  buildPortableSkillResourceNotice,
+  buildPortableSkillToolAliasNotice,
+  buildPortableForkUserPrompt,
+  buildPortableSkillHooksNotice,
+  buildPortableSkillInputNotice,
+  buildPortableSubAgentDefinitionMap,
+  extractPortableCommandSubstitutions,
+  normalizePortableContextMode,
+  parsePortableAllowedToolPolicy,
+  parsePortableSkillInvocationInput,
+  resolvePortableSkillAgent,
+} from "./portableSkillCompat.js";
 
 const TOOL_SCHEMA_ISSUES = collectToolSchemaIssues();
 let TOOL_SCHEMA_NOTICE_EMITTED = false;
@@ -454,13 +471,182 @@ function buildSkillToolAliasNotice(manifest: any): string {
   ].join("\n");
 }
 
-function renderSkillPromptTemplate(text: string, args?: string) {
+function splitSkillInvocationArgs(raw: string): string[] {
+  const text = String(raw ?? "").trim();
+  if (!text) return [];
+  const matches = text.match(/"([^"\\]|\\.)*"|'([^'\\]|\\.)*'|\S+/g) ?? [];
+  return matches.map((token) => token.replace(/^['"]|['"]$/g, "").replace(/\\(["'])/g, "$1"));
+}
+
+function renderSkillPromptTemplate(
+  text: string,
+  args?: string,
+  runtime?: { sessionId?: string; skillDir?: string } | null,
+) {
   const raw = String(text ?? "");
-  const value = String(args ?? "");
+  const value = String(args ?? "").trim();
   if (!raw) return "";
-  return raw
-    .replace(/\$ARGUMENTS/g, value)
-    .replace(/\$1\b/g, value);
+  const templated = raw
+    .replace(/\$\{CLAUDE_SESSION_ID\}/g, String(runtime?.sessionId ?? "").trim())
+    .replace(/\$\{CLAUDE_SKILL_DIR\}/g, String(runtime?.skillDir ?? "").trim());
+  const tokens = splitSkillInvocationArgs(value);
+  let usedPlaceholder = false;
+  const rendered = templated
+    .replace(/\$ARGUMENTS\[(\d+)\]/g, (_m, idx) => {
+      usedPlaceholder = true;
+      return tokens[Number(idx)] ?? "";
+    })
+    .replace(/\$(\d+)\b/g, (_m, idx) => {
+      usedPlaceholder = true;
+      return tokens[Number(idx)] ?? "";
+    })
+    .replace(/\$ARGUMENTS\b/g, () => {
+      usedPlaceholder = true;
+      return value;
+    });
+  if (!value || usedPlaceholder) return rendered;
+  return `${rendered}\n\n[Skill Invocation Arguments]\n${value}`.trim();
+}
+
+type PortablePromptPreprocessShellRule = {
+  raw: string;
+  kind: "any" | "command_pattern";
+  specifier?: string;
+};
+
+type PortablePromptPreprocessJob = {
+  placeholder: string;
+  skillId: string;
+  skillDir: string;
+  manifestPath?: string;
+  text: string;
+  opMode: OpMode;
+  shellRules: PortablePromptPreprocessShellRule[];
+};
+
+const PORTABLE_PROMPT_PREPROCESS_TOOL_NAME = "portable.skill.preprocess";
+const PORTABLE_PROMPT_PREPROCESS_TIMEOUT_MS = 120_000;
+
+function collectPortablePromptShellRules(manifest: any): PortablePromptPreprocessShellRule[] {
+  const policy = parsePortableAllowedToolPolicy(manifest ? [manifest] : []);
+  if (!policy?.rules?.length) return [];
+  return policy.rules
+    .filter((rule) => rule.toolName === "shell.exec" && (rule.kind === "any" || rule.kind === "command_pattern"))
+    .map((rule) => ({
+      raw: String(rule.raw ?? "").trim(),
+      kind: rule.kind === "command_pattern" ? "command_pattern" : "any",
+      ...(typeof rule.specifier === "string" && rule.specifier.trim() ? { specifier: rule.specifier.trim() } : {}),
+    }));
+}
+
+function queuePortablePromptPreprocessJob(args: {
+  jobs: PortablePromptPreprocessJob[];
+  manifest: any;
+  skillId: string;
+  text: string;
+  opMode: OpMode;
+}): string {
+  const text = String(args.text ?? "");
+  if (!extractPortableCommandSubstitutions(text).length) return text;
+  const placeholder = `__PORTABLE_PREPROCESS_${args.jobs.length}__`;
+  args.jobs.push({
+    placeholder,
+    skillId: String(args.skillId ?? "").trim(),
+    skillDir: String(args.manifest?.portableRuntime?.skillDir ?? "").trim(),
+    manifestPath: String(args.manifest?.portableRuntime?.manifestPath ?? "").trim() || undefined,
+    text,
+    opMode: args.opMode,
+    shellRules: collectPortablePromptShellRules(args.manifest),
+  });
+  return placeholder;
+}
+
+function replacePortablePromptPlaceholder(text: string, placeholder: string, value: string): string {
+  const raw = String(text ?? "");
+  if (!raw || !placeholder) return raw;
+  return raw.split(placeholder).join(value);
+}
+
+function inferPortableForkToolPolicy(toolNames: Iterable<string>): SubAgentDefinition["toolPolicy"] {
+  const normalized = Array.from(toolNames)
+    .map((item) => String(item ?? "").trim())
+    .filter(Boolean);
+  const hasMutableTool = normalized.some((name) =>
+    /^(write|edit|delete|mkdir|rename|doc\.|shell\.exec|process\.run|run\.mainDoc\.update)/.test(name),
+  );
+  return hasMutableTool ? "proposal_first" : "readonly";
+}
+
+function buildPortableForkSubAgentDefinition(args: {
+  skillId: string;
+  manifest: any;
+  resolvedAgent: ReturnType<typeof resolvePortableSkillAgent>;
+  fallbackToolNames: Iterable<string>;
+  contextMode: "inline" | "fork";
+  modelOverride?: string | null;
+}): SubAgentDefinition {
+  const requestedAgent = String(args.resolvedAgent.requestedAgent ?? "").trim();
+  const toolNames = Array.from(
+    new Set(
+      Array.from(args.fallbackToolNames)
+        .map((item) => String(item ?? "").trim())
+        .filter(Boolean),
+    ),
+  );
+  const base = args.resolvedAgent.definition;
+  if (base) {
+    return {
+      ...base,
+      tools: toolNames.length ? toolNames : Array.isArray(base.tools) ? [...base.tools] : [],
+      model: String(args.modelOverride ?? "").trim() || String(base.model ?? "").trim() || "sonnet",
+      toolPolicy: inferPortableForkToolPolicy(toolNames.length ? toolNames : base.tools ?? []),
+      budget: {
+        maxTurns: Number(base.budget?.maxTurns ?? 12) || 12,
+        maxToolCalls: Number(base.budget?.maxToolCalls ?? 30) || 30,
+        timeoutMs: Number(base.budget?.timeoutMs ?? 240_000) || 240_000,
+      },
+    };
+  }
+  const skillId = String(args.skillId ?? "").trim() || "portable-skill";
+  return {
+    id: `portable_skill__${skillId}`,
+    name: requestedAgent || `Portable Skill /${skillId}`,
+    description: `执行 portable skill /${skillId} 的子任务代理。`,
+    systemPrompt: [
+      `你是 portable skill /${skillId} 的执行子代理。`,
+      args.contextMode === "fork"
+        ? "本次运行要求 clean-room fork：不要依赖父 run 的对话历史、mainDoc、L1/L2 记忆；只根据当前任务消息完成执行。"
+        : "本次运行来自 portable skill agent 委派：优先完成当前任务消息中声明的 skill 合同。",
+      toolNames.length ? `可用工具仅限：${toolNames.join(", ")}` : "如果当前任务没有明确可用工具，就直接基于当前输入完成。",
+    ].join("\n"),
+    tools: toolNames,
+    skills: [],
+    mcpServers: [],
+    model: String(args.modelOverride ?? "").trim() || "sonnet",
+    toolPolicy: inferPortableForkToolPolicy(toolNames),
+    budget: {
+      maxTurns: 12,
+      maxToolCalls: 30,
+      timeoutMs: 240_000,
+    },
+    enabled: true,
+    version: "portable-fork-v1",
+  };
+}
+
+function buildPortableForkTaskText(args: {
+  manifest: any;
+  userPrompt: string;
+  hooksNotice?: string;
+  toolPolicyNotice?: string;
+}): string {
+  return [
+    buildPortableSkillToolAliasNotice(args.manifest),
+    buildPortableSkillResourceNotice(args.manifest),
+    String(args.toolPolicyNotice ?? "").trim(),
+    String(args.hooksNotice ?? "").trim(),
+    String(args.userPrompt ?? "").trim(),
+  ].filter(Boolean).join("\n\n").trim();
 }
 
 function formatAvailableSkillLine(manifest: any): string {
@@ -482,6 +668,68 @@ function formatAvailableSkillLine(manifest: any): string {
   const argumentHint = String(manifest?.argumentHint ?? "").trim();
   const argumentText = argumentHint ? ` 参数：${argumentHint.length > 40 ? `${argumentHint.slice(0, 40)}…` : argumentHint}` : "";
   return `  - ${id}（${name}，${tags.join(" / ")}）：${brief}${argumentText}`;
+}
+
+async function executePortablePromptPreprocessJob(args: {
+  runId: string;
+  job: PortablePromptPreprocessJob;
+  index: number;
+  turn: number;
+  writeEvent: (event: string, data: unknown) => void;
+  waiters: WaiterMap;
+  abortSignal: AbortSignal;
+}): Promise<string> {
+  const toolCallId = `${args.runId}:portable-preprocess:${args.index}`;
+  const fallbackText = String(args.job.text ?? "");
+  const buildFailureFallback = (reason: string) =>
+    [fallbackText, `[Portable skill command preprocessing failed: ${reason}]`].filter(Boolean).join("\n\n").trim();
+
+  return await new Promise<string>((resolve) => {
+    let settled = false;
+    const finish = (value: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      args.waiters.delete(toolCallId);
+      args.abortSignal.removeEventListener("abort", onAbort);
+      resolve(value);
+    };
+    const timeoutId = setTimeout(() => {
+      finish(buildFailureFallback("TIMEOUT"));
+    }, PORTABLE_PROMPT_PREPROCESS_TIMEOUT_MS);
+    const onAbort = () => {
+      finish(buildFailureFallback("ABORTED"));
+    };
+
+    args.waiters.set(toolCallId, (payload: any) => {
+      const output = payload?.output ?? null;
+      if (payload?.ok === true && typeof output?.transformedText === "string") {
+        finish(String(output.transformedText));
+        return;
+      }
+      const detail =
+        String(output?.error ?? payload?.error ?? output?.message ?? "PREPROCESS_FAILED").trim() || "PREPROCESS_FAILED";
+      finish(buildFailureFallback(detail));
+    });
+
+    args.writeEvent("tool.call", {
+      toolCallId,
+      name: PORTABLE_PROMPT_PREPROCESS_TOOL_NAME,
+      args: {
+        skillId: args.job.skillId,
+        skillDir: args.job.skillDir,
+        manifestPath: args.job.manifestPath ?? null,
+        text: args.job.text,
+        shellRules: args.job.shellRules,
+        opMode: args.job.opMode,
+      },
+      executedBy: "desktop",
+      turn: args.turn,
+    });
+
+    if (args.abortSignal.aborted) onAbort();
+    else args.abortSignal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function buildRouteDecisionV1(args: {
@@ -2190,6 +2438,8 @@ const agentRunBodySchema = z.object({
   stylePipelinePayload: z.any().optional(),
   /** Desktop 传来的外部扩展包 skill manifests */
   userSkillManifests: z.array(z.any()).max(20).optional(),
+  /** Desktop 传来的 Claude 风格外部 agent 定义 */
+  userAgentDefinitions: z.array(z.any()).max(40).optional(),
   contextPack: z.string().optional(),
   /** P3：结构化上下文段落（优先于 contextPack） */
   contextSegments: z.array(z.any()).max(200).optional(),
@@ -2371,6 +2621,10 @@ export type PreparedRun = {
   ctxDialogueSummaryFromPack: string;
   compositeTaskPlan: CompositeTaskPlanV1 | null;
   assembledContextSummary: AssembledContextSummary;
+  runtimeUserPrompt: string;
+  portableSkillContext: RunContext["portableSkillContext"];
+  portablePromptPreprocessJobs: PortablePromptPreprocessJob[];
+  subAgentDefinitionById: Map<string, SubAgentDefinition>;
 };
 
 export type PrepareAgentRunResult =
@@ -2391,6 +2645,7 @@ export async function prepareAgentRun(args: {
   const ideSummaryFromSidecar = toolSidecar && typeof toolSidecar === "object" ? (toolSidecar as any).ideSummary ?? null : null;
 
   const mode = (body.mode ?? "agent") as AgentMode;
+  const runOpMode = ((body as any).opMode === "assistant" ? "assistant" : "creative") as OpMode;
   const userPrompt = String(body.prompt ?? "");
 
   const contextPackFallback = body.contextPack;
@@ -2527,6 +2782,7 @@ export async function prepareAgentRun(args: {
     ? ((body as any).userSkillManifests as any[])
         .filter((m: any) => m && typeof m === "object" && String(m?.id ?? "").trim() && String(m?.name ?? "").trim())
     : [];
+  const subAgentDefinitionById = buildPortableSubAgentDefinitionMap((body as any).userAgentDefinitions);
   const builtinOverrides = (body as any).builtinOverrides && typeof (body as any).builtinOverrides === "object"
     ? ((body as any).builtinOverrides as Record<string, { enabled?: boolean }>)
     : undefined;
@@ -2614,12 +2870,130 @@ export async function prepareAgentRun(args: {
     }
   }
 
+  const activePortableManifests = activeSkillIds
+    .map((id) => skillManifestById.get(id) as any)
+    .filter((manifest: any) => manifest?.portable);
+  const portableAllowedToolPolicy = parsePortableAllowedToolPolicy(activePortableManifests as any);
+  const explicitPortableInvocationManifests = skillInvocations
+    .map((item) => skillManifestById.get(item.id) as any)
+    .filter((manifest: any) => manifest?.portable && activeSkillIds.includes(String(manifest?.id ?? "").trim()));
+  const portableInvocationStateEntries: Array<[string, NonNullable<ReturnType<typeof parsePortableSkillInvocationInput>>]> = [];
+  for (const manifest of explicitPortableInvocationManifests) {
+    const skillId = String(manifest?.id ?? "").trim();
+    const parsed = parsePortableSkillInvocationInput({
+      skillId,
+      rawArguments: invocationBySkillId.get(skillId)?.arguments,
+      inputSchema: manifest?.inputSchema,
+    });
+    if (parsed) portableInvocationStateEntries.push([skillId, parsed]);
+  }
+  const portableInvocationStateBySkillId = new Map(portableInvocationStateEntries);
+  const primaryPortableInvocationManifest = explicitPortableInvocationManifests[0] ?? null;
+  const primaryPortableSkillId = String(primaryPortableInvocationManifest?.id ?? "").trim();
+  const primaryPortableInvocation = primaryPortableSkillId ? invocationBySkillId.get(primaryPortableSkillId) : undefined;
+  const primaryPortableInputState = primaryPortableSkillId ? portableInvocationStateBySkillId.get(primaryPortableSkillId) ?? null : null;
+  const primaryPortableContextMode = normalizePortableContextMode(primaryPortableInvocationManifest?.context);
+  const primaryPortableResolvedAgent = resolvePortableSkillAgent(
+    primaryPortableInvocationManifest?.agent,
+    subAgentDefinitionById,
+  );
+  const portableForkPlan = primaryPortableInvocationManifest &&
+    (primaryPortableContextMode === "fork" || primaryPortableResolvedAgent.agentId)
+      ? {
+          skillId: primaryPortableSkillId,
+          manifest: primaryPortableInvocationManifest,
+          invocation: primaryPortableInvocation,
+          inputState: primaryPortableInputState,
+          contextMode: primaryPortableContextMode,
+          resolvedAgent: primaryPortableResolvedAgent,
+        }
+      : null;
+  const portableAgentToolNames = new Set(
+    portableForkPlan?.resolvedAgent.definition?.tools
+      ?.map((item: string) => String(item ?? "").trim())
+      .filter(Boolean) ?? [],
+  );
+  const primaryPortableModelOverride = primaryPortableInvocationManifest?.model
+    ? String(primaryPortableInvocationManifest.model).trim()
+    : "";
+  const portableHardAllowedToolNames =
+    portableAllowedToolPolicy?.allowedToolNames.size
+      ? new Set(portableAllowedToolPolicy.allowedToolNames)
+      : portableAgentToolNames.size > 0
+        ? portableAgentToolNames
+        : null;
+
   const stageKeyForRun = (activeSkills.length
     ? (activeSkills as any[])
         .map((s: any) => String((s as any)?.stageKey ?? "").trim())
         .find(Boolean)
     : "") || pickSkillStageKeyForAgentRun(activeSkills, "agent.run");
   const billingSource = stageKeyForRun.startsWith("agent.skill.") ? stageKeyForRun : `agent.${mode}`;
+  const runId = randomUUID();
+
+  const portableAllowedToolPolicyNotice = buildPortableAllowedToolPolicyNotice(portableAllowedToolPolicy);
+  const portablePromptPreprocessJobs: PortablePromptPreprocessJob[] = [];
+  const primaryPortableRenderedPrompt = portableForkPlan
+    ? queuePortablePromptPreprocessJob({
+        jobs: portablePromptPreprocessJobs,
+        manifest: portableForkPlan.manifest,
+        skillId: portableForkPlan.skillId,
+        opMode: runOpMode,
+        text: rewritePortableSkillRelativePaths(
+        renderSkillPromptTemplate(
+          String(portableForkPlan.manifest?.promptFragments?.system ?? "").trim(),
+          portableForkPlan.invocation?.arguments,
+          {
+            sessionId: runId,
+            skillDir: String(portableForkPlan.manifest?.portableRuntime?.skillDir ?? "").trim(),
+          },
+        ),
+        portableForkPlan.manifest,
+      ),
+      })
+    : "";
+  const portableForkSystemPrompt = portableForkPlan
+    ? [
+        `【Portable Skill Fork】/${portableForkPlan.skillId} 已请求 ${portableForkPlan.contextMode} 模式；Crab 将以“近似 fork”方式执行本轮任务。`,
+        "请把本轮输入视为该 skill 的独立子任务，优先遵守映射后的 agent 合同与 portable skill 合同；历史对话仅作为弱背景，不要依赖未在本轮重述的隐含上下文。",
+        portableForkPlan.resolvedAgent.definition
+          ? `[Mapped Agent]\n${portableForkPlan.resolvedAgent.definition.systemPrompt}`
+          : "",
+      ].filter(Boolean).join("\n\n")
+    : "";
+  const portableForkRunPrompt = portableForkPlan
+    ? buildPortableForkUserPrompt({
+        renderedPrompt: primaryPortableRenderedPrompt,
+        rawArguments: portableForkPlan.invocation?.arguments,
+        userPrompt,
+        parsedInputState: portableForkPlan.inputState,
+      })
+    : "";
+  const runtimeUserPrompt = portableForkRunPrompt || userPrompt;
+  const portableSkillContext: RunContext["portableSkillContext"] =
+    activePortableManifests.length > 0 || portableAllowedToolPolicy || portableForkPlan
+      ? {
+          activeSkillIds: activePortableManifests
+            .map((manifest: any) => String(manifest?.id ?? "").trim())
+            .filter(Boolean),
+          primarySkillId: primaryPortableSkillId || undefined,
+          modelOverride: primaryPortableModelOverride || undefined,
+          allowedToolPolicy: portableAllowedToolPolicy ?? undefined,
+          inputStates: Array.from(portableInvocationStateBySkillId.values()),
+          hooksSkillIds: activePortableManifests
+            .filter((manifest: any) => manifest?.hooks !== undefined)
+            .map((manifest: any) => String(manifest?.id ?? "").trim())
+            .filter(Boolean),
+          fork: portableForkPlan
+            ? {
+                skillId: portableForkPlan.skillId,
+                agentId: portableForkPlan.resolvedAgent.agentId,
+                requestedAgent: portableForkPlan.resolvedAgent.requestedAgent,
+                mode: portableForkPlan.contextMode,
+              }
+            : null,
+        }
+      : null;
 
   // 构建系统提示词：可用 Skill 清单 + 已激活 Skill 的 promptFragments
   const skillsSystemPrompt = (() => {
@@ -2627,7 +3001,7 @@ export async function prepareAgentRun(args: {
 
     // 1) 可用 Skill 清单——让负责人知道有哪些能力可建议用户使用
     const availableLines = skillManifestsEffective.map((m: any) => formatAvailableSkillLine(m));
-    if (availableLines.length) {
+    if (!portableForkPlan && availableLines.length) {
       parts.push(`【可用 Skills】共 ${availableLines.length} 个已注册能力：\n${availableLines.join("\n")}`);
     }
 
@@ -2636,9 +3010,35 @@ export async function prepareAgentRun(args: {
       const frags = activeSkillIds
         .map((id: string) => {
           const m: any = skillManifestById.get(id);
-          const rendered = renderSkillPromptTemplate(String(m?.promptFragments?.system ?? "").trim(), invocationBySkillId.get(id)?.arguments);
+          const inputNotice = buildPortableSkillInputNotice(m, portableInvocationStateBySkillId.get(id) ?? null);
+          const hooksNotice = buildPortableSkillHooksNotice(m);
+          const rendered = queuePortablePromptPreprocessJob({
+            jobs: portablePromptPreprocessJobs,
+            manifest: m,
+            skillId: id,
+            opMode: runOpMode,
+            text: rewritePortableSkillRelativePaths(
+            renderSkillPromptTemplate(
+              String(m?.promptFragments?.system ?? "").trim(),
+              invocationBySkillId.get(id)?.arguments,
+              {
+                sessionId: runId,
+                skillDir: String(m?.portableRuntime?.skillDir ?? "").trim(),
+              },
+            ),
+            m,
+          ),
+          });
           const aliasNotice = buildSkillToolAliasNotice(m);
-          return [aliasNotice, rendered].filter(Boolean).join("\n\n").trim();
+          const resourceNotice = buildPortableSkillResourceNotice(m);
+          const toolPolicyNotice = portableAllowedToolPolicyNotice && portableAllowedToolPolicy?.activeSkillIds[0] === id
+            ? portableAllowedToolPolicyNotice
+            : "";
+          const renderedForSystem = portableForkPlan?.skillId === id ? "" : rendered;
+          return [aliasNotice, resourceNotice, toolPolicyNotice, inputNotice, hooksNotice, renderedForSystem]
+            .filter(Boolean)
+            .join("\n\n")
+            .trim();
         })
         .filter(Boolean);
       const header = `【Active Skills】${activeSkillIds.join(", ")}（stageKey=${stageKeyForRun}）`;
@@ -3008,8 +3408,9 @@ export async function prepareAgentRun(args: {
   }
 
   const requestedIdRaw = body.model ? String(body.model).trim() : "";
+  const portableModelOverride = !requestedIdRaw ? primaryPortableModelOverride : "";
   // 用户显式选择的模型优先使用，不再被 stage allowlist 覆盖
-  const requestedId = requestedIdRaw;
+  const requestedId = requestedIdRaw || portableModelOverride;
   // 用户选的 model 优先；不再 fallback 到 env.defaultModel
   const pickedId = requestedId || stageDefaultId || (stageAllowedIds?.length ? stageAllowedIds[0] : "") || env.defaultModel || "";
 
@@ -3101,7 +3502,6 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     };
   })();
 
-  const runId = randomUUID();
   // 观察 agent vs assistant 模式下高危运行时工具的可见性（用于排查 shell.exec/process.* 暂不可用问题）
   try {
     const runtimeToolNames = ["shell.exec", "process.run", "process.list", "process.stop", "cron.create", "cron.list"];
@@ -3188,6 +3588,29 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
             skillPinnedToolNames.add(name);
           }
         }
+      }
+    }
+  }
+
+  if (portableAllowedToolPolicy?.allowedToolNames.size) {
+    for (const name of portableAllowedToolPolicy.allowedToolNames) {
+      if (allToolNamesForMode.has(name)) {
+        baseAllowedToolNames.add(name);
+        skillPinnedToolNames.add(name);
+      }
+    }
+  }
+  if (!portableAllowedToolPolicy?.allowedToolNames.size && portableAgentToolNames.size > 0) {
+    const agentToolNames = Array.from(portableAgentToolNames).filter((name) => name && allToolNamesForMode.has(name));
+    for (const name of agentToolNames) {
+      baseAllowedToolNames.add(name);
+      skillPinnedToolNames.add(name);
+    }
+  }
+  if (portableHardAllowedToolNames?.size) {
+    for (const name of Array.from(baseAllowedToolNames)) {
+      if (!portableHardAllowedToolNames.has(name)) {
+        baseAllowedToolNames.delete(name);
       }
     }
   }
@@ -3605,6 +4028,14 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     else selectedAllowedToolNames.delete("code.exec");
   }
 
+  if (portableHardAllowedToolNames?.size) {
+    for (const name of Array.from(selectedAllowedToolNames)) {
+      if (!portableHardAllowedToolNames.has(name)) {
+        selectedAllowedToolNames.delete(name);
+      }
+    }
+  }
+
   const compositeCapabilityIssue = validateCompositePhaseCapabilities({
     plan: compositeTaskPlan,
     serverCatalog: mcpServerCatalog,
@@ -3704,12 +4135,14 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     mentionedSkillIds,
   });
 
+  const portableForkCleanRoom = portableForkPlan?.contextMode === "fork";
+
   const assembledContext = buildAssembledContextMessages({
     mode,
     modelContextWindowTokens,
     userPrompt: body.prompt,
-    contextPack: contextPackFallback,
-    contextSegments: contextSegmentsFromBody,
+    contextPack: portableForkCleanRoom ? "" : contextPackFallback,
+    contextSegments: portableForkCleanRoom ? [] : contextSegmentsFromBody,
     selectedAllowedToolNames,
     toolCatalogSummary,
     mcpToolsForRun,
@@ -3718,19 +4151,19 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       return !mcpServerSelection.summary.selectedServerIds.length || mcpServerSelection.summary.selectedServerIds.includes(serverId);
     }),
     mcpServerSelectionSummary: mcpServerSelection.summary,
-    mainDocFromPack,
-    runTodoFromPack,
-    taskStateFromPack,
-    pendingArtifactsFromPack,
-    recentDialogueFromPack,
-    l1MemoryFromPack,
-    l2MemoryFromPack,
-    ctxDialogueSummaryFromPack,
-    kbSelectedList,
+    mainDocFromPack: portableForkCleanRoom ? null : mainDocFromPack,
+    runTodoFromPack: portableForkCleanRoom ? null : runTodoFromPack,
+    taskStateFromPack: portableForkCleanRoom ? null : taskStateFromPack,
+    pendingArtifactsFromPack: portableForkCleanRoom ? null : pendingArtifactsFromPack,
+    recentDialogueFromPack: portableForkCleanRoom ? null : recentDialogueFromPack,
+    l1MemoryFromPack: portableForkCleanRoom ? "" : l1MemoryFromPack,
+    l2MemoryFromPack: portableForkCleanRoom ? "" : l2MemoryFromPack,
+    ctxDialogueSummaryFromPack: portableForkCleanRoom ? "" : ctxDialogueSummaryFromPack,
+    kbSelectedList: portableForkCleanRoom ? [] : kbSelectedList,
     webSearchHint: webSearchHint || undefined,
     mcpCapabilityCards,
     skillCapabilityCards,
-    threadCapabilityState,
+    threadCapabilityState: portableForkCleanRoom ? null : threadCapabilityState,
   });
 
   const messages: OpenAiChatMessage[] = [
@@ -3747,6 +4180,15 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
         webSearchHint: webSearchHint || undefined,
       }),
     },
+    ...(portableForkSystemPrompt ? ([{ role: "system", content: portableForkSystemPrompt }] as OpenAiChatMessage[]) : []),
+    ...(portableForkCleanRoom
+      ? ([{
+          role: "system",
+          content:
+            "当前 portable skill 请求 clean-room fork：已主动移除上一轮对话、mainDoc、Todo、线程能力粘性、L1/L2 记忆等历史上下文。\n" +
+            "本轮只保留当前用户输入、当前项目/工具访问能力，以及该 skill 自己声明的合同；除非本轮重新给出，不要依赖历史任务状态。",
+        }] as OpenAiChatMessage[])
+      : []),
     ...(skillsSystemPrompt ? ([{ role: "system", content: skillsSystemPrompt }] as OpenAiChatMessage[]) : []),
     ...(projectDirFromSidecar
       ? ([{ role: "system", content: `用户当前已打开项目目录：${projectDirFromSidecar}\n项目内的文件操作（read/write/project.search 等）均基于此目录。` }] as OpenAiChatMessage[])
@@ -3755,7 +4197,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       ? ([{ role: "system", content: `检测到这是一次“恢复上轮未落盘写入”的续跑：上轮因未打开项目目录而阻塞，现在项目目录已可用。\n你必须优先复用 Context Pack 中的 PENDING_ARTIFACTS 里的现成正文，直接调用 write 保存到 ${pendingResumeState.pathHint || "TASK_STATE.resume.pathHint"}；不要重新调研，不要重新生成正文。\n写入成功后，结束这次恢复写入，不要再把同一份待恢复产物重复保存一遍。` }] as OpenAiChatMessage[])
       : []),
     ...assembledContext.messages,
-    { role: "user", content: body.prompt },
+    { role: "user", content: portableForkRunPrompt || body.prompt },
   ];
 
   const lintMaxRework = Number(process.env.STYLE_LINT_MAX_REWORK ?? 2);
@@ -4329,6 +4771,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       const runtimeHighRiskTools = ["shell.exec", "process.run", "process.list", "process.stop", "cron.create", "cron.list"];
       const removed: string[] = [];
       for (const name of runtimeHighRiskTools) {
+        if (portableAllowedToolPolicy?.allowedToolNames.has(name)) continue;
         if (allowed.delete(name)) removed.push(name);
       }
       if (removed.length > 0) {
@@ -4516,6 +4959,10 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       l2MemoryFromPack,
       ctxDialogueSummaryFromPack,
       assembledContextSummary: assembledContext.summary,
+      runtimeUserPrompt,
+      portableSkillContext,
+      portablePromptPreprocessJobs,
+      subAgentDefinitionById,
     },
   };
 }
@@ -4585,9 +5032,16 @@ export async function executeAgentRun(args: {
     l2MemoryFromPack,
     ctxDialogueSummaryFromPack,
     assembledContextSummary,
+    runtimeUserPrompt,
+    portableSkillContext,
+    portablePromptPreprocessJobs,
+    subAgentDefinitionById,
   } = prepared;
 
   services.agentRunWaiters.set(runId, transport.waiters);
+
+  let messagesForRun = Array.isArray(messages) ? messages.map((item) => ({ ...item })) : [];
+  let runtimeUserPromptForRun = String(runtimeUserPrompt ?? "");
 
   const audit: RunAudit = {
     id: runId,
@@ -4911,7 +5365,7 @@ export async function executeAgentRun(args: {
       const ok = p?.ok === true;
       let threadCapabilitiesChanged = false;
       let threadSkillsChanged = false;
-      if (ok && toolName === "tools.describe" && output) {
+      if (ok && (toolName === "tools.describe" || toolName === "skills.activate") && output) {
         const targetType = String(output?.targetType ?? "").trim();
         if (targetType === "mcp_capability") {
           const capabilityId = String((output as any)?.capability?.id ?? "").trim();
@@ -4926,7 +5380,9 @@ export async function executeAgentRun(args: {
             }
           }
         } else if (targetType === "skill") {
-          const skillId = String((output as any)?.skill?.id ?? "").trim();
+          const skillId =
+            String((output as any)?.skill?.id ?? "").trim() ||
+            String((output as any)?.activation?.skillId ?? "").trim();
           if (skillId) {
             const nextCapabilityState = activateSkillCapability({
               state: threadState.capabilityState,
@@ -5520,6 +5976,30 @@ export async function executeAgentRun(args: {
     reasonCodes: [`intent:${intentRoute.intentType}`, `todo:${intentRoute.todoPolicy}`, `tools:${intentRoute.toolPolicy}`, `tools_effective:${effectiveToolPolicy}`],
     detail: { ...intentRoute, effectiveToolPolicy, modeFloor: mode === "agent" ? "allow_tools" : "allow_readonly", trace: intentRouterTrace },
   });
+
+  if (portablePromptPreprocessJobs.length > 0) {
+    for (let i = 0; i < portablePromptPreprocessJobs.length; i += 1) {
+      const job = portablePromptPreprocessJobs[i];
+      const transformedText = await executePortablePromptPreprocessJob({
+        runId,
+        job,
+        index: i,
+        turn: 0,
+        writeEvent,
+        waiters: transport.waiters,
+        abortSignal: transport.abortSignal,
+      });
+      messagesForRun = messagesForRun.map((message) => ({
+        ...message,
+        content:
+          typeof message.content === "string"
+            ? replacePortablePromptPlaceholder(message.content, job.placeholder, transformedText)
+            : message.content,
+      }));
+      runtimeUserPromptForRun = replacePortablePromptPlaceholder(runtimeUserPromptForRun, job.placeholder, transformedText);
+    }
+  }
+
   writeEvent("intent.route.phase0", {
     runId,
     mode,
@@ -5533,8 +6013,8 @@ export async function executeAgentRun(args: {
 
   if (effectiveToolPolicy === "deny") {
     try {
-      const insertAt = Math.max(0, messages.length - 1);
-      messages.splice(insertAt, 0, {
+      const insertAt = Math.max(0, messagesForRun.length - 1);
+      messagesForRun.splice(insertAt, 0, {
         role: "system",
         content:
           "【Intent Routing】本轮判定为讨论/解释（非任务闭环）。\n" +
@@ -5695,8 +6175,8 @@ export async function executeAgentRun(args: {
         const selectedId = rec || String(ordered?.[0]?.id ?? "").trim();
         const selectedLabel = selectedId ? String((byId.get(selectedId) as any)?.label ?? "").trim() : "";
         try {
-          const insertAt = Math.max(0, messages.length - 1);
-          messages.splice(insertAt, 0, {
+          const insertAt = Math.max(0, messagesForRun.length - 1);
+          messagesForRun.splice(insertAt, 0, {
             role: "system",
             content:
               `【写法选择（Selector v1）】本次已默认采用写法：${selectedLabel ? `${selectedLabel}（${selectedId}）` : selectedId || "cluster_0"}。` +
@@ -5728,7 +6208,7 @@ export async function executeAgentRun(args: {
     // ignore
   }
 
-  const fullSystemPrompt = messages
+  const fullSystemPrompt = messagesForRun
     .filter((m) => m.role === "system")
     .map((m) => String(m.content ?? ""))
     .filter(Boolean)
@@ -5824,6 +6304,8 @@ export async function executeAgentRun(args: {
     deliveryContract,
     toolDiscoveryContract,
     jsonToolFallbackEnabled,
+    portableSkillContext,
+    subAgentDefinitionById,
   };
 
   // 将 MCP 工具传递给 runner（用于生成 tool definitions）
@@ -5835,6 +6317,197 @@ export async function executeAgentRun(args: {
   }
 
   (runState as any).mainDocLatest = runCtx.mainDoc;
+
+  const primaryPortableSkillId = String(portableSkillContext?.primarySkillId ?? "").trim();
+  const primaryPortableManifest = primaryPortableSkillId
+    ? runtimeSkillManifestById.get(primaryPortableSkillId)
+    : null;
+  const primaryPortableContextMode = normalizePortableContextMode(primaryPortableManifest?.context);
+  const primaryPortableResolvedAgent = resolvePortableSkillAgent(
+    primaryPortableManifest?.agent,
+    subAgentDefinitionById,
+  );
+  const shouldRunPortableFork = Boolean(
+    primaryPortableManifest &&
+    (primaryPortableContextMode === "fork" || primaryPortableResolvedAgent.agentId),
+  );
+
+  if (shouldRunPortableFork && primaryPortableManifest) {
+    const portableForkToolNames =
+      portableSkillContext?.allowedToolPolicy?.allowedToolNames?.size
+        ? portableSkillContext.allowedToolPolicy.allowedToolNames
+        : primaryPortableResolvedAgent.definition?.tools?.length
+          ? new Set(primaryPortableResolvedAgent.definition.tools)
+          : selectedAllowedToolNames;
+    const portableForkDefinition = buildPortableForkSubAgentDefinition({
+      skillId: primaryPortableSkillId,
+      manifest: primaryPortableManifest,
+      resolvedAgent: primaryPortableResolvedAgent,
+      fallbackToolNames: portableForkToolNames,
+      contextMode: primaryPortableContextMode,
+      modelOverride: portableSkillContext?.modelOverride ?? null,
+    });
+    const portableForkTask = buildPortableForkTaskText({
+      manifest: primaryPortableManifest,
+      userPrompt: runtimeUserPromptForRun,
+      hooksNotice: buildPortableSkillHooksNotice(primaryPortableManifest),
+      toolPolicyNotice: buildPortableAllowedToolPolicyNotice(portableSkillContext?.allowedToolPolicy ?? null),
+    });
+    const portableForkToolCallId = `portable_fork:${primaryPortableSkillId}`;
+    const portableForkChildRunId = `${runId}:sub:${portableForkToolCallId}`;
+
+    writeEvent("run.execution.mode", {
+      runId,
+      executionMode: "portable_skill_fork",
+      portableSkillId: primaryPortableSkillId,
+      requestedAgent: primaryPortableResolvedAgent.requestedAgent ?? null,
+      agentId: portableForkDefinition.id,
+      cleanRoom: primaryPortableContextMode === "fork",
+      turn: 0,
+    });
+
+    const portableForkBridge = new SubAgentExecutionBridge(runCtx);
+    const portableForkResult = await portableForkBridge.execute(
+      portableForkToolCallId,
+      {
+        agentId: portableForkDefinition.id,
+        task: portableForkTask,
+        ...(String(portableSkillContext?.modelOverride ?? "").trim()
+          ? { model: String(portableSkillContext?.modelOverride ?? "").trim() }
+          : {}),
+      },
+      0,
+      {
+        definitionOverride: portableForkDefinition,
+        cleanRoom: primaryPortableContextMode === "fork",
+        inheritSkillRuntime: true,
+      },
+    );
+
+    const portableForkOutput =
+      portableForkResult.output && typeof portableForkResult.output === "object"
+        ? (portableForkResult.output as Record<string, unknown>)
+        : {};
+    const portableForkArtifact = String(portableForkOutput.artifact ?? "").trim();
+    const portableForkRawStatus = String(portableForkOutput.status ?? "").trim().toLowerCase();
+    const portableForkRunStatus: "completed" | "failed" | "aborted" =
+      transport.abortSignal.aborted
+        ? "aborted"
+        : portableForkRawStatus === "completed"
+          ? "completed"
+          : "failed";
+    const portableForkReason =
+      portableForkRunStatus === "completed"
+        ? "completed"
+        : portableForkRunStatus === "aborted"
+          ? "portable_fork_aborted"
+          : portableForkRawStatus === "timeout"
+            ? "portable_fork_timeout"
+            : "portable_fork_failed";
+    const portableForkReasonCodes = Array.from(
+      new Set(
+        [
+          "portable_skill_fork",
+          `skill:${primaryPortableSkillId}`,
+          `portable_fork_mode:${primaryPortableContextMode}`,
+          primaryPortableResolvedAgent.requestedAgent
+            ? `portable_fork_agent:${primaryPortableResolvedAgent.requestedAgent}`
+            : null,
+          portableForkRunStatus === "completed"
+            ? "completed"
+            : portableForkRunStatus === "aborted"
+              ? null
+              : "failed",
+          portableForkRunStatus === "aborted" ? "aborted" : null,
+          portableForkRawStatus === "timeout" ? "portable_fork_timeout" : null,
+        ].filter(Boolean) as string[],
+      ),
+    );
+
+    const portableForkExecutionReport = {
+      providerApi: apiType,
+      portableFork: {
+        active: true,
+        skillId: primaryPortableSkillId,
+        requestedAgent: primaryPortableResolvedAgent.requestedAgent ?? null,
+        resolvedAgentId: portableForkDefinition.id,
+        childRunId: portableForkChildRunId,
+        cleanRoom: primaryPortableContextMode === "fork",
+        status: portableForkRawStatus || portableForkRunStatus,
+        turnsUsed: Number(portableForkOutput.turnsUsed ?? 0) || 0,
+        toolCallsUsed: Number(portableForkOutput.toolCallsUsed ?? 0) || 0,
+        artifactChars: portableForkArtifact.length,
+      },
+      runState,
+    };
+
+    try {
+      (audit.meta as any).runtimeExecutionSummary = sanitizeForAudit({
+        providerApi: apiType,
+        portableFork: portableForkExecutionReport.portableFork,
+      });
+    } catch {
+      // ignore audit summary mutation failures
+    }
+
+    let emittedPortableForkFallback = false;
+    if (portableForkRunStatus !== "completed" && !portableForkArtifact) {
+      emittedPortableForkFallback = true;
+      writeEvent("assistant.start", { runId, turn: 0 });
+      writeEvent("assistant.delta", {
+        delta:
+          `/${primaryPortableSkillId} 的子 run 没有完成。` +
+          (primaryPortableContextMode === "fork"
+            ? "这次已按真实 clean-room fork 执行，没有再降级回主 run prompt 模式。"
+            : "这次已按真实 child run 执行，没有再降级回主 run prompt 模式。"),
+        turn: 0,
+      });
+    }
+
+    if (portableForkRunStatus !== "completed") {
+      writeEvent("run.notice", {
+        turn: 0,
+        kind: "error",
+        title: "PortableSkillFork",
+        message: `/${primaryPortableSkillId} 子 run 未完成。`,
+        detail: {
+          status: portableForkRunStatus,
+          childStatus: portableForkRawStatus || null,
+          requestedAgent: primaryPortableResolvedAgent.requestedAgent ?? null,
+          resolvedAgentId: portableForkDefinition.id,
+          childRunId: portableForkChildRunId,
+        },
+      });
+    }
+
+    writeEvent("run.execution.report", {
+      runId,
+      ...portableForkExecutionReport,
+    });
+    writeEvent("run.end", {
+      runId,
+      reason: portableForkReason,
+      reasonCodes: portableForkReasonCodes,
+      status: portableForkRunStatus,
+      turn: 0,
+      executionReport: portableForkExecutionReport,
+      ...(portableForkRunStatus !== "completed"
+        ? {
+            detail: {
+              childStatus: portableForkRawStatus || null,
+              requestedAgent: primaryPortableResolvedAgent.requestedAgent ?? null,
+              resolvedAgentId: portableForkDefinition.id,
+              childRunId: portableForkChildRunId,
+            },
+          }
+        : {}),
+    });
+    if (emittedPortableForkFallback) {
+      writeEvent("assistant.done", { reason: portableForkReason, status: portableForkRunStatus, turn: 0 });
+    }
+    await persistOnce();
+    return;
+  }
 
   const shouldRunStylePipeline =
     styleExecutionMode === "pipeline_v1" &&
@@ -5926,7 +6599,7 @@ export async function executeAgentRun(args: {
   const runtime = createRuntime({ runCtx });
   let runnerOutcome = runtime.getOutcome();
   try {
-    await runtime.run(userPrompt, body.images?.length ? body.images : undefined);
+    await runtime.run(runtimeUserPromptForRun, body.images?.length ? body.images : undefined);
     runnerOutcome = runtime.getOutcome();
   } catch (err: any) {
     const msg = String(err?.message ?? err ?? "RUNNER_ERROR");

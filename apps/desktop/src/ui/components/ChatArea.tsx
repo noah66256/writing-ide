@@ -11,6 +11,11 @@ import {
 } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import {
+  getToolResultEnvelopePayload,
+  getToolResultEnvelopeSummary,
+  isToolResultEnvelope,
+} from "@ohmycrab/shared";
 import { cn } from "@/lib/utils";
 import {
   useRunStore,
@@ -20,6 +25,8 @@ import {
   type ToolBlockStep,
   type ImageAttachment,
   type RuntimeThreadRecord,
+  type RuntimeItemRecord,
+  type RuntimeCollabSessionRecord,
   type TodoItem,
   setActiveRunCancel,
   cancelActiveRun,
@@ -60,6 +67,149 @@ function looksLikeKbPanelOnlyIntent(text: string): boolean {
   const looksLikeDebug = /(问题|bug|报错|失败|修复|检查|日志|代码|实现|排查|原因|为什么)/i.test(t);
   if (looksLikeDebug) return false;
   return true;
+}
+
+function fastAutosaveHash(text: string, maxChars = 256) {
+  const raw = String(text ?? "");
+  const len = raw.length;
+  const limit = Math.min(len, maxChars);
+  let hash = 2166136261;
+  for (let i = 0; i < limit; i += 1) {
+    hash ^= raw.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${len}:${(hash >>> 0).toString(16)}`;
+}
+
+function summarizeAutosaveValue(value: unknown, depth = 0): string {
+  if (value == null) return "null";
+  if (typeof value === "string") return `s:${fastAutosaveHash(value)}`;
+  if (typeof value === "number" || typeof value === "boolean") return `${typeof value}:${String(value)}`;
+  if (Array.isArray(value)) {
+    if (depth >= 1) return `a:${value.length}`;
+    const head = value.slice(0, 2).map((item) => summarizeAutosaveValue(item, depth + 1));
+    const tail = value.length > 4 ? value.slice(-2).map((item) => summarizeAutosaveValue(item, depth + 1)) : [];
+    return `a:${value.length}:${[...head, ...tail].join(",")}`;
+  }
+  if (typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    const keys = Object.keys(obj).sort();
+    if (depth >= 1) return `o:${keys.join(",")}`;
+    return `o:${keys.slice(0, 8).map((key) => `${key}=${summarizeAutosaveValue(obj[key], depth + 1)}`).join(",")}`;
+  }
+  return typeof value;
+}
+
+function summarizeStepForAutosave(step: Step | null | undefined) {
+  const raw = (step ?? {}) as any;
+  return [
+    String(raw.id ?? ""),
+    String(raw.type ?? ""),
+    String(raw.status ?? ""),
+    String(raw.toolName ?? ""),
+    fastAutosaveHash(String(raw.text ?? raw.summary ?? raw.message ?? "")),
+  ].join(":");
+}
+
+function summarizeTodoForAutosave(item: TodoItem | null | undefined) {
+  const raw = (item ?? {}) as any;
+  return [
+    String(raw.id ?? ""),
+    String(raw.status ?? ""),
+    fastAutosaveHash(String(raw.text ?? raw.title ?? "")),
+  ].join(":");
+}
+
+function summarizePendingArtifactForAutosave(item: unknown) {
+  const raw = (item ?? {}) as Record<string, unknown>;
+  return [
+    String(raw.id ?? ""),
+    String(raw.kind ?? ""),
+    String(raw.pathHint ?? ""),
+    String(raw.sourceTool ?? ""),
+    String(raw.ifExists ?? ""),
+  ].join(":");
+}
+
+function summarizeThreadForAutosave(thread: RuntimeThreadRecord | null | undefined) {
+  const raw = (thread ?? {}) as any;
+  const workflow = raw?.taskState?.workflow ?? raw?.workflow ?? null;
+  return [
+    String(raw?.id ?? ""),
+    String(raw?.runId ?? ""),
+    String(raw?.status ?? ""),
+    summarizeAutosaveValue(raw?.activeSkillRefs ?? []),
+    summarizeAutosaveValue(workflow),
+  ].join(":");
+}
+
+function buildAutosaveSignature(args: {
+  activeConvId: string | null;
+  rootDir: string | null;
+  mode: string;
+  model: string;
+  opMode: string;
+  renderSteps: Step[];
+  logs: unknown[];
+  turns: unknown[];
+  items: unknown[];
+  activeItemIds: string[];
+  collabSessions: unknown[];
+  todoList: TodoItem[];
+  mainDoc: Record<string, unknown> | null | undefined;
+  kbAttachedLibraryIds: string[];
+  thread: RuntimeThreadRecord | null | undefined;
+  ctxRefs: unknown[];
+  pendingArtifacts: unknown[];
+  dialogueSummaryByMode: unknown;
+  dialogueSummaryTurnCursorByMode: unknown;
+}) {
+  const tailSteps = args.renderSteps.slice(-4).map((step) => summarizeStepForAutosave(step)).join("|");
+  const tailTodos = args.todoList.slice(-4).map((item) => summarizeTodoForAutosave(item)).join("|");
+  const tailArtifacts = args.pendingArtifacts.slice(-4).map((item) => summarizePendingArtifactForAutosave(item)).join("|");
+  return [
+    `conv:${args.activeConvId ?? ""}`,
+    `root:${args.rootDir ?? ""}`,
+    `mode:${args.mode}:${args.model}:${args.opMode}`,
+    `steps:${args.renderSteps.length}:${tailSteps}`,
+    `logs:${args.logs.length}`,
+    `turns:${args.turns.length}`,
+    `items:${args.items.length}:${args.activeItemIds.length}:${args.collabSessions.length}`,
+    `todos:${args.todoList.length}:${tailTodos}`,
+    `mainDoc:${summarizeAutosaveValue(args.mainDoc ?? {})}`,
+    `kb:${args.kbAttachedLibraryIds.join(",")}`,
+    `thread:${summarizeThreadForAutosave(args.thread)}`,
+    `ctx:${summarizeAutosaveValue(args.ctxRefs)}`,
+    `artifacts:${args.pendingArtifacts.length}:${tailArtifacts}`,
+    `dialogue:${summarizeAutosaveValue(args.dialogueSummaryByMode)}:${summarizeAutosaveValue(args.dialogueSummaryTurnCursorByMode)}`,
+  ].join("||");
+}
+
+function hasAutosaveableDraftState(args: {
+  renderSteps: Step[];
+  todoList: TodoItem[];
+  pendingArtifacts: unknown[];
+  ctxRefs: unknown[];
+  kbAttachedLibraryIds: string[];
+  thread: RuntimeThreadRecord | null | undefined;
+  mainDoc: Record<string, unknown> | null | undefined;
+  rootDir: string | null;
+}) {
+  return (
+    args.renderSteps.length > 0 ||
+    args.todoList.length > 0 ||
+    args.pendingArtifacts.length > 0 ||
+    args.ctxRefs.length > 0 ||
+    args.kbAttachedLibraryIds.length > 0 ||
+    Boolean(args.rootDir) ||
+    (Array.isArray(args.thread?.activeSkillRefs) && args.thread.activeSkillRefs.length > 0) ||
+    Object.values(args.mainDoc ?? {}).some((value) => {
+      if (value == null) return false;
+      if (typeof value === "string") return Boolean(value.trim());
+      if (typeof value === "object") return Object.keys(value as Record<string, unknown>).length > 0;
+      return true;
+    })
+  );
 }
 
 function tryPreAttachStyleLibraryFromPrompt(args: {
@@ -929,11 +1079,16 @@ export function ChatArea() {
   const thread = useRunStore((s) => s.thread);
   const ctxRefs = useRunStore((s) => s.ctxRefs);
   const pendingArtifacts = useRunStore((s) => s.pendingArtifacts);
+  const logs = useRunStore((s) => s.logs);
+  const turns = useRunStore((s) => s.turns);
+  const dialogueSummaryByMode = useRunStore((s) => s.dialogueSummaryByMode);
+  const dialogueSummaryTurnCursorByMode = useRunStore((s) => s.dialogueSummaryTurnCursorByMode);
   const mode = useRunStore((s) => s.mode);
   const model = useRunStore((s) => s.model);
   const opMode = useRunStore((s) => s.opMode);
   const setOpMode = useRunStore((s) => s.setOpMode);
   const hasMoreHistoryBefore = useRunStore((s) => s.historyWindow?.hasMoreBefore ?? false);
+  const rootDir = useProjectStore((s) => s.rootDir);
 
   const [suggestText, setSuggestText] = useState<string>("");
   const [todoPanelCollapsed, setTodoPanelCollapsed] = useState(false);
@@ -944,6 +1099,10 @@ export function ChatArea() {
   const stickRef = useRef(true);
   const loadingMoreHistoryRef = useRef(false);
   const autoSaveDirtyRef = useRef(false);
+  const autoSaveInitializedRef = useRef(false);
+  const latestAutosaveSignatureRef = useRef("");
+  const lastSavedAutosaveSignatureRef = useRef("");
+  const prevAutosaveConvIdRef = useRef<string | null>(null);
   const controllerRef = useRef<RunController | null>(null);
   const prevRunningRef = useRef(false);
 
@@ -966,6 +1125,51 @@ export function ChatArea() {
   );
   const showWorkflowTodoPanel = todoList.length > 0 && (isRunning || hasPendingTodo);
   const renderRows = useMemo(() => buildRenderRows(renderSteps), [renderSteps]);
+  const autosaveSignature = useMemo(
+    () =>
+      buildAutosaveSignature({
+        activeConvId,
+        rootDir,
+        mode,
+        model,
+        opMode,
+        renderSteps,
+        logs: (logs ?? []) as unknown[],
+        turns: (turns ?? []) as unknown[],
+        items: (items ?? []) as unknown[],
+        activeItemIds: (activeItemIds ?? []) as string[],
+        collabSessions: (collabSessions ?? []) as unknown[],
+        todoList,
+        mainDoc: (mainDoc ?? {}) as Record<string, unknown>,
+        kbAttachedLibraryIds,
+        thread,
+        ctxRefs: (ctxRefs ?? []) as unknown[],
+        pendingArtifacts: (pendingArtifacts ?? []) as unknown[],
+        dialogueSummaryByMode,
+        dialogueSummaryTurnCursorByMode,
+      }),
+    [
+      activeConvId,
+      rootDir,
+      mode,
+      model,
+      opMode,
+      renderSteps,
+      logs,
+      turns,
+      items,
+      activeItemIds,
+      collabSessions,
+      todoList,
+      mainDoc,
+      kbAttachedLibraryIds,
+      thread,
+      ctxRefs,
+      pendingArtifacts,
+      dialogueSummaryByMode,
+      dialogueSummaryTurnCursorByMode,
+    ],
+  );
 
   // 自动滚动到底部
   useEffect(() => {
@@ -1067,48 +1271,75 @@ export function ChatArea() {
 
   // 自动保存：使用脏标记 + 固定间隔轮询，避免连续工具调用/流式输出饿死 timer
   useEffect(() => {
-    autoSaveDirtyRef.current = true;
-  }, [renderSteps, mainDoc, todoList, kbAttachedLibraryIds, thread, ctxRefs, pendingArtifacts, mode, model, activeConvId]);
+    latestAutosaveSignatureRef.current = autosaveSignature;
+    if (!autoSaveInitializedRef.current) {
+      autoSaveInitializedRef.current = true;
+      prevAutosaveConvIdRef.current = activeConvId;
+      lastSavedAutosaveSignatureRef.current = autosaveSignature;
+      autoSaveDirtyRef.current = false;
+      return;
+    }
+    if (prevAutosaveConvIdRef.current !== activeConvId) {
+      prevAutosaveConvIdRef.current = activeConvId;
+      lastSavedAutosaveSignatureRef.current = autosaveSignature;
+      autoSaveDirtyRef.current = false;
+      return;
+    }
+    if (autosaveSignature !== lastSavedAutosaveSignatureRef.current) {
+      autoSaveDirtyRef.current = true;
+    }
+  }, [activeConvId, autosaveSignature]);
 
   // 自动保存草稿到 conversationStore，同时更新活跃对话（带防降级保护）
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (!autoSaveDirtyRef.current) return;
+      const currentSignature = latestAutosaveSignatureRef.current;
+      if (!currentSignature || currentSignature === lastSavedAutosaveSignatureRef.current) {
+        autoSaveDirtyRef.current = false;
+        return;
+      }
 
+      const runState = useRunStore.getState() as any;
       const convStore = useConversationStore.getState();
       const convIdNow = convStore.activeConvId;
 
-    const hasDraftState =
-      renderSteps.length > 0 ||
-      todoList.length > 0 ||
-      pendingArtifacts.length > 0 ||
-      ctxRefs.length > 0 ||
-      kbAttachedLibraryIds.length > 0 ||
-      (Array.isArray(thread?.activeSkillRefs) && thread.activeSkillRefs.length > 0) ||
-      Object.values(mainDoc ?? {}).some((v) => {
-        if (v == null) return false;
-        if (typeof v === "string") return Boolean(v.trim());
-        if (typeof v === "object") return Object.keys(v as Record<string, unknown>).length > 0;
-        return true;
+      const projectedSteps = getProjectedStepsFromRuntime({
+        steps: runState.steps ?? [],
+        items: (runState.items ?? []) as RuntimeItemRecord[],
+        activeItemIds: (runState.activeItemIds ?? []) as string[],
+        collabSessions: (runState.collabSessions ?? []) as RuntimeCollabSessionRecord[],
       });
-      const hasConversationContext = Boolean(convIdNow) || Boolean(model) || Boolean(mode);
+      const hasDraftState = hasAutosaveableDraftState({
+        renderSteps: projectedSteps as Step[],
+        todoList: (runState.todoList ?? []) as TodoItem[],
+        pendingArtifacts: (runState.pendingArtifacts ?? []) as unknown[],
+        ctxRefs: (runState.ctxRefs ?? []) as unknown[],
+        kbAttachedLibraryIds: (runState.kbAttachedLibraryIds ?? []) as string[],
+        thread: (runState.thread ?? null) as RuntimeThreadRecord | null,
+        mainDoc: (runState.mainDoc ?? {}) as Record<string, unknown>,
+        rootDir: useProjectStore.getState().rootDir ?? null,
+      });
+      const hasConversationContext = Boolean(convIdNow) || Boolean(runState.model) || Boolean(runState.mode);
       if (!hasDraftState && !hasConversationContext) {
         autoSaveDirtyRef.current = false;
+        lastSavedAutosaveSignatureRef.current = currentSignature;
         return;
       }
 
       // 防降级：当前运行态完全为空，但 active 对话已有非空 snapshot 时，
       // 跳过本轮自动保存，避免把历史对话误写成"空对话"快照。
-    const existingSnapshot =
-      convIdNow
-        ? convStore.conversations.find((c) => c.id === convIdNow)?.snapshot
-        : null;
-    const existingSteps =
-      existingSnapshot && Array.isArray((existingSnapshot as any).steps)
-        ? (existingSnapshot as any).steps.length
-        : 0;
+      const existingSnapshot =
+        convIdNow
+          ? convStore.conversations.find((c) => c.id === convIdNow)?.snapshot
+          : null;
+      const existingSteps =
+        existingSnapshot && Array.isArray((existingSnapshot as any).steps)
+          ? (existingSnapshot as any).steps.length
+          : 0;
       if (!hasDraftState && existingSteps > 0) {
         autoSaveDirtyRef.current = false;
+        lastSavedAutosaveSignatureRef.current = currentSignature;
         return;
       }
 
@@ -1117,17 +1348,21 @@ export function ChatArea() {
       if (convIdNow) {
         convStore.updateConversation(convIdNow, { snapshot: snap });
       }
+      lastSavedAutosaveSignatureRef.current = currentSignature;
       autoSaveDirtyRef.current = false;
     }, 2000);
     return () => window.clearInterval(timer);
-  }, [renderSteps, mainDoc, todoList, kbAttachedLibraryIds, thread, ctxRefs, pendingArtifacts, mode, model]);
+  }, []);
 
   // 运行结束时立即刷盘一次，避免 dev/HMR/强制退出导致最后一轮没落盘
   useEffect(() => {
     const prev = prevRunningRef.current;
     if (prev && !isRunning) {
       try {
-        void useConversationStore.getState().flushDraftSnapshotNow().catch(() => void 0);
+        void useConversationStore.getState().flushDraftSnapshotNow().then(() => {
+          lastSavedAutosaveSignatureRef.current = latestAutosaveSignatureRef.current;
+          autoSaveDirtyRef.current = false;
+        }).catch(() => void 0);
       } catch {
         // ignore
       }
@@ -2049,7 +2284,8 @@ function _trunc(v: unknown, max = 48): string {
 }
 
 function _asRecord(v: unknown): Record<string, unknown> {
-  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+  const payload = getToolResultEnvelopePayload(v);
+  return payload && typeof payload === "object" && !Array.isArray(payload) ? (payload as Record<string, unknown>) : {};
 }
 
 const TOOL_DISPLAY_NAMES: Record<string, string> = {
@@ -2136,6 +2372,11 @@ function summarizeToolInput(toolName: string, input: unknown): string {
 
 function summarizeToolOutput(toolName: string, output: unknown): string {
   if (output == null) return "";
+  if (isToolResultEnvelope(output)) {
+    const summary = getToolResultEnvelopeSummary(output);
+    if (summary) return _trunc(summary, 60);
+    return summarizeToolOutput(toolName, getToolResultEnvelopePayload(output));
+  }
   if (typeof output === "string") {
     const docCreated = output.match(/^Document\s+(.+?)\s+created successfully\.?$/i)?.[1];
     if (docCreated) return `已创建文档《${docCreated.trim()}》`;
