@@ -6,7 +6,13 @@ import { type LlmTokenUsage } from "../billing.js";
 import { type OpenAiChatMessage } from "../llm/openaiCompat.js";
 import { completionOnceViaProvider, isGeminiLikeEndpoint } from "../llm/providerAdapter.js";
 import { toolNamesForMode, type AgentMode } from "./toolRegistry.js";
-import { applyOpModeToBaseAllowedTools, ensureCoreToolsSelected, CORE_TOOL_NAME_SET, type OpMode } from "./coreTools.js";
+import {
+  applyOpModeToBaseAllowedTools,
+  ensureCoreToolsSelected,
+  CORE_TOOL_NAME_SET,
+  HIGH_RISK_TOOL_NAME_SET,
+  type OpMode,
+} from "./coreTools.js";
 import {
   buildMcpServerCatalog,
   filterMcpToolsByServerIds,
@@ -1237,7 +1243,7 @@ export function buildAgentProtocolPrompt(args: {
           }
           return (
             `当前助手权限：创作模式（安全）。\n` +
-            `- 你可以自由使用写作/检索/KB/风格相关工具，但禁止执行任何本机命令或全局技能安装（如 shell.exec / process.* / cron.* / skill.install）。\n` +
+            `- 你可以自由使用写作/检索/KB/风格相关工具，但禁止执行任何高风险本机运行时工具、全局技能安装或 MCP 生命周期变更（如 code.exec / shell.exec / process.* / cron.* / skill.install / mcpServer.applyInstall / mcpServer.applyUpgrade / mcpServer.uninstall）。\n` +
             `- 不要建议用户你“已经”执行了命令或安装了软件；在创作模式下，你只能给出命令建议，由用户自行执行。\n\n`
           );
         })()
@@ -1299,7 +1305,9 @@ export function buildAgentProtocolPrompt(args: {
         `- 如果用户要求把结果写入项目，你必须调用相关工具真正写入；不要只在文本里声称"已完成"。\n` +
         `- 若需要调用工具：直接使用工具，不要在工具调用消息中夹带不相关的 Markdown。\n` +
         `- 如需更新多个 Todo/Main Doc：在同一轮中批量调用多个工具，减少回合。\n` +
-        `- 写入类操作遵守系统的 proposal-first 机制：先给出提案，再由用户决定是否应用或回滚。\n` +
+        `- 文本写入合同以工具真实 applyPolicy 为准：doc.previewDiff 只生成提案/diff，不会写盘；write/edit 才会真实修改文件，并按各自风险策略申请确认或提供回滚。\n` +
+        `- 当用户明确要求“先看 diff / 不要直接覆盖 / 先讨论方案”时，必须先调用 doc.previewDiff；在收到用户确认前，不要继续 write/edit。\n` +
+        `- 在收到 write/edit 的成功结果前，不得声称“已写入/已落盘/已保存完成”。\n` +
         `- 交付文件导航：任务产出了文件（write/code.exec 等写入的文件）时，在最终交付文字中列出所有产出文件的相对路径（如 output/report.md），供用户点击打开。路径直接写纯文本，不要用反引号或代码格式包裹。不要主动调用 file.open 自动打开文件，除非用户明确要求"打开"或"预览"。\n` +
         `- 写作产出格式：写作类任务默认用 write 输出 .md 文件（Markdown 省 token、可 diff、可 proposal-first）。write 只能写纯文本文件（.md/.txt/.json 等），不能创建真实的 .docx/.xlsx/.pptx/.pdf。用户要求 Office/PDF 格式时，优先用对应 MCP 工具（Word MCP / Excel MCP）；仅当工具列表中无对应 MCP 时才退回 code.exec。\n\n` +
         `Skills（必须执行）：\n` +
@@ -1959,6 +1967,25 @@ export function shouldAllowCodeExecForRun(args: {
   if (routeId === "web_radar") return false;
   if (looksLikeExplicitShellExecIntent(args.userPrompt)) return false;
   return looksLikeExplicitCodeExecIntent(args.userPrompt);
+}
+
+export function shouldExposeRuntimeHighRiskToolsForRun(args: {
+  opMode: "creative" | "assistant";
+  userPrompt: string;
+  routeId: string;
+  intentIsWritingTask: boolean;
+  styleWorkflowActive: boolean;
+  hasPortableScopedHighRiskGrant: boolean;
+}): boolean {
+  if (args.hasPortableScopedHighRiskGrant) return true;
+  if (args.opMode !== "assistant") return false;
+  if (args.routeId === "file_delete_only" || args.routeId === "file_ops" || looksLikeFileOpsIntent(args.userPrompt)) {
+    return true;
+  }
+  if (args.intentIsWritingTask || args.styleWorkflowActive) {
+    return looksLikeExplicitShellExecIntent(args.userPrompt) || looksLikeExplicitCodeExecIntent(args.userPrompt);
+  }
+  return true;
 }
 
 export function resolveStickyMcpServerIds(args: {
@@ -3094,6 +3121,18 @@ export async function prepareAgentRun(args: {
     primaryPortableInvocationManifest?.agent,
     subAgentDefinitionById,
   );
+  const portableExecutionScope: NonNullable<RunContext["portableSkillContext"]>["executionScope"] | undefined =
+    primaryPortableSkillId
+      ? "explicit_portable_invocation"
+      : activePortableManifests.length > 0
+        ? "skill_activation"
+        : undefined;
+  const portableScopedHighRiskToolNames = new Set<string>();
+  if (portableAllowedToolPolicy?.allowedToolNames?.size && portableExecutionScope === "explicit_portable_invocation") {
+    for (const name of portableAllowedToolPolicy.allowedToolNames) {
+      if (HIGH_RISK_TOOL_NAME_SET.has(name)) portableScopedHighRiskToolNames.add(name);
+    }
+  }
   const portableForkPlan = primaryPortableInvocationManifest &&
     (primaryPortableContextMode === "fork" || primaryPortableResolvedAgent.agentId)
       ? {
@@ -3184,6 +3223,8 @@ export async function prepareAgentRun(args: {
           primarySkillId: primaryPortableSkillId || undefined,
           modelOverride: primaryPortableModelOverride || undefined,
           allowedToolPolicy: portableAllowedToolPolicy ?? undefined,
+          executionScope: portableExecutionScope,
+          scopedHighRiskToolNames: portableScopedHighRiskToolNames.size > 0 ? Array.from(portableScopedHighRiskToolNames) : undefined,
           inputStates: Array.from(portableInvocationStateBySkillId.values()),
           hooksSkillIds: activePortableManifests
             .filter((manifest: any) => manifest?.hooks !== undefined)
@@ -3265,7 +3306,7 @@ export async function prepareAgentRun(args: {
           "- skill 草稿、eval workspace、临时副本可以放在当前项目目录或临时 workspace 中。",
           "- 最终安装到用户可用的全局 skills 目录时，必须调用 skill.install；它写入的是 Desktop 管理的用户 skills 根目录，不是当前项目目录。",
           runOpMode === "assistant"
-            ? "- 当前为助手模式：当用户明确要安装最终版 skill 时，可以直接调用 skill.install。"
+            ? "- 当前为助手模式：安装全局 skill 优先调用 skill.install；若用户要安装/配置 MCP，优先调用 mcpServer.planInstall / mcpServer.applyInstall，不要直接用 shell.exec 模拟安装。"
             : "- 当前为创作模式：禁止直接调用 skill.install。若用户要把最终版 skill 装到全局 skills 目录，先整理好草稿，再提醒用户切到助手模式。",
         ].join("\n"),
       );
@@ -3726,7 +3767,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
 
   // 观察 agent vs assistant 模式下高危运行时工具的可见性（用于排查 shell.exec/process.* 暂不可用问题）
   try {
-    const runtimeToolNames = ["shell.exec", "process.run", "process.list", "process.stop", "cron.create", "cron.list"];
+    const runtimeToolNames = Array.from(HIGH_RISK_TOOL_NAME_SET);
     const runtimeToolsInBase = Array.from(baseAllowedToolNames).filter((n) => runtimeToolNames.includes(n));
     services.fastify.log.info(
       {
@@ -3801,7 +3842,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       if (Array.isArray(allowTools)) {
         for (const tn of allowTools) {
           const name = String(tn ?? "").trim();
-          if (name && allToolNamesForMode.has(name)) {
+          if (name && allToolNamesForMode.has(name) && !HIGH_RISK_TOOL_NAME_SET.has(name)) {
             baseAllowedToolNames.add(name);
             skillPinnedToolNames.add(name);
           }
@@ -3812,10 +3853,16 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
 
   if (portableAllowedToolPolicy?.allowedToolNames.size) {
     for (const name of portableAllowedToolPolicy.allowedToolNames) {
-      if (allToolNamesForMode.has(name)) {
-        baseAllowedToolNames.add(name);
-        skillPinnedToolNames.add(name);
+      if (!allToolNamesForMode.has(name)) continue;
+      if (HIGH_RISK_TOOL_NAME_SET.has(name)) {
+        if (portableScopedHighRiskToolNames.has(name)) {
+          baseAllowedToolNames.add(name);
+          skillPinnedToolNames.add(name);
+        }
+        continue;
       }
+      baseAllowedToolNames.add(name);
+      skillPinnedToolNames.add(name);
     }
   }
   if (!portableAllowedToolPolicy?.allowedToolNames.size && portableAgentToolNames.size > 0) {
@@ -4114,7 +4161,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
 
   // 调试：观察经过 Tool Retrieval / Routing 收敛后的工具集合中，高危运行时工具是否仍然存在。
   try {
-    const runtimeToolNames = ["shell.exec", "process.run", "process.list", "process.stop", "cron.create", "cron.list"];
+    const runtimeToolNames = Array.from(HIGH_RISK_TOOL_NAME_SET);
     const runtimeToolsSelected = Array.from(selectedAllowedToolNames).filter((n) => runtimeToolNames.includes(n));
     services.fastify.log.info(
       {
@@ -4228,13 +4275,29 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     selectedAllowedToolNames,
     mcpTools: mcpToolsForRun.map((t) => ({ name: t.name, originalName: t.originalName })),
   });
+  const shouldExposeRuntimeHighRiskTools = shouldExposeRuntimeHighRiskToolsForRun({
+    opMode: runOpMode,
+    userPrompt,
+    routeId: routeIdLower || intentRoute.routeId || "",
+    intentIsWritingTask: Boolean(intent?.isWritingTask),
+    styleWorkflowActive: styleSkillActive,
+    hasPortableScopedHighRiskGrant: portableScopedHighRiskToolNames.size > 0,
+  });
   const allowCodeExecForRun = shouldAllowCodeExecForRun({
     userPrompt,
     routeId: routeIdLower || intentRoute.routeId || "",
     projectDir: projectDirFromSidecar,
   });
-  if (baseAllowedToolNames.has("code.exec")) {
-    if (allowCodeExecForRun) selectedAllowedToolNames.add("code.exec");
+  if (!shouldExposeRuntimeHighRiskTools) {
+    for (const name of HIGH_RISK_TOOL_NAME_SET) {
+      if (!portableScopedHighRiskToolNames.has(name)) selectedAllowedToolNames.delete(name);
+    }
+  }
+  for (const name of portableScopedHighRiskToolNames) {
+    if (baseAllowedToolNames.has(name)) selectedAllowedToolNames.add(name);
+  }
+  if (baseAllowedToolNames.has("code.exec") && !portableScopedHighRiskToolNames.has("code.exec")) {
+    if (shouldExposeRuntimeHighRiskTools && allowCodeExecForRun) selectedAllowedToolNames.add("code.exec");
     else selectedAllowedToolNames.delete("code.exec");
   }
   const compositeCapabilityIssue = validateCompositePhaseCapabilities({
@@ -4949,20 +5012,23 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       }
     }
 
-    // 基于创作/助手模式裁剪高风险 runtime 工具（shell.exec / process.* / cron.* / skill.install）
-    const opModeForTurn: "creative" | "assistant" =
-      (body as any).opMode === "assistant" ? "assistant" : "creative";
-    if (opModeForTurn !== "assistant") {
-      const runtimeHighRiskTools = ["shell.exec", "process.run", "process.list", "process.stop", "cron.create", "cron.list", "skill.install"];
+    // 基于创作/助手模式 + 任务类型裁剪高风险 runtime 工具（统一使用 HIGH_RISK_TOOL_NAME_SET，包含 code.exec）
+    if (!shouldExposeRuntimeHighRiskTools) {
       const removed: string[] = [];
-      for (const name of runtimeHighRiskTools) {
-        if (portableAllowedToolPolicy?.allowedToolNames.has(name)) continue;
+      for (const name of HIGH_RISK_TOOL_NAME_SET) {
+        if (portableScopedHighRiskToolNames.has(name)) continue;
         if (allowed.delete(name)) removed.push(name);
       }
       if (removed.length > 0) {
-        hints.push(
-          "当前为创作模式：已临时禁用 shell.exec / process.* / cron.* / skill.install 等高风险运行时工具；如需执行本机命令或安装到用户全局技能目录，请在桌面端切换到“助手模式”。",
-        );
+        if (runOpMode !== "assistant") {
+          hints.push(
+            "当前为创作模式：已临时禁用 code.exec / shell.exec / process.* / cron.* / skill.install / mcpServer.applyInstall / mcpServer.applyUpgrade / mcpServer.uninstall 等高风险运行时工具；如需执行本机命令、安装全局技能或变更 MCP，请在桌面端切换到“助手模式”。",
+          );
+        } else {
+          hints.push(
+            "当前虽为助手模式，但本轮识别为写作/风格闭环：已默认隐藏 code.exec / shell.exec / process.* / cron.* / skill.install / mcpServer.applyInstall / mcpServer.applyUpgrade / mcpServer.uninstall 等高风险运行时工具，避免绕过写作闭环；如确需显式代码/命令任务，请在用户指令中明确说明。",
+          );
+        }
       }
     }
 
@@ -5436,6 +5502,12 @@ export async function executeAgentRun(args: {
   let collabSessions: CollabAgentSessionRecord[] = Array.isArray(threadSnapshotHint?.collabSessions)
     ? (threadSnapshotHint.collabSessions as CollabAgentSessionRecord[]).filter((item) => item && typeof item === "object")
     : [];
+  let lifecyclePendingWaiting: {
+    kind: "mcp_install" | "mcp_auth";
+    requestId?: string;
+    question?: string;
+    replyHint?: string;
+  } | null = null;
   for (const session of collabSessions) {
     threadState = upsertCollabAgent(threadState, {
       threadId: session.childThreadId,
@@ -5772,6 +5844,7 @@ export async function executeAgentRun(args: {
       }
     }
     if (event === "run.start") {
+      lifecyclePendingWaiting = null;
       if (Array.isArray(threadState.pendingApprovalIds) && threadState.pendingApprovalIds.length > 0) {
         threadState = {
           ...threadState,
@@ -6689,7 +6762,14 @@ export async function executeAgentRun(args: {
   if (shouldRunPortableFork && primaryPortableManifest) {
     const portableForkToolNames =
       portableSkillContext?.allowedToolPolicy?.allowedToolNames?.size
-        ? portableSkillContext.allowedToolPolicy.allowedToolNames
+        ? new Set(
+            Array.from(portableSkillContext.allowedToolPolicy.allowedToolNames).filter((name) =>
+              !HIGH_RISK_TOOL_NAME_SET.has(name) ||
+              (portableSkillContext.executionScope === "explicit_portable_invocation" &&
+                Array.isArray(portableSkillContext.scopedHighRiskToolNames) &&
+                portableSkillContext.scopedHighRiskToolNames.includes(name)),
+            ),
+          )
         : primaryPortableResolvedAgent.definition?.tools?.length
           ? new Set(primaryPortableResolvedAgent.definition.tools)
           : selectedAllowedToolNames;

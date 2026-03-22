@@ -7,6 +7,7 @@ import {
 } from "@ohmycrab/agent-core";
 
 import { resolveSpawnAgentRole } from "./runtime/collabCompat.js";
+import { HIGH_RISK_TOOL_NAME_SET } from "./coreTools.js";
 
 const CLAUDE_TOOL_ALIAS_MAP = new Map<string, string>([
   ["read", "read"],
@@ -115,6 +116,8 @@ export type PortableSkillRunContext = {
   primarySkillId?: string;
   modelOverride?: string;
   allowedToolPolicy?: PortableAllowedToolPolicy | null;
+  executionScope?: "explicit_portable_invocation" | "skill_activation";
+  scopedHighRiskToolNames?: string[];
   inputStates?: PortableInvocationInputState[];
   hooksSkillIds?: string[];
   fork?: {
@@ -823,7 +826,10 @@ export function collectPortableActivationToolNames(
     if (!manifest || typeof manifest !== "object") continue;
     const policy = parsePortableAllowedToolPolicy([manifest]);
     if (policy?.allowedToolNames?.size) {
-      for (const name of policy.allowedToolNames) out.add(name);
+      for (const name of policy.allowedToolNames) {
+        if (HIGH_RISK_TOOL_NAME_SET.has(name)) continue;
+        out.add(name);
+      }
       continue;
     }
     const resolvedAgent = resolvePortableSkillAgent(manifest.agent, registry);

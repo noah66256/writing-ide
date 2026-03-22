@@ -22,6 +22,7 @@ import {
   parsePortableSkillInvocationInput,
   resolvePortableSkillAgent,
 } from "./portableSkillCompat.js";
+import { HIGH_RISK_TOOL_NAME_SET } from "./coreTools.js";
 
 export type ServerToolExecutionDecision = {
   executedBy: "gateway" | "desktop";
@@ -1052,7 +1053,7 @@ function executeSkillsActivateOnGateway(args: {
   if (Array.isArray((manifest as any)?.toolCaps?.allowTools)) {
     for (const name of (manifest as any).toolCaps.allowTools) {
       const normalized = String(name ?? "").trim();
-      if (normalized) activationToolNames.add(normalized);
+      if (normalized && !HIGH_RISK_TOOL_NAME_SET.has(normalized)) activationToolNames.add(normalized);
     }
   }
   for (const name of collectPortableActivationToolNames([manifest], args.subAgentDefinitionById ?? null)) {
@@ -1099,11 +1100,13 @@ function executeSkillsActivateOnGateway(args: {
         renderedPrompt,
         portable: manifest.portable === true,
         contextMode: normalizePortableContextMode(manifest.context),
+        executionScope: manifest.portable ? "skill_activation" : null,
         modelOverride: String(manifest.model ?? "").trim() || null,
         requestedAgent: resolvedAgent.requestedAgent ?? null,
         agentId: resolvedAgent.agentId ?? null,
         inputState: inputState ?? null,
         toolNames: Array.from(activationToolNames).filter(Boolean),
+        scopedHighRiskToolNames: [],
         allowedToolPolicy: portableAllowedToolPolicy
           ? {
               activeSkillIds: portableAllowedToolPolicy.activeSkillIds,

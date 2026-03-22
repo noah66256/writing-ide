@@ -160,6 +160,7 @@ function buildHint(snapshot: WorkflowSkillPhaseSnapshot, state: RunState, nextTo
       "style_imitate 编排阶段：风格样例已具备，现在先产出候选草稿。",
       "- 只调用 write 生成候选稿（draft），不要直接宣称终稿完成。",
       "- 草稿应服务于后续 lint.copy / lint.style，不要跳过审计。",
+      "- 不要改用 code.exec / shell.exec / process.* 生成或覆写正文，它们不是 style 闭环的合法捷径。",
     ].join("\n");
   }
 
@@ -174,7 +175,7 @@ function buildHint(snapshot: WorkflowSkillPhaseSnapshot, state: RunState, nextTo
     return [
       "style_imitate 编排阶段：已有草稿，现在先做复述风险检查。",
       "- 优先调用 lint.copy，对候选稿做复述/重合风险审计。",
-      "- copy lint 通过前，不要做终稿写入。",
+      "- copy lint 通过前，不要做终稿写入，也不要改走 shell/code 旁路。",
     ].join("\n");
   }
 
@@ -189,7 +190,7 @@ function buildHint(snapshot: WorkflowSkillPhaseSnapshot, state: RunState, nextTo
     return [
       "style_imitate 编排阶段：copy lint 已通过，现在做风格校验。",
       "- 优先调用 lint.style，确认结构/节奏/语气已贴合目标风格。",
-      "- style lint 通过后，才进入终稿写入。",
+      "- style lint 通过后，才进入终稿写入；不要改用 code.exec / shell.exec / process.* 绕过校验。",
     ].join("\n");
   }
 
@@ -197,6 +198,7 @@ function buildHint(snapshot: WorkflowSkillPhaseSnapshot, state: RunState, nextTo
     return [
       "style_imitate 编排阶段：lint 已满足，现在把 best draft 落成终稿。",
       "- 优先 write / edit 更新终稿，再 run.done 收口。",
+      "- 如果只是想先给用户看差异，请用 doc.previewDiff；不要把 preview 说成“已经落盘”。",
     ].join("\n");
   }
 

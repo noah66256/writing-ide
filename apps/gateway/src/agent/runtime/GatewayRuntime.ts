@@ -53,7 +53,7 @@ import {
   decideServerToolExecution,
   executeServerToolOnGateway,
 } from "../serverToolRunner.js";
-import { CORE_TOOL_NAME_SET } from "../coreTools.js";
+import { CORE_TOOL_NAME_SET, HIGH_RISK_TOOL_NAME_SET } from "../coreTools.js";
 import { normalizeToolParametersSchema } from "../../llm/toolSchema.js";
 import { TurnEngine, type RunOutcome } from "../turnEngine.js";
 import type { ModelApiType, ToolResultPayload } from "../writingAgentRunner.js";
@@ -1364,7 +1364,7 @@ export class GatewayRuntime implements AgentRuntime {
         : [];
       for (const raw of toolCaps) {
         const name = String(raw ?? "").trim();
-        if (name) out.add(name);
+        if (name && !HIGH_RISK_TOOL_NAME_SET.has(name)) out.add(name);
       }
       for (const name of collectPortableActivationToolNames([manifest])) out.add(name);
     }
@@ -1408,7 +1408,7 @@ export class GatewayRuntime implements AgentRuntime {
       : [];
     for (const raw of toolCaps) {
       const name = String(raw ?? "").trim();
-      if (name) nextAllowed.add(name);
+      if (name && !HIGH_RISK_TOOL_NAME_SET.has(name)) nextAllowed.add(name);
     }
     for (const raw of Array.isArray(output?.activation?.toolNames) ? output.activation.toolNames : []) {
       const name = String(raw ?? "").trim();
@@ -1443,6 +1443,9 @@ export class GatewayRuntime implements AgentRuntime {
         this.config.runCtx.subAgentDefinitionById ?? null,
       );
       const contextMode = normalizePortableContextMode(output?.activation?.contextMode ?? manifest.context);
+      const existingScopedHighRiskToolNames = Array.isArray(existing?.scopedHighRiskToolNames)
+        ? Array.from(new Set(existing.scopedHighRiskToolNames.map((item) => String(item ?? "").trim()).filter(Boolean)))
+        : [];
       this.config.runCtx.portableSkillContext = {
         activeSkillIds: activePortableIds,
         primarySkillId: String(existing?.primarySkillId ?? "").trim() || skillId,
@@ -1452,6 +1455,8 @@ export class GatewayRuntime implements AgentRuntime {
           String(manifest.model ?? "").trim() ||
           undefined,
         allowedToolPolicy: allowedToolPolicy ?? undefined,
+        executionScope: existing?.executionScope ?? "skill_activation",
+        scopedHighRiskToolNames: existingScopedHighRiskToolNames.length > 0 ? existingScopedHighRiskToolNames : undefined,
         inputStates: nextInputStates,
         hooksSkillIds: activePortableManifests
           .filter((item) => item.hooks !== undefined)
@@ -3051,6 +3056,11 @@ export class GatewayRuntime implements AgentRuntime {
     }
 
     const portableToolPolicy = this.config.runCtx.portableSkillContext?.allowedToolPolicy ?? null;
+    const portableScopedHighRiskToolNames = new Set(
+      Array.isArray(this.config.runCtx.portableSkillContext?.scopedHighRiskToolNames)
+        ? this.config.runCtx.portableSkillContext!.scopedHighRiskToolNames!.map((item) => String(item ?? "").trim()).filter(Boolean)
+        : [],
+    );
     const portableDecision = evaluatePortableAllowedToolPolicy(portableToolPolicy, toolName, toolArgs);
     if (!portableDecision.ok) {
       const deniedMessage = portableDecision.message || `Portable skill guardrails blocked tool "${toolName}".`;
@@ -3102,14 +3112,15 @@ export class GatewayRuntime implements AgentRuntime {
     }
 
     const opMode = (this.config.runCtx as any).opMode === "assistant" ? "assistant" : "creative";
-    const runtimeHighRiskTools = new Set<string>(["shell.exec", "process.run", "process.list", "process.stop", "cron.create", "cron.list", "skill.install"]);
+    const runtimeHighRiskTools = HIGH_RISK_TOOL_NAME_SET;
     const portableHighRiskOverride =
       runtimeHighRiskTools.has(toolName) &&
-      Boolean(portableToolPolicy?.allowedToolNames?.has(toolName));
+      this.config.runCtx.portableSkillContext?.executionScope === "explicit_portable_invocation" &&
+      portableScopedHighRiskToolNames.has(toolName);
     if (opMode !== "assistant" && runtimeHighRiskTools.has(toolName) && !portableHighRiskOverride) {
       const deniedMessage = toolName === "skill.install"
         ? "当前为创作模式，禁止直接安装到用户全局技能目录；请先在当前项目或临时 workspace 中完成 skill 草稿，再切到“助手模式”后调用 skill.install。"
-        : "当前为创作模式，禁止执行 shell.exec / process.* / cron.* 等高风险本机操作；如确需执行，请先在桌面端切换到“助手模式”后再重试。";
+        : "当前为创作模式，禁止执行 code.exec / shell.exec / process.* / cron.* 等高风险本机操作；如确需执行，请先在桌面端切换到“助手模式”后再重试。";
       const permissionHook = await this._emitPortablePermissionRequest({
         toolName,
         toolArgs,
@@ -4683,6 +4694,10 @@ export class GatewayRuntime implements AgentRuntime {
             : [],
           primarySkillId: runCtx.portableSkillContext.primarySkillId ?? null,
           modelOverride: runCtx.portableSkillContext.modelOverride ?? null,
+          executionScope: runCtx.portableSkillContext.executionScope ?? null,
+          scopedHighRiskToolNames: Array.isArray(runCtx.portableSkillContext.scopedHighRiskToolNames)
+            ? runCtx.portableSkillContext.scopedHighRiskToolNames
+            : [],
           hooksSkillIds: Array.isArray(runCtx.portableSkillContext.hooksSkillIds)
             ? runCtx.portableSkillContext.hooksSkillIds
             : [],
