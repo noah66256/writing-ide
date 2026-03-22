@@ -62,7 +62,7 @@ function createServices(): RunServices {
   };
 }
 
-async function prepareResult(prompt: string, toolSidecar: any) {
+async function prepareResult(prompt: string, toolSidecar: any, bodyOverrides?: Record<string, unknown>) {
   const prevRouterMode = process.env.INTENT_ROUTER_MODE;
   process.env.INTENT_ROUTER_MODE = "heuristic";
   try {
@@ -72,6 +72,7 @@ async function prepareResult(prompt: string, toolSidecar: any) {
         mode: "agent",
         prompt,
         toolSidecar,
+        ...(bodyOverrides ?? {}),
       },
       services: createServices(),
     });
@@ -81,8 +82,8 @@ async function prepareResult(prompt: string, toolSidecar: any) {
   }
 }
 
-async function prepare(prompt: string, toolSidecar: any) {
-  const result = await prepareResult(prompt, toolSidecar);
+async function prepare(prompt: string, toolSidecar: any, bodyOverrides?: Record<string, unknown>) {
+  const result = await prepareResult(prompt, toolSidecar, bodyOverrides);
   assert.equal(!!result.error, false, `prepareAgentRun should succeed: ${JSON.stringify(result.error)}`);
   return result.prepared!;
 }
@@ -285,9 +286,37 @@ async function scenarioExplicitCodeExec() {
       ...makeSidecar(),
       ideSummary: { projectDir: "/tmp/mock-project", activePath: "/tmp/mock-project/README.md", openPaths: 1 },
     },
+    {
+      opMode: "assistant",
+    },
   );
   assert.equal(prepared.selectedAllowedToolNames.has("code.exec"), true, "explicit code scenario should keep code.exec");
   ok("explicit code scenario");
+}
+
+async function scenarioExplicitPortableInvocationDoesNotExposeSkillsActivate() {
+  const skillId = "portable-skill-smoke";
+  const prepared = await prepare(
+    " ",
+    makeSidecar(),
+    {
+      opMode: "assistant",
+      skillRefs: [{ id: skillId }],
+      skillInvocations: [{ id: skillId, arguments: "" }],
+      userSkillManifests: [
+        {
+          id: skillId,
+          name: "Portable Skill Smoke",
+          description: "portable smoke skill",
+          portable: true,
+          allowedTools: ["Read", "Write", "Task"],
+        },
+      ],
+    },
+  );
+  assert.equal(prepared.portableSkillContext?.executionScope, "explicit_portable_invocation");
+  assert.equal(prepared.selectedAllowedToolNames.has("skills.activate"), false);
+  ok("explicit portable invocation hides skills.activate");
 }
 
 async function main() {
@@ -298,6 +327,7 @@ async function main() {
   await scenarioSearchWithoutBrowser();
   await scenarioWordDeliveryFailFast();
   await scenarioExplicitCodeExec();
+  await scenarioExplicitPortableInvocationDoesNotExposeSkillsActivate();
   console.log("[smoke-mcp-server-first] all scenarios passed");
 }
 

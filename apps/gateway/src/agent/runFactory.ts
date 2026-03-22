@@ -1489,10 +1489,10 @@ export function classifyDirectiveIntent(text: string, mentionedSkillIds?: string
   reason: string;
 } {
   const t = String(text ?? "").trim();
-  if (!t) return { kind: "inquiry", reason: "empty_prompt" };
   if (hasExplicitSkillMention(mentionedSkillIds)) {
     return { kind: "directive", reason: "explicit_skill_invocation" };
   }
+  if (!t) return { kind: "inquiry", reason: "empty_prompt" };
   if (looksLikeWorkflowContinuationPrompt(t, mentionedSkillIds)) {
     return { kind: "continuation", reason: "workflow_continuation" };
   }
@@ -4129,6 +4129,12 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
 
   // 兜底：确保 CORE_TOOLS 不被 B2 裁剪掉，只要它们在 baseAllowedToolNames 中。
   ensureCoreToolsSelected({ baseAllowedToolNames, selectedAllowedToolNames });
+
+  // 显式 portable invocation 已经选定目标 skill，不应再向模型暴露内部激活工具；
+  // 否则模型可能重复调用 skills.activate，把同一 run 切成多个 denied turn。
+  if (portableExecutionScope === "explicit_portable_invocation") {
+    selectedAllowedToolNames.delete("skills.activate");
+  }
 
   // MCP Server 粒度补齐：如果 selectToolSubset 选中了某个 MCP Server 的任一工具，
   // 就把该 Server 的全部工具补入 selectedAllowedToolNames。

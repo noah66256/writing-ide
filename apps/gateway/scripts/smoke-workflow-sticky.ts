@@ -106,6 +106,23 @@ assert.equal(
 );
 ok("routing.correction_prompt_breaks_sticky");
 
+const slashOnlySkillInvocationRoute = computeIntentRouteDecisionPhase0({
+  mode: "agent",
+  userPrompt: " ",
+  mentionedSkillIds: ["skill-creator"],
+  mainDocRunIntent: "auto",
+  mainDoc: {},
+  runTodo: [],
+  intent: { wantsWrite: false, isWritingTask: false, wantsOkOnly: false },
+  ideSummary: null,
+});
+assert.equal(slashOnlySkillInvocationRoute.routeId, "task_execution");
+assert.equal(
+  slashOnlySkillInvocationRoute.derivedFrom.includes("intent_reason:explicit_skill_invocation"),
+  true,
+);
+ok("routing.skill_only_invocation_is_task");
+
 const todoShouldNotForceContinuation = computeIntentRouteDecisionPhase0({
   mode: "agent",
   userPrompt: "为什么",
