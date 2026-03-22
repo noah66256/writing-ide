@@ -1,17 +1,7 @@
-name: Desktop Windows EXE
+name: Desktop Windows Setup EXE
 
 on:
   workflow_dispatch:
-    inputs:
-      build_type:
-        description: "Build type"
-        required: true
-        default: "nsis"
-        type: choice
-        options:
-          - nsis
-          - portable
-          - all
 
 permissions:
   contents: write
@@ -63,17 +53,7 @@ jobs:
           # Vite build + electron-builder
           cd apps/desktop
           npx vite build
-          echo "build_type=${{ inputs.build_type }}"
-          if [ "${{ inputs.build_type }}" = "nsis" ]; then
-            npx electron-builder --win nsis --x64
-          elif [ "${{ inputs.build_type }}" = "portable" ]; then
-            npx electron-builder --win portable --x64
-          elif [ "${{ inputs.build_type }}" = "all" ]; then
-            npx electron-builder --win nsis portable --x64
-          else
-            echo "Unknown build_type: ${{ inputs.build_type }}"
-            exit 2
-          fi
+          npx electron-builder --win nsis --x64
 
       - name: Upload to GitHub Release
         env:
@@ -86,7 +66,7 @@ jobs:
           TITLE="Desktop v${VER}"
           echo "version=${VER}  tag=${TAG}"
 
-          # 仅上传 NSIS 安装包（IDE.Setup.*.exe），不上传 portable exe
+          # 仅上传 NSIS 安装包（setup.exe）
           SETUP_EXE="$(find apps/desktop/out -maxdepth 1 -name '*Setup*.exe' -print | head -n 1 || true)"
           if [ -z "${SETUP_EXE:-}" ]; then
             echo "NSIS setup exe not found under apps/desktop/out"

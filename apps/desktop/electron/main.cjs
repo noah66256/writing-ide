@@ -581,6 +581,9 @@ async function readSkillMetaFromDir(dir) {
   return result;
 }
 
+const BUNDLED_SYSTEM_SKILL_DIRS = new Set(["style_imitate", "skill-creator"]);
+const LEGACY_REMOVED_BUNDLED_SKILL_DIRS = new Set(["docx", "pdf", "pptx", "xlsx"]);
+
 async function walkTextFiles(dir, rootDir, out) {
   let entries = [];
   try {
@@ -4456,9 +4459,8 @@ function updateMenu() {
   }
 }
 
-// ======== Desktop Update (v0.2: silent download + install on quit) ========
+// ======== Desktop Update（仅手动确认后下载/安装） ========
 const DEFAULT_GATEWAY_URL = "http://120.26.6.147:8000";
-let pendingUpdate = null; // { version, cachedPath, launchPath } — 下载完成后设置，退出时静默安装
 function trimSlash(url) {
   return String(url ?? "").trim().replace(/\/+$/g, "");
 }
@@ -4851,6 +4853,19 @@ async function interactiveUpdateFlow(args) {
     : cachePath;
 
   try {
+    const currentExeName = path.basename(process.execPath || "").trim();
+    if (currentExeName) {
+      const running = await countRunningProcessesByImageNameWin(currentExeName);
+      if (running.ok && Number(running.count) > 1) {
+        await dialog.showMessageBox(mainWindow ?? undefined, {
+          type: "warning",
+          title: "请先关闭其它桌面端实例",
+          message: "检测到还有其它 OhMyCrab 进程正在运行，请先关闭后再执行安装更新。",
+        });
+        return { ok: false, error: "OTHER_INSTANCES_RUNNING", count: running.count };
+      }
+    }
+
     // 关键：我们必须"确认安装器已启动"，再退出当前进程。
     // 过去的实现是 detached fire-and-forget：如果 PowerShell/Start-Process 失败，用户会只看到"下载完就闪退"。
     const launched = await runPowershellForInstallerLaunchWin(finalLaunchPath);
@@ -4918,69 +4933,6 @@ async function interactiveUpdateFlow(args) {
     // ignore
   }
   return { ok: true, installing: true, cachePath, launchPath: finalLaunchPath, reusedDownload: !needDownload };
-}
-
-// ======== v0.2: 静默下载（无弹框）+ 退出时自动安装 ========
-async function silentDownloadUpdate(args) {
-  // 仅 Windows 安装版支持
-  if (process.platform !== "win32") return { ok: true, supported: false };
-  if (Boolean(process.env.PORTABLE_EXECUTABLE_DIR)) return { ok: true, supported: false, portable: true };
-
-  const opts = args && typeof args === "object" ? args : {};
-  const info = await checkForUpdates(opts);
-  if (!info.ok) return info;
-  if (!info.updateAvailable) return { ok: true, updateAvailable: false };
-  if (!info.nsisUrl) return { ok: false, error: "NSIS_URL_MISSING" };
-
-  // 文件名/路径逻辑（复用 interactiveUpdateFlow 中的方式）
-  const nsisUrlObj = new URL(info.nsisUrl);
-  const decodedPathname = (() => {
-    try { return decodeURIComponent(String(nsisUrlObj.pathname ?? "")); } catch { return String(nsisUrlObj.pathname ?? ""); }
-  })();
-  const fileName = path.basename(decodedPathname || "");
-  const safeName = sanitizeFileName(fileName, `ohmycrab-setup-${info.latestVersion}.exe`);
-  const cachePath = path.join(app.getPath("userData"), "updates", safeName);
-  const launchPath = path.join(app.getPath("temp"), "ohmycrab-updates", safeName);
-
-  // sha256 缓存检查
-  const expectedSha = String(info.sha256 ?? "").trim().toLowerCase();
-  const hasExpectedSha = Boolean(expectedSha && /^[a-f0-9]{64}$/.test(expectedSha));
-  const cacheExists = await fsp.access(cachePath).then(() => true).catch(() => false);
-  let needDownload = true;
-  if (cacheExists && hasExpectedSha) {
-    const h = await sha256File(cachePath);
-    if (h.ok && String(h.sha256).toLowerCase() === expectedSha) needDownload = false;
-  }
-
-  if (needDownload) {
-    safeSendToRenderer("update.event", { type: "download.start", version: info.latestVersion, target: cachePath });
-    const dl = await downloadToFile(info.nsisUrl, cachePath, ({ transferred, total }) => {
-      safeSendToRenderer("update.event", { type: "download.progress", transferred, total });
-    });
-    if (!dl.ok) return { ok: false, error: "DOWNLOAD_FAILED", detail: dl.error };
-  }
-
-  // sha256 验证
-  if (hasExpectedSha) {
-    const h = await sha256File(cachePath);
-    if (!h.ok || String(h.sha256).toLowerCase() !== expectedSha) {
-      try { await fsp.unlink(cachePath); } catch { /* ignore */ }
-      return { ok: false, error: "SHA256_MISMATCH" };
-    }
-  }
-
-  // 复制到 launchPath（避免 Unicode 路径问题）
-  try {
-    await fsp.mkdir(path.dirname(launchPath), { recursive: true });
-    await fsp.copyFile(cachePath, launchPath);
-  } catch { /* ignore */ }
-  const finalPath = await fsp.access(launchPath).then(() => launchPath).catch(() => cachePath);
-
-  pendingUpdate = { version: info.latestVersion, cachedPath: cachePath, launchPath: finalPath };
-  safeSendToRenderer("update.event", { type: "silent.ready", version: info.latestVersion });
-  safeSendToRenderer("update.event", { type: "download.done", version: info.latestVersion, target: cachePath });
-
-  return { ok: true, updateAvailable: true, downloaded: true, version: info.latestVersion, path: finalPath, reusedDownload: !needDownload };
 }
 
 function registerIpc() {
@@ -6536,17 +6488,6 @@ function registerIpc() {
   ipcMain.handle("app.getTempPath", async () => ({ ok: true, path: app.getPath("temp") }));
   ipcMain.handle("update.check", async (_event, opts) => checkForUpdates(opts));
   ipcMain.handle("update.checkInteractive", async (_event, opts) => interactiveUpdateFlow(opts));
-  ipcMain.handle("update.silentDownload", async (_event, opts) => silentDownloadUpdate(opts));
-  ipcMain.handle("update.installPending", async () => {
-    if (!pendingUpdate) return { ok: false, error: "NO_PENDING_UPDATE" };
-    try {
-      const { launchPath } = pendingUpdate;
-      pendingUpdate = null;
-      spawn(launchPath, ["/S"], { detached: true, stdio: "ignore" }).unref();
-    } catch { /* ignore */ }
-    setTimeout(() => { try { app.quit(); } catch { /* ignore */ } }, 100);
-    return { ok: true };
-  });
 
   // MCP
   ipcMain.handle("mcp.getServers", async () => {
@@ -6987,7 +6928,7 @@ app.whenReady().then(async () => {
     console.error("[electron] MCP Manager 初始化失败:", e);
   }
 
-  // ======== Bundled Skills 同步到 userData ========
+  // ======== Bundled Skills 同步到 userData（仅系统内置 allowlist） ========
   try {
     // 解析 bundled-skills 目录路径（兼容 dev 和 packaged 环境）
     let resolvedBundledDir = "";
@@ -7014,6 +6955,7 @@ app.whenReady().then(async () => {
 
     for (const entry of bundledEntries) {
       if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+      if (!BUNDLED_SYSTEM_SKILL_DIRS.has(entry.name)) continue;
       const src = path.join(resolvedBundledDir, entry.name);
       const dest = path.join(userSkillsDir, entry.name);
       try {
@@ -7037,6 +6979,26 @@ app.whenReady().then(async () => {
         console.log(`[electron] seeded bundled skill: ${entry.name}`);
       } catch (e) {
         console.warn(`[electron] seed skill failed: ${entry.name} —`, e?.message);
+      }
+    }
+
+    let installedSkillEntries = [];
+    try {
+      installedSkillEntries = await fsp.readdir(userSkillsDir, { withFileTypes: true });
+    } catch {
+      installedSkillEntries = [];
+    }
+    for (const entry of installedSkillEntries) {
+      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+      if (!LEGACY_REMOVED_BUNDLED_SKILL_DIRS.has(entry.name)) continue;
+      const targetDir = path.join(userSkillsDir, entry.name);
+      try {
+        const meta = await readSkillMetaFromDir(targetDir);
+        if (meta.builtin !== true) continue;
+        await fsp.rm(targetDir, { recursive: true, force: true });
+        console.log(`[electron] removed legacy bundled skill: ${entry.name}`);
+      } catch (e) {
+        console.warn(`[electron] remove legacy bundled skill failed: ${entry.name} —`, e?.message);
       }
     }
   } catch (e) {
@@ -7123,12 +7085,8 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-// v0.2: 退出时检测 pendingUpdate → 静默启动 NSIS 安装器
-// 同时清理 SingleInstanceLock，避免安装器误报"应用还在运行"
 app.on("will-quit", () => {
-  recordMainEvent("app.will-quit", {
-    hasPendingUpdate: Boolean(pendingUpdate),
-  });
+  recordMainEvent("app.will-quit");
   for (const rec of processTable.values()) {
     disposeClaudeBridgeSession(rec?.claudeBridgeSession);
     if (rec && typeof rec === "object") rec.claudeBridgeSession = null;
@@ -7151,20 +7109,5 @@ app.on("will-quit", () => {
   }
   for (const dir of lockDirs) {
     try { fs.unlinkSync(path.join(dir, "SingleInstanceLock")); } catch { /* ignore */ }
-  }
-
-  if (!pendingUpdate) return;
-  const { launchPath } = pendingUpdate;
-  pendingUpdate = null; // 防止重入
-  try {
-    // 延迟 2s 启动安装器：等待当前进程完全退出后 NSIS 才检测运行进程，避免弹"无法关闭 WritingIDE"提示
-    const p = escapeForPsSingleQuoted(launchPath);
-    const ps = `Start-Sleep -Milliseconds 2000; Start-Process -FilePath '${p}' -ArgumentList '/S'`;
-    spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps], {
-      detached: true, stdio: "ignore", windowsHide: true,
-    }).unref();
-  } catch {
-    // 兜底：直接 spawn（无延迟）
-    try { spawn(launchPath, ["/S"], { detached: true, stdio: "ignore" }).unref(); } catch { /* ignore */ }
   }
 });

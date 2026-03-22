@@ -2,6 +2,13 @@
 
 目标：把 `apps/desktop` 打成**可交付给普通用户**的安装包/可执行文件，且**不把用户数据/日志打进安装包**。
 
+> `0.1.5` 当前推荐发布策略：
+> - `macOS dmg`：本地打包
+> - `Windows setup.exe`：GitHub Actions 打包并上传 release
+> - `macOS pkg`：GitHub Actions 打包并上传 release
+> - 内置 MCP 只保留：`playwright`、`bocha-search`、`web-search`
+> - 内置 Skill 只保留：`style_imitate`、`skill-creator`
+
 > 现状：本项目 Desktop 使用 `electron-builder`。Windows 已落地 **NSIS 安装包** + **portable 单文件**；本文补齐 macOS（Apple Silicon / Intel / Universal）打包方式，并把入口挂到 `plan.md` 便于检索。
 
 ---
@@ -28,10 +35,10 @@
 ## 2. Windows 打包（已落地）
 
 ### 2.1 产物类型
-- **NSIS 安装包**：`写作IDE Setup x.y.z.exe`
-- **portable 单文件**：`写作IDE.exe`（无需安装）
+- **NSIS 安装包**：`Oh My Crab Setup x.y.z.exe`
+- **portable 单文件**：`OhMyCrab.exe`（无需安装，仅本地备用，不作为 GH 主发布物）
 
-### 2.2 命令（Windows）
+### 2.2 命令（Windows，本地）
 
 在仓库根目录：
 
@@ -39,7 +46,7 @@
 npm run dist:desktop:win
 ```
 
-或 portable：
+或 portable（仅本地备用）：
 
 ```bash
 npm run dist:desktop:win:portable
@@ -53,7 +60,16 @@ npm run dist:desktop:win:all
 
 产物输出：`apps/desktop/out/`
 
-### 2.3 推送自动更新（Windows 安装版）
+### 2.3 GitHub Actions（Windows 安装版）
+
+推荐直接运行：
+- `.github/workflows/desktop-windows-exe.yml`
+
+说明：
+- 该工作流只产出并上传 `setup.exe`
+- 不再把 portable 作为 GitHub release 主产物
+
+### 2.4 推送自动更新（Windows 安装版）
 > v0.1 仅支持 **Windows NSIS 安装包**的自动更新（portable 与 macOS 不走自动安装）。
 
 步骤：
@@ -79,7 +95,7 @@ python scripts/push-desktop-update.py \
 - Gateway 会通过 `/downloads/desktop/stable/latest.json` 与 `/downloads/desktop/stable/:file` 暴露更新源（见 `docs/specs/desktop-auto-update-v0.1.md`）。
 - 服务器侧需要确保 `DESKTOP_UPDATES_DIR` 指向上述目录的父目录（例如 `/opt/writing-ide/desktop-updates`），或使用默认 `<gateway_workdir>/desktop-updates`。
 
-### 2.4 常见坑（已沉淀）
+### 2.5 常见坑（已沉淀）
 
 见 `debug.md`：
 - monorepo 下 electron 版本必须固定（否则 electron-builder 报 “Cannot compute electron version…”）
@@ -94,7 +110,7 @@ python scripts/push-desktop-update.py \
 - Node.js（建议跟项目一致：Node 22）
 - Xcode Command Line Tools（若未安装：`xcode-select --install`）
 
-### 3.2 命令（推荐：Apple Silicon / arm64）
+### 3.2 命令（推荐：Apple Silicon / arm64，本地 dmg）
 
 在仓库根目录：
 
@@ -175,7 +191,7 @@ sudo spctl --master-enable
 - Run workflow，选 `arm64`（M 系列推荐）或 `universal`
 - 下载产物 `desktop-macos-notarized-<arch>`，里面的 `.dmg` 在别的 Mac 上通常就不会再提示“已损坏”
 
-### 3.5 没有 Mac 环境也要“直接产 DMG”（推荐：GitHub Actions）
+### 3.5 没有 Mac 环境也要“直接产 DMG”（备选：GitHub Actions）
 
 仓库已提供工作流：`.github/workflows/desktop-macos-dmg.yml`
 
@@ -195,5 +211,6 @@ sudo spctl --master-enable
 - Windows 打包与常见坑：`debug.md`
 - macOS 打包后常见问题（已损坏 / Monaco loading / KB 抽卡）：`debug.md`
 - Desktop 打包配置：`apps/desktop/package.json`（`scripts` 与 `build` 字段）
-
+- Windows Setup GH 工作流：`.github/workflows/desktop-windows-exe.yml`
+- macOS PKG GH 工作流：`.github/workflows/desktop-macos-pkg.yml`
 

@@ -41,6 +41,8 @@ import { shouldAttemptMcpSessionRecovery } from "./mcp-session-recovery.mjs";
  */
 
 /** 内置 MCP Server 清单 */
+const BUILTIN_SERVER_DEFAULTS_VERSION = "0.1.5";
+
 const BUILTIN_SERVERS = [
   {
     id: "playwright",
@@ -60,7 +62,7 @@ const BUILTIN_SERVERS = [
     builtin: true,
     modulePath: "electron/mcp-servers/bocha-search.mjs",
     args: [],
-    enabled: false,
+    enabled: true,
     configFields: [
       {
         envKey: "BOCHA_API_KEY",
@@ -80,7 +82,7 @@ const BUILTIN_SERVERS = [
     builtin: true,
     modulePath: "electron/mcp-servers/web-search.mjs",
     args: [],
-    enabled: false,
+    enabled: true,
     configFields: [
       {
         envKey: "SERPER_API_KEY",
@@ -1145,7 +1147,7 @@ export class McpManager {
       if (!existing) {
         // 不存在则注入
         this._servers.set(builtin.id, {
-          config: { ...builtin },
+          config: { ...builtin, systemDefaultVersion: BUILTIN_SERVER_DEFAULTS_VERSION },
           client: null,
           transport: null,
           status: "disconnected",
@@ -1162,6 +1164,11 @@ export class McpManager {
             cfg[key] = builtin[key];
             patched = true;
           }
+        }
+        if (cfg.systemDefaultVersion !== BUILTIN_SERVER_DEFAULTS_VERSION) {
+          cfg.enabled = Boolean(builtin.enabled);
+          cfg.systemDefaultVersion = BUILTIN_SERVER_DEFAULTS_VERSION;
+          patched = true;
         }
         if (patched) changed = true;
       }
