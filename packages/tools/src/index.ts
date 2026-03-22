@@ -255,7 +255,7 @@ export const TOOL_LIST: ToolMeta[] = [
     description:
       "获取某个候选能力的详细说明。\n" +
       "既支持具体工具（内置 + MCP），也支持 MCP 能力卡片和 Skill 卡片。\n" +
-      "建议用法：tools.search 找到候选后，再 tools.describe 确认参数、能力边界或激活线索；对 MCP/Skill 卡片，runtime 会把它记入当前线程的活跃能力集，便于后续续跑。\n" +
+      "建议用法：tools.search 找到候选后，再 tools.describe 确认参数、能力边界或激活线索；对 Skill 卡片，tools.describe 只会记入最近查看记录，不等于激活，真正加载合同请使用 skills.activate。\n" +
       "只读、无副作用。",
     args: [
       { name: "name", required: true, desc: "工具名或能力卡片 ID（例如 write、mcp.playwright.browser_snapshot、mcp:playwright/browser、skill:style_imitate）", type: "string" },

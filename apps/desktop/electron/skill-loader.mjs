@@ -284,6 +284,25 @@ function extractVendorMetadata(raw) {
   return Object.keys(out).length ? out : undefined;
 }
 
+function normalizeTriggerShorthand(raw) {
+  if (!isObj(raw)) return raw;
+  const out = { ...raw };
+  const args = isObj(raw.args) ? { ...raw.args } : {};
+  const when = norm(raw.when);
+  if (when === "text_regex") {
+    const pattern = norm(raw.pattern) || norm(args.pattern);
+    if (pattern) args.pattern = pattern;
+  } else if (when === "mode_in") {
+    if (!Array.isArray(args.modes) && Array.isArray(raw.modes)) args.modes = deepClone(raw.modes);
+  } else if (when === "run_intent_in") {
+    if (!Array.isArray(args.intents) && Array.isArray(raw.intents)) args.intents = deepClone(raw.intents);
+  } else if (when === "has_style_library") {
+    if (args.purpose == null && raw.purpose != null) args.purpose = raw.purpose;
+  }
+  out.args = args;
+  return out;
+}
+
 // 解析 SKILL.md：frontmatter + body
 function parseSkillMarkdown(text, dirName) {
   const raw = String(text ?? "");
@@ -438,18 +457,19 @@ function parseManifest(raw, skillDir, fallbackId) {
   const priority = finiteNum(raw.priority, 50);
   const stageKey = norm(raw.stageKey) || `agent.skill.user.${id}`;
   const portable = typeof raw.portable === "boolean" ? raw.portable : isPortableSkillLike(raw);
-  const hasStructuredTriggers = Array.isArray(raw.triggers) && raw.triggers.length > 0;
+  const normalizedRawTriggers = Array.isArray(raw.triggers) ? raw.triggers.map((r) => normalizeTriggerShorthand(r)) : [];
+  const hasStructuredTriggers = normalizedRawTriggers.length > 0;
   const disableModelInvocation = typeof raw.disableModelInvocation === "boolean" ? raw.disableModelInvocation : undefined;
   const autoEnable = typeof raw.autoEnable === "boolean"
-    ? (disableModelInvocation ? false : raw.autoEnable)
+    ? (disableModelInvocation ? false : (portable ? raw.autoEnable && hasStructuredTriggers : raw.autoEnable))
     : (hasStructuredTriggers ? true : portable ? false : true);
 
   // triggers
   if (raw.triggers != null && !Array.isArray(raw.triggers)) {
     throw new Error(`SKILL_TRIGGERS_INVALID:${id}`);
   }
-  const triggers = Array.isArray(raw.triggers)
-    ? raw.triggers.map((r, i) => {
+  const triggers = normalizedRawTriggers.length
+    ? normalizedRawTriggers.map((r, i) => {
         if (!isObj(r)) throw new Error(`SKILL_TRIGGER_INVALID:${id}:${i}`);
         const when = norm(r.when);
         if (!VALID_TRIGGER_WHEN.has(when)) throw new Error(`SKILL_TRIGGER_WHEN_INVALID:${id}:${i}`);
@@ -478,7 +498,7 @@ function parseManifest(raw, skillDir, fallbackId) {
       if (deny.length) toolCaps.denyTools = deny;
     }
   }
-  const allowedTools = normalizeAllowedTools(raw.allowedTools);
+  const allowedTools = normalizeAllowedTools(raw.allowedTools ?? raw.allowTools);
   const mappedAllowedTools = mapPortableAllowedTools(allowedTools);
   if (mappedAllowedTools.length) {
     toolCaps = toolCaps ?? {};

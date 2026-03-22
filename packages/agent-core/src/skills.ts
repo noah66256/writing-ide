@@ -121,6 +121,11 @@ export type ActiveSkill = {
   activatedBy: { reasonCodes: string[]; detail?: Record<string, unknown> };
 };
 
+export type SkillActivationEvaluation = {
+  candidateSkills: ActiveSkill[];
+  activeSkills: ActiveSkill[];
+};
+
 function normStr(v: unknown) {
   return String(v ?? "").trim();
 }
@@ -194,7 +199,7 @@ function matchTrigger(args: {
 
   if (when === "text_regex") {
     const pattern = normStr(a?.pattern);
-    if (!pattern) return { ok: true, reasonCodes: ["trigger:text_regex:empty"], detail: {} };
+    if (!pattern) return { ok: false, reasonCodes: ["trigger:text_regex:missing_pattern"], detail: {} };
     let re: RegExp | null = null;
     try {
       re = new RegExp(pattern);
@@ -281,7 +286,49 @@ export function listRegisteredSkills(): SkillManifest[] {
 // 兼容旧引用
 export const SKILL_MANIFESTS_V1: SkillManifest[] = BUILTIN_MANIFESTS.map((m) => ({ ...m }));
 
-export function activateSkills(args: {
+function isWorkflowSkillManifest(manifest: SkillManifest | undefined | null) {
+  if (!manifest || typeof manifest !== "object") return false;
+  return manifest.kind === "workflow" || (!!manifest.workflow && typeof manifest.workflow === "object");
+}
+
+function canModelAutoActivateSkill(manifest: SkillManifest | undefined | null) {
+  if (!manifest || typeof manifest !== "object") return false;
+  if (manifest.disableModelInvocation === true) return false;
+  const activationMode = normLower(manifest.activationMode || "auto");
+  if (activationMode === "explicit") return false;
+  if (manifest.portable === true) {
+    return activationMode === "auto" && Array.isArray(manifest.triggers) && manifest.triggers.length > 0;
+  }
+  return true;
+}
+
+function canSelectSkill(args: {
+  manifest: SkillManifest;
+  selectedIds: Set<string>;
+  blockedByConflict: Set<string>;
+}) {
+  const skillId = normStr(args.manifest.id);
+  if (!skillId) return false;
+  if (args.blockedByConflict.has(skillId)) return false;
+  const conflicts = normalizeStringArray(args.manifest.conflicts);
+  if (conflicts.some((id) => args.selectedIds.has(id))) return false;
+  const requires = normalizeStringArray(args.manifest.requires);
+  if (requires.length && !requires.every((id) => args.selectedIds.has(id))) return false;
+  return true;
+}
+
+function markSkillSelected(args: {
+  manifest: SkillManifest;
+  selectedIds: Set<string>;
+  blockedByConflict: Set<string>;
+}) {
+  const skillId = normStr(args.manifest.id);
+  if (!skillId) return;
+  args.selectedIds.add(skillId);
+  for (const cid of normalizeStringArray(args.manifest.conflicts)) args.blockedByConflict.add(cid);
+}
+
+export function evaluateSkillActivation(args: {
   mode: AgentMode;
   userPrompt?: string;
   mainDocRunIntent?: unknown;
@@ -289,7 +336,7 @@ export function activateSkills(args: {
   intent?: RunIntent;
   manifests?: SkillManifest[];
   explicitSkillIds?: string[];
-}): ActiveSkill[] {
+}): SkillActivationEvaluation {
   const mode = args.mode;
   const userPrompt = normStr(args.userPrompt);
   const kbSelected = Array.isArray(args.kbSelected) ? (args.kbSelected as any[]) : [];
@@ -302,21 +349,13 @@ export function activateSkills(args: {
     (a, b) => (b.priority ?? 0) - (a.priority ?? 0) || String(a.id).localeCompare(String(b.id)),
   );
 
-  const out: Array<{ m: SkillManifest; s: ActiveSkill }> = [];
-  const activeSkillIds = new Set<string>();
-  const blockedByConflict = new Set<string>();
+  const candidates: Array<{ m: SkillManifest; s: ActiveSkill; explicit: boolean }> = [];
   for (const m of sorted) {
     const skillId = normStr(m.id);
     if (!skillId) continue;
     const isExplicit = explicitSkillIds.has(skillId);
     if (!m?.autoEnable && !isExplicit) continue;
-    // conflicts 互斥：被已激活 Skill 声明为冲突的，或自身声明与已激活 Skill 冲突的，跳过
-    if (blockedByConflict.has(skillId)) continue;
-    const conflicts = normalizeStringArray(m.conflicts);
-    if (conflicts.some((id) => activeSkillIds.has(id))) continue;
-    // requires 依赖：前置 Skill 必须已激活
-    const requires = normalizeStringArray(m.requires);
-    if (requires.length && !requires.every((id) => activeSkillIds.has(id))) continue;
+    if (!isExplicit && !canModelAutoActivateSkill(m)) continue;
 
     const reasonCodes: string[] = [`skill:${m.id}`];
     const detail: Record<string, unknown> = { stageKey: m.stageKey };
@@ -343,9 +382,7 @@ export function activateSkills(args: {
       }
     }
     if (!ok) continue;
-    activeSkillIds.add(skillId);
-    for (const cid of conflicts) blockedByConflict.add(cid);
-    out.push({
+    candidates.push({
       m,
       s: {
         id: m.id,
@@ -354,10 +391,52 @@ export function activateSkills(args: {
         badge: m.ui?.badge || m.id.toUpperCase(),
         activatedBy: { reasonCodes: reasonCodes.slice(0, 32), detail },
       },
+      explicit: isExplicit,
     });
   }
-  // 迭代前已按 priority 排序，无需再排
-  return out.map((x) => x.s);
+
+  const active: Array<{ m: SkillManifest; s: ActiveSkill; explicit: boolean }> = [];
+  const selectedIds = new Set<string>();
+  const blockedByConflict = new Set<string>();
+
+  for (const item of candidates.filter((entry) => entry.explicit)) {
+    if (!canSelectSkill({ manifest: item.m, selectedIds, blockedByConflict })) continue;
+    active.push(item);
+    markSkillSelected({ manifest: item.m, selectedIds, blockedByConflict });
+  }
+
+  let autoWorkflowSelected = false;
+  for (const item of candidates.filter((entry) => !entry.explicit && isWorkflowSkillManifest(entry.m))) {
+    if (autoWorkflowSelected) continue;
+    if (!canSelectSkill({ manifest: item.m, selectedIds, blockedByConflict })) continue;
+    active.push(item);
+    markSkillSelected({ manifest: item.m, selectedIds, blockedByConflict });
+    autoWorkflowSelected = true;
+  }
+
+  for (const item of candidates.filter((entry) => !entry.explicit && !isWorkflowSkillManifest(entry.m))) {
+    if (item.m.portable === true && normLower(item.m.activationMode || "auto") !== "auto") continue;
+    if (!canSelectSkill({ manifest: item.m, selectedIds, blockedByConflict })) continue;
+    active.push(item);
+    markSkillSelected({ manifest: item.m, selectedIds, blockedByConflict });
+  }
+
+  return {
+    candidateSkills: candidates.map((x) => x.s),
+    activeSkills: active.map((x) => x.s),
+  };
+}
+
+export function activateSkills(args: {
+  mode: AgentMode;
+  userPrompt?: string;
+  mainDocRunIntent?: unknown;
+  kbSelected?: KbSelectedLibrary[];
+  intent?: RunIntent;
+  manifests?: SkillManifest[];
+  explicitSkillIds?: string[];
+}): ActiveSkill[] {
+  return evaluateSkillActivation(args).activeSkills;
 }
 
 export function pickSkillStageKeyForAgentRun(activeSkills: ActiveSkill[], fallback = "agent.run") {

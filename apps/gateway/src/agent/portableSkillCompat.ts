@@ -518,7 +518,7 @@ export function parsePortableAllowedToolPolicy(manifests: SkillManifest[]): Port
 
 export function buildPortableAllowedToolPolicyNotice(policy: PortableAllowedToolPolicy | null | undefined) {
   if (!policy) return "";
-  const lines = ["Portable skill allowed-tools guardrails (Crab uses hard runtime gates while these skills are active):"];
+  const lines = ["Portable skill allowed-tools overlay (applies inside explicit portable skill execution scope only):"];
   for (const rule of policy.rules.slice(0, 16)) {
     lines.push(`- ${rule.skillId}: ${rule.raw} -> ${rule.toolName}`);
   }

@@ -2,7 +2,7 @@ import { type OpenAiChatMessage } from "../llm/openaiCompat.js";
 import type { ThreadCapabilityState } from "@ohmycrab/shared";
 import { type McpServerSelectionSummary, type ToolCatalogSummary } from "./toolCatalog.js";
 import { TOOL_LIST, type AgentMode } from "./toolRegistry.js";
-import type { McpCapabilityCard, SkillCard } from "./capabilityIndex.js";
+import { searchCapabilityCards, type McpCapabilityCard, type SkillCard } from "./capabilityIndex.js";
 
 type ContextPackSegment = {
   name: string;
@@ -469,17 +469,31 @@ function renderSkillCapabilityCardLines(cards: SkillCard[]): string[] {
 export function buildSkillCapabilitySummary(args: {
   skillCapabilityCards?: SkillCard[];
   syntheticSkillCapabilityCards?: SkillCard[];
+  userPrompt?: string;
 }): string {
   const installed = Array.isArray(args.skillCapabilityCards) ? args.skillCapabilityCards : [];
   const synthetic = Array.isArray(args.syntheticSkillCapabilityCards) ? args.syntheticSkillCapabilityCards : [];
+  const rankSkillCards = (cards: SkillCard[]) => {
+    const query = String(args.userPrompt ?? "").trim();
+    if (!query) return cards.slice(0, 6);
+    return searchCapabilityCards({
+      query,
+      cards,
+      limit: 6,
+    })
+      .map((item) => item.card)
+      .filter((card): card is SkillCard => card.resultType === "skill");
+  };
   const lines: string[] = [];
-  if (installed.length > 0) {
+  const rankedInstalled = rankSkillCards(installed);
+  if (rankedInstalled.length > 0) {
     lines.push("- 可按需激活的 Skills（未激活）：");
-    lines.push(...renderSkillCapabilityCardLines(installed.slice(0, 6)));
+    lines.push(...renderSkillCapabilityCardLines(rankedInstalled));
   }
-  if (synthetic.length > 0) {
+  const rankedSynthetic = rankSkillCards(synthetic);
+  if (rankedSynthetic.length > 0) {
     lines.push("- 临时 Skills（仅本次 bridge 可见）：");
-    lines.push(...renderSkillCapabilityCardLines(synthetic.slice(0, 6)));
+    lines.push(...renderSkillCapabilityCardLines(rankedSynthetic));
   }
   return lines.join("\n");
 }
@@ -544,6 +558,7 @@ function buildCapabilitySummaryMessage(args: BuildAssembledContextArgs): string 
   const skillSummary = buildSkillCapabilitySummary({
     skillCapabilityCards: args.skillCapabilityCards,
     syntheticSkillCapabilityCards: args.syntheticSkillCapabilityCards,
+    userPrompt: args.userPrompt,
   });
   if (skillSummary) {
     lines.push(skillSummary);

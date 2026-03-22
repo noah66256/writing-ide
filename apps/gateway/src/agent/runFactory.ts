@@ -17,13 +17,14 @@ import {
   type ToolCatalogSummary,
 } from "./toolCatalog.js";
 import { retrieveToolsForRun, type ToolRetrievalResult } from "./toolRetriever.js";
-import { buildMcpCapabilityCards, buildSkillCards, type McpCapabilityCard } from "./capabilityIndex.js";
+import { buildMcpCapabilityCards, buildSkillCards, searchCapabilityCards, type McpCapabilityCard } from "./capabilityIndex.js";
 import {
   activateMcpCapability,
   activateSkillCapability,
   clearThreadCapabilityStateForNewTask,
   findMcpCapabilityIdForToolName,
   normalizeThreadCapabilityState,
+  rememberDescribedCapability,
   resolveMcpServerIdsForCapabilityIds,
   resolveMcpToolNamesForCapabilityIds,
 } from "./threadCapabilityState.js";
@@ -43,6 +44,7 @@ import {
   SKILL_MANIFESTS_V1,
   listRegisteredSkills,
   activateSkills,
+  evaluateSkillActivation,
   createInitialRunState,
   detectRunIntent,
   deriveStyleGate,
@@ -2764,7 +2766,9 @@ export type PreparedRun = {
   intentRouterTrace: any;
   activeSkills: any[];
   explicitSkillRefs: SkillRef[];
+  candidateSkillIds: string[];
   activeSkillIds: string[];
+  hydratedSkillIds: string[];
   threadCapabilityState: ThreadCapabilityState;
   rawActiveSkillIds: string[];
   suppressedSkillIds: string[];
@@ -3012,7 +3016,7 @@ export async function prepareAgentRun(args: {
   const skillManifestsEffective = mergedSkills.filter((m: any) => !disabledSkillIds.has(String(m?.id ?? "").trim()));
   const skillManifestById = new Map(skillManifestsEffective.map((m: any) => [String(m?.id ?? "").trim(), m] as const));
 
-  const rawActiveSkills = activateSkills({
+  const skillActivation = evaluateSkillActivation({
     mode,
     userPrompt,
     mainDocRunIntent: (mainDocFromPack as any)?.runIntent,
@@ -3021,36 +3025,9 @@ export async function prepareAgentRun(args: {
     manifests: skillManifestsEffective as any,
     explicitSkillIds,
   });
-
-  // 合并 @ 提及但未自动激活的 Skill（须遵守 conflicts/requires）
-  const autoActivatedIds = new Set((rawActiveSkills ?? []).map((s: any) => String(s?.id ?? "").trim()));
-  for (const sid of mentionedSkillIds) {
-    if (autoActivatedIds.has(sid)) continue;
-    const manifest = skillManifestById.get(sid) as any;
-    if (!manifest) continue;
-    // conflicts 检查：与已激活 Skill 互斥则跳过
-    const conflicts = Array.isArray(manifest.conflicts) ? manifest.conflicts.map((c: any) => String(c ?? "").trim()).filter(Boolean) : [];
-    if (conflicts.some((cid: string) => autoActivatedIds.has(cid))) continue;
-    // 反向 conflicts：已激活 Skill 声明与本 Skill 冲突
-    let reverseConflict = false;
-    for (const aid of autoActivatedIds) {
-      const am = skillManifestById.get(aid) as any;
-      const ac = Array.isArray(am?.conflicts) ? am.conflicts.map((c: any) => String(c ?? "").trim()) : [];
-      if (ac.includes(sid)) { reverseConflict = true; break; }
-    }
-    if (reverseConflict) continue;
-    // requires 检查：前置 Skill 必须已激活
-    const requires = Array.isArray(manifest.requires) ? manifest.requires.map((r: any) => String(r ?? "").trim()).filter(Boolean) : [];
-    if (requires.length && !requires.every((rid: string) => autoActivatedIds.has(rid))) continue;
-    rawActiveSkills.push({
-      id: manifest.id,
-      name: manifest.name,
-      stageKey: manifest.stageKey,
-      badge: manifest.ui?.badge || manifest.id.toUpperCase(),
-      activatedBy: { reasonCodes: [`skill:${manifest.id}`, "mentioned_by_user"], detail: { trigger: "mention" } },
-    });
-    autoActivatedIds.add(sid);
-  }
+  const candidateSkills = skillActivation.candidateSkills ?? [];
+  const candidateSkillIds = candidateSkills.map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
+  const rawActiveSkills = skillActivation.activeSkills ?? [];
 
   const rawActiveSkillIds = (rawActiveSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
 
@@ -3078,6 +3055,7 @@ export async function prepareAgentRun(args: {
   }
 
   const activeSkillIds = (activeSkills ?? []).map((s: any) => String(s?.id ?? "").trim()).filter(Boolean);
+  const hydratedSkillIds = activeSkillIds.slice();
 
   // 构建活跃 Skill 的 workflow 声明映射（供 GatewayRuntime 使用）
   const activeWorkflowDeclarations = new Map<string, WorkflowDeclaration>();
@@ -3092,10 +3070,10 @@ export async function prepareAgentRun(args: {
   const activePortableManifests = activeSkillIds
     .map((id) => skillManifestById.get(id) as any)
     .filter((manifest: any) => manifest?.portable);
-  const portableAllowedToolPolicy = parsePortableAllowedToolPolicy(activePortableManifests as any);
   const explicitPortableInvocationManifests = skillInvocations
     .map((item) => skillManifestById.get(item.id) as any)
     .filter((manifest: any) => manifest?.portable && activeSkillIds.includes(String(manifest?.id ?? "").trim()));
+  const portableAllowedToolPolicy = parsePortableAllowedToolPolicy(explicitPortableInvocationManifests as any);
   const portableInvocationStateEntries: Array<[string, NonNullable<ReturnType<typeof parsePortableSkillInvocationInput>>]> = [];
   for (const manifest of explicitPortableInvocationManifests) {
     const skillId = String(manifest?.id ?? "").trim();
@@ -3135,12 +3113,20 @@ export async function prepareAgentRun(args: {
   const primaryPortableModelOverride = primaryPortableInvocationManifest?.model
     ? String(primaryPortableInvocationManifest.model).trim()
     : "";
-  const portableHardAllowedToolNames =
-    portableAllowedToolPolicy?.allowedToolNames.size
-      ? new Set(portableAllowedToolPolicy.allowedToolNames)
-      : portableAgentToolNames.size > 0
-        ? portableAgentToolNames
-        : null;
+
+  const skillCapabilityCards = buildSkillCards({
+    skillManifests: skillManifestsEffective as any,
+    activeSkillIds,
+  });
+  const rankedAvailableSkillCards = userPrompt
+    ? searchCapabilityCards({
+        query: userPrompt,
+        cards: skillCapabilityCards,
+        limit: 6,
+      })
+        .map((item) => item.card)
+        .filter((card): card is (typeof skillCapabilityCards)[number] => card.resultType === "skill")
+    : skillCapabilityCards.slice(0, 6);
 
   const stageKeyForRun = (activeSkills.length
     ? (activeSkills as any[])
@@ -3220,9 +3206,12 @@ export async function prepareAgentRun(args: {
     const hasSkillCreatorActive = activeSkillIds.includes("skill-creator");
 
     // 1) 可用 Skill 清单——让负责人知道有哪些能力可建议用户使用
-    const availableLines = skillManifestsEffective.map((m: any) => formatAvailableSkillLine(m));
+    const availableLines = rankedAvailableSkillCards
+      .map((card) => skillManifestById.get(card.skillId))
+      .filter(Boolean)
+      .map((m: any) => formatAvailableSkillLine(m));
     if (!portableForkPlan && availableLines.length) {
-      parts.push(`【可用 Skills】共 ${availableLines.length} 个已注册能力：\n${availableLines.join("\n")}`);
+      parts.push(`【可用 Skills】当前最相关 ${availableLines.length} 个候选能力：\n${availableLines.join("\n")}`);
     }
 
     // 2) 已激活 Skill 的 promptFragments
@@ -3800,10 +3789,6 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     capabilityIds: threadCapabilityState.activeMcpCapabilityIds,
     cards: mcpCapabilityCards,
   });
-  const skillCapabilityCards = buildSkillCards({
-    skillManifests: skillManifestsEffective as any,
-    activeSkillIds,
-  });
   const enforceMcpFirstForBinaryRead = binaryReadIntent && binaryReadMcpToolNames.size > 0;
 
   // 已激活 Skill 声明的 toolCaps.allowTools：即使 toolPolicy=deny 也应放行
@@ -3838,13 +3823,6 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     for (const name of agentToolNames) {
       baseAllowedToolNames.add(name);
       skillPinnedToolNames.add(name);
-    }
-  }
-  if (portableHardAllowedToolNames?.size) {
-    for (const name of Array.from(baseAllowedToolNames)) {
-      if (!portableHardAllowedToolNames.has(name)) {
-        baseAllowedToolNames.delete(name);
-      }
     }
   }
 
@@ -4259,15 +4237,6 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     if (allowCodeExecForRun) selectedAllowedToolNames.add("code.exec");
     else selectedAllowedToolNames.delete("code.exec");
   }
-
-  if (portableHardAllowedToolNames?.size) {
-    for (const name of Array.from(selectedAllowedToolNames)) {
-      if (!portableHardAllowedToolNames.has(name)) {
-        selectedAllowedToolNames.delete(name);
-      }
-    }
-  }
-
   const compositeCapabilityIssue = validateCompositePhaseCapabilities({
     plan: compositeTaskPlan,
     serverCatalog: mcpServerCatalog,
@@ -5117,7 +5086,9 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       intentRouterTrace,
       activeSkills,
       explicitSkillRefs,
+      candidateSkillIds,
       activeSkillIds,
+      hydratedSkillIds,
       threadCapabilityState,
       rawActiveSkillIds,
       suppressedSkillIds,
@@ -5200,7 +5171,9 @@ export async function executeAgentRun(args: {
     effectiveToolPolicy,
     messages,
     activeSkills,
+    candidateSkillIds,
     activeSkillIds,
+    hydratedSkillIds,
     threadCapabilityState,
     rawActiveSkillIds,
     suppressedSkillIds,
@@ -5632,7 +5605,21 @@ export async function executeAgentRun(args: {
               threadCapabilitiesChanged = true;
             }
           }
-        } else if (targetType === "skill") {
+        } else if (targetType === "skill" && toolName === "tools.describe") {
+          const cardId =
+            String((output as any)?.skill?.cardId ?? "").trim() ||
+            `skill:${String((output as any)?.skill?.id ?? "").trim()}`;
+          if (cardId) {
+            const nextCapabilityState = rememberDescribedCapability({
+              state: threadState.capabilityState,
+              id: cardId,
+            });
+            if (jsonSig(nextCapabilityState) !== jsonSig(threadState.capabilityState ?? null)) {
+              threadState = updateThreadCapabilityState(threadState, nextCapabilityState);
+              threadCapabilitiesChanged = true;
+            }
+          }
+        } else if (targetType === "skill" && toolName === "skills.activate") {
           const skillId =
             String((output as any)?.skill?.id ?? "").trim() ||
             String((output as any)?.activation?.skillId ?? "").trim();
@@ -6481,7 +6468,9 @@ export async function executeAgentRun(args: {
       : ["skills_none"],
     detail: {
       stageKey: stageKeyForRun,
+      candidateSkillIds,
       activeSkillIds,
+      hydratedSkillIds,
       activeSkills,
       ...(suppressedSkillIds.length ? { suppressedSkillIds } : {}),
       rawActiveSkillIds: rawActiveSkillIds.slice(0, 8),

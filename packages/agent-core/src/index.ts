@@ -4,6 +4,7 @@ export type AgentMode = "agent" | "chat";
 export type { ParsedToolCall } from "./runMachine.js";
 
 export type { TriggerRule, SkillManifest, ActiveSkill, SkillConfigOverride, SkillConfig, RegisterSkillOptions } from "./skills.js";
+export type { SkillActivationEvaluation } from "./skills.js";
 export type {
   PipelineDeclaration,
   PipelineLintConfig,
@@ -12,7 +13,7 @@ export type {
 export {
   SkillRegistry, skillRegistry, listRegisteredSkills,
   SKILL_MANIFESTS_V1,
-  activateSkills, pickSkillStageKeyForAgentRun, parseActiveSkillsFromContextPack, mergeSkillManifests,
+  activateSkills, evaluateSkillActivation, pickSkillStageKeyForAgentRun, parseActiveSkillsFromContextPack, mergeSkillManifests,
 } from "./skills.js";
 
 export type {

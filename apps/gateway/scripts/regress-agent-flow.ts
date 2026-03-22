@@ -397,10 +397,22 @@ async function main() {
   }
   {
     const skillDoc = await readRepoFile("apps/desktop/electron/bundled-skills/style_imitate/SKILL.md");
-    assert.ok(skillDoc.includes("Phase 0A: 选库"), "style_imitate 未收敛到统一 spec 的选库阶段");
-    assert.ok(skillDoc.includes("Phase 0B: 题面确认"), "style_imitate 未收敛到统一 spec 的题面确认阶段");
-    assert.ok(skillDoc.includes("toneCard + structureOutline"), "style_imitate 未要求保留定调与骨架产物");
-    assert.ok(skillDoc.includes("不得跳过 lint.copy 和 lint.style"), "style_imitate lint 双闭环合同缺失");
+    assert.ok(
+      skillDoc.includes("选库 → 题面确认 → kb.search → 定调骨架 → 草稿 → lint.copy → lint.style → write"),
+      "style_imitate 未声明统一闭环阶段顺序",
+    );
+    assert.ok(
+      skillDoc.includes("toneCard 和 structureOutline"),
+      "style_imitate 未要求保留定调与骨架产物",
+    );
+    assert.ok(
+      skillDoc.includes("`lint.copy` 与 `lint.style` 都必须跑"),
+      "style_imitate lint 双闭环合同缺失",
+    );
+    assert.ok(
+      skillDoc.includes("## Runtime Contract"),
+      "style_imitate 缺少 runtime contract 主体",
+    );
   }
   {
     const runtime = await readRepoFile("apps/gateway/src/agent/runtime/GatewayRuntime.ts");
