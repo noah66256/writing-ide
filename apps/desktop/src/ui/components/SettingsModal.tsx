@@ -1099,7 +1099,76 @@ function extractEnvKeysFromText(text: string): string[] {
   return keys.slice(0, 8);
 }
 
-async function buildMcpDraftFromGithubUrl(repoUrl: string): Promise<McpDraft> {
+function normalizeDraftConfidence(input: unknown): DraftConfidence {
+  const raw = String(input ?? "").trim().toLowerCase();
+  if (raw === "high" || raw === "medium" || raw === "low") return raw;
+  return "medium";
+}
+
+function draftFromInstallPlan(plan: any, repoUrl: string): McpDraft {
+  const candidates = Array.isArray(plan?.candidates) ? plan.candidates : [];
+  const candidate = candidates[0];
+  if (!candidate || typeof candidate !== "object") {
+    throw new Error("INSTALL_PLAN_EMPTY");
+  }
+  const serverDraft = candidate?.serverDraft && typeof candidate.serverDraft === "object"
+    ? candidate.serverDraft
+    : {};
+  const transportRaw = String(serverDraft?.transport ?? "").trim();
+  const transport: TransportType =
+    transportRaw === "streamable-http" || transportRaw === "sse" ? transportRaw : "stdio";
+  const configFields = Array.isArray(serverDraft?.configFields) ? serverDraft.configFields : [];
+  const envEntries = configFields
+    .filter((field: any) => String(field?.source ?? "env").trim().toLowerCase() === "env")
+    .map((field: any) => [String(field?.key ?? "").trim(), ""] as const)
+    .filter(([key]) => Boolean(key));
+  const unsupportedHeaderKeys = configFields
+    .filter((field: any) => String(field?.source ?? "").trim().toLowerCase() === "header")
+    .map((field: any) => String(field?.key ?? "").trim())
+    .filter(Boolean);
+  const notes = Array.from(
+    new Set(
+      [
+        ...(Array.isArray(candidate?.warnings) ? candidate.warnings : []),
+        ...(Array.isArray(plan?.warnings) ? plan.warnings : []),
+        unsupportedHeaderKeys.length
+          ? `以下 header 配置项需要保存后再手动补充：${unsupportedHeaderKeys.join(", ")}`
+          : "",
+      ]
+        .map((item) => String(item ?? "").trim())
+        .filter(Boolean),
+    ),
+  );
+  const confidence = normalizeDraftConfidence(candidate?.confidence);
+  const confidenceReasonMap: Record<DraftConfidence, string> = {
+    high: "来自 MCP 生命周期 planner 的高置信度安装计划",
+    medium: "来自 MCP 生命周期 planner 的中置信度安装计划",
+    low: "来自 MCP 生命周期 planner 的低置信度安装计划，建议人工复核",
+  };
+  const command = String(serverDraft?.command ?? "").trim();
+  const endpoint = String(serverDraft?.endpoint ?? "").trim();
+  if (transport === "stdio" && !command) {
+    throw new Error("INSTALL_PLAN_COMMAND_REQUIRED");
+  }
+  return {
+    name: String(serverDraft?.name ?? candidate?.title ?? "MCP Server").trim() || "MCP Server",
+    transport,
+    ...(command ? { command } : {}),
+    ...(Array.isArray(serverDraft?.args)
+      ? { args: serverDraft.args.map((item: unknown) => String(item ?? "")).filter(Boolean) }
+      : {}),
+    ...(endpoint ? { endpoint } : {}),
+    ...(envEntries.length ? { env: Object.fromEntries(envEntries) } : {}),
+    ...(String(serverDraft?.toolProfile ?? "").trim() ? { toolProfile: String(serverDraft.toolProfile).trim() } : {}),
+    ...(String(serverDraft?.familyHint ?? "").trim() ? { familyHint: String(serverDraft.familyHint).trim() } : {}),
+    sourceRepo: String(candidate?.sourceMeta?.repo ?? repoUrl).trim() || repoUrl,
+    notes: notes.length ? notes : ["由 MCP 生命周期 planner 生成配置草案"],
+    confidence,
+    confidenceReason: confidenceReasonMap[confidence],
+  };
+}
+
+async function buildMcpDraftFromGithubUrlFallback(repoUrl: string): Promise<McpDraft> {
   const parsed = parseGithubRepoUrl(repoUrl);
   if (!parsed) throw new Error("请提供标准 GitHub 仓库地址（例如 https://github.com/owner/repo）");
   const { owner, repo } = parsed;
@@ -1225,6 +1294,25 @@ async function buildMcpDraftFromGithubUrl(repoUrl: string): Promise<McpDraft> {
   draft.confidence = draft.confidence ?? confidence;
   draft.confidenceReason = draft.confidenceReason ?? confidenceReason;
   return draft;
+}
+
+async function buildMcpDraftFromGithubUrl(repoUrl: string): Promise<McpDraft> {
+  const parsed = parseGithubRepoUrl(repoUrl);
+  if (!parsed) throw new Error("请提供标准 GitHub 仓库地址（例如 https://github.com/owner/repo）");
+  const api = (window as any).desktop?.mcp;
+  if (api?.planInstall) {
+    try {
+      const planned = await api.planInstall({
+        source: { kind: "github_repo", url: repoUrl },
+      });
+      if (planned?.ok) {
+        return draftFromInstallPlan(planned, repoUrl);
+      }
+    } catch {
+      // fall through to renderer fallback
+    }
+  }
+  return buildMcpDraftFromGithubUrlFallback(repoUrl);
 }
 
 // ── 浏览器状态栏（MCP 标签页顶部） ──────────────────

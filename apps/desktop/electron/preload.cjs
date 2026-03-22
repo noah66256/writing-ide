@@ -271,6 +271,30 @@ contextBridge.exposeInMainWorld("desktop", {
     repairRuntime(opts) {
       return ipcRenderer.invoke("mcp.repairRuntime", opts);
     },
+    searchCatalog(args) {
+      return ipcRenderer.invoke("mcp.searchCatalog", args);
+    },
+    planInstall(args) {
+      return ipcRenderer.invoke("mcp.planInstall", args);
+    },
+    applyInstall(args) {
+      return ipcRenderer.invoke("mcp.applyInstall", args);
+    },
+    resolvePendingRequest(args) {
+      return ipcRenderer.invoke("mcp.resolvePendingRequest", args);
+    },
+    testServer(args) {
+      return ipcRenderer.invoke("mcp.testServer", args);
+    },
+    planUpgrade(args) {
+      return ipcRenderer.invoke("mcp.planUpgrade", args);
+    },
+    applyUpgrade(args) {
+      return ipcRenderer.invoke("mcp.applyUpgrade", args);
+    },
+    uninstallServer(args) {
+      return ipcRenderer.invoke("mcp.uninstallServer", args);
+    },
     onStatusChange(handler) {
       if (typeof handler !== "function") return () => {};
       const listener = (_event, payload) => handler(payload);

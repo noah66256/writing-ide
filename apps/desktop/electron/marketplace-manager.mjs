@@ -41,6 +41,7 @@ export class MarketplaceManager {
    * @param {{
    *   userDataPath: string;
    *   getMcpManager: ()=>any;
+   *   getMcpLifecycleService?: ()=>any;
    *   getSkillLoader: ()=>any;
    *   reloadSkillsAndBroadcast: ()=>Promise<void>;
    * }} args
@@ -49,6 +50,7 @@ export class MarketplaceManager {
     this._userDataPath = String(args?.userDataPath ?? "");
     this._statePath = path.join(this._userDataPath, STATE_FILE);
     this._getMcpManager = args?.getMcpManager ?? (() => null);
+    this._getMcpLifecycleService = args?.getMcpLifecycleService ?? (() => null);
     this._getSkillLoader = args?.getSkillLoader ?? (() => null);
     this._reloadSkillsAndBroadcast = args?.reloadSkillsAndBroadcast ?? (async () => void 0);
   }
@@ -192,6 +194,31 @@ export class MarketplaceManager {
     if (!p || p.kind !== "mcp_server" || !p.config || typeof p.config !== "object") {
       throw new Error("MCP_PAYLOAD_INVALID");
     }
+    const lifecycle = this._getMcpLifecycleService();
+    if (lifecycle?.applyInstall) {
+      const result = await lifecycle.applyInstall({
+        source: {
+          kind: "catalog_item",
+          itemId: String(manifest?.id ?? "").trim(),
+          version: String(manifest?.version ?? "").trim(),
+        },
+        catalogRecord: {
+          manifest: deepClone(manifest),
+          payload: deepClone(payload),
+        },
+        candidateId: "catalog-default",
+        configValues: {
+          env: deepClone(p?.config?.env ?? {}),
+          headers: deepClone(p?.config?.headers ?? {}),
+          endpoint: p?.config?.endpoint,
+        },
+        confirm: true,
+        managedBy: "marketplace",
+      });
+      if (!result?.ok) throw new Error(String(result?.error ?? "MCP_INSTALL_FAILED"));
+      return { serverId: String(result.serverId ?? "") };
+    }
+
     const mgr = this._getMcpManager();
     if (!mgr) throw new Error("MCP_NOT_READY");
 
@@ -238,6 +265,12 @@ export class MarketplaceManager {
   async _uninstallMcpServer(installed) {
     const serverId = String(installed?.meta?.serverId ?? "").trim();
     if (!serverId) throw new Error("MCP_SERVER_ID_MISSING");
+    const lifecycle = this._getMcpLifecycleService();
+    if (lifecycle?.uninstallServer) {
+      const result = await lifecycle.uninstallServer({ serverId, confirm: true, source: "marketplace" });
+      if (!result?.ok) throw new Error(String(result?.error ?? "MCP_REMOVE_FAILED"));
+      return;
+    }
     const mgr = this._getMcpManager();
     if (!mgr) throw new Error("MCP_NOT_READY");
     const ret = await mgr.removeServer(serverId);

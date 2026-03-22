@@ -1,6 +1,7 @@
 import { useProjectStore } from "../state/projectStore";
 import { useRunStore, type Mode, type ToolApplyPolicy, type ToolRiskLevel } from "../state/runStore";
 import { useKbStore } from "../state/kbStore";
+import { useMcpStore } from "../state/mcpStore";
 import { useAuthStore } from "../state/authStore";
 import { useWritingBatchStore } from "../state/writingBatchStore";
 import { useFileOpPermissionStore } from "../state/fileOpPermissionStore";
@@ -652,6 +653,81 @@ function failToolResult(args: {
       ...(args.extra && typeof args.extra === "object" ? args.extra : {}),
     },
   };
+}
+
+function currentMcpLifecycleArgs(extra?: Record<string, unknown>) {
+  const baseUrl = absoluteGatewayBaseUrlForLocalExec();
+  const threadId = String((useRunStore.getState() as any)?.thread?.id ?? "").trim();
+  return {
+    ...(baseUrl ? { baseUrl } : {}),
+    ...(threadId ? { threadId } : {}),
+    ...(extra && typeof extra === "object" ? extra : {}),
+  };
+}
+
+function maskMcpSecretMap(input: unknown): Record<string, string> {
+  const src = input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(src)) {
+    const raw = String(value ?? "");
+    out[key] = raw ? (raw.length <= 6 ? "*".repeat(raw.length) : `${raw.slice(0, 2)}***${raw.slice(-2)}`) : "";
+  }
+  return out;
+}
+
+function sanitizeMcpServerForModel(server: any) {
+  const config = server?.config && typeof server.config === "object" ? server.config : {};
+  return {
+    id: String(server?.id ?? "").trim(),
+    name: String(server?.name ?? "").trim(),
+    transport: String(server?.transport ?? "").trim(),
+    enabled: server?.enabled !== false,
+    status: String(server?.status ?? "").trim(),
+    error: server?.error ? String(server.error) : null,
+    bundled: server?.bundled === true,
+    builtin: server?.builtin === true,
+    toolCount: Array.isArray(server?.tools) ? server.tools.length : 0,
+    agentToolCount:
+      typeof server?.agentToolCount === "number" && Number.isFinite(server.agentToolCount)
+        ? Math.max(0, Math.floor(server.agentToolCount))
+        : Array.isArray(server?.agentTools)
+          ? server.agentTools.length
+          : 0,
+    resolvedFamily: String(server?.resolvedFamily ?? "").trim() || undefined,
+    resolvedToolProfile: String(server?.resolvedToolProfile ?? "").trim() || undefined,
+    config: {
+      command: String(config?.command ?? "").trim() || undefined,
+      args: Array.isArray(config?.args) ? config.args.map((item: any) => String(item ?? "")).filter(Boolean) : undefined,
+      endpoint: String(config?.endpoint ?? "").trim() || undefined,
+      headers: maskMcpSecretMap(config?.headers),
+      env: maskMcpSecretMap(config?.env),
+      enabledTools: Array.isArray(config?.enabledTools) ? config.enabledTools : [],
+      disabledTools: Array.isArray(config?.disabledTools) ? config.disabledTools : [],
+      toolProfile: String(config?.toolProfile ?? "").trim() || undefined,
+      familyHint: String(config?.familyHint ?? "").trim() || undefined,
+    },
+    configFields: Array.isArray(server?.configFields) ? server.configFields : [],
+    lifecycle: server?.lifecycle ?? null,
+  };
+}
+
+function sanitizeMcpServerList(input: unknown) {
+  return Array.isArray(input) ? input.map((server) => sanitizeMcpServerForModel(server)) : [];
+}
+
+function buildMcpServerConfigPatch(configValues: unknown) {
+  const values = configValues && typeof configValues === "object" && !Array.isArray(configValues)
+    ? (configValues as Record<string, unknown>)
+    : {};
+  const patch: Record<string, unknown> = {};
+  if (typeof values.endpoint === "string" && values.endpoint.trim()) patch.endpoint = values.endpoint.trim();
+  if (values.env && typeof values.env === "object" && !Array.isArray(values.env)) patch.env = { ...(values.env as Record<string, unknown>) };
+  if (values.headers && typeof values.headers === "object" && !Array.isArray(values.headers)) patch.headers = { ...(values.headers as Record<string, unknown>) };
+  if (typeof values.toolProfile === "string" && values.toolProfile.trim()) patch.toolProfile = values.toolProfile.trim();
+  if (typeof values.familyHint === "string" && values.familyHint.trim()) patch.familyHint = values.familyHint.trim();
+  if (Array.isArray(values.enabledTools)) patch.enabledTools = values.enabledTools.map((item) => String(item ?? "")).filter(Boolean);
+  if (Array.isArray(values.disabledTools)) patch.disabledTools = values.disabledTools.map((item) => String(item ?? "")).filter(Boolean);
+  return patch;
 }
 
 function failPathResolve(args: { rawPath: unknown; resolved: PathResolveResult; actionLabel: string }): ToolExecErr {
@@ -3104,6 +3180,318 @@ const tools: ToolDefinition[] = [
         },
         undoable: false,
       };
+    },
+  },
+  {
+    name: "mcpServer.searchCatalog",
+    description: "搜索官方/审核 MCP catalog，返回可安装的 MCP 候选。",
+    args: [{ name: "query", required: true, desc: "搜索词", type: "string" }],
+    riskLevel: "low",
+    applyPolicy: "auto_apply",
+    reversible: false,
+    run: async (args) => {
+      const query = String(args?.query ?? "").trim();
+      if (!query) return failToolResult({ code: "QUERY_REQUIRED", message: "query is required" });
+      const api = (window as any).desktop?.mcp;
+      if (!api?.searchCatalog) {
+        return failToolResult({ code: "MCP_API_NOT_AVAILABLE", message: "MCP 生命周期 API 不可用" });
+      }
+      const result = await api.searchCatalog(currentMcpLifecycleArgs({ query }));
+      if (!result?.ok) {
+        return failToolResult({ code: result?.error ?? "SEARCH_FAILED", message: result?.detail ?? "failed to search mcp catalog" });
+      }
+      return { ok: true, output: result, undoable: false };
+    },
+  },
+  {
+    name: "mcpServer.planInstall",
+    description: "为某个 MCP 来源生成安装计划，不直接执行安装。",
+    args: [{ name: "source", required: true, desc: "MCP 来源对象", type: "object" }],
+    riskLevel: "medium",
+    applyPolicy: "auto_apply",
+    reversible: false,
+    run: async (args) => {
+      const source = args?.source;
+      if (!source || typeof source !== "object" || Array.isArray(source)) {
+        return failToolResult({ code: "SOURCE_REQUIRED", message: "source object is required" });
+      }
+      const api = (window as any).desktop?.mcp;
+      if (!api?.planInstall) {
+        return failToolResult({ code: "MCP_API_NOT_AVAILABLE", message: "MCP 生命周期 API 不可用" });
+      }
+      const result = await api.planInstall(currentMcpLifecycleArgs({ source }));
+      if (!result?.ok) {
+        return failToolResult({ code: result?.error ?? "PLAN_FAILED", message: result?.detail ?? "failed to plan mcp install" });
+      }
+      return { ok: true, output: result, undoable: false };
+    },
+  },
+  {
+    name: "mcpServer.applyInstall",
+    description: "执行 MCP 安装、连接与验证。",
+    args: [
+      { name: "source", required: true, desc: "MCP 来源对象", type: "object" },
+      { name: "candidateId", required: true, desc: "候选 ID", type: "string" },
+      { name: "configValues", required: false, desc: "配置值", type: "object" },
+      { name: "confirm", required: true, desc: "显式确认执行安装", type: "boolean" },
+    ],
+    riskLevel: "high",
+    applyPolicy: "auto_apply",
+    reversible: false,
+    run: async (args) => {
+      const source = args?.source;
+      const candidateId = String(args?.candidateId ?? "").trim();
+      if (!source || typeof source !== "object" || Array.isArray(source)) {
+        return failToolResult({ code: "SOURCE_REQUIRED", message: "source object is required" });
+      }
+      if (!candidateId) {
+        return failToolResult({ code: "CANDIDATE_ID_REQUIRED", message: "candidateId is required" });
+      }
+      const api = (window as any).desktop?.mcp;
+      if (!api?.applyInstall) {
+        return failToolResult({ code: "MCP_API_NOT_AVAILABLE", message: "MCP 生命周期 API 不可用" });
+      }
+      const result = await api.applyInstall(currentMcpLifecycleArgs({
+        source,
+        candidateId,
+        configValues: args?.configValues && typeof args.configValues === "object" ? args.configValues : {},
+        confirm: args?.confirm === true,
+      }));
+      await useMcpStore.getState().refresh().catch(() => void 0);
+      if (!result?.ok) {
+        return failToolResult({
+          code: result?.error ?? "APPLY_FAILED",
+          message: result?.detail ?? "failed to apply mcp install",
+          extra: result && typeof result === "object" ? result as Record<string, unknown> : undefined,
+        });
+      }
+      return { ok: true, output: result, undoable: false };
+    },
+  },
+  {
+    name: "mcpServer.list",
+    description: "列出当前已配置 MCP server 的脱敏运行状态摘要。",
+    args: [],
+    riskLevel: "low",
+    applyPolicy: "auto_apply",
+    reversible: false,
+    run: async () => {
+      const api = (window as any).desktop?.mcp;
+      if (!api?.getServers) {
+        return failToolResult({ code: "MCP_API_NOT_AVAILABLE", message: "MCP API 不可用" });
+      }
+      const servers = await api.getServers();
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          servers: sanitizeMcpServerList(servers),
+        },
+        undoable: false,
+      };
+    },
+  },
+  {
+    name: "mcpServer.updateConfig",
+    description: "更新某个 MCP server 的配置。",
+    args: [
+      { name: "serverId", required: true, desc: "server id", type: "string" },
+      { name: "configValues", required: true, desc: "配置更新", type: "object" },
+    ],
+    riskLevel: "high",
+    applyPolicy: "auto_apply",
+    reversible: false,
+    run: async (args) => {
+      const serverId = String(args?.serverId ?? "").trim();
+      if (!serverId) return failToolResult({ code: "SERVER_ID_REQUIRED", message: "serverId is required" });
+      const api = (window as any).desktop?.mcp;
+      if (!api?.updateServer) {
+        return failToolResult({ code: "MCP_API_NOT_AVAILABLE", message: "MCP API 不可用" });
+      }
+      const patch = buildMcpServerConfigPatch(args?.configValues);
+      const result = await api.updateServer(serverId, patch);
+      await useMcpStore.getState().refresh().catch(() => void 0);
+      if (!result?.ok) {
+        return failToolResult({ code: result?.error ?? "UPDATE_FAILED", message: result?.detail ?? "failed to update mcp config" });
+      }
+      if (api?.testServer) {
+        const verify = await api.testServer(currentMcpLifecycleArgs({ serverId }));
+        if (!verify?.ok) {
+          return failToolResult({ code: verify?.error ?? "VERIFY_FAILED", message: verify?.detail ?? "failed to verify mcp server", extra: verify });
+        }
+        return { ok: true, output: verify, undoable: false };
+      }
+      return { ok: true, output: { ok: true, serverId }, undoable: false };
+    },
+  },
+  {
+    name: "mcpServer.enable",
+    description: "启用并连接某个 MCP server。",
+    args: [{ name: "serverId", required: true, desc: "server id", type: "string" }],
+    riskLevel: "high",
+    applyPolicy: "auto_apply",
+    reversible: false,
+    run: async (args) => {
+      const serverId = String(args?.serverId ?? "").trim();
+      if (!serverId) return failToolResult({ code: "SERVER_ID_REQUIRED", message: "serverId is required" });
+      const api = (window as any).desktop?.mcp;
+      if (!api?.updateServer || !api?.connect) {
+        return failToolResult({ code: "MCP_API_NOT_AVAILABLE", message: "MCP API 不可用" });
+      }
+      const updated = await api.updateServer(serverId, { enabled: true });
+      if (!updated?.ok) {
+        return failToolResult({ code: updated?.error ?? "ENABLE_FAILED", message: updated?.detail ?? "failed to enable mcp server" });
+      }
+      await api.connect(serverId);
+      await useMcpStore.getState().refresh().catch(() => void 0);
+      if (api?.testServer) {
+        const verify = await api.testServer(currentMcpLifecycleArgs({ serverId }));
+        if (!verify?.ok) {
+          return failToolResult({ code: verify?.error ?? "VERIFY_FAILED", message: verify?.detail ?? "failed to verify mcp server", extra: verify });
+        }
+        return { ok: true, output: verify, undoable: false };
+      }
+      return { ok: true, output: { ok: true, serverId, status: "connected" }, undoable: false };
+    },
+  },
+  {
+    name: "mcpServer.disable",
+    description: "断开并禁用某个 MCP server。",
+    args: [{ name: "serverId", required: true, desc: "server id", type: "string" }],
+    riskLevel: "high",
+    applyPolicy: "auto_apply",
+    reversible: false,
+    run: async (args) => {
+      const serverId = String(args?.serverId ?? "").trim();
+      if (!serverId) return failToolResult({ code: "SERVER_ID_REQUIRED", message: "serverId is required" });
+      const api = (window as any).desktop?.mcp;
+      if (!api?.updateServer || !api?.disconnect) {
+        return failToolResult({ code: "MCP_API_NOT_AVAILABLE", message: "MCP API 不可用" });
+      }
+      const updated = await api.updateServer(serverId, { enabled: false });
+      if (!updated?.ok) {
+        return failToolResult({ code: updated?.error ?? "DISABLE_FAILED", message: updated?.detail ?? "failed to disable mcp server" });
+      }
+      await api.disconnect(serverId);
+      await useMcpStore.getState().refresh().catch(() => void 0);
+      return { ok: true, output: { ok: true, serverId, status: "disabled", connected: false }, undoable: false };
+    },
+  },
+  {
+    name: "mcpServer.test",
+    description: "测试某个已安装 MCP server 的连接状态与工具暴露情况。",
+    args: [{ name: "serverId", required: true, desc: "server id", type: "string" }],
+    riskLevel: "low",
+    applyPolicy: "auto_apply",
+    reversible: false,
+    run: async (args) => {
+      const serverId = String(args?.serverId ?? "").trim();
+      if (!serverId) return failToolResult({ code: "SERVER_ID_REQUIRED", message: "serverId is required" });
+      const api = (window as any).desktop?.mcp;
+      if (!api?.testServer) {
+        return failToolResult({ code: "MCP_API_NOT_AVAILABLE", message: "MCP 生命周期 API 不可用" });
+      }
+      const result = await api.testServer(currentMcpLifecycleArgs({ serverId }));
+      await useMcpStore.getState().refresh().catch(() => void 0);
+      if (!result?.ok) {
+        return failToolResult({ code: result?.error ?? "TEST_FAILED", message: result?.detail ?? "failed to test mcp server", extra: result });
+      }
+      return { ok: true, output: result, undoable: false };
+    },
+  },
+  {
+    name: "mcpServer.repairRuntime",
+    description: "修复某个 MCP server 所需的运行时环境。",
+    args: [{ name: "serverId", required: true, desc: "server id", type: "string" }],
+    riskLevel: "high",
+    applyPolicy: "auto_apply",
+    reversible: false,
+    run: async (args) => {
+      const serverId = String(args?.serverId ?? "").trim();
+      if (!serverId) return failToolResult({ code: "SERVER_ID_REQUIRED", message: "serverId is required" });
+      const api = (window as any).desktop?.mcp;
+      if (!api?.repairRuntime || !api?.getServers) {
+        return failToolResult({ code: "MCP_API_NOT_AVAILABLE", message: "MCP API 不可用" });
+      }
+      const serverList = await api.getServers();
+      const servers = Array.isArray(serverList) ? serverList : [];
+      const server = servers.find((item: any) => String(item?.id ?? "").trim() === serverId);
+      if (!server) return failToolResult({ code: "SERVER_NOT_FOUND", message: "server not found" });
+      const command = String(server?.config?.command ?? "").trim();
+      const result = await api.repairRuntime({ commands: command ? [command] : [] });
+      await useMcpStore.getState().refresh().catch(() => void 0);
+      return { ok: true, output: { ok: true, serverId, runtime: result }, undoable: false };
+    },
+  },
+  {
+    name: "mcpServer.planUpgrade",
+    description: "为某个已托管 MCP server 生成升级计划。",
+    args: [{ name: "serverId", required: true, desc: "server id", type: "string" }],
+    riskLevel: "medium",
+    applyPolicy: "auto_apply",
+    reversible: false,
+    run: async (args) => {
+      const serverId = String(args?.serverId ?? "").trim();
+      if (!serverId) return failToolResult({ code: "SERVER_ID_REQUIRED", message: "serverId is required" });
+      const api = (window as any).desktop?.mcp;
+      if (!api?.planUpgrade) {
+        return failToolResult({ code: "MCP_API_NOT_AVAILABLE", message: "MCP 生命周期 API 不可用" });
+      }
+      const result = await api.planUpgrade(currentMcpLifecycleArgs({ serverId }));
+      if (!result?.ok) {
+        return failToolResult({ code: result?.error ?? "PLAN_UPGRADE_FAILED", message: result?.detail ?? "failed to plan mcp upgrade", extra: result });
+      }
+      return { ok: true, output: result, undoable: false };
+    },
+  },
+  {
+    name: "mcpServer.applyUpgrade",
+    description: "执行某个已托管 MCP server 的升级。",
+    args: [
+      { name: "serverId", required: true, desc: "server id", type: "string" },
+      { name: "confirm", required: true, desc: "显式确认执行升级", type: "boolean" },
+    ],
+    riskLevel: "high",
+    applyPolicy: "auto_apply",
+    reversible: false,
+    run: async (args) => {
+      const serverId = String(args?.serverId ?? "").trim();
+      if (!serverId) return failToolResult({ code: "SERVER_ID_REQUIRED", message: "serverId is required" });
+      const api = (window as any).desktop?.mcp;
+      if (!api?.applyUpgrade) {
+        return failToolResult({ code: "MCP_API_NOT_AVAILABLE", message: "MCP 生命周期 API 不可用" });
+      }
+      const result = await api.applyUpgrade(currentMcpLifecycleArgs({ serverId, confirm: args?.confirm === true }));
+      await useMcpStore.getState().refresh().catch(() => void 0);
+      if (!result?.ok) {
+        return failToolResult({ code: result?.error ?? "APPLY_UPGRADE_FAILED", message: result?.detail ?? "failed to apply mcp upgrade", extra: result });
+      }
+      return { ok: true, output: result, undoable: false };
+    },
+  },
+  {
+    name: "mcpServer.uninstall",
+    description: "卸载某个已托管 MCP server。",
+    args: [
+      { name: "serverId", required: true, desc: "server id", type: "string" },
+      { name: "confirm", required: true, desc: "显式确认执行卸载", type: "boolean" },
+    ],
+    riskLevel: "high",
+    applyPolicy: "auto_apply",
+    reversible: false,
+    run: async (args) => {
+      const serverId = String(args?.serverId ?? "").trim();
+      if (!serverId) return failToolResult({ code: "SERVER_ID_REQUIRED", message: "serverId is required" });
+      const api = (window as any).desktop?.mcp;
+      if (!api?.uninstallServer) {
+        return failToolResult({ code: "MCP_API_NOT_AVAILABLE", message: "MCP 生命周期 API 不可用" });
+      }
+      const result = await api.uninstallServer(currentMcpLifecycleArgs({ serverId, confirm: args?.confirm === true }));
+      await useMcpStore.getState().refresh().catch(() => void 0);
+      if (!result?.ok) {
+        return failToolResult({ code: result?.error ?? "UNINSTALL_FAILED", message: result?.detail ?? "failed to uninstall mcp server", extra: result });
+      }
+      return { ok: true, output: result, undoable: false };
     },
   },
   {

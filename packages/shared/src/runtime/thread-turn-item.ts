@@ -90,7 +90,8 @@ export type ThreadRecord = {
   status: "idle" | "running" | "waiting" | "completed" | "failed";
   waitingFor: ThreadWaitingFor;
   waiting?: {
-    kind: "clarify" | "proposal" | "approval" | "resume_or_narrow" | "login_or_choice";
+    kind: "clarify" | "proposal" | "approval" | "resume_or_narrow" | "login_or_choice" | "mcp_install" | "mcp_auth";
+    requestId?: string;
     question?: string;
     replyHint?: string;
     sourceTurnId?: string;

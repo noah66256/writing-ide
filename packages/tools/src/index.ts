@@ -1273,6 +1273,191 @@ export const TOOL_LIST: ToolMeta[] = [
     },
   },
   {
+    name: "mcpServer.searchCatalog",
+    description: "搜索官方/审核 MCP catalog，返回可安装的 MCP 候选。",
+    args: [{ name: "query", required: true, desc: "搜索词", type: "string" }],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+      },
+      required: ["query"],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: "mcpServer.planInstall",
+    description: "为某个 MCP 来源生成安装计划，不直接执行安装。支持 catalog item 或 GitHub 仓库 URL。",
+    args: [{ name: "source", required: true, desc: "MCP 来源对象", type: "object" }],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        source: { type: "object" },
+      },
+      required: ["source"],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: "mcpServer.applyInstall",
+    description: "根据 source + candidateId + configValues 执行 MCP 安装、连接与验证。仅应在助手模式下使用。",
+    args: [
+      { name: "source", required: true, desc: "MCP 来源对象", type: "object" },
+      { name: "candidateId", required: true, desc: "候选 ID", type: "string" },
+      { name: "configValues", required: false, desc: "配置值", type: "object" },
+      { name: "confirm", required: true, desc: "显式确认执行安装", type: "boolean" },
+    ],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        source: { type: "object" },
+        candidateId: { type: "string" },
+        configValues: { type: "object" },
+        confirm: { type: "boolean" },
+      },
+      required: ["source", "candidateId", "confirm"],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: "mcpServer.list",
+    description: "列出当前已配置 MCP server 的脱敏运行状态与托管状态摘要。",
+    args: [],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: true,
+    },
+  },
+  {
+    name: "mcpServer.updateConfig",
+    description: "更新某个 MCP server 的配置，并返回新的脱敏状态摘要。",
+    args: [
+      { name: "serverId", required: true, desc: "server id", type: "string" },
+      { name: "configValues", required: true, desc: "配置更新", type: "object" },
+    ],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        serverId: { type: "string" },
+        configValues: { type: "object" },
+      },
+      required: ["serverId", "configValues"],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: "mcpServer.enable",
+    description: "启用并连接某个 MCP server。",
+    args: [{ name: "serverId", required: true, desc: "server id", type: "string" }],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        serverId: { type: "string" },
+      },
+      required: ["serverId"],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: "mcpServer.disable",
+    description: "断开并禁用某个 MCP server。",
+    args: [{ name: "serverId", required: true, desc: "server id", type: "string" }],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        serverId: { type: "string" },
+      },
+      required: ["serverId"],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: "mcpServer.test",
+    description: "测试某个已安装 MCP server 的连接状态与工具暴露情况。",
+    args: [{ name: "serverId", required: true, desc: "server id", type: "string" }],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        serverId: { type: "string" },
+      },
+      required: ["serverId"],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: "mcpServer.repairRuntime",
+    description: "修复某个 MCP server 所需的运行时环境，然后重新验证。",
+    args: [{ name: "serverId", required: true, desc: "server id", type: "string" }],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        serverId: { type: "string" },
+      },
+      required: ["serverId"],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: "mcpServer.planUpgrade",
+    description: "为某个已托管 MCP server 生成升级计划，不直接执行升级。",
+    args: [{ name: "serverId", required: true, desc: "server id", type: "string" }],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        serverId: { type: "string" },
+      },
+      required: ["serverId"],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: "mcpServer.applyUpgrade",
+    description: "执行某个已托管 MCP server 的升级，并在完成后重新验证。",
+    args: [
+      { name: "serverId", required: true, desc: "server id", type: "string" },
+      { name: "confirm", required: true, desc: "显式确认执行升级", type: "boolean" },
+    ],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        serverId: { type: "string" },
+        confirm: { type: "boolean" },
+      },
+      required: ["serverId", "confirm"],
+      additionalProperties: true,
+    },
+  },
+  {
+    name: "mcpServer.uninstall",
+    description: "卸载某个已托管 MCP server，并清理托管状态。",
+    args: [
+      { name: "serverId", required: true, desc: "server id", type: "string" },
+      { name: "confirm", required: true, desc: "显式确认执行卸载", type: "boolean" },
+    ],
+    modes: ["agent"],
+    inputSchema: {
+      type: "object",
+      properties: {
+        serverId: { type: "string" },
+        confirm: { type: "boolean" },
+      },
+      required: ["serverId", "confirm"],
+      additionalProperties: true,
+    },
+  },
+  {
     name: "rename",
     description: "重命名/移动 文件或目录（fromPath → toPath）。默认自动执行（可 Undo 回滚）。",
     args: [

@@ -5663,6 +5663,61 @@ export async function executeAgentRun(args: {
       const ok = p?.ok === true;
       let threadCapabilitiesChanged = false;
       let threadSkillsChanged = false;
+      if (
+        ok &&
+        output &&
+        (toolName === "mcpServer.applyInstall" || toolName === "mcpServer.test" || toolName === "mcpServer.applyUpgrade")
+      ) {
+        const lifecycleStatus = String(output?.status ?? "").trim().toLowerCase();
+        const requestId = String(output?.requestId ?? "").trim();
+        const needsInput = output?.needsInput && typeof output.needsInput === "object"
+          ? (output.needsInput as Record<string, unknown>)
+          : null;
+        if (lifecycleStatus === "needs_input" && needsInput) {
+          const fields = Array.isArray(needsInput?.fields) ? (needsInput.fields as Array<Record<string, unknown>>) : [];
+          const hasSecretField = fields.some((field) => field?.secret === true);
+          const kind: "mcp_install" | "mcp_auth" =
+            String(needsInput?.mode ?? "").trim().toLowerCase() === "url" || hasSecretField ? "mcp_auth" : "mcp_install";
+          const question =
+            String(needsInput?.message ?? "").trim() ||
+            "还缺少一些 MCP 配置，补齐后我就继续。";
+          const replyHint = kind === "mcp_auth" ? "完成授权或直接回复配置值" : "直接回复配置值即可";
+          const nowIso = new Date().toISOString();
+          lifecyclePendingWaiting = {
+            kind,
+            ...(requestId ? { requestId } : {}),
+            question,
+            replyHint,
+          };
+          patchThreadWorkflow({
+            status: "waiting_user",
+            updatedAt: nowIso,
+            lastEndReason: "mcp_needs_input",
+            waiting: {
+              kind,
+              ...(requestId ? { requestId } : {}),
+              question,
+              replyHint,
+              sourceToolName: toolName,
+            },
+          });
+          threadState = updateThreadWaiting({
+            thread: threadState,
+            waitingFor: "user",
+            waiting: {
+              kind,
+              ...(requestId ? { requestId } : {}),
+              question,
+              replyHint,
+              sourceTurnId: turnRecord.id,
+              updatedAt: nowIso,
+            },
+          });
+          emitThreadWaitingUpdated();
+        } else if (lifecycleStatus === "connected" || output?.connected === true) {
+          lifecyclePendingWaiting = null;
+        }
+      }
       if (ok && (toolName === "tools.describe" || toolName === "skills.activate") && output) {
         const targetType = String(output?.targetType ?? "").trim();
         if (targetType === "mcp_capability") {
@@ -5995,13 +6050,57 @@ export async function executeAgentRun(args: {
         });
         emitThreadWaitingUpdated();
       } else if (reason === "completed") {
-        patchThreadWorkflow({
-          status: "done",
-          updatedAt: nowIso,
-          lastEndReason: "completed",
-        });
-        clearThreadWaiting();
-        threadState = setThreadStatus(threadState, "completed");
+        if (lifecyclePendingWaiting && threadState.waitingFor !== "approval") {
+          const existingWaiting =
+            threadState.waiting && typeof threadState.waiting === "object"
+              ? (threadState.waiting as Record<string, unknown>)
+              : null;
+          const question =
+            String(existingWaiting?.question ?? "").trim() ||
+            String(lifecyclePendingWaiting.question ?? "").trim() ||
+            "还缺少一些 MCP 配置，补齐后我就继续。";
+          const replyHint =
+            String(existingWaiting?.replyHint ?? "").trim() ||
+            String(lifecyclePendingWaiting.replyHint ?? "").trim() ||
+            "直接回复配置值即可";
+          const sourceTurnId =
+            String(existingWaiting?.sourceTurnId ?? "").trim() ||
+            turnRecord.id;
+          patchThreadWorkflow({
+            status: "waiting_user",
+            updatedAt: nowIso,
+            lastEndReason: "mcp_needs_input",
+            waiting: {
+              kind: lifecyclePendingWaiting.kind,
+              ...(lifecyclePendingWaiting.requestId ? { requestId: lifecyclePendingWaiting.requestId } : {}),
+              question,
+              replyHint,
+              sourceTurnId,
+            },
+          });
+          threadState = updateThreadWaiting({
+            thread: threadState,
+            waitingFor: "user",
+            waiting: {
+              kind: lifecyclePendingWaiting.kind,
+              ...(lifecyclePendingWaiting.requestId ? { requestId: lifecyclePendingWaiting.requestId } : {}),
+              question,
+              replyHint,
+              sourceTurnId,
+              updatedAt: nowIso,
+            },
+          });
+          emitThreadWaitingUpdated();
+          threadState = setThreadStatus(threadState, "waiting");
+        } else {
+          patchThreadWorkflow({
+            status: "done",
+            updatedAt: nowIso,
+            lastEndReason: "completed",
+          });
+          clearThreadWaiting();
+          threadState = setThreadStatus(threadState, "completed");
+        }
       } else if (reason) {
         if (threadState.waitingFor === "none") {
           patchThreadWorkflow({

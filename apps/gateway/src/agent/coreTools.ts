@@ -52,6 +52,15 @@ export const HIGH_RISK_TOOL_NAMES = [
   "cron.create",
   "cron.list",
   "skill.install",
+  "mcpServer.planInstall",
+  "mcpServer.applyInstall",
+  "mcpServer.updateConfig",
+  "mcpServer.enable",
+  "mcpServer.disable",
+  "mcpServer.repairRuntime",
+  "mcpServer.planUpgrade",
+  "mcpServer.applyUpgrade",
+  "mcpServer.uninstall",
 ] as const;
 
 export type HighRiskToolName = (typeof HIGH_RISK_TOOL_NAMES)[number];

@@ -228,6 +228,21 @@ declare global {
         callTool: (serverId: string, toolName: string, args?: any) => Promise<any>;
         getRuntimeHealth?: (opts?: { commands?: string[] }) => Promise<any>;
         repairRuntime?: (opts?: { commands?: string[] }) => Promise<any>;
+        searchCatalog?: (args?: { query?: string; baseUrl?: string }) => Promise<any>;
+        planInstall?: (args?: { source?: any; baseUrl?: string }) => Promise<any>;
+        applyInstall?: (args?: {
+          source?: any;
+          candidateId?: string;
+          configValues?: any;
+          confirm?: boolean;
+          baseUrl?: string;
+          threadId?: string | null;
+        }) => Promise<any>;
+        resolvePendingRequest?: (args?: { requestId?: string; action?: string; values?: any }) => Promise<any>;
+        testServer?: (args?: { serverId?: string; threadId?: string | null }) => Promise<any>;
+        planUpgrade?: (args?: { serverId?: string; baseUrl?: string }) => Promise<any>;
+        applyUpgrade?: (args?: { serverId?: string; confirm?: boolean; baseUrl?: string; threadId?: string | null }) => Promise<any>;
+        uninstallServer?: (args?: { serverId?: string; confirm?: boolean }) => Promise<any>;
         onStatusChange: (handler: (payload: any) => void) => () => void;
       };
       marketplace?: {

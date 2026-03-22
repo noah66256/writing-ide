@@ -118,6 +118,7 @@ let watchChanged = new Set();
 let mcpManager = null;
 let skillLoader = null;  // Skill 扩展包加载器
 let marketplaceManager = null;  // Marketplace 安装管理器
+let mcpLifecycleService = null;
 let claudeCliBridgeManager = null;  // shell.exec 内嵌 claude -p 受限 bridge
 let appSettings = {};  // 应用级设置（含浏览器路径等）
 let appSettingsModules = null;  // { loadSettings, saveSettings, detectBrowser }
@@ -6595,6 +6596,38 @@ function registerIpc() {
       return { ok: false, error: String(e?.message ?? e) };
     }
   });
+  ipcMain.handle("mcp.searchCatalog", async (_event, args) => {
+    if (!mcpLifecycleService) return { ok: false, error: "MCP_LIFECYCLE_NOT_READY" };
+    return mcpLifecycleService.searchCatalog(args ?? {});
+  });
+  ipcMain.handle("mcp.planInstall", async (_event, args) => {
+    if (!mcpLifecycleService) return { ok: false, error: "MCP_LIFECYCLE_NOT_READY" };
+    return mcpLifecycleService.planInstall(args ?? {});
+  });
+  ipcMain.handle("mcp.applyInstall", async (_event, args) => {
+    if (!mcpLifecycleService) return { ok: false, error: "MCP_LIFECYCLE_NOT_READY" };
+    return mcpLifecycleService.applyInstall(args ?? {});
+  });
+  ipcMain.handle("mcp.resolvePendingRequest", async (_event, args) => {
+    if (!mcpLifecycleService) return { ok: false, error: "MCP_LIFECYCLE_NOT_READY" };
+    return mcpLifecycleService.resolvePendingRequest(args ?? {});
+  });
+  ipcMain.handle("mcp.testServer", async (_event, args) => {
+    if (!mcpLifecycleService) return { ok: false, error: "MCP_LIFECYCLE_NOT_READY" };
+    return mcpLifecycleService.testServer(args ?? {});
+  });
+  ipcMain.handle("mcp.planUpgrade", async (_event, args) => {
+    if (!mcpLifecycleService) return { ok: false, error: "MCP_LIFECYCLE_NOT_READY" };
+    return mcpLifecycleService.planUpgrade(args ?? {});
+  });
+  ipcMain.handle("mcp.applyUpgrade", async (_event, args) => {
+    if (!mcpLifecycleService) return { ok: false, error: "MCP_LIFECYCLE_NOT_READY" };
+    return mcpLifecycleService.applyUpgrade(args ?? {});
+  });
+  ipcMain.handle("mcp.uninstallServer", async (_event, args) => {
+    if (!mcpLifecycleService) return { ok: false, error: "MCP_LIFECYCLE_NOT_READY" };
+    return mcpLifecycleService.uninstallServer(args ?? {});
+  });
 
   // ── Skill 扩展包 ──────────────────────────
   ipcMain.handle("skills.list", async () => {
@@ -7043,6 +7076,7 @@ app.whenReady().then(async () => {
     marketplaceManager = new MarketplaceManager({
       userDataPath: app.getPath("userData"),
       getMcpManager: () => mcpManager,
+      getMcpLifecycleService: () => mcpLifecycleService,
       getSkillLoader: () => skillLoader,
       reloadSkillsAndBroadcast,
     });
@@ -7050,6 +7084,20 @@ app.whenReady().then(async () => {
   } catch (e) {
     marketplaceManager = null;
     console.error("[electron] MarketplaceManager 初始化失败:", e);
+  }
+
+  try {
+    const { McpLifecycleService } = await import("./mcp-lifecycle-service.mjs");
+    mcpLifecycleService = new McpLifecycleService({
+      userDataPath: app.getPath("userData"),
+      getMcpManager: () => mcpManager,
+      getMarketplaceManager: () => marketplaceManager,
+    });
+    await mcpLifecycleService.startHealthSweep().catch(() => void 0);
+    console.log("[electron] McpLifecycleService initialized");
+  } catch (e) {
+    mcpLifecycleService = null;
+    console.error("[electron] McpLifecycleService 初始化失败:", e);
   }
 
   app.on("activate", () => {
@@ -7070,6 +7118,7 @@ app.on("window-all-closed", () => {
   stopAutomationScheduler();
   try { skillLoader?.dispose?.(); } catch { /* ignore */ }
   try { codeExecManager?.dispose?.(); } catch { /* ignore */ }
+  try { mcpLifecycleService?.dispose?.(); } catch { /* ignore */ }
   try { mcpManager?.dispose?.(); } catch { /* ignore */ }
   if (process.platform !== "darwin") app.quit();
 });
@@ -7084,6 +7133,7 @@ app.on("will-quit", () => {
     disposeClaudeBridgeSession(rec?.claudeBridgeSession);
     if (rec && typeof rec === "object") rec.claudeBridgeSession = null;
   }
+  try { mcpLifecycleService?.dispose?.(); } catch { /* ignore */ }
   try { claudeCliBridgeManager?.dispose?.(); } catch { /* ignore */ }
   // 清理 Electron 的 SingleInstanceLock 文件（防止安装器误报）
   // 同时清理旧版 "写作IDE" 和新版 "WritingIDE" 两个路径
