@@ -1099,9 +1099,7 @@ export const useConversationStore = create<ConversationState>()(
         }
 
         try {
-          const pendingResPromise = api.loadPendingConversations
-            ? api.loadPendingConversations().catch(() => null)
-            : Promise.resolve(null);
+          await api.recoverHistoryIfNeeded?.().catch(() => null);
           const indexRes = api.loadConversationIndex
             ? await api.loadConversationIndex().catch(() => null)
             : null;
@@ -1117,7 +1115,6 @@ export const useConversationStore = create<ConversationState>()(
           const legacyRes = !hasUsableIndex && api.loadConversations
             ? await api.loadConversations().catch(() => null)
             : null;
-          const pendingRes = await pendingResPromise;
           const res = hasUsableIndex ? indexRes : legacyRes;
           if (!res) {
             throw new Error("history_load_failed");
@@ -1145,13 +1142,6 @@ export const useConversationStore = create<ConversationState>()(
           const diskDraftRevision = normalizeHistoryRevision((res as any)?.draftRevision);
           const diskActiveConvId = ((res as any)?.activeConvId ?? null) as string | null;
 
-          const pendingPayload = pendingRes && (pendingRes as any).ok !== false ? (pendingRes as any).payload : null;
-          const pendingList = Array.isArray(pendingPayload?.conversations) ? (pendingPayload.conversations as any[]) : [];
-          const pendingDraft = pendingPayload?.draftSnapshot && typeof pendingPayload.draftSnapshot === "object" ? pendingPayload.draftSnapshot : null;
-          const pendingDraftOwnerId = normalizeId(pendingPayload?.draftSnapshotOwnerId) || null;
-          const pendingDraftRevision = normalizeHistoryRevision(pendingPayload?.draftRevision);
-          const pendingActiveConvId = typeof pendingPayload?.activeConvId === "string" ? pendingPayload.activeConvId : null;
-
           // 当前内存态（可能在 hydrate 尚未完成时，用户已经发了消息/产生草稿）
           const curConvs = get().conversations ?? [];
           const curDraft = get().draftSnapshot ?? null;
@@ -1160,11 +1150,10 @@ export const useConversationStore = create<ConversationState>()(
           const curActiveConvId = get().activeConvId ?? null;
 
           const diskConvs = capConversations(diskList as any);
-          const pendConvs = capConversations(pendingList as any);
 
-          // precedence：disk < pending < memory
+          // precedence：disk < memory
           const byId = new Map();
-          for (const list of [diskConvs, pendConvs, curConvs]) {
+          for (const list of [diskConvs, curConvs]) {
             for (const c of Array.isArray(list) ? list : []) {
               if (!c || !c.id) continue;
               const prev = byId.get(c.id);
@@ -1179,10 +1168,10 @@ export const useConversationStore = create<ConversationState>()(
               });
             }
           }
-          // order：memory > pending > disk
+          // order：memory > disk
           const order: string[] = [];
           const seen = new Set<string>();
-          for (const list of [curConvs, pendConvs, diskConvs]) {
+          for (const list of [curConvs, diskConvs]) {
             for (const c of Array.isArray(list) ? list : []) {
               const id = String(c?.id ?? "");
               if (!id || seen.has(id)) continue;
@@ -1211,22 +1200,18 @@ export const useConversationStore = create<ConversationState>()(
             };
           }) as Conversation[];
 
-          // 计算最终 activeConvId（memory > pending > disk）
+          // 计算最终 activeConvId（memory > disk）
           const pickActive = (id: string | null) =>
             id && merged.some((c) => c.id === id) ? id : null;
           const finalActiveConvId =
             pickActive(curActiveConvId) ||
-            pickActive(pendingActiveConvId) ||
             pickActive(diskActiveConvId);
 
-          // 在 curDraft / pendingDraft / diskDraft 之间选择 steps 更多的一份；
-          // 若三者都不存在，则回退到 activeConvId 对应对话的 snapshot。
+          // 在 curDraft / diskDraft 之间选择 steps 更多的一份；
+          // 若都不存在，则回退到 activeConvId 对应对话的 snapshot。
           const draftCandidates: Array<{ snapshot: RunSnapshot; ownerId: string | null; revision: number }> = [];
           if (curDraft && typeof curDraft === "object") {
             draftCandidates.push({ snapshot: curDraft as RunSnapshot, ownerId: curDraftOwnerId, revision: curDraftRevision });
-          }
-          if (pendingDraft && typeof pendingDraft === "object") {
-            draftCandidates.push({ snapshot: pendingDraft as RunSnapshot, ownerId: pendingDraftOwnerId, revision: pendingDraftRevision });
           }
           if (diskDraft && typeof diskDraft === "object") {
             draftCandidates.push({ snapshot: diskDraft as RunSnapshot, ownerId: diskDraftOwnerId, revision: diskDraftRevision });
@@ -1268,7 +1253,7 @@ export const useConversationStore = create<ConversationState>()(
           if (finalDraft) {
             finalDraftRevision = Math.max(finalDraftRevision, highestDraftRevision);
           }
-          const shouldSyncImmediately = !hasUsableIndex || Boolean(pendingPayload) || (curConvs?.length ?? 0) > 0;
+          const shouldSyncImmediately = !hasUsableIndex || (curConvs?.length ?? 0) > 0;
           const touchedConversationIds = merged
             .filter((item) => item.snapshotLoaded !== false)
             .map((item) => item.id);
@@ -1282,7 +1267,7 @@ export const useConversationStore = create<ConversationState>()(
             : merged;
           const shouldWriteDraft =
             shouldSyncImmediately &&
-            Boolean(finalDraft || diskDraft || pendingDraft || curDraft);
+            Boolean(finalDraft || diskDraft || curDraft);
           const persistedDraftRevision = shouldWriteDraft
             ? bumpHistoryRevision(finalDraftRevision)
             : finalDraftRevision;
@@ -1309,7 +1294,6 @@ export const useConversationStore = create<ConversationState>()(
               intent: "hydrate-repair",
             });
           }
-          void api.clearPendingConversations?.().catch(() => void 0);
 
           // 并把 localStorage 写回一个"很小的占位"，清掉旧的大对象（避免下一次 setItem 直接 quota 崩溃）
           try {

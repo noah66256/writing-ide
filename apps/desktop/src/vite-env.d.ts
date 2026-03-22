@@ -139,11 +139,20 @@ declare global {
         applyOperations?: (batch: any) => Promise<{ ok: boolean; used?: "primary" | "fallback"; file?: string; error?: string }>;
         applyOperationsSync?: (batch: any) => { ok: boolean; used?: "primary" | "fallback"; file?: string; error?: string };
         getInfo: () => Promise<{ ok: boolean; primaryDir?: string | null; fallbackDir?: string | null; filename?: string; error?: string }>;
+        recoverHistoryIfNeeded?: () => Promise<{
+          ok: boolean;
+          replayedJournalCount?: number;
+          migratedLegacyPendingCount?: number;
+          staleIgnoredCount?: number;
+          clearedCount?: number;
+          error?: string;
+        }>;
         loadConversationIndex?: () => Promise<{
           ok: boolean;
           conversations?: any[];
           draftSnapshot?: any | null;
           draftSnapshotOwnerId?: string | null;
+          draftRevision?: number;
           activeConvId?: string | null;
           used?: string;
           file?: string | null;
@@ -156,6 +165,7 @@ declare global {
         }) => Promise<{
           ok: boolean;
           snapshot?: any | null;
+          bodyRevision?: number;
           used?: string;
           error?: string;
           detail?: string;
@@ -164,13 +174,16 @@ declare global {
           ok: boolean;
           conversations?: any[];
           draftSnapshot?: any | null;
+          draftRevision?: number;
           activeConvId?: string | null;
           used?: "primary" | "fallback";
           file?: string;
           error?: string;
           detail?: string;
         }>;
+        /** Legacy compat shell. New renderer hot paths should use applyOperations*. */
         saveConversations: (payload: any) => Promise<{ ok: boolean; used?: "primary" | "fallback"; file?: string; error?: string }>;
+        /** Legacy compat shell. New renderer hot paths should use applyOperationsSync. */
         saveConversationsSync?: (payload: any) => { ok: boolean; used?: "primary" | "fallback"; file?: string; error?: string };
         loadConversationSegment?: (params: {
           conversationId: string;
@@ -183,7 +196,9 @@ declare global {
           error?: string;
           detail?: string;
         }>;
+        /** Legacy compat shell. New renderer hydrate should rely on recoverHistoryIfNeeded + index/body only. */
         loadPendingConversations: () => Promise<{ ok: boolean; payload?: any | null; used?: "primary" | "fallback"; file?: string; error?: string }>;
+        /** Legacy compat shell. Retained only for older clients / migration paths. */
         savePendingConversations: (payload: any) => Promise<{ ok: boolean; used?: "primary" | "fallback"; file?: string; error?: string }>;
         clearPendingConversations: () => Promise<{ ok: boolean; error?: string }>;
       };

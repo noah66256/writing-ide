@@ -98,6 +98,7 @@ const MAX_INDEX_FILES = 10000;
 const HISTORY_DIRNAME = "ohmycrab-data";
 const HISTORY_FILENAME = "conversations.v1.json";
 const HISTORY_PENDING_FILENAME = "conversations.pending.v1.json";
+const HISTORY_PENDING_JOURNAL_FILENAME_V2 = "conversations.pending.ops.v2.json";
 const HISTORY_BAK_SUFFIX = ".bak";
 const HISTORY_INDEX_FILENAME_V2 = "conversations.index.v2.json";
 const HISTORY_CONV_DIRNAME_V2 = "conversations";
@@ -130,6 +131,7 @@ let mainEventLogWriteChain = Promise.resolve();
 let pendingProjectFsEvent = null; // { rootDir, paths:Set<string>, ts:number }
 let pendingMcpStatusPayload = null;
 let startupHistoryTmpCleanupPromise = null;
+let historyPendingRecoveryPromise = null;
 
 function trimTextForLog(value, max = 1600) {
   const text = String(value ?? "");
@@ -802,6 +804,33 @@ function makeEmptyRunSnapshot(head) {
   };
 }
 
+function normalizeHistoryRevisionValue(raw) {
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) return 0;
+  return Math.floor(value);
+}
+
+function makeStaleHistoryWriteError(kind, conversationId, expected, actual) {
+  const error = new Error("STALE_HISTORY_WRITE");
+  error.code = "STALE_HISTORY_WRITE";
+  error.kind = kind;
+  error.conversationId = conversationId;
+  error.expected = expected;
+  error.actual = actual;
+  return error;
+}
+
+function rejectStaleHistoryWrite(kind, conversationId, expected, actual, extra) {
+  recordMainEvent("history.write.rejected_stale", {
+    kind,
+    conversationId,
+    expected,
+    actual,
+    ...(extra && typeof extra === "object" ? extra : {}),
+  });
+  throw makeStaleHistoryWriteError(kind, conversationId, expected, actual);
+}
+
 function buildSnapshotFromV2Payload(v2Payload, options) {
   const parsed = v2Payload && typeof v2Payload === "object" ? v2Payload : null;
   if (!parsed) return null;
@@ -974,6 +1003,7 @@ function buildConversationIndexEntry(rawConv, previousEntry) {
   const stepsArr = snapshot && Array.isArray(snapshot.steps) ? snapshot.steps : [];
   const createdAt = Number(raw.createdAt ?? prev?.createdAt ?? Date.now()) || Date.now();
   const updatedAt = Number(raw.updatedAt ?? prev?.updatedAt ?? Date.now()) || Date.now();
+  const bodyRevision = normalizeHistoryRevisionValue(raw.bodyRevision ?? prev?.bodyRevision);
 
   let lastMessagePreview = null;
   if (stepsArr.length > 0) {
@@ -1022,6 +1052,7 @@ function buildConversationIndexEntry(rawConv, previousEntry) {
     archived: Boolean(raw.archived),
     createdAt,
     updatedAt,
+    bodyRevision,
     lastMessagePreview,
     recentStepsMeta: recentStepsMeta.length ? recentStepsMeta : undefined,
   };
@@ -1497,6 +1528,7 @@ async function saveSingleConversationFileV2(historyDir, rawConv) {
   const convPayload = {
     version: 2,
     conversationId: id,
+    bodyRevision: normalizeHistoryRevisionValue(rawConv.bodyRevision),
     head,
     steps: stepsArr,
     logs:
@@ -1637,6 +1669,27 @@ function listHistoryPendingReadCandidates() {
   });
 }
 
+function listHistoryPendingJournalReadCandidates() {
+  const { primary, fallback } = historyCandidateDirs();
+  const out = [];
+  if (primary) out.push({ used: "primary", file: path.join(primary, HISTORY_PENDING_JOURNAL_FILENAME_V2) });
+  if (fallback) out.push({ used: "fallback", file: path.join(fallback, HISTORY_PENDING_JOURNAL_FILENAME_V2) });
+  const seen = new Set();
+  return out.filter((item) => {
+    const file = String(item?.file ?? "");
+    if (!file || seen.has(file)) return false;
+    seen.add(file);
+    return true;
+  });
+}
+
+function listHistoryCandidateDirsUnique() {
+  const { primary, fallback } = historyCandidateDirs();
+  return Array.from(
+    new Set([primary, fallback].map((item) => String(item ?? "").trim()).filter(Boolean)),
+  );
+}
+
 function listHistoryTmpReadCandidates() {
   const { primary, fallback } = historyCandidateDirs();
   const dirs = [primary, fallback].filter(Boolean);
@@ -1740,11 +1793,18 @@ async function resolveHistoryPendingFileForWrite() {
   return { dir, file, used };
 }
 
+async function resolveHistoryPendingJournalFileForWrite() {
+  const { dir, used } = await resolveHistoryFileForWrite();
+  const file = path.join(dir, HISTORY_PENDING_JOURNAL_FILENAME_V2);
+  return { dir, file, used };
+}
+
 async function clearHistoryPendingFiles() {
-  const { primary, fallback } = historyCandidateDirs();
   const files = [];
-  if (primary) files.push(path.join(primary, HISTORY_PENDING_FILENAME));
-  if (fallback) files.push(path.join(fallback, HISTORY_PENDING_FILENAME));
+  for (const dir of listHistoryCandidateDirsUnique()) {
+    files.push(path.join(dir, HISTORY_PENDING_FILENAME));
+    files.push(path.join(dir, HISTORY_PENDING_JOURNAL_FILENAME_V2));
+  }
   for (const f of files) {
     try {
       await fsp.unlink(f);
@@ -1755,10 +1815,11 @@ async function clearHistoryPendingFiles() {
 }
 
 function clearHistoryPendingFilesSync() {
-  const { primary, fallback } = historyCandidateDirs();
   const files = [];
-  if (primary) files.push(path.join(primary, HISTORY_PENDING_FILENAME));
-  if (fallback) files.push(path.join(fallback, HISTORY_PENDING_FILENAME));
+  for (const dir of listHistoryCandidateDirsUnique()) {
+    files.push(path.join(dir, HISTORY_PENDING_FILENAME));
+    files.push(path.join(dir, HISTORY_PENDING_JOURNAL_FILENAME_V2));
+  }
   for (const file of files) {
     try {
       fs.unlinkSync(file);
@@ -1766,6 +1827,249 @@ function clearHistoryPendingFilesSync() {
       // ignore
     }
   }
+}
+
+function isStaleHistoryWriteError(error) {
+  return String(error?.code ?? error?.message ?? error).includes("STALE_HISTORY_WRITE");
+}
+
+async function unlinkIfExists(file) {
+  try {
+    await fsp.unlink(file);
+  } catch {
+    // ignore
+  }
+}
+
+function unlinkIfExistsSync(file) {
+  try {
+    fs.unlinkSync(file);
+  } catch {
+    // ignore
+  }
+}
+
+function buildLegacyPendingRecoveryBatch(payloadObj, currentAuthority) {
+  const payload = payloadObj && typeof payloadObj === "object" ? payloadObj : {};
+  const authority = currentAuthority && typeof currentAuthority === "object" ? currentAuthority : {};
+  const currentEntries = Array.isArray(authority.entries) ? authority.entries : [];
+  const currentIds = new Set(currentEntries.map((entry) => String(entry?.id ?? "").trim()).filter(Boolean));
+  const currentDraftRevision = normalizeHistoryRevisionValue(authority.draftRevision);
+  const currentHasDraft = Boolean(authority.draftSnapshot && typeof authority.draftSnapshot === "object");
+  const currentHasActive = typeof authority.activeConvId === "string" && authority.activeConvId.trim();
+  const ops = [];
+  const orderedNewIds = [];
+
+  for (const rawConv of Array.isArray(payload.conversations) ? payload.conversations : []) {
+    if (!rawConv || typeof rawConv !== "object") continue;
+    const id = String(rawConv.id ?? "").trim();
+    if (!id || currentIds.has(id)) continue;
+    currentIds.add(id);
+    orderedNewIds.push(id);
+    ops.push({
+      type: "upsert-meta",
+      conversationId: id,
+      patch: {
+        title: String(rawConv.title ?? "").trim() || "未命名对话",
+        pinned: Boolean(rawConv.pinned),
+        archived: Boolean(rawConv.archived),
+        createdAt: Number(rawConv.createdAt ?? Date.now()) || Date.now(),
+        updatedAt: Number(rawConv.updatedAt ?? Date.now()) || Date.now(),
+      },
+    });
+    const snapshotLoaded = rawConv.snapshotLoaded !== false;
+    if (snapshotLoaded && rawConv.snapshot && typeof rawConv.snapshot === "object") {
+      ops.push({
+        type: "write-body",
+        conversationId: id,
+        snapshot: rawConv.snapshot,
+        source: "manual",
+        expectedBaseRevision: 0,
+      });
+    }
+  }
+
+  if (orderedNewIds.length > 0) {
+    ops.unshift({ type: "sync-order", conversationIds: orderedNewIds });
+  }
+
+  if (!currentHasDraft && payload.draftSnapshot && typeof payload.draftSnapshot === "object") {
+    ops.push({
+      type: "write-draft",
+      draftSnapshot: payload.draftSnapshot,
+      draftSnapshotOwnerId: typeof payload.draftSnapshotOwnerId === "string" ? payload.draftSnapshotOwnerId : null,
+      expectedDraftRevision: currentDraftRevision,
+    });
+  }
+
+  if (!currentHasActive && typeof payload.activeConvId === "string" && payload.activeConvId.trim()) {
+    ops.push({
+      type: "set-active",
+      conversationId: payload.activeConvId.trim(),
+    });
+  }
+
+  if (ops.length === 0) return null;
+  return normalizeHistoryOperationBatch({
+    version: 2,
+    batchId: `legacy_pending_${Number(payload.updatedAt ?? Date.now()) || Date.now()}`,
+    updatedAt: Number(payload.updatedAt ?? Date.now()) || Date.now(),
+    intent: "legacy-upsert-only",
+    ops,
+  });
+}
+
+async function replayPendingHistoryJournalCandidate(candidate) {
+  const file = String(candidate?.file ?? "").trim();
+  if (!file) return { replayed: false, cleared: false, staleIgnored: false };
+  if (!(await fileExists(file))) return { replayed: false, cleared: false, staleIgnored: false };
+  const dir = path.dirname(file);
+  const raw = await fsp.readFile(file, "utf-8");
+  const parsed = JSON.parse(String(raw ?? ""));
+  const batch = normalizeHistoryOperationBatch(parsed);
+  if (!Array.isArray(batch.ops) || batch.ops.length === 0) {
+    await unlinkIfExists(file);
+    return { replayed: false, cleared: true, staleIgnored: false };
+  }
+  try {
+    await applyHistoryOperationsToDir(dir, batch, {
+      writePending: false,
+      clearPending: false,
+    });
+    await unlinkIfExists(file);
+    recordMainEvent("history.pending_journal.replayed", {
+      file,
+      batchId: batch.batchId,
+      opCount: batch.ops.length,
+      updatedAt: batch.updatedAt,
+    });
+    return { replayed: true, cleared: true, staleIgnored: false };
+  } catch (error) {
+    if (isStaleHistoryWriteError(error)) {
+      await unlinkIfExists(file);
+      recordMainEvent("history.pending_journal.stale_ignored", {
+        file,
+        batchId: batch.batchId,
+        error: String(error?.message ?? error),
+      });
+      return { replayed: false, cleared: true, staleIgnored: true };
+    }
+    throw error;
+  }
+}
+
+async function migrateLegacyPendingPayloadCandidate(candidate) {
+  const file = String(candidate?.file ?? "").trim();
+  if (!file) return { replayed: false, cleared: false, staleIgnored: false };
+  if (!(await fileExists(file))) return { replayed: false, cleared: false, staleIgnored: false };
+  const dir = path.dirname(file);
+  const raw = await fsp.readFile(file, "utf-8");
+  const parsed = JSON.parse(String(raw ?? ""));
+  if (!parsed || typeof parsed !== "object") {
+    await unlinkIfExists(file);
+    return { replayed: false, cleared: true, staleIgnored: false };
+  }
+  const currentIndexPayload = await readHistoryPayloadFile(path.join(dir, HISTORY_INDEX_FILENAME_V2));
+  const currentLegacyPayload = await readHistoryPayloadFile(path.join(dir, HISTORY_FILENAME));
+  const currentEntries = Array.isArray(currentIndexPayload?.conversations)
+    ? currentIndexPayload.conversations
+    : buildHistoryIndexFallbackFromLegacyPayload(currentLegacyPayload);
+  const batch = buildLegacyPendingRecoveryBatch(parsed, {
+    entries: currentEntries,
+    draftSnapshot:
+      currentIndexPayload?.draftSnapshot && typeof currentIndexPayload.draftSnapshot === "object"
+        ? currentIndexPayload.draftSnapshot
+        : (currentLegacyPayload?.draftSnapshot && typeof currentLegacyPayload.draftSnapshot === "object"
+            ? currentLegacyPayload.draftSnapshot
+            : null),
+    draftRevision: currentIndexPayload?.draftRevision ?? currentLegacyPayload?.draftRevision,
+    activeConvId:
+      typeof currentIndexPayload?.activeConvId === "string"
+        ? currentIndexPayload.activeConvId
+        : (typeof currentLegacyPayload?.activeConvId === "string" ? currentLegacyPayload.activeConvId : null),
+  });
+  if (!batch || batch.ops.length === 0) {
+    await unlinkIfExists(file);
+    recordMainEvent("history.pending_legacy_payload.ignored", {
+      file,
+      reason: "no_missing_authority",
+      updatedAt: Number(parsed.updatedAt ?? 0) || 0,
+    });
+    return { replayed: false, cleared: true, staleIgnored: false };
+  }
+  try {
+    await applyHistoryOperationsToDir(dir, batch, {
+      writePending: false,
+      clearPending: false,
+    });
+    await unlinkIfExists(file);
+    recordMainEvent("history.pending_legacy_payload.migrated", {
+      file,
+      batchId: batch.batchId,
+      opCount: batch.ops.length,
+      updatedAt: batch.updatedAt,
+    });
+    return { replayed: true, cleared: true, staleIgnored: false };
+  } catch (error) {
+    if (isStaleHistoryWriteError(error)) {
+      await unlinkIfExists(file);
+      recordMainEvent("history.pending_legacy_payload.stale_ignored", {
+        file,
+        batchId: batch.batchId,
+        error: String(error?.message ?? error),
+      });
+      return { replayed: false, cleared: true, staleIgnored: true };
+    }
+    throw error;
+  }
+}
+
+async function recoverHistoryIfNeeded() {
+  if (historyPendingRecoveryPromise) return historyPendingRecoveryPromise;
+  historyPendingRecoveryPromise = (async () => {
+    const result = {
+      ok: true,
+      replayedJournalCount: 0,
+      migratedLegacyPendingCount: 0,
+      staleIgnoredCount: 0,
+      clearedCount: 0,
+    };
+
+    for (const candidate of listHistoryPendingJournalReadCandidates()) {
+      try {
+        const replayed = await replayPendingHistoryJournalCandidate(candidate);
+        if (replayed.replayed) result.replayedJournalCount += 1;
+        if (replayed.staleIgnored) result.staleIgnoredCount += 1;
+        if (replayed.cleared) result.clearedCount += 1;
+      } catch (error) {
+        recordMainEvent("history.pending_journal.replay_failed", {
+          file: String(candidate?.file ?? ""),
+          error: String(error?.message ?? error),
+        });
+        throw error;
+      }
+    }
+
+    for (const candidate of listHistoryPendingReadCandidates()) {
+      try {
+        const replayed = await migrateLegacyPendingPayloadCandidate(candidate);
+        if (replayed.replayed) result.migratedLegacyPendingCount += 1;
+        if (replayed.staleIgnored) result.staleIgnoredCount += 1;
+        if (replayed.cleared) result.clearedCount += 1;
+      } catch (error) {
+        recordMainEvent("history.pending_legacy_payload.migration_failed", {
+          file: String(candidate?.file ?? ""),
+          error: String(error?.message ?? error),
+        });
+        throw error;
+      }
+    }
+
+    return result;
+  })().finally(() => {
+    historyPendingRecoveryPromise = null;
+  });
+  return historyPendingRecoveryPromise;
 }
 
 async function resolveHistoryFileForRead() {
@@ -1861,6 +2165,10 @@ function mergeConversationIndexEntryForPersist(previousEntry, conversationId, pa
     archived: patch.archived !== undefined ? Boolean(patch.archived) : Boolean(prev?.archived),
     createdAt,
     updatedAt,
+    bodyRevision:
+      patch.bodyRevision !== undefined
+        ? normalizeHistoryRevisionValue(patch.bodyRevision)
+        : normalizeHistoryRevisionValue(prev?.bodyRevision),
   };
 }
 
@@ -1886,9 +2194,11 @@ function computeConversationBodyStats(snapshotObj) {
   };
 }
 
-function buildConversationBodyPayload(conversationId, snapshotObj) {
+function buildConversationBodyPayload(conversationId, snapshotObj, options) {
   const snapshot = normalizeCompactSnapshot(snapshotObj && typeof snapshotObj === "object" ? snapshotObj : null);
   const id = String(conversationId ?? "").trim();
+  const opts = options && typeof options === "object" ? options : {};
+  const bodyRevision = normalizeHistoryRevisionValue(opts.bodyRevision);
   const stepsArr = snapshot && Array.isArray(snapshot.steps) ? snapshot.steps : [];
   const head = snapshot && typeof snapshot === "object"
     ? {
@@ -1924,6 +2234,7 @@ function buildConversationBodyPayload(conversationId, snapshotObj) {
     payload: {
       version: 2,
       conversationId: id,
+      bodyRevision,
       head,
       steps: stepsArr,
       logs: snapshot && Array.isArray(snapshot.logs) ? snapshot.logs : [],
@@ -1969,24 +2280,24 @@ function writeJsonFileAtomicSync(file, value) {
   writeFileAtomicSync(target, text);
 }
 
-async function writeConversationBodyFileV2(historyDir, conversationId, snapshotObj) {
+async function writeConversationBodyFileV2(historyDir, conversationId, snapshotObj, options) {
   const dir = String(historyDir ?? "").trim();
   const id = String(conversationId ?? "").trim();
   if (!dir || !id) return null;
   const safeId = normalizeConversationIdForFilename(id);
   const convFile = path.join(dir, HISTORY_CONV_DIRNAME_V2, `conv_${safeId}.json`);
-  const built = buildConversationBodyPayload(id, snapshotObj);
+  const built = buildConversationBodyPayload(id, snapshotObj, options);
   await writeJsonFileAtomic(convFile, built.payload);
   return built;
 }
 
-function writeConversationBodyFileV2Sync(historyDir, conversationId, snapshotObj) {
+function writeConversationBodyFileV2Sync(historyDir, conversationId, snapshotObj, options) {
   const dir = String(historyDir ?? "").trim();
   const id = String(conversationId ?? "").trim();
   if (!dir || !id) return null;
   const safeId = normalizeConversationIdForFilename(id);
   const convFile = path.join(dir, HISTORY_CONV_DIRNAME_V2, `conv_${safeId}.json`);
-  const built = buildConversationBodyPayload(id, snapshotObj);
+  const built = buildConversationBodyPayload(id, snapshotObj, options);
   writeJsonFileAtomicSync(convFile, built.payload);
   return built;
 }
@@ -2061,13 +2372,68 @@ function loadConversationBodyFromCurrentDirSync(historyDir, conversationId, lega
   return v2Snapshot ?? legacySnapshot ?? null;
 }
 
+async function loadConversationBodyRevisionFromCurrentDir(historyDir, conversationId, metaEntry, legacyById) {
+  const metaRevision = normalizeHistoryRevisionValue(metaEntry?.bodyRevision);
+  if (metaRevision > 0) return metaRevision;
+  const v2Payload = await tryLoadConversationFromV2(historyDir, conversationId);
+  if (v2Payload && typeof v2Payload === "object") {
+    return normalizeHistoryRevisionValue(v2Payload.bodyRevision);
+  }
+  const legacyConv = legacyById instanceof Map ? legacyById.get(String(conversationId ?? "").trim()) : null;
+  return normalizeHistoryRevisionValue(legacyConv?.bodyRevision);
+}
+
+function loadConversationBodyRevisionFromCurrentDirSync(historyDir, conversationId, metaEntry, legacyById) {
+  const metaRevision = normalizeHistoryRevisionValue(metaEntry?.bodyRevision);
+  if (metaRevision > 0) return metaRevision;
+  const dir = String(historyDir ?? "").trim();
+  const id = String(conversationId ?? "").trim();
+  if (dir && id) {
+    try {
+      const safeId = normalizeConversationIdForFilename(id);
+      const convFile = path.join(dir, HISTORY_CONV_DIRNAME_V2, `conv_${safeId}.json`);
+      if (fs.existsSync(convFile)) {
+        const raw = fs.readFileSync(convFile, "utf-8");
+        const parsed = JSON.parse(String(raw ?? ""));
+        return normalizeHistoryRevisionValue(parsed?.bodyRevision);
+      }
+    } catch {
+      // ignore
+    }
+  }
+  const legacyConv = legacyById instanceof Map ? legacyById.get(id) : null;
+  return normalizeHistoryRevisionValue(legacyConv?.bodyRevision);
+}
+
+function normalizeHistoryBatchIntent(rawIntent) {
+  const intent = String(rawIntent ?? "").trim();
+  return intent === "autosave" ||
+    intent === "hydrate-repair" ||
+    intent === "manual" ||
+    intent === "shutdown" ||
+    intent === "explicit-clear-all" ||
+    intent === "legacy-upsert-only"
+    ? intent
+    : undefined;
+}
+
+function normalizeHistoryBatchId(rawBatchId, updatedAt) {
+  const batchId = String(rawBatchId ?? "").trim();
+  if (batchId) return batchId;
+  const stamp = Number(updatedAt ?? Date.now()) || Date.now();
+  return `history_${stamp}_${process.pid}_${Math.random().toString(16).slice(2, 10)}`;
+}
+
 function normalizeHistoryOperationBatch(batchObj) {
   const parsed = typeof batchObj === "string" ? JSON.parse(String(batchObj ?? "null")) : batchObj;
   const batch = parsed && typeof parsed === "object" ? parsed : {};
   const ops = Array.isArray(batch.ops) ? batch.ops.filter((op) => op && typeof op === "object" && typeof op.type === "string") : [];
+  const updatedAt = Number(batch.updatedAt ?? Date.now()) || Date.now();
   return {
-    version: 1,
-    updatedAt: Number(batch.updatedAt ?? Date.now()) || Date.now(),
+    version: 2,
+    batchId: normalizeHistoryBatchId(batch.batchId, updatedAt),
+    updatedAt,
+    intent: normalizeHistoryBatchIntent(batch.intent),
     ops,
   };
 }
@@ -2081,12 +2447,17 @@ function translateLegacyPayloadToHistoryOps(payloadObj, previousPayload) {
   const nextConversations = Array.isArray(payload.conversations) ? payload.conversations : [];
   const nextIds = uniqueHistoryIds(nextConversations.map((conv) => conv?.id));
   const ops = [];
+  const explicitClearAll = payload.intent === "explicit-clear-all" && payload.userConfirmed === true;
+  const allowDeleteMissingIds =
+    payload.replaceMode === "replace-all" &&
+    payload.allowDeleteMissingIds === true;
 
-  if (allowEmptyConversations && nextIds.length === 0) {
+  if (explicitClearAll && nextIds.length === 0) {
     ops.push({ type: "clear-all" });
     return {
-      version: 1,
+      version: 2,
       updatedAt: Number(payload.updatedAt ?? Date.now()) || Date.now(),
+      intent: "explicit-clear-all",
       ops,
     };
   }
@@ -2118,9 +2489,11 @@ function translateLegacyPayloadToHistoryOps(payloadObj, previousPayload) {
         });
       }
     }
-    for (const prevId of previousIds) {
-      if (!nextIds.includes(prevId)) {
-        ops.push({ type: "delete-conversation", conversationId: prevId });
+    if (allowDeleteMissingIds) {
+      for (const prevId of previousIds) {
+        if (!nextIds.includes(prevId)) {
+          ops.push({ type: "delete-conversation", conversationId: prevId });
+        }
       }
     }
   }
@@ -2135,8 +2508,9 @@ function translateLegacyPayloadToHistoryOps(payloadObj, previousPayload) {
     conversationId: typeof payload.activeConvId === "string" ? payload.activeConvId : null,
   });
   return {
-    version: 1,
+    version: 2,
     updatedAt: Number(payload.updatedAt ?? Date.now()) || Date.now(),
+    intent: "legacy-upsert-only",
     ops,
   };
 }
@@ -2167,6 +2541,7 @@ async function buildLegacyPayloadFromHistoryState(historyDir, args) {
       archived: Boolean(entry?.archived),
       createdAt: Number(entry?.createdAt ?? prevConv?.createdAt ?? Date.now()) || Date.now(),
       updatedAt: Number(entry?.updatedAt ?? prevConv?.updatedAt ?? Date.now()) || Date.now(),
+      bodyRevision: normalizeHistoryRevisionValue(entry?.bodyRevision ?? prevConv?.bodyRevision),
       snapshot: snapshot ?? makeEmptyRunSnapshot({}),
       snapshotLoaded: Boolean(snapshot),
     });
@@ -2177,6 +2552,7 @@ async function buildLegacyPayloadFromHistoryState(historyDir, args) {
     conversations,
     draftSnapshot: args?.draftSnapshot && typeof args.draftSnapshot === "object" ? args.draftSnapshot : null,
     draftSnapshotOwnerId: typeof args?.draftSnapshotOwnerId === "string" ? args.draftSnapshotOwnerId : null,
+    draftRevision: normalizeHistoryRevisionValue(args?.draftRevision),
     activeConvId: typeof args?.activeConvId === "string" ? args.activeConvId : null,
   };
 }
@@ -2207,6 +2583,7 @@ function buildLegacyPayloadFromHistoryStateSync(historyDir, args) {
       archived: Boolean(entry?.archived),
       createdAt: Number(entry?.createdAt ?? prevConv?.createdAt ?? Date.now()) || Date.now(),
       updatedAt: Number(entry?.updatedAt ?? prevConv?.updatedAt ?? Date.now()) || Date.now(),
+      bodyRevision: normalizeHistoryRevisionValue(entry?.bodyRevision ?? prevConv?.bodyRevision),
       snapshot: snapshot ?? makeEmptyRunSnapshot({}),
       snapshotLoaded: Boolean(snapshot),
     });
@@ -2217,6 +2594,7 @@ function buildLegacyPayloadFromHistoryStateSync(historyDir, args) {
     conversations,
     draftSnapshot: args?.draftSnapshot && typeof args.draftSnapshot === "object" ? args.draftSnapshot : null,
     draftSnapshotOwnerId: typeof args?.draftSnapshotOwnerId === "string" ? args.draftSnapshotOwnerId : null,
+    draftRevision: normalizeHistoryRevisionValue(args?.draftRevision),
     activeConvId: typeof args?.activeConvId === "string" ? args.activeConvId : null,
   };
 }
@@ -2227,17 +2605,20 @@ async function applyHistoryOperationsToDir(historyDir, batchObj, options) {
   const batch = normalizeHistoryOperationBatch(batchObj);
   const indexFile = path.join(dir, HISTORY_INDEX_FILENAME_V2);
   const legacyFile = path.join(dir, HISTORY_FILENAME);
-  const pendingFile = path.join(dir, HISTORY_PENDING_FILENAME);
+  const pendingJournalFile = path.join(dir, HISTORY_PENDING_JOURNAL_FILENAME_V2);
   const previousIndexPayload = await readHistoryPayloadFile(indexFile);
   const previousLegacyPayload = await readHistoryPayloadFile(legacyFile);
   const previousEntries = Array.isArray(previousIndexPayload?.conversations)
     ? previousIndexPayload.conversations
     : buildHistoryIndexFallbackFromLegacyPayload(previousLegacyPayload);
   const metaMap = new Map();
+  const bodyRevisionById = new Map();
   for (const entry of previousEntries) {
     const id = String(entry?.id ?? "").trim();
     if (!id) continue;
     metaMap.set(id, { ...entry });
+    const bodyRevision = normalizeHistoryRevisionValue(entry?.bodyRevision);
+    if (bodyRevision > 0) bodyRevisionById.set(id, bodyRevision);
   }
   let orderedIds = uniqueHistoryIds(previousEntries.map((entry) => entry?.id));
   const legacyById = new Map();
@@ -2245,6 +2626,10 @@ async function applyHistoryOperationsToDir(historyDir, batchObj, options) {
     const id = String(conv?.id ?? "").trim();
     if (!id) continue;
     legacyById.set(id, conv);
+    if (!bodyRevisionById.has(id)) {
+      const bodyRevision = normalizeHistoryRevisionValue(conv?.bodyRevision);
+      if (bodyRevision > 0) bodyRevisionById.set(id, bodyRevision);
+    }
   }
   let activeConvId =
     typeof previousIndexPayload?.activeConvId === "string"
@@ -2260,19 +2645,30 @@ async function applyHistoryOperationsToDir(historyDir, batchObj, options) {
     typeof previousIndexPayload?.draftSnapshotOwnerId === "string"
       ? previousIndexPayload.draftSnapshotOwnerId
       : (typeof previousLegacyPayload?.draftSnapshotOwnerId === "string" ? previousLegacyPayload.draftSnapshotOwnerId : null);
+  let draftRevision = normalizeHistoryRevisionValue(previousIndexPayload?.draftRevision ?? previousLegacyPayload?.draftRevision);
   const changedSnapshots = new Map();
   const deletedIds = new Set();
 
   for (const op of batch.ops) {
     if (!op || typeof op !== "object") continue;
     if (op.type === "clear-all") {
+      if (batch.intent !== "explicit-clear-all") {
+        recordMainEvent("history.clear_all.rejected", {
+          reason: "implicit_intent",
+          batchIntent: batch.intent ?? null,
+          updatedAt: batch.updatedAt,
+        });
+        continue;
+      }
       for (const id of metaMap.keys()) deletedIds.add(id);
       metaMap.clear();
+      bodyRevisionById.clear();
       orderedIds = [];
       changedSnapshots.clear();
       activeConvId = null;
       draftSnapshot = null;
       draftSnapshotOwnerId = null;
+      draftRevision = 0;
       continue;
     }
     if (op.type === "sync-order") {
@@ -2294,13 +2690,29 @@ async function applyHistoryOperationsToDir(historyDir, batchObj, options) {
     if (op.type === "write-body") {
       const id = String(op.conversationId ?? "").trim();
       if (!id || !op.snapshot || typeof op.snapshot !== "object") continue;
+      let currentRevision = bodyRevisionById.has(id)
+        ? normalizeHistoryRevisionValue(bodyRevisionById.get(id))
+        : await loadConversationBodyRevisionFromCurrentDir(dir, id, metaMap.get(id), legacyById);
+      bodyRevisionById.set(id, currentRevision);
+      const expectedRevision =
+        op.expectedBaseRevision !== undefined && op.expectedBaseRevision !== null
+          ? normalizeHistoryRevisionValue(op.expectedBaseRevision)
+          : currentRevision;
+      if (expectedRevision !== currentRevision) {
+        rejectStaleHistoryWrite("body", id, expectedRevision, currentRevision, {
+          batchIntent: batch.intent ?? null,
+          updatedAt: batch.updatedAt,
+        });
+      }
       const previousSnapshot =
         changedSnapshots.get(id) ??
         await loadConversationBodyFromCurrentDir(dir, id, legacyById);
       const mergedSnapshot =
         mergeConversationSnapshotForAuthoritativeBody(previousSnapshot, op.snapshot) ??
         normalizeCompactSnapshot(op.snapshot);
+      const nextBodyRevision = currentRevision + 1;
       changedSnapshots.set(id, mergedSnapshot);
+      bodyRevisionById.set(id, nextBodyRevision);
       deletedIds.delete(id);
       const previousEntry = metaMap.get(id);
       const nextIndexEntry = buildConversationIndexEntry(
@@ -2311,6 +2723,7 @@ async function applyHistoryOperationsToDir(historyDir, batchObj, options) {
           archived: Boolean(previousEntry?.archived),
           createdAt: Number(previousEntry?.createdAt ?? legacyById.get(id)?.createdAt ?? Date.now()) || Date.now(),
           updatedAt: Date.now(),
+          bodyRevision: nextBodyRevision,
           snapshot: mergedSnapshot,
         },
         previousEntry,
@@ -2322,8 +2735,20 @@ async function applyHistoryOperationsToDir(historyDir, batchObj, options) {
       continue;
     }
     if (op.type === "write-draft") {
+      const currentDraftRevision = normalizeHistoryRevisionValue(draftRevision);
+      const expectedDraftRevision =
+        op.expectedDraftRevision !== undefined && op.expectedDraftRevision !== null
+          ? normalizeHistoryRevisionValue(op.expectedDraftRevision)
+          : currentDraftRevision;
+      if (expectedDraftRevision !== currentDraftRevision) {
+        rejectStaleHistoryWrite("draft", typeof op.draftSnapshotOwnerId === "string" ? op.draftSnapshotOwnerId : "draft", expectedDraftRevision, currentDraftRevision, {
+          batchIntent: batch.intent ?? null,
+          updatedAt: batch.updatedAt,
+        });
+      }
       draftSnapshot = op.draftSnapshot && typeof op.draftSnapshot === "object" ? normalizeCompactSnapshot(op.draftSnapshot) : null;
       draftSnapshotOwnerId = typeof op.draftSnapshotOwnerId === "string" ? op.draftSnapshotOwnerId : null;
+      draftRevision = currentDraftRevision + 1;
       continue;
     }
     if (op.type === "set-active") {
@@ -2336,6 +2761,7 @@ async function applyHistoryOperationsToDir(historyDir, batchObj, options) {
       metaMap.delete(id);
       legacyById.delete(id);
       changedSnapshots.delete(id);
+      bodyRevisionById.delete(id);
       deletedIds.add(id);
       orderedIds = orderedIds.filter((itemId) => itemId !== id);
       if (activeConvId === id) activeConvId = null;
@@ -2360,6 +2786,7 @@ async function applyHistoryOperationsToDir(historyDir, batchObj, options) {
     conversations: orderedEntries,
     draftSnapshot: draftSnapshot && typeof draftSnapshot === "object" ? draftSnapshot : null,
     draftSnapshotOwnerId,
+    draftRevision,
     activeConvId,
   };
   const legacyPayload = await buildLegacyPayloadFromHistoryState(dir, {
@@ -2369,17 +2796,26 @@ async function applyHistoryOperationsToDir(historyDir, batchObj, options) {
     updatedAt,
     draftSnapshot,
     draftSnapshotOwnerId,
+    draftRevision,
     activeConvId,
   });
 
   if (options?.writePending !== false) {
-    await writeJsonFileAtomic(pendingFile, legacyPayload);
+    await writeJsonFileAtomic(pendingJournalFile, {
+      version: 2,
+      batchId: batch.batchId,
+      updatedAt,
+      intent: batch.intent ?? null,
+      ops: batch.ops,
+    });
   }
   for (const id of deletedIds) {
     await deleteConversationBodyFileV2(dir, id);
   }
   for (const [id, snapshot] of changedSnapshots.entries()) {
-    const built = await writeConversationBodyFileV2(dir, id, snapshot);
+    const built = await writeConversationBodyFileV2(dir, id, snapshot, {
+      bodyRevision: bodyRevisionById.get(id),
+    });
     const currentEntry = metaMap.get(id);
     if (built && currentEntry) {
       metaMap.set(id, { ...currentEntry, ...built.stats });
@@ -2390,11 +2826,8 @@ async function applyHistoryOperationsToDir(historyDir, batchObj, options) {
   await writeJsonFileAtomic(indexFile, indexPayload);
   await writeJsonFileAtomic(legacyFile, legacyPayload);
   if (options?.clearPending !== false) {
-    try {
-      await fsp.unlink(pendingFile);
-    } catch {
-      // ignore
-    }
+    await unlinkIfExists(pendingJournalFile);
+    await unlinkIfExists(path.join(dir, HISTORY_PENDING_FILENAME));
   }
   return { ok: true, file: legacyFile };
 }
@@ -2405,17 +2838,20 @@ function applyHistoryOperationsToDirSync(historyDir, batchObj, options) {
   const batch = normalizeHistoryOperationBatch(batchObj);
   const indexFile = path.join(dir, HISTORY_INDEX_FILENAME_V2);
   const legacyFile = path.join(dir, HISTORY_FILENAME);
-  const pendingFile = path.join(dir, HISTORY_PENDING_FILENAME);
+  const pendingJournalFile = path.join(dir, HISTORY_PENDING_JOURNAL_FILENAME_V2);
   const previousIndexPayload = readHistoryPayloadFileSync(indexFile);
   const previousLegacyPayload = readHistoryPayloadFileSync(legacyFile);
   const previousEntries = Array.isArray(previousIndexPayload?.conversations)
     ? previousIndexPayload.conversations
     : buildHistoryIndexFallbackFromLegacyPayload(previousLegacyPayload);
   const metaMap = new Map();
+  const bodyRevisionById = new Map();
   for (const entry of previousEntries) {
     const id = String(entry?.id ?? "").trim();
     if (!id) continue;
     metaMap.set(id, { ...entry });
+    const bodyRevision = normalizeHistoryRevisionValue(entry?.bodyRevision);
+    if (bodyRevision > 0) bodyRevisionById.set(id, bodyRevision);
   }
   let orderedIds = uniqueHistoryIds(previousEntries.map((entry) => entry?.id));
   const legacyById = new Map();
@@ -2423,6 +2859,10 @@ function applyHistoryOperationsToDirSync(historyDir, batchObj, options) {
     const id = String(conv?.id ?? "").trim();
     if (!id) continue;
     legacyById.set(id, conv);
+    if (!bodyRevisionById.has(id)) {
+      const bodyRevision = normalizeHistoryRevisionValue(conv?.bodyRevision);
+      if (bodyRevision > 0) bodyRevisionById.set(id, bodyRevision);
+    }
   }
   let activeConvId =
     typeof previousIndexPayload?.activeConvId === "string"
@@ -2438,19 +2878,31 @@ function applyHistoryOperationsToDirSync(historyDir, batchObj, options) {
     typeof previousIndexPayload?.draftSnapshotOwnerId === "string"
       ? previousIndexPayload.draftSnapshotOwnerId
       : (typeof previousLegacyPayload?.draftSnapshotOwnerId === "string" ? previousLegacyPayload.draftSnapshotOwnerId : null);
+  let draftRevision = normalizeHistoryRevisionValue(previousIndexPayload?.draftRevision ?? previousLegacyPayload?.draftRevision);
   const changedSnapshots = new Map();
   const deletedIds = new Set();
 
   for (const op of batch.ops) {
     if (!op || typeof op !== "object") continue;
     if (op.type === "clear-all") {
+      if (batch.intent !== "explicit-clear-all") {
+        recordMainEvent("history.clear_all.rejected", {
+          reason: "implicit_intent",
+          batchIntent: batch.intent ?? null,
+          updatedAt: batch.updatedAt,
+          sync: true,
+        });
+        continue;
+      }
       for (const id of metaMap.keys()) deletedIds.add(id);
       metaMap.clear();
+      bodyRevisionById.clear();
       orderedIds = [];
       changedSnapshots.clear();
       activeConvId = null;
       draftSnapshot = null;
       draftSnapshotOwnerId = null;
+      draftRevision = 0;
       continue;
     }
     if (op.type === "sync-order") {
@@ -2472,13 +2924,30 @@ function applyHistoryOperationsToDirSync(historyDir, batchObj, options) {
     if (op.type === "write-body") {
       const id = String(op.conversationId ?? "").trim();
       if (!id || !op.snapshot || typeof op.snapshot !== "object") continue;
+      let currentRevision = bodyRevisionById.has(id)
+        ? normalizeHistoryRevisionValue(bodyRevisionById.get(id))
+        : loadConversationBodyRevisionFromCurrentDirSync(dir, id, metaMap.get(id), legacyById);
+      bodyRevisionById.set(id, currentRevision);
+      const expectedRevision =
+        op.expectedBaseRevision !== undefined && op.expectedBaseRevision !== null
+          ? normalizeHistoryRevisionValue(op.expectedBaseRevision)
+          : currentRevision;
+      if (expectedRevision !== currentRevision) {
+        rejectStaleHistoryWrite("body", id, expectedRevision, currentRevision, {
+          batchIntent: batch.intent ?? null,
+          updatedAt: batch.updatedAt,
+          sync: true,
+        });
+      }
       const previousSnapshot =
         changedSnapshots.get(id) ??
         loadConversationBodyFromCurrentDirSync(dir, id, legacyById);
       const mergedSnapshot =
         mergeConversationSnapshotForAuthoritativeBody(previousSnapshot, op.snapshot) ??
         normalizeCompactSnapshot(op.snapshot);
+      const nextBodyRevision = currentRevision + 1;
       changedSnapshots.set(id, mergedSnapshot);
+      bodyRevisionById.set(id, nextBodyRevision);
       deletedIds.delete(id);
       const previousEntry = metaMap.get(id);
       const nextIndexEntry = buildConversationIndexEntry(
@@ -2489,6 +2958,7 @@ function applyHistoryOperationsToDirSync(historyDir, batchObj, options) {
           archived: Boolean(previousEntry?.archived),
           createdAt: Number(previousEntry?.createdAt ?? legacyById.get(id)?.createdAt ?? Date.now()) || Date.now(),
           updatedAt: Date.now(),
+          bodyRevision: nextBodyRevision,
           snapshot: mergedSnapshot,
         },
         previousEntry,
@@ -2500,8 +2970,21 @@ function applyHistoryOperationsToDirSync(historyDir, batchObj, options) {
       continue;
     }
     if (op.type === "write-draft") {
+      const currentDraftRevision = normalizeHistoryRevisionValue(draftRevision);
+      const expectedDraftRevision =
+        op.expectedDraftRevision !== undefined && op.expectedDraftRevision !== null
+          ? normalizeHistoryRevisionValue(op.expectedDraftRevision)
+          : currentDraftRevision;
+      if (expectedDraftRevision !== currentDraftRevision) {
+        rejectStaleHistoryWrite("draft", typeof op.draftSnapshotOwnerId === "string" ? op.draftSnapshotOwnerId : "draft", expectedDraftRevision, currentDraftRevision, {
+          batchIntent: batch.intent ?? null,
+          updatedAt: batch.updatedAt,
+          sync: true,
+        });
+      }
       draftSnapshot = op.draftSnapshot && typeof op.draftSnapshot === "object" ? normalizeCompactSnapshot(op.draftSnapshot) : null;
       draftSnapshotOwnerId = typeof op.draftSnapshotOwnerId === "string" ? op.draftSnapshotOwnerId : null;
+      draftRevision = currentDraftRevision + 1;
       continue;
     }
     if (op.type === "set-active") {
@@ -2514,6 +2997,7 @@ function applyHistoryOperationsToDirSync(historyDir, batchObj, options) {
       metaMap.delete(id);
       legacyById.delete(id);
       changedSnapshots.delete(id);
+      bodyRevisionById.delete(id);
       deletedIds.add(id);
       orderedIds = orderedIds.filter((itemId) => itemId !== id);
       if (activeConvId === id) activeConvId = null;
@@ -2537,17 +3021,26 @@ function applyHistoryOperationsToDirSync(historyDir, batchObj, options) {
     updatedAt,
     draftSnapshot,
     draftSnapshotOwnerId,
+    draftRevision,
     activeConvId,
   });
 
   if (options?.writePending !== false) {
-    writeJsonFileAtomicSync(pendingFile, legacyPayload);
+    writeJsonFileAtomicSync(pendingJournalFile, {
+      version: 2,
+      batchId: batch.batchId,
+      updatedAt,
+      intent: batch.intent ?? null,
+      ops: batch.ops,
+    });
   }
   for (const id of deletedIds) {
     deleteConversationBodyFileV2Sync(dir, id);
   }
   for (const [id, snapshot] of changedSnapshots.entries()) {
-    const built = writeConversationBodyFileV2Sync(dir, id, snapshot);
+    const built = writeConversationBodyFileV2Sync(dir, id, snapshot, {
+      bodyRevision: bodyRevisionById.get(id),
+    });
     const currentEntry = metaMap.get(id);
     if (built && currentEntry) {
       metaMap.set(id, { ...currentEntry, ...built.stats });
@@ -2560,16 +3053,14 @@ function applyHistoryOperationsToDirSync(historyDir, batchObj, options) {
     conversations: finalEntries,
     draftSnapshot: draftSnapshot && typeof draftSnapshot === "object" ? draftSnapshot : null,
     draftSnapshotOwnerId,
+    draftRevision,
     activeConvId,
   };
   writeJsonFileAtomicSync(indexFile, indexPayload);
   writeJsonFileAtomicSync(legacyFile, legacyPayload);
   if (options?.clearPending !== false) {
-    try {
-      fs.unlinkSync(pendingFile);
-    } catch {
-      // ignore
-    }
+    unlinkIfExistsSync(pendingJournalFile);
+    unlinkIfExistsSync(path.join(dir, HISTORY_PENDING_FILENAME));
   }
   return { ok: true, file: legacyFile };
 }
@@ -2670,6 +3161,7 @@ async function runHistorySmokeCli() {
   const convPayload = await tryLoadConversationFromV2(dir, "legacy_only");
   const legacyPayload = await readHistoryPayloadFile(path.join(dir, HISTORY_FILENAME));
   const pendingPayload = await readHistoryPayloadFile(path.join(dir, HISTORY_PENDING_FILENAME));
+  const pendingJournalPayload = await readHistoryPayloadFile(path.join(dir, HISTORY_PENDING_JOURNAL_FILENAME_V2));
   const snapshot = buildSnapshotFromV2Payload(convPayload, { includeSteps: true });
 
   if (!indexPayload || !Array.isArray(indexPayload.conversations) || indexPayload.conversations.length < 2) {
@@ -2684,16 +3176,296 @@ async function runHistorySmokeCli() {
   if (!legacyPayload || !Array.isArray(legacyPayload.conversations) || legacyPayload.conversations.length < 2) {
     throw new Error("SMOKE_LEGACY_MIRROR_MISSING");
   }
-  if (pendingPayload) {
+  if (pendingPayload || pendingJournalPayload) {
     throw new Error("SMOKE_PENDING_NOT_CLEARED");
+  }
+
+  const compatPayload = {
+    version: 1,
+    updatedAt: 4,
+    conversations: [
+      {
+        id: "legacy_only",
+        title: "Legacy Only Compat",
+        createdAt: 1,
+        updatedAt: 4,
+        snapshot: {
+          ...seedSnapshot,
+          steps: [...seedSnapshot.steps, { id: "a3", type: "assistant", text: "compat", ts: 4 }],
+        },
+        snapshotLoaded: true,
+      },
+    ],
+    activeConvId: "legacy_only",
+  };
+  const compatOps = translateLegacyPayloadToHistoryOps(compatPayload, legacyPayload);
+  await applyHistoryOperationsToDir(dir, compatOps, {
+    writePending: true,
+    clearPending: true,
+  });
+
+  const compatIndexPayload = await readHistoryPayloadFile(path.join(dir, HISTORY_INDEX_FILENAME_V2));
+  if (!compatIndexPayload || !Array.isArray(compatIndexPayload.conversations) || compatIndexPayload.conversations.length < 2) {
+    throw new Error("SMOKE_LEGACY_COMPAT_DELETED_OMITTED_IDS");
+  }
+
+  const implicitClearCompat = translateLegacyPayloadToHistoryOps({
+    version: 1,
+    updatedAt: 5,
+    allowEmptyConversations: true,
+    conversations: [],
+    activeConvId: null,
+  }, await readHistoryPayloadFile(path.join(dir, HISTORY_FILENAME)));
+  await applyHistoryOperationsToDir(dir, implicitClearCompat, {
+    writePending: true,
+    clearPending: true,
+  });
+  const afterImplicitClearIndex = await readHistoryPayloadFile(path.join(dir, HISTORY_INDEX_FILENAME_V2));
+  if (!afterImplicitClearIndex || !Array.isArray(afterImplicitClearIndex.conversations) || afterImplicitClearIndex.conversations.length < 2) {
+    throw new Error("SMOKE_IMPLICIT_CLEAR_ALL_NOT_BLOCKED");
+  }
+
+  const beforeFreshBodyPayload = await tryLoadConversationFromV2(dir, "legacy_only");
+  const beforeFreshIndexPayload = await readHistoryPayloadFile(path.join(dir, HISTORY_INDEX_FILENAME_V2));
+  const beforeFreshBodyRevision = normalizeHistoryRevisionValue(beforeFreshBodyPayload?.bodyRevision);
+  const beforeFreshDraftRevision = normalizeHistoryRevisionValue(beforeFreshIndexPayload?.draftRevision);
+  const beforeFreshSnapshot = buildSnapshotFromV2Payload(beforeFreshBodyPayload, { includeSteps: true }) ?? seedSnapshot;
+  const beforeFreshDraftSnapshot =
+    beforeFreshIndexPayload?.draftSnapshot && typeof beforeFreshIndexPayload.draftSnapshot === "object"
+      ? beforeFreshIndexPayload.draftSnapshot
+      : seedSnapshot;
+
+  await applyHistoryOperationsToDir(dir, {
+    version: 2,
+    updatedAt: 6,
+    intent: "autosave",
+    ops: [
+      {
+        type: "write-body",
+        conversationId: "legacy_only",
+        source: "autosave",
+        expectedBaseRevision: beforeFreshBodyRevision,
+        snapshot: {
+          ...beforeFreshSnapshot,
+          steps: [...(Array.isArray(beforeFreshSnapshot.steps) ? beforeFreshSnapshot.steps : []), { id: "a4", type: "assistant", text: "fresh", ts: 5 }],
+        },
+      },
+      {
+        type: "write-draft",
+        draftSnapshot: {
+          ...beforeFreshDraftSnapshot,
+          model: "draft-fresh",
+        },
+        draftSnapshotOwnerId: "legacy_only",
+        expectedDraftRevision: beforeFreshDraftRevision,
+      },
+    ],
+  }, {
+    writePending: true,
+    clearPending: true,
+  });
+
+  let staleRejected = false;
+  try {
+    await applyHistoryOperationsToDir(dir, {
+      version: 2,
+      updatedAt: 7,
+      intent: "autosave",
+      ops: [
+        {
+          type: "write-body",
+          conversationId: "legacy_only",
+          source: "autosave",
+          expectedBaseRevision: beforeFreshBodyRevision,
+          snapshot: {
+            ...beforeFreshSnapshot,
+            steps: [...(Array.isArray(beforeFreshSnapshot.steps) ? beforeFreshSnapshot.steps : []), { id: "a5", type: "assistant", text: "stale", ts: 6 }],
+          },
+        },
+        {
+          type: "write-draft",
+          draftSnapshot: {
+            ...beforeFreshDraftSnapshot,
+            model: "draft-stale",
+          },
+          draftSnapshotOwnerId: "legacy_only",
+          expectedDraftRevision: beforeFreshDraftRevision,
+        },
+      ],
+    }, {
+      writePending: true,
+      clearPending: true,
+    });
+  } catch (error) {
+    staleRejected = String(error?.code ?? error?.message ?? error).includes("STALE_HISTORY_WRITE");
+  }
+  if (!staleRejected) {
+    throw new Error("SMOKE_STALE_WRITE_NOT_REJECTED");
+  }
+
+  const afterStaleBodyPayload = await tryLoadConversationFromV2(dir, "legacy_only");
+  const afterStaleIndexPayload = await readHistoryPayloadFile(path.join(dir, HISTORY_INDEX_FILENAME_V2));
+  const afterStaleSnapshot = buildSnapshotFromV2Payload(afterStaleBodyPayload, { includeSteps: true });
+  if (!afterStaleSnapshot || !Array.isArray(afterStaleSnapshot.steps) || afterStaleSnapshot.steps.some((step) => String(step?.id ?? "") === "a5")) {
+    throw new Error("SMOKE_STALE_BODY_WRITE_OVERWROTE");
+  }
+  if (normalizeHistoryRevisionValue(afterStaleBodyPayload?.bodyRevision) !== beforeFreshBodyRevision + 1) {
+    throw new Error("SMOKE_BODY_REVISION_NOT_INCREMENTED");
+  }
+  if (!afterStaleIndexPayload || normalizeHistoryRevisionValue(afterStaleIndexPayload?.draftRevision) !== beforeFreshDraftRevision + 1) {
+    throw new Error("SMOKE_DRAFT_REVISION_NOT_INCREMENTED");
+  }
+  if (String(afterStaleIndexPayload?.draftSnapshot?.model ?? "") === "draft-stale") {
+    throw new Error("SMOKE_STALE_DRAFT_WRITE_OVERWROTE");
+  }
+
+  const journalRecoveryBatch = normalizeHistoryOperationBatch({
+    version: 2,
+    batchId: "smoke_recover_journal",
+    updatedAt: 8,
+    intent: "autosave",
+    ops: [
+      {
+        type: "upsert-meta",
+        conversationId: "journal_only",
+        patch: {
+          title: "Journal Only",
+          createdAt: 8,
+          updatedAt: 8,
+        },
+      },
+      {
+        type: "write-body",
+        conversationId: "journal_only",
+        source: "autosave",
+        expectedBaseRevision: 0,
+        snapshot: {
+          ...seedSnapshot,
+          model: "journal-model",
+          steps: [...seedSnapshot.steps, { id: "j1", type: "assistant", text: "journal", ts: 8 }],
+        },
+      },
+      {
+        type: "write-draft",
+        draftSnapshot: {
+          ...beforeFreshDraftSnapshot,
+          model: "draft-from-journal",
+        },
+        draftSnapshotOwnerId: "journal_only",
+        expectedDraftRevision: normalizeHistoryRevisionValue(afterStaleIndexPayload?.draftRevision),
+      },
+      {
+        type: "set-active",
+        conversationId: "journal_only",
+      },
+    ],
+  });
+  await writeJsonFileAtomic(path.join(dir, HISTORY_PENDING_JOURNAL_FILENAME_V2), journalRecoveryBatch);
+  const journalRecoveryResult = await recoverHistoryIfNeeded();
+  const afterJournalRecoverIndex = await readHistoryPayloadFile(path.join(dir, HISTORY_INDEX_FILENAME_V2));
+  const afterJournalRecoverBody = await tryLoadConversationFromV2(dir, "journal_only");
+  if (!journalRecoveryResult || (journalRecoveryResult.replayedJournalCount ?? 0) < 1) {
+    throw new Error("SMOKE_PENDING_JOURNAL_NOT_REPLAYED");
+  }
+  if (!afterJournalRecoverIndex || !Array.isArray(afterJournalRecoverIndex.conversations) || !afterJournalRecoverIndex.conversations.some((entry) => String(entry?.id ?? "") === "journal_only")) {
+    throw new Error("SMOKE_PENDING_JOURNAL_RECOVERY_MISSING_INDEX");
+  }
+  if (!afterJournalRecoverBody || normalizeHistoryRevisionValue(afterJournalRecoverBody.bodyRevision) !== 1) {
+    throw new Error("SMOKE_PENDING_JOURNAL_RECOVERY_MISSING_BODY");
+  }
+  if (String(afterJournalRecoverIndex?.draftSnapshot?.model ?? "") !== "draft-from-journal") {
+    throw new Error("SMOKE_PENDING_JOURNAL_RECOVERY_MISSING_DRAFT");
+  }
+  if (await readHistoryPayloadFile(path.join(dir, HISTORY_PENDING_JOURNAL_FILENAME_V2))) {
+    throw new Error("SMOKE_PENDING_JOURNAL_NOT_CLEARED");
+  }
+
+  const staleJournalBatch = normalizeHistoryOperationBatch({
+    version: 2,
+    batchId: "smoke_recover_stale_journal",
+    updatedAt: 9,
+    intent: "autosave",
+    ops: [
+      {
+        type: "write-body",
+        conversationId: "legacy_only",
+        source: "autosave",
+        expectedBaseRevision: normalizeHistoryRevisionValue(afterStaleBodyPayload?.bodyRevision) - 1,
+        snapshot: {
+          ...beforeFreshSnapshot,
+          steps: [...(Array.isArray(beforeFreshSnapshot.steps) ? beforeFreshSnapshot.steps : []), { id: "stale-journal", type: "assistant", text: "stale-journal", ts: 9 }],
+        },
+      },
+      {
+        type: "write-draft",
+        draftSnapshot: {
+          ...afterJournalRecoverIndex?.draftSnapshot,
+          model: "draft-from-stale-journal",
+        },
+        draftSnapshotOwnerId: "legacy_only",
+        expectedDraftRevision: normalizeHistoryRevisionValue(afterJournalRecoverIndex?.draftRevision) - 1,
+      },
+    ],
+  });
+  await writeJsonFileAtomic(path.join(dir, HISTORY_PENDING_JOURNAL_FILENAME_V2), staleJournalBatch);
+  const staleRecoverResult = await recoverHistoryIfNeeded();
+  const afterStaleRecoverBody = await tryLoadConversationFromV2(dir, "legacy_only");
+  const afterStaleRecoverIndex = await readHistoryPayloadFile(path.join(dir, HISTORY_INDEX_FILENAME_V2));
+  const afterStaleRecoverSnapshot = buildSnapshotFromV2Payload(afterStaleRecoverBody, { includeSteps: true });
+  if (!staleRecoverResult || (staleRecoverResult.staleIgnoredCount ?? 0) < 1) {
+    throw new Error("SMOKE_PENDING_STALE_JOURNAL_NOT_IGNORED");
+  }
+  if (!afterStaleRecoverSnapshot || afterStaleRecoverSnapshot.steps.some((step) => String(step?.id ?? "") === "stale-journal")) {
+    throw new Error("SMOKE_PENDING_STALE_JOURNAL_OVERWROTE_BODY");
+  }
+  if (String(afterStaleRecoverIndex?.draftSnapshot?.model ?? "") === "draft-from-stale-journal") {
+    throw new Error("SMOKE_PENDING_STALE_JOURNAL_OVERWROTE_DRAFT");
+  }
+  if (await readHistoryPayloadFile(path.join(dir, HISTORY_PENDING_JOURNAL_FILENAME_V2))) {
+    throw new Error("SMOKE_PENDING_STALE_JOURNAL_NOT_CLEARED");
+  }
+
+  await writeJsonFileAtomic(path.join(dir, HISTORY_PENDING_FILENAME), {
+    version: 1,
+    updatedAt: 10,
+    conversations: [
+      {
+        id: "legacy_pending_only",
+        title: "Legacy Pending Only",
+        createdAt: 10,
+        updatedAt: 10,
+        snapshot: {
+          ...seedSnapshot,
+          model: "legacy-pending",
+          steps: [...seedSnapshot.steps, { id: "lp1", type: "assistant", text: "legacy-pending", ts: 10 }],
+        },
+        snapshotLoaded: true,
+      },
+    ],
+    activeConvId: "legacy_pending_only",
+  });
+  const legacyPendingRecoverResult = await recoverHistoryIfNeeded();
+  const afterLegacyPendingRecoverIndex = await readHistoryPayloadFile(path.join(dir, HISTORY_INDEX_FILENAME_V2));
+  const afterLegacyPendingRecoverBody = await tryLoadConversationFromV2(dir, "legacy_pending_only");
+  if (!legacyPendingRecoverResult || (legacyPendingRecoverResult.migratedLegacyPendingCount ?? 0) < 1) {
+    throw new Error("SMOKE_LEGACY_PENDING_NOT_MIGRATED");
+  }
+  if (!afterLegacyPendingRecoverIndex || !Array.isArray(afterLegacyPendingRecoverIndex.conversations) || !afterLegacyPendingRecoverIndex.conversations.some((entry) => String(entry?.id ?? "") === "legacy_pending_only")) {
+    throw new Error("SMOKE_LEGACY_PENDING_MISSING_INDEX");
+  }
+  if (!afterLegacyPendingRecoverBody || normalizeHistoryRevisionValue(afterLegacyPendingRecoverBody.bodyRevision) !== 1) {
+    throw new Error("SMOKE_LEGACY_PENDING_MISSING_BODY");
+  }
+  if (await readHistoryPayloadFile(path.join(dir, HISTORY_PENDING_FILENAME))) {
+    throw new Error("SMOKE_LEGACY_PENDING_NOT_CLEARED");
   }
 
   return {
     ok: true,
     dir,
-    indexCount: indexPayload.conversations.length,
+    indexCount: afterImplicitClearIndex.conversations.length,
     preservedSteps: snapshot.steps.length,
-    activeConvId: indexPayload.activeConvId ?? null,
+    activeConvId: afterImplicitClearIndex.activeConvId ?? null,
   };
 }
 
@@ -2716,6 +3488,7 @@ async function saveConversationsV2(historyDir, payloadObj) {
     payloadObj && typeof payloadObj === "object" && typeof payloadObj.draftSnapshotOwnerId === "string"
       ? payloadObj.draftSnapshotOwnerId
       : null;
+  const draftRevision = normalizeHistoryRevisionValue(payloadObj?.draftRevision);
   const updatedAt =
     payloadObj && typeof payloadObj === "object" && Number.isFinite(Number(payloadObj.updatedAt))
       ? Number(payloadObj.updatedAt)
@@ -2796,6 +3569,7 @@ async function saveConversationsV2(historyDir, payloadObj) {
     const convPayload = {
       version: 2,
       conversationId: id,
+      bodyRevision: normalizeHistoryRevisionValue(raw.bodyRevision),
       head,
       steps: stepsArr,
       logs:
@@ -2863,6 +3637,7 @@ async function saveConversationsV2(historyDir, payloadObj) {
     activeConvId,
     draftSnapshot,
     draftSnapshotOwnerId,
+    draftRevision,
   };
   const indexTmp = `${indexFile}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
   await fsp.writeFile(indexTmp, JSON.stringify(indexPayload), "utf-8");
@@ -2919,6 +3694,7 @@ function saveConversationsV2Sync(historyDir, payloadObj) {
     payloadObj && typeof payloadObj === "object" && typeof payloadObj.draftSnapshotOwnerId === "string"
       ? payloadObj.draftSnapshotOwnerId
       : null;
+  const draftRevision = normalizeHistoryRevisionValue(payloadObj?.draftRevision);
   const updatedAt =
     payloadObj && typeof payloadObj === "object" && Number.isFinite(Number(payloadObj.updatedAt))
       ? Number(payloadObj.updatedAt)
@@ -3000,6 +3776,7 @@ function saveConversationsV2Sync(historyDir, payloadObj) {
     const convPayload = {
       version: 2,
       conversationId: id,
+      bodyRevision: normalizeHistoryRevisionValue(raw.bodyRevision),
       head,
       steps: stepsArr,
       logs:
@@ -3054,6 +3831,7 @@ function saveConversationsV2Sync(historyDir, payloadObj) {
     activeConvId,
     draftSnapshot,
     draftSnapshotOwnerId,
+    draftRevision,
   };
   writeFileAtomicSync(indexFile, JSON.stringify(indexPayload));
 }
@@ -4639,6 +5417,7 @@ function registerIpc() {
 
   ipcMain.handle("history.loadConversationIndex", async () => {
     try {
+      await recoverHistoryIfNeeded();
       const parsedIndexes = [];
       for (const candidate of listHistoryIndexReadCandidates()) {
         try {
@@ -4653,6 +5432,7 @@ function registerIpc() {
             draftSnapshot: parsed?.draftSnapshot && typeof parsed.draftSnapshot === "object" ? parsed.draftSnapshot : null,
             draftSnapshotOwnerId:
               typeof parsed?.draftSnapshotOwnerId === "string" ? parsed.draftSnapshotOwnerId : null,
+            draftRevision: normalizeHistoryRevisionValue(parsed?.draftRevision),
           });
         } catch {
           // ignore
@@ -4676,6 +5456,7 @@ function registerIpc() {
           conversations: Array.isArray(picked.conversations) ? picked.conversations : [],
           draftSnapshot: picked.draftSnapshot ?? null,
           draftSnapshotOwnerId: picked.draftSnapshotOwnerId ?? null,
+          draftRevision: picked.draftRevision ?? 0,
           activeConvId: picked.activeConvId ?? null,
           used: picked.used,
           file: picked.file,
@@ -4689,6 +5470,7 @@ function registerIpc() {
           conversations: [],
           draftSnapshot: null,
           draftSnapshotOwnerId: null,
+          draftRevision: 0,
           activeConvId: null,
           used: "primary",
           file: null,
@@ -4706,6 +5488,7 @@ function registerIpc() {
         conversations: indexConversations,
         draftSnapshot: parsed?.draftSnapshot && typeof parsed.draftSnapshot === "object" ? parsed.draftSnapshot : null,
         draftSnapshotOwnerId: typeof parsed?.draftSnapshotOwnerId === "string" ? parsed.draftSnapshotOwnerId : null,
+        draftRevision: normalizeHistoryRevisionValue(parsed?.draftRevision),
         activeConvId: typeof parsed?.activeConvId === "string" ? parsed.activeConvId : null,
         used: `${fallbackRead.used}:v1`,
         file: fallbackRead.file,
@@ -4717,6 +5500,7 @@ function registerIpc() {
 
   ipcMain.handle("history.readConversationSnapshot", async (_event, params) => {
     try {
+      await recoverHistoryIfNeeded();
       const p = params && typeof params === "object" ? params : {};
       const convId = String(p.conversationId ?? "").trim();
       if (!convId) return { ok: false, error: "MISSING_CONVERSATION_ID" };
@@ -4725,6 +5509,7 @@ function registerIpc() {
 
       let snapshot = null;
       const v2Payload = await tryLoadConversationFromV2(dir, convId);
+      let bodyRevision = normalizeHistoryRevisionValue(v2Payload?.bodyRevision);
       if (v2Payload) {
         snapshot = buildSnapshotFromV2Payload(v2Payload, { includeSteps });
       }
@@ -4738,6 +5523,7 @@ function registerIpc() {
         const fallbackConv = await tryLoadConversationFromV1(dir, convId);
         const fallbackSnapshot =
           fallbackConv?.snapshot && typeof fallbackConv.snapshot === "object" ? fallbackConv.snapshot : null;
+        bodyRevision = bodyRevision || normalizeHistoryRevisionValue(fallbackConv?.bodyRevision);
         if (fallbackSnapshot) {
           snapshot = snapshot
             ? {
@@ -4766,6 +5552,7 @@ function registerIpc() {
       return {
         ok: true,
         snapshot,
+        bodyRevision,
         used: v2Payload ? `${used}:v2` : `${used}:v1`,
       };
     } catch (e) {
@@ -4776,6 +5563,7 @@ function registerIpc() {
   // 按会话按段加载 steps（用于滚动加载与迷你地图）
   ipcMain.handle("history.loadConversationSegment", async (_event, params) => {
     try {
+      await recoverHistoryIfNeeded();
       const p = params && typeof params === "object" ? params : {};
       const convId = String(p.conversationId ?? "").trim();
       if (!convId) return { ok: false, error: "MISSING_CONVERSATION_ID" };
@@ -4853,6 +5641,7 @@ function registerIpc() {
 
   ipcMain.handle("history.loadConversations", async () => {
     try {
+      await recoverHistoryIfNeeded();
       const { primary } = historyCandidateDirs();
       const unique = listHistoryReadCandidates();
 
@@ -4866,6 +5655,7 @@ function registerIpc() {
           const draftSnapshot = parsed && typeof parsed === "object" ? (parsed.draftSnapshot ?? null) : null;
           const draftSnapshotOwnerId = parsed && typeof parsed === "object" ? (parsed.draftSnapshotOwnerId ?? null) : null;
           const activeConvId = parsed && typeof parsed === "object" ? (parsed.activeConvId ?? null) : null;
+          const draftRevision = parsed && typeof parsed === "object" ? normalizeHistoryRevisionValue(parsed.draftRevision) : 0;
           const updatedAt = parsed && typeof parsed === "object" ? Number(parsed.updatedAt ?? 0) || 0 : 0;
           parsedList.push({
             ...c,
@@ -4873,6 +5663,7 @@ function registerIpc() {
             conversations: Array.isArray(list) ? list : [],
             draftSnapshot: draftSnapshot && typeof draftSnapshot === "object" ? draftSnapshot : null,
             draftSnapshotOwnerId: typeof draftSnapshotOwnerId === "string" ? draftSnapshotOwnerId : null,
+            draftRevision,
             activeConvId: typeof activeConvId === "string" ? activeConvId : null,
             updatedAt,
           });
@@ -4891,6 +5682,7 @@ function registerIpc() {
           const draftSnapshot = parsed && typeof parsed === "object" ? (parsed.draftSnapshot ?? null) : null;
           const draftSnapshotOwnerId = parsed && typeof parsed === "object" ? (parsed.draftSnapshotOwnerId ?? null) : null;
           const activeConvId = parsed && typeof parsed === "object" ? (parsed.activeConvId ?? null) : null;
+          const draftRevision = parsed && typeof parsed === "object" ? normalizeHistoryRevisionValue(parsed.draftRevision) : 0;
           const updatedAt = parsed && typeof parsed === "object" ? Number(parsed.updatedAt ?? 0) || 0 : 0;
           parsedTmpList.push({
             ...c,
@@ -4898,6 +5690,7 @@ function registerIpc() {
             conversations: Array.isArray(list) ? list : [],
             draftSnapshot: draftSnapshot && typeof draftSnapshot === "object" ? draftSnapshot : null,
             draftSnapshotOwnerId: typeof draftSnapshotOwnerId === "string" ? draftSnapshotOwnerId : null,
+            draftRevision,
             activeConvId: typeof activeConvId === "string" ? activeConvId : null,
             updatedAt,
           });
@@ -4913,6 +5706,7 @@ function registerIpc() {
           ok: true,
           conversations: [],
           draftSnapshot: null,
+          draftRevision: 0,
           activeConvId: null,
           used: fallbackRead?.used ?? "primary",
           file: fallbackRead?.file ?? null,
@@ -4940,6 +5734,7 @@ function registerIpc() {
           ok: true,
           conversations: [],
           draftSnapshot: null,
+          draftRevision: 0,
           activeConvId: null,
           used: "primary",
           file: null,
@@ -4999,6 +5794,7 @@ function registerIpc() {
                 conversations: repairedConversations,
                 draftSnapshot: picked.draftSnapshot,
                 draftSnapshotOwnerId: picked.draftSnapshotOwnerId,
+                draftRevision: picked.draftRevision ?? 0,
                 activeConvId: picked.activeConvId,
               }),
               "utf-8",
@@ -5014,6 +5810,7 @@ function registerIpc() {
         conversations: repairedConversations,
         draftSnapshot: picked.draftSnapshot,
         draftSnapshotOwnerId: picked.draftSnapshotOwnerId,
+        draftRevision: picked.draftRevision ?? 0,
         activeConvId: picked.activeConvId,
         used: picked.used,
         file: picked.file,
@@ -5030,31 +5827,19 @@ function registerIpc() {
     }
   });
 
+  ipcMain.handle("history.recoverHistoryIfNeeded", async () => {
+    try {
+      return await recoverHistoryIfNeeded();
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
 
   ipcMain.handle("history.loadPendingConversations", async () => {
     try {
-      const unique = listHistoryPendingReadCandidates();
-      let best = null;
-      for (const c of unique) {
-        try {
-          const raw = await fsp.readFile(c.file, "utf-8");
-          const parsed = JSON.parse(String(raw ?? ""));
-          if (!parsed || typeof parsed !== "object") continue;
-          const updatedAt = Number(parsed.updatedAt ?? 0) || 0;
-          const conversations = Array.isArray(parsed.conversations) ? parsed.conversations : [];
-          const draftSnapshot = parsed.draftSnapshot && typeof parsed.draftSnapshot === "object" ? parsed.draftSnapshot : null;
-          const draftSnapshotOwnerId = typeof parsed.draftSnapshotOwnerId === "string" ? parsed.draftSnapshotOwnerId : null;
-          const activeConvId = typeof parsed.activeConvId === "string" ? parsed.activeConvId : null;
-          const payload = { version: 1, updatedAt, conversations, draftSnapshot, draftSnapshotOwnerId, activeConvId };
-          if (!best || updatedAt > Number(best.updatedAt ?? 0)) {
-            best = { ...c, updatedAt, payload };
-          }
-        } catch {
-          // ignore
-        }
-      }
-      if (!best) return { ok: true, payload: null };
-      return { ok: true, payload: best.payload, used: best.used, file: best.file };
+      await recoverHistoryIfNeeded();
+      return { ok: true, payload: null };
     } catch (e) {
       return { ok: false, error: String(e?.message ?? e) };
     }
@@ -5062,6 +5847,7 @@ function registerIpc() {
 
   ipcMain.handle("history.applyOperations", async (_event, batch) => {
     try {
+      await recoverHistoryIfNeeded();
       const { dir, file, used } = await resolveHistoryFileForWrite();
       const normalized = normalizeHistoryOperationBatch(batch);
       recordMainEvent("history.apply.start", {
@@ -5118,6 +5904,9 @@ function registerIpc() {
 
   ipcMain.handle("history.savePendingConversations", async (_event, payload) => {
     try {
+      recordMainEvent("history.legacy_api.used", {
+        api: "savePendingConversations",
+      });
       const { file, used } = await resolveHistoryPendingFileForWrite();
       const rawObj = typeof payload === "string" ? JSON.parse(String(payload ?? "null")) : (payload ?? {});
       const mainHistory = await resolveHistoryFileForRead().catch(() => null);
@@ -5187,6 +5976,9 @@ function registerIpc() {
   // 同步写盘：仅在 beforeunload/卸载等关键路径使用
   ipcMain.on("history.saveConversationsSync", (event, payload) => {
     try {
+      recordMainEvent("history.legacy_api.used", {
+        api: "saveConversationsSync",
+      });
       const { primary, fallback } = historyCandidateDirs();
       const dir = primary || fallback;
       const used = primary ? "primary" : "fallback";
@@ -5221,6 +6013,9 @@ function registerIpc() {
 
   ipcMain.handle("history.saveConversations", async (_event, payload) => {
     try {
+      recordMainEvent("history.legacy_api.used", {
+        api: "saveConversations",
+      });
       const { dir, file, used } = await resolveHistoryFileForWrite();
       const rawObj = typeof payload === "string" ? JSON.parse(String(payload ?? "null")) : (payload ?? {});
       const previousPayload = await readHistoryPayloadFile(file);
@@ -6070,6 +6865,16 @@ app.whenReady().then(async () => {
     await tryMigrateGlobalMemory(app.getPath("userData"), app.getPath("appData"));
   } catch (e) {
     console.warn("[electron] 全局记忆迁移失败:", e);
+  }
+  try {
+    const recovery = await recoverHistoryIfNeeded();
+    if ((recovery?.replayedJournalCount ?? 0) > 0 || (recovery?.migratedLegacyPendingCount ?? 0) > 0 || (recovery?.staleIgnoredCount ?? 0) > 0) {
+      recordMainEvent("history.pending.recovery.startup", recovery);
+    }
+  } catch (e) {
+    recordMainEvent("history.pending.recovery.startup_failed", {
+      error: String(e?.message ?? e),
+    });
   }
   void scheduleStartupHistoryTmpCleanup();
 

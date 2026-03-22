@@ -104,15 +104,20 @@ contextBridge.exposeInMainWorld("desktop", {
     loadConversationIndex() {
       return ipcRenderer.invoke("history.loadConversationIndex");
     },
+    recoverHistoryIfNeeded() {
+      return ipcRenderer.invoke("history.recoverHistoryIfNeeded");
+    },
     readConversationSnapshot(params) {
       return ipcRenderer.invoke("history.readConversationSnapshot", params);
     },
     loadConversations() {
       return ipcRenderer.invoke("history.loadConversations");
     },
+    // Legacy compat shell. New hot paths should use applyOperations*.
     saveConversations(payload) {
       return ipcRenderer.invoke("history.saveConversations", payload);
     },
+    // Legacy compat shell. New hot paths should use applyOperationsSync.
     saveConversationsSync(payload) {
       try {
         const text = typeof payload === "string" ? payload : JSON.stringify(payload ?? null);
@@ -125,6 +130,7 @@ contextBridge.exposeInMainWorld("desktop", {
     loadPendingConversations() {
       return ipcRenderer.invoke("history.loadPendingConversations");
     },
+    // Legacy compat shell. Retained only for older clients / migration paths.
     savePendingConversations(payload) {
       return ipcRenderer.invoke("history.savePendingConversations", payload);
     },
