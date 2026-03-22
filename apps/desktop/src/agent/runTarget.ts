@@ -29,6 +29,16 @@ import {
   type ToolBlockStep,
 } from "../state/runStore";
 import { getProjectedStepsFromRuntime } from "./threadProjection";
+import {
+  appendTextToTranscriptParts,
+  buildTranscriptFromStep,
+  buildTranscriptFromSteps,
+  mergeTranscriptEntries,
+  removeEphemeralStatusEntries,
+  resequenceTranscript,
+  upsertEphemeralStatusEntry,
+  type TranscriptEntry,
+} from "./transcript";
 
 // ─── 内部类型别名 ──────────────────────────────────────────────────────────────
 
@@ -92,6 +102,10 @@ function toSerializableStep(step: Step): RunSnapshot["steps"][number] {
 /** 把含 apply/undo 函数的 Step 序列化为可存 JSON 的 SerializableStep */
 function toSerializableSteps(steps: Step[]): RunSnapshot["steps"] {
   return (steps ?? []).map(toSerializableStep);
+}
+
+function toSerializableTranscript(entries: TranscriptEntry[]): TranscriptEntry[] {
+  return JSON.parse(JSON.stringify(entries ?? [])) as TranscriptEntry[];
 }
 
 /**
@@ -205,6 +219,7 @@ export function createRunTarget(convId: string) {
       // mainDoc/todoList/ctxRefs 从当前状态或快照初始化，供后台 run 读取上下文
       reg.start(cid, {
         steps: [],
+        transcript: base ? [...((base as any).transcript ?? [])] : [...(((snap as any)?.transcript) ?? [])],
         logs: [],
         mainDoc: base ? { ...base.mainDoc } : { ...(snap?.mainDoc ?? {}) },
         todoList: base ? [...base.todoList] : [...(snap?.todoList ?? [])],
@@ -273,11 +288,16 @@ export function createRunTarget(convId: string) {
       activeItemIds: (runtime?.activeItemIds ?? (base as any)?.activeItemIds ?? []) as string[],
       collabSessions: (runtime?.collabSessions ?? (base as any)?.collabSessions ?? []) as RuntimeCollabSessionRecord[],
     });
+    const mergedTranscript = mergeTranscriptEntries(
+      ((base as any)?.transcript ?? []) as TranscriptEntry[],
+      (entry.buffer.transcript ?? []) as TranscriptEntry[],
+    );
     const next: RunSnapshot = {
       ...base,
       mainDoc: JSON.parse(JSON.stringify(entry.buffer.mainDoc ?? base.mainDoc ?? {})),
       todoList: JSON.parse(JSON.stringify(entry.buffer.todoList ?? base.todoList ?? [])),
       steps: toSerializableSteps(projectedSteps),
+      transcript: toSerializableTranscript(mergedTranscript),
       logs: JSON.parse(JSON.stringify(
         entry.buffer.logs?.length ? entry.buffer.logs : (base.logs ?? [])
       )),
@@ -305,6 +325,38 @@ export function createRunTarget(convId: string) {
     ensureEntry();
     useRunRegistry.getState().patchStep(cid, stepId, patch);
   };
+
+  const mirrorAppendTranscript = (entry: TranscriptEntry | null) => {
+    if (!hasConv || !entry) return;
+    ensureEntry();
+    const current = (getBuffer()?.transcript ?? []) as TranscriptEntry[];
+    mirrorUpdateBuffer({ transcript: resequenceTranscript([...current, entry]) as any });
+  };
+
+  const mirrorPatchTranscript = (
+    entryId: string,
+    updater: (entry: TranscriptEntry) => TranscriptEntry | null,
+  ) => {
+    if (!hasConv) return;
+    ensureEntry();
+    const current = (getBuffer()?.transcript ?? []) as TranscriptEntry[];
+    const next = current
+      .map((entry) => (entry.id === entryId ? updater(entry) : entry))
+      .filter(Boolean) as TranscriptEntry[];
+    mirrorUpdateBuffer({ transcript: resequenceTranscript(next) as any });
+  };
+
+  const inferStatusPhase = (text: string) => (
+    text.includes("构建上下文")
+      ? "context"
+      : text.includes("整理") || text.includes("汇总")
+        ? "synthesis"
+        : text.includes("生成")
+          ? "answer"
+          : text.includes("网页") || text.includes("搜索") || text.includes("处理")
+            ? "tool"
+            : "planning"
+  );
 
   const mirrorUpdateBuffer = (patch: Partial<RunBuffer>) => {
     if (!hasConv) return;
@@ -443,7 +495,15 @@ export function createRunTarget(convId: string) {
       if (isActive()) {
         useRunStore.getState().setActivity(text, opts);
       }
-      mirrorUpdateBuffer({ activity: activity ?? undefined });
+      const currentTranscript = (getBuffer()?.transcript ?? []) as TranscriptEntry[];
+      const nextTranscript = t
+        ? upsertEphemeralStatusEntry({
+            entries: currentTranscript,
+            text: t,
+            phase: inferStatusPhase(t),
+          })
+        : removeEphemeralStatusEntries(currentTranscript);
+      mirrorUpdateBuffer({ activity: activity ?? undefined, transcript: nextTranscript as any });
     },
 
     // ---- addAssistant ----
@@ -467,8 +527,10 @@ export function createRunTarget(convId: string) {
         const id = useRunStore.getState().addAssistant(initialText, streaming, hidden, opts);
         step.id = id;
       }
+      const transcriptEntry = buildTranscriptFromStep(step);
       // 镜像到 buffer（active 也镜像，保证切走后 buffer 有完整步骤）
       mirrorAddStep(step);
+      mirrorAppendTranscript(transcriptEntry);
       return step.id;
     },
 
@@ -487,6 +549,16 @@ export function createRunTarget(convId: string) {
           mirrorPatchStep(stepId, { text: `${cur.text}${delta ?? ""}` } as any);
         }
       }
+      mirrorPatchTranscript(stepId, (entry) => {
+        if (entry.kind !== "assistant_message") return entry;
+        return {
+          ...entry,
+          parts: appendTextToTranscriptParts(entry.parts, delta, {
+            mode: "markdown",
+            partId: `${stepId}_markdown`,
+          }),
+        };
+      });
     },
 
     // ---- finishAssistant ----
@@ -495,6 +567,10 @@ export function createRunTarget(convId: string) {
         useRunStore.getState().finishAssistant(stepId);
       }
       mirrorPatchStep(stepId, { streaming: false } as any);
+      mirrorPatchTranscript(stepId, (entry) => {
+        if (entry.kind !== "assistant_message") return entry;
+        return { ...entry, streaming: false };
+      });
     },
 
     // ---- patchAssistant ----
@@ -503,6 +579,14 @@ export function createRunTarget(convId: string) {
         useRunStore.getState().patchAssistant(stepId, patch);
       }
       mirrorPatchStep(stepId, patch as any);
+      const cur = (getBuffer()?.steps ?? []).find((s) => s.id === stepId && s.type === "assistant") as AssistantStep | undefined;
+      const nextAssistant = cur ? ({ ...cur, ...patch } as AssistantStep) : null;
+      if (nextAssistant) {
+        const transcriptEntry = buildTranscriptFromStep(nextAssistant);
+        if (transcriptEntry) {
+          mirrorPatchTranscript(stepId, () => transcriptEntry);
+        }
+      }
     },
 
     // ---- addTool ----
@@ -535,6 +619,7 @@ export function createRunTarget(convId: string) {
         turnId: String((runtimeBefore?.turns ?? []).slice(-1)[0]?.id ?? "").trim() || "local-turn",
       });
       mirrorAddStep(step);
+      mirrorAppendTranscript(buildTranscriptFromStep(step));
       updateRuntimeBuffer({ items: upsertById(runtimeBefore?.items ?? [], shadowItem) });
       return step.id;
     },
@@ -550,6 +635,10 @@ export function createRunTarget(convId: string) {
       const baseStep = ((getBuffer()?.steps ?? []).find((s) => s.id === stepId && s.type === "tool") ?? null) as ToolBlockStep | null;
       if (baseStep) {
         const nextTool = { ...baseStep, ...patch };
+        const transcriptEntry = buildTranscriptFromStep(nextTool);
+        if (transcriptEntry) {
+          mirrorPatchTranscript(stepId, () => transcriptEntry);
+        }
         const runtimeBefore = getRuntimeBuffer();
         const shadowItem = createShadowItemFromToolStep({
           step: nextTool,

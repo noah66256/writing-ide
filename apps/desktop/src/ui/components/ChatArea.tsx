@@ -52,10 +52,21 @@ import {
   resolveOpenableFileRef,
 } from "@/utils/fileRefLink";
 import type { SkillRef } from "@ohmycrab/shared";
+import {
+  buildTranscriptFromSteps,
+  type TranscriptEntry,
+  type TranscriptMediaSource,
+  type TranscriptMessagePart,
+  type ToolTranscriptEntry,
+  type AssistantTranscriptEntry,
+  type UserTranscriptEntry,
+  type StatusTranscriptEntry,
+} from "@/agent/transcript";
 
 type RunController = { cancel: (reason?: string) => void; done: Promise<void> };
 const MARKDOWN_IMAGE_EXT_RE = /\.(png|jpe?g|gif|svg|webp|bmp|ico|avif)$/i;
 const localImageDataUrlCache = new Map<string, string>();
+const markdownImageResolvedSrcCache = new Map<string, string>();
 
 function looksLikeKbPanelOnlyIntent(text: string): boolean {
   const t = String(text ?? "").trim();
@@ -111,6 +122,17 @@ function summarizeStepForAutosave(step: Step | null | undefined) {
   ].join(":");
 }
 
+function summarizeTranscriptEntryForAutosave(entry: TranscriptEntry | null | undefined) {
+  const raw = (entry ?? {}) as any;
+  return [
+    String(raw.id ?? ""),
+    String(raw.kind ?? ""),
+    String(raw.order?.turnSeq ?? ""),
+    String(raw.order?.itemSeq ?? ""),
+    fastAutosaveHash(String(raw.text ?? raw.toolName ?? raw.phase ?? "")),
+  ].join(":");
+}
+
 function summarizeTodoForAutosave(item: TodoItem | null | undefined) {
   const raw = (item ?? {}) as any;
   return [
@@ -150,6 +172,7 @@ function buildAutosaveSignature(args: {
   model: string;
   opMode: string;
   renderSteps: Step[];
+  renderTranscript: TranscriptEntry[];
   logs: unknown[];
   turns: unknown[];
   items: unknown[];
@@ -165,6 +188,7 @@ function buildAutosaveSignature(args: {
   dialogueSummaryTurnCursorByMode: unknown;
 }) {
   const tailSteps = args.renderSteps.slice(-4).map((step) => summarizeStepForAutosave(step)).join("|");
+  const tailTranscript = args.renderTranscript.slice(-6).map((entry) => summarizeTranscriptEntryForAutosave(entry)).join("|");
   const tailTodos = args.todoList.slice(-4).map((item) => summarizeTodoForAutosave(item)).join("|");
   const tailArtifacts = args.pendingArtifacts.slice(-4).map((item) => summarizePendingArtifactForAutosave(item)).join("|");
   return [
@@ -172,6 +196,7 @@ function buildAutosaveSignature(args: {
     `root:${args.rootDir ?? ""}`,
     `mode:${args.mode}:${args.model}:${args.opMode}`,
     `steps:${args.renderSteps.length}:${tailSteps}`,
+    `transcript:${args.renderTranscript.length}:${tailTranscript}`,
     `logs:${args.logs.length}`,
     `turns:${args.turns.length}`,
     `items:${args.items.length}:${args.activeItemIds.length}:${args.collabSessions.length}`,
@@ -451,6 +476,10 @@ type RenderRow =
   | { kind: "step"; key: string; step: Step }
   | { kind: "tool_group"; key: string; steps: ToolBlockStep[] };
 
+type TranscriptRenderRow =
+  | { kind: "entry"; key: string; entry: TranscriptEntry }
+  | { kind: "tool_group"; key: string; entries: ToolTranscriptEntry[] };
+
 function parseMcpToolMeta(toolName: string): { serverId: string; toolId: string } | null {
   const parts = String(toolName ?? "").trim().split(".");
   if (parts.length < 3 || parts[0] !== "mcp") return null;
@@ -471,6 +500,11 @@ function shouldHideInternalToolStep(step: ToolBlockStep): boolean {
   if (!name) return false;
   if (step.status === "failed") return false;
   return name === "time.now" || name === "run.setTodoList" || name === "run.done" || name === "run.mainDoc.get" || name === "run.mainDoc.update" || name === "run.todo" || name.startsWith("run.todo.");
+}
+
+function shouldHideInternalToolEntry(entry: ToolTranscriptEntry): boolean {
+  const toolStep = transcriptToolEntryToStep(entry);
+  return shouldHideInternalToolStep(toolStep);
 }
 
 function buildRenderRows(steps: Step[]): RenderRow[] {
@@ -498,6 +532,63 @@ function buildRenderRows(steps: Step[]): RenderRow[] {
       }
     }
     rows.push({ kind: "step", key: current.id, step: current });
+    index += 1;
+  }
+  return rows;
+}
+
+function transcriptToolEntryToStep(entry: ToolTranscriptEntry): ToolBlockStep {
+  return {
+    id: entry.id,
+    type: "tool",
+    toolName: entry.toolName,
+    status: entry.status,
+    toolCallId: entry.toolCallId,
+    input: entry.input,
+    output: entry.output,
+    riskLevel: entry.riskLevel ?? "low",
+    applyPolicy: entry.applyPolicy ?? "auto_apply",
+    kept: Boolean(entry.kept),
+    applied: Boolean(entry.applied),
+    undoable: Boolean(entry.undoable),
+    ...(entry.agentId ? { agentId: entry.agentId } : {}),
+  };
+}
+
+function getTranscriptToolGroupKey(entry: ToolTranscriptEntry): string | null {
+  return getToolGroupKey(transcriptToolEntryToStep(entry));
+}
+
+function buildTranscriptRenderRows(entries: TranscriptEntry[]): TranscriptRenderRow[] {
+  const visibleEntries = (entries ?? []).filter((entry) => {
+    if (!entry || typeof entry !== "object") return false;
+    if ((entry as any).hidden) return false;
+    if (entry.kind !== "tool_call") return true;
+    return !shouldHideInternalToolEntry(entry);
+  });
+  const rows: TranscriptRenderRow[] = [];
+  for (let index = 0; index < visibleEntries.length;) {
+    const current = visibleEntries[index];
+    if (current.kind === "tool_call") {
+      const groupKey = getTranscriptToolGroupKey(current);
+      if (groupKey) {
+        const group: ToolTranscriptEntry[] = [current];
+        let cursor = index + 1;
+        while (cursor < visibleEntries.length) {
+          const next = visibleEntries[cursor];
+          if (next.kind !== "tool_call") break;
+          if (getTranscriptToolGroupKey(next) !== groupKey) break;
+          group.push(next);
+          cursor += 1;
+        }
+        if (group.length > 1) {
+          rows.push({ kind: "tool_group", key: `tool_group_${current.id}`, entries: group });
+          index = cursor;
+          continue;
+        }
+      }
+    }
+    rows.push({ kind: "entry", key: current.id, entry: current });
     index += 1;
   }
   return rows;
@@ -963,23 +1054,35 @@ function MarkdownImage({
   rootDir: string | null | undefined;
 }) {
   const resolved = useMemo(() => resolveMarkdownImageSource(rootDir, src), [rootDir, src]);
-  const [resolvedSrc, setResolvedSrc] = useState<string>("");
+  const signature = resolved
+    ? resolved.kind === "local"
+      ? `local:${resolved.absPath}`
+      : `remote:${resolved.src}`
+    : "";
+  const [resolvedSrc, setResolvedSrc] = useState<string>(signature ? (markdownImageResolvedSrcCache.get(signature) ?? "") : "");
   const [loadError, setLoadError] = useState<string>("");
-  const [isLoading, setIsLoading] = useState<boolean>(Boolean(resolved));
+  const [isLoading, setIsLoading] = useState<boolean>(Boolean(resolved) && !markdownImageResolvedSrcCache.get(signature));
 
   useEffect(() => {
     let cancelled = false;
     setLoadError("");
-    setIsLoading(Boolean(resolved));
     if (!resolved) {
       setResolvedSrc("");
+      setIsLoading(false);
       return;
     }
+    const cached = signature ? markdownImageResolvedSrcCache.get(signature) : "";
+    if (cached) {
+      setResolvedSrc(cached);
+      setIsLoading(false);
+      return;
+    }
+    setIsLoading(true);
     if (resolved.kind === "remote") {
-      setResolvedSrc("");
       const img = new window.Image();
       img.onload = () => {
         if (cancelled) return;
+        markdownImageResolvedSrcCache.set(signature, resolved.src);
         setResolvedSrc(resolved.src);
         setIsLoading(false);
       };
@@ -991,6 +1094,7 @@ function MarkdownImage({
       };
       img.src = resolved.src;
       if (img.complete && img.naturalWidth > 0) {
+        markdownImageResolvedSrcCache.set(signature, resolved.src);
         setResolvedSrc(resolved.src);
         setIsLoading(false);
       }
@@ -1000,13 +1104,13 @@ function MarkdownImage({
         img.onerror = null;
       };
     }
-    const cached = localImageDataUrlCache.get(resolved.absPath);
-    if (cached) {
-      setResolvedSrc(cached);
+    const localCached = localImageDataUrlCache.get(resolved.absPath);
+    if (localCached) {
+      markdownImageResolvedSrcCache.set(signature, localCached);
+      setResolvedSrc(localCached);
       setIsLoading(false);
       return;
     }
-    setResolvedSrc("");
     const api = window.desktop?.fs?.readImageDataUrl;
     if (!api) {
       setLoadError("当前桌面端不支持本地图像预览");
@@ -1021,6 +1125,7 @@ function MarkdownImage({
         return;
       }
       localImageDataUrlCache.set(resolved.absPath, ret.dataUrl);
+      markdownImageResolvedSrcCache.set(signature, ret.dataUrl);
       setResolvedSrc(ret.dataUrl);
       setIsLoading(false);
     }).catch((err) => {
@@ -1031,7 +1136,7 @@ function MarkdownImage({
     return () => {
       cancelled = true;
     };
-  }, [resolved]);
+  }, [resolved, signature]);
 
   const localAbsPath = resolved?.kind === "local" ? resolved.absPath : "";
   const remoteSrc = resolved?.kind === "remote" ? resolved.src : "";
@@ -1069,6 +1174,7 @@ function MarkdownImage({
 
 export function ChatArea() {
   const steps = useRunStore((s) => s.steps);
+  const transcript = useRunStore((s) => s.transcript);
   const items = useRunStore((s) => s.items);
   const activeItemIds = useRunStore((s) => s.activeItemIds);
   const collabSessions = useRunStore((s) => s.collabSessions);
@@ -1116,15 +1222,19 @@ export function ChatArea() {
       }),
     [steps, items, activeItemIds, collabSessions],
   );
+  const renderTranscript = useMemo(
+    () => (Array.isArray(transcript) && transcript.length > 0 ? transcript : buildTranscriptFromSteps(renderSteps)),
+    [transcript, renderSteps],
+  );
 
   const activeConvId = useConversationStore((s) => s.activeConvId);
-  const hasMessages = renderSteps.length > 0;
+  const hasMessages = renderTranscript.length > 0;
   const hasPendingTodo = useMemo(
     () => todoList.some((item) => item.status !== "done" && item.status !== "skipped"),
     [todoList],
   );
   const showWorkflowTodoPanel = todoList.length > 0 && (isRunning || hasPendingTodo);
-  const renderRows = useMemo(() => buildRenderRows(renderSteps), [renderSteps]);
+  const renderRows = useMemo(() => buildTranscriptRenderRows(renderTranscript), [renderTranscript]);
   const autosaveSignature = useMemo(
     () =>
       buildAutosaveSignature({
@@ -1134,6 +1244,7 @@ export function ChatArea() {
         model,
         opMode,
         renderSteps,
+        renderTranscript,
         logs: (logs ?? []) as unknown[],
         turns: (turns ?? []) as unknown[],
         items: (items ?? []) as unknown[],
@@ -1149,13 +1260,14 @@ export function ChatArea() {
         dialogueSummaryTurnCursorByMode,
       }),
     [
-      activeConvId,
-      rootDir,
-      mode,
-      model,
-      opMode,
-      renderSteps,
-      logs,
+        activeConvId,
+        rootDir,
+        mode,
+        model,
+        opMode,
+        renderSteps,
+        renderTranscript,
+        logs,
       turns,
       items,
       activeItemIds,
@@ -1175,7 +1287,7 @@ export function ChatArea() {
   useEffect(() => {
     if (!stickRef.current) return;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [renderSteps]);
+  }, [renderTranscript]);
 
   // 初始化当前会话是否存在更早历史（用于顶部“加载更多”判断）
   useEffect(() => {
@@ -1634,12 +1746,12 @@ export function ChatArea() {
                 </button>
               </div>
             )}
-            <div className="max-w-[var(--chat-max-width)] mx-auto w-full px-6 pb-4 space-y-1">
-              {renderRows.map((row) => (
-                row.kind === "tool_group"
-                  ? <ToolGroupCard key={row.key} steps={row.steps} />
-                  : <StepRenderer key={row.key} step={row.step} onAssistantQuickAction={handleAssistantQuickAction} />
-              ))}
+	            <div className="max-w-[var(--chat-max-width)] mx-auto w-full px-6 pb-4 space-y-1">
+	              {renderRows.map((row) => (
+	                row.kind === "tool_group"
+	                  ? <ToolGroupCard key={row.key} steps={row.entries.map((entry) => transcriptToolEntryToStep(entry))} />
+	                  : <TranscriptEntryRenderer key={row.key} entry={row.entry} onAssistantQuickAction={handleAssistantQuickAction} />
+	              ))}
               <div ref={bottomRef} />
             </div>
           </div>
@@ -1825,6 +1937,474 @@ function MiniMap({
       </div>
     </div>
   );
+}
+
+function TranscriptJsonBlock({ value, raw }: { value: unknown; raw?: string }) {
+  const display = useMemo(() => {
+    if (typeof raw === "string" && raw.trim()) return raw.trim();
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value ?? "");
+    }
+  }, [raw, value]);
+
+  return (
+    <div className="mt-2 rounded-xl border border-border bg-surface-alt/70">
+      <div className="flex items-center justify-between gap-3 border-b border-border/60 px-3 py-2">
+        <div className="text-[12px] font-medium text-text-muted">JSON</div>
+        <button
+          type="button"
+          className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-faint transition-colors hover:bg-surface hover:text-text-muted"
+          onClick={() => { void copyPlainText(display); }}
+        >
+          <Copy size={12} />
+          复制
+        </button>
+      </div>
+      <pre className="max-h-[320px] overflow-auto px-3 py-3 text-[12px] leading-relaxed text-text whitespace-pre-wrap break-words">
+        {display}
+      </pre>
+    </div>
+  );
+}
+
+function tryParseJsonBlock(raw: string): unknown | null {
+  const text = String(raw ?? "").trim();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function TranscriptMarkdownBlock({
+  text,
+  rootDir,
+}: {
+  text: string;
+  rootDir: string | null | undefined;
+}) {
+  const markdownText = useMemo(
+    () => injectFileRefLinksInMarkdown(wrapBareUrlsInMarkdown(normalizeAssistantMarkdownForDisplay(text))),
+    [text],
+  );
+
+  const openFileRef = useCallback(
+    async (filePath: string) => {
+      const targetPath = resolveOpenableFileRef(rootDir, filePath);
+      if (!targetPath) return;
+      const ret = await window.desktop?.exec?.openFile?.(targetPath);
+      if (ret && !ret.ok) alert(ret.detail || `无法打开文件：${filePath}`);
+    },
+    [rootDir],
+  );
+
+  return (
+    <div className="markdown-body chat-markdown-body max-w-none break-words">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        urlTransform={(url) => {
+          if (
+            url.startsWith("file-ref:")
+            || /^data:image\//i.test(url)
+            || /^file:\/\//i.test(url)
+            || /^(\/|[A-Za-z]:[\\/])/.test(url)
+          ) {
+            return url;
+          }
+          return defaultUrlTransform(url);
+        }}
+        components={{
+          a: ({ href, children }) => {
+            const filePath = parseFileRefHref(href);
+            if (filePath) {
+              const canOpen = Boolean(resolveOpenableFileRef(rootDir, filePath));
+              return (
+                <span
+                  className={cn("rtFileRef", !canOpen && "rtFileRefDisabled")}
+                  role="button"
+                  tabIndex={canOpen ? 0 : -1}
+                  title={canOpen ? `打开文件：${filePath}` : "当前无法打开该文件"}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    void openFileRef(filePath);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      void openFileRef(filePath);
+                    }
+                  }}
+                >
+                  {children}
+                </span>
+              );
+            }
+            return (
+              <a href={href} target="_blank" rel="noreferrer">
+                {children}
+              </a>
+            );
+          },
+          table: ({ children }) => (
+            <div className="chat-markdown-table-wrap">
+              <table>{children}</table>
+            </div>
+          ),
+          img: ({ src, alt, title }) => (
+            <MarkdownImage src={src} alt={alt} title={title} rootDir={rootDir} />
+          ),
+          code: ({ inline, className, children, ...props }: any) => {
+            const raw = String(children ?? "");
+            const language = String(className ?? "").replace(/^language-/, "").trim().toLowerCase();
+            if (!inline && language === "json") {
+              const parsed = tryParseJsonBlock(raw);
+              if (parsed !== null) return <TranscriptJsonBlock value={parsed} raw={raw} />;
+            }
+            if (inline) {
+              return <code className={className} {...props}>{children}</code>;
+            }
+            return (
+              <pre className="overflow-auto rounded-xl border border-border bg-surface-alt/70 px-3 py-3 text-[12px] leading-relaxed text-text">
+                <code className={className} {...props}>{children}</code>
+              </pre>
+            );
+          },
+        }}
+      >
+        {markdownText}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+function TranscriptImagePart({
+  part,
+  rootDir,
+}: {
+  part: Extract<TranscriptMessagePart, { type: "image" }>;
+  rootDir: string | null | undefined;
+}) {
+  const src = part.source.kind === "remote"
+    ? part.source.url
+    : part.source.kind === "data"
+      ? part.source.dataUrl
+      : part.source.path;
+  return (
+    <MarkdownImage
+      src={src}
+      alt={part.alt}
+      title={part.caption}
+      rootDir={rootDir}
+    />
+  );
+}
+
+function toLocalFileUrl(absPath: string): string | null {
+  const raw = String(absPath ?? "").trim();
+  if (!raw) return null;
+  if (/^file:\/\//i.test(raw)) return raw;
+  const normalized = raw.replace(/\\/g, "/");
+  if (/^[a-zA-Z]:\//.test(normalized)) {
+    return encodeURI(`file:///${normalized}`);
+  }
+  if (normalized.startsWith("//")) {
+    return encodeURI(`file:${normalized}`);
+  }
+  if (normalized.startsWith("/")) {
+    return encodeURI(`file://${normalized}`);
+  }
+  return null;
+}
+
+function resolveTranscriptMediaSrc(source: TranscriptMediaSource): string | null {
+  if (source.kind === "remote") return source.url;
+  if (source.kind === "data") return source.dataUrl;
+  return toLocalFileUrl(source.path);
+}
+
+function TranscriptMediaCard({
+  label,
+  src,
+  kind,
+}: {
+  label: string;
+  src: string | null;
+  kind: "audio" | "video";
+}) {
+  if (!src) {
+    return (
+      <div className="mt-2 rounded-xl border border-border bg-surface-alt/70 px-3 py-3 text-[12px] text-text-faint">
+        {label} 暂不支持当前来源预览
+      </div>
+    );
+  }
+  if (kind === "audio") {
+    return (
+      <div className="mt-2 rounded-xl border border-border bg-surface-alt/70 px-3 py-3">
+        <audio controls className="w-full" src={src} />
+      </div>
+    );
+  }
+  return (
+    <div className="mt-2 rounded-xl border border-border bg-surface-alt/70 px-3 py-3">
+      <video controls className="max-h-[360px] w-full rounded-lg bg-black/80" src={src} />
+    </div>
+  );
+}
+
+function renderTranscriptPartsToPlainText(parts: TranscriptMessagePart[]): string {
+  return (parts ?? []).map((part) => {
+    if (part.type === "markdown" || part.type === "text") return part.text;
+    if (part.type === "json") {
+      try {
+        return JSON.stringify(part.value, null, 2);
+      } catch {
+        return String(part.raw ?? "");
+      }
+    }
+    if (part.type === "image") return part.caption || part.alt || "[图片]";
+    if (part.type === "audio") return "[音频]";
+    if (part.type === "video") return "[视频]";
+    if (part.type === "file") return `[文件] ${part.label}`;
+    return "";
+  }).filter(Boolean).join("\n\n");
+}
+
+function TranscriptPartsRenderer({
+  parts,
+  rootDir,
+}: {
+  parts: TranscriptMessagePart[];
+  rootDir: string | null | undefined;
+}) {
+  return (
+    <div className="space-y-2">
+      {(parts ?? []).map((part) => {
+        if (part.type === "text") {
+          return (
+            <div key={part.id} className="whitespace-pre-wrap break-words text-[14px] leading-relaxed text-text">
+              {part.text}
+            </div>
+          );
+        }
+        if (part.type === "markdown") {
+          return <TranscriptMarkdownBlock key={part.id} text={part.text} rootDir={rootDir} />;
+        }
+        if (part.type === "image") {
+          return <TranscriptImagePart key={part.id} part={part} rootDir={rootDir} />;
+        }
+        if (part.type === "json") {
+          return <TranscriptJsonBlock key={part.id} value={part.value} raw={part.raw} />;
+        }
+        if (part.type === "audio") {
+          const src = resolveTranscriptMediaSrc(part.source);
+          return <TranscriptMediaCard key={part.id} label="音频" src={src} kind="audio" />;
+        }
+        if (part.type === "video") {
+          const src = resolveTranscriptMediaSrc(part.source);
+          return <TranscriptMediaCard key={part.id} label="视频" src={src} kind="video" />;
+        }
+        if (part.type === "file") {
+          return (
+            <button
+              key={part.id}
+              type="button"
+              className="mt-2 inline-flex items-center gap-2 rounded-xl border border-border bg-surface-alt/70 px-3 py-2 text-[12px] text-text-muted transition-colors hover:bg-surface"
+              onClick={() => {
+                void window.desktop?.exec?.openFile?.(part.path);
+              }}
+            >
+              <span>{part.label}</span>
+            </button>
+          );
+        }
+        return null;
+      })}
+    </div>
+  );
+}
+
+function TranscriptStatusMessage({ entry }: { entry: StatusTranscriptEntry }) {
+  return (
+    <div className="flex gap-3 py-2">
+      <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border border-border bg-accent-soft text-[16px]">
+        <Loader2 size={16} className="animate-spin text-accent" />
+      </div>
+      <div className="min-w-0 flex-1 pt-1.5">
+        <div className="inline-flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1.5 text-[12px] text-text-faint">
+          <Loader2 size={12} className="animate-spin" />
+          <span>{entry.text || "思考中..."}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TranscriptUserMessage({ entry }: { entry: UserTranscriptEntry }) {
+  const user = useAuthStore((s) => s.user);
+  const userAvatarDataUrl = useAuthStore((s) => s.userAvatarDataUrl);
+  const displayName = user?.email?.split("@")[0] ?? user?.phone ?? "我";
+
+  return (
+    <div className="flex justify-end gap-3 py-3">
+      <div className="max-w-[85%] rounded-2xl rounded-tr-md bg-accent-soft px-4 py-2.5">
+        <TranscriptPartsRenderer parts={entry.parts} rootDir={null} />
+      </div>
+      <div className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border border-border bg-surface-alt text-[13px] font-semibold text-text-muted">
+        {userAvatarDataUrl ? (
+          <img src={userAvatarDataUrl} alt={displayName} className="h-full w-full object-cover" />
+        ) : (
+          <span>{(displayName[0] ?? "我").toUpperCase()}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TranscriptAssistantMessage({
+  entry,
+  onQuickAction,
+}: {
+  entry: AssistantTranscriptEntry;
+  onQuickAction: (
+    action:
+      | "open_kb_manager"
+      | "kb_done_continue"
+      | "file_op_deny"
+      | "file_op_allow_once"
+      | "file_op_always_allow",
+  ) => void;
+}) {
+  const subAgent = entry.agentId
+    ? BUILTIN_SUB_AGENTS.find((a) => a.id === entry.agentId)
+    : null;
+  const agentName = usePersonaStore((s) => s.agentName);
+  const agentAvatarDataUrl = usePersonaStore((s) => s.agentAvatarDataUrl);
+  const displayName = (subAgent?.name ?? entry.agentName ?? agentName) || "Friday";
+  const rootDir = useProjectStore((s) => s.rootDir);
+  const avatar = subAgent?.avatar;
+  const avatarNode = avatar ? (
+    <span>{avatar}</span>
+  ) : agentAvatarDataUrl ? (
+    <img src={agentAvatarDataUrl} alt={displayName} className="h-full w-full object-cover" />
+  ) : (
+    <Bot size={18} className="text-accent" />
+  );
+  const plainText = useMemo(() => renderTranscriptPartsToPlainText(entry.parts), [entry.parts]);
+
+  return (
+    <div className="flex gap-3 py-3">
+      <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border border-border bg-accent-soft text-[16px]">
+        {avatarNode}
+      </div>
+      <div className="min-w-0 flex-1 pt-0.5">
+        <div className="mb-1.5 text-[11px] text-text-faint">{displayName}</div>
+        {entry.streaming && entry.parts.length === 0 ? (
+          <span className="inline-flex items-center gap-1.5 text-text-faint">
+            <Loader2 size={13} className="animate-spin" />
+            思考中...
+          </span>
+        ) : (
+          <TranscriptPartsRenderer parts={entry.parts} rootDir={rootDir} />
+        )}
+
+        {!entry.streaming && plainText && (
+          <div className="mt-3 flex items-center gap-1 opacity-0 transition-opacity duration-fast hover:opacity-100">
+            <button
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-text-faint transition-colors duration-fast hover:bg-surface-alt hover:text-text-muted"
+              onClick={() => { void copyPlainText(plainText); }}
+              title="复制文本"
+            >
+              <Copy size={12} />
+              复制
+            </button>
+          </div>
+        )}
+
+        {Array.isArray(entry.quickActions) && entry.quickActions.length > 0 && (
+          <div className="mt-2 flex items-center gap-2">
+            {entry.quickActions.includes("open_kb_manager") && (
+              <button
+                className="rounded-md border border-border bg-surface px-2.5 py-1 text-[12px] text-text-muted transition-colors hover:bg-surface-alt hover:text-text"
+                onClick={() => onQuickAction("open_kb_manager")}
+                type="button"
+              >
+                打开知识库
+              </button>
+            )}
+            {entry.quickActions.includes("kb_done_continue") && (
+              <button
+                className="rounded-md bg-accent px-2.5 py-1 text-[12px] text-white transition-opacity hover:opacity-90"
+                onClick={() => onQuickAction("kb_done_continue")}
+                type="button"
+              >
+                我已完成抽卡
+              </button>
+            )}
+            {entry.quickActions.includes("file_op_deny") && (
+              <button
+                className="rounded-md border border-border bg-surface px-2.5 py-1 text-[12px] text-text-muted transition-colors hover:bg-surface-alt hover:text-text"
+                onClick={() => onQuickAction("file_op_deny")}
+                type="button"
+              >
+                拒绝
+              </button>
+            )}
+            {entry.quickActions.includes("file_op_allow_once") && (
+              <button
+                className="rounded-md bg-accent px-2.5 py-1 text-[12px] text-white transition-opacity hover:opacity-90"
+                onClick={() => onQuickAction("file_op_allow_once")}
+                type="button"
+              >
+                允许
+              </button>
+            )}
+            {entry.quickActions.includes("file_op_always_allow") && (
+              <button
+                className="rounded-md border border-border bg-surface px-2.5 py-1 text-[12px] text-text-muted transition-colors hover:bg-surface-alt hover:text-text"
+                onClick={() => onQuickAction("file_op_always_allow")}
+                type="button"
+              >
+                总是允许
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TranscriptEntryRenderer({
+  entry,
+  onAssistantQuickAction,
+}: {
+  entry: TranscriptEntry;
+  onAssistantQuickAction: (
+    action:
+      | "open_kb_manager"
+      | "kb_done_continue"
+      | "file_op_deny"
+      | "file_op_allow_once"
+      | "file_op_always_allow",
+  ) => void;
+}) {
+  if ((entry as any).hidden) return null;
+  if (entry.kind === "user_message") return <TranscriptUserMessage entry={entry} />;
+  if (entry.kind === "assistant_message") {
+    return <TranscriptAssistantMessage entry={entry} onQuickAction={onAssistantQuickAction} />;
+  }
+  if (entry.kind === "status") return <TranscriptStatusMessage entry={entry} />;
+  if (entry.kind === "tool_call") {
+    const step = transcriptToolEntryToStep(entry);
+    return step.toolName === "shell.exec"
+      ? <ShellExecCard step={step} />
+      : <ToolCallCard step={step} />;
+  }
+  return null;
 }
 
 /* ─── Step 渲染分发 ─── */

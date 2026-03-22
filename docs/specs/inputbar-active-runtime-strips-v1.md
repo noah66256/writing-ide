@@ -255,8 +255,10 @@ type CollabRuntimeEntry = {
 本次必须同步收敛以下旧行为：
 
 1. 删除 `ChatArea.tsx` 中旧的 `BackgroundProcessSummary`
-2. `InputBar.tsx` 不再在编辑器上方单独显示 `activity` 文案
+2. `InputBar.tsx` 仍不在编辑器上方单独显示 `activity` 文案
 3. `runStore.activity` 继续保留给 stop 按钮、消息流和后续状态整合使用，但不再直接渲染成独立文本行
+4. turn 级 loading 已由 `ChatArea` 的 transcript `status` item 承载，详见
+   `docs/specs/desktop-chat-transcript-ordering-and-rich-media-v0.1.md`
 
 原因：
 

@@ -10,11 +10,13 @@
 
 import { create } from "zustand";
 import type { CtxRefItem, LogEntry, MainDoc, PendingArtifact, RunActivity, Step, TodoItem } from "./runStore";
+import type { TranscriptEntry } from "../agent/transcript";
 
 // ─── 类型 ─────────────────────────────────────────────────────────────────────
 
 export type RunBuffer = {
   steps: Step[];
+  transcript: TranscriptEntry[];
   logs: LogEntry[];
   mainDoc: MainDoc;
   todoList: TodoItem[];
@@ -49,6 +51,7 @@ type RunRegistryState = {
 function emptyBuffer(): RunBuffer {
   return {
     steps: [],
+    transcript: [],
     logs: [],
     mainDoc: {},
     todoList: [],
@@ -61,6 +64,7 @@ function emptyBuffer(): RunBuffer {
 function cloneBuffer(seed?: Partial<RunBuffer>): RunBuffer {
   return {
     steps: Array.isArray(seed?.steps) ? [...seed!.steps] : [],
+    transcript: Array.isArray((seed as any)?.transcript) ? [...((seed as any).transcript)] : [],
     logs: Array.isArray(seed?.logs) ? [...seed!.logs] : [],
     mainDoc: seed?.mainDoc ? { ...seed.mainDoc } : {},
     todoList: Array.isArray(seed?.todoList) ? [...seed!.todoList] : [],
@@ -164,6 +168,7 @@ export const useRunRegistry = create<RunRegistryState>()((set) => ({
       const cur = prev.buffer;
       const next: RunBuffer = {
         steps: hasOwn(patch, "steps") ? [...(patch.steps ?? [])] : cur.steps,
+        transcript: hasOwn(patch, "transcript") ? [...(((patch as any).transcript) ?? [])] : cur.transcript,
         logs: hasOwn(patch, "logs") ? [...(patch.logs ?? [])] : cur.logs,
         mainDoc: hasOwn(patch, "mainDoc") ? { ...(patch.mainDoc ?? {}) } : cur.mainDoc,
         todoList: hasOwn(patch, "todoList") ? [...(patch.todoList ?? [])] : cur.todoList,

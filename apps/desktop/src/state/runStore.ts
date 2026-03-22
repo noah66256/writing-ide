@@ -7,6 +7,18 @@ import {
   type ToolResultEnvelope,
 } from "@ohmycrab/shared";
 import type { ProjectSnapshot } from "./projectStore";
+import {
+  appendTextToTranscriptParts,
+  buildTranscriptFromStep,
+  buildTranscriptFromSteps,
+  cloneTranscript,
+  mergeTranscriptEntries,
+  removeEphemeralStatusEntries,
+  replaceTranscriptMessageText,
+  resequenceTranscript,
+  upsertEphemeralStatusEntry,
+  type TranscriptEntry,
+} from "../agent/transcript";
 
 export type Mode = "agent" | "chat";
 export type OpMode = "creative" | "assistant";
@@ -386,6 +398,7 @@ type RunState = {
   mainDoc: MainDoc;
   todoList: TodoItem[];
   steps: Step[];
+  transcript: TranscriptEntry[];
   logs: LogEntry[];
   thread: RuntimeThreadRecord | null;
   turns: RuntimeTurnRecord[];
@@ -449,6 +462,7 @@ type RunState = {
     mainDoc: MainDoc;
     todoList: TodoItem[];
     steps: Array<Step | Omit<ToolBlockStep, "apply" | "undo">>;
+    transcript?: TranscriptEntry[];
     logs: LogEntry[];
     kbAttachedLibraryIds: string[];
     ctxRefs?: CtxRefItem[];
@@ -577,6 +591,39 @@ function dedupePendingArtifacts(items: PendingArtifact[]) {
     map.set(norm.id, norm);
   }
   return Array.from(map.values()).sort((a, b) => a.updatedAt - b.updatedAt).slice(-3);
+}
+
+function dedupeTranscript(entries: TranscriptEntry[]) {
+  const seen = new Set<string>();
+  const out: TranscriptEntry[] = [];
+  for (const entry of entries ?? []) {
+    const id = String((entry as any)?.id ?? "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(entry);
+  }
+  return resequenceTranscript(out);
+}
+
+function prependTranscriptEntries(current: TranscriptEntry[], older: TranscriptEntry[]) {
+  return dedupeTranscript([...(older ?? []), ...(current ?? [])]);
+}
+
+function patchTranscriptEntryById(
+  entries: TranscriptEntry[],
+  entryId: string,
+  updater: (entry: TranscriptEntry) => TranscriptEntry | null,
+) {
+  const id = String(entryId ?? "").trim();
+  if (!id) return entries;
+  let changed = false;
+  const next = (entries ?? []).map((entry) => {
+    if (entry.id !== id) return entry;
+    const patched = updater(entry);
+    changed = true;
+    return patched ?? entry;
+  }).filter(Boolean) as TranscriptEntry[];
+  return changed ? resequenceTranscript(next) : entries;
 }
 
 function upsertById<T extends { id: string }>(list: T[], nextItem: T): T[] {
@@ -746,11 +793,12 @@ export const useRunStore = create<RunState>()(
   opMode: "creative",
   dialogueSummaryByMode: { agent: "", chat: "" },
   dialogueSummaryTurnCursorByMode: { agent: 0, chat: 0 },
-  memoryExtractTurnCursorByMode: { agent: 0, chat: 0 },
-  mainDoc: { goal: "" },
-  todoList: [],
-  steps: [],
-  logs: [],
+	  memoryExtractTurnCursorByMode: { agent: 0, chat: 0 },
+	  mainDoc: { goal: "" },
+	  todoList: [],
+	  steps: [],
+	  transcript: [],
+	  logs: [],
   thread: null,
   turns: [],
   items: [],
@@ -854,31 +902,51 @@ export const useRunStore = create<RunState>()(
         memoryExtractTurnCursorByMode: { ...s.memoryExtractTurnCursorByMode, [m]: Math.max(prevCursor, nextCursor) },
       };
     }),
-  setRunning: (running) =>
-    set((s) => ({
-      isRunning: running,
-      // run 结束/停止时，清空 activity，避免残留“像卡死”
-      activity: running ? s.activity : null,
-    })),
-  setActivity: (text, opts) =>
-    set((s) => {
-      const t = text ? String(text).trim() : "";
-      if (!t) return { activity: null };
-      const prev = s.activity;
-      const same = prev && prev.text === t;
-      const resetTimer = Boolean(opts?.resetTimer);
-      return {
-        activity: {
-          text: t,
-          startedAt: same && !resetTimer ? prev!.startedAt : Date.now(),
-        },
-      };
-    }),
+	  setRunning: (running) =>
+	    set((s) => ({
+	      isRunning: running,
+	      // run 结束/停止时，清空 activity，避免残留“像卡死”
+	      activity: running ? s.activity : null,
+	      transcript: running ? s.transcript : removeEphemeralStatusEntries(s.transcript),
+	    })),
+	  setActivity: (text, opts) =>
+	    set((s) => {
+	      const t = text ? String(text).trim() : "";
+	      if (!t) {
+	        return {
+	          activity: null,
+	          transcript: removeEphemeralStatusEntries(s.transcript),
+	        };
+	      }
+	      const prev = s.activity;
+	      const same = prev && prev.text === t;
+	      const resetTimer = Boolean(opts?.resetTimer);
+	      return {
+	        activity: {
+	          text: t,
+	          startedAt: same && !resetTimer ? prev!.startedAt : Date.now(),
+	        },
+	        transcript: upsertEphemeralStatusEntry({
+	          entries: s.transcript,
+	          text: t,
+	          phase: t.includes("构建上下文")
+	            ? "context"
+	            : t.includes("整理") || t.includes("汇总")
+	              ? "synthesis"
+	              : t.includes("生成")
+	                ? "answer"
+	                : t.includes("网页") || t.includes("搜索") || t.includes("处理")
+	                  ? "tool"
+	                  : "planning",
+	        }),
+	      };
+	    }),
   resetRun: () => {
     clearItemActionRuntime();
-    set({
-      steps: [],
-      logs: [],
+	    set({
+	      steps: [],
+	      transcript: [],
+	      logs: [],
       isRunning: false,
       activity: null,
       mainDoc: { goal: "" },
@@ -899,9 +967,10 @@ export const useRunStore = create<RunState>()(
   },
   clearConversationSteps: () => {
     clearItemActionRuntime();
-    set({
-      steps: [],
-      logs: [],
+	    set({
+	      steps: [],
+	      transcript: [],
+	      logs: [],
       isRunning: false,
       activity: null,
       workflowSkills: {},
@@ -956,12 +1025,15 @@ export const useRunStore = create<RunState>()(
           .filter((x) => x && typeof x === "object" && String((x as any).id ?? "").trim())
           .map((x) => ({ ...(x as any) } as RuntimeCollabSessionRecord))
       : [];
-    const prev = get();
-    const chatModel = mode === "chat" ? model : prev.chatModel;
-    const agentModel = mode !== "chat" ? model : prev.agentModel;
-    const ds = (s as any).dialogueSummaryByMode;
-    const dc = (s as any).dialogueSummaryTurnCursorByMode;
-    set({
+	    const prev = get();
+	    const chatModel = mode === "chat" ? model : prev.chatModel;
+	    const agentModel = mode !== "chat" ? model : prev.agentModel;
+	    const ds = (s as any).dialogueSummaryByMode;
+	    const dc = (s as any).dialogueSummaryTurnCursorByMode;
+	    const normalizedTranscript = Array.isArray((s as any).transcript)
+	      ? dedupeTranscript(cloneTranscript((s as any).transcript as TranscriptEntry[]))
+	      : buildTranscriptFromSteps(normalized);
+	    set({
       mode,
       model,
       chatModel,
@@ -989,10 +1061,11 @@ export const useRunStore = create<RunState>()(
               chat: Number.isFinite(Number((dc as any).chat)) ? Math.max(0, Math.floor(Number((dc as any).chat))) : 0,
             }
           : { agent: 0, chat: 0 },
-      mainDoc: (s.mainDoc && typeof s.mainDoc === "object" ? s.mainDoc : get().mainDoc) as MainDoc,
-      todoList: Array.isArray(s.todoList) ? (s.todoList as TodoItem[]) : [],
-      steps: normalized,
-      logs: Array.isArray(s.logs) ? (s.logs as LogEntry[]) : [],
+	      mainDoc: (s.mainDoc && typeof s.mainDoc === "object" ? s.mainDoc : get().mainDoc) as MainDoc,
+	      todoList: Array.isArray(s.todoList) ? (s.todoList as TodoItem[]) : [],
+	      steps: normalized,
+	      transcript: normalizedTranscript,
+	      logs: Array.isArray(s.logs) ? (s.logs as LogEntry[]) : [],
       kbAttachedLibraryIds: Array.isArray((s as any).kbAttachedLibraryIds)
         ? Array.from(new Set(((s as any).kbAttachedLibraryIds as any[]).map((x: any) => String(x ?? "").trim()).filter(Boolean)))
         : [],
@@ -1023,20 +1096,23 @@ export const useRunStore = create<RunState>()(
       historyWindow: { hasMoreBefore: false },
     });
   },
-  prependSteps: (olderSteps) =>
-    set((s) => {
-      const current = Array.isArray(s.steps) ? s.steps : [];
-      const incoming = Array.isArray(olderSteps) ? olderSteps : [];
+	  prependSteps: (olderSteps) =>
+	    set((s) => {
+	      const current = Array.isArray(s.steps) ? s.steps : [];
+	      const incoming = Array.isArray(olderSteps) ? olderSteps : [];
       if (!incoming.length) return {};
       const existingIds = new Set(current.map((x: any) => String(x?.id ?? "")));
       const filtered = incoming.filter((step: any) => {
         const id = String(step?.id ?? "");
         if (!id) return false;
         return !existingIds.has(id);
-      }) as Step[];
-      if (!filtered.length) return {};
-      return { steps: [...filtered, ...current] };
-    }),
+	      }) as Step[];
+	      if (!filtered.length) return {};
+	      return {
+	        steps: [...filtered, ...current],
+	        transcript: prependTranscriptEntries(s.transcript, buildTranscriptFromSteps(filtered)),
+	      };
+	    }),
   setHistoryWindowHasMoreBefore: (hasMore) =>
     set(() => ({
       historyWindow: { hasMoreBefore: Boolean(hasMore) },
@@ -1099,9 +1175,9 @@ export const useRunStore = create<RunState>()(
   clearPendingArtifacts: () => set({ pendingArtifacts: [] }),
   startFreshWritingTaskBoundary: () => {
     clearItemActionRuntime();
-    set((s) => ({
-      todoList: [],
-      ctxRefs: [],
+	    set((s) => ({
+	      todoList: [],
+	      ctxRefs: [],
       pendingArtifacts: [],
       thread: null,
       turns: [],
@@ -1125,90 +1201,155 @@ export const useRunStore = create<RunState>()(
     }));
   },
 
-  addUser: (text, baseline, mentions, images) => {
-    const id = makeId("u");
-    const step: UserStep = {
-      id, type: "user", text, ts: Date.now(), baseline,
-      ...(mentions?.length ? { mentions } : {}),
-      ...(images?.length ? { images } : {}),
-    };
-    set((s) => ({ steps: [...s.steps, step] }));
-    return id;
-  },
-  patchUser: (stepId, patch) =>
-    set((s) => ({
-      steps: s.steps.map((step) =>
-        step.id === stepId && step.type === "user" ? { ...step, ...patch } : step,
-      ),
-    })),
-  truncateAfter: (stepId) =>
-    set((s) => {
-      const idx = s.steps.findIndex((x) => x.id === stepId);
-      if (idx < 0) return {};
-      return { steps: s.steps.slice(0, idx + 1) };
-    }),
-  truncateFrom: (stepId) =>
-    set((s) => {
-      const idx = s.steps.findIndex((x) => x.id === stepId);
-      if (idx < 0) return {};
-      return { steps: s.steps.slice(0, idx) };
-    }),
+	  addUser: (text, baseline, mentions, images) => {
+	    const id = makeId("u");
+	    const step: UserStep = {
+	      id, type: "user", text, ts: Date.now(), baseline,
+	      ...(mentions?.length ? { mentions } : {}),
+	      ...(images?.length ? { images } : {}),
+	    };
+	    const transcriptEntry = buildTranscriptFromStep(step);
+	    set((s) => ({
+	      steps: [...s.steps, step],
+	      transcript: resequenceTranscript([
+	        ...removeEphemeralStatusEntries(s.transcript),
+	        ...(transcriptEntry ? [transcriptEntry] : []),
+	      ]),
+	    }));
+	    return id;
+	  },
+	  patchUser: (stepId, patch) =>
+	    set((s) => {
+	      let nextUser: UserStep | null = null;
+	      const nextSteps = s.steps.map((step) => {
+	        if (step.id === stepId && step.type === "user") {
+	          nextUser = { ...step, ...patch };
+	          return nextUser;
+	        }
+	        return step;
+	      });
+	      const transcript = nextUser
+	        ? patchTranscriptEntryById(s.transcript, stepId, (entry) => {
+	            if (entry.kind !== "user_message") return entry;
+	            const rebuilt = buildTranscriptFromStep(nextUser);
+	            return rebuilt ?? entry;
+	          })
+	        : s.transcript;
+	      return { steps: nextSteps, transcript };
+	    }),
+	  truncateAfter: (stepId) =>
+	    set((s) => {
+	      const idx = s.steps.findIndex((x) => x.id === stepId);
+	      if (idx < 0) return {};
+	      const keptStepIds = new Set(s.steps.slice(0, idx + 1).map((step) => step.id));
+	      return {
+	        steps: s.steps.slice(0, idx + 1),
+	        transcript: removeEphemeralStatusEntries(
+	          s.transcript.filter((entry) => entry.kind === "status" || keptStepIds.has(entry.id)),
+	        ),
+	      };
+	    }),
+	  truncateFrom: (stepId) =>
+	    set((s) => {
+	      const idx = s.steps.findIndex((x) => x.id === stepId);
+	      if (idx < 0) return {};
+	      const keptStepIds = new Set(s.steps.slice(0, idx).map((step) => step.id));
+	      return {
+	        steps: s.steps.slice(0, idx),
+	        transcript: removeEphemeralStatusEntries(
+	          s.transcript.filter((entry) => entry.kind === "status" || keptStepIds.has(entry.id)),
+	        ),
+	      };
+	    }),
 
   addAssistant: (
     initialText = "",
     streaming = false,
     hidden = false,
     opts?: { agentId?: string; agentName?: string; quickActions?: AssistantStep["quickActions"]; variant?: AssistantStep["variant"] },
-  ) => {
-    const id = makeId("a");
-    set((s) => ({
-      steps: [
-        ...s.steps,
-        {
-          id,
-          type: "assistant" as const,
-          text: initialText,
-          streaming,
-          hidden,
-          variant: opts?.variant === "progress" ? "progress" : "default",
-          ...(opts?.agentId ? { agentId: opts.agentId, agentName: opts.agentName } : {}),
-          ...(Array.isArray(opts?.quickActions) && opts!.quickActions!.length ? { quickActions: opts!.quickActions } : {}),
-        },
-      ],
-    }));
-    return id;
-  },
-  appendAssistantDelta: (stepId, delta) =>
-    set((s) => ({
-      steps: s.steps.map((step) =>
-        step.id === stepId && step.type === "assistant"
-          ? { ...step, text: step.text + delta }
-          : step,
-      ),
-    })),
-  finishAssistant: (stepId) =>
-    set((s) => {
-      const cur = s.steps.find((step) => step.id === stepId);
-      if (!cur || cur.type !== "assistant") return {};
-      const hasText = String(cur.text ?? "").trim().length > 0;
-      const hasQuickActions = Array.isArray(cur.quickActions) && cur.quickActions.length > 0;
-      if (!hasText && !hasQuickActions) {
-        return { steps: s.steps.filter((step) => step.id !== stepId) };
-      }
-      return {
-        steps: s.steps.map((step) =>
-          step.id === stepId && step.type === "assistant"
-            ? { ...step, streaming: false }
-            : step,
-        ),
-      };
-    }),
-  patchAssistant: (stepId, patch) =>
-    set((s) => ({
-      steps: s.steps.map((step) =>
-        step.id === stepId && step.type === "assistant" ? { ...step, ...patch } : step,
-      ),
-    })),
+	  ) => {
+	    const id = makeId("a");
+	    const assistantStep: AssistantStep = {
+	      id,
+	      type: "assistant",
+	      text: initialText,
+	      streaming,
+	      hidden,
+	      variant: opts?.variant === "progress" ? "progress" : "default",
+	      ...(opts?.agentId ? { agentId: opts.agentId, agentName: opts.agentName } : {}),
+	      ...(Array.isArray(opts?.quickActions) && opts.quickActions.length ? { quickActions: opts.quickActions } : {}),
+	    };
+	    const transcriptEntry = buildTranscriptFromStep(assistantStep);
+	    set((s) => ({
+	      steps: [
+	        ...s.steps,
+	        assistantStep,
+	      ],
+	      transcript: transcriptEntry ? resequenceTranscript([...s.transcript, transcriptEntry]) : s.transcript,
+	    }));
+	    return id;
+	  },
+	  appendAssistantDelta: (stepId, delta) =>
+	    set((s) => ({
+	      steps: s.steps.map((step) =>
+	        step.id === stepId && step.type === "assistant"
+	          ? { ...step, text: step.text + delta }
+	          : step,
+	      ),
+	      transcript: patchTranscriptEntryById(s.transcript, stepId, (entry) => {
+	        if (entry.kind !== "assistant_message") return entry;
+	        return {
+	          ...entry,
+	          parts: appendTextToTranscriptParts(entry.parts, delta, {
+	            mode: "markdown",
+	            partId: `${stepId}_markdown`,
+	          }),
+	        };
+	      }),
+	    })),
+	  finishAssistant: (stepId) =>
+	    set((s) => {
+	      const cur = s.steps.find((step) => step.id === stepId);
+	      if (!cur || cur.type !== "assistant") return {};
+	      const hasText = String(cur.text ?? "").trim().length > 0;
+	      const hasQuickActions = Array.isArray(cur.quickActions) && cur.quickActions.length > 0;
+	      if (!hasText && !hasQuickActions) {
+	        return {
+	          steps: s.steps.filter((step) => step.id !== stepId),
+	          transcript: s.transcript.filter((entry) => entry.id !== stepId),
+	        };
+	      }
+	      return {
+	        steps: s.steps.map((step) =>
+	          step.id === stepId && step.type === "assistant"
+	            ? { ...step, streaming: false }
+	            : step,
+	        ),
+	        transcript: patchTranscriptEntryById(s.transcript, stepId, (entry) => {
+	          if (entry.kind !== "assistant_message") return entry;
+	          return { ...entry, streaming: false };
+	        }),
+	      };
+	    }),
+	  patchAssistant: (stepId, patch) =>
+	    set((s) => {
+	      let nextAssistant: AssistantStep | null = null;
+	      const nextSteps = s.steps.map((step) => {
+	        if (step.id === stepId && step.type === "assistant") {
+	          nextAssistant = { ...step, ...patch };
+	          return nextAssistant;
+	        }
+	        return step;
+	      });
+	      const transcript = nextAssistant
+	        ? patchTranscriptEntryById(s.transcript, stepId, (entry) => {
+	            if (entry.kind !== "assistant_message") return entry;
+	            const rebuilt = buildTranscriptFromStep(nextAssistant);
+	            return rebuilt ?? entry;
+	          })
+	        : s.transcript;
+	      return { steps: nextSteps, transcript };
+	    }),
 
   addTool: (tool) => {
     const id = tool.id ?? makeId("t");
@@ -1233,16 +1374,21 @@ export const useRunStore = create<RunState>()(
     const latestTurnId =
       String((get().turns ?? []).slice(-1)[0]?.id ?? "").trim() || "local-turn";
     const shadowItem = buildShadowItemFromToolStep({ step, threadId, turnId: latestTurnId });
-    if (tool.applyPolicy === "proposal" || tool.undoable || tool.apply || tool.undo) {
-      registerItemActionRuntime(id, {
-        spec: buildItemActionSpecFromToolStep(step),
+	    if (tool.applyPolicy === "proposal" || tool.undoable || tool.apply || tool.undo) {
+	      registerItemActionRuntime(id, {
+	        spec: buildItemActionSpecFromToolStep(step),
         ...(tool.apply ? { apply: tool.apply } : {}),
         ...(tool.undo ? { undo: tool.undo } : {}),
-      });
-    }
-    set((s) => ({ steps: [...s.steps, step], items: upsertById(s.items, shadowItem) }));
-    return id;
-  },
+	      });
+	    }
+	    const transcriptEntry = buildTranscriptFromStep(step);
+	    set((s) => ({
+	      steps: [...s.steps, step],
+	      transcript: transcriptEntry ? resequenceTranscript([...s.transcript, transcriptEntry]) : s.transcript,
+	      items: upsertById(s.items, shadowItem),
+	    }));
+	    return id;
+	  },
   patchTool: (stepId, patch) =>
     set((s) => {
       let nextTool: ToolBlockStep | null = null;
@@ -1272,8 +1418,15 @@ export const useRunStore = create<RunState>()(
             }),
           )
         : s.items;
-      return { steps: nextSteps, items: nextItems };
-    }),
+	      const transcript = resolvedTool
+	        ? patchTranscriptEntryById(s.transcript, stepId, (entry) => {
+	            if (entry.kind !== "tool_call") return entry;
+	            const rebuilt = buildTranscriptFromStep(resolvedTool);
+	            return rebuilt ?? entry;
+	          })
+	        : s.transcript;
+	      return { steps: nextSteps, transcript, items: nextItems };
+	    }),
 
   dispatchItemAction: (itemId, action) => {
     const id = String(itemId ?? "").trim();
@@ -1291,15 +1444,19 @@ export const useRunStore = create<RunState>()(
       return;
     }
 
-    const setRunningState = () =>
-      set((s) => ({
-        steps: s.steps.map((step) =>
-          step.id === id && step.type === "tool" ? { ...step, status: "running" } : step,
-        ),
-        items: s.items.map((entry) =>
-          entry.id === id ? { ...entry, status: "in_progress", updatedAt: new Date().toISOString() } : entry,
-        ),
-      }));
+	    const setRunningState = () =>
+	      set((s) => ({
+	        steps: s.steps.map((step) =>
+	          step.id === id && step.type === "tool" ? { ...step, status: "running" } : step,
+	        ),
+	        transcript: patchTranscriptEntryById(s.transcript, id, (entry) => {
+	          if (entry.kind !== "tool_call") return entry;
+	          return { ...entry, status: "running" };
+	        }),
+	        items: s.items.map((entry) =>
+	          entry.id === id ? { ...entry, status: "in_progress", updatedAt: new Date().toISOString() } : entry,
+	        ),
+	      }));
 
     const finalize = (ret?: void | { undo?: () => void }) => {
       const undo = (ret as any)?.undo as (() => void) | undefined;
@@ -1307,8 +1464,8 @@ export const useRunStore = create<RunState>()(
         registerItemActionRuntime(id, { undo });
       }
       const nowIso = new Date().toISOString();
-      set((s) => ({
-        steps: s.steps.map((step) => {
+	      set((s) => ({
+	        steps: s.steps.map((step) => {
           if (step.id !== id || step.type !== "tool") return step;
           if (runApply) {
             return {
@@ -1320,9 +1477,22 @@ export const useRunStore = create<RunState>()(
               undo: undo ?? step.undo,
             };
           }
-          return { ...step, status: "undone", kept: false, applied: false };
-        }),
-        items: s.items.map((entry) => {
+	          return { ...step, status: "undone", kept: false, applied: false };
+	        }),
+	        transcript: patchTranscriptEntryById(s.transcript, id, (entry) => {
+	          if (entry.kind !== "tool_call") return entry;
+	          if (runApply) {
+	            return {
+	              ...entry,
+	              status: "success",
+	              kept: true,
+	              applied: true,
+	              undoable: Boolean(undo) || Boolean(entry.undoable),
+	            };
+	          }
+	          return { ...entry, status: "undone", kept: false, applied: false };
+	        }),
+	        items: s.items.map((entry) => {
           if (entry.id !== id) return entry;
           return {
             ...entry,
@@ -1337,13 +1507,17 @@ export const useRunStore = create<RunState>()(
     const fail = (error: unknown) => {
       const msg = error instanceof Error ? error.message : String(error ?? "ITEM_ACTION_FAILED");
       const nowIso = new Date().toISOString();
-      set((s) => ({
-        steps: s.steps.map((step) =>
-          step.id === id && step.type === "tool" ? { ...step, status: "failed", output: { ok: false, error: msg } } : step,
-        ),
-        items: s.items.map((entry) =>
-          entry.id === id ? { ...entry, status: "failed", updatedAt: nowIso, error: msg } as RuntimeItemRecord : entry,
-        ),
+	      set((s) => ({
+	        steps: s.steps.map((step) =>
+	          step.id === id && step.type === "tool" ? { ...step, status: "failed", output: { ok: false, error: msg } } : step,
+	        ),
+	        transcript: patchTranscriptEntryById(s.transcript, id, (entry) => {
+	          if (entry.kind !== "tool_call") return entry;
+	          return { ...entry, status: "failed", output: { ok: false, error: msg } };
+	        }),
+	        items: s.items.map((entry) =>
+	          entry.id === id ? { ...entry, status: "failed", updatedAt: nowIso, error: msg } as RuntimeItemRecord : entry,
+	        ),
       }));
       get().log("error", "item.action.failed", { itemId: id, action, error: msg });
     };
@@ -1372,12 +1546,16 @@ export const useRunStore = create<RunState>()(
       return;
     }
     const step = get().steps.find((s) => s.id === stepId);
-    if (!step || step.type !== "tool") return;
-    if (step.status === "running" || step.status === "undone" || step.kept) return;
-    set((s) => ({
-      steps: s.steps.map((x) => (x.id === stepId && x.type === "tool" ? { ...x, kept: true } : x)),
-    }));
-  },
+	    if (!step || step.type !== "tool") return;
+	    if (step.status === "running" || step.status === "undone" || step.kept) return;
+	    set((s) => ({
+	      steps: s.steps.map((x) => (x.id === stepId && x.type === "tool" ? { ...x, kept: true } : x)),
+	      transcript: patchTranscriptEntryById(s.transcript, stepId, (entry) => {
+	        if (entry.kind !== "tool_call") return entry;
+	        return { ...entry, kept: true };
+	      }),
+	    }));
+	  },
   undoStep: (stepId) => {
     const item = get().items.find((entry) => String(entry?.id ?? "") === String(stepId ?? "").trim());
     if (item) {
@@ -1385,16 +1563,20 @@ export const useRunStore = create<RunState>()(
       return;
     }
     const step = get().steps.find((s) => s.id === stepId);
-    if (!step || step.type !== "tool") return;
-    if (step.undoable && step.undo) step.undo();
-    set((s) => ({
-      steps: s.steps.map((x) =>
-        x.id === stepId && x.type === "tool"
-          ? { ...x, status: "undone", kept: false, applied: false }
-          : x,
-      ),
-    }));
-  },
+	    if (!step || step.type !== "tool") return;
+	    if (step.undoable && step.undo) step.undo();
+	    set((s) => ({
+	      steps: s.steps.map((x) =>
+	        x.id === stepId && x.type === "tool"
+	          ? { ...x, status: "undone", kept: false, applied: false }
+	          : x,
+	      ),
+	      transcript: patchTranscriptEntryById(s.transcript, stepId, (entry) => {
+	        if (entry.kind !== "tool_call") return entry;
+	        return { ...entry, status: "undone", kept: false, applied: false };
+	      }),
+	    }));
+	  },
   keepAllProposals: () => {
     const pendingItems = (get().items ?? [])
       .filter((item: any) => item && item.type === "fileChange")

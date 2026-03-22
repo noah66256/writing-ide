@@ -38,6 +38,7 @@ import { SettingsModal } from "./SettingsModal";
 import { useKbStore } from "@/state/kbStore";
 import { authHeader } from "@/agent/gatewayAgent";
 import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
+import { buildTranscriptFromSteps, mergeTranscriptEntries, type TranscriptEntry } from "@/agent/transcript";
 
 /* ─── Helpers ─── */
 
@@ -85,6 +86,14 @@ function buildSnapshotFromBuffer(base: RunSnapshot, buffer: import("@/state/runR
     mainDoc: deepClone(buffer.mainDoc ?? base.mainDoc ?? {}),
     todoList: deepClone(buffer.todoList ?? base.todoList ?? []),
     steps: merged as RunSnapshot["steps"],
+    transcript: deepClone(
+      mergeTranscriptEntries(
+        (((base as any).transcript ?? []) as TranscriptEntry[]).length
+          ? (((base as any).transcript ?? []) as TranscriptEntry[])
+          : buildTranscriptFromSteps(base.steps ?? []),
+        (buffer as any).transcript ?? [],
+      ),
+    ),
     logs: deepClone(buffer.logs?.length ? buffer.logs : (base.logs ?? [])),
     ctxRefs: deepClone(buffer.ctxRefs ?? base.ctxRefs ?? []),
     pendingArtifacts: deepClone((buffer as any).pendingArtifacts ?? (base as any).pendingArtifacts ?? []),
@@ -285,10 +294,13 @@ export function NavSidebar() {
             });
             useRunStore.getState().setHistoryWindowHasMoreBefore(preferred.hasMoreBefore);
 
-            const snapshotToLoad = {
-              ...baseSnapshot,
-              steps: preferred.steps.length ? preferred.steps : (baseSnapshot?.steps ?? []),
-            } as any;
+	            const snapshotToLoad = {
+	              ...baseSnapshot,
+	              steps: preferred.steps.length ? preferred.steps : (baseSnapshot?.steps ?? []),
+	              transcript: buildTranscriptFromSteps(
+	                (preferred.steps.length ? preferred.steps : (baseSnapshot?.steps ?? [])) as any[],
+	              ),
+	            } as any;
 
             loadSnapshot(snapshotToLoad);
 
