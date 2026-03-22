@@ -294,7 +294,7 @@ async function scenarioExplicitCodeExec() {
   ok("explicit code scenario");
 }
 
-async function scenarioExplicitPortableInvocationDoesNotExposeSkillsActivate() {
+async function scenarioExplicitPortableInvocationConvergesVisibleToolPool() {
   const skillId = "portable-skill-smoke";
   const prepared = await prepare(
     " ",
@@ -315,8 +315,14 @@ async function scenarioExplicitPortableInvocationDoesNotExposeSkillsActivate() {
     },
   );
   assert.equal(prepared.portableSkillContext?.executionScope, "explicit_portable_invocation");
+  assert.equal(prepared.selectedAllowedToolNames.has("read"), true);
+  assert.equal(prepared.selectedAllowedToolNames.has("write"), true);
+  assert.equal(prepared.selectedAllowedToolNames.has("spawn_agent"), true);
   assert.equal(prepared.selectedAllowedToolNames.has("skills.activate"), false);
-  ok("explicit portable invocation hides skills.activate");
+  assert.equal(prepared.selectedAllowedToolNames.has("run.mainDoc.get"), false);
+  assert.equal(prepared.selectedAllowedToolNames.has("run.done"), false);
+  assert.equal(prepared.selectedAllowedToolNames.has("tools.search"), false);
+  ok("explicit portable invocation converges visible tool pool");
 }
 
 async function main() {
@@ -327,7 +333,7 @@ async function main() {
   await scenarioSearchWithoutBrowser();
   await scenarioWordDeliveryFailFast();
   await scenarioExplicitCodeExec();
-  await scenarioExplicitPortableInvocationDoesNotExposeSkillsActivate();
+  await scenarioExplicitPortableInvocationConvergesVisibleToolPool();
   console.log("[smoke-mcp-server-first] all scenarios passed");
 }
 

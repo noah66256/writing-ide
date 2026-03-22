@@ -4130,9 +4130,20 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
   // 兜底：确保 CORE_TOOLS 不被 B2 裁剪掉，只要它们在 baseAllowedToolNames 中。
   ensureCoreToolsSelected({ baseAllowedToolNames, selectedAllowedToolNames });
 
-  // 显式 portable invocation 已经选定目标 skill，不应再向模型暴露内部激活工具；
-  // 否则模型可能重复调用 skills.activate，把同一 run 切成多个 denied turn。
+  // 显式 portable invocation 的可见工具池必须与 allowed-tools 收敛到同一作用域，
+  // 否则会出现“模型看得到，但 runtime 又因 portable policy 拒绝”的分叉。
   if (portableExecutionScope === "explicit_portable_invocation") {
+    if (portableAllowedToolPolicy) {
+      const portableVisibleToolNames = Array.from(portableAllowedToolPolicy.allowedToolNames).filter((name) =>
+        baseAllowedToolNames.has(name),
+      );
+      selectedAllowedToolNames.clear();
+      for (const name of portableVisibleToolNames) {
+        selectedAllowedToolNames.add(name);
+      }
+    }
+    // 目标 skill 已经显式选定，不应再向模型暴露内部激活工具；
+    // 否则模型可能重复调用 skills.activate，把同一 run 切成多个 denied turn。
     selectedAllowedToolNames.delete("skills.activate");
   }
 
