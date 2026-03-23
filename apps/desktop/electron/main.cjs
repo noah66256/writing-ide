@@ -1469,6 +1469,15 @@ async function tryMigrateConversationHistory(userData, appData) {
   });
 }
 
+async function readUtf8FileBufferFirst(file) {
+  const target = String(file ?? "").trim();
+  if (!target) throw new Error("MISSING_FILE");
+  // Electron 41 / macOS 26 下，history 热路径尽量避开 async readFile(..., "utf-8")
+  // 直接走 Node 内部 StringDecoder 的 native 回调解码。
+  const raw = await fsp.readFile(target);
+  return Buffer.isBuffer(raw) ? raw.toString("utf-8") : String(raw ?? "");
+}
+
 function countDialogueStepsForHistory(steps) {
   const list = Array.isArray(steps) ? steps : [];
   let userCount = 0;
@@ -1515,7 +1524,7 @@ async function tryLoadConversationFromV1(historyDir, convId) {
     const file = c && typeof c === "object" ? String(c.file ?? "") : "";
     if (!file) continue;
     try {
-      const raw = await fsp.readFile(file, "utf-8");
+      const raw = await readUtf8FileBufferFirst(file);
       const parsed = JSON.parse(String(raw ?? ""));
       const list = Array.isArray(parsed?.conversations)
         ? parsed.conversations
@@ -1550,7 +1559,7 @@ async function tryLoadConversationFromV1(historyDir, convId) {
   try {
     // 兜底：仍然尝试当前 primary/fallback v1 文件，保持与旧版本近似的行为
     const { file } = await resolveHistoryFileForRead();
-    const raw = await fsp.readFile(file, "utf-8");
+    const raw = await readUtf8FileBufferFirst(file);
     const parsed = JSON.parse(String(raw ?? ""));
     const list = Array.isArray(parsed?.conversations) ? parsed.conversations : [];
     const found = list.find((c) => c && typeof c === "object" && String(c.id ?? "").trim() === id);
@@ -1616,7 +1625,7 @@ async function tryLoadConversationFromV2(historyDir, convId) {
     const safeId = normalizeConversationIdForFilename(id);
     const convFile = path.join(dir, HISTORY_CONV_DIRNAME_V2, `conv_${safeId}.json`);
     if (!(await fileExists(convFile))) return null;
-    const raw = await fsp.readFile(convFile, "utf-8");
+    const raw = await readUtf8FileBufferFirst(convFile);
     const parsed = JSON.parse(String(raw ?? ""));
     return parsed && typeof parsed === "object" ? parsed : null;
   } catch {
@@ -2131,7 +2140,7 @@ async function replayPendingHistoryJournalCandidate(candidate) {
   if (!file) return { replayed: false, cleared: false, staleIgnored: false };
   if (!(await fileExists(file))) return { replayed: false, cleared: false, staleIgnored: false };
   const dir = path.dirname(file);
-  const raw = await fsp.readFile(file, "utf-8");
+  const raw = await readUtf8FileBufferFirst(file);
   const parsed = JSON.parse(String(raw ?? ""));
   const batch = normalizeHistoryOperationBatch(parsed);
   if (!Array.isArray(batch.ops) || batch.ops.length === 0) {
@@ -2170,7 +2179,7 @@ async function migrateLegacyPendingPayloadCandidate(candidate) {
   if (!file) return { replayed: false, cleared: false, staleIgnored: false };
   if (!(await fileExists(file))) return { replayed: false, cleared: false, staleIgnored: false };
   const dir = path.dirname(file);
-  const raw = await fsp.readFile(file, "utf-8");
+  const raw = await readUtf8FileBufferFirst(file);
   const parsed = JSON.parse(String(raw ?? ""));
   if (!parsed || typeof parsed !== "object") {
     await unlinkIfExists(file);
@@ -2316,7 +2325,7 @@ async function readHistoryPayloadFile(file) {
   const target = String(file ?? "").trim();
   if (!target) return null;
   try {
-    const raw = await fsp.readFile(target, "utf-8");
+    const raw = await readUtf8FileBufferFirst(target);
     const parsed = JSON.parse(String(raw ?? ""));
     return parsed && typeof parsed === "object" ? parsed : null;
   } catch {
@@ -2914,7 +2923,7 @@ function mergeUniqueHistoryEventBatches(batches) {
 async function readConversationEventLogBatches(historyDir, conversationId) {
   const file = getConversationEventLogFileV2Path(historyDir, conversationId);
   if (!file || !(await fileExists(file))) return [];
-  const raw = await fsp.readFile(file, "utf-8");
+  const raw = await readUtf8FileBufferFirst(file);
   const lines = String(raw ?? "").split(/\r?\n/);
   const batches = [];
   let ignored = 0;
@@ -6360,8 +6369,7 @@ function registerIpc() {
       const parsedIndexes = [];
       for (const candidate of listHistoryIndexReadCandidates()) {
         try {
-          const raw = await fsp.readFile(candidate.file, "utf-8");
-          const parsed = JSON.parse(String(raw ?? ""));
+          const parsed = await readHistoryPayloadFile(candidate.file);
           const list = Array.isArray(parsed?.conversations) ? parsed.conversations : [];
           parsedIndexes.push({
             ...candidate,
@@ -6388,28 +6396,9 @@ function registerIpc() {
         return sorted[0] || null;
       };
 
-      let picked = pickBestIndex(parsedIndexes);
-      if (picked?.activeConvId && picked?.file) {
-        await materializeConversationEventsToHistory(path.dirname(picked.file), picked.activeConvId, {
-          clearEventLog: false,
-        }).catch(() => null);
-        try {
-          const refreshedRaw = await fsp.readFile(picked.file, "utf-8");
-          const refreshed = JSON.parse(String(refreshedRaw ?? ""));
-          picked = {
-            ...picked,
-            updatedAt: Number(refreshed?.updatedAt ?? picked.updatedAt ?? 0) || 0,
-            conversations: Array.isArray(refreshed?.conversations) ? refreshed.conversations : [],
-            activeConvId: typeof refreshed?.activeConvId === "string" ? refreshed.activeConvId : null,
-            draftSnapshot: normalizeHistoryDraftSnapshot(refreshed?.draftSnapshot),
-            draftSnapshotOwnerId:
-              typeof refreshed?.draftSnapshotOwnerId === "string" ? refreshed.draftSnapshotOwnerId : null,
-            draftRevision: normalizeHistoryRevisionValue(refreshed?.draftRevision),
-          };
-        } catch {
-          // ignore refresh failure and keep original picked payload
-        }
-      }
+      // 读索引时不再隐式 materialize：读路径只读，避免启动/切会话时反复触发
+      // event log -> body/index 的额外 fs 读写。
+      const picked = pickBestIndex(parsedIndexes);
       if (picked) {
         return {
           ok: true,
@@ -6437,8 +6426,7 @@ function registerIpc() {
         };
       }
 
-      const raw = await fsp.readFile(fallbackRead.file, "utf-8");
-      const parsed = JSON.parse(String(raw ?? ""));
+      const parsed = await readHistoryPayloadFile(fallbackRead.file);
       const list = Array.isArray(parsed?.conversations) ? parsed.conversations : Array.isArray(parsed) ? parsed : [];
       const indexConversations = Array.isArray(list)
         ? list.map((conv) => buildConversationIndexEntry(conv, null)).filter(Boolean)
@@ -6466,13 +6454,11 @@ function registerIpc() {
       if (!convId) return { ok: false, error: "MISSING_CONVERSATION_ID" };
       const includeSteps = p.includeSteps === true;
       const { dir, used } = await resolveHistoryFileForRead();
-      await materializeConversationEventsToHistory(dir, convId, {
-        clearEventLog: false,
-      }).catch(() => null);
 
       let snapshot = null;
       const v2Payload = await tryLoadConversationFromV2(dir, convId);
       let bodyRevision = normalizeHistoryRevisionValue(v2Payload?.bodyRevision);
+      // 直接按 authority（body + event log + pending）做内存合并，不在读取时落盘。
       snapshot = await loadConversationAuthoritySnapshotFromCurrentDir(dir, convId, null);
       if (snapshot && includeSteps !== true) {
         snapshot = {
@@ -6541,48 +6527,15 @@ function registerIpc() {
         typeof beforeStepIdRaw === "string" && beforeStepIdRaw.trim() ? String(beforeStepIdRaw).trim() : null;
 
       const { dir } = await resolveHistoryFileForRead();
-      const convRootDir = path.join(dir, HISTORY_CONV_DIRNAME_V2);
-      const safeId = normalizeConversationIdForFilename(convId);
-      const convFile = path.join(convRootDir, `conv_${safeId}.json`);
-
       let steps = [];
+      // segment 读取也走 authority 合并，避免 read IPC 为了拿最新 steps 又触发 materialize。
+      const authoritySnapshot = await loadConversationAuthoritySnapshotFromCurrentDir(dir, convId, null);
+      steps = Array.isArray(authoritySnapshot?.steps) ? authoritySnapshot.steps : [];
 
-      await materializeConversationEventsToHistory(dir, convId, {
-        clearEventLog: false,
-      }).catch(() => null);
-
-      if (await fileExists(convFile)) {
-        const raw = await fsp.readFile(convFile, "utf-8");
-        const parsed = JSON.parse(String(raw ?? ""));
-        steps = Array.isArray(parsed?.steps) ? parsed.steps : [];
-
-        // per-conv 文件存在但 steps 为空：优先尝试从任意 v1 历史中恢复完整 snapshot，并写回当前目录。
-        if (!Array.isArray(steps) || steps.length === 0) {
-          const fallbackConv = await tryLoadConversationFromV1(dir, convId);
-          if (fallbackConv && fallbackConv.snapshot && Array.isArray(fallbackConv.snapshot.steps)) {
-            const fbSteps = fallbackConv.snapshot.steps;
-            if (fbSteps.length > 0) {
-              steps = fbSteps;
-              try {
-                await saveSingleConversationFileV2(dir, fallbackConv);
-              } catch {
-                // ignore
-              }
-            }
-          }
-        }
-      } else {
-        // v2 文件不存在时，从 v1 历史尝试恢复该会话，并顺便生成 conv 文件
+      if (!Array.isArray(steps) || steps.length === 0) {
         const fallbackConv = await tryLoadConversationFromV1(dir, convId);
         if (!fallbackConv) return { ok: false, error: "CONVERSATION_NOT_FOUND" };
         steps = Array.isArray(fallbackConv.snapshot?.steps) ? fallbackConv.snapshot.steps : [];
-        if (Array.isArray(steps) && steps.length > 0) {
-          try {
-            await saveSingleConversationFileV2(dir, fallbackConv);
-          } catch {
-            // ignore
-          }
-        }
       }
 
       if (!Array.isArray(steps) || steps.length === 0) {

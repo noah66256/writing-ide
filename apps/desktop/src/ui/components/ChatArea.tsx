@@ -1409,6 +1409,8 @@ export function ChatArea() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [renderTranscript]);
 
+  const firstRenderStepId = renderSteps[0]?.id ?? null;
+
   // 初始化当前会话是否存在更早历史（用于顶部“加载更多”判断）
   useEffect(() => {
     const convId = activeConvId;
@@ -1418,10 +1420,9 @@ export function ChatArea() {
     }
     const api = window.desktop?.history?.loadConversationSegment;
     if (!api) return;
-    const first = renderSteps[0];
-    if (!first?.id) return;
+    if (!firstRenderStepId) return;
     let cancelled = false;
-    void api({ conversationId: convId, beforeStepId: first.id, limit: 1 })
+    void api({ conversationId: convId, beforeStepId: firstRenderStepId, limit: 1 })
       .then((res: any) => {
         if (cancelled || !res || res.ok === false) return;
         useRunStore.getState().setHistoryWindowHasMoreBefore(Boolean(res.hasMoreBefore));
@@ -1432,7 +1433,7 @@ export function ChatArea() {
     return () => {
       cancelled = true;
     };
-  }, [activeConvId, renderSteps]);
+  }, [activeConvId, firstRenderStepId]);
 
   const loadOlderHistory = useCallback((opts?: { preserveViewport?: boolean }) => {
     if (loadingMoreHistoryRef.current) return;
