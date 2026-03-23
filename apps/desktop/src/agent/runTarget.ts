@@ -309,7 +309,9 @@ export function createRunTarget(convId: string) {
       collabSessions: JSON.parse(JSON.stringify(runtime?.collabSessions ?? (base as any).collabSessions ?? [])),
       activeItemIds: JSON.parse(JSON.stringify(runtime?.activeItemIds ?? (base as any).activeItemIds ?? [])),
     };
-    useConversationStore.getState().updateConversation(cid, { snapshot: next });
+    void useConversationStore.getState().persistConversationSnapshotViaEvents(cid, next, {
+      source: "autosave",
+    }).catch(() => void 0);
   };
 
   // ── 镜像写到 registry buffer（active 路径调用，保证 buffer 与 flat store 同步） ──

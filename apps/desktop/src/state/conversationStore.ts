@@ -56,6 +56,24 @@ export type RunSnapshot = {
   dialogueSummaryTurnCursorByMode?: Record<Mode, number>;
 };
 
+export type DraftState = {
+  mode: Mode;
+  model: string;
+  /** 草稿态也保留会话执行模式，避免重启后模式漂移。 */
+  opMode?: OpMode;
+  mainDoc: MainDoc;
+  todoList: TodoItem[];
+  steps: SerializableStep[];
+  kbAttachedLibraryIds: string[];
+  ctxRefs?: CtxRefItem[];
+  pendingArtifacts?: PendingArtifact[];
+  projectDir?: string | null;
+  dialogueSummaryByMode?: Record<Mode, string>;
+  dialogueSummaryTurnCursorByMode?: Record<Mode, number>;
+};
+
+type DraftSnapshotInput = RunSnapshot | DraftState | null | undefined;
+
 type StepDialogueStats = {
   total: number;
   userCount: number;
@@ -438,6 +456,65 @@ function slimLogsForHistory(logs: LogEntry[] | undefined | null): LogEntry[] {
   }));
 }
 
+function slimTranscriptPartForHistory(part: unknown): unknown {
+  const raw = part && typeof part === "object" ? (part as Record<string, unknown>) : null;
+  if (!raw) return part;
+  const next: Record<string, unknown> = { ...raw };
+  if (typeof raw.text === "string") {
+    next.text = truncateForHistory(raw.text, MAX_RUNTIME_ITEM_CONTENT_HISTORY_CHARS);
+  }
+  if (typeof raw.caption === "string") {
+    next.caption = truncateForHistory(raw.caption, MAX_TOOL_GENERIC_STRING_CHARS);
+  }
+  if (typeof raw.alt === "string") {
+    next.alt = truncateForHistory(raw.alt, 240);
+  }
+  if (typeof raw.label === "string") {
+    next.label = truncateForHistory(raw.label, 240);
+  }
+  if (raw.type === "json") {
+    next.value = slimStructuredValueForHistory(raw.value, {
+      defaultStringLimit: MAX_TOOL_GENERIC_STRING_CHARS,
+      maxDepth: 4,
+      maxKeys: 20,
+      maxArray: 16,
+    });
+    if (typeof raw.raw === "string") {
+      next.raw = truncateForHistory(raw.raw, MAX_RUNTIME_ITEM_CONTENT_HISTORY_CHARS);
+    }
+  }
+  return next;
+}
+
+function slimTranscriptEntryForHistory(entry: TranscriptEntry): TranscriptEntry {
+  if (!entry || typeof entry !== "object") return entry;
+  const raw = entry as any;
+  const next: any = {
+    ...raw,
+    ...(Array.isArray(raw.parts)
+      ? { parts: raw.parts.map((part: unknown) => slimTranscriptPartForHistory(part)) }
+      : {}),
+  };
+  if (typeof raw.text === "string") {
+    next.text = truncateForHistory(raw.text, MAX_TOOL_GENERIC_STRING_CHARS);
+  }
+  if (raw.kind === "tool_call") {
+    const toolName = String(raw.toolName ?? "").trim();
+    if (raw.input !== undefined) {
+      next.input = slimToolIoForHistory(toolName, raw.input);
+    }
+    if (raw.output !== undefined) {
+      next.output = slimToolResultEnvelopeForHistory(toolName, raw.output);
+    }
+  }
+  return next as TranscriptEntry;
+}
+
+function slimTranscriptForHistory(entries: TranscriptEntry[] | undefined | null): TranscriptEntry[] {
+  return clampTailForHistory(Array.isArray(entries) ? entries : [], MAX_RUNTIME_ITEMS_HISTORY)
+    .map((entry) => slimTranscriptEntryForHistory(entry));
+}
+
 function slimRuntimeTurnForHistory(turn: RuntimeTurnRecord): RuntimeTurnRecord {
   if (!turn || typeof turn !== "object") return turn;
   const next = slimStructuredValueForHistory(turn, {
@@ -555,6 +632,7 @@ function slimSnapshotForHistory(snapshot: RunSnapshot | null | undefined): RunSn
   const stepsRaw = Array.isArray((snapshot as any).steps) ? ((snapshot as any).steps as any[]) : [];
   const stepsSlim: SerializableStep[] = stepsRaw.map((step) => slimStepForHistory(step));
   const logsSlim = slimLogsForHistory((snapshot as any).logs as LogEntry[]);
+  const transcriptSlim = slimTranscriptForHistory((snapshot as any).transcript as TranscriptEntry[] | undefined);
   const turnsSlim = clampTailForHistory((snapshot as any).turns as RuntimeTurnRecord[] | undefined, MAX_RUNTIME_TURNS_HISTORY)
     .map((turn) =>
       slimRuntimeTurnForHistory({
@@ -586,6 +664,7 @@ function slimSnapshotForHistory(snapshot: RunSnapshot | null | undefined): RunSn
       maxArray: 24,
     }) as MainDoc,
     steps: stepsSlim,
+    transcript: transcriptSlim,
     logs: logsSlim,
     thread: slimRuntimeThreadForHistory((snapshot as any).thread as RuntimeThreadRecord | null | undefined),
     turns: turnsSlim,
@@ -601,6 +680,53 @@ function slimSnapshotForHistory(snapshot: RunSnapshot | null | undefined): RunSn
       maxKeys: 8,
       maxArray: 8,
     }) as Record<Mode, string> | undefined,
+  };
+}
+
+function slimDraftStateForHistory(snapshot: DraftSnapshotInput): DraftState | null {
+  if (!snapshot || typeof snapshot !== "object") return null;
+  const base = slimSnapshotForHistory(snapshot as RunSnapshot) ?? (snapshot as RunSnapshot);
+  const projectDir =
+    typeof base.projectDir === "string" && base.projectDir.trim()
+      ? base.projectDir.trim()
+      : null;
+  const pendingArtifacts = Array.isArray(base.pendingArtifacts)
+    ? Array.from(
+        new Map(
+          base.pendingArtifacts
+            .filter((item) => item && typeof item === "object" && String((item as any).id ?? "").trim())
+            .map((item) => [String((item as any).id ?? "").trim(), item as PendingArtifact]),
+        ).values(),
+      )
+        .sort((a, b) => Number((a as any)?.updatedAt ?? 0) - Number((b as any)?.updatedAt ?? 0))
+        .slice(-3)
+    : null;
+  return {
+    mode: base.mode === "chat" ? "chat" : "agent",
+    model: String(base.model ?? ""),
+    ...(base.opMode != null ? { opMode: base.opMode } : {}),
+    mainDoc:
+      base.mainDoc && typeof base.mainDoc === "object"
+        ? ({ ...(base.mainDoc as MainDoc) } as MainDoc)
+        : ({} as MainDoc),
+    todoList: Array.isArray(base.todoList) ? [...base.todoList] : [],
+    steps: Array.isArray(base.steps) ? (base.steps as SerializableStep[]) : [],
+    kbAttachedLibraryIds: Array.isArray(base.kbAttachedLibraryIds)
+      ? Array.from(new Set(base.kbAttachedLibraryIds.map((id) => String(id ?? "").trim()).filter(Boolean)))
+      : [],
+    ...(Array.isArray(base.ctxRefs) ? { ctxRefs: [...base.ctxRefs] } : {}),
+    ...(pendingArtifacts ? { pendingArtifacts } : {}),
+    ...(projectDir ? { projectDir } : {}),
+    ...(base.dialogueSummaryByMode && typeof base.dialogueSummaryByMode === "object"
+      ? { dialogueSummaryByMode: { ...(base.dialogueSummaryByMode as Record<Mode, string>) } }
+      : {}),
+    ...(base.dialogueSummaryTurnCursorByMode && typeof base.dialogueSummaryTurnCursorByMode === "object"
+      ? {
+          dialogueSummaryTurnCursorByMode: {
+            ...(base.dialogueSummaryTurnCursorByMode as Record<Mode, number>),
+          },
+        }
+      : {}),
   };
 }
 
@@ -713,6 +839,97 @@ export function buildCurrentSnapshot(): RunSnapshot {
   return slimSnapshotForHistory(rawSnapshot) ?? rawSnapshot;
 }
 
+export function buildCurrentDraftState(): DraftState {
+  const s = useRunStore.getState();
+  const projectDir = useProjectStore.getState().rootDir ?? null;
+  const normalizedCollabSessions = Array.isArray((s as any).collabSessions)
+    ? (((s as any).collabSessions as RuntimeCollabSessionRecord[]).map((session) => ({ ...(session as any) })))
+    : [];
+  const projectedSteps = getProjectedStepsFromRuntime({
+    steps: s.steps ?? [],
+    items: ((s as any).items ?? []) as RuntimeItemRecord[],
+    activeItemIds: ((s as any).activeItemIds ?? []) as string[],
+    collabSessions: normalizedCollabSessions as RuntimeCollabSessionRecord[],
+  });
+
+  const draftState: DraftState = {
+    mode: s.mode,
+    model: s.model,
+    opMode: s.opMode,
+    mainDoc: { ...(s.mainDoc ?? {}) },
+    todoList: [...(s.todoList ?? [])],
+    steps: projectedSteps.map((step) => slimStepForHistory(step as Step)),
+    kbAttachedLibraryIds: [...(s.kbAttachedLibraryIds ?? [])],
+    ctxRefs: [...(s.ctxRefs ?? [])],
+    pendingArtifacts: [...(((s as any).pendingArtifacts ?? []) as PendingArtifact[])],
+    ...(projectDir ? { projectDir } : {}),
+    ...(s.dialogueSummaryByMode && typeof s.dialogueSummaryByMode === "object"
+      ? { dialogueSummaryByMode: { ...(s.dialogueSummaryByMode as Record<Mode, string>) } }
+      : {}),
+    ...(s.dialogueSummaryTurnCursorByMode && typeof s.dialogueSummaryTurnCursorByMode === "object"
+      ? {
+          dialogueSummaryTurnCursorByMode: {
+            ...(s.dialogueSummaryTurnCursorByMode as Record<Mode, number>),
+          },
+        }
+      : {}),
+  };
+  return slimDraftStateForHistory(draftState) ?? draftState;
+}
+
+export function buildCurrentThreadStateForHistory(): RuntimeThreadRecord | null {
+  const s = useRunStore.getState();
+  const normalizedCollabSessions = Array.isArray((s as any).collabSessions)
+    ? (((s as any).collabSessions as RuntimeCollabSessionRecord[]).map((session) => ({ ...(session as any) })))
+    : [];
+  const thread =
+    s.thread && typeof s.thread === "object"
+      ? sanitizeThreadCollabState(s.thread as RuntimeThreadRecord, normalizedCollabSessions as RuntimeCollabSessionRecord[])
+      : null;
+  return slimRuntimeThreadForHistory(thread);
+}
+
+function buildHistoryEventHeadFromDraftState(draftState: DraftState | null | undefined) {
+  const draft = draftState && typeof draftState === "object" ? draftState : null;
+  if (!draft) return null;
+  return {
+    mode: draft.mode,
+    model: draft.model,
+    opMode: draft.opMode ?? null,
+    mainDoc: draft.mainDoc ?? {},
+    todoList: Array.isArray(draft.todoList) ? [...draft.todoList] : [],
+    kbAttachedLibraryIds: Array.isArray(draft.kbAttachedLibraryIds) ? [...draft.kbAttachedLibraryIds] : [],
+    ctxRefs: Array.isArray(draft.ctxRefs) ? [...draft.ctxRefs] : [],
+    pendingArtifacts: Array.isArray(draft.pendingArtifacts) ? [...draft.pendingArtifacts] : [],
+    projectDir: draft.projectDir ?? null,
+    dialogueSummaryByMode: draft.dialogueSummaryByMode ?? null,
+    dialogueSummaryTurnCursorByMode: draft.dialogueSummaryTurnCursorByMode ?? null,
+  };
+}
+
+function buildHistoryEventBatchFromSnapshot(conversationId: string, snapshot: RunSnapshot | null | undefined) {
+  const convId = normalizeId(conversationId);
+  const safeSnapshot = slimSnapshotForHistory(snapshot ?? null);
+  const draftState = slimDraftStateForHistory(safeSnapshot);
+  if (!convId || !safeSnapshot || !draftState) return null;
+  return {
+    version: 1,
+    conversationId: convId,
+    updatedAt: Date.now(),
+    head: buildHistoryEventHeadFromDraftState(draftState),
+    stepUpserts: Array.isArray(draftState.steps) ? draftState.steps : [],
+    thread: (safeSnapshot.thread ?? null) as RuntimeThreadRecord | null,
+    runtimeState: {
+      transcript: Array.isArray((safeSnapshot as any).transcript) ? (safeSnapshot as any).transcript : [],
+      logs: Array.isArray((safeSnapshot as any).logs) ? (safeSnapshot as any).logs : [],
+      turns: Array.isArray((safeSnapshot as any).turns) ? (safeSnapshot as any).turns : [],
+      items: Array.isArray((safeSnapshot as any).items) ? (safeSnapshot as any).items : [],
+      collabSessions: Array.isArray((safeSnapshot as any).collabSessions) ? (safeSnapshot as any).collabSessions : [],
+      activeItemIds: Array.isArray((safeSnapshot as any).activeItemIds) ? (safeSnapshot as any).activeItemIds : [],
+    },
+  };
+}
+
 export type Conversation = {
   id: string;
   title: string;
@@ -724,6 +941,11 @@ export type Conversation = {
   pinned?: boolean;
   /** 手动归档标记：归档后从“进行中”列表移至“已归档”分组 */
   archived?: boolean;
+};
+
+type AddConversationInput = Omit<Conversation, "id" | "createdAt" | "updatedAt"> & {
+  id?: string;
+  persistBody?: boolean;
 };
 
 type HistoryWriteSource = "autosave" | "switch" | "shutdown" | "hydrate-repair" | "manual";
@@ -750,7 +972,7 @@ type HistoryOperation =
     }
   | {
       type: "write-draft";
-      draftSnapshot: RunSnapshot | null;
+      draftSnapshot: DraftState | null;
       draftSnapshotOwnerId?: string | null;
       expectedDraftRevision?: number | null;
     }
@@ -772,26 +994,43 @@ type HistoryOperationBatch = {
   ops: HistoryOperation[];
 };
 
+type ConversationPersistResult = {
+  ok: boolean;
+  used: "event" | "legacy";
+  conversationId: string;
+};
+
 type ConversationState = {
   conversations: Conversation[];
-  /** 当前"草稿对话"（未归档到历史，也无需点 +），用于重启后自动恢复右侧内容 */
-  draftSnapshot: RunSnapshot | null;
+  /** 当前"草稿对话"的轻量状态；仅用于未保存对话恢复，不再承载 runtime 大对象。 */
+  draftSnapshot: DraftState | null;
   draftSnapshotOwnerId: string | null;
   draftRevision: number;
   /** 当前活跃的对话 ID（发送首条消息时创建，侧边栏切换时设置） */
   activeConvId: string | null;
   hydrateFromDisk: () => Promise<void>;
-  addConversation: (c: Omit<Conversation, "id" | "createdAt" | "updatedAt"> & { id?: string }) => string;
+  addConversation: (c: AddConversationInput) => string;
   deleteConversation: (id: string) => void;
   pinConversation: (id: string, pinned: boolean) => void;
   archiveConversation: (id: string, archived: boolean) => void;
   renameConversation: (id: string, title: string) => void;
   updateConversation: (id: string, patch: { snapshot?: RunSnapshot; title?: string }) => void;
+  persistConversationSnapshotViaEvents: (
+    id: string,
+    snapshot: DraftSnapshotInput,
+    opts?: { writeDraft?: boolean; materialize?: boolean; source?: HistoryWriteSource },
+  ) => Promise<ConversationPersistResult>;
+  promoteDraftToConversation: (args?: {
+    title?: string;
+    snapshot?: DraftSnapshotInput;
+    setActive?: boolean;
+    source?: HistoryWriteSource;
+  }) => Promise<string | null>;
   loadConversationSnapshot: (id: string, opts?: { includeSteps?: boolean }) => Promise<RunSnapshot | null>;
   setActiveConvId: (id: string | null) => void;
-  setDraftSnapshot: (snap: RunSnapshot | null) => void;
-  flushDraftSnapshotNow: (snap?: RunSnapshot | null) => Promise<void>;
-  flushDraftSnapshotNowSync: (snap?: RunSnapshot | null) => void;
+  setDraftSnapshot: (snap: DraftSnapshotInput) => void;
+  flushDraftSnapshotNow: (snap?: DraftSnapshotInput) => Promise<void>;
+  flushDraftSnapshotNowSync: (snap?: DraftSnapshotInput) => void;
   clearAll: () => void;
 };
 
@@ -849,6 +1088,41 @@ function createHistoryPlaceholderSnapshot(raw?: Partial<RunSnapshot> | null): Ru
   };
 }
 
+function hasMeaningfulHistoryField(value: unknown): boolean {
+  if (value == null) return false;
+  if (typeof value === "string") return Boolean(value.trim());
+  if (typeof value === "number" || typeof value === "boolean") return true;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "object") {
+    return Object.values(value as Record<string, unknown>).some((item) => hasMeaningfulHistoryField(item));
+  }
+  return false;
+}
+
+function hasPersistableConversationSnapshot(snapshot: DraftSnapshotInput): boolean {
+  const safeSnapshot = slimSnapshotForHistory(snapshot as RunSnapshot | null) ?? (snapshot as RunSnapshot | null);
+  const draft = slimDraftStateForHistory(safeSnapshot);
+  if (!safeSnapshot || !draft) return false;
+  if (getSnapshotStepsCount(draft) > 0) return true;
+  if ((draft.todoList ?? []).length > 0) return true;
+  if ((draft.kbAttachedLibraryIds ?? []).length > 0) return true;
+  if ((draft.ctxRefs ?? []).length > 0) return true;
+  if ((draft.pendingArtifacts ?? []).length > 0) return true;
+  if (typeof draft.projectDir === "string" && draft.projectDir.trim()) return true;
+  if (hasMeaningfulHistoryField(draft.mainDoc ?? null)) return true;
+  const thread = (safeSnapshot as RunSnapshot | null)?.thread ?? null;
+  if (thread && typeof thread === "object") {
+    const threadFact = {
+      status: (thread as any)?.status ?? null,
+      activeSkillRefs: (thread as any)?.activeSkillRefs ?? [],
+      workflow: (thread as any)?.taskState?.workflow ?? (thread as any)?.workflow ?? null,
+      waitingFor: (thread as any)?.waitingFor ?? null,
+    };
+    if (hasMeaningfulHistoryField(threadFact)) return true;
+  }
+  return false;
+}
+
 function mergeConversationSnapshotFromDisk(
   current: Conversation | null,
   incoming: RunSnapshot | null | undefined,
@@ -879,12 +1153,34 @@ let diskWriteAllowed = false;
 let persistTimer: any = null;
 let pendingHistoryBatch: HistoryOperationBatch | null = null;
 
+function rewritePendingHistoryBatch(
+  rewrite: (batch: HistoryOperationBatch) => HistoryOperationBatch | null,
+) {
+  if (!pendingHistoryBatch) return;
+  const next = rewrite(pendingHistoryBatch);
+  pendingHistoryBatch = next && Array.isArray(next.ops) && next.ops.length > 0 ? next : null;
+}
+
+function dropPendingHistoryBodyWritesForConversation(conversationId: string | null | undefined) {
+  const convId = normalizeId(conversationId);
+  if (!convId) return;
+  rewritePendingHistoryBatch((batch) => {
+    const nextOps = batch.ops.filter((op) => !(op.type === "write-body" && normalizeId(op.conversationId) === convId));
+    if (nextOps.length === batch.ops.length) return batch;
+    return {
+      ...batch,
+      updatedAt: Date.now(),
+      ops: nextOps,
+    };
+  });
+}
+
 function hasDiskHistoryApi() {
   try {
     const historyApi = window.desktop?.history;
     return Boolean(
-      (historyApi?.applyOperations || historyApi?.saveConversations) &&
-      (historyApi?.loadConversationIndex || historyApi?.loadConversations),
+      historyApi?.applyOperations &&
+      historyApi?.loadConversationIndex,
     );
   } catch {
     return false;
@@ -927,7 +1223,7 @@ function capConversations(list: Conversation[]) {
 
 function schedulePersistToDisk(args: {
   conversations: Conversation[];
-  draftSnapshot: RunSnapshot | null;
+  draftSnapshot: DraftState | null;
   draftSnapshotOwnerId?: string | null;
   draftRevision?: number | null;
   activeConvIdOverride?: string | null;
@@ -940,10 +1236,10 @@ function schedulePersistToDisk(args: {
   sync?: boolean;
 }) {
   const api = window.desktop?.history;
-  if (!api?.applyOperations && !api?.saveConversations) return;
+  if (!api?.applyOperations) return;
 
   const conversations = capConversations(args.conversations);
-  const draftSnapshot = args.draftSnapshot ?? null;
+  const draftSnapshot = slimDraftStateForHistory(args.draftSnapshot ?? null);
   const activeConvId =
     args.activeConvIdOverride !== undefined
       ? normalizeId(args.activeConvIdOverride) || null
@@ -1092,7 +1388,7 @@ export const useConversationStore = create<ConversationState>()(
         if (diskHydrated) return;
         diskHydrated = true;
         const api = window.desktop?.history;
-        if (!api?.loadConversations && !api?.loadConversationIndex) {
+        if (!api?.loadConversationIndex) {
           // 无 Electron disk API（纯浏览器模式），直接开放写权限
           diskWriteAllowed = true;
           return;
@@ -1112,10 +1408,7 @@ export const useConversationStore = create<ConversationState>()(
               Boolean((indexRes as any)?.draftSnapshot) ||
               Boolean((indexRes as any)?.activeConvId)
             );
-          const legacyRes = !hasUsableIndex && api.loadConversations
-            ? await api.loadConversations().catch(() => null)
-            : null;
-          const res = hasUsableIndex ? indexRes : legacyRes;
+          const res = hasUsableIndex ? indexRes : null;
           if (!res) {
             throw new Error("history_load_failed");
           }
@@ -1137,14 +1430,14 @@ export const useConversationStore = create<ConversationState>()(
                 snapshotLoaded: false,
               }))
             : diskListRaw;
-          const diskDraft = ((res as any)?.draftSnapshot ?? null) as any;
+          const diskDraft = slimDraftStateForHistory((res as any)?.draftSnapshot ?? null);
           const diskDraftOwnerId = normalizeId((res as any)?.draftSnapshotOwnerId) || null;
           const diskDraftRevision = normalizeHistoryRevision((res as any)?.draftRevision);
           const diskActiveConvId = ((res as any)?.activeConvId ?? null) as string | null;
 
           // 当前内存态（可能在 hydrate 尚未完成时，用户已经发了消息/产生草稿）
           const curConvs = get().conversations ?? [];
-          const curDraft = get().draftSnapshot ?? null;
+          const curDraft = slimDraftStateForHistory(get().draftSnapshot ?? null);
           const curDraftOwnerId = normalizeId(get().draftSnapshotOwnerId) || null;
           const curDraftRevision = normalizeHistoryRevision(get().draftRevision);
           const curActiveConvId = get().activeConvId ?? null;
@@ -1209,15 +1502,15 @@ export const useConversationStore = create<ConversationState>()(
 
           // 在 curDraft / diskDraft 之间选择 steps 更多的一份；
           // 若都不存在，则回退到 activeConvId 对应对话的 snapshot。
-          const draftCandidates: Array<{ snapshot: RunSnapshot; ownerId: string | null; revision: number }> = [];
+          const draftCandidates: Array<{ snapshot: DraftState; ownerId: string | null; revision: number }> = [];
           if (curDraft && typeof curDraft === "object") {
-            draftCandidates.push({ snapshot: curDraft as RunSnapshot, ownerId: curDraftOwnerId, revision: curDraftRevision });
+            draftCandidates.push({ snapshot: curDraft as DraftState, ownerId: curDraftOwnerId, revision: curDraftRevision });
           }
           if (diskDraft && typeof diskDraft === "object") {
-            draftCandidates.push({ snapshot: diskDraft as RunSnapshot, ownerId: diskDraftOwnerId, revision: diskDraftRevision });
+            draftCandidates.push({ snapshot: diskDraft as DraftState, ownerId: diskDraftOwnerId, revision: diskDraftRevision });
           }
 
-          let finalDraftRaw: RunSnapshot | null = null;
+          let finalDraftRaw: DraftState | null = null;
           let finalDraftOwnerId: string | null = null;
           let finalDraftRevision = 0;
           const highestDraftRevision = draftCandidates.reduce(
@@ -1227,7 +1520,7 @@ export const useConversationStore = create<ConversationState>()(
           let bestSteps = -1;
           for (const candidate of draftCandidates) {
             const ownerId = candidate.ownerId && merged.some((c) => c.id === candidate.ownerId) ? candidate.ownerId : null;
-            const snap = repairConversationSnapshotForDisplay(ownerId, candidate.snapshot);
+            const snap = slimDraftStateForHistory(candidate.snapshot);
             if (!snap || typeof snap !== "object") continue;
             const steps = getSnapshotStepsCount(snap);
             if (steps > bestSteps) {
@@ -1242,14 +1535,12 @@ export const useConversationStore = create<ConversationState>()(
           if (!finalDraftRaw && finalActiveConvId) {
             const activeConv = merged.find((c) => c.id === finalActiveConvId);
             if (activeConv && activeConv.snapshotLoaded !== false && activeConv.snapshot && typeof activeConv.snapshot === "object") {
-              finalDraftRaw = activeConv.snapshot as RunSnapshot;
+              finalDraftRaw = slimDraftStateForHistory(activeConv.snapshot as RunSnapshot);
               finalDraftOwnerId = finalActiveConvId;
             }
           }
 
-          const finalDraft = finalDraftRaw
-            ? slimSnapshotForHistory(finalDraftRaw as any) ?? finalDraftRaw
-            : null;
+          const finalDraft = finalDraftRaw ?? null;
           if (finalDraft) {
             finalDraftRevision = Math.max(finalDraftRevision, highestDraftRevision);
           }
@@ -1313,6 +1604,10 @@ export const useConversationStore = create<ConversationState>()(
         const id = String(c.id ?? makeId("conv"));
         const now = Date.now();
         const safeSnapshot = repairConversationSnapshotForDisplay(id, c.snapshot) ?? c.snapshot;
+        const shouldPersistBody =
+          c.persistBody !== undefined
+            ? c.persistBody === true
+            : hasPersistableConversationSnapshot(safeSnapshot);
         const next: Conversation = {
           id,
           title: clampTitle(c.title),
@@ -1332,7 +1627,7 @@ export const useConversationStore = create<ConversationState>()(
             conversations: capped,
             draftSnapshot: get().draftSnapshot ?? null,
             draftSnapshotOwnerId: get().draftSnapshotOwnerId ?? null,
-            touchedConversationIds: [id],
+            touchedConversationIds: shouldPersistBody ? [id] : [],
             source: "manual",
           });
           return { conversations: capped };
@@ -1449,6 +1744,151 @@ export const useConversationStore = create<ConversationState>()(
           return { conversations: next };
         });
       },
+      persistConversationSnapshotViaEvents: async (id, snapshot, opts) => {
+        const convId = normalizeId(id);
+        if (!convId) {
+          return { ok: false, used: "legacy", conversationId: "" };
+        }
+        const base =
+          snapshot && typeof snapshot === "object"
+            ? (snapshot as any)
+            : snapshot === null
+              ? null
+              : buildCurrentSnapshot();
+        const candidateRaw = base ? repairConversationSnapshotForDisplay(convId, base as any) ?? base : null;
+        const candidate = candidateRaw ? slimSnapshotForHistory(candidateRaw as any) ?? candidateRaw : null;
+        const draftCandidate = slimDraftStateForHistory(candidate ?? candidateRaw);
+        const prevConversations = get().conversations ?? [];
+        let foundConversation = false;
+        const conversations = prevConversations.map((x) => {
+          if (x.id !== convId) return x;
+          foundConversation = true;
+          const prevSnap = x.snapshot as any;
+          const safeSnapshot =
+            candidate == null
+              ? null
+              : repairConversationSnapshotForDisplay(
+                  convId,
+                  mergeSnapshotForHistory(prevSnap as RunSnapshot | null, candidate as RunSnapshot) ?? candidate,
+                ) ?? candidate;
+          return {
+            ...x,
+            ...(candidate != null ? { snapshot: safeSnapshot, snapshotLoaded: true, bodyRevision: bumpHistoryRevision(x.bodyRevision) } : {}),
+            updatedAt: Date.now(),
+          };
+        });
+        if (!foundConversation) {
+          return { ok: false, used: "legacy", conversationId: convId };
+        }
+
+        const shouldWriteDraft = opts?.writeDraft === true;
+        const activeOwnerId = normalizeId(get().activeConvId) === convId ? convId : null;
+        const prevDraft = get().draftSnapshot as any;
+        const prevDraftOwnerId = normalizeId(get().draftSnapshotOwnerId) || null;
+        const nextDraft =
+          !shouldWriteDraft
+            ? (get().draftSnapshot ?? null)
+            : draftCandidate == null
+              ? null
+              : activeOwnerId && prevDraftOwnerId && activeOwnerId === prevDraftOwnerId
+                ? slimDraftStateForHistory(
+                    mergeSnapshotForHistory(prevDraft as RunSnapshot | null, draftCandidate as RunSnapshot) ?? draftCandidate,
+                  ) ?? draftCandidate
+                : draftCandidate;
+        const nextDraftOwnerId = shouldWriteDraft ? activeOwnerId : (get().draftSnapshotOwnerId ?? null);
+        const nextDraftRevision = shouldWriteDraft ? bumpHistoryRevision(get().draftRevision) : get().draftRevision;
+        set({
+          conversations,
+          ...(shouldWriteDraft
+            ? {
+                draftSnapshot: nextDraft as any,
+                draftSnapshotOwnerId: nextDraftOwnerId,
+                draftRevision: nextDraftRevision,
+              }
+            : {}),
+        });
+
+        const historyApi = window.desktop?.history;
+        const eventBatch =
+          convId && candidate
+            ? buildHistoryEventBatchFromSnapshot(convId, candidate as RunSnapshot)
+            : null;
+        const canUseEventWriter = Boolean(
+          eventBatch &&
+          historyApi?.appendEvents &&
+          (opts?.materialize !== true || historyApi?.materializeConversation),
+        );
+        if (canUseEventWriter) {
+          try {
+            const appendRes = await historyApi!.appendEvents!(eventBatch);
+            if (!appendRes || appendRes.ok === false) {
+              throw new Error(String(appendRes?.error ?? "APPEND_EVENTS_FAILED"));
+            }
+            if (opts?.materialize === true) {
+              const materializeRes = await historyApi!.materializeConversation!(convId);
+              if (!materializeRes || materializeRes.ok === false) {
+                throw new Error(String(materializeRes?.error ?? "MATERIALIZE_CONVERSATION_FAILED"));
+              }
+              const flushRes = await historyApi!.flushWriter?.(convId);
+              if (flushRes && flushRes.ok === false) {
+                throw new Error(String(flushRes.error ?? "FLUSH_WRITER_FAILED"));
+              }
+              dropPendingHistoryBodyWritesForConversation(convId);
+              await get().loadConversationSnapshot(convId, { includeSteps: true }).catch(() => null);
+            }
+            schedulePersistToDisk({
+              conversations,
+              draftSnapshot: (shouldWriteDraft ? nextDraft : get().draftSnapshot) as any,
+              draftSnapshotOwnerId: shouldWriteDraft ? nextDraftOwnerId : get().draftSnapshotOwnerId,
+              draftRevision: nextDraftRevision,
+              writeDraft: shouldWriteDraft,
+              source: opts?.source ?? "manual",
+            });
+            return { ok: true, used: "event", conversationId: convId };
+          } catch {
+            // fallback to legacy body write path below
+          }
+        }
+
+        schedulePersistToDisk({
+          conversations,
+          draftSnapshot: (shouldWriteDraft ? nextDraft : get().draftSnapshot) as any,
+          draftSnapshotOwnerId: shouldWriteDraft ? nextDraftOwnerId : get().draftSnapshotOwnerId,
+          draftRevision: nextDraftRevision,
+          touchedConversationIds: candidate ? [convId] : [],
+          writeDraft: shouldWriteDraft,
+          source: opts?.source ?? "manual",
+        });
+        return { ok: true, used: "legacy", conversationId: convId };
+      },
+      promoteDraftToConversation: async (args) => {
+        const title = clampTitle(String(args?.title ?? "未命名对话"));
+        const base =
+          args?.snapshot && typeof args.snapshot === "object"
+            ? (args.snapshot as any)
+            : args?.snapshot === null
+              ? null
+              : buildCurrentSnapshot();
+        const placeholderSnapshot =
+          (base && typeof base === "object" ? (base as RunSnapshot) : null) ?? createHistoryPlaceholderSnapshot();
+        const conversationId = get().addConversation({
+          title,
+          snapshot: placeholderSnapshot,
+          persistBody: false,
+        });
+        if (args?.setActive === true) {
+          get().setActiveConvId(conversationId);
+        }
+        if (!hasPersistableConversationSnapshot(base ?? null)) {
+          return conversationId;
+        }
+        await get().persistConversationSnapshotViaEvents(conversationId, base, {
+          writeDraft: args?.setActive === true,
+          materialize: true,
+          source: args?.source ?? "manual",
+        });
+        return conversationId;
+      },
       loadConversationSnapshot: async (id, opts) => {
         const convId = String(id ?? "").trim();
         if (!convId) return null;
@@ -1501,20 +1941,19 @@ export const useConversationStore = create<ConversationState>()(
         });
       },
       setDraftSnapshot: (snap) => {
-        const nextRaw = snap && typeof snap === "object" ? (snap as any) : null;
+        const nextRaw = slimDraftStateForHistory(snap);
         const prevDraft = get().draftSnapshot ?? null;
         const nextDraftRevision = bumpHistoryRevision(get().draftRevision);
         const ownerId = normalizeId(get().activeConvId) || null;
         const prevOwnerId = normalizeId(get().draftSnapshotOwnerId) || null;
-        const baseNext = nextRaw ? repairConversationSnapshotForDisplay(ownerId, nextRaw as RunSnapshot) ?? nextRaw : null;
+        const baseNext = nextRaw ?? null;
         const merged =
           baseNext == null
             ? null
             : ownerId && prevOwnerId && ownerId === prevOwnerId
-              ? mergeSnapshotForHistory(prevDraft, baseNext as RunSnapshot) ?? baseNext
+              ? slimDraftStateForHistory(mergeSnapshotForHistory(prevDraft as any, baseNext as any)) ?? baseNext
               : baseNext;
-        const repaired = merged ? repairConversationSnapshotForDisplay(ownerId, merged) ?? merged : null;
-        const next = repaired ? slimSnapshotForHistory(repaired) ?? repaired : null;
+        const next = merged ?? null;
         set(() => {
           const conversations = get().conversations ?? [];
           schedulePersistToDisk({
@@ -1539,6 +1978,7 @@ export const useConversationStore = create<ConversationState>()(
         const ownerId = normalizeId(activeConvId) || null;
         const candidateRaw = base ? repairConversationSnapshotForDisplay(ownerId, base as any) ?? base : null;
         const candidate = candidateRaw ? slimSnapshotForHistory(candidateRaw as any) ?? candidateRaw : null;
+        const draftCandidate = slimDraftStateForHistory(candidate ?? candidateRaw);
         const prevConversations = get().conversations ?? [];
         const conversations = activeConvId
           ? prevConversations.map((x) => {
@@ -1564,17 +2004,57 @@ export const useConversationStore = create<ConversationState>()(
         const prevDraft = get().draftSnapshot as any;
         const prevDraftOwnerId = normalizeId(get().draftSnapshotOwnerId) || null;
         const nextDraft =
-          candidate == null
+          draftCandidate == null
             ? null
             : ownerId && prevDraftOwnerId && ownerId === prevDraftOwnerId
-              ? repairConversationSnapshotForDisplay(
-                  ownerId,
-                  mergeSnapshotForHistory(prevDraft as RunSnapshot | null, candidate as RunSnapshot) ?? candidate,
-                ) ?? candidate
-              : candidate;
+              ? slimDraftStateForHistory(
+                  mergeSnapshotForHistory(prevDraft as RunSnapshot | null, draftCandidate as RunSnapshot) ?? draftCandidate,
+                ) ?? draftCandidate
+              : draftCandidate;
 
         const nextDraftRevision = bumpHistoryRevision(get().draftRevision);
         set({ draftSnapshot: nextDraft as any, draftSnapshotOwnerId: ownerId, draftRevision: nextDraftRevision, conversations });
+        const historyApi = window.desktop?.history;
+        const eventBatch =
+          activeConvId && candidate
+            ? buildHistoryEventBatchFromSnapshot(activeConvId, candidate as RunSnapshot)
+            : null;
+        const canUseEventWriter = Boolean(
+          activeConvId &&
+          eventBatch &&
+          historyApi?.appendEvents &&
+          historyApi?.materializeConversation,
+        );
+        if (canUseEventWriter) {
+          try {
+            const appendRes = await historyApi!.appendEvents!(eventBatch);
+            if (!appendRes || appendRes.ok === false) {
+              throw new Error(String(appendRes?.error ?? "APPEND_EVENTS_FAILED"));
+            }
+            const materializeRes = await historyApi!.materializeConversation!(activeConvId!);
+            if (!materializeRes || materializeRes.ok === false) {
+              throw new Error(String(materializeRes?.error ?? "MATERIALIZE_CONVERSATION_FAILED"));
+            }
+            const flushRes = await historyApi!.flushWriter?.(activeConvId);
+            if (flushRes && flushRes.ok === false) {
+              throw new Error(String(flushRes.error ?? "FLUSH_WRITER_FAILED"));
+            }
+            dropPendingHistoryBodyWritesForConversation(activeConvId);
+            schedulePersistToDisk({
+              conversations,
+              draftSnapshot: nextDraft as any,
+              draftSnapshotOwnerId: ownerId,
+              draftRevision: nextDraftRevision,
+              writeDraft: true,
+              source: "shutdown",
+              sync: true,
+            });
+            await get().loadConversationSnapshot(activeConvId!, { includeSteps: true }).catch(() => null);
+            return;
+          } catch {
+            // fallback to legacy body write path below
+          }
+        }
 
         schedulePersistToDisk({
           conversations,
@@ -1598,6 +2078,7 @@ export const useConversationStore = create<ConversationState>()(
         const ownerId = normalizeId(activeConvId) || null;
         const candidateRaw = base ? repairConversationSnapshotForDisplay(ownerId, base as any) ?? base : null;
         const candidate = candidateRaw ? slimSnapshotForHistory(candidateRaw as any) ?? candidateRaw : null;
+        const draftCandidate = slimDraftStateForHistory(candidate ?? candidateRaw);
         const prevConversations = get().conversations ?? [];
         const conversations = activeConvId
           ? prevConversations.map((x) => {
@@ -1623,17 +2104,56 @@ export const useConversationStore = create<ConversationState>()(
         const prevDraft = get().draftSnapshot as any;
         const prevDraftOwnerId = normalizeId(get().draftSnapshotOwnerId) || null;
         const nextDraft =
-          candidate == null
+          draftCandidate == null
             ? null
             : ownerId && prevDraftOwnerId && ownerId === prevDraftOwnerId
-              ? repairConversationSnapshotForDisplay(
-                  ownerId,
-                  mergeSnapshotForHistory(prevDraft as RunSnapshot | null, candidate as RunSnapshot) ?? candidate,
-                ) ?? candidate
-              : candidate;
+              ? slimDraftStateForHistory(
+                  mergeSnapshotForHistory(prevDraft as RunSnapshot | null, draftCandidate as RunSnapshot) ?? draftCandidate,
+                ) ?? draftCandidate
+              : draftCandidate;
 
         const nextDraftRevision = bumpHistoryRevision(get().draftRevision);
         set({ draftSnapshot: nextDraft as any, draftSnapshotOwnerId: ownerId, draftRevision: nextDraftRevision, conversations });
+        const historyApi = window.desktop?.history;
+        const eventBatch =
+          activeConvId && candidate
+            ? buildHistoryEventBatchFromSnapshot(activeConvId, candidate as RunSnapshot)
+            : null;
+        const canUseEventWriter = Boolean(
+          activeConvId &&
+          eventBatch &&
+          historyApi?.appendEventsSync &&
+          historyApi?.materializeConversationSync,
+        );
+        if (canUseEventWriter) {
+          try {
+            const appendRes = historyApi!.appendEventsSync!(eventBatch);
+            if (!appendRes || appendRes.ok === false) {
+              throw new Error(String(appendRes?.error ?? "APPEND_EVENTS_SYNC_FAILED"));
+            }
+            const materializeRes = historyApi!.materializeConversationSync!(activeConvId!);
+            if (!materializeRes || materializeRes.ok === false) {
+              throw new Error(String(materializeRes?.error ?? "MATERIALIZE_CONVERSATION_SYNC_FAILED"));
+            }
+            const flushRes = historyApi!.flushWriterSync?.(activeConvId);
+            if (flushRes && flushRes.ok === false) {
+              throw new Error(String(flushRes.error ?? "FLUSH_WRITER_SYNC_FAILED"));
+            }
+            dropPendingHistoryBodyWritesForConversation(activeConvId);
+            schedulePersistToDisk({
+              conversations,
+              draftSnapshot: nextDraft as any,
+              draftSnapshotOwnerId: ownerId,
+              draftRevision: nextDraftRevision,
+              writeDraft: true,
+              source: "shutdown",
+              sync: true,
+            });
+            return;
+          } catch {
+            // fallback to legacy body write path below
+          }
+        }
 
         schedulePersistToDisk({
           conversations,
@@ -1662,7 +2182,7 @@ export const useConversationStore = create<ConversationState>()(
     }),
     {
       name: "writing-ide.conversations.v1",
-      // 关键：历史对话与草稿快照都落盘到 userData（history.saveConversations）。
+      // 关键：历史对话与草稿快照都落盘到 userData（history.applyOperations / appendEvents）。
       // localStorage 只存"极小占位"用于兜底（否则会因 5MB 配额触发 QuotaExceededError，导致渲染崩溃）。
       storage: createJSONStorage(() => safeLocalStorage as any),
       partialize: (s) => {

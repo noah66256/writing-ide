@@ -102,6 +102,7 @@ const HISTORY_PENDING_JOURNAL_FILENAME_V2 = "conversations.pending.ops.v2.json";
 const HISTORY_BAK_SUFFIX = ".bak";
 const HISTORY_INDEX_FILENAME_V2 = "conversations.index.v2.json";
 const HISTORY_CONV_DIRNAME_V2 = "conversations";
+const HISTORY_CONV_EVENT_LOG_SUFFIX_V2 = ".events.jsonl";
 const MAIN_EVENT_LOG_DIRNAME = "logs";
 const MAIN_EVENT_LOG_FILENAME = "desktop-main-events.jsonl";
 const HISTORY_TMP_FILE_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000;
@@ -118,6 +119,8 @@ let watchChanged = new Set();
 let mcpManager = null;
 let skillLoader = null;  // Skill 扩展包加载器
 let marketplaceManager = null;  // Marketplace 安装管理器
+const conversationEventWriterQueues = new Map();
+const conversationPendingEventBatches = new Map();
 let mcpLifecycleService = null;
 let claudeCliBridgeManager = null;  // shell.exec 内嵌 claude -p 受限 bridge
 let appSettings = {};  // 应用级设置（含浏览器路径等）
@@ -845,6 +848,7 @@ function buildSnapshotFromV2Payload(v2Payload, options) {
   return normalizeCompactSnapshot({
     ...base,
     steps: includeSteps && Array.isArray(parsed.steps) ? parsed.steps : [],
+    transcript: Array.isArray(parsed.transcript) ? parsed.transcript : [],
     logs: Array.isArray(parsed.logs) ? parsed.logs : [],
     thread: parsed.thread && typeof parsed.thread === "object" ? parsed.thread : null,
     turns: Array.isArray(parsed.turns) ? parsed.turns : [],
@@ -901,6 +905,57 @@ function compactStructuredToolPreviewForHistory(value, depth = 0) {
     out[key] = compactStructuredToolPreviewForHistory(child, depth + 1);
   }
   return out;
+}
+
+function compactTranscriptPartForHistory(part) {
+  if (!part || typeof part !== "object") return part;
+  const next = { ...part };
+  if (typeof next.text === "string") {
+    next.text = truncateToolResultTextForHistory(next.text, HISTORY_TOOL_RESULT_PREVIEW_CHARS);
+  }
+  if (typeof next.caption === "string") {
+    next.caption = truncateToolResultTextForHistory(next.caption, 600);
+  }
+  if (typeof next.alt === "string") {
+    next.alt = truncateToolResultTextForHistory(next.alt, 240);
+  }
+  if (typeof next.label === "string") {
+    next.label = truncateToolResultTextForHistory(next.label, 240);
+  }
+  if (part.type === "json") {
+    next.value = compactStructuredToolPreviewForHistory(part.value);
+    if (typeof part.raw === "string") {
+      next.raw = truncateToolResultTextForHistory(part.raw, HISTORY_TOOL_RESULT_PREVIEW_CHARS);
+    }
+  }
+  return next;
+}
+
+function compactTranscriptEntryForHistory(entry) {
+  if (!entry || typeof entry !== "object") return entry;
+  const next = { ...entry };
+  if (Array.isArray(entry.parts)) {
+    next.parts = entry.parts.map((part) => compactTranscriptPartForHistory(part));
+  }
+  if (typeof next.text === "string") {
+    next.text = truncateToolResultTextForHistory(next.text, 600);
+  }
+  if (entry.kind === "tool_call") {
+    const toolName = String(entry.toolName ?? "").trim();
+    if (entry.input !== undefined) {
+      next.input = compactStructuredToolPreviewForHistory(entry.input);
+    }
+    if (entry.output !== undefined) {
+      next.output = compactToolResultEnvelopeForHistory(toolName, entry.output);
+    }
+  }
+  return next;
+}
+
+function compactTranscriptForHistory(entries) {
+  return (Array.isArray(entries) ? entries : [])
+    .filter((entry) => entry && typeof entry === "object" && String(entry.id ?? "").trim())
+    .map((entry) => compactTranscriptEntryForHistory(entry));
 }
 
 function compactToolResultEnvelopeForHistory(toolName, rawOutput) {
@@ -994,6 +1049,105 @@ function normalizeCompactSnapshot(snapshot) {
           };
         })
       : [],
+    transcript: compactTranscriptForHistory(snap.transcript),
+  };
+}
+
+function normalizeHistoryDraftSnapshot(snapshot) {
+  const snap = snapshot && typeof snapshot === "object" ? normalizeCompactSnapshot(snapshot) : null;
+  if (!snap) return null;
+  const projectDir =
+    typeof snap.projectDir === "string" && snap.projectDir.trim()
+      ? snap.projectDir.trim()
+      : null;
+  return {
+    mode: snap.mode === "chat" ? "chat" : "agent",
+    model: String(snap.model ?? ""),
+    ...(snap.opMode != null ? { opMode: snap.opMode } : {}),
+    mainDoc:
+      snap.mainDoc && typeof snap.mainDoc === "object"
+        ? { ...snap.mainDoc }
+        : {},
+    todoList: Array.isArray(snap.todoList) ? [...snap.todoList] : [],
+    steps: Array.isArray(snap.steps) ? [...snap.steps] : [],
+    kbAttachedLibraryIds: Array.isArray(snap.kbAttachedLibraryIds)
+      ? Array.from(new Set(snap.kbAttachedLibraryIds.map((id) => String(id ?? "").trim()).filter(Boolean)))
+      : [],
+    ...(Array.isArray(snap.ctxRefs) ? { ctxRefs: [...snap.ctxRefs] } : {}),
+    ...(Array.isArray(snap.pendingArtifacts) ? { pendingArtifacts: [...snap.pendingArtifacts] } : {}),
+    ...(projectDir ? { projectDir } : {}),
+    ...(snap.dialogueSummaryByMode && typeof snap.dialogueSummaryByMode === "object"
+      ? { dialogueSummaryByMode: { ...snap.dialogueSummaryByMode } }
+      : {}),
+    ...(snap.dialogueSummaryTurnCursorByMode && typeof snap.dialogueSummaryTurnCursorByMode === "object"
+      ? { dialogueSummaryTurnCursorByMode: { ...snap.dialogueSummaryTurnCursorByMode } }
+      : {}),
+  };
+}
+
+function normalizeHistoryEventHead(headObj) {
+  const raw = headObj && typeof headObj === "object" ? headObj : null;
+  if (!raw) return null;
+  const normalizedDraft = normalizeHistoryDraftSnapshot({
+    mode: raw.mode,
+    model: raw.model,
+    opMode: raw.opMode,
+    mainDoc: raw.mainDoc,
+    todoList: raw.todoList,
+    steps: [],
+    kbAttachedLibraryIds: raw.kbAttachedLibraryIds,
+    ctxRefs: raw.ctxRefs,
+    pendingArtifacts: raw.pendingArtifacts,
+    projectDir: raw.projectDir,
+    dialogueSummaryByMode: raw.dialogueSummaryByMode,
+    dialogueSummaryTurnCursorByMode: raw.dialogueSummaryTurnCursorByMode,
+  });
+  if (!normalizedDraft) return null;
+  return {
+    mode: normalizedDraft.mode,
+    model: normalizedDraft.model,
+    opMode: Object.prototype.hasOwnProperty.call(raw, "opMode") ? (raw.opMode ?? null) : undefined,
+    mainDoc: normalizedDraft.mainDoc ?? {},
+    todoList: Array.isArray(normalizedDraft.todoList) ? normalizedDraft.todoList : [],
+    kbAttachedLibraryIds: Array.isArray(normalizedDraft.kbAttachedLibraryIds)
+      ? normalizedDraft.kbAttachedLibraryIds
+      : [],
+    ctxRefs: Array.isArray(normalizedDraft.ctxRefs) ? normalizedDraft.ctxRefs : [],
+    pendingArtifacts: Array.isArray(normalizedDraft.pendingArtifacts) ? normalizedDraft.pendingArtifacts : [],
+    projectDir:
+      typeof normalizedDraft.projectDir === "string" && normalizedDraft.projectDir.trim()
+        ? normalizedDraft.projectDir.trim()
+        : null,
+    dialogueSummaryByMode:
+      normalizedDraft.dialogueSummaryByMode && typeof normalizedDraft.dialogueSummaryByMode === "object"
+        ? { ...normalizedDraft.dialogueSummaryByMode }
+        : null,
+    dialogueSummaryTurnCursorByMode:
+      normalizedDraft.dialogueSummaryTurnCursorByMode && typeof normalizedDraft.dialogueSummaryTurnCursorByMode === "object"
+        ? { ...normalizedDraft.dialogueSummaryTurnCursorByMode }
+      : null,
+  };
+}
+
+function normalizeHistoryEventRuntimeState(runtimeObj, headObj) {
+  const raw = runtimeObj && typeof runtimeObj === "object" ? runtimeObj : null;
+  if (!raw) return null;
+  const normalized = normalizeCompactSnapshot({
+    ...makeEmptyRunSnapshot(headObj ?? {}),
+    transcript: Array.isArray(raw.transcript) ? raw.transcript : [],
+    logs: Array.isArray(raw.logs) ? raw.logs : [],
+    turns: Array.isArray(raw.turns) ? raw.turns : [],
+    items: Array.isArray(raw.items) ? raw.items : [],
+    collabSessions: Array.isArray(raw.collabSessions) ? raw.collabSessions : [],
+    activeItemIds: Array.isArray(raw.activeItemIds) ? raw.activeItemIds : [],
+  });
+  return {
+    transcript: Array.isArray(normalized?.transcript) ? normalized.transcript : [],
+    logs: Array.isArray(normalized?.logs) ? normalized.logs : [],
+    turns: Array.isArray(normalized?.turns) ? normalized.turns : [],
+    items: Array.isArray(normalized?.items) ? normalized.items : [],
+    collabSessions: Array.isArray(normalized?.collabSessions) ? normalized.collabSessions : [],
+    activeItemIds: Array.isArray(normalized?.activeItemIds) ? normalized.activeItemIds : [],
   };
 }
 
@@ -1237,7 +1391,7 @@ function sanitizeHistoryPayloadForPersist(payloadObj, previousPayload) {
 
   const draftSnapshot =
     payload.draftSnapshot && typeof payload.draftSnapshot === "object"
-      ? normalizeCompactSnapshot(payload.draftSnapshot)
+      ? normalizeHistoryDraftSnapshot(payload.draftSnapshot)
       : null;
 
   return {
@@ -1405,6 +1559,53 @@ async function tryLoadConversationFromV1(historyDir, convId) {
   } catch {
     return null;
   }
+}
+
+function tryLoadConversationFromV1Sync(historyDir, convId) {
+  const id = String(convId ?? "").trim();
+  if (!id) return null;
+
+  const candidates = listHistoryReadCandidates();
+  if (!Array.isArray(candidates) || candidates.length === 0) return null;
+
+  let best = null;
+
+  for (const c of candidates) {
+    const file = c && typeof c === "object" ? String(c.file ?? "") : "";
+    if (!file) continue;
+    try {
+      const raw = fs.readFileSync(file, "utf-8");
+      const parsed = JSON.parse(String(raw ?? ""));
+      const list = Array.isArray(parsed?.conversations)
+        ? parsed.conversations
+        : Array.isArray(parsed)
+          ? parsed
+          : [];
+      if (!Array.isArray(list) || list.length === 0) continue;
+      const conv = list.find(
+        (convItem) =>
+          convItem &&
+          typeof convItem === "object" &&
+          String(convItem.id ?? "").trim() === id,
+      );
+      if (!conv || !conv.snapshot || typeof conv.snapshot !== "object") continue;
+      const stepsArr = Array.isArray(conv.snapshot.steps) ? conv.snapshot.steps : [];
+      const stepsLen = stepsArr.length;
+      const dialogueScore = countDialogueStepsForHistory(stepsArr).score;
+
+      if (
+        !best ||
+        dialogueScore > best.dialogueScore ||
+        (dialogueScore === best.dialogueScore && stepsLen > best.stepsLen)
+      ) {
+        best = { conv, stepsLen, dialogueScore };
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return best ? best.conv : null;
 }
 
 async function tryLoadConversationFromV2(historyDir, convId) {
@@ -1597,7 +1798,7 @@ function buildLegacyAppDataFileCandidates(args) {
   // 说明：
   // - getLegacyAppDataProductNames() 仍然包含 "Electron"，用于启动阶段的一次性迁移（tryMigrateConversationHistory）。
   // - 但运行时 history 读取只需要从已经迁移好的路径读数据，再去反复扫描 Electron 目录的大历史文件收益不高、代价很大。
-  // - 这里在 runtime 级别排除 "Electron"，降低每次 history.loadConversations / tryLoadConversationFromV1
+  // - 这里在 runtime 级别排除 "Electron"，降低每次 history index/body 读取与 tryLoadConversationFromV1
   //   时对超大 JSON 的重复读取风险（尤其是在 8GB 内存 + 多模型/浏览器会话并行时）。
   const productNames = getLegacyAppDataProductNames().filter((name) => name !== "Electron");
   for (const name of productNames) {
@@ -1859,7 +2060,9 @@ function buildLegacyPendingRecoveryBatch(payloadObj, currentAuthority) {
   const currentEntries = Array.isArray(authority.entries) ? authority.entries : [];
   const currentIds = new Set(currentEntries.map((entry) => String(entry?.id ?? "").trim()).filter(Boolean));
   const currentDraftRevision = normalizeHistoryRevisionValue(authority.draftRevision);
-  const currentHasDraft = Boolean(authority.draftSnapshot && typeof authority.draftSnapshot === "object");
+  const currentDraftSnapshot = normalizeHistoryDraftSnapshot(authority.draftSnapshot);
+  const incomingDraftSnapshot = normalizeHistoryDraftSnapshot(payload.draftSnapshot);
+  const currentHasDraft = Boolean(currentDraftSnapshot);
   const currentHasActive = typeof authority.activeConvId === "string" && authority.activeConvId.trim();
   const ops = [];
   const orderedNewIds = [];
@@ -1897,10 +2100,10 @@ function buildLegacyPendingRecoveryBatch(payloadObj, currentAuthority) {
     ops.unshift({ type: "sync-order", conversationIds: orderedNewIds });
   }
 
-  if (!currentHasDraft && payload.draftSnapshot && typeof payload.draftSnapshot === "object") {
+  if (!currentHasDraft && incomingDraftSnapshot) {
     ops.push({
       type: "write-draft",
-      draftSnapshot: payload.draftSnapshot,
+      draftSnapshot: incomingDraftSnapshot,
       draftSnapshotOwnerId: typeof payload.draftSnapshotOwnerId === "string" ? payload.draftSnapshotOwnerId : null,
       expectedDraftRevision: currentDraftRevision,
     });
@@ -1980,12 +2183,13 @@ async function migrateLegacyPendingPayloadCandidate(candidate) {
     : buildHistoryIndexFallbackFromLegacyPayload(currentLegacyPayload);
   const batch = buildLegacyPendingRecoveryBatch(parsed, {
     entries: currentEntries,
-    draftSnapshot:
+    draftSnapshot: normalizeHistoryDraftSnapshot(
       currentIndexPayload?.draftSnapshot && typeof currentIndexPayload.draftSnapshot === "object"
         ? currentIndexPayload.draftSnapshot
         : (currentLegacyPayload?.draftSnapshot && typeof currentLegacyPayload.draftSnapshot === "object"
             ? currentLegacyPayload.draftSnapshot
             : null),
+    ),
     draftRevision: currentIndexPayload?.draftRevision ?? currentLegacyPayload?.draftRevision,
     activeConvId:
       typeof currentIndexPayload?.activeConvId === "string"
@@ -2184,6 +2388,7 @@ function computeConversationBodyStats(snapshotObj) {
     opMode: snapshot?.opMode ?? null,
     projectDir: typeof snapshot?.projectDir === "string" ? snapshot.projectDir : null,
     steps,
+    transcript: Array.isArray(snapshot?.transcript) ? snapshot.transcript : [],
     logs: Array.isArray(snapshot?.logs) ? snapshot.logs : [],
     thread: snapshot?.thread && typeof snapshot.thread === "object" ? snapshot.thread : null,
     turns: Array.isArray(snapshot?.turns) ? snapshot.turns : [],
@@ -2241,6 +2446,7 @@ function buildConversationBodyPayload(conversationId, snapshotObj, options) {
       bodyRevision,
       head,
       steps: stepsArr,
+      transcript: snapshot && Array.isArray(snapshot.transcript) ? snapshot.transcript : [],
       logs: snapshot && Array.isArray(snapshot.logs) ? snapshot.logs : [],
       thread: snapshot && snapshot.thread && typeof snapshot.thread === "object" ? snapshot.thread : null,
       turns: snapshot && Array.isArray(snapshot.turns) ? snapshot.turns : [],
@@ -2338,15 +2544,15 @@ async function loadConversationBodyFromCurrentDir(historyDir, conversationId, le
   if (!dir || !id) return null;
   const v2Payload = await tryLoadConversationFromV2(dir, id);
   const v2Snapshot = v2Payload ? buildSnapshotFromV2Payload(v2Payload, { includeSteps: true }) : null;
-  const legacyConv = legacyById instanceof Map ? legacyById.get(id) : null;
+  if (v2Snapshot) return v2Snapshot;
+  const legacyConv = legacyById instanceof Map
+    ? legacyById.get(id)
+    : await tryLoadConversationFromV1(dir, id);
   const legacySnapshot =
     legacyConv && legacyConv.snapshot && typeof legacyConv.snapshot === "object"
       ? normalizeCompactSnapshot(legacyConv.snapshot)
       : null;
-  if (v2Snapshot && legacySnapshot) {
-    return mergeConversationSnapshotForAuthoritativeBody(legacySnapshot, v2Snapshot) ?? v2Snapshot;
-  }
-  return v2Snapshot ?? legacySnapshot ?? null;
+  return legacySnapshot ?? null;
 }
 
 function loadConversationBodyFromCurrentDirSync(historyDir, conversationId, legacyById) {
@@ -2365,15 +2571,39 @@ function loadConversationBodyFromCurrentDirSync(historyDir, conversationId, lega
   } catch {
     v2Snapshot = null;
   }
-  const legacyConv = legacyById instanceof Map ? legacyById.get(id) : null;
+  if (v2Snapshot) return v2Snapshot;
+  const legacyConv = legacyById instanceof Map ? legacyById.get(id) : tryLoadConversationFromV1Sync(dir, id);
   const legacySnapshot =
     legacyConv && legacyConv.snapshot && typeof legacyConv.snapshot === "object"
       ? normalizeCompactSnapshot(legacyConv.snapshot)
       : null;
-  if (v2Snapshot && legacySnapshot) {
-    return mergeConversationSnapshotForAuthoritativeBody(legacySnapshot, v2Snapshot) ?? v2Snapshot;
+  return legacySnapshot ?? null;
+}
+
+async function loadConversationAuthoritySnapshotFromCurrentDir(historyDir, conversationId, legacyById) {
+  const baseSnapshot = await loadConversationBodyFromCurrentDir(historyDir, conversationId, legacyById);
+  const batches = await collectConversationEventBatches(historyDir, conversationId);
+  if ((!baseSnapshot || typeof baseSnapshot !== "object") && batches.length === 0) {
+    return null;
   }
-  return v2Snapshot ?? legacySnapshot ?? null;
+  let nextSnapshot = baseSnapshot ?? makeEmptyRunSnapshot(batches.find((batch) => batch?.head)?.head ?? {});
+  for (const batch of batches) {
+    nextSnapshot = applyHistoryEventBatchToSnapshot(nextSnapshot, batch);
+  }
+  return normalizeCompactSnapshot(nextSnapshot) ?? nextSnapshot;
+}
+
+function loadConversationAuthoritySnapshotFromCurrentDirSync(historyDir, conversationId, legacyById) {
+  const baseSnapshot = loadConversationBodyFromCurrentDirSync(historyDir, conversationId, legacyById);
+  const batches = collectConversationEventBatchesSync(historyDir, conversationId);
+  if ((!baseSnapshot || typeof baseSnapshot !== "object") && batches.length === 0) {
+    return null;
+  }
+  let nextSnapshot = baseSnapshot ?? makeEmptyRunSnapshot(batches.find((batch) => batch?.head)?.head ?? {});
+  for (const batch of batches) {
+    nextSnapshot = applyHistoryEventBatchToSnapshot(nextSnapshot, batch);
+  }
+  return normalizeCompactSnapshot(nextSnapshot) ?? nextSnapshot;
 }
 
 async function loadConversationBodyRevisionFromCurrentDir(historyDir, conversationId, metaEntry, legacyById) {
@@ -2442,6 +2672,687 @@ function normalizeHistoryOperationBatch(batchObj) {
   };
 }
 
+function normalizeHistoryEventStep(rawStep) {
+  if (!rawStep || typeof rawStep !== "object") return null;
+  const normalized = normalizeCompactSnapshot({
+    ...makeEmptyRunSnapshot({ mode: "agent" }),
+    steps: [rawStep],
+  });
+  const step = Array.isArray(normalized?.steps) ? normalized.steps[0] : null;
+  const id = String(step?.id ?? "").trim();
+  if (!step || !id) return null;
+  return { ...step, id };
+}
+
+function normalizeHistoryEventBatch(batchObj) {
+  const parsed = typeof batchObj === "string" ? JSON.parse(String(batchObj ?? "null")) : batchObj;
+  const batch = parsed && typeof parsed === "object" ? parsed : null;
+  if (!batch) return null;
+  const conversationId = String(batch.conversationId ?? "").trim();
+  if (!conversationId) return null;
+  const updatedAt = Number(batch.updatedAt ?? Date.now()) || Date.now();
+  const head = normalizeHistoryEventHead(batch.head);
+  const stepUpserts = Array.isArray(batch.stepUpserts)
+    ? batch.stepUpserts.map((step) => normalizeHistoryEventStep(step)).filter(Boolean)
+    : [];
+  const hasThread = Object.prototype.hasOwnProperty.call(batch, "thread");
+  const threadSnapshot = hasThread
+    ? normalizeCompactSnapshot({
+        ...makeEmptyRunSnapshot({ mode: head?.mode ?? "agent" }),
+        thread: batch.thread && typeof batch.thread === "object" ? batch.thread : null,
+      })
+    : null;
+  const thread = hasThread && threadSnapshot && typeof threadSnapshot.thread === "object"
+    ? threadSnapshot.thread
+    : null;
+  const hasRuntimeState = Object.prototype.hasOwnProperty.call(batch, "runtimeState");
+  const runtimeState = hasRuntimeState ? normalizeHistoryEventRuntimeState(batch.runtimeState, head) : null;
+  if (!head && stepUpserts.length === 0 && !hasThread && !hasRuntimeState) {
+    return {
+      version: 1,
+      eventId: normalizeHistoryBatchId(batch.eventId ?? batch.batchId, updatedAt),
+      conversationId,
+      updatedAt,
+      stepUpserts: [],
+      hasThread: false,
+      thread: null,
+      hasRuntimeState: false,
+      runtimeState: null,
+    };
+  }
+  return {
+    version: 1,
+    eventId: normalizeHistoryBatchId(batch.eventId ?? batch.batchId, updatedAt),
+    conversationId,
+    updatedAt,
+    head,
+    stepUpserts,
+    hasThread,
+    thread,
+    hasRuntimeState,
+    runtimeState,
+  };
+}
+
+function mergeHistoryEventStepsById(previousSteps, incomingSteps) {
+  const next = Array.isArray(previousSteps) ? previousSteps.map((step) => ({ ...(step ?? {}) })) : [];
+  const indexById = new Map();
+  for (let i = 0; i < next.length; i += 1) {
+    const id = String(next[i]?.id ?? "").trim();
+    if (!id) continue;
+    indexById.set(id, i);
+  }
+  for (const rawStep of Array.isArray(incomingSteps) ? incomingSteps : []) {
+    const step = rawStep && typeof rawStep === "object" ? rawStep : null;
+    const id = String(step?.id ?? "").trim();
+    if (!step || !id) continue;
+    if (indexById.has(id)) {
+      next[indexById.get(id)] = { ...(next[indexById.get(id)] ?? {}), ...step };
+      continue;
+    }
+    indexById.set(id, next.length);
+    next.push({ ...step });
+  }
+  return next;
+}
+
+function applyHistoryEventHeadToSnapshot(snapshotObj, headObj) {
+  const snapshot = normalizeCompactSnapshot(snapshotObj && typeof snapshotObj === "object" ? snapshotObj : null)
+    ?? makeEmptyRunSnapshot(headObj ?? {});
+  const head = headObj && typeof headObj === "object" ? headObj : null;
+  if (!head) return snapshot;
+  const next = {
+    ...snapshot,
+    mode: head.mode === "chat" ? "chat" : "agent",
+    model: String(head.model ?? ""),
+    mainDoc: head.mainDoc && typeof head.mainDoc === "object" ? { ...head.mainDoc } : {},
+    todoList: Array.isArray(head.todoList) ? [...head.todoList] : [],
+    kbAttachedLibraryIds: Array.isArray(head.kbAttachedLibraryIds)
+      ? Array.from(new Set(head.kbAttachedLibraryIds.map((id) => String(id ?? "").trim()).filter(Boolean)))
+      : [],
+    ctxRefs: Array.isArray(head.ctxRefs) ? [...head.ctxRefs] : [],
+    pendingArtifacts: Array.isArray(head.pendingArtifacts) ? [...head.pendingArtifacts] : [],
+    projectDir:
+      typeof head.projectDir === "string" && head.projectDir.trim()
+        ? head.projectDir.trim()
+        : null,
+    steps: Array.isArray(snapshot.steps) ? snapshot.steps : [],
+    logs: Array.isArray(snapshot.logs) ? snapshot.logs : [],
+    turns: Array.isArray(snapshot.turns) ? snapshot.turns : [],
+    items: Array.isArray(snapshot.items) ? snapshot.items : [],
+    collabSessions: Array.isArray(snapshot.collabSessions) ? snapshot.collabSessions : [],
+    activeItemIds: Array.isArray(snapshot.activeItemIds) ? snapshot.activeItemIds : [],
+    thread: snapshot.thread && typeof snapshot.thread === "object" ? snapshot.thread : null,
+    dialogueSummaryByMode:
+      head.dialogueSummaryByMode && typeof head.dialogueSummaryByMode === "object"
+        ? { ...head.dialogueSummaryByMode }
+        : undefined,
+    dialogueSummaryTurnCursorByMode:
+      head.dialogueSummaryTurnCursorByMode && typeof head.dialogueSummaryTurnCursorByMode === "object"
+        ? { ...head.dialogueSummaryTurnCursorByMode }
+        : undefined,
+  };
+  if (Object.prototype.hasOwnProperty.call(head, "opMode")) {
+    next.opMode = head.opMode ?? undefined;
+  }
+  return normalizeCompactSnapshot(next) ?? next;
+}
+
+function applyHistoryEventBatchToSnapshot(snapshotObj, batchObj) {
+  const batch = batchObj && typeof batchObj === "object" ? batchObj : null;
+  const base = normalizeCompactSnapshot(snapshotObj && typeof snapshotObj === "object" ? snapshotObj : null)
+    ?? makeEmptyRunSnapshot(batch?.head ?? {});
+  let next = base;
+  if (batch?.head) {
+    next = applyHistoryEventHeadToSnapshot(next, batch.head);
+  }
+  if (Array.isArray(batch?.stepUpserts) && batch.stepUpserts.length > 0) {
+    next = normalizeCompactSnapshot({
+      ...next,
+      steps: mergeHistoryEventStepsById(next.steps, batch.stepUpserts),
+    }) ?? next;
+  }
+  if (batch?.hasThread) {
+    next = normalizeCompactSnapshot({
+      ...next,
+      thread: batch.thread && typeof batch.thread === "object" ? batch.thread : null,
+    }) ?? next;
+  }
+  if (batch?.hasRuntimeState) {
+    next = normalizeCompactSnapshot({
+      ...next,
+      transcript: Array.isArray(batch?.runtimeState?.transcript) ? batch.runtimeState.transcript : [],
+      logs: Array.isArray(batch?.runtimeState?.logs) ? batch.runtimeState.logs : [],
+      turns: Array.isArray(batch?.runtimeState?.turns) ? batch.runtimeState.turns : [],
+      items: Array.isArray(batch?.runtimeState?.items) ? batch.runtimeState.items : [],
+      collabSessions: Array.isArray(batch?.runtimeState?.collabSessions) ? batch.runtimeState.collabSessions : [],
+      activeItemIds: Array.isArray(batch?.runtimeState?.activeItemIds) ? batch.runtimeState.activeItemIds : [],
+    }) ?? next;
+  }
+  return next;
+}
+
+function getConversationBodyFileV2Path(historyDir, conversationId) {
+  const dir = String(historyDir ?? "").trim();
+  const id = String(conversationId ?? "").trim();
+  if (!dir || !id) return null;
+  const safeId = normalizeConversationIdForFilename(id);
+  return path.join(dir, HISTORY_CONV_DIRNAME_V2, `conv_${safeId}.json`);
+}
+
+function getConversationEventLogFileV2Path(historyDir, conversationId) {
+  const dir = String(historyDir ?? "").trim();
+  const id = String(conversationId ?? "").trim();
+  if (!dir || !id) return null;
+  const safeId = normalizeConversationIdForFilename(id);
+  return path.join(dir, HISTORY_CONV_DIRNAME_V2, `conv_${safeId}${HISTORY_CONV_EVENT_LOG_SUFFIX_V2}`);
+}
+
+function rememberPendingConversationEventBatch(batchObj) {
+  const batch = batchObj && typeof batchObj === "object" ? batchObj : null;
+  const conversationId = String(batch?.conversationId ?? "").trim();
+  const eventId = String(batch?.eventId ?? "").trim();
+  if (!batch || !conversationId || !eventId) return;
+  const pendingById = conversationPendingEventBatches.get(conversationId) ?? new Map();
+  pendingById.set(eventId, batch);
+  conversationPendingEventBatches.set(conversationId, pendingById);
+}
+
+function forgetPendingConversationEventBatch(conversationId, eventId) {
+  const convId = String(conversationId ?? "").trim();
+  const batchId = String(eventId ?? "").trim();
+  if (!convId || !batchId) return;
+  const pendingById = conversationPendingEventBatches.get(convId);
+  if (!pendingById) return;
+  pendingById.delete(batchId);
+  if (pendingById.size <= 0) {
+    conversationPendingEventBatches.delete(convId);
+    return;
+  }
+  conversationPendingEventBatches.set(convId, pendingById);
+}
+
+function hasPendingConversationEventBatch(conversationId, eventId) {
+  const convId = String(conversationId ?? "").trim();
+  const batchId = String(eventId ?? "").trim();
+  if (!convId || !batchId) return false;
+  const pendingById = conversationPendingEventBatches.get(convId);
+  return Boolean(pendingById && pendingById.has(batchId));
+}
+
+function listPendingConversationEventBatches(conversationId) {
+  const convId = String(conversationId ?? "").trim();
+  if (!convId) return [];
+  const pendingById = conversationPendingEventBatches.get(convId);
+  return pendingById ? Array.from(pendingById.values()) : [];
+}
+
+function clearPendingConversationEventBatches(conversationId) {
+  const convId = String(conversationId ?? "").trim();
+  if (!convId) return;
+  conversationPendingEventBatches.delete(convId);
+}
+
+function mergeUniqueHistoryEventBatches(batches) {
+  const seen = new Set();
+  const out = [];
+  for (const rawBatch of Array.isArray(batches) ? batches : []) {
+    const batch = rawBatch && typeof rawBatch === "object" ? rawBatch : null;
+    const eventId = String(batch?.eventId ?? "").trim();
+    if (!batch || !eventId || seen.has(eventId)) continue;
+    seen.add(eventId);
+    out.push(batch);
+  }
+  return out.sort((a, b) => {
+    const t1 = Number(a?.updatedAt ?? 0) || 0;
+    const t2 = Number(b?.updatedAt ?? 0) || 0;
+    if (t1 !== t2) return t1 - t2;
+    return String(a?.eventId ?? "").localeCompare(String(b?.eventId ?? ""));
+  });
+}
+
+async function readConversationEventLogBatches(historyDir, conversationId) {
+  const file = getConversationEventLogFileV2Path(historyDir, conversationId);
+  if (!file || !(await fileExists(file))) return [];
+  const raw = await fsp.readFile(file, "utf-8");
+  const lines = String(raw ?? "").split(/\r?\n/);
+  const batches = [];
+  let ignored = 0;
+  for (const line of lines) {
+    if (!line || !line.trim()) continue;
+    try {
+      const normalized = normalizeHistoryEventBatch(line);
+      if (!normalized) {
+        ignored += 1;
+        continue;
+      }
+      batches.push(normalized);
+    } catch {
+      ignored += 1;
+    }
+  }
+  if (ignored > 0) {
+    recordMainEvent("history.events.read.ignored", {
+      conversationId: String(conversationId ?? "").trim() || null,
+      ignored,
+      file,
+    });
+  }
+  return batches;
+}
+
+function readConversationEventLogBatchesSync(historyDir, conversationId) {
+  const file = getConversationEventLogFileV2Path(historyDir, conversationId);
+  if (!file || !fs.existsSync(file)) return [];
+  try {
+    const raw = fs.readFileSync(file, "utf-8");
+    const lines = String(raw ?? "").split(/\r?\n/);
+    const batches = [];
+    let ignored = 0;
+    for (const line of lines) {
+      if (!line || !line.trim()) continue;
+      try {
+        const normalized = normalizeHistoryEventBatch(line);
+        if (!normalized) {
+          ignored += 1;
+          continue;
+        }
+        batches.push(normalized);
+      } catch {
+        ignored += 1;
+      }
+    }
+    if (ignored > 0) {
+      recordMainEvent("history.events.read.ignored", {
+        conversationId: String(conversationId ?? "").trim() || null,
+        ignored,
+        file,
+        sync: true,
+      });
+    }
+    return batches;
+  } catch {
+    return [];
+  }
+}
+
+async function collectConversationEventBatches(historyDir, conversationId) {
+  return mergeUniqueHistoryEventBatches([
+    ...(await readConversationEventLogBatches(historyDir, conversationId)),
+    ...listPendingConversationEventBatches(conversationId),
+  ]);
+}
+
+function collectConversationEventBatchesSync(historyDir, conversationId) {
+  return mergeUniqueHistoryEventBatches([
+    ...readConversationEventLogBatchesSync(historyDir, conversationId),
+    ...listPendingConversationEventBatches(conversationId),
+  ]);
+}
+
+function enqueueConversationEventWriterTask(conversationId, task) {
+  const id = String(conversationId ?? "").trim();
+  if (!id) return Promise.reject(new Error("MISSING_CONVERSATION_ID"));
+  const prev = conversationEventWriterQueues.get(id) ?? Promise.resolve();
+  const next = prev
+    .catch(() => undefined)
+    .then(() => task());
+  conversationEventWriterQueues.set(id, next);
+  void next.finally(() => {
+    if (conversationEventWriterQueues.get(id) === next) {
+      conversationEventWriterQueues.delete(id);
+    }
+  });
+  return next;
+}
+
+async function appendConversationEventBatchToWriter(historyDir, batchObj) {
+  const batch = normalizeHistoryEventBatch(batchObj);
+  if (!batch) throw new Error("INVALID_EVENT_BATCH");
+  const file = getConversationEventLogFileV2Path(historyDir, batch.conversationId);
+  if (!file) throw new Error("INVALID_EVENT_BATCH");
+  if (!batch.head && (!Array.isArray(batch.stepUpserts) || batch.stepUpserts.length === 0) && !batch.hasThread && !batch.hasRuntimeState) {
+    return {
+      ok: true,
+      conversationId: batch.conversationId,
+      eventId: batch.eventId,
+      file,
+      appended: false,
+    };
+  }
+  rememberPendingConversationEventBatch(batch);
+  return enqueueConversationEventWriterTask(batch.conversationId, async () => {
+    if (!hasPendingConversationEventBatch(batch.conversationId, batch.eventId)) {
+      return {
+        ok: true,
+        conversationId: batch.conversationId,
+        eventId: batch.eventId,
+        file,
+        appended: false,
+        skipped: true,
+      };
+    }
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.appendFile(file, `${JSON.stringify(batch)}\n`, "utf-8");
+    forgetPendingConversationEventBatch(batch.conversationId, batch.eventId);
+    recordMainEvent("history.events.append", {
+      conversationId: batch.conversationId,
+      eventId: batch.eventId,
+      updatedAt: batch.updatedAt,
+      stepUpsertCount: Array.isArray(batch.stepUpserts) ? batch.stepUpserts.length : 0,
+      hasHead: Boolean(batch.head),
+      hasThread: Boolean(batch.hasThread),
+    });
+    return {
+      ok: true,
+      conversationId: batch.conversationId,
+      eventId: batch.eventId,
+      file,
+      appended: true,
+    };
+  });
+}
+
+function appendConversationEventBatchToWriterSync(historyDir, batchObj) {
+  const batch = normalizeHistoryEventBatch(batchObj);
+  if (!batch) throw new Error("INVALID_EVENT_BATCH");
+  const file = getConversationEventLogFileV2Path(historyDir, batch.conversationId);
+  if (!file) throw new Error("INVALID_EVENT_BATCH");
+  if (!batch.head && (!Array.isArray(batch.stepUpserts) || batch.stepUpserts.length === 0) && !batch.hasThread && !batch.hasRuntimeState) {
+    return {
+      ok: true,
+      conversationId: batch.conversationId,
+      eventId: batch.eventId,
+      file,
+      appended: false,
+    };
+  }
+  rememberPendingConversationEventBatch(batch);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, `${JSON.stringify(batch)}\n`, "utf-8");
+  forgetPendingConversationEventBatch(batch.conversationId, batch.eventId);
+  recordMainEvent("history.events.append", {
+    conversationId: batch.conversationId,
+    eventId: batch.eventId,
+    updatedAt: batch.updatedAt,
+    stepUpsertCount: Array.isArray(batch.stepUpserts) ? batch.stepUpserts.length : 0,
+    hasHead: Boolean(batch.head),
+    hasThread: Boolean(batch.hasThread),
+    sync: true,
+  });
+  return {
+    ok: true,
+    conversationId: batch.conversationId,
+    eventId: batch.eventId,
+    file,
+    appended: true,
+  };
+}
+
+async function flushConversationEventWriter(conversationId) {
+  const id = typeof conversationId === "string" ? conversationId.trim() : "";
+  if (id) {
+    await (conversationEventWriterQueues.get(id) ?? Promise.resolve()).catch(() => undefined);
+    return { ok: true, conversationId: id };
+  }
+  const pending = Array.from(conversationEventWriterQueues.values());
+  await Promise.all(pending.map((task) => task.catch(() => undefined)));
+  return { ok: true, conversationId: null };
+}
+
+function flushConversationEventWriterSync(conversationId) {
+  const id = typeof conversationId === "string" ? conversationId.trim() : "";
+  return { ok: true, conversationId: id || null };
+}
+
+async function materializeConversationEventsToHistory(historyDir, conversationId, options) {
+  const dir = String(historyDir ?? "").trim();
+  const id = String(conversationId ?? "").trim();
+  if (!dir || !id) {
+    return { ok: false, error: "MISSING_CONVERSATION_ID" };
+  }
+
+  await flushConversationEventWriter(id);
+
+  const eventFile = getConversationEventLogFileV2Path(dir, id);
+  const batches = await collectConversationEventBatches(dir, id);
+  if (!eventFile || (batches.length === 0 && !(await fileExists(eventFile)))) {
+    return {
+      ok: true,
+      conversationId: id,
+      materialized: false,
+      eventCount: 0,
+      cleared: false,
+    };
+  }
+  if (batches.length === 0) {
+    if (options?.clearEventLog !== false) {
+      await unlinkIfExists(eventFile);
+    }
+    clearPendingConversationEventBatches(id);
+    return {
+      ok: true,
+      conversationId: id,
+      materialized: false,
+      eventCount: 0,
+      cleared: options?.clearEventLog !== false,
+    };
+  }
+
+  const currentIndexPayload = await readHistoryPayloadFile(path.join(dir, HISTORY_INDEX_FILENAME_V2));
+  const currentLegacyPayload = await readHistoryPayloadFile(path.join(dir, HISTORY_FILENAME));
+  const previousEntries = Array.isArray(currentIndexPayload?.conversations)
+    ? currentIndexPayload.conversations
+    : buildHistoryIndexFallbackFromLegacyPayload(currentLegacyPayload);
+  const previousEntry = previousEntries.find((entry) => String(entry?.id ?? "").trim() === id) ?? null;
+  const legacyById = new Map();
+  for (const conv of Array.isArray(currentLegacyPayload?.conversations) ? currentLegacyPayload.conversations : []) {
+    const convId = String(conv?.id ?? "").trim();
+    if (!convId) continue;
+    legacyById.set(convId, conv);
+  }
+
+  const baseSnapshot = await loadConversationBodyFromCurrentDir(dir, id, legacyById);
+  let nextSnapshot = baseSnapshot ?? makeEmptyRunSnapshot(batches.find((batch) => batch?.head)?.head ?? {});
+  for (const batch of batches) {
+    nextSnapshot = applyHistoryEventBatchToSnapshot(nextSnapshot, batch);
+  }
+  nextSnapshot = normalizeCompactSnapshot(nextSnapshot) ?? nextSnapshot;
+
+  const nextStats = computeConversationBodyStats(nextSnapshot);
+  const previousStats = baseSnapshot ? computeConversationBodyStats(baseSnapshot) : null;
+  const previousHash = String(previousEntry?.bodyHash ?? previousStats?.bodyHash ?? "");
+  const changed = !baseSnapshot || previousHash !== String(nextStats.bodyHash ?? "");
+
+  if (changed) {
+    const fallbackLegacyConv = legacyById.get(id);
+    const previousCreatedAt = Number(previousEntry?.createdAt ?? fallbackLegacyConv?.createdAt ?? Date.now()) || Date.now();
+    const previousUpdatedAt = Number(previousEntry?.updatedAt ?? fallbackLegacyConv?.updatedAt ?? Date.now()) || Date.now();
+    const metaTitle = String(previousEntry?.title ?? fallbackLegacyConv?.title ?? "").trim() || "未命名对话";
+    const ops = [];
+    if (!previousEntry) {
+      ops.push({
+        type: "upsert-meta",
+        conversationId: id,
+        patch: {
+          title: metaTitle,
+          createdAt: previousCreatedAt,
+          updatedAt: Math.max(previousUpdatedAt, Date.now()),
+          pinned: Boolean(previousEntry?.pinned ?? fallbackLegacyConv?.pinned),
+          archived: Boolean(previousEntry?.archived ?? fallbackLegacyConv?.archived),
+        },
+      });
+    }
+    ops.push({
+      type: "write-body",
+      conversationId: id,
+      snapshot: nextSnapshot,
+      source: "autosave",
+      replaceBody: true,
+    });
+    await applyHistoryOperationsToDir(dir, {
+      version: 2,
+      updatedAt: Number(batches[batches.length - 1]?.updatedAt ?? Date.now()) || Date.now(),
+      intent: "autosave",
+      ops,
+    }, {
+      writePending: false,
+      clearPending: false,
+    });
+  }
+
+  if (options?.clearEventLog !== false) {
+    await unlinkIfExists(eventFile);
+  }
+  clearPendingConversationEventBatches(id);
+  recordMainEvent("history.events.materialize", {
+    conversationId: id,
+    eventCount: batches.length,
+    materialized: changed,
+    cleared: options?.clearEventLog !== false,
+  });
+  return {
+    ok: true,
+    conversationId: id,
+    materialized: changed,
+    eventCount: batches.length,
+    cleared: options?.clearEventLog !== false,
+  };
+}
+
+function materializeConversationEventsToHistorySync(historyDir, conversationId, options) {
+  const dir = String(historyDir ?? "").trim();
+  const id = String(conversationId ?? "").trim();
+  if (!dir || !id) {
+    return { ok: false, error: "MISSING_CONVERSATION_ID" };
+  }
+
+  flushConversationEventWriterSync(id);
+
+  const eventFile = getConversationEventLogFileV2Path(dir, id);
+  const batches = collectConversationEventBatchesSync(dir, id);
+  if (!eventFile || (batches.length === 0 && !fs.existsSync(eventFile))) {
+    return {
+      ok: true,
+      conversationId: id,
+      materialized: false,
+      eventCount: 0,
+      cleared: false,
+    };
+  }
+
+  if (batches.length === 0) {
+    if (options?.clearEventLog !== false) {
+      unlinkIfExistsSync(eventFile);
+    }
+    clearPendingConversationEventBatches(id);
+    return {
+      ok: true,
+      conversationId: id,
+      materialized: false,
+      eventCount: 0,
+      cleared: options?.clearEventLog !== false,
+    };
+  }
+
+  let currentIndexPayload = null;
+  let currentLegacyPayload = null;
+  try {
+    const indexFile = path.join(dir, HISTORY_INDEX_FILENAME_V2);
+    if (fs.existsSync(indexFile)) {
+      currentIndexPayload = JSON.parse(String(fs.readFileSync(indexFile, "utf-8") ?? ""));
+    }
+  } catch {
+    currentIndexPayload = null;
+  }
+  try {
+    const legacyFile = path.join(dir, HISTORY_FILENAME);
+    if (fs.existsSync(legacyFile)) {
+      currentLegacyPayload = JSON.parse(String(fs.readFileSync(legacyFile, "utf-8") ?? ""));
+    }
+  } catch {
+    currentLegacyPayload = null;
+  }
+  const previousEntries = Array.isArray(currentIndexPayload?.conversations)
+    ? currentIndexPayload.conversations
+    : buildHistoryIndexFallbackFromLegacyPayload(currentLegacyPayload);
+  const previousEntry = previousEntries.find((entry) => String(entry?.id ?? "").trim() === id) ?? null;
+  const legacyById = new Map();
+  for (const conv of Array.isArray(currentLegacyPayload?.conversations) ? currentLegacyPayload.conversations : []) {
+    const convId = String(conv?.id ?? "").trim();
+    if (!convId) continue;
+    legacyById.set(convId, conv);
+  }
+
+  const baseSnapshot = loadConversationBodyFromCurrentDirSync(dir, id, legacyById);
+  let nextSnapshot = baseSnapshot ?? makeEmptyRunSnapshot(batches.find((batch) => batch?.head)?.head ?? {});
+  for (const batch of batches) {
+    nextSnapshot = applyHistoryEventBatchToSnapshot(nextSnapshot, batch);
+  }
+  nextSnapshot = normalizeCompactSnapshot(nextSnapshot) ?? nextSnapshot;
+
+  const nextStats = computeConversationBodyStats(nextSnapshot);
+  const previousStats = baseSnapshot ? computeConversationBodyStats(baseSnapshot) : null;
+  const previousHash = String(previousEntry?.bodyHash ?? previousStats?.bodyHash ?? "");
+  const changed = !baseSnapshot || previousHash !== String(nextStats.bodyHash ?? "");
+
+  if (changed) {
+    const fallbackLegacyConv = legacyById.get(id);
+    const previousCreatedAt = Number(previousEntry?.createdAt ?? fallbackLegacyConv?.createdAt ?? Date.now()) || Date.now();
+    const previousUpdatedAt = Number(previousEntry?.updatedAt ?? fallbackLegacyConv?.updatedAt ?? Date.now()) || Date.now();
+    const metaTitle = String(previousEntry?.title ?? fallbackLegacyConv?.title ?? "").trim() || "未命名对话";
+    const ops = [];
+    if (!previousEntry) {
+      ops.push({
+        type: "upsert-meta",
+        conversationId: id,
+        patch: {
+          title: metaTitle,
+          createdAt: previousCreatedAt,
+          updatedAt: Math.max(previousUpdatedAt, Date.now()),
+          pinned: Boolean(previousEntry?.pinned ?? fallbackLegacyConv?.pinned),
+          archived: Boolean(previousEntry?.archived ?? fallbackLegacyConv?.archived),
+        },
+      });
+    }
+    ops.push({
+      type: "write-body",
+      conversationId: id,
+      snapshot: nextSnapshot,
+      source: "shutdown",
+      replaceBody: true,
+    });
+    applyHistoryOperationsToDirSync(dir, {
+      version: 2,
+      updatedAt: Number(batches[batches.length - 1]?.updatedAt ?? Date.now()) || Date.now(),
+      intent: "shutdown",
+      ops,
+    }, {
+      writePending: false,
+      clearPending: false,
+    });
+  }
+
+  if (options?.clearEventLog !== false) {
+    unlinkIfExistsSync(eventFile);
+  }
+  clearPendingConversationEventBatches(id);
+  recordMainEvent("history.events.materialize", {
+    conversationId: id,
+    eventCount: batches.length,
+    materialized: changed,
+    cleared: options?.clearEventLog !== false,
+    sync: true,
+  });
+  return {
+    ok: true,
+    conversationId: id,
+    materialized: changed,
+    eventCount: batches.length,
+    cleared: options?.clearEventLog !== false,
+  };
+}
+
 function translateLegacyPayloadToHistoryOps(payloadObj, previousPayload) {
   const payload = payloadObj && typeof payloadObj === "object" ? payloadObj : {};
   const previous = previousPayload && typeof previousPayload === "object" ? previousPayload : {};
@@ -2504,7 +3415,7 @@ function translateLegacyPayloadToHistoryOps(payloadObj, previousPayload) {
 
   ops.push({
     type: "write-draft",
-    draftSnapshot: payload.draftSnapshot && typeof payload.draftSnapshot === "object" ? payload.draftSnapshot : null,
+    draftSnapshot: normalizeHistoryDraftSnapshot(payload.draftSnapshot),
     draftSnapshotOwnerId: typeof payload.draftSnapshotOwnerId === "string" ? payload.draftSnapshotOwnerId : null,
   });
   ops.push({
@@ -2535,7 +3446,7 @@ async function buildLegacyPayloadFromHistoryState(historyDir, args) {
       snapshot = normalizeCompactSnapshot(prevConv.snapshot);
     }
     if (!snapshot && dir) {
-      snapshot = await loadConversationBodyFromCurrentDir(dir, id, legacyById);
+      snapshot = await loadConversationAuthoritySnapshotFromCurrentDir(dir, id, legacyById);
     }
     conversations.push({
       ...(prevConv && typeof prevConv === "object" ? prevConv : {}),
@@ -2554,7 +3465,7 @@ async function buildLegacyPayloadFromHistoryState(historyDir, args) {
     version: 1,
     updatedAt,
     conversations,
-    draftSnapshot: args?.draftSnapshot && typeof args.draftSnapshot === "object" ? args.draftSnapshot : null,
+    draftSnapshot: normalizeHistoryDraftSnapshot(args?.draftSnapshot),
     draftSnapshotOwnerId: typeof args?.draftSnapshotOwnerId === "string" ? args.draftSnapshotOwnerId : null,
     draftRevision: normalizeHistoryRevisionValue(args?.draftRevision),
     activeConvId: typeof args?.activeConvId === "string" ? args.activeConvId : null,
@@ -2577,7 +3488,7 @@ function buildLegacyPayloadFromHistoryStateSync(historyDir, args) {
       snapshot = normalizeCompactSnapshot(prevConv.snapshot);
     }
     if (!snapshot && dir) {
-      snapshot = loadConversationBodyFromCurrentDirSync(dir, id, legacyById);
+      snapshot = loadConversationAuthoritySnapshotFromCurrentDirSync(dir, id, legacyById);
     }
     conversations.push({
       ...(prevConv && typeof prevConv === "object" ? prevConv : {}),
@@ -2596,11 +3507,73 @@ function buildLegacyPayloadFromHistoryStateSync(historyDir, args) {
     version: 1,
     updatedAt,
     conversations,
-    draftSnapshot: args?.draftSnapshot && typeof args.draftSnapshot === "object" ? args.draftSnapshot : null,
+    draftSnapshot: normalizeHistoryDraftSnapshot(args?.draftSnapshot),
     draftSnapshotOwnerId: typeof args?.draftSnapshotOwnerId === "string" ? args.draftSnapshotOwnerId : null,
     draftRevision: normalizeHistoryRevisionValue(args?.draftRevision),
     activeConvId: typeof args?.activeConvId === "string" ? args.activeConvId : null,
   };
+}
+
+async function buildLegacyPayloadFromAuthority(historyDir) {
+  const dir = String(historyDir ?? "").trim();
+  if (!dir) return null;
+  const indexPayload = await readHistoryPayloadFile(path.join(dir, HISTORY_INDEX_FILENAME_V2));
+  const legacyPayload = await readHistoryPayloadFile(path.join(dir, HISTORY_FILENAME));
+  const orderedEntries = Array.isArray(indexPayload?.conversations)
+    ? indexPayload.conversations
+    : buildHistoryIndexFallbackFromLegacyPayload(legacyPayload);
+  const legacyById = new Map();
+  for (const conv of Array.isArray(legacyPayload?.conversations) ? legacyPayload.conversations : []) {
+    const id = String(conv?.id ?? "").trim();
+    if (!id) continue;
+    legacyById.set(id, conv);
+  }
+  return buildLegacyPayloadFromHistoryState(dir, {
+    legacyById,
+    orderedEntries,
+    updatedAt: Number(indexPayload?.updatedAt ?? legacyPayload?.updatedAt ?? Date.now()) || Date.now(),
+    draftSnapshot: normalizeHistoryDraftSnapshot(indexPayload?.draftSnapshot ?? legacyPayload?.draftSnapshot),
+    draftSnapshotOwnerId:
+      typeof indexPayload?.draftSnapshotOwnerId === "string"
+        ? indexPayload.draftSnapshotOwnerId
+        : (typeof legacyPayload?.draftSnapshotOwnerId === "string" ? legacyPayload.draftSnapshotOwnerId : null),
+    draftRevision: normalizeHistoryRevisionValue(indexPayload?.draftRevision ?? legacyPayload?.draftRevision),
+    activeConvId:
+      typeof indexPayload?.activeConvId === "string"
+        ? indexPayload.activeConvId
+        : (typeof legacyPayload?.activeConvId === "string" ? legacyPayload.activeConvId : null),
+  });
+}
+
+function buildLegacyPayloadFromAuthoritySync(historyDir) {
+  const dir = String(historyDir ?? "").trim();
+  if (!dir) return null;
+  const indexPayload = readHistoryPayloadFileSync(path.join(dir, HISTORY_INDEX_FILENAME_V2));
+  const legacyPayload = readHistoryPayloadFileSync(path.join(dir, HISTORY_FILENAME));
+  const orderedEntries = Array.isArray(indexPayload?.conversations)
+    ? indexPayload.conversations
+    : buildHistoryIndexFallbackFromLegacyPayload(legacyPayload);
+  const legacyById = new Map();
+  for (const conv of Array.isArray(legacyPayload?.conversations) ? legacyPayload.conversations : []) {
+    const id = String(conv?.id ?? "").trim();
+    if (!id) continue;
+    legacyById.set(id, conv);
+  }
+  return buildLegacyPayloadFromHistoryStateSync(dir, {
+    legacyById,
+    orderedEntries,
+    updatedAt: Number(indexPayload?.updatedAt ?? legacyPayload?.updatedAt ?? Date.now()) || Date.now(),
+    draftSnapshot: normalizeHistoryDraftSnapshot(indexPayload?.draftSnapshot ?? legacyPayload?.draftSnapshot),
+    draftSnapshotOwnerId:
+      typeof indexPayload?.draftSnapshotOwnerId === "string"
+        ? indexPayload.draftSnapshotOwnerId
+        : (typeof legacyPayload?.draftSnapshotOwnerId === "string" ? legacyPayload.draftSnapshotOwnerId : null),
+    draftRevision: normalizeHistoryRevisionValue(indexPayload?.draftRevision ?? legacyPayload?.draftRevision),
+    activeConvId:
+      typeof indexPayload?.activeConvId === "string"
+        ? indexPayload.activeConvId
+        : (typeof legacyPayload?.activeConvId === "string" ? legacyPayload.activeConvId : null),
+  });
 }
 
 async function applyHistoryOperationsToDir(historyDir, batchObj, options) {
@@ -2639,12 +3612,13 @@ async function applyHistoryOperationsToDir(historyDir, batchObj, options) {
     typeof previousIndexPayload?.activeConvId === "string"
       ? previousIndexPayload.activeConvId
       : (typeof previousLegacyPayload?.activeConvId === "string" ? previousLegacyPayload.activeConvId : null);
-  let draftSnapshot =
+  let draftSnapshot = normalizeHistoryDraftSnapshot(
     previousIndexPayload?.draftSnapshot && typeof previousIndexPayload.draftSnapshot === "object"
       ? previousIndexPayload.draftSnapshot
       : (previousLegacyPayload?.draftSnapshot && typeof previousLegacyPayload.draftSnapshot === "object"
           ? previousLegacyPayload.draftSnapshot
-          : null);
+          : null),
+  );
   let draftSnapshotOwnerId =
     typeof previousIndexPayload?.draftSnapshotOwnerId === "string"
       ? previousIndexPayload.draftSnapshotOwnerId
@@ -2711,9 +3685,14 @@ async function applyHistoryOperationsToDir(historyDir, batchObj, options) {
       const previousSnapshot =
         changedSnapshots.get(id) ??
         await loadConversationBodyFromCurrentDir(dir, id, legacyById);
+      const normalizedIncomingSnapshot = normalizeCompactSnapshot(op.snapshot);
       const mergedSnapshot =
-        mergeConversationSnapshotForAuthoritativeBody(previousSnapshot, op.snapshot) ??
-        normalizeCompactSnapshot(op.snapshot);
+        op.replaceBody === true
+          ? (normalizedIncomingSnapshot ?? previousSnapshot ?? makeEmptyRunSnapshot({}))
+          : (
+              mergeConversationSnapshotForAuthoritativeBody(previousSnapshot, op.snapshot) ??
+              normalizedIncomingSnapshot
+            );
       const nextBodyRevision = currentRevision + 1;
       changedSnapshots.set(id, mergedSnapshot);
       bodyRevisionById.set(id, nextBodyRevision);
@@ -2750,7 +3729,7 @@ async function applyHistoryOperationsToDir(historyDir, batchObj, options) {
           updatedAt: batch.updatedAt,
         });
       }
-      draftSnapshot = op.draftSnapshot && typeof op.draftSnapshot === "object" ? normalizeCompactSnapshot(op.draftSnapshot) : null;
+      draftSnapshot = normalizeHistoryDraftSnapshot(op.draftSnapshot);
       draftSnapshotOwnerId = typeof op.draftSnapshotOwnerId === "string" ? op.draftSnapshotOwnerId : null;
       draftRevision = currentDraftRevision + 1;
       continue;
@@ -2788,21 +3767,24 @@ async function applyHistoryOperationsToDir(historyDir, batchObj, options) {
     version: 2,
     updatedAt,
     conversations: orderedEntries,
-    draftSnapshot: draftSnapshot && typeof draftSnapshot === "object" ? draftSnapshot : null,
+    draftSnapshot: normalizeHistoryDraftSnapshot(draftSnapshot),
     draftSnapshotOwnerId,
     draftRevision,
     activeConvId,
   };
-  const legacyPayload = await buildLegacyPayloadFromHistoryState(dir, {
-    legacyById,
-    changedSnapshots,
-    orderedEntries,
-    updatedAt,
-    draftSnapshot,
-    draftSnapshotOwnerId,
-    draftRevision,
-    activeConvId,
-  });
+  const shouldWriteLegacyMirror = options?.writeLegacyMirror === true;
+  const legacyPayload = shouldWriteLegacyMirror
+    ? await buildLegacyPayloadFromHistoryState(dir, {
+        legacyById,
+        changedSnapshots,
+        orderedEntries,
+        updatedAt,
+        draftSnapshot,
+        draftSnapshotOwnerId,
+        draftRevision,
+        activeConvId,
+      })
+    : null;
 
   if (options?.writePending !== false) {
     await writeJsonFileAtomic(pendingJournalFile, {
@@ -2828,12 +3810,14 @@ async function applyHistoryOperationsToDir(historyDir, batchObj, options) {
   const finalEntries = orderedIds.map((id) => metaMap.get(id)).filter(Boolean);
   indexPayload.conversations = finalEntries;
   await writeJsonFileAtomic(indexFile, indexPayload);
-  await writeJsonFileAtomic(legacyFile, legacyPayload);
+  if (shouldWriteLegacyMirror && legacyPayload) {
+    await writeJsonFileAtomic(legacyFile, legacyPayload);
+  }
   if (options?.clearPending !== false) {
     await unlinkIfExists(pendingJournalFile);
     await unlinkIfExists(path.join(dir, HISTORY_PENDING_FILENAME));
   }
-  return { ok: true, file: legacyFile };
+  return { ok: true, file: shouldWriteLegacyMirror ? legacyFile : indexFile };
 }
 
 function applyHistoryOperationsToDirSync(historyDir, batchObj, options) {
@@ -2872,12 +3856,13 @@ function applyHistoryOperationsToDirSync(historyDir, batchObj, options) {
     typeof previousIndexPayload?.activeConvId === "string"
       ? previousIndexPayload.activeConvId
       : (typeof previousLegacyPayload?.activeConvId === "string" ? previousLegacyPayload.activeConvId : null);
-  let draftSnapshot =
+  let draftSnapshot = normalizeHistoryDraftSnapshot(
     previousIndexPayload?.draftSnapshot && typeof previousIndexPayload.draftSnapshot === "object"
       ? previousIndexPayload.draftSnapshot
       : (previousLegacyPayload?.draftSnapshot && typeof previousLegacyPayload.draftSnapshot === "object"
           ? previousLegacyPayload.draftSnapshot
-          : null);
+          : null),
+  );
   let draftSnapshotOwnerId =
     typeof previousIndexPayload?.draftSnapshotOwnerId === "string"
       ? previousIndexPayload.draftSnapshotOwnerId
@@ -2946,9 +3931,14 @@ function applyHistoryOperationsToDirSync(historyDir, batchObj, options) {
       const previousSnapshot =
         changedSnapshots.get(id) ??
         loadConversationBodyFromCurrentDirSync(dir, id, legacyById);
+      const normalizedIncomingSnapshot = normalizeCompactSnapshot(op.snapshot);
       const mergedSnapshot =
-        mergeConversationSnapshotForAuthoritativeBody(previousSnapshot, op.snapshot) ??
-        normalizeCompactSnapshot(op.snapshot);
+        op.replaceBody === true
+          ? (normalizedIncomingSnapshot ?? previousSnapshot ?? makeEmptyRunSnapshot({}))
+          : (
+              mergeConversationSnapshotForAuthoritativeBody(previousSnapshot, op.snapshot) ??
+              normalizedIncomingSnapshot
+            );
       const nextBodyRevision = currentRevision + 1;
       changedSnapshots.set(id, mergedSnapshot);
       bodyRevisionById.set(id, nextBodyRevision);
@@ -2986,7 +3976,7 @@ function applyHistoryOperationsToDirSync(historyDir, batchObj, options) {
           sync: true,
         });
       }
-      draftSnapshot = op.draftSnapshot && typeof op.draftSnapshot === "object" ? normalizeCompactSnapshot(op.draftSnapshot) : null;
+      draftSnapshot = normalizeHistoryDraftSnapshot(op.draftSnapshot);
       draftSnapshotOwnerId = typeof op.draftSnapshotOwnerId === "string" ? op.draftSnapshotOwnerId : null;
       draftRevision = currentDraftRevision + 1;
       continue;
@@ -3018,16 +4008,28 @@ function applyHistoryOperationsToDirSync(historyDir, batchObj, options) {
 
   const orderedEntries = orderedIds.map((id) => metaMap.get(id)).filter(Boolean);
   const updatedAt = Number(batch.updatedAt ?? Date.now()) || Date.now();
-  const legacyPayload = buildLegacyPayloadFromHistoryStateSync(dir, {
-    legacyById,
-    changedSnapshots,
-    orderedEntries,
+  const indexPayload = {
+    version: 2,
     updatedAt,
-    draftSnapshot,
+    conversations: orderedEntries,
+    draftSnapshot: normalizeHistoryDraftSnapshot(draftSnapshot),
     draftSnapshotOwnerId,
     draftRevision,
     activeConvId,
-  });
+  };
+  const shouldWriteLegacyMirror = options?.writeLegacyMirror === true;
+  const legacyPayload = shouldWriteLegacyMirror
+    ? buildLegacyPayloadFromHistoryStateSync(dir, {
+        legacyById,
+        changedSnapshots,
+        orderedEntries,
+        updatedAt,
+        draftSnapshot,
+        draftSnapshotOwnerId,
+        draftRevision,
+        activeConvId,
+      })
+    : null;
 
   if (options?.writePending !== false) {
     writeJsonFileAtomicSync(pendingJournalFile, {
@@ -3051,28 +4053,44 @@ function applyHistoryOperationsToDirSync(historyDir, batchObj, options) {
     }
   }
   const finalEntries = orderedIds.map((id) => metaMap.get(id)).filter(Boolean);
-  const indexPayload = {
-    version: 2,
-    updatedAt,
-    conversations: finalEntries,
-    draftSnapshot: draftSnapshot && typeof draftSnapshot === "object" ? draftSnapshot : null,
-    draftSnapshotOwnerId,
-    draftRevision,
-    activeConvId,
-  };
+  indexPayload.conversations = finalEntries;
   writeJsonFileAtomicSync(indexFile, indexPayload);
-  writeJsonFileAtomicSync(legacyFile, legacyPayload);
+  if (shouldWriteLegacyMirror && legacyPayload) {
+    writeJsonFileAtomicSync(legacyFile, legacyPayload);
+  }
   if (options?.clearPending !== false) {
     unlinkIfExistsSync(pendingJournalFile);
     unlinkIfExistsSync(path.join(dir, HISTORY_PENDING_FILENAME));
   }
-  return { ok: true, file: legacyFile };
+  return { ok: true, file: shouldWriteLegacyMirror ? legacyFile : indexFile };
 }
 
 async function runHistorySmokeCli() {
   const { dir } = await resolveHistoryFileForWrite();
   await fsp.rm(dir, { recursive: true, force: true });
   await fsp.mkdir(dir, { recursive: true });
+  const assertLightweightDraft = (snapshot, label) => {
+    const draft = snapshot && typeof snapshot === "object" ? snapshot : null;
+    if (!draft) throw new Error(`${label}_MISSING`);
+    const forbiddenKeys = ["logs", "thread", "turns", "items", "collabSessions", "activeItemIds", "transcript"];
+    if (forbiddenKeys.some((key) => Object.prototype.hasOwnProperty.call(draft, key))) {
+      throw new Error(`${label}_CONTAINS_RUNTIME_FIELDS`);
+    }
+  };
+  const pickRuntimeStateFromSnapshot = (snapshot) => ({
+    transcript: Array.isArray(snapshot?.transcript) ? snapshot.transcript : [],
+    logs: Array.isArray(snapshot?.logs) ? snapshot.logs : [],
+    turns: Array.isArray(snapshot?.turns) ? snapshot.turns : [],
+    items: Array.isArray(snapshot?.items) ? snapshot.items : [],
+    collabSessions: Array.isArray(snapshot?.collabSessions) ? snapshot.collabSessions : [],
+    activeItemIds: Array.isArray(snapshot?.activeItemIds) ? snapshot.activeItemIds : [],
+  });
+  const assertRuntimeState = (snapshot, expectedRuntimeState, label) => {
+    const actual = pickRuntimeStateFromSnapshot(snapshot);
+    if (JSON.stringify(actual) !== JSON.stringify(expectedRuntimeState)) {
+      throw new Error(`${label}_RUNTIME_STATE_MISMATCH`);
+    }
+  };
 
   const seedSnapshot = normalizeCompactSnapshot({
     ...makeEmptyRunSnapshot({
@@ -3164,6 +4182,7 @@ async function runHistorySmokeCli() {
   const indexPayload = await readHistoryPayloadFile(path.join(dir, HISTORY_INDEX_FILENAME_V2));
   const convPayload = await tryLoadConversationFromV2(dir, "legacy_only");
   const legacyPayload = await readHistoryPayloadFile(path.join(dir, HISTORY_FILENAME));
+  const authorityLegacyPayload = await buildLegacyPayloadFromAuthority(dir);
   const pendingPayload = await readHistoryPayloadFile(path.join(dir, HISTORY_PENDING_FILENAME));
   const pendingJournalPayload = await readHistoryPayloadFile(path.join(dir, HISTORY_PENDING_JOURNAL_FILENAME_V2));
   const snapshot = buildSnapshotFromV2Payload(convPayload, { includeSteps: true });
@@ -3177,8 +4196,10 @@ async function runHistorySmokeCli() {
   if (snapshot.model !== "gpt-5.4" || snapshot.projectDir !== "/tmp/demo-project") {
     throw new Error("SMOKE_HEAD_FIELDS_DEGRADED");
   }
-  if (!legacyPayload || !Array.isArray(legacyPayload.conversations) || legacyPayload.conversations.length < 2) {
-    throw new Error("SMOKE_LEGACY_MIRROR_MISSING");
+  assertLightweightDraft(indexPayload?.draftSnapshot, "SMOKE_INDEX_DRAFT");
+  assertLightweightDraft(authorityLegacyPayload?.draftSnapshot, "SMOKE_AUTHORITY_LEGACY_DRAFT");
+  if (!legacyPayload || !Array.isArray(legacyPayload.conversations) || legacyPayload.conversations.length !== 1) {
+    throw new Error("SMOKE_LEGACY_HOT_PATH_SHOULD_STAY_STALE");
   }
   if (pendingPayload || pendingJournalPayload) {
     throw new Error("SMOKE_PENDING_NOT_CLEARED");
@@ -3202,15 +4223,20 @@ async function runHistorySmokeCli() {
     ],
     activeConvId: "legacy_only",
   };
-  const compatOps = translateLegacyPayloadToHistoryOps(compatPayload, legacyPayload);
+  const compatOps = translateLegacyPayloadToHistoryOps(compatPayload, authorityLegacyPayload);
   await applyHistoryOperationsToDir(dir, compatOps, {
     writePending: true,
     clearPending: true,
+    writeLegacyMirror: true,
   });
 
   const compatIndexPayload = await readHistoryPayloadFile(path.join(dir, HISTORY_INDEX_FILENAME_V2));
+  const compatLegacyPayload = await readHistoryPayloadFile(path.join(dir, HISTORY_FILENAME));
   if (!compatIndexPayload || !Array.isArray(compatIndexPayload.conversations) || compatIndexPayload.conversations.length < 2) {
     throw new Error("SMOKE_LEGACY_COMPAT_DELETED_OMITTED_IDS");
+  }
+  if (!compatLegacyPayload || !Array.isArray(compatLegacyPayload.conversations) || compatLegacyPayload.conversations.length < 2) {
+    throw new Error("SMOKE_LEGACY_COMPAT_MIRROR_NOT_WRITTEN");
   }
 
   const implicitClearCompat = translateLegacyPayloadToHistoryOps({
@@ -3219,10 +4245,11 @@ async function runHistorySmokeCli() {
     allowEmptyConversations: true,
     conversations: [],
     activeConvId: null,
-  }, await readHistoryPayloadFile(path.join(dir, HISTORY_FILENAME)));
+  }, await buildLegacyPayloadFromAuthority(dir));
   await applyHistoryOperationsToDir(dir, implicitClearCompat, {
     writePending: true,
     clearPending: true,
+    writeLegacyMirror: true,
   });
   const afterImplicitClearIndex = await readHistoryPayloadFile(path.join(dir, HISTORY_INDEX_FILENAME_V2));
   if (!afterImplicitClearIndex || !Array.isArray(afterImplicitClearIndex.conversations) || afterImplicitClearIndex.conversations.length < 2) {
@@ -3319,6 +4346,7 @@ async function runHistorySmokeCli() {
   if (!afterStaleIndexPayload || normalizeHistoryRevisionValue(afterStaleIndexPayload?.draftRevision) !== beforeFreshDraftRevision + 1) {
     throw new Error("SMOKE_DRAFT_REVISION_NOT_INCREMENTED");
   }
+  assertLightweightDraft(afterStaleIndexPayload?.draftSnapshot, "SMOKE_STALE_INDEX_DRAFT");
   if (String(afterStaleIndexPayload?.draftSnapshot?.model ?? "") === "draft-stale") {
     throw new Error("SMOKE_STALE_DRAFT_WRITE_OVERWROTE");
   }
@@ -3377,6 +4405,7 @@ async function runHistorySmokeCli() {
   if (!afterJournalRecoverBody || normalizeHistoryRevisionValue(afterJournalRecoverBody.bodyRevision) !== 1) {
     throw new Error("SMOKE_PENDING_JOURNAL_RECOVERY_MISSING_BODY");
   }
+  assertLightweightDraft(afterJournalRecoverIndex?.draftSnapshot, "SMOKE_JOURNAL_INDEX_DRAFT");
   if (String(afterJournalRecoverIndex?.draftSnapshot?.model ?? "") !== "draft-from-journal") {
     throw new Error("SMOKE_PENDING_JOURNAL_RECOVERY_MISSING_DRAFT");
   }
@@ -3422,6 +4451,7 @@ async function runHistorySmokeCli() {
   if (!afterStaleRecoverSnapshot || afterStaleRecoverSnapshot.steps.some((step) => String(step?.id ?? "") === "stale-journal")) {
     throw new Error("SMOKE_PENDING_STALE_JOURNAL_OVERWROTE_BODY");
   }
+  assertLightweightDraft(afterStaleRecoverIndex?.draftSnapshot, "SMOKE_STALE_JOURNAL_INDEX_DRAFT");
   if (String(afterStaleRecoverIndex?.draftSnapshot?.model ?? "") === "draft-from-stale-journal") {
     throw new Error("SMOKE_PENDING_STALE_JOURNAL_OVERWROTE_DRAFT");
   }
@@ -3464,6 +4494,307 @@ async function runHistorySmokeCli() {
     throw new Error("SMOKE_LEGACY_PENDING_NOT_CLEARED");
   }
 
+  const eventOnlyConversationId = "event_only";
+  const eventLogFile = getConversationEventLogFileV2Path(dir, eventOnlyConversationId);
+  const eventRuntimeState1 = normalizeHistoryEventRuntimeState({
+    transcript: [
+      {
+        id: "tr_event_1",
+        kind: "assistant_message",
+        role: "assistant",
+        parts: [{ type: "text", id: "tr_event_1_part_1", text: "event transcript 1" }],
+        order: { turnSeq: 1, itemSeq: 1, subSeq: 0 },
+      },
+    ],
+    logs: [{ type: "info", message: "event-log-1" }],
+    turns: [{ id: "turn_event_1", itemIds: ["item_event_1"], status: "done" }],
+    items: [{ id: "item_event_1", type: "toolCall", title: "tool result preview" }],
+    collabSessions: [{ id: "collab_event_1", agentId: "copywriter" }],
+    activeItemIds: ["item_event_1"],
+  }, { mode: "agent" });
+  const emptyEventRuntimeState = normalizeHistoryEventRuntimeState({}, { mode: "agent" });
+  const eventAppendResult1 = await appendConversationEventBatchToWriter(dir, {
+    version: 1,
+    conversationId: eventOnlyConversationId,
+    updatedAt: 11,
+    head: {
+      mode: "agent",
+      model: "event-model-v1",
+      opMode: "assistant",
+      mainDoc: { title: "event-head-1" },
+      todoList: [{ id: "todo_1", text: "first todo", status: "pending" }],
+      kbAttachedLibraryIds: ["kb_event"],
+      ctxRefs: [{ id: "ctx_event", title: "ctx-event" }],
+      pendingArtifacts: [{ id: "artifact_event", kind: "doc", status: "ready" }],
+      projectDir: "/tmp/event-project",
+      dialogueSummaryByMode: { agent: "summary-1", chat: "" },
+      dialogueSummaryTurnCursorByMode: { agent: 2, chat: 0 },
+    },
+    stepUpserts: [
+      { id: "ev_u1", type: "user", text: "event hello", ts: 11 },
+      { id: "ev_a1", type: "assistant", text: "event world", ts: 12 },
+    ],
+    thread: {
+      id: eventOnlyConversationId,
+      status: "waiting_user",
+      activeSkillRefs: ["style_imitate"],
+    },
+    runtimeState: eventRuntimeState1,
+  });
+  if (!eventAppendResult1 || eventAppendResult1.ok !== true || eventAppendResult1.appended !== true) {
+    throw new Error("SMOKE_EVENT_APPEND_NOT_WRITTEN");
+  }
+  const eventMaterializeResult1 = await materializeConversationEventsToHistory(dir, eventOnlyConversationId, {
+    clearEventLog: false,
+  });
+  const eventBodyPayload1 = await tryLoadConversationFromV2(dir, eventOnlyConversationId);
+  const eventSnapshot1 = buildSnapshotFromV2Payload(eventBodyPayload1, { includeSteps: true });
+  if (!eventMaterializeResult1 || eventMaterializeResult1.ok !== true || eventMaterializeResult1.materialized !== true) {
+    throw new Error("SMOKE_EVENT_MATERIALIZE_NOT_WRITTEN");
+  }
+  if (!eventSnapshot1 || !Array.isArray(eventSnapshot1.steps) || eventSnapshot1.steps.length !== 2) {
+    throw new Error("SMOKE_EVENT_FIRST_STEPS_MISSING");
+  }
+  if (eventSnapshot1.model !== "event-model-v1" || eventSnapshot1.projectDir !== "/tmp/event-project") {
+    throw new Error("SMOKE_EVENT_FIRST_HEAD_MISSING");
+  }
+  if (!eventSnapshot1.thread || String(eventSnapshot1.thread?.id ?? "") !== eventOnlyConversationId) {
+    throw new Error("SMOKE_EVENT_FIRST_THREAD_MISSING");
+  }
+  assertRuntimeState(eventSnapshot1, eventRuntimeState1, "SMOKE_EVENT_FIRST");
+  if (eventMaterializeResult1.cleared !== false) {
+    throw new Error("SMOKE_EVENT_LOG_SHOULD_REMAIN_AUTHORITY");
+  }
+  if (!eventLogFile || !(await fileExists(eventLogFile))) {
+    throw new Error("SMOKE_EVENT_LOG_MISSING_AFTER_MATERIALIZE");
+  }
+
+  const eventAppendResult2 = await appendConversationEventBatchToWriter(dir, {
+    version: 1,
+    conversationId: eventOnlyConversationId,
+    updatedAt: 12,
+    head: {
+      mode: "agent",
+      model: "event-model-v2",
+      opMode: "assistant",
+      mainDoc: { title: "event-head-2" },
+      todoList: [],
+      kbAttachedLibraryIds: [],
+      ctxRefs: [],
+      pendingArtifacts: [],
+      projectDir: "/tmp/event-project-2",
+      dialogueSummaryByMode: { agent: "summary-2", chat: "" },
+      dialogueSummaryTurnCursorByMode: { agent: 3, chat: 0 },
+    },
+    stepUpserts: [
+      { id: "ev_a1", type: "assistant", text: "event world updated", ts: 13 },
+      { id: "ev_a2", type: "assistant", text: "event again", ts: 14 },
+    ],
+    thread: null,
+    runtimeState: emptyEventRuntimeState,
+  });
+  if (!eventAppendResult2 || eventAppendResult2.ok !== true || eventAppendResult2.appended !== true) {
+    throw new Error("SMOKE_EVENT_APPEND_SECOND_NOT_WRITTEN");
+  }
+  const eventMaterializeResult2 = await materializeConversationEventsToHistory(dir, eventOnlyConversationId, {
+    clearEventLog: false,
+  });
+  const eventBodyPayload2 = await tryLoadConversationFromV2(dir, eventOnlyConversationId);
+  const eventSnapshot2 = buildSnapshotFromV2Payload(eventBodyPayload2, { includeSteps: true });
+  const updatedAssistantSteps = Array.isArray(eventSnapshot2?.steps)
+    ? eventSnapshot2.steps.filter((step) => String(step?.id ?? "") === "ev_a1")
+    : [];
+  if (!eventMaterializeResult2 || eventMaterializeResult2.ok !== true || eventMaterializeResult2.materialized !== true) {
+    throw new Error("SMOKE_EVENT_MATERIALIZE_SECOND_NOT_WRITTEN");
+  }
+  if (!eventSnapshot2 || !Array.isArray(eventSnapshot2.steps) || eventSnapshot2.steps.length !== 3) {
+    throw new Error("SMOKE_EVENT_UPSERT_DUPLICATED");
+  }
+  if (updatedAssistantSteps.length !== 1 || String(updatedAssistantSteps[0]?.text ?? "") !== "event world updated") {
+    throw new Error("SMOKE_EVENT_UPSERT_NOT_APPLIED");
+  }
+  if (eventSnapshot2.model !== "event-model-v2" || eventSnapshot2.projectDir !== "/tmp/event-project-2") {
+    throw new Error("SMOKE_EVENT_SECOND_HEAD_NOT_APPLIED");
+  }
+  if ((eventSnapshot2.todoList ?? []).length !== 0 || eventSnapshot2.thread != null) {
+    throw new Error("SMOKE_EVENT_CLEAR_FIELDS_NOT_APPLIED");
+  }
+  assertRuntimeState(eventSnapshot2, emptyEventRuntimeState, "SMOKE_EVENT_SECOND");
+  if (eventMaterializeResult2.cleared !== false) {
+    throw new Error("SMOKE_EVENT_LOG_SECOND_SHOULD_REMAIN_AUTHORITY");
+  }
+  if (!eventLogFile || !(await fileExists(eventLogFile))) {
+    throw new Error("SMOKE_EVENT_LOG_SECOND_MISSING");
+  }
+  await deleteConversationBodyFileV2(dir, eventOnlyConversationId);
+  const eventAuthoritySnapshot = await loadConversationAuthoritySnapshotFromCurrentDir(dir, eventOnlyConversationId, null);
+  if (!eventAuthoritySnapshot || !Array.isArray(eventAuthoritySnapshot.steps) || eventAuthoritySnapshot.steps.length !== 3) {
+    throw new Error("SMOKE_EVENT_AUTHORITY_REBUILD_FAILED");
+  }
+  assertRuntimeState(eventAuthoritySnapshot, emptyEventRuntimeState, "SMOKE_EVENT_AUTHORITY");
+  const eventRematerializeResult = await materializeConversationEventsToHistory(dir, eventOnlyConversationId, {
+    clearEventLog: false,
+  });
+  if (!eventRematerializeResult || eventRematerializeResult.ok !== true) {
+    throw new Error("SMOKE_EVENT_REMATERIALIZE_FAILED");
+  }
+  if (!await fileExists(getConversationBodyFileV2Path(dir, eventOnlyConversationId) ?? "")) {
+    throw new Error("SMOKE_EVENT_BODY_NOT_REBUILT_FROM_AUTHORITY");
+  }
+  if (!eventLogFile || !(await fileExists(eventLogFile))) {
+    throw new Error("SMOKE_EVENT_LOG_LOST_AFTER_REBUILD");
+  }
+
+  const syncEventConversationId = "event_only_sync";
+  const syncEventLogFile = getConversationEventLogFileV2Path(dir, syncEventConversationId);
+  const syncEventRuntimeState1 = normalizeHistoryEventRuntimeState({
+    transcript: [
+      {
+        id: "tr_sync_event_1",
+        kind: "assistant_message",
+        role: "assistant",
+        parts: [{ type: "text", id: "tr_sync_event_1_part_1", text: "event sync transcript 1" }],
+        order: { turnSeq: 1, itemSeq: 1, subSeq: 0 },
+      },
+    ],
+    logs: [{ type: "info", message: "event-sync-log-1" }],
+    turns: [{ id: "turn_sync_event_1", itemIds: ["item_sync_event_1"], status: "done" }],
+    items: [{ id: "item_sync_event_1", type: "toolCall", title: "sync tool result preview" }],
+    collabSessions: [{ id: "collab_sync_event_1", agentId: "seo_specialist" }],
+    activeItemIds: ["item_sync_event_1"],
+  }, { mode: "agent" });
+  const syncEventAppendResult1 = appendConversationEventBatchToWriterSync(dir, {
+    version: 1,
+    conversationId: syncEventConversationId,
+    updatedAt: 21,
+    head: {
+      mode: "agent",
+      model: "event-sync-model-v1",
+      opMode: "assistant",
+      mainDoc: { title: "event-sync-head-1" },
+      todoList: [{ id: "todo_sync_1", text: "sync todo", status: "pending" }],
+      kbAttachedLibraryIds: ["kb_event_sync"],
+      ctxRefs: [{ id: "ctx_event_sync", title: "ctx-event-sync" }],
+      pendingArtifacts: [{ id: "artifact_event_sync", kind: "doc", status: "ready" }],
+      projectDir: "/tmp/event-sync-project",
+      dialogueSummaryByMode: { agent: "sync-summary-1", chat: "" },
+      dialogueSummaryTurnCursorByMode: { agent: 4, chat: 0 },
+    },
+    stepUpserts: [
+      { id: "ev_sync_u1", type: "user", text: "event sync hello", ts: 21 },
+      { id: "ev_sync_a1", type: "assistant", text: "event sync world", ts: 22 },
+    ],
+    thread: {
+      id: syncEventConversationId,
+      status: "waiting_user",
+      activeSkillRefs: ["style_imitate"],
+    },
+    runtimeState: syncEventRuntimeState1,
+  });
+  if (!syncEventAppendResult1 || syncEventAppendResult1.ok !== true || syncEventAppendResult1.appended !== true) {
+    throw new Error("SMOKE_EVENT_SYNC_APPEND_NOT_WRITTEN");
+  }
+  const syncEventMaterializeResult1 = materializeConversationEventsToHistorySync(dir, syncEventConversationId, {
+    clearEventLog: false,
+  });
+  const syncEventBodyPayload1 = await tryLoadConversationFromV2(dir, syncEventConversationId);
+  const syncEventSnapshot1 = buildSnapshotFromV2Payload(syncEventBodyPayload1, { includeSteps: true });
+  if (!syncEventMaterializeResult1 || syncEventMaterializeResult1.ok !== true || syncEventMaterializeResult1.materialized !== true) {
+    throw new Error("SMOKE_EVENT_SYNC_MATERIALIZE_NOT_WRITTEN");
+  }
+  if (!syncEventSnapshot1 || !Array.isArray(syncEventSnapshot1.steps) || syncEventSnapshot1.steps.length !== 2) {
+    throw new Error("SMOKE_EVENT_SYNC_FIRST_STEPS_MISSING");
+  }
+  if (syncEventSnapshot1.model !== "event-sync-model-v1" || syncEventSnapshot1.projectDir !== "/tmp/event-sync-project") {
+    throw new Error("SMOKE_EVENT_SYNC_FIRST_HEAD_MISSING");
+  }
+  if (!syncEventSnapshot1.thread || String(syncEventSnapshot1.thread?.id ?? "") !== syncEventConversationId) {
+    throw new Error("SMOKE_EVENT_SYNC_FIRST_THREAD_MISSING");
+  }
+  assertRuntimeState(syncEventSnapshot1, syncEventRuntimeState1, "SMOKE_EVENT_SYNC_FIRST");
+  if (syncEventMaterializeResult1.cleared !== false) {
+    throw new Error("SMOKE_EVENT_SYNC_LOG_SHOULD_REMAIN_AUTHORITY");
+  }
+  if (!syncEventLogFile || !(await fileExists(syncEventLogFile))) {
+    throw new Error("SMOKE_EVENT_SYNC_LOG_MISSING_AFTER_MATERIALIZE");
+  }
+
+  const syncEventAppendResult2 = appendConversationEventBatchToWriterSync(dir, {
+    version: 1,
+    conversationId: syncEventConversationId,
+    updatedAt: 22,
+    head: {
+      mode: "agent",
+      model: "event-sync-model-v2",
+      opMode: "assistant",
+      mainDoc: { title: "event-sync-head-2" },
+      todoList: [],
+      kbAttachedLibraryIds: [],
+      ctxRefs: [],
+      pendingArtifacts: [],
+      projectDir: "/tmp/event-sync-project-2",
+      dialogueSummaryByMode: { agent: "sync-summary-2", chat: "" },
+      dialogueSummaryTurnCursorByMode: { agent: 5, chat: 0 },
+    },
+    stepUpserts: [
+      { id: "ev_sync_a1", type: "assistant", text: "event sync world updated", ts: 23 },
+      { id: "ev_sync_a2", type: "assistant", text: "event sync again", ts: 24 },
+    ],
+    thread: null,
+    runtimeState: emptyEventRuntimeState,
+  });
+  if (!syncEventAppendResult2 || syncEventAppendResult2.ok !== true || syncEventAppendResult2.appended !== true) {
+    throw new Error("SMOKE_EVENT_SYNC_APPEND_SECOND_NOT_WRITTEN");
+  }
+  const syncEventMaterializeResult2 = materializeConversationEventsToHistorySync(dir, syncEventConversationId, {
+    clearEventLog: false,
+  });
+  const syncEventBodyPayload2 = await tryLoadConversationFromV2(dir, syncEventConversationId);
+  const syncEventSnapshot2 = buildSnapshotFromV2Payload(syncEventBodyPayload2, { includeSteps: true });
+  const updatedSyncAssistantSteps = Array.isArray(syncEventSnapshot2?.steps)
+    ? syncEventSnapshot2.steps.filter((step) => String(step?.id ?? "") === "ev_sync_a1")
+    : [];
+  if (!syncEventMaterializeResult2 || syncEventMaterializeResult2.ok !== true || syncEventMaterializeResult2.materialized !== true) {
+    throw new Error("SMOKE_EVENT_SYNC_MATERIALIZE_SECOND_NOT_WRITTEN");
+  }
+  if (!syncEventSnapshot2 || !Array.isArray(syncEventSnapshot2.steps) || syncEventSnapshot2.steps.length !== 3) {
+    throw new Error("SMOKE_EVENT_SYNC_UPSERT_DUPLICATED");
+  }
+  if (updatedSyncAssistantSteps.length !== 1 || String(updatedSyncAssistantSteps[0]?.text ?? "") !== "event sync world updated") {
+    throw new Error("SMOKE_EVENT_SYNC_UPSERT_NOT_APPLIED");
+  }
+  if (syncEventSnapshot2.model !== "event-sync-model-v2" || syncEventSnapshot2.projectDir !== "/tmp/event-sync-project-2") {
+    throw new Error("SMOKE_EVENT_SYNC_SECOND_HEAD_NOT_APPLIED");
+  }
+  if ((syncEventSnapshot2.todoList ?? []).length !== 0 || syncEventSnapshot2.thread != null) {
+    throw new Error("SMOKE_EVENT_SYNC_CLEAR_FIELDS_NOT_APPLIED");
+  }
+  assertRuntimeState(syncEventSnapshot2, emptyEventRuntimeState, "SMOKE_EVENT_SYNC_SECOND");
+  if (syncEventMaterializeResult2.cleared !== false) {
+    throw new Error("SMOKE_EVENT_SYNC_LOG_SECOND_SHOULD_REMAIN_AUTHORITY");
+  }
+  if (!syncEventLogFile || !(await fileExists(syncEventLogFile))) {
+    throw new Error("SMOKE_EVENT_SYNC_LOG_SECOND_MISSING");
+  }
+  deleteConversationBodyFileV2Sync(dir, syncEventConversationId);
+  const syncEventAuthoritySnapshot = loadConversationAuthoritySnapshotFromCurrentDirSync(dir, syncEventConversationId, null);
+  if (!syncEventAuthoritySnapshot || !Array.isArray(syncEventAuthoritySnapshot.steps) || syncEventAuthoritySnapshot.steps.length !== 3) {
+    throw new Error("SMOKE_EVENT_SYNC_AUTHORITY_REBUILD_FAILED");
+  }
+  assertRuntimeState(syncEventAuthoritySnapshot, emptyEventRuntimeState, "SMOKE_EVENT_SYNC_AUTHORITY");
+  const syncEventRematerializeResult = materializeConversationEventsToHistorySync(dir, syncEventConversationId, {
+    clearEventLog: false,
+  });
+  if (!syncEventRematerializeResult || syncEventRematerializeResult.ok !== true) {
+    throw new Error("SMOKE_EVENT_SYNC_REMATERIALIZE_FAILED");
+  }
+  if (!fs.existsSync(getConversationBodyFileV2Path(dir, syncEventConversationId) ?? "")) {
+    throw new Error("SMOKE_EVENT_SYNC_BODY_NOT_REBUILT_FROM_AUTHORITY");
+  }
+  if (!syncEventLogFile || !fs.existsSync(syncEventLogFile)) {
+    throw new Error("SMOKE_EVENT_SYNC_LOG_LOST_AFTER_REBUILD");
+  }
+
   return {
     ok: true,
     dir,
@@ -3471,190 +4802,6 @@ async function runHistorySmokeCli() {
     preservedSteps: snapshot.steps.length,
     activeConvId: afterImplicitClearIndex.activeConvId ?? null,
   };
-}
-
-async function saveConversationsV2(historyDir, payloadObj) {
-  const dir = String(historyDir ?? "");
-  if (!dir) return;
-  const convRootDir = path.join(dir, HISTORY_CONV_DIRNAME_V2);
-  const indexFile = path.join(dir, HISTORY_INDEX_FILENAME_V2);
-
-  const conversations = Array.isArray(payloadObj?.conversations) ? payloadObj.conversations : [];
-  const activeConvId =
-    payloadObj && typeof payloadObj === "object" && typeof payloadObj.activeConvId === "string"
-      ? payloadObj.activeConvId
-      : null;
-  const draftSnapshot =
-    payloadObj && typeof payloadObj === "object" && payloadObj.draftSnapshot && typeof payloadObj.draftSnapshot === "object"
-      ? payloadObj.draftSnapshot
-      : null;
-  const draftSnapshotOwnerId =
-    payloadObj && typeof payloadObj === "object" && typeof payloadObj.draftSnapshotOwnerId === "string"
-      ? payloadObj.draftSnapshotOwnerId
-      : null;
-  const draftRevision = normalizeHistoryRevisionValue(payloadObj?.draftRevision);
-  const updatedAt =
-    payloadObj && typeof payloadObj === "object" && Number.isFinite(Number(payloadObj.updatedAt))
-      ? Number(payloadObj.updatedAt)
-      : Date.now();
-
-  await fsp.mkdir(convRootDir, { recursive: true });
-
-  const indexEntries = [];
-  const expectedConvFiles = new Set();
-  let previousIndexEntries = [];
-  try {
-    const previousRaw = await fsp.readFile(indexFile, "utf-8");
-    const previousParsed = JSON.parse(String(previousRaw ?? ""));
-    previousIndexEntries = Array.isArray(previousParsed?.conversations) ? previousParsed.conversations : [];
-  } catch {
-    previousIndexEntries = [];
-  }
-  const previousIndexById = new Map();
-  for (const entry of previousIndexEntries) {
-    const entryId = String(entry?.id ?? "").trim();
-    if (!entryId) continue;
-    previousIndexById.set(entryId, entry);
-  }
-
-  for (const raw of conversations) {
-    if (!raw || typeof raw !== "object") continue;
-    const id = String(raw.id ?? "").trim();
-    if (!id) continue;
-    const safeId = normalizeConversationIdForFilename(id);
-    const snapshot = normalizeCompactSnapshot(raw.snapshot && typeof raw.snapshot === "object" ? raw.snapshot : null);
-    const stepsArr = snapshot && Array.isArray(snapshot.steps) ? snapshot.steps : [];
-    const snapshotLoaded = raw.snapshotLoaded !== false && Boolean(snapshot);
-    const nextIndexEntry = buildConversationIndexEntry(raw, previousIndexById.get(id));
-    if (nextIndexEntry) {
-      indexEntries.push(nextIndexEntry);
-    }
-
-    // 写 per-conv 文件
-    const convFile = path.join(convRootDir, `conv_${safeId}.json`);
-    if (!snapshotLoaded) {
-      if (await fileExists(convFile)) {
-        expectedConvFiles.add(convFile);
-      }
-      continue;
-    }
-    expectedConvFiles.add(convFile);
-
-    const head = snapshot && typeof snapshot === "object"
-      ? {
-          mode: snapshot.mode ?? null,
-          model: snapshot.model ?? "",
-          opMode: snapshot.opMode ?? null,
-          mainDoc: snapshot.mainDoc ?? {},
-          todoList: Array.isArray(snapshot.todoList) ? snapshot.todoList : [],
-          kbAttachedLibraryIds: Array.isArray(snapshot.kbAttachedLibraryIds)
-            ? snapshot.kbAttachedLibraryIds
-            : [],
-          ctxRefs: Array.isArray(snapshot.ctxRefs) ? snapshot.ctxRefs : [],
-          pendingArtifacts: Array.isArray(snapshot.pendingArtifacts) ? snapshot.pendingArtifacts : [],
-          projectDir: typeof snapshot.projectDir === "string" ? snapshot.projectDir : null,
-          dialogueSummaryByMode: snapshot.dialogueSummaryByMode ?? null,
-          dialogueSummaryTurnCursorByMode: snapshot.dialogueSummaryTurnCursorByMode ?? null,
-        }
-      : {
-          mode: null,
-          model: "",
-          opMode: null,
-          mainDoc: {},
-          todoList: [],
-          kbAttachedLibraryIds: [],
-          ctxRefs: [],
-          pendingArtifacts: [],
-          projectDir: null,
-          dialogueSummaryByMode: null,
-          dialogueSummaryTurnCursorByMode: null,
-        };
-
-    const convPayload = {
-      version: 2,
-      conversationId: id,
-      bodyRevision: normalizeHistoryRevisionValue(raw.bodyRevision),
-      head,
-      steps: stepsArr,
-      logs:
-        snapshot && Array.isArray(snapshot.logs)
-          ? snapshot.logs
-          : [],
-      thread:
-        snapshot && snapshot.thread && typeof snapshot.thread === "object"
-          ? snapshot.thread
-          : null,
-      turns:
-        snapshot && Array.isArray(snapshot.turns)
-          ? snapshot.turns
-          : [],
-      items:
-        snapshot && Array.isArray(snapshot.items)
-          ? snapshot.items
-          : [],
-      collabSessions:
-        snapshot && Array.isArray(snapshot.collabSessions)
-          ? snapshot.collabSessions
-          : [],
-      activeItemIds:
-        snapshot && Array.isArray(snapshot.activeItemIds)
-          ? snapshot.activeItemIds
-          : [],
-    };
-
-    const convTmp = `${convFile}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
-    await fsp.writeFile(convTmp, JSON.stringify(convPayload), "utf-8");
-    try {
-      await fsp.rename(convTmp, convFile);
-    } catch {
-      try {
-        await fsp.unlink(convFile);
-      } catch {
-        // ignore
-      }
-      await fsp.rename(convTmp, convFile);
-    }
-  }
-
-  // 清理多余的 conv_*.json
-  try {
-    const files = await fsp.readdir(convRootDir);
-    for (const name of files) {
-      if (!name.startsWith("conv_") || !name.endsWith(".json")) continue;
-      const full = path.join(convRootDir, name);
-      if (!expectedConvFiles.has(full)) {
-        try {
-          await fsp.unlink(full);
-        } catch {
-          // ignore
-        }
-      }
-    }
-  } catch {
-    // ignore
-  }
-
-  const indexPayload = {
-    version: 2,
-    updatedAt,
-    conversations: indexEntries,
-    activeConvId,
-    draftSnapshot,
-    draftSnapshotOwnerId,
-    draftRevision,
-  };
-  const indexTmp = `${indexFile}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
-  await fsp.writeFile(indexTmp, JSON.stringify(indexPayload), "utf-8");
-  try {
-    await fsp.rename(indexTmp, indexFile);
-  } catch {
-    try {
-      await fsp.unlink(indexFile);
-    } catch {
-      // ignore
-    }
-    await fsp.rename(indexTmp, indexFile);
-  }
 }
 
 function writeFileAtomicSync(file, text) {
@@ -3677,167 +4824,6 @@ function writeFileAtomicSync(file, text) {
       throw e;
     }
   }
-}
-
-function saveConversationsV2Sync(historyDir, payloadObj) {
-  const dir = String(historyDir ?? "");
-  if (!dir) return;
-  const convRootDir = path.join(dir, HISTORY_CONV_DIRNAME_V2);
-  const indexFile = path.join(dir, HISTORY_INDEX_FILENAME_V2);
-
-  const conversations = Array.isArray(payloadObj?.conversations) ? payloadObj.conversations : [];
-  const activeConvId =
-    payloadObj && typeof payloadObj === "object" && typeof payloadObj.activeConvId === "string"
-      ? payloadObj.activeConvId
-      : null;
-  const draftSnapshot =
-    payloadObj && typeof payloadObj === "object" && payloadObj.draftSnapshot && typeof payloadObj.draftSnapshot === "object"
-      ? payloadObj.draftSnapshot
-      : null;
-  const draftSnapshotOwnerId =
-    payloadObj && typeof payloadObj === "object" && typeof payloadObj.draftSnapshotOwnerId === "string"
-      ? payloadObj.draftSnapshotOwnerId
-      : null;
-  const draftRevision = normalizeHistoryRevisionValue(payloadObj?.draftRevision);
-  const updatedAt =
-    payloadObj && typeof payloadObj === "object" && Number.isFinite(Number(payloadObj.updatedAt))
-      ? Number(payloadObj.updatedAt)
-      : Date.now();
-
-  fs.mkdirSync(convRootDir, { recursive: true });
-
-  const indexEntries = [];
-  const expectedConvFiles = new Set();
-  let previousIndexEntries = [];
-  try {
-    const previousRaw = fs.readFileSync(indexFile, "utf-8");
-    const previousParsed = JSON.parse(String(previousRaw ?? ""));
-    previousIndexEntries = Array.isArray(previousParsed?.conversations) ? previousParsed.conversations : [];
-  } catch {
-    previousIndexEntries = [];
-  }
-
-  const previousIndexById = new Map();
-  for (const entry of previousIndexEntries) {
-    const entryId = String(entry?.id ?? "").trim();
-    if (!entryId) continue;
-    previousIndexById.set(entryId, entry);
-  }
-
-  for (const raw of conversations) {
-    if (!raw || typeof raw !== "object") continue;
-    const id = String(raw.id ?? "").trim();
-    if (!id) continue;
-
-    const safeId = normalizeConversationIdForFilename(id);
-    const snapshot = normalizeCompactSnapshot(raw.snapshot && typeof raw.snapshot === "object" ? raw.snapshot : null);
-    const stepsArr = snapshot && Array.isArray(snapshot.steps) ? snapshot.steps : [];
-    const snapshotLoaded = raw.snapshotLoaded !== false && Boolean(snapshot);
-    const nextIndexEntry = buildConversationIndexEntry(raw, previousIndexById.get(id));
-    if (nextIndexEntry) {
-      indexEntries.push(nextIndexEntry);
-    }
-
-    const convFile = path.join(convRootDir, `conv_${safeId}.json`);
-    if (!snapshotLoaded) {
-      if (fs.existsSync(convFile)) {
-        expectedConvFiles.add(convFile);
-      }
-      continue;
-    }
-    expectedConvFiles.add(convFile);
-
-    const head = snapshot && typeof snapshot === "object"
-      ? {
-          mode: snapshot.mode ?? null,
-          model: snapshot.model ?? "",
-          opMode: snapshot.opMode ?? null,
-          mainDoc: snapshot.mainDoc ?? {},
-          todoList: Array.isArray(snapshot.todoList) ? snapshot.todoList : [],
-          kbAttachedLibraryIds: Array.isArray(snapshot.kbAttachedLibraryIds)
-            ? snapshot.kbAttachedLibraryIds
-            : [],
-          ctxRefs: Array.isArray(snapshot.ctxRefs) ? snapshot.ctxRefs : [],
-          pendingArtifacts: Array.isArray(snapshot.pendingArtifacts) ? snapshot.pendingArtifacts : [],
-          projectDir: typeof snapshot.projectDir === "string" ? snapshot.projectDir : null,
-          dialogueSummaryByMode: snapshot.dialogueSummaryByMode ?? null,
-          dialogueSummaryTurnCursorByMode: snapshot.dialogueSummaryTurnCursorByMode ?? null,
-        }
-      : {
-          mode: null,
-          model: "",
-          opMode: null,
-          mainDoc: {},
-          todoList: [],
-          kbAttachedLibraryIds: [],
-          ctxRefs: [],
-          pendingArtifacts: [],
-          projectDir: null,
-          dialogueSummaryByMode: null,
-          dialogueSummaryTurnCursorByMode: null,
-        };
-
-    const convPayload = {
-      version: 2,
-      conversationId: id,
-      bodyRevision: normalizeHistoryRevisionValue(raw.bodyRevision),
-      head,
-      steps: stepsArr,
-      logs:
-        snapshot && Array.isArray(snapshot.logs)
-          ? snapshot.logs
-          : [],
-      thread:
-        snapshot && snapshot.thread && typeof snapshot.thread === "object"
-          ? snapshot.thread
-          : null,
-      turns:
-        snapshot && Array.isArray(snapshot.turns)
-          ? snapshot.turns
-          : [],
-      items:
-        snapshot && Array.isArray(snapshot.items)
-          ? snapshot.items
-          : [],
-      collabSessions:
-        snapshot && Array.isArray(snapshot.collabSessions)
-          ? snapshot.collabSessions
-          : [],
-      activeItemIds:
-        snapshot && Array.isArray(snapshot.activeItemIds)
-          ? snapshot.activeItemIds
-          : [],
-    };
-
-    writeFileAtomicSync(convFile, JSON.stringify(convPayload));
-  }
-
-  try {
-    const files = fs.readdirSync(convRootDir);
-    for (const name of files) {
-      if (!name.startsWith("conv_") || !name.endsWith(".json")) continue;
-      const full = path.join(convRootDir, name);
-      if (expectedConvFiles.has(full)) continue;
-      try {
-        fs.unlinkSync(full);
-      } catch {
-        // ignore
-      }
-    }
-  } catch {
-    // ignore
-  }
-
-  const indexPayload = {
-    version: 2,
-    updatedAt,
-    conversations: indexEntries,
-    activeConvId,
-    draftSnapshot,
-    draftSnapshotOwnerId,
-    draftRevision,
-  };
-  writeFileAtomicSync(indexFile, JSON.stringify(indexPayload));
 }
 
 async function cleanupHistoryTmpFiles(historyDir) {
@@ -5382,7 +6368,7 @@ function registerIpc() {
             updatedAt: Number(parsed?.updatedAt ?? 0) || 0,
             conversations: list,
             activeConvId: typeof parsed?.activeConvId === "string" ? parsed.activeConvId : null,
-            draftSnapshot: parsed?.draftSnapshot && typeof parsed.draftSnapshot === "object" ? parsed.draftSnapshot : null,
+            draftSnapshot: normalizeHistoryDraftSnapshot(parsed?.draftSnapshot),
             draftSnapshotOwnerId:
               typeof parsed?.draftSnapshotOwnerId === "string" ? parsed.draftSnapshotOwnerId : null,
             draftRevision: normalizeHistoryRevisionValue(parsed?.draftRevision),
@@ -5402,7 +6388,28 @@ function registerIpc() {
         return sorted[0] || null;
       };
 
-      const picked = pickBestIndex(parsedIndexes);
+      let picked = pickBestIndex(parsedIndexes);
+      if (picked?.activeConvId && picked?.file) {
+        await materializeConversationEventsToHistory(path.dirname(picked.file), picked.activeConvId, {
+          clearEventLog: false,
+        }).catch(() => null);
+        try {
+          const refreshedRaw = await fsp.readFile(picked.file, "utf-8");
+          const refreshed = JSON.parse(String(refreshedRaw ?? ""));
+          picked = {
+            ...picked,
+            updatedAt: Number(refreshed?.updatedAt ?? picked.updatedAt ?? 0) || 0,
+            conversations: Array.isArray(refreshed?.conversations) ? refreshed.conversations : [],
+            activeConvId: typeof refreshed?.activeConvId === "string" ? refreshed.activeConvId : null,
+            draftSnapshot: normalizeHistoryDraftSnapshot(refreshed?.draftSnapshot),
+            draftSnapshotOwnerId:
+              typeof refreshed?.draftSnapshotOwnerId === "string" ? refreshed.draftSnapshotOwnerId : null,
+            draftRevision: normalizeHistoryRevisionValue(refreshed?.draftRevision),
+          };
+        } catch {
+          // ignore refresh failure and keep original picked payload
+        }
+      }
       if (picked) {
         return {
           ok: true,
@@ -5439,7 +6446,7 @@ function registerIpc() {
       return {
         ok: true,
         conversations: indexConversations,
-        draftSnapshot: parsed?.draftSnapshot && typeof parsed.draftSnapshot === "object" ? parsed.draftSnapshot : null,
+        draftSnapshot: normalizeHistoryDraftSnapshot(parsed?.draftSnapshot),
         draftSnapshotOwnerId: typeof parsed?.draftSnapshotOwnerId === "string" ? parsed.draftSnapshotOwnerId : null,
         draftRevision: normalizeHistoryRevisionValue(parsed?.draftRevision),
         activeConvId: typeof parsed?.activeConvId === "string" ? parsed.activeConvId : null,
@@ -5459,12 +6466,19 @@ function registerIpc() {
       if (!convId) return { ok: false, error: "MISSING_CONVERSATION_ID" };
       const includeSteps = p.includeSteps === true;
       const { dir, used } = await resolveHistoryFileForRead();
+      await materializeConversationEventsToHistory(dir, convId, {
+        clearEventLog: false,
+      }).catch(() => null);
 
       let snapshot = null;
       const v2Payload = await tryLoadConversationFromV2(dir, convId);
       let bodyRevision = normalizeHistoryRevisionValue(v2Payload?.bodyRevision);
-      if (v2Payload) {
-        snapshot = buildSnapshotFromV2Payload(v2Payload, { includeSteps });
+      snapshot = await loadConversationAuthoritySnapshotFromCurrentDir(dir, convId, null);
+      if (snapshot && includeSteps !== true) {
+        snapshot = {
+          ...snapshot,
+          steps: [],
+        };
       }
 
       const needV1Fallback =
@@ -5533,6 +6547,10 @@ function registerIpc() {
 
       let steps = [];
 
+      await materializeConversationEventsToHistory(dir, convId, {
+        clearEventLog: false,
+      }).catch(() => null);
+
       if (await fileExists(convFile)) {
         const raw = await fsp.readFile(convFile, "utf-8");
         const parsed = JSON.parse(String(raw ?? ""));
@@ -5592,194 +6610,6 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle("history.loadConversations", async () => {
-    try {
-      await recoverHistoryIfNeeded();
-      const { primary } = historyCandidateDirs();
-      const unique = listHistoryReadCandidates();
-
-      const parsedList = [];
-      let parseErr = null;
-      for (const c of unique) {
-        try {
-          const raw = await fsp.readFile(c.file, "utf-8");
-          const parsed = JSON.parse(String(raw ?? ""));
-          const list = Array.isArray(parsed?.conversations) ? parsed.conversations : Array.isArray(parsed) ? parsed : [];
-          const draftSnapshot = parsed && typeof parsed === "object" ? (parsed.draftSnapshot ?? null) : null;
-          const draftSnapshotOwnerId = parsed && typeof parsed === "object" ? (parsed.draftSnapshotOwnerId ?? null) : null;
-          const activeConvId = parsed && typeof parsed === "object" ? (parsed.activeConvId ?? null) : null;
-          const draftRevision = parsed && typeof parsed === "object" ? normalizeHistoryRevisionValue(parsed.draftRevision) : 0;
-          const updatedAt = parsed && typeof parsed === "object" ? Number(parsed.updatedAt ?? 0) || 0 : 0;
-          parsedList.push({
-            ...c,
-            raw,
-            conversations: Array.isArray(list) ? list : [],
-            draftSnapshot: draftSnapshot && typeof draftSnapshot === "object" ? draftSnapshot : null,
-            draftSnapshotOwnerId: typeof draftSnapshotOwnerId === "string" ? draftSnapshotOwnerId : null,
-            draftRevision,
-            activeConvId: typeof activeConvId === "string" ? activeConvId : null,
-            updatedAt,
-          });
-        } catch (e) {
-          const msg = String(e?.code ?? e?.message ?? e);
-          if (!msg.includes("ENOENT")) parseErr = String(e?.message ?? e);
-        }
-      }
-
-      const parsedTmpList = [];
-      for (const c of listHistoryTmpReadCandidates()) {
-        try {
-          const raw = await fsp.readFile(c.file, "utf-8");
-          const parsed = JSON.parse(String(raw ?? ""));
-          const list = Array.isArray(parsed?.conversations) ? parsed.conversations : Array.isArray(parsed) ? parsed : [];
-          const draftSnapshot = parsed && typeof parsed === "object" ? (parsed.draftSnapshot ?? null) : null;
-          const draftSnapshotOwnerId = parsed && typeof parsed === "object" ? (parsed.draftSnapshotOwnerId ?? null) : null;
-          const activeConvId = parsed && typeof parsed === "object" ? (parsed.activeConvId ?? null) : null;
-          const draftRevision = parsed && typeof parsed === "object" ? normalizeHistoryRevisionValue(parsed.draftRevision) : 0;
-          const updatedAt = parsed && typeof parsed === "object" ? Number(parsed.updatedAt ?? 0) || 0 : 0;
-          parsedTmpList.push({
-            ...c,
-            raw,
-            conversations: Array.isArray(list) ? list : [],
-            draftSnapshot: draftSnapshot && typeof draftSnapshot === "object" ? draftSnapshot : null,
-            draftSnapshotOwnerId: typeof draftSnapshotOwnerId === "string" ? draftSnapshotOwnerId : null,
-            draftRevision,
-            activeConvId: typeof activeConvId === "string" ? activeConvId : null,
-            updatedAt,
-          });
-        } catch {
-          // tmp 文件大量是不完整写入，只保留能正常 parse 的候选
-        }
-      }
-
-      if (parsedList.length === 0) {
-        if (parseErr) return { ok: false, error: "READ_OR_PARSE_FAILED", detail: parseErr };
-        const fallbackRead = await resolveHistoryFileForRead().catch(() => null);
-        return {
-          ok: true,
-          conversations: [],
-          draftSnapshot: null,
-          draftRevision: 0,
-          activeConvId: null,
-          used: fallbackRead?.used ?? "primary",
-          file: fallbackRead?.file ?? null,
-        };
-      }
-
-      // 多路径并存时，优先选择 primary/fallback 主文件；主文件为空或不存在时才回退到 .bak/legacy。
-      const pickBestByFreshness = (list) => {
-        if (!Array.isArray(list) || list.length === 0) return null;
-        const sorted = [...list].sort((a, b) => {
-          const t1 = Number(a.updatedAt ?? 0) || 0;
-          const t2 = Number(b.updatedAt ?? 0) || 0;
-          return t2 - t1;
-        });
-        return sorted.find((x) => Array.isArray(x.conversations) && x.conversations.length > 0) || sorted[0] || null;
-      };
-
-      const mainCandidates = parsedList.filter((x) => x.used === "primary" || x.used === "fallback");
-      let picked = pickBestByFreshness(mainCandidates);
-      if (!picked) {
-        picked = pickBestByFreshness(parsedList);
-      }
-      if (!picked) {
-        return {
-          ok: true,
-          conversations: [],
-          draftSnapshot: null,
-          draftRevision: 0,
-          activeConvId: null,
-          used: "primary",
-          file: null,
-        };
-      }
-
-      const tmpRecovered = maybeRecoverConversationListFromTmp(picked, parsedTmpList);
-      if (tmpRecovered.recovered && tmpRecovered.picked) {
-        picked = tmpRecovered.picked;
-      }
-
-      const pickedDir = (() => {
-        try {
-          return picked.file ? path.dirname(String(picked.file)) : null;
-        } catch {
-          return null;
-        }
-      })();
-
-      let repairedConversations = Array.isArray(picked.conversations) ? picked.conversations : [];
-      let repairedAny = false;
-      if (pickedDir && repairedConversations.length > 0) {
-        const next = [];
-        for (const conv of repairedConversations) {
-          const convId = String(conv?.id ?? "").trim();
-          if (!convId) {
-            next.push(conv);
-            continue;
-          }
-          const v2Payload = await tryLoadConversationFromV2(pickedDir, convId);
-          const repaired = repairConversationSnapshotFromV2(conv, v2Payload);
-          repairedAny = repairedAny || repaired.changed;
-          next.push(repaired.conversation);
-        }
-        repairedConversations = next;
-      }
-
-      // 自愈：若最佳来源不是 primary，则回写一份到 primary，避免下次继续读到旧文件。
-      if (primary) {
-        const primaryFile = path.join(primary, HISTORY_FILENAME);
-        if (picked.file !== primaryFile) {
-          try {
-            await fsp.mkdir(primary, { recursive: true });
-            await fsp.writeFile(primaryFile, String(picked.raw ?? ""), "utf-8");
-          } catch {
-            // ignore
-          }
-        }
-        if (repairedAny || tmpRecovered.recovered) {
-          try {
-            await fsp.mkdir(primary, { recursive: true });
-            await fsp.writeFile(
-              primaryFile,
-              JSON.stringify({
-                version: 1,
-                updatedAt: Date.now(),
-                conversations: repairedConversations,
-                draftSnapshot: picked.draftSnapshot,
-                draftSnapshotOwnerId: picked.draftSnapshotOwnerId,
-                draftRevision: picked.draftRevision ?? 0,
-                activeConvId: picked.activeConvId,
-              }),
-              "utf-8",
-            );
-          } catch {
-            // ignore
-          }
-        }
-      }
-
-      return {
-        ok: true,
-        conversations: repairedConversations,
-        draftSnapshot: picked.draftSnapshot,
-        draftSnapshotOwnerId: picked.draftSnapshotOwnerId,
-        draftRevision: picked.draftRevision ?? 0,
-        activeConvId: picked.activeConvId,
-        used: picked.used,
-        file: picked.file,
-        ...(tmpRecovered.recovered
-          ? {
-              recoveredFromTmp: true,
-              recoverySourceFile: tmpRecovered.recoverySourceFile,
-              recoverySourceUsed: tmpRecovered.recoverySourceUsed,
-            }
-          : {}),
-      };
-    } catch (e) {
-      return { ok: false, error: String(e?.message ?? e) };
-    }
-  });
-
   ipcMain.handle("history.recoverHistoryIfNeeded", async () => {
     try {
       return await recoverHistoryIfNeeded();
@@ -5826,6 +6656,129 @@ function registerIpc() {
       return { ok: true, used, file };
     } catch (e) {
       return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
+  ipcMain.handle("history.appendEvents", async (_event, batch) => {
+    try {
+      await recoverHistoryIfNeeded();
+      const { dir, file, used } = await resolveHistoryFileForWrite();
+      const result = await appendConversationEventBatchToWriter(dir, batch);
+      return { ok: true, used, file, ...result };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
+  ipcMain.on("history.appendEventsSync", (event, batch) => {
+    try {
+      const { primary, fallback } = historyCandidateDirs();
+      const dir = primary || fallback;
+      const used = primary ? "primary" : "fallback";
+      if (!dir) {
+        event.returnValue = { ok: false, error: "NO_HISTORY_DIR" };
+        return;
+      }
+      const file = path.join(dir, HISTORY_FILENAME);
+      const result = appendConversationEventBatchToWriterSync(dir, batch);
+      event.returnValue = { ok: true, used, file, ...result };
+    } catch (e) {
+      event.returnValue = { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
+  ipcMain.handle("history.materializeConversation", async (_event, conversationId) => {
+    try {
+      await recoverHistoryIfNeeded();
+      const convId = String(
+        typeof conversationId === "object" && conversationId
+          ? conversationId.conversationId
+          : conversationId,
+      ).trim();
+      if (!convId) return { ok: false, error: "MISSING_CONVERSATION_ID" };
+      const { dir, file, used } = await resolveHistoryFileForWrite();
+      const result = await materializeConversationEventsToHistory(dir, convId, {
+        clearEventLog: false,
+      });
+      return { ok: true, used, file, ...result };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
+  ipcMain.on("history.materializeConversationSync", (event, conversationId) => {
+    try {
+      const { primary, fallback } = historyCandidateDirs();
+      const dir = primary || fallback;
+      const used = primary ? "primary" : "fallback";
+      if (!dir) {
+        event.returnValue = { ok: false, error: "NO_HISTORY_DIR" };
+        return;
+      }
+      const parsedConversationId =
+        typeof conversationId === "string"
+          ? (() => {
+              try {
+                return JSON.parse(conversationId);
+              } catch {
+                return conversationId;
+              }
+            })()
+          : conversationId;
+      const convId = String(
+        typeof parsedConversationId === "object" && parsedConversationId
+          ? parsedConversationId.conversationId
+          : parsedConversationId,
+      ).trim();
+      if (!convId) {
+        event.returnValue = { ok: false, error: "MISSING_CONVERSATION_ID" };
+        return;
+      }
+      const file = path.join(dir, HISTORY_FILENAME);
+      const result = materializeConversationEventsToHistorySync(dir, convId, {
+        clearEventLog: false,
+      });
+      event.returnValue = { ok: true, used, file, ...result };
+    } catch (e) {
+      event.returnValue = { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
+  ipcMain.handle("history.flushWriter", async (_event, conversationId) => {
+    try {
+      const convId = String(
+        typeof conversationId === "object" && conversationId
+          ? conversationId.conversationId
+          : conversationId ?? "",
+      ).trim();
+      const result = await flushConversationEventWriter(convId || null);
+      return { ok: true, ...result };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
+  ipcMain.on("history.flushWriterSync", (event, conversationId) => {
+    try {
+      const parsedConversationId =
+        typeof conversationId === "string"
+          ? (() => {
+              try {
+                return JSON.parse(conversationId);
+              } catch {
+                return conversationId;
+              }
+            })()
+          : conversationId;
+      const convId = String(
+        typeof parsedConversationId === "object" && parsedConversationId
+          ? parsedConversationId.conversationId
+          : parsedConversationId ?? "",
+      ).trim();
+      const result = flushConversationEventWriterSync(convId || null);
+      event.returnValue = { ok: true, ...result };
+    } catch (e) {
+      event.returnValue = { ok: false, error: String(e?.message ?? e) };
     }
   });
 
@@ -5921,88 +6874,6 @@ function registerIpc() {
     try {
       await clearHistoryPendingFiles();
       return { ok: true };
-    } catch (e) {
-      return { ok: false, error: String(e?.message ?? e) };
-    }
-  });
-
-  // 同步写盘：仅在 beforeunload/卸载等关键路径使用
-  ipcMain.on("history.saveConversationsSync", (event, payload) => {
-    try {
-      recordMainEvent("history.legacy_api.used", {
-        api: "saveConversationsSync",
-      });
-      const { primary, fallback } = historyCandidateDirs();
-      const dir = primary || fallback;
-      const used = primary ? "primary" : "fallback";
-      if (!dir) {
-        event.returnValue = { ok: false, error: "NO_HISTORY_DIR" };
-        return;
-      }
-      const file = path.join(dir, HISTORY_FILENAME);
-      const rawObj = typeof payload === "string" ? JSON.parse(String(payload ?? "null")) : (payload ?? {});
-      const previousPayload = readHistoryPayloadFileSync(file);
-      const translated = translateLegacyPayloadToHistoryOps(rawObj, previousPayload);
-      recordMainEvent("history.save.sync.start", {
-        file,
-        opCount: translated.ops.length,
-        updatedAt: translated.updatedAt,
-      });
-      const bak = file + HISTORY_BAK_SUFFIX;
-      try {
-        fs.copyFileSync(file, bak);
-      } catch {
-        // ignore
-      }
-      applyHistoryOperationsToDirSync(dir, translated, {
-        writePending: true,
-        clearPending: true,
-      });
-      event.returnValue = { ok: true, file, used };
-    } catch (e) {
-      event.returnValue = { ok: false, error: String(e?.message ?? e) };
-    }
-  });
-
-  ipcMain.handle("history.saveConversations", async (_event, payload) => {
-    try {
-      recordMainEvent("history.legacy_api.used", {
-        api: "saveConversations",
-      });
-      const { dir, file, used } = await resolveHistoryFileForWrite();
-      const rawObj = typeof payload === "string" ? JSON.parse(String(payload ?? "null")) : (payload ?? {});
-      const previousPayload = await readHistoryPayloadFile(file);
-      const translated = translateLegacyPayloadToHistoryOps(rawObj, previousPayload);
-      recordMainEvent("history.save.start", {
-        file,
-        opCount: translated.ops.length,
-        updatedAt: translated.updatedAt,
-      });
-      // 最小兜底：写入前备份上一版，避免写入中断导致“历史全没了”。
-      // 备份失败不应阻塞写入（例如首次写入/文件不存在）。
-      const bak = file + HISTORY_BAK_SUFFIX;
-      try {
-        await fsp.copyFile(file, bak);
-      } catch {
-        // ignore
-      }
-      await applyHistoryOperationsToDir(dir, translated, {
-        writePending: true,
-        clearPending: true,
-      });
-      void cleanupHistoryTmpFiles(dir)
-        .then((result) => {
-          if ((result?.removed ?? 0) > 0) {
-            recordMainEvent("history.tmp.cleanup", {
-              scope: "main",
-              removed: result.removed,
-              bytes: result.bytes,
-            });
-          }
-        })
-        .catch(() => {});
-
-      return { ok: true, used, file };
     } catch (e) {
       return { ok: false, error: String(e?.message ?? e) };
     }

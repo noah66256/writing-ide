@@ -128,7 +128,55 @@ declare global {
       };
       history?: {
         applyOperations?: (batch: any) => Promise<{ ok: boolean; used?: "primary" | "fallback"; file?: string; error?: string }>;
+        appendEvents?: (batch: any) => Promise<{
+          ok: boolean;
+          used?: "primary" | "fallback";
+          file?: string;
+          conversationId?: string;
+          eventId?: string;
+          appended?: boolean;
+          error?: string;
+        }>;
+        appendEventsSync?: (batch: any) => {
+          ok: boolean;
+          used?: "primary" | "fallback";
+          file?: string;
+          conversationId?: string;
+          eventId?: string;
+          appended?: boolean;
+          error?: string;
+        };
         applyOperationsSync?: (batch: any) => { ok: boolean; used?: "primary" | "fallback"; file?: string; error?: string };
+        materializeConversation?: (conversationId: string) => Promise<{
+          ok: boolean;
+          used?: "primary" | "fallback";
+          file?: string;
+          conversationId?: string;
+          materialized?: boolean;
+          eventCount?: number;
+          cleared?: boolean;
+          error?: string;
+        }>;
+        materializeConversationSync?: (conversationId: string) => {
+          ok: boolean;
+          used?: "primary" | "fallback";
+          file?: string;
+          conversationId?: string;
+          materialized?: boolean;
+          eventCount?: number;
+          cleared?: boolean;
+          error?: string;
+        };
+        flushWriter?: (conversationId?: string | null) => Promise<{
+          ok: boolean;
+          conversationId?: string | null;
+          error?: string;
+        }>;
+        flushWriterSync?: (conversationId?: string | null) => {
+          ok: boolean;
+          conversationId?: string | null;
+          error?: string;
+        };
         getInfo: () => Promise<{ ok: boolean; primaryDir?: string | null; fallbackDir?: string | null; filename?: string; error?: string }>;
         recoverHistoryIfNeeded?: () => Promise<{
           ok: boolean;
@@ -161,21 +209,6 @@ declare global {
           error?: string;
           detail?: string;
         }>;
-        loadConversations: () => Promise<{
-          ok: boolean;
-          conversations?: any[];
-          draftSnapshot?: any | null;
-          draftRevision?: number;
-          activeConvId?: string | null;
-          used?: "primary" | "fallback";
-          file?: string;
-          error?: string;
-          detail?: string;
-        }>;
-        /** Legacy compat shell. New renderer hot paths should use applyOperations*. */
-        saveConversations: (payload: any) => Promise<{ ok: boolean; used?: "primary" | "fallback"; file?: string; error?: string }>;
-        /** Legacy compat shell. New renderer hot paths should use applyOperationsSync. */
-        saveConversationsSync?: (payload: any) => { ok: boolean; used?: "primary" | "fallback"; file?: string; error?: string };
         loadConversationSegment?: (params: {
           conversationId: string;
           beforeStepId?: string;

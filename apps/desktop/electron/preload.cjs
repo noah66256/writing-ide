@@ -93,10 +93,49 @@ contextBridge.exposeInMainWorld("desktop", {
     applyOperations(batch) {
       return ipcRenderer.invoke("history.applyOperations", batch);
     },
+    appendEvents(batch) {
+      return ipcRenderer.invoke("history.appendEvents", batch);
+    },
+    appendEventsSync(batch) {
+      try {
+        const text = typeof batch === "string" ? batch : JSON.stringify(batch ?? null);
+        return ipcRenderer.sendSync("history.appendEventsSync", text);
+      } catch (e) {
+        return { ok: false, error: String(e?.message ?? e) };
+      }
+    },
     applyOperationsSync(batch) {
       try {
         const text = typeof batch === "string" ? batch : JSON.stringify(batch ?? null);
         return ipcRenderer.sendSync("history.applyOperationsSync", text);
+      } catch (e) {
+        return { ok: false, error: String(e?.message ?? e) };
+      }
+    },
+    materializeConversation(conversationId) {
+      return ipcRenderer.invoke("history.materializeConversation", conversationId);
+    },
+    materializeConversationSync(conversationId) {
+      try {
+        const text =
+          typeof conversationId === "string"
+            ? JSON.stringify({ conversationId })
+            : JSON.stringify(conversationId ?? null);
+        return ipcRenderer.sendSync("history.materializeConversationSync", text);
+      } catch (e) {
+        return { ok: false, error: String(e?.message ?? e) };
+      }
+    },
+    flushWriter(conversationId) {
+      return ipcRenderer.invoke("history.flushWriter", conversationId);
+    },
+    flushWriterSync(conversationId) {
+      try {
+        const text =
+          typeof conversationId === "string"
+            ? JSON.stringify({ conversationId })
+            : JSON.stringify(conversationId ?? null);
+        return ipcRenderer.sendSync("history.flushWriterSync", text);
       } catch (e) {
         return { ok: false, error: String(e?.message ?? e) };
       }
@@ -109,23 +148,6 @@ contextBridge.exposeInMainWorld("desktop", {
     },
     readConversationSnapshot(params) {
       return ipcRenderer.invoke("history.readConversationSnapshot", params);
-    },
-    loadConversations() {
-      return ipcRenderer.invoke("history.loadConversations");
-    },
-    // Legacy compat shell. New hot paths should use applyOperations*.
-    saveConversations(payload) {
-      return ipcRenderer.invoke("history.saveConversations", payload);
-    },
-    // Legacy compat shell. New hot paths should use applyOperationsSync.
-    saveConversationsSync(payload) {
-      try {
-        const text = typeof payload === "string" ? payload : JSON.stringify(payload ?? null);
-        // sendSync 返回值结构与 async handler 一致 { ok, error? }
-        return ipcRenderer.sendSync("history.saveConversationsSync", text);
-      } catch (e) {
-        return { ok: false, error: String(e?.message ?? e) };
-      }
     },
     loadPendingConversations() {
       return ipcRenderer.invoke("history.loadPendingConversations");

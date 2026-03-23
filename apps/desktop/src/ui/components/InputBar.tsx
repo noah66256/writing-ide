@@ -904,7 +904,9 @@ export function InputBar({
     const convStore = useConversationStore.getState();
     convStore.setDraftSnapshot(snapshot);
     if (convStore.activeConvId) {
-      convStore.updateConversation(convStore.activeConvId, { snapshot });
+      void convStore.persistConversationSnapshotViaEvents(convStore.activeConvId, snapshot, {
+        source: "manual",
+      }).catch(() => void 0);
     }
   }, [setModel]);
 

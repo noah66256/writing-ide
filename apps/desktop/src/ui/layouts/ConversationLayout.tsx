@@ -43,7 +43,10 @@ export function ConversationLayout() {
         if (!hasHistoryState) return;
         // 优先同步写盘，确保 beforeunload 期间历史能真正落到磁盘；
         // 若同步渠道不可用，则退回异步 flush。
-        if (mode === "shutdown" && (window as any).desktop?.history?.saveConversationsSync) {
+        if (
+          mode === "shutdown" &&
+          (window as any).desktop?.history?.materializeConversationSync
+        ) {
           store.flushDraftSnapshotNowSync();
         } else {
           void store.flushDraftSnapshotNow().catch(() => void 0);

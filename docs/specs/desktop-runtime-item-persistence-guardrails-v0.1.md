@@ -2,7 +2,38 @@
 
 > 目标：在 **不改 Gateway 合同**、**不把 ChatArea 窗口化绑进这一期**、**不推翻最近几轮 history/runtime 恢复修复** 的前提下，只收口 Desktop 侧 `runtime items / turns / read.result.content` 的持久化合同，切断“运行中 autosave + 重启恢复 + 单会话落盘”继续把前端慢性撑炸的链路。
 
+> 文档状态说明（2026-03-23）：
+> 本文最初是设计稿；当前实现已经落下大部分 guardrail。以下“实施卡片 / 实施状态”与当前工作树保持同步；后面的 diff 草案保留作设计缘由参考，若与代码细节不一致，以源码现状为准。
+
 ---
+
+## 实施卡片
+
+- spec：`docs/specs/desktop-runtime-item-persistence-guardrails-v0.1.md`
+- 目标：把 runtime-item 持久化从“fat runtime 原样入盘”收口到“compact runtime snapshot + preview-only tool result + logical dedupe + id remap”，并与 event-log 持久化链对齐。
+- 范围：`apps/desktop/src/state/conversationStore.ts`、`apps/desktop/src/state/runStore.ts`、`apps/desktop/src/agent/wsTransport.ts`、`packages/shared/src/runtime/toolResultEnvelope.ts`
+- 当前状态：working tree（2026-03-23）
+- 仍未做：artifact pointer/sidecar、ChatArea 窗口化，以及 derived body cache 的进一步瘦身
+
+## 实施状态
+
+| Spec 条目 | 文件/符号 | 状态 | 说明 |
+|------|-----------|------|------|
+| `buildCurrentSnapshot()` 不再为历史持久化深拷贝 fat runtime | `conversationStore.ts` / `buildCurrentSnapshot()` / `slimSnapshotForHistory()` | 已完成 | 已移除整包 `JSON.parse(JSON.stringify(...))`；保存前统一走 slim/compact |
+| active conversation / draft / pending 统一走 compact runtime snapshot | `conversationStore.ts` / `setDraftSnapshot()` / `persistConversationSnapshotViaEvents()` / `flushDraftSnapshotNow*()` | 已完成 | draft lane、event lane、fallback legacy body write 都以 slim snapshot 为输入 |
+| runtime overlay 已进入 event authority | `conversationStore.ts` / `buildHistoryEventBatchFromSnapshot()`；`ChatArea.tsx` / `buildConversationHistoryEventPayload()`；`main.cjs` / `normalizeHistoryEventRuntimeState()` | 已完成 | `logs / turns / items / collabSessions / activeItemIds / transcript` 已不再只靠 body 兜底，而是进入 `runtimeState` 事件模型 |
+| `read.result.content` 历史持久化改成 preview-only | `packages/shared/src/runtime/toolResultEnvelope.ts` / `slimToolResultEnvelopeForHistory()` | 已完成 | `read` 结果历史只保留 `path/totalChars/truncated/proposalSources/contentPreview` 等预览字段 |
+| shadow tool item 与 authoritative item 持久化前去重 | `conversationStore.ts` / `compactRuntimeItemsForHistory()` | 已完成 | `toolCall` 按 `toolCallId` 作为逻辑键；shadow 只兜底，不双份落盘 |
+| `turn.itemIds` / `activeItemIds` 跟随 dedupe 重写 | `conversationStore.ts` / `remapHistoryItemIds()` | 已完成 | 去重后会统一 remap 并去重，避免 reload 指向不存在 item |
+| shadow item 具备真实 `toolCallId` | `runStore.ts` / `ToolBlockStep.toolCallId` / `buildShadowItemFromToolStep()`；`wsTransport.ts` | 已完成 | 网关工具调用、MCP、子 agent 工具流都在本地 step 上透传真实 `toolCallId` |
+| `proposal/undo/fileChange`、`waiting-user`、`projectDir`、`taskState` 语义保留 | `conversationStore.ts` / `slimRuntimeItemForHistory()` / `slimRuntimeThreadForHistory()` | 已完成 | 当前 slim 合同保留这些恢复正确性字段 |
+| artifact pointer / sidecar | - | 未开始 | 本期仍坚持保守收口，不新增独立 artifact 存储层 |
+
+## 剩余未完成
+
+1. `artifact pointer / sidecar` 还没开始，历史工具卡如果将来要“点开重看全文”，还需要单开一轮存储设计。
+2. ChatArea 窗口化还没做，但这是明确排除项，不属于本轮 runtime persistence guardrail 的阻塞项。
+3. `items / turns / thread` 仍保留在 materialized body 这个 derived cache 里；不过 authority 已经迁到 event log，这一项现在属于后续继续瘦身，而不是本轮阻塞。
 
 ## 1. 目标
 
@@ -22,7 +53,7 @@
 
 1. 启动期 `history index-first + active on-demand` 已经落地
 2. 项目 `tree-first + ensureLoaded(path)` 已经落地
-3. `read.result.content` 持久化合同、runtime item 去重、artifact pointer 仍是 **deferred**
+3. 当时 `read.result.content` 持久化合同、runtime item 去重、artifact pointer 仍是 **deferred**
 4. ChatArea 长会话窗口化要 **单开 spec**
 
 也就是说，P0 已经切掉了“启动即全量 hydrate 全历史 + 打开项目即全量读正文”两条主链，但还剩一条没有真正切断：
@@ -36,7 +67,7 @@
 
 ---
 
-## 3. 当前事实（基于当前工作树 / `HEAD 5b8e1ab`）
+## 3. 当前事实（基于当前工作树 / 2026-03-23）
 
 ## 3.1 现在最大的头仍然是 `snapshot.items`
 
@@ -57,42 +88,38 @@
 - 当前后续风险并不在 `steps`
 - 当前后续风险主要在 **`items` 的大 payload + 双份保留**
 
-## 3.2 现有保存链仍会把 fat runtime 一路带下去
+## 3.2 当前保存链已经显著变轻，但 materialized body 仍保留 compact runtime overlay
 
 关键代码点：
 
-- `apps/desktop/src/state/conversationStore.ts:619` `buildCurrentSnapshot()`
-- `apps/desktop/src/state/conversationStore.ts:783` `schedulePersistToDisk()`
-- `apps/desktop/src/state/conversationStore.ts:1115` `updateConversation()`
-- `apps/desktop/src/state/conversationStore.ts:1185` `setDraftSnapshot()`
-- `apps/desktop/src/state/conversationStore.ts:1205` `flushDraftSnapshotNow()`
-- `apps/desktop/src/ui/components/ChatArea.tsx:1267` autosave effect
+- `apps/desktop/src/state/conversationStore.ts` `buildCurrentSnapshot()`
+- `apps/desktop/src/state/conversationStore.ts` `slimSnapshotForHistory()`
+- `apps/desktop/src/state/conversationStore.ts` `persistConversationSnapshotViaEvents()`
+- `apps/desktop/src/state/conversationStore.ts` `flushDraftSnapshotNow*()`
+- `apps/desktop/src/ui/components/ChatArea.tsx` autosave / run end materialize
 
 当前事实：
 
-1. `buildCurrentSnapshot()` 仍对 `thread / turns / items` 做 `JSON.parse(JSON.stringify(...))`
-2. `setDraftSnapshot / updateConversation / flushDraftSnapshotNow` 都会复用这条路径
-3. `schedulePersistToDisk()` 会同时写：
-   - pending crash-safe payload
-   - 主历史 payload
-4. 也就是说，不只是磁盘文件胖；**renderer 在保存前就已经先做了一轮 fat clone**
+1. `buildCurrentSnapshot()` 已不再对 `thread / turns / items` 做整包 JSON 深拷贝，而是保留必要浅拷贝后统一走 `slimSnapshotForHistory()`
+2. autosave 热路径已经优先切到 `draft + appendEvents`；run end / flush 点再做 `materializeConversation + flushWriter`
+3. `setDraftSnapshot / persistConversationSnapshotViaEvents / flushDraftSnapshotNow*` 都会复用同一份 compact/safe snapshot 合同
+4. 因此最重的“renderer 先做 fat clone 再落盘”已经切掉；当前残余问题是 materialized body 仍会保留 compact 版 `items/turns/thread`
 
-## 3.3 v2 per-conv 文件现在仍会原样吃下 runtime 大对象
+## 3.3 v2 per-conv 仍保留 compact runtime 字段，但重 payload 已经先被收口
 
 关键代码点：
 
-- `apps/desktop/electron/main.cjs:754` `buildSnapshotFromV2Payload()`
-- `apps/desktop/electron/main.cjs:1071` `saveSingleConversationFileV2()`
-- `apps/desktop/electron/main.cjs:1417` `saveConversationsV2()`
-- `apps/desktop/electron/main.cjs:1620` `saveConversationsV2Sync()`
-- `apps/desktop/electron/main.cjs:3435` `history.readConversationSnapshot`
-- `apps/desktop/electron/main.cjs:3492` `history.loadConversationSegment`
+- `packages/shared/src/runtime/toolResultEnvelope.ts` `slimToolResultEnvelopeForHistory()`
+- `apps/desktop/src/state/conversationStore.ts` `compactRuntimeItemsForHistory()`
+- `apps/desktop/electron/main.cjs` `buildSnapshotFromV2Payload()`
+- `apps/desktop/electron/main.cjs` `history.readConversationSnapshot`
+- `apps/desktop/electron/main.cjs` `history.loadConversationSegment`
 
 当前事实：
 
-1. `saveSingleConversationFileV2()` 直接把 `logs/thread/turns/items/collabSessions/activeItemIds` 原样写入 per-conv
-2. `buildSnapshotFromV2Payload({ includeSteps:false })` 虽然不读 `steps`，但仍把 `logs/thread/turns/items/...` 全量读回
-3. `history.loadConversationSegment()` 已经是 transcript 的权威来源，但 runtime overlay 仍然偏胖
+1. per-conv body 仍会保留 `logs/thread/turns/items/collabSessions/activeItemIds` 这些恢复辅助字段，所以它还不是 text-only / event-only 形态
+2. 但在进入 per-conv 之前，`read` 结果已经先被压成 preview-only，shadow/authoritative tool item 已先按 `toolCallId` 去重
+3. `history.loadConversationSegment()` 仍是 transcript 的权威来源；当前剩余压力主要来自 compact runtime overlay 还未从 body 完全剥离
 
 ## 3.4 UI 对旧工具卡的依赖其实是“摘要线”，不是全文
 
@@ -157,11 +184,11 @@
 
 ---
 
-## 6. 推荐方案
+## 6. 落地方案
 
 ## 6.1 方案一句话
 
-把本期的核心收口点定义为：
+本期实际落地的核心收口点是：
 
 > **live runtime 可以继续富；history persistence 必须轻且可恢复。**
 
@@ -312,7 +339,8 @@
 
 ## 8. 详细改动点（含锚点与 diff 草案）
 
-以下锚点基于当前工作树 / `HEAD 5b8e1ab`。
+以下内容主要保留为立项时的设计草案与对照思路。
+当前实现已经覆盖其中大部分改动，阅读时请优先以上面的“实施状态”和当前源码为准；这里的旧行号 / diff 仅用于解释为什么这样收口。
 
 ## 8.1 `apps/desktop/src/state/runStore.ts`
 

@@ -205,7 +205,7 @@ export function NavSidebar() {
       .catch(() => void 0);
   }, [steps.length, activeConvId, conversations, renameConversation]);
 
-  const handleNewChat = useCallback(() => {
+  const handleNewChat = useCallback(async () => {
     // 防抖：当前已是空白"新任务"对话，不重复创建
     const activeConv = activeConvId ? conversations.find((c) => c.id === activeConvId) : null;
     if (activeConv?.title === "新任务" && steps.length === 0) return;
@@ -220,29 +220,37 @@ export function NavSidebar() {
     }
     // 保存当前对话
     if (hasCurrentContent && !activeConvId) {
-      addConversation({ title: conversationTitle(), snapshot: buildCurrentSnapshot() });
+      await useConversationStore.getState().promoteDraftToConversation({
+        title: conversationTitle(),
+        snapshot: buildCurrentSnapshot(),
+        source: "manual",
+      }).catch(() => void 0);
     } else if (hasCurrentContent && activeConvId) {
-      useConversationStore.getState().updateConversation(activeConvId, { snapshot: buildCurrentSnapshot() });
+      await useConversationStore.getState().flushDraftSnapshotNow().catch(() => void 0);
     }
 
     // 清空右侧 + 立即创建新条目
     resetRun();
     useProjectStore.getState().clearProject();
     const emptySnapshot = buildCurrentSnapshot();
-    const newId = addConversation({ title: "新任务", snapshot: emptySnapshot });
+    const newId = addConversation({ title: "新任务", snapshot: emptySnapshot, persistBody: false });
     storeSetActiveConvId(newId);
   }, [steps.length, hasCurrentContent, activeConvId, conversations, addConversation, resetRun, storeSetActiveConvId]);
 
   const handleLoadConversation = useCallback(
-    (id: string) => {
+    async (id: string) => {
       if (activeConvId !== id) {
         // 不再强制取消后台 run——保留其继续执行
         // 保存当前对话到 conversationStore
         if (hasCurrentContent) {
           if (activeConvId) {
-            useConversationStore.getState().updateConversation(activeConvId, { snapshot: buildCurrentSnapshot() });
+            await useConversationStore.getState().flushDraftSnapshotNow().catch(() => void 0);
           } else {
-            addConversation({ title: conversationTitle(), snapshot: buildCurrentSnapshot() });
+            await useConversationStore.getState().promoteDraftToConversation({
+              title: conversationTitle(),
+              snapshot: buildCurrentSnapshot(),
+              source: "switch",
+            }).catch(() => void 0);
           }
         }
       }

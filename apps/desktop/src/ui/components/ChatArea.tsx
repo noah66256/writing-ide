@@ -35,7 +35,13 @@ import { cancelConvRun } from "@/state/runRegistry";
 import { useProjectStore } from "@/state/projectStore";
 import { useAuthStore } from "@/state/authStore";
 import { useKbStore } from "@/state/kbStore";
-import { useConversationStore, buildCurrentSnapshot } from "@/state/conversationStore";
+import {
+  useConversationStore,
+  buildCurrentDraftState,
+  buildCurrentSnapshot,
+  buildCurrentThreadStateForHistory,
+  type RunSnapshot,
+} from "@/state/conversationStore";
 import { resolveInlineFileOpConfirm } from "@/state/inlineFileOpConfirm";
 import { startGatewayRun, humanizeToolActivity } from "@/agent/gatewayAgent";
 import { getGatewayBaseUrl } from "@/agent/gatewayUrl";
@@ -235,6 +241,110 @@ function hasAutosaveableDraftState(args: {
       return true;
     })
   );
+}
+
+function buildHistoryEventHeadFromDraftState(draftState: ReturnType<typeof buildCurrentDraftState>) {
+  return {
+    mode: draftState.mode,
+    model: draftState.model,
+    opMode: draftState.opMode ?? null,
+    mainDoc: draftState.mainDoc ?? {},
+    todoList: Array.isArray(draftState.todoList) ? [...draftState.todoList] : [],
+    kbAttachedLibraryIds: Array.isArray(draftState.kbAttachedLibraryIds) ? [...draftState.kbAttachedLibraryIds] : [],
+    ctxRefs: Array.isArray(draftState.ctxRefs) ? [...draftState.ctxRefs] : [],
+    pendingArtifacts: Array.isArray(draftState.pendingArtifacts) ? [...draftState.pendingArtifacts] : [],
+    projectDir: draftState.projectDir ?? null,
+    dialogueSummaryByMode: draftState.dialogueSummaryByMode ?? null,
+    dialogueSummaryTurnCursorByMode: draftState.dialogueSummaryTurnCursorByMode ?? null,
+  };
+}
+
+function hashHistoryEventHeadForAutosave(head: ReturnType<typeof buildHistoryEventHeadFromDraftState>) {
+  try {
+    return fastAutosaveHash(JSON.stringify(head ?? null), 2048);
+  } catch {
+    return summarizeAutosaveValue(head);
+  }
+}
+
+function buildHistoryEventRuntimeStateFromSnapshot(snapshot: RunSnapshot | null | undefined) {
+  const safe = snapshot && typeof snapshot === "object" ? snapshot : null;
+  return {
+    transcript: Array.isArray((safe as any)?.transcript) ? ((safe as any).transcript as unknown[]) : [],
+    logs: Array.isArray((safe as any)?.logs) ? ((safe as any).logs as unknown[]) : [],
+    turns: Array.isArray((safe as any)?.turns) ? ((safe as any).turns as unknown[]) : [],
+    items: Array.isArray((safe as any)?.items) ? ((safe as any).items as unknown[]) : [],
+    collabSessions: Array.isArray((safe as any)?.collabSessions) ? ((safe as any).collabSessions as unknown[]) : [],
+    activeItemIds: Array.isArray((safe as any)?.activeItemIds) ? ((safe as any).activeItemIds as string[]) : [],
+  };
+}
+
+function hashHistoryEventRuntimeStateForAutosave(runtimeState: ReturnType<typeof buildHistoryEventRuntimeStateFromSnapshot>) {
+  try {
+    return fastAutosaveHash(JSON.stringify(runtimeState ?? null), 4096);
+  } catch {
+    return summarizeAutosaveValue(runtimeState);
+  }
+}
+
+function buildConversationHistoryEventPayload(args: {
+  conversationId: string;
+  draftState: ReturnType<typeof buildCurrentDraftState>;
+  snapshot: RunSnapshot | null;
+  threadState: RuntimeThreadRecord | null;
+  persistedStepHashesByConv: Map<string, Map<string, string>>;
+  persistedHeadSignatureByConv: Map<string, string>;
+  persistedThreadSignatureByConv: Map<string, string>;
+  persistedRuntimeSignatureByConv: Map<string, string>;
+  forceHead?: boolean;
+  forceThread?: boolean;
+  forceRuntime?: boolean;
+  forceAllSteps?: boolean;
+}) {
+  const conversationId = String(args.conversationId ?? "").trim();
+  const head = buildHistoryEventHeadFromDraftState(args.draftState);
+  const runtimeState = buildHistoryEventRuntimeStateFromSnapshot(args.snapshot);
+  const headSignature = hashHistoryEventHeadForAutosave(head);
+  const threadSignature = summarizeThreadForAutosave(args.threadState);
+  const runtimeSignature = hashHistoryEventRuntimeStateForAutosave(runtimeState);
+  const previousStepHashes = args.persistedStepHashesByConv.get(conversationId) ?? new Map<string, string>();
+  const nextStepHashes = new Map(previousStepHashes);
+  const stepUpserts: Step[] = [];
+  for (const rawStep of Array.isArray(args.draftState.steps) ? args.draftState.steps : []) {
+    const step = rawStep as Step;
+    const stepId = String((step as any)?.id ?? "").trim();
+    if (!stepId) continue;
+    const stepSignature = summarizeStepForAutosave(step);
+    if (args.forceAllSteps || previousStepHashes.get(stepId) !== stepSignature) {
+      stepUpserts.push(step);
+    }
+    nextStepHashes.set(stepId, stepSignature);
+  }
+
+  const shouldIncludeHead =
+    args.forceHead || args.persistedHeadSignatureByConv.get(conversationId) !== headSignature;
+  const shouldIncludeThread =
+    args.forceThread || args.persistedThreadSignatureByConv.get(conversationId) !== threadSignature;
+  const shouldIncludeRuntime =
+    args.forceRuntime || args.persistedRuntimeSignatureByConv.get(conversationId) !== runtimeSignature;
+  const hasChanges = shouldIncludeHead || shouldIncludeThread || shouldIncludeRuntime || stepUpserts.length > 0;
+
+  return {
+    hasChanges,
+    headSignature,
+    threadSignature,
+    runtimeSignature,
+    nextStepHashes,
+    batch: {
+      version: 1,
+      conversationId,
+      updatedAt: Date.now(),
+      ...(shouldIncludeHead ? { head } : {}),
+      ...(stepUpserts.length > 0 ? { stepUpserts } : {}),
+      ...(shouldIncludeThread ? { thread: args.threadState } : {}),
+      ...(shouldIncludeRuntime ? { runtimeState } : {}),
+    },
+  };
 }
 
 function tryPreAttachStyleLibraryFromPrompt(args: {
@@ -449,7 +559,10 @@ function enterLocalStyleWorkflowWaiting(args: {
   runStore.addAssistant(args.question);
   const snapshot = buildCurrentSnapshot();
   if (convId) {
-    useConversationStore.getState().updateConversation(convId, { snapshot });
+    void useConversationStore.getState().persistConversationSnapshotViaEvents(convId, snapshot, {
+      writeDraft: true,
+      source: "manual",
+    }).catch(() => void 0);
   } else {
     useConversationStore.getState().setDraftSnapshot(snapshot);
   }
@@ -1205,9 +1318,15 @@ export function ChatArea() {
   const stickRef = useRef(true);
   const loadingMoreHistoryRef = useRef(false);
   const autoSaveDirtyRef = useRef(false);
+  const autoSaveInFlightRef = useRef(false);
   const autoSaveInitializedRef = useRef(false);
   const latestAutosaveSignatureRef = useRef("");
   const lastSavedAutosaveSignatureRef = useRef("");
+  const persistedEventStepHashesByConvRef = useRef<Map<string, Map<string, string>>>(new Map());
+  const persistedEventHeadSignatureByConvRef = useRef<Map<string, string>>(new Map());
+  const persistedEventThreadSignatureByConvRef = useRef<Map<string, string>>(new Map());
+  const persistedEventRuntimeSignatureByConvRef = useRef<Map<string, string>>(new Map());
+  const primedEventBodyRevisionByConvRef = useRef<Map<string, number>>(new Map());
   const prevAutosaveConvIdRef = useRef<string | null>(null);
   const controllerRef = useRef<RunController | null>(null);
   const prevRunningRef = useRef(false);
@@ -1228,6 +1347,7 @@ export function ChatArea() {
   );
 
   const activeConvId = useConversationStore((s) => s.activeConvId);
+  const conversations = useConversationStore((s) => s.conversations);
   const hasMessages = renderTranscript.length > 0;
   const hasPendingTodo = useMemo(
     () => todoList.some((item) => item.status !== "done" && item.status !== "skipped"),
@@ -1402,66 +1522,151 @@ export function ChatArea() {
     }
   }, [activeConvId, autosaveSignature]);
 
+  useEffect(() => {
+    const convId = String(activeConvId ?? "").trim();
+    if (!convId) return;
+    const activeConversation = conversations.find((conversation) => conversation.id === convId) ?? null;
+    if (!activeConversation || activeConversation.snapshotLoaded === false || !activeConversation.snapshot) return;
+    const currentBodyRevision = Number(activeConversation.bodyRevision ?? 0) || 0;
+    if (primedEventBodyRevisionByConvRef.current.get(convId) === currentBodyRevision) return;
+    const snapshot = activeConversation.snapshot as any;
+    const steps = Array.isArray(snapshot?.steps) ? snapshot.steps : [];
+    const stepHashes = new Map<string, string>();
+    for (const rawStep of steps) {
+      const stepId = String((rawStep as any)?.id ?? "").trim();
+      if (!stepId) continue;
+      stepHashes.set(stepId, summarizeStepForAutosave(rawStep as Step));
+    }
+    persistedEventStepHashesByConvRef.current.set(convId, stepHashes);
+    persistedEventHeadSignatureByConvRef.current.set(
+      convId,
+      hashHistoryEventHeadForAutosave(
+        buildHistoryEventHeadFromDraftState({
+          mode: snapshot?.mode ?? "agent",
+          model: String(snapshot?.model ?? ""),
+          opMode: snapshot?.opMode ?? null,
+          mainDoc: snapshot?.mainDoc ?? {},
+          todoList: Array.isArray(snapshot?.todoList) ? snapshot.todoList : [],
+          steps: [],
+          kbAttachedLibraryIds: Array.isArray(snapshot?.kbAttachedLibraryIds) ? snapshot.kbAttachedLibraryIds : [],
+          ctxRefs: Array.isArray(snapshot?.ctxRefs) ? snapshot.ctxRefs : [],
+          pendingArtifacts: Array.isArray(snapshot?.pendingArtifacts) ? snapshot.pendingArtifacts : [],
+          projectDir: snapshot?.projectDir ?? null,
+          dialogueSummaryByMode: snapshot?.dialogueSummaryByMode ?? null,
+          dialogueSummaryTurnCursorByMode: snapshot?.dialogueSummaryTurnCursorByMode ?? null,
+        }),
+      ),
+    );
+    persistedEventThreadSignatureByConvRef.current.set(
+      convId,
+      summarizeThreadForAutosave((snapshot?.thread ?? null) as RuntimeThreadRecord | null),
+    );
+    persistedEventRuntimeSignatureByConvRef.current.set(
+      convId,
+      hashHistoryEventRuntimeStateForAutosave(
+        buildHistoryEventRuntimeStateFromSnapshot(snapshot as RunSnapshot | null),
+      ),
+    );
+    primedEventBodyRevisionByConvRef.current.set(convId, currentBodyRevision);
+  }, [activeConvId, conversations]);
+
   // 自动保存草稿到 conversationStore，同时更新活跃对话（带防降级保护）
   useEffect(() => {
     const timer = window.setInterval(() => {
+      if (autoSaveInFlightRef.current) return;
       if (!autoSaveDirtyRef.current) return;
       const currentSignature = latestAutosaveSignatureRef.current;
       if (!currentSignature || currentSignature === lastSavedAutosaveSignatureRef.current) {
         autoSaveDirtyRef.current = false;
         return;
       }
+      autoSaveInFlightRef.current = true;
+      void (async () => {
+        try {
+          const runState = useRunStore.getState() as any;
+          const convStore = useConversationStore.getState();
+          const convIdNow = convStore.activeConvId;
 
-      const runState = useRunStore.getState() as any;
-      const convStore = useConversationStore.getState();
-      const convIdNow = convStore.activeConvId;
+          const projectedSteps = getProjectedStepsFromRuntime({
+            steps: runState.steps ?? [],
+            items: (runState.items ?? []) as RuntimeItemRecord[],
+            activeItemIds: (runState.activeItemIds ?? []) as string[],
+            collabSessions: (runState.collabSessions ?? []) as RuntimeCollabSessionRecord[],
+          });
+          const hasDraftState = hasAutosaveableDraftState({
+            renderSteps: projectedSteps as Step[],
+            todoList: (runState.todoList ?? []) as TodoItem[],
+            pendingArtifacts: (runState.pendingArtifacts ?? []) as unknown[],
+            ctxRefs: (runState.ctxRefs ?? []) as unknown[],
+            kbAttachedLibraryIds: (runState.kbAttachedLibraryIds ?? []) as string[],
+            thread: (runState.thread ?? null) as RuntimeThreadRecord | null,
+            mainDoc: (runState.mainDoc ?? {}) as Record<string, unknown>,
+            rootDir: useProjectStore.getState().rootDir ?? null,
+          });
+          const hasConversationContext = Boolean(convIdNow) || Boolean(runState.model) || Boolean(runState.mode);
+          if (!hasDraftState && !hasConversationContext) {
+            autoSaveDirtyRef.current = false;
+            lastSavedAutosaveSignatureRef.current = currentSignature;
+            return;
+          }
 
-      const projectedSteps = getProjectedStepsFromRuntime({
-        steps: runState.steps ?? [],
-        items: (runState.items ?? []) as RuntimeItemRecord[],
-        activeItemIds: (runState.activeItemIds ?? []) as string[],
-        collabSessions: (runState.collabSessions ?? []) as RuntimeCollabSessionRecord[],
-      });
-      const hasDraftState = hasAutosaveableDraftState({
-        renderSteps: projectedSteps as Step[],
-        todoList: (runState.todoList ?? []) as TodoItem[],
-        pendingArtifacts: (runState.pendingArtifacts ?? []) as unknown[],
-        ctxRefs: (runState.ctxRefs ?? []) as unknown[],
-        kbAttachedLibraryIds: (runState.kbAttachedLibraryIds ?? []) as string[],
-        thread: (runState.thread ?? null) as RuntimeThreadRecord | null,
-        mainDoc: (runState.mainDoc ?? {}) as Record<string, unknown>,
-        rootDir: useProjectStore.getState().rootDir ?? null,
-      });
-      const hasConversationContext = Boolean(convIdNow) || Boolean(runState.model) || Boolean(runState.mode);
-      if (!hasDraftState && !hasConversationContext) {
-        autoSaveDirtyRef.current = false;
-        lastSavedAutosaveSignatureRef.current = currentSignature;
-        return;
-      }
+          // 防降级：当前运行态完全为空，但 active 对话已有非空 snapshot 时，
+          // 跳过本轮自动保存，避免把历史对话误写成"空对话"快照。
+          const existingSnapshot =
+            convIdNow
+              ? convStore.conversations.find((c) => c.id === convIdNow)?.snapshot
+              : null;
+          const existingSteps =
+            existingSnapshot && Array.isArray((existingSnapshot as any).steps)
+              ? (existingSnapshot as any).steps.length
+              : 0;
+          if (!hasDraftState && existingSteps > 0) {
+            autoSaveDirtyRef.current = false;
+            lastSavedAutosaveSignatureRef.current = currentSignature;
+            return;
+          }
 
-      // 防降级：当前运行态完全为空，但 active 对话已有非空 snapshot 时，
-      // 跳过本轮自动保存，避免把历史对话误写成"空对话"快照。
-      const existingSnapshot =
-        convIdNow
-          ? convStore.conversations.find((c) => c.id === convIdNow)?.snapshot
-          : null;
-      const existingSteps =
-        existingSnapshot && Array.isArray((existingSnapshot as any).steps)
-          ? (existingSnapshot as any).steps.length
-          : 0;
-      if (!hasDraftState && existingSteps > 0) {
-        autoSaveDirtyRef.current = false;
-        lastSavedAutosaveSignatureRef.current = currentSignature;
-        return;
-      }
+          const draftState = buildCurrentDraftState();
+          convStore.setDraftSnapshot(draftState);
+          const snapshot = buildCurrentSnapshot();
 
-      const snap = buildCurrentSnapshot();
-      convStore.setDraftSnapshot(snap);
-      if (convIdNow) {
-        convStore.updateConversation(convIdNow, { snapshot: snap });
-      }
-      lastSavedAutosaveSignatureRef.current = currentSignature;
-      autoSaveDirtyRef.current = false;
+          const historyApi = window.desktop?.history;
+          if (convIdNow && historyApi?.appendEvents) {
+            const threadState = buildCurrentThreadStateForHistory();
+            const payload = buildConversationHistoryEventPayload({
+              conversationId: convIdNow,
+              draftState,
+              snapshot,
+              threadState,
+              persistedStepHashesByConv: persistedEventStepHashesByConvRef.current,
+              persistedHeadSignatureByConv: persistedEventHeadSignatureByConvRef.current,
+              persistedThreadSignatureByConv: persistedEventThreadSignatureByConvRef.current,
+              persistedRuntimeSignatureByConv: persistedEventRuntimeSignatureByConvRef.current,
+            });
+            if (payload.hasChanges) {
+              const result = await historyApi.appendEvents(payload.batch);
+              if (!result || result.ok === false) {
+                throw new Error(String(result?.error ?? "APPEND_EVENTS_FAILED"));
+              }
+              persistedEventStepHashesByConvRef.current.set(convIdNow, payload.nextStepHashes);
+              persistedEventHeadSignatureByConvRef.current.set(convIdNow, payload.headSignature);
+              persistedEventThreadSignatureByConvRef.current.set(convIdNow, payload.threadSignature);
+              persistedEventRuntimeSignatureByConvRef.current.set(convIdNow, payload.runtimeSignature);
+            }
+          } else if (convIdNow) {
+            await convStore.persistConversationSnapshotViaEvents(convIdNow, snapshot, {
+              source: "autosave",
+            });
+          }
+
+          lastSavedAutosaveSignatureRef.current = currentSignature;
+          autoSaveDirtyRef.current = false;
+        } catch {
+          autoSaveDirtyRef.current = true;
+        } finally {
+          autoSaveInFlightRef.current = false;
+        }
+      })();
     }, 2000);
     return () => window.clearInterval(timer);
   }, []);
@@ -1471,10 +1676,58 @@ export function ChatArea() {
     const prev = prevRunningRef.current;
     if (prev && !isRunning) {
       try {
-        void useConversationStore.getState().flushDraftSnapshotNow().then(() => {
-          lastSavedAutosaveSignatureRef.current = latestAutosaveSignatureRef.current;
-          autoSaveDirtyRef.current = false;
-        }).catch(() => void 0);
+        void (async () => {
+          const convStore = useConversationStore.getState();
+          const historyApi = window.desktop?.history;
+          const convId = convStore.activeConvId;
+          const draftState = buildCurrentDraftState();
+          const snapshot = buildCurrentSnapshot();
+          convStore.setDraftSnapshot(draftState);
+          try {
+            if (convId && historyApi?.materializeConversation) {
+              if (historyApi.appendEvents) {
+                const payload = buildConversationHistoryEventPayload({
+                  conversationId: convId,
+                  draftState,
+                  snapshot,
+                  threadState: buildCurrentThreadStateForHistory(),
+                  persistedStepHashesByConv: persistedEventStepHashesByConvRef.current,
+                  persistedHeadSignatureByConv: persistedEventHeadSignatureByConvRef.current,
+                  persistedThreadSignatureByConv: persistedEventThreadSignatureByConvRef.current,
+                  persistedRuntimeSignatureByConv: persistedEventRuntimeSignatureByConvRef.current,
+                  forceHead: true,
+                  forceThread: true,
+                  forceRuntime: true,
+                });
+                if (payload.hasChanges) {
+                  const result = await historyApi.appendEvents(payload.batch);
+                  if (!result || result.ok === false) {
+                    throw new Error(String(result?.error ?? "APPEND_EVENTS_FAILED"));
+                  }
+                  persistedEventStepHashesByConvRef.current.set(convId, payload.nextStepHashes);
+                  persistedEventHeadSignatureByConvRef.current.set(convId, payload.headSignature);
+                  persistedEventThreadSignatureByConvRef.current.set(convId, payload.threadSignature);
+                  persistedEventRuntimeSignatureByConvRef.current.set(convId, payload.runtimeSignature);
+                }
+              }
+              const materialized = await historyApi.materializeConversation(convId);
+              if (!materialized || materialized.ok === false) {
+                throw new Error(String(materialized?.error ?? "MATERIALIZE_CONVERSATION_FAILED"));
+              }
+              const flushResult = await historyApi.flushWriter?.(convId);
+              if (flushResult && flushResult.ok === false) {
+                throw new Error(String(flushResult.error ?? "FLUSH_WRITER_FAILED"));
+              }
+              await useConversationStore.getState().loadConversationSnapshot(convId, { includeSteps: true }).catch(() => null);
+            } else {
+              await useConversationStore.getState().flushDraftSnapshotNow();
+            }
+            lastSavedAutosaveSignatureRef.current = latestAutosaveSignatureRef.current;
+            autoSaveDirtyRef.current = false;
+          } catch {
+            // ignore
+          }
+        })();
       } catch {
         // ignore
       }
@@ -1533,8 +1786,17 @@ export function ChatArea() {
           convStore.renameConversation(currentConvId, title);
         }
       } else {
-        const convId = convStore.addConversation({ title, snapshot: buildCurrentSnapshot() });
-        convStore.setActiveConvId(convId);
+        const convId =
+          (await convStore.promoteDraftToConversation({
+            title,
+            snapshot: buildCurrentSnapshot(),
+            setActive: true,
+            source: "manual",
+          })) ??
+          convStore.addConversation({ title, snapshot: buildCurrentSnapshot(), persistBody: false });
+        if (!useConversationStore.getState().activeConvId) {
+          convStore.setActiveConvId(convId);
+        }
       }
 
       if (mode === "agent" && looksLikeKbPanelOnlyIntent(text)) {
