@@ -219,6 +219,42 @@ function sanitizeBrowserOutputFilename(value) {
   return String(base || "artifact").trim() || "artifact";
 }
 
+const INLINE_MEDIA_MIME_EXT = new Map([
+  ["image/png", "png"],
+  ["image/jpeg", "jpg"],
+  ["image/jpg", "jpg"],
+  ["image/webp", "webp"],
+  ["image/gif", "gif"],
+  ["image/bmp", "bmp"],
+  ["image/svg+xml", "svg"],
+  ["image/avif", "avif"],
+]);
+
+function toFileRefHref(absPath) {
+  return `file-ref:${encodeURIComponent(String(absPath ?? "").trim())}`;
+}
+
+function looksLikeLocalMarkdownTarget(value) {
+  const href = String(value ?? "").trim();
+  if (!href) return false;
+  if (/^(https?:|data:|blob:|mailto:|chrome:|about:|javascript:|file-ref:)/i.test(href)) return false;
+  return true;
+}
+
+function rewriteMarkdownLinksToArtifacts(text, artifacts) {
+  const src = String(text ?? "");
+  const list = Array.isArray(artifacts) ? artifacts.filter((item) => item?.href && item?.mimeType) : [];
+  if (!src || list.length === 0) return src;
+  let artifactIndex = 0;
+  return src.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (full, label, href) => {
+    if (!looksLikeLocalMarkdownTarget(href)) return full;
+    const next = list[artifactIndex];
+    if (!next) return full;
+    artifactIndex += 1;
+    return `[${label}](${next.href})`;
+  });
+}
+
 const MCP_SERVER_FAMILIES = new Set(["browser", "search", "word", "spreadsheet", "pdf", "custom"]);
 const MCP_TOOL_PROFILES = new Set([
   "full",
@@ -1849,6 +1885,60 @@ export class McpManager {
     return Boolean(stat?.isFile?.());
   }
 
+  _inlineMediaArtifactDir(toolName) {
+    const base = this._userDataPath
+      ? path.join(this._userDataPath, "mcp-artifacts")
+      : path.join(this._appBasePath, ".mcp-artifacts");
+    const safeTool = String(toolName ?? "tool")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "tool";
+    return path.join(base, safeTool);
+  }
+
+  async _persistInlineMediaArtifacts(toolName, callArgs, rawResult) {
+    const parts = Array.isArray(rawResult?.content) ? rawResult.content : [];
+    const inlineImages = parts.filter((part) =>
+      part &&
+      typeof part === "object" &&
+      String(part.type ?? "").trim() === "image" &&
+      typeof part.data === "string" &&
+      part.data &&
+      typeof part.mimeType === "string" &&
+      INLINE_MEDIA_MIME_EXT.has(String(part.mimeType ?? "").trim().toLowerCase()),
+    );
+    if (inlineImages.length === 0) return [];
+
+    const dir = this._inlineMediaArtifactDir(toolName);
+    await fs.mkdir(dir, { recursive: true });
+    const requestedName = shouldSanitizeBrowserOutputFilename("playwright", toolName)
+      ? sanitizeBrowserOutputFilename(callArgs?.filename)
+      : "";
+    const requestedBase = requestedName ? path.parse(requestedName).name : "";
+
+    const artifacts = [];
+    for (let index = 0; index < inlineImages.length; index += 1) {
+      const part = inlineImages[index];
+      const mimeType = String(part.mimeType ?? "").trim().toLowerCase();
+      const ext = INLINE_MEDIA_MIME_EXT.get(mimeType) ?? "bin";
+      const fallbackBase = `${String(toolName ?? "artifact").replace(/[^a-z0-9._-]+/gi, "-") || "artifact"}-${Date.now()}-${index + 1}`;
+      const baseName = requestedBase
+        ? (index === 0 ? requestedBase : `${requestedBase}-${index + 1}`)
+        : fallbackBase;
+      const fileName = `${baseName}.${ext}`;
+      const absPath = path.join(dir, fileName);
+      const data = Buffer.from(String(part.data ?? ""), "base64");
+      await fs.writeFile(absPath, data);
+      artifacts.push({
+        absPath,
+        href: toFileRefHref(absPath),
+        mimeType,
+      });
+    }
+    return artifacts;
+  }
+
   // ── 工具操作 ──────────────────────────
 
   async getTools(serverId) {
@@ -2093,7 +2183,15 @@ export class McpManager {
     const textParts = (result?.content ?? [])
       .filter((c) => c.type === "text")
       .map((c) => c.text);
-    const output = textParts.join("\n") || JSON.stringify(result?.content ?? []);
+    let output = textParts.join("\n") || JSON.stringify(result?.content ?? []);
+    const inlineArtifacts = await this._persistInlineMediaArtifacts(toolName, callArgs, result).catch(() => []);
+    if (inlineArtifacts.length > 0) {
+      output = rewriteMarkdownLinksToArtifacts(output, inlineArtifacts);
+      if (!/\[.*\]\((?:file-ref:|\/|[A-Za-z]:[\\/])/i.test(output)) {
+        const lines = inlineArtifacts.map((item, index) => `- [Attachment ${index + 1}](${item.href})`);
+        output = [output, ...lines].filter(Boolean).join("\n");
+      }
+    }
     const isError = result?.isError === true;
     return { ok: !isError, output, raw: result };
   }

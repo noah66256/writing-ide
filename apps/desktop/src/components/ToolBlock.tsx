@@ -3,7 +3,7 @@ import { getToolResultEnvelopeNormalizedText, getToolResultEnvelopePayload } fro
 import { useProjectStore } from "../state/projectStore";
 import { getItemActionRuntime, useRunStore, type ToolBlockStep } from "../state/runStore";
 import type { TopicCandidate, TopicLabOutput } from "../agent/topicLab";
-import { resolveOpenableFileRef } from "../utils/fileRefLink";
+import { parseFileRefHref, resolveOpenableFileRef } from "../utils/fileRefLink";
 
 const MARKDOWN_LINK_RE = /\[([^\]]+)\]\(([^)\s]+)\)/g;
 const IMAGE_EXT_RE = /\.(png|jpe?g|gif|svg|webp|bmp|ico|avif)$/i;
@@ -169,7 +169,10 @@ function extractLinkedArtifacts(output: unknown, rootDir: string | null | undefi
       const label = String(match[1] ?? "").trim();
       const href = decodeMarkdownTarget(String(match[2] ?? ""));
       if (!href || /^(https?:|data:|blob:|mailto:|chrome:|about:|javascript:)/i.test(href)) continue;
-      const absPath = resolveOpenableFileRef(rootDir, href);
+      const fileRefPath = parseFileRefHref(href);
+      const absPath = fileRefPath
+        ? resolveOpenableFileRef(rootDir, fileRefPath)
+        : resolveOpenableFileRef(rootDir, href);
       if (!absPath || seen.has(absPath)) continue;
       seen.add(absPath);
       const normalizedAbsPath = absPath.replaceAll("\\", "/");
