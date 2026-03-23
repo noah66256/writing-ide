@@ -1,8 +1,27 @@
 import { useMemo, useState } from "react";
-import { getToolResultEnvelopePayload } from "@ohmycrab/shared";
+import { getToolResultEnvelopeNormalizedText, getToolResultEnvelopePayload } from "@ohmycrab/shared";
 import { useProjectStore } from "../state/projectStore";
 import { getItemActionRuntime, useRunStore, type ToolBlockStep } from "../state/runStore";
 import type { TopicCandidate, TopicLabOutput } from "../agent/topicLab";
+import { resolveOpenableFileRef } from "../utils/fileRefLink";
+
+const MARKDOWN_LINK_RE = /\[([^\]]+)\]\(([^)\s]+)\)/g;
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|svg|webp|bmp|ico|avif)$/i;
+const AUDIO_EXT_RE = /\.(mp3|wav|ogg|m4a|aac|flac)$/i;
+const VIDEO_EXT_RE = /\.(mp4|mov|m4v|webm|ogg|mkv|avi)$/i;
+
+type ToolArtifactPreviewKind = "image" | "audio" | "video";
+
+type ToolArtifactCard = {
+  id: string;
+  absPath: string;
+  relPath: string;
+  name: string;
+  label?: string;
+  ext: string;
+  sizeBytes?: number;
+  previewKind?: ToolArtifactPreviewKind;
+};
 
 function findDiffInfo(output: any): { path?: string; diff: string; truncated?: boolean; stats?: any; note?: string } | null {
   const rawOutput = getToolResultEnvelopePayload(output);
@@ -98,6 +117,79 @@ function artifactExtBadge(name?: string, ext?: string) {
   return String(n.split(".").pop() ?? "FILE").toUpperCase().slice(0, 4);
 }
 
+function toLocalFileUrl(absPath: string): string | null {
+  const raw = String(absPath ?? "").trim();
+  if (!raw) return null;
+  if (/^file:\/\//i.test(raw)) return raw;
+  const normalized = raw.replace(/\\/g, "/");
+  if (/^[a-zA-Z]:\//.test(normalized)) return encodeURI(`file:///${normalized}`);
+  if (normalized.startsWith("//")) return encodeURI(`file:${normalized}`);
+  if (normalized.startsWith("/")) return encodeURI(`file://${normalized}`);
+  return null;
+}
+
+function detectPreviewKind(pathOrExt?: string): ToolArtifactPreviewKind | undefined {
+  const value = String(pathOrExt ?? "").trim().toLowerCase();
+  if (!value) return undefined;
+  if (IMAGE_EXT_RE.test(value)) return "image";
+  if (AUDIO_EXT_RE.test(value)) return "audio";
+  if (VIDEO_EXT_RE.test(value)) return "video";
+  return undefined;
+}
+
+function detectPreviewKindFromArtifact(ext?: string, name?: string): ToolArtifactPreviewKind | undefined {
+  const normalizedExt = String(ext ?? "").trim().replace(/^\./, "");
+  if (normalizedExt) return detectPreviewKind(`.${normalizedExt}`);
+  return detectPreviewKind(name);
+}
+
+function decodeMarkdownTarget(value: string): string {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  try {
+    return decodeURI(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function extractLinkedArtifacts(output: unknown, rootDir: string | null | undefined): ToolArtifactCard[] {
+  const texts = new Set<string>();
+  const payload = getToolResultEnvelopePayload(output);
+  if (typeof payload === "string" && payload.trim()) texts.add(payload);
+  const normalizedText = getToolResultEnvelopeNormalizedText(output);
+  if (normalizedText.trim()) texts.add(normalizedText);
+  const artifacts: ToolArtifactCard[] = [];
+  const seen = new Set<string>();
+
+  for (const text of texts) {
+    let match: RegExpExecArray | null = null;
+    const re = new RegExp(MARKDOWN_LINK_RE.source, MARKDOWN_LINK_RE.flags);
+    while ((match = re.exec(text)) !== null) {
+      const label = String(match[1] ?? "").trim();
+      const href = decodeMarkdownTarget(String(match[2] ?? ""));
+      if (!href || /^(https?:|data:|blob:|mailto:|chrome:|about:|javascript:)/i.test(href)) continue;
+      const absPath = resolveOpenableFileRef(rootDir, href);
+      if (!absPath || seen.has(absPath)) continue;
+      seen.add(absPath);
+      const normalizedAbsPath = absPath.replaceAll("\\", "/");
+      const fileName = normalizedAbsPath.split("/").pop() ?? normalizedAbsPath;
+      const ext = fileName.includes(".") ? String(fileName.split(".").pop() ?? "").trim().toLowerCase() : "";
+      if (!ext) continue;
+      artifacts.push({
+        id: `linked:${normalizedAbsPath}`,
+        absPath: normalizedAbsPath,
+        relPath: href,
+        name: fileName,
+        label: label || undefined,
+        ext,
+        previewKind: detectPreviewKind(`.${ext}`),
+      });
+    }
+  }
+  return artifacts;
+}
+
 function openFileFromToolBlock(args: { path: string; pinned?: boolean }) {
   const p = String(args.path ?? "").trim().replaceAll("\\", "/");
   if (!p) return;
@@ -139,6 +231,7 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
   const dispatchItemAction = useRunStore((s) => s.dispatchItemAction);
   const keepStep = useRunStore((s) => s.keepStep);
   const undoStep = useRunStore((s) => s.undoStep);
+  const rootDir = useProjectStore((s) => s.rootDir);
 
   const [expanded, setExpanded] = useState(false);
   const [pickedIndex, setPickedIndex] = useState<number | null>(null);
@@ -180,11 +273,13 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
   }, [step.output, step.toolName]);
 
   // 统一提取产出文件（code.exec + write）
-  const toolArtifacts = useMemo(() => {
+  const toolArtifacts = useMemo<ToolArtifactCard[]>(() => {
     const out = getToolResultEnvelopePayload(step.output) as any;
-    if (!out || typeof out !== "object") return [];
+    const linkedArtifacts = extractLinkedArtifacts(step.output, rootDir);
+    if (!out || typeof out !== "object") return linkedArtifacts;
+    const structuredArtifacts: ToolArtifactCard[] = [];
     if (step.toolName === "code.exec" && Array.isArray(out.artifacts)) {
-      return out.artifacts
+      structuredArtifacts.push(...out.artifacts
         .map((a: any, idx: number) => ({
           id: String(a?.absPath ?? a?.relPath ?? `artifact_${idx}`),
           absPath: String(a?.absPath ?? "").trim(),
@@ -192,24 +287,32 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
           name: String(a?.name ?? "").trim() || String(a?.relPath ?? "").split("/").pop() || "",
           ext: String(a?.ext ?? "").trim(),
           sizeBytes: Number(a?.sizeBytes ?? 0),
+          previewKind: detectPreviewKindFromArtifact(String(a?.ext ?? "").trim(), String(a?.name ?? "").trim()),
         }))
-        .filter((a: any) => Boolean(a.absPath));
+        .filter((a: any) => Boolean(a.absPath)));
     }
     if (step.toolName === "write" && out.artifact && typeof out.artifact === "object") {
       const a = out.artifact;
       const absPath = String(a.absPath ?? "").trim();
-      if (!absPath) return [];
-      return [{
+      if (absPath) structuredArtifacts.push({
         id: absPath,
         absPath,
         relPath: String(a.relPath ?? "").trim(),
         name: String(a.name ?? "").trim() || String(a.relPath ?? "").split("/").pop() || "",
         ext: String(a.ext ?? "").trim(),
         sizeBytes: Number(a.sizeBytes ?? 0),
-      }];
+        previewKind: detectPreviewKindFromArtifact(String(a.ext ?? "").trim(), String(a.name ?? "").trim()),
+      });
     }
-    return [];
-  }, [step.output, step.toolName]);
+    const merged = [...structuredArtifacts, ...linkedArtifacts];
+    const seen = new Set<string>();
+    return merged.filter((artifact) => {
+      const key = String(artifact.absPath ?? "").trim();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [rootDir, step.output, step.toolName]);
 
   const canApplyPick = mode !== "chat" && step.status === "success" && !!topicOutput;
   const isMac = (window as any).desktop?.platform === "darwin";
@@ -518,13 +621,45 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
                               whiteSpace: "nowrap",
                             }}
                           >
-                            {a.name || a.relPath}
+                            {a.label || a.name || a.relPath}
                           </span>
                         </div>
-                        <span style={{ color: "var(--muted)", fontSize: 12, flexShrink: 0 }}>
-                          {formatBytes(a.sizeBytes)}
-                        </span>
+                        {Number.isFinite(Number(a.sizeBytes)) && Number(a.sizeBytes) > 0 ? (
+                          <span style={{ color: "var(--muted)", fontSize: 12, flexShrink: 0 }}>
+                            {formatBytes(a.sizeBytes)}
+                          </span>
+                        ) : null}
                       </div>
+                      {a.previewKind === "image" && toLocalFileUrl(a.absPath) ? (
+                        <div
+                          style={{
+                            border: "1px solid var(--border)",
+                            borderRadius: 10,
+                            overflow: "hidden",
+                            background: "var(--surface)",
+                          }}
+                        >
+                          <img
+                            src={toLocalFileUrl(a.absPath) ?? undefined}
+                            alt={a.label || a.name}
+                            style={{ display: "block", width: "100%", maxHeight: 320, objectFit: "contain", background: "var(--surface)" }}
+                          />
+                        </div>
+                      ) : null}
+                      {a.previewKind === "audio" && toLocalFileUrl(a.absPath) ? (
+                        <div style={{ border: "1px solid var(--border)", borderRadius: 10, background: "var(--surface)", padding: 10 }}>
+                          <audio controls className="w-full" src={toLocalFileUrl(a.absPath) ?? undefined} />
+                        </div>
+                      ) : null}
+                      {a.previewKind === "video" && toLocalFileUrl(a.absPath) ? (
+                        <div style={{ border: "1px solid var(--border)", borderRadius: 10, background: "var(--surface)", padding: 10 }}>
+                          <video
+                            controls
+                            src={toLocalFileUrl(a.absPath) ?? undefined}
+                            style={{ display: "block", width: "100%", maxHeight: 320, borderRadius: 8, background: "black" }}
+                          />
+                        </div>
+                      ) : null}
                       <div style={{ color: "var(--muted)", fontSize: 12, overflowWrap: "anywhere" }}>
                         {a.relPath || a.absPath}
                       </div>

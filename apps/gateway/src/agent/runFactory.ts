@@ -4929,16 +4929,24 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
 
       // 浏览器意图（包括短追问/上轮已注入 playwright）下，启动阶段也必须给出最小可执行工具，
       // 否则 Pi runtime 可能出现“工具声明在 system 中，但 kernel.tools 太少 → Tool ... not found”。
-      const playwrightNavigateTool = mcpToolsForRun
+      const browserBootToolEntries = mcpToolsForRun
         .map((t) => ({
           name: String((t as any)?.name ?? "").trim(),
           originalName: String((t as any)?.originalName ?? (t as any)?.name ?? "").trim(),
         }))
-        .find((t) => /^mcp\.[^.]*?(?:playwright|browser)[^.]*\./i.test(t.name) && /browser_navigate/i.test(t.originalName))
-        ?.name;
+        .filter((t) => /^mcp\.[^.]*?(?:playwright|browser)[^.]*\./i.test(t.name));
+      const findBrowserBootTool = (pattern: RegExp) =>
+        browserBootToolEntries.find((t) => pattern.test(t.originalName))?.name ?? "";
+      const playwrightNavigateTool = findBrowserBootTool(/browser_navigate/i);
+      const playwrightSnapshotTool = findBrowserBootTool(/browser_snapshot/i);
+      const playwrightScreenshotTool = findBrowserBootTool(/browser_take_screenshot/i);
       const browserBootExtras = allowBrowserForTurn
         ? [
             playwrightNavigateTool || "",
+            // 浏览器启动阶段常见链路是“打开 -> 看快照/截图 -> 再继续”，
+            // 这里一起放进最小执行集，避免刚导航完就因为仍处于 boot 阶段而被 TOOL_NOT_ALLOWED。
+            playwrightSnapshotTool || "",
+            playwrightScreenshotTool || "",
             baseAllowedToolNames.has("web.search") ? "web.search" : "",
             baseAllowedToolNames.has("web.fetch") ? "web.fetch" : "",
             baseAllowedToolNames.has("run.mainDoc.get") ? "run.mainDoc.get" : "",

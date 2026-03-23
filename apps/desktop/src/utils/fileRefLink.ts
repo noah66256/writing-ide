@@ -5,6 +5,24 @@
 
 export const FILE_REF_SCHEME = "file-ref:";
 
+const ROOT_LIKE_POSIX_DIRS = new Set([
+  "Applications",
+  "Library",
+  "System",
+  "Users",
+  "Volumes",
+  "bin",
+  "dev",
+  "etc",
+  "home",
+  "opt",
+  "private",
+  "sbin",
+  "tmp",
+  "usr",
+  "var",
+]);
+
 const KNOWN_EXTS = new Set([
   "pptx", "docx", "xlsx", "pdf", "doc", "xls", "ppt", "key", "pages", "numbers",
   "png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "ico",
@@ -113,6 +131,8 @@ export function resolveOpenableFileRef(rootDir: string | null | undefined, path:
   const normalized = normalizeFileRef(path, { allowAbsolute: true });
   if (!normalized) return null;
   if (isAbsoluteFileRefPath(normalized)) return normalized;
+  const firstSegment = normalized.split("/")[0] ?? "";
+  if (ROOT_LIKE_POSIX_DIRS.has(firstSegment)) return `/${normalized.replace(/^\/+/, "")}`;
   if (!rootDir) return null;
   return resolveProjectAbsPath(rootDir, normalized);
 }

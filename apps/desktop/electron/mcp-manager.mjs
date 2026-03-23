@@ -131,6 +131,16 @@ const ARG_ALIAS_GROUPS = [
   ["url", "uri", "link", "href"],
 ];
 
+const BROWSER_OUTPUT_FILENAME_TOOL_NAMES = new Set([
+  "browser_take_screenshot",
+  "browser_snapshot",
+  "browser_console_messages",
+  "browser_network_requests",
+  "browser_pdf_save",
+  "browser_storage_state",
+  "browser_stop_video",
+]);
+
 const RUNTIME_INSTALL_PLAN_BY_COMMAND = {
   uv: { id: "uv", label: "uv/uvx", commands: ["uv", "uvx"] },
   uvx: { id: "uv", label: "uv/uvx", commands: ["uv", "uvx"] },
@@ -183,6 +193,30 @@ function normalizePathArgValue(value) {
     raw = raw.replace(/\\/g, "/");
   }
   return raw;
+}
+
+function shouldSanitizeBrowserOutputFilename(serverId, toolName) {
+  const sid = String(serverId ?? "").trim().toLowerCase();
+  const tname = String(toolName ?? "").trim();
+  return /(playwright|browser)/.test(sid) && BROWSER_OUTPUT_FILENAME_TOOL_NAMES.has(tname);
+}
+
+function sanitizeBrowserOutputFilename(value) {
+  if (typeof value !== "string") return value;
+  const raw = normalizePathArgValue(value);
+  if (typeof raw !== "string") return value;
+  const normalized = String(raw).trim().replace(/\\/g, "/");
+  if (!normalized) return normalized;
+  const looksAbsolute =
+    normalized.startsWith("/") ||
+    normalized.startsWith("~/") ||
+    /^[A-Za-z]:\//.test(normalized);
+  const hasParentTraversal = normalized.split("/").some((part) => part === "..");
+  if (!looksAbsolute && !hasParentTraversal) {
+    return normalized.replace(/^\.\/+/, "");
+  }
+  const base = path.posix.basename(normalized) || path.win32.basename(normalized);
+  return String(base || "artifact").trim() || "artifact";
 }
 
 const MCP_SERVER_FAMILIES = new Set(["browser", "search", "word", "spreadsheet", "pdf", "custom"]);
@@ -1994,6 +2028,18 @@ export class McpManager {
       if (next === v) continue;
       args[reqKey] = next;
       rewrites.push({ from: reqKey, to: reqKey, reason: "normalize_path_value" });
+    }
+
+    if (shouldSanitizeBrowserOutputFilename(opts.serverId, toolName)) {
+      for (const reqKey of orderedTargets) {
+        if (!Object.prototype.hasOwnProperty.call(args, reqKey)) continue;
+        if (normalizeArgKey(reqKey) !== "filename") continue;
+        const v = args[reqKey];
+        const next = sanitizeBrowserOutputFilename(v);
+        if (next === v) continue;
+        args[reqKey] = next;
+        rewrites.push({ from: reqKey, to: reqKey, reason: "sanitize_browser_output_filename" });
+      }
     }
 
     return { args, rewrites, schemaKeys: meta.schemaKeys };
