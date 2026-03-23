@@ -89,6 +89,35 @@ type PhoneCodeRequest = {
 const phoneCodeRequests = new Map<string, PhoneCodeRequest>();
 const kbStore = new MemoryKbStore();
 const aiConfig = createAiConfigService({ loadDb, saveDb, updateDb });
+const SIGNUP_BONUS_POINTS = 1000;
+
+// 新注册用户赠送积分，并保留一条可审计的积分流水。
+function createUserWithSignupBonus(params: {
+  db: Db;
+  email: string | null;
+  phone: string | null;
+  role: User["role"];
+}): User {
+  const { db, email, phone, role } = params;
+  const user: User = {
+    id: randomUUID(),
+    email,
+    phone,
+    role,
+    pointsBalance: 0,
+    billingGroup: null,
+    createdAt: new Date().toISOString(),
+  };
+  db.users.push(user);
+  adjustUserPoints({
+    db,
+    userId: user.id,
+    delta: SIGNUP_BONUS_POINTS,
+    type: "adjust",
+    reason: "signup_bonus",
+  });
+  return user;
+}
 
 const fastify = Fastify({
   logger: true
@@ -2449,16 +2478,12 @@ fastify.post("/api/auth/phone/verify", async (request, reply) => {
     const user = await updateDb((db) => {
       let u = db.users.find((x) => x.phone === phoneNumber);
       if (!u) {
-        u = {
-          id: randomUUID(),
+        u = createUserWithSignupBonus({
+          db,
           email: null,
           phone: phoneNumber,
           role: "user",
-          pointsBalance: 0,
-          billingGroup: null,
-          createdAt: new Date().toISOString(),
-        };
-        db.users.push(u);
+        });
       }
       return u;
     });
@@ -2527,16 +2552,12 @@ fastify.post("/api/auth/email/verify", async (request, reply) => {
     if (!user) {
       const isAdmin = ADMIN_EMAILS.includes(lowerEmail) || (IS_DEV && db.users.length === 0);
       const role: User["role"] = isAdmin ? "admin" : "user";
-      user = {
-        id: randomUUID(),
+      user = createUserWithSignupBonus({
+        db,
         email: lowerEmail,
         phone: null,
         role,
-        pointsBalance: 0,
-        billingGroup: null,
-        createdAt: new Date().toISOString()
-      };
-      db.users.push(user);
+      });
     }
     return user;
   });
@@ -2780,16 +2801,21 @@ fastify.post(
           return { ok: true, user: existing, existed: true };
         }
 
-        const user: User = {
-          id: randomUUID(),
+        const user = createUserWithSignupBonus({
+          db,
           email,
           phone,
           role,
-          pointsBalance,
-          billingGroup: null,
-          createdAt: new Date().toISOString(),
-        };
-        db.users.push(user);
+        });
+        if (pointsBalance > 0) {
+          adjustUserPoints({
+            db,
+            userId: user.id,
+            delta: pointsBalance,
+            type: "adjust",
+            reason: "admin_create_initial_points",
+          });
+        }
         return { ok: true, user, existed: false };
       });
       return reply.send(ret);
