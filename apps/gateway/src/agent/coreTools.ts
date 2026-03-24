@@ -1,38 +1,27 @@
-// 核心工具目录与 opMode 映射（对齐 docs/research/core-tools-exposure-refactor-2026-03-13.md）
+// L0 即时工具：完整 schema 每轮必带（对齐 docs/specs/feat-runtime-tool-exposure-v1.md）
+// 内部使用 legacy 名，LLM 边界通过 toolNameBridge 映射到 PascalCase 公共名。
 
 export const CORE_TOOL_NAMES = [
-  // 时间 / 工具发现
-  "time.now",
+  // 工具发现（ToolSearch 入口）
   "tools.search",
   "tools.describe",
-  "skills.list",
-  "skills.activate",
 
-  // Web / KB
+  // Web
   "web.search",
   "web.fetch",
-  "kb.listLibraries",
-  "kb.search",
 
   // Run 编排
   "run.mainDoc.get",
   "run.mainDoc.update",
-  "run.setTodoList",
   "run.todo",
   "run.done",
 
-  // 文件系统（读/写/编辑/快照/拆分/目录/重命名/删除/列表/打开）
+  // 文件系统
   "read",
   "write",
   "edit",
-  "doc.previewDiff",
-  "doc.snapshot",
-  "doc.splitToDir",
-  "mkdir",
-  "rename",
-  "delete",
   "project.listFiles",
-  "file.open",
+  "project.search",
 
   // 记忆
   "memory",

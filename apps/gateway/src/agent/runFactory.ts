@@ -78,7 +78,7 @@ import {
   validateCompositePhaseCapabilities,
   type CompositeTaskPlanV1,
 } from "./compositeTask.js";
-import { collectToolSchemaIssues } from "@ohmycrab/tools";
+import { TOOL_LIST, collectToolSchemaIssues } from "@ohmycrab/tools";
 import type {
   ApprovalItem,
   CollabAgentSessionRecord,
@@ -319,7 +319,7 @@ const CORE_WORKFLOW_TOOL_NAMES = [
   "tools.describe",
   "run.mainDoc.get",
   "run.mainDoc.update",
-  "run.setTodoList",
+  "run.todo(action=replace)",
   "run.todo",
   "run.done",
 ] as const;
@@ -327,7 +327,6 @@ const CORE_WORKFLOW_TOOL_NAMES = [
 const DELETE_ROUTE_PINNED_TOOL_NAMES = [
   ...CORE_WORKFLOW_TOOL_NAMES,
   "project.listFiles",
-  "doc.snapshot",
   "delete",
 ] as const;
 
@@ -472,9 +471,9 @@ function buildSkillToolAliasNotice(manifest: any): string {
     "- Edit -> edit",
     "- Glob -> project.searchPaths",
     "- Grep -> project.search",
-    "- Bash -> shell.exec",
+    "- Bash（命令执行 + Python 代码）",
     "- WebFetch -> web.fetch",
-    "- Task -> spawn_agent",
+    "- Agent（子 Agent 生命周期管理）",
   ].join("\n");
 }
 
@@ -538,7 +537,7 @@ function collectPortablePromptShellRules(manifest: any): PortablePromptPreproces
   const policy = parsePortableAllowedToolPolicy(manifest ? [manifest] : []);
   if (!policy?.rules?.length) return [];
   return policy.rules
-    .filter((rule) => rule.toolName === "shell.exec" && (rule.kind === "any" || rule.kind === "command_pattern"))
+    .filter((rule) => rule.toolName === "Bash" && (rule.kind === "any" || rule.kind === "command_pattern"))
     .map((rule) => ({
       raw: String(rule.raw ?? "").trim(),
       kind: rule.kind === "command_pattern" ? "command_pattern" : "any",
@@ -776,20 +775,20 @@ function buildRouteDecisionV1(args: {
   } else if (routeIdLower === "web_radar") {
     executionPreferredRaw.push("web.search", "web.fetch");
   } else if (routeIdLower === "file_ops") {
-    executionPreferredRaw.push("project.listFiles", "run.setTodoList", "run.todo");
+    executionPreferredRaw.push("project.listFiles", "run.todo(action=replace)", "run.todo");
   } else if (routeIdLower === "kb_ops") {
-    executionPreferredRaw.push("kb.search", "run.mainDoc.get", "run.setTodoList");
+    executionPreferredRaw.push("kb.search", "run.mainDoc.get", "run.todo(action=replace)");
   } else if (routeIdLower === "task_execution") {
     if (freshWebResearchTask) {
-      executionPreferredRaw.push("time.now", "web.search", "web.fetch", "run.mainDoc.get", "kb.search", "run.setTodoList", "run.todo");
+      executionPreferredRaw.push("time.now", "web.search", "web.fetch", "run.mainDoc.get", "kb.search", "run.todo(action=replace)", "run.todo");
     } else if (isAnthropicLike) {
-      executionPreferredRaw.push("run.setTodoList", "run.todo", "run.mainDoc.get", "kb.search");
+      executionPreferredRaw.push("run.todo(action=replace)", "run.todo", "run.mainDoc.get", "kb.search");
     } else {
-      executionPreferredRaw.push("run.mainDoc.get", "kb.search", "run.setTodoList");
+      executionPreferredRaw.push("run.mainDoc.get", "kb.search", "run.todo(action=replace)");
     }
     // 安装/部署类任务：优先建议使用本地 runtime 工具（shell.exec/process.run）
     if (installOrDeployTask) {
-      executionPreferredRaw.unshift("process.run", "shell.exec");
+      executionPreferredRaw.unshift("process.run", "Bash");
     }
   }
 
@@ -813,7 +812,7 @@ function buildRouteDecisionV1(args: {
     ),
   );
   if (isExecutionRoute && executionPreferred.length === 0) {
-    for (const name of ["run.mainDoc.get", "run.setTodoList", "run.todo", "project.listFiles", "kb.search"]) {
+    for (const name of ["run.mainDoc.get", "run.todo(action=replace)", "run.todo", "project.listFiles", "kb.search"]) {
       if (args.baseAllowedToolNames.has(name)) executionPreferred.push(name);
     }
   }
@@ -844,8 +843,6 @@ function buildRouteDecisionV1(args: {
       "write",
       "read",
       "mkdir",
-      "doc.splitToDir",
-      "doc.previewDiff",
       "edit",
       "project.listFiles",
     ];
@@ -925,8 +922,8 @@ function inferDeliveryContractV1(args: {
   ) || undefined;
 
   const preferredWriteToolNames = kind === "file_office"
-    ? ["write", "code.exec"]
-    : ["write", "edit", "code.exec"];
+    ? ["write", "Bash"]
+    : ["write", "edit", "Bash"];
 
   return {
     required: true,
@@ -1235,15 +1232,15 @@ export function buildAgentProtocolPrompt(args: {
           if (m === "assistant") {
             return (
               `当前助手权限：助手模式（高权限）。\n` +
-              `- 你可以在用户本机执行命令（例如 shell.exec / process.*），用于跑测试脚本、构建、启动本地服务或使用包管理器（brew/winget 等）。\n` +
-              `- 一次性任务（如 git clone / cat / curl 安装脚本）优先使用 shell.exec；需要长期运行的服务（如 dev server / 本地 dashboard），优先使用 process.run，并通过 process.list / process.stop 管理会话，而不是用 shell.exec 启动无法追踪的后台进程。\n` +
+              `- 你可以在用户本机执行命令（例如 Bash / process.*），用于跑测试脚本、构建、启动本地服务或使用包管理器（brew/winget 等）。\n` +
+              `- 一次性任务（如 git clone / cat / curl 安装脚本）优先使用 Bash；需要长期运行的服务（如 dev server / 本地 dashboard），优先使用 process.run，并通过 process.list / process.stop 管理会话，而不是用 Bash 启动无法追踪的后台进程。\n` +
               `- 所有这类命令仍然是高风险操作：在执行安装/升级/修改系统环境的命令前，先用自然语言向用户说明你将做什么，再执行命令。\n` +
               `- 极端危险命令（例如 rm -rf 根目录）在系统层面会被直接拒绝，你不得尝试绕过。\n\n`
             );
           }
           return (
             `当前助手权限：创作模式（安全）。\n` +
-            `- 你可以自由使用写作/检索/KB/风格相关工具，但禁止执行任何高风险本机运行时工具、全局技能安装或 MCP 生命周期变更（如 code.exec / shell.exec / process.* / cron.* / skill.install / mcpServer.applyInstall / mcpServer.applyUpgrade / mcpServer.uninstall）。\n` +
+            `- 你可以自由使用写作/检索/KB/风格相关工具，但禁止执行任何高风险本机运行时工具、全局技能安装或 MCP 生命周期变更（如 Bash / process.* / cron.* / skill.install / mcpServer.applyInstall / mcpServer.applyUpgrade / mcpServer.uninstall）。\n` +
             `- 不要建议用户你“已经”执行了命令或安装了软件；在创作模式下，你只能给出命令建议，由用户自行执行。\n\n`
           );
         })()
@@ -1278,7 +1275,7 @@ export function buildAgentProtocolPrompt(args: {
         `- 当 style_imitate 进入 orchestrator 阶段化工具暴露时，以当前回合可见工具作为权威阶段信号：若本回合只暴露了 kb.search / lint.copy / lint.style / write 中的某一个或少量工具，只能用这些工具推进当前阶段，不要要求隐藏工具。\n\n` +
         `1) Todo（任务清单）：进入执行流后默认维护 Todo。\n` +
         `   - Todo 体现执行者视角，例如”① 搜索素材 ② 整理要点 ③ 撰写初稿 ④ 风格检查 ⑤ 交付用户”。\n` +
-        `   - 首次可用 run.setTodoList；已有 Todo 时优先 run.todo（action=upsert/update/remove），不重复覆盖。\n` +
+        `   - 首次可用 run.todo(action=replace)；已有 Todo 时优先 run.todo（action=upsert/update/remove），不重复覆盖。\n` +
         `2) 任务工作台（mainDoc）：关键决策/约束/假设及时写入 run.mainDoc.update。这是你的结构化工作记忆。\n` +
         `   ⚠ mainDoc 禁止存储：草稿全文、lint 对比结果全文、逐句改写记录、任何超过 3 段的长文本。\n` +
         `   ✓ mainDoc 只允许：目标、平台、受众、约束、大纲摘要、当前步骤状态。\n` +
@@ -1293,7 +1290,7 @@ export function buildAgentProtocolPrompt(args: {
         `     Word/docx → Word MCP；Excel/xlsx → Excel MCP；浏览器自动化 → Playwright MCP。\n` +
         `     MCP 文档类工具的操作顺序：先 create/open → 再 add/insert/update → 最后 save/export。\n` +
         `     若报 "Document does not exist"，说明漏了 create/open 步骤，不要改用 write 伪造。\n` +
-        `     code.exec 仅用于 Python fallback，不等于 shell/terminal；如果工具列表里没有 shell.exec / terminal / ssh 能力，不得把 code.exec 当成 bash、npm、pnpm、yarn 或部署终端来使用。\n` +
+        `     Bash 支持命令执行（command 参数）和 Python 脚本（code/entryFile 参数），不要混用。\n` +
         `     只要 Playwright/browser MCP 工具出现在工具列表中，就表示当前已授权可用，直接使用即可。\n` +
         `   - 组合任务：根据需要组合多种工具完成复杂流程，不要跳过必要步骤直接臆造。\n` +
         `   - 修改/延续任务：先读取当前内容，再按用户要求修改；如已有检查结果，一并纳入参考。\n` +
@@ -1305,11 +1302,11 @@ export function buildAgentProtocolPrompt(args: {
         `- 如果用户要求把结果写入项目，你必须调用相关工具真正写入；不要只在文本里声称"已完成"。\n` +
         `- 若需要调用工具：直接使用工具，不要在工具调用消息中夹带不相关的 Markdown。\n` +
         `- 如需更新多个 Todo/Main Doc：在同一轮中批量调用多个工具，减少回合。\n` +
-        `- 文本写入合同以工具真实 applyPolicy 为准：doc.previewDiff 只生成提案/diff，不会写盘；write/edit 才会真实修改文件，并按各自风险策略申请确认或提供回滚。\n` +
-        `- 当用户明确要求“先看 diff / 不要直接覆盖 / 先讨论方案”时，必须先调用 doc.previewDiff；在收到用户确认前，不要继续 write/edit。\n` +
+        `- 文本写入合同以工具真实 applyPolicy 为准：write/edit 会真实修改文件，并按各自风险策略申请确认或提供回滚。\n` +
+        `- 当用户明确要求“先看 diff / 不要直接覆盖 / 先讨论方案”时，如需先看 diff，可让用户确认后再 write/edit。\n` +
         `- 在收到 write/edit 的成功结果前，不得声称“已写入/已落盘/已保存完成”。\n` +
-        `- 交付文件导航：任务产出了文件（write/code.exec 等写入的文件）时，在最终交付文字中列出所有产出文件的相对路径（如 output/report.md），供用户点击打开。路径直接写纯文本，不要用反引号或代码格式包裹。不要主动调用 file.open 自动打开文件，除非用户明确要求"打开"或"预览"。\n` +
-        `- 写作产出格式：写作类任务默认用 write 输出 .md 文件（Markdown 省 token、可 diff、可 proposal-first）。write 只能写纯文本文件（.md/.txt/.json 等），不能创建真实的 .docx/.xlsx/.pptx/.pdf。用户要求 Office/PDF 格式时，优先用对应 MCP 工具（Word MCP / Excel MCP）；仅当工具列表中无对应 MCP 时才退回 code.exec。\n\n` +
+        `- 交付文件导航：任务产出了文件（write/Bash 等产出的文件）时，在最终交付文字中列出所有产出文件的相对路径（如 output/report.md），供用户点击打开。路径直接写纯文本，不要用反引号或代码格式包裹。文件路径直接写纯文本供用户点击。\n` +
+        `- 写作产出格式：写作类任务默认用 write 输出 .md 文件（Markdown 省 token、可 diff、可 proposal-first）。write 只能写纯文本文件（.md/.txt/.json 等），不能创建真实的 .docx/.xlsx/.pptx/.pdf。用户要求 Office/PDF 格式时，优先用对应 MCP 工具（Word MCP / Excel MCP）；仅当工具列表中无对应 MCP 时才退回 Bash。\n\n` +
         `Skills（必须执行）：\n` +
         `- Context Pack 中包含 ACTIVE_SKILLS(JSON)，列出了当前本轮已激活的 Skill 列表（例如 style_imitate）。\n` +
         `- 回复任何内容之前，先快速浏览 ACTIVE_SKILLS(JSON)。\n` +
@@ -1978,14 +1975,9 @@ export function shouldExposeRuntimeHighRiskToolsForRun(args: {
   hasPortableScopedHighRiskGrant: boolean;
 }): boolean {
   if (args.hasPortableScopedHighRiskGrant) return true;
-  if (args.opMode !== "assistant") return false;
-  if (args.routeId === "file_delete_only" || args.routeId === "file_ops" || looksLikeFileOpsIntent(args.userPrompt)) {
-    return true;
-  }
-  if (args.intentIsWritingTask || args.styleWorkflowActive) {
-    return looksLikeExplicitShellExecIntent(args.userPrompt) || looksLikeExplicitCodeExecIntent(args.userPrompt);
-  }
-  return true;
+  // 助手模式：无条件开放高风险工具，LLM 自己判断用不用
+  if (args.opMode === "assistant") return true;
+  return false;
 }
 
 export function resolveStickyMcpServerIds(args: {
@@ -3306,7 +3298,7 @@ export async function prepareAgentRun(args: {
           "- skill 草稿、eval workspace、临时副本可以放在当前项目目录或临时 workspace 中。",
           "- 最终安装到用户可用的全局 skills 目录时，必须调用 skill.install；它写入的是 Desktop 管理的用户 skills 根目录，不是当前项目目录。",
           runOpMode === "assistant"
-            ? "- 当前为助手模式：安装全局 skill 优先调用 skill.install；若用户要安装/配置 MCP，优先调用 mcpServer.planInstall / mcpServer.applyInstall，不要直接用 shell.exec 模拟安装。"
+            ? "- 当前为助手模式：安装全局 skill 优先调用 skill.install；若用户要安装/配置 MCP，优先调用 mcpServer.planInstall / mcpServer.applyInstall，不要直接用 Bash 模拟安装。"
             : "- 当前为创作模式：禁止直接调用 skill.install。若用户要把最终版 skill 装到全局 skills 目录，先整理好草稿，再提醒用户切到助手模式。",
         ].join("\n"),
       );
@@ -3744,6 +3736,12 @@ export async function prepareAgentRun(args: {
         ? new Set(Array.from(allToolNamesForModeEffective).filter((n) => !isWriteLikeTool(n)))
         : new Set(allToolNamesForModeEffective);
 
+  // 合成 wrapper 需要的 legacy 名注入（Bash = shell.exec + code.exec，Agent = spawn_agent + collab）
+  // 它们已从 TOOL_LIST 删除，但 _buildAgentTools wrapper 和 HIGH_RISK gate 仍需识别。
+  for (const name of ["Bash", "code.exec", "spawn_agent", "send_input", "resume_agent", "wait_agent", "close_agent"]) {
+    baseAllowedToolNames.add(name);
+  }
+
   // 基础工具集先按 opMode（创作/助手）做一次硬兜底：
   // - 创作模式：剔除 shell.exec / code.exec / process.* / cron.* / skill.install 等高危工具；
   // - 助手模式：完整保留（后续仍有 code.exec 等细粒度 gate）。
@@ -4039,7 +4037,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
   const shouldPreserveRuntimeTools =
     opModeForRun === "assistant" && typeof projectDirFromSidecar === "string" && projectDirFromSidecar.length > 0;
   if (shouldPreserveRuntimeTools) {
-    const runtimeToolNames = ["shell.exec", "process.run", "process.list", "process.stop", "cron.create", "cron.list"];
+    const runtimeToolNames = ["Bash", "process.run", "process.list", "process.stop", "cron.create", "cron.list"];
     for (const name of runtimeToolNames) {
       if (baseAllowedToolNames.has(name)) {
         preserveToolNamesWithComposite.add(name);
@@ -4144,7 +4142,6 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     }
     // 目标 skill 已经显式选定，不应再向模型暴露内部激活工具；
     // 否则模型可能重复调用 skills.activate，把同一 run 切成多个 denied turn。
-    selectedAllowedToolNames.delete("skills.activate");
   }
 
   // MCP Server 粒度补齐：如果 selectToolSubset 选中了某个 MCP Server 的任一工具，
@@ -4313,9 +4310,8 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
   for (const name of portableScopedHighRiskToolNames) {
     if (baseAllowedToolNames.has(name)) selectedAllowedToolNames.add(name);
   }
-  if (baseAllowedToolNames.has("code.exec") && !portableScopedHighRiskToolNames.has("code.exec")) {
-    if (shouldExposeRuntimeHighRiskTools && allowCodeExecForRun) selectedAllowedToolNames.add("code.exec");
-    else selectedAllowedToolNames.delete("code.exec");
+  // code.exec 已合并进 Bash wrapper，不再单独管理
+  if (false) {
   }
   const compositeCapabilityIssue = validateCompositePhaseCapabilities({
     plan: compositeTaskPlan,
@@ -4473,7 +4469,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     ...(skillsSystemPrompt ? ([{ role: "system", content: skillsSystemPrompt }] as OpenAiChatMessage[]) : []),
     ...(projectDirFromSidecar
       ? ([{ role: "system", content: `用户当前已打开项目目录：${projectDirFromSidecar}\n项目内的文件操作（read/write/project.search 等）均基于此目录。` }] as OpenAiChatMessage[])
-      : ([{ role: "system", content: `当前没有打开项目文件夹。文件写入工具（write/doc.splitToDir/mkdir 等）和代码执行工具（code.exec）需要项目目录才能正常工作。\n如果任务需要写入文件或执行代码，请在第一步提醒用户点击输入框左下角的文件夹按钮选择或创建一个项目文件夹。` }] as OpenAiChatMessage[])),
+      : ([{ role: "system", content: `当前没有打开项目文件夹。文件写入工具（write/mkdir 等）和代码执行工具（Bash）需要项目目录才能正常工作。\n如果任务需要写入文件或执行代码，请在第一步提醒用户点击输入框左下角的文件夹按钮选择或创建一个项目文件夹。` }] as OpenAiChatMessage[])),
     ...(shouldResumePendingWrite
       ? ([{ role: "system", content: `检测到这是一次“恢复上轮未落盘写入”的续跑：上轮因未打开项目目录而阻塞，现在项目目录已可用。\n你必须优先复用 Context Pack 中的 PENDING_ARTIFACTS 里的现成正文，直接调用 write 保存到 ${pendingResumeState.pathHint || "TASK_STATE.resume.pathHint"}；不要重新调研，不要重新生成正文。\n写入成功后，结束这次恢复写入，不要再把同一份待恢复产物重复保存一遍。` }] as OpenAiChatMessage[])
       : []),
@@ -4600,10 +4596,10 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
   const PHASE_CONTRACTS_V1: Partial<Record<SkillToolCapsPhase, PhaseContractV1>> = {
     todo_required: {
       phase: "todo_required",
-      allowTools: ["run.setTodoList", "run.todo", "run.mainDoc.update", "run.mainDoc.get"],
+      allowTools: ["run.todo", "run.mainDoc.update", "run.mainDoc.get"],
       hint:
         "【Todo Gate】当前阶段：todo_required（先立计划，再行动）。\n" +
-        "- 你必须先设置 Todo（run.setTodoList 或 run.todo action=upsert；建议 5–12 条，全部可执行）。\n" +
+        "- 你必须先设置 Todo（run.todo(action=replace) 或 run.todo action=upsert；建议 5–12 条，全部可执行）。\n" +
         "- 默认不要创建 status=blocked/等待确认 条目；如有不确定点：写成 todo，并在 note 写明“默认假设”，继续推进（不要硬等用户）。\n" +
         "- 本回合不要调用 kb.search / lint.* / doc.* / project.* 等其它工具；不要输出最终正文。\n",
       autoRetry: ({ runState, toolCapsPhase }) => {
@@ -4615,7 +4611,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
           reasonCodes: ["need_todo"],
           reasons: ["Todo 未设置"],
           systemMessage:
-            "你还没有设置 Todo。请立刻调用 run.setTodoList（或 run.todo action=upsert）写入可执行 Todo，再继续下一步。\n" +
+            "你还没有设置 Todo。请立刻调用 run.todo(action=replace)（或 run.todo action=upsert）写入可执行 Todo，再继续下一步。\n" +
             "- 建议：先写 5–12 条，包含：检索模板 → 产候选稿 → 二次检索金句/收束 → lint.style → 写入。\n" +
             "- 默认不要创建 status=blocked/等待确认 条目；如有不确定点：写明默认假设继续推进。\n",
         };
@@ -4623,7 +4619,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     },
     style_need_catalog_pick: {
       phase: "style_need_catalog_pick",
-      allowTools: ["run.mainDoc.update", "run.mainDoc.get", "run.setTodoList", "run.todo", "kb.search"],
+      allowTools: ["run.mainDoc.update", "run.mainDoc.get", "run.todo(action=replace)", "run.todo", "kb.search"],
       hint:
         "【Skill: style_imitate】当前阶段：need_catalog_pick（目录先挑，工业化 v0.1）。\n" +
         "- 你必须先基于 Context Pack 里的 STYLE_CATALOG(JSON) 选择维度与子套路选项，并写入 Main Doc：run.mainDoc.update。\n" +
@@ -4662,447 +4658,100 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     ...DELETE_ROUTE_PINNED_TOOL_NAMES,
   ]);
 
-  // Phase gates disabled — provide all tools, let LLM decide when to call each.
-  // Previous implementation dynamically removed tools per-turn based on run state
-  // (todo_required, web gate, style gate, lint gate, etc.), which caused KV-cache
-  // thrashing and deadlocks with the AutoRetry mechanism.
-  const isDeleteOnlyRoute = routeIdLower === "file_delete_only";
+  // ── computePerTurnAllowed（精简版，对齐 feat-runtime-tool-exposure-v1）──
+  // 只做四件事：1.合并已激活工具 2.模式门禁 3.预算检查 4.兜底 CORE_TOOLS
   const computePerTurnAllowed = (state: RunState): { allowed: Set<string>; hint: string; orchestratorMode?: boolean } | null => {
-    let allowed: Set<string> | null = null;
     const hints: string[] = [];
+    if (compositeTaskSummary) hints.push(compositeTaskSummary);
 
-    if (compositeTaskSummary) {
-      hints.push(compositeTaskSummary);
-    }
+    const allowed = new Set(selectedAllowedToolNames);
 
-    const compositePhasePins = new Set<string>();
-    if (compositeTaskPlan) {
-      const phases = Array.isArray(compositeTaskPlan.phases) ? compositeTaskPlan.phases : [];
-      const delivered = Array.isArray((state as any)?.deliveredArtifactFamilies)
-        ? ((state as any).deliveredArtifactFamilies as any[]).filter(Boolean)
-        : [];
-      const needsDelivery = Boolean(deliveryContract.required) && delivered.length === 0;
+    // 1. 合并已激活工具（sticky + thread active MCP + discovered）
+    const stickyNames = (Array.isArray((state as any)?.stickyToolNames) ? ((state as any).stickyToolNames as unknown[]) : [])
+      .map((x) => String(x ?? "").trim()).filter((n) => n && baseAllowedToolNames.has(n));
+    const discoveredNames = Array.from(
+      (state as any).discoveredMcpToolNames instanceof Set ? ((state as any).discoveredMcpToolNames as Set<string>) : new Set<string>(),
+    ).map((x) => String(x ?? "").trim()).filter((n) => n && baseAllowedToolNames.has(n));
+    const activatedNames = Array.from(new Set([
+      ...stickyNames,
+      ...threadActiveMcpToolNames.filter((n) => baseAllowedToolNames.has(n)),
+      ...discoveredNames,
+    ]));
+    for (const name of activatedNames) allowed.add(name);
 
-      const phaseSatisfied = (kind: string) => {
-        if (kind === "web_research") return Boolean(state.hasWebSearch || state.hasWebFetch);
-        if (kind === "browser_collect") return Boolean((state as any).hasBrowserMcpToolCall);
-        if (kind === "project_delivery") return !needsDelivery;
-        return false;
-      };
-
-      const current = phases.find((p: any) => !phaseSatisfied(String(p?.kind ?? ""))) ?? phases[0] ?? null;
-      const hintList = Array.isArray((current as any)?.allowedToolHints) ? ((current as any).allowedToolHints as any[]) : [];
-      for (const it of hintList.slice(0, 16)) {
-        const name = String(it ?? "").trim();
-        if (name && baseAllowedToolNames.has(name)) compositePhasePins.add(name);
-      }
-      if ((current as any)?.kind) {
-        const sample = Array.from(compositePhasePins).slice(0, 8).join(", ");
-        hints.push(`复合任务阶段保底：currentPhase=${String((current as any).kind)}，已补齐 ${compositePhasePins.size} 个阶段工具${sample ? "（例如：" + sample + "）" : ""}。`);
-      }
-    }
-
-
-    // B2：sticky tools + 自愈补齐（TOOL_NOT_ALLOWED） + 失败驱动扩展（web.fetch/search -> playwright/web-search MCP）
-    // 说明：这是在 baseline selectedAllowedToolNames 之上的“增量扩展”，避免工具随机消失。
-    const stickyTools = new Set<string>(
-      (Array.isArray((state as any)?.stickyToolNames) ? ((state as any).stickyToolNames as any[]) : [])
-        .map((x) => String(x ?? "").trim())
-        .filter((x) => x && baseAllowedToolNames.has(x)),
-    );
-
-    const lastNotAllowed = String((state as any)?.lastToolNotAllowedName ?? "").trim();
-    const healTools = new Set<string>();
-    if (lastNotAllowed && baseAllowedToolNames.has(lastNotAllowed)) {
-      healTools.add(lastNotAllowed);
-      hints.push(`检测到上一回合 TOOL_NOT_ALLOWED：已自动补齐工具 ${lastNotAllowed}（自愈）。`);
-    }
-
-    const lastNotFound = String((state as any)?.lastToolNotFoundName ?? "").trim();
-    if (lastNotFound && baseAllowedToolNames.has(lastNotFound)) {
-      healTools.add(lastNotFound);
-      hints.push(`检测到上一回合 TOOL_NOT_FOUND：已自动补齐工具 ${lastNotFound}（自愈）。`);
-    }
-
-    const failFetch = Math.max(0, Math.floor(Number((state as any)?.webFetchFailCount ?? 0)));
-    const failSearch = Math.max(0, Math.floor(Number((state as any)?.webSearchFailCount ?? 0)));
-    const expansionTools = new Set<string>();
-    if (failFetch > 0 || failSearch > 0) {
-      // runner 内置回退链需要的 MCP 工具名：web-search.get_page_content / playwright.browser_navigate
-      for (const t of mcpToolsForRun) {
-        const name = String((t as any)?.name ?? "").trim();
-        if (!name || !baseAllowedToolNames.has(name)) continue;
-        const orig = String((t as any)?.originalName ?? (t as any)?.name ?? "").trim().toLowerCase();
-        if (failFetch > 0 && /get_page_content/.test(orig)) expansionTools.add(name);
-        if ((failFetch > 0 || failSearch > 0) && /browser_navigate/.test(orig)) expansionTools.add(name);
-        if (failSearch > 0 && (/bocha_web_search/.test(orig) || /\bweb_search\b/.test(orig))) expansionTools.add(name);
-      }
-      if (expansionTools.size > 0) {
-        hints.push(
-          `检测到 web.* 失败（searchFail=${failSearch}, fetchFail=${failFetch}）：已为回退链补齐 ${expansionTools.size} 个 MCP 工具。`,
-        );
-      }
-    }
-
+    // 1.5 delete-only 路由：只暴露最小工具集
+    const isDeleteOnlyRoute = routeIdLower === "file_delete_only";
     if (isDeleteOnlyRoute) {
-      allowed = new Set(Array.from(selectedAllowedToolNames).filter((name) => DELETE_ONLY_ALLOWED_TOOL_NAMES.has(name)));
-      // 兜底确保关键链路可用（受 mode/toolPolicy 影响时仍保留）。
-      if (baseAllowedToolNames.has("project.listFiles")) allowed.add("project.listFiles");
-      if (baseAllowedToolNames.has("delete")) allowed.add("delete");
-      if (baseAllowedToolNames.has("run.done")) allowed.add("run.done");
-      hints.push(
-        "当前任务为删除/清理（file_delete_only）：已启用最小工具集。\n" +
-          "- 仅允许 project.listFiles / delete / 快照回滚 / run.*\n" +
-          "- 默认禁止 read、project.search、code.exec 等非必要工具。",
-      );
+      const deleteAllowed = new Set<string>();
+      for (const name of DELETE_ONLY_ALLOWED_TOOL_NAMES) {
+        if (allowed.has(name)) deleteAllowed.add(name);
+      }
+      if (baseAllowedToolNames.has("project.listFiles")) deleteAllowed.add("project.listFiles");
+      if (baseAllowedToolNames.has("delete")) deleteAllowed.add("delete");
+      if (baseAllowedToolNames.has("run.done")) deleteAllowed.add("run.done");
+      for (const name of ALWAYS_ALLOW_TOOL_NAMES) {
+        if (baseAllowedToolNames.has(name)) deleteAllowed.add(name);
+      }
+      hints.push("当前任务为删除/清理（file_delete_only）：已启用最小工具集。");
+      return { allowed: deleteAllowed, hint: hints.join("\n\n") };
     }
 
-    if (!allowed) {
-      allowed = new Set(selectedAllowedToolNames);
-    }
-
-    const needsWebFirst = webGate.enabled && webGate.needsSearch && !state.hasWebSearch;
-
-    // ── 声明式 workflow 分支：style_imitate ──
+    // 1.6 声明式 workflow 分支（style_imitate 等）
     const wfSkillId = activeSkillIds.find((id: string) => id === "style_imitate");
     const wfWorkflow = wfSkillId ? activeWorkflowDeclarations.get(wfSkillId) : null;
-    if (wfWorkflow && !isDeleteOnlyRoute && !needsWebFirst) {
+    if (wfWorkflow) {
       const wfCaps = resolveAllowedTools(wfWorkflow, state, selectedAllowedToolNames);
       if (wfCaps && wfCaps.allowed.size > 0) {
-        // 保留 CORE_TOOL_NAME_SET（run.* / memory 等始终可用）
         for (const name of CORE_TOOL_NAME_SET) {
           if (selectedAllowedToolNames.has(name)) wfCaps.allowed.add(name);
         }
         hints.push(wfSkillId + " orchestrator：phase=" + wfCaps.snapshot.currentPhase + "。");
-        hints.push(wfCaps.hint);
-        return {
-          allowed: wfCaps.allowed,
-          hint: hints.join("\n\n"),
-          orchestratorMode: wfCaps.orchestratorMode,
-        };
+        if (wfCaps.hint) hints.push(wfCaps.hint);
+        return { allowed: wfCaps.allowed, hint: hints.join("\n\n"), orchestratorMode: wfCaps.orchestratorMode };
       }
     }
 
-    // Style_imitate 顺序 gate 统一由 analyzeStyleWorkflowBatch 负责；
-    // 此处不再收紧 per-turn 工具白名单，避免出现 TOOL_NOT_ALLOWED_THIS_TURN，
-    // 只通过提示引导模型遵守 kb → draft → lint.copy → lint.style → write 的顺序。
-
-    for (const n of compositePhasePins) allowed.add(n);
-
-    // 增量合并：sticky/heal/expansion
-    for (const n of stickyTools) allowed.add(n);
-    for (const n of healTools) allowed.add(n);
-    for (const n of expansionTools) allowed.add(n);
-
-    if (threadActiveMcpToolNames.length > 0) {
-      const scopedMcpTools = new Set<string>(threadActiveMcpToolNames);
-      const discovered = (state as any).discoveredMcpToolNames;
-      if (discovered instanceof Set) {
-        for (const name of discovered) {
-          const trimmed = String(name ?? "").trim();
-          if (trimmed) scopedMcpTools.add(trimmed);
-        }
-      }
-      if (allowed.has("web.search") || allowed.has("web.fetch")) {
-        for (const tool of mcpToolsForRun) {
-          const name = String((tool as any)?.name ?? "").trim();
-          const originalName = String((tool as any)?.originalName ?? (tool as any)?.name ?? "").trim().toLowerCase();
-          if (!name) continue;
-          if (
-            /browser_navigate/.test(originalName) ||
-            /get_page_content/.test(originalName) ||
-            /bocha_web_search/.test(originalName) ||
-            /\bweb_search\b/.test(originalName)
-          ) {
-            scopedMcpTools.add(name);
-          }
-        }
-      }
-      let removedCount = 0;
-      for (const name of Array.from(allowed)) {
-        if (!String(name ?? "").startsWith("mcp.")) continue;
-        if (scopedMcpTools.has(name)) continue;
-        if (!allowed.delete(name)) continue;
-        removedCount += 1;
-      }
-      for (const name of scopedMcpTools) {
-        if (baseAllowedToolNames.has(name)) allowed.add(name);
-      }
-      hints.push(
-        `线程活跃能力集已生效：MCP 具体工具优先收敛到已激活能力（active=${threadActiveMcpToolNames.length}，expanded=${scopedMcpTools.size}，pruned=${removedCount}）。`,
-      );
-    }
-
-    // 自愈触发时：若补齐的是浏览器 MCP，则视作浏览器意图信号（避免再次被屏蔽）
-    const shouldForceAllowBrowser = Array.from(healTools).some((n) => /^mcp\.[^.]*?(?:playwright|browser)[^.]*\./i.test(n));
-    const allowBrowserForTurn = allowBrowserToolsEffective || shouldForceAllowBrowser;
-
-    // B2：尽量避免工具集合无限膨胀（以“提示 + 审计”为主，不硬裁掉核心工具）
-    if (allowed.size > 56) {
-      const sticky = Array.from(stickyTools).slice(0, 12);
-      const healed = Array.from(healTools).slice(0, 6);
-      const expanded = Array.from(expansionTools).slice(0, 12);
-      hints.push(`当前回合工具数较多（${allowed.size}），已启用轻量收敛提示；如频繁出现 TOOL_NOT_ALLOWED，可继续优化选择器。`);
-      hints.push(`sticky=${sticky.join(", ") || "-"} / heal=${healed.join(", ") || "-"} / expand=${expanded.join(", ") || "-"}`);
-    }
-
-    // 非网页导航场景：默认屏蔽浏览器类 MCP 工具，避免“执行约束”把写作/文件任务导向 browser。
-    if (!allowBrowserForTurn && browserMcpToolNames.size > 0) {
-      let removed = 0;
-      for (const n of browserMcpToolNames) {
-        if (allowed.delete(n)) removed += 1;
-      }
-      if (removed > 0) {
-        hints.push(`当前任务非网页导航：已临时屏蔽 ${removed} 个浏览器工具。`);
-      }
-    }
-
-    // 执行启动阶段（首个工具调用前）：收敛到"任务首工具"集合，减少模型盲选和偏航。
-    if (executionContract.required && !state.hasAnyToolCall) {
-      const allowedNow = allowed ?? new Set<string>();
-      const toolDiscoveryBoot = toolDiscoveryContract.required && !state.hasToolsSearch && allowedNow.has("tools.search");
-      if (toolDiscoveryBoot) {
-        const boot = new Set<string>(
-          [
-            "tools.search",
-            "tools.describe",
-            "run.mainDoc.get",
-            "run.mainDoc.update",
-            "run.setTodoList",
-            "run.todo",
-            "time.now",
-            "kb.search",
-            "web.search",
-            "web.fetch",
-            deliveryContract.required ? "write" : "",
-          ]
-            .map((x) => String(x ?? "").trim())
-            .filter(Boolean)
-            .filter((n) => allowedNow.has(n)),
-        );
-        // 兜底：工具发现启动阶段也不应剪掉 CORE_TOOLS（包括 memory / run.* / 基础读写等）。
-        // 只要这些工具在本轮基线 allowedNow 中，就强制并入 boot 集。
-        if (boot.size > 0) {
-          for (const name of CORE_TOOL_NAME_SET) {
-            if (allowedNow.has(name)) boot.add(name);
-          }
-        }
-        hints.push(
-          "工具发现契约：用户明确表示不知道用哪些工具时，必须先 tools.search（必要时再 tools.describe），再继续执行。当前已将本回合工具收敛到工具发现启动集（CORE_TOOLS 始终保留）。",
-        );
-        return { allowed: boot.size ? boot : allowedNow, hint: hints.join("\n\n") };
-      }
-
-      const shouldStartWithWebResearch = routeIdLower === "task_execution" && webGate.enabled && webGate.needsSearch && !state.hasWebSearch;
-      const shouldPrimeCurrentTimeBeforeWebSearch =
-        webGate.enabled &&
-        webGate.needsSearch &&
-        !state.hasTimeNow &&
-        !state.hasWebSearch &&
-        !state.hasWebFetch &&
-        !hasExplicitTimeReference(userPrompt);
-      if (shouldPrimeCurrentTimeBeforeWebSearch) {
-        const boot = new Set<string>(
-          [
-            "time.now",
-            "run.mainDoc.get",
-            "run.mainDoc.update",
-            "run.setTodoList",
-            "run.todo",
-            "run.done",
-          ]
-            .map((x) => String(x ?? "").trim())
-            .filter(Boolean)
-            .filter((n) => allowedNow.has(n)),
-        );
-        if (boot.size > 0) {
-          for (const name of CORE_TOOL_NAME_SET) {
-            if (allowedNow.has(name)) boot.add(name);
-          }
-          hints.push("本轮需要联网搜索，且用户未给出明确时间范围：请先调用一次 time.now 获取当前日期/年份，再继续 web.search / web.fetch。");
-          return { allowed: boot, hint: hints.join("\n\n") };
-        }
-      }
-      if (shouldStartWithWebResearch) {
-        hints.push("本轮包含强时效联网研究要求：请先调用 time.now / web.search / web.fetch 补齐当天信息，再进入写作与交付。");
-      }
-
-      // 浏览器意图（包括短追问/上轮已注入 playwright）下，启动阶段也必须给出最小可执行工具，
-      // 否则 Pi runtime 可能出现“工具声明在 system 中，但 kernel.tools 太少 → Tool ... not found”。
-      const browserBootToolEntries = mcpToolsForRun
-        .map((t) => ({
-          name: String((t as any)?.name ?? "").trim(),
-          originalName: String((t as any)?.originalName ?? (t as any)?.name ?? "").trim(),
-        }))
-        .filter((t) => /^mcp\.[^.]*?(?:playwright|browser)[^.]*\./i.test(t.name));
-      const findBrowserBootTool = (pattern: RegExp) =>
-        browserBootToolEntries.find((t) => pattern.test(t.originalName))?.name ?? "";
-      const playwrightNavigateTool = findBrowserBootTool(/browser_navigate/i);
-      const playwrightSnapshotTool = findBrowserBootTool(/browser_snapshot/i);
-      const playwrightScreenshotTool = findBrowserBootTool(/browser_take_screenshot/i);
-      const browserBootExtras = allowBrowserForTurn
-        ? [
-            playwrightNavigateTool || "",
-            // 浏览器启动阶段常见链路是“打开 -> 看快照/截图 -> 再继续”，
-            // 这里一起放进最小执行集，避免刚导航完就因为仍处于 boot 阶段而被 TOOL_NOT_ALLOWED。
-            playwrightSnapshotTool || "",
-            playwrightScreenshotTool || "",
-            baseAllowedToolNames.has("web.search") ? "web.search" : "",
-            baseAllowedToolNames.has("web.fetch") ? "web.fetch" : "",
-            baseAllowedToolNames.has("run.mainDoc.get") ? "run.mainDoc.get" : "",
-            baseAllowedToolNames.has("run.setTodoList") ? "run.setTodoList" : "",
-            baseAllowedToolNames.has("run.todo") ? "run.todo" : "",
-            // Phase2：文件交付契约下，确保 write 在启动阶段也可见（避免模型只看到浏览器工具导致后续忘写）。
-            (deliveryContract.required && baseAllowedToolNames.has("write")) ? "write" : "",
-          ].filter(Boolean)
-        : [];
-
-      const bootCandidates =
-        routeIdLower === "web_radar" || directOpenWebIntent || allowBrowserForTurn
-          ? [...browserBootExtras, ...executionPreferredWithComposite]
-          : shouldStartWithWebResearch
-            ? [
-                "time.now",
-                "web.search",
-                "web.fetch",
-                "run.mainDoc.get",
-                "kb.search",
-                ...executionPreferredWithComposite,
-                "run.setTodoList",
-                "run.todo",
-                "run.mainDoc.update",
-                "write",
-              ]
-            : (!state.hasTodoList
-                ? [
-                    "run.setTodoList",
-                    "run.todo",
-                    "run.mainDoc.get",
-                    "run.mainDoc.update",
-                    "kb.search",
-                    "web.search",
-                    "web.fetch",
-                    "write",
-                    ...executionPreferredWithComposite,
-                  ]
-                : [
-                    ...executionPreferredWithComposite,
-                    "run.mainDoc.get",
-                    "run.mainDoc.update",
-                    "run.setTodoList",
-                    "run.todo",
-                    "project.listFiles",
-                    "kb.search",
-                    "web.search",
-                    "web.fetch",
-                    "write",
-                  ]);
-      const boot = new Set<string>(
-        Array.from(new Set(bootCandidates.map((x) => String(x ?? "").trim()).filter(Boolean))).filter((n) => allowedNow.has(n)),
-      );
-      for (const name of Array.from(boot)) {
-        const layer = classifyToolLayer(name);
-        if (layer === "L3_SUB_AGENT") {
-          boot.delete(name);
-          continue;
-        }
-        if (!allowBrowserForTurn && layer === "L2_MCP") {
-          boot.delete(name);
-          continue;
-        }
-      }
-      if (boot.size === 0) {
-        for (const name of allowedNow) {
-          const layer = classifyToolLayer(name);
-          if (layer === "L0_CONTROL" || layer === "L1_LOCAL" || (allowBrowserForTurn && layer === "L2_MCP")) {
-            boot.add(name);
-          }
-        }
-        // 启动阶段先做一次本地/受控动作建立上下文
-        for (const name of Array.from(boot)) {
-          if (classifyToolLayer(name) === "L3_SUB_AGENT") boot.delete(name);
-        }
-      }
-      if (boot.size > 0) {
-        // 兜底：执行启动阶段同样不应剪掉 CORE_TOOLS。
-        // 只要 CORE_TOOLS 在基线 allowedNow 中，就强制并入 boot 集，
-        // 避免 memory / edit / file.open 等核心工具在首轮被 TOOL_NOT_ALLOWED。
-        for (const name of CORE_TOOL_NAME_SET) {
-          if (allowedNow.has(name)) boot.add(name);
-        }
-        allowed = boot;
-        hints.push(
-          "执行启动阶段：请先调用首工具（优先 executionPreferred；默认先用 L0/L1），完成一次有效工具调用后再进入全工具阶段。",
-        );
-      }
-    }
-
-    // 基于创作/助手模式 + 任务类型裁剪高风险 runtime 工具（统一使用 HIGH_RISK_TOOL_NAME_SET，包含 code.exec）
+    // 2. 模式门禁（唯一的减法：creative 模式删 HIGH_RISK）
     if (!shouldExposeRuntimeHighRiskTools) {
-      const removed: string[] = [];
       for (const name of HIGH_RISK_TOOL_NAME_SET) {
         if (portableScopedHighRiskToolNames.has(name)) continue;
-        if (allowed.delete(name)) removed.push(name);
-      }
-      if (removed.length > 0) {
-        if (runOpMode !== "assistant") {
-          hints.push(
-            "当前为创作模式：已临时禁用 code.exec / shell.exec / process.* / cron.* / skill.install / mcpServer.applyInstall / mcpServer.applyUpgrade / mcpServer.uninstall 等高风险运行时工具；如需执行本机命令、安装全局技能或变更 MCP，请在桌面端切换到“助手模式”。",
-          );
-        } else {
-          hints.push(
-            "当前虽为助手模式，但本轮识别为写作/风格闭环：已默认隐藏 code.exec / shell.exec / process.* / cron.* / skill.install / mcpServer.applyInstall / mcpServer.applyUpgrade / mcpServer.uninstall 等高风险运行时工具，避免绕过写作闭环；如确需显式代码/命令任务，请在用户指令中明确说明。",
-          );
-        }
+        allowed.delete(name);
       }
     }
 
-    // 构建返回值：最终一步兜底 ALWAYS_ALLOW_TOOL_NAMES，确保 CORE_TOOLS 不被任何 per-turn gate 剪掉。
-    const perTurnResult = () => {
-      // delete-only 路由已经在前面 early return 或直接按 DELETE_ONLY_ALLOWED_TOOL_NAMES 收敛；
-      // 这里仅对普通路由做兜底。
-      if (!isDeleteOnlyRoute) {
-        for (const name of ALWAYS_ALLOW_TOOL_NAMES) {
-          if (baseAllowedToolNames.has(name)) {
-            allowed.add(name);
-          }
-        }
-        // tools.search 动态发现的 MCP 工具放行：Agent 通过 tools.search 发现了新工具后，
-        // 后续 turn 应允许调用这些工具，即使它们不在 run 启动时的 selectedAllowedToolNames 中。
-        const discovered = (state as any).discoveredMcpToolNames;
-        if (discovered instanceof Set && discovered.size > 0) {
-          for (const name of discovered) {
-            if (baseAllowedToolNames.has(name)) {
-              allowed.add(name);
-            }
-          }
-        }
-      }
-      const base = { allowed: allowed as Set<string>, hint: hints.join("\n\n") };
-      return base;
+    // 3. 预算检查（动态激活的工具超 10% 上下文 → LRU 淡出）
+    const dynamicNames = activatedNames.filter((n) => !ALWAYS_ALLOW_TOOL_NAMES.has(n));
+    const budgetTokens = modelContextWindowTokens ? Math.max(256, Math.floor(modelContextWindowTokens * 0.10)) : 3200;
+    const estimateTokens = (name: string): number => {
+      const t = TOOL_LIST.find((tool) => String(tool?.name ?? "").trim() === name);
+      const mcp = mcpToolsForRun.find((tool) => String((tool as any)?.name ?? "").trim() === name);
+      const schema = t?.inputSchema ?? (mcp as any)?.inputSchema ?? null;
+      if (!schema) return 32;
+      try { return Math.max(16, Math.ceil(JSON.stringify(schema).length / 4)); } catch { return 32; }
     };
-
-    if (!enforceMcpFirstForBinaryRead) {
-      return perTurnResult();
+    const keepDynamic = new Set<string>();
+    let spentTokens = 0;
+    for (const name of dynamicNames.slice().reverse()) {
+      const cost = estimateTokens(name);
+      if (spentTokens + cost > budgetTokens) continue;
+      spentTokens += cost;
+      keepDynamic.add(name);
     }
-    const mcpCalls = Math.max(0, Math.floor(Number((state as any)?.mcpToolCallCount ?? 0)));
-    const mcpOk = Math.max(0, Math.floor(Number((state as any)?.mcpToolSuccessCount ?? 0)));
-    const mcpFail = Math.max(0, Math.floor(Number((state as any)?.mcpToolFailCount ?? 0)));
-
-    // MCP-first 护栏：二进制读取场景下，先完成至少两次 MCP 尝试（或一次成功）再放开 code.exec。
-    const shouldBlockCodeExec = mcpOk === 0 && (mcpCalls < 2 || mcpFail < 2);
-    if (!shouldBlockCodeExec) {
-      return perTurnResult();
+    let fadedCount = 0;
+    for (const name of dynamicNames) {
+      if (keepDynamic.has(name)) continue;
+      if (allowed.delete(name)) fadedCount += 1;
     }
 
-    allowed.delete("code.exec");
-    const toolHint = Array.from(binaryReadMcpToolNames).slice(0, 4).join(" / ");
+    // 4. 兜底 CORE_TOOLS
+    for (const name of ALWAYS_ALLOW_TOOL_NAMES) {
+      if (baseAllowedToolNames.has(name)) allowed.add(name);
+    }
+
     hints.push(
-      "当前任务包含 Office/PDF 等二进制文档读取，请先使用 MCP 文档工具完成读取，不要直接使用 code.exec。\n" +
-        `已启用 MCP-first 护栏（当前 mcpCalls=${mcpCalls}, mcpOk=${mcpOk}, mcpFail=${mcpFail}）。` +
-        (toolHint ? `\n优先工具：${toolHint}` : ""),
+      `runtime tool exposure：L0=${ALWAYS_ALLOW_TOOL_NAMES.size} / activated=${activatedNames.length} / faded=${fadedCount} / budget≈${budgetTokens}t`,
     );
-    return perTurnResult();
+    return { allowed, hint: hints.join("\n\n") };
   };
 
   const runnerStyleLibIds = parseKbSelectedLibrariesFromContextPack(body.contextPack ?? "")
@@ -6564,7 +6213,7 @@ export async function executeAgentRun(args: {
         role: "system",
         content:
           "【Intent Routing】本轮判定为讨论/解释（非任务闭环）。\n" +
-          "- 不要求设置 Todo（不要调用 run.setTodoList）。\n" +
+          "- 不要求设置 Todo（不要调用 run.todo(action=replace)）。\n" +
           "- 禁止调用任何工具。\n" +
           "- 请直接用 Markdown 纯文本给出可读回答。\n",
       } as any);

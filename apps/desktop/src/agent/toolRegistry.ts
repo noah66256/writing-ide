@@ -4385,7 +4385,35 @@ const tools: ToolDefinition[] = [
     },
   },
   {
-    name: "portable.skill.preprocess",
+    name: "Bash",
+    description: "统一命令/代码执行工具。有 command 走 shell，有 code/entryFile 走 Python 沙箱。",
+    args: [
+      { name: "command", desc: "命令行" },
+      { name: "code", desc: "内联 Python 代码" },
+      { name: "entryFile", desc: "脚本路径" },
+    ],
+    riskLevel: "high" as ToolRiskLevel,
+    applyPolicy: "proposal" as ToolApplyPolicy,
+    reversible: false,
+    run: async (args: Record<string, unknown>) => {
+      const hasCode =
+        (typeof args.code === "string" && args.code.trim().length > 0) ||
+        (typeof args.entryFile === "string" && args.entryFile.trim().length > 0);
+
+      if (hasCode) {
+        // 走 code.exec 路径
+        const tool = getTool("code.exec");
+        if (!tool) return { ok: false, error: "CODE_EXEC_NOT_AVAILABLE" };
+        return tool.run(args, { mode: "agent" } as any);
+      }
+
+      // 走 shell.exec 路径
+      const tool = getTool("shell.exec");
+      if (!tool) return { ok: false, error: "SHELL_EXEC_NOT_AVAILABLE" };
+      return tool.run(args, { mode: "agent" } as any);
+    },
+  },
+  {
     description: "内部工具：在本地执行 portable skill 的 !`command` 预处理，并把输出嵌回 prompt。",
     args: [
       { name: "skillId", required: true, desc: "skill id" },

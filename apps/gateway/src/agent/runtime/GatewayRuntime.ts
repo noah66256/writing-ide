@@ -700,6 +700,62 @@ function createZeroUsage() {
   };
 }
 
+// ── 公共名 ↔ legacy 运行时名 桥接 ─────────────────
+// 对齐 Claude Code PascalCase 工具名（feat-runtime-tool-exposure-v1）
+
+const PUBLIC_TO_LEGACY = new Map<string, string>([
+  ["Read", "read"],
+  ["Write", "write"],
+  ["Edit", "edit"],
+  ["WebSearch", "web.search"],
+  ["WebFetch", "web.fetch"],
+  ["Glob", "project.searchPaths"],
+  ["Grep", "project.search"],
+  ["Bash", "shell.exec"],  // 默认路由；code/entryFile 时由 _resolveRuntimeToolName 动态切换
+  ["Agent", "spawn_agent"], // 默认路由；其他 action 由 _resolveRuntimeToolName 动态切换
+]);
+
+const LEGACY_TO_PUBLIC = new Map<string, string>();
+for (const [pub, leg] of PUBLIC_TO_LEGACY) {
+  LEGACY_TO_PUBLIC.set(leg, pub);
+}
+// 多对一补充
+LEGACY_TO_PUBLIC.set("code.exec", "Bash");
+LEGACY_TO_PUBLIC.set("send_input", "Agent");
+LEGACY_TO_PUBLIC.set("resume_agent", "Agent");
+LEGACY_TO_PUBLIC.set("wait_agent", "Agent");
+LEGACY_TO_PUBLIC.set("close_agent", "Agent");
+
+/** 将 legacy 或公共名统一为公共名 */
+function normalizeToPublicToolName(raw: string): string {
+  const name = String(raw ?? "").trim();
+  if (!name) return "";
+  return LEGACY_TO_PUBLIC.get(name) ?? name;
+}
+
+/** 将公共名 + 参数解析为 legacy 运行时名 */
+function resolveRuntimeToolName(publicName: string, toolArgs: Record<string, unknown>): string {
+  const name = String(publicName ?? "").trim();
+  switch (name) {
+    case "Bash": {
+      const hasCode =
+        (typeof toolArgs.code === "string" && toolArgs.code.trim().length > 0) ||
+        (typeof toolArgs.entryFile === "string" && toolArgs.entryFile.trim().length > 0);
+      return hasCode ? "code.exec" : "shell.exec";
+    }
+    case "Agent": {
+      const action = String(toolArgs.action ?? "spawn").trim().toLowerCase();
+      if (action === "send") return "send_input";
+      if (action === "resume") return "resume_agent";
+      if (action === "wait") return "wait_agent";
+      if (action === "close") return "close_agent";
+      return "spawn_agent";
+    }
+    default:
+      return PUBLIC_TO_LEGACY.get(name) ?? name;
+  }
+}
+
 // ── GatewayRuntime ───────────────────────────────
 
 export class GatewayRuntime implements AgentRuntime {
@@ -1371,7 +1427,7 @@ export class GatewayRuntime implements AgentRuntime {
     return out;
   }
 
-  private async _applyDynamicSkillActivation(output: any) {
+  private async _applyDynamicSkillActivation(output: any, sourceToolName = "skills.activate") {
     const skillId =
       String(output?.activation?.skillId ?? "").trim() ||
       String(output?.skill?.id ?? "").trim();
@@ -1387,7 +1443,7 @@ export class GatewayRuntime implements AgentRuntime {
         createActiveSkillFromManifest({
           manifest,
           reasonCode: "skill:model_tool_activate",
-          detail: { trigger: "skills.activate" },
+          detail: { trigger: sourceToolName },
         }),
       );
       this.config.runCtx.activeSkills = activeSkills;
@@ -1504,7 +1560,7 @@ export class GatewayRuntime implements AgentRuntime {
       turn: this.turn,
       kind: "info",
       title: "DynamicSkillActivated",
-      message: `模型通过 skills.activate 激活了 /${skillId}。`,
+      message: `模型通过 ${sourceToolName} 激活了 /${skillId}。`,
       detail: {
         skillId,
         portable: manifest.portable === true,
@@ -1512,7 +1568,7 @@ export class GatewayRuntime implements AgentRuntime {
         modelOverride: modelOverride || null,
         addedToolNames: Array.isArray(output?.activation?.toolNames) ? output.activation.toolNames : [],
       },
-      source: "skills.activate",
+      source: sourceToolName,
     });
   }
 
@@ -1801,7 +1857,7 @@ export class GatewayRuntime implements AgentRuntime {
     const lastText = this._getLastAssistantText();
     if (this.orchestratorMode && lastText.length > 300) {
       pushHint(
-        "你是编排者（负责人），禁止直接输出长文内容。请改为通过 spawn_agent 委派给合适成员执行；" +
+        "你是编排者（负责人），禁止直接输出长文内容。请改为通过 Agent 委派给合适成员执行；" +
           "如需联网搜索先委派 topic_planner，写作任务委派 copywriter。",
         ["orchestrator_long_text_blocked"],
       );
@@ -2836,43 +2892,122 @@ export class GatewayRuntime implements AgentRuntime {
    */
   private _buildAgentTools(visibleAllowed?: Set<string> | null): AgentTool<any>[] {
     const allowed = visibleAllowed instanceof Set ? visibleAllowed : this.config.runCtx.allowedToolNames;
+    const mode = this.config.runCtx.mode;
 
-    // ── 内置工具 ──────────────────────────────────
+    // 被 Bash/Agent wrapper 吞掉的 legacy 名
+    const COLLAPSED = new Set([
+      "shell.exec", "code.exec",
+      "spawn_agent", "send_input", "resume_agent", "wait_agent", "close_agent",
+    ]);
+
+    // ── 内置工具（参考 CC：单层过滤，modes:[] 直接排除）──
     const builtins = TOOL_LIST
-      .filter((tool) => allowed.size === 0 || allowed.has(tool.name))
-      .filter((tool) => !tool.modes || tool.modes.includes(this.config.runCtx.mode))
-      .map((tool) => ({
-        name: this._encodeRuntimeToolName(tool.name),
-        label: tool.name,
-        description: tool.description,
-        parameters: (tool.inputSchema ?? {
-          type: "object",
-          properties: {},
-          additionalProperties: true,
-        }) as any,
-        execute: async (
-          toolCallId: string,
-          params: Record<string, unknown>,
-        ): Promise<AgentToolResult<GatewayToolExecResult>> => {
-          // 使用原始名（带 dot）路由执行
-          const result = await this._executeAgentTool(toolCallId, tool.name, params ?? {});
-          // 保存到 snapshot 供 _handleKernelEvent 使用（即使 throw 也能读取）
-          this.toolCallSnapshots.set(toolCallId, {
-            args: params ?? {},
-            executedBy: result.executedBy,
-            dryRun: result.dryRun,
-          });
-          // 失败时 throw 让 pi-agent-core 正确标记 isError=true
-          if (!result.ok) {
-            const errorText = normalizeToolOutputText(result.output);
-            throw new Error(errorText);
-          }
-          return {
-            content: buildTextContent(normalizeToolOutputText(result.output)),
-            details: result,
-          };
+      .filter((tool) => {
+        if (Array.isArray(tool.modes) && tool.modes.length === 0) return false;
+        if (Array.isArray(tool.modes) && tool.modes.length > 0 && !tool.modes.includes(mode)) return false;
+        if (allowed.size > 0 && !allowed.has(tool.name)) return false;
+        if (COLLAPSED.has(tool.name)) return false;
+        return true;
+      })
+      .map((tool) => {
+        const publicName = normalizeToPublicToolName(tool.name);
+        return {
+          name: this._encodeRuntimeToolName(publicName),
+          label: publicName,
+          description: tool.description,
+          parameters: (tool.inputSchema ?? {
+            type: "object",
+            properties: {},
+            additionalProperties: true,
+          }) as any,
+          execute: async (
+            toolCallId: string,
+            params: Record<string, unknown>,
+          ): Promise<AgentToolResult<GatewayToolExecResult>> => {
+            const result = await this._executeAgentTool(toolCallId, tool.name, params ?? {});
+            this.toolCallSnapshots.set(toolCallId, {
+              args: params ?? {},
+              executedBy: result.executedBy,
+              dryRun: result.dryRun,
+            });
+            if (!result.ok) {
+              const errorText = normalizeToolOutputText(result.output);
+              throw new Error(errorText);
+            }
+            return {
+              content: buildTextContent(normalizeToolOutputText(result.output)),
+              details: result,
+            };
+          },
+        };
+      });
+
+    // ── 合成 Bash wrapper（shell.exec + code.exec）──
+    const hasBash = allowed.has("shell.exec") || allowed.has("code.exec");
+    const bashWrapper: AgentTool<any>[] = hasBash ? [{
+      name: this._encodeRuntimeToolName("Bash"),
+      label: "Bash",
+      description:
+        "执行本机命令或脚本（高风险）。\n" +
+        "传 command：在项目工作目录执行 shell 命令。\n" +
+        "传 code 或 entryFile：执行 Python 代码，支持 pip 依赖和产物回收。",
+      parameters: {
+        type: "object",
+        properties: {
+          command: { type: "string", description: "命令名或完整命令行" },
+          args: { type: "array", items: { type: "string" }, description: "参数数组" },
+          cwd: { type: "string", description: "工作目录（默认项目目录）" },
+          runtime: { type: "string", description: "运行时（默认 python）" },
+          code: { type: "string", description: "内联代码" },
+          entryFile: { type: "string", description: "项目内脚本路径" },
+          requirements: { type: "array", items: { type: "string" }, description: "pip 依赖" },
+          timeoutMs: { type: "number", description: "超时毫秒" },
+          artifactGlobs: { type: "array", items: { type: "string" }, description: "产物 glob" },
         },
-      }));
+        additionalProperties: true,
+      } as any,
+      execute: async (toolCallId: string, params: Record<string, unknown>) => {
+        const result = await this._executeAgentTool(toolCallId, "Bash", params ?? {});
+        this.toolCallSnapshots.set(toolCallId, { args: params ?? {}, executedBy: result.executedBy, dryRun: result.dryRun });
+        if (!result.ok) throw new Error(normalizeToolOutputText(result.output));
+        return { content: buildTextContent(normalizeToolOutputText(result.output)), details: result };
+      },
+    }] : [];
+
+    // ── 合成 Agent wrapper（spawn/send/resume/wait/close）──
+    const hasAgent = allowed.has("spawn_agent") || allowed.has("send_input") || allowed.has("resume_agent") || allowed.has("wait_agent") || allowed.has("close_agent");
+    const agentWrapper: AgentTool<any>[] = hasAgent ? [{
+      name: this._encodeRuntimeToolName("Agent"),
+      label: "Agent",
+      description:
+        "统一的子 Agent 生命周期工具。\n" +
+        "action=spawn|send|resume|wait|close",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", description: "spawn|send|resume|wait|close" },
+          id: { type: "string" },
+          ids: { type: "array", items: { type: "string" } },
+          agent_type: { type: "string" },
+          message: { type: "string" },
+          items: { type: "array", items: { type: "object" } },
+          model: { type: "string" },
+          reasoning_effort: { type: "string" },
+          fork_context: { type: "boolean" },
+          interrupt: { type: "boolean" },
+          timeout_ms: { type: "number" },
+        },
+        required: ["action"],
+        additionalProperties: true,
+      } as any,
+      execute: async (toolCallId: string, params: Record<string, unknown>) => {
+        const legacyName = resolveRuntimeToolName("Agent", params);
+        const result = await this._executeAgentTool(toolCallId, legacyName, params ?? {});
+        this.toolCallSnapshots.set(toolCallId, { args: params ?? {}, executedBy: result.executedBy, dryRun: result.dryRun });
+        if (!result.ok) throw new Error(normalizeToolOutputText(result.output));
+        return { content: buildTextContent(normalizeToolOutputText(result.output)), details: result };
+      },
+    }] : [];
 
     // ── Sidecar MCP 工具（playwright / web-search / bocha-search 等）──
     // 路由：_executeAgentTool → decideServerToolExecution → executedBy: "desktop"
@@ -2918,7 +3053,7 @@ export class GatewayRuntime implements AgentRuntime {
         };
       });
 
-    return [...builtins, ...mcpTools];
+    return [...builtins, ...bashWrapper, ...agentWrapper, ...mcpTools];
   }
 
   // ── 工具执行 ───────────────────────────────────
@@ -3475,8 +3610,15 @@ export class GatewayRuntime implements AgentRuntime {
               if (name) discovered.add(name);
             }
           }
+          // tools.describe(skill) 也触发激活（替代 skills.activate）
+          if (
+            String(output?.targetType ?? "").trim() === "skill" &&
+            String(output?.skill?.id ?? "").trim()
+          ) {
+            await this._applyDynamicSkillActivation(output, "tools.describe");
+          }
         } else if (toolName === "skills.activate") {
-          await this._applyDynamicSkillActivation((ret as any).output);
+          await this._applyDynamicSkillActivation((ret as any).output, "skills.activate");
         }
         return {
           ok: true,
@@ -4222,7 +4364,10 @@ export class GatewayRuntime implements AgentRuntime {
     if (
       toolName === "run.setTodoList" ||
       toolName === "run.todo.upsertMany" ||
-      (toolName === "run.todo" && String(toolArgs.action ?? "").trim().toLowerCase() === "upsert")
+      (toolName === "run.todo" && (
+        String(toolArgs.action ?? "").trim().toLowerCase() === "upsert" ||
+        String(toolArgs.action ?? "").trim().toLowerCase() === "replace"
+      ))
     ) {
       this.runState.hasTodoList = true;
       this.runState.hasPlanCommitment = true;

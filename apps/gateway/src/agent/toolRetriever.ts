@@ -1,4 +1,5 @@
 import { detectPromptCapabilities, type ToolCatalogEntry } from "./toolCatalog.js";
+import { CORE_TOOL_NAME_SET } from "./coreTools.js";
 
 export type ToolRetrievalCandidate = {
   name: string;
@@ -16,12 +17,12 @@ export type ToolRetrievalResult = {
 const STRONG_BROWSER_RE = /(公众号|小红书|抖音|知乎|微博|后台|管理后台|扫码|扫码登录|登录|浏览器|网页|网站|页面|打开.*(网页|网站|页面)|navigate|goto|open\s+.*https?:\/\/)/i;
 const STRONG_WORD_RE = /(word|docx|文档|公文|报告|备忘录)/i;
 const STRONG_SHEET_RE = /(excel|xlsx|表格|电子表格|工作表)/i;
-const COLLAB_TOOL_ORDER = ["spawn_agent", "send_input", "wait_agent", "resume_agent", "close_agent"] as const;
+const COLLAB_TOOL_NAMES = new Set(["Agent", "spawn_agent", "send_input", "wait_agent", "resume_agent", "close_agent"]);
 
 type CollabIntent = "spawn" | "send" | "wait" | "resume" | "close" | "generic" | null;
 
 function isCollabToolName(name: string): boolean {
-  return COLLAB_TOOL_ORDER.includes(name as (typeof COLLAB_TOOL_ORDER)[number]);
+  return COLLAB_TOOL_NAMES.has(name);
 }
 
 function inferCollabIntent(text: string): CollabIntent {
@@ -42,21 +43,9 @@ function inferCollabIntent(text: string): CollabIntent {
 }
 
 function collabIntentToolOrder(intent: CollabIntent): string[] {
-  switch (intent) {
-    case "close":
-      return ["close_agent", "wait_agent", "resume_agent", "send_input", "spawn_agent"];
-    case "wait":
-      return ["wait_agent", "send_input", "resume_agent", "close_agent", "spawn_agent"];
-    case "resume":
-      return ["resume_agent", "send_input", "wait_agent", "close_agent", "spawn_agent"];
-    case "send":
-      return ["send_input", "wait_agent", "resume_agent", "close_agent", "spawn_agent"];
-    case "spawn":
-    case "generic":
-      return [...COLLAB_TOOL_ORDER];
-    default:
-      return [];
-  }
+  if (!intent) return [];
+  // 合并后统一返回 Agent（公共名），legacy 名保留做兼容
+  return ["Agent", "spawn_agent"];
 }
 
 function tokenize(text: string): string[] {
@@ -67,7 +56,7 @@ function tokenize(text: string): string[] {
   const ascii = s.match(/[a-z0-9_]+/g);
   if (ascii) out.push(...ascii);
 
-  // CJK：按连续片段取 token + bigram，兼容“公众号/小红书/扫码”等。
+  // CJK：按连续片段取 token + bigram，兼容"公众号/小红书/扫码"等。
   const cjk = s.match(/[\u4e00-\u9fff]+/g);
   if (cjk) {
     for (const seg of cjk) {
@@ -182,11 +171,19 @@ export function retrieveToolsForRun(args: {
     const reasons: string[] = [];
     if (base > 0) reasons.push(`bm25=${base.toFixed(3)}`);
 
-    // capability boost：让“意图→能力”在检索中显式生效。
+    // capability boost：让"意图→能力"在检索中显式生效。
     for (const cap of entry.capabilities ?? []) {
       if (!caps.has(cap)) continue;
       score += 2.2;
       reasons.push(`cap:${cap}`);
+    }
+
+    // L0 核心工具 boost：确保 CORE_TOOLS 在泛搜索时排在前列
+    // 同时匹配公共名（Read/Write/Bash 等）和 legacy 名（read/write 等）
+    const L0_PUBLIC_NAMES = new Set(["Read", "Write", "Edit", "WebSearch", "WebFetch", "Glob", "Grep", "Bash", "Agent"]);
+    if (CORE_TOOL_NAME_SET.has(entry.name) || L0_PUBLIC_NAMES.has(entry.name)) {
+      score += 3.0;
+      reasons.push("L0_core");
     }
 
     if (collabIntent && isCollabToolName(entry.name)) {

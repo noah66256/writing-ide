@@ -1674,6 +1674,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                 if (name === "run.todo") {
                   const action = String(parsedArgsPreview?.action ?? "").trim().toLowerCase();
                   if (action === "upsert") localToolName = "run.todo.upsertMany";
+                  else if (action === "replace") localToolName = "run.setTodoList";
                   else if (action === "update") localToolName = "run.todo.update";
                   else if (action === "remove") localToolName = "run.todo.remove";
                   else if (action === "clear") localToolName = "run.todo.clear";

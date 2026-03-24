@@ -6,6 +6,7 @@ const MAX_ACTIVE_SKILLS = 6;
 const MAX_STICKY_CAPABILITIES = 8;
 const MAX_STICKY_SKILLS = 6;
 const MAX_RECENTLY_DESCRIBED_IDS = 16;
+const MAX_DISCOVERED_BUILTIN_TOOLS = 24;
 
 function normalizeId(raw: unknown): string {
   return String(raw ?? "").trim();
@@ -54,6 +55,7 @@ export function createEmptyThreadCapabilityState(): ThreadCapabilityState {
     stickyCapabilityIds: [],
     stickySkillIds: [],
     recentlyDescribedIds: [],
+    discoveredBuiltinToolNames: [],
   };
 }
 
@@ -64,6 +66,7 @@ export function normalizeThreadCapabilityState(raw: unknown): ThreadCapabilitySt
   const stickyCapabilityIds = dedupeBounded(src?.stickyCapabilityIds, MAX_STICKY_CAPABILITIES);
   const stickySkillIds = dedupeBounded(src?.stickySkillIds, MAX_STICKY_SKILLS);
   const recentlyDescribedIds = dedupeBounded(src?.recentlyDescribedIds, MAX_RECENTLY_DESCRIBED_IDS);
+  const discoveredBuiltinToolNames = dedupeBounded(src?.discoveredBuiltinToolNames, MAX_DISCOVERED_BUILTIN_TOOLS);
   const keepIds = [
     ...activeMcpCapabilityIds,
     ...activeSkillIds,
@@ -78,6 +81,7 @@ export function normalizeThreadCapabilityState(raw: unknown): ThreadCapabilitySt
     stickyCapabilityIds,
     stickySkillIds,
     recentlyDescribedIds,
+    discoveredBuiltinToolNames,
     lastActivatedAt: trimActivationMap(src?.lastActivatedAt as Record<string, number> | undefined, keepIds),
   };
 }
@@ -159,7 +163,25 @@ export function clearThreadCapabilityStateForNewTask(
     ...base,
     activeMcpCapabilityIds: [],
     recentlyDescribedIds: [],
+    discoveredBuiltinToolNames: [],
     lastActivatedAt: trimActivationMap(base.lastActivatedAt, keepIds),
+  };
+}
+
+export function rememberDiscoveredBuiltinTool(args: {
+  state: ThreadCapabilityState | null | undefined;
+  toolName: string;
+}): ThreadCapabilityState {
+  const toolName = normalizeId(args.toolName);
+  const base = normalizeThreadCapabilityState(args.state);
+  if (!toolName) return base;
+  return {
+    ...base,
+    discoveredBuiltinToolNames: moveToTail(
+      Array.isArray(base.discoveredBuiltinToolNames) ? base.discoveredBuiltinToolNames : [],
+      toolName,
+      MAX_DISCOVERED_BUILTIN_TOOLS,
+    ),
   };
 }
 

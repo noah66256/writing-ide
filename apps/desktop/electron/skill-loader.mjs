@@ -36,6 +36,8 @@ const CLAUDE_TOOL_ALIAS_MAP = new Map([
   ["grep", "project.search"],
   ["bash", "shell.exec"],
   ["webfetch", "web.fetch"],
+  ["websearch", "web.search"],
+  ["agent", "spawn_agent"],
   ["task", "spawn_agent"],
 ]);
 const KNOWN_MANIFEST_KEYS = new Set([

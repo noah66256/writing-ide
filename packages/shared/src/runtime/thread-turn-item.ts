@@ -81,6 +81,8 @@ export type ThreadCapabilityState = {
   stickyCapabilityIds: string[];
   stickySkillIds: string[];
   recentlyDescribedIds: string[];
+  /** 非 L0 内置工具的 thread 级发现状态（tools.search/tools.describe 触发） */
+  discoveredBuiltinToolNames: string[];
   lastActivatedAt?: Record<string, number>;
 };
 

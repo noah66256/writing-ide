@@ -79,8 +79,8 @@ export function decideServerToolExecution(args: {
 }): ServerToolExecutionDecision {
   const name = String(args.name ?? "").trim();
 
-  // 代码执行器强制走 Desktop（无论 allowlist 如何配置）
-  if (name === "code.exec") return { executedBy: "desktop", reasonCodes: ["code_exec_desktop_only"] };
+  // 代码/命令执行强制走 Desktop
+  if (name === "code.exec" || name === "Bash") return { executedBy: "desktop", reasonCodes: ["exec_desktop_only"] };
 
   const allow = getServerToolAllowlist();
   if (!allow.has(name)) return { executedBy: "desktop", reasonCodes: ["server_tool_not_allowed"] };
@@ -99,7 +99,7 @@ export function decideServerToolExecution(args: {
     return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "skill_runtime_server_side"] };
   }
   // web.*：优先 Gateway 执行（Bocha API / 直接 HTTP）；若不可用，Runner 层回退到 MCP
-  if (name === "web.search" || name === "web.fetch") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "web_gateway_first"] };
+  if (name === "web.search" || name === "web.fetch" || name === "WebSearch" || name === "WebFetch") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "web_gateway_first"] };
   // run.*：系统编排类工具（无副作用，但会影响 run 生命周期），应 server-side 执行
   if (name === "run.done") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "run_done_server_side"] };
   if (name === "spawn_agent" || name === "send_input" || name === "resume_agent" || name === "wait_agent" || name === "close_agent") {
@@ -258,8 +258,17 @@ async function fetchWithTimeout(url: string, init: RequestInit & { timeoutMs?: n
 
 export async function executeWebSearchOnGateway(args: { call: any }) {
   const call = args.call;
-  const query = String((call?.args as any)?.query ?? "").trim();
-  if (!query) return { ok: false as const, error: "MISSING_QUERY" };
+  const originalQuery = String((call?.args as any)?.query ?? "").trim();
+  if (!originalQuery) return { ok: false as const, error: "MISSING_QUERY" };
+
+  // 自动注入当前日期（仅在用户无明确时间锚点时）
+  const hasTimeAnchor = /\b\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?\b/.test(originalQuery) ||
+    /\b(?:19|20)\d{2}\b/.test(originalQuery) ||
+    /\b(?:today|yesterday|tomorrow|latest|recently?|current|now|this\s+(?:week|month|year)|last\s+(?:week|month|year))\b/i.test(originalQuery) ||
+    /(今天|昨天|明天|本周|上周|下周|本月|上月|今年|去年|最近|最新|当前|截至|近\d+(?:天|周|月|年)|\d{4}年)/.test(originalQuery);
+  const currentDate = new Date().toISOString().slice(0, 10);
+  const query = hasTimeAnchor ? originalQuery : `${originalQuery}\nCurrent date: ${currentDate}`;
+  const dateInjected = !hasTimeAnchor;
 
   const rt = await toolConfig.resolveWebSearchRuntime().catch(() => null as any);
   if (!rt || !rt.isEnabled) return { ok: false as const, error: "WEB_SEARCH_DISABLED" };
@@ -313,7 +322,10 @@ export async function executeWebSearchOnGateway(args: { call: any }) {
         ok: true,
         provider: "bocha",
         fetchedAt,
-        query,
+        query: originalQuery,
+        effectiveQuery: query,
+        currentDate,
+        dateInjected,
         freshness,
         count,
         summary,
@@ -506,8 +518,8 @@ export async function executeServerToolOnGateway(args: {
   // 合并后的 run.todo（通过 action 分发）
   if (name === "run.todo") {
     const action = String(args.call?.args?.action ?? "").trim().toLowerCase();
-    if (action === "upsert") {
-      const items = args.call?.args?.items ?? [];
+    if (action === "upsert" || action === "replace") {
+      const items = args.call?.args?.items ?? args.call?.args?.todos ?? [];
       return { ok: true as const, output: { ok: true, items } };
     }
     if (action === "update") {
@@ -519,7 +531,7 @@ export async function executeServerToolOnGateway(args: {
     if (action === "clear") {
       return { ok: true as const, output: { ok: true } };
     }
-    return { ok: false as const, error: `INVALID_TODO_ACTION: action="${action}" 不合法，请使用 upsert|update|remove|clear。` };
+    return { ok: false as const, error: `INVALID_TODO_ACTION: action="${action}" 不合法，请使用 replace|upsert|update|remove|clear。` };
   }
   if (name === "run.mainDoc.update") {
     const patchRaw = args.call?.args?.patch;
@@ -679,12 +691,62 @@ function buildDiscoveryCatalog(args: {
   const allowed = args.allowedToolNames ?? new Set(TOOL_LIST.map((t) => String(t?.name ?? "").trim()).filter(Boolean));
   const sidecar = (args.toolSidecar ?? null) as any;
   const mcpTools = Array.isArray(sidecar?.mcpTools) ? (sidecar.mcpTools as any[]) : [];
-  return buildDiscoveryCatalogForToolSearch({
+
+  // 被公共名 wrapper 吞掉的 legacy 名，不暴露给发现目录
+  const COLLAPSED_LEGACY_NAMES = new Set([
+    "shell.exec", "code.exec",
+    "send_input", "resume_agent", "wait_agent", "close_agent",
+  ]);
+
+  const raw = buildDiscoveryCatalogForToolSearch({
     mode: args.mode,
     allowedToolNames: allowed,
     mcpTools,
     includeAllMcpTools: args.includeAllMcpTools,
   });
+
+  // 过滤 collapsed legacy 工具 + 将剩余 legacy 名映射为公共名
+  const PUBLIC_NAME_MAP: Record<string, string> = {
+    "read": "Read", "write": "Write", "edit": "Edit",
+    "web.search": "WebSearch", "web.fetch": "WebFetch",
+    "project.searchPaths": "Glob", "project.search": "Grep",
+  };
+
+  const result = raw
+    .filter((entry) => !COLLAPSED_LEGACY_NAMES.has(entry.name))
+    .map((entry) => {
+      const publicName = PUBLIC_NAME_MAP[entry.name];
+      if (!publicName) return entry;
+      return { ...entry, name: publicName };
+    });
+
+  // 注入合成 wrapper（Bash / Agent）作为虚拟 catalog entry
+  const hasBash = allowed.has("shell.exec") || allowed.has("code.exec");
+  const hasAgent = allowed.has("spawn_agent");
+  if (hasBash) {
+    result.push({
+      name: "Bash",
+      source: "builtin" as any,
+      description: "执行本机命令或脚本（高风险）。传 command 执行 shell 命令，传 code/entryFile 执行 Python 代码。",
+      modes: ["agent"] as any,
+      inputSchema: { type: "object", properties: { command: { type: "string" }, code: { type: "string" } }, additionalProperties: true },
+      riskLevel: "high" as any,
+      capabilities: ["shell_exec", "code_exec"],
+    });
+  }
+  if (hasAgent) {
+    result.push({
+      name: "Agent",
+      source: "builtin" as any,
+      description: "统一的子 Agent 生命周期工具。action=spawn|send|resume|wait|close。",
+      modes: ["agent"] as any,
+      inputSchema: { type: "object", properties: { action: { type: "string" } }, required: ["action"], additionalProperties: true },
+      riskLevel: "high" as any,
+      capabilities: ["collab"],
+    });
+  }
+
+  return result;
 }
 
 function listCapabilityCardsForDiscovery(args: {
@@ -741,9 +803,17 @@ function executeToolsSearchOnGateway(args: {
     activeSkillIds: args.activeSkillIds,
   });
 
+  // L0 工具已在 kernel tools 数组中，tools.search 只搜非 L0（参考 CC ToolSearch 只搜 deferred）
+  const L0_TOOL_NAMES = new Set([
+    "tools.search", "tools.describe", "skills.list", "skills.activate", "WebSearch", "WebFetch",
+    "run.mainDoc.get", "run.mainDoc.update", "run.todo", "run.done",
+    "Read", "Write", "Edit", "project.listFiles", "Grep", "memory",
+    "Bash", "Agent",
+  ]);
+  const nonL0Catalog = catalog.filter((e) => !L0_TOOL_NAMES.has(e.name));
   const filteredCatalog = sources.size > 0
-    ? catalog.filter((e) => sources.has(String(e.source ?? "").toLowerCase()))
-    : catalog;
+    ? nonL0Catalog.filter((e) => sources.has(String(e.source ?? "").toLowerCase()))
+    : nonL0Catalog;
   const filteredCards = capabilityCards.allCards.filter((card) => {
     if (sources.size === 0) return true;
     if (card.resultType === "mcp_capability") return sources.has("mcp") || sources.has("mcp_capability");
@@ -816,7 +886,7 @@ function executeToolsSearchOnGateway(args: {
           allowedTools: card.allowedTools,
         }),
   }));
-  const looksToolSpecificQuery = /(?:^|[\s`"'（(])(mcp\.|run\.|web\.|kb\.|tools\.|read\b|write\b|edit\b|delete\b|spawn_agent|send_input|wait_agent|resume_agent|close_agent)/i.test(query);
+  const looksToolSpecificQuery = /(?:^|[\s`"'（(])(mcp\.|run\.|web\.|kb\.|tools\.|read\b|write\b|edit\b|delete\b|agent\b|bash\b)/i.test(query);
   const tools = [...toolItems, ...cardItems]
     .sort((a, b) => {
       if (!looksToolSpecificQuery) {

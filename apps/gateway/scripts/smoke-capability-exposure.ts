@@ -103,7 +103,11 @@ async function scenarioSelectionKeepsCollabWithMcp() {
   const selectionCatalog = buildSelectionCatalog({ modelVisibleCatalog });
   const selectedNames = new Set(selectionCatalog.map((entry) => entry.name));
 
-  assert.equal(selectedNames.has("spawn_agent"), true, "selection catalog should keep collab builtin");
+  assert.equal(
+    selectedNames.has("Agent") || selectedNames.has("spawn_agent"),
+    true,
+    "selection catalog should keep collab builtin (Agent wrapper or legacy spawn_agent)",
+  );
   assert.equal(
     selectedNames.has("mcp.playwright.browser_navigate"),
     true,
@@ -119,9 +123,9 @@ async function scenarioSelectionKeepsCollabWithMcp() {
   });
 
   assert.equal(
-    retrieval.retrievedToolNames.includes("spawn_agent"),
+    retrieval.retrievedToolNames.includes("Agent") || retrieval.retrievedToolNames.includes("spawn_agent"),
     true,
-    "collab intent should still retrieve spawn_agent when MCP exists",
+    "collab intent should still retrieve Agent when MCP exists",
   );
   ok("selection catalog keeps collab + MCP");
 }

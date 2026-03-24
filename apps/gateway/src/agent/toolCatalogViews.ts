@@ -9,11 +9,37 @@ export function buildModelVisibleCatalog(args: {
   const allowed =
     args.allowedToolNames ??
     new Set(TOOL_LIST.map((tool) => String(tool?.name ?? "").trim()).filter(Boolean));
-  return buildToolCatalog({
+  const catalog = buildToolCatalog({
     mode: args.mode,
     allowedToolNames: allowed,
     mcpTools: Array.isArray(args.mcpTools) ? args.mcpTools : [],
   });
+
+  // 注入合成 wrapper 的虚拟 catalog entry（Bash / Agent 不在 TOOL_LIST 中）
+  if (allowed.has("shell.exec") || allowed.has("code.exec")) {
+    catalog.push({
+      name: "Bash",
+      source: "builtin",
+      description: "执行本机命令或脚本（高风险）。传 command 执行 shell 命令，传 code/entryFile 执行 Python。",
+      modes: ["agent"],
+      inputSchema: { type: "object", properties: { command: { type: "string" }, code: { type: "string" } }, additionalProperties: true },
+      riskLevel: "high",
+      capabilities: ["shell_exec", "code_exec"],
+    });
+  }
+  if (allowed.has("spawn_agent")) {
+    catalog.push({
+      name: "Agent",
+      source: "builtin",
+      description: "统一的子 Agent 生命周期工具。action=spawn|send|resume|wait|close。",
+      modes: ["agent"],
+      inputSchema: { type: "object", properties: { action: { type: "string" } }, required: ["action"], additionalProperties: true },
+      riskLevel: "high",
+      capabilities: ["collab"],
+    });
+  }
+
+  return catalog;
 }
 
 export function buildSelectionCatalog(args: {

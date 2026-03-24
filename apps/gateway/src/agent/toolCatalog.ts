@@ -109,7 +109,8 @@ export function detectPromptCapabilities(prompt: string): Set<string> {
 }
 
 export function inferCapabilities(name: string, description: string, source: ToolCatalogSource): string[] {
-  const n = String(name ?? "").trim().toLowerCase();
+  const rawName = String(name ?? "").trim();
+  const n = rawName.toLowerCase();
   const d = String(description ?? "").toLowerCase();
   const caps = new Set<string>();
 
@@ -120,24 +121,24 @@ export function inferCapabilities(name: string, description: string, source: Too
   if (n === "time.now") caps.add("time");
   if (n === "delete" || /\bdelete\b|\bremove\b/.test(n)) caps.add("file_delete");
   if (n.startsWith("project.list") || /listfiles|list_files|目录/.test(d)) caps.add("file_list");
-  if (n.startsWith("read") || n.startsWith("project.read") || /\bread\b|\bparse\b/.test(n)) caps.add("file_read");
-  if (isWriteLikeTool(name)) caps.add("file_write");
+  if (n === "read" || rawName === "Read" || n.startsWith("project.read") || /\bread\b|\bparse\b/.test(n)) caps.add("file_read");
+  if (isWriteLikeTool(rawName) || isWriteLikeTool(name)) caps.add("file_write");
   if (n === "doc.snapshot") {
     caps.add("file_read");
     caps.add("file_write");
   }
   if (n === "memory") caps.add("kb_search");
-  if (n.startsWith("project.search") || n.startsWith("project.find")) caps.add("project_search");
+  if (n.startsWith("project.search") || n.startsWith("project.find") || rawName === "Grep" || rawName === "Glob") caps.add("project_search");
   if (n.startsWith("project.dir.") || n.startsWith("project.file.")) {
     caps.add("project_search");
     caps.add("file_read");
   }
-  if (n.startsWith("web.search")) caps.add("web_search");
-  if (n.startsWith("web.fetch")) caps.add("web_fetch");
+  if (n.startsWith("web.search") || rawName === "WebSearch") caps.add("web_search");
+  if (n.startsWith("web.fetch") || rawName === "WebFetch") caps.add("web_fetch");
   if (n.startsWith("kb.")) caps.add("kb_search");
-  if (n === "code.exec") caps.add("code_exec");
-  if (n === "shell.exec" || /^mcp\.[^.]*?(terminal|ssh)[^.]*\./i.test(n)) caps.add("shell_exec");
-  if (n === "spawn_agent" || n === "send_input" || n === "resume_agent" || n === "wait_agent" || n === "close_agent") {
+  if (n === "code.exec" || rawName === "Bash") caps.add("code_exec");
+  if (n === "shell.exec" || rawName === "Bash" || /^mcp\.[^.]*?(terminal|ssh)[^.]*\./i.test(n)) caps.add("shell_exec");
+  if (rawName === "Agent" || n === "spawn_agent" || n === "send_input" || n === "resume_agent" || n === "wait_agent" || n === "close_agent") {
     caps.add("collab");
   }
 
@@ -170,10 +171,12 @@ export function inferCapabilities(name: string, description: string, source: Too
 }
 
 function inferRiskLevel(name: string, source: ToolCatalogSource): "low" | "medium" | "high" {
-  const n = String(name ?? "").toLowerCase();
-  if (n === "code.exec" || /publish|deploy|billing|charge/.test(n)) return "high";
+  const rawName = String(name ?? "").trim();
+  const n = rawName.toLowerCase();
+  if (n === "code.exec" || n === "shell.exec" || rawName === "Bash" || /publish|deploy|billing|charge/.test(n)) return "high";
+  if (rawName === "Agent" || n === "spawn_agent") return "high";
   if (source === "mcp" && /delete|remove|write|exec|run|shell/.test(n)) return "high";
-  if (isWriteLikeTool(name) || /delete|remove|write|update|rename|move/.test(n)) return "medium";
+  if (isWriteLikeTool(rawName) || /delete|remove|write|update|rename|move/.test(n)) return "medium";
   return "low";
 }
 

@@ -281,85 +281,12 @@ export const TOOL_LIST: ToolMeta[] = [
     },
   },
   {
-    name: "skills.list",
-    description:
-      "列出当前可由模型按需激活的 Skills。\n" +
-      "优先用于 Claude Code / portable skill 兼容场景：先 skills.list 看有哪些技能，再 skills.activate 加载具体 skill 合同。\n" +
-      "只读、无副作用。",
-    args: [
-      { name: "query", desc: "可选：按主题/描述过滤（自然语言即可）", type: "string" },
-      { name: "limit", desc: "返回数量（默认 8，最大 20）", type: "number" },
-      { name: "includePromptSummary", desc: "是否附带 prompt 摘要（默认 false）", type: "boolean" },
-    ],
-    modes: ["chat", "agent"],
-    inputSchema: {
-      type: "object",
-      properties: {
-        query: { type: "string" },
-        limit: { type: "number" },
-        includePromptSummary: { type: "boolean" },
-      },
-      additionalProperties: false,
-    },
-    outputSchema: {
-      type: "object",
-      description: "Model-invocable skill list",
-      properties: {
-        ok: { type: "boolean" },
-        skills: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              id: { type: "string" },
-              name: { type: "string" },
-              description: { type: "string" },
-              activationMode: { type: "string" },
-              portable: { type: "boolean" },
-              slashCommand: { type: "string" },
-              argumentHint: { type: "string" },
-            },
-          },
-        },
-      },
-    },
-  },
-  {
-    name: "skills.activate",
-    description:
-      "激活一个 Skill，并把它的完整合同加载进当前 run。\n" +
-      "适用于模型自主触发 skill 的场景：给出 skill 名称和可选参数后，runtime 会返回 skill 正文、参数渲染结果、allowed-tools / hooks / fork 等运行时元信息，并让该 skill 在当前 run 后续轮次生效。",
-    args: [
-      { name: "name", required: true, desc: "skill id / 卡片 id / slash 名（如 docx、skill:docx、/docx）", type: "string" },
-      { name: "arguments", desc: "可选：传给 skill 的原始参数文本", type: "string" },
-    ],
-    modes: ["chat", "agent"],
-    inputSchema: {
-      type: "object",
-      properties: {
-        name: { type: "string" },
-        arguments: { type: "string" },
-      },
-      required: ["name"],
-      additionalProperties: false,
-    },
-    outputSchema: {
-      type: "object",
-      description: "Skill activation result",
-      properties: {
-        ok: { type: "boolean" },
-        targetType: { type: "string" },
-        skill: { type: "object" },
-        activation: { type: "object" },
-      },
-    },
-  },
-  {
     name: "web.search",
     description:
       "联网搜索。用于热点追踪、关键词研究、竞品分析、实时信息获取。\n" +
       "返回 title/url/snippet/summary 列表。\n" +
-      "系统自动选择可用后端（博查 API → 搜索 MCP → Playwright 浏览器）。",
+      "系统自动选择可用后端（博查 API → 搜索 MCP → Playwright 浏览器）。\n" +
+      "实现层会自动注入当前日期/年份上下文；不再要求先显式调用 time.now。",
     args: [
       { name: "query", required: true, desc: "搜索关键词", type: "string" as const },
       { name: "freshness", desc: "时效过滤：noLimit(默认)/day/week/month", type: "string" as const },
@@ -942,22 +869,16 @@ export const TOOL_LIST: ToolMeta[] = [
     inputSchema: { type: "object", properties: { patch: { type: "object" } }, required: ["patch"], additionalProperties: true },
   },
   {
-    name: "run.setTodoList",
-    description: "设置本次 Run 的 Todo List（用于进度追踪与防跑偏）。",
-    args: [{ name: "items", required: true, desc: 'JSON 数组：TodoItem[]（{ id?, text, status?, note? }）', type: "array" }],
-    modes: ["agent"],
-    inputSchema: { type: "object", properties: { items: { type: "array", items: { type: "object" } } }, required: ["items"], additionalProperties: true },
-  },
-  {
     name: "run.todo",
     description:
-      "管理本次 Run 的待办事项（增删改清）。\n" +
+      "管理本次 Run 的待办事项（增删改清/整体替换）。\n" +
+      "action=replace：整体替换 todoList（传 items 数组）。\n" +
       "action=upsert：批量新增或更新（传 items 数组；id 命中则 patch，不命中或无 id 则新增）。\n" +
       "action=update：更新单条（传 id + status/note/text）。todoList 仅 1 条时可省略 id。\n" +
       "action=remove：删除单条（传 id）。\n" +
       "action=clear：清空全部。",
     args: [
-      { name: "action", required: true, desc: "操作类型: upsert|update|remove|clear", type: "string" },
+      { name: "action", required: true, desc: "操作类型: replace|upsert|update|remove|clear", type: "string" },
       { name: "items", desc: 'upsert 时的 todo 列表：Array<{ id?, text?, status?, note? }>', type: "array" },
       { name: "id", desc: "update/remove 时的 todo ID", type: "string" },
       { name: "status", desc: 'update 时的新状态（"todo"|"in_progress"|"done"|"blocked"|"skipped"）', type: "string" },
@@ -995,109 +916,8 @@ export const TOOL_LIST: ToolMeta[] = [
       additionalProperties: true,
     },
   },
-  {
-    name: "spawn_agent",
-    description:
-      "创建并启动一个子 Agent 会话（Codex-style collab 工具）。\n" +
-      "用于把子任务委派给专门角色，并通过 send_input/resume_agent/wait_agent/close_agent 协调其生命周期。\n" +
-      "结果中的 `agent_id` / `id` 就是后续协作工具应继续使用的主键。",
-    args: [
-      { name: "agent_type", required: false, desc: "子 Agent 类型/角色标识（如 copywriter/topic_planner）", type: "string" },
-      { name: "message", required: false, desc: "发给子 Agent 的主要任务说明", type: "string" },
-      { name: "items", required: false, desc: "结构化输入项（可含 text/path/image_url/name）", type: "array" },
-      { name: "model", required: false, desc: "可选：子 Agent 指定模型", type: "string" },
-      { name: "reasoning_effort", required: false, desc: "可选：推理强度 low|medium|high|xhigh", type: "string" },
-      { name: "fork_context", required: false, desc: "是否继承父会话上下文（默认 true）", type: "boolean" },
-    ],
-    modes: ["agent"],
-    inputSchema: {
-      type: "object",
-      properties: {
-        agent_type: { type: "string" },
-        message: { type: "string" },
-        items: { type: "array", items: { type: "object" } },
-        model: { type: "string" },
-        reasoning_effort: { type: "string" },
-        fork_context: { type: "boolean" },
-      },
-      additionalProperties: true,
-    },
-    outputSchema: {
-      type: "object",
-      description: "Sub-agent spawn result",
-      properties: {
-        ok: { type: "boolean" },
-        id: { type: "string", description: "子 Agent 会话 ID" },
-        agentId: { type: "string", description: "子 Agent 标识" },
-        threadId: { type: "string", description: "子会话 Thread ID" },
-        status: { type: "string", description: "running|waiting|completed|failed|closed" },
-      },
-    },
-  },
-  {
-    name: "send_input",
-    description: "向已存在的子 Agent 会话发送新输入（Codex-style collab 工具）。`id` 使用 spawn_agent 返回的 `agent_id` / `id`。",
-    args: [
-      { name: "id", required: true, desc: "子 Agent 会话 ID", type: "string" },
-      { name: "message", required: false, desc: "补充指令文本", type: "string" },
-      { name: "items", required: false, desc: "结构化输入项", type: "array" },
-      { name: "interrupt", required: false, desc: "是否中断当前执行并切换到新输入", type: "boolean" },
-    ],
-    modes: ["agent"],
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: { type: "string" },
-        message: { type: "string" },
-        items: { type: "array", items: { type: "object" } },
-        interrupt: { type: "boolean" },
-      },
-      required: ["id"],
-      additionalProperties: true,
-    },
-  },
-  {
-    name: "resume_agent",
-    description: "恢复一个已暂停/等待态的子 Agent 会话（Codex-style collab 工具）。`id` 使用 spawn_agent 返回的 `agent_id` / `id`。",
-    args: [{ name: "id", required: true, desc: "子 Agent 会话 ID", type: "string" }],
-    modes: ["agent"],
-    inputSchema: {
-      type: "object",
-      properties: { id: { type: "string" } },
-      required: ["id"],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "wait_agent",
-    description: "等待一个或多个子 Agent 会话完成或进入下一状态（Codex-style collab 工具）。`ids` 使用 spawn_agent 返回的 `agent_id` / `id`。",
-    args: [
-      { name: "ids", required: true, desc: "要等待的子 Agent 会话 ID 数组", type: "array" },
-      { name: "timeout_ms", required: false, desc: "超时毫秒（默认由运行时决定）", type: "number" },
-    ],
-    modes: ["agent"],
-    inputSchema: {
-      type: "object",
-      properties: {
-        ids: { type: "array", items: { type: "string" } },
-        timeout_ms: { type: "number" },
-      },
-      required: ["ids"],
-      additionalProperties: true,
-    },
-  },
-  {
-    name: "close_agent",
-    description: "关闭一个子 Agent 会话并释放其协作上下文（Codex-style collab 工具）。`id` 使用 spawn_agent 返回的 `agent_id` / `id`。",
-    args: [{ name: "id", required: true, desc: "子 Agent 会话 ID", type: "string" }],
-    modes: ["agent"],
-    inputSchema: {
-      type: "object",
-      properties: { id: { type: "string" } },
-      required: ["id"],
-      additionalProperties: false,
-    },
-  },
+  // spawn_agent/send_input/resume_agent/wait_agent/close_agent 已合并为 Agent wrapper（见 GatewayRuntime._buildAgentTools）
+
   {
     name: "project.listFiles",
     description: "列出当前项目文件列表（path）。",
@@ -1164,9 +984,8 @@ export const TOOL_LIST: ToolMeta[] = [
   {
     name: "project.search",
     description:
-      "[已弃用] 在当前项目中搜索文本（跨文件）。\n" +
-      "- 当前产品形态已不再强调 IDE 式“全项目搜索”，多数场景可直接依赖 L2 记忆索引与 doc.read。\n" +
-      "- 新任务中请避免主动使用该工具；仅为兼容历史 Run 保留，未来版本可能移除。",
+      "按内容/正则在当前项目文本中搜索（跨文件）。\n" +
+      "适合在 read 前先定位命中文件与片段；支持正则、大小写和路径范围。",
     args: [
       { name: "query", required: true, desc: "搜索关键字（或正则表达式文本）", type: "string" },
       { name: "useRegex", required: false, desc: "可选：是否按正则搜索（默认 false）", type: "boolean" },
@@ -1175,7 +994,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "maxResults", required: false, desc: "可选：最多返回多少条命中（默认 80，最大 500）", type: "number" },
       { name: "maxPerFile", required: false, desc: "可选：每个文件最多返回多少条命中（默认 20，最大 200）", type: "number" },
     ],
-    modes: [],
+    modes: ["chat", "agent"],
     inputSchema: {
       type: "object",
       properties: {
@@ -1188,25 +1007,6 @@ export const TOOL_LIST: ToolMeta[] = [
       },
       required: ["query"],
       additionalProperties: true,
-    },
-  },
-  {
-    name: "file.open",
-    description: "用系统默认应用打开文件（如 PPT 用 Keynote/PowerPoint，PDF 用预览/Acrobat，图片用系统图片查看器）。仅在用户要求打开/预览文件时使用。",
-    args: [{ name: "path", required: true, desc: "文件路径（相对项目根目录，如 output/report.pptx）", type: "string" }],
-    modes: ["agent"] as ("chat" | "agent")[],
-    inputSchema: {
-      type: "object",
-      properties: { path: { type: "string" } },
-      required: ["path"],
-      additionalProperties: true,
-    },
-    outputSchema: {
-      type: "object",
-      properties: {
-        ok: { type: "boolean" },
-        opened: { type: "string", description: "已打开的文件路径" },
-      },
     },
   },
   {
@@ -1480,50 +1280,6 @@ export const TOOL_LIST: ToolMeta[] = [
     inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: true },
   },
   {
-    name: "doc.snapshot",
-    description: "管理项目快照（用于回滚/Undo）。action=create：创建快照（可选 label 备注）。action=list：列出快照列表（只读）。action=restore：恢复到指定快照（传 snapshotId）。高风险操作会先确认。",
-    args: [
-      { name: "action", required: true, desc: "操作类型: create|list|restore", type: "string" },
-      { name: "label", desc: "create 时的快照备注（可选）", type: "string" },
-      { name: "snapshotId", desc: "restore 时的快照 ID", type: "string" },
-    ],
-    modes: ["agent"],
-    inputSchema: {
-      type: "object",
-      properties: {
-        action: { type: "string" },
-        label: { type: "string" },
-        snapshotId: { type: "string" },
-      },
-      required: ["action"],
-      additionalProperties: true,
-    },
-  },
-  {
-    name: "doc.previewDiff",
-    description: "生成 diff 预览（无副作用）。可传 newContent 或 edits。ifExists 默认 rename，避免覆盖已有文件。",
-    args: [
-      { name: "path", required: true, desc: "文件路径", type: "string" },
-      { name: "newContent", required: false, desc: "新内容全文", type: "string" },
-      { name: "edits", required: false, desc: "JSON 数组：TextEdit[]", type: "array" },
-      { name: "ifExists", required: false, desc: "文件已存在时的策略：rename/overwrite/error", type: "string" },
-      { name: "suggestedName", required: false, desc: "建议的新文件名（仅 ifExists=rename 时使用）", type: "string" },
-    ],
-    modes: ["agent"],
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: { type: "string" },
-        newContent: { type: "string" },
-        edits: { type: "array", items: { type: "object" } },
-        ifExists: { type: "string" },
-        suggestedName: { type: "string" },
-      },
-      required: ["path"],
-      additionalProperties: true,
-    },
-  },
-  {
     name: "write",
     description: "写入文件（path, content）。高风险写入会先在对话中确认，确认后自动执行；支持 Undo 回滚。",
     args: [
@@ -1575,16 +1331,6 @@ export const TOOL_LIST: ToolMeta[] = [
 
   },
   {
-    name: "doc.splitToDir",
-    description: "将一个大文档按“标题/文案(正文)”块分割成多篇，并写入目标文件夹（中风险默认自动写入，支持 Undo 回滚）。",
-    args: [
-      { name: "path", required: true, desc: "源文件路径（如 直男财经.md）", type: "string" },
-      { name: "targetDir", required: true, desc: "目标目录（如 直男财经/）", type: "string" },
-    ],
-    modes: ["agent"],
-    inputSchema: { type: "object", properties: { path: { type: "string" }, targetDir: { type: "string" } }, required: ["path", "targetDir"], additionalProperties: true },
-  },
-  {
     name: "edit",
     description: "对指定文件应用一组 TextEdit（增量编辑，支持 Undo 回滚）。",
     args: [
@@ -1599,100 +1345,8 @@ export const TOOL_LIST: ToolMeta[] = [
       additionalProperties: true,
     },
   },
-  // Collab 工具已收敛到 spawn_agent/send_input/resume_agent/wait_agent/close_agent。
-  // ── 代码执行 ──────────────────────────────────────
-  {
-    name: "code.exec",
-    description:
-      "在沙箱工作目录中执行代码（当前仅支持 Python），用于产出 Office 文件等二进制结果。\n" +
-      "支持内联代码（code）或项目内入口脚本（entryFile）二选一；可选 requirements 自动安装 pip 依赖。\n" +
-      "产物文件保存在当前工作目录（os.getcwd()）或项目目录下会被自动收集并在结果中列出。\n" +
-      "项目目录可通过环境变量 PROJECT_DIR 获取（如 os.environ['PROJECT_DIR']）。",
-    args: [
-      { name: "runtime", required: false, desc: "运行时（默认 python）", type: "string" as ToolArgType },
-      { name: "code", required: false, desc: "内联代码（与 entryFile 二选一）", type: "string" as ToolArgType },
-      { name: "entryFile", required: false, desc: "项目内脚本路径（与 code 二选一）", type: "string" as ToolArgType },
-      { name: "args", required: false, desc: "脚本参数数组", type: "array" as ToolArgType },
-      { name: "requirements", required: false, desc: "pip 依赖数组，如 [\"python-pptx==1.0.2\"]", type: "array" as ToolArgType },
-      { name: "timeoutMs", required: false, desc: "执行超时（毫秒），默认 600000，最大 600000", type: "number" as ToolArgType },
-      { name: "artifactGlobs", required: false, desc: "产物匹配 glob 数组，默认匹配 Office/PDF/图片文件", type: "array" as ToolArgType },
-    ],
-    modes: ["agent" as ToolMode],
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        runtime: { type: "string" as ToolArgType },
-        code: { type: "string" as ToolArgType },
-        entryFile: { type: "string" as ToolArgType },
-        args: { type: "array" as ToolArgType, items: { type: "string" } },
-        requirements: { type: "array" as ToolArgType, items: { type: "string" } },
-        timeoutMs: { type: "number" as ToolArgType },
-        artifactGlobs: { type: "array" as ToolArgType, items: { type: "string" } },
-      },
-      oneOfRequired: [{ required: ["code"] }, { required: ["entryFile"] }],
-      additionalProperties: true,
-    },
-    outputSchema: {
-      type: "object" as const,
-      description: "代码执行结果",
-      properties: {
-        ok: { type: "boolean" as const, description: "执行是否成功" },
-        runId: { type: "string" as const, description: "执行任务 ID" },
-        exitCode: { type: "number" as const, description: "进程退出码" },
-        timedOut: { type: "boolean" as const, description: "是否超时" },
-        durationMs: { type: "number" as const, description: "执行耗时（毫秒）" },
-        stdout: { type: "string" as const, description: "标准输出（可能截断）" },
-        stderr: { type: "string" as const, description: "标准错误（可能截断）" },
-        error: { type: "string" as const, description: "失败时的错误信息" },
-        artifacts: {
-          type: "array" as const,
-          description: "匹配到的产物文件",
-          items: {
-            type: "object" as const,
-            properties: {
-              name: { type: "string" as const },
-              ext: { type: "string" as const },
-              absPath: { type: "string" as const },
-              relPath: { type: "string" as const },
-              sizeBytes: { type: "number" as const },
-            },
-          },
-        },
-      },
-    },
-  },
-  {
-    name: "shell.exec",
-    description: "在项目工作目录中执行命令（高风险）。主要用于运行测试脚本、构建命令或安装工具；慎用：可能修改本机环境，通常只在明确需要时调用。",
-    args: [
-      { name: "command", required: true, desc: "命令名或完整命令行（如 npm 或 npm run test）", type: "string" },
-      { name: "args", required: false, desc: "可选：命令参数数组", type: "array" },
-      { name: "timeoutMs", required: false, desc: "可选：超时（毫秒），默认 600000，最大 600000", type: "number" },
-    ],
-    modes: ["agent"],
-    inputSchema: {
-      type: "object",
-      properties: {
-        command: { type: "string" },
-        args: { type: "array", items: { type: "string" } },
-        timeoutMs: { type: "number" },
-      },
-      required: ["command"],
-      additionalProperties: true,
-    },
-    outputSchema: {
-      type: "object",
-      description: "Shell 执行结果",
-      properties: {
-        ok: { type: "boolean", description: "是否执行成功（exitCode===0）" },
-        exitCode: { type: "number", description: "进程退出码" },
-        stdout: { type: "string", description: "标准输出（可能截断）" },
-        stderr: { type: "string", description: "标准错误（可能截断）" },
-        error: { type: "string", description: "启动失败或超时时的错误信息" },
-        timedOut: { type: "boolean", description: "是否因为超时被终止" },
-      },
-    },
-  },
+  // shell.exec + code.exec 已合并为 Bash wrapper（见 GatewayRuntime._buildAgentTools）
+
   {
     name: "process.run",
     description: "启动一个长时间运行的本地进程（仅管理由 Crab 自己启动的进程）。",
@@ -1866,7 +1520,7 @@ export const TOOL_LIST: ToolMeta[] = [
 ];
 
 export function getToolsForMode(mode: ToolMode) {
-  return TOOL_LIST.filter((t) => (t.modes?.length ? t.modes.includes(mode) : true));
+  return TOOL_LIST.filter((t) => (!Array.isArray(t.modes) ? true : t.modes.includes(mode)));
 }
 
 export function toolsPrompt(mode: ToolMode) {

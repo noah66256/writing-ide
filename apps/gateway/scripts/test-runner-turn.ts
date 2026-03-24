@@ -374,14 +374,17 @@ async function scenario7_anthropicMissingParamPreValidation() {
       "should NOT emit tool.call for kb.search (preset intercept, not sent to Desktop)",
     );
 
-    // tool.result 事件应包含 ERR_PARAM_SCHEMA_MISMATCH
+    // tool.result 事件应包含 ERR_PARAM_SCHEMA_MISMATCH（可能被 ToolResultEnvelope 包裹）
     const toolResultEvent = events.find(
       (e) => e.event === "tool.result" && String(e.data?.name ?? "") === "kb.search",
     );
     assert.ok(toolResultEvent, "should have tool.result event for kb.search");
     const resultOutput = toolResultEvent!.data?.output;
+    const errorCode =
+      String(resultOutput?.error ?? "") ||
+      String(resultOutput?.inline?.error ?? "");
     assert.equal(
-      String(resultOutput?.error ?? ""),
+      errorCode,
       "ERR_PARAM_SCHEMA_MISMATCH",
       `tool.result should contain ERR_PARAM_SCHEMA_MISMATCH, got: ${JSON.stringify(resultOutput)}`,
     );
@@ -709,7 +712,7 @@ async function main() {
   await scenario9_todoGateFailsWithoutTodo();
   await scenario10_deliveryLatchNormalizesVersionedPaths();
   await scenario11_openAiMainDocUpdateAutoWrapPatch();
-  await scenario12_openAiSetTodoListAutoWrapItems();
+  // scenario12 (run.setTodoList auto-wrap) 已随 run.setTodoList 废弃
   console.log("[test-runner-turn] ALL PASSED");
 }
 

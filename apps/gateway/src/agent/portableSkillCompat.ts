@@ -17,6 +17,11 @@ const CLAUDE_TOOL_ALIAS_MAP = new Map<string, string>([
   ["grep", "project.search"],
   ["bash", "shell.exec"],
   ["webfetch", "web.fetch"],
+  ["web_fetch", "web.fetch"],
+  ["websearch", "web.search"],
+  ["web_search", "web.search"],
+  ["web-search", "web.search"],
+  ["agent", "spawn_agent"],
   ["task", "spawn_agent"],
 ]);
 
@@ -27,8 +32,14 @@ const TOOL_NAME_TO_CLAUDE_ALIAS = new Map<string, string>([
   ["project.searchPaths", "Glob"],
   ["project.search", "Grep"],
   ["shell.exec", "Bash"],
+  ["code.exec", "Bash"],
   ["web.fetch", "WebFetch"],
-  ["spawn_agent", "Task"],
+  ["web.search", "WebSearch"],
+  ["spawn_agent", "Agent"],
+  ["send_input", "Agent"],
+  ["resume_agent", "Agent"],
+  ["wait_agent", "Agent"],
+  ["close_agent", "Agent"],
 ]);
 
 const PORTABLE_AGENT_ALIAS_MAP = new Map<string, string>([
@@ -420,7 +431,8 @@ export function buildPortableSkillToolAliasNotice(manifest: SkillManifest | null
     "- Grep -> project.search",
     "- Bash -> shell.exec",
     "- WebFetch -> web.fetch",
-    "- Task -> spawn_agent",
+    "- WebSearch -> web.search",
+    "- Agent -> spawn_agent",
   ].join("\n");
 }
 

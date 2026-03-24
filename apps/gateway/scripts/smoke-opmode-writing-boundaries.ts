@@ -189,8 +189,8 @@ function scenario4_runtimeHighRiskExposurePolicy() {
       styleWorkflowActive: true,
       hasPortableScopedHighRiskGrant: false,
     }),
-    false,
-    "assistant writing run should default-hide runtime high-risk tools",
+    true,
+    "assistant mode should always expose runtime high-risk tools (LLM decides usage)",
   );
 
   assert.equal(
