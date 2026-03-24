@@ -93,9 +93,10 @@ function createMockRunContext(overrides?: Record<string, unknown>) {
   } as any;
 }
 
-function scenario1_highRiskSetIncludesCodeExec() {
-  assert.equal(HIGH_RISK_TOOL_NAME_SET.has("code.exec"), true, "code.exec should be part of high-risk tool set");
-  ok("scenario1.high_risk_contains_code_exec");
+function scenario1_highRiskSetIncludesBash() {
+  assert.equal(HIGH_RISK_TOOL_NAME_SET.has("Bash"), true, "Bash should be part of high-risk tool set");
+  assert.equal(HIGH_RISK_TOOL_NAME_SET.has("Agent"), true, "Agent should be part of high-risk tool set");
+  ok("scenario1.high_risk_contains_bash_and_agent");
 }
 
 function scenario2_portableActivationFiltersHighRiskTools() {
@@ -111,7 +112,7 @@ function scenario2_portableActivationFiltersHighRiskTools() {
   assert.equal(toolNames.has("read"), true, "read should still be exposed for activation");
   assert.equal(toolNames.has("write"), true, "write should still be exposed for activation");
   assert.equal(toolNames.has("spawn_agent"), true, "Task alias should still be exposed for activation");
-  assert.equal(toolNames.has("shell.exec"), false, "high-risk Bash alias should not leak into activation toolNames");
+  assert.equal(toolNames.has("Bash"), false, "high-risk Bash should not leak into activation toolNames");
   ok("scenario2.portable_activation_filters_high_risk");
 }
 
@@ -137,7 +138,7 @@ async function scenario3_skillsActivateDoesNotLeakHighRiskTools() {
           id: "portable_writer",
           name: "Portable Writer",
           portable: true,
-          toolCaps: { allowTools: ["shell.exec", "write"] },
+          toolCaps: { allowTools: ["Bash", "write"] },
           allowedTools: ["Read", "Bash(python -V)", "Write"],
         },
       ],
@@ -148,7 +149,7 @@ async function scenario3_skillsActivateDoesNotLeakHighRiskTools() {
   assert.equal(result.ok, true, "skills.activate should succeed");
   const toolNames = Array.isArray((result as any).output?.activation?.toolNames) ? (result as any).output.activation.toolNames : [];
   assert.equal(toolNames.includes("write"), true, "safe write tool should remain in activation payload");
-  assert.equal(toolNames.includes("shell.exec"), false, "high-risk shell.exec should not leak into activation payload");
+  assert.equal(toolNames.includes("Bash"), false, "high-risk Bash should not leak into activation payload");
   assert.equal((result as any).output?.activation?.executionScope, "skill_activation", "activation payload should expose non-escalating scope");
   ok("scenario3.skills_activate_does_not_leak_high_risk");
 }
@@ -255,7 +256,7 @@ async function scenario6_runtimeCreativeDenyCodeExec() {
       mode: "pi",
       runCtx: createMockRunContext({
         opMode: "creative",
-        allowedToolNames: new Set(["code.exec"]),
+        allowedToolNames: new Set(["Bash"]),
       }),
     } as any,
     kernel as any,
@@ -264,10 +265,10 @@ async function scenario6_runtimeCreativeDenyCodeExec() {
   await runtime.run("test prompt");
   await kernel.capturedArgs.transformContext([]);
 
-  const result = await (runtime as any)._executeAgentTool("tc_code_exec", "code.exec", { code: "print(1)" });
-  assert.equal(result.ok, false, "creative code.exec should be denied");
+  const result = await (runtime as any)._executeAgentTool("tc_bash", "Bash", { code: "print(1)" });
+  assert.equal(result.ok, false, "creative Bash should be denied");
   assert.equal(result.output?.error, "ASSISTANT_MODE_REQUIRED");
-  ok("scenario6.runtime_creative_deny_code_exec");
+  ok("scenario6.runtime_creative_deny_bash");
 }
 
 async function scenario7_runtimeSkillActivationStillDenied() {
@@ -277,15 +278,15 @@ async function scenario7_runtimeSkillActivationStillDenied() {
       mode: "pi",
       runCtx: createMockRunContext({
         opMode: "creative",
-        allowedToolNames: new Set(["code.exec"]),
+        allowedToolNames: new Set(["Bash"]),
         portableSkillContext: {
           activeSkillIds: ["portable_writer"],
           primarySkillId: "portable_writer",
           executionScope: "skill_activation",
-          scopedHighRiskToolNames: ["code.exec"],
+          scopedHighRiskToolNames: ["Bash"],
           allowedToolPolicy: {
             activeSkillIds: ["portable_writer"],
-            allowedToolNames: new Set(["code.exec"]),
+            allowedToolNames: new Set(["Bash"]),
             rules: [],
             rulesByTool: new Map(),
             unsupportedEntries: [],
@@ -299,14 +300,14 @@ async function scenario7_runtimeSkillActivationStillDenied() {
   await runtime.run("test prompt");
   await kernel.capturedArgs.transformContext([]);
 
-  const result = await (runtime as any)._executeAgentTool("tc_skill_activation", "code.exec", { code: "print(2)" });
+  const result = await (runtime as any)._executeAgentTool("tc_skill_activation", "Bash", { code: "print(2)" });
   assert.equal(result.ok, false, "skill_activation scope should not bypass creative deny");
   assert.equal(result.output?.error, "ASSISTANT_MODE_REQUIRED");
   ok("scenario7.runtime_skill_activation_still_denied");
 }
 
 async function main() {
-  scenario1_highRiskSetIncludesCodeExec();
+  scenario1_highRiskSetIncludesBash();
   scenario2_portableActivationFiltersHighRiskTools();
   await scenario3_skillsActivateDoesNotLeakHighRiskTools();
   scenario4_runtimeHighRiskExposurePolicy();

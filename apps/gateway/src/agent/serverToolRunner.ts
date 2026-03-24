@@ -50,7 +50,7 @@ function getServerToolAllowlist(): Set<string> {
     ? parseCsv(cfg)
     : ["lint.style", "time.now",
        "tools.search", "tools.describe", "skills.list", "skills.activate",
-       "web.search", "web.fetch",
+       "web.search", "web.fetch", "mcp.info",
        "run.done", "run.setTodoList", "run.todo", "run.mainDoc.update", "run.mainDoc.get",
        "spawn_agent", "send_input", "resume_agent", "wait_agent", "close_agent"];
   return new Set(list.map((x) => String(x ?? "").trim()).filter(Boolean));
@@ -80,7 +80,7 @@ export function decideServerToolExecution(args: {
   const name = String(args.name ?? "").trim();
 
   // 代码/命令执行强制走 Desktop
-  if (name === "code.exec" || name === "Bash") return { executedBy: "desktop", reasonCodes: ["exec_desktop_only"] };
+  if (name === "Bash") return { executedBy: "desktop", reasonCodes: ["exec_desktop_only"] };
 
   const allow = getServerToolAllowlist();
   if (!allow.has(name)) return { executedBy: "desktop", reasonCodes: ["server_tool_not_allowed"] };
@@ -89,6 +89,7 @@ export function decideServerToolExecution(args: {
   const styleLinterLibraries = Array.isArray(sidecar?.styleLinterLibraries) ? (sidecar.styleLinterLibraries as any[]) : [];
 
   // time.*：完全 server-side（只读时间）；不依赖 Desktop sidecar
+  if (name === "mcp.info") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "mcp_info_server_side"] };
   if (name === "time.now") return { executedBy: "gateway", reasonCodes: ["server_tool_allowed", "time_now_server_side"] };
   // tools.*：工具发现（只读）
   if (name === "tools.search" || name === "tools.describe") {
@@ -577,6 +578,26 @@ export async function executeServerToolOnGateway(args: {
   if (name === "run.mainDoc.get") {
     return { ok: true as const, output: { ok: true, mainDoc: args.mainDoc } };
   }
+  if (name === "mcp.info") {
+    const sidecar = (args.toolSidecar ?? null) as any;
+    const mcpServers: any[] = Array.isArray(sidecar?.mcpServers) ? sidecar.mcpServers : [];
+    const mcpTools: any[] = Array.isArray(sidecar?.mcpTools) ? sidecar.mcpTools : [];
+    const filterServerId = String(args.call?.args?.serverId ?? "").trim();
+    const servers = mcpServers
+      .filter((s: any) => !filterServerId || String(s?.id ?? "").trim() === filterServerId)
+      .map((s: any) => {
+        const sid = String(s?.id ?? "").trim();
+        const tools = mcpTools.filter((t: any) => String(t?.name ?? "").startsWith(`mcp.${sid}.`));
+        return {
+          id: sid,
+          name: String(s?.name ?? sid).trim(),
+          status: String(s?.status ?? "unknown").trim(),
+          toolCount: tools.length,
+          toolNames: tools.map((t: any) => String(t?.name ?? "").trim()).filter(Boolean).slice(0, 50),
+        };
+      });
+    return { ok: true as const, output: { ok: true, servers } };
+  }
   if (name === "time.now") return executeTimeNowOnGateway();
   if (name === "tools.search") {
     return executeToolsSearchOnGateway({
@@ -694,8 +715,7 @@ function buildDiscoveryCatalog(args: {
 
   // 被公共名 wrapper 吞掉的 legacy 名，不暴露给发现目录
   const COLLAPSED_LEGACY_NAMES = new Set([
-    "shell.exec", "code.exec",
-    "send_input", "resume_agent", "wait_agent", "close_agent",
+        "send_input", "resume_agent", "wait_agent", "close_agent",
   ]);
 
   const raw = buildDiscoveryCatalogForToolSearch({
@@ -721,7 +741,7 @@ function buildDiscoveryCatalog(args: {
     });
 
   // 注入合成 wrapper（Bash / Agent）作为虚拟 catalog entry
-  const hasBash = allowed.has("shell.exec") || allowed.has("code.exec");
+  const hasBash = true  // Bash wrapper 无条件注入 discovery catalog;
   const hasAgent = allowed.has("spawn_agent");
   if (hasBash) {
     result.push({

@@ -25,6 +25,8 @@ export const CORE_TOOL_NAMES = [
 
   // 记忆
   "memory",
+  // MCP 信息（只读）
+  "mcp.info",
 ] as const;
 
 export type CoreToolName = (typeof CORE_TOOL_NAMES)[number];
@@ -33,23 +35,14 @@ export const CORE_TOOL_NAME_SET = new Set<string>(CORE_TOOL_NAMES as readonly st
 
 // 高风险工具：仅在助手模式（opMode=assistant）开放
 export const HIGH_RISK_TOOL_NAMES = [
-  "shell.exec",
-  "code.exec",
+  "Bash",
+  "Agent",
   "process.run",
   "process.list",
   "process.stop",
   "cron.create",
   "cron.list",
   "skill.install",
-  "mcpServer.planInstall",
-  "mcpServer.applyInstall",
-  "mcpServer.updateConfig",
-  "mcpServer.enable",
-  "mcpServer.disable",
-  "mcpServer.repairRuntime",
-  "mcpServer.planUpgrade",
-  "mcpServer.applyUpgrade",
-  "mcpServer.uninstall",
 ] as const;
 
 export type HighRiskToolName = (typeof HIGH_RISK_TOOL_NAMES)[number];

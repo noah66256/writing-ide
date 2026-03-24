@@ -720,7 +720,6 @@ for (const [pub, leg] of PUBLIC_TO_LEGACY) {
   LEGACY_TO_PUBLIC.set(leg, pub);
 }
 // 多对一补充
-LEGACY_TO_PUBLIC.set("code.exec", "Bash");
 LEGACY_TO_PUBLIC.set("send_input", "Agent");
 LEGACY_TO_PUBLIC.set("resume_agent", "Agent");
 LEGACY_TO_PUBLIC.set("wait_agent", "Agent");
@@ -741,7 +740,7 @@ function resolveRuntimeToolName(publicName: string, toolArgs: Record<string, unk
       const hasCode =
         (typeof toolArgs.code === "string" && toolArgs.code.trim().length > 0) ||
         (typeof toolArgs.entryFile === "string" && toolArgs.entryFile.trim().length > 0);
-      return hasCode ? "code.exec" : "shell.exec";
+      return "Bash"; // Bash wrapper 直接下发给 Desktop，Desktop 按参数分发
     }
     case "Agent": {
       const action = String(toolArgs.action ?? "spawn").trim().toLowerCase();
@@ -1586,7 +1585,7 @@ export class GatewayRuntime implements AgentRuntime {
     if (toolName === "edit" || toolName === "doc.restoreSnapshot") {
       return "doc_edit";
     }
-    if (toolName === "write" || toolName === "doc.splitToDir" || toolName === "code.exec") {
+    if (toolName === "write" || toolName === "Bash") {
       return "artifact_write";
     }
     return "other";
@@ -1595,7 +1594,7 @@ export class GatewayRuntime implements AgentRuntime {
   private _isDeliveryCandidateTool(toolName: string): boolean {
 
     const opMode = (this.config.runCtx as any).opMode === "assistant" ? "assistant" : "creative";
-    return isContentWriteTool(toolName) || toolName === "doc.snapshot" || toolName === "code.exec";
+    return isContentWriteTool(toolName) || toolName === "Bash";
   }
 
   private _logicalTargetForTool(
@@ -2401,7 +2400,7 @@ export class GatewayRuntime implements AgentRuntime {
     const policy = parsePortableAllowedToolPolicy(manifest ? [manifest] : []);
     if (!policy?.rules?.length) return [];
     return policy.rules
-      .filter((rule) => rule.toolName === "shell.exec" && (rule.kind === "any" || rule.kind === "command_pattern"))
+      .filter((rule) => rule.toolName === "Bash" && (rule.kind === "any" || rule.kind === "command_pattern"))
       .map((rule) => ({
         raw: String(rule.raw ?? "").trim(),
         kind: rule.kind === "command_pattern" ? "command_pattern" : "any",
@@ -2896,8 +2895,7 @@ export class GatewayRuntime implements AgentRuntime {
 
     // 被 Bash/Agent wrapper 吞掉的 legacy 名
     const COLLAPSED = new Set([
-      "shell.exec", "code.exec",
-      "spawn_agent", "send_input", "resume_agent", "wait_agent", "close_agent",
+            "spawn_agent", "send_input", "resume_agent", "wait_agent", "close_agent",
     ]);
 
     // ── 内置工具（参考 CC：单层过滤，modes:[] 直接排除）──
@@ -2943,7 +2941,8 @@ export class GatewayRuntime implements AgentRuntime {
       });
 
     // ── 合成 Bash wrapper（shell.exec + code.exec）──
-    const hasBash = allowed.has("shell.exec") || allowed.has("code.exec");
+    // Bash wrapper 无条件创建——可见性由 effectiveAllowed 软门禁控制，不依赖 B2 选择
+    const hasBash = true;
     const bashWrapper: AgentTool<any>[] = hasBash ? [{
       name: this._encodeRuntimeToolName("Bash"),
       label: "Bash",
@@ -2975,7 +2974,7 @@ export class GatewayRuntime implements AgentRuntime {
     }] : [];
 
     // ── 合成 Agent wrapper（spawn/send/resume/wait/close）──
-    const hasAgent = allowed.has("spawn_agent") || allowed.has("send_input") || allowed.has("resume_agent") || allowed.has("wait_agent") || allowed.has("close_agent");
+    const hasAgent = true;
     const agentWrapper: AgentTool<any>[] = hasAgent ? [{
       name: this._encodeRuntimeToolName("Agent"),
       label: "Agent",
@@ -3255,7 +3254,7 @@ export class GatewayRuntime implements AgentRuntime {
     if (opMode !== "assistant" && runtimeHighRiskTools.has(toolName) && !portableHighRiskOverride) {
       const deniedMessage = toolName === "skill.install"
         ? "当前为创作模式，禁止直接安装到用户全局技能目录；请先在当前项目或临时 workspace 中完成 skill 草稿，再切到“助手模式”后调用 skill.install。"
-        : "当前为创作模式，禁止执行 code.exec / shell.exec / process.* / cron.* 等高风险本机操作；如确需执行，请先在桌面端切换到“助手模式”后再重试。";
+        : "当前为创作模式，禁止执行 Bash / process.* / cron.* 等高风险本机操作；如确需执行，请先在桌面端切换到“助手模式”后再重试。";
       const permissionHook = await this._emitPortablePermissionRequest({
         toolName,
         toolArgs,
@@ -4568,7 +4567,7 @@ export class GatewayRuntime implements AgentRuntime {
     if (isWriteLikeTool(toolName) || isSnapshotRestore) {
       this.runState.hasWriteOps = true;
     }
-    if (isContentWriteTool(toolName) || isSnapshotRestore || toolName === "code.exec") {
+    if (isContentWriteTool(toolName) || isSnapshotRestore || toolName === "Bash") {
       this.runState.hasWriteOps = true;
       this.runState.hasWriteApplied = true;
       this._recordSideEffect(toolName, toolArgs, result);

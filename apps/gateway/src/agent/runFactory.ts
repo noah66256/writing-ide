@@ -3767,11 +3767,9 @@ export async function prepareAgentRun(args: {
         ? new Set(Array.from(allToolNamesForModeEffective).filter((n) => !isWriteLikeTool(n)))
         : new Set(allToolNamesForModeEffective);
 
-  // 合成 wrapper 需要的 legacy 名注入（Bash = shell.exec + code.exec，Agent = spawn_agent + collab）
-  // 它们已从 TOOL_LIST 删除，但 _buildAgentTools wrapper 和 HIGH_RISK gate 仍需识别。
-  for (const name of ["Bash", "code.exec", "spawn_agent", "send_input", "resume_agent", "wait_agent", "close_agent"]) {
-    baseAllowedToolNames.add(name);
-  }
+  // Bash/Agent 不在 TOOL_LIST 里（wrapper 合成），但必须在 baseAllowed 里才能通过软门禁
+  baseAllowedToolNames.add("Bash");
+  baseAllowedToolNames.add("Agent");
 
   // 基础工具集先按 opMode（创作/助手）做一次硬兜底：
   // - 创作模式：剔除 shell.exec / code.exec / process.* / cron.* / skill.install 等高危工具；
@@ -4145,19 +4143,11 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     maxTools: maxToolsForMode,
   });
 
-  const selectedAllowedToolNames =
-    toolSelection.selectedToolNames.size > 0
-      ? toolSelection.selectedToolNames
-      : new Set(baseAllowedToolNames);
-  for (const name of preserveToolNamesWithComposite) {
-    if (baseAllowedToolNames.has(name)) selectedAllowedToolNames.add(name);
-  }
-  for (const name of preferredToolNamesWithRetrieval) {
-    if (baseAllowedToolNames.has(name)) selectedAllowedToolNames.add(name);
-  }
-
-  // 兜底：确保 CORE_TOOLS 不被 B2 裁剪掉，只要它们在 baseAllowedToolNames 中。
-  ensureCoreToolsSelected({ baseAllowedToolNames, selectedAllowedToolNames });
+  // B2 工具选择已废弃——LLM 自己判断用什么工具，不再由 BM25 检索裁剪。
+  // selectedAllowedToolNames 直接等于 baseAllowedToolNames（全集），保持下游变量兼容。
+  const selectedAllowedToolNames = new Set(baseAllowedToolNames);
+  // B2 废弃后 preserve/preferred 注入不再需要（selectedAllowed 已是全集）
+  // ensureCoreToolsSelected 也不需要（CORE_TOOLS 本来就在全集里）
 
   // 显式 portable invocation 的可见工具池必须与 allowed-tools 收敛到同一作用域，
   // 否则会出现“模型看得到，但 runtime 又因 portable policy 拒绝”的分叉。
@@ -4685,6 +4675,9 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
   const ALWAYS_ALLOW_TOOL_NAMES = new Set<string>(
     Array.from(CORE_TOOL_NAME_SET).filter((name) => selectedAllowedToolNames.has(name)),
   );
+  // Bash/Agent 已在 baseAllowed/selectedAllowed 里，自动进入 ALWAYS_ALLOW
+  ALWAYS_ALLOW_TOOL_NAMES.add("Bash");
+  ALWAYS_ALLOW_TOOL_NAMES.add("Agent");
   const DELETE_ONLY_ALLOWED_TOOL_NAMES = new Set<string>([
     ...DELETE_ROUTE_PINNED_TOOL_NAMES,
   ]);

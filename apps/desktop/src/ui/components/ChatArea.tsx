@@ -2663,7 +2663,7 @@ function TranscriptEntryRenderer({
   if (entry.kind === "status") return <TranscriptStatusMessage entry={entry} />;
   if (entry.kind === "tool_call") {
     const step = transcriptToolEntryToStep(entry);
-    return step.toolName === "shell.exec"
+    return (step.toolName === "Bash" || step.toolName === "shell.exec")
       ? <ShellExecCard step={step} />
       : <ToolCallCard step={step} />;
   }
@@ -2692,7 +2692,7 @@ function StepRenderer({
     case "assistant":
       return <AssistantMessage step={step} onQuickAction={onAssistantQuickAction} />;
     case "tool":
-      return step.toolName === "shell.exec"
+      return (step.toolName === "Bash" || step.toolName === "shell.exec")
         ? <ShellExecCard step={step} />
         : <ToolCallCard step={step} />;
     default:
@@ -2978,7 +2978,7 @@ function ToolCallCard({ step }: { step: ToolBlockStep }) {
   );
 }
 
-/* ─── shell.exec 专用终端小窗 ─── */
+/* ─── Bash / shell.exec 终端小窗 ─── */
 
 function ShellExecCard({ step }: { step: ToolBlockStep }) {
   const [expanded, setExpanded] = useState(step.status === "running");
@@ -3166,7 +3166,7 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   "project.docRules.get": "读取文档规范",
   "file.open": "打开文件",
   "code.exec": "执行代码",
-  "shell.exec": "执行命令",
+  "Bash": "执行命令", "shell.exec": "执行命令",
   "process.run": "启动进程",
   "process.list": "查看进程",
   "process.stop": "停止进程",
@@ -3178,7 +3178,7 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
 function toolDisplayName(toolName: string, input: unknown): string {
   const mcpLabel = humanizeMcpToolDisplayName(toolName);
   if (mcpLabel) return mcpLabel;
-  if (toolName === "spawn_agent") {
+  if ((toolName === "Agent" || toolName === "spawn_agent")) {
     const args = _asRecord(input);
     const agentId = String(args.agentId ?? args.agent_type ?? "").trim();
     const agent = BUILTIN_SUB_AGENTS.find((a) => a.id === agentId);
@@ -3202,7 +3202,7 @@ function summarizeToolInput(toolName: string, input: unknown): string {
   if (toolName === "read" || toolName === "write" || toolName === "doc.previewDiff" || toolName === "doc.splitToDir" || toolName === "edit") {
     return _trunc(args.path ?? args.filePath ?? args.targetPath, 40);
   }
-  if (toolName === "shell.exec") {
+  if ((toolName === "Bash" || toolName === "shell.exec")) {
     const cmd = _trunc(args.command, 40);
     return cmd || "";
   }
@@ -3227,7 +3227,7 @@ function summarizeToolOutput(toolName: string, output: unknown): string {
   }
   if (Array.isArray(output)) return output.length ? `返回 ${output.length} 项` : "";
   const out = _asRecord(output);
-  if (toolName === "shell.exec") {
+  if ((toolName === "Bash" || toolName === "shell.exec")) {
     const exitCodeRaw = (out as any).exitCode;
     const exitCode = typeof exitCodeRaw === "number" ? exitCodeRaw : null;
     const timedOut = Boolean((out as any).timedOut);

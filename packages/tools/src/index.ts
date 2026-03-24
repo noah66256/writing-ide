@@ -1076,7 +1076,7 @@ export const TOOL_LIST: ToolMeta[] = [
     name: "mcpServer.searchCatalog",
     description: "搜索官方/审核 MCP catalog，返回可安装的 MCP 候选。",
     args: [{ name: "query", required: true, desc: "搜索词", type: "string" }],
-    modes: ["agent"],
+    modes: [],
     inputSchema: {
       type: "object",
       properties: {
@@ -1090,7 +1090,7 @@ export const TOOL_LIST: ToolMeta[] = [
     name: "mcpServer.planInstall",
     description: "为某个 MCP 来源生成安装计划，不直接执行安装。支持 catalog item 或 GitHub 仓库 URL。",
     args: [{ name: "source", required: true, desc: "MCP 来源对象", type: "object" }],
-    modes: ["agent"],
+    modes: [],
     inputSchema: {
       type: "object",
       properties: {
@@ -1109,7 +1109,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "configValues", required: false, desc: "配置值", type: "object" },
       { name: "confirm", required: true, desc: "显式确认执行安装", type: "boolean" },
     ],
-    modes: ["agent"],
+    modes: [],
     inputSchema: {
       type: "object",
       properties: {
@@ -1126,7 +1126,7 @@ export const TOOL_LIST: ToolMeta[] = [
     name: "mcpServer.list",
     description: "列出当前已配置 MCP server 的脱敏运行状态与托管状态摘要。",
     args: [],
-    modes: ["agent"],
+    modes: [],
     inputSchema: {
       type: "object",
       properties: {},
@@ -1140,7 +1140,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "serverId", required: true, desc: "server id", type: "string" },
       { name: "configValues", required: true, desc: "配置更新", type: "object" },
     ],
-    modes: ["agent"],
+    modes: [],
     inputSchema: {
       type: "object",
       properties: {
@@ -1155,7 +1155,7 @@ export const TOOL_LIST: ToolMeta[] = [
     name: "mcpServer.enable",
     description: "启用并连接某个 MCP server。",
     args: [{ name: "serverId", required: true, desc: "server id", type: "string" }],
-    modes: ["agent"],
+    modes: [],
     inputSchema: {
       type: "object",
       properties: {
@@ -1169,7 +1169,7 @@ export const TOOL_LIST: ToolMeta[] = [
     name: "mcpServer.disable",
     description: "断开并禁用某个 MCP server。",
     args: [{ name: "serverId", required: true, desc: "server id", type: "string" }],
-    modes: ["agent"],
+    modes: [],
     inputSchema: {
       type: "object",
       properties: {
@@ -1183,7 +1183,7 @@ export const TOOL_LIST: ToolMeta[] = [
     name: "mcpServer.test",
     description: "测试某个已安装 MCP server 的连接状态与工具暴露情况。",
     args: [{ name: "serverId", required: true, desc: "server id", type: "string" }],
-    modes: ["agent"],
+    modes: [],
     inputSchema: {
       type: "object",
       properties: {
@@ -1197,7 +1197,7 @@ export const TOOL_LIST: ToolMeta[] = [
     name: "mcpServer.repairRuntime",
     description: "修复某个 MCP server 所需的运行时环境，然后重新验证。",
     args: [{ name: "serverId", required: true, desc: "server id", type: "string" }],
-    modes: ["agent"],
+    modes: [],
     inputSchema: {
       type: "object",
       properties: {
@@ -1211,7 +1211,7 @@ export const TOOL_LIST: ToolMeta[] = [
     name: "mcpServer.planUpgrade",
     description: "为某个已托管 MCP server 生成升级计划，不直接执行升级。",
     args: [{ name: "serverId", required: true, desc: "server id", type: "string" }],
-    modes: ["agent"],
+    modes: [],
     inputSchema: {
       type: "object",
       properties: {
@@ -1228,7 +1228,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "serverId", required: true, desc: "server id", type: "string" },
       { name: "confirm", required: true, desc: "显式确认执行升级", type: "boolean" },
     ],
-    modes: ["agent"],
+    modes: [],
     inputSchema: {
       type: "object",
       properties: {
@@ -1246,7 +1246,7 @@ export const TOOL_LIST: ToolMeta[] = [
       { name: "serverId", required: true, desc: "server id", type: "string" },
       { name: "confirm", required: true, desc: "显式确认执行卸载", type: "boolean" },
     ],
-    modes: ["agent"],
+    modes: [],
     inputSchema: {
       type: "object",
       properties: {
@@ -1486,6 +1486,45 @@ export const TOOL_LIST: ToolMeta[] = [
       properties: {
         ok: { type: "boolean" },
         automations: { type: "array", items: { type: "object" } },
+      },
+    },
+  },
+  // ── MCP 信息（只读）──────────────────────────────────
+  {
+    name: "mcp.info",
+    description:
+      "查看当前已连接的 MCP Server 列表及其工具概况（只读，无副作用）。\n" +
+      "返回每个 server 的名称、连接状态、工具数量和工具名列表。\n" +
+      "创作模式和助手模式均可用。",
+    args: [
+      { name: "serverId", required: false, desc: "可选：只查某个 server 的详情", type: "string" },
+    ],
+    modes: ["chat", "agent"] as ToolMode[],
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        serverId: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+    outputSchema: {
+      type: "object" as const,
+      description: "MCP server 信息",
+      properties: {
+        ok: { type: "boolean" as const },
+        servers: {
+          type: "array" as const,
+          items: {
+            type: "object" as const,
+            properties: {
+              id: { type: "string" as const },
+              name: { type: "string" as const },
+              status: { type: "string" as const },
+              toolCount: { type: "number" as const },
+              toolNames: { type: "array" as const, items: { type: "string" as const } },
+            },
+          },
+        },
       },
     },
   },

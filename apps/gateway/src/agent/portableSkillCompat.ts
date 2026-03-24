@@ -429,10 +429,10 @@ export function buildPortableSkillToolAliasNotice(manifest: SkillManifest | null
     "- Edit -> edit",
     "- Glob -> project.searchPaths",
     "- Grep -> project.search",
-    "- Bash -> shell.exec",
+    "- Bash（命令执行 + Python 代码）",
     "- WebFetch -> web.fetch",
     "- WebSearch -> web.search",
-    "- Agent -> spawn_agent",
+    "- Agent（子 Agent 生命周期）",
   ].join("\n");
 }
 

@@ -444,7 +444,7 @@ export function humanizeToolActivity(name: string, args: Record<string, unknown>
   if (tool === "run.mainDoc.get" || tool === "run.mainDoc.update") return "思考中…";
   if (tool === "kb.search") return "正在搜索资料…";
   if (tool === "read") return "正在读取文件…";
-  if (tool === "shell.exec") return "正在执行命令…";
+  if ((tool === "Bash" || tool === "shell.exec")) return "正在执行命令…";
   if (tool === "write" || tool === "doc.previewDiff" || tool === "doc.splitToDir") return "正在整理结果…";
   if (tool === "web.search") {
     const q = oneLine((args as any)?.query ?? (args as any)?.q ?? (args as any)?.keyword, 36);
@@ -462,7 +462,7 @@ export function humanizeToolActivity(name: string, args: Record<string, unknown>
   }
   if (tool === "lint.style") return "正在做风格校验…";
   if (tool === "lint.copy") return "正在做抄袭/复述风险检查…";
-  if (tool === "spawn_agent") {
+  if ((tool === "Agent" || tool === "spawn_agent")) {
     const agentId = String((args as any)?.agentId ?? (args as any)?.agent_type ?? "").trim();
     const agentName = BUILTIN_SUB_AGENTS.find((a) => a.id === agentId)?.name ?? agentId;
     return agentName ? `正在委派${agentName}…` : "正在委派子 Agent…";
