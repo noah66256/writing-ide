@@ -13,7 +13,15 @@ import dotenv from "dotenv";
 import { loadDb, saveDb, updateDb, listBackups, createBackup, restoreBackup, getBackupFilePath, type Db, type LlmConfig, type LlmModelPrice, type RunAudit, type User } from "./db.js";
 import { kbSearch, type KbCard } from "@ohmycrab/kb-core";
 import { MemoryKbStore } from "./kb/memoryStore.js";
-import { adjustUserPoints, calculateCostPoints, listUserTransactions, type LlmTokenUsage } from "./billing.js";
+import {
+  adjustUserPoints,
+  calculateCostCny,
+  calculateCostPoints,
+  hasBillableUsage,
+  listUserTransactions,
+  normalizeLlmTokenUsage,
+  type LlmTokenUsage,
+} from "./billing.js";
 import { openAiCompatUrl, type OpenAiChatMessage } from "./llm/openaiCompat.js";
 import {
   completionOnceViaProvider,
@@ -302,8 +310,24 @@ function getModelPriceFromDb(db: Db, modelId: string): LlmModelPrice | null {
   if (m) {
     const priceIn = Number(m?.priceInCnyPer1M);
     const priceOut = Number(m?.priceOutCnyPer1M);
-    if (Number.isFinite(priceIn) && Number.isFinite(priceOut) && priceIn >= 0 && priceOut >= 0) {
-      return { priceInCnyPer1M: priceIn, priceOutCnyPer1M: priceOut };
+    const priceCacheRead = Number(m?.priceCacheReadCnyPer1M ?? 0);
+    const priceCacheCreation5m = Number(m?.priceCacheCreation5mCnyPer1M ?? 0);
+    if (
+      Number.isFinite(priceIn) &&
+      Number.isFinite(priceOut) &&
+      Number.isFinite(priceCacheRead) &&
+      Number.isFinite(priceCacheCreation5m) &&
+      priceIn >= 0 &&
+      priceOut >= 0 &&
+      priceCacheRead >= 0 &&
+      priceCacheCreation5m >= 0
+    ) {
+      return {
+        priceInCnyPer1M: priceIn,
+        priceOutCnyPer1M: priceOut,
+        priceCacheReadCnyPer1M: priceCacheRead,
+        priceCacheCreation5mCnyPer1M: priceCacheCreation5m,
+      };
     }
   }
 
@@ -311,8 +335,24 @@ function getModelPriceFromDb(db: Db, modelId: string): LlmModelPrice | null {
   if (!raw || typeof raw !== "object") return null;
   const priceIn = Number((raw as any).priceInCnyPer1M);
   const priceOut = Number((raw as any).priceOutCnyPer1M);
-  if (!Number.isFinite(priceIn) || !Number.isFinite(priceOut) || priceIn < 0 || priceOut < 0) return null;
-  return { priceInCnyPer1M: priceIn, priceOutCnyPer1M: priceOut };
+  const priceCacheRead = Number((raw as any).priceCacheReadCnyPer1M ?? 0);
+  const priceCacheCreation5m = Number((raw as any).priceCacheCreation5mCnyPer1M ?? 0);
+  if (
+    !Number.isFinite(priceIn) ||
+    !Number.isFinite(priceOut) ||
+    !Number.isFinite(priceCacheRead) ||
+    !Number.isFinite(priceCacheCreation5m) ||
+    priceIn < 0 ||
+    priceOut < 0 ||
+    priceCacheRead < 0 ||
+    priceCacheCreation5m < 0
+  ) return null;
+  return {
+    priceInCnyPer1M: priceIn,
+    priceOutCnyPer1M: priceOut,
+    priceCacheReadCnyPer1M: priceCacheRead,
+    priceCacheCreation5mCnyPer1M: priceCacheCreation5m,
+  };
 }
 
 async function chargeUserForLlmUsage(args: {
@@ -333,16 +373,24 @@ async function chargeUserForLlmUsage(args: {
     const price = getModelPriceFromDb(db, modelId);
     if (!price) return { ok: false as const, reason: "PRICE_NOT_CONFIGURED" as const };
 
-    const usage: LlmTokenUsage = {
-      promptTokens: Math.max(0, Math.floor(Number(args.usage.promptTokens) || 0)),
-      completionTokens: Math.max(0, Math.floor(Number(args.usage.completionTokens) || 0)),
-      ...(Number.isFinite(args.usage.totalTokens as any) ? { totalTokens: Math.floor(Number(args.usage.totalTokens)) } : {}),
-    };
-
-    const costCny =
-      (usage.promptTokens / 1_000_000) * price.priceInCnyPer1M + (usage.completionTokens / 1_000_000) * price.priceOutCnyPer1M;
+    const usage = normalizeLlmTokenUsage(args.usage);
+    const costCny = calculateCostCny({ usage, price });
     const costPoints = calculateCostPoints({ usage, price, pointsPerCny: 1000 });
     if (costPoints <= 0) return { ok: false as const, reason: "ZERO_COST" as const };
+
+    const cacheCreation5mTokens =
+      (usage.cacheCreation5mInputTokens ?? 0) > 0
+        ? (usage.cacheCreation5mInputTokens ?? 0)
+        : (usage.cacheCreation1hInputTokens ?? 0) > 0
+          ? 0
+          : (usage.cacheCreationInputTokens ?? 0);
+    const costBreakdown = {
+      promptInputCny: (usage.promptTokens / 1_000_000) * price.priceInCnyPer1M,
+      completionOutputCny: (usage.completionTokens / 1_000_000) * price.priceOutCnyPer1M,
+      cacheReadInputCny: ((usage.cacheReadInputTokens ?? 0) / 1_000_000) * price.priceCacheReadCnyPer1M,
+      cacheCreation5mInputCny: (cacheCreation5mTokens / 1_000_000) * price.priceCacheCreation5mCnyPer1M,
+      ignoredCacheCreation1hInputTokens: usage.cacheCreation1hInputTokens ?? 0,
+    };
 
     const meta = {
       kind: "llm_cost_v1",
@@ -352,6 +400,7 @@ async function chargeUserForLlmUsage(args: {
       price,
       costCny,
       costPoints,
+      costBreakdown,
       pointsPerCny: 1000,
       ...(args.metaExtra !== undefined ? { extra: args.metaExtra } : {}),
     };
@@ -646,6 +695,59 @@ async function resolveRequiredKbTaskRuntime(modelId?: string) {
       hint: `当前主 Agent 模型（${id}）未在 AI 配置中注册或已禁用，请检查顶部模型选择或后台配置。`,
     };
   }
+}
+
+async function resolveGeminiRuntimeForDesktopImage() {
+  try {
+    const stage = await aiConfig.resolveStage("llm.gemini");
+    const endpoint = String(stage?.endpoint || "").trim();
+    const baseUrl = String(stage?.baseURL || "").trim();
+    const apiKey = String(stage?.apiKey || "").trim();
+    const model = String(stage?.model || "").trim();
+    const modelId = String((stage as any)?.modelId || "").trim();
+    if (endpoint && isGeminiLikeEndpoint(endpoint) && baseUrl && apiKey && model) {
+      return {
+        source: "stage" as const,
+        modelId,
+        model,
+        baseUrl,
+        endpoint,
+        apiKey,
+      };
+    }
+  } catch {
+    // ignore stage fallback
+  }
+
+  try {
+    const models = await aiConfig.listModels();
+    const picked = (models ?? []).find((item: any) => {
+      if (!item || typeof item !== "object") return false;
+      if (item.isEnabled === false) return false;
+      return isGeminiLikeEndpoint(String(item.endpoint || "").trim());
+    });
+    if (!picked?.id) return null;
+    const runtime = await aiConfig.resolveModel(String(picked.id));
+    const endpoint = String(runtime?.endpoint || "").trim();
+    const baseUrl = String(runtime?.baseURL || "").trim();
+    const apiKey = String(runtime?.apiKey || "").trim();
+    const model = String(runtime?.model || "").trim();
+    const modelId = String(runtime?.modelId || picked.id).trim();
+    if (endpoint && isGeminiLikeEndpoint(endpoint) && baseUrl && apiKey && model) {
+      return {
+        source: "model" as const,
+        modelId,
+        model,
+        baseUrl,
+        endpoint,
+        apiKey,
+      };
+    }
+  } catch {
+    // ignore
+  }
+
+  return null;
 }
 
 async function getPlaybookEnv(db?: Db) {
@@ -1083,6 +1185,35 @@ fastify.get("/api/llm/selector", async () => {
   };
 });
 
+fastify.get(
+  "/api/llm/gemini/runtime",
+  {
+    preHandler: [(fastify as any).authenticate],
+  },
+  async (_request, reply) => {
+    try {
+      await aiConfig.ensureDefaults();
+    } catch {
+      // ignore
+    }
+
+    const runtime = await resolveGeminiRuntimeForDesktopImage();
+    if (!runtime) {
+      return reply.code(404).send({ ok: false, error: "GEMINI_RUNTIME_NOT_CONFIGURED" });
+    }
+
+    return {
+      ok: true,
+      source: runtime.source,
+      modelId: runtime.modelId,
+      model: runtime.model,
+      baseUrl: runtime.baseUrl,
+      endpoint: runtime.endpoint,
+      apiKey: runtime.apiKey,
+    };
+  },
+);
+
 fastify.get("/api/llm/embedding_models", async () => {
   const env = await getEmbedEnv();
   return { models: (env.models ?? []).map((id) => ({ id })) };
@@ -1157,13 +1288,12 @@ fastify.post(
     // embeddings usage 也计费：usage.prompt_tokens（completion=0）
     let billing: any = null;
     try {
-      const usage0 = json?.usage ?? null;
-      const pt = Number(usage0?.prompt_tokens ?? usage0?.promptTokens ?? NaN);
-      if (jwtUser?.id && jwtUser.role !== "admin" && Number.isFinite(pt) && pt > 0) {
+      const usage = normalizeLlmTokenUsage(json?.usage ?? null);
+      if (jwtUser?.id && jwtUser.role !== "admin" && hasBillableUsage(usage)) {
         const charged = await chargeUserForLlmUsage({
           userId: jwtUser.id,
           modelId: model,
-          usage: { promptTokens: Math.floor(pt), completionTokens: 0, totalTokens: Math.floor(pt) },
+          usage,
           source: "llm.embeddings",
           metaExtra: { endpoint },
         });
@@ -1312,17 +1442,13 @@ fastify.post(
     results = results.slice(0, topN);
 
     // \u8BA1\u8D39
-    const usage = (ret as any).usage ?? null;
+    const usage = normalizeLlmTokenUsage((ret as any).usage ?? null);
     try {
-      if (jwtUser?.id && jwtUser.role !== "admin" && usage) {
+      if (jwtUser?.id && jwtUser.role !== "admin" && hasBillableUsage(usage)) {
         await chargeUserForLlmUsage({
           userId: jwtUser.id,
           modelId: modelIdUsed,
-          usage: {
-            promptTokens: usage.prompt_tokens ?? usage.promptTokens ?? 0,
-            completionTokens: usage.completion_tokens ?? usage.completionTokens ?? 0,
-            totalTokens: (usage.prompt_tokens ?? usage.promptTokens ?? 0) + (usage.completion_tokens ?? usage.completionTokens ?? 0),
-          },
+          usage,
           source: "kb.llm_search",
         });
       }
@@ -1334,10 +1460,7 @@ fastify.post(
       ok: true,
       results,
       modelUsed: modelIdUsed,
-      usage: usage ? {
-        promptTokens: usage.prompt_tokens ?? usage.promptTokens ?? 0,
-        completionTokens: usage.completion_tokens ?? usage.completionTokens ?? 0,
-      } : undefined,
+      usage: hasBillableUsage(usage) || Number.isFinite(Number(usage.totalTokens ?? NaN)) ? usage : undefined,
     };
   } catch (e: any) {
     const msg = e?.message ? String(e.message) : String(e);
@@ -1565,7 +1688,7 @@ fastify.post(
 
       for await (const ev of iter) {
         if (ev.type === "delta") writeEvent("assistant.delta", { delta: ev.delta });
-        else if (ev.type === "usage") lastUsage = ev.usage as any;
+        else if (ev.type === "usage") lastUsage = normalizeLlmTokenUsage(ev.usage);
         else if (ev.type === "done") writeEvent("assistant.done", {});
         else if (ev.type === "error") {
           hadUpstreamError = true;
@@ -1603,7 +1726,7 @@ fastify.post(
         writeEvent("billing.charge", { ...charged, ok: false, source: "llm.chat", runId });
       }
     }
-    audit.usage = (!hadUpstreamError ? (lastUsage as any) : null) as any;
+    audit.usage = !hadUpstreamError && lastUsage ? normalizeLlmTokenUsage(lastUsage) : null;
   } catch (e: any) {
     const msg = e?.message ? String(e.message) : String(e);
     writeEvent("error", { error: msg });
@@ -1985,15 +2108,8 @@ fastify.post(
 
   // 摘要也计费（usage 由 adapter 尽量返回）
   try {
-    const usage = (ret as any).usage ?? null;
-    if (
-      jwtUser?.id &&
-      jwtUser.role !== "admin" &&
-      usage &&
-      typeof usage === "object" &&
-      Number.isFinite((usage as any).promptTokens as any) &&
-      Number.isFinite((usage as any).completionTokens as any)
-    ) {
+    const usage = normalizeLlmTokenUsage((ret as any).usage ?? null);
+    if (jwtUser?.id && jwtUser.role !== "admin" && hasBillableUsage(usage)) {
       await chargeUserForLlmUsage({
         userId: jwtUser.id,
         modelId: model,
@@ -2010,7 +2126,7 @@ fastify.post(
   const summaryRaw = String(ret.content ?? "").trim();
   const summaryWrapped = summaryRaw.match(/^```(?:markdown|md)?\s*\n?([\s\S]*?)\n?```$/i);
   const cleanedSummary = summaryWrapped ? summaryWrapped[1].trim() : summaryRaw;
-  return { ok: true, summary: cleanedSummary, modelIdUsed, usage: (ret as any).usage ?? null };
+  return { ok: true, summary: cleanedSummary, modelIdUsed, usage: normalizeLlmTokenUsage((ret as any).usage ?? null) };
 });
 
 // ======== Memory Extraction（记忆提取：对话结束后提取 L1/L2 记忆） ========
@@ -2181,15 +2297,8 @@ fastify.post(
 
   // 计费
   try {
-    const usage = (ret as any).usage ?? null;
-    if (
-      jwtUser?.id &&
-      jwtUser.role !== "admin" &&
-      usage &&
-      typeof usage === "object" &&
-      Number.isFinite((usage as any).promptTokens as any) &&
-      Number.isFinite((usage as any).completionTokens as any)
-    ) {
+    const usage = normalizeLlmTokenUsage((ret as any).usage ?? null);
+    if (jwtUser?.id && jwtUser.role !== "admin" && hasBillableUsage(usage)) {
       await chargeUserForLlmUsage({
         userId: jwtUser.id,
         modelId: model,
@@ -2257,7 +2366,7 @@ fastify.post(
     globalOps,
     projectOps,
     modelIdUsed,
-    usage: (ret as any).usage ?? null,
+    usage: normalizeLlmTokenUsage((ret as any).usage ?? null),
   };
 });
 
@@ -3314,6 +3423,8 @@ fastify.post(
       copyFromId: z.string().optional(),
       priceInCnyPer1M: z.number().min(0),
       priceOutCnyPer1M: z.number().min(0),
+      priceCacheReadCnyPer1M: z.number().min(0).nullable().optional(),
+      priceCacheCreation5mCnyPer1M: z.number().min(0).nullable().optional(),
       billingGroup: z.string().optional(),
       isEnabled: z.boolean().optional(),
       sortOrder: z.number().int().optional(),
@@ -3333,6 +3444,8 @@ fastify.post(
         copyFromId: body.copyFromId,
         priceInCnyPer1M: body.priceInCnyPer1M,
         priceOutCnyPer1M: body.priceOutCnyPer1M,
+        priceCacheReadCnyPer1M: body.priceCacheReadCnyPer1M ?? null,
+        priceCacheCreation5mCnyPer1M: body.priceCacheCreation5mCnyPer1M ?? null,
         billingGroup: body.billingGroup ?? null,
         isEnabled: body.isEnabled,
         sortOrder: body.sortOrder,
@@ -3364,6 +3477,8 @@ fastify.patch(
       clearApiKey: z.boolean().optional(),
       priceInCnyPer1M: z.number().min(0).nullable().optional(),
       priceOutCnyPer1M: z.number().min(0).nullable().optional(),
+      priceCacheReadCnyPer1M: z.number().min(0).nullable().optional(),
+      priceCacheCreation5mCnyPer1M: z.number().min(0).nullable().optional(),
       billingGroup: z.string().nullable().optional(),
       isEnabled: z.boolean().optional(),
       sortOrder: z.number().int().optional(),
@@ -3865,6 +3980,8 @@ fastify.put(
     const priceSchema = z.object({
       priceInCnyPer1M: z.number().min(0),
       priceOutCnyPer1M: z.number().min(0),
+      priceCacheReadCnyPer1M: z.number().min(0).default(0),
+      priceCacheCreation5mCnyPer1M: z.number().min(0).default(0),
     });
 
     const bodySchema = z.object({
@@ -4176,13 +4293,8 @@ fastify.post(
 
     // 计费
     try {
-      const usage = (ret as any)?.usage ?? null;
-      if (
-        jwtUser?.id && jwtUser.role !== "admin" && usage &&
-        typeof usage === "object" &&
-        Number.isFinite((usage as any).promptTokens) &&
-        Number.isFinite((usage as any).completionTokens)
-      ) {
+      const usage = normalizeLlmTokenUsage((ret as any)?.usage ?? null);
+      if (jwtUser?.id && jwtUser.role !== "admin" && hasBillableUsage(usage)) {
         await chargeUserForLlmUsage({
           userId: jwtUser.id, modelId: model, usage,
           source: "kb.split_articles",
@@ -4560,15 +4672,8 @@ fastify.post(
   // 计费（按 usage）：仅对非 admin
   let billing: any = null;
   try {
-    const usage = (ret as any)?.usage ?? null;
-    if (
-      jwtUser?.id &&
-      jwtUser.role !== "admin" &&
-      usage &&
-      typeof usage === "object" &&
-      Number.isFinite((usage as any).promptTokens as any) &&
-      Number.isFinite((usage as any).completionTokens as any)
-    ) {
+    const usage = normalizeLlmTokenUsage((ret as any)?.usage ?? null);
+    if (jwtUser?.id && jwtUser.role !== "admin" && hasBillableUsage(usage)) {
       billing = await chargeUserForLlmUsage({
         userId: jwtUser.id,
         modelId: model,
@@ -5091,15 +5196,8 @@ fastify.post(
   // 计费（按 usage）：仅对非 admin
   let billing: any = null;
   try {
-    const usage = (ret as any)?.usage ?? null;
-    if (
-      jwtUser?.id &&
-      jwtUser.role !== "admin" &&
-      usage &&
-      typeof usage === "object" &&
-      Number.isFinite((usage as any).promptTokens as any) &&
-      Number.isFinite((usage as any).completionTokens as any)
-    ) {
+    const usage = normalizeLlmTokenUsage((ret as any)?.usage ?? null);
+    if (jwtUser?.id && jwtUser.role !== "admin" && hasBillableUsage(usage)) {
       billing = await chargeUserForLlmUsage({
         userId: jwtUser.id,
         modelId: model,
@@ -5388,15 +5486,8 @@ fastify.post(
     // 计费（按 usage）：仅对非 admin
     let billing: any = null;
     try {
-      const usage = (ret as any)?.usage ?? null;
-      if (
-        jwtUser?.id &&
-        jwtUser.role !== "admin" &&
-        usage &&
-        typeof usage === "object" &&
-        Number.isFinite((usage as any).promptTokens as any) &&
-        Number.isFinite((usage as any).completionTokens as any)
-      ) {
+      const usage = normalizeLlmTokenUsage((ret as any)?.usage ?? null);
+      if (jwtUser?.id && jwtUser.role !== "admin" && hasBillableUsage(usage)) {
         billing = await chargeUserForLlmUsage({
           userId: jwtUser.id,
           modelId: model,
@@ -5806,15 +5897,8 @@ fastify.post(
     // 计费（按 usage）：仅对非 admin
     let billing: any = null;
     try {
-      const usage = (ret as any)?.usage ?? null;
-      if (
-        jwtUser?.id &&
-        jwtUser.role !== "admin" &&
-        usage &&
-        typeof usage === "object" &&
-        Number.isFinite((usage as any).promptTokens as any) &&
-        Number.isFinite((usage as any).completionTokens as any)
-      ) {
+      const usage = normalizeLlmTokenUsage((ret as any)?.usage ?? null);
+      if (jwtUser?.id && jwtUser.role !== "admin" && hasBillableUsage(usage)) {
         billing = await chargeUserForLlmUsage({
           userId: jwtUser.id,
           modelId: model,
@@ -6692,7 +6776,7 @@ fastify.post(
         ok: true,
         modelUsed: usedModelName,
         timeoutMs,
-        ...(((ret as any)?.usage ?? null) ? { usage: (ret as any).usage } : {}),
+        ...(((ret as any)?.usage ?? null) ? { usage: normalizeLlmTokenUsage((ret as any).usage) } : {}),
         ...(billing ? { billing } : {}),
         ...outWithPatch,
       });

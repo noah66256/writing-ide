@@ -7393,6 +7393,28 @@ function registerIpc() {
     if (!mcpLifecycleService) return { ok: false, error: "MCP_LIFECYCLE_NOT_READY" };
     return mcpLifecycleService.uninstallServer(args ?? {});
   });
+  ipcMain.handle("mcp.syncCrabImageGatewayGeminiEnv", async (_event, args) => {
+    if (!mcpManager) return { ok: false, error: "MCP_NOT_READY" };
+    const apiKey = String(args?.apiKey ?? "").trim();
+    const baseUrl = String(args?.baseUrl ?? "").trim();
+    try {
+      mcpManager.setGlobalEnv({
+        GEMINI_API_KEY: apiKey || null,
+        LLM_GEMINI_API_KEY: apiKey || null,
+        GEMINI_BASE_URL: baseUrl || null,
+      });
+      const crabImage = (mcpManager.getServers?.() ?? []).find((item) => String(item?.id ?? "").trim() === "crab-image");
+      const wasEnabled = crabImage?.enabled !== false;
+      const previousStatus = String(crabImage?.status ?? "").trim() || null;
+      await mcpManager.disconnect("crab-image").catch(() => void 0);
+      if (wasEnabled) {
+        await mcpManager.connect("crab-image");
+      }
+      return { ok: true, wasEnabled, previousStatus };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
 
   // ── Skill 扩展包 ──────────────────────────
   ipcMain.handle("skills.list", async () => {

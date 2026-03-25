@@ -267,6 +267,7 @@ declare global {
         planUpgrade?: (args?: { serverId?: string; baseUrl?: string }) => Promise<any>;
         applyUpgrade?: (args?: { serverId?: string; confirm?: boolean; baseUrl?: string; threadId?: string | null }) => Promise<any>;
         uninstallServer?: (args?: { serverId?: string; confirm?: boolean }) => Promise<any>;
+        syncCrabImageGatewayGeminiEnv?: (args?: { apiKey?: string; baseUrl?: string }) => Promise<{ ok: boolean; error?: string }>;
         onStatusChange: (handler: (payload: any) => void) => () => void;
       };
       marketplace?: {

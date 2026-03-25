@@ -14,6 +14,7 @@ import { useSkillStore } from "./state/skillStore";
 import { getUpdateBaseUrl } from "./agent/updateBaseUrl";
 import { getGatewayBaseUrl } from "./agent/gatewayUrl";
 import { startGatewayRun } from "./agent/gatewayAgent";
+import { syncCrabImageGatewayGeminiRuntime } from "./agent/crabImageRuntime";
 import { useRunStore } from "./state/runStore";
 import { useConversationStore } from "./state/conversationStore";
 import { Loader2 } from "lucide-react";
@@ -26,6 +27,7 @@ export default function App() {
   const rootDir = useProjectStore((s) => s.rootDir);
 
   const initStatus = useAuthStore((s) => s.initStatus);
+  const accessToken = useAuthStore((s) => s.accessToken);
   const user = useAuthStore((s) => s.user);
   const loginModalOpen = useAuthStore((s) => s.loginModalOpen);
   const closeLoginModal = useAuthStore((s) => s.closeLoginModal);
@@ -34,6 +36,11 @@ export default function App() {
   useEffect(() => {
     useAuthStore.getState().init();
   }, []);
+
+  useEffect(() => {
+    if (initStatus !== "done") return;
+    void syncCrabImageGatewayGeminiRuntime();
+  }, [initStatus, accessToken]);
 
   // 初始化外部 Skill 加载监听
   useEffect(() => {

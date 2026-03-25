@@ -311,6 +311,9 @@ contextBridge.exposeInMainWorld("desktop", {
     uninstallServer(args) {
       return ipcRenderer.invoke("mcp.uninstallServer", args);
     },
+    syncCrabImageGatewayGeminiEnv(args) {
+      return ipcRenderer.invoke("mcp.syncCrabImageGatewayGeminiEnv", args);
+    },
     onStatusChange(handler) {
       if (typeof handler !== "function") return () => {};
       const listener = (_event, payload) => handler(payload);
