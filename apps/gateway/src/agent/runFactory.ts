@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
 import { type Db, type RunAudit } from "../db.js";
-import { type LlmTokenUsage } from "../billing.js";
+import { addLlmTokenUsage, hasBillableUsage, normalizeLlmTokenUsage, type LlmTokenUsage } from "../billing.js";
 import { type OpenAiChatMessage } from "../llm/openaiCompat.js";
 import { completionOnceViaProvider, isGeminiLikeEndpoint } from "../llm/providerAdapter.js";
 import { toolNamesForMode, type AgentMode } from "./toolRegistry.js";
@@ -86,6 +86,7 @@ import type {
   ItemRecord,
   SkillRef,
   ThreadCapabilityState,
+  ThreadImageSessionV1,
   TaskStateV2,
   ThreadRecord,
   TurnRecord,
@@ -95,7 +96,7 @@ import {
   type SseWriter,
   type WaiterMap,
   type ModelApiType,
-} from "./writingAgentRunner.js";
+} from "./types.js";
 import { createRuntime } from "./runtime/RuntimeFactory.js";
 import { releaseLiveCollabRuntime } from "./runtime/collabRuntime.js";
 import { SubAgentExecutionBridge } from "./runtime/SubAgentExecutionBridge.js";
@@ -2718,6 +2719,7 @@ const agentRunBodySchema = z.object({
     pendingArtifactIds: z.array(z.string().min(1).max(200)).max(20).optional(),
     collabSessionIds: z.array(z.string().min(1).max(200)).max(20).optional(),
     collabSessions: z.array(z.any()).max(20).optional(),
+    imageSession: z.any().optional(),
   }).optional(),
   portablePreRunCompact: z.object({
     trigger: z.enum(["auto", "manual"]).optional(),
@@ -4468,6 +4470,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     mcpCapabilityCards,
     skillCapabilityCards,
     threadCapabilityState: portableForkCleanRoom ? null : threadCapabilityState,
+    threadImageSession: portableForkCleanRoom ? null : ((threadSnapshotHint?.imageSession as ThreadImageSessionV1 | null | undefined) ?? null),
   });
 
   const messages: OpenAiChatMessage[] = [
@@ -5094,22 +5097,16 @@ export async function executeAgentRun(args: {
     // ignore
   }
 
-  let usageSumPrompt = 0;
-  let usageSumCompletion = 0;
-  let usageSumTotal = 0;
+  let usageSum = normalizeLlmTokenUsage(undefined);
 
   let auditPersisted = false;
   const persistOnce = async (forced?: { endReason?: string; endReasonCodes?: string[] }) => {
     if (auditPersisted) return;
     auditPersisted = true;
-    const totalTokens = usageSumTotal || usageSumPrompt + usageSumCompletion;
+    const normalizedUsageSum = normalizeLlmTokenUsage(usageSum);
     audit.usage =
-      usageSumPrompt > 0 || usageSumCompletion > 0 || totalTokens > 0
-        ? {
-            promptTokens: usageSumPrompt,
-            completionTokens: usageSumCompletion,
-            ...(totalTokens > 0 ? { totalTokens } : {}),
-          }
+      hasBillableUsage(normalizedUsageSum) || Number.isFinite(Number(normalizedUsageSum.totalTokens ?? NaN))
+        ? normalizedUsageSum
         : null;
     ensureRunAuditEnded(audit, forced);
     try {
@@ -5184,6 +5181,7 @@ export async function executeAgentRun(args: {
     activeSkillRefs: activeSkillRefsSeed,
     taskState: initialTaskState,
     capabilityState: threadCapabilityState,
+    imageSession: (threadSnapshotHint?.imageSession as ThreadImageSessionV1 | null | undefined) ?? null,
   });
   if (threadSnapshotHint?.waitingFor === "user" || threadSnapshotHint?.waitingFor === "approval") {
     threadState = updateThreadWaiting({
@@ -6501,16 +6499,15 @@ export async function executeAgentRun(args: {
     writeEvent,
     waiters: transport.waiters,
     abortSignal: transport.abortSignal,
-    onTurnUsage: (promptTokens, completionTokens) => {
-      usageSumPrompt += promptTokens;
-      usageSumCompletion += completionTokens;
-      usageSumTotal += promptTokens + completionTokens;
+    onTurnUsage: (usage) => {
+      const normalizedUsage = normalizeLlmTokenUsage(usage);
+      usageSum = addLlmTokenUsage(usageSum, normalizedUsage);
       if (prepared.jwtUser?.id && prepared.jwtUser.role !== "admin") {
         services
           .chargeUserForLlmUsage({
             userId: prepared.jwtUser.id,
             modelId: prepared.pickedId || prepared.model,
-            usage: { promptTokens, completionTokens },
+            usage: normalizedUsage,
             source: "agent.run",
             metaExtra: { runId, mode, stageKey: stageKeyForRun },
           })

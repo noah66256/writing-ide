@@ -1,5 +1,5 @@
 import type { RunState, WorkflowSkillPhaseSnapshot } from "@ohmycrab/agent-core";
-import type { RunContext } from "./writingAgentRunner.js";
+import type { RunContext } from "./types.js";
 
 export type StyleOrchestratorTask = {
   /** 写作任务描述（主题/受众/平台/长度等） */

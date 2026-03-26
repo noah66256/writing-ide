@@ -5,7 +5,7 @@
  * 与现有 AgentRunner / RunOutcome 保持兼容。
  */
 
-import type { RunContext } from "../writingAgentRunner.js";
+import type { RunContext } from "../types.js";
 import type { RunOutcome } from "../turnEngine.js";
 
 // ── 模式 ─────────────────────────────────────────

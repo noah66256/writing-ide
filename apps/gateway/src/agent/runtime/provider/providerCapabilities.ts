@@ -4,7 +4,7 @@
  * 定义各 provider API 类型的能力特征，用于 PiProviderBridge 路由和降级。
  */
 
-import type { ModelApiType } from "../../writingAgentRunner.js";
+import type { ModelApiType } from "../../types.js";
 import { deriveProviderCapabilities, type ProviderCapabilitySnapshot } from "../../../llm/providerCapabilities.js";
 
 // ── 类型 ─────────────────────────────────────────

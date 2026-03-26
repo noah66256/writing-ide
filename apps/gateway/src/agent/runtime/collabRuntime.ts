@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { CollabAgentSessionRecord } from "@ohmycrab/shared";
 
-import type { RunContext } from "../writingAgentRunner.js";
+import type { RunContext } from "../types.js";
 import {
   SubAgentExecutionBridge,
   type SubAgentExecutionBridgeResult,

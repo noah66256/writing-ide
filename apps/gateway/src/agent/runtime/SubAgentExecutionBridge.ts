@@ -14,7 +14,8 @@ import {
 import {
   type RunContext,
   type SseWriter,
-} from "../writingAgentRunner.js";
+} from "../types.js";
+import { hasBillableUsage } from "../../billing.js";
 
 // ── 常量 ─────────────────────────────────────────
 
@@ -404,8 +405,9 @@ export class SubAgentExecutionBridge {
       // 若未来支持并行子 Agent，需改为 `${runId}:${toolCallId}` 复合键）
       waiters: this.parentCtx.waiters,
       abortSignal: subAbort.signal,
-      onTurnUsage: (promptTokens, completionTokens) => {
-        this.parentCtx.onTurnUsage?.(promptTokens, completionTokens);
+      onTurnUsage: (usage) => {
+        if (!hasBillableUsage(usage)) return;
+        this.parentCtx.onTurnUsage?.(usage);
         this.parentCtx.writeEvent("subagent.usage", {
           turn,
           toolCallId,
@@ -413,8 +415,7 @@ export class SubAgentExecutionBridge {
           runId: subRunId,
           agentId: subAgent.id,
           agentName: subAgent.name,
-          promptTokens,
-          completionTokens,
+          ...usage,
         });
       },
       agentId: subAgent.id,

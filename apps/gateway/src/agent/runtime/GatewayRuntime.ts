@@ -57,7 +57,7 @@ import {
 import { CORE_TOOL_NAME_SET, HIGH_RISK_TOOL_NAME_SET } from "../coreTools.js";
 import { normalizeToolParametersSchema } from "../../llm/toolSchema.js";
 import { TurnEngine, type RunOutcome } from "../turnEngine.js";
-import type { ModelApiType, ToolResultPayload } from "../writingAgentRunner.js";
+import type { ModelApiType, ToolResultPayload } from "../types.js";
 import { sanitizeAssistantUserFacingText } from "../userFacingText.js";
 import { completionOnceViaProvider } from "../../llm/providerAdapter.js";
 import type {

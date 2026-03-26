@@ -26,7 +26,7 @@ import type {
   AssistantMessageEventStream,
 } from "@mariozechner/pi-ai";
 
-import type { ModelApiType } from "../../writingAgentRunner.js";
+import type { ModelApiType } from "../../types.js";
 import {
   getProviderCapabilities,
   inferProviderApiType,
