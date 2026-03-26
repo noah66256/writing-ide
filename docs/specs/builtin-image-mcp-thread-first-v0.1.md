@@ -1,4 +1,4 @@
-# 系统内置 Image MCP（Thread-first / Nano Banana，v0.1）
+# 系统内置 Image MCP（Thread-first / Crab Image，v0.1）
 
 > 目标：把 Crab 的对话式图片生成/编辑做成**系统内置 MCP Server**，对齐现有 `Desktop 执行 + Gateway 编排 + thread-first` 架构，而不是再造一条 chat tool / skill / 页面外挂旁路。
 
@@ -15,12 +15,12 @@
 
 v0.1 的目标形态：
 
-1. **新增系统内置 bundled MCP server：`nano-banana`**
+1. **新增系统内置 bundled MCP server：`Crab Image`（serverId=`crab-image`）**
 2. **主对话继续走多 provider，图像执行层先固定 Gemini / Nano Banana**
 3. **新增 MCP family：`image`**
 4. **对主模型默认只暴露两个工具：**
-   - `mcp.nano-banana.generate_image`
-   - `mcp.nano-banana.edit_image`
+   - `mcp.crab-image.generate_image`
+   - `mcp.crab-image.edit_image`
 5. **新增 thread 级持久化 `imageSessionV1`**
    - 保存 thread 的图片历史、最近 artifact、默认参数
 6. **新增进程内易失 `providerSessionCache`**
@@ -135,10 +135,10 @@ skill 适合流程、规则、编排，不适合承载底层图像执行器。
 ```mermaid
 flowchart LR
   U["用户在对话中提需求 / 上传图片"] --> G["Gateway Runtime / 主模型"]
-  G --> S["MCP Server Selection<br/>选中 nano-banana(image family)"]
+  G --> S["MCP Server Selection<br/>选中 Crab Image（image family）"]
   S --> D["Desktop MCP Manager"]
   D --> C["Image Context Adapter<br/>thread image session + ref resolve"]
-  C --> N["Bundled nano-banana MCP Server"]
+  C --> N["Bundled Crab Image MCP Server"]
   N --> P["Gemini / Nano Banana Provider"]
   P --> N
   N --> D
@@ -201,8 +201,8 @@ flowchart LR
 
 新增 built-in bundled MCP server：
 
-- `serverId`: `nano-banana`
-- `name`: `Nano Banana 图像生成与编辑`
+- `serverId`: `crab-image`
+- `name`: `Crab Image`
 - `familyHint`: `image`
 - `toolProfile`: `image_generation_minimal`
 - `transport`: `stdio`
@@ -210,7 +210,7 @@ flowchart LR
 
 建议入口文件：
 
-- `apps/desktop/electron/mcp-servers/nano-banana.mjs`
+- `apps/desktop/electron/mcp-servers/crab-image.mjs`
 
 对应 Desktop 内置 server 列表：
 
@@ -222,10 +222,10 @@ v0.1 暴露以下配置字段：
 
 - `GEMINI_API_KEY`（复用仓库已有的 Google/Gemini key，与 LLM 模型用的是同一个）
 - `GEMINI_BASE_URL`（可选，支持代理/聚合 API）
-- `NANOBANANA_DEFAULT_MODEL`（可选，默认 `gemini-3.1-flash-image-preview`）
-- `NANOBANANA_PRO_MODEL`（可选，默认 `gemini-3-pro-image-preview`）
-- `NANOBANANA_DEFAULT_TIER`（可选，默认 `nb2`）
-- `modelNameOverride`（可选，聚合 API 模型名映射，如 `{"flash": "custom-flash-name", "pro": "custom-pro-name"}`）
+- `CRAB_IMAGE_FLASH_MODEL`（可选，默认 `gemini-3.1-flash-image-preview`）
+- `CRAB_IMAGE_PRO_MODEL`（可选，默认 `gemini-3-pro-image-preview`）
+- `CRAB_IMAGE_DEFAULT_TIER`（可选，默认 `auto`）
+- `CRAB_IMAGE_MODEL_NAME_OVERRIDE`（可选，聚合 API 模型名映射，如 `{"flash": "custom-flash-name", "pro": "custom-pro-name"}`）
 
 ### 5.2.1 API 端点
 
@@ -253,9 +253,15 @@ server 启动时从以下优先级读取：
    - 状态标成 `needs_auth` / `error` 风格摘要
 3. 配置后支持热连接与重连
 
-## 5.3 为什么 serverId 先用 `nano-banana`
+## 5.3 为什么 serverId 用 `crab-image`
 
-v0.1 先明确 provider 执行层就是 Gemini / Nano Banana。
+对主模型和 MCP 生态来说，这个 server 应该表达“Crab 自带的图像执行能力”，而不是把 provider 品牌直接写进 server id。
+v0.1 的 provider 执行层虽然仍然先固定 Gemini / Nano Banana，但 server 身份先收敛为产品内置能力：
+
+- 展示名：`Crab Image`
+- serverId：`crab-image`
+- 工具名保持稳定：`generate_image / edit_image`
+
 后续如果要加：
 
 - `gpt-image`
@@ -605,7 +611,7 @@ type McpToolArtifact = {
 
 `selectMcpServerSubset()` 增加对 `image` family 的评分：
 
-- prompt 命中 `image_generate` / `image_edit` 时优先保留 `nano-banana`
+- prompt 命中 `image_generate` / `image_edit` 时优先保留 `crab-image`
 - `image` family 视为 `stateful`
 
 ## 11.3 capability card
@@ -636,7 +642,7 @@ type McpToolArtifact = {
 
 1. 主模型负责理解用户视觉意图
 2. 如当前模型本身支持看图，应先看再编 prompt
-3. 如需要出图/改图，应调用 `nano-banana`
+3. 如需要出图/改图，应调用 `Crab Image`
 4. 连续迭代时优先基于当前 thread 里的最近图片，而不是让用户重新上传
 5. 如果 thread 里有多张候选图且目标不明确，应先澄清
 
@@ -650,7 +656,7 @@ type McpToolArtifact = {
 
 新增内置 server 卡片：
 
-- 名称：`Nano Banana 图像生成与编辑`
+- 名称：`Crab Image`
 - 字段：
   - API Key
   - Base URL（可选）
@@ -770,23 +776,81 @@ v0.1 不新增图片专用 sidebar / editor page。
 
 交付：
 
-- built-in `nano-banana`
+- built-in `crab-image`
 - image family + profile
 - 结构化图片 artifact 返回
 - assistant transcript 显示图片
 
-## Phase 2：imageSession 持久化
+## Phase 2：Image Context Adapter 闭环（2026-03-26 更新）
 
-目标：
+### 目标场景
 
-- thread 记住最近图片 artifact
-- 重启后还能继续编辑
+1. **吃稿子 + 吃上传图 → 生封面**：用户写完文稿后上传自己的照片，让 AI 生成小红书封面。系统应同时利用对话上下文（稿子内容）和参考图（用户上传的照片）。
+2. **吃上下文 + 截图/拼接**：对话中有文献/截图等素材，用户让 AI 基于这些素材生成或拼接图片。
+3. **连续编辑**：用户说"logo 不应该在屏幕上"或"太 AI 味了，修一下"，系统应该用 `edit_image` 基于上一张图修改，而不是重新生成。
 
-交付：
+### 当前已实现（Phase 1 交付）
 
-- `ThreadRecord.imageSessionV1`
-- `threadSnapshotHint.imageSession`
-- artifact 引用解析
+以下代码已存在于 `apps/desktop/src/agent/wsTransport.ts`，无需新增：
+
+- `resolveImageToken()`：解析 `last` / `last_generated` / `last_user_image` / `artifact:<id>` / 绝对路径 / data URL → 统一输出 `{ kind: "path", path }` 或 `{ kind: "data", dataUrl }`
+- `buildCrabImageToolArgs()`：在 MCP tool call 发给 server 之前拦截，注入 `resolvedTargetImage` / `resolvedReferenceImages` / `threadId`
+- `applyCrabImageToolResultToThread()`：在 MCP tool call 成功后，从 `output.artifacts` 提取路径，更新 `thread.imageSession`
+- `findLatestUserImageSource()`：从当前 run 的 steps 里找最近一张用户上传图
+
+以下代码已存在于 `apps/desktop/electron/mcp-manager.mjs`：
+
+- `_persistInlineMediaArtifacts()`：把 MCP 返回的 inline image base64 落盘到 `mcp-artifacts/` 目录，返回 `{ absPath, href, mimeType, ... }`
+- `_callToolOnce()`：返回值包含 `output.artifacts[]`，结构化传递给 wsTransport
+
+### Phase 2 要修的问题
+
+**P0：`edit_image` 的 `target: "last"` 解析失败**
+
+- 现象：`edit_image({ target: "last" })` 报"未解析到可编辑的目标图片"
+- 原因：`buildCrabImageToolArgs` 调用 `resolveImageToken({ token: "last" })` 时，`imageSession.recentArtifacts` 为空——说明第一次 `generate_image` 成功后，`applyCrabImageToolResultToThread` 没有正确写入 imageSession，或 `getThread()` / `setThread()` 在 run 内不持久
+- 修复范围：仅 `apps/desktop/src/agent/wsTransport.ts`
+- 排查方向：
+  1. 检查 `rt.getThread()` 是否在同一个 run 内返回 `setThread()` 写入的值
+  2. 检查 `callTool` 的返回值中 `output` 是否为对象（包含 `artifacts`）而不是纯字符串
+  3. 如果 `getThread` / `setThread` 不在同一个 run 内共享，考虑在 wsTransport 维护一个 run 级 `localImageSession` 作为热缓存
+
+**P1：用户上传图片作为参考图**
+
+- 现象：用户拖入/粘贴图片后，`generate_image` 无法用它作为参考
+- 原因：主模型调用 `generate_image({ referenceImages: ["last_user_image"] })` 时，`findLatestUserImageSource` 需要从 run steps 中找到用户上传图的 base64，但模型不一定知道要传 `"last_user_image"`
+- 修复范围：仅 `apps/desktop/src/agent/wsTransport.ts`
+- 方案：在 `buildCrabImageToolArgs` 中增加自动注入——如果本轮用户消息包含图片，且 `referenceImages` 为空或未显式排除，自动将用户上传图注入 `resolvedReferenceImages`
+
+**P2：Playwright 截图 / 其他 artifact 作为参考图**
+
+- 现象：Playwright 截图保存为 artifact 后，`generate_image` 无法引用
+- 原因：截图 artifact 的路径没有进入 `imageSession.recentArtifacts`（只有 crab-image 工具的输出会进入）
+- 修复范围：仅 `apps/desktop/src/agent/wsTransport.ts`
+- 方案：模型已经可以通过绝对路径引用 artifact（`referenceImages: ["/path/to/screenshot.png"]`），无需改动。但如果需要 `artifact:<id>` 语法，需要扩展 `resolveImageToken` 使其也能查 `mcp-artifacts/` 目录下的非 crab-image artifact
+
+### 改动范围约束
+
+**仅改以下文件，不涉及其他模块：**
+
+| 文件 | 改动类型 |
+|------|---------|
+| `apps/desktop/src/agent/wsTransport.ts` | 修复 imageSession 持久化、增强参考图自动注入 |
+
+不改的文件：
+
+- `apps/gateway/src/agent/runtime/GatewayRuntime.ts` — 不涉及
+- `apps/gateway/src/agent/runFactory.ts` — 不涉及
+- `apps/desktop/electron/mcp-manager.mjs` — 已工作正常，不需要改
+- `apps/desktop/electron/mcp-servers/crab-image.mjs` — server 逻辑已完备，不需要改
+- `packages/shared/` — 不涉及
+
+### 交付标准
+
+- [ ] `generate_image` 成功后，同一 session 内 `edit_image({ target: "last" })` 能拿到上一张图并编辑
+- [ ] 用户上传图片后，`generate_image` 自动将上传图作为参考图
+- [ ] 用户说"修一下"时，模型调用 `edit_image` 而非重新 `generate_image`（这依赖模型行为，不是代码约束）
+- [ ] 整个 Phase 2 的改动限定在 `wsTransport.ts` 一个文件内
 
 ## Phase 3：providerSessionCache
 
@@ -818,7 +882,7 @@ v0.1 不新增图片专用 sidebar / editor page。
 
 ### A. 连接与暴露
 
-- [ ] Settings 中可见 `nano-banana`
+- [ ] Settings 中可见 `Crab Image`
 - [ ] 未配置 key 时不会进入本轮 MCP tool 池
 - [ ] 配置 key 后可连接并出现在 `mcp.info`
 
@@ -908,18 +972,18 @@ v0.1 不新增图片专用 sidebar / editor page。
 `generate_image` / `edit_image` 只要在 sidecar 里上报，就能进入 LLM 的工具池。
 
 但 `selectMcpServerSubset()` 仍在运行——它决定哪些 MCP **server** 的工具进入本轮。
-image family 需要在这里加评分逻辑（命中 `image_generate` / `image_edit` capability 时优先保留 nano-banana）。
+image family 需要在这里加评分逻辑（命中 `image_generate` / `image_edit` capability 时优先保留 `crab-image`）。
 
 ### 20.2 L0/L1/L2 分层
 
 `generate_image` / `edit_image` 是 MCP 工具，**不在 L0**。
 
-- **L1**：系统提示的能力卡片里一行摘要："Nano Banana（图像生成/编辑，2 个工具）"
+- **L1**：系统提示的能力卡片里一行摘要："Crab Image（图像生成/编辑，2 个工具）"
 - **L2**：LLM 检测到图像意图时通过 `selectMcpServerSubset()` 自动激活，或用户通过 `tools.search("生图")` 手动发现
 
 ### 20.3 mcp.info 可见性
 
-nano-banana 配好后，`mcp.info` 会自动返回它的 server 信息和工具列表。
+`crab-image` 配好后，`mcp.info` 会自动返回它的 server 信息和工具列表。
 创作模式下也可见（mcp.info 是 L0 只读工具），用户在创作模式也能查看自己有哪些图像能力。
 
 ### 20.4 Bash 不用于图像执行
@@ -930,7 +994,7 @@ LLM 不应该用 Bash 调 curl/python 来生图——system prompt 的工具使�
 ### 20.5 聚合 API 兼容
 
 聚合 API（如 `api.vectorengine.ai`）模型名可能与 Google 官方不同。
-`modelNameOverride` 配置项允许映射：`{"flash": "聚合API的flash名", "pro": "聚合API的pro名"}`。
+`CRAB_IMAGE_MODEL_NAME_OVERRIDE` 配置项允许映射：`{"flash": "聚合API的flash名", "pro": "聚合API的pro名"}`。
 server 内部解析 `quality` 参数时，先查 override 再 fallback 到默认名。
 
 ### 20.6 Key 复用
@@ -952,4 +1016,3 @@ v0.1 的标准实现不是：
 而是：
 
 **在 Crab 现有 MCP 主线上，新增一个 thread-first 的系统内置 Image MCP family。**
-

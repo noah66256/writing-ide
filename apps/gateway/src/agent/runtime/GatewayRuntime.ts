@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { hasBillableUsage, normalizeLlmTokenUsage } from "../../billing.js";
 
 /**
  * GatewayRuntime — Phase 3：基于 pi-agent-core 的新运行时
@@ -819,11 +820,11 @@ export class GatewayRuntime implements AgentRuntime {
     const cached = this.rawToEncodedToolName.get(raw);
     if (cached) return cached;
 
-    let encoded = encodeToolName(raw).replace(/[^A-Za-z0-9_.:-]/g, "_");
+    let encoded = encodeToolName(raw).replace(/[^A-Za-z0-9_]/g, "_");
     if (!/^[A-Za-z_]/.test(encoded)) encoded = `t_${encoded}`;
     if (encoded.length > MAX_PROVIDER_TOOL_NAME_LEN) {
       const hash = createHash("sha1").update(raw).digest("hex").slice(0, 12);
-      const normalized = encoded.replace(/[^A-Za-z0-9_.:-]/g, "_").replace(/^[^A-Za-z_]+/, "tool_");
+      const normalized = encoded.replace(/[^A-Za-z0-9_]/g, "_").replace(/^[^A-Za-z_]+/, "tool_");
       const suffix = `_${hash}`;
       const headBudget = Math.max(1, MAX_PROVIDER_TOOL_NAME_LEN - suffix.length);
       encoded = `${normalized.slice(0, headBudget)}${suffix}`;
@@ -3874,10 +3875,11 @@ export class GatewayRuntime implements AgentRuntime {
             await this._activateDeliveryLatch("assistant_text", { stopReason: msg.stopReason ?? null });
           }
           // 上报 token usage
-          this.config.runCtx.onTurnUsage?.(
-            Math.max(0, Math.floor(Number(msg.usage?.input ?? 0))),
-            Math.max(0, Math.floor(Number(msg.usage?.output ?? 0))),
-          );
+          const usage = normalizeLlmTokenUsage({
+            promptTokens: msg.usage?.input ?? 0,
+            completionTokens: msg.usage?.output ?? 0,
+          });
+          if (hasBillableUsage(usage)) this.config.runCtx.onTurnUsage?.(usage);
           this.config.runCtx.writeEvent("assistant.done", { turn: this.turn });
 
           // 错误检测

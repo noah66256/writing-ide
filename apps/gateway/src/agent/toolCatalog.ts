@@ -46,7 +46,7 @@ export type McpSidecarServer = {
   toolProfile?: string;
 };
 
-export type McpServerFamily = "browser" | "search" | "word" | "spreadsheet" | "pdf" | "custom";
+export type McpServerFamily = "browser" | "search" | "word" | "spreadsheet" | "pdf" | "image" | "custom";
 export type McpServerSessionMode = "stateful" | "stateless" | "unknown";
 
 export type McpServerCatalogEntry = {
@@ -96,6 +96,8 @@ const CAPABILITY_KEYWORDS: Array<{ capability: string; re: RegExp }> = [
   { capability: "mcp_spreadsheet", re: /(excel|xlsx|表格|电子表格|spreadsheet|工作表)/i },
   { capability: "mcp_word_doc", re: /(word文档|docx|word\s*文件|写.*word|导出.*word|word.*版|生成.*word)/i },
   { capability: "mcp_pdf", re: /(pdf|转.*pdf|导出.*pdf)/i },
+  { capability: "image_generate", re: /(生图|生[成个一].*图|画[个张一]|画图|出图|配图|封面图|海报|插画|生成.*图片|帮我画|给我画|图片生成|image generation|generate image|text[-\s]?to[-\s]?image)/i },
+  { capability: "image_edit", re: /(修图|改图|改[一下]*.*图|换背景|抠图|重绘|扩图|保持人物一致|风格一致|把.*图.*[改修换]|image edit|edit image|img2img|inpaint)/i },
 ];
 
 export function detectPromptCapabilities(prompt: string): Set<string> {
@@ -164,6 +166,12 @@ export function inferCapabilities(name: string, description: string, source: Too
     if (/(pdf)/i.test(mcpText)) {
       caps.add("mcp_pdf");
     }
+    if (/(generate_image|image_generation|text[-_\s]?to[-_\s]?image|image.*generation|图像生成|生图|画图)/i.test(mcpText)) {
+      caps.add("image_generate");
+    }
+    if (/(edit_image|image_edit|img2img|inpaint|image.*edit|修图|改图|换背景|抠图)/i.test(mcpText)) {
+      caps.add("image_edit");
+    }
   }
 
   if (caps.size === 0) caps.add("generic");
@@ -215,12 +223,13 @@ function inferMcpServerFamily(capabilities: string[]): McpServerFamily {
   if (caps.has("mcp_word_doc")) return "word";
   if (caps.has("mcp_spreadsheet")) return "spreadsheet";
   if (caps.has("mcp_pdf")) return "pdf";
+  if (caps.has("image_generate") || caps.has("image_edit")) return "image";
   if (caps.has("web_search") || caps.has("web_fetch")) return "search";
   return "custom";
 }
 
 function inferMcpServerSessionMode(family: McpServerFamily): McpServerSessionMode {
-  if (family === "browser" || family === "word" || family === "spreadsheet" || family === "pdf") return "stateful";
+  if (family === "browser" || family === "word" || family === "spreadsheet" || family === "pdf" || family === "image") return "stateful";
   if (family === "search") return "stateless";
   return "unknown";
 }
@@ -279,7 +288,7 @@ export function buildMcpServerCatalog(args: {
     serverMap.set(serverId, {
       serverId,
       serverName: String(server?.serverName ?? "").trim() || serverId,
-      family: (["browser", "search", "word", "spreadsheet", "pdf", "custom"] as string[]).includes(hintedFamily) ? (hintedFamily as McpServerFamily) : "custom",
+      family: (["browser", "search", "word", "spreadsheet", "pdf", "image", "custom"] as string[]).includes(hintedFamily) ? (hintedFamily as McpServerFamily) : "custom",
       sessionMode: "unknown",
       status: String(server?.status ?? "connected").trim() || "connected",
       toolCount: Math.max(0, Math.floor(Number(server?.toolCount ?? 0) || 0)),
@@ -389,6 +398,16 @@ export function selectMcpServerSubset(args: {
     if (server.family === "pdf" && promptCaps.has("mcp_pdf")) {
       score += 220;
       reasons.push("pdf");
+    }
+    if (server.family === "image") {
+      if (promptCaps.has("image_generate")) {
+        score += 240;
+        reasons.push("image_generate");
+      }
+      if (promptCaps.has("image_edit")) {
+        score += 260;
+        reasons.push("image_edit");
+      }
     }
     if (server.family === "custom" && promptCaps.size === 0) {
       score += 5;

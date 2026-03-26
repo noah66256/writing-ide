@@ -58,7 +58,8 @@ if [ -n "$OLD_VITE" ]; then
   sleep 1
 fi
 
-npx vite apps/desktop &
+# dev.sh 启动的 gateway 在 localhost:8000，Vite proxy 必须指向它
+VITE_GATEWAY_URL=http://localhost:8000 npx vite apps/desktop &
 VITE_PID=$!
 
 # 等 Vite 就绪

@@ -24,6 +24,8 @@ import {
   isToolResultEnvelope,
   renderContextPackV1,
   type ContextSegmentV1,
+  type ThreadImageArtifactRef,
+  type ThreadImageSessionV1,
 } from "@ohmycrab/shared";
 import { buildProjectMapSegmentV2, buildProjectSummarySegmentsV1 } from "../lib/projectIndexing";
 import {
@@ -145,6 +147,304 @@ function summarizeExecutionReportForLog(payload: any) {
         ? Object.keys(styleWorkflow.stepArtifactRefs).length
         : 0,
     } : null,
+  };
+}
+
+function isCrabImageTool(toolName: string): boolean {
+  return toolName === "mcp.crab-image.generate_image" || toolName === "mcp.crab-image.edit_image";
+}
+
+// ── Run 级图像 artifact 热缓存 ──
+// thread.imageSession 的 getThread/setThread 可能在同一 run 内断链，
+// 这里维护一个进程级热缓存作为 fallback。
+const _imageArtifactCache = {
+  lastGeneratedPath: null as string | null,
+  lastEditedPath: null as string | null,
+  recentPaths: [] as string[],
+  updatedAt: 0,
+};
+
+function _cacheImageArtifact(absPath: string, source: "generated" | "edited") {
+  if (!absPath) return;
+  _imageArtifactCache.recentPaths = [
+    absPath,
+    ..._imageArtifactCache.recentPaths.filter((p) => p !== absPath),
+  ].slice(0, 24);
+  if (source === "generated") _imageArtifactCache.lastGeneratedPath = absPath;
+  if (source === "edited") _imageArtifactCache.lastEditedPath = absPath;
+  _imageArtifactCache.updatedAt = Date.now();
+}
+
+function _getCachedImagePath(token: string): string | null {
+  if (token === "last") return _imageArtifactCache.lastEditedPath ?? _imageArtifactCache.lastGeneratedPath ?? _imageArtifactCache.recentPaths[0] ?? null;
+  if (token === "last_generated") return _imageArtifactCache.lastGeneratedPath;
+  return null;
+}
+
+function isAbsolutePathLike(value: unknown): boolean {
+  const raw = String(value ?? "").trim();
+  return raw.startsWith("/") || /^[A-Za-z]:[\\/]/.test(raw);
+}
+
+function makeImageArtifactId(seed: string): string {
+  const text = String(seed ?? "").trim();
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
+  }
+  return `img_${Math.abs(hash).toString(36)}`;
+}
+
+function normalizeThreadImageSession(session: unknown): ThreadImageSessionV1 | null {
+  if (!session || typeof session !== "object") return null;
+  const recentArtifacts = Array.isArray((session as any).recentArtifacts)
+    ? ((session as any).recentArtifacts as any[])
+        .filter((item) => item && typeof item === "object" && String(item?.artifactId ?? "").trim())
+        .map<ThreadImageArtifactRef>((item) => {
+          const source: ThreadImageArtifactRef["source"] =
+            item?.source === "user_upload" ? "user_upload" : item?.source === "edited" ? "edited" : "generated";
+          return {
+            artifactId: String(item?.artifactId ?? "").trim(),
+            ...(String(item?.path ?? "").trim() ? { path: String(item.path).trim() } : {}),
+            source,
+            createdAt: String(item?.createdAt ?? "").trim() || new Date().toISOString(),
+            ...(String(item?.prompt ?? "").trim() ? { prompt: String(item.prompt).trim() } : {}),
+            ...(String(item?.aspectRatio ?? "").trim() ? { aspectRatio: String(item.aspectRatio).trim() } : {}),
+            ...(String(item?.mimeType ?? "").trim() ? { mimeType: String(item.mimeType).trim() } : {}),
+          };
+        })
+        .slice(-24)
+    : [];
+  return {
+    v: 1,
+    recentArtifacts,
+    lastGeneratedArtifactId: String((session as any)?.lastGeneratedArtifactId ?? "").trim() || null,
+    lastEditedArtifactId: String((session as any)?.lastEditedArtifactId ?? "").trim() || null,
+    defaultAspectRatio: String((session as any)?.defaultAspectRatio ?? "").trim() || null,
+    preferredProvider: "gemini_nb",
+    updatedAt: String((session as any)?.updatedAt ?? "").trim() || new Date().toISOString(),
+  };
+}
+
+function findLatestUserImageSource(rt: ReturnType<typeof createRunTarget>): { kind: "data"; dataUrl: string } | null {
+  const steps = Array.isArray(rt.getSteps?.()) ? rt.getSteps() : [];
+  for (let stepIndex = steps.length - 1; stepIndex >= 0; stepIndex -= 1) {
+    const step = steps[stepIndex] as any;
+    if (!step || step.type !== "user" || !Array.isArray(step.images) || step.images.length === 0) continue;
+    for (let imageIndex = step.images.length - 1; imageIndex >= 0; imageIndex -= 1) {
+      const image = step.images[imageIndex];
+      const mediaType = String(image?.mediaType ?? "").trim() || "image/png";
+      const data = String(image?.data ?? "").trim();
+      if (!data) continue;
+      return { kind: "data", dataUrl: `data:${mediaType};base64,${data}` };
+    }
+  }
+  return null;
+}
+
+function resolveImageToken(args: {
+  token: unknown;
+  rt: ReturnType<typeof createRunTarget>;
+  imageSession: ThreadImageSessionV1 | null;
+}): { kind: "path"; path: string } | { kind: "data"; dataUrl: string } | null {
+  const token = String(args.token ?? "").trim();
+  if (!token) return null;
+  const imageSession = args.imageSession;
+  const recentArtifacts = Array.isArray(imageSession?.recentArtifacts) ? imageSession!.recentArtifacts : [];
+  const findArtifactById = (artifactId: string) =>
+    recentArtifacts.find((item) => String(item?.artifactId ?? "").trim() === artifactId && String(item?.path ?? "").trim());
+  const findLastArtifact = () => {
+    const preferredId = String(imageSession?.lastEditedArtifactId ?? "").trim() || String(imageSession?.lastGeneratedArtifactId ?? "").trim();
+    if (preferredId) {
+      const matched = findArtifactById(preferredId);
+      if (matched?.path) return matched;
+    }
+    return [...recentArtifacts].reverse().find((item) => String(item?.path ?? "").trim());
+  };
+  if (token === "last") {
+    const matched = findLastArtifact();
+    if (matched?.path) return { kind: "path", path: matched.path };
+    // fallback: 热缓存
+    const cached = _getCachedImagePath("last");
+    if (cached) return { kind: "path", path: cached };
+    return findLatestUserImageSource(args.rt);
+  }
+  if (token === "last_generated") {
+    const matched = findArtifactById(String(imageSession?.lastGeneratedArtifactId ?? "").trim());
+    if (matched?.path) return { kind: "path", path: matched.path };
+    const cached = _getCachedImagePath("last_generated");
+    if (cached) return { kind: "path", path: cached };
+    return null;
+  }
+  if (token === "last_user_image") {
+    return findLatestUserImageSource(args.rt);
+  }
+  if (token.startsWith("artifact:")) {
+    const matched = findArtifactById(token.slice("artifact:".length).trim());
+    return matched?.path ? { kind: "path", path: matched.path } : null;
+  }
+  if (/^data:image\//i.test(token)) {
+    return { kind: "data", dataUrl: token };
+  }
+  if (isAbsolutePathLike(token)) {
+    return { kind: "path", path: token.replaceAll("\\", "/") };
+  }
+  return null;
+}
+
+function buildCrabImageToolArgs(args: {
+  toolName: string;
+  rawArgs: Record<string, unknown>;
+  rt: ReturnType<typeof createRunTarget>;
+}): Record<string, unknown> {
+  const nextArgs: Record<string, unknown> = { ...(args.rawArgs ?? {}) };
+  const thread = args.rt.getThread?.() as any;
+  const imageSession = normalizeThreadImageSession(thread?.imageSession);
+  const threadId = String(thread?.id ?? "").trim();
+  if (threadId) nextArgs.threadId = threadId;
+
+  const rawReferenceImages = Array.isArray(args.rawArgs?.referenceImages)
+    ? (args.rawArgs.referenceImages as unknown[])
+    : [];
+  const resolvedReferenceImages = rawReferenceImages
+    .map((item) => resolveImageToken({ token: item, rt: args.rt, imageSession }))
+    .filter(Boolean);
+
+  if (args.toolName === "mcp.crab-image.generate_image") {
+    const useThreadHistory = Boolean((args.rawArgs as any)?.useThreadHistory);
+    if (useThreadHistory && resolvedReferenceImages.length === 0) {
+      const fallback = resolveImageToken({ token: "last", rt: args.rt, imageSession });
+      if (fallback) resolvedReferenceImages.push(fallback);
+    }
+  }
+
+  if (args.toolName === "mcp.crab-image.edit_image") {
+    const targetToken = String((args.rawArgs as any)?.target ?? "").trim() || "last";
+    const resolvedTargetImage = resolveImageToken({ token: targetToken, rt: args.rt, imageSession });
+    if (resolvedTargetImage) nextArgs.resolvedTargetImage = resolvedTargetImage;
+    if (!Array.isArray(nextArgs.referenceImages) || nextArgs.referenceImages.length === 0) {
+      delete nextArgs.referenceImages;
+    }
+  }
+
+  if (resolvedReferenceImages.length > 0) {
+    nextArgs.resolvedReferenceImages = resolvedReferenceImages;
+  }
+  return nextArgs;
+}
+
+function applyCrabImageToolResultToThread(args: {
+  toolName: string;
+  toolArgs: Record<string, unknown>;
+  output: unknown;
+  rt: ReturnType<typeof createRunTarget>;
+}) {
+  const thread = (args.rt.getThread?.() ?? null) as any;
+  const payload = args.output && typeof args.output === "object" ? (args.output as any) : null;
+  const artifacts = Array.isArray(payload?.artifacts) ? payload.artifacts : [];
+  const source = args.toolName === "mcp.crab-image.edit_image" ? "edited" : "generated";
+  // 无论 thread 是否可用，先写热缓存
+  for (const artifact of artifacts) {
+    const absPath = String(artifact?.absPath ?? "").trim();
+    if (absPath) _cacheImageArtifact(absPath, source as "generated" | "edited");
+  }
+  if (!thread || typeof thread !== "object") {
+    console.warn("[CrabImage] applyCrabImageToolResult: thread is null/invalid, imageSession skipped but cache updated");
+    return;
+  }
+  if (artifacts.length === 0) return;
+  const session = normalizeThreadImageSession(thread?.imageSession) ?? {
+    v: 1,
+    recentArtifacts: [],
+    lastGeneratedArtifactId: null,
+    lastEditedArtifactId: null,
+    defaultAspectRatio: null,
+    preferredProvider: "gemini_nb",
+    updatedAt: new Date().toISOString(),
+  };
+  const createdAt = new Date().toISOString();
+  const promptKey = args.toolName === "mcp.crab-image.edit_image" ? "editPrompt" : "prompt";
+  const prompt = String((args.toolArgs as any)?.[promptKey] ?? "").trim();
+  const aspectRatio = String((args.toolArgs as any)?.aspectRatio ?? "").trim() || null;
+  const nextRecent = [...session.recentArtifacts];
+  let lastArtifactId = source === "edited" ? session.lastEditedArtifactId ?? null : session.lastGeneratedArtifactId ?? null;
+
+  for (const artifact of artifacts) {
+    const absPath = String(artifact?.absPath ?? "").trim();
+    if (!absPath) continue;
+    const artifactId = makeImageArtifactId(absPath);
+    lastArtifactId = artifactId;
+    const nextItem = {
+      artifactId,
+      path: absPath,
+      source,
+      createdAt,
+      ...(prompt ? { prompt } : {}),
+      ...(aspectRatio ? { aspectRatio } : {}),
+      ...(String(artifact?.mimeType ?? "").trim() ? { mimeType: String(artifact.mimeType).trim() } : {}),
+    } as const;
+    const existingIndex = nextRecent.findIndex((item) => String(item?.artifactId ?? "").trim() === artifactId || String(item?.path ?? "").trim() === absPath);
+    if (existingIndex >= 0) nextRecent.splice(existingIndex, 1);
+    nextRecent.push(nextItem as any);
+  }
+
+  const nextThread = {
+    ...thread,
+    imageSession: {
+      ...session,
+      recentArtifacts: nextRecent.slice(-24),
+      ...(source === "generated" ? { lastGeneratedArtifactId: lastArtifactId } : {}),
+      ...(source === "edited" ? { lastEditedArtifactId: lastArtifactId } : {}),
+      ...(aspectRatio ? { defaultAspectRatio: aspectRatio } : {}),
+      preferredProvider: "gemini_nb",
+      updatedAt: createdAt,
+    },
+  };
+  args.rt.setThread?.(nextThread);
+}
+
+function buildCrabImageTranscriptEntry(args: {
+  toolCallId: string;
+  toolName: string;
+  output: unknown;
+  agentId?: string | null;
+  agentName?: string | null;
+}) {
+  const payload = args.output && typeof args.output === "object" ? (args.output as any) : null;
+  const artifacts = Array.isArray(payload?.artifacts) ? payload.artifacts : [];
+  if (artifacts.length === 0) return null;
+  const parts = artifacts
+    .map((artifact: any, index: number) => {
+      const absPath = String(artifact?.absPath ?? "").trim();
+      if (!absPath) return null;
+      const label = String(artifact?.name ?? "").trim() || `image-${index + 1}`;
+      return {
+        type: "image",
+        id: `${args.toolCallId || args.toolName}_image_${index}`,
+        source: { kind: "local", path: absPath },
+        alt: label,
+        caption: label,
+      };
+    })
+    .filter(Boolean);
+  const summary = String(payload?.summary ?? payload?.text ?? "").trim();
+  if (summary) {
+    parts.push({
+      type: "markdown",
+      id: `${args.toolCallId || args.toolName}_image_summary`,
+      text: summary,
+    });
+  }
+  if (parts.length === 0) return null;
+  return {
+    kind: "assistant_message",
+    id: `${args.toolCallId || args.toolName}:image`,
+    turnId: undefined,
+    order: { turnSeq: 0, itemSeq: 0, subSeq: 0 },
+    author: args.agentId ? "subagent" : "main",
+    ...(args.agentId ? { agentId: args.agentId, agentName: args.agentName ?? undefined } : {}),
+    parts,
+    streaming: false,
   };
 }
 
@@ -1047,6 +1347,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                   collabSessions: Array.isArray(runStateAny?.collabSessions)
                     ? runStateAny.collabSessions
                     : undefined,
+                  imageSession: threadState.imageSession ?? undefined,
                 },
               }
             : {}),
@@ -1518,8 +1819,11 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                 });
                 try {
                   const mcpApi = (window as any).desktop?.mcp;
+                  const callArgsToUse = isCrabImageTool(name)
+                    ? buildCrabImageToolArgs({ toolName: name, rawArgs, rt })
+                    : rawArgs;
                   const result = mcpApi
-                    ? await mcpApi.callTool(serverId, mcpToolName, rawArgs)
+                    ? await mcpApi.callTool(serverId, mcpToolName, callArgsToUse)
                     : { ok: false, error: "MCP_API_NOT_AVAILABLE" };
                   const mcpDiag = {
                     retried: Boolean((result as any)?.retried),
@@ -1539,14 +1843,33 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                     result?.output !== undefined
                       ? result.output
                       : { ok: false, error: result?.error ?? "MCP_TOOL_FAILED" };
+                  const successOutput = result.ok ? result.output : failureOutput;
+                  if (result.ok && isCrabImageTool(name)) {
+                    applyCrabImageToolResultToThread({
+                      toolName: name,
+                      toolArgs: callArgsToUse,
+                      output: successOutput,
+                      rt,
+                    });
+                    const imageEntry = buildCrabImageTranscriptEntry({
+                      toolCallId,
+                      toolName: name,
+                      output: successOutput,
+                      agentId: toolAgentId,
+                      agentName: data?.agentName ? String(data.agentName) : null,
+                    });
+                    if (imageEntry) {
+                      rt.appendTranscriptEntry(imageEntry as any);
+                    }
+                  }
                   patchTool(stepId, {
                     status: result.ok ? "success" : "failed",
-                    output: normalizeIncomingToolOutput(name, result.ok ? result.output : failureOutput),
+                    output: normalizeIncomingToolOutput(name, successOutput),
                   });
                   submitToolResult({
                     toolCallId, name,
                     ok: result.ok,
-                    output: result.ok ? result.output : failureOutput,
+                    output: successOutput,
                     meta: { applyPolicy: "auto", riskLevel: "low", hasApply: false, mcpDiag },
                   });
                 } catch (e: any) {
@@ -1613,8 +1936,11 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
               });
               try {
                 const mcpApi = (window as any).desktop?.mcp;
+                const callArgsToUse = isCrabImageTool(name)
+                  ? buildCrabImageToolArgs({ toolName: name, rawArgs, rt })
+                  : rawArgs;
                 const result = mcpApi
-                  ? await mcpApi.callTool(serverId, mcpToolName, rawArgs)
+                  ? await mcpApi.callTool(serverId, mcpToolName, callArgsToUse)
                   : { ok: false, error: "MCP_API_NOT_AVAILABLE" };
                 const mcpDiag = {
                   retried: Boolean((result as any)?.retried),
@@ -1638,15 +1964,32 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                   result?.output !== undefined
                     ? result.output
                     : { ok: false, error: result?.error ?? "MCP_TOOL_FAILED" };
+                const successOutput = result.ok ? result.output : failureOutput;
+                if (result.ok && isCrabImageTool(name)) {
+                  applyCrabImageToolResultToThread({
+                    toolName: name,
+                    toolArgs: callArgsToUse,
+                    output: successOutput,
+                    rt,
+                  });
+                  const imageEntry = buildCrabImageTranscriptEntry({
+                    toolCallId,
+                    toolName: name,
+                    output: successOutput,
+                  });
+                  if (imageEntry) {
+                    rt.appendTranscriptEntry(imageEntry as any);
+                  }
+                }
                 patchTool(stepId, {
                   status: result.ok ? "success" : "failed",
                   toolCallId,
-                  output: normalizeIncomingToolOutput(name, result.ok ? result.output : failureOutput),
+                  output: normalizeIncomingToolOutput(name, successOutput),
                 });
                 submitToolResult({
                   toolCallId, name,
                   ok: result.ok,
-                  output: result.ok ? result.output : failureOutput,
+                  output: successOutput,
                   meta: { applyPolicy: "auto", riskLevel: "low", hasApply: false, mcpDiag },
                 });
               } catch (e: any) {
