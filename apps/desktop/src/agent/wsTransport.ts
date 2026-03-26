@@ -311,6 +311,12 @@ function buildCrabImageToolArgs(args: {
     .filter(Boolean);
 
   if (args.toolName === "mcp.crab-image.generate_image") {
+    // 自动注入用户上传图作为参考图：
+    // 如果本轮用户消息包含图片，且模型没有显式传 referenceImages，自动注入
+    if (resolvedReferenceImages.length === 0) {
+      const userImage = findLatestUserImageSource(args.rt);
+      if (userImage) resolvedReferenceImages.push(userImage);
+    }
     const useThreadHistory = Boolean((args.rawArgs as any)?.useThreadHistory);
     if (useThreadHistory && resolvedReferenceImages.length === 0) {
       const fallback = resolveImageToken({ token: "last", rt: args.rt, imageSession });
@@ -320,7 +326,12 @@ function buildCrabImageToolArgs(args: {
 
   if (args.toolName === "mcp.crab-image.edit_image") {
     const targetToken = String((args.rawArgs as any)?.target ?? "").trim() || "last";
-    const resolvedTargetImage = resolveImageToken({ token: targetToken, rt: args.rt, imageSession });
+    let resolvedTargetImage = resolveImageToken({ token: targetToken, rt: args.rt, imageSession });
+    // 如果 target 解析失败，且本轮用户上传了图片，用上传图作为 target
+    if (!resolvedTargetImage) {
+      const userImage = findLatestUserImageSource(args.rt);
+      if (userImage) resolvedTargetImage = userImage;
+    }
     if (resolvedTargetImage) nextArgs.resolvedTargetImage = resolvedTargetImage;
     if (!Array.isArray(nextArgs.referenceImages) || nextArgs.referenceImages.length === 0) {
       delete nextArgs.referenceImages;
