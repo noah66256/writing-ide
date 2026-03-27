@@ -259,7 +259,7 @@ export function NavSidebar() {
       const historyApi = window.desktop?.history?.loadConversationSegment;
       const loadConversation = async () => {
         const loadedSnapshot =
-          (await loadConversationSnapshot(id, { includeSteps: false })) ??
+          (await loadConversationSnapshot(id, { includeSteps: true })) ??
           (conv.snapshotLoaded !== false ? conv.snapshot : null);
         if (!loadedSnapshot) return;
         const runEntry = useRunRegistry.getState().runs[id];
