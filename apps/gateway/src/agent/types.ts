@@ -81,8 +81,6 @@ export type RunContext = {
   waiters: WaiterMap;
   abortSignal: AbortSignal;
   onTurnUsage?: (usage: LlmTokenUsage) => void;
-  /** 每轮回调：根据当前运行状态动态计算本轮可用工具集和 hint。返回 null 表示无阶段限制。 */
-  computePerTurnAllowed?: (state: RunState) => { allowed: Set<string>; hint: string; orchestratorMode?: boolean } | null;
   /** 子 Agent 模型解析回调 */
   resolveSubAgentModel?: (
     candidates: string[],

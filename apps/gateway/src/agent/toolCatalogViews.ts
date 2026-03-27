@@ -42,12 +42,6 @@ export function buildModelVisibleCatalog(args: {
   return catalog;
 }
 
-export function buildSelectionCatalog(args: {
-  modelVisibleCatalog: ToolCatalogEntry[];
-}): ToolCatalogEntry[] {
-  return Array.isArray(args.modelVisibleCatalog) ? args.modelVisibleCatalog.slice() : [];
-}
-
 export function buildDiscoveryCatalogForToolSearch(args: {
   mode: "chat" | "agent";
   allowedToolNames: Set<string> | null;

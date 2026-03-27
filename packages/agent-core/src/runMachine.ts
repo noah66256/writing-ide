@@ -106,11 +106,6 @@ export type RunState = {
   webSearchUniqueQueries: string[];
   webFetchUniqueDomains: string[];
 
-  // B2：工具粘性（跨 turn 保留成功工具，避免随机消失）
-  stickyToolNames: string[];
-
-  // B2：自愈（当出现 TOOL_NOT_ALLOWED_THIS_TURN 时，下一 turn 自动补齐）
-  lastToolNotAllowedName: string | null;
   // 编排者对各子 Agent 的委派次数（用于重复委派预警）
   delegationCounts: Record<string, number>;
   hasSelectedStyleLibrary: boolean;
@@ -243,8 +238,6 @@ export function createInitialRunState(args?: { protocolRetryBudget?: number; wor
     webFetchFailCount: 0,
     webSearchUniqueQueries: [],
     webFetchUniqueDomains: [],
-    stickyToolNames: [],
-    lastToolNotAllowedName: null,
     delegationCounts: {},
     hasSelectedStyleLibrary: false,
     selectedStyleLibraryId: null,

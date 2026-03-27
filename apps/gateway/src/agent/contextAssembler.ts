@@ -1,6 +1,6 @@
 import { type OpenAiChatMessage } from "../llm/openaiCompat.js";
-import type { ThreadCapabilityState } from "@ohmycrab/shared";
-import { type McpServerSelectionSummary, type ToolCatalogSummary } from "./toolCatalog.js";
+import type { ThreadCapabilityState, ThreadImageSessionV1 } from "@ohmycrab/shared";
+import { type ToolCatalogSummary } from "./toolCatalog.js";
 import { TOOL_LIST, type AgentMode } from "./toolRegistry.js";
 import { searchCapabilityCards, type McpCapabilityCard, type SkillCard } from "./capabilityIndex.js";
 
@@ -71,7 +71,7 @@ export type BuildAssembledContextArgs = {
   toolCatalogSummary: ToolCatalogSummary;
   mcpToolsForRun: McpToolLite[];
   mcpServersForRun: McpServerLite[];
-  mcpServerSelectionSummary: McpServerSelectionSummary;
+  mcpServerSelectionSummary: { selectedServerIds: string[]; prunedServerIds: string[]; rankingSample: Array<{ serverId: string; score: number; family: string }> };
   mainDocFromPack: any;
   runTodoFromPack: any[] | null;
   taskStateFromPack: any;
@@ -86,6 +86,7 @@ export type BuildAssembledContextArgs = {
   skillCapabilityCards?: SkillCard[];
   syntheticSkillCapabilityCards?: SkillCard[];
   threadCapabilityState?: ThreadCapabilityState | null;
+  threadImageSession?: ThreadImageSessionV1 | null;
 };
 
 export function parseContextSegmentsV1(
@@ -354,11 +355,13 @@ function summarizeMcpFamilies(args: {
   const hasWord = toolNames.some((name) => /(word|docx|document)/i.test(name));
   const hasSheet = toolNames.some((name) => /(excel|sheet|workbook|xlsx|spreadsheet)/i.test(name));
   const hasPdf = toolNames.some((name) => /pdf/i.test(name));
+  const hasImage = toolNames.some((name) => /(generate_image|edit_image|crab-image|image)/i.test(name));
   const families: string[] = [];
   if (hasBrowser) families.push("浏览器自动化/网页操作");
   if (hasWord) families.push("Word/docx 文档");
   if (hasSheet) families.push("Excel/xlsx 表格");
   if (hasPdf) families.push("PDF 读取/导出");
+  if (hasImage) families.push("图像生成/编辑");
   const selectedServers = args.mcpServersForRun.filter((server) =>
     args.selectedServerIds.includes(String(server?.serverId ?? "").trim()),
   );
@@ -584,6 +587,21 @@ function buildTaskStateMessage(args: BuildAssembledContextArgs, segments: Contex
   if (args.taskStateFromPack && typeof args.taskStateFromPack === "object") {
     blocks.push(renderJsonSection("TASK_STATE", args.taskStateFromPack, MAX_JSON_BLOCK_CHARS));
     retained.add("TASK_STATE");
+  }
+  if (args.threadImageSession && typeof args.threadImageSession === "object") {
+    const imageSession = args.threadImageSession;
+    const recentCount = Array.isArray(imageSession.recentArtifacts) ? imageSession.recentArtifacts.length : 0;
+    blocks.push(renderJsonSection("THREAD_IMAGE_SESSION", {
+      preferredProvider: imageSession.preferredProvider ?? "gemini_nb",
+      defaultAspectRatio: imageSession.defaultAspectRatio ?? null,
+      lastGeneratedArtifactId: imageSession.lastGeneratedArtifactId ?? null,
+      lastEditedArtifactId: imageSession.lastEditedArtifactId ?? null,
+      recentArtifactCount: recentCount,
+      recentArtifacts: Array.isArray(imageSession.recentArtifacts)
+        ? imageSession.recentArtifacts.slice(-4)
+        : [],
+    }, MAX_JSON_BLOCK_CHARS));
+    retained.add("THREAD_IMAGE_SESSION");
   }
   if (args.threadCapabilityState && typeof args.threadCapabilityState === "object") {
     const compactThreadCapabilities = {

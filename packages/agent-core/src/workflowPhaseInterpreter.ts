@@ -154,7 +154,7 @@ export function resolveAllowedTools(
   workflow: WorkflowDeclaration,
   state: Record<string, unknown>,
   baseAllowed: Set<string>,
-): { allowed: Set<string>; hint: string; orchestratorMode: boolean; snapshot: WorkflowSkillPhaseSnapshot } | null {
+): { allowed: Set<string>; hint: string; snapshot: WorkflowSkillPhaseSnapshot } | null {
   const phases = workflow.phases ?? [];
   if (phases.length === 0) return null;
 
@@ -171,7 +171,6 @@ export function resolveAllowedTools(
   return {
     allowed,
     hint: currentPhase.hint ?? "",
-    orchestratorMode: true,
     snapshot,
   };
 }

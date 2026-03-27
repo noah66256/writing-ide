@@ -7,22 +7,16 @@ import { type OpenAiChatMessage } from "../llm/openaiCompat.js";
 import { completionOnceViaProvider, isGeminiLikeEndpoint } from "../llm/providerAdapter.js";
 import { toolNamesForMode, type AgentMode } from "./toolRegistry.js";
 import {
-  applyOpModeToBaseAllowedTools,
-  ensureCoreToolsSelected,
   CORE_TOOL_NAME_SET,
   HIGH_RISK_TOOL_NAME_SET,
   type OpMode,
 } from "./coreTools.js";
 import {
   buildMcpServerCatalog,
-  filterMcpToolsByServerIds,
-  selectMcpServerSubset,
-  selectToolSubset,
-  type McpServerSelectionSummary,
   type McpSidecarServer,
   type ToolCatalogSummary,
 } from "./toolCatalog.js";
-import { retrieveToolsForRun, type ToolRetrievalResult } from "./toolRetriever.js";
+import { type ToolRetrievalResult } from "./toolRetriever.js";
 import { buildMcpCapabilityCards, buildSkillCards, searchCapabilityCards, type McpCapabilityCard } from "./capabilityIndex.js";
 import {
   activateMcpCapability,
@@ -37,7 +31,6 @@ import {
 import {
   buildDiscoveryCatalogForToolSearch,
   buildModelVisibleCatalog,
-  buildSelectionCatalog,
   summarizeCatalogBySource,
 } from "./toolCatalogViews.js";
 import {
@@ -2858,7 +2851,6 @@ export type PreparedRun = {
   baseAllowedToolNames: Set<string>;
   selectedAllowedToolNames: Set<string>;
   toolCatalogSummary: ToolCatalogSummary;
-  toolRetrievalNotice: any;
   styleLinterLibraries: any[];
   projectFilesCount: number;
   messages: OpenAiChatMessage[];
@@ -2883,14 +2875,14 @@ export type PreparedRun = {
   PHASE_CONTRACTS_V1: Partial<Record<SkillToolCapsPhase, PhaseContractV1>>;
   ALWAYS_ALLOW_TOOL_NAMES: Set<string>;
   runState: RunState;
-  computePerTurnAllowed: (state: RunState) => { allowed: Set<string>; hint: string; orchestratorMode?: boolean } | null;
+  computePerTurnAllowed: (state: RunState) => { allowed: Set<string>; hint: string } | null;
   resolveSubAgentModel: NonNullable<RunContext["resolveSubAgentModel"]>;
   runnerStyleLibIds: string[];
   mcpServersFromSidecar: McpSidecarServer[];
   mcpToolsFromSidecar: Array<{ name: string; description: string; inputSchema?: any; serverId: string; serverName: string; originalName: string }>;
   mcpCapabilityCards: McpCapabilityCard[];
   mcpToolsForRun: Array<{ name: string; description: string; inputSchema?: any; serverId: string; serverName: string; originalName: string }>;
-  mcpServerSelectionSummary: McpServerSelectionSummary;
+  mcpServerSelectionSummary: { selectedServerIds: string[]; prunedServerIds: string[]; rankingSample: Array<{ serverId: string; score: number; family: string }> };
   mcpServerStickyFallbackUsed: boolean;
   mcpServerStickyFallbackIds: string[];
   executionContract: ExecutionContract;
@@ -3784,7 +3776,12 @@ export async function prepareAgentRun(args: {
   // - 助手模式：完整保留（后续仍有 code.exec 等细粒度 gate）。
   const opModeForRun: OpMode =
     mode === "agent" && (body as any)?.opMode === "assistant" ? "assistant" : "creative";
-  applyOpModeToBaseAllowedTools({ baseAllowedToolNames, opMode: opModeForRun });
+  // 内联 opMode 过滤逻辑
+  if (opModeForRun !== "assistant") {
+    for (const name of HIGH_RISK_TOOL_NAME_SET) {
+      baseAllowedToolNames.delete(name);
+    }
+  }
 
   const toolDiscoveryContract: { required: boolean; preferredToolNames?: string[]; reason?: string } = (() => {
     // 仅在 agent + allow_tools 下启用：chat/只读不需要强制发现。
@@ -3949,111 +3946,31 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     projectDir: projectDirFromSidecar,
   });
 
-  // MCP 工具参与正常相关性评分，不再全量 preserve（+500）；
-  // 但在进入工具级排序前，先做一轮 server-first 收敛：先挑 MCP server，再只展开已选 server 的 tools。
+  // MCP 工具全量使用，不做 server 选择
   const mcpServerCatalog = buildMcpServerCatalog({
     servers: mcpServersFromSidecar,
     tools: mcpToolsFromSidecar,
   });
-  const compositeMaxServers = getCompositeServerSelectionBudget(compositeTaskPlan);
-  let mcpServerSelection = selectMcpServerSubset({
-    servers: mcpServerCatalog,
-    routeId: routeIdLower || intentRoute.routeId,
-    userPrompt,
-    maxServers: compositeMaxServers,
-    preferBrowser: allowBrowserTools,
-  });
-  let mcpServerSelectionUsedStickyFallback = false;
-  const stickyServerIds = resolveStickyMcpServerIds({
-    mainDoc: mainDocFromPack,
-    availableServerIds: mcpServerCatalog.map((server) => String(server?.serverId ?? "").trim()).filter(Boolean),
-    userPrompt,
-    routeId: routeIdLower || intentRoute.routeId,
-    maxServers: compositeMaxServers,
-  });
-  if (mcpServerSelection.selectedServerIds.size === 0 && stickyServerIds.length > 0) {
-    mcpServerSelectionUsedStickyFallback = true;
-    const stickySet = new Set(stickyServerIds);
-    const prunedServerIds = mcpServerCatalog
-      .map((server) => String(server?.serverId ?? "").trim())
-      .filter((id) => id && !stickySet.has(id));
-    mcpServerSelection = {
-      selectedServerIds: stickySet,
-      summary: {
-        totalServers: mcpServerCatalog.length,
-        selectedServerIds: stickyServerIds.slice(0, 12),
-        prunedServerIds: prunedServerIds.slice(0, 24),
-        rankingSample: mcpServerSelection.summary.rankingSample,
-      },
-    };
-  }
-  if (threadActiveMcpServerIds.length > 0) {
-    const mergedSelectedServerIds: string[] = [];
-    for (const serverId of threadActiveMcpServerIds) {
-      if (!mergedSelectedServerIds.includes(serverId)) mergedSelectedServerIds.push(serverId);
-    }
-    for (const serverId of mcpServerSelection.summary.selectedServerIds) {
-      if (!mergedSelectedServerIds.includes(serverId)) mergedSelectedServerIds.push(serverId);
-    }
-    const maxServerCount = Math.max(compositeMaxServers, threadActiveMcpServerIds.length);
-    const limitedSelectedServerIds = mergedSelectedServerIds.slice(0, maxServerCount);
-    const mergedSelectedSet = new Set(limitedSelectedServerIds);
-    const prunedServerIds = mcpServerCatalog
-      .map((server) => String(server?.serverId ?? "").trim())
-      .filter((id) => id && !mergedSelectedSet.has(id));
-    mcpServerSelection = {
-      selectedServerIds: mergedSelectedSet,
-      summary: {
-        ...mcpServerSelection.summary,
-        selectedServerIds: limitedSelectedServerIds,
-        prunedServerIds: prunedServerIds.slice(0, 24),
-      },
-    };
-  }
-  const compositePreferredServerIds = getCompositePreferredServerIds({
-    plan: compositeTaskPlan,
-    serverCatalog: mcpServerCatalog,
-    rankingSample: mcpServerSelection.summary.rankingSample.map((item) => ({ serverId: item.serverId, score: item.score })),
-    maxServers: compositeMaxServers,
-  });
-  if (compositePreferredServerIds.length > 0) {
-    const mergedSelectedServerIds: string[] = [];
-    for (const serverId of compositePreferredServerIds) {
-      if (!mergedSelectedServerIds.includes(serverId)) mergedSelectedServerIds.push(serverId);
-    }
-    for (const item of mcpServerSelection.summary.rankingSample) {
-      if (mergedSelectedServerIds.length >= compositeMaxServers) break;
-      if (Number(item?.score ?? 0) <= 0) continue;
-      const serverId = String(item?.serverId ?? "").trim();
-      if (serverId && !mergedSelectedServerIds.includes(serverId)) mergedSelectedServerIds.push(serverId);
-    }
-    const mergedSelectedSet = new Set(mergedSelectedServerIds);
-    const prunedServerIds = mcpServerCatalog
-      .map((server) => String(server?.serverId ?? "").trim())
-      .filter((id) => id && !mergedSelectedSet.has(id));
-    mcpServerSelection = {
-      selectedServerIds: mergedSelectedSet,
-      summary: {
-        ...mcpServerSelection.summary,
-        selectedServerIds: mergedSelectedServerIds.slice(0, 12),
-        prunedServerIds: prunedServerIds.slice(0, 24),
-      },
-    };
-  }
+
+  // mcpToolsForRun 直接等于 mcpToolsFromSidecar（全量）
   const mcpToolsForRun: Array<{ name: string; description: string; inputSchema?: any; serverId: string; serverName: string; originalName: string }> =
-    (mcpServerSelection.selectedServerIds.size > 0
-      ? filterMcpToolsByServerIds({
-          tools: mcpToolsFromSidecar,
-          selectedServerIds: mcpServerSelection.selectedServerIds,
-        })
-      : mcpToolsFromSidecar).map((tool: any) => ({
-        name: String(tool?.name ?? "").trim(),
-        description: String(tool?.description ?? ""),
-        inputSchema: tool?.inputSchema,
-        serverId: String(tool?.serverId ?? "").trim(),
-        serverName: String(tool?.serverName ?? "").trim(),
-        originalName: String(tool?.originalName ?? "").trim(),
-      }));
+    mcpToolsFromSidecar.map((tool: any) => ({
+      name: String(tool?.name ?? "").trim(),
+      description: String(tool?.description ?? ""),
+      inputSchema: tool?.inputSchema,
+      serverId: String(tool?.serverId ?? "").trim(),
+      serverName: String(tool?.serverName ?? "").trim(),
+      originalName: String(tool?.originalName ?? "").trim(),
+    }));
+
+  // mcpServerSelectionSummary 简化为空结果
+  const mcpServerSelectionSummary = {
+    selectedServerIds: mcpServersFromSidecar.map((s: any) => String(s?.serverId ?? "").trim()).filter(Boolean),
+    prunedServerIds: [] as string[],
+    rankingSample: [] as Array<{ serverId: string; score: number; family: string }>,
+  };
+  const mcpServerStickyFallbackUsed = false;
+  const mcpServerStickyFallbackIds: string[] = [];
 
   const compositePreferredToolNames = getCompositePreferredToolNames({
     plan: compositeTaskPlan,
@@ -4087,75 +4004,24 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     allowedToolNames: baseAllowedToolNames,
     mcpTools: mcpToolsForRun,
   });
-  const selectionCatalog = buildSelectionCatalog({
-    modelVisibleCatalog,
-  });
-
-  // [B0/B1] 工具检索（Tool Retrieval）：先给出候选，再以 preferred 方式影响 top-K 选择。
-  const retrievalInputText = (() => {
-    if (!looksLikeShortFollowUp(userPrompt)) return userPrompt;
-    const list = Array.isArray(recentDialogueFromPack) ? (recentDialogueFromPack as any[]) : [];
-    const tail = list.slice(-6).map((m: any) => {
-      const role = String(m?.role ?? "").trim() || "unknown";
-      const t = String(m?.text ?? "").trim();
-      return t ? `${role}: ${t}` : "";
-    }).filter(Boolean).join("\n");
-    return tail ? `${tail}\nuser: ${userPrompt}` : userPrompt;
-  })();
-
-  const maxToolsForMode = mode === "agent" ? 30 : 20;
-
-  // v0.2：run-level retrieval 直接基于本轮 model-visible catalog。
-  // 不再使用“有 MCP 就 MCP-only”的互斥裁剪，避免 builtin/collab 因 source 被错误排除。
-  const retrievalCatalog = selectionCatalog;
-
-  const toolRetrieval: ToolRetrievalResult = retrieveToolsForRun({
-    catalog: retrievalCatalog,
-    userPrompt: retrievalInputText,
-    routeId: routeIdLower || intentRoute.routeId,
-    maxCandidates: 16,
-    desired: mode === "agent" ? 6 : 4,
-  });
-
-  const pinnedToolNames = new Set<string>([
-    ...Array.from(preserveToolNamesWithComposite),
-    ...executionPreferredWithComposite,
-  ]);
-  const retrievalBudget = Math.max(0, maxToolsForMode - pinnedToolNames.size);
-  const injectedRetrievalToolNames = toolRetrieval.retrievedToolNames
-    .filter((name) => Boolean(name) && !pinnedToolNames.has(name))
-    .slice(0, retrievalBudget);
-
-  const preferredToolNamesWithRetrieval = Array.from(
-    new Set([...executionPreferredWithComposite, ...injectedRetrievalToolNames]),
-  );
-
-  // 活跃会话的 sticky preferred tools：为当前 run 提升 Playwright/browser 工具选择概率（+420 权重）。
-  const stickyState = readWorkflowStickyState(mainDocFromPack);
-  if (stickyState.isFresh && !looksLikeExplicitNewTaskPrompt(userPrompt)) {
-    for (const name of stickyState.preferredToolNames) {
-      const trimmed = String(name ?? "").trim();
-      if (!trimmed) continue;
-      if (!preferredToolNamesWithRetrieval.includes(trimmed)) {
-        preferredToolNamesWithRetrieval.push(trimmed);
-      }
-    }
-  }
-
-  const toolSelection = selectToolSubset({
-    catalog: modelVisibleCatalog,
-    routeId: routeIdLower || intentRoute.routeId,
-    userPrompt,
-    preferredToolNames: preferredToolNamesWithRetrieval,
-    preserveToolNames: Array.from(preserveToolNamesWithComposite),
-    maxTools: maxToolsForMode,
-  });
+  // selectionCatalog 直接等于 modelVisibleCatalog（不做额外裁剪）
+  const selectionCatalog = modelVisibleCatalog;
 
   // B2 工具选择已废弃——LLM 自己判断用什么工具，不再由 BM25 检索裁剪。
   // selectedAllowedToolNames 直接等于 baseAllowedToolNames（全集），保持下游变量兼容。
   const selectedAllowedToolNames = new Set(baseAllowedToolNames);
-  // B2 废弃后 preserve/preferred 注入不再需要（selectedAllowed 已是全集）
-  // ensureCoreToolsSelected 也不需要（CORE_TOOLS 本来就在全集里）
+
+  // toolCatalogSummary 保留 shape，但 rankingSample=[], pruned=0
+  const toolCatalogSummary: ToolCatalogSummary = {
+    total: modelVisibleCatalog.length,
+    selected: modelVisibleCatalog.length,
+    pruned: 0,
+    builtin: summarizeCatalogBySource(modelVisibleCatalog).builtin || 0,
+    mcp: summarizeCatalogBySource(modelVisibleCatalog).mcp || 0,
+    selectedToolNames: modelVisibleCatalog.map((t) => t.name),
+    prunedToolNames: [],
+    rankingSample: [],
+  };
 
   // 显式 portable invocation 的可见工具池必须与 allowed-tools 收敛到同一作用域，
   // 否则会出现“模型看得到，但 runtime 又因 portable policy 拒绝”的分叉。
@@ -4202,7 +4068,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     }
   }
 
-  // 调试：观察经过 Tool Retrieval / Routing 收敛后的工具集合中，高危运行时工具是否仍然存在。
+  // 调试：观察经过工具选择后的工具集合中，高危运行时工具是否仍然存在。
   try {
     const runtimeToolNames = Array.from(HIGH_RISK_TOOL_NAME_SET);
     const runtimeToolsSelected = Array.from(selectedAllowedToolNames).filter((n) => runtimeToolNames.includes(n));
@@ -4214,11 +4080,6 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
         opModeForRun,
         runtimeToolsSelected,
         selectedCount: selectedAllowedToolNames.size,
-        toolSelectionSummary: {
-          routeId: routeIdLower || intentRoute.routeId || "unknown",
-          selected: toolSelection.summary.selected,
-          pruned: toolSelection.summary.pruned,
-        },
       },
       "agent.run.selected_runtime_tools",
     );
@@ -4228,28 +4089,9 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
 
   const browserSessionActive = isBrowserSessionActive(mainDocFromPack, userPrompt);
 
-  const toolRetrievalNotice = {
-    routeId: routeIdLower || intentRoute.routeId || "unknown",
-    promptCaps: toolRetrieval.promptCaps,
-    queryTokens: toolRetrieval.queryTokens,
-    candidates: toolRetrieval.candidates.slice(0, 12).map((c) => ({
-      name: c.name,
-      score: Math.round(c.score * 1000) / 1000,
-      reasons: (Array.isArray(c.reasons) ? c.reasons.slice(0, 6) : []).join("|"),
-    })),
-    retrievedToolNames: injectedRetrievalToolNames,
-    injectedPreferredCount: injectedRetrievalToolNames.length,
-    pinnedCount: pinnedToolNames.size,
-    maxTools: maxToolsForMode,
-    finalIncludedToolNames: injectedRetrievalToolNames.filter((name) => selectedAllowedToolNames.has(name)),
-    finalMissingToolNames: injectedRetrievalToolNames.filter((name) => !selectedAllowedToolNames.has(name)),
-  };
-
   const allowBrowserToolsEffective =
     allowBrowserTools ||
     browserSessionActive ||
-    toolRetrieval.promptCaps.includes("browser_open") ||
-    injectedRetrievalToolNames.some((name) => /^mcp\.[^.]*?(?:playwright|browser)[^.]*\./i.test(String(name ?? ""))) ||
     Array.from(selectedAllowedToolNames).some((name) => /^mcp\.[^.]*?(?:playwright|browser)[^.]*\./i.test(String(name ?? "")));
 
 
@@ -4365,18 +4207,6 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     };
   }
 
-  const toolCatalogSummary: ToolCatalogSummary = (() => {
-    const allNames = modelVisibleCatalog.map((entry) => String(entry.name ?? "").trim()).filter(Boolean);
-    const selectedNames = Array.from(selectedAllowedToolNames).filter((name) => allNames.includes(name));
-    const prunedNames = allNames.filter((name) => !selectedAllowedToolNames.has(name));
-    return {
-      ...toolSelection.summary,
-      selected: selectedNames.length,
-      pruned: prunedNames.length,
-      selectedToolNames: selectedNames.slice(0, 48),
-      prunedToolNames: prunedNames.slice(0, 48),
-    };
-  })();
   const discoveryCatalogSummary = summarizeCatalogBySource(
     buildDiscoveryCatalogForToolSearch({
       mode,
@@ -4385,14 +4215,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       includeAllMcpTools: true,
     }),
   );
-  Object.assign(toolRetrievalNotice, {
-    modelVisibleCatalogCount: modelVisibleCatalog.length,
-    modelVisibleBySource: summarizeCatalogBySource(modelVisibleCatalog),
-    selectionCatalogCount: selectionCatalog.length,
-    selectionCatalogBySource: summarizeCatalogBySource(selectionCatalog),
-    discoveryCatalogCount: discoveryCatalogSummary.total,
-    discoveryCatalogBySource: discoveryCatalogSummary,
-  });
+
   const deleteTargetsHint =
     routeIdLower === "file_delete_only"
       ? extractDeleteTargetsHint(userPrompt)
@@ -4452,11 +4275,8 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     selectedAllowedToolNames,
     toolCatalogSummary,
     mcpToolsForRun,
-    mcpServersForRun: mcpServersFromSidecar.filter((server: any) => {
-      const serverId = String(server?.serverId ?? "").trim();
-      return !mcpServerSelection.summary.selectedServerIds.length || mcpServerSelection.summary.selectedServerIds.includes(serverId);
-    }),
-    mcpServerSelectionSummary: mcpServerSelection.summary,
+    mcpServersForRun: mcpServersFromSidecar,
+    mcpServerSelectionSummary,
     mainDocFromPack: portableForkCleanRoom ? null : mainDocFromPack,
     runTodoFromPack: portableForkCleanRoom ? null : runTodoFromPack,
     taskStateFromPack: portableForkCleanRoom ? null : taskStateFromPack,
@@ -4693,7 +4513,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
 
   // ── computePerTurnAllowed（精简版，对齐 feat-runtime-tool-exposure-v1）──
   // 只做四件事：1.合并已激活工具 2.模式门禁 3.预算检查 4.兜底 CORE_TOOLS
-  const computePerTurnAllowed = (state: RunState): { allowed: Set<string>; hint: string; orchestratorMode?: boolean } | null => {
+  const computePerTurnAllowed = (state: RunState): { allowed: Set<string>; hint: string } | null => {
     const hints: string[] = [];
     if (compositeTaskSummary) hints.push(compositeTaskSummary);
 
@@ -4740,7 +4560,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
         }
         hints.push(wfSkillId + " orchestrator：phase=" + wfCaps.snapshot.currentPhase + "。");
         if (wfCaps.hint) hints.push(wfCaps.hint);
-        return { allowed: wfCaps.allowed, hint: hints.join("\n\n"), orchestratorMode: wfCaps.orchestratorMode };
+        return { allowed: wfCaps.allowed, hint: hints.join("\n\n") };
       }
     }
 
@@ -4885,8 +4705,7 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       baseAllowedToolNames,
       selectedAllowedToolNames,
       toolCatalogSummary,
-      toolRetrievalNotice,
-        styleLinterLibraries,
+      styleLinterLibraries,
       projectFilesCount,
       messages,
       gates,
@@ -4907,9 +4726,9 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
       mcpToolsFromSidecar,
       mcpCapabilityCards,
       mcpToolsForRun,
-      mcpServerSelectionSummary: mcpServerSelection.summary,
-      mcpServerStickyFallbackUsed: mcpServerSelectionUsedStickyFallback,
-      mcpServerStickyFallbackIds: mcpServerSelectionUsedStickyFallback ? mcpServerSelection.summary.selectedServerIds.slice(0, 12) : [],
+      mcpServerSelectionSummary,
+      mcpServerStickyFallbackUsed,
+      mcpServerStickyFallbackIds,
       executionContract,
       deliveryContract,
       toolDiscoveryContract,
@@ -4963,7 +4782,6 @@ export async function executeAgentRun(args: {
     baseAllowedToolNames,
     selectedAllowedToolNames,
     toolCatalogSummary,
-    toolRetrievalNotice,
     styleLinterLibraries,
     projectFilesCount,
     contextManifestFromPack,
@@ -5972,7 +5790,7 @@ export async function executeAgentRun(args: {
         ? `本轮已先筛 MCP servers：${mcpServerSelectionSummary.selectedServerIds.join(", ")}`
         : "本轮未命中明确 MCP server，回退为保留全部 sidecar MCP tools",
     detail: {
-      totalServers: mcpServerSelectionSummary.totalServers,
+      totalServers: mcpServersFromSidecar.length,
       selectedServerIds: mcpServerSelectionSummary.selectedServerIds,
       prunedServerIds: mcpServerSelectionSummary.prunedServerIds,
       rankingSample: mcpServerSelectionSummary.rankingSample,
@@ -6042,31 +5860,15 @@ export async function executeAgentRun(args: {
   });
   writeEvent("run.notice", {
     turn: 0,
-    kind: toolRetrievalNotice.injectedPreferredCount > 0 ? "info" : "debug",
-    title: "ToolRetrieval",
-    message:
-      toolRetrievalNotice.injectedPreferredCount > 0
-        ? `本轮已注入检索工具：+${toolRetrievalNotice.injectedPreferredCount}（用于避免关键工具被 top-K 裁掉）`
-        : "本轮工具检索未注入（候选不足或已被 pinned 覆盖）",
-    detail: toolRetrievalNotice,
-  });
-  writeEvent("run.notice", {
-    turn: 0,
     kind: "info",
     title: "ToolSelection",
-    message:
-      toolCatalogSummary.pruned > 0
-        ? `本轮已筛选工具：${toolCatalogSummary.selected}/${toolCatalogSummary.total}（已收敛，避免误选）`
-        : `本轮工具池：${toolCatalogSummary.selected}/${toolCatalogSummary.total}`,
+    message: `本轮工具池：${toolCatalogSummary.selected}/${toolCatalogSummary.total}`,
     detail: {
       routeId: intentRoute.routeId ?? "unknown",
       selected: toolCatalogSummary.selected,
       total: toolCatalogSummary.total,
       builtin: toolCatalogSummary.builtin,
       mcp: toolCatalogSummary.mcp,
-      selectedToolNames: toolCatalogSummary.selectedToolNames.slice(0, 32),
-      prunedToolNames: toolCatalogSummary.prunedToolNames.slice(0, 24),
-      rankingSample: toolCatalogSummary.rankingSample.slice(0, 12),
     },
   });
 
@@ -6515,7 +6317,6 @@ export async function executeAgentRun(args: {
       }
     },
     initialRunState: runState,
-    computePerTurnAllowed,
     targetChars: targetChars ?? null,
     resolveSubAgentModel,
     threadSnapshotHint: (body as any).threadSnapshotHint ?? undefined,
@@ -6535,13 +6336,14 @@ export async function executeAgentRun(args: {
     subAgentDefinitionById,
   };
 
-  // 将 MCP 工具传递给 runner（用于生成 tool definitions）
+  // 将 MCP 工具和 computePerTurnAllowed 传递给 runner
   if (mcpToolsForRun.length) {
     (runCtx as any).mcpTools = mcpToolsForRun;
   }
   if (runtimeMcpServers.length) {
     (runCtx as any).mcpServers = runtimeMcpServers;
   }
+  (runCtx as any).computePerTurnAllowed = computePerTurnAllowed;
 
   (runState as any).mainDocLatest = runCtx.mainDoc;
 

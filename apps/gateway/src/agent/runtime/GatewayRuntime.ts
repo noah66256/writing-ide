@@ -952,7 +952,7 @@ export class GatewayRuntime implements AgentRuntime {
       for (const name of this._collectDeclaredPortableActivationToolNames()) {
         declaredAllowed.add(name);
       }
-      const turn0Gate = this.config.runCtx.computePerTurnAllowed?.(this.runState) ?? null;
+      const turn0Gate = (this.config.runCtx as any).computePerTurnAllowed?.(this.runState) ?? null;
       const turn0EffectiveAllowed = turn0Gate?.allowed instanceof Set
         ? turn0Gate.allowed
         : null;
@@ -1787,11 +1787,11 @@ export class GatewayRuntime implements AgentRuntime {
     this.effectiveAllowed = new Set(baselineAllowed);
     this.orchestratorMode = false;
 
-    const gating = this.config.runCtx.computePerTurnAllowed?.(this.runState) ?? null;
+    const gating = (this.config.runCtx as any).computePerTurnAllowed?.(this.runState) ?? null;
     if (!gating) return messages;
 
     if (gating.allowed) {
-      const nextAllowed = new Set(gating.allowed);
+      const nextAllowed = new Set<string>(gating.allowed);
       this.effectiveAllowed = nextAllowed;
 
       // 观测 per-turn gating 效果，特别是 CORE_TOOLS 是否被剪掉

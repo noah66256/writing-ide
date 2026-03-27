@@ -50,29 +50,3 @@ export type HighRiskToolName = (typeof HIGH_RISK_TOOL_NAMES)[number];
 export const HIGH_RISK_TOOL_NAME_SET = new Set<string>(HIGH_RISK_TOOL_NAMES as readonly string[]);
 
 export type OpMode = "creative" | "assistant";
-
-export function applyOpModeToBaseAllowedTools(args: {
-  baseAllowedToolNames: Set<string>;
-  opMode: OpMode;
-}): void {
-  const { baseAllowedToolNames, opMode } = args;
-  if (opMode !== "assistant") {
-    // 创作模式：统一剔除高危工具（即使被 toolPolicy/allowlist 打开）
-    for (const name of HIGH_RISK_TOOL_NAME_SET) {
-      baseAllowedToolNames.delete(name);
-    }
-  }
-}
-
-export function ensureCoreToolsSelected(args: {
-  baseAllowedToolNames: Set<string>;
-  selectedAllowedToolNames: Set<string>;
-}): void {
-  const { baseAllowedToolNames, selectedAllowedToolNames } = args;
-  // 兜底：确保所有在 baseAllowed 内的 CORE_TOOLS 始终可见，不被 B2 裁剪掉。
-  for (const name of CORE_TOOL_NAMES) {
-    if (baseAllowedToolNames.has(name)) {
-      selectedAllowedToolNames.add(name);
-    }
-  }
-}
