@@ -847,44 +847,57 @@ export function InputBar({
 
   // ─── 拖拽处理 ──────────────────────────────────────────────────────────────
 
-  const handleDragOver = useCallback((e: DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragOver(true);
-  }, []);
+  // ─── 全局拖拽处理（window 级别，覆盖整个窗口）─────────────────────────────
 
-  const handleDragLeave = useCallback((e: DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragOver(false);
-  }, []);
+  useEffect(() => {
+    const onDragOver = (e: Event) => {
+      e.preventDefault();
+      (e as any).dataTransfer && ((e as any).dataTransfer.dropEffect = "copy");
+      setIsDragOver(true);
+    };
+    const onDragLeave = (e: Event) => {
+      // 只有离开窗口时才取消高亮
+      const related = (e as any).relatedTarget;
+      if (!related || related === document.documentElement) {
+        setIsDragOver(false);
+      }
+    };
+    const onDrop = (e: Event) => {
+      e.preventDefault();
+      setIsDragOver(false);
+      const dt = (e as any).dataTransfer as DataTransfer | null;
+      if (!dt) return;
 
-  const handleDrop = useCallback((e: DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragOver(false);
+      const allFiles = Array.from(dt.files);
+      const imageFiles = filterImageFiles(allFiles);
+      if (imageFiles.length > 0) setDroppedFiles((prev) => [...prev, ...imageFiles]);
 
-    const allFiles = Array.from(e.dataTransfer.files);
-    const imageFiles = filterImageFiles(allFiles);
-    if (imageFiles.length > 0) setDroppedFiles((prev) => [...prev, ...imageFiles]);
-
-    // 非图片文件 / 文件夹：通过 Electron File.path 获取本地路径，作为 mention 插入
-    const nonImageFiles = allFiles.filter((f) => !String(f.type ?? "").startsWith("image/"));
-    for (const f of nonImageFiles) {
-      const filePath = (f as any).path as string | undefined;
-      if (!filePath) continue;
-      const label = filePath.split("/").pop() || filePath;
-      insertMention({ id: filePath, type: "file", label, icon: null });
-    }
-
-    // 图片文件也额外加 mention（路径引用，供 crab-image 使用）
-    for (const f of imageFiles) {
-      const filePath = (f as any).path as string | undefined;
-      if (filePath) {
+      // 非图片文件 / 文件夹：通过 Electron File.path 获取本地路径，作为 mention 插入
+      const nonImageFiles = allFiles.filter((f) => !String(f.type ?? "").startsWith("image/"));
+      for (const f of nonImageFiles) {
+        const filePath = (f as any).path as string | undefined;
+        if (!filePath) continue;
         const label = filePath.split("/").pop() || filePath;
         insertMention({ id: filePath, type: "file", label, icon: null });
       }
-    }
+
+      // 图片文件也额外加 mention（路径引用，供 crab-image 使用）
+      for (const f of imageFiles) {
+        const filePath = (f as any).path as string | undefined;
+        if (filePath) {
+          const label = filePath.split("/").pop() || filePath;
+          insertMention({ id: filePath, type: "file", label, icon: null });
+        }
+      }
+    };
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("dragleave", onDragLeave);
+    window.addEventListener("drop", onDrop);
+    return () => {
+      window.removeEventListener("dragover", onDragOver);
+      window.removeEventListener("dragleave", onDragLeave);
+      window.removeEventListener("drop", onDrop);
+    };
   }, [insertMention]);
 
   const handlePaste = useCallback((e: ClipboardEvent<HTMLDivElement>) => {
@@ -950,9 +963,6 @@ export function InputBar({
   return (
     <div
       className="w-full max-w-[var(--chat-max-width)] mx-auto px-4 pb-5 pt-2"
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
     >
       <div
         ref={containerRef}
