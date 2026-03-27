@@ -1328,8 +1328,8 @@ export function buildAgentProtocolPrompt(args: {
     `  - 不要用你的别名（如 Friday）拼路径，始终用上述真实路径。\n\n` +
     // ── 工具使用 ──
     `# 工具使用\n` +
-    `- 你拥有一组即时可用的工具（如 Read、Write、Edit、WebSearch 等），无需搜索即可直接调用。\n` +
-    `- 对于未在工具列表中出现的能力（MCP 工具、非核心内置工具、已安装的 Skill），先用 tools.search 搜索，再用 tools.describe 获取详情后调用。\n` +
+    `- 核心工具（Read、Write、Edit、WebSearch、Bash、Agent 等）已在工具列表中详细描述，可直接调用。\n` +
+    `- 已连接的 MCP 工具和已安装的 Skill 也已注册，但详细参数需通过 tools.search 搜索、tools.describe 获取后调用。\n` +
     `- 优先使用结构化工具而非 Bash：读文件用 Read 不要 cat，写文件用 Write 不要 echo >，搜索内容用 Grep 不要 grep，搜索文件名用 Glob 不要 find。\n` +
     `- Bash 适合：运行脚本、安装依赖、启动服务、执行构建命令、调用 ffmpeg/whisper 等命令行工具。\n` +
     `- 多个独立工具调用可以并行发起，不必串行等待。\n` +
@@ -4276,7 +4276,6 @@ ${String((mainDocFromPack as any)?.goal ?? "").trim()}`.trim();
     toolCatalogSummary,
     mcpToolsForRun,
     mcpServersForRun: mcpServersFromSidecar,
-    mcpServerSelectionSummary,
     mainDocFromPack: portableForkCleanRoom ? null : mainDocFromPack,
     runTodoFromPack: portableForkCleanRoom ? null : runTodoFromPack,
     taskStateFromPack: portableForkCleanRoom ? null : taskStateFromPack,

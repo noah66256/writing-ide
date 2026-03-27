@@ -71,7 +71,6 @@ export type BuildAssembledContextArgs = {
   toolCatalogSummary: ToolCatalogSummary;
   mcpToolsForRun: McpToolLite[];
   mcpServersForRun: McpServerLite[];
-  mcpServerSelectionSummary: { selectedServerIds: string[]; prunedServerIds: string[]; rankingSample: Array<{ serverId: string; score: number; family: string }> };
   mainDocFromPack: any;
   runTodoFromPack: any[] | null;
   taskStateFromPack: any;
@@ -348,7 +347,6 @@ function groupBuiltinTools(selectedAllowedToolNames: Set<string>) {
 function summarizeMcpFamilies(args: {
   mcpToolsForRun: McpToolLite[];
   mcpServersForRun: McpServerLite[];
-  selectedServerIds: string[];
 }) {
   const toolNames = args.mcpToolsForRun.map((tool) => String(tool?.name ?? "").trim()).filter(Boolean);
   const hasBrowser = toolNames.some((name) => /(browser|playwright|navigate|screenshot|click|type)/i.test(name));
@@ -362,10 +360,7 @@ function summarizeMcpFamilies(args: {
   if (hasSheet) families.push("Excel/xlsx 表格");
   if (hasPdf) families.push("PDF 读取/导出");
   if (hasImage) families.push("图像生成/编辑");
-  const selectedServers = args.mcpServersForRun.filter((server) =>
-    args.selectedServerIds.includes(String(server?.serverId ?? "").trim()),
-  );
-  const serverLines = selectedServers.slice(0, 6).map((server) => {
+  const serverLines = args.mcpServersForRun.slice(0, 6).map((server) => {
     const name = String(server?.serverName ?? server?.serverId ?? "").trim();
     const status = String(server?.status ?? "connected").trim() || "connected";
     const toolCount = Number.isFinite(Number(server?.toolCount)) ? Math.max(0, Math.floor(Number(server?.toolCount))) : undefined;
@@ -506,18 +501,14 @@ function buildCapabilitySummaryMessage(args: BuildAssembledContextArgs): string 
   const builtinLines = builtinGroups
     .slice(0, 6)
     .map((group) => `- ${group.prefix}：${group.names.slice(0, 6).join("、")}${group.names.length > 6 ? ` 等 ${group.names.length} 个` : ""}`);
-  const selectedServerIds = args.mcpServerSelectionSummary.selectedServerIds.length > 0
-    ? args.mcpServerSelectionSummary.selectedServerIds
-    : args.mcpServersForRun.map((server) => String(server?.serverId ?? "").trim()).filter(Boolean);
   const mcp = summarizeMcpFamilies({
     mcpToolsForRun: args.mcpToolsForRun,
     mcpServersForRun: args.mcpServersForRun,
-    selectedServerIds,
   });
   const lines: string[] = [
     "【当前能力目录（常驻摘要）】",
     `- 模式：${args.mode === "chat" ? "Chat（只读协作）" : "Agent（直接执行）"}`,
-    `- 本轮真实工具池：${args.toolCatalogSummary.selected}/${args.toolCatalogSummary.total}（内置 ${args.toolCatalogSummary.builtin} / MCP ${args.toolCatalogSummary.mcp}）`,
+    `- 已声明工具池：${args.toolCatalogSummary.total} 个（内置 ${args.toolCatalogSummary.builtin} / MCP ${args.toolCatalogSummary.mcp}）`,
   ];
   const threadCaps = args.threadCapabilityState && typeof args.threadCapabilityState === "object"
     ? args.threadCapabilityState
@@ -554,9 +545,7 @@ function buildCapabilitySummaryMessage(args: BuildAssembledContextArgs): string 
     }
   }
   if (mcp.families.length > 0) {
-    lines.push(`- 本轮可直接使用的 MCP 能力家族：${mcp.families.join("；")}`);
-  } else {
-    lines.push("- 本轮未选中任何专用 MCP 家族；优先使用当前已列出的内置工具。");
+    lines.push(`- 已连接的 MCP 能力家族：${mcp.families.join("；")}`);
   }
   const skillSummary = buildSkillCapabilitySummary({
     skillCapabilityCards: args.skillCapabilityCards,

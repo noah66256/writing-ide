@@ -22,7 +22,7 @@ import {
   parsePortableSkillInvocationInput,
   resolvePortableSkillAgent,
 } from "./portableSkillCompat.js";
-import { HIGH_RISK_TOOL_NAME_SET } from "./coreTools.js";
+import { HIGH_RISK_TOOL_NAME_SET, CORE_TOOL_NAME_SET } from "./coreTools.js";
 
 export type ServerToolExecutionDecision = {
   executedBy: "gateway" | "desktop";
@@ -707,7 +707,6 @@ function buildDiscoveryCatalog(args: {
   mode: "chat" | "agent";
   allowedToolNames: Set<string> | null;
   toolSidecar: ToolSidecar | null;
-  includeAllMcpTools?: boolean;
 }): ToolCatalogEntry[] {
   const allowed = args.allowedToolNames ?? new Set(TOOL_LIST.map((t) => String(t?.name ?? "").trim()).filter(Boolean));
   const sidecar = (args.toolSidecar ?? null) as any;
@@ -722,7 +721,7 @@ function buildDiscoveryCatalog(args: {
     mode: args.mode,
     allowedToolNames: allowed,
     mcpTools,
-    includeAllMcpTools: args.includeAllMcpTools,
+    includeAllMcpTools: true,
   });
 
   // 过滤 collapsed legacy 工具 + 将剩余 legacy 名映射为公共名
@@ -814,7 +813,6 @@ function executeToolsSearchOnGateway(args: {
     mode: args.mode,
     allowedToolNames: args.allowedToolNames,
     toolSidecar: args.toolSidecar,
-    includeAllMcpTools: true,
   });
   const capabilityCards = listCapabilityCardsForDiscovery({
     toolCatalog: catalog,
@@ -824,13 +822,7 @@ function executeToolsSearchOnGateway(args: {
   });
 
   // L0 工具已在 kernel tools 数组中，tools.search 只搜非 L0（参考 CC ToolSearch 只搜 deferred）
-  const L0_TOOL_NAMES = new Set([
-    "tools.search", "tools.describe", "skills.list", "skills.activate", "WebSearch", "WebFetch",
-    "run.mainDoc.get", "run.mainDoc.update", "run.todo", "run.done",
-    "Read", "Write", "Edit", "project.listFiles", "Grep", "memory",
-    "Bash", "Agent",
-  ]);
-  const nonL0Catalog = catalog.filter((e) => !L0_TOOL_NAMES.has(e.name));
+  const nonL0Catalog = catalog.filter((e) => !CORE_TOOL_NAME_SET.has(e.name));
   const filteredCatalog = sources.size > 0
     ? nonL0Catalog.filter((e) => sources.has(String(e.source ?? "").toLowerCase()))
     : nonL0Catalog;
@@ -949,7 +941,6 @@ function executeToolsDescribeOnGateway(args: {
     mode: args.mode,
     allowedToolNames: args.allowedToolNames,
     toolSidecar: args.toolSidecar,
-    includeAllMcpTools: true,
   });
   const entry = catalog.find((e) => e.name === name) ?? null;
   if (entry) {
