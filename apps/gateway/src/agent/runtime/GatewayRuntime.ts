@@ -782,10 +782,6 @@ export class GatewayRuntime implements AgentRuntime {
   private consecutiveTextOnlyTurns = 0;
   /** 当前 run() 的内部 AbortController，run.done / maxTurns 通过此终止 */
   private internalAc: AbortController | null = null;
-  /** 当前轮次的有效工具白名单（由 computePerTurnAllowed 动态计算） */
-  private effectiveAllowed: Set<string> | null = null;
-  /** 编排者模式标记（由 computePerTurnAllowed 设置） */
-  private orchestratorMode = false;
   /** 软提示上次处理时的失败工具计数（避免重复提示） */
   private lastSteeringFailureCount = 0;
   private readonly collabRuntime: CollabRuntime;
@@ -942,22 +938,11 @@ export class GatewayRuntime implements AgentRuntime {
     }
 
     try {
-      // 重要：Pi runtime 的 tools 声明集在 run 内基本是静态的（pi-agent-core 不支持每 turn 替换 tools）。
-      // 若按 turn0 的 effectiveAllowed（boot 收敛）去构建 kernel.tools，会出现：
-      // - system prompt 里明明写了工具
-      // - 但 kernel 只声明了 1~3 个工具
-      // - 模型调用其它工具时直接报：Tool XXX not found（不是 TOOL_NOT_ALLOWED）
-      // 因此这里必须用“稳定声明集”，保证每 turn 的 effectiveAllowed 都是它的子集。
+      // Pi runtime 的 tools 声明集在 run 内基本是静态的（pi-agent-core 不支持每 turn 替换 tools）。
       const declaredAllowed = new Set(this.config.runCtx.allowedToolNames);
       for (const name of this._collectDeclaredPortableActivationToolNames()) {
         declaredAllowed.add(name);
       }
-      const turn0Gate = (this.config.runCtx as any).computePerTurnAllowed?.(this.runState) ?? null;
-      const turn0EffectiveAllowed = turn0Gate?.allowed instanceof Set
-        ? turn0Gate.allowed
-        : null;
-      // 预置 effectiveAllowed，避免 transformContext 运行前出现空白窗口。
-      this.effectiveAllowed = new Set(turn0EffectiveAllowed ?? declaredAllowed);
       const visibleTools = this._buildAgentTools(declaredAllowed);
 
       await this._writePortableNotificationNotice({
@@ -973,7 +958,6 @@ export class GatewayRuntime implements AgentRuntime {
           userPromptChars: String(userPrompt ?? "").length,
           visibleToolCount: visibleTools.length,
           declaredToolCount: declaredAllowed.size,
-          turn0EffectiveAllowedCount: turn0EffectiveAllowed?.size ?? null,
           toolChoice: null,
         },
         source: "runtime.kernel_input",
@@ -1101,8 +1085,6 @@ export class GatewayRuntime implements AgentRuntime {
       : createInitialRunState();
     this.failureDigest = { failedCount: 0, failedTools: [] };
     this.executionReport = {};
-    this.effectiveAllowed = new Set(this.config.runCtx.allowedToolNames);
-    this.orchestratorMode = false;
     this.lastSteeringFailureCount = 0;
     this.executionNoToolTurns = 0;
     this.consecutiveTextOnlyTurns = 0;
@@ -1760,9 +1742,7 @@ export class GatewayRuntime implements AgentRuntime {
 
   /**
    * transformContext：每轮 LLM 调用前对上下文做变换。
-   * 1. 调用 computePerTurnAllowed 计算本轮工具白名单和 hint
-   * 2. 更新 effectiveAllowed / orchestratorMode
-   * 3. 在 messages 末尾追加 runtime_hint（软 gating 提示）
+   * per-turn gating 已移除，仅处理 portable immediate items。
    */
   private async _transformContext(
     messages: AgentMessage[],
@@ -1782,66 +1762,16 @@ export class GatewayRuntime implements AgentRuntime {
       }
     }
 
-    // 每轮重置为基线
-    const baselineAllowed = new Set(this.config.runCtx.allowedToolNames);
-    this.effectiveAllowed = new Set(baselineAllowed);
-    this.orchestratorMode = false;
-
-    const gating = (this.config.runCtx as any).computePerTurnAllowed?.(this.runState) ?? null;
-    if (!gating) return messages;
-
-    if (gating.allowed) {
-      const nextAllowed = new Set<string>(gating.allowed);
-      this.effectiveAllowed = nextAllowed;
-
-      // 观测 per-turn gating 效果，特别是 CORE_TOOLS 是否被剪掉
-      try {
-        const removedCore: string[] = [];
-        for (const name of CORE_TOOL_NAME_SET) {
-          if (baselineAllowed.has(name) && !nextAllowed.has(name)) {
-            removedCore.push(name);
-          }
-        }
-        await this._writePortableNotificationNotice({
-          turn: this.turn,
-          kind: removedCore.length > 0 ? "warn" : "debug",
-          title: "PerTurnToolGating",
-          message:
-            `per-turn gating：baseline=${baselineAllowed.size} / gated=${nextAllowed.size}` +
-            (removedCore.length ? ` / removedCore=${removedCore.join(",")}` : ""),
-          detail: {
-            baselineCount: baselineAllowed.size,
-            gatedCount: nextAllowed.size,
-            removedCoreTools: removedCore,
-          },
-          source: "runtime.per_turn_gating",
-        });
-      } catch {
-        // logging failures must not影响正常执行
-      }
-    }
-    if (gating.orchestratorMode) {
-      this.orchestratorMode = true;
-    }
-    if (gating.hint) {
-      const hintItem: CanonicalTranscriptItem = {
-        kind: "runtime_hint",
-        text: String(gating.hint),
-        reasonCodes: ["per_turn_gating"],
-      };
-      messages.push(hintItem as unknown as AgentMessage);
-    }
-
     return messages;
   }
 
   /**
-   * 软提示收集：这些提示用于“下一轮继续执行/收口”，不能走 steering 通道。
+   * 软提示收集：这些提示用于"下一轮继续执行/收口"，不能走 steering 通道。
    *
-   * pi-agent-core 中 getSteeringMessages 的语义是“用户在当前回合中途插话/转向”，
+   * pi-agent-core 中 getSteeringMessages 的语义是"用户在当前回合中途插话/转向"，
    * 一旦这里返回消息，会直接跳过当前回合剩余工具调用。此前把 Todo Gate /
    * 执行契约 / 失败修复等软提示塞进 steering，导致 Gemini 在首个工具后把同轮
-   * 其他工具误判成 “Skipped due to queued user message.”。
+   * 其他工具误判成 "Skipped due to queued user message."。
    */
   private _collectSoftGuidanceMessages(): AgentMessage[] {
     const hints: AgentMessage[] = [];
@@ -1855,13 +1785,6 @@ export class GatewayRuntime implements AgentRuntime {
     };
 
     const lastText = this._getLastAssistantText();
-    if (this.orchestratorMode && lastText.length > 300) {
-      pushHint(
-        "你是编排者（负责人），禁止直接输出长文内容。请改为通过 Agent 委派给合适成员执行；" +
-          "如需联网搜索先委派 topic_planner，写作任务委派 copywriter。",
-        ["orchestrator_long_text_blocked"],
-      );
-    }
 
     if (this.failureDigest.failedCount > this.lastSteeringFailureCount) {
       const failures = this.failureDigest.failedTools;
@@ -1934,7 +1857,7 @@ export class GatewayRuntime implements AgentRuntime {
   }
 
   /**
-   * getSteeringMessages：仅用于“真实用户中途插话/转向”。
+   * getSteeringMessages：仅用于"真实用户中途插话/转向"。
    * 当前 GatewayRuntime 尚未实现独立的用户 steering 队列，因此这里必须保持空，
    * 避免把软提示误当成 queued user message，导致同轮剩余工具被跳过。
    */
@@ -2151,7 +2074,7 @@ export class GatewayRuntime implements AgentRuntime {
 
     // 模型已输出一轮纯文本总结（consecutiveTextOnlyTurns >= 1），说明最近一次工具失败
     // 已被语义层处理过（总结/解释原因等）。此时提前消耗 failure 计数，避免
-    // tool_failure_repair 在 followUp 通道再追加一轮“自言自语”式提示。
+    // tool_failure_repair 在 followUp 通道再追加一轮"自言自语"式提示。
     if (
       this.consecutiveTextOnlyTurns >= 1 &&
       this.failureDigest.failedCount > this.lastSteeringFailureCount
@@ -2942,7 +2865,7 @@ export class GatewayRuntime implements AgentRuntime {
       });
 
     // ── 合成 Bash wrapper（shell.exec + code.exec）──
-    // Bash wrapper 无条件创建——可见性由 effectiveAllowed 软门禁控制，不依赖 B2 选择
+    // Bash wrapper 无条件创建——可见性不依赖 B2 选择
     const hasBash = true;
     const bashWrapper: AgentTool<any>[] = hasBash ? [{
       name: this._encodeRuntimeToolName("Bash"),
@@ -3091,50 +3014,6 @@ export class GatewayRuntime implements AgentRuntime {
       return result;
     };
 
-    // 软 gating：工具不在本轮白名单中时拒绝执行
-    if (
-      this.effectiveAllowed &&
-      this.effectiveAllowed.size > 0 &&
-      !this.effectiveAllowed.has(toolName)
-    ) {
-      (this.runState as any).lastToolNotAllowedName = String(toolName ?? "").trim() || null;
-      const deniedMessage = `工具 "${toolName}" 在当前阶段不可用，请使用其他工具。`;
-      const permissionHook = await this._emitPortablePermissionRequest({
-        toolName,
-        toolArgs,
-        errorCode: "TOOL_NOT_ALLOWED_THIS_TURN",
-        decisionSource: "effective_allowed_turn_gate",
-        message: deniedMessage,
-        detail: {
-          toolName,
-          effectiveAllowedCount: this.effectiveAllowed?.size ?? 0,
-        },
-        approvalEligible: false,
-        allowCanProceed: false,
-      });
-      await this._writePortableNotificationNotice({
-        turn: this.turn,
-        kind: "warn",
-        title: "ToolNotAllowed",
-        message: `工具 "${toolName}" 在当前回合不可用（TOOL_NOT_ALLOWED_THIS_TURN）。`,
-        detail: {
-          toolName,
-          effectiveAllowedCount: this.effectiveAllowed?.size ?? 0,
-          permissionHookMessage: permissionHook.hookMessage ?? null,
-        },
-        source: "tool.permission_denied",
-      });
-      return {
-        ok: false,
-        output: {
-          ok: false,
-          error: "TOOL_NOT_ALLOWED_THIS_TURN",
-          message: permissionHook.hookMessage || deniedMessage,
-        },
-        executedBy: "gateway",
-      };
-    }
-
     const preHook = await this._runPortableHookEvent({
       eventName: "PreToolUse",
       toolName,
@@ -3254,8 +3133,8 @@ export class GatewayRuntime implements AgentRuntime {
       portableScopedHighRiskToolNames.has(toolName);
     if (opMode !== "assistant" && runtimeHighRiskTools.has(toolName) && !portableHighRiskOverride) {
       const deniedMessage = toolName === "skill.install"
-        ? "当前为创作模式，禁止直接安装到用户全局技能目录；请先在当前项目或临时 workspace 中完成 skill 草稿，再切到“助手模式”后调用 skill.install。"
-        : "当前为创作模式，禁止执行 Bash / process.* / cron.* 等高风险本机操作；如确需执行，请先在桌面端切换到“助手模式”后再重试。";
+        ? "当前为创作模式，禁止直接安装到用户全局技能目录；请先在当前项目或临时 workspace 中完成 skill 草稿，再切到\u201c助手模式\u201d后调用 skill.install。"
+        : "当前为创作模式，禁止执行 Bash / process.* / cron.* 等高风险本机操作；如确需执行，请先在桌面端切换到\u201c助手模式\u201d后再重试。";
       const permissionHook = await this._emitPortablePermissionRequest({
         toolName,
         toolArgs,
@@ -3424,8 +3303,6 @@ export class GatewayRuntime implements AgentRuntime {
 
       const execTool = async (name: string, argsForTool: Record<string, unknown>): Promise<GatewayToolExecResult> => {
         const nestedToolCallId = `${toolCallId}::${name}:${Date.now()}`;
-        if (!this.effectiveAllowed) this.effectiveAllowed = new Set(this.config.runCtx.allowedToolNames);
-        this.effectiveAllowed.add(name);
         const result = await this._executeAgentTool(nestedToolCallId, name, argsForTool);
         const outputEnvelope = compactToolResultEnvelope(name, result.output);
         this.config.runCtx.writeEvent("tool.result", {
@@ -3585,7 +3462,7 @@ export class GatewayRuntime implements AgentRuntime {
       });
 
       if (ret.ok) {
-        // 记录 tools.search 发现的 MCP 工具名，供 computePerTurnAllowed 在后续 turn 放行
+        // 记录 tools.search 发现的 MCP 工具名
         if (toolName === "tools.search") {
           const output: any = (ret as any).output;
           const tools = Array.isArray(output?.tools) ? output.tools : [];
@@ -3979,25 +3856,13 @@ export class GatewayRuntime implements AgentRuntime {
         });
 
         // RunState（使用原始工具名做匹配）
-        // TOOL_NOT_ALLOWED_THIS_TURN 表示本轮 per-turn gating 拦截了调用，工具实际未执行。
-        // 不应将此类调用计入 hasAnyToolCall / stickyToolNames 等状态，否则 ExecutionContract 会
-        // 误判"已有工具调用"而过早结束 run。
-        const isGatingRejection =
-          !ok &&
-          executedBy === "gateway" &&
-          output &&
-          typeof output === "object" &&
-          (output as any).error === "TOOL_NOT_ALLOWED_THIS_TURN";
-
-        if (!isGatingRejection) {
-          this._updateRunState(rawToolName, snap?.args ?? {}, {
-            ok,
-            output,
-            meta,
-            executedBy,
-            dryRun,
-          });
-        }
+        this._updateRunState(rawToolName, snap?.args ?? {}, {
+          ok,
+          output,
+          meta,
+          executedBy,
+          dryRun,
+        });
 
         // 失败摘要
         if (!ok && !dryRun) {
@@ -4278,16 +4143,6 @@ export class GatewayRuntime implements AgentRuntime {
   ): void {
     this.runState.hasAnyToolCall = true;
 
-    // B2：sticky 记录（成功工具跨 turn 保留；低成本提高稳定性）
-    if (result.ok && !result.dryRun) {
-      const nextSticky = appendUniqueBounded(
-        Array.isArray((this.runState as any).stickyToolNames) ? ((this.runState as any).stickyToolNames as string[]) : [],
-        toolName,
-        10,
-      );
-      (this.runState as any).stickyToolNames = nextSticky;
-    }
-
     // MCP 工具统计
     if (toolName.startsWith("mcp.")) {
       this.runState.hasMcpToolCall = true;
@@ -4296,7 +4151,7 @@ export class GatewayRuntime implements AgentRuntime {
       else this.runState.mcpToolFailCount += 1;
     }
 
-    // Tool Discovery：即使失败也算“已尝试”，避免反复卡死在同一步
+    // Tool Discovery：即使失败也算"已尝试"，避免反复卡死在同一步
     if (toolName === "tools.search") this.runState.hasToolsSearch = true;
     if (toolName === "tools.describe") this.runState.hasToolsDescribe = true;
     // 浏览器类 MCP（Playwright/browser）标记：用于复合任务阶段推断
