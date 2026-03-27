@@ -7564,6 +7564,7 @@ function createWindow() {
     minWidth: 640,
     minHeight: 480,
     title: "Oh My Crab",
+    icon: path.join(__dirname, "../build/icon.png"),
 
     // macOS 原生感：隐藏标题栏但保留 traffic lights
     ...(isMac
