@@ -785,6 +785,7 @@ function mergeSnapshotForHistory(prev: RunSnapshot | null | undefined, incoming:
     items: Array.isArray(incoming.items) ? incoming.items : prev.items,
     collabSessions: Array.isArray(incoming.collabSessions) ? incoming.collabSessions : prev.collabSessions,
     activeItemIds: Array.isArray(incoming.activeItemIds) ? incoming.activeItemIds : prev.activeItemIds,
+    thread: incoming.thread ?? prev.thread,
   };
 }
 
