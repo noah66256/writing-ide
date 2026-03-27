@@ -12,6 +12,7 @@ import { useProjectIndexStore } from "../state/projectIndexStore";
 import { useKbStore } from "../state/kbStore";
 import { useAuthStore } from "../state/authStore";
 import { useRunStore } from "../state/runStore";
+import { useConversationStore } from "../state/conversationStore";
 import { cancelInlineFileOpConfirm } from "../state/inlineFileOpConfirm";
 import { activateSkills } from "@ohmycrab/agent-core";
 import { buildStyleLinterLibrariesSidecar, executeToolCall, getTool } from "./toolRegistry";
@@ -1871,6 +1872,11 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                     });
                     if (imageEntry) {
                       rt.appendTranscriptEntry(imageEntry as any);
+                    }
+                    // 立即持久化 thread，避免 run 超时/报错时 imageSession 丢失
+                    const convId = (rt as any).convId;
+                    if (convId) {
+                      useConversationStore.getState().flushDraftSnapshotNow().catch(() => void 0);
                     }
                   }
                   patchTool(stepId, {
