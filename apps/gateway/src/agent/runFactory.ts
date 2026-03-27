@@ -5786,8 +5786,8 @@ export async function executeAgentRun(args: {
     title: "McpServerSelection",
     message:
       mcpServerSelectionSummary.selectedServerIds.length > 0
-        ? `本轮已先筛 MCP servers：${mcpServerSelectionSummary.selectedServerIds.join(", ")}`
-        : "本轮未命中明确 MCP server，回退为保留全部 sidecar MCP tools",
+        ? `已连接 MCP servers：${mcpServerSelectionSummary.selectedServerIds.join(", ")}`
+        : "未连接任何 MCP server",
     detail: {
       totalServers: mcpServersFromSidecar.length,
       selectedServerIds: mcpServerSelectionSummary.selectedServerIds,
