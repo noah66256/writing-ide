@@ -54,27 +54,25 @@
 
 ---
 
-## 7. @文件引用图片 / 拖入文件时走 read 而非视觉输入（未修，待设计）
+## 7. 拖入文件/文件夹 + @图片引用 改进（P2，实施中）
 
-**现象**：
-1. 用户通过 `@文件名.jpg` 引用图片时，系统走 `read` 工具读取文件，模型无法"看到"图片内容，也无法将其作为 crab-image 的参考图
-2. 用户拖动文件（图片/文档）进对话框时，文件不被识别——既不作为视觉输入，也不作为 @引用
+**子项**：
 
-**期望**：
-- @图片文件 / 拖入图片时应同时提供两种能力：视觉输入（让模型看到）+ 文件路径（注入 crab-image 参考图）
-- 拖入非图片文件（.md / .txt / .docx）时应自动转为 @引用或内联内容
+### 7a. 拖入文件夹 → 作为项目路径 ctxRef（优先）
+- 拖入文件夹时，将路径作为 ctxRef 注入上下文，模型自己用 Glob/Read 探索
+- 改动范围：InputBar 或 ChatArea 的 drop handler
 
-**设计方向**：
-- 检测 @引用 / 拖入文件的 MIME type，`image/*` 自动注入为 vision input + crab-image referenceImages
-- 非图片文件自动转为 @引用（读取内容注入上下文）
-- 需要区分"看图"vs"读文件属性"——可能默认同时提供两种能力
+### 7b. 拖入图片 → 视觉输入 + 文件路径（优先）
+- 拖入图片时，自动读取为 base64 注入 images 字段（视觉输入），同时保留路径作为 ctxRef
+- 改动范围：InputBar 的 drop handler
 
-**影响范围**：
-- `apps/desktop/src/agent/wsTransport.ts` — buildCrabImageToolArgs 增强
-- `apps/desktop/src/agent/runTarget.ts` — @引用的图片路径提取
-- `apps/desktop/src/ui/components/ChatArea.tsx` 或 InputBar — 拖拽文件识别
+### 7c. 拖入文本文件 → 作为 ctxRef（优先）
+- 拖入 .md/.txt/.json 等文本文件时，转为 ctxRef
+- 改动范围：同 7a
 
-**优先级**：P2（需 UX 设计讨论后实现）
+### 7d. @图片引用 → 视觉输入 + 文件路径（不急）
+- @引用图片文件时，除了走 read，额外注入 vision input
+- 改动范围：wsTransport 或 ctxRef 处理
 
 ---
 
