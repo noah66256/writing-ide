@@ -1063,6 +1063,7 @@ export function buildAgentProtocolPrompt(args: {
         `     若报 "Document does not exist"，说明漏了 create/open 步骤，不要改用 write 伪造。\n` +
         `     Bash 支持命令执行（command 参数）和 Python 脚本（code/entryFile 参数），不要混用。\n` +
         `     只要 Playwright/browser MCP 工具出现在工具列表中，就表示当前已授权可用，直接使用即可。\n` +
+        `     禁止用浏览器工具打开 file: 协议的本地路径（如 file:///Users/...）——这会被安全策略阻止。查看本地文件用 Read 工具，查看本地图片直接告知用户点击 artifact 链接。\n` +
         `   - 组合任务：根据需要组合多种工具完成复杂流程，不要跳过必要步骤直接臆造。\n` +
         `   - 修改/延续任务：先读取当前内容，再按用户要求修改；如已有检查结果，一并纳入参考。\n` +
         `4) 续跑契约：当你提出"请选择/请确认"并准备结束本轮等待用户时，通过结构化工具结果或 run.done(reason=clarify_waiting/proposal_waiting) 表达等待意图；不要要求模型自己改写旧状态镜像。\n` +
