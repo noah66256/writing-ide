@@ -7588,6 +7588,7 @@ function createWindow() {
   // macOS: 强制设置 Dock 图标（dev 模式需要）
   if (isMac && app.dock) {
     const iconPath = path.join(__dirname, "../build/icon.png");
+    console.log("[Icon] Attempting to set Dock icon:", iconPath, "exists:", fs.existsSync(iconPath));
     if (fs.existsSync(iconPath)) {
       app.dock.setIcon(iconPath);
     }
