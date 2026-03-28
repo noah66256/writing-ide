@@ -86,6 +86,26 @@ export type ThreadCapabilityState = {
   lastActivatedAt?: Record<string, number>;
 };
 
+export type ThreadImageArtifactRef = {
+  artifactId: string;
+  path?: string;
+  source: "generated" | "edited" | "user_upload" | "screenshot";
+  createdAt: string;
+  prompt?: string;
+  aspectRatio?: string;
+  mimeType?: string;
+};
+
+export type ThreadImageSessionV1 = {
+  v: 1;
+  lastGeneratedArtifactId?: string | null;
+  lastEditedArtifactId?: string | null;
+  recentArtifacts: ThreadImageArtifactRef[];
+  defaultAspectRatio?: string | null;
+  preferredProvider?: "gemini_nb";
+  updatedAt: string;
+};
+
 export type ThreadRecord = {
   id: string;
   convId?: string | null;
@@ -105,6 +125,7 @@ export type ThreadRecord = {
   pendingApprovalIds: string[];
   taskState?: TaskStateV2 | null;
   capabilityState?: ThreadCapabilityState | null;
+  imageSession?: ThreadImageSessionV1 | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -303,6 +324,7 @@ export type StartGatewayRunPayloadV2 = {
     collabSessionIds?: string[];
     collabSessions?: CollabAgentSessionRecord[];
     capabilityState?: ThreadCapabilityState | null;
+    imageSession?: ThreadImageSessionV1 | null;
   };
   portablePreRunCompact?: {
     trigger?: "auto" | "manual";

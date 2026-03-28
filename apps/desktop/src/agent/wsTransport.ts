@@ -162,11 +162,12 @@ function isCrabImageTool(toolName: string): boolean {
 const _imageArtifactCache = {
   lastGeneratedPath: null as string | null,
   lastEditedPath: null as string | null,
+  lastScreenshotPath: null as string | null,
   recentPaths: [] as string[],
   updatedAt: 0,
 };
 
-function _cacheImageArtifact(absPath: string, source: "generated" | "edited") {
+function _cacheImageArtifact(absPath: string, source: "generated" | "edited" | "screenshot") {
   if (!absPath) return;
   _imageArtifactCache.recentPaths = [
     absPath,
@@ -174,12 +175,14 @@ function _cacheImageArtifact(absPath: string, source: "generated" | "edited") {
   ].slice(0, 24);
   if (source === "generated") _imageArtifactCache.lastGeneratedPath = absPath;
   if (source === "edited") _imageArtifactCache.lastEditedPath = absPath;
+  if (source === "screenshot") _imageArtifactCache.lastScreenshotPath = absPath;
   _imageArtifactCache.updatedAt = Date.now();
 }
 
 function _getCachedImagePath(token: string): string | null {
-  if (token === "last") return _imageArtifactCache.lastEditedPath ?? _imageArtifactCache.lastGeneratedPath ?? _imageArtifactCache.recentPaths[0] ?? null;
+  if (token === "last") return _imageArtifactCache.lastEditedPath ?? _imageArtifactCache.lastGeneratedPath ?? _imageArtifactCache.lastScreenshotPath ?? _imageArtifactCache.recentPaths[0] ?? null;
   if (token === "last_generated") return _imageArtifactCache.lastGeneratedPath;
+  if (token === "last_screenshot") return _imageArtifactCache.lastScreenshotPath;
   return null;
 }
 
@@ -275,6 +278,14 @@ function resolveImageToken(args: {
     const matched = findArtifactById(String(imageSession?.lastGeneratedArtifactId ?? "").trim());
     if (matched?.path) return { kind: "path", path: matched.path };
     const cached = _getCachedImagePath("last_generated");
+    if (cached) return { kind: "path", path: cached };
+    return null;
+  }
+  if (token === "last_screenshot") {
+    // 优先从 imageSession 中找 source=screenshot 的最近一个
+    const screenshotArtifact = [...recentArtifacts].reverse().find((a) => a.source === "screenshot" && String(a.path ?? "").trim());
+    if (screenshotArtifact?.path) return { kind: "path", path: screenshotArtifact.path };
+    const cached = _getCachedImagePath("last_screenshot");
     if (cached) return { kind: "path", path: cached };
     return null;
   }
@@ -469,10 +480,61 @@ async function collectToolResultImages(args: {
 
 function shouldMirrorToolImageToTranscript(toolName: string, output: unknown): boolean {
   if (isCrabImageTool(toolName)) return true;
-  if (toolName === "mcp.playwright.browser_take_screenshot") {
+  if (isPlaywrightScreenshot(toolName)) {
     return extractImageArtifacts(output).length > 0;
   }
   return false;
+}
+
+function isPlaywrightScreenshot(toolName: string): boolean {
+  return toolName === "mcp.playwright.browser_take_screenshot";
+}
+
+/** Playwright 截图注册到 imageSession + 热缓存，使 generate_image 可通过 last/last_screenshot 引用 */
+function registerScreenshotArtifact(args: {
+  output: unknown;
+  rt: ReturnType<typeof createRunTarget>;
+}) {
+  const imageArtifacts = extractImageArtifacts(args.output);
+  if (imageArtifacts.length === 0) return;
+
+  for (const artifact of imageArtifacts) {
+    const absPath = String(artifact?.absPath ?? "").trim();
+    if (!absPath) continue;
+    // 注册到热缓存
+    _cacheImageArtifact(absPath, "screenshot");
+  }
+
+  // 注册到 imageSession（和 crab-image 一样持久化）
+  const thread = args.rt.getThread?.() as any;
+  const imageSession: ThreadImageSessionV1 = normalizeThreadImageSession(thread?.imageSession) ?? {
+    v: 1 as const,
+    recentArtifacts: [],
+    lastGeneratedArtifactId: null,
+    lastEditedArtifactId: null,
+    defaultAspectRatio: null,
+    preferredProvider: "gemini_nb" as const,
+    updatedAt: new Date().toISOString(),
+  };
+  for (const artifact of imageArtifacts) {
+    const absPath = String(artifact?.absPath ?? "").trim();
+    if (!absPath) continue;
+    const ref: ThreadImageArtifactRef = {
+      artifactId: crypto.randomUUID(),
+      path: absPath,
+      source: "screenshot",
+      createdAt: new Date().toISOString(),
+      mimeType: String(artifact?.mimeType ?? "image/png").trim(),
+    };
+    imageSession.recentArtifacts = [
+      ...imageSession.recentArtifacts.filter((a) => a.path !== absPath),
+      ref,
+    ].slice(-24);
+    imageSession.updatedAt = new Date().toISOString();
+  }
+
+  const nextThread = { ...(thread ?? {}), imageSession };
+  args.rt.setThread?.(nextThread);
 }
 
 function buildCrabImageTranscriptEntry(args: {
@@ -1932,6 +1994,10 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                       useConversationStore.getState().flushDraftSnapshotNow().catch(() => void 0);
                     }
                   }
+                  // Playwright 截图注册到 imageSession + 热缓存，使模型可通过 "last_screenshot" / "last" 引用
+                  if (result.ok && isPlaywrightScreenshot(name)) {
+                    registerScreenshotArtifact({ output: successOutput, rt });
+                  }
                   if (result.ok && shouldMirrorToolImageToTranscript(name, successOutput)) {
                     const imageEntry = buildCrabImageTranscriptEntry({
                       toolCallId,
@@ -2063,6 +2129,10 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                   if (convId2) {
                     useConversationStore.getState().flushDraftSnapshotNow().catch(() => void 0);
                   }
+                }
+                // Playwright 截图注册到 imageSession + 热缓存
+                if (result.ok && isPlaywrightScreenshot(name)) {
+                  registerScreenshotArtifact({ output: successOutput, rt });
                 }
                 if (result.ok && shouldMirrorToolImageToTranscript(name, successOutput)) {
                   const imageEntry = buildCrabImageTranscriptEntry({
