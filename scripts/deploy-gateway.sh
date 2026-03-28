@@ -39,6 +39,7 @@ PORT="${DEPLOY_PORT:-8000}"
 DEPLOY_PUSH="${DEPLOY_PUSH:-1}"
 ALLOW_DIRTY="${DEPLOY_ALLOW_DIRTY:-0}"
 ADMIN_WEB="${DEPLOY_ADMIN_WEB:-1}"
+WEB="${DEPLOY_WEB:-1}"
 SSH_OPTS=(
   -o ProxyCommand=none
   -o ProxyJump=none
@@ -83,7 +84,7 @@ echo "[remote] after=\$(git rev-parse --short HEAD)"
 
 # ── npm install（仅 gateway + admin-web workspace，跳过 desktop/electron 的平台限制） ──
 echo "[remote] npm install (workspace-scoped)"
-npm install -w @ohmycrab/gateway -w @ohmycrab/admin-web --no-audit --no-fund --force 2>&1 | tail -5
+npm install -w @ohmycrab/gateway -w @ohmycrab/admin-web -w @ohmycrab/web --no-audit --no-fund --force 2>&1 | tail -5
 
 # ── 确保 Linux native 包存在（rollup/esbuild 可选依赖在 lock 中可能只有 darwin 版本） ──
 echo "[remote] ensure linux native deps"
@@ -114,6 +115,19 @@ if [[ "${ADMIN_WEB}" == "1" ]]; then
   pm2 delete writing-admin-web 2>/dev/null || true
   pm2 delete ohmycrab-admin-web 2>/dev/null || true
   pm2 serve apps/admin-web/dist 8001 --name ohmycrab-admin-web --spa
+fi
+
+# ── 构建 + 部署 Web 主页（可选） ──
+if [[ "${WEB}" == "1" ]]; then
+  echo "[remote] build web"
+  cd ${DIR}/apps/web
+  npx tsc -b
+  npx vite build
+  cd ${DIR}
+
+  echo "[remote] redeploy web"
+  pm2 delete ohmycrab-web 2>/dev/null || true
+  pm2 serve apps/web/dist 8002 --name ohmycrab-web --spa
 fi
 
 # ── Health check ──
@@ -151,6 +165,25 @@ if [[ "${ADMIN_WEB}" == "1" ]]; then
   if [[ "\${admin_ok}" != "1" ]]; then
     echo "admin-web: FAILED (port 8001)"
     cat /tmp/admin-health.err || true
+  fi
+fi
+
+if [[ "${WEB}" == "1" ]]; then
+  web_ok=0
+  web_out=""
+  for i in {1..15}; do
+    web_out="\$(curl -fsS -m 3 http://127.0.0.1:8002/ 2>/tmp/web-health.err || true)"
+    if [[ -n "\${web_out}" ]]; then
+      echo "web: OK (\${web_out:0:80})"
+      web_ok=1
+      break
+    fi
+    echo "[remote] web health retry \${i}/15 ..."
+    sleep 1
+  done
+  if [[ "\${web_ok}" != "1" ]]; then
+    echo "web: FAILED (port 8002)"
+    cat /tmp/web-health.err || true
   fi
 fi
 
