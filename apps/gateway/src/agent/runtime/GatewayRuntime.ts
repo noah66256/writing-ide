@@ -1061,9 +1061,9 @@ export class GatewayRuntime implements AgentRuntime {
       }
       await stream.result();
 
-      // 最终 outcome（run.done 在 tool_execution_end 中已设置 outcome，此处不覆盖）
-      if (this.outcome.reason === "run_done" || this.outcome.reason === "approval_waiting") {
-        // 已由 run.done 处理器设置，保持不变
+      // 最终 outcome（run.done / implicit_completion 在 turn_end 中已设置 outcome，此处不覆盖）
+      if (this.outcome.reason === "run_done" || this.outcome.reason === "approval_waiting" || this.outcome.reason === "implicit_completion") {
+        // 已由对应处理器设置，保持不变
       } else if (ac.signal.aborted) {
         this._setOutcome({
           status: "aborted",
