@@ -17,6 +17,7 @@ import {
   adjustUserPoints,
   calculateCostCny,
   calculateCostPoints,
+  calculateImageGenPoints,
   hasBillableUsage,
   listUserTransactions,
   normalizeLlmTokenUsage,
@@ -312,6 +313,7 @@ function getModelPriceFromDb(db: Db, modelId: string): LlmModelPrice | null {
     const priceOut = Number(m?.priceOutCnyPer1M);
     const priceCacheRead = Number(m?.priceCacheReadCnyPer1M ?? 0);
     const priceCacheCreation5m = Number(m?.priceCacheCreation5mCnyPer1M ?? 0);
+    const imageGenBillPointsPerCall = Number(m?.imageGenBillPointsPerCall);
     if (
       Number.isFinite(priceIn) &&
       Number.isFinite(priceOut) &&
@@ -327,6 +329,10 @@ function getModelPriceFromDb(db: Db, modelId: string): LlmModelPrice | null {
         priceOutCnyPer1M: priceOut,
         priceCacheReadCnyPer1M: priceCacheRead,
         priceCacheCreation5mCnyPer1M: priceCacheCreation5m,
+        imageGenBillPointsPerCall:
+          Number.isFinite(imageGenBillPointsPerCall) && imageGenBillPointsPerCall >= 0
+            ? Math.floor(imageGenBillPointsPerCall)
+            : null,
       };
     }
   }
@@ -337,6 +343,7 @@ function getModelPriceFromDb(db: Db, modelId: string): LlmModelPrice | null {
   const priceOut = Number((raw as any).priceOutCnyPer1M);
   const priceCacheRead = Number((raw as any).priceCacheReadCnyPer1M ?? 0);
   const priceCacheCreation5m = Number((raw as any).priceCacheCreation5mCnyPer1M ?? 0);
+  const imageGenBillPointsPerCall = Number((raw as any).imageGenBillPointsPerCall);
   if (
     !Number.isFinite(priceIn) ||
     !Number.isFinite(priceOut) ||
@@ -352,6 +359,10 @@ function getModelPriceFromDb(db: Db, modelId: string): LlmModelPrice | null {
     priceOutCnyPer1M: priceOut,
     priceCacheReadCnyPer1M: priceCacheRead,
     priceCacheCreation5mCnyPer1M: priceCacheCreation5m,
+    imageGenBillPointsPerCall:
+      Number.isFinite(imageGenBillPointsPerCall) && imageGenBillPointsPerCall >= 0
+        ? Math.floor(imageGenBillPointsPerCall)
+        : null,
   };
 }
 
@@ -430,6 +441,90 @@ async function chargeUserForLlmUsage(args: {
     }
 
     return { ok: true as const, chargedPoints: charged, costPoints, txId, newBalance, ...(note ? { note } : {}) };
+  });
+}
+
+async function chargeUserForImageGen(args: {
+  userId: string;
+  modelId: string;
+  toolName: string;
+  source: string;
+  metaExtra?: unknown;
+}) {
+  const userId = normStr(args.userId);
+  const modelId = normStr(args.modelId);
+  const toolName = normStr(args.toolName);
+  if (!userId || !modelId || !toolName) return { ok: false as const, reason: "MISSING_USER_OR_MODEL" as const };
+
+  return updateDb((db) => {
+    const user = db.users.find((u) => u.id === userId);
+    if (!user) return { ok: false as const, reason: "USER_NOT_FOUND" as const };
+
+    const price = getModelPriceFromDb(db, modelId);
+    if (!price) return { ok: false as const, reason: "PRICE_NOT_CONFIGURED" as const };
+
+    const billPoints = calculateImageGenPoints({
+      billPointsPerCall: Number(price.imageGenBillPointsPerCall ?? 0),
+    });
+    if (billPoints <= 0) return { ok: false as const, reason: "ZERO_COST" as const };
+
+    const meta = {
+      kind: "image_gen_cost_v1",
+      source: args.source,
+      modelId,
+      toolName,
+      billPointsPerCall: Number(price.imageGenBillPointsPerCall ?? 0),
+      chargedPoints: billPoints,
+      ...(args.metaExtra !== undefined ? { extra: args.metaExtra } : {}),
+    };
+    const txReason = `image_gen:${toolName}:${modelId}`;
+
+    try {
+      const { user: nextUser, tx } = adjustUserPoints({
+        db,
+        userId,
+        delta: -billPoints,
+        type: "consume",
+        reason: txReason,
+      });
+      tx.meta = meta;
+      return {
+        ok: true as const,
+        chargedPoints: billPoints,
+        txId: tx.id,
+        newBalance: nextUser.pointsBalance,
+      };
+    } catch (error: any) {
+      const msg = error?.message ? String(error.message) : String(error);
+      if (msg !== "INSUFFICIENT_POINTS") {
+        return { ok: false as const, reason: "DEDUCT_FAILED" as const, detail: msg };
+      }
+      const prevBalance = Number.isFinite(Number(user.pointsBalance)) ? Number(user.pointsBalance) : 0;
+      const nextBalance = prevBalance - billPoints;
+      user.pointsBalance = nextBalance;
+      const tx = {
+        id: randomUUID(),
+        userId,
+        type: "consume" as const,
+        delta: -billPoints,
+        reason: txReason,
+        meta: {
+          ...meta,
+          note: "allow_negative_balance_v1",
+          previousBalance: prevBalance,
+          nextBalance,
+        },
+        createdAt: new Date().toISOString(),
+      };
+      db.pointsTransactions.push(tx);
+      return {
+        ok: true as const,
+        chargedPoints: billPoints,
+        txId: tx.id,
+        newBalance: nextBalance,
+        note: "allow_negative_balance_v1" as const,
+      };
+    }
   });
 }
 
@@ -2425,6 +2520,7 @@ fastify.get("/ws/agent/run", { websocket: true, preHandler: [authenticateWs] }, 
     getLlmEnv,
     tryGetJwtUser,
     chargeUserForLlmUsage,
+    chargeUserForImageGen,
     loadDb,
     agentRunWaiters: agentRunWaiters as any,
   };
@@ -3433,6 +3529,7 @@ fastify.post(
       priceOutCnyPer1M: z.number().min(0),
       priceCacheReadCnyPer1M: z.number().min(0).nullable().optional(),
       priceCacheCreation5mCnyPer1M: z.number().min(0).nullable().optional(),
+      imageGenBillPointsPerCall: z.number().int().min(0).nullable().optional(),
       billingGroup: z.string().optional(),
       isEnabled: z.boolean().optional(),
       sortOrder: z.number().int().optional(),
@@ -3454,6 +3551,7 @@ fastify.post(
         priceOutCnyPer1M: body.priceOutCnyPer1M,
         priceCacheReadCnyPer1M: body.priceCacheReadCnyPer1M ?? null,
         priceCacheCreation5mCnyPer1M: body.priceCacheCreation5mCnyPer1M ?? null,
+        imageGenBillPointsPerCall: body.imageGenBillPointsPerCall ?? null,
         billingGroup: body.billingGroup ?? null,
         isEnabled: body.isEnabled,
         sortOrder: body.sortOrder,
@@ -3487,6 +3585,7 @@ fastify.patch(
       priceOutCnyPer1M: z.number().min(0).nullable().optional(),
       priceCacheReadCnyPer1M: z.number().min(0).nullable().optional(),
       priceCacheCreation5mCnyPer1M: z.number().min(0).nullable().optional(),
+      imageGenBillPointsPerCall: z.number().int().min(0).nullable().optional(),
       billingGroup: z.string().nullable().optional(),
       isEnabled: z.boolean().optional(),
       sortOrder: z.number().int().optional(),
@@ -3990,6 +4089,7 @@ fastify.put(
       priceOutCnyPer1M: z.number().min(0),
       priceCacheReadCnyPer1M: z.number().min(0).default(0),
       priceCacheCreation5mCnyPer1M: z.number().min(0).default(0),
+      imageGenBillPointsPerCall: z.number().int().min(0).nullable().default(null),
     });
 
     const bodySchema = z.object({

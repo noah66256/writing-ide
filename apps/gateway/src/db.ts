@@ -101,6 +101,8 @@ export type LlmModelPrice = {
   priceCacheReadCnyPer1M: number;
   /** 5 分钟缓存创建单价：元/1,000,000 tokens */
   priceCacheCreation5mCnyPer1M: number;
+  /** 图片生成按次计费：积分/次（null/undefined=不按次计费） */
+  imageGenBillPointsPerCall: number | null;
 };
 
 export type LlmConfig = {
@@ -177,6 +179,7 @@ export type AiModel = {
   priceOutCnyPer1M: number | null;
   priceCacheReadCnyPer1M: number | null;
   priceCacheCreation5mCnyPer1M: number | null;
+  imageGenBillPointsPerCall: number | null;
   billingGroup: string | null;
   isEnabled: boolean;
   sortOrder: number;
@@ -580,12 +583,15 @@ export async function loadDb(): Promise<Db> {
           const priceOut = normNum((v as any)?.priceOutCnyPer1M);
           const priceCacheRead = normNum((v as any)?.priceCacheReadCnyPer1M) ?? 0;
           const priceCacheCreation5m = normNum((v as any)?.priceCacheCreation5mCnyPer1M) ?? 0;
+          const imageGenBillPointsPerCall = normNum((v as any)?.imageGenBillPointsPerCall);
           if (priceIn === null || priceOut === null) continue;
           pricing[modelId] = {
             priceInCnyPer1M: priceIn,
             priceOutCnyPer1M: priceOut,
             priceCacheReadCnyPer1M: priceCacheRead,
             priceCacheCreation5mCnyPer1M: priceCacheCreation5m,
+            imageGenBillPointsPerCall:
+              imageGenBillPointsPerCall !== null ? Math.max(0, Math.floor(imageGenBillPointsPerCall)) : null,
           };
         }
       }
@@ -704,6 +710,7 @@ export async function loadDb(): Promise<Db> {
           const priceOut = normNum(m?.priceOutCnyPer1M);
           const priceCacheRead = normNum(m?.priceCacheReadCnyPer1M);
           const priceCacheCreation5m = normNum(m?.priceCacheCreation5mCnyPer1M);
+          const imageGenBillPointsPerCall = normNum(m?.imageGenBillPointsPerCall);
           const billingGroup = typeof m?.billingGroup === "string" ? normStr(m.billingGroup) : null;
           const isEnabled = m?.isEnabled === false ? false : true;
           const sortOrder = Number.isFinite(m?.sortOrder) ? Number(m.sortOrder) : 0;
@@ -737,6 +744,10 @@ export async function loadDb(): Promise<Db> {
             priceOutCnyPer1M: priceOut,
             priceCacheReadCnyPer1M: priceCacheRead,
             priceCacheCreation5mCnyPer1M: priceCacheCreation5m,
+            imageGenBillPointsPerCall:
+              imageGenBillPointsPerCall !== null && Number.isFinite(imageGenBillPointsPerCall)
+                ? Math.max(0, Math.floor(Number(imageGenBillPointsPerCall)))
+                : null,
             billingGroup,
             isEnabled,
             sortOrder,

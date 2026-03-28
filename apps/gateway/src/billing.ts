@@ -243,6 +243,11 @@ export function calculateCostPoints(args: {
   return Number.isFinite(points) && points > 0 ? points : 0;
 }
 
+export function calculateImageGenPoints(args: {
+  billPointsPerCall: number;
+}): number {
+  return Math.max(0, Math.ceil(Number(args.billPointsPerCall) || 0));
+}
 
 
 

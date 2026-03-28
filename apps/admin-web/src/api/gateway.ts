@@ -205,6 +205,7 @@ export type AiModelDto = {
   priceOutCnyPer1M: number | null;
   priceCacheReadCnyPer1M: number | null;
   priceCacheCreation5mCnyPer1M: number | null;
+  imageGenBillPointsPerCall?: number | null;
   billingGroup: string | null;
   isEnabled: boolean;
   sortOrder: number;
@@ -279,6 +280,7 @@ export async function aiConfigCreateModel(body: {
   priceOutCnyPer1M: number;
   priceCacheReadCnyPer1M?: number | null;
   priceCacheCreation5mCnyPer1M?: number | null;
+  imageGenBillPointsPerCall?: number | null;
   billingGroup?: string;
   isEnabled?: boolean;
   sortOrder?: number;
@@ -302,6 +304,7 @@ export async function aiConfigUpdateModel(id: string, body: Partial<{
   priceOutCnyPer1M: number | null;
   priceCacheReadCnyPer1M: number | null;
   priceCacheCreation5mCnyPer1M: number | null;
+  imageGenBillPointsPerCall: number | null;
   billingGroup: string | null;
   isEnabled: boolean;
   sortOrder: number;

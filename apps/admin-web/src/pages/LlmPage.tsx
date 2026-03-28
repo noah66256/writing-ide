@@ -27,6 +27,7 @@ type ModelDraftUi = ModelDraft & {
   priceOutInput?: string;
   priceCacheReadInput?: string;
   priceCacheCreation5mInput?: string;
+  imageGenBillPointsInput?: string;
   contextWindowTokensInput?: string;
 };
 
@@ -119,6 +120,7 @@ export function LlmPage() {
   const [newPriceOut, setNewPriceOut] = useState("");
   const [newPriceCacheRead, setNewPriceCacheRead] = useState("");
   const [newPriceCacheCreation5m, setNewPriceCacheCreation5m] = useState("");
+  const [newImageGenBillPoints, setNewImageGenBillPoints] = useState("");
   const [newBillingGroup, setNewBillingGroup] = useState("");
   const [newEnabled, setNewEnabled] = useState(true);
   const [newSortOrder, setNewSortOrder] = useState("0");
@@ -166,6 +168,7 @@ export function LlmPage() {
           priceOutInput: m.priceOutCnyPer1M === null ? "" : String(m.priceOutCnyPer1M),
           priceCacheReadInput: m.priceCacheReadCnyPer1M === null ? "" : String(m.priceCacheReadCnyPer1M),
           priceCacheCreation5mInput: m.priceCacheCreation5mCnyPer1M === null ? "" : String(m.priceCacheCreation5mCnyPer1M),
+          imageGenBillPointsInput: m.imageGenBillPointsPerCall === null || m.imageGenBillPointsPerCall === undefined ? "" : String(m.imageGenBillPointsPerCall),
         })),
       );
     } catch (e: any) {
@@ -220,6 +223,8 @@ export function LlmPage() {
     const cacheCreation5mStr = String(newPriceCacheCreation5m ?? "").trim();
     const priceCacheRead = cacheReadStr ? Number(cacheReadStr) : null;
     const priceCacheCreation5m = cacheCreation5mStr ? Number(cacheCreation5mStr) : null;
+    const imageGenBillPointsStr = String(newImageGenBillPoints ?? "").trim();
+    const imageGenBillPoints = imageGenBillPointsStr ? Number(imageGenBillPointsStr) : null;
     const sortOrder = Number(newSortOrder);
     const ctxStr = String(newContextWindowTokens ?? "").trim();
     const contextWindowTokens = ctxStr ? Number(ctxStr) : null;
@@ -241,6 +246,9 @@ export function LlmPage() {
     if (priceCacheCreation5m !== null && (!Number.isFinite(priceCacheCreation5m) || priceCacheCreation5m < 0)) {
       return setError("5m 缓存创建单价必须是 >=0 的数字（元/1,000,000 tokens）");
     }
+    if (imageGenBillPoints !== null && (!Number.isFinite(imageGenBillPoints) || imageGenBillPoints < 0 || !Number.isInteger(imageGenBillPoints))) {
+      return setError("图片生成扣积分必须是 >=0 的整数");
+    }
     if (!Number.isFinite(sortOrder) || !Number.isInteger(sortOrder)) return setError("sortOrder 必须是整数");
     if (contextWindowTokens !== null) {
       if (!Number.isFinite(contextWindowTokens) || contextWindowTokens <= 0) return setError("上下文窗口必须是 >0 的数字");
@@ -259,6 +267,7 @@ export function LlmPage() {
         priceOutCnyPer1M: priceOut,
         ...(priceCacheRead !== null ? { priceCacheReadCnyPer1M: priceCacheRead } : {}),
         ...(priceCacheCreation5m !== null ? { priceCacheCreation5mCnyPer1M: priceCacheCreation5m } : {}),
+        ...(imageGenBillPoints !== null ? { imageGenBillPointsPerCall: imageGenBillPoints } : {}),
         billingGroup: newBillingGroup.trim() || undefined,
         isEnabled: newEnabled,
         sortOrder,
@@ -277,6 +286,7 @@ export function LlmPage() {
       setNewPriceOut("");
       setNewPriceCacheRead("");
       setNewPriceCacheCreation5m("");
+      setNewImageGenBillPoints("");
       setNewBillingGroup("");
       setNewEnabled(true);
       setNewSortOrder("0");
@@ -400,6 +410,12 @@ export function LlmPage() {
         : m.priceCacheCreation5mCnyPer1M === null
           ? ""
           : String(m.priceCacheCreation5mCnyPer1M);
+    const imageGenBillPointsStr =
+      typeof m.imageGenBillPointsInput === "string"
+        ? m.imageGenBillPointsInput.trim()
+        : m.imageGenBillPointsPerCall === null || m.imageGenBillPointsPerCall === undefined
+          ? ""
+          : String(m.imageGenBillPointsPerCall);
 
     if (!inStr) return setError("输入单价不能为空（元/1,000,000 tokens）");
     if (!outStr) return setError("输出单价不能为空（元/1,000,000 tokens）");
@@ -408,10 +424,14 @@ export function LlmPage() {
     const priceOut = Number(outStr);
     const priceCacheRead = cacheReadStr ? Number(cacheReadStr) : null;
     const priceCacheCreation5m = cacheCreation5mStr ? Number(cacheCreation5mStr) : null;
+    const imageGenBillPoints = imageGenBillPointsStr ? Number(imageGenBillPointsStr) : null;
     if (!Number.isFinite(priceIn) || priceIn < 0) return setError("输入单价无效");
     if (!Number.isFinite(priceOut) || priceOut < 0) return setError("输出单价无效");
     if (priceCacheRead !== null && (!Number.isFinite(priceCacheRead) || priceCacheRead < 0)) return setError("缓存读取单价无效");
     if (priceCacheCreation5m !== null && (!Number.isFinite(priceCacheCreation5m) || priceCacheCreation5m < 0)) return setError("5m 缓存创建单价无效");
+    if (imageGenBillPoints !== null && (!Number.isFinite(imageGenBillPoints) || imageGenBillPoints < 0 || !Number.isInteger(imageGenBillPoints))) {
+      return setError("图片生成扣积分必须是 >=0 的整数");
+    }
 
     setBusy(true);
     try {
@@ -425,6 +445,7 @@ export function LlmPage() {
         priceOutCnyPer1M: priceOut,
         priceCacheReadCnyPer1M: priceCacheRead,
         priceCacheCreation5mCnyPer1M: priceCacheCreation5m,
+        imageGenBillPointsPerCall: imageGenBillPoints,
         billingGroup: (m.billingGroup ?? null) ? String(m.billingGroup).trim() : null,
         isEnabled: Boolean(m.isEnabled),
         sortOrder: Number(m.sortOrder),
@@ -692,6 +713,9 @@ export function LlmPage() {
                     <span className="tag">{trf}</span>
                     <span className={`tag ${keyTag}`}>{keyText}</span>
                     <span className={`tag ${testTagClass}`}>{testText}</span>
+                    {typeof m.imageGenBillPointsPerCall === "number" && m.imageGenBillPointsPerCall > 0 ? (
+                      <span className="tag">{`图片 ${m.imageGenBillPointsPerCall}积分/次`}</span>
+                    ) : null}
                     {m.billingGroup ? <span className="tag">{`group ${m.billingGroup}`}</span> : null}
                   </div>
 
@@ -883,6 +907,20 @@ export function LlmPage() {
                       value={m.billingGroup ?? ""}
                       onChange={(e) => setModels((prev) => prev.map((x) => (x.id === m.id ? { ...x, billingGroup: e.target.value } : x)))}
                       placeholder="thirdparty-A"
+                    />
+                  </label>
+
+                  <label className="field">
+                    <div className="label">图片生成扣积分/次（可选）</div>
+                    <input
+                      className="input"
+                      value={(m as any).imageGenBillPointsInput ?? (m.imageGenBillPointsPerCall === null || m.imageGenBillPointsPerCall === undefined ? "" : String(m.imageGenBillPointsPerCall))}
+                      onChange={(e) =>
+                        setModels((prev) =>
+                          prev.map((x) => (x.id === m.id ? ({ ...x, imageGenBillPointsInput: e.target.value } as any) : x)),
+                        )
+                      }
+                      placeholder="993"
                     />
                   </label>
 
@@ -1206,6 +1244,10 @@ export function LlmPage() {
                   onChange={(e) => setNewPriceCacheCreation5m(e.target.value)}
                   placeholder="1.25"
                 />
+              </label>
+              <label className="field">
+                <div className="label">图片生成扣积分/次（可选）</div>
+                <input className="input" value={newImageGenBillPoints} onChange={(e) => setNewImageGenBillPoints(e.target.value)} placeholder="993" />
               </label>
               <label className="field">
                 <div className="label">billingGroup（可选）</div>

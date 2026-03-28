@@ -57,6 +57,7 @@ function createServices(): RunServices {
     }),
     tryGetJwtUser: async () => ({ id: "u_test", role: "admin" }),
     chargeUserForLlmUsage: async () => null,
+    chargeUserForImageGen: async () => null,
     loadDb: async () => ({ users: [], audits: [] } as any),
     agentRunWaiters: new Map(),
   };

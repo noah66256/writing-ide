@@ -109,6 +109,8 @@ const EMPTY_FAILURE_DIGEST: RuntimeFailureDigest = {
 /** Desktop 工具结果超时（10 分钟） */
 const TOOL_RESULT_TIMEOUT_MS = 600_000;
 const PORTABLE_HOOK_COMMAND_TOOL_NAME = "portable.hook.command";
+const CRAB_IMAGE_PRO_MODEL_ID = "gemini-3-pro-image-preview";
+const CRAB_IMAGE_FLASH_MODEL_ID = "gemini-3.1-flash-image-preview";
 
 /** 工具结果文本截断上限 */
 const MAX_TOOL_RESULT_CHARS = 60_000;
@@ -118,6 +120,19 @@ const COMPLETED_OUTCOME: RunOutcome = {
   reason: "completed",
   reasonCodes: ["completed"],
 };
+
+function isCrabImageBillingTool(name: string): boolean {
+  return name === "mcp.crab-image.generate_image" || name === "mcp.crab-image.edit_image";
+}
+
+function resolveImageGenModelIdFromArgs(args: unknown): string {
+  const source = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+  const explicitModel = typeof source.model === "string" ? source.model.trim() : "";
+  if (explicitModel) return explicitModel;
+  const quality = typeof source.quality === "string" ? source.quality.trim().toLowerCase() : "";
+  if (quality === "fast") return CRAB_IMAGE_FLASH_MODEL_ID;
+  return CRAB_IMAGE_PRO_MODEL_ID;
+}
 
 /** 默认最大回合数，防止无限循环 */
 const DEFAULT_MAX_TURNS = 200;
@@ -3944,6 +3959,40 @@ export class GatewayRuntime implements AgentRuntime {
           executedBy,
           dryRun,
         });
+
+        if (ok && !dryRun && isCrabImageBillingTool(rawToolName) && typeof this.config.runCtx.chargeUserForImageGen === "function") {
+          try {
+            const modelId = resolveImageGenModelIdFromArgs(snap?.args);
+            const charged = await this.config.runCtx.chargeUserForImageGen({
+              modelId,
+              toolName: rawToolName,
+              source: `run:${this.config.runCtx.runId}`,
+              metaExtra: {
+                toolCallId: event.toolCallId,
+                args: snap?.args ?? {},
+              },
+            });
+            const chargedPoints = Number(charged?.chargedPoints ?? 0);
+            if (charged?.ok && Number.isFinite(chargedPoints) && chargedPoints > 0) {
+              this.config.runCtx.writeEvent("policy.decision", {
+                runId: this.config.runCtx.runId,
+                ts: Date.now(),
+                turn: this.turn,
+                policy: "BillingPolicy",
+                decision: "charged",
+                reasonCodes: ["image_gen", rawToolName],
+                detail: {
+                  kind: "image_gen",
+                  toolName: rawToolName,
+                  modelId,
+                  chargedPoints: Math.floor(chargedPoints),
+                },
+              });
+            }
+          } catch {
+            // 图片扣费失败不阻断工具结果
+          }
+        }
 
         // 失败摘要
         if (!ok && !dryRun) {

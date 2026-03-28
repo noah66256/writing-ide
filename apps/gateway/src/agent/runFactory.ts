@@ -164,6 +164,13 @@ export type RunServices = {
     source: string;
     metaExtra?: unknown;
   }) => Promise<any>;
+  chargeUserForImageGen: (args: {
+    userId: string;
+    modelId: string;
+    toolName: string;
+    source: string;
+    metaExtra?: unknown;
+  }) => Promise<any>;
   loadDb: () => Promise<Db>;
   agentRunWaiters: Map<string, WaiterMap>;
 };
@@ -5384,6 +5391,17 @@ export async function executeAgentRun(args: {
           .catch(() => {});
       }
     },
+    chargeUserForImageGen:
+      prepared.jwtUser?.id && prepared.jwtUser.role !== "admin"
+        ? (args) =>
+            services.chargeUserForImageGen({
+              userId: prepared.jwtUser!.id,
+              modelId: args.modelId,
+              toolName: args.toolName,
+              source: args.source,
+              metaExtra: args.metaExtra,
+            })
+        : undefined,
     initialRunState: runState,
     targetChars: targetChars ?? null,
     resolveSubAgentModel,

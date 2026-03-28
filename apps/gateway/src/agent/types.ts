@@ -83,6 +83,12 @@ export type RunContext = {
   waiters: WaiterMap;
   abortSignal: AbortSignal;
   onTurnUsage?: (usage: LlmTokenUsage) => void;
+  chargeUserForImageGen?: (args: {
+    modelId: string;
+    toolName: string;
+    source: string;
+    metaExtra?: unknown;
+  }) => Promise<any>;
   /** 子 Agent 模型解析回调 */
   resolveSubAgentModel?: (
     candidates: string[],

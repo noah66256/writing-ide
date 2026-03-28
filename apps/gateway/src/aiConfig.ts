@@ -496,6 +496,20 @@ export function createAiConfigService(args: {
       String(process.env.LLM_GEMINI_FLASH_LITE_ENDPOINT ?? "/v1beta/models/gemini-3.1-flash-lite-preview:generateContent"),
       "/v1beta/models/gemini-3.1-flash-lite-preview:generateContent",
     );
+    const envGeminiImageProModel = normalizeModelId(
+      String(process.env.LLM_GEMINI_IMAGE_PRO_MODEL ?? "gemini-3-pro-image-preview"),
+    );
+    const envGeminiImageFlashModel = normalizeModelId(
+      String(process.env.LLM_GEMINI_IMAGE_FLASH_MODEL ?? "gemini-3.1-flash-image-preview"),
+    );
+    const envGeminiImageProEndpoint = normalizeEndpoint(
+      String(process.env.LLM_GEMINI_IMAGE_PRO_ENDPOINT ?? "/v1beta/models/gemini-3-pro-image-preview:generateContent"),
+      "/v1beta/models/gemini-3-pro-image-preview:generateContent",
+    );
+    const envGeminiImageFlashEndpoint = normalizeEndpoint(
+      String(process.env.LLM_GEMINI_IMAGE_FLASH_ENDPOINT ?? "/v1beta/models/gemini-3.1-flash-image-preview:generateContent"),
+      "/v1beta/models/gemini-3.1-flash-image-preview:generateContent",
+    );
 
     const pickCredsForStage = (stageKey: string) => {
       if (stageKey === "embedding") return { baseURL: envEmbedBase || envBase, apiKey: envEmbedKey || envKey };
@@ -510,7 +524,20 @@ export function createAiConfigService(args: {
       return { baseURL: envBase, apiKey: envKey };
     };
 
-    const ensureModel = (modelId: string, stageKey: string, endpoint: string) => {
+    const ensureModel = (
+      modelId: string,
+      stageKey: string,
+      endpoint: string,
+      defaults?: Partial<Pick<
+        AiModel,
+        | "priceInCnyPer1M"
+        | "priceOutCnyPer1M"
+        | "priceCacheReadCnyPer1M"
+        | "priceCacheCreation5mCnyPer1M"
+        | "imageGenBillPointsPerCall"
+        | "description"
+      >>,
+    ) => {
       const id = normalizeModelId(modelId);
       if (!id) return null;
       const creds = pickCredsForStage(stageKey);
@@ -528,6 +555,30 @@ export function createAiConfigService(args: {
           existed.toolResultFormat = useTextToolResult ? "text" : "xml";
           existed.apiKeyEnc = enc ? enc.enc : null;
           existed.apiKeyLast4 = enc ? enc.last4 : null;
+          if (defaults?.priceInCnyPer1M !== undefined && existed.priceInCnyPer1M === null) {
+            existed.priceInCnyPer1M = defaults.priceInCnyPer1M;
+          }
+          if (defaults?.priceOutCnyPer1M !== undefined && existed.priceOutCnyPer1M === null) {
+            existed.priceOutCnyPer1M = defaults.priceOutCnyPer1M;
+          }
+          if (defaults?.priceCacheReadCnyPer1M !== undefined && existed.priceCacheReadCnyPer1M === null) {
+            existed.priceCacheReadCnyPer1M = defaults.priceCacheReadCnyPer1M;
+          }
+          if (
+            defaults?.priceCacheCreation5mCnyPer1M !== undefined &&
+            existed.priceCacheCreation5mCnyPer1M === null
+          ) {
+            existed.priceCacheCreation5mCnyPer1M = defaults.priceCacheCreation5mCnyPer1M;
+          }
+          if (
+            defaults?.imageGenBillPointsPerCall !== undefined &&
+            (existed.imageGenBillPointsPerCall === null || existed.imageGenBillPointsPerCall === undefined)
+          ) {
+            existed.imageGenBillPointsPerCall = defaults.imageGenBillPointsPerCall;
+          }
+          if (defaults?.description && String(existed.description || "").includes("自动初始化：来自 env 默认值")) {
+            existed.description = defaults.description;
+          }
           existed.updatedAt = nowIso();
           existed.updatedBy = "system";
         }
@@ -552,15 +603,22 @@ export function createAiConfigService(args: {
         priceOutCnyPer1M: null,
         priceCacheReadCnyPer1M: null,
         priceCacheCreation5mCnyPer1M: null,
+        imageGenBillPointsPerCall: defaults?.imageGenBillPointsPerCall ?? null,
         billingGroup: null,
         isEnabled: true,
         sortOrder: 0,
-        description: "自动初始化：来自 env 默认值（开发期兜底）",
+        description: defaults?.description ?? "自动初始化：来自 env 默认值（开发期兜底）",
         testResult: null,
         updatedBy: "system",
         createdAt: t,
         updatedAt: t,
       };
+      if (defaults?.priceInCnyPer1M !== undefined) m.priceInCnyPer1M = defaults.priceInCnyPer1M;
+      if (defaults?.priceOutCnyPer1M !== undefined) m.priceOutCnyPer1M = defaults.priceOutCnyPer1M;
+      if (defaults?.priceCacheReadCnyPer1M !== undefined) m.priceCacheReadCnyPer1M = defaults.priceCacheReadCnyPer1M;
+      if (defaults?.priceCacheCreation5mCnyPer1M !== undefined) {
+        m.priceCacheCreation5mCnyPer1M = defaults.priceCacheCreation5mCnyPer1M;
+      }
       byId.set(id, m);
       ai.models = [...(ai.models ?? []), m];
       return m;
@@ -601,6 +659,26 @@ export function createAiConfigService(args: {
     }
     if (envGeminiFlashLiteModel) {
       ensureModel(envGeminiFlashLiteModel, "llm.gemini", envGeminiFlashLiteEndpoint);
+    }
+    if (envGeminiBase && envGeminiImageProModel) {
+      ensureModel(envGeminiImageProModel, "llm.gemini", envGeminiImageProEndpoint, {
+        priceInCnyPer1M: 0,
+        priceOutCnyPer1M: 0,
+        priceCacheReadCnyPer1M: 0,
+        priceCacheCreation5mCnyPer1M: 0,
+        imageGenBillPointsPerCall: 993,
+        description: "自动初始化：Gemini 图片生成 Pro（默认 993 积分/次）",
+      });
+    }
+    if (envGeminiBase && envGeminiImageFlashModel) {
+      ensureModel(envGeminiImageFlashModel, "llm.gemini", envGeminiImageFlashEndpoint, {
+        priceInCnyPer1M: 0,
+        priceOutCnyPer1M: 0,
+        priceCacheReadCnyPer1M: 0,
+        priceCacheCreation5mCnyPer1M: 0,
+        imageGenBillPointsPerCall: 993,
+        description: "自动初始化：Gemini 图片生成 Flash（默认 993 积分/次）",
+      });
     }
 
     // 2) 确保所有 stage 都有 stage 配置（缺失则补齐）
@@ -952,6 +1030,10 @@ export function createAiConfigService(args: {
         typeof m.priceCacheCreation5mCnyPer1M === "number" && Number.isFinite(m.priceCacheCreation5mCnyPer1M) && m.priceCacheCreation5mCnyPer1M >= 0
           ? m.priceCacheCreation5mCnyPer1M
           : 0,
+      imageGenBillPointsPerCall:
+        typeof m.imageGenBillPointsPerCall === "number" && Number.isFinite(m.imageGenBillPointsPerCall) && m.imageGenBillPointsPerCall >= 0
+          ? Math.floor(m.imageGenBillPointsPerCall)
+          : null,
     };
   };
 
@@ -968,6 +1050,7 @@ export function createAiConfigService(args: {
     priceOutCnyPer1M: number;
     priceCacheReadCnyPer1M?: number | null;
     priceCacheCreation5mCnyPer1M?: number | null;
+    imageGenBillPointsPerCall?: number | null;
     billingGroup?: string | null;
     isEnabled?: boolean;
     sortOrder?: number;
@@ -1002,9 +1085,17 @@ export function createAiConfigService(args: {
       params.priceCacheCreation5mCnyPer1M === undefined || params.priceCacheCreation5mCnyPer1M === null
         ? null
         : Number(params.priceCacheCreation5mCnyPer1M);
+    const imageGenBillPointsPerCall =
+      params.imageGenBillPointsPerCall === undefined || params.imageGenBillPointsPerCall === null
+        ? null
+        : Number(params.imageGenBillPointsPerCall);
     if (!Number.isFinite(priceIn) || !Number.isFinite(priceOut) || priceIn < 0 || priceOut < 0) throw new Error("pricing_invalid");
     if (priceCacheRead !== null && (!Number.isFinite(priceCacheRead) || priceCacheRead < 0)) throw new Error("pricing_invalid");
     if (priceCacheCreation5m !== null && (!Number.isFinite(priceCacheCreation5m) || priceCacheCreation5m < 0)) throw new Error("pricing_invalid");
+    if (
+      imageGenBillPointsPerCall !== null &&
+      (!Number.isFinite(imageGenBillPointsPerCall) || imageGenBillPointsPerCall < 0)
+    ) throw new Error("pricing_invalid");
 
     const apiKeyInput = normalizeApiKeyInput(params.apiKey || "");
     let apiKeyEnc: string | null = null;
@@ -1069,6 +1160,7 @@ export function createAiConfigService(args: {
       priceOutCnyPer1M: priceOut,
       priceCacheReadCnyPer1M: priceCacheRead,
       priceCacheCreation5mCnyPer1M: priceCacheCreation5m,
+      imageGenBillPointsPerCall: imageGenBillPointsPerCall === null ? null : Math.floor(imageGenBillPointsPerCall),
       billingGroup: params.billingGroup ?? null,
       isEnabled: params.isEnabled === false ? false : true,
       sortOrder: Number.isFinite(params.sortOrder as any) ? Number(params.sortOrder) : 0,
@@ -1104,6 +1196,7 @@ export function createAiConfigService(args: {
       priceOutCnyPer1M: number | null;
       priceCacheReadCnyPer1M: number | null;
       priceCacheCreation5mCnyPer1M: number | null;
+      imageGenBillPointsPerCall: number | null;
       billingGroup: string | null;
       isEnabled: boolean;
       sortOrder: number;
@@ -1171,10 +1264,18 @@ export function createAiConfigService(args: {
       patch.priceCacheCreation5mCnyPer1M !== undefined
         ? (patch.priceCacheCreation5mCnyPer1M === null ? null : Number(patch.priceCacheCreation5mCnyPer1M))
         : cur.priceCacheCreation5mCnyPer1M;
+    const imageGenBillPointsPerCall =
+      patch.imageGenBillPointsPerCall !== undefined
+        ? (patch.imageGenBillPointsPerCall === null ? null : Number(patch.imageGenBillPointsPerCall))
+        : cur.imageGenBillPointsPerCall ?? null;
     if (priceIn !== null && (!Number.isFinite(priceIn) || priceIn < 0)) throw new Error("pricing_invalid");
     if (priceOut !== null && (!Number.isFinite(priceOut) || priceOut < 0)) throw new Error("pricing_invalid");
     if (priceCacheRead !== null && (!Number.isFinite(priceCacheRead) || priceCacheRead < 0)) throw new Error("pricing_invalid");
     if (priceCacheCreation5m !== null && (!Number.isFinite(priceCacheCreation5m) || priceCacheCreation5m < 0)) throw new Error("pricing_invalid");
+    if (
+      imageGenBillPointsPerCall !== null &&
+      (!Number.isFinite(imageGenBillPointsPerCall) || imageGenBillPointsPerCall < 0)
+    ) throw new Error("pricing_invalid");
 
     // 防重复（排除自己）
     if (apiKeyLast4) {
@@ -1205,6 +1306,7 @@ export function createAiConfigService(args: {
       priceOutCnyPer1M: priceOut,
       priceCacheReadCnyPer1M: priceCacheRead,
       priceCacheCreation5mCnyPer1M: priceCacheCreation5m,
+      imageGenBillPointsPerCall: imageGenBillPointsPerCall === null ? null : Math.floor(imageGenBillPointsPerCall),
       billingGroup: patch.billingGroup !== undefined ? patch.billingGroup : cur.billingGroup,
       isEnabled: patch.isEnabled !== undefined ? Boolean(patch.isEnabled) : cur.isEnabled,
       sortOrder: patch.sortOrder !== undefined ? Number(patch.sortOrder) : cur.sortOrder,
