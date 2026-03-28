@@ -32,6 +32,7 @@ import {
   getToolResultEnvelopeNormalizedText,
   isToolResultEnvelope,
   type ToolResultEnvelope,
+  type ToolResultImagePayload,
 } from "@ohmycrab/shared";
 import { TOOL_LIST, encodeToolName, decodeToolName } from "@ohmycrab/tools";
 import type {
@@ -126,12 +127,14 @@ const MAX_PROVIDER_TOOL_NAME_LEN = 64;
 const STYLE_LINT_PASS_SCORE = 70;
 const LINT_MAX_REWORK = 2;
 const MAX_TOOL_FAILURE_REPAIR_SERIES = 3;
+const MAX_TOOL_RESULT_VISION_IMAGES = 3;
 
 // ── 内部类型 ─────────────────────────────────────
 
 type GatewayToolExecResult = {
   ok: boolean;
   output: unknown;
+  images?: ToolResultImagePayload[];
   meta?: Record<string, unknown> | null;
   executedBy: "gateway" | "desktop";
   dryRun?: boolean;
@@ -367,6 +370,78 @@ function normalizeToolOutputText(output: unknown): string {
 
 function buildTextContent(text: string): TextContent[] {
   return [{ type: "text", text: truncateText(text || "(empty tool result)") }];
+}
+
+function normalizeToolResultImages(images: unknown): ToolResultImagePayload[] {
+  if (!Array.isArray(images)) return [];
+  return images
+    .filter((item) => item && typeof item === "object")
+    .map((item) => {
+      const mediaType = String((item as any).mediaType ?? "").trim();
+      const data = String((item as any).data ?? "").trim();
+      if (!mediaType || !data) return null;
+      const name = String((item as any).name ?? "").trim();
+      const width = Number((item as any).width);
+      const height = Number((item as any).height);
+      const sizeBytes = Number((item as any).sizeBytes);
+      return {
+        mediaType,
+        data,
+        ...(name ? { name } : {}),
+        ...(Number.isFinite(width) && width > 0 ? { width: Math.round(width) } : {}),
+        ...(Number.isFinite(height) && height > 0 ? { height: Math.round(height) } : {}),
+        ...(Number.isFinite(sizeBytes) && sizeBytes > 0 ? { sizeBytes: Math.round(sizeBytes) } : {}),
+      } satisfies ToolResultImagePayload;
+    })
+    .filter((item): item is ToolResultImagePayload => Boolean(item))
+    .slice(0, 1);
+}
+
+function buildToolResultImageFallbackText(images: ToolResultImagePayload[]): string {
+  if (!images.length) return "";
+  return images
+    .map((image) => {
+      const parts: string[] = [];
+      if (image.name) parts.push(image.name);
+      if (image.width && image.height) parts.push(`${image.width}x${image.height}`);
+      return `[图片: ${parts.join(", ") || image.mediaType}]`;
+    })
+    .join("\n");
+}
+
+function buildToolResultContentParts(
+  item: CanonicalToolResultItem,
+  keepImages: boolean,
+): Array<TextContent | ImageContent> {
+  const images = normalizeToolResultImages(item.images);
+  const textBase = item.normalizedText || normalizeToolOutputText(item.output);
+  const fallbackText = keepImages ? "" : buildToolResultImageFallbackText(images);
+  const text = [textBase, fallbackText].filter(Boolean).join("\n\n").trim() || "(empty tool result)";
+  const parts: Array<TextContent | ImageContent> = buildTextContent(text);
+  if (keepImages) {
+    for (const image of images) {
+      parts.push({
+        type: "image",
+        data: image.data,
+        mimeType: image.mediaType,
+      } as ImageContent);
+    }
+  }
+  return parts;
+}
+
+function collectRecentToolResultImageCallIds(messages: AgentMessage[]): Set<string> {
+  const out = new Set<string>();
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (!isCanonicalItem(message)) continue;
+    const item = message as CanonicalTranscriptItem;
+    if (item.kind !== "tool_result") continue;
+    if (!normalizeToolResultImages(item.images).length) continue;
+    out.add(item.callId);
+    if (out.size >= MAX_TOOL_RESULT_VISION_IMAGES) break;
+  }
+  return out;
 }
 
 function cloneMainDoc(mainDoc: Record<string, unknown>): Record<string, unknown> {
@@ -3670,6 +3745,7 @@ export class GatewayRuntime implements AgentRuntime {
         finish({
           ok: payload.ok,
           output: payload.output,
+          images: normalizeToolResultImages(payload.images),
           meta: payload.meta ?? null,
           executedBy: "desktop",
         });
@@ -4032,6 +4108,9 @@ export class GatewayRuntime implements AgentRuntime {
       toolName: this._decodeRuntimeToolName(message.toolName),
       ok,
       output: envelope,
+      ...(normalizeToolResultImages(details?.images).length
+        ? { images: normalizeToolResultImages(details?.images) }
+        : {}),
       normalizedText,
       providerMeta: details?.meta
         ? {
@@ -4053,6 +4132,10 @@ export class GatewayRuntime implements AgentRuntime {
   private _convertToLlm(messages: AgentMessage[]): Message[] {
     const providerApi = inferProviderApi(this.config);
     const capabilities = getProviderCapabilities(providerApi);
+    const allowToolResultImages = providerApi === "anthropic-messages";
+    const recentImageCallIds = allowToolResultImages
+      ? collectRecentToolResultImageCallIds(messages)
+      : new Set<string>();
     let timestamp = Date.now();
     const out: Message[] = [];
     let assistantParts: Array<TextContent | ToolCall> = [];
@@ -4124,8 +4207,9 @@ export class GatewayRuntime implements AgentRuntime {
             role: "toolResult",
             toolCallId: item.callId,
             toolName: this._encodeRuntimeToolName(item.toolName),
-            content: buildTextContent(
-              item.normalizedText || normalizeToolOutputText(item.output),
+            content: buildToolResultContentParts(
+              item,
+              allowToolResultImages && recentImageCallIds.has(item.callId),
             ),
             ...(inlinePayload !== undefined ? { details: inlinePayload } : {}),
             isError: !item.ok,
@@ -4586,6 +4670,7 @@ export class GatewayRuntime implements AgentRuntime {
     return {
       ok: Boolean(obj.ok),
       output: obj.output,
+      images: normalizeToolResultImages(obj.images),
       meta: (obj.meta as Record<string, unknown> | null | undefined) ?? null,
       executedBy: obj.executedBy === "desktop" ? "desktop" : "gateway",
       dryRun: Boolean(obj.dryRun),

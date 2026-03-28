@@ -27,6 +27,7 @@ import {
   type ContextSegmentV1,
   type ThreadImageArtifactRef,
   type ThreadImageSessionV1,
+  type ToolResultImagePayload,
 } from "@ohmycrab/shared";
 import { buildProjectMapSegmentV2, buildProjectSummarySegmentsV1 } from "../lib/projectIndexing";
 import {
@@ -415,6 +416,65 @@ function applyCrabImageToolResultToThread(args: {
   args.rt.setThread?.(nextThread);
 }
 
+const IMAGE_ARTIFACT_EXTENSIONS = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "webp",
+  "gif",
+  "bmp",
+  "svg",
+  "avif",
+  "ico",
+]);
+
+function extractImageArtifacts(output: unknown): any[] {
+  const payload = output && typeof output === "object" ? (output as any) : null;
+  const artifacts = Array.isArray(payload?.artifacts) ? payload.artifacts : [];
+  return artifacts.filter((artifact: any) => {
+    const absPath = String(artifact?.absPath ?? "").trim();
+    if (!absPath) return false;
+    const mimeType = String(artifact?.mimeType ?? "").trim().toLowerCase();
+    const previewKind = String(artifact?.previewKind ?? "").trim().toLowerCase();
+    const ext = String(artifact?.ext ?? "").trim().toLowerCase();
+    return previewKind === "image" || mimeType.startsWith("image/") || IMAGE_ARTIFACT_EXTENSIONS.has(ext);
+  });
+}
+
+async function collectToolResultImages(args: {
+  output: unknown;
+}): Promise<ToolResultImagePayload[]> {
+  const firstArtifact = extractImageArtifacts(args.output)[0];
+  const absPath = String(firstArtifact?.absPath ?? "").trim();
+  const readImageVisionPayload = window.desktop?.fs?.readImageVisionPayload;
+  if (!absPath || typeof readImageVisionPayload !== "function") return [];
+  try {
+    const result = await readImageVisionPayload(absPath, {
+      maxEdge: 1568,
+      maxBytes: 500 * 1024,
+    });
+    if (!result?.ok || !result.data || !result.mediaType) return [];
+    return [{
+      mediaType: result.mediaType,
+      data: result.data,
+      ...(String(firstArtifact?.name ?? "").trim() ? { name: String(firstArtifact.name).trim() } : {}),
+      ...(Number.isFinite(Number(result.width)) ? { width: Number(result.width) } : {}),
+      ...(Number.isFinite(Number(result.height)) ? { height: Number(result.height) } : {}),
+      ...(Number.isFinite(Number(result.sizeBytes)) ? { sizeBytes: Number(result.sizeBytes) } : {}),
+    }];
+  } catch {
+    return [];
+  }
+}
+
+function shouldMirrorToolImageToTranscript(toolName: string, output: unknown): boolean {
+  if (isCrabImageTool(toolName)) return true;
+  if (toolName === "mcp.playwright.browser_take_screenshot") {
+    return extractImageArtifacts(output).length > 0;
+  }
+  return false;
+}
+
 function buildCrabImageTranscriptEntry(args: {
   toolCallId: string;
   toolName: string;
@@ -423,7 +483,7 @@ function buildCrabImageTranscriptEntry(args: {
   agentName?: string | null;
 }) {
   const payload = args.output && typeof args.output === "object" ? (args.output as any) : null;
-  const artifacts = Array.isArray(payload?.artifacts) ? payload.artifacts : [];
+  const artifacts = extractImageArtifacts(args.output);
   if (artifacts.length === 0) return null;
   const parts = artifacts
     .map((artifact: any, index: number) => {
@@ -1856,6 +1916,9 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                       ? result.output
                       : { ok: false, error: result?.error ?? "MCP_TOOL_FAILED" };
                   const successOutput = result.ok ? result.output : failureOutput;
+                  const toolResultImages = result.ok
+                    ? await collectToolResultImages({ output: successOutput })
+                    : [];
                   if (result.ok && isCrabImageTool(name)) {
                     applyCrabImageToolResultToThread({
                       toolName: name,
@@ -1863,6 +1926,13 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                       output: successOutput,
                       rt,
                     });
+                    // 立即持久化 thread，避免 run 超时/报错时 imageSession 丢失
+                    const convId = (rt as any).convId;
+                    if (convId) {
+                      useConversationStore.getState().flushDraftSnapshotNow().catch(() => void 0);
+                    }
+                  }
+                  if (result.ok && shouldMirrorToolImageToTranscript(name, successOutput)) {
                     const imageEntry = buildCrabImageTranscriptEntry({
                       toolCallId,
                       toolName: name,
@@ -1873,11 +1943,6 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                     if (imageEntry) {
                       rt.appendTranscriptEntry(imageEntry as any);
                     }
-                    // 立即持久化 thread，避免 run 超时/报错时 imageSession 丢失
-                    const convId = (rt as any).convId;
-                    if (convId) {
-                      useConversationStore.getState().flushDraftSnapshotNow().catch(() => void 0);
-                    }
                   }
                   patchTool(stepId, {
                     status: result.ok ? "success" : "failed",
@@ -1887,6 +1952,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                     toolCallId, name,
                     ok: result.ok,
                     output: successOutput,
+                    ...(toolResultImages.length ? { images: toolResultImages } : {}),
                     meta: { applyPolicy: "auto", riskLevel: "low", hasApply: false, mcpDiag },
                   });
                 } catch (e: any) {
@@ -1982,6 +2048,9 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                     ? result.output
                     : { ok: false, error: result?.error ?? "MCP_TOOL_FAILED" };
                 const successOutput = result.ok ? result.output : failureOutput;
+                const toolResultImages = result.ok
+                  ? await collectToolResultImages({ output: successOutput })
+                  : [];
                 if (result.ok && isCrabImageTool(name)) {
                   applyCrabImageToolResultToThread({
                     toolName: name,
@@ -1989,6 +2058,8 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                     output: successOutput,
                     rt,
                   });
+                }
+                if (result.ok && shouldMirrorToolImageToTranscript(name, successOutput)) {
                   const imageEntry = buildCrabImageTranscriptEntry({
                     toolCallId,
                     toolName: name,
@@ -2007,6 +2078,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                   toolCallId, name,
                   ok: result.ok,
                   output: successOutput,
+                  ...(toolResultImages.length ? { images: toolResultImages } : {}),
                   meta: { applyPolicy: "auto", riskLevel: "low", hasApply: false, mcpDiag },
                 });
               } catch (e: any) {

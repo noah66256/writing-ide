@@ -1873,6 +1873,14 @@ type ToolResultPayload = {
   name: string;
   ok: boolean;
   output: unknown;
+  images?: Array<{
+    mediaType: string;
+    data: string;
+    name?: string;
+    width?: number;
+    height?: number;
+    sizeBytes?: number;
+  }>;
   meta?: {
     applyPolicy?: "proposal" | "auto_apply";
     riskLevel?: "low" | "medium" | "high";

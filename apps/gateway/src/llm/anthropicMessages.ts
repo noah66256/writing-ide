@@ -32,7 +32,7 @@ export type ContentBlockToolUse = {
 export type ContentBlockToolResult = {
   type: "tool_result";
   tool_use_id: string;
-  content: string | Array<{ type: "text"; text: string }>;
+  content: string | Array<ContentBlockText | ContentBlockImage>;
   is_error?: boolean;
 };
 
@@ -146,8 +146,25 @@ export function buildToolResultMessage(
   toolUseId: string,
   result: unknown,
   isError = false,
+  images?: Array<{ mediaType: string; data: string }>,
 ): AnthropicMessage {
-  const content = typeof result === "string" ? result : JSON.stringify(result ?? null);
+  const baseText = typeof result === "string" ? result : JSON.stringify(result ?? null);
+  const imageBlocks = Array.isArray(images)
+    ? images
+        .filter((image) => image && typeof image === "object")
+        .map((image) => ({
+          type: "image" as const,
+          source: {
+            type: "base64" as const,
+            media_type: String(image.mediaType ?? "").trim(),
+            data: String(image.data ?? "").trim(),
+          },
+        }))
+        .filter((image) => image.source.media_type && image.source.data)
+    : [];
+  const content: string | Array<ContentBlockText | ContentBlockImage> = imageBlocks.length > 0
+    ? [{ type: "text" as const, text: baseText }, ...imageBlocks]
+    : baseText;
   const block: ContentBlockToolResult = {
     type: "tool_result",
     tool_use_id: toolUseId,

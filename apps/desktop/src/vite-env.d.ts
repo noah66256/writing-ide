@@ -83,6 +83,18 @@ declare global {
           error?: string;
         }>;
         readImageDataUrl: (absPath: string) => Promise<{ ok: boolean; dataUrl?: string; error?: string }>;
+        readImageVisionPayload: (
+          absPath: string,
+          opts?: { maxEdge?: number; maxBytes?: number },
+        ) => Promise<{
+          ok: boolean;
+          mediaType?: string;
+          data?: string;
+          width?: number;
+          height?: number;
+          sizeBytes?: number;
+          error?: string;
+        }>;
         readIndex: (rootDir: string) => Promise<{ ok: boolean; data?: any; error?: string }>;
         writeIndex: (rootDir: string, data: any) => Promise<{ ok: boolean; error?: string }>;
         readFile: (rootDir: string, relPath: string) => Promise<{ ok: boolean; content?: string; error?: string }>;

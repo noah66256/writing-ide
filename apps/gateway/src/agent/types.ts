@@ -15,6 +15,7 @@ import type {
   SkillManifest,
   SubAgentDefinition,
 } from "@ohmycrab/agent-core";
+import type { ToolResultImagePayload } from "@ohmycrab/shared";
 import type { LlmTokenUsage } from "../billing.js";
 import type { PortableSkillRunContext } from "./portableSkillCompat.js";
 
@@ -27,6 +28,7 @@ export type ToolResultPayload = {
   name: string;
   ok: boolean;
   output: unknown;
+  images?: ToolResultImagePayload[];
   meta?: Record<string, unknown> | null;
 };
 

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, shell, ipcMain, dialog, clipboard, protocol, session } = require("electron");
+const { app, BrowserWindow, Menu, shell, ipcMain, dialog, clipboard, protocol, session, nativeImage } = require("electron");
 const path = require("path");
 
 // ======== userData 路径对齐（dev <-> packaged） ========
@@ -93,6 +93,8 @@ const RENDERABLE_IMAGE_MIME = new Map([
   [".avif", "image/avif"],
 ]);
 const MAX_RENDERABLE_IMAGE_BYTES = 12 * 1024 * 1024;
+const DEFAULT_VISION_IMAGE_MAX_EDGE = 1568;
+const DEFAULT_VISION_IMAGE_MAX_BYTES = 500 * 1024;
 const MAX_INDEX_FILES = 10000;
 
 const HISTORY_DIRNAME = "ohmycrab-data";
@@ -6232,6 +6234,81 @@ function registerIpc() {
     return { ok: true, content };
   });
 
+  function clampVisionMaxEdge(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return DEFAULT_VISION_IMAGE_MAX_EDGE;
+    return Math.max(256, Math.min(4096, Math.floor(n)));
+  }
+
+  function clampVisionMaxBytes(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return DEFAULT_VISION_IMAGE_MAX_BYTES;
+    return Math.max(64 * 1024, Math.min(5 * 1024 * 1024, Math.floor(n)));
+  }
+
+  function encodeImageForVision(absPath, options) {
+    const file = path.resolve(String(absPath ?? "").trim());
+    if (!file) return { ok: false, error: "MISSING_PATH" };
+    const maxEdge = clampVisionMaxEdge(options?.maxEdge);
+    const maxBytes = clampVisionMaxBytes(options?.maxBytes);
+    const image = nativeImage.createFromPath(file);
+    if (!image || image.isEmpty()) return { ok: false, error: "IMAGE_LOAD_FAILED" };
+
+    const originalSize = image.getSize();
+    if (!originalSize?.width || !originalSize?.height) {
+      return { ok: false, error: "IMAGE_DIMENSION_INVALID" };
+    }
+
+    let targetWidth = originalSize.width;
+    let targetHeight = originalSize.height;
+    const maxOriginalEdge = Math.max(targetWidth, targetHeight);
+    if (maxOriginalEdge > maxEdge) {
+      const scale = maxEdge / maxOriginalEdge;
+      targetWidth = Math.max(1, Math.round(targetWidth * scale));
+      targetHeight = Math.max(1, Math.round(targetHeight * scale));
+    }
+
+    const encodeCandidate = (img) => {
+      const png = img.toPNG();
+      let best = { mediaType: "image/png", buffer: png };
+      if (png.length <= maxBytes) return best;
+      for (const quality of [90, 82, 74, 66, 58, 50, 42, 34]) {
+        const jpeg = img.toJPEG(quality);
+        if (jpeg.length < best.buffer.length) {
+          best = { mediaType: "image/jpeg", buffer: jpeg };
+        }
+        if (jpeg.length <= maxBytes) return { mediaType: "image/jpeg", buffer: jpeg };
+      }
+      return best;
+    };
+
+    let workingImage =
+      targetWidth === originalSize.width && targetHeight === originalSize.height
+        ? image
+        : image.resize({ width: targetWidth, height: targetHeight, quality: "best" });
+    let best = encodeCandidate(workingImage);
+
+    for (let attempt = 0; attempt < 4 && best.buffer.length > maxBytes; attempt += 1) {
+      const nextWidth = Math.max(1, Math.round(targetWidth * 0.85));
+      const nextHeight = Math.max(1, Math.round(targetHeight * 0.85));
+      if (nextWidth === targetWidth && nextHeight === targetHeight) break;
+      targetWidth = nextWidth;
+      targetHeight = nextHeight;
+      workingImage = workingImage.resize({ width: targetWidth, height: targetHeight, quality: "good" });
+      const next = encodeCandidate(workingImage);
+      if (next.buffer.length <= best.buffer.length) best = next;
+    }
+
+    return {
+      ok: true,
+      mediaType: best.mediaType,
+      data: best.buffer.toString("base64"),
+      width: targetWidth,
+      height: targetHeight,
+      sizeBytes: best.buffer.length,
+    };
+  }
+
   ipcMain.handle("readImageDataUrl", async (_event, absPath) => {
     try {
       const file = path.resolve(String(absPath ?? "").trim());
@@ -6244,6 +6321,18 @@ function registerIpc() {
       if (stat.size > MAX_RENDERABLE_IMAGE_BYTES) return { ok: false, error: "IMAGE_TOO_LARGE" };
       const buf = await fsp.readFile(file);
       return { ok: true, dataUrl: `data:${mime};base64,${buf.toString("base64")}` };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  });
+
+  ipcMain.handle("readImageVisionPayload", async (_event, absPath, options) => {
+    try {
+      const file = path.resolve(String(absPath ?? "").trim());
+      if (!file) return { ok: false, error: "MISSING_PATH" };
+      const stat = await fsp.stat(file);
+      if (!stat.isFile()) return { ok: false, error: "NOT_A_FILE" };
+      return encodeImageForVision(file, options);
     } catch (e) {
       return { ok: false, error: String(e?.message ?? e) };
     }

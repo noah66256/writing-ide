@@ -19,4 +19,5 @@ export type EmailVerifyResponse = {
 
 export * from "./contextSegments.js";
 export * from "./runtime/thread-turn-item.js";
+export * from "./runtime/toolResultImage.js";
 export * from "./runtime/toolResultEnvelope.js";

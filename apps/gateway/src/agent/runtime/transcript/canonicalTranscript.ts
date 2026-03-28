@@ -1,4 +1,4 @@
-import type { ToolResultEnvelope } from "@ohmycrab/shared";
+import type { ToolResultEnvelope, ToolResultImagePayload } from "@ohmycrab/shared";
 
 /**
  * Canonical Transcript — Provider 无关的对话记录类型
@@ -52,6 +52,7 @@ export type CanonicalToolResultItem = {
   toolName: string;
   ok: boolean;
   output: ToolResultEnvelope | unknown;
+  images?: ToolResultImagePayload[];
   /** 归一化的纯文本表示（用于 replay 对比和审计摘要） */
   normalizedText: string;
   /** Provider 特有元数据 */
