@@ -2065,11 +2065,16 @@ export class GatewayRuntime implements AgentRuntime {
       }
     }
 
-    // 隐式完成：模型已做过工具调用，且连续纯文本回合 ≥ 2 → 自然终止（参考 Codex 模式）
-    // Codex 的设计：模型不返回 tool call 即视为完成，不注入追问。
-    // 我们保留 1 次追问机会（consecutiveTextOnlyTurns < 2），超过后尊重模型的"自然结束"信号。
-    if (this.totalToolCalls > 0 && this.consecutiveTextOnlyTurns >= 2) {
-      return [];
+    // 隐式完成：连续纯文本回合 ≥ 2 时，turn_end 已经会 abort loop。
+    // 此处作为 belt-and-suspenders 防御：万一 agentLoop 实现差异导致 abort 未生效，
+    // 仍然通过 follow-up 强制要求 run.done，避免无限自言自语。
+    if (this.consecutiveTextOnlyTurns >= 2) {
+      const item: CanonicalTranscriptItem = {
+        kind: "runtime_hint",
+        text: "你已连续两轮没有调用任何工具。请立即调用 run.done 结束。",
+        reasonCodes: ["implicit_completion_force_done"],
+      };
+      return [item as unknown as AgentMessage];
     }
 
     // 模型已输出一轮纯文本总结（consecutiveTextOnlyTurns >= 1），说明最近一次工具失败
@@ -3942,6 +3947,21 @@ export class GatewayRuntime implements AgentRuntime {
         } else {
           this.consecutiveTextOnlyTurns = 0;
         }
+
+        // ── 隐式完成硬停（参考 Claude Code：模型不调工具 = 完成） ──
+        // Claude Code 做法：响应中没有 tool_use → 直接 return {reason:"completed"}
+        // 我们宽松一点：容忍 1 轮纯文本输出（模型可能在给用户总结），
+        // 第 2 轮连续纯文本 → 直接 abort 终止 loop，不再给模型继续发言的机会。
+        if (this.consecutiveTextOnlyTurns >= 2) {
+          this._setOutcome({
+            status: "completed",
+            reason: "implicit_completion",
+            reasonCodes: ["implicit_completion", "consecutive_text_only"],
+          });
+          ac.abort();
+          return;
+        }
+
         await this._enforceTurnLevelGuards(ac);
         return;
       case "message_start":
