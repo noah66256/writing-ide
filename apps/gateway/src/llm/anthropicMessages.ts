@@ -185,7 +185,7 @@ export async function* streamAnthropicMessages(
   const url = `${normalizeBaseUrl(args.baseUrl)}/messages`;
 
   const maxTokens =
-    typeof args.maxTokens === "number" && args.maxTokens > 0 ? Math.floor(args.maxTokens) : 8192;
+    typeof args.maxTokens === "number" && args.maxTokens > 0 ? Math.floor(args.maxTokens) : 16384;
 
   // Re-encode tool_use names in historical messages:
   // Internal code uses decoded names (e.g., "run.setTodoList") but the API
