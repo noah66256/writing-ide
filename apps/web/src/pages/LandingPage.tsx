@@ -360,15 +360,15 @@ export default function LandingPage() {
           <h2 className="text-4xl font-bold mb-4">准备好了吗？</h2>
           <p className="text-gray-500 text-lg mb-10">免费下载，3分钟上手，数据全在本地。</p>
           <div className="flex flex-wrap justify-center gap-4">
-            <a href="http://120.26.6.147:8000/downloads/desktop/stable/OhMyCrab-0.2.0-arm64.dmg" className="btn-brand text-base py-3.5 px-7">
+            <a href="http://ohmycrab.top/downloads/desktop/stable/OhMyCrab-0.2.0-arm64.dmg" className="btn-brand text-base py-3.5 px-7">
               <i className="fa fa-apple text-lg" /> macOS M 系列
               <span className="text-xs opacity-75 ml-1">M1 / M2 / M3 / M4</span>
             </a>
-            <a href="http://120.26.6.147:8000/downloads/desktop/stable/OhMyCrab-0.2.0-x64.pkg" className="btn-outline text-base py-3.5 px-7">
+            <a href="http://ohmycrab.top/downloads/desktop/stable/OhMyCrab-0.2.0-x64.pkg" className="btn-outline text-base py-3.5 px-7">
               <i className="fa fa-apple text-lg" /> macOS Intel
               <span className="text-xs text-gray-400 ml-1">PKG 安装包</span>
             </a>
-            <a href="http://120.26.6.147:8000/downloads/desktop/stable/Oh.My.Crab.Setup.0.2.0.exe" className="btn-outline text-base py-3.5 px-7">
+            <a href="http://ohmycrab.top/downloads/desktop/stable/Oh.My.Crab.Setup.0.2.0.exe" className="btn-outline text-base py-3.5 px-7">
               <i className="fa fa-windows text-lg" /> Windows
               <span className="text-xs text-gray-400 ml-1">安装版</span>
             </a>
