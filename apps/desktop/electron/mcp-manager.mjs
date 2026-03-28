@@ -37,7 +37,7 @@ import { shouldAttemptMcpSessionRecovery } from "./mcp-session-recovery.mjs";
  * @property {string[]} [enabledTools] - 仅对 Agent 暴露这些工具（server 级 allowlist）
  * @property {string[]} [disabledTools] - 从 Agent 视图中剔除这些工具（server 级 denylist）
  * @property {string} [toolProfile] - Agent 工具收敛 profile（如 browse_minimal / word_delivery_minimal）
- * @property {string} [familyHint] - Server 家族提示（browser/search/word/spreadsheet/pdf/custom）
+ * @property {string} [familyHint] - Server 家族提示（browser/search/word/spreadsheet/pdf/image/custom）
  */
 
 /** 内置 MCP Server 清单 */
@@ -98,6 +98,63 @@ const BUILTIN_SERVERS = [
         placeholder: "tvly-...",
         helpUrl: "https://tavily.com",
         helpText: "备选搜索服务",
+        required: false,
+      },
+    ],
+  },
+  {
+    id: "crab-image",
+    name: "Crab Image",
+    transport: "stdio",
+    bundled: true,
+    builtin: true,
+    modulePath: "electron/mcp-servers/crab-image.mjs",
+    args: [],
+    enabled: true,
+    familyHint: "image",
+    toolProfile: "image_generation_minimal",
+    configFields: [
+      {
+        envKey: "GEMINI_API_KEY",
+        label: "Gemini API Key",
+        placeholder: "AIza...",
+        helpUrl: "https://ai.google.dev",
+        helpText: "Google AI Studio / Gemini API Key",
+        required: true,
+      },
+      {
+        envKey: "GEMINI_BASE_URL",
+        label: "Gemini Base URL",
+        placeholder: "https://generativelanguage.googleapis.com",
+        helpText: "可选，支持代理或聚合 API",
+        required: false,
+      },
+      {
+        envKey: "CRAB_IMAGE_DEFAULT_TIER",
+        label: "默认档位",
+        placeholder: "auto / nb2 / pro",
+        helpText: "默认 auto；high 会优先走 pro",
+        required: false,
+      },
+      {
+        envKey: "CRAB_IMAGE_FLASH_MODEL",
+        label: "Flash 模型名",
+        placeholder: "gemini-3.1-flash-image-preview",
+        helpText: "可选，覆盖默认快速模型名",
+        required: false,
+      },
+      {
+        envKey: "CRAB_IMAGE_PRO_MODEL",
+        label: "Pro 模型名",
+        placeholder: "gemini-3-pro-image-preview",
+        helpText: "可选，覆盖默认高质量模型名",
+        required: false,
+      },
+      {
+        envKey: "CRAB_IMAGE_MODEL_NAME_OVERRIDE",
+        label: "模型映射 JSON",
+        placeholder: "{\"flash\":\"custom-flash\",\"pro\":\"custom-pro\"}",
+        helpText: "可选，聚合 API 模型名映射",
         required: false,
       },
     ],
@@ -255,7 +312,7 @@ function rewriteMarkdownLinksToArtifacts(text, artifacts) {
   });
 }
 
-const MCP_SERVER_FAMILIES = new Set(["browser", "search", "word", "spreadsheet", "pdf", "custom"]);
+const MCP_SERVER_FAMILIES = new Set(["browser", "search", "word", "spreadsheet", "pdf", "image", "custom"]);
 const MCP_TOOL_PROFILES = new Set([
   "full",
   "browse_minimal",
@@ -263,6 +320,7 @@ const MCP_TOOL_PROFILES = new Set([
   "word_delivery_minimal",
   "spreadsheet_delivery_minimal",
   "pdf_read_minimal",
+  "image_generation_minimal",
 ]);
 
 function defaultToolProfileForFamily(family) {
@@ -277,6 +335,8 @@ function defaultToolProfileForFamily(family) {
       return "spreadsheet_delivery_minimal";
     case "pdf":
       return "pdf_read_minimal";
+    case "image":
+      return "image_generation_minimal";
     default:
       return "full";
   }
@@ -1229,7 +1289,7 @@ export class McpManager {
         // 已存在：回填/锁定核心字段（防止手改配置文件破坏）
         const cfg = existing.config;
         let patched = false;
-        for (const key of ["bundled", "builtin", "modulePath", "transport", "configFields"]) {
+        for (const key of ["name", "bundled", "builtin", "modulePath", "transport", "args", "configFields", "familyHint", "toolProfile"]) {
           if (JSON.stringify(cfg[key]) !== JSON.stringify(builtin[key])) {
             cfg[key] = builtin[key];
             patched = true;
@@ -1430,12 +1490,14 @@ export class McpManager {
     if (/(^|)(pdf|acrobat)(|$)/.test(serverIdentity)) return "pdf";
     if (/(^|)(web-search|search|serper|tavily|bocha)(|$)/.test(serverIdentity)) return "search";
     if (/(^|)(playwright|browser)(|$)/.test(serverIdentity)) return "browser";
+    if (/(^|)(crab[-_\s]?image|image|imagen|gemini.*image|nano[-_\s]?banana)(|$)/.test(serverIdentity)) return "image";
     const haystack = `${serverIdentity} ${toolText}`;
     if (/(word|docx|paragraph|get_xml|get_text|heading|footer|header)/.test(haystack)) return "word";
     if (/(excel|sheet|spreadsheet|workbook|worksheet|cell|column|row)/.test(haystack)) return "spreadsheet";
     if (/(pdf|acrobat|document_page)/.test(haystack)) return "pdf";
     if (/(search|query|serper|tavily|bocha|fetch|crawler)/.test(haystack)) return "search";
     if (/(playwright|browser_|navigate|snapshot|click|press|fill|tab)/.test(haystack)) return "browser";
+    if (/(generate_image|edit_image|image generation|image editing|img2img|text-to-image|图像生成|修图|改图)/.test(haystack)) return "image";
     return "custom";
   }
 
@@ -1487,6 +1549,8 @@ export class McpManager {
         return "spreadsheet_delivery_minimal";
       case "pdf":
         return "pdf_read_minimal";
+      case "image":
+        return "image_generation_minimal";
       default:
         return "full";
     }
@@ -1512,6 +1576,9 @@ export class McpManager {
     }
     if (profile === "pdf_read_minimal") {
       return matches(/(open|read|get_|extract|page|search|outline|metadata|text)/);
+    }
+    if (profile === "image_generation_minimal") {
+      return matches(/(generate_image|edit_image)/);
     }
     if (family === "custom") return true;
     return true;
@@ -1931,9 +1998,12 @@ export class McpManager {
       const data = Buffer.from(String(part.data ?? ""), "base64");
       await fs.writeFile(absPath, data);
       artifacts.push({
+        name: fileName,
+        ext,
         absPath,
         href: toFileRefHref(absPath),
         mimeType,
+        previewKind: "image",
       });
     }
     return artifacts;
@@ -2184,6 +2254,18 @@ export class McpManager {
       .filter((c) => c.type === "text")
       .map((c) => c.text);
     let output = textParts.join("\n") || JSON.stringify(result?.content ?? []);
+    // 裁剪 Playwright 工具结果中的 console/events 噪声
+    // 非开发任务不需要页面 console 输出，数百条 warning 会严重膨胀 context 导致模型 JSON 输出畸形
+    if (toolName.startsWith("browser_") || (entry.id === "playwright")) {
+      output = output
+        .replace(/### (?:New )?[Cc]onsole[^\n]*\n[\s\S]*?(?=###|$)/g, "")
+        .replace(/### Events\n[\s\S]*?(?=###|$)/g, "")
+        .replace(/\[(?:WARNING|ERROR|LOG|DEBUG|INFO)\][^\n]*\n?/g, "")
+        .replace(/New console entries:[^\n]*\n?/g, "")
+        .replace(/Console:\s*\d+\s*errors?,\s*\d+\s*warnings?\n?/gi, "")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+    }
     const inlineArtifacts = await this._persistInlineMediaArtifacts(toolName, callArgs, result).catch(() => []);
     if (inlineArtifacts.length > 0) {
       output = rewriteMarkdownLinksToArtifacts(output, inlineArtifacts);
@@ -2193,7 +2275,22 @@ export class McpManager {
       }
     }
     const isError = result?.isError === true;
-    return { ok: !isError, output, raw: result };
+    const outputPayload = inlineArtifacts.length > 0
+      ? {
+          summary: output,
+          text: output,
+          artifacts: inlineArtifacts.map((item) => ({
+            name: item.name,
+            ext: item.ext,
+            absPath: item.absPath,
+            relPath: item.href,
+            href: item.href,
+            mimeType: item.mimeType,
+            previewKind: item.previewKind,
+          })),
+        }
+      : output;
+    return { ok: !isError, output: outputPayload, raw: result, artifacts: inlineArtifacts };
   }
 
   async _recoverStatefulToolCall(serverId, toolName, callArgs) {

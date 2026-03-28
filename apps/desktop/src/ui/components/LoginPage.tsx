@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/state/authStore";
+import appIcon from "@/assets/icon.png";
 
 export function LoginPage() {
   const busy = useAuthStore((s) => s.busy);
@@ -90,9 +91,11 @@ export function LoginPage() {
       <div className="w-full max-w-[380px] px-6">
         {/* Brand */}
         <div className="text-center mb-10">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-accent-soft mb-5">
-            <span className="text-[24px] font-bold text-accent">F</span>
-          </div>
+          <img
+            src={appIcon}
+            alt="Oh My Crab"
+            className="w-14 h-14 rounded-2xl mb-5 mx-auto"
+          />
           <h1 className="text-[22px] font-semibold tracking-tight text-text mb-1.5">
             欢迎回来
           </h1>
