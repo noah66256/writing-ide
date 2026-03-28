@@ -41,10 +41,13 @@ export default function LandingPage() {
 
           <div className="flex flex-wrap justify-center gap-3 mb-14">
             <a href="#download" className="btn-brand">
-              <i className="fa fa-apple" /> 下载 macOS 版
+              <i className="fa fa-apple" /> macOS M 系列
             </a>
             <a href="#download" className="btn-outline">
-              <i className="fa fa-windows" /> 下载 Windows 版
+              <i className="fa fa-apple" /> macOS Intel
+            </a>
+            <a href="#download" className="btn-outline">
+              <i className="fa fa-windows" /> Windows
             </a>
           </div>
 
@@ -357,13 +360,17 @@ export default function LandingPage() {
           <h2 className="text-4xl font-bold mb-4">准备好了吗？</h2>
           <p className="text-gray-500 text-lg mb-10">免费下载，3分钟上手，数据全在本地。</p>
           <div className="flex flex-wrap justify-center gap-4">
-            <a href="http://120.26.6.147:8000/downloads/desktop/stable/latest.json" className="btn-brand text-base py-3.5 px-7">
-              <i className="fa fa-apple text-lg" /> 下载 macOS 版
-              <span className="text-xs opacity-75 ml-1">Apple Silicon</span>
+            <a href="http://120.26.6.147:8000/downloads/desktop/stable/OhMyCrab-0.2.0-arm64.dmg" className="btn-brand text-base py-3.5 px-7">
+              <i className="fa fa-apple text-lg" /> macOS M 系列
+              <span className="text-xs opacity-75 ml-1">M1 / M2 / M3 / M4</span>
             </a>
-            <a href="http://120.26.6.147:8000/downloads/desktop/stable/latest.json" className="btn-outline text-base py-3.5 px-7">
-              <i className="fa fa-windows text-lg" /> 下载 Windows 版
-              <span className="text-xs text-gray-400 ml-1">NSIS 安装包</span>
+            <a href="http://120.26.6.147:8000/downloads/desktop/stable/OhMyCrab-0.2.0-x64.pkg" className="btn-outline text-base py-3.5 px-7">
+              <i className="fa fa-apple text-lg" /> macOS Intel
+              <span className="text-xs text-gray-400 ml-1">PKG 安装包</span>
+            </a>
+            <a href="http://120.26.6.147:8000/downloads/desktop/stable/Oh.My.Crab.Setup.0.2.0.exe" className="btn-outline text-base py-3.5 px-7">
+              <i className="fa fa-windows text-lg" /> Windows
+              <span className="text-xs text-gray-400 ml-1">安装版</span>
             </a>
           </div>
           <div className="flex items-center justify-center gap-8 mt-10 text-sm text-gray-400">
