@@ -3,7 +3,7 @@ import type { McpSidecarServer, ToolCatalogEntry } from "./toolCatalog.js";
 import { detectPromptCapabilities } from "./toolCatalog.js";
 
 export type CapabilityCardResultType = "mcp_capability" | "skill";
-export type McpCapabilityFamily = "browser" | "search" | "word" | "spreadsheet" | "pdf" | "custom";
+export type McpCapabilityFamily = "browser" | "search" | "word" | "spreadsheet" | "pdf" | "image" | "custom";
 export type CapabilitySearchReason = string;
 
 type SearchableCardBase = {
@@ -154,6 +154,7 @@ function familyFromCapabilities(capabilities: string[]): McpCapabilityFamily {
   if (caps.has("mcp_word_doc")) return "word";
   if (caps.has("mcp_spreadsheet")) return "spreadsheet";
   if (caps.has("mcp_pdf")) return "pdf";
+  if (caps.has("image_generate") || caps.has("image_edit")) return "image";
   if (caps.has("web_search") || caps.has("web_fetch")) return "search";
   return "custom";
 }
@@ -170,6 +171,8 @@ function familyTitle(family: McpCapabilityFamily): string {
       return "表格处理";
     case "pdf":
       return "PDF 文档";
+    case "image":
+      return "图像生成/编辑";
     default:
       return "扩展能力";
   }
@@ -187,6 +190,8 @@ function familySummary(family: McpCapabilityFamily): string {
       return "创建、读取、编辑和导出 Excel/表格内容。";
     case "pdf":
       return "读取、解析、转换或导出 PDF 内容。";
+    case "image":
+      return "根据文字生成图片，或基于当前线程图片继续修图、保持风格一致。";
     default:
       return "通过外部 MCP Server 提供的专用扩展能力。";
   }
@@ -204,6 +209,8 @@ function familyExamples(family: McpCapabilityFamily): string[] {
       return ["生成 Excel", "更新表格", "导出工作表"];
     case "pdf":
       return ["读取 PDF", "转换 PDF", "抽取 PDF 文本"];
+    case "image":
+      return ["生成封面图", "改刚才那张图", "保持人物一致再出一张"];
     default:
       return ["使用扩展能力", "调用外部服务"];
   }

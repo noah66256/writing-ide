@@ -9,6 +9,7 @@ import { chatCompletionOnce, streamChatCompletions } from "./openaiCompat.js";
 import { isGeminiEndpoint, streamGeminiGenerateContent } from "./gemini.js";
 import { completionOnceAnthropicMessages } from "./anthropicMessages.js";
 import { parseToolCallsXml } from "./toolXmlProtocol.js";
+import { hasBillableUsage, maxLlmTokenUsage, normalizeLlmTokenUsage, type LlmTokenUsage } from "../billing.js";
 
 export type ProviderStreamArgs = {
   baseUrl: string;
@@ -32,7 +33,7 @@ export type ToolResultFormat = "xml" | "text";
 export type ProviderCanonicalEvent =
   | { type: "text_delta"; delta: string }
   | { type: "tool_call"; id: string; name: string; args: Record<string, unknown> }
-  | { type: "usage"; promptTokens: number; completionTokens: number }
+  | { type: "usage"; usage: LlmTokenUsage }
   | { type: "error"; error: string }
   | {
       type: "done";
@@ -108,8 +109,7 @@ export function toCanonicalEvents(events: StreamDeltaEvent[]): ProviderCanonical
   const out: ProviderCanonicalEvent[] = [];
   const raw = Array.isArray(events) ? events : [];
   let assistantRaw = "";
-  let promptTokens = 0;
-  let completionTokens = 0;
+  let usage = normalizeLlmTokenUsage(undefined);
   let streamError = "";
 
   for (const ev of raw) {
@@ -119,10 +119,7 @@ export function toCanonicalEvents(events: StreamDeltaEvent[]): ProviderCanonical
       continue;
     }
     if (ev.type === "usage") {
-      const p = Math.max(0, Math.floor(Number((ev as any)?.usage?.promptTokens ?? 0)));
-      const c = Math.max(0, Math.floor(Number((ev as any)?.usage?.completionTokens ?? 0)));
-      promptTokens = Math.max(promptTokens, p);
-      completionTokens = Math.max(completionTokens, c);
+      usage = maxLlmTokenUsage(usage, (ev as any)?.usage);
       continue;
     }
     if (ev.type === "error") {
@@ -132,8 +129,8 @@ export function toCanonicalEvents(events: StreamDeltaEvent[]): ProviderCanonical
     if (ev.type === "done") break;
   }
 
-  if (promptTokens > 0 || completionTokens > 0) {
-    out.push({ type: "usage", promptTokens, completionTokens });
+  if (hasBillableUsage(usage) || Number.isFinite(Number(usage.totalTokens ?? NaN))) {
+    out.push({ type: "usage", usage });
   }
   if (streamError) {
     out.push({ type: "error", error: streamError });

@@ -3,6 +3,7 @@
 
 import type { ToolMeta } from "@ohmycrab/tools";
 import { encodeToolName, decodeToolName } from "@ohmycrab/tools";
+import { hasBillableUsage, maxLlmTokenUsage, normalizeLlmTokenUsage, type LlmTokenUsage } from "../billing.js";
 
 // ──────────────────────────────────────────────
 // 核心类型（对齐 Anthropic Messages API v1）
@@ -62,7 +63,7 @@ export type MsgStreamEvent =
   | { type: "tool_use_start"; id: string; name: string }
   | { type: "tool_use_input_delta"; id: string; partial_json: string }
   | { type: "tool_use_done"; id: string; name: string; input: Record<string, unknown> }
-  | { type: "usage"; promptTokens: number; completionTokens: number }
+  | { type: "usage"; usage: LlmTokenUsage }
   | { type: "done" }
   | { type: "error"; error: string };
 
@@ -256,8 +257,7 @@ export async function* streamAnthropicMessages(
   // tool id → 已积累的 partial JSON 字符串
   const toolInputAccum = new Map<string, string>();
 
-  let promptTokensCumulative = 0;
-  let completionTokensCumulative = 0;
+  let usageCumulative: LlmTokenUsage = normalizeLlmTokenUsage(undefined);
   let buf = "";
 
   // 同步 generator：解析一行 SSE data 并产出流事件（无 async 操作，yield* 即可）
@@ -275,10 +275,10 @@ export async function* streamAnthropicMessages(
 
     switch (String(ev?.type ?? "")) {
       case "message_start": {
-        const n = Number(ev?.message?.usage?.input_tokens);
-        if (Number.isFinite(n) && n > 0) {
-          promptTokensCumulative = Math.floor(n);
-          yield { type: "usage", promptTokens: promptTokensCumulative, completionTokens: 0 };
+        const usage = normalizeLlmTokenUsage(ev?.message?.usage);
+        if (hasBillableUsage(usage)) {
+          usageCumulative = maxLlmTokenUsage(usageCumulative, usage);
+          yield { type: "usage", usage: usageCumulative };
         }
         break;
       }
@@ -338,14 +338,13 @@ export async function* streamAnthropicMessages(
       }
 
       case "message_delta": {
-        const n = Number(ev?.usage?.output_tokens);
-        if (Number.isFinite(n) && n > 0) {
-          completionTokensCumulative = Math.floor(n);
-          yield {
-            type: "usage",
-            promptTokens: promptTokensCumulative,
-            completionTokens: completionTokensCumulative,
-          };
+        const usage = normalizeLlmTokenUsage({
+          ...usageCumulative,
+          ...(ev?.usage && typeof ev.usage === "object" ? ev.usage : {}),
+        });
+        if (hasBillableUsage(usage)) {
+          usageCumulative = maxLlmTokenUsage(usageCumulative, usage);
+          yield { type: "usage", usage: usageCumulative };
         }
         break;
       }
@@ -423,7 +422,7 @@ export type AnthropicOnceResult = {
   status?: number;
   rawText?: string;
   raw?: any;
-  usage?: { promptTokens: number; completionTokens: number; totalTokens?: number };
+  usage?: LlmTokenUsage;
 };
 
 /**
@@ -504,19 +503,9 @@ export async function completionOnceAnthropicMessages(args: AnthropicOnceArgs): 
     return { ok: false, error: "UPSTREAM_EMPTY_CONTENT", status: res.status, rawText: JSON.stringify(json) };
   }
 
-  const u = json?.usage;
-  const pt = Number(u?.input_tokens ?? 0);
-  const ct = Number(u?.output_tokens ?? 0);
-  const usage =
-    Number.isFinite(pt) || Number.isFinite(ct)
-      ? {
-          promptTokens: Math.max(0, Math.floor(pt)),
-          completionTokens: Math.max(0, Math.floor(ct)),
-          totalTokens: Math.max(0, Math.floor(pt) + Math.floor(ct)),
-        }
-      : undefined;
+  const usage = normalizeLlmTokenUsage(json?.usage);
 
-  return usage
+  return hasBillableUsage(usage) || Number.isFinite(Number(usage.totalTokens ?? NaN))
     ? { ok: true, content, raw: json, usage }
     : { ok: true, content, raw: json };
 }

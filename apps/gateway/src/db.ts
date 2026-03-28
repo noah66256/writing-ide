@@ -97,6 +97,10 @@ export type LlmModelPrice = {
   priceInCnyPer1M: number;
   /** 输出单价：元/1,000,000 tokens */
   priceOutCnyPer1M: number;
+  /** 缓存读取单价：元/1,000,000 tokens */
+  priceCacheReadCnyPer1M: number;
+  /** 5 分钟缓存创建单价：元/1,000,000 tokens */
+  priceCacheCreation5mCnyPer1M: number;
 };
 
 export type LlmConfig = {
@@ -171,6 +175,8 @@ export type AiModel = {
   apiKeyLast4: string | null;
   priceInCnyPer1M: number | null;
   priceOutCnyPer1M: number | null;
+  priceCacheReadCnyPer1M: number | null;
+  priceCacheCreation5mCnyPer1M: number | null;
   billingGroup: string | null;
   isEnabled: boolean;
   sortOrder: number;
@@ -324,7 +330,15 @@ export type RunAudit = {
   endedAt: string | null; // ISO
   endReason: string | null;
   endReasonCodes: string[];
-  usage: { promptTokens: number; completionTokens: number; totalTokens?: number } | null;
+  usage: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens?: number;
+    cacheReadInputTokens?: number;
+    cacheCreationInputTokens?: number;
+    cacheCreation5mInputTokens?: number;
+    cacheCreation1hInputTokens?: number;
+  } | null;
   chargedPoints: number | null;
   events: RunAuditEvent[];
   meta: unknown | null;
@@ -564,8 +578,15 @@ export async function loadDb(): Promise<Db> {
           if (!modelId) continue;
           const priceIn = normNum((v as any)?.priceInCnyPer1M);
           const priceOut = normNum((v as any)?.priceOutCnyPer1M);
+          const priceCacheRead = normNum((v as any)?.priceCacheReadCnyPer1M) ?? 0;
+          const priceCacheCreation5m = normNum((v as any)?.priceCacheCreation5mCnyPer1M) ?? 0;
           if (priceIn === null || priceOut === null) continue;
-          pricing[modelId] = { priceInCnyPer1M: priceIn, priceOutCnyPer1M: priceOut };
+          pricing[modelId] = {
+            priceInCnyPer1M: priceIn,
+            priceOutCnyPer1M: priceOut,
+            priceCacheReadCnyPer1M: priceCacheRead,
+            priceCacheCreation5mCnyPer1M: priceCacheCreation5m,
+          };
         }
       }
       const updatedAt = normStr(c?.updatedAt) || nowIso;
@@ -681,6 +702,8 @@ export async function loadDb(): Promise<Db> {
           const apiKeyLast4 = typeof m?.apiKeyLast4 === "string" ? normStr(m.apiKeyLast4) : null;
           const priceIn = normNum(m?.priceInCnyPer1M);
           const priceOut = normNum(m?.priceOutCnyPer1M);
+          const priceCacheRead = normNum(m?.priceCacheReadCnyPer1M);
+          const priceCacheCreation5m = normNum(m?.priceCacheCreation5mCnyPer1M);
           const billingGroup = typeof m?.billingGroup === "string" ? normStr(m.billingGroup) : null;
           const isEnabled = m?.isEnabled === false ? false : true;
           const sortOrder = Number.isFinite(m?.sortOrder) ? Number(m.sortOrder) : 0;
@@ -712,6 +735,8 @@ export async function loadDb(): Promise<Db> {
             apiKeyLast4,
             priceInCnyPer1M: priceIn,
             priceOutCnyPer1M: priceOut,
+            priceCacheReadCnyPer1M: priceCacheRead,
+            priceCacheCreation5mCnyPer1M: priceCacheCreation5m,
             billingGroup,
             isEnabled,
             sortOrder,
@@ -907,11 +932,24 @@ export async function loadDb(): Promise<Db> {
           : [];
         const usageRaw = r?.usage && typeof r.usage === "object" ? (r.usage as any) : null;
         const usage =
-          usageRaw && (Number.isFinite(usageRaw.promptTokens) || Number.isFinite(usageRaw.completionTokens) || Number.isFinite(usageRaw.totalTokens))
+          usageRaw &&
+          (
+            Number.isFinite(usageRaw.promptTokens) ||
+            Number.isFinite(usageRaw.completionTokens) ||
+            Number.isFinite(usageRaw.totalTokens) ||
+            Number.isFinite(usageRaw.cacheReadInputTokens) ||
+            Number.isFinite(usageRaw.cacheCreationInputTokens) ||
+            Number.isFinite(usageRaw.cacheCreation5mInputTokens) ||
+            Number.isFinite(usageRaw.cacheCreation1hInputTokens)
+          )
             ? {
                 promptTokens: Math.max(0, Math.floor(Number(usageRaw.promptTokens) || 0)),
                 completionTokens: Math.max(0, Math.floor(Number(usageRaw.completionTokens) || 0)),
                 ...(Number.isFinite(usageRaw.totalTokens) ? { totalTokens: Math.max(0, Math.floor(Number(usageRaw.totalTokens))) } : {}),
+                ...(Number.isFinite(usageRaw.cacheReadInputTokens) ? { cacheReadInputTokens: Math.max(0, Math.floor(Number(usageRaw.cacheReadInputTokens))) } : {}),
+                ...(Number.isFinite(usageRaw.cacheCreationInputTokens) ? { cacheCreationInputTokens: Math.max(0, Math.floor(Number(usageRaw.cacheCreationInputTokens))) } : {}),
+                ...(Number.isFinite(usageRaw.cacheCreation5mInputTokens) ? { cacheCreation5mInputTokens: Math.max(0, Math.floor(Number(usageRaw.cacheCreation5mInputTokens))) } : {}),
+                ...(Number.isFinite(usageRaw.cacheCreation1hInputTokens) ? { cacheCreation1hInputTokens: Math.max(0, Math.floor(Number(usageRaw.cacheCreation1hInputTokens))) } : {}),
               }
             : null;
         const chargedPoints = Number.isFinite((r as any)?.chargedPoints) ? Math.floor(Number((r as any).chargedPoints)) : null;

@@ -2,6 +2,8 @@ import type {
   CollabAgentRef,
   SkillRef,
   ThreadCapabilityState,
+  ThreadImageArtifactRef,
+  ThreadImageSessionV1,
   TaskStateV2,
   ThreadRecord,
   ThreadWaitingFor,
@@ -12,12 +14,46 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function normalizeThreadImageSession(
+  session: ThreadImageSessionV1 | null | undefined,
+): ThreadImageSessionV1 | null {
+  if (!session || typeof session !== "object") return null;
+  const recentArtifacts = Array.isArray(session.recentArtifacts)
+    ? session.recentArtifacts
+        .filter((item) => item && typeof item === "object" && String(item.artifactId ?? "").trim())
+        .map<ThreadImageArtifactRef>((item) => {
+          const source: ThreadImageArtifactRef["source"] =
+            item.source === "user_upload" ? "user_upload" : item.source === "edited" ? "edited" : "generated";
+          return {
+            artifactId: String(item.artifactId ?? "").trim(),
+            ...(String(item.path ?? "").trim() ? { path: String(item.path ?? "").trim() } : {}),
+            source,
+            createdAt: String(item.createdAt ?? "").trim() || nowIso(),
+            ...(String(item.prompt ?? "").trim() ? { prompt: String(item.prompt ?? "").trim() } : {}),
+            ...(String(item.aspectRatio ?? "").trim() ? { aspectRatio: String(item.aspectRatio ?? "").trim() } : {}),
+            ...(String(item.mimeType ?? "").trim() ? { mimeType: String(item.mimeType ?? "").trim() } : {}),
+          };
+        })
+        .slice(-24)
+    : [];
+  return {
+    v: 1,
+    recentArtifacts,
+    lastGeneratedArtifactId: String(session.lastGeneratedArtifactId ?? "").trim() || null,
+    lastEditedArtifactId: String(session.lastEditedArtifactId ?? "").trim() || null,
+    defaultAspectRatio: String(session.defaultAspectRatio ?? "").trim() || null,
+    preferredProvider: "gemini_nb",
+    updatedAt: String(session.updatedAt ?? "").trim() || nowIso(),
+  };
+}
+
 export function createThreadState(args: {
   threadId: string;
   convId?: string | null;
   activeSkillRefs?: SkillRef[];
   taskState?: TaskStateV2 | null;
   capabilityState?: ThreadCapabilityState | null;
+  imageSession?: ThreadImageSessionV1 | null;
 }): ThreadRecord {
   const now = nowIso();
   return {
@@ -32,6 +68,7 @@ export function createThreadState(args: {
     pendingApprovalIds: [],
     taskState: args.taskState ?? null,
     capabilityState: normalizeThreadCapabilityState(args.capabilityState),
+    imageSession: normalizeThreadImageSession(args.imageSession),
     createdAt: now,
     updatedAt: now,
   };
@@ -63,6 +100,7 @@ export function cloneThreadState(thread: ThreadRecord): ThreadRecord {
             : undefined,
         }
       : null,
+    imageSession: normalizeThreadImageSession(thread.imageSession),
   };
 }
 

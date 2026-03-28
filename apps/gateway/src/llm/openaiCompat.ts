@@ -1,5 +1,6 @@
 import { normalizeToolParametersSchema } from "./toolSchema.js";
 import { buildToolCallsXml } from "./toolXmlProtocol.js";
+import { hasBillableUsage, normalizeLlmTokenUsage, type LlmTokenUsage } from "../billing.js";
 
 export type OpenAiChatRole = "system" | "user" | "assistant" | "tool";
 
@@ -324,7 +325,7 @@ export type StreamDeltaEvent =
   | { type: "delta"; delta: string }
   | {
       type: "usage";
-      usage: { promptTokens: number; completionTokens: number; totalTokens?: number };
+      usage: LlmTokenUsage;
       raw?: any;
     }
   | { type: "done"; responseId?: string }
@@ -335,7 +336,7 @@ export type ChatCompletionOnceResult =
       ok: true;
       content: string;
       raw: any;
-      usage?: { promptTokens: number; completionTokens: number; totalTokens?: number };
+      usage?: LlmTokenUsage;
       responseId?: string;
     }
   | { ok: false; error: string; status?: number; rawText?: string };
@@ -346,31 +347,13 @@ function kindOfContentLike(v: any): string {
   return typeof v;
 }
 
-function coerceUsageLike(v: any):
-  | { promptTokens: number; completionTokens: number; totalTokens?: number }
-  | undefined {
+function coerceUsageLike(v: any): LlmTokenUsage | undefined {
   if (!v || typeof v !== "object") return undefined;
-  const pt = Number(
-    v?.prompt_tokens ??
-      v?.input_tokens ??
-      v?.promptTokens ??
-      v?.inputTokens,
-  );
-  const ct = Number(
-    v?.completion_tokens ??
-      v?.output_tokens ??
-      v?.completionTokens ??
-      v?.outputTokens,
-  );
-  const tt = Number(v?.total_tokens ?? v?.totalTokens);
-  if (!Number.isFinite(pt) && !Number.isFinite(ct) && !Number.isFinite(tt)) {
+  const usage = normalizeLlmTokenUsage(v);
+  if (!hasBillableUsage(usage) && !Number.isFinite(Number(usage.totalTokens ?? NaN))) {
     return undefined;
   }
-  return {
-    promptTokens: Number.isFinite(pt) ? Math.max(0, Math.floor(pt)) : 0,
-    completionTokens: Number.isFinite(ct) ? Math.max(0, Math.floor(ct)) : 0,
-    ...(Number.isFinite(tt) ? { totalTokens: Math.max(0, Math.floor(tt)) } : {}),
-  };
+  return usage;
 }
 
 function messageContentToResponsesInput(

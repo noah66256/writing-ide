@@ -550,6 +550,8 @@ export function createAiConfigService(args: {
         apiKeyLast4: enc ? enc.last4 : null,
         priceInCnyPer1M: null,
         priceOutCnyPer1M: null,
+        priceCacheReadCnyPer1M: null,
+        priceCacheCreation5mCnyPer1M: null,
         billingGroup: null,
         isEnabled: true,
         sortOrder: 0,
@@ -939,7 +941,18 @@ export function createAiConfigService(args: {
     const m = await getModelById(modelId);
     if (!m) return null;
     if (!hasPricing(m)) return null;
-    return { priceInCnyPer1M: m.priceInCnyPer1M!, priceOutCnyPer1M: m.priceOutCnyPer1M! };
+    return {
+      priceInCnyPer1M: m.priceInCnyPer1M!,
+      priceOutCnyPer1M: m.priceOutCnyPer1M!,
+      priceCacheReadCnyPer1M:
+        typeof m.priceCacheReadCnyPer1M === "number" && Number.isFinite(m.priceCacheReadCnyPer1M) && m.priceCacheReadCnyPer1M >= 0
+          ? m.priceCacheReadCnyPer1M
+          : 0,
+      priceCacheCreation5mCnyPer1M:
+        typeof m.priceCacheCreation5mCnyPer1M === "number" && Number.isFinite(m.priceCacheCreation5mCnyPer1M) && m.priceCacheCreation5mCnyPer1M >= 0
+          ? m.priceCacheCreation5mCnyPer1M
+          : 0,
+    };
   };
 
   const createModel = async (params: {
@@ -953,6 +966,8 @@ export function createAiConfigService(args: {
     toolResultFormat?: "xml" | "text";
     priceInCnyPer1M: number;
     priceOutCnyPer1M: number;
+    priceCacheReadCnyPer1M?: number | null;
+    priceCacheCreation5mCnyPer1M?: number | null;
     billingGroup?: string | null;
     isEnabled?: boolean;
     sortOrder?: number;
@@ -979,7 +994,17 @@ export function createAiConfigService(args: {
         : null;
     const priceIn = Number(params.priceInCnyPer1M);
     const priceOut = Number(params.priceOutCnyPer1M);
+    const priceCacheRead =
+      params.priceCacheReadCnyPer1M === undefined || params.priceCacheReadCnyPer1M === null
+        ? null
+        : Number(params.priceCacheReadCnyPer1M);
+    const priceCacheCreation5m =
+      params.priceCacheCreation5mCnyPer1M === undefined || params.priceCacheCreation5mCnyPer1M === null
+        ? null
+        : Number(params.priceCacheCreation5mCnyPer1M);
     if (!Number.isFinite(priceIn) || !Number.isFinite(priceOut) || priceIn < 0 || priceOut < 0) throw new Error("pricing_invalid");
+    if (priceCacheRead !== null && (!Number.isFinite(priceCacheRead) || priceCacheRead < 0)) throw new Error("pricing_invalid");
+    if (priceCacheCreation5m !== null && (!Number.isFinite(priceCacheCreation5m) || priceCacheCreation5m < 0)) throw new Error("pricing_invalid");
 
     const apiKeyInput = normalizeApiKeyInput(params.apiKey || "");
     let apiKeyEnc: string | null = null;
@@ -1042,6 +1067,8 @@ export function createAiConfigService(args: {
       apiKeyLast4,
       priceInCnyPer1M: priceIn,
       priceOutCnyPer1M: priceOut,
+      priceCacheReadCnyPer1M: priceCacheRead,
+      priceCacheCreation5mCnyPer1M: priceCacheCreation5m,
       billingGroup: params.billingGroup ?? null,
       isEnabled: params.isEnabled === false ? false : true,
       sortOrder: Number.isFinite(params.sortOrder as any) ? Number(params.sortOrder) : 0,
@@ -1075,6 +1102,8 @@ export function createAiConfigService(args: {
       clearApiKey: boolean;
       priceInCnyPer1M: number | null;
       priceOutCnyPer1M: number | null;
+      priceCacheReadCnyPer1M: number | null;
+      priceCacheCreation5mCnyPer1M: number | null;
       billingGroup: string | null;
       isEnabled: boolean;
       sortOrder: number;
@@ -1134,8 +1163,18 @@ export function createAiConfigService(args: {
       patch.priceInCnyPer1M !== undefined ? (patch.priceInCnyPer1M === null ? null : Number(patch.priceInCnyPer1M)) : cur.priceInCnyPer1M;
     const priceOut =
       patch.priceOutCnyPer1M !== undefined ? (patch.priceOutCnyPer1M === null ? null : Number(patch.priceOutCnyPer1M)) : cur.priceOutCnyPer1M;
+    const priceCacheRead =
+      patch.priceCacheReadCnyPer1M !== undefined
+        ? (patch.priceCacheReadCnyPer1M === null ? null : Number(patch.priceCacheReadCnyPer1M))
+        : cur.priceCacheReadCnyPer1M;
+    const priceCacheCreation5m =
+      patch.priceCacheCreation5mCnyPer1M !== undefined
+        ? (patch.priceCacheCreation5mCnyPer1M === null ? null : Number(patch.priceCacheCreation5mCnyPer1M))
+        : cur.priceCacheCreation5mCnyPer1M;
     if (priceIn !== null && (!Number.isFinite(priceIn) || priceIn < 0)) throw new Error("pricing_invalid");
     if (priceOut !== null && (!Number.isFinite(priceOut) || priceOut < 0)) throw new Error("pricing_invalid");
+    if (priceCacheRead !== null && (!Number.isFinite(priceCacheRead) || priceCacheRead < 0)) throw new Error("pricing_invalid");
+    if (priceCacheCreation5m !== null && (!Number.isFinite(priceCacheCreation5m) || priceCacheCreation5m < 0)) throw new Error("pricing_invalid");
 
     // 防重复（排除自己）
     if (apiKeyLast4) {
@@ -1164,6 +1203,8 @@ export function createAiConfigService(args: {
       apiKeyLast4,
       priceInCnyPer1M: priceIn,
       priceOutCnyPer1M: priceOut,
+      priceCacheReadCnyPer1M: priceCacheRead,
+      priceCacheCreation5mCnyPer1M: priceCacheCreation5m,
       billingGroup: patch.billingGroup !== undefined ? patch.billingGroup : cur.billingGroup,
       isEnabled: patch.isEnabled !== undefined ? Boolean(patch.isEnabled) : cur.isEnabled,
       sortOrder: patch.sortOrder !== undefined ? Number(patch.sortOrder) : cur.sortOrder,
