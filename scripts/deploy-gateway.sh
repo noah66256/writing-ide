@@ -121,7 +121,6 @@ fi
 if [[ "${WEB}" == "1" ]]; then
   echo "[remote] build web"
   cd ${DIR}/apps/web
-  npx tsc -b
   npx vite build
   cd ${DIR}
 
