@@ -842,7 +842,7 @@ function safeStableFilePath(fileName: string) {
   if (path.basename(name) !== name) return null;
   // 允许中英文文件名；仅限制扩展名（避免任意读服务器文件）
   const lower = name.toLowerCase();
-  const allowedExt = [".exe", ".zip", ".dmg", ".yml", ".yaml", ".blockmap", ".json"];
+  const allowedExt = [".exe", ".zip", ".dmg", ".pkg", ".yml", ".yaml", ".blockmap", ".json"];
   if (!allowedExt.some((ext) => lower.endsWith(ext))) return null;
   return path.join(DESKTOP_UPDATES_DIR, "stable", name);
 }
