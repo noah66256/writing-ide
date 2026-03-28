@@ -31,6 +31,10 @@ export type RunAuditUsageDto = {
   promptTokens: number;
   completionTokens: number;
   totalTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+  cacheCreation5mInputTokens?: number;
+  cacheCreation1hInputTokens?: number;
 };
 
 export type RunAuditEventDto = {
@@ -68,6 +72,8 @@ export type RunAuditListItemDto = Omit<RunAuditDto, "events"> & {
 export type LlmModelPriceDto = {
   priceInCnyPer1M: number;
   priceOutCnyPer1M: number;
+  priceCacheReadCnyPer1M: number;
+  priceCacheCreation5mCnyPer1M: number;
 };
 
 export type AdminLlmStageStored = {
@@ -197,6 +203,8 @@ export type AiModelDto = {
   toolResultFormat?: "xml" | "text";
   priceInCnyPer1M: number | null;
   priceOutCnyPer1M: number | null;
+  priceCacheReadCnyPer1M: number | null;
+  priceCacheCreation5mCnyPer1M: number | null;
   billingGroup: string | null;
   isEnabled: boolean;
   sortOrder: number;
@@ -269,6 +277,8 @@ export async function aiConfigCreateModel(body: {
   toolResultFormat?: "xml" | "text";
   priceInCnyPer1M: number;
   priceOutCnyPer1M: number;
+  priceCacheReadCnyPer1M?: number | null;
+  priceCacheCreation5mCnyPer1M?: number | null;
   billingGroup?: string;
   isEnabled?: boolean;
   sortOrder?: number;
@@ -290,6 +300,8 @@ export async function aiConfigUpdateModel(id: string, body: Partial<{
   clearApiKey: boolean;
   priceInCnyPer1M: number | null;
   priceOutCnyPer1M: number | null;
+  priceCacheReadCnyPer1M: number | null;
+  priceCacheCreation5mCnyPer1M: number | null;
   billingGroup: string | null;
   isEnabled: boolean;
   sortOrder: number;

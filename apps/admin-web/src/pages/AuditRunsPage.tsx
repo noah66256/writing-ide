@@ -235,7 +235,10 @@ export function AuditRunsPage() {
                   <span className="pill pillUser">events: {detail.events?.length ?? 0}</span>
                   {detail.usage ? (
                     <span className="pill pillUser">
-                      tokens: {detail.usage.promptTokens}+{detail.usage.completionTokens}
+                      tokens: in {detail.usage.promptTokens} · out {detail.usage.completionTokens}
+                      {(detail.usage.cacheReadInputTokens ?? 0) > 0 ? ` · cache ${detail.usage.cacheReadInputTokens}` : ""}
+                      {(detail.usage.cacheCreation5mInputTokens ?? 0) > 0 ? ` · 5m ${detail.usage.cacheCreation5mInputTokens}` : ""}
+                      {(detail.usage.cacheCreation1hInputTokens ?? 0) > 0 ? ` · 1h ${detail.usage.cacheCreation1hInputTokens}` : ""}
                     </span>
                   ) : null}
                 </div>
@@ -273,5 +276,4 @@ export function AuditRunsPage() {
     </div>
   );
 }
-
 

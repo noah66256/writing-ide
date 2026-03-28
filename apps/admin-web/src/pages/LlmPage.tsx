@@ -25,6 +25,8 @@ type StageDraft = Pick<AiStageDto, "stage" | "name" | "description" | "modelId" 
 type ModelDraftUi = ModelDraft & {
   priceInInput?: string;
   priceOutInput?: string;
+  priceCacheReadInput?: string;
+  priceCacheCreation5mInput?: string;
   contextWindowTokensInput?: string;
 };
 
@@ -115,6 +117,8 @@ export function LlmPage() {
   const [newApiKey, setNewApiKey] = useState("");
   const [newPriceIn, setNewPriceIn] = useState("");
   const [newPriceOut, setNewPriceOut] = useState("");
+  const [newPriceCacheRead, setNewPriceCacheRead] = useState("");
+  const [newPriceCacheCreation5m, setNewPriceCacheCreation5m] = useState("");
   const [newBillingGroup, setNewBillingGroup] = useState("");
   const [newEnabled, setNewEnabled] = useState(true);
   const [newSortOrder, setNewSortOrder] = useState("0");
@@ -160,6 +164,8 @@ export function LlmPage() {
           contextWindowTokensInput: m.contextWindowTokens === null || m.contextWindowTokens === undefined ? "" : String(m.contextWindowTokens),
           priceInInput: m.priceInCnyPer1M === null ? "" : String(m.priceInCnyPer1M),
           priceOutInput: m.priceOutCnyPer1M === null ? "" : String(m.priceOutCnyPer1M),
+          priceCacheReadInput: m.priceCacheReadCnyPer1M === null ? "" : String(m.priceCacheReadCnyPer1M),
+          priceCacheCreation5mInput: m.priceCacheCreation5mCnyPer1M === null ? "" : String(m.priceCacheCreation5mCnyPer1M),
         })),
       );
     } catch (e: any) {
@@ -210,6 +216,10 @@ export function LlmPage() {
     setNotice("");
     const priceIn = Number(newPriceIn);
     const priceOut = Number(newPriceOut);
+    const cacheReadStr = String(newPriceCacheRead ?? "").trim();
+    const cacheCreation5mStr = String(newPriceCacheCreation5m ?? "").trim();
+    const priceCacheRead = cacheReadStr ? Number(cacheReadStr) : null;
+    const priceCacheCreation5m = cacheCreation5mStr ? Number(cacheCreation5mStr) : null;
     const sortOrder = Number(newSortOrder);
     const ctxStr = String(newContextWindowTokens ?? "").trim();
     const contextWindowTokens = ctxStr ? Number(ctxStr) : null;
@@ -225,6 +235,12 @@ export function LlmPage() {
     }
     if (!Number.isFinite(priceIn) || priceIn < 0) return setError("输入单价必须是 >=0 的数字（元/1,000,000 tokens）");
     if (!Number.isFinite(priceOut) || priceOut < 0) return setError("输出单价必须是 >=0 的数字（元/1,000,000 tokens）");
+    if (priceCacheRead !== null && (!Number.isFinite(priceCacheRead) || priceCacheRead < 0)) {
+      return setError("缓存读取单价必须是 >=0 的数字（元/1,000,000 tokens）");
+    }
+    if (priceCacheCreation5m !== null && (!Number.isFinite(priceCacheCreation5m) || priceCacheCreation5m < 0)) {
+      return setError("5m 缓存创建单价必须是 >=0 的数字（元/1,000,000 tokens）");
+    }
     if (!Number.isFinite(sortOrder) || !Number.isInteger(sortOrder)) return setError("sortOrder 必须是整数");
     if (contextWindowTokens !== null) {
       if (!Number.isFinite(contextWindowTokens) || contextWindowTokens <= 0) return setError("上下文窗口必须是 >0 的数字");
@@ -241,6 +257,8 @@ export function LlmPage() {
         toolResultFormat: newToolResultFormat,
         priceInCnyPer1M: priceIn,
         priceOutCnyPer1M: priceOut,
+        ...(priceCacheRead !== null ? { priceCacheReadCnyPer1M: priceCacheRead } : {}),
+        ...(priceCacheCreation5m !== null ? { priceCacheCreation5mCnyPer1M: priceCacheCreation5m } : {}),
         billingGroup: newBillingGroup.trim() || undefined,
         isEnabled: newEnabled,
         sortOrder,
@@ -257,6 +275,8 @@ export function LlmPage() {
       setNewApiKey("");
       setNewPriceIn("");
       setNewPriceOut("");
+      setNewPriceCacheRead("");
+      setNewPriceCacheCreation5m("");
       setNewBillingGroup("");
       setNewEnabled(true);
       setNewSortOrder("0");
@@ -368,14 +388,30 @@ export function LlmPage() {
 
     const inStr = typeof m.priceInInput === "string" ? m.priceInInput.trim() : m.priceInCnyPer1M === null ? "" : String(m.priceInCnyPer1M);
     const outStr = typeof m.priceOutInput === "string" ? m.priceOutInput.trim() : m.priceOutCnyPer1M === null ? "" : String(m.priceOutCnyPer1M);
+    const cacheReadStr =
+      typeof m.priceCacheReadInput === "string"
+        ? m.priceCacheReadInput.trim()
+        : m.priceCacheReadCnyPer1M === null
+          ? ""
+          : String(m.priceCacheReadCnyPer1M);
+    const cacheCreation5mStr =
+      typeof m.priceCacheCreation5mInput === "string"
+        ? m.priceCacheCreation5mInput.trim()
+        : m.priceCacheCreation5mCnyPer1M === null
+          ? ""
+          : String(m.priceCacheCreation5mCnyPer1M);
 
     if (!inStr) return setError("输入单价不能为空（元/1,000,000 tokens）");
     if (!outStr) return setError("输出单价不能为空（元/1,000,000 tokens）");
 
     const priceIn = Number(inStr);
     const priceOut = Number(outStr);
+    const priceCacheRead = cacheReadStr ? Number(cacheReadStr) : null;
+    const priceCacheCreation5m = cacheCreation5mStr ? Number(cacheCreation5mStr) : null;
     if (!Number.isFinite(priceIn) || priceIn < 0) return setError("输入单价无效");
     if (!Number.isFinite(priceOut) || priceOut < 0) return setError("输出单价无效");
+    if (priceCacheRead !== null && (!Number.isFinite(priceCacheRead) || priceCacheRead < 0)) return setError("缓存读取单价无效");
+    if (priceCacheCreation5m !== null && (!Number.isFinite(priceCacheCreation5m) || priceCacheCreation5m < 0)) return setError("5m 缓存创建单价无效");
 
     setBusy(true);
     try {
@@ -387,6 +423,8 @@ export function LlmPage() {
         toolResultFormat,
         priceInCnyPer1M: priceIn,
         priceOutCnyPer1M: priceOut,
+        priceCacheReadCnyPer1M: priceCacheRead,
+        priceCacheCreation5mCnyPer1M: priceCacheCreation5m,
         billingGroup: (m.billingGroup ?? null) ? String(m.billingGroup).trim() : null,
         isEnabled: Boolean(m.isEnabled),
         sortOrder: Number(m.sortOrder),
@@ -787,8 +825,14 @@ export function LlmPage() {
                   </label>
 
                   <label className="field">
-                    <div className="label">定价（元/1,000,000 tokens，in / out）</div>
-                    <div className="modelDouble">
+                    <div className="label">定价（元/1,000,000 tokens，in / out / cache read / cache create 5m）</div>
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+                        gap: 8,
+                      }}
+                    >
                       <input
                         className="input"
                         value={(m as any).priceInInput ?? (m.priceInCnyPer1M === null ? "" : String(m.priceInCnyPer1M))}
@@ -808,6 +852,26 @@ export function LlmPage() {
                           )
                         }
                         placeholder="out"
+                      />
+                      <input
+                        className="input"
+                        value={(m as any).priceCacheReadInput ?? (m.priceCacheReadCnyPer1M === null ? "" : String(m.priceCacheReadCnyPer1M))}
+                        onChange={(e) =>
+                          setModels((prev) =>
+                            prev.map((x) => (x.id === m.id ? ({ ...x, priceCacheReadInput: e.target.value } as any) : x)),
+                          )
+                        }
+                        placeholder="cache read"
+                      />
+                      <input
+                        className="input"
+                        value={(m as any).priceCacheCreation5mInput ?? (m.priceCacheCreation5mCnyPer1M === null ? "" : String(m.priceCacheCreation5mCnyPer1M))}
+                        onChange={(e) =>
+                          setModels((prev) =>
+                            prev.map((x) => (x.id === m.id ? ({ ...x, priceCacheCreation5mInput: e.target.value } as any) : x)),
+                          )
+                        }
+                        placeholder="cache create 5m"
                       />
                     </div>
                   </label>
@@ -1129,6 +1193,19 @@ export function LlmPage() {
               <label className="field">
                 <div className="label">输出单价（元/1,000,000 tokens）</div>
                 <input className="input" value={newPriceOut} onChange={(e) => setNewPriceOut(e.target.value)} placeholder="1.6" />
+              </label>
+              <label className="field">
+                <div className="label">缓存读取单价（元/1,000,000 tokens，可选）</div>
+                <input className="input" value={newPriceCacheRead} onChange={(e) => setNewPriceCacheRead(e.target.value)} placeholder="0.1" />
+              </label>
+              <label className="field">
+                <div className="label">5m 缓存创建单价（元/1,000,000 tokens，可选）</div>
+                <input
+                  className="input"
+                  value={newPriceCacheCreation5m}
+                  onChange={(e) => setNewPriceCacheCreation5m(e.target.value)}
+                  placeholder="1.25"
+                />
               </label>
               <label className="field">
                 <div className="label">billingGroup（可选）</div>
