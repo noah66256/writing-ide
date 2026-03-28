@@ -4097,6 +4097,7 @@ export class GatewayRuntime implements AgentRuntime {
       ? (output as ToolResultEnvelope)
       : compactToolResultEnvelope(this._decodeRuntimeToolName(message.toolName), output);
     const ok = details?.ok ?? !message.isError;
+    const images = normalizeToolResultImages(details?.images);
     const normalizedText = envelope.normalizedText || this._toolResultText(message);
     if (!isToolResultEnvelope(output)) {
       this.turnLocalRawToolResults.set(message.toolCallId, output);
@@ -4108,9 +4109,7 @@ export class GatewayRuntime implements AgentRuntime {
       toolName: this._decodeRuntimeToolName(message.toolName),
       ok,
       output: envelope,
-      ...(normalizeToolResultImages(details?.images).length
-        ? { images: normalizeToolResultImages(details?.images) }
-        : {}),
+      ...(images.length ? { images } : {}),
       normalizedText,
       providerMeta: details?.meta
         ? {

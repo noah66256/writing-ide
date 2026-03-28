@@ -2058,6 +2058,11 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
                     output: successOutput,
                     rt,
                   });
+                  // 立即持久化 thread，避免 run 超时/报错时 imageSession 丢失
+                  const convId2 = (rt as any).convId;
+                  if (convId2) {
+                    useConversationStore.getState().flushDraftSnapshotNow().catch(() => void 0);
+                  }
                 }
                 if (result.ok && shouldMirrorToolImageToTranscript(name, successOutput)) {
                   const imageEntry = buildCrabImageTranscriptEntry({
