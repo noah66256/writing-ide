@@ -4035,20 +4035,24 @@ const tools: ToolDefinition[] = [
   {
     name: "edit",
     description:
-      "对当前活动文件应用一组文本编辑（edits）。中风险默认自动写入，之后可回滚更改。",
+      "对当前活动文件进行精确的字符串替换编辑。支持两种模式：\n" +
+      "1. 字符串匹配：old_string + new_string（推荐，不需要行号）\n" +
+      "2. Monaco range：edits 数组（高级用法）",
     args: [
-      { name: "path", required: false, desc: "文件路径（默认 activePath；MVP 仅支持 activePath）" },
+      { name: "path", required: false, desc: "文件路径（默认 activePath）" },
+      { name: "old_string", required: false, desc: "要替换的原文本" },
+      { name: "new_string", required: false, desc: "替换后的新文本" },
+      { name: "replace_all", required: false, desc: "是否替换所有匹配" },
       {
         name: "edits",
-        required: true,
-        desc:
-          'JSON 数组：[{ startLineNumber, startColumn, endLineNumber, endColumn, text }...]（基于 Monaco range）',
+        required: false,
+        desc: 'JSON 数组：[{ startLineNumber, startColumn, endLineNumber, endColumn, text }...]（Monaco range，高级用法）',
       },
     ],
-    riskLevel: "medium",
-    applyPolicy: "auto_apply",
+    riskLevel: "medium" as ToolRiskLevel,
+    applyPolicy: "auto_apply" as ToolApplyPolicy,
     reversible: true,
-    run: async (args) => {
+    run: async (args: Record<string, unknown>) => {
       const s = useProjectStore.getState();
       const ed = s.editorRef;
       const inputPath = args.path !== undefined ? args.path : s.activePath;
@@ -4056,6 +4060,122 @@ const tools: ToolDefinition[] = [
       if (!rPath.ok) return failPathResolve({ rawPath: inputPath, resolved: rPath, actionLabel: "应用文本编辑" });
       const path = rPath.path;
       const file = s.getFileByPath(path);
+
+      // ── 字符串匹配模式（old_string / new_string） ──
+      const oldStr = args.old_string !== undefined ? String(args.old_string ?? "") : undefined;
+      const newStr = args.new_string !== undefined ? String(args.new_string ?? "") : undefined;
+
+      if (oldStr !== undefined && newStr !== undefined) {
+        // old_string="" + 文件不存在 → 创建新文件
+        if (oldStr === "" && !file) {
+          const snap = useProjectStore.getState().snapshot();
+          useProjectStore.getState().addFile(path, newStr);
+          const d = unifiedDiff({ path, before: "", after: newStr });
+          return {
+            ok: true,
+            output: {
+              ok: true,
+              path,
+              mode: "string_match",
+              action: "created",
+              preview: { note: "已创建新文件；可回滚更改。", diffUnified: d.diff, truncated: d.truncated, stats: d.stats ?? null },
+            },
+            applyPolicy: "auto_apply",
+            riskLevel: "medium",
+            undoable: true,
+            undo: () => useProjectStore.getState().restore(snap),
+          };
+        }
+
+        if (!file) {
+          return failToolResult({
+            code: "FILE_NOT_FOUND",
+            message: "未找到要修改的文件。",
+            nextActions: ["确认 path 是否正确", "必要时先 read 确认目标文件存在"],
+            extra: { path },
+          });
+        }
+
+        const before = await s.ensureLoaded(file.path);
+
+        // old_string="" + 文件已存在且有内容 → 报错（和 Claude Code 行为一致）
+        if (oldStr === "" && before.trim() !== "") {
+          return failToolResult({
+            code: "FILE_EXISTS",
+            message: "文件已存在且非空，无法用空 old_string 创建。要追加内容请匹配文件尾部文本。",
+            nextActions: [
+              "用 read 查看文件末尾内容",
+              "将末尾文本作为 old_string，末尾文本 + 新内容作为 new_string",
+            ],
+            extra: { path },
+          });
+        }
+
+        // 查找匹配
+        const replaceAll = Boolean(args.replace_all);
+        const matchCount = before.split(oldStr).length - 1;
+
+        if (matchCount === 0) {
+          return failToolResult({
+            code: "STRING_NOT_FOUND",
+            message: `在文件中未找到要替换的文本。\n要替换的文本: ${oldStr.length > 200 ? oldStr.slice(0, 200) + "..." : oldStr}`,
+            nextActions: [
+              "确认 old_string 与文件内容完全一致（包括空格和换行）",
+              "用 read 重新查看文件内容",
+              "提供更多上下文使匹配更精确",
+            ],
+            extra: { path },
+          });
+        }
+
+        if (matchCount > 1 && !replaceAll) {
+          return failToolResult({
+            code: "MULTIPLE_MATCHES",
+            message: `找到 ${matchCount} 处匹配，但 replace_all 为 false。请提供更多上下文使 old_string 唯一，或设置 replace_all: true。`,
+            nextActions: [
+              "在 old_string 中包含更多前后文使其唯一",
+              "或设置 replace_all: true 替换所有匹配",
+            ],
+            extra: { path, matchCount },
+          });
+        }
+
+        // 执行替换
+        const after = replaceAll
+          ? before.replaceAll(oldStr, newStr)
+          : before.replace(oldStr, newStr);
+
+        const d = unifiedDiff({ path, before, after });
+
+        const snap = useProjectStore.getState().snapshot();
+        if (s.activePath === path && ed?.getModel()) {
+          // 用 Monaco 应用（保光标/markers）
+          const model = ed.getModel()!;
+          const full = model.getFullModelRange();
+          ed.executeEdits("agent", [{ range: full, text: after, forceMoveMarkers: true }]);
+          const next = model.getValue() ?? after;
+          useProjectStore.getState().updateFile(path, next);
+        } else {
+          useProjectStore.getState().updateFile(path, after);
+        }
+
+        return {
+          ok: true,
+          output: {
+            ok: true,
+            path,
+            mode: "string_match",
+            matchCount: replaceAll ? matchCount : 1,
+            preview: { note: "已应用字符串替换；可回滚更改。", diffUnified: d.diff, truncated: d.truncated, stats: d.stats ?? null },
+          },
+          applyPolicy: "auto_apply",
+          riskLevel: "medium",
+          undoable: true,
+          undo: () => useProjectStore.getState().restore(snap),
+        };
+      }
+
+      // ── Monaco range 模式（edits 数组） ──
       if (!file) {
         return failToolResult({
           code: "FILE_NOT_FOUND",
@@ -4069,8 +4189,11 @@ const tools: ToolDefinition[] = [
       if (!Array.isArray(edits) || edits.length === 0) {
         return failToolResult({
           code: "EMPTY_EDITS",
-          message: "edits 为空，无法应用修改。",
-          nextActions: ["传入至少 1 条 Monaco range 编辑", "或改用 write 直接写入全文"],
+          message: "必须提供 old_string + new_string 或 edits 数组。",
+          nextActions: [
+            "推荐：用 old_string 和 new_string 做字符串替换",
+            "或传入 edits 数组（Monaco range 格式）",
+          ],
           extra: { path },
         });
       }
