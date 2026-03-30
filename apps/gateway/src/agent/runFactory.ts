@@ -2569,6 +2569,9 @@ export async function prepareAgentRun(args: {
       if (wf) activeWorkflowDeclarations.set(sid, wf);
     }
   }
+  if (activeSkillIds.includes("style_imitate") && !activeWorkflowDeclarations.has("style_imitate")) {
+    throw new Error("STYLE_WORKFLOW_DECLARATION_MISSING");
+  }
 
   const activePortableManifests = activeSkillIds
     .map((id) => skillManifestById.get(id) as any)
@@ -5823,18 +5826,24 @@ export async function executeAgentRun(args: {
         const path = item.path ? `（${item.path}）` : "";
         return `${idx + 1}. ${item.name}${path}: ${msg}`;
       });
+    const suppressAssistantFallbackText = runEndReason === "silent_no_output";
     const fallbackText = (
-      failedLines.length
-        ? `这次没有完成，失败步骤如下：\n${failedLines.join("\n")}\n\n你可以让我"继续重试"，我会从失败步骤接着处理。`
-        : `这次没有完成。你可以让我"继续重试"，我会从失败处接着处理。`
+      suppressAssistantFallbackText
+        ? ""
+        : failedLines.length
+          ? `这次没有完成，失败步骤如下：\n${failedLines.join("\n")}\n\n你可以让我"继续重试"，我会从失败步骤接着处理。`
+          : `这次没有完成。你可以让我"继续重试"，我会从失败处接着处理。`
     );
     writeEvent("run.notice", {
       turn: runtime.getTurn(),
       kind: "error",
       title: "RunOutcome",
-      message: runnerOutcome.status === "aborted"
-        ? "本轮已中断。"
-        : "本轮未完成，请查看失败步骤后重试。",
+      message:
+        runEndReason === "silent_no_output"
+          ? "这轮没有收到模型的可见回复，已停止续跑。"
+          : runnerOutcome.status === "aborted"
+            ? "本轮已中断。"
+            : "本轮未完成，请查看失败步骤后重试。",
       detail: {
         status: runnerOutcome.status,
         reason: runEndReason,
@@ -5843,7 +5852,9 @@ export async function executeAgentRun(args: {
         failedCount: failureDigest.failedCount,
       },
     });
-    writeEvent("assistant.delta", { delta: fallbackText, turn: runtime.getTurn() });
+    if (fallbackText) {
+      writeEvent("assistant.delta", { delta: fallbackText, turn: runtime.getTurn() });
+    }
   }
 
   writeEvent("run.end", {

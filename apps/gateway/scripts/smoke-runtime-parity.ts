@@ -27,7 +27,6 @@ import {
   type CanonicalTranscriptItem,
 } from "../src/agent/runtime/transcript/index.js";
 import type { RuntimeMode } from "../src/agent/runtime/types.js";
-import type { RunState } from "@ohmycrab/agent-core";
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -285,23 +284,18 @@ class MockKernel implements LoopKernel {
 }
 
 // ---------------------------------------------------------------------------
-// 场景 8: transformContext 注入 per-turn hint
+// 场景 8: transformContext 注入 portable immediate hint
 // ---------------------------------------------------------------------------
 async function scenario8_transformContextHint() {
   const mockKernel = new MockKernel();
   const mockCtx = createMockRunContext();
-  // 注入 computePerTurnAllowed 回调
-  (mockCtx as any).computePerTurnAllowed = (_state: RunState) => ({
-    allowed: new Set(["run.done", "write"]),
-    hint: "当前为执行阶段，请调用工具。",
-    orchestratorMode: true,
-  });
 
   const runtime = new GatewayRuntime(
     { mode: "pi", runCtx: mockCtx },
     mockKernel,
   );
   await runtime.run("test prompt");
+  (runtime as any)._queuePortableImmediateHint("这是 portable immediate hint。", ["portable_immediate"]);
 
   // 验证 kernel 接收到了 transformContext hook
   assert.ok(mockKernel.capturedArgs, "kernel should have captured args");
@@ -316,21 +310,18 @@ async function scenario8_transformContextHint() {
   assert.ok(result.length > 0, "should have injected hint message");
   const hint = result[result.length - 1];
   assert.equal(hint.kind, "runtime_hint");
-  assert.ok(hint.text.includes("执行阶段"), `hint text should mention 执行阶段, got: ${hint.text}`);
+  assert.ok(hint.text.includes("portable immediate hint"), `hint text should mention portable immediate hint, got: ${hint.text}`);
 
   ok("scenario8.transformContext_hint");
 }
 
 // ---------------------------------------------------------------------------
-// 场景 9: 软 gating 拒绝越权工具
+// 场景 9: 工具可见性遵循 allowedToolNames
 // ---------------------------------------------------------------------------
 async function scenario9_softGatingReject() {
   const mockKernel = new MockKernel();
-  const mockCtx = createMockRunContext();
-  // 限制只允许 run.done
-  (mockCtx as any).computePerTurnAllowed = (_state: RunState) => ({
-    allowed: new Set(["run.done"]),
-    hint: "",
+  const mockCtx = createMockRunContext(undefined, {
+    allowedToolNames: new Set(["run.done"]),
   });
 
   const runtime = new GatewayRuntime(
@@ -339,26 +330,10 @@ async function scenario9_softGatingReject() {
   );
   await runtime.run("test prompt");
 
-  // 先调一次 transformContext 来初始化 effectiveAllowed
-  await mockKernel.capturedArgs.transformContext([]);
-
-  // 通过 _executeAgentTool 测试越权拒绝
-  const execResult = await (runtime as any)._executeAgentTool(
-    "tc_test_1",
-    "write",
-    { text: "hello" },
-  );
-  assert.equal(execResult.ok, false);
-  assert.equal(execResult.output.error, "TOOL_NOT_ALLOWED_THIS_TURN");
-
-  // 允许的工具不被拒绝（但会走 gateway/desktop 路由，在 mock 环境下也可能失败）
-  // 此处仅验证不被 soft gating 拒绝
-  const doneResult = await (runtime as any)._executeAgentTool(
-    "tc_test_2",
-    "run.done",
-    {},
-  );
-  assert.notEqual(doneResult.output?.error, "TOOL_NOT_ALLOWED_THIS_TURN");
+  const tools = (runtime as any)._buildAgentTools() as Array<{ label?: string }>;
+  const labels = tools.map((tool) => String(tool?.label ?? "").trim()).filter(Boolean);
+  assert.ok(labels.includes("run.done"), `should include run.done, got: ${labels.join(", ")}`);
+  assert.ok(!labels.includes("Write"), `should exclude Write, got: ${labels.join(", ")}`);
 
   ok("scenario9.soft_gating_reject");
 }
@@ -621,6 +596,19 @@ class ScriptedKernel implements LoopKernel {
   }
 }
 
+function createAssistantMessage(text: string) {
+  return {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    api: "openai-completions",
+    provider: "openai",
+    model: "smoke-model",
+    usage: { input: 0, output: 0, cacheReadInputTokens: 0, cacheWriteInputTokens: 0 },
+    stopReason: "stop",
+    timestamp: Date.now(),
+  } as any;
+}
+
 // ---------------------------------------------------------------------------
 // 场景 16: Provider parity - task_execution allows direct tool execution without todo
 // ---------------------------------------------------------------------------
@@ -759,6 +747,44 @@ async function scenario20_browserSessionWaitingUserNotCleared() {
 }
 
 // ---------------------------------------------------------------------------
+// 场景 21: no_tool_with_visible_text 应自然完成
+// ---------------------------------------------------------------------------
+async function scenario21_noToolVisibleTextNaturalStop() {
+  const scripted = new ScriptedKernel([
+    { type: "turn_start" },
+    { type: "message_end", message: createAssistantMessage("这是直接回复给用户的可见正文。") },
+    { type: "turn_end" },
+    { type: "agent_end" },
+  ]);
+  const ctx = createMockRunContext();
+  const runtime = new GatewayRuntime({ mode: "pi", runCtx: ctx } as any, scripted);
+  const result = await runtime.run("test prompt");
+  assert.equal(result.outcome.status, "completed");
+  assert.equal(result.outcome.reason, "completed");
+  assert.equal((result.executionReport as any).noToolBranchKind, "no_tool_with_visible_text");
+  ok("scenario21.no_tool_visible_text_natural_stop");
+}
+
+// ---------------------------------------------------------------------------
+// 场景 22: no_tool_without_visible_text 应失败为 silent_no_output
+// ---------------------------------------------------------------------------
+async function scenario22_noToolSilentOutputFails() {
+  const scripted = new ScriptedKernel([
+    { type: "turn_start" },
+    { type: "message_end", message: createAssistantMessage('{"status":"ok"}') },
+    { type: "turn_end" },
+    { type: "agent_end" },
+  ]);
+  const ctx = createMockRunContext();
+  const runtime = new GatewayRuntime({ mode: "pi", runCtx: ctx } as any, scripted);
+  const result = await runtime.run("test prompt");
+  assert.equal(result.outcome.status, "failed");
+  assert.equal(result.outcome.reason, "silent_no_output");
+  assert.equal((result.executionReport as any).noToolBranchKind, "no_tool_without_visible_text");
+  ok("scenario22.no_tool_silent_output_fails");
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 async function main() {
@@ -781,6 +807,8 @@ async function main() {
   await scenario18_providerParityRunDoneStopsLoop();
   await scenario19_providerParityDeliveryLatchBlocksRepeatWrite();
   await scenario20_browserSessionWaitingUserNotCleared();
+  await scenario21_noToolVisibleTextNaturalStop();
+  await scenario22_noToolSilentOutputFails();
   console.log("[smoke-parity] ALL PASSED");
 }
 

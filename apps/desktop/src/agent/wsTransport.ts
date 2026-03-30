@@ -1557,6 +1557,7 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
           (s: any) => s && s.type === "assistant" && s.variant !== "progress" && !s.hidden && String(s.text ?? "").trim().length > 0,
         );
         if (hasAssistantText) return;
+        const outcomeReason = String(runEndData?.reason ?? runEndData?.outcome?.reason ?? "").trim().toLowerCase();
         const failedToolSteps = runSteps.filter((s: any) => s && s.type === "tool" && s.status === "failed");
         const stepFailures = failedToolSteps.map((s: any) => summarizeStepFailure(s)).filter(Boolean);
         const digestFailures = Array.isArray(runEndData?.failureDigest?.failedTools)
@@ -1582,6 +1583,10 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
             ? `本轮已结束，但有 ${failedCount} 个步骤失败：\n${lines.join("\n")}${more}`
             : `本轮已结束，但有 ${failedCount} 个步骤失败。请展开失败项查看原因。`;
           addAssistant(body, false, false);
+          return;
+        }
+        if (outcomeReason === "silent_no_output") {
+          addAssistant("这轮没有收到模型的可见回复，已停止续跑。请直接重试，或切换模型后再试。", false, false);
           return;
         }
         const note = String(runDoneNote ?? "").trim();

@@ -18,6 +18,7 @@ import {
   isContentWriteTool,
   isStyleExampleKbSearch,
   isWriteLikeTool,
+  normalizeWorkflow,
   parseStyleLintResult,
   checkExclusions,
   resolveFollowUp,
@@ -868,8 +869,10 @@ export class GatewayRuntime implements AgentRuntime {
   private readonly providerCapabilities: ProviderCapabilities;
   private executionNoToolTurns = 0;
   private currentTurnToolCalls = 0;
-  /** 连续纯文本回合计数——用于隐式完成检测（参考 Codex 模式） */
-  private consecutiveTextOnlyTurns = 0;
+  /** 连续“有可见正文但无工具”回合，仅用于 follow-up 抑制 */
+  private consecutiveVisibleNoToolTurns = 0;
+  /** 连续“无可见正文且无工具”回合，用于 silent output 诊断 */
+  private consecutiveSilentNoToolTurns = 0;
   /** 当前 run() 的内部 AbortController，run.done / maxTurns 通过此终止 */
   private internalAc: AbortController | null = null;
   /** 软提示上次处理时的失败工具计数（避免重复提示） */
@@ -1076,8 +1079,8 @@ export class GatewayRuntime implements AgentRuntime {
       }
       await stream.result();
 
-      // 最终 outcome（run.done / implicit_completion 在 turn_end 中已设置 outcome，此处不覆盖）
-      if (this.outcome.reason === "run_done" || this.outcome.reason === "approval_waiting" || this.outcome.reason === "implicit_completion") {
+      // 最终 outcome（run.done / approval_waiting / silent_no_output 在事件处理中已设置，此处不覆盖）
+      if (this.outcome.reason === "run_done" || this.outcome.reason === "approval_waiting" || this.outcome.reason === "silent_no_output") {
         // 已由对应处理器设置，保持不变
       } else if (ac.signal.aborted) {
         this._setOutcome({
@@ -1177,7 +1180,8 @@ export class GatewayRuntime implements AgentRuntime {
     this.executionReport = {};
     this.lastSteeringFailureCount = 0;
     this.executionNoToolTurns = 0;
-    this.consecutiveTextOnlyTurns = 0;
+    this.consecutiveVisibleNoToolTurns = 0;
+    this.consecutiveSilentNoToolTurns = 0;
     this.currentTurnToolCalls = 0;
     this.pendingImmediateItems = [];
     this.pendingFollowUpItems = [];
@@ -1526,7 +1530,11 @@ export class GatewayRuntime implements AgentRuntime {
         this.config.runCtx.activeWorkflowDeclarations instanceof Map
           ? new Map(this.config.runCtx.activeWorkflowDeclarations)
           : new Map<string, any>();
-      nextWorkflowDecls.set(skillId, manifest.workflow);
+      const workflow = normalizeWorkflow(manifest.workflow);
+      if (skillId === "style_imitate" && !workflow) {
+        throw new Error("STYLE_WORKFLOW_DECLARATION_MISSING");
+      }
+      if (workflow) nextWorkflowDecls.set(skillId, workflow);
       this.config.runCtx.activeWorkflowDeclarations = nextWorkflowDecls;
     }
 
@@ -1759,15 +1767,18 @@ export class GatewayRuntime implements AgentRuntime {
     }
     this.runState.toolLoopGuardReason = null;
   }
-  private _assistantHasVisibleText(message: AssistantMessage): boolean {
+
+  private _extractAssistantVisibleText(message: AssistantMessage): string {
+    const parts: string[] = [];
     for (const part of message.content) {
       if (part.type !== "text") continue;
       const sanitized = sanitizeAssistantUserFacingText(part.text, {
         dropPureJsonPayload: true,
       });
-      if (sanitized.text && sanitized.text.trim()) return true;
+      const text = String(sanitized.text ?? "").trim();
+      if (!sanitized.dropped && text) parts.push(text);
     }
-    return false;
+    return parts.join("\n").trim();
   }
 
   private async _activateDeliveryLatch(reason: "assistant_text" | "run_done", detail?: Record<string, unknown>): Promise<void> {
@@ -1975,69 +1986,17 @@ export class GatewayRuntime implements AgentRuntime {
     const st: any = this.runState as any;
     const wfDecls: Map<string, WorkflowDeclaration> | undefined = runCtx.activeWorkflowDeclarations;
     const wfWorkflow = wfDecls?.get("style_imitate");
-    if (wfWorkflow) {
-      const followUpMsg = resolveFollowUp(wfWorkflow, st);
-      if (!followUpMsg) return null;
-      const snapshot = resolvePhase(wfWorkflow, st);
-      return {
-        skillId: "style_imitate",
-        phase: String(snapshot.currentPhase ?? "unknown").trim() || "unknown",
-        item: {
-          kind: "runtime_hint",
-          text: followUpMsg,
-          reasonCodes: ["style_workflow_followup", "phase:" + String(snapshot.currentPhase ?? "unknown").trim()],
-        },
-      };
-    }
-
-    const lintGateDegraded = Boolean(st.lintGateDegraded);
-    const styleLintAccepted = Boolean(st.styleLintSatisfied || st.styleLintPassed || lintGateDegraded);
-    const copyLintAccepted = Boolean(st.copyLintSatisfied || st.copyLintPassed || st.copyGateDegraded);
-    const styleCompleted = Boolean(
-      st.hasSelectedStyleLibrary &&
-      st.topicConfirmed &&
-      st.hasStyleKbSearch &&
-      st.hasStylePlan &&
-      st.hasDraftText &&
-      copyLintAccepted &&
-      styleLintAccepted &&
-      st.finalWritten,
-    );
-    if (styleCompleted) return null;
-
-    const currentPhase =
-      !st.hasSelectedStyleLibrary ? "need_style_library"
-      : !st.topicConfirmed ? "need_topic"
-      : !st.hasStyleKbSearch ? "need_style_kb"
-      : !st.hasStylePlan ? "need_tone_outline"
-      : !st.hasDraftText ? "need_draft"
-      : !copyLintAccepted ? "need_copy_lint"
-      : !styleLintAccepted ? "need_style_lint"
-      : !st.finalWritten ? "need_final_write"
-      : "completed";
-    const followUpText =
-      currentPhase === "need_style_library"
-        ? "当前已启用 style_imitate，但风格库尚未唯一确定。\n请先确认使用哪个 style 库；如果有多个库，不要默认取第一个。"
-        : currentPhase === "need_topic"
-          ? "当前已启用 style_imitate，但还缺少写作主题。\n请先向用户确认题目或核心观点，再继续后续检索与写作。"
-        : currentPhase === "need_style_kb"
-        ? "当前已启用 style_imitate，但风格样例检索还没完成。\n请先调用 kb.search，从 purpose=style 的风格库检索模板/规则卡；不要先写草稿，也不要直接交付终稿。"
-        : currentPhase === "need_tone_outline"
-          ? "风格规则卡已经就位，但定调与骨架还没形成。\n请先整理 toneCard / structureOutline，再进入正文写作。"
-        : currentPhase === "need_draft"
-          ? "当前已启用 style_imitate，风格样例已具备。\n请先调用 write 生成候选稿；不要直接把聊天文本当成终稿交付。"
-          : currentPhase === "need_copy_lint"
-            ? "你已经产出了候选稿，现在必须进入复述风险检查。\n请先调用 lint.copy 对候选稿做复述风险审计；在 copy lint 通过前，不要继续终稿写入。"
-            : currentPhase === "need_style_lint"
-              ? "copy lint 已通过，现在必须进入风格校验。\n请先调用 lint.style 检查结构、节奏和语气；在 style lint 通过前，不要继续终稿写入。"
-              : "lint 已满足，现在请把 best draft 落成终稿，再 run.done 完成本轮。";
+    if (!wfWorkflow) return null;
+    const followUpMsg = resolveFollowUp(wfWorkflow, st);
+    if (!followUpMsg) return null;
+    const snapshot = resolvePhase(wfWorkflow, st);
     return {
       skillId: "style_imitate",
-      phase: currentPhase,
+      phase: String(snapshot.currentPhase ?? "unknown").trim() || "unknown",
       item: {
         kind: "runtime_hint",
-        text: followUpText,
-        reasonCodes: ["style_workflow_followup", "phase:" + currentPhase],
+        text: followUpMsg,
+        reasonCodes: ["style_workflow_followup", "phase:" + String(snapshot.currentPhase ?? "unknown").trim()],
       },
     };
   }
@@ -2098,7 +2057,11 @@ export class GatewayRuntime implements AgentRuntime {
    */
   private async _getFollowUpMessages(): Promise<AgentMessage[]> {
     // run.done 已触发，不再追加
-    if (this.outcome.reason === "run_done" || this.outcome.reason === "approval_waiting") return [];
+    if (
+      this.outcome.reason === "run_done" ||
+      this.outcome.reason === "approval_waiting" ||
+      this.outcome.reason === "silent_no_output"
+    ) return [];
 
     if (this.pendingFollowUpItems.length > 0) {
       const items = this.pendingFollowUpItems
@@ -2155,23 +2118,11 @@ export class GatewayRuntime implements AgentRuntime {
       }
     }
 
-    // 隐式完成：连续纯文本回合 ≥ 2 时，turn_end 已经会 abort loop。
-    // 此处作为 belt-and-suspenders 防御：万一 agentLoop 实现差异导致 abort 未生效，
-    // 仍然通过 follow-up 强制要求 run.done，避免无限自言自语。
-    if (this.consecutiveTextOnlyTurns >= 2) {
-      const item: CanonicalTranscriptItem = {
-        kind: "runtime_hint",
-        text: "你已连续两轮没有调用任何工具。请立即调用 run.done 结束。",
-        reasonCodes: ["implicit_completion_force_done"],
-      };
-      return [item as unknown as AgentMessage];
-    }
-
-    // 模型已输出一轮纯文本总结（consecutiveTextOnlyTurns >= 1），说明最近一次工具失败
+    // 模型已输出一轮可见正文但无工具，说明最近一次工具失败
     // 已被语义层处理过（总结/解释原因等）。此时提前消耗 failure 计数，避免
     // tool_failure_repair 在 followUp 通道再追加一轮"自言自语"式提示。
     if (
-      this.consecutiveTextOnlyTurns >= 1 &&
+      this.consecutiveVisibleNoToolTurns >= 1 &&
       this.failureDigest.failedCount > this.lastSteeringFailureCount
     ) {
       this.lastSteeringFailureCount = this.failureDigest.failedCount;
@@ -3794,6 +3745,7 @@ export class GatewayRuntime implements AgentRuntime {
       case "turn_start":
         this.turn += 1;
         this.currentTurnToolCalls = 0;
+        this.turnEngine.beginTurn();
         this.turnEngine.setTurn(this.turn);
         // maxTurns 保护
         if (this.turn > maxTurns) {
@@ -3843,8 +3795,14 @@ export class GatewayRuntime implements AgentRuntime {
         }
 
         if (isAssistantMsg(msg)) {
+          const visibleAssistantText = this._extractAssistantVisibleText(msg);
+          const hasVisibleAssistantText = visibleAssistantText.length > 0;
+          this.turnEngine.noteAssistantTurn({
+            hasVisibleAssistantText,
+            askedUser: hasVisibleAssistantText && this._detectAssistantAskingUser(visibleAssistantText),
+          });
           this._pushAssistantToTranscript(msg);
-          if (msg.stopReason !== "error" && msg.stopReason !== "aborted" && this._assistantHasVisibleText(msg)) {
+          if (msg.stopReason !== "error" && msg.stopReason !== "aborted" && hasVisibleAssistantText) {
             await this._activateDeliveryLatch("assistant_text", { stopReason: msg.stopReason ?? null });
           }
           // 上报 token usage
@@ -3882,6 +3840,7 @@ export class GatewayRuntime implements AgentRuntime {
         const rawToolName = this._decodeRuntimeToolName(event.toolName);
         this.totalToolCalls += 1;
         this.currentTurnToolCalls += 1;
+        this.turnEngine.noteToolCall();
         this.portableStopBlockRetryCount = 0;
         this.turnEngine.record({
           type: "model_tool_call",
@@ -4066,24 +4025,33 @@ export class GatewayRuntime implements AgentRuntime {
 
       case "turn_end":
         this.turnLocalRawToolResults.clear();
-        // 追踪连续纯文本回合——用于隐式完成检测
-        if (this.currentTurnToolCalls === 0) {
-          this.consecutiveTextOnlyTurns += 1;
-        } else {
-          this.consecutiveTextOnlyTurns = 0;
+        if (
+          this.outcome.status !== "completed" ||
+          this.outcome.reason === "run_done" ||
+          this.outcome.reason === "approval_waiting"
+        ) {
+          return;
         }
 
-        // ── 隐式完成硬停（参考 Claude Code：模型不调工具 = 完成） ──
-        // Claude Code 做法：响应中没有 tool_use → 直接 return {reason:"completed"}
-        // 我们宽松一点：容忍 1 轮纯文本输出（模型可能在给用户总结），
-        // 第 2 轮连续纯文本 → 直接 abort 终止 loop，不再给模型继续发言的机会。
-        if (this.consecutiveTextOnlyTurns >= 2) {
+        const noToolBranch = this.turnEngine.classifyNoToolBranch();
+        if (noToolBranch === "with_tool") {
+          this.consecutiveVisibleNoToolTurns = 0;
+          this.consecutiveSilentNoToolTurns = 0;
+        } else if (noToolBranch === "no_tool_with_visible_text") {
+          this.consecutiveVisibleNoToolTurns += 1;
+          this.consecutiveSilentNoToolTurns = 0;
+        } else {
+          this.consecutiveVisibleNoToolTurns = 0;
+          this.consecutiveSilentNoToolTurns += 1;
           this._setOutcome({
-            status: "completed",
-            reason: "implicit_completion",
-            reasonCodes: ["implicit_completion", "consecutive_text_only"],
+            status: "failed",
+            reason: "silent_no_output",
+            reasonCodes: ["silent_no_output", "no_tool_branch"],
+            detail: {
+              turn: this.turn,
+              noToolBranch,
+            },
           });
-          ac.abort();
           return;
         }
 

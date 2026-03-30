@@ -12,6 +12,18 @@ export type RunOutcome = {
   detail?: Record<string, unknown> | null;
 };
 
+export type TurnObservation = {
+  hasAssistantMessage: boolean;
+  hasVisibleAssistantText: boolean;
+  askedUser: boolean;
+  toolCallCount: number;
+};
+
+export type NoToolBranchKind =
+  | "with_tool"
+  | "no_tool_with_visible_text"
+  | "no_tool_without_visible_text";
+
 type TurnEngineSnapshot = {
   turn: number;
   totalToolCalls: number;
@@ -22,6 +34,8 @@ type TurnEngineSnapshot = {
   pendingToolCallCount: number;
   unmatchedToolResultCount: number;
   pendingToolCalls: Array<{ callId: string; name: string }>;
+  lastTurnObservation: TurnObservation;
+  noToolBranchKind: NoToolBranchKind;
 };
 
 const DEFAULT_OUTCOME: RunOutcome = {
@@ -42,6 +56,12 @@ export class TurnEngine {
   private readonly canonicalEvents: CanonicalTurnEvent[] = [];
   private readonly pendingToolCalls = new Map<string, { callId: string; name: string }>();
   private unmatchedToolResults = 0;
+  private lastTurnObservation: TurnObservation = {
+    hasAssistantMessage: false,
+    hasVisibleAssistantText: false,
+    askedUser: false,
+    toolCallCount: 0,
+  };
 
   reset(): void {
     this.outcome = { ...DEFAULT_OUTCOME };
@@ -53,10 +73,20 @@ export class TurnEngine {
     this.canonicalEvents.splice(0, this.canonicalEvents.length);
     this.pendingToolCalls.clear();
     this.unmatchedToolResults = 0;
+    this.beginTurn();
   }
 
   setTurn(turn: number): void {
     this.turn = Math.max(0, Math.floor(Number(turn) || 0));
+  }
+
+  beginTurn(): void {
+    this.lastTurnObservation = {
+      hasAssistantMessage: false,
+      hasVisibleAssistantText: false,
+      askedUser: false,
+      toolCallCount: 0,
+    };
   }
 
   setOutcome(next: RunOutcome): void {
@@ -72,6 +102,22 @@ export class TurnEngine {
 
   getOutcome(): RunOutcome {
     return this.outcome;
+  }
+
+  noteAssistantTurn(args: { hasVisibleAssistantText: boolean; askedUser: boolean }): void {
+    this.lastTurnObservation.hasAssistantMessage = true;
+    if (args.hasVisibleAssistantText) this.lastTurnObservation.hasVisibleAssistantText = true;
+    if (args.askedUser) this.lastTurnObservation.askedUser = true;
+  }
+
+  noteToolCall(): void {
+    this.lastTurnObservation.toolCallCount += 1;
+  }
+
+  classifyNoToolBranch(): NoToolBranchKind {
+    if (this.lastTurnObservation.toolCallCount > 0) return "with_tool";
+    if (this.lastTurnObservation.hasVisibleAssistantText) return "no_tool_with_visible_text";
+    return "no_tool_without_visible_text";
   }
 
   record(event: CanonicalTurnEvent): void {
@@ -112,6 +158,8 @@ export class TurnEngine {
       pendingToolCallCount: this.pendingToolCalls.size,
       unmatchedToolResultCount: this.unmatchedToolResults,
       pendingToolCalls: Array.from(this.pendingToolCalls.values()).slice(0, 20),
+      lastTurnObservation: { ...this.lastTurnObservation },
+      noToolBranchKind: this.classifyNoToolBranch(),
     };
   }
 }
