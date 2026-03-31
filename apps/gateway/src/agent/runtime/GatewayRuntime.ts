@@ -881,6 +881,8 @@ export class GatewayRuntime implements AgentRuntime {
   private pendingImmediateItems: CanonicalTranscriptItem[] = [];
   private pendingFollowUpItems: CanonicalTranscriptItem[] = [];
   private executedPortableHookOnceKeys = new Set<string>();
+  /** 当前轮用户上传的图片数量，用于 crab-image 多图重写 */
+  private _currentTurnUserImageCount = 0;
   private activePortableHookEventStack: PortableHookEventName[] = [];
   private portableSessionStartSource = "startup";
   private portableHookInvocationSeq = 0;
@@ -1025,6 +1027,7 @@ export class GatewayRuntime implements AgentRuntime {
       ? { kind: "user", text: userPrompt, images }
       : { kind: "user", text: userPrompt };
     const seedTranscript = [...this.transcript, seedUserItem];
+    this._currentTurnUserImageCount = images?.length ?? 0;
 
     // Shadow 模式审计事件
     if (this.shadowMode === "shadow") {
@@ -3753,6 +3756,32 @@ export class GatewayRuntime implements AgentRuntime {
         this.config.runCtx.fastify.log.info({ toolName, toolCallId, crabImageArgs: diag }, "crab-image.tool.call.diag");
       }
 
+      // ── crab-image 多图重写 ──
+      // LLM 经常在多图场景下错误选择 edit_image（单图编辑），
+      // 导致只有 last_user_image（最后一张）被注入。
+      // 当用户上传 ≥2 张图且 LLM 调用 edit_image 时，
+      // 在 Gateway 侧重写为 generate_image，这样 Desktop 会自动注入所有用户图。
+      if (
+        toolName === "mcp.crab-image.edit_image" &&
+        this._currentTurnUserImageCount >= 2
+      ) {
+        const editPrompt = String((toolArgs as any).editPrompt ?? "").trim();
+        if (editPrompt) {
+          toolName = "mcp.crab-image.generate_image";
+          toolArgs = {
+            ...toolArgs,
+            prompt: editPrompt,
+          };
+          // 清理 edit_image 专用字段
+          delete (toolArgs as any).editPrompt;
+          delete (toolArgs as any).target;
+          this.config.runCtx.fastify.log.info(
+            { toolCallId, originalTool: "edit_image", rewrittenTo: "generate_image", userImageCount: this._currentTurnUserImageCount },
+            "crab-image.multi-image-rewrite",
+          );
+        }
+      }
+
       // 通知 Desktop 执行工具
       this.config.runCtx.writeEvent("tool.call", {
         toolCallId,
@@ -4714,7 +4743,9 @@ export class GatewayRuntime implements AgentRuntime {
     // 图片数据由 wsTransport.ts 在工具调用时自动注入到 crab-image MCP。
     // 这里只注入文字注释，让模型知道有图可用。
     const n = item.images.length;
-    const note = `（用户上传了 ${n} 张图片，这些图片会在调用 generate_image / edit_image 时作为参考图自动注入，无需在 referenceImages 中指定 last_user_image；直接调用工具即可）`;
+    const note = n >= 2
+      ? `（用户上传了 ${n} 张图片。多图场景请使用 generate_image（不是 edit_image），所有 ${n} 张图会作为参考图自动注入，无需传 referenceImages 或 last_user_image；直接调用 generate_image 即可）`
+      : `（用户上传了 ${n} 张图片，在调用 generate_image / edit_image 时会作为参考图自动注入，无需在 referenceImages 中指定 last_user_image；直接调用工具即可）`;
     return item.text.trim() ? `${item.text}\n\n${note}` : note;
   }
 
