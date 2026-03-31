@@ -281,16 +281,24 @@ export function ToolBlock(props: { step: ToolBlockStep }) {
     const linkedArtifacts = extractLinkedArtifacts(step.output, rootDir);
     if (!out || typeof out !== "object") return linkedArtifacts;
     const structuredArtifacts: ToolArtifactCard[] = [];
-    if (step.toolName === "code.exec" && Array.isArray(out.artifacts)) {
+    if (Array.isArray(out.artifacts)) {
       structuredArtifacts.push(...out.artifacts
         .map((a: any, idx: number) => ({
           id: String(a?.absPath ?? a?.relPath ?? `artifact_${idx}`),
           absPath: String(a?.absPath ?? "").trim(),
-          relPath: String(a?.relPath ?? "").trim(),
+          relPath: String(a?.relPath ?? a?.href ?? "").trim(),
           name: String(a?.name ?? "").trim() || String(a?.relPath ?? "").split("/").pop() || "",
-          ext: String(a?.ext ?? "").trim(),
+          ext: String(a?.ext ?? "").trim() || String(a?.mimeType ?? "").trim().split("/").pop()?.replace("jpeg", "jpg") || "",
           sizeBytes: Number(a?.sizeBytes ?? 0),
-          previewKind: detectPreviewKindFromArtifact(String(a?.ext ?? "").trim(), String(a?.name ?? "").trim()),
+          previewKind:
+            String(a?.previewKind ?? "").trim() === "image" ||
+            String(a?.previewKind ?? "").trim() === "audio" ||
+            String(a?.previewKind ?? "").trim() === "video"
+              ? String(a.previewKind).trim() as ToolArtifactPreviewKind
+              : detectPreviewKindFromArtifact(
+                  String(a?.ext ?? "").trim() || String(a?.mimeType ?? "").trim().split("/").pop()?.replace("jpeg", "jpg") || "",
+                  String(a?.name ?? "").trim(),
+                ),
         }))
         .filter((a: any) => Boolean(a.absPath)));
     }

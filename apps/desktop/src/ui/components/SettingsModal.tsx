@@ -954,6 +954,7 @@ const MCP_FAMILY_OPTIONS = [
   { value: "word", label: "word" },
   { value: "spreadsheet", label: "spreadsheet" },
   { value: "pdf", label: "pdf" },
+  { value: "image", label: "image" },
   { value: "custom", label: "custom" },
 ] as const;
 
@@ -965,6 +966,7 @@ const MCP_PROFILE_OPTIONS = [
   { value: "word_delivery_minimal", label: "word_delivery_minimal" },
   { value: "spreadsheet_delivery_minimal", label: "spreadsheet_delivery_minimal" },
   { value: "pdf_read_minimal", label: "pdf_read_minimal" },
+  { value: "image_generation_minimal", label: "image_generation_minimal" },
 ] as const;
 
 function formatToolListInput(list?: string[] | null): string {
@@ -1121,7 +1123,7 @@ function draftFromInstallPlan(plan: any, repoUrl: string): McpDraft {
   const envEntries = configFields
     .filter((field: any) => String(field?.source ?? "env").trim().toLowerCase() === "env")
     .map((field: any) => [String(field?.key ?? "").trim(), ""] as const)
-    .filter(([key]) => Boolean(key));
+    .filter(([key]: readonly [string, string]) => Boolean(key));
   const unsupportedHeaderKeys = configFields
     .filter((field: any) => String(field?.source ?? "").trim().toLowerCase() === "header")
     .map((field: any) => String(field?.key ?? "").trim())

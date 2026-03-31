@@ -591,6 +591,14 @@ export function createRunTarget(convId: string) {
       }
     },
 
+    appendTranscriptEntry: (entry: TranscriptEntry) => {
+      if (!entry || typeof entry !== "object" || !String((entry as any)?.id ?? "").trim()) return;
+      if (isActive()) {
+        (useRunStore.getState() as any).appendTranscriptEntry?.(entry);
+      }
+      mirrorAppendTranscript(entry);
+    },
+
     // ---- addTool ----
     addTool: (tool: AddToolInput) => {
       const id = tool.id ?? makeId("t");

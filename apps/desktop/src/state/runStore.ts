@@ -4,6 +4,7 @@ import {
   getToolResultEnvelopePayload,
   type ItemActionSpec,
   type ThreadCapabilityState,
+  type ThreadImageSessionV1,
   type ToolResultEnvelope,
 } from "@ohmycrab/shared";
 import type { ProjectSnapshot } from "./projectStore";
@@ -215,6 +216,7 @@ export type RuntimeThreadRecord = {
   pendingApprovalIds?: string[];
   taskState?: RuntimeTaskStateV2 | null;
   capabilityState?: ThreadCapabilityState | null;
+  imageSession?: ThreadImageSessionV1 | null;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -493,6 +495,7 @@ type RunState = {
   appendAssistantDelta: (stepId: string, delta: string) => void;
   finishAssistant: (stepId: string) => void;
   patchAssistant: (stepId: string, patch: Partial<AssistantStep>) => void;
+  appendTranscriptEntry: (entry: TranscriptEntry) => void;
 
   addTool: (
     tool: Omit<ToolBlockStep, "id" | "type" | "kept" | "applied"> & {
@@ -1351,6 +1354,16 @@ export const useRunStore = create<RunState>()(
 	        : s.transcript;
 	      return { steps: nextSteps, transcript };
 	    }),
+  appendTranscriptEntry: (entry) =>
+    set((s) => {
+      if (!entry || typeof entry !== "object" || !String((entry as any).id ?? "").trim()) return {};
+      return {
+        transcript: resequenceTranscript([
+          ...s.transcript.filter((item) => String((item as any)?.id ?? "").trim() !== String((entry as any)?.id ?? "").trim()),
+          JSON.parse(JSON.stringify(entry)) as TranscriptEntry,
+        ]),
+      };
+    }),
 
   addTool: (tool) => {
     const id = tool.id ?? makeId("t");

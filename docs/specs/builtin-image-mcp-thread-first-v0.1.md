@@ -847,10 +847,17 @@ v0.1 不新增图片专用 sidebar / editor page。
 
 ### 交付标准
 
-- [ ] `generate_image` 成功后，同一 session 内 `edit_image({ target: "last" })` 能拿到上一张图并编辑
-- [ ] 用户上传图片后，`generate_image` 自动将上传图作为参考图
-- [ ] 用户说"修一下"时，模型调用 `edit_image` 而非重新 `generate_image`（这依赖模型行为，不是代码约束）
-- [ ] 整个 Phase 2 的改动限定在 `wsTransport.ts` 一个文件内
+- [x] `generate_image` 成功后，同一 session 内 `edit_image({ target: "last" })` 能拿到上一张图并编辑（通过 `_imageArtifactCache` 热缓存）
+- [x] 用户上传图片后，`generate_image` 自动将上传图作为参考图（自动注入 `resolvedReferenceImages`）
+- [ ] 用户说"修一下"时，模型调用 `edit_image` 而非重新 `generate_image`（依赖模型行为，当前 Sonnet 在对话上下文明确时会调 edit_image）
+- [x] 整个 Phase 2 的改动限定在 `wsTransport.ts` 一个文件内（+ `toolCatalog.ts` 正则修复）
+
+### 已知遗留问题（不在 Phase 2 范围内）
+
+详见 `docs/specs/crab-image-known-issues.md`。关键项：
+- **#8 intent router 降级**：聊天后画图被分到 analysis_readonly，MCP 工具全被裁掉
+- **#9 session 串台**：不同 session 的对话历史混入当前 session
+- **#7 @文件引用图片**：走 read 而非视觉输入，需 UX 设计
 
 ## Phase 3：providerSessionCache
 

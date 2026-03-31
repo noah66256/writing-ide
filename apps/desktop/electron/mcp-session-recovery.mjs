@@ -1,4 +1,4 @@
-const STATEFUL_RE = /(playwright|browser|word|doc|excel|spreadsheet|workbook|pdf|ssh|terminal|app-server)/i;
+const STATEFUL_RE = /(playwright|browser|word|doc|excel|spreadsheet|workbook|pdf|image|imagen|gemini.*image|crab-image|ssh|terminal|app-server)/i;
 const SESSION_ERROR_RE = /(another\s+browser\s+context\s+is\s+being\s+closed|context\s+is\s+being\s+closed|context\s+has\s+been\s+closed|browser\s+has\s+been\s+closed|target\s+page.*has\s+been\s+closed|transport\s+closed|session\s+closed|connection\s+closed)/i;
 
 export function isLikelyStatefulMcpServer(args = {}) {
