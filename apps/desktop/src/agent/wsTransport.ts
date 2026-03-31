@@ -341,11 +341,13 @@ function buildCrabImageToolArgs(args: {
     .filter(Boolean);
 
   if (args.toolName === "mcp.crab-image.generate_image") {
-    // 自动注入用户上传图作为参考图：
-    // 仅当模型未显式传 referenceImages 且当前轮有用户图时，才自动注入（≤12张）
-    if (!hasExplicitReferenceImages && resolvedReferenceImages.length === 0) {
-      const userImages = findAllUserImagesInCurrentTurn(args.rt).slice(0, 12);
-      if (userImages.length > 0) resolvedReferenceImages.push(...userImages);
+    // 自动注入用户上传图作为参考图（≤12张）：
+    // 当前轮用户图数量 > 已解析的参考图数量时，用全量用户图替换，
+    // 避免模型只传 last_user_image 导致多图场景漏图。
+    const currentTurnImages = findAllUserImagesInCurrentTurn(args.rt).slice(0, 12);
+    if (currentTurnImages.length > 0 && currentTurnImages.length > resolvedReferenceImages.length) {
+      resolvedReferenceImages.length = 0;
+      resolvedReferenceImages.push(...currentTurnImages);
     }
     const useThreadHistory = Boolean((args.rawArgs as any)?.useThreadHistory);
     if (useThreadHistory && resolvedReferenceImages.length === 0) {

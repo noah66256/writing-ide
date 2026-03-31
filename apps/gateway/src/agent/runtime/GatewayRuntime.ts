@@ -4705,7 +4705,7 @@ export class GatewayRuntime implements AgentRuntime {
     // 图片数据由 wsTransport.ts 在工具调用时自动注入到 crab-image MCP。
     // 这里只注入文字注释，让模型知道有图可用。
     const n = item.images.length;
-    const note = `（用户上传了 ${n} 张图片，如需绘图/修图请调用 generate_image 或 edit_image）`;
+    const note = `（用户上传了 ${n} 张图片，这些图片会在调用 generate_image / edit_image 时作为参考图自动注入，无需在 referenceImages 中指定 last_user_image；直接调用工具即可）`;
     return item.text.trim() ? `${item.text}\n\n${note}` : note;
   }
 
