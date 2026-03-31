@@ -4701,18 +4701,12 @@ export class GatewayRuntime implements AgentRuntime {
   ): string | (TextContent | ImageContent)[] {
     if (!item.images?.length) return item.text;
 
-    const parts: Array<TextContent | ImageContent> = [];
-    if (item.text.trim()) {
-      parts.push({ type: "text", text: item.text });
-    }
-    for (const image of item.images) {
-      parts.push({
-        type: "image",
-        data: image.data,
-        mimeType: image.mediaType,
-      } as ImageContent);
-    }
-    return parts;
+    // 不把用户上传的原始图片发给主 LLM——大图会导致请求体过大、代理报错。
+    // 图片数据由 wsTransport.ts 在工具调用时自动注入到 crab-image MCP。
+    // 这里只注入文字注释，让模型知道有图可用。
+    const n = item.images.length;
+    const note = `（用户上传了 ${n} 张图片，如需绘图/修图请调用 generate_image 或 edit_image）`;
+    return item.text.trim() ? `${item.text}\n\n${note}` : note;
   }
 
   private _normalizeUserContent(
