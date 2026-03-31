@@ -3744,6 +3744,15 @@ export class GatewayRuntime implements AgentRuntime {
         });
       });
 
+      // 诊断日志：crab-image 工具调用的 LLM 参数
+      if (/crab-image/i.test(toolName)) {
+        const diag = { ...toolArgs };
+        // 不打 base64 数据
+        delete (diag as any).resolvedReferenceImages;
+        delete (diag as any).resolvedTargetImage;
+        this.log.info({ toolName, toolCallId, crabImageArgs: diag }, "crab-image.tool.call.diag");
+      }
+
       // 通知 Desktop 执行工具
       this.config.runCtx.writeEvent("tool.call", {
         toolCallId,
