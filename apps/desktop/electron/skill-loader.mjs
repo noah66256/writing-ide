@@ -147,8 +147,6 @@ function buildProjectSkillRoots(projectRoots) {
 function buildScanRoots(primaryRoot, projectRoots = []) {
   return uniq([
     path.resolve(String(primaryRoot ?? "")),
-    path.join(os.homedir(), ".claude", "skills"),
-    path.join(os.homedir(), ".agents", "skills"),
     ...buildProjectSkillRoots(projectRoots),
   ]);
 }
@@ -157,12 +155,6 @@ function getScanRootPrecedence(rootDir, primaryRoot, projectRoots = []) {
   const root = path.resolve(String(rootDir ?? ""));
   const userDataRoot = path.resolve(String(primaryRoot ?? ""));
   if (root === userDataRoot) return 100;
-
-  const homeClaudeRoot = path.join(os.homedir(), ".claude", "skills");
-  if (root === homeClaudeRoot) return 300;
-
-  const homeAgentsRoot = path.join(os.homedir(), ".agents", "skills");
-  if (root === homeAgentsRoot) return 290;
 
   const projects = normalizeProjectRoots(projectRoots);
   for (let i = 0; i < projects.length; i++) {

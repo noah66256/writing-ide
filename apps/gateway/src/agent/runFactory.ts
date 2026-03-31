@@ -2152,7 +2152,7 @@ const agentRunBodySchema = z.object({
   styleExecutionMode: z.enum(["agent_v1", "pipeline_v1"]).optional(),
   stylePipelinePayload: z.any().optional(),
   /** Desktop 传来的外部扩展包 skill manifests */
-  userSkillManifests: z.array(z.any()).max(20).optional(),
+  userSkillManifests: z.array(z.any()).max(200).optional(),
   /** Desktop 传来的 Claude 风格外部 agent 定义 */
   userAgentDefinitions: z.array(z.any()).max(40).optional(),
   contextPack: z.string().optional(),
