@@ -3750,7 +3750,7 @@ export class GatewayRuntime implements AgentRuntime {
         // 不打 base64 数据
         delete (diag as any).resolvedReferenceImages;
         delete (diag as any).resolvedTargetImage;
-        this.log.info({ toolName, toolCallId, crabImageArgs: diag }, "crab-image.tool.call.diag");
+        this.config.runCtx.fastify.log.info({ toolName, toolCallId, crabImageArgs: diag }, "crab-image.tool.call.diag");
       }
 
       // 通知 Desktop 执行工具
