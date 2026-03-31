@@ -1182,6 +1182,42 @@ const STRUCTURED_PREVIEW_MAX_DEPTH = 3;
 const STRUCTURED_PREVIEW_MAX_ITEMS = 12;
 const STRUCTURED_PREVIEW_MAX_STRING_CHARS = 1600;
 
+// ---- context summary 熔断 ----
+type SummaryFuseState = { consecutiveFailures: number; lastFailureTs: number };
+const SUMMARY_FUSE_MAX = 3;
+const SUMMARY_FUSE_COOLDOWN_MS = 5 * 60 * 1000; // 5 分钟冷却
+const SUMMARY_FETCH_TIMEOUT_MS = 30_000; // 30 秒超时
+const summaryFuseByKey = new Map<string, SummaryFuseState>();
+
+function getSummaryFuseKey(opts: { gatewayUrl: string; mode: string; preferModelId: string }) {
+  return `${opts.gatewayUrl}::${opts.mode}::${opts.preferModelId}`;
+}
+
+function readSummaryFuse(key: string): { fused: boolean; failures: number } {
+  const s = summaryFuseByKey.get(key);
+  if (!s) return { fused: false, failures: 0 };
+  // 冷却期过后自动恢复
+  if (Date.now() - s.lastFailureTs >= SUMMARY_FUSE_COOLDOWN_MS) {
+    summaryFuseByKey.delete(key);
+    return { fused: false, failures: 0 };
+  }
+  return { fused: s.consecutiveFailures >= SUMMARY_FUSE_MAX, failures: s.consecutiveFailures };
+}
+
+function noteSummaryFuseSuccess(key: string) {
+  summaryFuseByKey.delete(key);
+}
+
+function noteSummaryFuseFailure(key: string) {
+  const s = summaryFuseByKey.get(key);
+  if (s) {
+    s.consecutiveFailures += 1;
+    s.lastFailureTs = Date.now();
+  } else {
+    summaryFuseByKey.set(key, { consecutiveFailures: 1, lastFailureTs: Date.now() });
+  }
+}
+
 function getModelContextWindowTokens(modelId: string): number | null {
   const id = String(modelId ?? "").trim();
   if (!id) return null;
@@ -2629,6 +2665,17 @@ async function fetchContextSummaryOnce(args: {
   abort: AbortController;
   log: (level: "info" | "warn" | "error", message: string, data?: unknown) => void;
 }) {
+  // 30s 超时 AbortController，与外部 abort 联合
+  const timeoutAc = new AbortController();
+  const timer = setTimeout(() => timeoutAc.abort(), SUMMARY_FETCH_TIMEOUT_MS);
+  const onExternalAbort = () => timeoutAc.abort();
+  args.abort.signal.addEventListener("abort", onExternalAbort);
+
+  const cleanup = () => {
+    clearTimeout(timer);
+    args.abort.signal.removeEventListener("abort", onExternalAbort);
+  };
+
   const doFetch = async (baseUrl: string) => {
     const url = baseUrl ? `${baseUrl}/api/agent/context/summary` : "/api/agent/context/summary";
     return fetch(url, {
@@ -2639,33 +2686,42 @@ async function fetchContextSummaryOnce(args: {
         previousSummary: args.previousSummary,
         deltaTurns: args.deltaTurns,
       }),
-      signal: args.abort.signal,
+      signal: timeoutAc.signal,
     });
   };
 
   let res: Response | null = null;
   try {
-    res = await doFetch(args.gatewayUrl);
-  } catch (e: any) {
-    const msg = e?.message ? String(e.message) : String(e);
-    if (msg.includes("Failed to fetch") && args.gatewayUrl.includes("localhost")) {
-      const fallback = args.gatewayUrl.replace("localhost", "127.0.0.1");
-      args.log("warn", "gateway.fetch_retry", { from: args.gatewayUrl, to: fallback });
-      res = await doFetch(fallback);
-    } else {
-      throw e;
+    try {
+      res = await doFetch(args.gatewayUrl);
+    } catch (e: any) {
+      const msg = e?.message ? String(e.message) : String(e);
+      // 超时 → AbortError
+      if (timeoutAc.signal.aborted && !args.abort.signal.aborted) {
+        args.log("warn", "context.summary.timeout", { timeoutMs: SUMMARY_FETCH_TIMEOUT_MS });
+        return { ok: false as const, error: "SUMMARY_TIMEOUT" };
+      }
+      if (msg.includes("Failed to fetch") && args.gatewayUrl.includes("localhost")) {
+        const fallback = args.gatewayUrl.replace("localhost", "127.0.0.1");
+        args.log("warn", "gateway.fetch_retry", { from: args.gatewayUrl, to: fallback });
+        res = await doFetch(fallback);
+      } else {
+        throw e;
+      }
     }
-  }
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    return { ok: false as const, error: text || `HTTP_${res.status}` };
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return { ok: false as const, error: text || `HTTP_${res.status}` };
+    }
+    const json = await res.json().catch(() => null);
+    const ok = Boolean(json?.ok);
+    const summary = ok ? String(json?.summary ?? "") : "";
+    if (!ok || !summary.trim()) return { ok: false as const, error: String(json?.error ?? "SUMMARY_FAILED") };
+    return { ok: true as const, summary, modelIdUsed: json?.modelIdUsed ?? null };
+  } finally {
+    cleanup();
   }
-  const json = await res.json().catch(() => null);
-  const ok = Boolean(json?.ok);
-  const summary = ok ? String(json?.summary ?? "") : "";
-  if (!ok || !summary.trim()) return { ok: false as const, error: String(json?.error ?? "SUMMARY_FAILED") };
-  return { ok: true as const, summary, modelIdUsed: json?.modelIdUsed ?? null };
 }
 
 export async function rollDialogueSummaryIfNeeded(args: {
@@ -2717,6 +2773,14 @@ export async function rollDialogueSummaryIfNeeded(args: {
   // 用户要求：摘要模型默认复用"agentModel"（即使在 chat 模式），后续可在 B 端单独配置 stage 覆盖/约束
   if (!preferModelId) return { ok: true as const, rolled: false as const };
 
+  // 熔断检查：连续失败 N 次后静默跳过，5 分钟冷却后自动恢复
+  const fuseKey = getSummaryFuseKey({ gatewayUrl: args.gatewayUrl, mode: args.mode, preferModelId });
+  const fuse = readSummaryFuse(fuseKey);
+  if (fuse.fused) {
+    args.log("info", "context.summary.fused", { failures: fuse.failures });
+    return { ok: true as const, rolled: false as const };
+  }
+
   args.log("info", "context.summary.roll", {
     mode: args.mode,
     cursor,
@@ -2731,18 +2795,28 @@ export async function rollDialogueSummaryIfNeeded(args: {
     triggerTokens: cfg.compactTriggerTokens,
     triggerRatio: cfg.triggerRatio,
   });
-  const ret = await fetchContextSummaryOnce({
-    gatewayUrl: args.gatewayUrl,
-    preferModelId,
-    previousSummary,
-    deltaTurns: delta.map((t) => ({ user: t.user, assistant: t.assistant })),
-    abort: args.abort,
-    log: args.log,
-  });
+  let ret;
+  try {
+    ret = await fetchContextSummaryOnce({
+      gatewayUrl: args.gatewayUrl,
+      preferModelId,
+      previousSummary,
+      deltaTurns: delta.map((t) => ({ user: t.user, assistant: t.assistant })),
+      abort: args.abort,
+      log: args.log,
+    });
+  } catch (e) {
+    // 网络异常也计入熔断
+    noteSummaryFuseFailure(fuseKey);
+    throw e;
+  }
   if (!ret.ok) {
+    noteSummaryFuseFailure(fuseKey);
     args.log("warn", "context.summary.failed", { mode: args.mode, error: ret.error });
     return { ok: false as const, error: ret.error };
   }
+
+  noteSummaryFuseSuccess(fuseKey);
 
   // 写回 store（持久化），并推进 cursor 到 "已摘要覆盖的 turn 数"
   try {

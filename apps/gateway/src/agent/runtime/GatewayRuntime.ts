@@ -886,6 +886,13 @@ export class GatewayRuntime implements AgentRuntime {
   private portableHookInvocationSeq = 0;
   private portableApprovalSeq = 0;
   private portableStopBlockRetryCount = 0;
+  /** max_tokens 续写：上一轮 stopReason */
+  private lastStopReason: string | null = null;
+  /** max_tokens 续写：是否需要注入续写提示 */
+  private pendingMaxTokensRecovery = false;
+  /** max_tokens 续写：已续写次数 */
+  private maxTokensRecoveryCount = 0;
+  private readonly MAX_TOKENS_RECOVERY_LIMIT = 3;
 
   constructor(
     private readonly config: RuntimeConfig & {
@@ -1191,6 +1198,9 @@ export class GatewayRuntime implements AgentRuntime {
     this.portableHookInvocationSeq = 0;
     this.portableApprovalSeq = 0;
     this.portableStopBlockRetryCount = 0;
+    this.lastStopReason = null;
+    this.pendingMaxTokensRecovery = false;
+    this.maxTokensRecoveryCount = 0;
     this.toolCallSnapshots.clear();
     this.turnLocalRawToolResults.clear();
     if (!Array.isArray(this.runState.deliveredArtifactFamilies)) this.runState.deliveredArtifactFamilies = [];
@@ -2062,6 +2072,23 @@ export class GatewayRuntime implements AgentRuntime {
       this.outcome.reason === "approval_waiting" ||
       this.outcome.reason === "silent_no_output"
     ) return [];
+
+    // max_tokens 续写：注入续写提示让模型从中断处继续
+    if (this.pendingMaxTokensRecovery) {
+      this.pendingMaxTokensRecovery = false;
+      this.lastStopReason = null;
+      this.maxTokensRecoveryCount += 1;
+      this.config.runCtx.writeEvent("max_tokens_recovery.inject", {
+        turn: this.turn,
+        count: this.maxTokensRecoveryCount,
+      });
+      const item: CanonicalTranscriptItem = {
+        kind: "runtime_hint",
+        text: "上一轮输出因达到 token 上限被截断。请从中断处直接继续，不要道歉，不要回顾，不要重述。",
+        reasonCodes: ["max_tokens_recovery"],
+      };
+      return [item as unknown as AgentMessage];
+    }
 
     if (this.pendingFollowUpItems.length > 0) {
       const items = this.pendingFollowUpItems
@@ -3801,6 +3828,25 @@ export class GatewayRuntime implements AgentRuntime {
             hasVisibleAssistantText,
             askedUser: hasVisibleAssistantText && this._detectAssistantAskingUser(visibleAssistantText),
           });
+
+          // max_tokens recovery: 检测 stopReason="length" 且无完整 tool call
+          this.lastStopReason = msg.stopReason ?? null;
+          const hasToolCall = Array.isArray((msg as any).content)
+            && (msg as any).content.some((b: any) => b.type === "tool_use");
+          if (msg.stopReason === "length" && !hasToolCall) {
+            this.pendingMaxTokensRecovery = this.maxTokensRecoveryCount < this.MAX_TOKENS_RECOVERY_LIMIT;
+            if (this.pendingMaxTokensRecovery) {
+              this.config.runCtx.writeEvent("max_tokens_recovery.pending", {
+                turn: this.turn,
+                count: this.maxTokensRecoveryCount + 1,
+                limit: this.MAX_TOKENS_RECOVERY_LIMIT,
+              });
+            }
+          } else {
+            this.pendingMaxTokensRecovery = false;
+            this.maxTokensRecoveryCount = 0;
+          }
+
           this._pushAssistantToTranscript(msg);
           if (msg.stopReason !== "error" && msg.stopReason !== "aborted" && hasVisibleAssistantText) {
             await this._activateDeliveryLatch("assistant_text", { stopReason: msg.stopReason ?? null });
@@ -4030,6 +4076,13 @@ export class GatewayRuntime implements AgentRuntime {
           this.outcome.reason === "run_done" ||
           this.outcome.reason === "approval_waiting"
         ) {
+          return;
+        }
+
+        // max_tokens 续写：跳过 no-tool guard 和 implicit_completion，让 loop 继续
+        if (this.pendingMaxTokensRecovery) {
+          this.consecutiveVisibleNoToolTurns = 0;
+          this.consecutiveSilentNoToolTurns = 0;
           return;
         }
 

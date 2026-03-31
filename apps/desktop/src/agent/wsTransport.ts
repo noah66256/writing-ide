@@ -1255,9 +1255,9 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
       // -- dialogue summary ---
       let portablePreRunCompact: Record<string, unknown> | null = null;
       try {
+        setActivity("正在压缩上下文…", { resetTimer: true });
         const r = await rollDialogueSummaryIfNeeded({ gatewayUrl: args.gatewayUrl, mode: args.mode, abort, log });
         if (r?.rolled) {
-          setActivity("正在构建上下文…", { resetTimer: false });
           // 摘要成功后：用 delta 原文（非压缩后的摘要）触发记忆提取，避免二次有损压缩
           const rolledResult = r as { rolled: true; delta: Array<{ user: string; assistant: string }>; newCursor: number };
           const dialogueText = formatDialogueTurnsForMemoryExtract(rolledResult.delta ?? []);
@@ -1269,6 +1269,8 @@ export function startGatewayRunWs(args: GatewayRunArgs): GatewayRunController {
         }
       } catch (e: any) {
         log("warn", "context.summary.exception", { error: e?.message ? String(e.message) : String(e) });
+      } finally {
+        setActivity("正在构建上下文…", { resetTimer: false });
       }
 
       // -- context pack ---
