@@ -231,20 +231,29 @@ function normalizeThreadImageSession(session: unknown): ThreadImageSessionV1 | n
   };
 }
 
-function findLatestUserImageSource(rt: ReturnType<typeof createRunTarget>): { kind: "data"; dataUrl: string } | null {
+function findAllUserImagesInCurrentTurn(rt: ReturnType<typeof createRunTarget>): Array<{ kind: "data"; dataUrl: string }> {
   const steps = Array.isArray(rt.getSteps?.()) ? rt.getSteps() : [];
   for (let stepIndex = steps.length - 1; stepIndex >= 0; stepIndex -= 1) {
     const step = steps[stepIndex] as any;
-    if (!step || step.type !== "user" || !Array.isArray(step.images) || step.images.length === 0) continue;
-    for (let imageIndex = step.images.length - 1; imageIndex >= 0; imageIndex -= 1) {
-      const image = step.images[imageIndex];
-      const mediaType = String(image?.mediaType ?? "").trim() || "image/png";
-      const data = String(image?.data ?? "").trim();
-      if (!data) continue;
-      return { kind: "data", dataUrl: `data:${mediaType};base64,${data}` };
-    }
+    if (!step || step.type !== "user") continue;
+    // 找到最近的 user step——不管有没有图，当前轮就是这一步
+    if (!Array.isArray(step.images) || step.images.length === 0) return [];
+    const images = step.images
+      .map((image: any) => {
+        const mediaType = String(image?.mediaType ?? "").trim() || "image/png";
+        const data = String(image?.data ?? "").trim();
+        if (!data) return null;
+        return { kind: "data" as const, dataUrl: `data:${mediaType};base64,${data}` };
+      })
+      .filter(Boolean) as Array<{ kind: "data"; dataUrl: string }>;
+    return images;
   }
-  return null;
+  return [];
+}
+
+function findLatestUserImageSource(rt: ReturnType<typeof createRunTarget>): { kind: "data"; dataUrl: string } | null {
+  const images = findAllUserImagesInCurrentTurn(rt);
+  return images.length > 0 ? images[images.length - 1] ?? null : null;
 }
 
 function resolveImageToken(args: {
@@ -319,16 +328,24 @@ function buildCrabImageToolArgs(args: {
   const rawReferenceImages = Array.isArray(args.rawArgs?.referenceImages)
     ? (args.rawArgs.referenceImages as unknown[])
     : [];
+  const hasExplicitReferenceImages = rawReferenceImages.some((item) => String(item ?? "").trim());
+  const rawReferenceImageRoles = Array.isArray(args.rawArgs?.referenceImageRoles)
+    ? (args.rawArgs.referenceImageRoles as unknown[]).map((item) => String(item ?? "").trim())
+    : [];
+  if (Array.isArray(args.rawArgs?.referenceImageRoles)) {
+    if (rawReferenceImageRoles.some(Boolean)) nextArgs.referenceImageRoles = rawReferenceImageRoles;
+    else delete nextArgs.referenceImageRoles;
+  }
   const resolvedReferenceImages = rawReferenceImages
     .map((item) => resolveImageToken({ token: item, rt: args.rt, imageSession }))
     .filter(Boolean);
 
   if (args.toolName === "mcp.crab-image.generate_image") {
     // 自动注入用户上传图作为参考图：
-    // 如果本轮用户消息包含图片，且模型没有显式传 referenceImages，自动注入
-    if (resolvedReferenceImages.length === 0) {
-      const userImage = findLatestUserImageSource(args.rt);
-      if (userImage) resolvedReferenceImages.push(userImage);
+    // 仅当模型未显式传 referenceImages 且当前轮有用户图时，才自动注入（≤12张）
+    if (!hasExplicitReferenceImages && resolvedReferenceImages.length === 0) {
+      const userImages = findAllUserImagesInCurrentTurn(args.rt).slice(0, 12);
+      if (userImages.length > 0) resolvedReferenceImages.push(...userImages);
     }
     const useThreadHistory = Boolean((args.rawArgs as any)?.useThreadHistory);
     if (useThreadHistory && resolvedReferenceImages.length === 0) {

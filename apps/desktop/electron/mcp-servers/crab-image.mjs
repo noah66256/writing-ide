@@ -151,27 +151,66 @@ async function sourceToPart(source) {
   return null;
 }
 
-async function normalizeResolvedImages(args) {
-  const resolvedRefs = Array.isArray(args?.resolvedReferenceImages) ? args.resolvedReferenceImages : [];
-  const out = [];
-  for (const item of resolvedRefs) {
-    const part = await sourceToPart(item);
-    if (part) out.push(part);
-  }
-  if (out.length > 0) return out;
+function normalizeReferenceImageRole(value) {
+  return String(value ?? "").trim().toLowerCase() || "reference";
+}
 
-  const rawRefs = Array.isArray(args?.referenceImages) ? args.referenceImages : [];
-  for (const ref of rawRefs) {
-    const value = trim(ref);
-    if (!value) continue;
-    if (isAbsolutePathLike(value)) {
-      out.push({ inlineData: await fileToInlineData(value) });
-      continue;
-    }
-    const parsed = parseDataUrl(value);
-    if (parsed) out.push({ inlineData: parsed });
+function describeRole(role) {
+  const r = normalizeReferenceImageRole(role);
+  if (r === "identity_plate")
+    return "身份底板锁：人物结构/轮廓/比例/视角严格以此图为准；锁定发型与体态，不要重构成别的人；禁止左右翻转/禁止镜像。";
+  if (r === "identity" || r.startsWith("identity_"))
+    return "身份锁：必须是同一人物（脸型/五官比例/肤色/年龄感一致）。";
+  if (r === "outfit_plate")
+    return "服装底板锁：服装结构/版型/材质质感/配色以此图为准；不要随意换款式或加外套；禁止把服装换成别的款式。";
+  if (r === "outfit" || r.startsWith("outfit_"))
+    return "服装锁：衣服款式/材质/配色以此图为准，只允许调整穿着角度，不得换成其他服装。";
+  if (r === "scene_plate")
+    return "场景底板锁（极强）：背景空间几何/透视/机位/楼梯走向/墙面分色/灯具位置严格以此图为准；禁止新增/删除/移动任何背景元素；禁止左右翻转。";
+  if (r === "scene" || r.startsWith("scene_"))
+    return "场景锁：背景结构/透视/机位方向以此图为准；不要发散成别的地点；不要新增路人；不要左右翻转。";
+  if (r === "hand_prop" || r.startsWith("hand_prop_"))
+    return "手持道具锁：该道具必须出现在对应角色手中，不得消失/不得互换/不得被别人拿走。";
+  if (r === "set_prop" || r.startsWith("set_prop_"))
+    return "场景道具锁：桌面/锚点道具必须出现且位置一致。";
+  if (r === "layout_guide")
+    return "构图引导（仅约束，不可见）：生成时按此图构图放置元素，但最终成片严禁出现线框/示意图残留。";
+  if (r === "prop" || r.startsWith("prop_"))
+    return "道具锁：该道具必须出现且外观一致。";
+  return "通用参考图：用于补充风格/材质/构图等信息。";
+}
+
+async function normalizeResolvedImages(args) {
+  const rawRoles = Array.isArray(args?.referenceImageRoles) ? args.referenceImageRoles : [];
+  const resolvedRefs = Array.isArray(args?.resolvedReferenceImages) ? args.resolvedReferenceImages : [];
+  const collected = [];
+
+  const push = (part, role) => { if (part) collected.push({ part, role: normalizeReferenceImageRole(role) }); };
+
+  for (let i = 0; i < resolvedRefs.length; i++) {
+    push(await sourceToPart(resolvedRefs[i]), rawRoles[i]);
   }
-  return out;
+
+  if (collected.length === 0) {
+    const rawRefs = Array.isArray(args?.referenceImages) ? args.referenceImages : [];
+    for (let i = 0; i < rawRefs.length; i++) {
+      const value = trim(rawRefs[i]);
+      if (!value) continue;
+      if (isAbsolutePathLike(value)) { push({ inlineData: await fileToInlineData(value) }, rawRoles[i]); continue; }
+      const parsed = parseDataUrl(value);
+      if (parsed) push({ inlineData: parsed }, rawRoles[i]);
+    }
+  }
+
+  if (collected.length > 12) {
+    console.error(`[crab-image] referenceImages truncated: received=${collected.length}, kept=12`);
+  }
+
+  // B喂法：每张参考图前插入角色说明文本
+  return collected.slice(0, 12).flatMap(({ part, role }, index) => [
+    { text: `Image${index + 1} role=${role}：${describeRole(role)}` },
+    part,
+  ]);
 }
 
 async function normalizeTargetImage(args) {
@@ -186,6 +225,21 @@ async function normalizeTargetImage(args) {
   }
   const parsed = parseDataUrl(rawTarget);
   return parsed ? { inlineData: parsed } : null;
+}
+
+function parseSizeToWH(value) {
+  const raw = trim(value) || "2048x2048";
+  const match = raw.match(/^(\d{2,5})\s*[xX]\s*(\d{2,5})$/);
+  if (!match) return { width: 2048, height: 2048 };
+  const w = Number(match[1]); const h = Number(match[2]);
+  return (Number.isFinite(w) && w > 0 && Number.isFinite(h) && h > 0) ? { width: w, height: h } : { width: 2048, height: 2048 };
+}
+
+function pickGeminiImageSizeByLongEdge(width, height) {
+  const longEdge = Math.max(Number(width) || 0, Number(height) || 0);
+  if (longEdge > 2816) return "4K";
+  if (longEdge > 1408) return "2K";
+  return "1K";
 }
 
 function collectTextParts(response) {
@@ -224,13 +278,19 @@ async function geminiGenerateImage(args) {
   if (!prompt) throw new Error("prompt 不能为空");
 
   const referenceParts = await normalizeResolvedImages(args);
+  // B喂法后 referenceParts 是 text+inlineData 交错数组，只统计 inlineData 数量
+  const referenceImageCount = referenceParts.filter(
+    (p) => p && typeof p === "object" && "inlineData" in p
+  ).length;
   const requestParts = [...referenceParts, { text: prompt }];
   const aspectRatio = normalizeAspectRatio(args.aspectRatio);
+  const { width, height } = parseSizeToWH(args.size);
+  const imageSize = pickGeminiImageSizeByLongEdge(width, height);
   const tier = chooseProviderTier({
     quality: args.quality,
     defaultTier: config.defaultTier,
     prompt,
-    referenceCount: referenceParts.length,
+    referenceCount: referenceImageCount,
   });
   const modelName = resolveModelName(config, tier);
   const url = buildGenerateContentUrl(config.baseUrl, modelName, config.apiKey);
@@ -242,8 +302,11 @@ async function geminiGenerateImage(args) {
       },
     ],
     generationConfig: {
-      responseModalities: ["TEXT", "IMAGE"],
-      ...(aspectRatio ? { imageConfig: { aspectRatio } } : {}),
+      responseModalities: ["IMAGE"],
+      imageConfig: {
+        imageSize,
+        ...(aspectRatio ? { aspectRatio } : {}),
+      },
     },
   };
 
@@ -266,7 +329,11 @@ async function geminiGenerateImage(args) {
     if (images.length === 0) {
       throw new Error("Gemini 未返回图片结果");
     }
-    const textParts = collectTextParts(parsed);
+    // responseModalities=["IMAGE"] 时模型不输出 TEXT，guard 防止空 parts 报错
+    const hasText = Array.isArray(parsed?.candidates) && parsed.candidates.some(
+      (c) => Array.isArray(c?.content?.parts) && c.content.parts.some((p) => trim(p?.text))
+    );
+    const textParts = hasText ? collectTextParts(parsed) : [];
     const threadId = trim(args.threadId);
     if (threadId) {
       providerSessionCache.set(threadId, {
@@ -278,10 +345,10 @@ async function geminiGenerateImage(args) {
       });
     }
     const summary = [
-      `Crab Image 已完成${referenceParts.length > 0 ? "图像生成/编辑" : "图像生成"}`,
+      `Crab Image 已完成${referenceImageCount > 0 ? "图像生成/编辑" : "图像生成"}`,
       `模型：${modelName}`,
       aspectRatio ? `比例：${aspectRatio}` : "",
-      referenceParts.length > 0 ? `参考图：${referenceParts.length} 张` : "",
+      referenceImageCount > 0 ? `参考图：${referenceImageCount} 张` : "",
       textParts[0] ? `说明：${textParts[0]}` : "",
     ].filter(Boolean).join("\n");
     return {
@@ -307,9 +374,11 @@ const server = new McpServer(SERVER_INFO);
 const generateImageInputSchema = z.object({
   prompt: z.string().describe("图片生成提示词"),
   aspectRatio: z.enum(["1:1", "4:3", "3:4", "16:9", "9:16", "21:9"]).optional().describe("画面比例"),
+  size: z.string().optional().describe('输出尺寸，格式 "WxH"，如 "2048x2048"，默认 2048x2048'),
   quality: z.enum(["auto", "fast", "high"]).optional().describe("质量档位"),
   useThreadHistory: z.boolean().optional().describe("是否优先继承当前线程图片历史"),
   referenceImages: z.array(z.string()).optional().describe("参考图引用，如 last_generated / last_user_image / artifact:<id>"),
+  referenceImageRoles: z.array(z.string()).optional().describe("与 referenceImages 对齐的角色标签，如 identity / outfit / scene / scene_plate / outfit_plate 等"),
 }).passthrough();
 
 const editImageInputSchema = z.object({
