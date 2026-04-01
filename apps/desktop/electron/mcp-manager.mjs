@@ -161,6 +161,11 @@ const BUILTIN_SERVERS = [
   },
 ];
 
+const LONG_RUNNING_MCP_TOOL_TIMEOUT_MS = 600_000;
+const LONG_RUNNING_MCP_TOOL_TIMEOUTS = new Map([
+  ["crab-image", new Set(["generate_image", "edit_image"])],
+]);
+
 /** 参数别名组（按规范名聚类，运行时用于 MCP 工具参数兜底映射） */
 const ARG_ALIAS_GROUPS = [
   [
@@ -220,6 +225,16 @@ function splitArgKeyTokens(key) {
     .toLowerCase();
   if (!raw) return [];
   return raw.split(/\s+/g).filter(Boolean);
+}
+
+function getMcpToolRequestOptions(serverId, toolName) {
+  const normalizedServerId = String(serverId ?? "").trim();
+  const normalizedToolName = String(toolName ?? "").trim();
+  const longRunningTools = LONG_RUNNING_MCP_TOOL_TIMEOUTS.get(normalizedServerId);
+  if (longRunningTools?.has(normalizedToolName)) {
+    return { timeout: LONG_RUNNING_MCP_TOOL_TIMEOUT_MS };
+  }
+  return undefined;
 }
 
 function detectArgSemanticGroup(key) {
@@ -2246,10 +2261,11 @@ export class McpManager {
    * @param {Record<string, any>} callArgs
    */
   async _callToolOnce(entry, toolName, callArgs) {
+    const requestOptions = getMcpToolRequestOptions(entry?.config?.id, toolName);
     const result = await entry.client.callTool({
       name: toolName,
       arguments: callArgs ?? {},
-    });
+    }, undefined, requestOptions);
     const textParts = (result?.content ?? [])
       .filter((c) => c.type === "text")
       .map((c) => c.text);
